@@ -118,6 +118,57 @@ def is_llm(entry: dict) -> bool:
     return isinstance(entry, dict) and entry.get("model_type", "llm") == "llm"
 
 
+def is_projector_entry(entry) -> bool:
+    """True when a registry *entry* records ``model_type`` 'mmproj': a vision
+    projector, which is loaded alongside a chat model and is never a model a
+    request can name."""
+    return isinstance(entry, dict) and entry.get("model_type") == "mmproj"
+
+
+def _same_file(a, b) -> bool:
+    return (isinstance(a, str) and isinstance(b, str) and bool(a) and bool(b)
+            and os.path.normcase(os.path.normpath(a)) == os.path.normcase(os.path.normpath(b)))
+
+
+def projector_owners(name: str, registry: dict) -> list[str]:
+    """Sorted names of the chat models in *registry* that use the projector
+    registered as *name*.
+
+    A model owns the projector when its recorded ``mmproj`` is the projector's
+    file; failing that, when it is a chat model whose file sits in the
+    projector's folder. Reads the registry only: no file is opened. Empty when
+    *name* is not a projector entry or nothing claims it."""
+    entry = registry.get(name)
+    if not is_projector_entry(entry):
+        return []
+    mmproj_path = _entry_path(entry)
+    if mmproj_path is None:
+        return []
+    chat = {n: e for n, e in registry.items()
+            if n != name and isinstance(e, dict) and e.get("model_type", "llm") == "llm"}
+    recorded = sorted(n for n, e in chat.items() if _same_file(e.get("mmproj"), mmproj_path))
+    if recorded:
+        return recorded
+    folder = os.path.dirname(os.path.normpath(mmproj_path))
+    return sorted(n for n, e in chat.items()
+                  if (p := _entry_path(e)) is not None
+                  and _same_file(os.path.dirname(os.path.normpath(p)), folder))
+
+
+def projector_refusal(name: str, registry: dict) -> Optional[str]:
+    """The message refusing a request that names *name* as a model to load, or
+    None when *name* is not a projector entry in *registry*. Names the chat
+    models that use the projector when the registry identifies any."""
+    if not is_projector_entry(registry.get(name)):
+        return None
+    owners = projector_owners(name, registry)
+    msg = f"'{name}' is a vision projector, not a model that can be loaded or chatted with."
+    if owners:
+        msg += (" It belongs to " + ", ".join(f"'{o}'" for o in owners)
+                + "; name that model instead and the projector is attached automatically.")
+    return msg
+
+
 def models_of_type(model_type: str, registry: Optional[dict] = None) -> dict:
     """Every registry entry whose ``model_type`` is *model_type*, as
     ``{name: entry}``.
