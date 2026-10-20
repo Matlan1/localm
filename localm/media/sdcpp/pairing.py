@@ -35,7 +35,7 @@ def slot_label(slot: str, family: Optional[str]) -> str:
 
 # Registry types whose entries can fill a native slot or be a native model.
 CANDIDATE_TYPES = ("diffusion-unet", "text-encoder", "vae", "lora", "llm", "unknown",
-                   "embedding")
+                   "embedding", "controlnet", "textual-inversion")
 
 
 @dataclass(frozen=True)
@@ -319,6 +319,8 @@ KIND_WORDS = {"clip_l": "a CLIP-L text encoder", "clip_g": "a CLIP-G text encode
               "byt5": "a ByT5 text encoder", "llm": "an LLM text encoder", "vae": "a VAE",
               "clip_vision": "a CLIP vision encoder", "lora": "a LoRA"}
 
+ADDON_WORDS = {"controlnet": "a ControlNet", "textual_inversion": "a textual-inversion embedding"}
+
 
 class MissingComponents(ModelFileError):
     """A diffusion model cannot load because companion slots have no file.
@@ -354,6 +356,10 @@ def build_context(main: Path, label: str, explicit: dict, *, where: str, media: 
     if info.kind == "music":
         raise ModelFileError(f"'{label}' is a music generation model, not {art} {media} "
                              f"model. Choose {art} {media} model in {where}.")
+    if info.kind in ADDON_WORDS:
+        raise ModelFileError(f"'{label}' is {ADDON_WORDS[info.kind]}, not {art} {media} model. "
+                             f"Choose {art} {media} model in {where}, and pick it under "
+                             "ControlNet or Embeddings on the Images page.")
     if info.kind in KIND_WORDS:
         raise ModelFileError(f"'{label}' is {KIND_WORDS[info.kind]}, not {art} {media} model. "
                              f"Choose it as a component in {where}, and {art} {media} model "
@@ -455,6 +461,105 @@ def resolve_loras(entries: list, family: Optional[str],
     return out, notes
 
 
+ADDON_TYPES = {"controlnet": "controlnet", "textual_inversion": "textual-inversion"}
+ADDON_LABELS = {"controlnet": "ControlNet", "textual_inversion": "embedding"}
+
+
+def embedding_trigger(path: Path) -> str:
+    """The word a prompt uses to apply the textual-inversion embedding at
+    *path*: its file name without the extension."""
+    return Path(path).stem
+
+
+def resolve_addon(name: str, kind: str, family: Optional[str],
+                  reg: Optional[dict] = None) -> dict:
+    """The registered ControlNet or textual-inversion embedding (*kind*
+    ``controlnet`` / ``textual_inversion``) named *name*, for a *family* model:
+    ``{"name", "path", "family"}``. Only a registry name of the matching type,
+    or of type ``unknown`` whose file reads as that kind, is accepted. Raises ``ModelFileError`` with a user-facing reason when *name* is
+    not one, has no file, its file is missing or on a network or device path,
+    does not read as that kind, or does not work with *family*
+    (``families.fits_unet_addon``)."""
+    from localm.model_manager import load_registry
+    from localm.model_manager.registry import _entry_path
+    from localm.pathsafe import is_unc_or_device_path
+    reg = load_registry() if reg is None else reg
+    label = ADDON_LABELS[kind]
+    entry = reg.get(name) if name else None
+    if not isinstance(entry, dict) or entry.get("model_type") not in (ADDON_TYPES[kind],
+                                                                       "unknown"):
+        raise ModelFileError(f"'{name}' is not a registered {label}. Add it on the Models page "
+                             f"(type {ADDON_TYPES[kind]}) first.")
+    raw = _entry_path(entry)
+    if not raw:
+        raise ModelFileError(f"The {label} '{name}' has no file.")
+    if is_unc_or_device_path(raw):
+        raise ModelFileError(f"The {label} '{name}' is on a network or device path, which is "
+                             "not allowed.")
+    path = Path(raw)
+    try:
+        ok = path.is_file()
+    except OSError:
+        ok = False
+    if not ok:
+        raise ModelFileError(f"The {label} '{name}' is registered, but its file is missing.")
+    info = families.inspect_file(path)
+    if info.kind != kind:
+        raise ModelFileError(f"'{name}' is registered as a {label}, but its file does not read "
+                             "as one (only .safetensors and .gguf files are read).")
+    if not families.fits_unet_addon(info, family):
+        model = families.FAMILY_LABELS.get(family or "", family or "this")
+        made = families.FAMILY_LABELS.get(info.family or "", info.family or "an unknown family")
+        if family not in families.UNET_FAMILIES:
+            why = (f"{model} models do not take a {label}; it works with Stable Diffusion "
+                   "1.x, 2.x and SDXL models")
+        elif info.family == family:
+            why = (f"this diffusers-layout {label} works with SDXL models only; use the "
+                   "original-layout file")
+        else:
+            why = f"it is made for {made}, not {model}"
+        raise ModelFileError(f"The {label} '{name}' cannot be used: {why}.")
+    return {"name": name, "path": str(path), "family": info.family}
+
+
+def resolve_embeddings(names: list, family: Optional[str],
+                       reg: Optional[dict] = None) -> list[dict]:
+    """``[{"name", "path", "trigger"}]`` for the registered textual-inversion
+    embeddings *names* (``resolve_addon``) for a *family* model, each once.
+    Raises ``ModelFileError`` as ``resolve_addon`` does, and when two share a
+    trigger word."""
+    out: list = []
+    seen: dict = {}
+    for name in names:
+        hit = resolve_addon(name, "textual_inversion", family, reg)
+        trigger = embedding_trigger(Path(hit["path"]))
+        other = seen.get(trigger.lower())
+        if other is not None and other != name:
+            raise ModelFileError(f"The embeddings '{other}' and '{name}' both use the trigger "
+                                 f"word '{trigger}'; pick one.")
+        if other is None:
+            seen[trigger.lower()] = name
+            out.append({"name": name, "path": hit["path"], "trigger": trigger})
+    return out
+
+
+def addon_options(kind: str, cands: list, family: Optional[str]) -> list[dict]:
+    """The registered ControlNets or textual-inversion embeddings (*kind*) a
+    picker offers: ``_option`` fields, ``fits`` for a known *family* (those
+    that fit first), and ``trigger`` for an embedding."""
+    out = []
+    for c in cands:
+        if c.info.kind != kind or c.model_type not in (ADDON_TYPES[kind], "unknown"):
+            continue
+        opt = _option(c)
+        if kind == "textual_inversion":
+            opt["trigger"] = embedding_trigger(c.path)
+        if family is not None:
+            opt["fits"] = families.fits_unet_addon(c.info, family)
+        out.append(opt)
+    return sorted(out, key=lambda o: (o.get("fits") is False, o["name"].lower()))
+
+
 MEDIA_SLOTS = {"image": ("clip_l", "clip_g", "t5xxl", "llm", "vae"),
                "video": ("t5xxl", "llm", "clip_vision", "vae")}
 
@@ -498,7 +603,8 @@ def native_options(media: str, cands: Optional[list] = None,
                    reg: Optional[dict] = None, *, family: Optional[str] = None,
                    variant: Optional[str] = None) -> dict:
     """What a *media* (``"image"``/``"video"``) model picker offers:
-    ``{"models", "slots", "loras"}``. ``models`` are the registered files that
+    ``{"models", "slots", "loras"}``, plus ``controlnets`` and ``embeddings``
+    (``addon_options``) for image. ``models`` are the registered files that
     can be the main model; ``slots`` maps each component slot of that media to
     the registered files of a fitting kind; ``loras`` the registered LoRAs.
     Each entry is ``{"name", "file", "kind", "family", "family_label"}``.
@@ -524,7 +630,11 @@ def native_options(media: str, cands: Optional[list] = None,
     slots = {slot: _slot_options(slot, cands, family, variant)
              for slot in MEDIA_SLOTS[media]}
     loras = [_option(c) for c in cands if c.info.kind == "lora"]
-    return {"models": models, "slots": slots, "loras": loras}
+    out = {"models": models, "slots": slots, "loras": loras}
+    if media == "image":
+        out["controlnets"] = addon_options("controlnet", cands, family)
+        out["embeddings"] = addon_options("textual_inversion", cands, family)
+    return out
 
 
 def preview(media: str, model_name: str, explicit: Optional[dict] = None,
@@ -532,8 +642,10 @@ def preview(media: str, model_name: str, explicit: Optional[dict] = None,
     """What a job would load for registered model *model_name* with the
     *explicit* ``{slot: registered name}`` choices, without loading anything:
     ``{"model", "family", "family_label", "variant", "kind", "needs",
-    "components", "missing", "notes", "defaults", "error"}``. ``needs`` lists
-    the slots the family needs; ``defaults`` is ``{"steps", "cfg_scale",
+    "components", "missing", "notes", "defaults", "capabilities", "error"}``.
+    ``needs`` lists the slots the family needs; ``capabilities`` is
+    ``families.capabilities`` of the model (None until it is read);
+    ``defaults`` is ``{"steps", "cfg_scale",
     "width", "height"}`` the family works with, or None; ``error`` is a
     user-facing reason it cannot run, or None. *recommended* maps a curated
     model's file name to its own ``defaults``, which replace the family's."""
@@ -541,7 +653,7 @@ def preview(media: str, model_name: str, explicit: Optional[dict] = None,
     cands = registry_candidates() if cands is None else cands
     out = {"model": display_name(model_name), "family": None, "family_label": None,
            "variant": None, "kind": None, "needs": [], "components": {}, "missing": [],
-           "notes": [], "defaults": None, "error": None}
+           "notes": [], "defaults": None, "capabilities": None, "error": None}
     try:
         main = resolve_model_file(model_name, f"{media} model")
         info = families.inspect_file(main)
@@ -549,6 +661,7 @@ def preview(media: str, model_name: str, explicit: Optional[dict] = None,
         out.update(kind=info.kind, family=info.family, variant=info.detail.get("variant"),
                    family_label=families.FAMILY_LABELS.get(info.family or "", info.family),
                    needs=[r.slot for r in families.requirements(info)],
+                   capabilities=families.capabilities(info),
                    defaults=None if dflt is None else {
                        "steps": dflt.steps, "cfg_scale": dflt.cfg_scale,
                        "width": dflt.width, "height": dflt.height})

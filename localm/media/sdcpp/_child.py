@@ -5,12 +5,16 @@ by ``runner.SdRunner``; owns the native library and the loaded model.
 Protocol (two ``multiprocessing.Queue``s, tagged tuples). ``req_q``, one
 command at a time:
     ("probe", {"runtime_dir", "extra_dirs"})
-    ("load", {"runtime_dir", "extra_dirs", "ctx": {<sd_ctx_params_t path fields>, ...}})
+    ("load", {"runtime_dir", "extra_dirs", "ctx": {<sd_ctx_params_t path fields>, ...,
+                                                   "embeddings": ((name, path), ...)}})
     ("generate_image", {"prompt", "negative_prompt", "width", "height", "steps",
                         "cfg_scale", "guidance", "seed", "strength", "sample_method",
                         "scheduler", "clip_skip", "init_image", "loras",
                         "hires": {"upscaler", "model_path", "scale", "steps",
-                                  "denoising_strength", "tile_size"}})
+                                  "denoising_strength", "tile_size"},
+                        "mask_image", "ref_images": [image, ...], "control_image",
+                        "control_strength", "control_canny"})
+    (an image is {"width", "height", "channel", "data"}; a mask has 1 channel)
     ("generate_video", {"prompt", "negative_prompt", "width", "height", "video_frames",
                         "fps", "steps", "cfg_scale", "flow_shift", "seed",
                         "sample_method", "scheduler", "init_image", "loras"})
@@ -299,7 +303,7 @@ def _do_probe(payload):
 _CTX_STRING_FIELDS = ("model_path", "clip_l_path", "clip_g_path", "clip_vision_path",
                       "t5xxl_path", "llm_path", "llm_vision_path", "diffusion_model_path",
                       "high_noise_diffusion_model_path", "vae_path", "taesd_path",
-                      "backend", "params_backend", "max_vram", "tokenizer")
+                      "control_net_path", "backend", "params_backend", "max_vram", "tokenizer")
 _CTX_BOOL_FIELDS = ("flash_attn", "diffusion_flash_attn", "enable_mmap", "vae_conv_direct",
                     "force_sdxl_vae_conv_scale",
                     "diffusion_conv_direct", "auto_fit", "batched_cfg")
@@ -332,11 +336,14 @@ def _do_load(payload):
             setattr(params, name, bool(ctx_fields[name]))
     if ctx_fields.get("n_threads"):
         params.n_threads = int(ctx_fields["n_threads"])
+    embeddings = _set_embeddings(b, params, ctx_fields.get("embeddings"))
     _State.last_errors = []
     _State.model_desc = ""
     _State.paths = tuple(str(v) for k, v in ctx_fields.items()
-                         if k.endswith("_path") and isinstance(v, str) and v)
+                         if k.endswith("_path") and isinstance(v, str) and v) + tuple(
+        str(path) for _name, path in (ctx_fields.get("embeddings") or ()))
     ctx = lib.new_sd_ctx(ctypes.byref(params))
+    del keep, embeddings
     if not ctx:
         raise RuntimeError(_error_with_native("stable-diffusion.cpp could not load the model"))
     _State.ctx = ctx
@@ -352,6 +359,68 @@ def _do_load(payload):
         "default_scheduler": (lib.sd_scheduler_name(scheduler) or b"").decode(),
         "devices": b.list_devices(lib),
     }
+
+
+def _set_embeddings(b, params, embeddings):
+    """Fill *params*' ``embeddings``/``embedding_count`` from *embeddings*
+    (``(name, path)`` pairs). Returns the ctypes objects that must stay alive
+    until ``new_sd_ctx`` returns (None without embeddings)."""
+    pairs = list(embeddings or ())
+    if not pairs:
+        return None
+    arr = (b.sd_embedding_t * len(pairs))()
+    keep = []
+    for i, (name, path) in enumerate(pairs):
+        enc_name, enc_path = str(name).encode("utf-8"), str(path).encode("utf-8")
+        keep += [enc_name, enc_path]
+        arr[i].name = enc_name
+        arr[i].path = enc_path
+    params.embeddings = ctypes.cast(arr, ctypes.POINTER(b.sd_embedding_t))
+    params.embedding_count = len(pairs)
+    return arr, keep
+
+
+def _image_struct(b, img, channels=(1, 3, 4)):
+    """``(sd_image_t, buffer)`` for *img* (``{"width", "height", "channel",
+    "data"}``); the buffer must stay alive while the struct is used. Raises
+    ``ValueError`` when the data does not match the size or the channel count
+    is not one of *channels*."""
+    w, h, c, data = int(img["width"]), int(img["height"]), int(img["channel"]), img["data"]
+    if c not in channels or len(data) != w * h * c:
+        raise ValueError("an input image buffer does not match its size")
+    buf = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
+    return b.sd_image_t(w, h, c, ctypes.cast(buf, ctypes.POINTER(ctypes.c_uint8))), buf
+
+
+_CANNY_RULE = b"target=control,canny=true"
+
+
+def _set_image_inputs(b, p, payload):
+    """Set *p*'s ``mask_image``, ``ref_images``, ``control_image``,
+    ``control_strength`` and (``control_canny``) the canny preprocessing rule
+    from *payload*. Returns the ctypes objects that must stay alive until
+    generation returns."""
+    keep = []
+    if payload.get("mask_image"):
+        p.mask_image, buf = _image_struct(b, payload["mask_image"], (1,))
+        keep.append(buf)
+    refs = payload.get("ref_images") or []
+    if refs:
+        arr = (b.sd_image_t * len(refs))()
+        for i, ref in enumerate(refs):
+            arr[i], buf = _image_struct(b, ref, (3,))
+            keep.append(buf)
+        keep.append(arr)
+        p.ref_images = ctypes.cast(arr, ctypes.POINTER(b.sd_image_t))
+        p.ref_images_count = len(refs)
+    if payload.get("control_image"):
+        p.control_image, buf = _image_struct(b, payload["control_image"], (3,))
+        keep.append(buf)
+        if payload.get("control_strength") is not None:
+            p.control_strength = float(payload["control_strength"])
+        if payload.get("control_canny"):
+            p.image_preprocess.rules = _CANNY_RULE
+    return keep
 
 
 def _enum_from_name(lib, kind: str, name):
@@ -452,6 +521,7 @@ def _do_generate_image(payload, cancel_event):
     if sched is not None:
         p.sample_params.scheduler = sched
     hires_refs = _set_hires(lib, b, p, payload)
+    input_refs = _set_image_inputs(b, p, payload)
     keep = None
     init = payload.get("init_image")
     if init:
@@ -479,7 +549,7 @@ def _do_generate_image(payload, cancel_event):
         if previewing:
             _disarm_preview(lib)
         _State.redact = ()
-        del keep, lora_refs, hires_refs
+        del keep, lora_refs, hires_refs, input_refs
     cancelled = cancel_event.is_set()
     try:
         if not ok or count.value < 1 or not out:

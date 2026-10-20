@@ -157,6 +157,42 @@ scheduler also on the Video page); an empty field uses the model's own default.
   same from a localm image or sidecar; a sampler or scheduler name from another tool is
   applied only when it is one of the names above, and is reported otherwise.
 
+## Inpaint, outpaint, reference images, ControlNet and embeddings
+
+These sit under the input image field of the Images page (native backend only). Images
+picked here stay in the page and go to the server with the next generation; they are not
+saved anywhere else.
+
+- **Mask (inpaint / outpaint).** *Paint mask* opens the input image (a gallery image set
+  with *Use as img2img input*, or a file loaded with *Load image file*) in an editor: paint
+  the area to repaint in white with the brush, take paint off with the eraser, *Invert* or
+  *Clear* the mask, and *Extend canvas* by a number of pixels on any side to outpaint (the
+  new border is filled from the image's edge and repainted; Denoise is set to 1 when it is
+  empty). The mask works with every model; a dedicated inpainting model (an SD 1.x/2.x/XL
+  inpainting checkpoint or FLUX.1 Fill) also gets the masked image as its input. Request
+  fields: `input_image_data` (the base image as a data URL, instead of the `input_image`
+  path) and `mask` (white repaints, black keeps; resized to the base image).
+- **Reference images** (up to 4) feed edit models: FLUX.1 Kontext, FLUX.2, Qwen-Image-Edit,
+  and other Qwen-Image, Z-Image and Anima models, or an instruct-pix2pix model. Describe the
+  change in the prompt. A model that does not take them is refused with a reason. Request
+  field: `ref_images` (data URLs).
+- **ControlNet** for Stable Diffusion 1.x, 2.x and SDXL models: pick a registered ControlNet,
+  choose a control image, and optionally its strength (default 0.9) and *edge map (canny)* to
+  turn a photo into edges first. The ControlNet loads with the model, so switching it reloads
+  the model. Request field: `control` (`{"model", "image", "strength", "preprocess"}`,
+  preprocess `none` or `canny`).
+- **Embeddings (textual inversion)** for Stable Diffusion 1.x, 2.x and SDXL: each registered
+  embedding is listed with its trigger word (its file name without the extension); *+ prompt*
+  and *+ negative* add the word, and an embedding is used when its word is in the prompt or
+  negative prompt. Request field: `embeddings` (registered names).
+- **Model types.** ControlNets register as `controlnet` and embeddings as `textual-inversion`:
+  files in a ComfyUI `controlnet` / `embeddings` folder (StabilityMatrix `ControlNet` /
+  `Embeddings`), CivitAI ControlNets and textual inversions, and a lone `.safetensors` file
+  whose header reads as one. Only `.safetensors` and `.gguf` files are read. A request names
+  them by registered name only, never by path. The sidecar records the ControlNet, its
+  strength and preprocessing, the embeddings, and that a mask or reference images were used
+  (not the images themselves).
+
 ## Parameters in the PNG
 
 By default a generated PNG carries no metadata, so a shared or moved image reveals nothing.

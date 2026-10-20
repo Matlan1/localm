@@ -158,9 +158,9 @@ class TestResolveDownload:
         ("LORA", "lora", "loras"),
         ("LoCon", "lora", "loras"),
         ("DoRA", "lora", "loras"),
-        ("TextualInversion", "embedding", "embeddings"),
+        ("TextualInversion", "textual-inversion", "embeddings"),
         ("VAE", "vae", "vae"),
-        ("Controlnet", "unknown", "controlnet"),
+        ("Controlnet", "controlnet", "controlnet"),
         ("Upscaler", "upscaler", "upscale_models"),
     ])
     def test_type_map_placement(self, monkeypatch, civitai_type, expected_model_type,

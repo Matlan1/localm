@@ -15,7 +15,7 @@ const SHELL = [
   "/app/icons.js", "/app/picker.js", "/app/theme.js",
   "/app/logo.js", "/app/tabs.js", "/app/models-sidebar.js", "/app/chat.js",
   "/app/cmdk.js", "/app/settings-perf.js", "/app/coder.js", "/app/slash.js",
-  "/app/init.js", "/app/media-gallery.js", "/app/native-models.js",
+  "/app/init.js", "/app/media-gallery.js", "/app/native-models.js", "/app/image-inputs.js",
   // Per-page modules.
   "/pages/dispatch.js", "/pages/models.js", "/pages/images.js",
   "/pages/plugins.js", "/pages/settings.js", "/pages/workflow.js",

@@ -9,6 +9,7 @@
 import { chat, renderAttachChips } from "../app/chat.js";
 import { $, authHeaders, cancelJob, checkModelsBeforeGenerate, createJobPreview, el, fetchImageURL, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
 import { t } from "../app/i18n.js";
+import { createImageInputs } from "../app/image-inputs.js";
 import { bindReloadToggle, createGallery, imagePreview, refreshReloadToggle } from "../app/media-gallery.js";
 import { createNativeGenControls, createNativeModelPicker, mountEnhanceButton } from "../app/native-models.js";
 import { showView } from "../app/tabs.js";
@@ -122,6 +123,7 @@ function reuseImageSettings(item) {
     imageModelPicker.setModels({ model: m.model, ...(m.components || {}) });
     imageModelPicker.setLoras(m.loras || []);
     imageGen.set(m);
+    imageInputs.setControl(m);
   }
   // Most of those ids live behind this page's Advanced fold; open it when
   // they are filled.
@@ -150,9 +152,14 @@ function showImageStepDefault(data) {
     : t("images.stepsPlaceholder");
 }
 
+/* Mask, reference images, ControlNet and embeddings (native backend only). */
+export const imageInputs = createImageInputs({
+  mountId: "img-native-inputs", promptId: "img-prompt", negativeId: "img-negative",
+  inputId: "img-input", denoiseId: "img-denoise" });
+
 export const imageModelPicker = createNativeModelPicker(
   { media: "image", prefix: "imagine", mountId: "img-native-models",
-    onData: showImageStepDefault });
+    onData: (data) => { showImageStepDefault(data); imageInputs.refresh(data); } });
 
 const imageLivePreview = createJobPreview("img-preview");
 
@@ -360,9 +367,11 @@ $("img-generate").onclick = async () => {
   const nativeChoice = native ? imageModelPicker.choice() : {};
   Object.assign(body, nativeChoice);
   if (native) {
+    const problem = imageInputs.problem();
+    if (problem) { toast(problem, true); return; }
     body.steps = num("img-steps");
     body.clip_skip = num("img-clip-skip");
-    Object.assign(body, imageGen.body());
+    Object.assign(body, imageGen.body(), imageInputs.body());
   }
   $("img-generate").disabled = true;
   imageLivePreview.clear();

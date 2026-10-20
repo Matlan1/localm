@@ -87,6 +87,8 @@ _FOLDER_MODEL_TYPES = {
     "vae": "vae",
     "loras": "lora",
     "upscale_models": "upscaler",
+    "controlnet": "controlnet",
+    "embeddings": "textual-inversion",
 }
 
 _FOUND_TTL = 1800.0

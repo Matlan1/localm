@@ -2358,6 +2358,7 @@ MEDIA_KIND_TYPES = {
     "lora": "lora", "clip_l": "text-encoder", "clip_g": "text-encoder",
     "clip_h": "text-encoder", "t5xxl": "text-encoder", "umt5": "text-encoder",
     "byt5": "text-encoder", "clip_vision": "text-encoder",
+    "controlnet": "controlnet", "textual_inversion": "textual-inversion",
 }
 
 

@@ -70,7 +70,7 @@ def test_folder_types_a_file_the_header_cannot_classify(tmp_path):
         "ClipVision/opaque.safetensors": "text-encoder",
         "TextEncoders/opaque.safetensors": "text-encoder",
         "Lora/opaque.safetensors": "lora",
-        "ControlNet/opaque.safetensors": "unknown",
+        "ControlNet/opaque.safetensors": "controlnet",
     }
 
 
@@ -87,7 +87,8 @@ def test_clip_vision_file_is_a_text_encoder_by_header_and_by_folder(tmp_path):
     ("TextEncoders", "text-encoder"), ("clip_vision", "text-encoder"),
     ("ClipVision", "text-encoder"), ("VAE", "vae"), ("ApproxVAE", "vae"),
     ("Lora", "lora"), ("LyCORIS", "lora"), ("upscale_models", "upscaler"),
-    ("ESRGAN", "upscaler"), ("embeddings", "unknown"), ("controlnet", "unknown"),
+    ("ESRGAN", "upscaler"), ("embeddings", "textual-inversion"), ("controlnet", "controlnet"),
+    ("Embeddings", "textual-inversion"), ("ControlNet", "controlnet"), ("ipadapter", "unknown"),
 ])
 def test_folder_names_are_matched_case_insensitively(tmp_path, folder, expected):
     models = tmp_path / "models"
