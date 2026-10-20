@@ -41,6 +41,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   languages are scanned by pattern and labelled approximate), so the agent can read just the part it
   needs. On a project with more than 300 files the codebase map is now a directory summary of every
   file found plus detail for the shallowest files, instead of stopping after the first 300.
+- **`localm coder` keeps long tool output instead of cutting out the middle.** When a command or
+  search prints more than the agent is shown, the full text is kept in memory for the session
+  (never written to disk) and the agent can read any part of it back with the new `read_output`
+  tool, by line range or by pattern.
 
 ### Changed
 

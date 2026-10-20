@@ -128,6 +128,9 @@ _SCOPED_TOOLS: frozenset[str] = frozenset({
 _INTENTIONALLY_UNSCOPED: frozenset[str] = frozenset({
     "run_shell", "run_tests", "git_diff", "git_log",
     "run_shell_background", "check_shell_job", "kill_shell_job",
+    # Reads this session's kept tool output from memory; its pattern is a regex
+    # over that text, not a path.
+    "read_output",
 })
 
 # The subset of _INTENTIONALLY_UNSCOPED that EXECUTES a process: git_diff and

@@ -26,7 +26,7 @@ PLAN_MODE_TOOLS: frozenset[str] = frozenset({
     "git_status", "git_diff", "git_log",
     "check_shell_job", "check_agent_job",
     "read_env",
-    "set_todos", "read_todos",
+    "set_todos", "read_todos", "read_output",
     "rag_list_collections",
     "list_skills", "use_skill", "search_tools",
     "ask_user", "enter_plan_mode", "exit_plan_mode",

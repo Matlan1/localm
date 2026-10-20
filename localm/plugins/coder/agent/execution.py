@@ -749,11 +749,17 @@ class _ExecutionMixin:
         # how long the tool took - the number the GUI shows next to the card.
         t_start = time.monotonic()
         try:
-            if interactive and self._spins_while_running(call.name):
-                with ActivitySpinner(f"Running {call.name}..."):
+            from ..provenance import is_untrusted_tool
+            from ..spill import SpillStore, spilling_to
+            store = getattr(self, "_spill_store", None)
+            if store is None:
+                store = self._spill_store = SpillStore()
+            with spilling_to(store, call.name, is_untrusted_tool(call.name, tool_def)):
+                if interactive and self._spins_while_running(call.name):
+                    with ActivitySpinner(f"Running {call.name}..."):
+                        result = tool_def.fn(self.cwd, **args)
+                else:
                     result = tool_def.fn(self.cwd, **args)
-            else:
-                result = tool_def.fn(self.cwd, **args)
         except TypeError as e:
             result = ToolResult.error(f"Bad arguments for {call.name}: {e}")
         except Exception as e:
