@@ -603,6 +603,12 @@ class _ExecutionMixin:
             allow_key is not None and not shell_unchecked and not lenient_call
             and call.name not in self.always_confirm
         )
+        if (needs_confirm and call.name == "run_shell" and not shell_unchecked
+                and not lenient_call and call.name not in self.always_confirm
+                and self._read_only_shell(call)):
+            needs_confirm = False
+            if interactive:
+                print_info("  (read-only command inside the project: ran without asking)")
         session_allowed = getattr(self, "_session_allowed", None)
         if session_allowed is None:
             session_allowed = self._session_allowed = set()
@@ -960,6 +966,20 @@ class _ExecutionMixin:
         if self.parent is None:
             return None
         return self.name or "sub-agent"
+
+    def _read_only_shell(self, call: ToolCall) -> bool:
+        """Whether run_shell *call* is provably read-only inside the project and
+        the project has not turned the shortcut off
+        (auto_allow_read_only_shell = false in .localcoder/config.toml)."""
+        command = call.args.get("command") if isinstance(call.args, dict) else None
+        if not isinstance(command, str) or not shell_guard.is_read_only(command, self.cwd):
+            return False
+        from ..project_config import load_project_config
+        try:
+            setting = load_project_config(self.cwd).get("auto_allow_read_only_shell", True)
+        except Exception:
+            return False
+        return setting is not False
 
     @staticmethod
     def _spins_while_running(name: str) -> bool:
