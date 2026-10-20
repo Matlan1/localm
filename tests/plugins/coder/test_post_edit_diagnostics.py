@@ -232,6 +232,12 @@ class TestOtherWriteTools:
                            _restricted=True)
         assert "[ruff" not in r.output and spawns == []
 
+    def test_edit_file_syntax_error_is_left_to_the_syntax_check(self, tmp_path, spawns):
+        (tmp_path / "m.py").write_text("x = 1\n", encoding="utf-8")
+        r = tool_edit_file(tmp_path, "m.py", "x = 1", "def f(:", _restricted=False)
+        assert "[syntax check]" in r.output and "[ruff" not in r.output
+        assert spawns == []
+
     def test_patch_file(self, tmp_path, spawns):
         (tmp_path / "m.py").write_text("x = 1\n", encoding="utf-8")
         diff = "--- a/m.py\n+++ b/m.py\n@@ -1 +1,2 @@\n+import os\n x = 1\n"
