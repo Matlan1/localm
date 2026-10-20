@@ -51,7 +51,10 @@ import shutil
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import IO, TYPE_CHECKING, Any, Callable, Optional, cast
+
+if TYPE_CHECKING:
+    from av.container import InputContainer
 
 import multiprocessing as mp
 
@@ -439,20 +442,22 @@ def _ignore_invalid_frames(frames):
             continue
 
 
-def _open_container(source):
+def _open_container(source: str | Path | IO[bytes]) -> InputContainer:
     """Open *source* for reading with PyAV. Metadata that is not valid text is
     ignored rather than raised, on the PyAV versions that have the
     ``metadata_errors`` option; newer versions dropped it and need no option."""
     import av
+    ignore_metadata_errors: dict[str, Any] = {"metadata_errors": "ignore"}
     try:
-        return av.open(source, mode="r", metadata_errors="ignore")
+        return cast(
+            "InputContainer", av.open(source, mode="r", **ignore_metadata_errors))
     except TypeError as e:
         if "metadata_errors" not in str(e):
             raise
         return av.open(source, mode="r")
 
 
-def decode_audio(source, sampling_rate: int = 16000):
+def decode_audio(source: str | Path | IO[bytes], sampling_rate: int = 16000):
     """Decode an audio file or binary file object to mono float32 samples in
     [-1, 1] at *sampling_rate* Hz, using PyAV.
 
@@ -461,10 +466,10 @@ def decode_audio(source, sampling_rate: int = 16000):
     stream. Works with every PyAV version localm allows."""
     import gc
 
-    import av
     import numpy as np
+    from av.audio.resampler import AudioResampler
 
-    resampler = av.audio.resampler.AudioResampler(
+    resampler = AudioResampler(
         format="s16", layout="mono", rate=sampling_rate)
     pieces = []
     with _open_container(source) as container:

@@ -20,6 +20,11 @@ from localm.debuglog import logger
 class NativeAWQLinear(nn.Module):
     """Linear layer holding 4-bit packed AWQ weights, dequantizing on demand during forward pass."""
 
+    qweight: torch.Tensor
+    qzeros: torch.Tensor
+    scales: torch.Tensor
+    bias: Optional[torch.Tensor]
+
     def __init__(
         self,
         in_features: int,
@@ -209,11 +214,13 @@ def _try_create_native_awq_quantizer_cls():
         def _process_model_after_weight_loading(self, model, **kwargs):
             return model
 
-        def is_serializable(self):
+        # HfQuantizer declares both members without a return type.
+        # See test_native_awq_quantizer_is_serializable_and_not_trainable.
+        def is_serializable(self):  # pyright: ignore[reportIncompatibleMethodOverride]
             return True
 
         @property
-        def is_trainable(self):
+        def is_trainable(self):  # pyright: ignore[reportIncompatibleMethodOverride]
             return False
 
     return NativeAwqQuantizer
