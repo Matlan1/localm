@@ -19,6 +19,7 @@ from typing import Optional
 
 from .agent import Agent
 from .agent.constants import _SHELL_EXEC_TOOLS
+from .agent.planmode import INTERACTION_TOOLS
 from .audit import SessionMode, parse_mode
 from .display import print_warning
 from .project_config import load_project_config
@@ -208,6 +209,8 @@ def build_agent(backend, work_dir: Path, *, task: str, max_turns: int,
         browser_enabled=browser_enabled,
         max_tokens_explicit=max_tokens_explicit,
         on_event=on_event,
+        # A one-shot task has nobody to answer a question or approve a plan.
+        disabled_tools=INTERACTION_TOOLS if task else None,
         **(gen_kw or {}),
     )
 

@@ -32,7 +32,7 @@ from .loop import _LoopMixin
 from .execution import _ExecutionMixin
 from .context import _ContextMixin
 from .persistence import _PersistenceMixin
-from .planmode import _PlanModeMixin
+from .planmode import INTERACTION_TOOLS, _PlanModeMixin
 from .session import _SessionMixin
 from .tooldefs import _build_openai_tool_defs
 
@@ -845,7 +845,8 @@ class Agent(
             self._expire_active_skill_locked()
             allowed = self._active_skill_tools
             names = ", ".join(self._active_skill_names)
-        if allowed is None or tool_name in allowed or tool_name in SKILL_META_TOOLS:
+        if (allowed is None or tool_name in allowed or tool_name in SKILL_META_TOOLS
+                or tool_name in INTERACTION_TOOLS):
             return None
         return (
             f"'{tool_name}' was not run: the active skill ({names}) declares "

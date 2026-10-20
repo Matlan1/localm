@@ -391,7 +391,8 @@ class _ExecutionMixin:
         if self.plan_mode:
             plan_refusal = plan_mode_refusal(call.name, tool_def)
             if plan_refusal is not None:
-                result = ToolResult.error(plan_refusal)
+                result = self._track_tool_failure(
+                    call, ToolResult.error(plan_refusal))
                 self._audit.notice("plan_mode_refused", plan_refusal)
                 if interactive:
                     print_tool_error(call.name, result.output)

@@ -318,7 +318,7 @@ def test_exit_plan_mode_autorun_switches_auto_approve_and_verify_for_one_run(
                return_value="pytest -q"):
         r = agent._execute_tool(_call("exit_plan_mode", plan="1. x"),
                                 interactive=True)
-    assert r.ok and "`pytest -q` exits 0" in r.output
+    assert r.ok and "`pytest -q` must exit 0" in r.output
     assert not agent.plan_mode
     assert agent.auto_approve is True and agent.verify_cmd == "pytest -q"
     agent._end_plan_autorun()
@@ -509,3 +509,123 @@ def test_plan_mode_survives_a_checkpoint(tmp_path, monkeypatch):
     third = _agent(proj, mode=SessionMode.LOG)
     third.resume_checkpoint(data)
     assert not third.plan_mode
+
+
+def test_resume_never_switches_off_a_plan_mode_the_user_turned_on(tmp_path, monkeypatch):
+    import localm.config as cfg
+    monkeypatch.setattr(cfg, "HOME_DIR", tmp_path / "home")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    old = _agent(proj, mode=SessionMode.LOG)
+    old._messages = [{"role": "user", "content": "earlier"}]
+    assert old.save_checkpoint()
+    now = _agent(proj, mode=SessionMode.LOG)
+    now.set_plan_mode(True)
+    data = now.load_checkpoint()
+    data.pop("plan_mode", None)
+    now.resume_checkpoint(data)
+    assert now.plan_mode
+
+
+# ---------------------------------------------------------------------------
+#  Review fixes: the harness gates, batch order, breakers, where tools appear
+# ---------------------------------------------------------------------------
+
+def test_verify_gate_does_not_run_in_plan_mode(tmp_path):
+    agent = _agent(tmp_path)
+    agent.verify_cmd = "pytest"
+    st = SimpleNamespace(verify_settled=False, verify_checked_at=0, verify_retries=0)
+    calls = []
+
+    def fake_run(cmd, cwd):
+        calls.append(cmd)
+        raise RuntimeError("verify ran")
+
+    with patch.object(agent, "_write_total", return_value=3), \
+         patch("localm.plugins.coder.verify.run_verify", side_effect=fake_run):
+        agent.set_plan_mode(True)
+        assert agent._run_verify_gate("plan", False, st) is None
+        assert calls == []
+        agent.set_plan_mode(False)
+        with pytest.raises(RuntimeError, match="verify ran"):
+            agent._run_verify_gate("done", False, st)
+    assert calls == ["pytest"]
+
+
+def test_self_verify_nudge_is_held_back_in_plan_mode(tmp_path):
+    agent = _agent(tmp_path, self_verify=True)
+    agent._unverified_writes.add("a.py")
+    agent.set_plan_mode(True)
+    with patch.object(agent, "_call_llm", return_value="Here is my plan.") as llm:
+        agent.chat("plan it")
+    assert llm.call_count == 1
+    agent.set_plan_mode(False)
+    with patch.object(agent, "_call_llm", return_value="Finished.") as llm:
+        agent.chat("go")
+    assert llm.call_count == 2
+
+
+def test_calls_after_exit_plan_mode_in_the_same_reply_wait_for_the_verdict(
+        tmp_path, monkeypatch):
+    _answers(monkeypatch, "y")
+    agent = _agent(tmp_path)
+    agent.set_plan_mode(True)
+    replies = iter([
+        _tc("exit_plan_mode", plan="1. write a.txt") + "\n"
+        + _tc("write_file", path="a.txt", content="x"),
+        "Done.",
+    ])
+    with patch.object(agent, "_call_llm", side_effect=lambda *a, **k: next(replies)):
+        agent.chat("do it")
+    assert not (tmp_path / "a.txt").exists()
+    history = " ".join(str(m.get("content")) for m in agent._messages)
+    assert "in the same reply as exit_plan_mode" in history
+    assert not agent.plan_mode
+
+
+def test_repeated_plan_mode_refusals_arm_the_failure_breaker(tmp_path):
+    agent = _agent(tmp_path)
+    agent.set_plan_mode(True)
+    for _ in range(4):
+        r = agent._execute_tool(_call("write_file", path="a.txt", content="x"),
+                                interactive=False)
+    assert "failed 4 times" in r.output
+    assert agent._abort_streak_tool == "write_file"
+
+
+def test_an_active_skill_does_not_block_the_interaction_tools(tmp_path, monkeypatch):
+    _answers(monkeypatch, "y")
+    agent = _agent(tmp_path)
+    agent.set_plan_mode(True)
+    with agent._skill_lock:
+        agent._active_skill_tools = frozenset({"read_file"})
+        agent._active_skill_names = ["s"]
+        agent._active_skill_seq = agent._user_request_seq
+    assert agent._skill_gate_denial("write_file") is not None
+    r = agent._execute_tool(_call("exit_plan_mode", plan="1. x"), interactive=True)
+    assert r.ok and not agent.plan_mode
+
+
+def test_one_shot_tasks_and_the_gui_do_not_offer_the_interaction_tools(
+        tmp_path, monkeypatch):
+    import localm.config as cfg
+    monkeypatch.setattr(cfg, "HOME_DIR", tmp_path / "home")
+    from localm.plugins.coder.runner import build_agent
+    from localm.plugins.coder.sessions import CoderSession
+
+    def built(task):
+        with patch("localm.plugins.coder.agent.ProjectMap") as PM, \
+             patch("localm.plugins.coder.agent.make_audit_log"), \
+             patch("localm.plugins.coder.agent.load_memory", return_value=""):
+            PM.build.return_value.file_count.return_value = 0
+            return build_agent(_Stub(), tmp_path, task=task, max_turns=5,
+                               auto_approve=False, always_confirm=(),
+                               session_mode=SessionMode.PRIVACY)
+
+    assert INTERACTION_TOOLS <= built("fix it").disabled_tools
+    assert not (INTERACTION_TOOLS & built("").disabled_tools)
+    gui = CoderSession(tmp_path, _Stub(), auto_approve=True, auto_verify=False)
+    try:
+        assert INTERACTION_TOOLS <= gui.agent.disabled_tools
+    finally:
+        gui.close()

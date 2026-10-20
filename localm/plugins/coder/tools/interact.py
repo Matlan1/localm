@@ -230,8 +230,8 @@ def tool_exit_plan_mode(cwd: Path, plan=None,
                 "The user approved the plan and switched on auto-run. Plan "
                 "mode is off. Carry the plan out now: tool calls run without "
                 "asking for the rest of this task (the shell safety gate and "
-                "tools set to always confirm still ask), and the task finishes only "
-                f"once `{label}` exits 0.")
+                f"tools set to always confirm still ask), and `{label}` must "
+                "exit 0 before the task finishes.")
         else:
             text = (
                 "The user approved the plan and switched on auto-run. Plan "

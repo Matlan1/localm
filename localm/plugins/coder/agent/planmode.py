@@ -17,8 +17,8 @@ from __future__ import annotations
 from typing import Any, Optional
 
 # The tools that can run in plan mode: they read the project, the session's own
-# state or a job's output, and none writes a file, runs a command, reaches the
-# network or starts an agent.
+# state or a job's output, and none writes a file, runs a model-chosen command,
+# reaches the network or starts an agent.
 PLAN_MODE_TOOLS: frozenset[str] = frozenset({
     "read_file", "list_dir", "tree", "grep", "search_files", "find_references",
     "git_status", "git_diff", "git_log",
@@ -26,7 +26,7 @@ PLAN_MODE_TOOLS: frozenset[str] = frozenset({
     "read_env",
     "set_todos", "read_todos",
     "rag_list_collections",
-    "use_skill",
+    "list_skills", "use_skill",
     "ask_user", "enter_plan_mode", "exit_plan_mode",
 })
 

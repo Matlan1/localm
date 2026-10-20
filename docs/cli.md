@@ -928,15 +928,17 @@ form: a verification command, a fix-attempt cap, and a skip-verification toggle.
 `enter_plan_mode` tool) switches to plan mode: only read-only tools run - reading,
 searching, git status/diff/log, the task list - and every tool that writes a file, runs
 a command, uses the network or starts a sub-agent is refused by the harness, whatever
-the model emits. When the agent has a plan it presents it with `exit_plan_mode`, and you
-answer `y` (approve; plan mode ends and edits still ask as usual), `a` (approve and
-auto-run: for the rest of that task gated tools run without asking, except what the
-shell safety gate or an always-confirm setting holds back, and the task finishes only
-once the project's verification check passes), or `n` or any text (the agent stays in
-plan mode and gets your feedback). `/plan off` leaves plan mode without a plan. In the
-GUI a plan arrives as an approval card (approve or reject). The agent can also ask you a
-question with `ask_user`, offering numbered options or taking a typed answer; in the GUI
-and in unattended runs it is told to decide for itself instead.
+the model emits. Background jobs started before plan mode keep running. When the agent
+has a plan it presents it with `exit_plan_mode`, and you answer `y` (approve; plan mode
+ends and edits ask as they did before), `a` (approve and auto-run: for the rest of that
+task gated tools run without asking, except what the shell safety gate or an
+always-confirm setting holds back, and the project's verification check runs before the
+task finishes, detected when none is set; if the fix attempts run out the task is
+reported as not verified), or `n` or any text (the agent stays in plan mode and gets
+your feedback). `/plan off` leaves plan mode without a plan. The agent can also ask you
+a question with `ask_user`, offering numbered options or taking a typed answer. Plan
+mode and `ask_user` are terminal features: the GUI coder and one-shot tasks do not offer
+them.
 
 **Self-review.** An optional reviewer model reads the cumulative diff before the agent
 declares a task done and looks for blocking problems - correctness bugs, security holes,
