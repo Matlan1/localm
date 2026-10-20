@@ -930,7 +930,14 @@ class _LoopMixin:
         # looks_like_tool_attempt().
         request = getattr(self, "_last_user_request", "") or ""
         offered = st.nocall_escalation >= 1 or st.code_nudged
-        declined = _RE_NO_TOOL_NEEDED.match(response) if offered else None
+        marker = _RE_NO_TOOL_NEEDED.match(response)
+        if marker is not None and self._change_still_owed(request, st):
+            # The escape does not answer a request to change the project while
+            # nothing was written: the marker is dropped and the reply is judged
+            # as written. See test_the_escape_does_not_answer_a_change_request.
+            response = response[marker.end():] or st.nocall_response
+            marker = None
+        declined = marker if offered else None
         if declined is not None and not response[declined.end():].strip():
             # The marker with no answer after it: an imperative request keeps
             # climbing the ladder, anything else is answered by the reply the
@@ -1073,22 +1080,22 @@ class _LoopMixin:
         Two cases, each nudged at most once per task while turns remain:
 
         * the reply carries a code block meant for a file (not a shell block)
-          on a request that implies action, and nothing was written this task;
+          while a change the request asked for is still owed (see
+          :meth:`_change_still_owed`); after that nudge, any reply that still
+          leaves the change owed ends the run as not finished;
         * the reply's last line announces a next step ("Let me run the tests.")
           after tools were used this task.
 
         Returns ``(False, "")`` after a nudge (the loop continues), a note for
-        the final answer when the same case recurs after its nudge (the run is
-        then reported as not finished), or ``""``."""
-        can_write = bool({"write_file", "edit_file", "patch_file"} - self.disabled_tools)
-        wrote = (self._write_total() > st.writes_at_start or self.patch_mode
-                 or any(_may_write_files(name) for name in st.called_tools))
+        the final answer when the run ends with the case still open (it is then
+        reported as not finished), or ``""``."""
         turns_left = self._turns < self.max_turns and not self.plan_mode
-        code = (can_write and not wrote and demands_action(request)
-                and _RE_CHANGE_REQUEST.search(request) is not None
-                and _has_file_code_block(response))
-        if code:
-            if not st.code_nudged and turns_left:
+        owed = self._change_still_owed(request, st)
+        if owed and st.code_nudged:
+            return ("\n\n[not finished: nothing was written to any file in this task, "
+                    "so the change the request asked for was not made]")
+        if owed and _has_file_code_block(response):
+            if turns_left:
                 st.code_nudged = True
                 st.nocall_response = response
                 self._audit.notice("code_not_written",
@@ -1099,18 +1106,15 @@ class _LoopMixin:
                     "written or edited in this task, so nothing on disk changed. If "
                     "the code belongs in the project, write it now with a tool call: "
                     "write_file for a new file or a complete rewrite, edit_file to "
-                    "change part of a file. If it is only an illustration and the "
-                    'task needs no file change, begin your reply with "[no tool '
-                    'needed]" and give your answer.')
+                    "change part of a file.")
                 if interactive:
                     print_info("(code not written: asking the agent to write it to a file)")
                 self._emit("info", text=(
                     "the reply showed code but wrote no file - asking the agent "
                     "to write it"))
                 return (False, "")
-            if st.code_nudged:
-                return ("\n\n[not finished: the code in this reply was not written "
-                        "to any file - nothing on disk changed]")
+            return ("\n\n[not finished: nothing was written to any file in this task, "
+                    "so the change the request asked for was not made]")
         announced = _announced_step(response)
         if st.announce_nudged and not announced and (
                 not response.strip() or _RE_NO_TOOL_NEEDED.fullmatch(response.strip())):
@@ -1140,6 +1144,21 @@ class _LoopMixin:
                 return (f'\n\n[not finished: the run ended on "{announced}" and '
                         "that step was never taken]")
         return ""
+
+    def _change_still_owed(self, request: str, st) -> bool:
+        """True when *request* tells the agent to change the project (an
+        imperative with a change verb), the session can write files and is not
+        in plan mode, and nothing that can write has run this task: no write
+        the tracker saw, no patch-mode capture, no shell, search_replace, MCP or
+        plugin call."""
+        if self.plan_mode:
+            return False
+        if not {"write_file", "edit_file", "patch_file"} - self.disabled_tools:
+            return False
+        if not (demands_action(request) and _RE_CHANGE_REQUEST.search(request)):
+            return False
+        return not (self._write_total() > st.writes_at_start or self.patch_mode
+                    or any(_may_write_files(name) for name in st.called_tools))
 
     def _used_tools_this_task(self, st) -> bool:
         """Has the model demonstrated, THIS TASK, that it can drive a tool?
@@ -1235,9 +1254,11 @@ class _LoopMixin:
                 "</tool_call>\n"
                 "Use one of the available tools by its exact name, with valid "
                 "JSON args. Emit one call now and I will run it and give you the "
-                "result. If this genuinely needs no tool at all, begin your reply "
-                'with "[no tool needed]" and answer in plain text, and I will '
-                "accept that as your answer."
+                "result."
+                + ("" if self._change_still_owed(request, st) else
+                   ' If this genuinely needs no tool at all, begin your reply '
+                   'with "[no tool needed]" and answer in plain text, and I will '
+                   "accept that as your answer.")
             )
             if interactive:
                 print_info("(no tool call: re-prompting with the tool-call format)")

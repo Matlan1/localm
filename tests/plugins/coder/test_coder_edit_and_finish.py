@@ -294,8 +294,34 @@ def test_code_left_unwritten_after_the_nudge_is_reported_not_finished(tmp_path):
     with _scripted(agent, [_call("read_file", {"path": "calc.py"}),
                            _CODE_REPLY, _CODE_REPLY + "\nDone."]):
         result = agent.run_task("implement add and sub in calc.py")
-    assert "[not finished: the code in this reply was not written" in result
+    assert "[not finished: nothing was written to any file" in result
     assert agent.last_run_ok is False
+
+
+def test_the_escape_does_not_answer_a_change_request(tmp_path):
+    """The live failure: qwen2.5-coder-7b answered a change request with
+    "[no tool needed]" plus code, then claimed the file was already in place."""
+    (tmp_path / "calc.py").write_text("# calc\n", encoding="utf-8")
+    agent = _make_agent(tmp_path, max_turns=8)
+    with _scripted(agent, [
+        _call("read_file", {"path": "calc.py"}),
+        "[no tool needed] Here it is.\n" + _CODE_REPLY,
+        "[no tool needed] The code is already placed in calc.py.",
+    ]):
+        result = agent.run_task("implement add and sub in calc.py")
+    nudges = [t for t in _user_texts(agent) if "[code not written]" in t]
+    assert len(nudges) == 1 and "[no tool needed]" not in nudges[0]
+    assert "[not finished: nothing was written to any file" in result
+    assert agent.last_run_ok is False
+
+
+def test_the_first_nudge_on_a_change_request_offers_no_escape(tmp_path):
+    agent = _make_agent(tmp_path, max_turns=6)
+    with _scripted(agent, ["I would write it like this.", "Still prose.", "More prose."]), \
+         patch("localm.plugins.coder.agent.parse_tool_calls", return_value=[]):
+        agent.run_task("implement add in calc.py")
+    rung1 = [t for t in _user_texts(agent) if t.startswith("[no tool call]")]
+    assert rung1 and "[no tool needed]" not in rung1[0]
 
 
 def test_code_in_an_answer_to_a_question_is_not_sent_back(tmp_path):
