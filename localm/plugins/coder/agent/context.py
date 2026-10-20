@@ -556,7 +556,7 @@ ws     ::= [ \t\n\r]*
             except Exception:
                 return raw
 
-        if getattr(self, "on_event", None) is None and getattr(self, "progress_sink", None) is None:
+        if getattr(self, "_interactive", False) and getattr(self, "on_event", None) is None:
             with ActivitySpinner("Compacting session history..."):
                 summary, failure = summarise_in_passes(
                     groups, _pass, reply_tokens=reply_tokens, measure=measure)
@@ -1031,10 +1031,13 @@ ws     ::= [ \t\n\r]*
                 yield chunk
                 if on_tool_progress is not None and len(raw_seen) - len(full) >= 12:
                     pending = raw_seen[len(full):]
-                    if any(m in pending for m in ("<tool_call", "<|tool_call", "```")):
+                    tagged = "<tool_call" in pending or "<|tool_call" in pending
+                    if tagged or "```" in pending:
                         m_name = _TOOL_NAME_PROGRESS_RE.search(pending)
                         t_name = m_name.group(1) if m_name else ""
-                        if not t_name or t_name in tool_names:
+                        # A bare ``` fence is reported only once it names a
+                        # tool; an ordinary code block is just held text.
+                        if (t_name in tool_names) or (tagged and not t_name):
                             m_tgt = _TOOL_TARGET_PROGRESS_RE.search(pending)
                             tgt = m_tgt.group(1) if m_tgt else ""
                             lines = pending.count("\\n") + pending.count("\n")

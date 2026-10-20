@@ -7,11 +7,18 @@ checklist rendering, and @file context expansion."""
 from __future__ import annotations
 
 import io
+import os
+import sys
+import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from localm.console import SafeConsole
 from localm.plugins.coder import display
+from localm.plugins.coder.cli import repl as repl_mod
 from localm.plugins.coder.cli.repl import _expand_at_mentions, _read_multiline
 from localm.plugins.coder.parser import ToolCall
 from localm.plugins.coder.tools import ToolResult
@@ -252,6 +259,28 @@ class TestDiffPreviewAndConfirmationUX:
         assert display._parse_confirm_answer(" y ") == ("yes", "")
 
 
+class TestAttachmentsStayOutOfTheRequestText:
+    def test_attachment_text_does_not_turn_a_question_into_an_action(self, tmp_path):
+        agent = _make_agent(tmp_path, auto_approve=True)
+        (tmp_path / "notes.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+        calls = []
+
+        def fake_stream(messages, on_reasoning=None, **kw):
+            calls.append(messages)
+            yield "It returns the sum of a and b."
+
+        agent.backend.chat_stream.side_effect = fake_stream
+        from localm.plugins.coder.cli.repl import _at_attachments
+        question = "what does @notes.py do"
+        agent.chat(question, attachments=_at_attachments(question, tmp_path))
+
+        assert len(calls) == 1, "a prose answer to a question must not be re-prompted"
+        sent = calls[0][-1]["content"]
+        assert "return a + b" in sent
+        assert agent._last_user_request == question
+        assert agent._session_title == question
+
+
 class TestContextWarningText:
     def test_compact_warning_carries_no_literal_markup(self, tmp_path):
         agent = _make_agent(tmp_path)
@@ -348,6 +377,240 @@ class TestReplAtMentionsAndPaste:
 
         monkeypatch.setattr("localm.plugins.coder.cli.repl._stdin_has_buffered_data", has_data)
         monkeypatch.setattr("sys.stdin.readline", lambda: next(buffered))
+        monkeypatch.setattr("localm.plugins.coder.cli.repl._drain_pasted_lines",
+                            repl_mod._drain_with_readline)
 
         msg = _read_multiline()
         assert msg == "first line\nsecond line\nthird line"
+
+    @pytest.mark.skipif(os.name == "nt", reason="needs a POSIX pty")
+    def test_paste_into_a_real_pty_arrives_as_one_message(self, tmp_path):
+        import pty
+        import select
+        root = str(Path(__file__).resolve().parents[3])
+        script = (
+            "import sys; sys.path.insert(0, %r)\n"
+            "import readline\n"
+            "from localm.plugins.coder.cli.repl import _read_multiline\n"
+            "print('GOT=' + repr(_read_multiline()), flush=True)\n"
+            "print('NEXT=' + repr(_read_multiline()), flush=True)\n" % root)
+        env = dict(os.environ, TERM="xterm", LOCALM_HOME=str(tmp_path / "home"))
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.execve(sys.executable, [sys.executable, "-c", script], env)
+        out = b""
+
+        def read_until(token: bytes, timeout: float = 20.0) -> None:
+            nonlocal out
+            end = time.monotonic() + timeout
+            while token not in out and time.monotonic() < end:
+                if select.select([fd], [], [], 0.2)[0]:
+                    try:
+                        out += os.read(fd, 4096)
+                    except OSError:
+                        break
+            assert token in out, out[-2000:]
+
+        try:
+            read_until(b"You")
+            os.write(fd, b"l1\nl2\nl3\nl4\n")
+            read_until(b"GOT=")
+            read_until(b"You", timeout=10.0)
+            os.write(fd, b"after\n")
+            read_until(b"NEXT=")
+            read_until(b"\n", timeout=5.0)
+        finally:
+            try:
+                os.kill(pid, 9)
+            except OSError:
+                pass
+            os.waitpid(pid, 0)
+            os.close(fd)
+        text = out.decode("utf-8", "replace")
+        got = text.split("GOT=", 1)[1].splitlines()[0]
+        nxt = text.split("NEXT=", 1)[1].splitlines()[0]
+        assert got.strip() == repr("l1\nl2\nl3\nl4")
+        assert nxt.strip() == repr("after")
+
+
+class TestReviewFindings:
+    def test_full_diff_is_offered_only_for_this_files_preview(self, monkeypatch):
+        big = "".join(f"line_{i} = {i}\n" for i in range(80))
+        prompts, printed = [], []
+        answers = iter(["f", "n"])
+
+        def fake_input(prompt=""):
+            prompts.append(str(prompt))
+            return next(answers)
+
+        monkeypatch.setattr(display.console, "input", fake_input)
+        with patch("localm.plugins.coder.display.Syntax",
+                   side_effect=lambda text, *a, **kw: printed.append(text) or text), \
+             patch.object(display.console, "print"):
+            display.print_diff_preview("", big, "a.py")
+            assert display.confirm_diff("b.py") is False
+        assert len(printed) == 1, "f must not print another file's diff"
+        assert all("f=full diff" not in p for p in prompts)
+
+    def test_confirm_tool_forgets_an_earlier_files_preview(self, tmp_path, monkeypatch):
+        agent = _make_agent(tmp_path, auto_approve=False)
+        big = "".join(f"line_{i} = {i}\n" for i in range(80))
+        with patch.object(display.console, "print"):
+            display.print_diff_preview("", big, "a.py")
+        prompts = []
+        monkeypatch.setattr(display.console, "input",
+                            lambda prompt="": prompts.append(str(prompt)) or "n")
+        call = ToolCall(name="patch_file", args={"path": "b.py", "diff": "--- a\n+++ b\n"},
+                        raw="", start=0, end=0)
+        with patch.object(display.console, "print"):
+            agent._execute_tool(call, interactive=True)
+        assert prompts and "f=full diff" not in prompts[0]
+        assert display._last_diff_preview is None
+
+    def test_rejection_event_summary_is_the_literal_the_gui_matches(self, tmp_path, monkeypatch):
+        agent = _make_agent(tmp_path, auto_approve=False)
+        events = []
+        agent.on_event = events.append
+        agent.confirm_handler = lambda call: False
+        call = ToolCall(name="write_file", args={"path": "x.py", "content": "x = 1\n"},
+                        raw="", start=0, end=0)
+        agent._execute_tool(call, interactive=False)
+        summaries = [e.get("summary") for e in events if e.get("type") == "tool_result"]
+        assert summaries == ["rejected by user"]
+
+    def test_child_prompt_through_parent_terminal_honours_a_and_reason(self, tmp_path, monkeypatch):
+        child = _make_agent(tmp_path, auto_approve=False)
+        prompts = []
+        answers = iter(["a", "use src/ instead"])
+
+        def fake_input(prompt=""):
+            prompts.append(str(prompt))
+            return next(answers)
+
+        monkeypatch.setattr(display.console, "input", fake_input)
+        child.confirm_handler = lambda call: display.confirm(f"  Allow {call.name}?")
+        w1 = ToolCall(name="write_file", args={"path": "a.py", "content": "a = 1\n"},
+                      raw="", start=0, end=0)
+        w2 = ToolCall(name="write_file", args={"path": "b.py", "content": "b = 1\n"},
+                      raw="", start=0, end=0)
+        assert child._execute_tool(w1, interactive=False).ok is True
+        assert "a=allow this session" in prompts[0]
+        assert child._execute_tool(w2, interactive=False).ok is True
+        assert len(prompts) == 1
+        sh = ToolCall(name="run_shell", args={"command": "echo hi"}, raw="", start=0, end=0)
+        res = child._execute_tool(sh, interactive=False)
+        assert res.ok is False and "Rejected by user: use src/ instead" in res.output
+
+    def test_plain_questions_do_not_offer_session_allow(self, monkeypatch):
+        prompts = []
+        monkeypatch.setattr(display.console, "input",
+                            lambda prompt="": prompts.append(str(prompt)) or "a")
+        assert display.confirm("  Keep going?") is True
+        assert "a=allow" not in prompts[0]
+        assert display.consume_confirm_always() is False
+
+    def test_session_allows_end_on_cd_and_clear(self, tmp_path, monkeypatch):
+        agent = _make_agent(tmp_path, auto_approve=False)
+        agent._session_allowed.add("write_file")
+        other = tmp_path / "other"
+        other.mkdir()
+        with patch("localm.plugins.coder.agent.ProjectMap") as pm, \
+             patch("localm.plugins.coder.agent.load_memory", return_value=""):
+            pm.build.return_value.file_count.return_value = 0
+            agent.set_cwd(other)
+        assert agent._session_allowed == set()
+        agent._session_allowed.add("write_file")
+        agent.reset()
+        assert agent._session_allowed == set()
+
+    def test_url_tools_are_allowed_per_host(self):
+        from localm.plugins.coder.agent.execution import _ExecutionMixin as M
+
+        def key(url):
+            return M._session_allow_key(
+                ToolCall(name="fetch_url", args={"url": url}, raw="", start=0, end=0))
+
+        assert key("https://docs.python.org/3/") == key("https://docs.python.org/x")
+        assert key("https://docs.python.org/3/") != key("https://evil.example/")
+        assert key("not a url") is None
+
+    def test_spinner_skips_tools_that_can_prompt_on_the_terminal(self):
+        from localm.plugins.coder.agent.execution import _ExecutionMixin as M
+        for name in ("run_shell", "run_shell_background", "git_push", "git_commit",
+                     "run_tests", "spawn_agent", "dispatch_parallel"):
+            assert M._spins_while_running(name) is False, name
+        for name in ("read_file", "write_file", "search_files", "fetch_url"):
+            assert M._spins_while_running(name) is True, name
+
+    def test_footer_and_warning_cover_only_this_tasks_files(self, tmp_path):
+        agent = _make_agent(tmp_path)
+        rows = [{"path": "tests/test_a.py", "writes": 2}, {"path": "src/b.py", "writes": 1}]
+        agent.changed_files = lambda: rows
+        st = SimpleNamespace(files_at_start={"tests/test_a.py": 2})
+        assert [f["path"] for f in agent._files_changed_this_task(st)] == ["src/b.py"]
+
+    def test_unreadable_tool_call_is_shown_to_the_user(self, tmp_path):
+        agent = _make_agent(tmp_path, auto_approve=True)
+        (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+        replies = [
+            'Reading.\n<tool_call>\n{"name": "read_file", "args": {"path": "a.py"}}\n</tool_call>\n'
+            'and then\n<tool_call>\n{"name": "write_file", "args": {"path": "b.py", "content": "oops\n</tool_call>\nDone.',
+            "Finished.",
+        ]
+
+        def fake_stream(messages, on_reasoning=None, **kw):
+            yield replies.pop(0) if replies else "Finished."
+
+        agent.backend.chat_stream.side_effect = fake_stream
+        warnings = []
+        with patch("localm.plugins.coder.agent.print_warning", side_effect=warnings.append):
+            agent.chat("read a.py")
+        assert any("could not be read" in w for w in warnings)
+
+    def test_ordinary_code_fence_is_not_reported_as_a_tool_call(self, tmp_path):
+        agent = _make_agent(tmp_path)
+        reply = ("Here is the config:\n```\n{\"settings\": {\n"
+                 + "".join(f'  "key_{i}": {i},\n' for i in range(30))
+                 + '  "last": 0}}\n```\nThat is all.')
+        chunks = [reply[i:i + 10] for i in range(0, len(reply), 10)]
+        agent.backend.chat_stream.side_effect = lambda messages, on_reasoning=None, **kw: iter(chunks)
+        from localm.plugins.coder.agent import context
+        progress = []
+        with patch.object(context._TerminalReply, "tool_progress",
+                          lambda self, label, detail="": progress.append(label)), \
+             patch.object(context, "print_streaming_token"), \
+             patch.object(context, "print_thinking"), \
+             patch.object(context, "print_assistant_label"), \
+             patch.object(context, "print_streaming_done"):
+            agent._call_llm([{"role": "user", "content": "show code"}], interactive=True)
+        assert progress == []
+
+    def test_compaction_spinner_only_in_the_interactive_session(self, tmp_path):
+        agent = _make_agent(tmp_path)
+        agent._messages = [{"role": "user" if i % 2 == 0 else "assistant",
+                            "content": f"message {i} " * 20} for i in range(12)]
+        from localm.plugins.coder.agent import context
+        for interactive, expected in ((False, 0), (True, 1)):
+            agent._interactive = interactive
+            with patch.object(context, "ActivitySpinner") as spin, \
+                 patch("localm.inference.compact.summarise_in_passes",
+                       return_value=("summary", None)), \
+                 patch.object(context, "print_info"):
+                agent._compact_history()
+            assert spin.call_count == expected, interactive
+
+    def test_goal_mode_keeps_attachments_out_of_the_request(self, tmp_path, monkeypatch):
+        from localm.plugins.coder.cli import goal
+        agent = MagicMock()
+        seen = {}
+
+        def run_task(task, attachments=""):
+            seen["task"], seen["attachments"] = task, attachments
+            return "done"
+
+        agent.run_task.side_effect = run_task
+        monkeypatch.setattr(goal._cli, "_run_verify", lambda cmd, cwd: (0, "ok"), raising=False)
+        goal._run_goal_loop(agent, "what is @a.py", "true", 1, tmp_path,
+                            attachments="\n\n<attached_file>body</attached_file>")
+        assert "body" not in seen["task"]
+        assert "body" in seen["attachments"]

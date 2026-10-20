@@ -64,20 +64,54 @@ def _read_multiline() -> str:
             first = False
         else:
             lines.append(line)
-            pasted = 0
-            while _stdin_has_buffered_data():
-                extra = sys.stdin.readline()
-                if not extra:
-                    break
-                lines.append(extra.rstrip("\r\n"))
-                pasted += 1
-            if pasted >= 2:
-                print_info(f"  (pasted {pasted + 1} lines)")
+            extra_lines = _drain_pasted_lines()
+            lines.extend(extra_lines)
+            if len(extra_lines) >= 2:
+                print_info(f"  (pasted {len(extra_lines) + 1} lines)")
             break
     return "\n".join(lines)
 
 
-def _expand_at_mentions(user_input: str, cwd: Path, scope_allows=None) -> str:
+def _drain_with_readline() -> list[str]:
+    """Pasted lines still waiting in the console input buffer (Windows)."""
+    lines = []
+    while _stdin_has_buffered_data():
+        extra = sys.stdin.readline()
+        if not extra:
+            break
+        lines.append(extra.rstrip("\r\n"))
+    return lines
+
+
+def _drain_fd() -> list[str]:
+    """Pasted lines still waiting on the terminal (POSIX), read straight from
+    the file descriptor: one read can return several pasted lines, and a
+    buffered readline would keep the rest where select() cannot see them.
+    See test_paste_into_a_real_pty_arrives_as_one_message."""
+    try:
+        if not sys.stdin.isatty():
+            return []
+        import select
+        fd = sys.stdin.fileno()
+        chunks: list[bytes] = []
+        while select.select([fd], [], [], 0.05 if chunks else 0.0)[0]:
+            data = os.read(fd, 65536)
+            if not data:
+                break
+            chunks.append(data)
+    except (OSError, ValueError):
+        return []
+    text = b"".join(chunks).decode(sys.stdin.encoding or "utf-8", errors="replace")
+    return text.replace("\r\n", "\n").replace("\r", "\n").splitlines()
+
+
+def _drain_pasted_lines() -> list[str]:
+    """Lines of a paste that arrived after the first one, read without waiting
+    for more typing."""
+    return _drain_with_readline() if os.name == "nt" else _drain_fd()
+
+
+def _at_attachments(user_input: str, cwd: Path, scope_allows=None) -> str:
     """Attach existing workspace files referenced as @path or @path:start-end.
 
     Each file is read through the read_file tool, so confinement, notebook
@@ -85,7 +119,7 @@ def _expand_at_mentions(user_input: str, cwd: Path, scope_allows=None) -> str:
     read. A path outside *scope_allows* (the session's /scope) is not attached.
     Tokens that name no file (a decorator, an @handle) are left alone."""
     if "@" not in user_input:
-        return user_input
+        return ""
     from ..tools.files import tool_read_file
 
     attachments: list[str] = []
@@ -123,8 +157,13 @@ def _expand_at_mentions(user_input: str, cwd: Path, scope_allows=None) -> str:
             f'<attached_file path="{spec}">\n{result.output}\n</attached_file>')
 
     if not attachments:
-        return user_input
-    return user_input + "\n\n" + "\n\n".join(attachments)
+        return ""
+    return "\n\n" + "\n\n".join(attachments)
+
+
+def _expand_at_mentions(user_input: str, cwd: Path, scope_allows=None) -> str:
+    """*user_input* with its @file attachments appended."""
+    return user_input + _at_attachments(user_input, cwd, scope_allows)
 
 
 # Every REPL slash command, for tab completion and /help
@@ -248,7 +287,7 @@ def _repl(agent: Agent) -> None:
                 break
             continue
 
-        expanded_input = _expand_at_mentions(
+        attachments = _at_attachments(
             user_input, agent.cwd,
             scope_allows=agent._scope_allows if agent.scope else None)
 
@@ -259,12 +298,20 @@ def _repl(agent: Agent) -> None:
             if agent.goal_cmd is not None:
                 before = {f["path"]: f["writes"] for f in agent.changed_files()}
                 try:
-                    _run_goal_loop(agent, expanded_input, agent.goal_cmd,
-                                   agent.goal_max_iters, agent.cwd)
+                    if attachments:
+                        _run_goal_loop(agent, user_input, agent.goal_cmd,
+                                       agent.goal_max_iters, agent.cwd,
+                                       attachments=attachments)
+                    else:
+                        _run_goal_loop(agent, user_input, agent.goal_cmd,
+                                       agent.goal_max_iters, agent.cwd)
                 finally:
                     _warn_goal_run_sensitive_changes(agent, before)
             else:
-                agent.chat(expanded_input)
+                if attachments:
+                    agent.chat(user_input, attachments=attachments)
+                else:
+                    agent.chat(user_input)
         except KeyboardInterrupt:
             # _loop has already dealt with the checkpoint; swallow the
             # interrupt here.

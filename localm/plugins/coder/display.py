@@ -7,6 +7,8 @@ Keeps all formatting in one place so the Agent class stays clean.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import difflib
 import re
 import threading
@@ -28,6 +30,8 @@ _SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇"
 _last_diff_preview: tuple[str, str, str, bool] | None = None
 _last_confirm_always: bool = False
 _last_reject_reason: str = ""
+_offer_session_allow: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "coder_offer_session_allow", default=False)
 
 
 def consume_confirm_always() -> bool:
@@ -605,32 +609,64 @@ def _parse_confirm_answer(raw: str) -> tuple[str, str]:
     return "no", s
 
 
+def reset_diff_preview() -> None:
+    """Forget the stored preview so a later prompt cannot offer [f]ull for it."""
+    global _last_diff_preview
+    _last_diff_preview = None
+
+
+@contextlib.contextmanager
+def offering_session_allow(offer: bool):
+    """Within the block, approval prompts offer the "a" (allow this session)
+    answer only when *offer* is true. Prompts outside any block never offer it."""
+    token = _offer_session_allow.set(bool(offer))
+    try:
+        yield
+    finally:
+        _offer_session_allow.reset(token)
+
+
+def _answer_hint(full: bool = False) -> str:
+    parts = ["y/N"]
+    if _offer_session_allow.get():
+        parts.append("a=allow this session")
+    if full:
+        parts.append("f=full diff")
+    return "[" + "/".join(parts) + "] "
+
+
+def _record_answer(action: str, reason: str) -> bool:
+    global _last_confirm_always, _last_reject_reason
+    if action == "always":
+        _last_confirm_always = _offer_session_allow.get()
+        return True
+    if action == "yes":
+        return True
+    _last_reject_reason = reason
+    return False
+
+
 def confirm_diff(path_label: str) -> bool:
-    """Prompt to apply changes to *path_label* with support for [y/N/a/f]."""
+    """Prompt to apply changes to *path_label*. [f] reprints the full diff, and
+    is offered only when the stored preview is this file's and was cut short."""
     global _last_confirm_always, _last_reject_reason
     _last_confirm_always = False
     _last_reject_reason = ""
     try:
         while True:
-            has_full = bool(_last_diff_preview and _last_diff_preview[3])
-            opts = ("[y/N/a=allow this session/f=full diff] " if has_full
-                    else "[y/N/a=allow this session] ")
+            preview = _last_diff_preview
+            has_full = bool(preview and preview[3] and preview[2] == path_label)
             prompt = Text("Apply changes to ", style="yellow")
             prompt.append(_strip_esc(path_label), style="bold yellow")
-            prompt.append(f"? {opts}", style="yellow")
+            prompt.append(f"? {_answer_hint(full=has_full)}", style="yellow")
             raw = console.input(prompt)
             action, reason = _parse_confirm_answer(raw)
-            if action == "full" and _last_diff_preview is not None:
-                old_t, new_t, lbl, _ = _last_diff_preview
-                print_diff_preview(old_t, new_t, path_label=lbl, max_lines=100_000)
+            if action == "full":
+                if has_full and preview is not None:
+                    old_t, new_t, lbl, _ = preview
+                    print_diff_preview(old_t, new_t, path_label=lbl, max_lines=100_000)
                 continue
-            if action == "always":
-                _last_confirm_always = True
-                return True
-            if action == "yes":
-                return True
-            _last_reject_reason = reason
-            return False
+            return _record_answer(action, reason)
     except (KeyboardInterrupt, EOFError):
         return False
 
@@ -644,16 +680,10 @@ def confirm(prompt: str) -> bool:
     _last_confirm_always = False
     _last_reject_reason = ""
     try:
-        line = _sanitized_text(f"{prompt} [y/N/a=allow this session] ", style="yellow")
+        line = _sanitized_text(f"{prompt} {_answer_hint()}", style="yellow")
         raw = console.input(line)
         action, reason = _parse_confirm_answer(raw)
-        if action == "always":
-            _last_confirm_always = True
-            return True
-        if action == "yes":
-            return True
-        _last_reject_reason = reason
-        return False
+        return _record_answer(action, reason)
     except (KeyboardInterrupt, EOFError):
         return False
 

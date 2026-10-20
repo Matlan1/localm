@@ -251,9 +251,12 @@ def response_similarity(a: str, b: str) -> float:
 
 
 class _LoopMixin:
-    def run_task(self, task: str) -> str:
+    def run_task(self, task: str, attachments: str = "") -> str:
         """
         Run a single task to completion (non-interactive).
+
+        *attachments* is appended to what the model receives only, as in
+        :meth:`chat`.
 
         Returns the agent's final text response.
         Used by spawn_agent and the CLI `run` command.
@@ -266,7 +269,8 @@ class _LoopMixin:
             self._session_title = task   # resume-listing display title
         # The raw request, before _with_episodes can prepend a lessons preamble.
         self._last_user_request = task
-        self._add_user(self._with_episodes(task))
+        message = self._with_episodes(task)
+        self._add_user(compose(message, attachments) if attachments else message)
         return self._loop(interactive=False)
 
     def continue_task(self, message: str) -> str:
@@ -282,9 +286,14 @@ class _LoopMixin:
         self._add_user(message)
         return self._loop(interactive=False)
 
-    def chat(self, user_input: str) -> str:
+    def chat(self, user_input: str, attachments: str = "") -> str:
         """
         Send one user message in an ongoing interactive session.
+
+        *attachments* (the REPL's @file blocks) is appended to the message the
+        model receives but is not part of the request text the session title,
+        action classification, episode recall and reviewer read.
+        See test_attachment_text_does_not_turn_a_question_into_an_action.
 
         History is preserved between calls.
         Returns the agent's final text response for this turn.
@@ -300,7 +309,7 @@ class _LoopMixin:
             user_input = self._with_episodes(user_input)
         if not self._review_task:
             self._review_task = user_input
-        self._add_user(user_input)
+        self._add_user(compose(user_input, attachments) if attachments else user_input)
         return self._loop(interactive=True)
 
     def _with_episodes(self, task: str) -> str:
@@ -389,6 +398,8 @@ class _LoopMixin:
                              partial_notice_count=0, partial_notice_cap_announced=False,
                              nocall_escalation=0, nocall_declined=False, tool_calls_made=0,
                              writes_at_start=self._write_total(),
+                             files_at_start={f["path"]: f["writes"]
+                                             for f in self.changed_files()},
                              start_turns=start_turns,
                              unfounded_checked=False)
 
@@ -581,6 +592,11 @@ class _LoopMixin:
                 if looks_like_tool_attempt(leftover, tool_names):
                     if st.partial_notice_count < _MAX_TOOL_REPAIRS:
                         st.partial_notice_count += 1
+                        if interactive:
+                            _agent.print_warning(
+                                "  Part of the reply looked like a tool call but "
+                                "could not be read, so it was not run. The model "
+                                "was told.")
                         result_blocks.append(
                             "[tool-call format] Part of this response looked "
                             "like another tool call, but it could not be "
@@ -882,12 +898,14 @@ class _LoopMixin:
                 print_warning(enforcement.strip())
             if unverified.strip():
                 print_warning(unverified.strip())
-            if sensitive.strip():
-                print_warning(sensitive.strip())
+            task_files = self._files_changed_this_task(st)
+            task_sensitive = self._sensitive_changes_notice(task_files) if task_files else ""
+            if task_sensitive.strip():
+                print_warning(task_sensitive.strip())
             if st.tool_calls_made > 0:
                 print_task_footer(
                     turns_used=max(1, self._turns - getattr(st, "start_turns", self._turns - 1)),
-                    files_changed=[c["path"] for c in self.changed_files()],
+                    files_changed=[c["path"] for c in task_files],
                     verify_status=self._last_verify_state,
                     ctx_ratio=self._fill_ratio(),
                 )
@@ -1045,7 +1063,13 @@ class _LoopMixin:
             parts.append(f"verify: {self._last_verify_state}")
         return "\n\n[session record: " + "; ".join(parts) + "]"
 
-    def _sensitive_changes_notice(self) -> str:
+    def _files_changed_this_task(self, st) -> list[dict]:
+        """changed_files() entries written since this task started."""
+        before = getattr(st, "files_at_start", None) or {}
+        return [f for f in self.changed_files()
+                if f.get("writes", 0) > before.get(f.get("path"), 0)]
+
+    def _sensitive_changes_notice(self, files: list[dict] | None = None) -> str:
         """A footer noting files a passing check cannot vouch for on its own
         (a rewritten test, a loosened CI/lint gate), or ``""`` when none.
 
@@ -1060,7 +1084,8 @@ class _LoopMixin:
         """
         try:
             from ..review_guard import classify_sensitive_changes, render_warning
-            message = render_warning(classify_sensitive_changes(self.changed_files()))
+            message = render_warning(classify_sensitive_changes(
+                self.changed_files() if files is None else files))
         except Exception as e:
             from localm.debuglog import logger
             logger.debug("sensitive-changes notice skipped: %r", e)   # See test_classify_sensitive_changes_tolerates_malformed_entries.
