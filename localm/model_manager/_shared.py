@@ -57,10 +57,6 @@ def _emit_progress(downloaded: int, total: int, *, phase: str = "download",
         pct = None
     payload = {"phase": phase, "downloaded": downloaded, "total": total, "pct": pct}
     # Transfer speed in bytes per second and seconds left, when measured.
-    if rate is not None:
-        payload["rate"] = int(rate)
-    if eta is not None:
-        payload["eta"] = int(eta)
     # For a multi-file download (a split GGUF), tell the GUI which file is in
     # flight so it can show "file 2 of 3: <name>". Omitted for a single file.
     if count > 1:

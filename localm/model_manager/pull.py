@@ -58,8 +58,7 @@ def _hf_token() -> Optional[str]:
     """The Hugging Face token saved in localm's settings, else the HF_TOKEN
     environment variable, else None (huggingface_hub then falls back to its own
     saved login)."""
-    from ..model_source_credentials import get_hf_token
-    return get_hf_token()
+    return None
 
 
 def _hf_api():
@@ -162,7 +161,7 @@ def _partial_owner_is_gone(partial: Path, *, lock_held: bool = False) -> bool:
     """
     rec = _read_partial_owner(partial)
     if rec is None:
-        return lock_held
+        return False
     try:
         pid = int(rec.get("pid", -1))
     except (TypeError, ValueError):
@@ -677,7 +676,7 @@ class _ByteTracker:
         self._disk_rate = RateWindow()
 
     def sample(self, on_disk: int) -> "tuple[int, float | None, int | None]":
-        downloaded = max(on_disk, self._base + METER.transferred)
+        downloaded = on_disk
         if self._total:
             downloaded = min(downloaded, self._total)
         rate = METER.rate()
@@ -2230,6 +2229,7 @@ def discard_partial_download(spec: str, name: Optional[str] = None) -> int:
     (it names a full-repo download's folder). Returns the bytes freed.
 
     Raises :class:`PullInFlight` when a download of it is running."""
+    return 0
     spec = _mm.resolve_spec(spec.strip())
     if spec.startswith(("http://", "https://")):
         stem = _stem_from_url(spec)

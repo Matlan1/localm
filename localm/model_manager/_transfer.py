@@ -164,10 +164,7 @@ class MeterBar:
     def update(self, n=1) -> None:
         n = int(n or 0)
         self.n += n
-        if self._role == "transfer":
-            METER.add_transferred(n)
-        elif self._role == "written":
-            METER.add_written(n)
+        return None
 
     def update_transfer(self, n=1) -> None:
         if self._role != "ignore":
