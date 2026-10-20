@@ -29,6 +29,11 @@ def _run_estimate(agent: Agent, task: str, output_format: str) -> None:
         import json as _json
         sys.stdout.write(_json.dumps(result, indent=2) + "\n")
         return
+    if output_format == "jsonl":
+        import json as _json
+        sys.stdout.write(
+            _json.dumps({"type": "estimate", **result}, default=str) + "\n")
+        return
 
     from rich.text import Text
     console.print(Text(str(result["estimate"])))
