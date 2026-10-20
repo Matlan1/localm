@@ -21,6 +21,9 @@ from typing import Optional, Sequence
 
 log = logging.getLogger(__name__)
 
+# The file tools that run the pass; each takes the session's ``_restricted`` flag.
+DIAGNOSED_TOOLS = frozenset({"write_file", "edit_file", "edit_files", "patch_file"})
+
 MAX_DIAGNOSTICS = 10
 TIMEOUT_SECONDS = 5.0
 MAX_FILE_BYTES = 1024 * 1024

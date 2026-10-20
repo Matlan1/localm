@@ -245,6 +245,13 @@ class TestOtherWriteTools:
         assert r.ok is True
         assert "F401" in r.output and len(spawns) == 1
 
+    def test_patch_file_syntax_error_is_left_to_the_syntax_check(self, tmp_path, spawns):
+        (tmp_path / "m.py").write_text("x = 1\n", encoding="utf-8")
+        diff = "--- a/m.py\n+++ b/m.py\n@@ -1 +1,2 @@\n+def f(:\n x = 1\n"
+        r = tool_patch_file(tmp_path, "m.py", diff, _restricted=False)
+        assert "[syntax check]" in r.output and "[ruff" not in r.output
+        assert spawns == []
+
     def test_edit_files_runs_one_process_for_the_batch(self, tmp_path, spawns):
         for name in ("a.py", "b.py", "c.txt"):
             (tmp_path / name).write_text("x = 1\n", encoding="utf-8")
@@ -266,3 +273,61 @@ class TestOtherWriteTools:
         assert "[syntax check]" in r.output
         assert "ok.py:1:" in r.output.split("[ruff", 1)[1]
         assert "bad.py" not in r.output.split("[ruff", 1)[1]
+
+
+def _agent(cwd, **kw):
+    from unittest.mock import MagicMock, patch
+
+    from localm.plugins.coder.agent import Agent
+    backend = MagicMock()
+    backend.model_id = "test-model"
+    with patch("localm.plugins.coder.agent.ProjectMap") as pm, \
+         patch("localm.plugins.coder.agent.make_audit_log"), \
+         patch("localm.plugins.coder.agent.load_memory", return_value=""):
+        pm.build.return_value.file_count.return_value = 0
+        return Agent(backend=backend, cwd=cwd, auto_approve=True, self_verify=False, **kw)
+
+
+def _tool_call(name, **args):
+    from unittest.mock import MagicMock
+    call = MagicMock()
+    call.name = name
+    call.args = args
+    return call
+
+
+@needs_ruff
+@pytest.mark.usefixtures("ruff_on_path")
+class TestThroughTheAgent:
+    """The real dispatch path: the session, not the tool call, decides."""
+
+    def test_an_owner_session_gets_diagnostics(self, tmp_path, spawns):
+        agent = _agent(tmp_path)
+        r = agent._execute_tool(
+            _tool_call("write_file", path="m.py", content=UNUSED_IMPORT), interactive=False)
+        assert "F401" in r.output
+        assert len(spawns) == 1
+
+    def test_a_restricted_session_spawns_nothing(self, tmp_path, spawns):
+        agent = _agent(tmp_path, restricted=True)
+        r = agent._execute_tool(
+            _tool_call("write_file", path="m.py", content=UNUSED_IMPORT), interactive=False)
+        assert r.ok is True
+        assert (tmp_path / "m.py").read_text(encoding="utf-8") == UNUSED_IMPORT
+        assert "[ruff" not in r.output
+        assert spawns == []
+
+    def test_a_model_supplied_flag_cannot_lift_the_restriction(self, tmp_path, spawns):
+        agent = _agent(tmp_path, restricted=True)
+        r = agent._execute_tool(
+            _tool_call("write_file", path="m.py", content=UNUSED_IMPORT, _restricted=False),
+            interactive=False)
+        assert "[ruff" not in r.output
+        assert spawns == []
+
+    def test_every_diagnosed_tool_is_injected(self):
+        import inspect
+
+        from localm.plugins.coder.tools import TOOL_REGISTRY
+        for name in diagnostics.DIAGNOSED_TOOLS:
+            assert "_restricted" in inspect.signature(TOOL_REGISTRY[name].fn).parameters
