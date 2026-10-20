@@ -1029,13 +1029,14 @@ trust and remember them. Untrusted hooks never run: a tool call an untrusted
 `/hooks` lists them and whether they run, `/hooks trust` trusts and remembers them, and
 `/hooks forget` withdraws the trust. In the GUI the **hooks** button in the coder setup
 panel shows the same list and trusts or untrusts them; a running session picks up trust
-granted there at its next tool call.
+granted or withdrawn there at its next tool call. After `/cd`, the new folder's hooks
+apply, with their own trust.
 
 Trust covers the hook commands, not the scripts they run, and the agent can edit those
 scripts. So when file writes run without confirmation but `run_shell` does not (a one-shot
 `localm coder "TASK"` without `--yes`, or `run_shell` in `always_confirm`), every hook run
-needs the same confirmation `run_shell` would; a run that cannot ask refuses it, and a
-session with `run_shell` disabled does not run hooks at all. When several read-only calls
+needs the same confirmation `run_shell` would, and a run that cannot ask refuses it; if
+`run_shell` is disabled in such a session, its hooks do not run at all. When several read-only calls
 run at once, their hooks count toward that batch's two-minute limit. Sub-agents run under
 the same hooks, in their own working tree; a restricted session (a shared `coder` key, a
 scheduled job without `--allow-shell`) never runs hooks.

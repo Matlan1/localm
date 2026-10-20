@@ -734,12 +734,16 @@ def test_disabled_shell_with_unconfirmed_writes_refuses_hooks(tmp_path):
     assert _log(tmp_path, "pre") == []
 
 
+def _destructive_tools() -> set:
+    from localm.plugins.coder.agent import TOOL_REGISTRY
+    return {n for n, td in TOOL_REGISTRY.items() if td.destructive}
+
+
 def test_confirmed_writes_need_no_extra_hook_gate(tmp_path):
-    from localm.plugins.coder.agent.constants import _UNDOABLE_TOOLS
     argv = _py_hook(tmp_path, "pre", "record(payload)\n")
     proj = _project(tmp_path, _hooks_toml(PRE, argv))
     agent = _trusted_agent(proj, auto_approve=True,
-                           always_confirm=set(_UNDOABLE_TOOLS) | {"run_shell"})
+                           always_confirm=_destructive_tools() | {"run_shell"})
     agent.confirm_handler = MagicMock(return_value=True)
     res = agent._execute_tool(_write_call(), interactive=False)
     assert res.ok and len(_log(tmp_path, "pre")) == 1
@@ -759,12 +763,14 @@ def test_unreadable_config_without_hooks_loads_none(tmp_path):
     assert agent._tool_hooks is None
 
 
-def test_a_child_in_another_tree_runs_hooks_there(tmp_path):
+@pytest.mark.parametrize("layout", ["inside", "sibling"])
+def test_a_child_in_another_tree_runs_hooks_there(tmp_path, layout):
     argv = _py_hook(tmp_path, "pre",
                     "record({'cwd': os.getcwd(), 'pd': payload['project_dir']})\n")
     proj = _project(tmp_path, _hooks_toml(PRE, argv, matcher="list_dir"))
-    other = tmp_path / "isolated-tree"
-    other.mkdir()
+    other = (proj / ".claude" / "worktrees" / "coder-x" if layout == "inside"
+             else tmp_path / "isolated-tree")
+    other.mkdir(parents=True)
     parent = _trusted_agent(proj)
     child = _make_agent(other, parent=parent)
     assert child._tool_hooks is parent._tool_hooks
@@ -787,3 +793,94 @@ def test_forget_that_cannot_write_still_stops_the_hooks(tmp_path):
     res = agent._execute_tool(_write_call(), interactive=False)
     assert not res.ok and "not trusted" in str(res.output)
     assert _log(tmp_path, "pre") == []
+
+
+
+def test_an_unconfirmed_search_replace_still_gates_hooks(tmp_path):
+    from localm.plugins.coder.agent.constants import _UNDOABLE_TOOLS
+    argv = _py_hook(tmp_path, "pre", "record(payload)\n")
+    proj = _project(tmp_path, _hooks_toml(PRE, argv))
+    agent = _trusted_agent(proj, auto_approve=True,
+                           always_confirm=set(_UNDOABLE_TOOLS) | {"run_shell"})
+    assert "search_replace" not in _UNDOABLE_TOOLS
+    res = agent._execute_tool(_write_call(), interactive=False)
+    assert not res.ok and _log(tmp_path, "pre") == []
+
+
+def test_a_child_that_cannot_write_runs_hooks_freely(tmp_path):
+    argv = _py_hook(tmp_path, "pre", "record(payload)\n")
+    proj = _project(tmp_path, _hooks_toml(PRE, argv, matcher="list_dir"))
+    parent = _trusted_agent(proj, auto_approve=True, always_confirm={"run_shell"})
+    child = _make_agent(proj, parent=parent, auto_approve=True,
+                        always_confirm={"run_shell"},
+                        disabled_tools=frozenset(_destructive_tools()))
+    res = child._execute_tool(_call("list_dir", {"path": "."}), interactive=False)
+    assert res.ok and len(_log(tmp_path, "pre")) == 1
+
+
+def test_cd_loads_the_new_folders_hooks(tmp_path):
+    argv = _py_hook(tmp_path, "pre", "record(payload); sys.exit(2)\n")
+    proj = _project(tmp_path, _hooks_toml(PRE, argv))
+    agent = _trusted_agent(proj)
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    agent.set_cwd(plain)
+    assert agent._tool_hooks is None
+    res = agent._execute_tool(_write_call(), interactive=False)
+    assert res.ok and (plain / "out.txt").exists() and _log(tmp_path, "pre") == []
+    other = tmp_path / "other"
+    (other / ".localcoder").mkdir(parents=True)
+    (other / ".localcoder" / "config.toml").write_text(
+        _hooks_toml(PRE, argv), encoding="utf-8")
+    agent.set_cwd(other)
+    assert agent._tool_hooks is not None and not agent._tool_hooks.trusted
+    res = agent._execute_tool(_write_call(), interactive=False)
+    assert not res.ok and "not trusted" in str(res.output)
+    assert _log(tmp_path, "pre") == []
+
+
+def test_trust_withdrawn_elsewhere_stops_a_running_session(tmp_path):
+    argv = _py_hook(tmp_path, "pre", "record(payload)\n")
+    proj = _project(tmp_path, _hooks_toml(PRE, argv))
+    agent = _trusted_agent(proj)
+    assert agent._execute_tool(_write_call("a.txt"), interactive=False).ok
+    assert len(_log(tmp_path, "pre")) == 1
+    hook_trust.forget_trust(agent._tool_hooks.config_path)
+    res = agent._execute_tool(_write_call("b.txt"), interactive=False)
+    assert not res.ok and "not trusted" in str(res.output)
+    assert len(_log(tmp_path, "pre")) == 1
+
+
+def test_session_only_trust_is_not_withdrawn_by_the_store(tmp_path):
+    argv = _py_hook(tmp_path, "pre", "record(payload)\n")
+    proj = _project(tmp_path, _hooks_toml(PRE, argv))
+    agent = _make_agent(proj)
+    agent._tool_hooks.trust_for_session()
+    assert agent._execute_tool(_write_call(), interactive=False).ok
+    assert len(_log(tmp_path, "pre")) == 1
+
+
+def test_the_full_command_is_shown_before_trust(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    long_cmd = "python guard.py " + "--flag " * 120 + "--tail-marker"
+    proj = _project(tmp_path, f'[[hooks.pre_tool_use]]\ncommand = "{long_cmd}"\n')
+    hooks = ToolHooks.load(proj)
+    assert any("--tail-marker" in line for line in hooks.describe())
+    app, owner = _owner_app(tmp_path, monkeypatch, proj)
+    with TestClient(app) as client:
+        data = client.get("/api/coder/hooks", headers=owner, params={"cwd": str(proj)}).json()
+    assert data["hooks"][0]["command"] == long_cmd
+    assert data["hooks"][0]["label"] == "pre_tool_use hook #1"
+
+
+def test_crlf_output_is_normalised(tmp_path):
+    argv = _py_hook_noread(
+        tmp_path, "crlf", "sys.stderr.buffer.write(b'a\\r\\nb'); sys.exit(2)\n")
+    out = run_hook(HookSpec(event=PRE, index=1, command=tuple(argv)), {"tool": "t"}, tmp_path)
+    assert out.stderr == "a\nb"
+
+
+def test_unreadable_config_mentioning_webhooks_only_is_not_hook_bearing(tmp_path):
+    proj = _project(tmp_path, 'webhooks_url = \n')
+    agent = _make_agent(proj)
+    assert agent._tool_hooks is None

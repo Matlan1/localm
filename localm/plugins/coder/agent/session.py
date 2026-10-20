@@ -164,7 +164,8 @@ class _SessionMixin:
 
     def set_cwd(self, cwd: Path) -> None:
         """Point this session at another project directory (the REPL's /cd, and
-        the GUI's cwd route).
+        the GUI's cwd route). The new folder's tool hooks replace the old ones,
+        with their own trust.
 
         THE CHECKPOINT MOVES WITH THE SESSION. A checkpoint is filed under
         ``<digest(cwd)>/<checkpoint_id>.json``, so changing the cwd changes
@@ -191,6 +192,7 @@ class _SessionMixin:
             else load_custom_instructions(cwd))
         self._rebuild_system_prompt()
         self._warn_injected_file_limits()
+        self._init_tool_hooks(cwd)
 
     def _migrate_checkpoint(self, old_cwd: Path, new_cwd: Path) -> None:
         """Move this session's own checkpoint file from *old_cwd*'s project

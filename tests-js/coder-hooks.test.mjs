@@ -10,7 +10,7 @@ const HOOKS = {
   configured: true, cwd: "/tmp/project",
   config_path: "/tmp/project/.localcoder/config.toml",
   digest: "abc123", warnings: [],
-  hooks: [{ event: "pre_tool_use", index: 1, matcher: "write_file",
+  hooks: [{ event: "pre_tool_use", index: 1, label: "pre_tool_use hook #1", matcher: "write_file",
             command: "python hooks/guard.py", timeout: 30, error: null }],
 };
 
@@ -43,7 +43,7 @@ test("hooks: lists the project's hooks and trusts the digest it was shown", asyn
   const get = calls.find((c) => c.url.startsWith("/api/coder/hooks?"));
   assert.match(get.url, /cwd=%2Ftmp%2Fproject/);
   const body = win.document.getElementById("modal-body").textContent;
-  assert.match(body, /pre_tool_use #1: python hooks\/guard\.py/);
+  assert.match(body, /pre_tool_use hook #1: python hooks\/guard\.py/);
   assert.match(body, /Not trusted/);
   const trust = buttonByText(win, "trust these hooks");
   assert.ok(trust, "an untrusted project offers a trust button");

@@ -255,6 +255,8 @@ def _handle_command(raw: str, agent: Agent) -> bool:
                 else:
                     agent.set_cwd(new_dir)
                     print_info(f"Working directory: {new_dir}")
+                    from .hooks_cli import resolve_hook_trust
+                    resolve_hook_trust(agent, trust_flag=False, can_prompt=True)
 
     elif cmd == "verbose":
         agent.verbose = not agent.verbose
