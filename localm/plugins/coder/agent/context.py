@@ -592,19 +592,28 @@ ws     ::= [ \t\n\r]*
         into every summary. They are also stored as one episodic-memory record
         when ``_may_store_durable_notes()``; otherwise nothing is written. Off
         when ``compaction_flush = false``. A failed or empty flush is logged and
-        leaves the notes unchanged. Never raises."""
+        leaves the notes unchanged. An interactive console session shows a
+        spinner while the model is asked. Never raises."""
         from localm.debuglog import logger
+        message = None
         try:
-            self._run_pre_compaction_flush(
-                excerpt_parts, guard=guard, request_part=request_part,
-                request=request, limit=limit, measure=measure)
+            kwargs = dict(guard=guard, request_part=request_part, request=request,
+                          limit=limit, measure=measure)
+            if getattr(self, "_interactive", False) and getattr(self, "on_event", None) is None:
+                with ActivitySpinner("Keeping durable notes..."):
+                    message = self._run_pre_compaction_flush(excerpt_parts, **kwargs)
+            else:
+                message = self._run_pre_compaction_flush(excerpt_parts, **kwargs)
         except Exception as e:
             logger.warning("coder compaction: pre-compaction flush failed (%s: %s)",
                            type(e).__name__, e)
+        if message:
+            self._compaction_say(message)
 
     def _run_pre_compaction_flush(self, excerpt_parts, *, guard, request_part,
-                                  request, limit, measure) -> None:
-        """The body of :meth:`_pre_compaction_flush`; may raise."""
+                                  request, limit, measure) -> Optional[str]:
+        """The body of :meth:`_pre_compaction_flush`: the notice to show when
+        notes were added, else None. May raise."""
         from localm.debuglog import logger
         from localm.textguard import compose, neutralise, untrusted_span
         from localm.inference.compact import (
@@ -612,7 +621,7 @@ ws     ::= [ \t\n\r]*
             summarise_in_passes, summary_reply_tokens,
         )
         if not excerpt_parts or not self._compaction_flush_enabled():
-            return
+            return None
         use_json = getattr(self.backend, "supports_grammar", False)
         instruction = (
             "The older part of this coding session is about to be condensed. "
@@ -659,17 +668,17 @@ ws     ::= [ \t\n\r]*
         if failure:
             logger.warning("coder compaction: pre-compaction flush produced no "
                            "notes (%s)", failure)
-            return
+            return None
         notes, readable = _parse_flush_notes(reply)
         if not readable:
             logger.warning("coder compaction: pre-compaction flush reply is not a "
                            "readable notes object; no notes kept")
-            return
+            return None
         merged, added = _merge_notes(
             list(getattr(self, "_durable_notes", None) or []), notes)
         self._durable_notes = merged
         if not added:
-            return
+            return None
         if self._may_store_durable_notes():
             where = "saved to episodic memory"
             try:
@@ -689,8 +698,7 @@ ws     ::= [ \t\n\r]*
                 where = "kept for this session only; saving them failed"
         else:
             where = "kept for this session only, nothing written to disk"
-        self._compaction_say(
-            f"Kept {len(added)} durable note(s) from the compacted turns ({where}).")
+        return f"Kept {len(added)} durable note(s) from the compacted turns ({where})."
 
     def _working_state_chars(self) -> int:
         """The size cap of the working-state block, in characters: a tenth of
