@@ -539,6 +539,12 @@ class FsRenameRequest(BaseModel):
     new_name: str = ""
 
 
+class FsSaveTextRequest(BaseModel):
+    path: str = ""
+    name: str = ""
+    content: str = ""
+
+
 # Image types accepted from a phone share-sheet into the chat composer.
 _SHARE_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".heic", ".heif"}
 

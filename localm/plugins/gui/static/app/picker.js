@@ -61,6 +61,19 @@ export async function renameFs(path, newName) {
   return data;
 }
 
+/** Save `content` as a new text file named `name` in the host folder `path`.
+ *  Resolves to {path, parent, name} of the written file (a numbered name when
+ *  `name` was taken), or throws with the server's reason. */
+export async function saveTextFs(path, name, content) {
+  const r = await fetch("/api/fs/save-text", {
+    method: "POST", headers: authHeaders(),
+    body: JSON.stringify({ path, name, content }),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.detail || r.statusText);
+  return data;
+}
+
 function fmtSize(n) {
   if (n === null || n === undefined) return "";
   if (n < 1024) return n + " B";

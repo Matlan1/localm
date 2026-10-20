@@ -48,6 +48,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Image prompts with letters such as ß work with the native image backend on Windows.** A prompt
   containing ß failed with "failed to encode prompt", and letters such as ä, ö and ü reached the
   model garbled; the prompt now reaches stable-diffusion.cpp unchanged.
+- **A chat reply that was cut off says so.** A reply that stopped because the model was unloaded or
+  replaced while it was writing, or because the reply stream ended before the model finished, used
+  to look like a finished reply. It now carries a cut-off note in the chat, and API clients get
+  `finish_reason: "error"` with the reason instead of `"stop"`.
+- **"continue" carries on with the previous reply.** "continue", "weiter", "continúa" and the same
+  word in other languages continue the last reply instead of searching the selected Knowledge
+  collection for the word.
+
+### Changed
+
+- **Export saves inside the app.** On the computer running localm, Export (the chat's, and the
+  coder's session, result and patch exports) asks for a folder in the app's own file browser and
+  saves there, without the browser's download prompt. Other devices still download the file.
 
 ## [0.3.0] - 2026-10-14
 

@@ -12,7 +12,7 @@ import { t, tn } from "./i18n.js";
 import { emptyState, iconEl } from "./icons.js";
 import { modelCache, refreshModels } from "./models-sidebar.js";
 import { pickDirectory } from "./picker.js";
-import { composerEnterToSend } from "./settings-perf.js";
+import { composerEnterToSend, saveTextFile } from "./settings-perf.js";
 import { execCoderCommand, handleSlashSubmit } from "./slash.js";
 
 /* ================================================================ */
@@ -1655,8 +1655,8 @@ export async function downloadCoderFile(s, path) {
   }
 }
 
-/** Download the active session's feed as markdown (explicit user action -
- *  works in privacy mode too, same contract as chat /export). */
+/** Save the active session's feed as markdown through saveTextFile (explicit
+ *  user action - works in privacy mode too, same contract as chat /export). */
 export function exportCoderSession() {
   const s = activeSession();
   const log = s?.eventLog || [];
@@ -1680,12 +1680,7 @@ export function exportCoderSession() {
       lines.push("", `${t("coder.export.agentLabel")}${ev.text}`, "");
     }
   }
-  const blob = new Blob([lines.join("\n")], { type: "text/markdown" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = `coder-session-${s.info.id}.md`;
-  a.click();
-  URL.revokeObjectURL(a.href);
+  return saveTextFile(`coder-session-${s.info.id}.md`, lines.join("\n"), "text/markdown");
 }
 
 /** The last finished task as JSON: the web form of the CLI's
@@ -1701,22 +1696,18 @@ export async function exportCoderResultJson() {
                           { headers: authHeaders() });
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
-    const blob = new Blob([JSON.stringify(data, null, 2)],
-                          { type: "application/json" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = `coder-result-${s.info.id}.json`;
-    a.click();
-    URL.revokeObjectURL(a.href);
+    await saveTextFile(`coder-result-${s.info.id}.json`, JSON.stringify(data, null, 2),
+                       "application/json");
   } catch (e) {
     toast(t("coder.export.resultFailed") + e.message, true);
   }
 }
 
-/** Download the patch a patch-mode session captured instead of writing - the
- *  web form of `--patch-mode FILE`, where the file lands on THIS device because
- *  that is the only disk a browser can write to. Reading it server-side does not
- *  consume it, so this can be pressed as often as you like. */
+/** Save the patch a patch-mode session captured instead of writing - the web
+ *  form of `--patch-mode FILE` - through saveTextFile: in a folder picked in the
+ *  app with host filesystem access, otherwise as a download on this device.
+ *  Reading it server-side does not consume it, so this can be pressed as often
+ *  as you like. */
 export async function downloadCoderPatch() {
   const s = activeSession();
   if (!s) { toast(t("coder.session.none"), true); return; }
@@ -1727,14 +1718,7 @@ export async function downloadCoderPatch() {
       const e = await r.json().catch(() => ({}));
       throw new Error(e.detail || r.statusText);
     }
-    const blob = await r.blob();
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = `coder-session-${s.info.id}.patch`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(a.href);
+    await saveTextFile(`coder-session-${s.info.id}.patch`, await r.text(), "text/x-diff");
   } catch (e) {
     toast(t("coder.export.patchFailed") + e.message, true);
   }
