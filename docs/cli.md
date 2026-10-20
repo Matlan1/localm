@@ -825,7 +825,8 @@ The agent auto-starts `localm serve` when needed and plans with tool calls: read
 
 The agent ships 48 built-in tools. "Confirms" means the agent stops and asks
 before running it by default; "Restricted" means a shared, non-owner session may
-use it at all. The GUI coder has the same set (see [gui.md](gui.md)).
+use it at all. The GUI coder has the same set except `ask_user` and the plan-mode
+tools, which only the terminal offers (see [gui.md](gui.md)).
 
 | Tool | What it does | Confirms | Restricted |
 |---|---|---|---|
