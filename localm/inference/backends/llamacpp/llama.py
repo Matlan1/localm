@@ -1387,6 +1387,7 @@ class LlamaCpp:
         mmproj_path: Optional[str] = None,
         cancel_event: Optional[threading.Event] = None,
         vram_check: Optional[Callable[[int, int], Optional[bool]]] = None,
+        vram_free: Optional[Callable[[], Optional[int]]] = None,
         gpu_split_ratios: Optional[list] = None,
         n_cpu_moe: int = 0,
         mtp_enabled: bool = False,
@@ -1433,6 +1434,9 @@ class LlamaCpp:
         # abort), or None when VRAM is unmeasurable (keep the default). None (the
         # attribute) = no check (only a NULL-pointer check on the result after).
         self._vram_check  = vram_check
+        # Free VRAM in bytes on the model's GPU, or None when unmeasurable;
+        # read by _note_residency.
+        self._vram_free = vram_free
         # Dynamic context window: starts at n_ctx, grows in n_ctx_grow steps
         # up to n_ctx_max when a conversation outgrows it. None/0 = unlimited
         # (the pre-dynamic behaviour: grow exactly as far as needed).
@@ -3623,6 +3627,80 @@ class LlamaCpp:
     _decode_refresh_at: Optional[float] = None  # time.monotonic() of the last refresh
     _decode_refresh_backoff = 60.0
 
+    # Shared system memory Windows may hold for a model fully on a GPU before
+    # the live context is recreated: at least _RESIDENCY_SHARED_MIN bytes and
+    # at least _RESIDENCY_SHARED_RATIO of the process's dedicated VRAM.
+    _RESIDENCY_SHARED_MIN = 1536 * 1024 ** 2
+    _RESIDENCY_SHARED_RATIO = 0.15
+    # Seconds between two residency checks while no context is recreated.
+    _RESIDENCY_RECHECK_S = 60.0
+    _residency_check_after = 0.0                # time.monotonic(); due at the next request
+    _residency_refresh: Optional[tuple[int, int, int]] = None  # (shared, dedicated, free) bytes
+    _residency_followup: Optional[int] = None  # shared bytes before the last residency refresh
+    _residency_unavailable_said = False
+
+    def _note_residency(self) -> None:
+        """On Windows, mark the live context for a refresh when the WDDM
+        counters show this process holding at least ``_RESIDENCY_SHARED_MIN``
+        bytes and ``_RESIDENCY_SHARED_RATIO`` of its dedicated VRAM in shared
+        system memory while ``_vram_free`` reports at least that much VRAM free.
+
+        Reads at most once per ``_RESIDENCY_RECHECK_S`` seconds, and at the
+        first call after a load or a context recreate. Does nothing on other
+        platforms, while ``_decode_judged`` is False, while the KV cache is in
+        system RAM, while a refresh is pending, or within the refresh backoff
+        (``_decode_refresh_after``). Unavailable counters or free VRAM leave
+        the context alone, logged at DEBUG. The first reading after a
+        residency refresh is logged at INFO. Never raises. Caller holds
+        ``_gen_lock``."""
+        import sys
+        if (sys.platform != "win32" or not self._decode_judged or not self._ctx_ptr
+                or self._offload_kqv is False or self._decode_refresh is not None
+                or self._residency_refresh is not None):
+            return
+        now = time.monotonic()
+        if now < self._residency_check_after:
+            return
+        self._residency_check_after = now + self._RESIDENCY_RECHECK_S
+        from localm import gpu_usage
+        from localm.debuglog import logger
+        reading = gpu_usage.process_gpu_memory()
+        if reading is None:
+            if not self._residency_unavailable_said:
+                self._residency_unavailable_said = True
+                logger.debug("gguf context: the GPU Process Memory counters are "
+                             "unavailable, residency is not checked")
+            return
+        dedicated, shared = reading
+        before = self._residency_followup
+        if before is not None:
+            self._residency_followup = None
+            logger.info("gguf context: after the refresh Windows holds %.2f GB of this "
+                        "process's GPU memory in shared system memory (%.2f GB before)",
+                        shared / 1024 ** 3, before / 1024 ** 3)
+        if (shared < self._RESIDENCY_SHARED_MIN
+                or shared < self._RESIDENCY_SHARED_RATIO * dedicated
+                or now < self._decode_refresh_after):
+            return
+        free_fn = getattr(self, "_vram_free", None)
+        try:
+            free = free_fn() if free_fn is not None else None
+        except Exception as exc:
+            logger.debug("gguf context: the free VRAM reading raised %s, residency "
+                         "is not acted on", type(exc).__name__)
+            return
+        if free is None:
+            logger.debug("gguf context: %.2f GB of this process's GPU memory is in "
+                         "shared system memory, free VRAM is unmeasurable",
+                         shared / 1024 ** 3)
+            return
+        if free < shared:
+            logger.debug("gguf context: %.2f GB of this process's GPU memory is in "
+                         "shared system memory, only %.2f GB of VRAM is free",
+                         shared / 1024 ** 3, free / 1024 ** 3)
+            return
+        self._residency_refresh = (int(shared), int(dedicated), int(free))
+
     def _note_decode_rate(self, steps: int, seconds: float, depth: float) -> None:
         """Record a finished reply that ran *steps* main decode steps in
         *seconds* of native time at a mean KV depth of *depth* cells, with the
@@ -3661,14 +3739,21 @@ class LlamaCpp:
             samples[key] = (rate, depth)
 
     def _consume_decode_refresh(self) -> None:
-        """Clear a pending refresh because the context is being recreated, and
-        start the backoff before the next one: ``_DECODE_REFRESH_BACKOFF_S``
-        when the last refresh was longer than ``_DECODE_REFRESH_BACKOFF_MAX_S``
-        ago (or there was none), else double the last backoff, at most
-        ``_DECODE_REFRESH_BACKOFF_MAX_S``. Caller holds ``_gen_lock``."""
-        if self._decode_refresh is None:
+        """Make the residency check due at the next ``_note_residency`` because
+        the context is being recreated. When a decode-rate or residency
+        refresh is pending, clear it and start the backoff before the next
+        one: ``_DECODE_REFRESH_BACKOFF_S`` when the last refresh was longer
+        than ``_DECODE_REFRESH_BACKOFF_MAX_S`` ago (or there was none), else
+        double the last backoff, at most ``_DECODE_REFRESH_BACKOFF_MAX_S``.
+        Caller holds ``_gen_lock``."""
+        self._residency_check_after = 0.0
+        residency = self._residency_refresh
+        if self._decode_refresh is None and residency is None:
             return
         self._decode_refresh = None
+        self._residency_refresh = None
+        if residency is not None:
+            self._residency_followup = residency[0]
         now = time.monotonic()
         last = self._decode_refresh_at
         if last is None or now - last > self._DECODE_REFRESH_BACKOFF_MAX_S:
@@ -3692,16 +3777,18 @@ class LlamaCpp:
         or else at ``_target_ctx(needed + others)`` when that is smaller and
         ``_vram_check`` answers True for it; the check is not asked again for
         ``_KV_PROMOTE_RETRY_S`` seconds after it is asked. Otherwise, when
-        ``_note_decode_rate`` marked the context for a refresh, recreates it at
-        the same size and KV placement.
+        ``_note_decode_rate`` or ``_note_residency`` (run first, whenever the
+        live context holds *needed*) marked the context for a refresh,
+        recreates it at the same size and KV placement.
         Caller holds ``_gen_lock``. ``_vram_check`` may raise."""
         if not self._ctx_ptr or needed > self._ctx_capacity:
             return None
+        self._note_residency()
         capacity = self._ctx_capacity
         target = self._target_ctx(needed + max(0, others))
         shrink = target <= capacity // 2
         promote = self._offload_kqv is False
-        refresh = self._decode_refresh is not None
+        refresh = self._decode_refresh is not None or self._residency_refresh is not None
         if not (shrink or promote or refresh):
             return None
         check = getattr(self, "_vram_check", None)
@@ -3776,8 +3863,18 @@ class LlamaCpp:
         refresh at the same size and placement, with the slow reply's rate."""
         from localm.debuglog import logger
         slow = self._decode_refresh
-        if (slow is not None and n_ctx == self._ctx_capacity
-                and offload_kqv == (self._offload_kqv is not False)):
+        same = (n_ctx == self._ctx_capacity
+                and offload_kqv == (self._offload_kqv is not False))
+        residency = self._residency_refresh
+        if residency is not None and slow is None and same:
+            logger.info("gguf context: recreating the %d-token context (KV cache in %s): "
+                        "Windows holds %.2f GB of this process's GPU memory in shared "
+                        "system memory (%.2f GB in VRAM) while %.2f GB of VRAM is free",
+                        n_ctx, "VRAM" if offload_kqv else "system RAM",
+                        residency[0] / 1024 ** 3, residency[1] / 1024 ** 3,
+                        residency[2] / 1024 ** 3)
+            return
+        if slow is not None and same:
             logger.info("gguf context: recreating the %d-token context (KV cache in %s): "
                         "the last reply decoded at %.1f steps/s where %.1f was expected",
                         n_ctx, "VRAM" if offload_kqv else "system RAM", slow[0], slow[1])

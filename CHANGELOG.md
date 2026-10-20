@@ -160,6 +160,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   context before the next request, which restores the speed without reloading the model. This
   applies to models loaded fully on the GPU, never while other replies are running, and at most
   once a minute.
+- **A model Windows kept partly in system memory from the start runs at full speed.** On
+  Windows, a model loaded fully on the GPU could have part of its memory placed in shared system
+  memory from its first reply onward, with no faster reply to compare against, and stayed
+  several times slower. localm now reads how much of the model's GPU memory Windows holds in
+  shared memory, and when that is large while enough VRAM is free, rebuilds the context before
+  the next request, at most once a minute and never while other replies are running.
 - **The Live tuning VRAM estimate counts the running model's own memory.** The VRAM the running
   model holds was counted as used, so settings that fit read "may not fit"; it is now shown
   beside the free VRAM and counted as available. Apply now reloads the running model with the

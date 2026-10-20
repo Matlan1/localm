@@ -52,6 +52,7 @@ _lock = threading.Lock()
 _adl_state: Optional[dict] = None      # None = not tried yet; {} = tried and unusable
 _pdh_state: Optional[dict] = None
 _pdh_util_state: Optional[dict] = None
+_pdh_proc_state: Optional[dict] = None
 
 # Source-selection notices already written this process, as {site: {key, ...}}.
 #
@@ -581,6 +582,79 @@ def adapter_utilisation() -> dict[str, float]:
         # Keep the open query; the next call retries.
         logger.debug("gpu_usage: PDH utilisation query failed (will retry): %s", e)
         return {}
+
+
+# Adapters on which a process holds less dedicated VRAM than this are left out
+# of process_gpu_memory.
+_PROC_ADAPTER_MIN_DEDICATED = 256 * 1024 ** 2
+
+
+def process_gpu_memory(pid: Optional[int] = None) -> Optional[tuple[int, int]]:
+    """``(dedicated, shared)`` bytes of GPU memory that process *pid* (default:
+    this process) holds, from the WDDM ``GPU Process Memory`` counters
+    ``Dedicated Usage`` and ``Shared Usage``, or None when unavailable.
+
+    Windows only: None on every other platform, without win32pdh, when the
+    process has no counter instance, or when the query fails (logged at DEBUG).
+    Sums the adapters on which the process holds at least
+    ``_PROC_ADAPTER_MIN_DEDICATED`` of dedicated VRAM; None when there is no
+    such adapter. ``Shared Usage`` counts the process's allocations Windows
+    placed in system memory, including those it moved out of VRAM.
+
+    The query is opened once per *pid* and kept open. Never raises."""
+    global _pdh_proc_state
+    if sys.platform != "win32":
+        return None
+    if pid is None:
+        import os
+        pid = os.getpid()
+    with _lock:
+        if _pdh_proc_state is not None and not _pdh_proc_state:
+            return None
+        try:
+            import win32pdh
+        except Exception as e:
+            logger.debug("gpu_usage: win32pdh unavailable for process GPU memory: %s", e)
+            _pdh_proc_state = {}
+            return None
+        state = _pdh_proc_state
+        try:
+            if state is None or state.get("pid") != pid:
+                if state:
+                    try:
+                        win32pdh.CloseQuery(state["query"])
+                    except Exception:
+                        pass   # a stale handle is replaced below
+                query = win32pdh.OpenQuery()
+                state = _pdh_proc_state = {"pid": pid, "query": query, "pdh": win32pdh,
+                                           "counters": {}}
+                for name in ("Dedicated Usage", "Shared Usage"):
+                    state["counters"][name] = win32pdh.AddEnglishCounter(
+                        query, f"\\GPU Process Memory(pid_{pid}_*)\\{name}")
+            pdh = state["pdh"]
+            pdh.CollectQueryData(state["query"])
+            arrays = {name: pdh.GetFormattedCounterArray(h, pdh.PDH_FMT_LARGE)
+                      for name, h in state["counters"].items()}
+        except Exception as e:
+            logger.debug("gpu_usage: GPU Process Memory query for pid %s failed "
+                         "(will retry next call): %s", pid, e)
+            if state:
+                try:
+                    state["pdh"].CloseQuery(state["query"])
+                except Exception:
+                    pass   # the query is reopened next call
+            _pdh_proc_state = None
+            return None
+    dedicated = shared = 0
+    found = False
+    shared_by_inst = arrays.get("Shared Usage") or {}
+    for inst, ded in (arrays.get("Dedicated Usage") or {}).items():
+        if int(ded) < _PROC_ADAPTER_MIN_DEDICATED:
+            continue
+        found = True
+        dedicated += int(ded)
+        shared += int(shared_by_inst.get(inst, 0))
+    return (dedicated, shared) if found else None
 
 
 def _luid_of(instance: str) -> Optional[str]:
