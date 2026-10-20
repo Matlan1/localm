@@ -10,6 +10,7 @@ import os
 import stat
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -455,6 +456,9 @@ def platform_shell(command: str) -> Union[list, str]:
 # How often a running subprocess is checked against its cancel token.
 _CANCEL_POLL_SECONDS = 0.25
 
+# Longest a finished or killed process's output pipes are waited on.
+_DRAIN_SECONDS = 1.0
+
 
 def _kill_tree(proc) -> None:
     """Kill *proc* and every process it started, so a shell-routed command's
@@ -509,46 +513,88 @@ def run_subprocess(
     carries ``cancelled=True`` plus the output captured so far. This is the
     canonical subprocess-execution primitive for the coder's tools/shell.py,
     tools/git.py, and cli/goal.py.
+
+    Output collection never outlives the process by more than
+    :data:`_DRAIN_SECONDS`: a descendant that left the process tree and kept
+    the output pipes open cannot stretch a timeout, a cancel or a normal exit;
+    the result then carries the output read so far.
     """
     argv = platform_shell(argv_or_cmd) if shell_wrap else argv_or_cmd
     from localm.config import user_command_env
     env = user_command_env(env)
-    if cancel is not None:
-        return _run_cancellable(argv, cwd, timeout=timeout, env=env, cancel=cancel)
+    return _run_cancellable(argv, cwd, timeout=timeout, env=env, cancel=cancel)
 
+
+def _read_pipe(stream, sink: bytearray) -> None:
+    """Append everything *stream* yields to *sink* until EOF or a read error."""
     try:
-        proc = subprocess.run(
-            argv, cwd=str(cwd), capture_output=True, text=True,
-            timeout=timeout, encoding="utf-8", errors="replace", env=env,
-        )
-    except subprocess.TimeoutExpired as e:
-        return SubprocessResult(
-            ok=False, timed_out=True, stdout=e.stdout, stderr=e.stderr)
-    except FileNotFoundError as e:
-        return SubprocessResult(ok=False, not_found=True, error=str(e))
-    except Exception as e:
-        return SubprocessResult(ok=False, error=str(e))
+        while True:
+            chunk = stream.read1(65536)
+            if not chunk:
+                return
+            sink.extend(chunk)
+    except (OSError, ValueError):
+        return
 
-    return SubprocessResult(
-        ok=(proc.returncode == 0), returncode=proc.returncode,
-        stdout=proc.stdout or "", stderr=proc.stderr or "",
-    )
+
+def _decode_output(raw: bytearray) -> str:
+    """Decode captured pipe bytes as UTF-8 text with universal newlines."""
+    return bytes(raw).decode("utf-8", errors="replace").replace(
+        "\r\n", "\n").replace("\r", "\n")
+
+
+def _drain(proc, readers, sinks) -> tuple[str, str]:
+    """Collect the output of an exited or killed *proc* within _DRAIN_SECONDS.
+
+    Each pipe is closed only once its reader thread has finished; a reader
+    still blocked on a pipe held open by an escaped descendant is left to end
+    on its own (it is a daemon thread) and the output read so far is returned.
+    """
+    deadline = time.monotonic() + _DRAIN_SECONDS
+    for t in readers:
+        t.join(max(0.0, deadline - time.monotonic()))
+    for stream, t in zip((proc.stdout, proc.stderr), readers, strict=True):
+        if not t.is_alive():
+            try:
+                stream.close()
+            except Exception:
+                pass
+    return _decode_output(sinks[0]), _decode_output(sinks[1])
+
+
+def _reap(proc) -> None:
+    """Wait for a killed *proc* to be collected, bounded by _DRAIN_SECONDS."""
+    try:
+        proc.wait(timeout=_DRAIN_SECONDS)
+    except Exception:
+        pass
 
 
 def _run_cancellable(argv, cwd: Path, *, timeout: float, env: Optional[dict],
-                     cancel: Callable[[], bool]) -> SubprocessResult:
-    """The cancellable form of :func:`run_subprocess`: the process is polled
-    every _CANCEL_POLL_SECONDS against *cancel* and killed the moment it
-    answers True, or at *timeout*, keeping the output captured so far."""
+                     cancel: Optional[Callable[[], bool]]) -> SubprocessResult:
+    """The body of :func:`run_subprocess`: the process is polled every
+    _CANCEL_POLL_SECONDS against *cancel* (when given) and killed the moment it
+    answers True, or at *timeout*, keeping the output captured so far.
+
+    stdout and stderr are read by daemon threads, so the wait on the process
+    never depends on the pipes reaching EOF."""
     try:
         proc = subprocess.Popen(
             argv, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, encoding="utf-8", errors="replace", env=env,
+            env=env,
         )
     except FileNotFoundError as e:
         return SubprocessResult(ok=False, not_found=True, error=str(e))
     except Exception as e:
         return SubprocessResult(ok=False, error=str(e))
+
+    sinks = (bytearray(), bytearray())
+    readers = [
+        threading.Thread(target=_read_pipe, args=(stream, sink), daemon=True)
+        for stream, sink in zip((proc.stdout, proc.stderr), sinks, strict=True)
+    ]
+    for t in readers:
+        t.start()
 
     deadline = time.monotonic() + timeout
     try:
@@ -556,30 +602,34 @@ def _run_cancellable(argv, cwd: Path, *, timeout: float, env: Optional[dict],
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 _kill_tree(proc)
-                stdout, stderr = proc.communicate()
+                _reap(proc)
+                stdout, stderr = _drain(proc, readers, sinks)
                 return SubprocessResult(
                     ok=False, timed_out=True, stdout=stdout, stderr=stderr)
-            if cancel():
+            if cancel is not None and cancel():
                 _kill_tree(proc)
-                stdout, stderr = proc.communicate()
+                _reap(proc)
+                stdout, stderr = _drain(proc, readers, sinks)
                 return SubprocessResult(
                     ok=False, cancelled=True, stdout=stdout, stderr=stderr)
             try:
-                stdout, stderr = proc.communicate(
-                    timeout=min(remaining, _CANCEL_POLL_SECONDS))
+                proc.wait(timeout=min(remaining, _CANCEL_POLL_SECONDS))
             except subprocess.TimeoutExpired:
                 continue
             break
     except Exception as e:
         _kill_tree(proc)
-        proc.communicate()
+        _reap(proc)
+        _drain(proc, readers, sinks)
         return SubprocessResult(ok=False, error=str(e))
     except BaseException:
         _kill_tree(proc)
-        proc.communicate()
+        _reap(proc)
+        _drain(proc, readers, sinks)
         raise
 
+    stdout, stderr = _drain(proc, readers, sinks)
     return SubprocessResult(
         ok=(proc.returncode == 0), returncode=proc.returncode,
-        stdout=stdout or "", stderr=stderr or "",
+        stdout=stdout, stderr=stderr,
     )
