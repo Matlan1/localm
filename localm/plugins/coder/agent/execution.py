@@ -607,7 +607,7 @@ class _ExecutionMixin:
         # call and always_confirm, which the read-only shortcut honours too.
         # Only where someone could have been asked: a run with no way to ask
         # still denies, as before.
-        can_ask = interactive or self.confirm_handler is not None
+        can_ask = interactive or getattr(self, "confirm_handler", None) is not None
         if (needs_confirm and can_ask and session_allowable and call.name == "run_shell"
                 and self._read_only_shell(call)):
             needs_confirm = False
