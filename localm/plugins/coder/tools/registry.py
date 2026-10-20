@@ -326,6 +326,7 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
         ),
         params={
             "path": {"type": "string", "description": "Source file path (relative to cwd)", "required": True},
+            "from_line": {"type": "int", "description": "List only declarations ending at or after this 1-based line; use it to continue an outline that was cut (optional)", "required": False},
         },
     ),
     "find_references": ToolDef(

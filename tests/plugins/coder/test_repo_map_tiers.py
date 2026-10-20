@@ -6,7 +6,10 @@ for both, and a cache that carries the per-directory counts."""
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+
+import pytest
 
 from localm.plugins.coder import indexer
 from localm.plugins.coder.indexer import _MAX_MAP_CHARS, ProjectMap
@@ -82,8 +85,7 @@ def test_detail_cap_prefers_shallow_files_over_alphabetical_order(tmp_path):
     (tmp_path / "z_top.py").write_text("y = 1\n", encoding="utf-8")
     pm = ProjectMap.build(tmp_path, max_files=1)
     assert [f.path.name for f in pm.files] == ["z_top.py"]
-    assert sum(sum(v.values()) for v in pm.unindexed.values()) == 5
-    assert pm.unindexed["a/b/c"] == {"python": 5}
+    assert pm.unindexed_paths == {f"a/b/c/deep{i}.py" for i in range(5)}
 
 
 def test_detail_slots_are_spread_across_directories(tmp_path):
@@ -122,7 +124,7 @@ def test_binary_files_are_not_counted(tmp_path):
         (tmp_path / f"img{i}.png").write_bytes(b"\x89PNG")
     (tmp_path / "a.py").write_text("a = 1\n", encoding="utf-8")
     pm = ProjectMap.build(tmp_path, max_files=1)
-    assert not pm.truncated and pm.unindexed == {}
+    assert not pm.truncated and pm.unindexed_paths == set()
 
 
 def test_walk_cap_is_reported_and_bounds_the_scan(tmp_path, monkeypatch):
@@ -131,7 +133,7 @@ def test_walk_cap_is_reported_and_bounds_the_scan(tmp_path, monkeypatch):
     pm = ProjectMap.build(tmp_path, max_files=10)
     assert pm.walk_capped is True
     assert len(pm.files) == 10
-    assert sum(sum(v.values()) for v in pm.unindexed.values()) == 90
+    assert len(pm.unindexed_paths) == 90
     assert "lower bound" in _text(pm)
 
 
@@ -161,7 +163,7 @@ def test_cache_round_trip_keeps_the_directory_tier(tmp_path):
     first = ProjectMap.build(repo, cache_path=cache)
     second = ProjectMap.build(repo, cache_path=cache)
     assert second.from_cache is True
-    assert second.unindexed == first.unindexed and second.unindexed
+    assert second.unindexed_paths == first.unindexed_paths and second.unindexed_paths
     assert second.walk_capped == first.walk_capped
     assert "pkg005/  60 files" in _text(second)
     assert len(_text(second)) <= _MAX_MAP_CHARS
@@ -179,7 +181,7 @@ def test_a_capped_cache_without_directory_counts_is_rebuilt_not_trusted(tmp_path
     cache.write_text(json.dumps(data), encoding="utf-8")
     assert ProjectMap.load_cached_and_reconcile(repo, cache) is None
     rebuilt = ProjectMap.build(repo, cache_path=cache)
-    assert rebuilt.from_cache is False and rebuilt.unindexed
+    assert rebuilt.from_cache is False and rebuilt.unindexed_paths
 
 
 def test_an_old_uncapped_cache_without_the_field_still_loads(tmp_path):
@@ -192,7 +194,7 @@ def test_an_old_uncapped_cache_without_the_field_still_loads(tmp_path):
     data.pop("unindexed"), data.pop("walk_capped")
     cache.write_text(json.dumps(data), encoding="utf-8")
     loaded = ProjectMap.load_cached_and_reconcile(repo, cache)
-    assert loaded is not None and loaded.unindexed == {}
+    assert loaded is not None and loaded.unindexed_paths == set()
 
 
 def test_a_malformed_unindexed_field_rejects_the_cache(tmp_path):
@@ -215,3 +217,74 @@ def test_edits_after_a_capped_build_still_refresh_indexed_files(tmp_path):
     pm.refresh_file(tmp_path / target)
     assert "brand_new_symbol" in next(f for f in pm.files if f.path == target).symbols
     assert len(_text(pm)) <= _MAX_MAP_CHARS
+
+
+def test_a_malformed_unindexed_list_rejects_the_cache(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.py").write_text("a = 1\n", encoding="utf-8")
+    cache = tmp_path / "cache" / "map.json"
+    ProjectMap.build(repo, cache_path=cache)
+    data = json.loads(cache.read_text(encoding="utf-8"))
+    data["unindexed"] = ["ok.py", 7]
+    cache.write_text(json.dumps(data), encoding="utf-8")
+    assert ProjectMap.load_cached_and_reconcile(repo, cache) is None
+
+
+def test_indexing_an_unindexed_file_moves_it_out_of_the_unindexed_count(tmp_path):
+    for i in range(10):
+        (tmp_path / f"f{i}.py").write_text("x = 1\n", encoding="utf-8")
+    pm = ProjectMap.build(tmp_path, max_files=4)
+    assert len(pm.files) == 4 and len(pm.unindexed_paths) == 6
+    victim = sorted(pm.unindexed_paths)[0]
+    pm.refresh_file(tmp_path / victim)
+    assert len(pm.files) == 5 and len(pm.unindexed_paths) == 5
+    assert "10 files in" in _text(pm) and "5 indexed in detail" in _text(pm)
+    assert "5 file(s) not indexed in detail" in _text(pm)
+
+
+def test_a_new_file_is_added_to_the_count_but_not_to_the_unindexed_set(tmp_path):
+    for i in range(10):
+        (tmp_path / f"f{i}.py").write_text("x = 1\n", encoding="utf-8")
+    pm = ProjectMap.build(tmp_path, max_files=4)
+    (tmp_path / "brand_new.py").write_text("y = 1\n", encoding="utf-8")
+    pm.refresh_file(tmp_path / "brand_new.py")
+    assert len(pm.unindexed_paths) == 6
+    assert "11 files in" in _text(pm)
+
+
+def test_deleting_an_unindexed_file_drops_it_from_the_count(tmp_path):
+    for i in range(10):
+        (tmp_path / f"f{i}.py").write_text("x = 1\n", encoding="utf-8")
+    pm = ProjectMap.build(tmp_path, max_files=4)
+    victim = sorted(pm.unindexed_paths)[0]
+    (tmp_path / victim).unlink()
+    pm.refresh_file(tmp_path / victim)
+    assert len(pm.unindexed_paths) == 5 and "9 files in" in _text(pm)
+
+
+def _symlink_or_skip(link: Path, target: Path) -> None:
+    try:
+        os.symlink(target, link)
+    except (OSError, NotImplementedError):
+        pytest.skip("this account cannot create symbolic links")
+
+
+def test_links_are_not_counted_as_unindexed_files(tmp_path):
+    repo = tmp_path / "repo"
+    (repo / "z").mkdir(parents=True)
+    outside = tmp_path / "outside.py"
+    outside.write_text("o = 1\n", encoding="utf-8")
+    for name in ("a.py", "b.py"):
+        (repo / name).write_text("x = 1\n", encoding="utf-8")
+    (repo / "z" / "c.py").write_text("c = 1\n", encoding="utf-8")
+    _symlink_or_skip(repo / "z" / "link_out.py", outside)
+    _symlink_or_skip(repo / "z" / "broken.py", tmp_path / "does-not-exist.py")
+
+    capped = ProjectMap.build(repo, max_files=2)
+    assert capped.unindexed_paths == {"z/c.py"} and capped.truncated
+
+    whole = ProjectMap.build(repo, max_files=3)
+    assert whole.unindexed_paths == set(), "no real file was left out"
+    assert whole.truncated is False and whole.files_capped is False
+    assert "Directories" not in _text(whole)

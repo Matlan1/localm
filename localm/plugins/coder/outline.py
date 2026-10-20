@@ -7,6 +7,10 @@ language (and a Python file that does not parse) goes through a regex scan
 that finds declaration lines by shape and estimates each end line from
 indentation; those spans are approximate and the result says so.
 
+Line numbers are 1-based and follow ``str.splitlines`` - the same line
+breaking ``read_file`` uses for its offset/limit - so a span can be passed to
+``read_file`` as is.
+
 The result feeds the ``outline_file`` coder tool (tools/outline.py), which
 lets the model read a large file's shape first and then ``read_file`` just the
 span it needs.
@@ -17,9 +21,10 @@ from __future__ import annotations
 import ast
 import re
 import warnings
+from bisect import bisect_right
 from dataclasses import dataclass
 
-from .indexer import _lang_for_ext
+from .indexer import _SYMBOL_LANGS, _lang_for_ext
 
 
 @dataclass(frozen=True)
@@ -34,16 +39,27 @@ class OutlineEntry:
 @dataclass(frozen=True)
 class Outline:
     entries: list[OutlineEntry]
-    method:  str        # "ast" or "regex"
+    method:  str        # "ast", "regex", or "unsupported" (no outline for this file type)
     lang:    str
-    lines:   int        # total lines in the file
+    lines:   int        # total lines, counted the way read_file reports them
+
+
+@dataclass(frozen=True)
+class FormattedOutline:
+    body:      str
+    shown:     int           # entries rendered
+    total:     int           # entries that matched (end line >= from_line)
+    next_from: int | None    # from_line that continues after a cut, None when nothing was cut
 
 
 _MAX_DECL_CHARS = 110   # a declaration longer than this is shown cut short
 
-
-def _count_lines(text: str) -> int:
-    return text.count("\n") + (1 if text and not text.endswith("\n") else 0)
+# Extensions the indexer has no symbol language for but that share a grammar
+# with one it does.
+_EXT_LANG: dict[str, str] = {
+    ".h": "c", ".hpp": "cpp", ".hh": "cpp", ".cc": "cpp", ".cxx": "cpp",
+    ".mjs": "javascript", ".cjs": "javascript", ".pyi": "python",
+}
 
 
 def _clip(text: str) -> str:
@@ -71,12 +87,15 @@ def _py_start(node: ast.AST) -> int:
     return min([node.lineno, *(d.lineno for d in decorators)])
 
 
+_Match = getattr(ast, "Match", None)
+
+
 def _py_collect(body: list[ast.stmt], depth: int, in_class: bool,
                 out: list[OutlineEntry]) -> None:
     """Declarations in *body*, descending into class bodies and into the
-    compound statements (``if``, ``try``, ``with``) that wrap declarations at
-    module or class level. A function body is not descended: its nested
-    helpers are implementation detail, not structure."""
+    compound statements (``if``, ``try``, ``with``, ``match``) that wrap
+    declarations at module or class level. A function body is not descended:
+    its nested helpers are implementation detail, not structure."""
     for node in body:
         if isinstance(node, ast.ClassDef):
             out.append(OutlineEntry("class", _clip(_py_signature(node)),
@@ -97,6 +116,36 @@ def _py_collect(body: list[ast.stmt], depth: int, in_class: bool,
                 _py_collect(handler.body, depth, in_class, out)
             _py_collect(node.orelse, depth, in_class, out)
             _py_collect(node.finalbody, depth, in_class, out)
+        elif _Match is not None and isinstance(node, _Match):
+            for case in node.cases:
+                _py_collect(case.body, depth, in_class, out)
+
+
+_AST_LINE_BREAK = re.compile(r"\r\n|\r|\n")
+
+
+def _line_translator(text: str):
+    """A function mapping an ``ast`` line number to the line number
+    ``str.splitlines`` (and so ``read_file``) gives the same position, or None
+    when the two agree for this text.
+
+    ``ast`` breaks lines only at \\n, \\r and \\r\\n; ``splitlines`` also breaks
+    at form feed, vertical tab, the file/group/record separators, NEL and the
+    Unicode line and paragraph separators."""
+    ast_starts = [0] + [m.end() for m in _AST_LINE_BREAK.finditer(text)]
+    split_starts = [0]
+    for piece in text.splitlines(keepends=True):
+        split_starts.append(split_starts[-1] + len(piece))
+    split_starts.pop()
+    if ast_starts[:len(split_starts)] == split_starts and \
+            len(ast_starts) - len(split_starts) <= 1:
+        return None
+
+    def translate(lineno: int) -> int:
+        offset = ast_starts[min(lineno, len(ast_starts)) - 1]
+        return bisect_right(split_starts, offset)
+
+    return translate
 
 
 def _outline_python_ast(text: str) -> list[OutlineEntry] | None:
@@ -112,7 +161,11 @@ def _outline_python_ast(text: str) -> list[OutlineEntry] | None:
         _py_collect(tree.body, 0, False, out)
     except RecursionError:
         return None
-    return out
+    translate = _line_translator(text)
+    if translate is None:
+        return out
+    return [OutlineEntry(e.kind, e.text, translate(e.start), translate(e.end), e.depth)
+            for e in out]
 
 
 # ---------------------------------------------------------------------------
@@ -152,7 +205,12 @@ _p(("javascript", "typescript"),
    ("function", rf"^(\s*)(?:export\s+)?(?:const|let|var)\s+({_IDENT})\s*(?::[^=]+)?=\s*"
                 rf"(?:async\s*)?(?:function\b|\([^)]*\)\s*(?::[^=]+)?=>|{_IDENT}\s*=>)"),
    ("method",   rf"^(\s+)(?:(?:public|private|protected|static|readonly|override|async|get|set)\s+)*"
-                rf"({_IDENT})\s*(?:<[^>]*>)?\([^)]*\)\s*(?::\s*[^{{;=]+)?\{{\s*$"),
+                rf"({_IDENT})\s*(?:<[^>()]*>)?\([^()]*\)\s*(?::\s*[^{{;=()]+)?\{{\s*$"),
+   )
+
+_p(("python",),
+   ("class",    rf"^(\s*)class\s+({_IDENT})"),
+   ("function", rf"^(\s*)(?:async\s+)?def\s+({_IDENT})"),
    )
 
 _p(("go",),
@@ -169,12 +227,19 @@ _p(("rust",),
    ("function", rf"^(\s*)(?:pub(?:\([^)]*\))?\s+)?(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+({_IDENT})"),
    )
 
-_JAVA_MODS = (r"(?:(?:public|private|protected|internal|static|final|abstract|sealed|"
-              r"partial|open|data|override|virtual|synchronized|native|suspend)\s+)*")
-_p(("java", "csharp", "kotlin", "swift"),
-   ("class",    rf"^(\s*){_JAVA_MODS}(?:class|interface|enum|record|struct|object|protocol|extension)\s+({_IDENT})"),
-   ("function", rf"^(\s*){_JAVA_MODS}(?:fun|func)\s+(?:<[^>]*>\s*)?({_IDENT})"),
-   ("method",   rf"^(\s*)(?!{_STATEMENT_START}){_JAVA_MODS}[\w<>\[\],.?\s]+?\s+({_IDENT})\s*\([^;]*$"),
+_JVM_MODS = (r"(?:(?:public|private|protected|internal|static|final|abstract|sealed|"
+             r"partial|open|data|override|virtual|synchronized|native|suspend|async|"
+             r"extern|readonly|unsafe)\s+)*")
+_CLASS_LIKE = rf"^(\s*){_JVM_MODS}(?:class|interface|enum|record|struct|object|protocol|extension)\s+({_IDENT})"
+# A return type, optionally generic (bounded) and/or an array or nullable.
+_JVM_TYPE = r"[\w.]+(?:<[^()]{0,80}>)?(?:\[\])*\??"
+_p(("java", "csharp"),
+   ("class",    _CLASS_LIKE),
+   ("method",   rf"^(\s*)(?!{_STATEMENT_START}){_JVM_MODS}{_JVM_TYPE}\s+({_IDENT})\s*\([^;]*$"),
+   )
+_p(("kotlin", "swift"),
+   ("class",    _CLASS_LIKE),
+   ("function", rf"^(\s*){_JVM_MODS}(?:fun|func)\s+(?:<[^>]*>\s*)?({_IDENT})"),
    )
 
 _p(("ruby",),
@@ -203,17 +268,25 @@ _p(("c", "cpp"),
    ("function", _C_FUNC),
    )
 
-_p(("generic",),
-   ("function", rf"^(\s*)(?:def|fn|func|function|sub|proc)\s+({_IDENT})"),
-   ("class",    rf"^(\s*)class\s+({_IDENT})"),
-   )
-
 _MAX_REGEX_LINE = 400   # a longer line (minified code) is not scanned
+
+
+def _lang_of(suffix: str) -> str:
+    suffix = suffix.lower()
+    return _EXT_LANG.get(suffix) or _lang_for_ext(suffix)
+
+
+def supported_suffixes() -> list[str]:
+    """Extensions outline_source() can outline, sorted."""
+    exts = {ext for ext, lang in _SYMBOL_LANGS.items()
+            if lang == "python" or lang in _PATTERNS}
+    exts |= {ext for ext, lang in _EXT_LANG.items() if lang == "python" or lang in _PATTERNS}
+    return sorted(exts)
 
 
 def _regex_declarations(lines: list[str], lang: str) -> list[tuple[int, int, str, str]]:
     """(1-based line, indent width, kind, declaration text) per declaration line."""
-    patterns = _PATTERNS.get(lang) or _PATTERNS["generic"]
+    patterns = _PATTERNS.get(lang, [])
     found: list[tuple[int, int, str, str]] = []
     for lineno, line in enumerate(lines, start=1):
         if len(line) > _MAX_REGEX_LINE or not line.strip():
@@ -259,58 +332,47 @@ def _outline_regex(text: str, lang: str) -> list[OutlineEntry]:
 
 
 # ---------------------------------------------------------------------------
-#  Public entry point
+#  Public entry points
 # ---------------------------------------------------------------------------
 
 def outline_source(text: str, suffix: str) -> Outline:
-    """Outline *text*, a source file with extension *suffix* (e.g. ``".py"``)."""
-    lang = _lang_for_ext(suffix.lower())
-    lines = _count_lines(text)
+    """Outline *text*, a source file with extension *suffix* (e.g. ``".py"``).
+
+    The result's method is "unsupported" (and entries empty) for a file type
+    with no outline support, so a caller can tell that apart from a file that
+    declares nothing."""
+    text = text.removeprefix("﻿")
+    lang = _lang_of(suffix)
+    lines = text.count("\n") + 1
     if lang == "python":
         entries = _outline_python_ast(text)
         if entries is not None:
             return Outline(entries, "ast", lang, lines)
+        return Outline(_outline_regex(text, "python"), "regex", lang, lines)
+    if lang not in _PATTERNS:
+        return Outline([], "unsupported", lang, lines)
     return Outline(_outline_regex(text, lang), "regex", lang, lines)
 
 
-def format_outline(outline: Outline, max_chars: int) -> tuple[str, int, str]:
-    """Render *outline* as text of at most *max_chars* characters.
+def format_outline(outline: Outline, max_chars: int, from_line: int = 1) -> FormattedOutline:
+    """Render the entries of *outline* that end at or after *from_line*, as text
+    of at most *max_chars* characters, in file order.
 
-    Returns ``(text, shown_entries, note)``. When the full outline is too long
-    it is rendered one nesting level shallower until it fits; *note* says so
-    (empty when nothing was cut). Past depth 0 the entries are cut from the end."""
-    entries = outline.entries
-    if not entries:
-        return "", 0, ""
-    deepest = max(e.depth for e in entries)
+    An enclosing class whose span covers *from_line* is included, so a page that
+    starts inside a class still shows which class it is. When the entries do not
+    all fit, the rest are cut from the end and ``next_from`` is the *from_line*
+    that continues from the first one left out."""
+    rows = [e for e in outline.entries if e.end >= from_line]
     width = len(str(outline.lines))
-
-    def render(limit_depth: int, cap: int | None) -> tuple[str, int]:
-        rows = [e for e in entries if e.depth <= limit_depth]
-        if cap is not None:
-            rows = rows[:cap]
-        body = "\n".join(
-            f"{'  ' * e.depth}L{e.start:>{width}}-{e.end:<{width}}  {e.text}" for e in rows)
-        return body, len(rows)
-
-    for limit in range(deepest, -1, -1):
-        body, shown = render(limit, None)
-        if len(body) <= max_chars:
-            hidden = len(entries) - shown
-            note = ""
-            if hidden:
-                note = (f"{hidden} deeper member(s) omitted to fit; outline a narrower "
-                        "span with read_file, or grep for the name")
-            return body, shown, note
-    shown = len([e for e in entries if e.depth == 0])
-    lo, hi = 1, shown
-    while lo < hi:
-        mid = (lo + hi + 1) // 2
-        if len(render(0, mid)[0]) <= max_chars:
-            lo = mid
-        else:
-            hi = mid - 1
-    body, shown_n = render(0, lo)
-    note = (f"only the first {shown_n} of {len(entries)} entries fit; use grep or "
-            "read_file with offset/limit to reach the rest")
-    return body, shown_n, note
+    used = 0
+    lines: list[str] = []
+    next_from: int | None = None
+    for e in rows:
+        line = f"{'  ' * e.depth}L{e.start:>{width}}-{e.end:<{width}}  {e.text}"
+        cost = len(line) + (1 if lines else 0)
+        if lines and used + cost > max_chars:
+            next_from = e.start
+            break
+        lines.append(line)
+        used += cost
+    return FormattedOutline("\n".join(lines), len(lines), len(rows), next_from)

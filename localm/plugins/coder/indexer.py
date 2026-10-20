@@ -391,9 +391,10 @@ class ProjectMap:
     # _MAX_WALK_FILES), so even the per-directory counts are a lower bound.
     walk_capped: bool = False
     # Files the walk counted but build() did not index in detail because
-    # max_files was reached: directory (see _dir_key) -> {language: file count}.
-    # They appear in the directory tier of to_context_string() and nowhere else.
-    unindexed: dict[str, dict[str, int]] = field(default_factory=dict)
+    # max_files was reached, as POSIX paths relative to the root. They appear in
+    # the directory tier of to_context_string() and nowhere else; refresh_file()
+    # removes a path from here when it indexes that file.
+    unindexed_paths: set[str] = field(default_factory=set)
     # Set by mark_dirty() after a tool that can write files with no resolvable
     # `path` arg (run_shell). Consumed by _rescan_if_dirty(), which every read
     # (to_context_string / file_count) calls first, so N shell calls before the
@@ -422,8 +423,7 @@ class ProjectMap:
         ``_MAX_WALK_FILES`` candidates are collected by name alone (no read), and
         the first *max_files* of them in ``_breadth_order`` (shallowest first,
         round-robin across directories) are read and indexed in detail; every
-        other candidate is only tallied per directory
-        (``unindexed``). A wall-clock *deadline_s* (None to disable) caps even a
+        other candidate is only recorded (``unindexed_paths``). A wall-clock *deadline_s* (None to disable) caps even a
         pathological walk; *on_progress*, if given, is called with the running
         candidate count. Indexing fewer files than were found sets ``truncated``
         and ``files_capped``; a walk cut short also sets ``walk_capped``.
@@ -506,8 +506,8 @@ class ProjectMap:
         ordered = _breadth_order(candidates, lambda p: p.relative_to(root))
         for pos, abs_path in enumerate(ordered):
             if count >= max_files:
-                pm.truncated = pm.files_capped = True
-                pm._tally_unindexed(p.relative_to(root) for p in ordered[pos:])
+                if pm._tally_unindexed(ordered[pos:]):
+                    pm.truncated = pm.files_capped = True
                 break
             try:
                 rel = abs_path.relative_to(root)
@@ -549,13 +549,19 @@ class ProjectMap:
             pm.save_cache(cache_path)
         return pm
 
-    def _tally_unindexed(self, rels) -> None:
-        """Count the files at relative paths *rels* per directory and language,
-        without reading them (see ``unindexed``)."""
-        for rel in rels:
-            by_lang = self.unindexed.setdefault(_dir_key(rel.parent), {})
-            lang = _lang_for_ext(rel.suffix.lower())
-            by_lang[lang] = by_lang.get(lang, 0) + 1
+    def _tally_unindexed(self, abs_paths) -> int:
+        """Record the files at *abs_paths* in ``unindexed_paths`` without reading
+        them, and return how many were recorded. A symbolic link (including a
+        dangling one or one leaving the root) is not recorded: the files build()
+        indexes in detail are checked for that, and the count must not include
+        what detail indexing would have dropped."""
+        added = 0
+        for abs_path in abs_paths:
+            if os.path.islink(abs_path):
+                continue
+            self.unindexed_paths.add(abs_path.relative_to(self.root).as_posix())
+            added += 1
+        return added
 
     # ------------------------------------------------------------------
     #  Cross-session cache: persist the built map, reconcile it against the
@@ -576,7 +582,7 @@ class ProjectMap:
             "truncated": self.truncated,
             "files_capped": self.files_capped,
             "walk_capped": self.walk_capped,
-            "unindexed": self.unindexed,
+            "unindexed": sorted(self.unindexed_paths),
             "files": [
                 {"path": str(f.path), "lang": f.lang, "lines": f.lines,
                  "symbols": f.symbols, "mtime": f.mtime, "size": f.size,
@@ -613,21 +619,18 @@ class ProjectMap:
         files_capped = bool(data.get("files_capped", False))
         unindexed = data.get("unindexed")
         if unindexed is None:
-            # A capped map written before the directory tier existed has no counts
-            # for the files it left out: rebuild rather than present it as whole.
+            # A capped map written before the directory tier existed does not
+            # record the files it left out: rebuild rather than present it as whole.
             if files_capped:
                 return None
-            unindexed = {}
-        try:
-            unindexed = {str(d): {str(k): int(v) for k, v in by_lang.items()}
-                         for d, by_lang in unindexed.items()}
-        except (AttributeError, TypeError, ValueError):
+            unindexed = []
+        if not isinstance(unindexed, list) or not all(isinstance(p, str) for p in unindexed):
             return None
         return cls(root=root, files=files,
                    truncated=bool(data.get("truncated", False)),
                    files_capped=files_capped,
                    walk_capped=bool(data.get("walk_capped", False)),
-                   unindexed=unindexed)
+                   unindexed_paths=set(unindexed))
 
     @classmethod
     def load_cached_and_reconcile(cls, root: Path, cache_path: Path,
@@ -695,6 +698,7 @@ class ProjectMap:
         lang = _lang_for_ext(ext)
 
         self.files = [f for f in self.files if f.path != rel]
+        self.unindexed_paths.discard(rel.as_posix())
 
         try:
             st = abs_path.stat()
@@ -824,7 +828,7 @@ class ProjectMap:
 
         lines: list[str] = [f"## Codebase map  ({shown_root})"]
         chars_used = len(lines[0])
-        flat_fits = not self.unindexed
+        flat_fits = not self.unindexed_paths
 
         if flat_fits:
             for f in self.files:
@@ -875,10 +879,10 @@ class ProjectMap:
         for f in self.files:
             by_lang = own.setdefault(_dir_key(f.path.parent), {})
             by_lang[f.lang] = by_lang.get(f.lang, 0) + 1
-        for dir_key, by_lang in self.unindexed.items():
-            merged = own.setdefault(dir_key, {})
-            for lang, n in by_lang.items():
-                merged[lang] = merged.get(lang, 0) + n
+        for rel_path in self.unindexed_paths:
+            by_lang = own.setdefault(rel_path.rpartition("/")[0], {})
+            lang = _lang_for_ext(os.path.splitext(rel_path)[1].lower())
+            by_lang[lang] = by_lang.get(lang, 0) + 1
         for dir_key, by_lang in own.items():
             add(dir_key, by_lang)
         return total, langs, children
@@ -946,7 +950,7 @@ class ProjectMap:
             listed += 1
 
         unlisted = len(self.files) - listed
-        unindexed_n = sum(sum(by_lang.values()) for by_lang in self.unindexed.values())
+        unindexed_n = len(self.unindexed_paths)
         parts = []
         if unlisted:
             parts.append(f"{unlisted} indexed file(s) not listed")

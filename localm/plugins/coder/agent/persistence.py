@@ -415,9 +415,8 @@ class _PersistenceMixin:
         pm = ProjectMap.build(cwd, deadline_s=_index_deadline(), cache_path=cache_path)
         took = time.monotonic() - t0
         if pm.truncated or took > 2.0:
-            unindexed = getattr(pm, "unindexed", None)
-            extra = (sum(sum(v.values()) for v in unindexed.values())
-                     if isinstance(unindexed, dict) else 0)
+            unindexed = getattr(pm, "unindexed_paths", None)
+            extra = len(unindexed) if isinstance(unindexed, set) else 0
             counted = f"; {extra} more counted by directory" if extra else ""
             suffix = (f" (large project - index truncated{counted}; the agent can "
                       "still tree / outline_file / search_files)" if pm.truncated else "")
