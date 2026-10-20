@@ -47,6 +47,11 @@ class SpillStore:
         self._max_total = max_total_chars
 
     def add(self, text: str, tool: str, untrusted: bool) -> str:
+        if len(text) > self._max_total:
+            half = self._max_total // 2
+            text = (text[:half]
+                    + f"\n... [{len(text) - 2 * half} characters not kept] ...\n"
+                    + text[-half:])
         with self._lock:
             self._seq += 1
             sid = f"o{self._seq}"
@@ -70,9 +75,9 @@ class SpillStore:
         total = sum(len(e.text) for e in self._entries.values())
         while self._entries and (len(self._entries) > self._max_entries
                                  or total > self._max_total):
-            oldest = next(iter(self._entries))
             if len(self._entries) == 1:
                 break
+            oldest = next(iter(self._entries))
             total -= len(self._entries.pop(oldest).text)
 
 

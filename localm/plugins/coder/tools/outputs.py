@@ -8,6 +8,7 @@ of a long test log or search result that the truncated view left out.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from ..spill import active_store
@@ -22,6 +23,7 @@ _DEFAULT_LIMIT = 200
 _MAX_LIMIT = 400
 _MAX_MATCHES = 100
 _MAX_CHARS = 8_000
+_SCAN_BUDGET_S = 10.0
 
 
 def tool_read_output(cwd: Path, id: str, offset: int = 0, limit: int = 0,
@@ -48,8 +50,15 @@ def tool_read_output(cwd: Path, id: str, offset: int = 0, limit: int = 0,
         except _ModelRegexUnavailable as e:
             return ToolResult.error(str(e))
         picked: list[int] = []
+        deadline = time.monotonic() + _SCAN_BUDGET_S
+        scanned = 0
         try:
             for i, line in enumerate(lines):
+                if time.monotonic() > deadline:
+                    return ToolResult.error(
+                        f"the pattern search stopped after {_SCAN_BUDGET_S:g}s at line "
+                        f"{scanned} of {total}; use a simpler pattern or read a line range")
+                scanned = i + 1
                 if _run_model_regex(rx.search, line):
                     picked.append(i)
                     if len(picked) >= _MAX_MATCHES:

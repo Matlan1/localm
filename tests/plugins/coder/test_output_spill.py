@@ -106,6 +106,36 @@ def test_store_is_bounded_and_drops_the_oldest():
     assert sum(len(big.get(i).text) for i in big.ids()) <= 250
 
 
+def test_one_oversized_output_is_trimmed_to_the_cap():
+    store = SpillStore(max_entries=5, max_total_chars=100)
+    sid = store.add("a" * 60 + "b" * 200 + "c" * 60, "run_shell", False)
+    kept = store.get(sid).text
+    assert kept.startswith("a" * 50) and kept.endswith("c" * 50)
+    assert len(kept) < 200
+
+
+def test_a_sub_agent_shares_its_parents_store(tmp_path):
+    parent = _make_agent(tmp_path)
+    from localm.plugins.coder.agent import Agent
+    with patch("localm.plugins.coder.agent.ProjectMap") as pm, \
+         patch("localm.plugins.coder.agent.make_audit_log"), \
+         patch("localm.plugins.coder.agent.load_memory", return_value=""):
+        pm.build.return_value.file_count.return_value = 0
+        child = Agent(backend=parent.backend, cwd=tmp_path, parent=parent)
+    assert child._spill_store is parent._spill_store
+
+
+def test_pattern_scan_has_a_whole_call_time_budget(tmp_path, monkeypatch):
+    from localm.plugins.coder.tools import outputs
+    agent = _make_agent(tmp_path)
+    agent._execute_tool(_call("run_shell", command=_numbered_lines_command(3000)),
+                        interactive=False)
+    monkeypatch.setattr(outputs, "_SCAN_BUDGET_S", -1.0)
+    back = agent._execute_tool(_call("read_output", id="o1", pattern="never matches"),
+                               interactive=False)
+    assert not back.ok and "stopped after" in back.output
+
+
 def test_spill_only_files_inside_a_tool_call():
     assert spill("abc") is None
     store = SpillStore()

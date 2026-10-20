@@ -359,9 +359,11 @@ class Agent(
         # tools. See _ExecutionMixin._session_allow_key.
         self._session_allowed: set = set()
         # Full text of tool outputs too long to show, in memory only; read back
-        # with read_output. See localm/plugins/coder/spill.py.
+        # with read_output. One store per agent tree: a sub-agent shares its
+        # parent's, so ids are unique and the size cap is one cap.
         from ..spill import SpillStore
-        self._spill_store = SpillStore()
+        inherited = getattr(parent, "_spill_store", None) if parent is not None else None
+        self._spill_store = inherited if inherited is not None else SpillStore()
         self._undo_stack: list[dict] = []
         self._unverified_writes: set[str] = set()  # code files changed since last test run
         # Changed-files tracker: rel path -> {original: bytes|None, writes: int,
