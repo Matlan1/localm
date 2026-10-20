@@ -304,9 +304,106 @@ def load_refusal(pre_type: Optional[str]) -> Optional[str]:
     )
 
 
-def check_text(pre_type: Optional[str], text: str) -> None:
+# llama_token_attr bits (llama.h) of the tokens llama.cpp splits text at before
+# the pre-tokenizer runs.
+TOKEN_ATTR_UNKNOWN = 1 << 0
+TOKEN_ATTR_CONTROL = 1 << 3
+TOKEN_ATTR_USER_DEFINED = 1 << 4
+
+
+def read_separators(vocab, api) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """``(with_special, without_special)``: the texts of the tokens llama.cpp's
+    tokenizer cuts a text at before running the pre-tokenizer on each piece,
+    when the text is tokenized with ``parse_special`` true (control, user-defined
+    and unknown tokens) and false (user-defined tokens only).
+
+    Both are empty when the runtime cannot report token attributes, which leaves
+    :func:`check_parts` checking the whole text. Never raises."""
+    from localm.debuglog import logger
+    try:
+        if not api.has_vocab_attr_api():
+            return (), ()
+        special: list[str] = []
+        user_defined: list[str] = []
+        mask = TOKEN_ATTR_CONTROL | TOKEN_ATTR_USER_DEFINED | TOKEN_ATTR_UNKNOWN
+        for tok in range(int(api.llama_vocab_n_tokens(vocab))):
+            attr = int(api.llama_vocab_get_attr(vocab, tok))
+            if not attr & mask:
+                continue
+            text = api.llama_vocab_get_text(vocab, tok).decode("utf-8", "replace")
+            if not text:
+                continue
+            special.append(text)
+            if attr & TOKEN_ATTR_USER_DEFINED:
+                user_defined.append(text)
+        return tuple(dict.fromkeys(special)), tuple(dict.fromkeys(user_defined))
+    except Exception as exc:
+        logger.warning(
+            "pretokenizer guard: could not read the special tokens (%s: %s); "
+            "input will be checked as one piece", type(exc).__name__, exc)
+        return (), ()
+
+
+def split_at_separators(text: str, separators) -> list[str]:
+    """*text* cut at every occurrence of a separator that overlaps no other
+    separator occurrence, with the separators removed.
+
+    llama.cpp cuts at every occurrence it finds, in its own order, so every cut
+    made here is one it also makes; an occurrence that overlaps another is left
+    uncut. The pieces are therefore never shorter than the ones llama.cpp hands
+    its pre-tokenizer. See test_pieces_are_never_shorter_than_llama_cpp_cuts."""
+    spans: list[tuple[int, int]] = []
+    for sep in separators:
+        # A separator that starts or ends with whitespace is never cut at: a
+        # neighbouring token's lstrip/rstrip can eat that whitespace first.
+        if not sep or sep != sep.strip() or sep not in text:
+            continue
+        pos = text.find(sep)
+        while pos != -1:
+            spans.append((pos, pos + len(sep)))
+            pos = text.find(sep, pos + 1)
+    if not spans:
+        return [text]
+    spans = sorted(set(spans))
+    clean: list[tuple[int, int]] = []
+    prev_end = -1
+    for i, (s, e) in enumerate(spans):
+        next_start = spans[i + 1][0] if i + 1 < len(spans) else len(text) + 1
+        if prev_end <= s and next_start >= e:
+            clean.append((s, e))
+        prev_end = max(prev_end, e)
+    pieces, pos = [], 0
+    for s, e in clean:
+        pieces.append(text[pos:s])
+        pos = e
+    pieces.append(text[pos:])
+    return [p for p in pieces if p]
+
+
+def check_parts(pre_type: Optional[str], text: str, separators=()) -> None:
+    """:func:`check_text` over each piece llama.cpp's tokenizer hands the
+    pre-tokenizer separately: *text* cut at *separators* (see
+    :func:`split_at_separators`). The whole text is checked first, so a text
+    that passes as one piece costs one scan."""
+    policy = policy_for(pre_type)
+    if policy is None:
+        return
+    try:
+        check_text(pre_type, text)
+        return
+    except PretokenizerUnsafeInputError:
+        pieces = split_at_separators(text, separators) if separators else [text]
+        if len(pieces) <= 1:
+            raise
+    for piece in pieces:
+        check_text(pre_type, piece, part=True)
+
+
+def check_text(pre_type: Optional[str], text: str, *, part: bool = False) -> None:
     """Raise :class:`PretokenizerUnsafeInputError` if *text* must not be handed
-    to the pre-tokenizer named by *pre_type*; return ``None`` otherwise.
+    to the pre-tokenizer named by *pre_type*; return ``None`` otherwise. With
+    *part*, *text* is one piece of a larger input and the total-length refusal
+    says so.
 
     Returns without scanning for any *pre_type* outside :data:`UNSAFE_PRE_TYPES`,
     so the ordinary case costs one dict lookup.
@@ -323,6 +420,13 @@ def check_text(pre_type: Optional[str], text: str) -> None:
     if policy is None:
         return
     if policy.max_chars is not None and len(text) > policy.max_chars:
+        if part:
+            raise PretokenizerUnsafeInputError(
+                f"This model's pre-tokenizer ({policy.label}) cannot safely handle "
+                f"more than {policy.max_chars} characters in one message; one "
+                f"message in this input is {len(text)}. Send that text in smaller "
+                f"parts."
+            )
         raise PretokenizerUnsafeInputError(
             f"This model's pre-tokenizer ({policy.label}) cannot safely handle "
             f"more than {policy.max_chars} characters at once; this input is "
@@ -366,6 +470,57 @@ def _refuse_long_run(policy: Policy, text: str, char_class: str, limit: int) -> 
         f"{run}. Break the run with punctuation or a line break, or use a model "
         f"with a different tokenizer."
     )
+
+
+class Refusal(NamedTuple):
+    """What a refusal message from this module says was too long.
+
+    ``kind``   ``"chars"`` (a whole input or one message over the length
+               limit), ``"run"`` (an unbroken run of one character class) or
+               ``"block"`` (a block with no spaces or line breaks, cost bound).
+    ``limit``  the largest size allowed, in characters.
+    ``size``   the size the refused input had.
+    ``run_kind`` for ``"run"``, the class as the message names it
+               (``"letters"``, ``"digits"``, ``"line breaks"``, ...); else None.
+    ``part``   True when one message of the input was over the limit rather
+               than the input as a whole.
+    """
+
+    kind: str
+    limit: int
+    size: int
+    run_kind: Optional[str] = None
+    part: bool = False
+
+
+_RE_REFUSAL_CHARS = regex.compile(
+    r"pre-tokenizer \([^)]*\) cannot safely handle more than (\d+) characters "
+    r"(at once; this input|in one message; one message in this input) is (\d+)")
+_RE_REFUSAL_RUN = regex.compile(
+    r"pre-tokenizer \([^)]*\) (?:crashes on|becomes extremely slow on) an unbroken "
+    r"run of more than (\d+) ([a-z ]+?); this input has a run of (\d+)")
+_RE_REFUSAL_BLOCK = regex.compile(
+    r"pre-tokenizer \([^)]*\) becomes extremely slow on a long block of text "
+    r"carrying no spaces or line breaks; at \d+ characters the longest such "
+    r"block may be (\d+) and this input has a block of (\d+)")
+
+
+def parse_refusal(message: str) -> Optional[Refusal]:
+    """The :class:`Refusal` a :class:`PretokenizerUnsafeInputError` message
+    from :func:`check_text` describes, found anywhere in *message* (a client
+    sees it inside an HTTP error), or None when *message* holds none."""
+    text = message or ""
+    m = _RE_REFUSAL_CHARS.search(text)
+    if m is not None:
+        return Refusal("chars", int(m.group(1)), int(m.group(3)),
+                       part=m.group(2).startswith("in one message"))
+    m = _RE_REFUSAL_RUN.search(text)
+    if m is not None:
+        return Refusal("run", int(m.group(1)), int(m.group(3)), run_kind=m.group(2))
+    m = _RE_REFUSAL_BLOCK.search(text)
+    if m is not None:
+        return Refusal("block", int(m.group(1)), int(m.group(2)))
+    return None
 
 
 def count_tokens_or_estimate(count_tokens, text: str, what: str) -> int:

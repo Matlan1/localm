@@ -34,6 +34,7 @@ _MAX_PINNED_FILES = 40      # changed files listed in the block; the rest are co
 _MAX_DURABLE_NOTES = 20     # notes carried across compactions, newest kept
 _MAX_FLUSH_NOTES = 8        # notes one flush may add
 _MAX_NOTE_CHARS = 300
+_MAX_INPUT_FITS = 4         # pre-tokenizer refusals one LLM call may cut the history for
 
 _NOTE_MARKER_RE = re.compile(r"^\s*(?:[-*+]|\d{1,2}[.)])\s+")
 
@@ -1435,8 +1436,10 @@ ws     ::= [ \t\n\r]*
         return full
 
     def _call_llm(self, messages: list[dict], interactive: bool) -> str:
+        from localm.inference.backends.base import PretokenizerUnsafeInputError
         from ..backends.http import CoderAuthError, CoderServerError
         first_attempt = True
+        fits_left = _MAX_INPUT_FITS
         self._streamed_to_terminal = False
         while True:
             try:
@@ -1525,10 +1528,49 @@ ws     ::= [ \t\n\r]*
                 self.backend._api_key = new_key
                 print_info("Retrying with new API key...")
             except CoderServerError as e:
+                if fits_left and self._fit_after_pretokenizer_refusal(e, messages):
+                    fits_left -= 1
+                    continue
                 if not self._disable_grammar_on_unsupported(e):
                     raise
                 # Falls through to the next loop iteration: _llm_kwargs() now
                 # omits the grammar, so the retry is not the request that failed.
+            except PretokenizerUnsafeInputError as e:
+                if fits_left and self._fit_after_pretokenizer_refusal(e, messages):
+                    fits_left -= 1
+                    continue
+                raise
+
+    def _fit_after_pretokenizer_refusal(self, e: Exception, messages: list[dict]) -> bool:
+        """Cut the messages this agent built so the request the model's
+        pre-tokenizer refused (*e*) fits, rebuild *messages* in place, and
+        return True so the caller retries. False when *e* is no such refusal or
+        nothing could be cut. Raises :class:`InputTooLongForModel` when only a
+        message the user typed is over the limit."""
+        from localm.inference.pretokenizer_guard import parse_refusal
+        from .inputfit import InputTooLongForModel, fit_messages, user_message_refusal
+        refusal = parse_refusal(str(e))
+        if refusal is None:
+            return False
+        typed = [t for t in self.__dict__.get("_typed_requests", []) if t]
+        protected = {i for i, m in enumerate(self._messages)
+                     if m.get("role") == "user"
+                     and any(str(m.get("content", "")).startswith(t)
+                             or str(m.get("content", "")).endswith(t) for t in typed)}
+        reserve = len(str(getattr(self, "_system_prompt", "") or ""))
+        changed, offenders = fit_messages(self._messages, refusal,
+                                          protected=protected, reserve=reserve)
+        if not changed:
+            if offenders:
+                raise InputTooLongForModel(
+                    user_message_refusal(refusal) or str(e)) from e
+            return False
+        note = (f"cut {len(changed)} earlier message(s) the agent built (tool "
+                "output, file contents) to fit this model's input limit")
+        self._audit.notice("input_fitted", note)
+        self._emit("info", text=note)
+        messages[:] = self._build_messages()
+        return True
 
     def _accumulate_usage(self) -> None:
         """Pull token counts from the backend's last call and add to the session total."""

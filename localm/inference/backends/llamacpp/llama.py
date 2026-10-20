@@ -360,6 +360,13 @@ class _Tokenizer:
         # Read once per load, not per encode: the value cannot change while the
         # model is loaded, and encode() runs on every request.
         self._pre_type = pretokenizer_guard.read_pre_type(model_ptr, api)
+        # Texts llama.cpp cuts the input at before the pre-tokenizer runs, read
+        # only for a pre-tokenizer the guard bounds.
+        self._separators: tuple = ()
+        self._separators_untrusted: tuple = ()
+        if pretokenizer_guard.policy_for(self._pre_type) is not None:
+            self._separators, self._separators_untrusted = (
+                pretokenizer_guard.read_separators(self._vocab, api))
         hazard = pretokenizer_guard.hazard_note(self._pre_type)
         if hazard is not None:
             from localm.debuglog import logger
@@ -383,7 +390,7 @@ class _Tokenizer:
 
         With no ranges this issues the single call it always did.
         """
-        pretokenizer_guard.check_text(self._pre_type, text)
+        self.check(text, untrusted_ranges)
         if not untrusted_ranges:
             return self._encode_segment(text, add_bos, True)
 
@@ -397,6 +404,22 @@ class _Tokenizer:
         if want_bos and add_bos:
             return self._encode_segment(text, add_bos, True)
         return tokens
+
+    def check(self, text: str, untrusted_ranges=()) -> None:
+        """Raise ``PretokenizerUnsafeInputError`` when a piece of *text* that
+        :meth:`encode` would hand the pre-tokenizer is one it must not see.
+        Each trust segment is tokenized on its own, and is cut at the special
+        tokens its ``parse_special`` setting lets llama.cpp recognise."""
+        if pretokenizer_guard.policy_for(self._pre_type) is None:
+            return
+        if not untrusted_ranges:
+            pretokenizer_guard.check_parts(self._pre_type, text, self._separators)
+            return
+        for segment, is_untrusted in split_by_trust(text, untrusted_ranges):
+            if segment:
+                pretokenizer_guard.check_parts(
+                    self._pre_type, segment,
+                    self._separators_untrusted if is_untrusted else self._separators)
 
     def _encode_segment(self, text: str, add_special: bool, parse_special: bool) -> list[int]:
         raw = text.encode("utf-8", errors="replace")
@@ -3235,7 +3258,7 @@ class LlamaCpp:
                 # mtmd_tokenize runs the same pre-tokenizer over the text parts
                 # of this prompt, so the vision path needs the same check the
                 # text path gets in _Tokenizer.encode.
-                pretokenizer_guard.check_text(self._tokenizer._pre_type, prompt)
+                self._tokenizer.check(prompt)
 
                 # Stays on _quiet_stderr rather than _generate()'s
                 # dedup_native_stderr: below, _ctx() is entered once for the mtmd

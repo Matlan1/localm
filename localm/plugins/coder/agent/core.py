@@ -935,6 +935,10 @@ class Agent(
     @_last_user_request.setter
     def _last_user_request(self, value: str) -> None:
         self.__dict__["_last_user_request_text"] = value
+        typed = self.__dict__.setdefault("_typed_requests", [])
+        if value:
+            typed.append(value)
+            del typed[:-64]
         # getattr default: a subclass or a restored checkpoint could conceivably
         # assign this before __init__ has run its state block.
         self._user_request_seq = getattr(self, "_user_request_seq", 0) + 1
