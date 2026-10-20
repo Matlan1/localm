@@ -70,6 +70,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `.localcoder/config.toml` to be asked every time.
 
 ### Changed
+- **The bundled koboldcpp runtime (native music generation) moved from v1.123 to v1.123.1.** An existing install picks it up the next time music generation starts.
 - **The bundled llama.cpp runtime moved from b11541 to b11756.** An existing install picks it up with `localm setup-llama --force`.
 
 - **The coder starts a project's MCP servers only after you trust them.** A cloned repository
