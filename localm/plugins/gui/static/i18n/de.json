@@ -1704,6 +1704,8 @@
   "settings.field.updateIgnoreNetPolicy.label": "Auch bei ausgeschaltetem Netzwerkzugriff nach Updates suchen",
   "settings.field.useMmap.help": "auto läuft aus festplattengestütztem Speicher, wenn das Modell möglicherweise nicht in den verfügbaren RAM passt. on erzwingt es; off liest zuerst das ganze Modell in den Speicher.",
   "settings.field.useMmap.label": "Modelldateien in den Speicher abbilden (mmap)",
+  "settings.field.kvCacheType.label": "KV-Cache-Typ",
+  "settings.field.kvCacheType.help": "f16 ist der Standard. q8_0 speichert den KV-Cache in etwa halb so viel Speicher, sodass etwa 1,9-mal so viel Kontext in den VRAM passt, bei etwas langsamerer Dekodierung. q8_0 braucht Flash Attention.",
   "settings.field.voiceSttLanguage.help": "Erzwingt eine Sprache für die Transkription, z. B. en oder de. Leer erkennt sie automatisch aus dem Audio.",
   "settings.field.parallelSlots.label": "Parallele Anfragen",
   "settings.field.parallelSlots.help": "Wie viele Chat-Anfragen ein GGUF-Modell gleichzeitig beantwortet; sie teilen sich sein Kontextfenster. auto verwendet 4 (1, solange spekulatives Entwerfen aktiv ist). 1 beantwortet eine nach der anderen.",
