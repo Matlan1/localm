@@ -533,10 +533,13 @@ def _download_pinned(name: str, repo: str, filename: str, dest: Path,
     import tempfile
 
     from huggingface_hub import hf_hub_download
+
+    from localm.model_source_credentials import get_hf_token
     scratch = Path(tempfile.mkdtemp(prefix=".download-", dir=str(dest.parent)))
     try:
         got = Path(hf_hub_download(repo, filename, local_dir=str(scratch),
-                                   endpoint=_HF_ENDPOINT, revision=pin[0], **extra))
+                                   endpoint=_HF_ENDPOINT, revision=pin[0],
+                                   token=get_hf_token(), **extra))
         actual = file_sha256(got)
         if actual != pin[1].lower():
             raise RuntimeError(
@@ -588,6 +591,8 @@ def _download_known(name: str, repo: str, filename: str, dest: Path,
         return None
     try:
         from huggingface_hub import hf_hub_download
+
+        from localm.model_source_credentials import get_hf_token
         dest.parent.mkdir(parents=True, exist_ok=True)
         logger.info("downloading embedding model %s/%s (one-time)...", repo, filename)
         extra: dict = ({"tqdm_class": _download_progress_class(
@@ -597,7 +602,7 @@ def _download_known(name: str, repo: str, filename: str, dest: Path,
         if pin is not None:
             return _download_pinned(name, repo, filename, dest, pin, extra)
         got = hf_hub_download(repo, filename, local_dir=str(dest.parent),
-                              endpoint=_HF_ENDPOINT, **extra)
+                              endpoint=_HF_ENDPOINT, token=get_hf_token(), **extra)
         # hf may nest under the repo dir; normalise to dest.
         got_p = Path(got)
         if got_p.resolve() != dest.resolve() and got_p.is_file():

@@ -273,7 +273,8 @@ class TestSnapshot:
                     raise OSError("offline")
                 return SimpleNamespace(siblings=siblings(), sha=state.sha)
 
-        def snapshot_download(repo_id, local_dir, endpoint=None, revision=None):
+        def snapshot_download(repo_id, local_dir, endpoint=None, revision=None,
+                              token=None, tqdm_class=None):
             state.revisions.append(revision)
             for n, b in state.served.items():
                 p = Path(local_dir) / n
