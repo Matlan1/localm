@@ -115,6 +115,9 @@ _EXPLICIT_FENCE_LANGS = frozenset({"tool_call", "tool_code", "tool"})
 _EXACT_CALL_KEY_SETS = (frozenset({"name", "args"}), frozenset({"name", "arguments"}),
                         frozenset({"name", "parameters"}))
 
+# Keys of a call object that are not arguments of the call.
+_CALL_ENVELOPE_KEYS = frozenset({"name", "args", "arguments", "parameters", "id", "type"})
+
 # Signals that the model TRIED to call a tool even when nothing parsed. Fires a
 # one-shot repair turn instead of printing the broken call as the final answer.
 _RE_TOOL_MARKER = re.compile(r"<\|?/?tool_call\|?>|\[/?tool_call\]", re.IGNORECASE)
@@ -292,6 +295,11 @@ def _try_parse_body(body: str, name_attr: Optional[str]) -> Optional[tuple[str, 
         # unhashable one would raise TypeError at the set/dict lookups downstream.
         if not isinstance(name, str) or not isinstance(args, dict):
             return None
+        # Keys written beside "args" instead of inside it are arguments too; a
+        # key present in both keeps the value from "args".
+        extra = {k: v for k, v in obj.items() if k not in _CALL_ENVELOPE_KEYS}
+        if extra:
+            args = {**extra, **args}
         return name, args
 
     # Args-only format: {"path": "..."} - requires name_attr

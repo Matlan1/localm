@@ -420,6 +420,11 @@ class _ExecutionMixin:
                 print_tool_error(call.name, result.output)
             return result
 
+        # Rename argument aliases (old_str -> old, file_path -> path) to the
+        # tool's own names.
+        from ..argnorm import bad_args_message, normalize_args
+        call.args, _renamed = normalize_args(tool_def, call.args or {})
+
         self._audit.tool_call(call.name, call.args)
         if interactive:
             print_tool_call(call.name, call.args)
@@ -429,6 +434,16 @@ class _ExecutionMixin:
             else:
                 print_progress_tool_call(call.name, call.args)
         self._emit("tool_call", tool=call.name, args=call.args)
+
+        # Refuse a call whose arguments cannot bind to the tool's function.
+        bad_args = bad_args_message(call.name, tool_def, call.args)
+        if bad_args is not None:
+            result = self._track_tool_failure(call, ToolResult.error(bad_args))
+            if interactive:
+                print_tool_error(call.name, result.output)
+            self._emit("tool_result", tool=call.name, ok=False,
+                       summary="not run: wrong arguments")
+            return result
 
         # A restricted session cannot create or change anything inside a
         # RESTRICTED_UNWRITABLE_DIRS directory, a folder one redirects to, or a
