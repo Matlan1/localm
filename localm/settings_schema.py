@@ -235,9 +235,8 @@ CORE_FIELDS: list = [
                  options=["auto", "on", "off"]),
     SettingField("kv_cache_type", Widget.SELECT, "KV cache type",
                  "f16 is the default. q8_0 stores the KV cache in about half the "
-                 "memory, so roughly 1.9x the context fits in the same VRAM, with "
-                 "slightly slower decoding. q8_0 needs flash attention; a model "
-                 "that cannot use it fails to load and names this setting.",
+                 "memory, so about 1.9x the context fits in VRAM, with slightly "
+                 "slower decoding. q8_0 needs flash attention.",
                  group="Engine", applies=Applies.NEXT_LOAD,
                  options=["f16", "q8_0"]),
     SettingField("n_gpu_layers_auto", Widget.TOGGLE, "Auto-size GPU layers from VRAM",
