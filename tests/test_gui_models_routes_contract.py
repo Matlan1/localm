@@ -565,7 +565,8 @@ class TestVramEstimate:
         assert r.status_code == 200
         data = r.json()
         assert set(data) == {"model", "model_bytes", "weights", "kv_cache", "overhead",
-                             "needed", "free", "total", "fits", "approximate"}
+                             "needed", "free", "held", "available", "total", "fits",
+                             "approximate"}
         assert data["model"] == "m-b" and data["model_bytes"] == 0
         assert data["free"] == 6 * _GB and data["total"] == 8 * _GB
         assert data["fits"] is True and data["approximate"] is True

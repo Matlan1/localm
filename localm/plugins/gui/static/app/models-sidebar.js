@@ -1080,8 +1080,8 @@ async function _postLoad(model, force) {
 // to slow CPU offload) is never returned to the caller: it is resolved right
 // here, so every caller gets the same final outcome without each needing its
 // own confirm/force plumbing.
-export async function switchModel(model) {
-  const routed = await _maybeRoutePeer(model);
+export async function switchModel(model, { local = false } = {}) {
+  const routed = local ? null : await _maybeRoutePeer(model);
   if (routed) return routed;
   _peerSelected = null;
   setStatus("busy", t("sidebar.status.loading", { model }));
@@ -1107,6 +1107,52 @@ export async function switchModel(model) {
   modelCache.active = data.model || model;
   window.dispatchEvent(new CustomEvent("localm:model-switched", { detail: { model: data.model || model } }));
   return data;
+}
+
+// Unload *model* and load it again on this instance, so a reload picks up the
+// saved load settings. Asks before unloading a model that is in use. Returns the
+// switchModel() result, or {status: "cancelled"} when the user declined, or
+// {status: "in_use"} when the model is busy and was not unloaded.
+export async function reloadModel(model) {
+  setStatus("busy", t("sidebar.status.unloading", { model }));
+  let data;
+  try {
+    data = await _postUnload(model, false);
+    if (data.status === "confirm_required") {
+      const confirmed = await confirmDangerAsync(
+        t("models.unload.confirmTitle"), data.detail, t("models.unload.confirmLabel"));
+      if (!confirmed) {
+        setStatus("ok", model);
+        return { status: "cancelled", reason: "declined by user", model };
+      }
+      setStatus("busy", t("sidebar.status.unloading", { model }));
+      data = await _postUnload(model, true);
+    }
+  } catch (e) {
+    setStatus("err", t("sidebar.status.unloadFailed"));
+    throw e;
+  }
+  if (data.status === "in_use") {
+    setStatus("ok", model);
+    return { status: "in_use", model };
+  }
+  let res;
+  try {
+    res = await switchModel(model, { local: true });
+  } catch (e) {
+    setStatus("err", t("sidebar.status.loadFailed"));
+    modelCache.active = "";
+    modelCache.resumable = model;
+    refreshModels();
+    throw e;
+  }
+  if (res && res.status === "cancelled") {
+    modelCache.active = "";
+    modelCache.resumable = model;
+    setStatus("ok", model);
+    refreshModels();
+  }
+  return res;
 }
 
 // Toast the outcome of a switchModel() call. A model too big to fully fit

@@ -1983,7 +1983,7 @@ export const I18N_EN = {
   // ---- Settings > Live tuning ----
   "settings.perf.title": "Live tuning (apply now)",
   "settings.perf.help":
-    "Adjust the running model without a reload: how much of it is on the GPU, and how large its context window is. Runtime & GPU holds the persisted next-load defaults; these apply right now. The VRAM figure is an estimate.",
+    "Adjust the running model: how much of it is on the GPU, and how large its context window is. Apply saves these and reloads the running model with them. The VRAM figure is an estimate.",
   "settings.perf.backendLabel": "Backend:",
   "settings.perf.backendHint":
     "An NVIDIA GPU was detected; the CUDA backend usually performs better than the currently installed Vulkan backend. localm never switches this for you - pick <strong>cuda</strong> under Settings > Updates > Inference runtime if you want to try it.",
@@ -2001,10 +2001,14 @@ export const I18N_EN = {
   "settings.perf.estimateUnavailable": "estimate unavailable",
   "settings.perf.estimateSummary": "~{needed} GB needed (weights {weights} · context {kv} · overhead {overhead})",
   "settings.perf.estimateFreeKnownSuffix": " · {free} GB free - ",
+  "settings.perf.estimateFreeHeldSuffix": " · {free} GB free + {held} GB held by this model - ",
   "settings.perf.estimateFits": "fits",
   "settings.perf.estimateMayNotFit": "may not fit",
   "settings.perf.estimateFreeUnknownSuffix": " · free VRAM unknown",
   "settings.perf.savedNextLoad": "Saved - applies on the next model load",
+  "settings.perf.reloadingToast": "Saved - reloading {model} with the new settings",
+  "settings.perf.reloadBusyToast": "Saved, but {model} is busy - the new settings apply on its next load",
+  "settings.perf.reloadFailedToast": "Saved, but reloading {model} failed: {message}",
   "settings.perf.saveFailedToast": "Could not save: {message}",
   "settings.perf.gpuLayersRangeToast": "GPU layers must be between 0 and 999",
   "settings.perf.mainGpuLabel": "Main GPU",

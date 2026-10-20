@@ -10,7 +10,7 @@ import { iconEl } from "./icons.js";
 import { COMPACT_KEEP, addMessageRow, audioPart, chat, chatBusy, chatParams, compactConversation, currentConv, isToolEvent, lsSetScoped, maybeCompactConversation, mountStatusIndicator, msgAudioClips, msgImages, msgText, newConversation, newToolEvent, noteLabel, removeStatusIndicator, renderAttachChips, renderChat, renderConvList, saveConversations, scopedKeyPrivate, setConversationPin, stripUserAudio, stripUserImages, syncPinModelToggle, updateStatusIndicator, wireParts } from "./chat.js";
 import { $, CHAT_SURFACE_HEADERS, GIB, TOOL_CALL_DELIM, authHeaders, autoGrow, confirmDanger, el, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setPreviewAllowed, splitThink, streamJob, stripThink, toast } from "./helpers.js";
 import { t } from "./i18n.js";
-import { modelCache, modelSelect } from "./models-sidebar.js";
+import { modelCache, modelSelect, reloadModel, toastLoadResult } from "./models-sidebar.js";
 import { pickPath, saveTextFs } from "./picker.js";
 import { execChatCommand, handleSlashSubmit } from "./slash.js";
 import { CORE_VIEWS, VIEWS, _applyActiveClasses, closeNav, showView } from "./tabs.js";
@@ -22,6 +22,7 @@ import { CORE_VIEWS, VIEWS, _applyActiveClasses, closeNav, showView } from "./ta
 export function _perfGiB(b) { return (Number(b) / GIB).toFixed(1); }
 
 export let _perfEstTimer = null;
+const PERF_ESTIMATE_AFTER_RELOAD_MS = 4000;
 export async function refreshPerfEstimate() {
   const gl = $("perf-gpu-layers"), ctx = $("perf-ctx"), out = $("perf-estimate");
   if (!gl || !ctx || !out) return;
@@ -36,8 +37,10 @@ export async function refreshPerfEstimate() {
     });
     out.replaceChildren();
     if (typeof d.free === "number") {
-      out.appendChild(document.createTextNode(
-        text + t("settings.perf.estimateFreeKnownSuffix", { free: _perfGiB(d.free) })));
+      const suffix = typeof d.held === "number"
+        ? t("settings.perf.estimateFreeHeldSuffix", { free: _perfGiB(d.free), held: _perfGiB(d.held) })
+        : t("settings.perf.estimateFreeKnownSuffix", { free: _perfGiB(d.free) });
+      out.appendChild(document.createTextNode(text + suffix));
       out.appendChild(iconEl(d.fits ? "check" : "warning", "btn-ic"));
       out.appendChild(document.createTextNode(
         t(d.fits ? "settings.perf.estimateFits" : "settings.perf.estimateMayNotFit")));
@@ -90,8 +93,23 @@ export function setupPerfCard() {
         body: JSON.stringify({ n_gpu_layers: glVal, n_ctx: Number(ctx.value) }),
       });
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
-      toast(t("settings.perf.savedNextLoad"));
-    } catch (e) { toast(t("settings.perf.saveFailedToast", { message: e.message }), true); }
+    } catch (e) {
+      toast(t("settings.perf.saveFailedToast", { message: e.message }), true);
+      return;
+    }
+    const model = modelCache.active;
+    if (!model) { toast(t("settings.perf.savedNextLoad")); return; }
+    toast(t("settings.perf.reloadingToast", { model }));
+    try {
+      const res = await reloadModel(model);
+      if (res.status === "in_use") toast(t("settings.perf.reloadBusyToast", { model }), true);
+      else if (res.status === "cancelled" || res.status === "superseded") toast(t("settings.perf.savedNextLoad"));
+      else toastLoadResult(res, model);
+    } catch (e) {
+      toast(t("settings.perf.reloadFailedToast", { model, message: e.message }), true);
+    }
+    // Re-reads the estimate once the free-VRAM reading has caught up with the reload.
+    setTimeout(refreshPerfEstimate, PERF_ESTIMATE_AFTER_RELOAD_MS);
   };
   // Seed slider positions from the current config, then estimate.
   fetch("/v1/config", { headers: authHeaders() })

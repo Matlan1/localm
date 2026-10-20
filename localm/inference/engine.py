@@ -501,6 +501,14 @@ class Engine:
         return size() if callable(size) else None
 
     @property
+    def live_context(self) -> Optional[dict]:
+        """``{"n_ctx": int, "kv_in_vram": bool}`` for the loaded model's live
+        context as its worker last reported it (at load and after each reply),
+        or None for a backend that does not report it or before a load."""
+        context = getattr(self._backend, "live_context", None)
+        return dict(context) if isinstance(context, dict) else None
+
+    @property
     def gpu_sizing(self) -> Optional[dict]:
         """How the last load chose its GPU layer count (the backend's
         ``last_gpu_sizing``: ``mode``, ``layers``, ``n_ctx`` and, for an

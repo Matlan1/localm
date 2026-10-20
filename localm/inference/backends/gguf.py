@@ -215,6 +215,9 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             self._VRAM_OVERHEAD_BYTES = vram_overhead_bytes
         self.effective_ctx_max: Optional[int] = None   # resolved ceiling of the last load
         self.effective_gpu_layers: Optional[int] = None  # resolved gpu layers of the last load
+        # {"n_ctx", "kv_in_vram"} of the worker's live context, from the load
+        # report and each reply's done envelope. None before a load reports it.
+        self.live_context: Optional[dict] = None
         # The n_cpu_moe the last load used: the configured value, or the one
         # automatic GPU sizing chose. None before the first sizing.
         self.effective_n_cpu_moe: Optional[int] = None
@@ -878,6 +881,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # Record the model's true transformer layer count, reported once by the
         # child, so the next load and the GUI VRAM estimate can size a partial GPU
         # offload. Static model metadata, written regardless of privacy mode.
+        context = meta.get("context")
+        self.live_context = context if isinstance(context, dict) else None
         n_layers = meta.get("n_layers")
         if isinstance(n_layers, int) and n_layers > 0:
             from localm.model_meta import store_n_layers
@@ -1106,6 +1111,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         self._llm = None
         self._loaded = False
         self.applied_adapters = []
+        self.live_context = None
 
     @property
     def loaded(self) -> bool:
@@ -1428,6 +1434,9 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             done = getattr(runner, "last_done", None) or {}
             self.last_finish_reason = done.get("finish_reason", "stop")
             self._record_mtp(done)
+            context = done.get("context")
+            if isinstance(context, dict):
+                self.live_context = context
             if done.get("grammar_unsupported") and not self._grammar_unsupported:
                 # First time this model has shown it cannot do grammar: latch it, so
                 # later calls skip sending grammar at all, and surface the degrade.
