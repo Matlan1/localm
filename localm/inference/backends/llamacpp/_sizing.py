@@ -324,7 +324,7 @@ class VramSizingMixin:
         return None, None
 
     @classmethod
-    def _free_vram_bytes(cls) -> Optional[int]:
+    def _free_vram_bytes(cls, strict: bool = False) -> Optional[int]:
         """Free VRAM in bytes on the GPU the model runs on, or None when not
         measurable.
 
@@ -351,7 +351,8 @@ class VramSizingMixin:
         one is known blind (see _device_global_free_bytes); on every other
         platform it is returned unchanged. A known-blind reading taken from
         discover.load_device_memory_isolated() that cannot be corrected
-        answers None."""
+        answers None; with *strict*, so does a known-blind reading from any
+        source that cannot be corrected."""
         # One debug line per read, stating raw/source/corrected.
         from localm.debuglog import logger as _dbg
         free_raw, total = cls._free_total_vram_bytes()
@@ -373,7 +374,7 @@ class VramSizingMixin:
         corrected = cls._device_global_free_bytes(total)
         _dbg.debug("free-vram read: raw=%d total=%s source=%s "
                    "device-global-corrected=%s", free_raw, total, src, corrected)
-        if (corrected is None and src == "isolated-probe-device"
+        if (corrected is None and (strict or src == "isolated-probe-device")
                 and cls._free_reading_may_be_blind()):
             _dbg.debug("free-vram read: unmeasurable (the per-device reading "
                        "counts only the probe's own process and could not be "
@@ -422,6 +423,12 @@ class VramSizingMixin:
             _dbg.debug("cross-process VRAM correction unavailable (%s); using the "
                        "uncorrected free reading for sizing", type(e).__name__)
             return None
+
+    @classmethod
+    def _global_free_vram_bytes(cls) -> Optional[int]:
+        """``_free_vram_bytes(strict=True)``: free VRAM that counts every
+        process's use, or None."""
+        return cls._free_vram_bytes(strict=True)
 
     @staticmethod
     def _free_reading_may_be_blind() -> bool:

@@ -134,12 +134,12 @@ class TestDetection:
         assert any(said in m for m in messages)
         assert not any("raised" in m and "keeping the live context" in m for m in messages)
 
-    def test_no_free_vram_source_is_left_alone(self):
+    def test_no_free_vram_source_never_reads_the_counters(self):
         llm = _llm()
         llm._vram_free = None
         api, _cp = _api()
-        _generate(llm, api, DEMOTED)
-        assert _inits(api) == 0
+        _out, reads = _generate(llm, api, DEMOTED)
+        assert reads == 0 and _inits(api) == 0
 
     def test_unavailable_counters_are_said_once_at_debug(self, caplog):
         llm = _llm()
@@ -198,12 +198,12 @@ class TestGating:
 
 
 class TestBackoff:
-    def test_a_second_refresh_waits_out_the_backoff(self):
+    def test_a_second_demotion_waits_out_the_backoff(self):
         llm = _llm()
         api, _cp = _api()
         _generate(llm, api, DEMOTED)
         assert _inits(api) == 1
-        _generate(llm, api, DEMOTED)
+        _generate(llm, api, HEALTHY)
         llm._residency_check_after = 0.0
         _generate(llm, api, DEMOTED)
         assert _inits(api) == 1
@@ -212,6 +212,45 @@ class TestBackoff:
         _generate(llm, api, DEMOTED)
         assert _inits(api) == 2
         assert llm._decode_refresh_backoff == 2 * llm._DECODE_REFRESH_BACKOFF_S
+
+
+class TestFutileRefresh:
+    def test_a_refresh_that_leaves_it_demoted_is_not_repeated(self, caplog):
+        llm = _llm()
+        api, _cp = _api()
+        _generate(llm, api, DEMOTED)
+        with caplog.at_level(logging.INFO, logger="localm"):
+            _generate(llm, api, DEMOTED)
+        assert any("did not move it back" in r.getMessage() for r in caplog.records)
+        for _ in range(5):
+            llm._decode_refresh_after = 0.0
+            llm._residency_check_after = 0.0
+            _generate(llm, api, DEMOTED)
+        assert _inits(api) == 1
+        llm._vram_free.assert_called_once()
+
+    def test_a_reading_under_the_threshold_rearms_it(self):
+        llm = _llm()
+        api, _cp = _api()
+        _generate(llm, api, DEMOTED)
+        _generate(llm, api, DEMOTED)
+        assert llm._residency_futile is True
+        llm._residency_check_after = 0.0
+        _generate(llm, api, HEALTHY)
+        assert llm._residency_futile is False
+        llm._decode_refresh_after = 0.0
+        llm._residency_check_after = 0.0
+        _generate(llm, api, DEMOTED)
+        assert _inits(api) == 2
+
+    def test_a_refresh_that_worked_is_not_latched(self, caplog):
+        llm = _llm()
+        api, _cp = _api()
+        _generate(llm, api, DEMOTED)
+        with caplog.at_level(logging.INFO, logger="localm"):
+            _generate(llm, api, HEALTHY)
+        assert llm._residency_futile is False
+        assert not any("did not move it back" in r.getMessage() for r in caplog.records)
 
     def test_a_pending_decode_rate_refresh_is_not_doubled(self, caplog):
         llm = _llm()
@@ -325,3 +364,61 @@ class TestProcessGpuMemory:
         reading = gpu_usage.process_gpu_memory()
         assert reading is None or (isinstance(reading, tuple) and len(reading) == 2
                                    and all(isinstance(v, int) and v >= 0 for v in reading))
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="WDDM counters exist on Windows only")
+    def test_the_real_counters_read_a_process_that_holds_vram(self):
+        pdh = pytest.importorskip("win32pdh")
+        try:
+            _c, instances = pdh.EnumObjectItems(None, None, "GPU Process Memory",
+                                                pdh.PERF_DETAIL_WIZARD)
+        except Exception as exc:
+            pytest.skip(f"GPU Process Memory is not enumerable here: {exc}")
+        pids = sorted({int(i.split("_")[1]) for i in instances if i.startswith("pid_")})
+        held = [r for r in (gpu_usage.process_gpu_memory(pid) for pid in pids) if r is not None]
+        if not held:
+            pytest.skip("no process holds dedicated VRAM on this machine")
+        for dedicated, shared in held:
+            assert dedicated >= gpu_usage._PROC_ADAPTER_MIN_DEDICATED and shared >= 0
+
+
+class TestWiring:
+    def test_the_worker_passes_its_device_global_free_reading(self, tmp_path):
+        from tests.test_gguf_worker import _StubLlm, _worker
+        w = _worker(str(tmp_path / "m.gguf"))
+        fake = MagicMock()
+        fake.LlamaCpp.return_value = _StubLlm()
+        with patch("localm.inference.backends.llamacpp._loader.load_lib"), \
+             patch.dict(sys.modules, {"localm.inference.backends.llamacpp": fake}):
+            w.load()
+        _, kwargs = fake.LlamaCpp.call_args
+        assert kwargs.get("vram_free") == w._global_free_vram_bytes
+
+    def test_the_constructor_keeps_the_free_reading(self):
+        import inspect
+        from localm.inference.backends.llamacpp.llama import LlamaCpp
+        assert "vram_free" in inspect.signature(LlamaCpp.__init__).parameters
+        assert "self._vram_free = vram_free" in inspect.getsource(LlamaCpp.__init__)
+
+
+class TestGlobalFreeReading:
+    @pytest.mark.parametrize("corrected, blind, strict, expected", [
+        (None, True, True, None),
+        (None, True, False, 900),
+        (None, False, True, 900),
+        (700, True, True, 700),
+    ])
+    def test_a_blind_uncorrected_reading_is_none_only_when_strict(
+            self, corrected, blind, strict, expected):
+        from localm.inference.backends.llamacpp._sizing import VramSizingMixin as cls
+        with patch.object(cls, "_free_total_vram_bytes", return_value=(None, 1000)), \
+             patch("localm.inference.backends.llamacpp._loader.gpu_memory_isolated",
+                   return_value=(900, 1000)), \
+             patch.object(cls, "_device_global_free_bytes", return_value=corrected), \
+             patch.object(cls, "_free_reading_may_be_blind", return_value=blind):
+            assert cls._free_vram_bytes(strict=strict) == expected
+
+    def test_the_global_reading_is_the_strict_one(self):
+        from localm.inference.backends.llamacpp._sizing import VramSizingMixin as cls
+        with patch.object(cls, "_free_vram_bytes", return_value=5) as read:
+            assert cls._global_free_vram_bytes() == 5
+        read.assert_called_once_with(strict=True)

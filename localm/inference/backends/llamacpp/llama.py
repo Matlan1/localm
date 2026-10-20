@@ -3637,6 +3637,7 @@ class LlamaCpp:
     _residency_check_after = 0.0                # time.monotonic(); due at the next request
     _residency_refresh: Optional[tuple[int, int, int]] = None  # (shared, dedicated, free) bytes
     _residency_followup: Optional[int] = None  # shared bytes before the last residency refresh
+    _residency_futile = False                  # a refresh left the shared share over the threshold
     _residency_unavailable_said = False
 
     def _note_residency(self) -> None:
@@ -3647,16 +3648,19 @@ class LlamaCpp:
 
         Reads at most once per ``_RESIDENCY_RECHECK_S`` seconds, and at the
         first call after a load or a context recreate. Does nothing on other
-        platforms, while ``_decode_judged`` is False, while the KV cache is in
-        system RAM, while a refresh is pending, or within the refresh backoff
-        (``_decode_refresh_after``). Unavailable counters or free VRAM leave
-        the context alone, logged at DEBUG. The first reading after a
-        residency refresh is logged at INFO. Never raises. Caller holds
+        platforms, without a ``_vram_free`` source, while ``_decode_judged`` is
+        False, while the KV cache is in system RAM, while a refresh is pending,
+        or within the refresh backoff (``_decode_refresh_after``). The first
+        reading after a residency refresh is logged at INFO; when it is still
+        over the threshold no further residency refresh is marked until a
+        reading falls under it. Unavailable counters or free VRAM leave the
+        context alone, logged at DEBUG. Never raises. Caller holds
         ``_gen_lock``."""
         import sys
-        if (sys.platform != "win32" or not self._decode_judged or not self._ctx_ptr
-                or self._offload_kqv is False or self._decode_refresh is not None
-                or self._residency_refresh is not None):
+        free_fn = getattr(self, "_vram_free", None)
+        if (sys.platform != "win32" or free_fn is None or not self._decode_judged
+                or not self._ctx_ptr or self._offload_kqv is False
+                or self._decode_refresh is not None or self._residency_refresh is not None):
             return
         now = time.monotonic()
         if now < self._residency_check_after:
@@ -3672,19 +3676,25 @@ class LlamaCpp:
                              "unavailable, residency is not checked")
             return
         dedicated, shared = reading
+        over = (shared >= self._RESIDENCY_SHARED_MIN
+                and shared >= self._RESIDENCY_SHARED_RATIO * dedicated)
         before = self._residency_followup
         if before is not None:
             self._residency_followup = None
             logger.info("gguf context: after the refresh Windows holds %.2f GB of this "
-                        "process's GPU memory in shared system memory (%.2f GB before)",
-                        shared / 1024 ** 3, before / 1024 ** 3)
-        if (shared < self._RESIDENCY_SHARED_MIN
-                or shared < self._RESIDENCY_SHARED_RATIO * dedicated
-                or now < self._decode_refresh_after):
+                        "process's GPU memory in shared system memory (%.2f GB before)%s",
+                        shared / 1024 ** 3, before / 1024 ** 3,
+                        "; recreating the context did not move it back, it is not "
+                        "recreated for this again until less is held there" if over else "")
+            if over:
+                self._residency_futile = True
+        if not over:
+            self._residency_futile = False
             return
-        free_fn = getattr(self, "_vram_free", None)
+        if self._residency_futile or now < self._decode_refresh_after:
+            return
         try:
-            free = free_fn() if free_fn is not None else None
+            free = free_fn()
         except Exception as exc:
             logger.debug("gguf context: the free VRAM reading raised %s, residency "
                          "is not acted on", type(exc).__name__)
@@ -3752,8 +3762,7 @@ class LlamaCpp:
             return
         self._decode_refresh = None
         self._residency_refresh = None
-        if residency is not None:
-            self._residency_followup = residency[0]
+        self._residency_followup = residency[0] if residency is not None else None
         now = time.monotonic()
         last = self._decode_refresh_at
         if last is None or now - last > self._DECODE_REFRESH_BACKOFF_MAX_S:
