@@ -72,6 +72,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ### Fixed
 - **A coder shell command that starts with a quoted program path now runs on Windows.** A command such as `"D:\tools dir\tool.exe" --flag "a b"` used to fail with "is not recognized as an internal or external command", because `cmd` dropped the first and last quote.
+- **A shell command's timeout or cancel in `localm coder` is no longer held up by a stray
+  background process.** A command that left a detached process holding its output open used to
+  keep the timeout, the cancel and even a normal finish waiting until that process exited; they
+  now return within a second, with the output read so far.
 - **`localm coder` no longer floods the terminal.** A new file shows a short preview instead of
   every line, a reply is no longer printed twice, and a failed tool shows the end of its error
   output without needing `/verbose`. Warnings at the end of a task now appear in the terminal.

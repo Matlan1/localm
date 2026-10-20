@@ -8,9 +8,10 @@ integration tests (use pytest's tmp_path fixture, require git in PATH).
 
 import subprocess
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 from pathlib import Path
 
+from tests.plugins.coder.launch_stub import patch_launch
 from localm.plugins.coder.tools import (
     _git,
     tool_git_status,
@@ -33,9 +34,7 @@ def _make_proc(stdout="", stderr="", returncode=0):
 
 
 def _patch_run(stdout="", stderr="", returncode=0):
-    return patch(
-        "localm.plugins.coder.tools.subprocess.run",
-        return_value=_make_proc(stdout, stderr, returncode),
+    return patch_launch(return_value=_make_proc(stdout, stderr, returncode),
     )
 
 
@@ -57,27 +56,21 @@ class TestGitHelper:
         assert "not a git repo" in out
 
     def test_git_not_found(self, tmp_path):
-        with patch(
-            "localm.plugins.coder.tools.subprocess.run",
-            side_effect=FileNotFoundError,
+        with patch_launch(side_effect=FileNotFoundError,
         ):
             out, ok = _git(tmp_path, "status")
         assert not ok
         assert "git not found" in out
 
     def test_timeout_returns_false(self, tmp_path):
-        with patch(
-            "localm.plugins.coder.tools.subprocess.run",
-            side_effect=subprocess.TimeoutExpired(["git"], 10),
+        with patch_launch(side_effect=subprocess.TimeoutExpired(["git"], 10),
         ):
             out, ok = _git(tmp_path, "status")
         assert not ok
         assert "timed out" in out
 
     def test_generic_exception_returns_false(self, tmp_path):
-        with patch(
-            "localm.plugins.coder.tools.subprocess.run",
-            side_effect=OSError("permission denied"),
+        with patch_launch(side_effect=OSError("permission denied"),
         ):
             out, ok = _git(tmp_path, "log")
         assert not ok
@@ -122,7 +115,7 @@ class TestGitStatus:
             captured_args.extend(cmd)
             return _make_proc(stdout="## main\n")
 
-        with patch("localm.plugins.coder.tools.subprocess.run", side_effect=fake_run):
+        with patch_launch(side_effect=fake_run):
             tool_git_status(tmp_path)
 
         assert "--short" in captured_args
@@ -148,7 +141,7 @@ class TestGitDiff:
             captured_args.extend(cmd)
             return _make_proc(stdout="staged diff")
 
-        with patch("localm.plugins.coder.tools.subprocess.run", side_effect=fake_run):
+        with patch_launch(side_effect=fake_run):
             tool_git_diff(tmp_path, staged=True)
 
         assert "--cached" in captured_args
@@ -160,7 +153,7 @@ class TestGitDiff:
             captured_args.extend(cmd)
             return _make_proc(stdout="unstaged diff")
 
-        with patch("localm.plugins.coder.tools.subprocess.run", side_effect=fake_run):
+        with patch_launch(side_effect=fake_run):
             tool_git_diff(tmp_path, staged=False)
 
         assert "--cached" not in captured_args
@@ -172,7 +165,7 @@ class TestGitDiff:
             captured_args.extend(cmd)
             return _make_proc(stdout="")
 
-        with patch("localm.plugins.coder.tools.subprocess.run", side_effect=fake_run):
+        with patch_launch(side_effect=fake_run):
             tool_git_diff(tmp_path, path="src/main.py")
 
         assert "src/main.py" in captured_args
@@ -215,7 +208,7 @@ class TestGitLog:
             captured_args.extend(cmd)
             return _make_proc(stdout="")
 
-        with patch("localm.plugins.coder.tools.subprocess.run", side_effect=fake_run):
+        with patch_launch(side_effect=fake_run):
             tool_git_log(tmp_path, n=5)
 
         assert "--max-count=5" in captured_args
@@ -227,7 +220,7 @@ class TestGitLog:
             captured_args.extend(cmd)
             return _make_proc(stdout="")
 
-        with patch("localm.plugins.coder.tools.subprocess.run", side_effect=fake_run):
+        with patch_launch(side_effect=fake_run):
             tool_git_log(tmp_path)
 
         assert "--max-count=10" in captured_args
@@ -239,7 +232,7 @@ class TestGitLog:
             captured_args.extend(cmd)
             return _make_proc(stdout="")
 
-        with patch("localm.plugins.coder.tools.subprocess.run", side_effect=fake_run):
+        with patch_launch(side_effect=fake_run):
             tool_git_log(tmp_path, path="README.md")
 
         assert "README.md" in captured_args
@@ -256,7 +249,7 @@ class TestGitLog:
             captured_args.extend(cmd)
             return _make_proc(stdout="")
 
-        with patch("localm.plugins.coder.tools.subprocess.run", side_effect=fake_run):
+        with patch_launch(side_effect=fake_run):
             tool_git_log(tmp_path)
 
         assert "--oneline" in captured_args

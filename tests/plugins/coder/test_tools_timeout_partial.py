@@ -6,16 +6,14 @@ timeout. Discarding it leaves a command that printed real diagnostics and then
 hung reporting only "timed out". The helper lives in tools/base.py."""
 
 import subprocess
-from unittest.mock import patch
 
+from tests.plugins.coder.launch_stub import patch_launch
 from localm.plugins.coder.tools import (
     tool_git_status,
     tool_run_shell,
     tool_run_tests,
 )
 from localm.plugins.coder.tools.base import _partial_on_timeout
-
-_RUN = "localm.plugins.coder.tools.subprocess.run"
 
 
 def _timeout_exc(output=None, stderr=None, cmd="cmd", timeout=30):
@@ -70,7 +68,7 @@ class TestErrorSummaryStaysOneLine:
 
     def test_timeout_partial_not_in_summary(self, tmp_path):
         exc = _timeout_exc(output="blob " * 500)
-        with patch(_RUN, side_effect=exc):
+        with patch_launch(side_effect=exc):
             r = tool_run_shell(tmp_path, "slow-command", timeout=30)
         assert r.summary == "ERROR: Command timed out after 30s"
         assert "blob" in r.output              # detail only in the output body
@@ -79,7 +77,7 @@ class TestErrorSummaryStaysOneLine:
 class TestRunShellTimeout:
     def test_partial_output_included(self, tmp_path):
         exc = _timeout_exc(output="step 1 done\nstep 2 running", stderr="late warn")
-        with patch(_RUN, side_effect=exc):
+        with patch_launch(side_effect=exc):
             r = tool_run_shell(tmp_path, "slow-command", timeout=30)
         assert r.ok is False
         assert "timed out after 30s" in r.output
@@ -87,7 +85,7 @@ class TestRunShellTimeout:
         assert "STDERR:" in r.output and "late warn" in r.output
 
     def test_no_partial_keeps_plain_message(self, tmp_path):
-        with patch(_RUN, side_effect=_timeout_exc()):
+        with patch_launch(side_effect=_timeout_exc()):
             r = tool_run_shell(tmp_path, "slow-command", timeout=30)
         assert r.ok is False
         assert "timed out after 30s" in r.output
@@ -97,7 +95,7 @@ class TestRunShellTimeout:
 class TestRunTestsTimeout:
     def test_partial_output_included(self, tmp_path):
         exc = _timeout_exc(output="3 passed, 2 failed so far")
-        with patch(_RUN, side_effect=exc):
+        with patch_launch(side_effect=exc):
             r = tool_run_tests(tmp_path, runner="pytest")
         assert r.ok is False
         assert "timed out after 120s" in r.output
@@ -107,7 +105,7 @@ class TestRunTestsTimeout:
 class TestGitTimeout:
     def test_partial_output_included(self, tmp_path):
         exc = _timeout_exc(output="On branch master")
-        with patch(_RUN, side_effect=exc):
+        with patch_launch(side_effect=exc):
             r = tool_git_status(tmp_path)
         assert r.ok is False
         assert "timed out" in r.output
@@ -125,7 +123,7 @@ class TestGoalVerifyTimeout:
         import localm.plugins.coder.cli as cli
 
         exc = _timeout_exc(output="1 passed\n2 running", stderr="slow fixture")
-        with patch("localm.plugins.coder.tools.base.subprocess.run", side_effect=exc):
+        with patch_launch(side_effect=exc):
             code, output = cli._run_verify("slow-command", tmp_path, timeout=30)
 
         assert code == 124
@@ -136,8 +134,7 @@ class TestGoalVerifyTimeout:
     def test_no_partial_keeps_plain_message(self, tmp_path):
         import localm.plugins.coder.cli as cli
 
-        with patch("localm.plugins.coder.tools.base.subprocess.run",
-                   side_effect=_timeout_exc()):
+        with patch_launch(side_effect=_timeout_exc()):
             code, output = cli._run_verify("slow-command", tmp_path, timeout=30)
 
         assert code == 124
@@ -147,8 +144,7 @@ class TestGoalVerifyTimeout:
     def test_command_not_found_reports_failure_not_a_crash(self, tmp_path):
         import localm.plugins.coder.cli as cli
 
-        with patch("localm.plugins.coder.tools.base.subprocess.run",
-                   side_effect=FileNotFoundError("no such file")):
+        with patch_launch(side_effect=FileNotFoundError("no such file")):
             code, output = cli._run_verify("ghost-command", tmp_path)
 
         assert code == 125
