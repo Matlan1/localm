@@ -2009,13 +2009,15 @@ class HFWorker:
         if _messages_contain_audio(messages) and not self._supports_audio:
             raise UnsupportedInputError(_AUDIO_UNSUPPORTED_MESSAGE)
 
+        tokenizer = self._tokenizer
+        model = self._model
+        if tokenizer is None or model is None:
+            raise RuntimeError("Model not loaded - call load() first")
+
         from transformers import (
             StoppingCriteriaList,
             TextIteratorStreamer,
         )
-
-        tokenizer = self._tokenizer
-        model = self._model
 
         # --- Extract and decode media, rebuild messages for the chat template ---
         from localm.inference.media import ImageBudget
