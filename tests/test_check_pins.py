@@ -359,16 +359,68 @@ def test_cuda_linux_source_stale_when_it_lacks_the_pinned_tag(monkeypatch):
     assert row.status == cp.STALE and "fall back to vulkan" in row.detail
 
 
-def test_cuda_linux_source_stale_when_the_release_has_no_cuda_asset(monkeypatch):
-    _router(monkeypatch, {"/releases/tags/": _rel("b1", 1, assets=["llama-b1-bin-ubuntu-x64.tar.gz"])})
-    row = next(s for s in cp.build_registry() if s.name == "Linux CUDA build source").check(NOW)
-    assert row.status == cp.STALE
+def _cuda_linux_table():
+    text = cp._read_text("localm/setup_llama/pins.py")
+    return dict(cp._ASSET_ENTRY_RE.findall(cp._CUDA_LINUX_TABLE_RE.search(text).group(1)))
 
 
-def test_cuda_linux_source_current_with_a_cuda_asset(monkeypatch):
-    _router(monkeypatch, {"/releases/tags/": _rel("b1", 1, assets=["llama-b1-bin-ubuntu-cuda-13-x64.tar.gz"])})
+def _cuda_source_row(monkeypatch, names, *, change=None):
+    table = _cuda_linux_table()
+    assets = [{"name": n, "digest": "sha256:" + ("0" * 64 if n == change else table.get(n, "1" * 64))}
+              for n in names]
+    _router(monkeypatch, {"llama-cpp-builder/releases/tags/": {"assets": assets}})
+    return next(s for s in cp.build_registry() if s.name == "Linux CUDA build source").check(NOW)
+
+
+def test_cuda_linux_source_current_when_every_pinned_asset_is_published_with_its_digest(monkeypatch):
+    table = _cuda_linux_table()
+    row = _cuda_source_row(monkeypatch, list(table))
+    assert row.status == cp.CURRENT and f"{len(table)} pinned CUDA asset(s)" in row.detail
+
+
+def test_cuda_linux_source_stale_when_only_an_unpinned_cuda_asset_is_published(monkeypatch):
+    tag = cp._read_const("localm/setup_llama/pins.py", r'^_PINNED_TAG = "([^"]+)"')
+    row = _cuda_source_row(monkeypatch, [f"llama-{tag}-bin-ubuntu-cuda-12-x64.tar.gz"])
+    assert row.status == cp.STALE and "not in the release" in row.detail
+
+
+def test_cuda_linux_source_stale_when_one_pinned_asset_was_removed(monkeypatch):
+    table = _cuda_linux_table()
+    victim = sorted(table)[0]
+    row = _cuda_source_row(monkeypatch, [n for n in table if n != victim])
+    assert row.status == cp.STALE and victim in row.detail
+
+
+def test_cuda_linux_source_stale_when_a_pinned_asset_was_re_uploaded(monkeypatch):
+    table = _cuda_linux_table()
+    victim = sorted(table)[-1]
+    row = _cuda_source_row(monkeypatch, list(table), change=victim)
+    assert row.status == cp.STALE and "digest differs" in row.detail and victim in row.detail
+
+
+def test_cuda_linux_source_inconsistent_when_the_table_does_not_name_the_pinned_tag(monkeypatch, tmp_path):
+    (tmp_path / "localm" / "setup_llama").mkdir(parents=True)
+    (tmp_path / "localm" / "setup_llama" / "pins.py").write_text(
+        '_PINNED_TAG = "b2"\n_CUDA_LINUX_REPO = "o/llama-cpp-builder"\n'
+        '_CUDA_LINUX_PINNED_SHA256 = {\n'
+        f'    "llama-b1-bin-ubuntu-cuda-x64.tar.gz": "{"a" * 64}",\n}}\n', encoding="utf-8")
+    monkeypatch.setattr(cp, "REPO", tmp_path)
+    _router(monkeypatch, {"llama-cpp-builder/releases/tags/b2": {"assets": [
+        {"name": "llama-b1-bin-ubuntu-cuda-x64.tar.gz", "digest": "sha256:" + "a" * 64}]}})
     row = next(s for s in cp.build_registry() if s.name == "Linux CUDA build source").check(NOW)
-    assert row.status == cp.CURRENT
+    assert row.status == cp.INCONSISTENT
+    assert "no pinned checksum for llama-b2-bin-ubuntu-cuda-13-x64.tar.gz" in row.detail
+    assert "llama-b1-bin-ubuntu-cuda-x64.tar.gz" in row.detail
+
+
+def test_cuda_linux_suffixes_are_the_names_the_resolver_installs(monkeypatch):
+    from localm.setup_llama import assets
+    tag = cp._read_const("localm/setup_llama/pins.py", r'^_PINNED_TAG = "([^"]+)"')
+    monkeypatch.setattr(assets._sl, "_release_assets", lambda tag, repo=None: [])
+    resolved = {assets._resolve_linux_cuda_asset("cuda", line, tag)[0].rsplit("/", 1)[-1]
+                for line in ("cuda-12", "cuda-13")}
+    assert resolved == {f"llama-{tag}-bin-ubuntu{s}" for s in cp._CUDA_LINUX_SUFFIXES}
+    assert resolved == set(_cuda_linux_table())
 
 
 def test_rocm_cpu_archive_needs_the_exact_asset(monkeypatch):
@@ -669,8 +721,11 @@ def _asset_router(monkeypatch, *, change=None, drop=None):
     rocm = cp._read_const("localm/setup_llama/pins.py", r'^_ROCM_TAG = "([^"]+)"')
     cpu = cp._read_const("localm/setup_llama/pins.py", r'^_ROCM_CPU_TAG = "([^"]+)"')
 
+    cuda_table = _cuda_linux_table()
+    digests = {**table, **cuda_table}
+
     def published(names):
-        return {"assets": [{"name": n, "digest": "sha256:" + ("0" * 64 if n == change else table[n])}
+        return {"assets": [{"name": n, "digest": "sha256:" + ("0" * 64 if n == change else digests[n])}
                            for n in names if n != drop]}
     rocm_names = [n for n in table if n.startswith(f"llama-{rocm}-")]
     cpu_names = [n for n in table if n.startswith(f"llama-{cpu}-")]
@@ -679,6 +734,7 @@ def _asset_router(monkeypatch, *, change=None, drop=None):
         f"ggml-org/llama.cpp/releases/tags/{cpu}": published(cpu_names),
         f"llamacpp-rocm/releases/tags/{rocm}": published(rocm_names),
         f"ggml-org/llama.cpp/releases/tags/{tag}": published(upstream_names),
+        f"llama-cpp-builder/releases/tags/{tag}": published(list(cuda_table)),
     }
     _router(monkeypatch, routes)
     return table, tag
@@ -691,7 +747,8 @@ def _checksum_row():
 def test_llama_asset_checksums_match_what_github_publishes(monkeypatch):
     table, _ = _asset_router(monkeypatch)
     row = _checksum_row()
-    assert row.status == cp.CURRENT and f"{len(table)} pinned checksum(s)" in row.detail
+    assert row.status == cp.CURRENT
+    assert f"{len(table) + len(_cuda_linux_table())} pinned checksum(s)" in row.detail
 
 
 def test_a_changed_published_digest_is_stale(monkeypatch):
@@ -702,6 +759,29 @@ def test_a_changed_published_digest_is_stale(monkeypatch):
 
 def test_a_pinned_asset_missing_from_its_release_is_inconsistent(monkeypatch):
     victim = next(n for n in _real_table() if n.endswith("-bin-win-vulkan-x64.zip"))
+    _asset_router(monkeypatch, drop=victim)
+    row = _checksum_row()
+    assert row.status == cp.INCONSISTENT and victim in row.detail
+
+
+@pytest.mark.parametrize("victim", ["cudart-llama-bin-win-cuda-12.4-x64.zip",
+                                          "cudart-llama-bin-win-cuda-13.4-x64.zip"])
+def test_a_tagless_cudart_asset_missing_from_the_release_is_inconsistent(monkeypatch, victim):
+    assert victim in _real_table()
+    _asset_router(monkeypatch, drop=victim)
+    row = _checksum_row()
+    assert row.status == cp.INCONSISTENT and victim in row.detail
+
+
+def test_a_re_uploaded_linux_cuda_asset_is_stale_in_the_checksum_row(monkeypatch):
+    victim = sorted(_cuda_linux_table())[0]
+    _asset_router(monkeypatch, change=victim)
+    row = _checksum_row()
+    assert row.status == cp.STALE and victim in row.detail
+
+
+def test_a_linux_cuda_asset_missing_from_its_release_is_inconsistent_in_the_checksum_row(monkeypatch):
+    victim = sorted(_cuda_linux_table())[-1]
     _asset_router(monkeypatch, drop=victim)
     row = _checksum_row()
     assert row.status == cp.INCONSISTENT and victim in row.detail
