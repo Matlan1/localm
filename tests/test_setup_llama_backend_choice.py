@@ -210,7 +210,8 @@ def test_choice_reason_is_one_bounded_line(tmp_path):
     sl._record_backend_choice(tmp_path, "cuda", "a\nb\r\n  c" + "x" * 5000)
     rec = sl._read_backend_choice(tmp_path)
     assert rec["reason"].startswith("a b c")
-    assert len(rec["reason"]) == sl._CHOICE_REASON_MAX
+    from localm.setup_llama.runtime_dir import _CHOICE_REASON_MAX
+    assert len(rec["reason"]) == _CHOICE_REASON_MAX
 
 
 def test_backend_choice_is_none_when_the_choice_is_installed(box):
@@ -352,7 +353,8 @@ def test_a_build_change_of_the_installed_backend_keeps_the_record(box, monkeypat
                                                                   version_args):
     box.gpu["cuda"] = _NO_GPU
     assert _run(["--backend", "cuda", "--force", "--yes"]).exit_code == 0
-    monkeypatch.setattr(sl, "_apply_version_request", lambda *a, **k: None)
+    from localm.setup_llama import cli
+    monkeypatch.setattr(cli, "_apply_version_request", lambda *a, **k: None)
     result = _run(["--backend", "vulkan", *version_args, "--yes"])
     assert result.exit_code == 0, result.output
     choice = sl.backend_choice()
