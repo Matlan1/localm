@@ -455,6 +455,24 @@ def test_keep_refuses_while_a_provision_holds_the_lock(app, runtime_dir):
     assert sl._read_backend_choice(runtime_dir) is not None
 
 
+def test_keep_needs_config_write(app, runtime_dir):
+    from localm import auth
+    from localm import scopes as S
+    sl._record_provisioned_backend(runtime_dir, "vulkan")
+    sl._record_backend_choice(runtime_dir, "cuda", "why")
+    read_key = auth.create_key("r", [S.CONFIG_READ])["key"]
+    write_key = auth.create_key("w", [S.CONFIG_WRITE], allow_privileged=True)["key"]
+    with TestClient(app) as client:
+        denied = client.post("/api/runtime/keep",
+                             headers={"Authorization": f"Bearer {read_key}"})
+        assert denied.status_code == 403, denied.text
+        assert sl._read_backend_choice(runtime_dir) is not None
+        allowed = client.post("/api/runtime/keep",
+                              headers={"Authorization": f"Bearer {write_key}"})
+    assert allowed.status_code == 200, allowed.text
+    assert sl._read_backend_choice(runtime_dir) is None
+
+
 def test_update_naming_a_backend_does_not_keep_an_earlier_choice(app, runtime_dir, no_subprocess):
     sl._record_provisioned_backend(runtime_dir, "vulkan")
     with TestClient(app) as client:
