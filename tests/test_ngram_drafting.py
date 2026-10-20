@@ -422,6 +422,27 @@ def test_ngram_output_survives_mid_generation_context_growth(draft_max):
     assert index == llm._cached_tokens[:len(index)]
 
 
+
+def test_ngram_drafting_survives_the_growth_of_a_reply_reserved_one_step_at_a_time():
+    llm = _llama(8)
+    llm._ctx_capacity = len(REPEATING) + 12
+    llm._n_ctx = llm._ctx_capacity
+    llm._n_ctx_grow = 256
+    budget = 1200
+    step_target = llm._target_ctx(len(REPEATING) + 576)
+    assert step_target < llm._target_ctx(len(REPEATING) + budget + 64)
+    calls = []
+    llm._vram_check = lambda t, c, hint=True: calls.append((t, c, hint)) or t <= step_target
+    fake = _GrowingFake(llm, capacity=llm._ctx_capacity)
+
+    tokens, _ = _generate(llm, fake, max_new_tokens=budget, prompt=REPEATING)
+
+    assert tokens == _reference(REPEATING, budget)
+    assert fake.grown >= 1
+    assert llm._source.accepted > 0
+    assert calls[:2] == [(step_target, len(REPEATING) + 12, False),
+                         (llm._target_ctx(len(REPEATING) + budget + 64), len(REPEATING) + 12, False)]
+
 def test_a_step_that_grew_the_context_is_not_timed_for_the_source():
     llm = _llama(8)
     llm._source.costs = _row_costs(0.1)
