@@ -194,6 +194,7 @@ class _Slot:
         self.room_seen: Optional[tuple[int, int]] = None  # (others' cells, capacity) at the last try
         self.order = 0                    # admission order
         self.last_used = 0.0
+        self.prompt_len = 0               # tokens in the last prompt this slot prefilled
         self.rate_ok = False              # the reply's decode rate is reported when it ends
         self.rate_steps = 0               # decode steps it ran alone
         self.rate_s = 0.0                 # their native seconds
@@ -559,7 +560,7 @@ class SlotScheduler:
             need = stream.reserve
             if all(s.stream is None for s in self._slots):
                 need = self._step_need(stream, slot)
-                self._rightsize(need, slot)
+                self._rightsize(need, slot, stream.prompt)
             fit = self._fit(need, slot, stream.reserve)
             if fit is _WAIT:
                 with self._cond:
@@ -596,12 +597,20 @@ class SlotScheduler:
         return need if step <= need <= stream.reserve else stream.reserve
 
     def _pick(self, free: list[_Slot], prompt: list[int]) -> _Slot:
-        """The free slot whose cache shares the longest prefix with *prompt*;
-        among equals an empty slot, then the least recently used."""
+        """The free slot whose cache shares the longest prefix with *prompt*,
+        counting a shared prefix only when it covers at least half of the last
+        prompt that slot prefilled (of its cache, when it has none recorded);
+        among equals an empty slot, then the least recently used. A request
+        that shares only a little of a long prompt (a short side request
+        beside a conversation) so goes to another slot and leaves that cache
+        whole, while a follow-up turn, which shares all of its previous prompt,
+        keeps its slot."""
         best = None
         best_key = None
         for slot in free:
             prefix = _common_prefix_len(slot.kv, prompt)
+            if prefix * 2 < (slot.prompt_len or len(slot.kv)):
+                prefix = 0
             key = (prefix, 1 if not slot.kv else 0, -slot.last_used)
             if best_key is None or key > best_key:
                 best, best_key = slot, key
@@ -657,12 +666,14 @@ class SlotScheduler:
             return exc
         return True
 
-    def _rightsize(self, need: int, slot: _Slot) -> None:
+    def _rightsize(self, need: int, slot: _Slot, prompt: list[int]) -> None:
         """Recreate the context per ``ops.rightsize`` before *slot* takes a
-        request of *need* cells, while no reply is active. Every cache is
-        dropped when it is recreated. A context that cannot be created with
-        the KV cache in VRAM is created with it in system RAM; when that fails
-        too the model has no context and ``_fit`` grows a new one."""
+        request of *need* cells for *prompt*, while no reply is active. The
+        other slots' caches, which the plan counts, and the part of *slot*'s
+        cache that *prompt* shares are decoded into the new context again; a
+        cache whose decode fails is dropped. A context that cannot be created
+        with the KV cache in VRAM is created with it in system RAM; when that
+        fails too the model has no context and ``_fit`` grows a new one."""
         from localm.debuglog import logger
         others = sum(len(s.kv) for s in self._slots if s is not slot)
         try:
@@ -674,21 +685,50 @@ class SlotScheduler:
         if plan is None:
             return
         target, offload_kqv = plan
+        shared = min(_common_prefix_len(slot.kv, prompt), len(prompt) - 1)
+        kept = [(s, list(s.kv) if s is not slot else list(s.kv[:max(0, shared)]))
+                for s in self._slots]
         for other in self._slots:
             other.kv = []
         self._touched = True
         try:
             self._ops.recreate(target, offload_kqv)
-            return
         except Exception as exc:
             logger.info("gguf slots: a %d-token context (KV cache in %s) could not be "
                         "created: %s", target, "VRAM" if offload_kqv else "system RAM", exc)
-        if offload_kqv:
+            if not offload_kqv:
+                return
             try:
                 self._ops.recreate(target, False)
             except Exception as exc:
                 logger.info("gguf slots: a %d-token context with the KV cache in system "
                             "RAM could not be created either: %s", target, exc)
+                return
+        self._restore_caches(kept)
+
+    def _restore_caches(self, kept: list[tuple[_Slot, list[int]]]) -> None:
+        """Decode each ``(slot, tokens)`` of *kept* into its sequence of a
+        freshly created context, in batches of ``ops.n_batch()``; a slot whose
+        decode fails keeps an empty cache."""
+        from localm.debuglog import logger
+        step = max(1, self._ops.n_batch())
+        restored = 0
+        for slot, tokens in kept:
+            for i in range(0, len(tokens), step):
+                chunk = tokens[i:i + step]
+                entries = [(tok, i + j, slot.seq, j == len(chunk) - 1)
+                           for j, tok in enumerate(chunk)]
+                rc = self._decode(entries, True)
+                if rc != 0:
+                    logger.info("gguf slots: the cache of slot %d was not restored into "
+                                "the new context (llama_decode code %d)", slot.seq, rc)
+                    self._drop_cache(slot)
+                    break
+                slot.kv.extend(chunk)
+            restored += len(slot.kv)
+        if restored:
+            logger.info("gguf slots: %d cached token(s) restored into the new context",
+                        restored)
 
     def _grow(self, target: int, offload_kqv: bool,
               ram_target: Optional[int] = None) -> None:
@@ -765,6 +805,7 @@ class SlotScheduler:
         slot.room_seen = None
         slot.reserve = reserve
         slot.promise = stream.reserve if reserve < stream.reserve else 0
+        slot.prompt_len = len(stream.prompt)
         slot.order = next(self._admissions)
         slot.rate_ok = stream.timed and stream.scorer is None
         slot.rate_steps = 0
