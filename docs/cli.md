@@ -940,6 +940,18 @@ a question with `ask_user`, offering numbered options or taking a typed answer. 
 mode and `ask_user` are terminal features: the GUI coder and one-shot tasks do not offer
 them.
 
+**Lint after an edit.** When `ruff` is on your PATH (an activated virtualenv puts it
+there), a `write_file`, `edit_file`, `edit_files` or `patch_file` on a Python file runs
+`ruff check --select F,E9` on it and appends up to 10 findings (unused imports,
+undefined names, syntax-level errors) to the tool result, so the agent fixes them in the
+same turn. Nothing is installed: with no ruff on PATH the result is unchanged. A ruff
+inside the project folder is never run unless its directory is on your PATH, and a
+restricted (shared-key) session never runs it. The run is capped at 5 seconds and a
+timeout or a ruff failure is reported in the result rather than skipped silently, and
+after two in a row the pass stops for that project until the coder restarts. Your
+project's ruff configuration (excludes, ignores) still applies. Turn it off with
+`diagnostics = false` in `.localcoder/config.toml`.
+
 **Self-review.** An optional reviewer model reads the cumulative diff before the agent
 declares a task done and looks for blocking problems - correctness bugs, security holes,
 broken or missing functionality, or a check weakened just to make it pass. Off by

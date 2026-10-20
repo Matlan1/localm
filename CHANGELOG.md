@@ -26,6 +26,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   approve its plan: approve it, approve and let it run with the project's check required, or
   send it back with feedback. The agent can also ask you a question with numbered options
   mid-task.
+- **The coder shows lint errors right after it edits a Python file.** When `ruff` is on your
+  PATH, a write or edit to a `.py` file appends up to 10 `ruff` findings (unused imports,
+  undefined names) to the result so the agent can fix them in the same turn. Off with
+  `diagnostics = false` in `.localcoder/config.toml`.
 
 ### Changed
 
