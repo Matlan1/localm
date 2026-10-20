@@ -82,6 +82,8 @@ def _agent(cwd, **kw):
         # sweep below would skip them and their injection would go unverified.
         # Their gating is pinned separately, in test_browser_tools_gate.py.
         kw.setdefault("browser_enabled", True)
+        # Same for ask_user and the plan-mode tools, offered only to a REPL.
+        kw.setdefault("interactive_tools", True)
         return Agent(_Stub(), cwd=cwd, self_verify=False, **kw)
 
 

@@ -971,7 +971,8 @@ class CoderSession:
             pending = self._pending.get(confirm_id)
         if pending is None:
             return False
-        if approved and always_allow:
+        # A plan approval (exit_plan_mode) is never made automatic.
+        if approved and always_allow and pending.tool != "exit_plan_mode":
             self.allowed_tools.add(pending.tool)
         pending.approved = approved
         pending.answered.set()
