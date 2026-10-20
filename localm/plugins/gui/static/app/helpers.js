@@ -67,6 +67,7 @@ export const INSTANCE_SCOPED_KEYS = [
   "localm.activeView",
   "localm.coderCwd",
   "localm.kbAddPath",
+  "localm.exportDir",
   "localm.convCollapsed",
   "localm.imgMoveDest",
   "localm.musicMoveDest",

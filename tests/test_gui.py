@@ -899,6 +899,77 @@ class TestVramEstimate:
         assert half["weights"] < full["weights"]
         assert half["weights"] == pytest.approx(full["weights"] / 2, rel=0.02)
 
+    def _running_estimate(self, gui_app, tmp_path, monkeypatch, engine, params):
+        import localm.inference.http_server as hs
+        app, _ = gui_app
+        model_file = tmp_path / "m.gguf"
+        model_file.write_bytes(b"\0" * 1024)
+        reg = {"m": {"path": str(model_file), "source": "local"}}
+        if engine is not None:
+            monkeypatch.setitem(hs._engines, "m", engine)
+        with patch("localm.config.load_registry", return_value=reg),              patch("localm.model_manager.gguf.gguf_file_bytes", return_value=22 * _GB),              patch("localm.model_meta.cached_n_layers", return_value=32),              patch("localm.discover.list_gpus",
+                   side_effect=_list_gpus_double([_DEVICE_GPU], GPU_PROBE_OK)):
+            with TestClient(app) as client:
+                return client.get("/api/vram-estimate",
+                                  params={"model": "m", **params}).json()
+
+    @staticmethod
+    def _engine(kv_in_vram=True, offloaded=32):
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            loaded=True, unloading=False,
+            gpu_placement={"gpu_layers_offloaded": offloaded, "gpu_layers_total": 32,
+                           "degraded": offloaded < 32},
+            live_context={"n_ctx": 8192, "kv_in_vram": kv_in_vram},
+            gpu_sizing={"mode": "auto", "n_cpu_moe": 0})
+
+    def test_the_running_models_own_vram_counts_as_available(
+            self, gui_app, tmp_path, monkeypatch):
+        """Reloading the running model at new settings frees what its current
+        load holds first, so that share is available to the new load."""
+        from localm.sysstats import estimate_vram
+        data = self._running_estimate(gui_app, tmp_path, monkeypatch, self._engine(),
+                                      {"n_ctx": 4096, "n_gpu_layers": 99})
+        held = estimate_vram(22 * _GB, 8192, 32, n_layers=32)["needed"]
+        assert data["free"] == 20 * _GB
+        assert data["needed"] > data["free"]
+        assert data["held"] == held
+        assert data["available"] == 20 * _GB + held
+        assert data["fits"] is True
+
+    def test_a_kv_cache_in_system_ram_is_not_counted_as_held(
+            self, gui_app, tmp_path, monkeypatch):
+        from localm.sysstats import estimate_vram
+        data = self._running_estimate(gui_app, tmp_path, monkeypatch,
+                                      self._engine(kv_in_vram=False),
+                                      {"n_ctx": 4096, "n_gpu_layers": 99})
+        assert data["held"] == estimate_vram(22 * _GB, 0, 32, n_layers=32)["needed"]
+
+    def test_only_the_gpu_share_of_a_partial_load_is_held(
+            self, gui_app, tmp_path, monkeypatch):
+        from localm.sysstats import estimate_vram
+        data = self._running_estimate(gui_app, tmp_path, monkeypatch,
+                                      self._engine(offloaded=16),
+                                      {"n_ctx": 4096, "n_gpu_layers": 99})
+        assert data["held"] == estimate_vram(22 * _GB, 8192, 16, n_layers=32)["needed"]
+        assert data["held"] < estimate_vram(22 * _GB, 8192, 32, n_layers=32)["needed"]
+
+    def test_a_model_that_is_not_loaded_holds_nothing(
+            self, gui_app, tmp_path, monkeypatch):
+        data = self._running_estimate(gui_app, tmp_path, monkeypatch, None,
+                                      {"n_ctx": 4096, "n_gpu_layers": 99})
+        assert data["held"] is None and data["available"] is None
+        assert data["fits"] is False
+
+    def test_estimate_charges_kv_for_the_gpu_layers_only(self):
+        from localm.sysstats import estimate_vram
+        full = estimate_vram(8 * _GB, 8192, 32, n_layers=32, kv_bytes_per_token=1000)
+        half = estimate_vram(8 * _GB, 8192, 16, n_layers=32, kv_bytes_per_token=1000)
+        none = estimate_vram(8 * _GB, 8192, 0, n_layers=32, kv_bytes_per_token=1000)
+        assert full["kv_cache"] == 8192 * 1000
+        assert half["kv_cache"] == 8192 * 500
+        assert none["needed"] == 0
+
     def test_estimate_withholds_free_on_stale_probe(self, gui_app):
         """A timed-out probe serves a last-known-good (possibly frozen) reading. Its
         free must NOT be weighed as if current: free -> None, fits -> None, so a
@@ -1673,10 +1744,37 @@ class TestBackendEndpoint:
         """The runtime-resolution warning latches are module-level and process-
         global (no per-request reset), so a test asserting the field's DEFAULT
         must pin a clean baseline rather than trust whatever an earlier test in
-        the same process left behind."""
+        the same process left behind. Also pins "no recorded choice" and "no
+        runtime resolves", so the payload does not depend on this machine."""
+        from localm import setup_llama
         from localm.inference.backends.llamacpp import _loader
         monkeypatch.setattr(_loader, "_last_broken_runtime_warning", None, raising=False)
         monkeypatch.setattr(_loader, "_last_explicit_lib_warning", None, raising=False)
+        monkeypatch.setattr(setup_llama, "backend_choice", lambda: None)
+        monkeypatch.setattr(setup_llama, "runtime_in_use",
+                            lambda: {"dir": None, "source": None, "backend": None})
+
+    def test_reports_the_recorded_choice_and_the_loaded_runtime(self, gui_app, monkeypatch):
+        """A cuda choice that could not be used, and a binary_dir override
+        supplying the loaded runtime, both reach the payload."""
+        from localm import hwdetect, setup_llama
+        self._reset_loader_warnings(monkeypatch)
+        monkeypatch.setattr(setup_llama, "backend_choice", lambda: {
+            "requested": "cuda", "reason": "driver too old", "installed": "vulkan"})
+        monkeypatch.setattr(setup_llama, "runtime_in_use", lambda: {
+            "dir": "x", "source": "binary_dir", "backend": "hip"})
+        app, _ = gui_app
+        with patch("localm.setup_llama.installed_backend", return_value="vulkan"),              patch("localm.hwdetect.detect",
+                   return_value=hwdetect.Detection(vendors=["nvidia"])),              patch("localm.hwdetect.recommended_install_backend", return_value="cuda"):
+            with TestClient(app) as client:
+                r = client.get("/api/backend")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["requested"] == "cuda"
+        assert body["requested_reason"] == "driver too old"
+        assert body["in_use"] == "hip"
+        assert body["in_use_source"] == "binary_dir"
+        assert "dir" not in body, "the runtime path is not part of the payload"
 
     def test_reports_installed_separately_from_recommended(self, gui_app, monkeypatch):
         """The whole point of this route: "installed" and "recommended" can
@@ -1693,8 +1791,10 @@ class TestBackendEndpoint:
             with TestClient(app) as client:
                 r = client.get("/api/backend")
         assert r.status_code == 200
-        assert r.json() == {"installed": "amd-rocm", "vendor": "amd", "recommended": "vulkan",
-                            "warning": None}
+        assert r.json() == {"installed": "amd-rocm", "vendor": "amd", "vendors": ["amd"],
+                            "recommended": "vulkan",
+                            "warning": None, "requested": None,
+                            "requested_reason": None, "in_use": None, "in_use_source": None}
 
     def test_nothing_detected_reports_nulls_not_an_error(self, gui_app, monkeypatch):
         """A total detection failure (no marker, hwdetect raises) must still
@@ -1707,8 +1807,10 @@ class TestBackendEndpoint:
             with TestClient(app) as client:
                 r = client.get("/api/backend")
         assert r.status_code == 200
-        assert r.json() == {"installed": None, "vendor": None, "recommended": None,
-                            "warning": None}
+        assert r.json() == {"installed": None, "vendor": None, "vendors": [],
+                            "recommended": None,
+                            "warning": None, "requested": None,
+                            "requested_reason": None, "in_use": None, "in_use_source": None}
 
     def test_nvidia_vendor_reported_when_vulkan_installed(self, gui_app, monkeypatch):
         """The exact combination the Settings hint keys on (Part 3): an
@@ -1724,8 +1826,10 @@ class TestBackendEndpoint:
             with TestClient(app) as client:
                 r = client.get("/api/backend")
         assert r.status_code == 200
-        assert r.json() == {"installed": "vulkan", "vendor": "nvidia", "recommended": "cuda",
-                            "warning": None}
+        assert r.json() == {"installed": "vulkan", "vendor": "nvidia", "vendors": ["nvidia"],
+                            "recommended": "cuda",
+                            "warning": None, "requested": None,
+                            "requested_reason": None, "in_use": None, "in_use_source": None}
 
     def test_reports_runtime_resolution_warning(self, gui_app, monkeypatch):
         """A latched _loader warning (a broken localm_llama_runtime install, or

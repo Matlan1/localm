@@ -261,7 +261,8 @@ def test_post_swap_command_runtime_uses_absolute_interpreter_not_bare_localm():
     cmd = au.post_swap_command("runtime", backend="cuda")
     assert cmd[0] == sys.executable
     assert cmd[1:3] == ["-m", "localm"]
-    assert cmd[3:] == ["setup-llama", "--backend", "cuda", "--force", "--yes"]
+    assert cmd[3:] == ["setup-llama", "--backend", "cuda", "--force", "--yes",
+                       "--keep-choice"]
 
 
 def test_post_swap_command_runtime_forces_and_never_prompts():

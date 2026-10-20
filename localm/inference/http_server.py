@@ -649,11 +649,16 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                     from localm.debuglog import logger as _dbg
                     _dbg.info("switch_engine: not reloading '%s' for a better placement, "
                               "it is used as loaded: %s", name, exc.detail)
+                    _postpone_placement_recheck(resident)
             if heal_budget is not None:
                 heal_budget = await _switch_with_backend_need(loop, heal_budget, resident)
                 heal_probe = await _switch_probe_vram(loop, heal_budget)
-                if not (heal_probe.probe_ok and heal_probe.measurable
-                        and _engines.get(name) is resident
+                fits = (heal_probe.probe_ok and heal_probe.measurable
+                        and await _placement_recheck_fits(
+                            loop, name, resident, heal_probe, heal_budget.needed_bytes))
+                if not fits:
+                    _postpone_placement_recheck(resident)
+                if not (fits and _engines.get(name) is resident
                         and _placement_heal_due(name, resident)):
                     heal_budget = None
             if heal_budget is None and _engines.get(name) is resident and _is_reusable(resident):
@@ -1414,10 +1419,20 @@ class PlacementHeal(NamedTuple):
     (``_record_placement_heal``): ``blockers`` are the resident models, other
     than the loaded one and the ``pinned_models``, that held VRAM when it
     loaded beside them; ``release_unconfirmed`` is True when an eviction made
-    for it did not see the VRAM release it expected."""
+    for it did not see the VRAM release it expected. ``recheck`` is True when
+    neither applies: free VRAM is read again from ``recheck_at`` (a
+    ``time.monotonic()`` value) on, and the model is reloaded once the
+    reading plus what its current load holds covers a full placement."""
 
     blockers: frozenset
     release_unconfirmed: bool
+    recheck: bool = False
+    recheck_at: float = 0.0
+
+
+# Seconds between two free-VRAM readings for a ``PlacementHeal.recheck``, and
+# from the load to the first one.
+_PLACEMENT_RECHECK_S = 30.0
 
 
 def _record_placement_heal(name: str, engine, pinned, evictions, *,
@@ -1426,11 +1441,12 @@ def _record_placement_heal(name: str, engine, pinned, evictions, *,
     *name*: a ``PlacementHeal`` when the load landed partly on the CPU with its
     layer count sized from free VRAM (``Engine.gpu_sizing`` mode "auto") and
     that sizing put the part there: fewer layers than all on the GPU, or routed
-    experts it chose to keep in system RAM (``n_cpu_moe_auto``),
-    *allowed* is True and it has a blocker or an unconfirmed release (from
-    *evictions*); None otherwise. Resident models are blockers only when
-    *deferred* (the load went ahead below the whole-model estimate because
-    nothing more could be evicted); models in *pinned* never are."""
+    experts it chose to keep in system RAM (``n_cpu_moe_auto``), and *allowed*
+    is True; None otherwise. The heal names its blockers or an unconfirmed
+    release (from *evictions*), or is a ``recheck`` heal when it has neither.
+    Resident models are blockers only when *deferred* (the load went ahead
+    below the whole-model estimate because nothing more could be evicted);
+    models in *pinned* never are."""
     placement = getattr(engine, "gpu_placement", None)
     sizing = getattr(engine, "gpu_sizing", None)
     heal = None
@@ -1443,6 +1459,9 @@ def _record_placement_heal(name: str, engine, pinned, evictions, *,
         unconfirmed = any(e.released is False and e.expected for e in evictions)
         if blockers or unconfirmed:
             heal = PlacementHeal(blockers, unconfirmed)
+        else:
+            heal = PlacementHeal(frozenset(), False, True,
+                                 time.monotonic() + _PLACEMENT_RECHECK_S)
     engine.placement_heal = heal
 
 
@@ -1450,7 +1469,8 @@ def _placement_heal_due(name: str, engine) -> bool:
     """Whether resident *engine* (model *name*) should be reloaded before it
     serves a request: it is still placed partly on the CPU, no request holds
     it, and its ``placement_heal`` names an unconfirmed release or a blocker
-    that is now gone, unloaded or idle. Reads state only."""
+    that is now gone, unloaded or idle, or is a ``recheck`` heal whose
+    ``recheck_at`` has passed. Reads state only."""
     heal = getattr(engine, "placement_heal", None)
     if not isinstance(heal, PlacementHeal):
         return False
@@ -1461,6 +1481,8 @@ def _placement_heal_due(name: str, engine) -> bool:
         return False
     if heal.release_unconfirmed:
         return True
+    if heal.recheck:
+        return time.monotonic() >= heal.recheck_at
     for blocker in heal.blockers:
         other = _engines.get(blocker)
         if other is None or not other.loaded:
@@ -1469,6 +1491,46 @@ def _placement_heal_due(name: str, engine) -> bool:
                 and getattr(other, "unloading", False) is not True):
             return True
     return False
+
+
+async def _placement_recheck_fits(loop, name: str, engine,
+                                  probe: switch_admission.VramProbe,
+                                  needed: int) -> bool:
+    """Whether a reload of resident *engine* (model *name*) for a full GPU
+    placement may go ahead. True unless its ``placement_heal`` is a
+    ``recheck`` heal. For one, True when *probe*'s free VRAM plus what the
+    current load holds (``_victim_vram_estimate``) covers *needed*; otherwise
+    False. A reading that counts only this process's allocations
+    (``probe.process_scoped``) is not used and answers False."""
+    heal = getattr(engine, "placement_heal", None)
+    if not (isinstance(heal, PlacementHeal) and heal.recheck):
+        return True
+    from localm.debuglog import logger as _dbg
+    held = 0
+    if not probe.process_scoped and isinstance(probe.free, int):
+        held = await loop.run_in_executor(None, _victim_vram_estimate, engine)
+        if probe.free + held >= needed:
+            _dbg.info("switch_engine: '%s' is partly on the CPU and %d MB VRAM is free "
+                      "beside the %d MB its load holds, enough for a full GPU placement "
+                      "(%d MB)", name, probe.free // 1024 ** 2, held // 1024 ** 2,
+                      needed // 1024 ** 2)
+            return True
+    _dbg.debug("switch_engine: '%s' stays partly on the CPU: free %s MB + held %d MB "
+               "< %d MB needed (process-scoped reading: %s); next check in %.0fs",
+               name, None if probe.free is None else probe.free // 1024 ** 2,
+               held // 1024 ** 2, needed // 1024 ** 2, probe.process_scoped,
+               _PLACEMENT_RECHECK_S)
+    _postpone_placement_recheck(engine)
+    return False
+
+
+def _postpone_placement_recheck(engine) -> None:
+    """Move the next reading of *engine*'s ``recheck`` heal
+    ``_PLACEMENT_RECHECK_S`` on. Leaves any other ``placement_heal`` as it is."""
+    heal = getattr(engine, "placement_heal", None)
+    if isinstance(heal, PlacementHeal) and heal.recheck:
+        engine.placement_heal = heal._replace(
+            recheck_at=time.monotonic() + _PLACEMENT_RECHECK_S)
 
 
 async def _switch_free_for_reload(loop, name: str, engine,
@@ -1486,9 +1548,12 @@ async def _switch_free_for_reload(loop, name: str, engine,
     from localm.debuglog import logger as _dbg
     heal = getattr(engine, "placement_heal", None)
     placement = getattr(engine, "gpu_placement", None) or {}
-    why = ("its earlier eviction's VRAM release was not confirmed"
-           if heal is not None and heal.release_unconfirmed
-           else "a model that held the VRAM it lacked is idle or gone")
+    if heal is not None and heal.release_unconfirmed:
+        why = "its earlier eviction's VRAM release was not confirmed"
+    elif heal is not None and heal.recheck:
+        why = "enough VRAM is free now"
+    else:
+        why = "a model that held the VRAM it lacked is idle or gone"
     from localm.inference.engine import describe_gpu_placement
     _dbg.info("switch_engine: reloading '%s' (%s) for a full GPU placement: %s",
               name, describe_gpu_placement(placement), why)
@@ -5709,7 +5774,7 @@ async def _stream_sse_body(
     # Also registered with residency's cancel broadcast so an unload/switch can
     # trigger the same stop proactively, instead of only reading active_requests
     # once and refusing.
-    cancel_event = threading.Event()
+    cancel_event = residency.GenerationCancel()
     residency.register_cancel(engine.display_name, cancel_event)
     call_outcome: dict = {}
 
@@ -5731,6 +5796,7 @@ async def _stream_sse_body(
             loop.call_soon_threadsafe(token_queue.put_nowait, _Records(records))
 
         from localm.inference.backends.base import stream_stop_check
+        cut = produced = False
         try:
             gen_opts = dict(gen_kwargs)
             gen_opts.pop("on_status", None)
@@ -5740,8 +5806,15 @@ async def _stream_sse_body(
                 gen = engine.chat_stream(messages, on_status=_on_status, **gen_opts)
                 for token in gen:
                     if cancel_event.is_set():
+                        cut = True
                         break
+                    produced = True
                     loop.call_soon_threadsafe(token_queue.put_nowait, token)
+            # A cancel from an unload or switch ends the reply as an error.
+            # See test_server_cancel_mid_stream_ends_as_error_not_stop.
+            if cancel_event.by_server and (cut or not produced):
+                loop.call_soon_threadsafe(
+                    token_queue.put_nowait, RuntimeError(residency.SERVER_CANCEL_TEXT))
         except Exception as e:
             # Log (full traceback to the debug log) and surface to the client - a
             # silent thread death looks like an empty reply. NOT
@@ -6005,7 +6078,7 @@ async def _stream_sse_completion_body(
     # releases llama.py's per-model _inference_lock instead of running to
     # end-of-generation and blocking the next request to this model. Also
     # registered with residency's cancel broadcast - see _stream_sse.
-    cancel_event = threading.Event()
+    cancel_event = residency.GenerationCancel()
     residency.register_cancel(engine.display_name, cancel_event)
 
     class _StatusSignal:
@@ -6029,6 +6102,7 @@ async def _stream_sse_completion_body(
             loop.call_soon_threadsafe(token_queue.put_nowait, _Records(records))
 
         from localm.inference.backends.base import stream_stop_check
+        cut = produced = False
         try:
             gen_opts = dict(gen_kwargs)
             gen_opts.pop("on_status", None)
@@ -6038,8 +6112,13 @@ async def _stream_sse_completion_body(
                 gen = engine.chat_stream(messages, on_status=_on_status, **gen_opts)
                 for token in gen:
                     if cancel_event.is_set():
+                        cut = True
                         break
+                    produced = True
                     loop.call_soon_threadsafe(token_queue.put_nowait, token)
+            if cancel_event.by_server and (cut or not produced):
+                loop.call_soon_threadsafe(
+                    token_queue.put_nowait, RuntimeError(residency.SERVER_CANCEL_TEXT))
         except Exception as e:
             # Surface an inference failure to the client instead of letting this
             # daemon thread die (an uncaught death fires a crash report and looks
@@ -6543,7 +6622,7 @@ async def _generate_full(engine, messages: list, request=None, *,
     client is gone).
     """
     loop = asyncio.get_running_loop()
-    cancel_event = threading.Event()
+    cancel_event = residency.GenerationCancel()
     residency.register_cancel(engine.display_name, cancel_event)
     poll = _resolve_disconnect_poll(request)
     stop = gen_kwargs.pop("stop", None)
@@ -6558,10 +6637,12 @@ async def _generate_full(engine, messages: list, request=None, *,
         extra = {"on_logprobs": on_logprobs} if gen_kwargs.get("logprobs") is not None else {}
         gen = engine.chat_stream(messages, **gen_kwargs, **extra)
         parts: list[str] = []
+        cut = False
         try:
             with stream_stop_check(cancel_event.is_set):
                 for token in gen:
                     if cancel_event.is_set():
+                        cut = True
                         break
                     if timing is not None and "first_token_at" not in timing:
                         timing["first_token_at"] = time.perf_counter()
@@ -6581,6 +6662,8 @@ async def _generate_full(engine, messages: list, request=None, *,
                 _dbg.exception("closing non-stream generation stream failed")
             if timing is not None:
                 _snapshot_outcome(timing.setdefault("outcome", {}), engine)
+        if cancel_event.by_server and (cut or not parts):
+            raise RuntimeError(residency.SERVER_CANCEL_TEXT)
         return "".join(parts)
 
     fut = loop.run_in_executor(None, _run)

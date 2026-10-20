@@ -78,6 +78,9 @@ class _SimContext:
         self.recreated = []
         self.cleared = 0
         self.seq_rms = []
+        self.rightsize_plan = None
+        self.rightsize_calls = []
+        self.recreate_fail = []
         self.stop = threading.Event()
         self.fail = None          # entries -> rc, or None to decode normally
         self.step_delay = 0.0
@@ -103,8 +106,16 @@ class _SimContext:
     def vram_fit(self, target):
         return self.vram_fits
 
+    def rightsize(self, need, others):
+        self.rightsize_calls.append((need, others))
+        return self.rightsize_plan
+
     def recreate(self, target, offload_kqv):
         self.recreated.append((target, offload_kqv))
+        if (target, offload_kqv) in self.recreate_fail:
+            self.cap = 0
+            self.cells = {}
+            raise RuntimeError("Not enough memory")
         self.cap = target
         self.cells = {}
 
@@ -1016,3 +1027,50 @@ def test_a_reply_paused_for_vram_does_not_probe_on_every_step(made):
     assert out == _reference(PROMPTS[0], len(out))[0]
     assert len(PROMPTS[0]) + len(out) >= 4096 - 1
     assert ctx.fit_calls <= 10, f"{ctx.fit_calls} VRAM checks while one reply waited"
+
+
+def test_an_idle_context_is_recreated_to_the_rightsize_plan(made):
+    ctx = _SimContext(capacity=2048, n_ctx_max=4096, base=256, grow=256)
+    ctx.rightsize_plan = (256, True)
+    sched = made(ctx, 2)
+    rec = _collect(sched, PROMPTS[0], 20)
+    assert rec["out"] == _reference(PROMPTS[0], 20)[0]
+    assert ctx.rightsize_calls and ctx.rightsize_calls[0][1] == 0
+    assert ctx.recreated[0] == (256, True)
+
+
+def test_no_rightsize_while_a_reply_is_running(made):
+    ctx = _SimContext(capacity=2048, n_ctx_max=4096, base=256, grow=256)
+    ctx.step_delay = 0.005
+    sched = made(ctx, 2)
+    first = sched.submit(PROMPTS[0], 150, _Sampler())
+    next(first)
+    calls_before = len(ctx.rightsize_calls)
+    ctx.rightsize_plan = (256, True)
+    rec = _collect(sched, PROMPTS[1], 20)
+    _drain(first)
+    assert rec["out"] == _reference(PROMPTS[1], 20)[0]
+    assert len(ctx.rightsize_calls) == calls_before
+    assert (256, True) not in ctx.recreated
+
+
+def test_rightsize_falls_back_to_system_ram_when_vram_creation_fails(made):
+    ctx = _SimContext(capacity=2048, n_ctx_max=4096, base=256, grow=256)
+    ctx.rightsize_plan = (2048, True)
+    ctx.recreate_fail = [(2048, True)]
+    sched = made(ctx, 2)
+    rec = _collect(sched, PROMPTS[0], 20)
+    assert rec["out"] == _reference(PROMPTS[0], 20)[0]
+    assert ctx.recreated[:2] == [(2048, True), (2048, False)]
+    assert ctx.cap == 2048
+
+
+def test_rightsize_counts_the_other_slots_cached_cells(made):
+    ctx = _SimContext(capacity=2048, n_ctx_max=4096, base=256, grow=256)
+    sched = made(ctx, 2)
+    _collect(sched, PROMPTS[0], 20)
+    cached = sum(len(s.kv) for s in sched._slots)
+    assert cached > 0
+    ctx.rightsize_calls.clear()
+    _collect(sched, PROMPTS[1], 20)
+    assert ctx.rightsize_calls[0][1] == cached

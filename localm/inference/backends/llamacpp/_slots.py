@@ -196,6 +196,7 @@ class SlotScheduler:
     *ops* is the native seam (:class:`LlamaSlotOps` for a loaded model):
     ``lock()``, ``stopped()``, ``capacity()``, ``max_capacity()``,
     ``target_ctx(n)``, ``vram_fit(n)``, ``recreate(n, offload_kqv)``,
+    ``rightsize(need, others)``,
     ``n_batch()``, ``decode(entries)``, ``sample(sampler, row)``,
     ``is_eog(tok)``, ``seq_rm(seq, p0, p1)``, ``clear_memory()``,
     ``free_sampler(sampler)``, ``stderr_scope()``, and, for a reply submitted
@@ -508,6 +509,8 @@ class SlotScheduler:
                     self._heartbeat_queued()
                 return
             slot = self._pick(free, stream.prompt)
+            if all(s.stream is None for s in self._slots):
+                self._rightsize(stream.reserve, slot)
             fit = self._fit(stream.reserve, slot)
             if fit is _WAIT:
                 with self._cond:
@@ -570,6 +573,39 @@ class SlotScheduler:
         except Exception as exc:
             return exc
         return True
+
+    def _rightsize(self, need: int, slot: _Slot) -> None:
+        """Recreate the context per ``ops.rightsize`` before *slot* takes a
+        request of *need* cells, while no reply is active. Every cache is
+        dropped when it is recreated. A context that cannot be created with
+        the KV cache in VRAM is created with it in system RAM; when that fails
+        too the model has no context and ``_fit`` grows a new one."""
+        from localm.debuglog import logger
+        others = sum(len(s.kv) for s in self._slots if s is not slot)
+        try:
+            plan = self._ops.rightsize(need, others)
+        except Exception as exc:
+            logger.info("gguf slots: keeping the live context, the VRAM check raised %s",
+                        type(exc).__name__)
+            return
+        if plan is None:
+            return
+        target, offload_kqv = plan
+        for other in self._slots:
+            other.kv = []
+        self._touched = True
+        try:
+            self._ops.recreate(target, offload_kqv)
+            return
+        except Exception as exc:
+            logger.info("gguf slots: a %d-token context (KV cache in %s) could not be "
+                        "created: %s", target, "VRAM" if offload_kqv else "system RAM", exc)
+        if offload_kqv:
+            try:
+                self._ops.recreate(target, False)
+            except Exception as exc:
+                logger.info("gguf slots: a %d-token context with the KV cache in system "
+                            "RAM could not be created either: %s", target, exc)
 
     def _grow(self, target: int, offload_kqv: bool) -> None:
         """Recreate the context with *target* cells and re-decode the cached
@@ -909,6 +945,13 @@ class LlamaSlotOps:
 
     def recreate(self, target: int, offload_kqv: bool) -> None:
         self._llm._recreate_slots_context(target, offload_kqv)
+
+    def rightsize(self, need: int, others: int) -> Optional[tuple[int, bool]]:
+        llm = self._llm
+        plan = llm._rightsize_plan(need, others)
+        if plan is not None:
+            llm._log_rightsize(*plan)
+        return plan
 
     def n_batch(self) -> int:
         return min(self.capacity() or BATCH_CAP, BATCH_CAP)

@@ -30,6 +30,7 @@ from .. import shell_guard
 from ..parser import ToolCall
 from ..tools import ToolResult
 from ..tools.base import restricted_write_refusal
+from ..tools.diagnostics import DIAGNOSED_TOOLS
 from ..audit import SessionMode
 from .constants import (
     _CODE_EXTS, _GLOBAL_ERROR_ABORT, _MAX_SHELL_SCOPE_FLAGS,
@@ -703,10 +704,10 @@ class _ExecutionMixin:
                 or call.name in _PROJECT_MAP_TOOLS \
                 or call.name in _BROWSER_TOOLS:
             args["_session"] = self
-        # search_replace finds its own targets, so it is told whether this session
-        # is restricted (the RESTRICTED_UNWRITABLE_DIRS filter). Injected after the
-        # copy, so a model-supplied "_restricted" cannot win.
-        if call.name == "search_replace":
+        # search_replace and the diagnosed file tools are told whether this session
+        # is restricted. Injected after the copy, so a model-supplied "_restricted"
+        # cannot win.
+        if call.name == "search_replace" or call.name in DIAGNOSED_TOOLS:
             args["_restricted"] = self.restricted
         if call.name in (*_SHELL_EXEC_TOOLS, "fetch_url", "web_search", "generate_image") \
                 and self.mode == SessionMode.PRIVACY:

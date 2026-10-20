@@ -191,6 +191,17 @@ class GgufWorker(VramSizingMixin):
         return str(getattr(self._llm, "mtp_skipped", "") or "") if self._llm is not None else ""
 
     @property
+    def live_context(self) -> Optional[dict]:
+        """``{"n_ctx": int, "kv_in_vram": bool}`` for the loaded model's live
+        context: its size in tokens and whether its KV cache is in VRAM. None
+        with no model or no live context."""
+        llm = self._llm
+        if llm is None or not getattr(llm, "_ctx_ptr", None):
+            return None
+        return {"n_ctx": int(getattr(llm, "_ctx_capacity", 0) or 0),
+                "kv_in_vram": getattr(llm, "_offload_kqv", True) is not False}
+
+    @property
     def spec_report(self) -> Optional[dict]:
         """The loaded model's speculation report (LlamaCpp.speculation_report):
         its draft source, status and the last call's figures. None with no model."""
@@ -322,6 +333,7 @@ class GgufWorker(VramSizingMixin):
             "parallel_slots": self.parallel_slots,
             "parallel_note": str(getattr(self._llm, "parallel_note", "") or ""),
             "speculation": self.spec_report,
+            "context": self.live_context,
         }
         if meta["diffusion"]:
             meta["diffusion_capacity"] = int(getattr(self._llm, "_diffusion_capacity", 0) or 0)

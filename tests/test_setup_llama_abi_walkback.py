@@ -385,6 +385,7 @@ def _wire(monkeypatch, tmp_path, loads):
     monkeypatch.setattr(sl, "_recent_tags", lambda *a, **k: ["b300", "b299"])
     seq = iter(loads)
     monkeypatch.setattr(sl, "_native_loads_ok", lambda: next(seq))
+    monkeypatch.setattr(sl, "_native_gpu_loads_ok", lambda: (True, ""))
     monkeypatch.setattr(sl.sys.stdin, "isatty", lambda: False)
     return provisioned
 

@@ -198,7 +198,7 @@
           <span>
             <button id="toggle-params" class="composer-action" data-i18n="chat.parameters"><span class="btn-ic" data-icon="sliders"></span>parameters</button>
             &nbsp;&nbsp;
-            <button id="export-conv" class="composer-action" title="Download this conversation"
+            <button id="export-conv" class="composer-action" title="Save this conversation"
                     data-i18n-title="chat.exportTitle" data-i18n="chat.export"><span class="btn-ic" data-icon="export"></span>export</button>
             &nbsp;&nbsp;
             <button id="compact-conv" class="composer-action" title="Summarise older messages to free context"
@@ -811,11 +811,12 @@
                    reference on the page (D3), and it is redundant now that the two
                    pairs of controls self-distinguish as "(next load)" vs
                    "(running model)". -->
-              <div class="sub" data-i18n="settings.perf.help">Adjust the running model without a reload: how much of it is on the GPU,
-              and how large its context window is. Runtime &amp; GPU holds the persisted next-load
-              defaults; these apply right now. The VRAM figure is an estimate.</div>
+              <div class="sub" data-i18n="settings.perf.help">Adjust the running model: how much of it is on the GPU,
+              and how large its context window is. Apply saves these and reloads the running model
+              with them. The VRAM figure is an estimate.</div>
               <div id="perf-backend-row" class="sub perf-backend-row" data-i18n="settings.perf.backendLabel" hidden>Backend: <span id="perf-backend-value">-</span></div>
               <div id="perf-backend-warning" class="key-warn" hidden></div>
+              <div id="perf-backend-choice" class="key-warn" hidden></div>
               <div id="perf-backend-hint" class="perf-backend-hint" hidden>
                 <span data-i18n-rich="settings.perf.backendHint">An NVIDIA GPU was detected; the CUDA backend usually performs better than the
                 currently installed Vulkan backend. localm never switches this for you - pick
@@ -1198,6 +1199,13 @@
                 it never re-provisions on its own. A build that fails to load on this machine
                 is never kept: setup-llama walks back to an older one that does.</div>
                 <div id="runtime-update-status" class="sub" hidden></div>
+                <div id="runtime-choice" class="key-warn" hidden>
+                  <span id="runtime-choice-text"></span>
+                  <div class="actions">
+                    <button class="btn-primary" id="runtime-choice-retry"></button>
+                    <button class="btn-secondary" id="runtime-choice-keep"></button>
+                  </div>
+                </div>
                 <label for="runtime-backend" data-i18n="settings.runtime.backendLabel">Backend</label>
                 <select id="runtime-backend" style="max-width:340px">
                   <option value="" data-i18n="settings.runtime.optKeepBackend">Keep the installed backend</option>

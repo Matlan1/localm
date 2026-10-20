@@ -16,8 +16,13 @@ from fastapi import Depends, FastAPI, HTTPException
 
 from localm import scopes
 from localm.inference.http_server import require_fs_host, require_scope
-from localm.pathsafe import confined_name, reject_unsafe_path_string
-from localm.plugins.gui.web import FsMkdirRequest, FsRenameRequest, LogExportRequest
+from localm.pathsafe import check_plain_name, confined_name, reject_unsafe_path_string
+from localm.plugins.gui.web import (
+    FsMkdirRequest,
+    FsRenameRequest,
+    FsSaveTextRequest,
+    LogExportRequest,
+)
 
 # Serializes concurrent /api/app/rebuild-launcher requests. One process, one lock.
 _launcher_build_lock = threading.Lock()
@@ -30,6 +35,10 @@ _FS_LIST_CAP = 5000
 # enumerates drive letters instead). Module-level so a test can point it at a
 # disposable fixture directory.
 _POSIX_FS_ROOT = "/"
+
+# File types /api/fs/save-text writes, and the most it writes in one file.
+_SAVE_TEXT_EXTS = frozenset({".md", ".txt", ".json", ".patch"})
+_SAVE_TEXT_MAX_BYTES = 64 * 1024 * 1024
 
 
 def _norm_path_str(s: str) -> str:
@@ -463,6 +472,72 @@ def register(app: FastAPI, ctx) -> None:
         except OSError as e:
             raise HTTPException(500, f"Could not rename: {e}") from e
         return {"path": str(new_path), "parent": str(parent), "name": new_path.name}
+
+    @app.post("/api/fs/save-text",
+              dependencies=[Depends(require_scope(scopes.CONFIG_WRITE)),
+                            Depends(require_fs_host)])
+    def fs_save_text(req: FsSaveTextRequest):
+        """Write *content* as a new UTF-8 text file named *name* inside the
+        folder *path* (an export the GUI saves in a folder picked in its own
+        file picker). Same gating as fs_mkdir.
+
+        The name must end in one of ``_SAVE_TEXT_EXTS``. An existing file is
+        never overwritten: the file is created exclusively, and when the name is
+        taken, "<stem>-2<ext>" up to "<stem>-99<ext>" are tried in turn; 409 when
+        all are taken. *content* over ``_SAVE_TEXT_MAX_BYTES`` encoded is
+        refused with 413. Returns ``{path, parent, name}`` of the written file.
+
+        Plain `def`, NOT `async def`: is_dir/resolve/open all block."""
+        parent_raw = (req.path or "").strip()
+        name = (req.name or "").strip()
+        if not parent_raw:
+            raise HTTPException(400, "Missing folder")
+        if not name:
+            raise HTTPException(400, "Missing file name")
+        stem, dot, ext = name.rpartition(".")
+        if not dot or not stem or "." + ext.lower() not in _SAVE_TEXT_EXTS:
+            raise HTTPException(
+                400, "The file name must end in " + ", ".join(sorted(_SAVE_TEXT_EXTS)))
+        data = (req.content or "").encode("utf-8")
+        if len(data) > _SAVE_TEXT_MAX_BYTES:
+            raise HTTPException(413, "The text is too large to save")
+        try:
+            reject_unsafe_path_string(
+                parent_raw, reject_network_drives=not _network_drives_allowed())
+        except ValueError as e:
+            raise HTTPException(400, f"Invalid path: {e}") from e
+        parent = Path(parent_raw).expanduser()
+        if not parent.is_dir():
+            raise HTTPException(404, f"Not a directory: {parent_raw}")
+        parent = parent.resolve()
+        check_plain_name(name)
+        for n in range(1, 100):
+            candidate = name if n == 1 else f"{stem}-{n}.{ext}"
+            check_plain_name(candidate)
+            # A name taken under another case or an 8.3 alias counts as taken.
+            if (parent / candidate).exists():
+                continue
+            target = confined_name(parent, candidate)
+            try:
+                f = open(target, "xb")
+            except FileExistsError:
+                continue
+            except PermissionError as exc:
+                raise HTTPException(403, f"Permission denied: {candidate}") from exc
+            except OSError as e:
+                raise HTTPException(500, f"Could not save the file: {e}") from e
+            try:
+                with f:
+                    f.write(data)
+            except OSError as e:
+                # A failed write removes the partial file it created.
+                try:
+                    target.unlink()
+                except OSError:
+                    pass
+                raise HTTPException(500, f"Could not save the file: {e}") from e
+            return {"path": str(target), "parent": str(parent), "name": target.name}
+        raise HTTPException(409, f"'{name}' and its numbered variants already exist")
 
     @app.get("/api/fs/places", dependencies=[Depends(require_fs_host)])
     def fs_places():

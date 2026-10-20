@@ -168,6 +168,20 @@ _PIN_LOCK = threading.Lock()
 _CANCEL_LOCK = threading.Lock()
 _cancel_events: dict[str, set] = {}
 
+# The text of the error a generation reports when ``cancel_all`` stopped it.
+SERVER_CANCEL_TEXT = ("The reply was cut off: the model was unloaded or "
+                      "replaced while it was being generated.")
+
+
+class GenerationCancel(threading.Event):
+    """The cancel flag of one generation call. ``by_server`` is True once
+    ``cancel_all`` set it (an unload or a model switch), and stays False when
+    the call's own request set it (a client disconnect)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.by_server = False
+
 
 def register_cancel(model_name: str, event) -> None:
     """Make *event* reachable by ``cancel_all(model_name)`` for as long as the
@@ -200,6 +214,8 @@ def cancel_all(model_name: str) -> int:
     with _CANCEL_LOCK:
         events = list(_cancel_events.get(model_name, ()))
     for event in events:
+        if isinstance(event, GenerationCancel):
+            event.by_server = True
         event.set()
     return len(events)
 

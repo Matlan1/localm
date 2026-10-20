@@ -10,7 +10,8 @@ import { iconEl } from "./icons.js";
 import { COMPACT_KEEP, addMessageRow, audioPart, chat, chatBusy, chatParams, compactConversation, currentConv, isToolEvent, lsSetScoped, maybeCompactConversation, mountStatusIndicator, msgAudioClips, msgImages, msgText, newConversation, newToolEvent, noteLabel, removeStatusIndicator, renderAttachChips, renderChat, renderConvList, saveConversations, scopedKeyPrivate, setConversationPin, stripUserAudio, stripUserImages, syncPinModelToggle, updateStatusIndicator, wireParts } from "./chat.js";
 import { $, CHAT_SURFACE_HEADERS, GIB, TOOL_CALL_DELIM, authHeaders, autoGrow, confirmDanger, el, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setPreviewAllowed, splitThink, streamJob, stripThink, toast } from "./helpers.js";
 import { t } from "./i18n.js";
-import { modelCache, modelSelect } from "./models-sidebar.js";
+import { modelCache, modelSelect, reloadModel, toastLoadResult } from "./models-sidebar.js";
+import { pickPath, saveTextFs } from "./picker.js";
 import { execChatCommand, handleSlashSubmit } from "./slash.js";
 import { CORE_VIEWS, VIEWS, _applyActiveClasses, closeNav, showView } from "./tabs.js";
 
@@ -21,6 +22,7 @@ import { CORE_VIEWS, VIEWS, _applyActiveClasses, closeNav, showView } from "./ta
 export function _perfGiB(b) { return (Number(b) / GIB).toFixed(1); }
 
 export let _perfEstTimer = null;
+const PERF_ESTIMATE_AFTER_RELOAD_MS = 4000;
 export async function refreshPerfEstimate() {
   const gl = $("perf-gpu-layers"), ctx = $("perf-ctx"), out = $("perf-estimate");
   if (!gl || !ctx || !out) return;
@@ -35,8 +37,10 @@ export async function refreshPerfEstimate() {
     });
     out.replaceChildren();
     if (typeof d.free === "number") {
-      out.appendChild(document.createTextNode(
-        text + t("settings.perf.estimateFreeKnownSuffix", { free: _perfGiB(d.free) })));
+      const suffix = typeof d.held === "number"
+        ? t("settings.perf.estimateFreeHeldSuffix", { free: _perfGiB(d.free), held: _perfGiB(d.held) })
+        : t("settings.perf.estimateFreeKnownSuffix", { free: _perfGiB(d.free) });
+      out.appendChild(document.createTextNode(text + suffix));
       out.appendChild(iconEl(d.fits ? "check" : "warning", "btn-ic"));
       out.appendChild(document.createTextNode(
         t(d.fits ? "settings.perf.estimateFits" : "settings.perf.estimateMayNotFit")));
@@ -89,8 +93,23 @@ export function setupPerfCard() {
         body: JSON.stringify({ n_gpu_layers: glVal, n_ctx: Number(ctx.value) }),
       });
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
-      toast(t("settings.perf.savedNextLoad"));
-    } catch (e) { toast(t("settings.perf.saveFailedToast", { message: e.message }), true); }
+    } catch (e) {
+      toast(t("settings.perf.saveFailedToast", { message: e.message }), true);
+      return;
+    }
+    const model = modelCache.active;
+    if (!model) { toast(t("settings.perf.savedNextLoad")); return; }
+    toast(t("settings.perf.reloadingToast", { model }));
+    try {
+      const res = await reloadModel(model);
+      if (res.status === "in_use") toast(t("settings.perf.reloadBusyToast", { model }), true);
+      else if (res.status === "cancelled" || res.status === "superseded") toast(t("settings.perf.savedNextLoad"));
+      else toastLoadResult(res, model);
+    } catch (e) {
+      toast(t("settings.perf.reloadFailedToast", { model, message: e.message }), true);
+    }
+    // Re-reads the estimate once the free-VRAM reading has caught up with the reload.
+    setTimeout(refreshPerfEstimate, PERF_ESTIMATE_AFTER_RELOAD_MS);
   };
   // Seed slider positions from the current config, then estimate.
   fetch("/v1/config", { headers: authHeaders() })
@@ -123,22 +142,60 @@ const BACKEND_HINT_DISMISSED_KEY = "localm.backendHintDismissed";
  *  Informational only - this never changes what backend is actually
  *  installed; only `localm setup-llama` (a user-run command) does that. */
 export function shouldShowBackendHint(data, dismissed) {
-  return !dismissed && !!data && data.vendor === "nvidia" && data.installed === "vulkan";
+  return !dismissed && !!data && data.vendor === "nvidia" && data.installed === "vulkan"
+    && !data.requested;
 }
 
-/** Read-only "Backend: <value>" row, plus the dismissable hint when an NVIDIA
- *  GPU is present but Vulkan (not CUDA) is what is actually installed. Never
+/** The note saying localm loads backend *inUse* from an override (*source*
+ *  "binary_dir" or "LLAMA_CPP_LIB") instead of the *installed* runtime, or null
+ *  when the installed runtime is the one loaded. Pure. */
+export function backendOverrideNote(inUse, source, installed) {
+  if (source !== "binary_dir" && source !== "LLAMA_CPP_LIB") return null;
+  return t("settings.perf.backendOverride", {
+    backend: inUse || "?",
+    source: t(source === "binary_dir"
+      ? "settings.perf.backendOverrideBinaryDir" : "settings.perf.backendOverrideEnv"),
+    installed: installed || "?",
+  });
+}
+
+/** The notes under the "Backend:" row for an /api/backend payload, as an array
+ *  of strings (empty when the chosen, installed and loaded backends agree):
+ *  the runtime localm loads when an override supplies it instead of the
+ *  installed one, and the user's chosen backend when a different one is
+ *  installed. Pure, so the wording is testable without a DOM. */
+export function backendChoiceNotes(data) {
+  const notes = [];
+  if (!data) return notes;
+  const override = backendOverrideNote(data.in_use, data.in_use_source, data.installed);
+  if (override) notes.push(override);
+  if (data.requested && data.installed && data.requested !== data.installed) {
+    notes.push(data.requested_reason
+      ? t("settings.perf.backendChoice", { requested: data.requested,
+          installed: data.installed, reason: data.requested_reason })
+      : t("settings.perf.backendChoiceNoReason", { requested: data.requested,
+          installed: data.installed }));
+  }
+  return notes;
+}
+
+/** Read-only "Backend: <value>" row (the backend localm loads), the
+ *  backendChoiceNotes() line under it, plus the dismissable hint when an NVIDIA
+ *  GPU is present but Vulkan (not CUDA) is what is actually installed and no
+ *  other choice is recorded. Never
  *  auto-switches anything - localm never re-provisions a user's backend on
  *  its own (see updater._installed_backend()); this only ever informs. */
 export async function refreshBackendInfo() {
   const row = $("perf-backend-row"), valueEl = $("perf-backend-value"), hint = $("perf-backend-hint");
   const warnEl = $("perf-backend-warning");
+  const choiceEl = $("perf-backend-choice");
   if (!row || !valueEl || !hint) return;
   try {
     const r = await fetch("/api/backend", { headers: authHeaders() });
     if (!r.ok) {
       row.hidden = true; hint.hidden = true;
       if (warnEl) warnEl.hidden = true;
+      if (choiceEl) choiceEl.hidden = true;
       return;
     }
     const data = await r.json();
@@ -149,8 +206,13 @@ export async function refreshBackendInfo() {
       warnEl.textContent = data.warning || "";
       warnEl.hidden = !data.warning;
     }
-    if (!data.installed) { row.hidden = true; hint.hidden = true; return; }
-    valueEl.textContent = data.installed;
+    if (choiceEl) {
+      const notes = backendChoiceNotes(data);
+      choiceEl.textContent = notes.join(" ");
+      choiceEl.hidden = !notes.length;
+    }
+    if (!data.installed && !data.in_use) { row.hidden = true; hint.hidden = true; return; }
+    valueEl.textContent = data.in_use || data.installed;
     row.hidden = false;
     let dismissed = false;
     try { dismissed = localStorage.getItem(BACKEND_HINT_DISMISSED_KEY) === "1"; }
@@ -159,6 +221,7 @@ export async function refreshBackendInfo() {
   } catch {   // server unreachable - stay hidden, not broken
     row.hidden = true; hint.hidden = true;
     if (warnEl) warnEl.hidden = true;
+    if (choiceEl) choiceEl.hidden = true;
   }
 }
 
@@ -981,6 +1044,14 @@ const _TOOL_CALL_TAGS = new RegExp(TOOL_CALL_DELIM, "g");
 // How the server's text for a failed generation begins (inference_error_text,
 // localm/inference/http_server.py).
 const _INFERENCE_ERROR_MARK = "[inference error:";
+
+/** *text* without its last "[inference error: ...]" block and anything after
+ *  it, trimmed at the end. */
+export function stripInferenceError(text) {
+  const s = String(text || "");
+  const at = s.lastIndexOf(_INFERENCE_ERROR_MARK);
+  return at < 0 ? s : s.slice(0, at).trimEnd();
+}
 
 /** *text* with every web tool call removed, in every dialect parseWebCalls
  *  reads (closed wrappers, an unclosed trailing wrapper, stray wrapper tags,
@@ -2481,7 +2552,14 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     if (m.role === "assistant" && typeof m.content === "string") {
       const next = conv.messages[i + 1];
       const answered = isToolEvent(next) && next.tool !== "note";
-      return { role: m.role, content: assistantHistoryText(m.content, answered) };
+      let text = assistantHistoryText(m.content, answered);
+      // A failed reply that the next message continues is sent without its
+      // trailing inference-error text.
+      if (m.failed && next && next.continues) text = stripInferenceError(text);
+      return { role: m.role, content: text };
+    }
+    if (m.role === "user" && m.continues && typeof m.content === "string") {
+      return { role: m.role, content: m.content + "\n\n[" + CONTINUE_PROMPT + "]" };
     }
     return {
       role: m.role, content: wireParts(m.content),
@@ -2849,6 +2927,13 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       // Leave the rendered error bubble in place instead.
       return outcome;
     }
+    if (!finishReason) {
+      // The stream ended with no finish reason and no text: the live bubble
+      // keeps a cut-off marker and nothing is persisted.
+      renderMarkdown(liveBody, "*[" + t("chat.reply.cutEmpty") + "]*");
+      toast(t("chat.reply.cutToast"), true);
+      return outcome;
+    }
     // A successful-but-empty completion: no error to show, just drop the
     // stray empty live bubble by re-rendering from (unchanged) history.
     renderChat();
@@ -2890,6 +2975,11 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     // The reply was cut by the max-tokens budget, not finished by the model.
     reply.truncated = true;
     toast("Reply hit the max-tokens limit - raise “Max tokens” in parameters, or reply “continue”", true);
+  } else if (!finishReason) {
+    // The stream ended without a finish reason: the reply is persisted as cut
+    // off, never as a finished reply.
+    reply.cut = true;
+    toast(t("chat.reply.cutToast"), true);
   }
   // F11: record which remembered facts steered this reply so the transcript can
   // show a "used N memories" chip (survives reload; opens the memory modal).
@@ -2916,6 +3006,8 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   conv.messages.push(reply);
   saveConversations(conv);
   renderChat();
+  // A cut-off reply is partial: it is never spoken or parsed for tool calls.
+  if (reply.cut) return outcome;
 
   // Web-access loop: with the toggle on, a web call in the reply is run and the
   // model continues, until it answers or the loop stops looking things up (a
@@ -3028,6 +3120,76 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   }
   return outcome;
 }
+
+/** Whole messages that ask the model to go on with its previous reply, in
+ *  several languages, compared by ``continueKey``. */
+export const CONTINUE_PHRASES = new Set([
+  "continue", "go on", "keep going", "carry on", "resume", "more",
+  "continue writing", "keep writing", "continue the reply",
+  "continue your reply", "continue your answer",
+  "weiter", "mach weiter", "weitermachen", "fortfahren", "fahre fort", "fahr fort",
+  "schreib weiter", "weiterschreiben", "weiter so", "mehr",
+  "continúa", "continua", "continuar", "sigue", "siga", "sigue escribiendo",
+  "continuez", "continuer", "poursuis", "poursuivez", "la suite",
+  "vai avanti", "prosegui", "prossiga", "ga door", "ga verder", "verder", "doorgaan",
+  "kontynuuj", "dalej", "pokračuj", "folytasd", "jatka", "fortsätt", "fortsæt",
+  "fortsett", "devam","tiếp tục", "lanjut", "lanjutkan",
+  "продолжай", "продолжи", "продолжить", "дальше", "продовжуй", "далі",
+  "συνέχισε", "استمر", "أكمل", "जारी रखें", "続けて", "続き", "続けてください",
+  "继续", "繼續", "계속", "계속해", "계속해줘", "ต่อ",
+]);
+
+/** Polite words dropped from either end of a message before it is compared
+ *  with CONTINUE_PHRASES. */
+const CONTINUE_POLITE = ["please", "pls", "plz", "bitte", "por favor", "per favore",
+  "s'il te plaît", "s'il vous plaît", "alsjeblieft", "proszę", "пожалуйста",
+  "lütfen", "請", "请", "ok", "okay", "yes", "ja", "sí", "oui"];
+
+/** *text* lowercased with surrounding whitespace, punctuation and polite
+ *  words removed, for comparison with CONTINUE_PHRASES. */
+export function continueKey(text) {
+  let s = String(text ?? "").normalize("NFC").toLowerCase()
+    .replace(/[\s.,;:!?¡¿…。！？、"'“”‘’()[\]{}*_~-]+$/u, "")
+    .replace(/^[\s.,;:!?¡¿…。！？、"'“”‘’()[\]{}*_~-]+/u, "")
+    .replace(/\s+/g, " ");
+  let changed = true;
+  while (changed && s) {
+    changed = false;
+    for (const w of CONTINUE_POLITE) {
+      if (s === w) return "";
+      for (const sep of [" ", ", ", ","]) {
+        if (s.startsWith(w + sep)) { s = s.slice(w.length + sep.length).trim(); changed = true; }
+        if (s.endsWith(sep + w)) { s = s.slice(0, -(w.length + sep.length)).trim(); changed = true; }
+      }
+    }
+    s = s.replace(/[\s.,;:!?¡¿…。！？、]+$/u, "");
+  }
+  return s;
+}
+
+/** Whether *text* as a whole asks the model to continue its previous reply. */
+export function isContinueRequest(text) {
+  const key = continueKey(text);
+  return !!key && CONTINUE_PHRASES.has(key);
+}
+
+/** Index of the assistant reply a new user message would follow (skipping
+ *  injected note rows and tool events), or -1 when the latest such message
+ *  is not an assistant reply. */
+export function lastReplyIndex(conv) {
+  const ms = (conv && conv.messages) || [];
+  for (let i = ms.length - 1; i >= 0; i--) {
+    const m = ms[i];
+    if (m.tag || isToolEvent(m)) continue;
+    return m.role === "assistant" ? i : -1;
+  }
+  return -1;
+}
+
+/** The instruction sent with a continue request, after the user's words. */
+export const CONTINUE_PROMPT =
+  "Continue your previous reply from exactly where it ends. Do not repeat, " +
+  "restart or summarise what you already wrote.";
 
 /** Longest excerpt injected for one knowledge hit, in characters. */
 export const KB_EXCERPT_CHARS = 1500;
@@ -3272,7 +3434,10 @@ export async function dispatchChatTurn(conv, text, attachments = [], docs = [], 
   } else {
     content = text || "Please read the attached document(s).";
   }
-  conv.messages.push({ role: "user", content });
+  const continues = typeof content === "string" && !(docs && docs.length) &&
+    isContinueRequest(text) && lastReplyIndex(conv) >= 0;
+  conv.messages.push(continues ? { role: "user", content, continues: true }
+                               : { role: "user", content });
 
   if (isFirstMessage) {
     conv.title = text.slice(0, 42) + (text.length > 42 ? "…" : "") ||
@@ -3284,7 +3449,7 @@ export async function dispatchChatTurn(conv, text, attachments = [], docs = [], 
 
   return runChatTurn(async (signal) => {
     const kb = $("p-kb") ? $("p-kb").value : "";
-    if (kb && text) {
+    if (kb && text && !isContinueRequest(text)) {
       const box = $("chat-messages");
       const { body: liveBody, row: liveRow } = addMessageRow(box, "assistant", "");
       mountStatusIndicator(liveBody, t("chat.status.searchingKnowledge"));
@@ -3434,12 +3599,44 @@ export function exportConversation() {
       lines.push(`**${exportLabel(m)}:**`, "", msgText(m), "");
     }
   }
-  const blob = new Blob([lines.join("\n")], { type: "text/markdown" });
+  let stem = conv.title.replace(/[^\w\- ]+/g, "").trim().replace(/\s+/g, "_") || "conversation";
+  // A Windows device name (con, nul, com1 ...) cannot be a file name there.
+  if (/^(con|prn|aux|nul|com\d|lpt\d)$/i.test(stem)) stem += "_chat";
+  const name = stem + ".md";
+  return saveTextFile(name, lines.join("\n"), "text/markdown");
+}
+
+/** localStorage key of the folder the last in-app save went to. */
+const EXPORT_DIR_KEY = "localm.exportDir";
+
+/** Saves *text* as the file *name*. A client with host filesystem access
+ *  picks the folder in the app's own file picker (starting in the folder of
+ *  the last save) and the server writes the file; cancelling the picker saves
+ *  nothing. Any other client gets a browser download of type *mime*. */
+export function saveTextFile(name, text, mime = "text/plain") {
+  if (caps.fsAccess === "host") return saveTextInApp(name, text);
+  const blob = new Blob([text], { type: mime });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
-  a.download = conv.title.replace(/[^\w\- ]+/g, "").trim().replace(/\s+/g, "_") + ".md";
+  a.download = name;
   a.click();
   URL.revokeObjectURL(a.href);
+}
+
+async function saveTextInApp(name, text) {
+  const dir = await pickPath({
+    mode: "dir", title: t("chat.export.pickTitle", { name }),
+    startPath: safeStorageGet(EXPORT_DIR_KEY) || "",
+    confirmLabel: t("chat.export.saveHere"),
+  });
+  if (!dir) return;
+  try {
+    const saved = await saveTextFs(dir, name, text);
+    lsSetScoped(EXPORT_DIR_KEY, saved.parent || dir);
+    toast(t("chat.export.saved", { path: saved.path }));
+  } catch (e) {
+    toast(t("chat.export.failed", { name, message: e.message }), true);
+  }
 }
 
 $("chat-send").onclick = () => {

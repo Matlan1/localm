@@ -27,6 +27,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   says to run the same command again to continue from there.
 - **`localm coder doctor` and `/doctor`.** One command checks that the model server answers and accepts the key, whether the session uses native tool calls or grammar-constrained ones, the context window against the size of the repo map, the git state, whether the verify command resolves, and that each configured MCP server starts. It exits 1 when a check fails and prints `--output-format json` or `jsonl` for scripts.
 - **`--output-format jsonl` for unattended coder runs.** `localm coder TASK --output-format jsonl` writes every agent event (tool calls and results, tokens, turns) to stdout as one JSON object per line as it happens, then a closing `final` line with the outcome; everything else the CLI prints goes to stderr.
+- **The coder shows lint errors right after it edits a Python file.** When `ruff` is on your
+  PATH, a write or edit to a `.py` file appends up to 10 `ruff` findings (unused imports,
+  undefined names) to the result so the agent can fix them in the same turn. Off with
+  `diagnostics = false` in `.localcoder/config.toml`.
 
 ### Changed
 
@@ -54,9 +58,46 @@ permanent public record of what shipped and are never rewritten; the in-progress
   after a line break) was not checked and could run. Each line is now checked like a command
   after `;`.
 - **`localm coder TASK --output-format json` prints only the JSON document on stdout.** The reply text and the session record used to be printed on stdout ahead of the document, so parsing stdout failed; they now go to stderr.
+- **A chosen llama.cpp backend is no longer replaced without your say.** Choosing CUDA in the
+  installer or in Settings could end with Vulkan installed and shown as if it were your pick. Now
+  CUDA is installed as asked; when it cannot be used (an old driver, no usable NVIDIA GPU, a
+  library that will not load, or a CUDA build that would only run on the CPU), setup says exactly
+  why and installs Vulkan only so localm keeps working. Your choice and the reason stay on record:
+  `localm doctor` and Settings show "you chose cuda, vulkan is installed", with buttons to retry
+  CUDA or keep Vulkan, and `localm update` keeps the record. An old NVIDIA driver now asks before
+  Vulkan is installed.
+- **Settings and `localm doctor` show the llama.cpp runtime that is actually loaded.** When the
+  llama.cpp binary folder setting or `LLAMA_CPP_LIB` points at another build, localm loads that
+  build instead of the one setup installed; setup, `localm doctor` and Settings now say so.
 - **Image prompts with letters such as ß work with the native image backend on Windows.** A prompt
   containing ß failed with "failed to encode prompt", and letters such as ä, ö and ü reached the
   model garbled; the prompt now reaches stable-diffusion.cpp unchanged.
+- **VRAM is given back and used again during a conversation.** A context that had grown for a
+  long conversation kept its size and its VRAM after the conversation was compacted; it now
+  shrinks once the conversation needs at most half of it. A context whose cache had to move to
+  system RAM because VRAM was short, where replies run several times slower, now moves back to
+  VRAM once there is room.
+- **A model loaded partly on the CPU moves onto the GPU once VRAM frees up.** With automatic GPU
+  layers, a model that loaded partly on the CPU because another program held VRAM is reloaded
+  on the GPU at a later request once enough VRAM is free. An explicit GPU layer count is never
+  changed.
+- **The Live tuning VRAM estimate counts the running model's own memory.** The VRAM the running
+  model holds was counted as used, so settings that fit read "may not fit"; it is now shown
+  beside the free VRAM and counted as available. Apply now reloads the running model with the
+  new settings instead of only saving them for the next load.
+- **A chat reply that was cut off says so.** A reply that stopped because the model was unloaded or
+  replaced while it was writing, or because the reply stream ended before the model finished, used
+  to look like a finished reply. It now carries a cut-off note in the chat, and API clients get
+  `finish_reason: "error"` with the reason instead of `"stop"`.
+- **"continue" carries on with the previous reply.** "continue", "weiter", "continúa" and the same
+  word in other languages continue the last reply instead of searching the selected Knowledge
+  collection for the word.
+
+### Changed
+
+- **Export saves inside the app.** On the computer running localm, Export (the chat's, and the
+  coder's session, result and patch exports) asks for a folder in the app's own file browser and
+  saves there, without the browser's download prompt. Other devices still download the file.
 
 ## [0.3.0] - 2026-10-14
 
