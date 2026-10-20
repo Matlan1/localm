@@ -1041,12 +1041,33 @@ _GIT_WRITING_FLAGS = ("--output", "-o", "--ext-diff", "-d", "-D", "-m", "-M",
 _EXEC_OR_WRITE_FLAGS: dict[str, tuple[str, ...]] = {
     "rg": ("--pre",),
     "sort": ("-o", "--output", "--compress-program"),
-    "tree": ("-o",),
+    "tree": ("-o", "--output"),
 }
 
 _FIND_ACTIONS = frozenset({"-exec", "-execdir", "-ok", "-okdir", "-delete",
                            "-fprint", "-fprint0", "-fprintf", "-fls"})
 _UNSAFE_CHARS = ("$", "`", "<", ">", "%")
+
+
+def _plain_operand(tok: str) -> bool:
+    """False for operand shapes the lexical path check cannot place: a tilde
+    form (~user), a drive-relative path (C:foo), an NTFS stream (a.txt:s) or
+    any other colon past a drive letter, and a UNC or device path."""
+    if tok.startswith("~") or tok.startswith("\\\\") or tok.startswith("//"):
+        return False
+    # Brace expansion can produce any path; a glob in a component that starts
+    # with a dot (".*") can match "..".
+    if any(ch in tok for ch in "{}["):
+        return False
+    for part in tok.replace("\\", "/").split("/"):
+        if part.startswith(".") and any(ch in part for ch in "*?"):
+            return False
+    colon = tok.find(":")
+    if colon == -1:
+        return True
+    is_drive_absolute = (colon == 1 and tok[0].isalpha() and len(tok) > 2
+                         and tok[2] in "/\\")
+    return is_drive_absolute and ":" not in tok[2:]
 
 
 def _inside(norm: Optional[str], root: str) -> bool:
@@ -1079,6 +1100,8 @@ def is_read_only(command: str, cwd: Optional[Path | str]) -> bool:
     caller asks the user as before. See test_read_only_shell_commands.
     """
     if not command or not command.strip() or cwd is None:
+        return False
+    if "\n" in command or "\r" in command:
         return False
     root = _canon(str(cwd))
     if root is None:
@@ -1115,6 +1138,8 @@ def is_read_only(command: str, cwd: Optional[Path | str]) -> bool:
         else:
             return False
         for tok in operands:
+            if not _plain_operand(tok):
+                return False
             norm = _norm_target(tok, current)
             if norm is None or not _inside(norm, root) or _secret_kind(norm):
                 return False

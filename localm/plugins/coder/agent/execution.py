@@ -605,11 +605,16 @@ class _ExecutionMixin:
         )
         # session_allowable already excludes a failed shell check, a lenient
         # call and always_confirm, which the read-only shortcut honours too.
-        if (needs_confirm and session_allowable and call.name == "run_shell"
+        # Only where someone could have been asked: a run with no way to ask
+        # still denies, as before.
+        can_ask = interactive or self.confirm_handler is not None
+        if (needs_confirm and can_ask and session_allowable and call.name == "run_shell"
                 and self._read_only_shell(call)):
             needs_confirm = False
+            note = "read-only command inside the project: ran without asking"
             if interactive:
-                print_info("  (read-only command inside the project: ran without asking)")
+                print_info(f"  ({note})")
+            self._emit("info", text=f"{call.name}: {note}")
         session_allowed = getattr(self, "_session_allowed", None)
         if session_allowed is None:
             session_allowed = self._session_allowed = set()
@@ -980,7 +985,9 @@ class _ExecutionMixin:
             setting = load_project_config(self.cwd).get("auto_allow_read_only_shell", True)
         except Exception:
             return False
-        return setting is not False
+        if isinstance(setting, str):
+            return setting.strip().lower() not in ("false", "0", "no", "off")
+        return bool(setting)
 
     @staticmethod
     def _spins_while_running(name: str) -> bool:

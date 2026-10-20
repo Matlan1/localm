@@ -40,9 +40,13 @@ def test_read_only_commands_inside_the_project(command):
     "env ls", "find . -delete", "find . -exec rm {} ;", "sort -o out.txt in.txt",
     "uniq in.txt out.txt", "rg --pre cat x", "rg --pre=cat x",
     "sort --compress-program=gzip a.txt", "sort -oout.txt a.txt", "tree -o out.txt",
-    "git grep -O foo", "git grep --open-files-in-pager=vim foo", "python script.py", "npm test", "pytest", "curl x",
+    "git grep -O foo", "git grep --open-files-in-pager=vim foo",
+    "python script.py", "npm test", "pytest", "curl x",
     "sed -n 1p a.txt", "awk '{print}' a.txt", "xargs cat", "ls; rm x",
-    "type%USERPROFILE%\\secrets.txt", "", "   ",
+    "cat ~root/.bashrc", "type C:foo", "type a.txt:stream", "tree --output x",
+    "ls\nrm -rf x", "ls\r\nrm x", "cat //server/share/x",
+    "cat {/etc/passwd,x}", "cat .*/x", "cat ./.*", "cat [ab].txt", "ls ..?",
+    "type %USERPROFILE%\\secrets.txt", "", "   ",
 ])
 def test_anything_unproven_is_not_read_only(command):
     assert is_read_only(command, PROJECT) is False, command
@@ -105,13 +109,32 @@ def test_always_confirm_and_lenient_calls_still_ask(tmp_path, monkeypatch):
     assert len(prompts) == 2
 
 
-def test_unattended_run_still_denies_without_confirmation_unless_read_only(tmp_path):
+def test_a_run_that_cannot_ask_still_denies_read_only_commands(tmp_path):
     (tmp_path / "a.txt").write_text("hello\n", encoding="utf-8")
     agent = _make_agent(tmp_path)
+    res = agent._execute_tool(_shell("cat a.txt"), interactive=False)
+    assert not res.ok and "requires confirmation" in res.output
+
+
+def test_gui_session_runs_read_only_without_a_card_and_says_so(tmp_path):
+    (tmp_path / "a.txt").write_text("hello\n", encoding="utf-8")
+    agent = _make_agent(tmp_path)
+    asked, events = [], []
+    agent.confirm_handler = lambda call: asked.append(call.name) or False
+    agent.on_event = events.append
     ok = agent._execute_tool(_shell("cat a.txt"), interactive=False)
     denied = agent._execute_tool(_shell("mkdir out"), interactive=False)
-    assert ok.ok
-    assert not denied.ok and "requires confirmation" in denied.output
+    assert ok.ok and asked == ["run_shell"] and not denied.ok
+    assert any("ran without asking" in str(e.get("text", "")) for e in events)
+
+
+@pytest.mark.parametrize("value", ["false", "0", 0, "off", False])
+def test_setting_off_spellings(tmp_path, monkeypatch, value):
+    (tmp_path / "a.txt").write_text("hello\n", encoding="utf-8")
+    agent = _make_agent(tmp_path)
+    monkeypatch.setattr("localm.plugins.coder.project_config.load_project_config",
+                        lambda cwd: {"auto_allow_read_only_shell": value})
+    assert agent._read_only_shell(_shell("cat a.txt")) is False
 
 
 def test_setting_turns_it_off(tmp_path, monkeypatch):
