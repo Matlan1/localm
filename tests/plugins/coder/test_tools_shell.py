@@ -12,6 +12,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
+from tests.plugins.coder.launch_stub import patch_launch
 from localm.plugins.coder.tools import (
     tool_run_shell,
     tool_run_tests,
@@ -45,9 +46,7 @@ class TestRunShell:
         return p
 
     def _patch_run(self, **kwargs):
-        return patch(
-            "localm.plugins.coder.tools.subprocess.run",
-            return_value=self._make_proc(**kwargs),
+        return patch_launch(return_value=self._make_proc(**kwargs),
         )
 
     def test_success_returns_ok(self, tmp_path):
@@ -74,9 +73,7 @@ class TestRunShell:
         assert "warning!" in r.output
 
     def test_timeout_returns_error(self, tmp_path):
-        with patch(
-            "localm.plugins.coder.tools.subprocess.run",
-            side_effect=subprocess.TimeoutExpired(["cmd"], 30),
+        with patch_launch(side_effect=subprocess.TimeoutExpired(["cmd"], 30),
         ):
             r = tool_run_shell(tmp_path, "sleep 100", timeout=30)
         assert not r.ok
@@ -106,7 +103,7 @@ class TestRunShell:
             captured_env.update(kwargs.get("env") or {})
             return self._make_proc(stdout="ok")
 
-        with patch("localm.plugins.coder.tools.subprocess.run", side_effect=fake_run):
+        with patch_launch(side_effect=fake_run):
             tool_run_shell(tmp_path, "echo hi", _privacy=True)
 
         assert captured_env.get("HISTFILE") in ("NUL", "/dev/null")
@@ -120,7 +117,7 @@ class TestRunShell:
             captured_cmd.extend(cmd)
             return self._make_proc(stdout="")
 
-        with patch("localm.plugins.coder.tools.subprocess.run", side_effect=fake_run):
+        with patch_launch(side_effect=fake_run):
             tool_run_shell(tmp_path, "git status")   # git resolves via PATH
 
         # Must NOT go through cmd/sh - first token names the executable.
@@ -140,7 +137,7 @@ class TestRunShell:
             captured["cmd"] = cmd
             return self._make_proc(stdout="hi\n")
 
-        with patch("localm.plugins.coder.tools.subprocess.run", side_effect=fake_run), \
+        with patch_launch(side_effect=fake_run), \
              patch("shutil.which", return_value=None):
             r = tool_run_shell(tmp_path, "echo hi")
 
@@ -155,7 +152,7 @@ class TestRunShell:
             captured["cmd"] = cmd
             return self._make_proc(stdout="")
 
-        with patch("localm.plugins.coder.tools.subprocess.run", side_effect=fake_run):
+        with patch_launch(side_effect=fake_run):
             tool_run_shell(tmp_path, "echo hi | cat")
 
         launched = captured["cmd"]
@@ -381,9 +378,7 @@ class TestRunTests:
         return p
 
     def _patch_run(self, **kwargs):
-        return patch(
-            "localm.plugins.coder.tools.subprocess.run",
-            return_value=self._make_proc(**kwargs),
+        return patch_launch(return_value=self._make_proc(**kwargs),
         )
 
     def test_auto_runner_runs_tests(self, tmp_path):
@@ -399,7 +394,7 @@ class TestRunTests:
             captured.extend(cmd)
             return self._make_proc(stdout="2 passed")
 
-        with patch("localm.plugins.coder.tools.subprocess.run", side_effect=fake_run):
+        with patch_launch(side_effect=fake_run):
             tool_run_tests(tmp_path, runner="pytest")
         assert "pytest" in " ".join(captured)
 
@@ -410,18 +405,14 @@ class TestRunTests:
         assert "failed" in r.summary
 
     def test_timeout_returns_error(self, tmp_path):
-        with patch(
-            "localm.plugins.coder.tools.subprocess.run",
-            side_effect=subprocess.TimeoutExpired(["pytest"], 120),
+        with patch_launch(side_effect=subprocess.TimeoutExpired(["pytest"], 120),
         ):
             r = tool_run_tests(tmp_path)
         assert not r.ok
         assert "timed out" in r.output.lower()
 
     def test_runner_not_found_returns_error(self, tmp_path):
-        with patch(
-            "localm.plugins.coder.tools.subprocess.run",
-            side_effect=FileNotFoundError,
+        with patch_launch(side_effect=FileNotFoundError,
         ):
             r = tool_run_tests(tmp_path, runner="pytest")
         assert not r.ok
@@ -439,7 +430,7 @@ class TestRunTests:
             captured.extend(cmd)
             return self._make_proc(stdout="ok")
 
-        with patch("localm.plugins.coder.tools.subprocess.run", side_effect=fake_run):
+        with patch_launch(side_effect=fake_run):
             tool_run_tests(tmp_path, runner="pytest", path="tests/")
         assert "tests/" in captured
 
@@ -450,7 +441,7 @@ class TestRunTests:
             captured.extend(cmd)
             return self._make_proc(stdout="ok")
 
-        with patch("localm.plugins.coder.tools.subprocess.run", side_effect=fake_run):
+        with patch_launch(side_effect=fake_run):
             tool_run_tests(tmp_path, runner="pytest", extra_args="-v -k test_foo")
         assert "-v" in captured
         assert "-k" in captured
@@ -491,8 +482,7 @@ class TestCallerArgsReachTheRunner:
             p.stdout, p.stderr, p.returncode = "ok", "", 0
             return p
 
-        with patch("localm.plugins.coder.tools.subprocess.run",
-                   side_effect=fake_run):
+        with patch_launch(side_effect=fake_run):
             tool_run_tests(tmp_path, **kwargs)
         assert len(captured) == 1, captured
         return captured[0]

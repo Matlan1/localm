@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 from unittest.mock import MagicMock, patch
 
+from tests.plugins.coder.launch_stub import patch_launch
 from localm.plugins.coder.audit import SessionMode
 from localm.plugins.coder.privacy import (
     subprocess_privacy_env,
@@ -385,7 +386,7 @@ class TestRunShellPrivacy:
             m.stderr = ""
             return m
 
-        with patch("localm.plugins.coder.tools.subprocess.run", side_effect=fake_run):
+        with patch_launch(side_effect=fake_run):
             tool_run_shell(tmp_path, "echo hi", _privacy=True)
 
         import os
@@ -409,7 +410,7 @@ class TestRunShellPrivacy:
             m.stderr = ""
             return m
 
-        with patch("localm.plugins.coder.tools.subprocess.run", side_effect=fake_run):
+        with patch_launch(side_effect=fake_run):
             tool_run_shell(tmp_path, "echo hi", _privacy=False)
 
         assert captured_kwargs.get("env") == user_command_env()
