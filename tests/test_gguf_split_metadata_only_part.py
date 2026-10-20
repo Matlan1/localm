@@ -329,7 +329,7 @@ class TestLoadFailureVramHint:
                 patch.object(GgufBackend, "_check_vram", lambda self_b: None), \
                 patch.object(GgufBackend, "_requested_parallel_slots", lambda self_b: 1), \
                 patch.object(GgufBackend, "_split_free_total_bytes",
-                             return_value=(10 * free, 10 * free, 2)), \
+                             return_value=(free, 10 * free, 2)), \
                 patch.object(GgufBackend, "_load_native",
                              side_effect=RuntimeError("worker died")):
             try:
