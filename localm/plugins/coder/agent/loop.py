@@ -266,6 +266,9 @@ class _LoopMixin:
 
         def start_deferred_mcp(self) -> list: ...
 
+        # Set by Agent (core.py) through _ContextMixin.
+        def _note_typed_request(self, text) -> None: ...
+
         def report_deferred_mcp(self, interactive: bool) -> None: ...
 
     def run_task(self, task: str, attachments: str = "") -> str:
