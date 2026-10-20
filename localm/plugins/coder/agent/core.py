@@ -694,7 +694,7 @@ class Agent(
         if names:
             self._rebuild_system_prompt()
             if getattr(self.backend, "native_tools", False):
-                self.backend.set_tools(self._native_tool_defs())
+                getattr(self.backend, "set_tools")(self._native_tool_defs())
         return names
 
     def report_deferred_mcp(self, interactive: bool) -> None:

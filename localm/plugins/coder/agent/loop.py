@@ -10,7 +10,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import localm.plugins.coder.agent as _agent
 from ..display import (
@@ -260,6 +260,13 @@ class _LoopMixin:
 
         def _add_user_with_plan_note(self, content) -> None: ...
         def _end_plan_autorun(self) -> None: ...
+
+        # Set by Agent (core.py).
+        parent: Any
+
+        def start_deferred_mcp(self) -> list: ...
+
+        def report_deferred_mcp(self, interactive: bool) -> None: ...
 
     def run_task(self, task: str, attachments: str = "") -> str:
         """
