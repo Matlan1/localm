@@ -21,6 +21,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   says to run the same command again to continue from there.
 - **`localm coder doctor` and `/doctor`.** One command checks that the model server answers and accepts the key, whether the session uses native tool calls or grammar-constrained ones, the context window against the size of the repo map, the git state, whether the verify command resolves, and that each configured MCP server starts. It exits 1 when a check fails and prints `--output-format json` or `jsonl` for scripts.
 - **`--output-format jsonl` for unattended coder runs.** `localm coder TASK --output-format jsonl` writes every agent event (tool calls and results, tokens, turns) to stdout as one JSON object per line as it happens, then a closing `final` line with the outcome; everything else the CLI prints goes to stderr.
+- **The coder sees the shape of a large project and of a large file.** A new `outline_file` tool lists a
+  source file's classes, functions and methods with their exact line spans (Python is parsed; other
+  languages are scanned by pattern and labelled approximate), so the agent can read just the part it
+  needs. On a project with more than 300 files the codebase map is now a directory summary of every
+  file found plus detail for the shallowest files, instead of stopping after the first 300.
 
 ### Changed
 
