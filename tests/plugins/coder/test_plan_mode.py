@@ -96,7 +96,7 @@ def test_every_destructive_ask_network_or_executing_tool_is_refused_in_plan_mode
 def test_every_plan_mode_tool_is_registered_and_none_is_risky():
     for name in PLAN_MODE_TOOLS:
         td = TOOL_REGISTRY.get(name)
-        if name == "use_skill" and td is None:
+        if name in ("use_skill", "list_skills") and td is None:
             continue   # registered only when a skill is installed
         assert td is not None, name
         assert not td.destructive and not td.ask_by_default, name
@@ -150,17 +150,21 @@ def test_patch_mode_and_dry_run_do_not_bypass_plan_mode(tmp_path):
     assert not result.ok and "plan mode is on" in result.output
 
 
-def test_a_dynamic_non_destructive_tool_is_refused_in_plan_mode(tmp_path):
+@pytest.mark.parametrize("name", ["plugin_demo_lookup", "mcp_srv_lookup"])
+def test_a_dynamic_non_destructive_tool_is_refused_in_plan_mode(tmp_path, name):
     ran = []
-    td = ToolDef(name="mcp_srv_lookup", description="", params={},
+    td = ToolDef(name=name, description="", params={},
                  fn=lambda cwd, **kw: ran.append(1) or ToolResult.success("ok"))
     agent = _agent(tmp_path)
+    agent._mcp_tool_names = frozenset({"mcp_srv_lookup"})
     agent.set_plan_mode(True)
-    with patch.dict("localm.plugins.coder.agent.TOOL_REGISTRY",
-                    {"mcp_srv_lookup": td}):
-        result = agent._execute_tool(_call("mcp_srv_lookup"), interactive=False)
-    assert not result.ok and "plan mode is on" in result.output
-    assert ran == []
+    with patch.dict("localm.plugins.coder.agent.TOOL_REGISTRY", {name: td}):
+        result = agent._execute_tool(_call(name), interactive=False)
+        assert not result.ok and "plan mode is on" in result.output
+        assert ran == []
+        agent.set_plan_mode(False)
+        assert agent._execute_tool(_call(name), interactive=False).ok
+    assert ran == [1]
 
 
 def test_a_child_of_a_plan_mode_parent_is_gated(tmp_path):
