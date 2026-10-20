@@ -2692,6 +2692,7 @@ def _policy_head(url: str):
     import urllib.parse
 
     from localm import netpolicy
+    from localm.discover import _hf_auth_headers
     allow_off = netpolicy.downloads_allowed_when_off()
     hub_host = urllib.parse.urlparse(_HF_ENDPOINT).hostname
     token = _hf_token()
@@ -2699,8 +2700,8 @@ def _policy_head(url: str):
     current = url
     while True:
         netpolicy.check_url(current, allow_when_off=allow_off)
-        headers = ({"Authorization": f"Bearer {token}"}
-                   if token and urllib.parse.urlparse(current).hostname == hub_host
+        headers = (_hf_auth_headers(token)
+                   if urllib.parse.urlparse(current).hostname == hub_host
                    else None)
         resp = netpolicy.pinned_request(
             "HEAD", current, allow_redirects=False, timeout=10, headers=headers)
