@@ -33,6 +33,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ### Changed
 
+- **The coder's system prompt is shorter.** Less frequent tools (git commit, branch and push,
+  background jobs, notebooks, image generation, Knowledge search, the browser, and MCP and
+  plugin tools) are listed by name and fetched with the new `search_tools` tool when needed,
+  and with `--native-tools` the prompt no longer repeats the argument schemas the tools API
+  already carries. The prompt stays identical from turn to turn, so the server can reuse its
+  prompt cache.
 - **Download progress and speed follow the bytes received.** The progress bar, the speed and the
   time left now come from the data arriving, so they move steadily instead of stalling for
   seconds and jumping; the same line appears in a terminal `localm pull`, in the GUI and as MCP

@@ -119,10 +119,14 @@ def test_small_prompt_has_condensed_rules():
 def test_small_prompt_lists_every_tool():
     """The small-model list is condensed (one line per tool, no JSON
     examples) and still lists every tool - the docs are generated from
-    TOOL_REGISTRY."""
+    TOOL_REGISTRY. Nothing is deferred for a small model, so search_tools is
+    the one tool left out."""
     from localm.plugins.coder.tools import TOOL_REGISTRY
     p = _prompt("phi3-mini")
     for tool in TOOL_REGISTRY:
+        if tool == "search_tools":
+            assert tool not in p
+            continue
         assert tool in p, f"Tool '{tool}' missing from small prompt"
 
 
