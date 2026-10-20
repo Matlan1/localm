@@ -2004,9 +2004,9 @@ async def coder_hooks(request: Request, cwd: str = ""):
             "trusted": hooks.trusted, "digest": hooks.digest,
             "warnings": list(hooks.warnings),
             "hooks": [
-                {"event": s.event, "index": s.index, "matcher": s.matcher,
-                 "command": s.command_text(400), "timeout": s.timeout,
-                 "error": s.error}
+                {"event": s.event, "index": s.index, "label": s.label,
+                 "matcher": s.matcher, "command": s.command_text(None),
+                 "timeout": s.timeout, "error": s.error}
                 for s in (*hooks.pre, *hooks.post)
             ],
         }
@@ -2047,7 +2047,8 @@ async def coder_hooks_trust(request: Request, req: HooksTrustRequest):
 @_router.post("/api/coder/hooks/forget")
 async def coder_hooks_forget(request: Request, req: EpisodeTargetRequest):
     """Withdraw the remembered trust for the project's tool hooks: the web form
-    of ``/hooks forget``. Sessions started after this do not run them."""
+    of ``/hooks forget``. Running sessions that trusted them through the store
+    stop at their next matching tool call."""
     if not _is_owner(request):
         raise HTTPException(404, "No tool hooks")
     root = _episode_root(req.cwd)

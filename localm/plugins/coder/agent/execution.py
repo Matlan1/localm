@@ -803,17 +803,24 @@ class _ExecutionMixin:
     def _hook_run_gate(self) -> Optional[str]:
         """Whether a hook run needs more than trust in this session.
 
-        A hook can run a file the agent wrote. When file writes run without
-        confirmation but run_shell does not, a hook run gets run_shell's gate:
-        "confirm" when run_shell needs confirmation, "refuse" when it is
-        disabled. None when trust is enough."""
-        writes_unconfirmed = (self.auto_approve
-                              and not _UNDOABLE_TOOLS <= set(self.always_confirm))
+        A hook can run a file the agent wrote. When some enabled destructive
+        tool other than the shell tools runs without confirmation but run_shell
+        does not, a hook run gets run_shell's gate: "confirm" when run_shell
+        needs confirmation, "refuse" when it is disabled. None when trust is
+        enough."""
+        if not self.auto_approve:
+            return None
+        disabled = self.disabled_tools
+        confirmed = set(self.always_confirm)
+        writes_unconfirmed = any(
+            td.destructive and name not in _SHELL_EXEC_TOOLS
+            and name not in disabled and name not in confirmed
+            for name, td in _agent.TOOL_REGISTRY.items())
         if not writes_unconfirmed:
             return None
-        if "run_shell" in self.disabled_tools:
+        if "run_shell" in disabled:
             return "refuse"
-        if "run_shell" in self.always_confirm:
+        if "run_shell" in confirmed:
             return "confirm"
         return None
 
@@ -838,21 +845,20 @@ class _ExecutionMixin:
                     f"  Run the project's {spec.label} ({spec.command_text(80)})?")
             else:
                 return ("it needs the confirmation run_shell needs in this session, "
-                        "and this run cannot ask for one (--yes allows both)")
+                        "and none can be asked for here (a non-interactive run, or "
+                        "several tool calls running at once)")
             return None if approved else "the user declined to run it"
         return _permit
 
     def _hook_project_dir(self, hooks) -> Path:
-        """The folder hooks run in for this agent: the project folder, or, for an
-        agent working in another tree (an isolated sub-agent), the matching
-        folder of that tree."""
+        """The folder hooks run in for this agent: the project folder, or, for a
+        sub-agent whose working folder differs from the one the hooks were
+        loaded for (an isolated worktree), the matching folder of its tree."""
         project = hooks.project_dir.resolve()
         cwd = Path(self.cwd).resolve()
-        if cwd == project or project in cwd.parents:
-            return project
         base = hooks.loaded_cwd
-        if base is None:
-            return cwd
+        if getattr(self, "parent", None) is None or base is None or cwd == base:
+            return project
         try:
             rel = base.relative_to(project).parts
         except ValueError:

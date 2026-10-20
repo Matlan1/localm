@@ -654,10 +654,12 @@ class Agent(
         try:
             self._tool_hooks = ToolHooks.load(cwd)
         except ProjectConfigUnreadable as e:
+            import re
             mentions = True
             if e.path is not None:
                 try:
-                    mentions = b"hooks" in Path(e.path).read_bytes()
+                    mentions = re.search(rb"(?m)^\s*(\[\[?\s*hooks\b|hooks\s*[.=])",
+                                         Path(e.path).read_bytes()) is not None
                 except OSError:
                     mentions = True
             if mentions and e.path is not None:

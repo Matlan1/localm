@@ -1886,7 +1886,7 @@ export async function openHooksModal() {
       body.appendChild(el("p", "sub", t("coder.hooks.declaredIn", { path: data.config_path })));
       for (const h of data.hooks || []) {
         const card = el("div", "card");
-        card.appendChild(el("div", "row", `${h.event} #${h.index}: ${h.command}`));
+        card.appendChild(el("div", "row", h.command ? `${h.label}: ${h.command}` : h.label));
         card.appendChild(el("div", "sub", h.error
           ? t("coder.hooks.invalid", { error: h.error })
           : t("coder.hooks.meta", { matcher: h.matcher, timeout: h.timeout })));

@@ -88,10 +88,13 @@ class HookSpec:
             return "hooks table"
         return f"{self.event} hook #{self.index}"
 
-    def command_text(self, limit: int = 120) -> str:
+    def command_text(self, limit: Optional[int] = 120) -> str:
+        """The command as one line; cut to *limit* characters unless None."""
         text = (self.command if isinstance(self.command, str)
                 else " ".join(self.command))
-        return text if len(text) <= limit else text[:limit - 3] + "..."
+        if limit is None or len(text) <= limit:
+            return text
+        return text[:limit - 3] + "..."
 
     def matches(self, tool: str) -> bool:
         if self.error is not None or self.regex is None:
@@ -294,9 +297,15 @@ def run_hook(spec: HookSpec, payload: dict, project_dir: Path,
                     stream.close()
                 except (OSError, ValueError):
                     pass
-        return HookOutcome(
-            stdout=b"".join(out).decode("utf-8", errors="replace"),
-            stderr=b"".join(err).decode("utf-8", errors="replace"), **flags)
+        if flags.get("timed_out") or flags.get("cancelled"):
+            try:
+                proc.wait(timeout=_DRAIN_SECONDS)
+            except subprocess.TimeoutExpired:
+                pass
+
+        def _text(chunks: list) -> str:
+            return b"".join(chunks).decode("utf-8", errors="replace").replace("\r\n", "\n")
+        return HookOutcome(stdout=_text(out), stderr=_text(err), **flags)
 
     deadline = time.monotonic() + spec.timeout
     try:
@@ -337,6 +346,7 @@ class ToolHooks:
         self.digest = hooks_digest(table)
         self.pre, self.post, self.warnings = parse_hooks(table)
         self.trusted = trusted
+        self.trust_source: Optional[str] = "store" if trusted else None
         self.revoked = False
         self.loaded_cwd: Optional[Path] = None
         self._lock = threading.Lock()
@@ -359,6 +369,7 @@ class ToolHooks:
         hooks = cls(path, raw["hooks"])
         hooks.loaded_cwd = Path(cwd).resolve()
         hooks.trusted = hooks.has_hooks() and is_trusted(path, hooks.digest)
+        hooks.trust_source = "store" if hooks.trusted else None
         return hooks
 
     @classmethod
@@ -372,6 +383,7 @@ class ToolHooks:
         hooks.warnings = [f"Tool hooks: {config_path} could not be read and mentions "
                           "hooks, so every tool call is blocked until it is fixed."]
         hooks.trusted = True
+        hooks.trust_source = "fixed"
         return hooks
 
     def has_hooks(self) -> bool:
@@ -383,21 +395,26 @@ class ToolHooks:
 
     def trust_for_session(self) -> None:
         self.trusted = True
+        self.trust_source = "session"
         self.revoked = False
 
     def revoke(self) -> None:
         """Stop these hooks for the rest of the session, whatever the trust
         store says."""
         self.trusted = False
+        self.trust_source = None
         self.revoked = True
 
     def refresh_trust(self) -> bool:
-        """Re-read the trust store for untrusted hooks, so trust granted
-        elsewhere (another session, the GUI) applies. Returns ``trusted``."""
-        if not self.trusted and not self.revoked and self.has_hooks():
-            from .hook_trust import is_trusted
-            if is_trusted(self.config_path, self.digest):
-                self.trusted = True
+        """Re-read the trust store, so trust granted or withdrawn elsewhere
+        (another session, the GUI) applies. Hooks trusted for this session only
+        stay trusted; revoked hooks stay off. Returns ``trusted``."""
+        if self.revoked or not self.has_hooks() or self.trust_source in ("session", "fixed"):
+            return self.trusted
+        from .hook_trust import is_trusted
+        stored = is_trusted(self.config_path, self.digest)
+        self.trusted = stored
+        self.trust_source = "store" if stored else None
         return self.trusted
 
     def remember_trust(self) -> None:
@@ -406,8 +423,10 @@ class ToolHooks:
         hooks are trusted for this session either way."""
         from .hook_trust import remember_trust
         self.trusted = True
+        self.trust_source = "session"
         self.revoked = False
         remember_trust(self.config_path, self.digest)
+        self.trust_source = "store"
 
     def claim_untrusted_report(self) -> bool:
         """True exactly once per session: the caller reports that these hooks
@@ -437,7 +456,7 @@ class ToolHooks:
             if spec.error is not None:
                 lines.append(f"{spec.label}: INVALID ({spec.error})")
             else:
-                lines.append(f"{spec.label}: [{spec.matcher}] {spec.command_text()} "
+                lines.append(f"{spec.label}: [{spec.matcher}] {spec.command_text(None)} "
                              f"(timeout {spec.timeout:g}s)")
         return lines
 
