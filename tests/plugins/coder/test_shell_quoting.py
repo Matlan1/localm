@@ -256,7 +256,7 @@ class TestTheQuotingDefectsFire:
         script.write_text(
             "import sys\nprint('ARG=' + sys.argv[1])\nsys.exit(2)\n",
             encoding="utf-8")
-        command = '"%s" "%s" "two words"' % (sys.executable, script)
+        command = '"%s" "%s" "two words" 2>&1' % (sys.executable, script)
 
         assert isinstance(_shell_argv(command), str)
         result = tool_run_shell(tmp_path, command, timeout=60)

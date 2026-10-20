@@ -82,7 +82,9 @@ class TestShellWrapMode:
 
         launched = captured["argv"]
         tail = launched if isinstance(launched, str) else launched[-1]
-        assert tail.endswith(command), tail
+        if isinstance(launched, str):
+            tail = tail[len('cmd /S /C "'):-1]
+        assert tail == command, launched
 
     def test_default_does_not_shell_wrap(self, tmp_path):
         captured = []
