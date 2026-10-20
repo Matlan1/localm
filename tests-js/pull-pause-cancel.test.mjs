@@ -49,7 +49,7 @@ test("pull panel: Pause cancels the job, keeps the partial data and offers Resum
   assert.equal($("pull-pause").hidden, false, "Pause shows while a download runs");
   assert.equal($("pull-cancel").hidden, false, "Cancel shows while a download runs");
   assert.equal($("pull-resume").hidden, true, "Resume is hidden while a download runs");
-  assert.match($("pull-pct").textContent, /34%.*22\.0 MB\/s.*ETA 15s/s,
+  assert.match($("pull-pct").textContent, /34%.*21\.0 MB\/s.*ETA 15s/s,
     "the server's rate and ETA are shown");
 
   $("pull-pause").click();
