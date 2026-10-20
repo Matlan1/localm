@@ -1104,7 +1104,8 @@ class _LoopMixin:
         Two cases:
 
         * a change the request asked for is still owed (see
-          :meth:`_change_still_owed`): the agent is told so once (worded for a
+          :meth:`_change_still_owed`) and the reply is not a short clarifying
+          question: the agent is told so once (worded for a
           reply that shows code when it does), unless the no-tool-call ladder
           already ran this task; a final answer with the change still owed after
           that ends the run as not finished;
@@ -1116,7 +1117,7 @@ class _LoopMixin:
         the final answer when the run ends with the case still open (it is then
         reported as not finished), or ``""``."""
         turns_left = self._turns < self.max_turns and not self.plan_mode
-        if self._change_still_owed(request, st):
+        if self._change_still_owed(request, st) and not _asks_a_question(response):
             if st.code_nudged or st.nocall_escalation or not turns_left:
                 return ("\n\n[not finished: nothing was written to any file in this "
                         "task, so the change the request asked for was not made]")

@@ -69,7 +69,9 @@ _LEAKED_RESPONSE = f"{_NARRATION}\n\n{_FENCE_CALL}\n\n{_HALLUCINATED_OUTPUT}"
 class TestAssistantTextCorrection:
     def test_executed_json_fence_call_is_removed_from_the_correction_event(self, tmp_path):
         agent = _make_agent(tmp_path)
-        responses = iter([_LEAKED_RESPONSE, "Done."])
+        # The third reply answers the "[nothing written]" nudge: the model never
+        # wrote whisper().
+        responses = iter([_LEAKED_RESPONSE, "Done.", "Done."])
         with patch.object(agent, "_call_llm",
                           side_effect=lambda *a, **k: next(responses)), \
              _stub_run_tests():
