@@ -928,7 +928,8 @@ undefined names, syntax-level errors) to the tool result, so the agent fixes the
 same turn. Nothing is installed: with no ruff on PATH the result is unchanged. A ruff
 inside the project folder is never run unless its directory is on your PATH, and a
 restricted (shared-key) session never runs it. The run is capped at 5 seconds and a
-timeout or a ruff failure is reported in the result rather than skipped silently. Your
+timeout or a ruff failure is reported in the result rather than skipped silently, and
+after two in a row the pass stops for that project until the coder restarts. Your
 project's ruff configuration (excludes, ignores) still applies. Turn it off with
 `diagnostics = false` in `.localcoder/config.toml`.
 

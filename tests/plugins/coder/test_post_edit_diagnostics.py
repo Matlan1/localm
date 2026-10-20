@@ -39,13 +39,20 @@ def no_ruff_on_path(monkeypatch):
     monkeypatch.setenv("PATH", os.fspath(Path(__file__).parent))
 
 
+@pytest.fixture(autouse=True)
+def _fresh_failure_counts(monkeypatch):
+    monkeypatch.setattr(diagnostics, "_failures", {})
+
+
 @pytest.fixture
 def spawns(monkeypatch):
+    """Every ruff process started, recorded from the real ``subprocess.run``."""
     calls: list = []
     real = diagnostics.subprocess.run
 
     def counting(argv, *a, **k):
-        calls.append(list(argv))
+        if Path(str(argv[0])).stem.lower() == "ruff":
+            calls.append(list(argv))
         return real(argv, *a, **k)
 
     monkeypatch.setattr(diagnostics.subprocess, "run", counting)
@@ -136,6 +143,22 @@ class TestNoProcessWhenNotAllowed:
         assert "F401" in _write(tmp_path).output
         assert len(spawns) == 1
 
+    @pytest.mark.parametrize("value", ['"false"', '"off"', '"No"', "0"])
+    def test_other_spellings_of_off_are_honoured(self, tmp_path, spawns, value):
+        (tmp_path / ".localcoder").mkdir()
+        (tmp_path / ".localcoder" / "config.toml").write_text(
+            f"diagnostics = {value}\n", encoding="utf-8")
+        r = _write(tmp_path)
+        assert "[ruff" not in r.output
+        assert spawns == []
+
+    @pytest.mark.parametrize("value", ['"true"', '"yes"', "1"])
+    def test_other_spellings_of_on_run(self, tmp_path, spawns, value):
+        (tmp_path / ".localcoder").mkdir()
+        (tmp_path / ".localcoder" / "config.toml").write_text(
+            f"diagnostics = {value}\n", encoding="utf-8")
+        assert "F401" in _write(tmp_path).output
+
     def test_unreadable_config_cannot_be_overridden_so_nothing_runs(self, tmp_path, spawns):
         (tmp_path / ".localcoder").mkdir()
         (tmp_path / ".localcoder" / "config.toml").write_text(
@@ -174,9 +197,15 @@ class TestResolution:
 
     def test_relative_and_empty_entries_are_ignored(self, tmp_path, monkeypatch):
         self._exe(tmp_path)
+        self._exe(tmp_path / "bin")
         monkeypatch.chdir(tmp_path)
         joined = os.pathsep.join(["", ".", "bin", os.curdir])
         assert diagnostics._resolve_ruff(joined, ".EXE") is None
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="PATHEXT is a Windows rule")
+    def test_an_empty_pathext_still_finds_a_real_executable(self, tmp_path):
+        exe = self._exe(tmp_path / "bin")
+        assert diagnostics._resolve_ruff(str(tmp_path / "bin"), "") == str(exe)
 
     def test_a_ruff_in_the_working_directory_is_never_found(self, tmp_path, monkeypatch):
         self._exe(tmp_path)
@@ -215,6 +244,81 @@ class TestHonestFailures:
         r = _write(tmp_path)
         assert r.ok is True
         assert "could not start ruff" in r.output
+
+    def test_repeated_failures_stop_the_pass_for_the_project(
+            self, tmp_path, spawns, monkeypatch):
+        monkeypatch.setattr(diagnostics, "TIMEOUT_SECONDS", 0.001)
+        first = _write(tmp_path)
+        second = _write(tmp_path)
+        third = _write(tmp_path)
+        assert "timed out" in first.output and "off for this project" not in first.output
+        assert "off for this project until restart" in second.output
+        assert "[ruff" not in third.output
+        assert len(spawns) == 2
+
+    def test_another_project_is_not_stopped(self, tmp_path, spawns, monkeypatch):
+        monkeypatch.setattr(diagnostics, "TIMEOUT_SECONDS", 0.001)
+        broken = tmp_path / "broken"
+        other = tmp_path / "other"
+        broken.mkdir()
+        other.mkdir()
+        _write(broken)
+        _write(broken)
+        monkeypatch.setattr(diagnostics, "TIMEOUT_SECONDS", 5.0)
+        assert "F401" in _write(other).output
+
+    def test_a_success_resets_the_count(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(diagnostics, "TIMEOUT_SECONDS", 0.001)
+        _write(tmp_path)
+        monkeypatch.setattr(diagnostics, "TIMEOUT_SECONDS", 5.0)
+        assert "F401" in _write(tmp_path).output
+        monkeypatch.setattr(diagnostics, "TIMEOUT_SECONDS", 0.001)
+        assert "off for this project" not in _write(tmp_path).output
+
+    def test_the_failure_note_does_not_carry_the_project_path(self, tmp_path):
+        (tmp_path / "ruff.toml").write_text("this is [not valid\n", encoding="utf-8")
+        r = _write(tmp_path)
+        assert "ruff failed" in r.output
+        assert str(tmp_path) not in r.output
+
+    def test_exit_one_with_unreadable_output_says_so(self, tmp_path, monkeypatch):
+        class _Garbled:
+            returncode = 1
+            stdout = "something else entirely\n"
+            stderr = ""
+
+        monkeypatch.setattr(diagnostics.subprocess, "run", lambda *a, **k: _Garbled())
+        r = _write(tmp_path)
+        assert "output could not be read" in r.output
+
+
+@needs_ruff
+@pytest.mark.usefixtures("ruff_on_path")
+class TestFileNames:
+    def test_an_at_sign_name_is_not_read_as_an_argument_file(self, tmp_path):
+        (tmp_path / "outside").mkdir()
+        (tmp_path / "outside" / "victim.py").write_text("import os\n", encoding="utf-8")
+        (tmp_path / "list.py").write_text("outside/victim.py\n", encoding="utf-8")
+        r = _write(tmp_path, name="@list.py", content="x = 1\n")
+        assert "victim" not in r.output
+        assert "[ruff" not in r.output
+
+    @pytest.mark.parametrize("name", ["--fix.py", "-e.py", "sp ace é.py",
+                                      "Found stuff/x.py"])
+    def test_unusual_names_are_linted_as_files(self, tmp_path, name):
+        r = _write(tmp_path, name=name)
+        assert "F401" in r.output
+        assert "1 issue(s)" in r.output
+
+    def test_a_path_that_cannot_be_made_relative_is_linted_by_absolute_path(
+            self, tmp_path, monkeypatch):
+        def other_drive(*a, **k):
+            raise ValueError("path is on mount 'D:', start on mount 'E:'")
+
+        monkeypatch.setattr(diagnostics.os.path, "relpath", other_drive)
+        r = _write(tmp_path)
+        assert r.ok is True
+        assert "F401" in r.output and "m.py:1:" in r.output
 
 
 @needs_ruff
@@ -324,6 +428,27 @@ class TestThroughTheAgent:
             interactive=False)
         assert "[ruff" not in r.output
         assert spawns == []
+
+    @pytest.mark.parametrize("restricted", [True, False])
+    @pytest.mark.parametrize("tool", ["edit_file", "edit_files", "patch_file"])
+    def test_every_diagnosed_tool_follows_the_session(
+            self, tmp_path, spawns, tool, restricted):
+        (tmp_path / "m.py").write_text("x = 1\n", encoding="utf-8")
+        if tool == "edit_file":
+            args = {"path": "m.py", "old": "x = 1", "new": "import os\nx = 1"}
+        elif tool == "edit_files":
+            args = {"edits": [{"path": "m.py", "old": "x = 1", "new": "import os\nx = 1"}]}
+        else:
+            args = {"path": "m.py",
+                    "diff": "--- a/m.py\n+++ b/m.py\n@@ -1 +1,2 @@\n+import os\n x = 1\n"}
+        r = _agent(tmp_path, restricted=restricted)._execute_tool(
+            _tool_call(tool, **args), interactive=False)
+        assert r.ok is True
+        assert (tmp_path / "m.py").read_text(encoding="utf-8").startswith("import os")
+        if restricted:
+            assert spawns == [] and "[ruff" not in r.output
+        else:
+            assert len(spawns) == 1 and "F401" in r.output
 
     def test_every_diagnosed_tool_is_injected(self):
         import inspect
