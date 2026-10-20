@@ -372,6 +372,9 @@ class Agent(
         # last_tool: str}. The first-seen original is kept so session_diff()
         # can show the cumulative change, not just the last edit.
         self._changed_files: dict[str, dict] = {}
+        # Notes the pre-compaction flush kept, oldest first; re-pinned into every
+        # compaction summary verbatim (see context._compact_history).
+        self._durable_notes: list[str] = []
         # Work done by ISOLATED children (their own git worktree), which is NOT
         # in _changed_files: it never touched this tree, and
         # merging its keys would fabricate diffs (keys are relative to the writing

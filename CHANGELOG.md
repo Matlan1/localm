@@ -41,6 +41,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   languages are scanned by pattern and labelled approximate), so the agent can read just the part it
   needs. On a project with more than 300 files the codebase map is now a directory summary of every
   file found plus detail for the shallowest files, instead of stopping after the first 300.
+- **Coder compaction keeps the working state.** A compacted coder session now carries the files
+  it changed (with added and removed line counts), the verification command's last result and
+  the code written since the last test run outside the summary, so they are never lost to
+  paraphrase. Before compacting, the agent also keeps durable notes from the condensed turns;
+  outside privacy mode they are saved to episodic memory. `compaction_flush = false` in
+  `.localcoder/config.toml` turns the note pass off.
 
 ### Changed
 

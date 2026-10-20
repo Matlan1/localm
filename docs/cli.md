@@ -988,6 +988,22 @@ measured, a GGUF reply can also depend on the requests the model answered before
 (see the prompt cache note in [server-api.md](server-api.md#behaviour-notes)), and
 `--anthropic` ignores the flag because the Anthropic API has no seed parameter.
 
+**Compaction keeps the working state.** When a long session is compacted (`/compact`,
+or automatically near the context limit), older turns become a prose summary, and the
+summary message ends with a block the summariser never rewrites: the files this session
+changed with their added and removed line counts (new, deleted, or created then
+deleted), the verification command and its last result, the code files written since
+the last test run, and the durable notes described next. It is rebuilt from what the
+session actually recorded every time it compacts. Before summarising, the agent asks the
+model for durable notes from the turns about to be condensed (decisions and their
+reasons, constraints you stated, commands that worked, pitfalls and their fixes). The
+notes stay word for word in every later summary and survive a resume. In `log` and
+`full` mode, with episodic memory on (`coder_episodic_memory`, the default), they are
+also saved as one lesson in episodic memory, so a later session can
+recall them; in privacy mode, in a restricted session, and for a sub-agent they stay in
+the session only and nothing is written to disk. Turn the note pass off for a project
+with `compaction_flush = false` in `.localcoder/config.toml`.
+
 **Episodic memory.** The agent keeps a per-project log of lessons learned across sessions. Manage it without starting a session:
 
 ```bash
