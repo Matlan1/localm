@@ -180,7 +180,7 @@ def test_update_with_nothing_installed_provisions_with_auto_detect(app, no_subpr
     assert r.status_code == 200, r.text
     assert len(no_subprocess) == 1, no_subprocess
     assert no_subprocess[0]["args"] == [
-        "setup-llama", "--backend", "auto", "--force", "--yes"]
+        "setup-llama", "--backend", "auto", "--force", "--yes", "--keep-choice"]
 
 
 def test_update_switches_backend_when_one_is_named(app, runtime_dir, no_subprocess):
@@ -207,7 +207,7 @@ def test_update_forwards_a_tag(app, runtime_dir, no_subprocess):
     assert r.status_code == 200, r.text
     assert no_subprocess[0]["args"] == [
         "setup-llama", "--backend", "vulkan", "--tag", "b10355",
-        "--force", "--yes"]
+        "--force", "--yes", "--keep-choice"]
 
 
 def test_update_accepts_backend_and_tag_together(app, no_subprocess):
@@ -232,7 +232,7 @@ def test_update_treats_blank_fields_as_absent(app, runtime_dir, no_subprocess):
 
     assert r.status_code == 200, r.text
     assert no_subprocess[0]["args"] == [
-        "setup-llama", "--backend", "vulkan", "--force", "--yes"]
+        "setup-llama", "--backend", "vulkan", "--force", "--yes", "--keep-choice"]
 
 
 def test_update_refuses_an_unknown_backend_before_dispatching(app, no_subprocess):
@@ -304,7 +304,8 @@ def test_rollback_dispatches_with_the_rollback_flag_not_a_tag(app, runtime_dir, 
 
     assert r.status_code == 200, r.text
     assert no_subprocess[0]["args"] == [
-        "setup-llama", "--backend", "vulkan", "--rollback", "--force", "--yes"]
+        "setup-llama", "--backend", "vulkan", "--rollback", "--force", "--yes",
+        "--keep-choice"]
     assert "--tag" not in no_subprocess[0]["args"]
 
 
@@ -400,3 +401,99 @@ def test_rollback_refuses_when_already_running(app, runtime_dir, monkeypatch):
         r = client.post("/api/runtime/update", json={"rollback": True})
 
     assert r.status_code == 409, r.text
+
+
+# --------------------------------------------------------------------------- #
+#  The recorded backend choice                                                #
+# --------------------------------------------------------------------------- #
+
+def test_check_reports_a_recorded_choice_that_is_not_installed(app, runtime_dir):
+    sl._record_provisioned_backend(runtime_dir, "vulkan", build=sl._PINNED_TAG)
+    sl._record_backend_choice(runtime_dir, "cuda", "the cuda build could not be used here")
+    with TestClient(app) as client:
+        body = client.get("/api/runtime/check").json()
+    assert body["backend"] == "vulkan"
+    assert body["requested"] == "cuda"
+    assert body["requested_reason"] == "the cuda build could not be used here"
+
+
+def test_check_reports_no_choice_when_the_choice_is_installed(app, runtime_dir):
+    sl._record_provisioned_backend(runtime_dir, "cuda", build=sl._PINNED_TAG)
+    sl._record_backend_choice(runtime_dir, "cuda", "stale")
+    with TestClient(app) as client:
+        body = client.get("/api/runtime/check").json()
+    assert body["requested"] is None
+    assert body["requested_reason"] is None
+
+
+def test_keep_drops_the_recorded_choice_and_touches_nothing_else(app, runtime_dir):
+    sl._record_provisioned_backend(runtime_dir, "vulkan", build="b1")
+    (runtime_dir / sl._lib_name()).write_bytes(b"lib")
+    sl._record_backend_choice(runtime_dir, "cuda", "why")
+    with TestClient(app) as client:
+        r = client.post("/api/runtime/keep")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"backend": "vulkan", "dropped": "cuda"}
+    assert not (runtime_dir / sl._CHOICE_MARKER).exists()
+    assert sl._provisioned_backend(runtime_dir) == "vulkan"
+    assert (runtime_dir / sl._lib_name()).read_bytes() == b"lib"
+
+
+def test_keep_with_nothing_installed_is_a_409(app, runtime_dir):
+    with TestClient(app) as client:
+        r = client.post("/api/runtime/keep")
+    assert r.status_code == 409
+
+
+def test_keep_refuses_while_a_provision_holds_the_lock(app, runtime_dir):
+    sl._record_provisioned_backend(runtime_dir, "vulkan")
+    sl._record_backend_choice(runtime_dir, "cuda", "why")
+    with sl._provisioning_lock(runtime_dir):
+        with TestClient(app) as client:
+            r = client.post("/api/runtime/keep")
+    assert r.status_code == 409
+    assert sl._read_backend_choice(runtime_dir) is not None
+
+
+def test_keep_needs_config_write(app, runtime_dir):
+    from localm import auth
+    from localm import scopes as S
+    sl._record_provisioned_backend(runtime_dir, "vulkan")
+    sl._record_backend_choice(runtime_dir, "cuda", "why")
+    read_key = auth.create_key("r", [S.CONFIG_READ])["key"]
+    write_key = auth.create_key("w", [S.CONFIG_WRITE], allow_privileged=True)["key"]
+    with TestClient(app) as client:
+        denied = client.post("/api/runtime/keep",
+                             headers={"Authorization": f"Bearer {read_key}"})
+        assert denied.status_code == 403, denied.text
+        assert sl._read_backend_choice(runtime_dir) is not None
+        allowed = client.post("/api/runtime/keep",
+                              headers={"Authorization": f"Bearer {write_key}"})
+    assert allowed.status_code == 200, allowed.text
+    assert sl._read_backend_choice(runtime_dir) is None
+
+
+def test_update_naming_a_backend_does_not_keep_an_earlier_choice(app, runtime_dir, no_subprocess):
+    sl._record_provisioned_backend(runtime_dir, "vulkan")
+    with TestClient(app) as client:
+        client.post("/api/runtime/update", json={"backend": "vulkan"})
+    assert "--keep-choice" not in no_subprocess[0]["args"]
+
+
+def test_keep_reports_a_failed_removal_instead_of_success(app, runtime_dir, monkeypatch):
+    sl._record_provisioned_backend(runtime_dir, "vulkan")
+    sl._record_backend_choice(runtime_dir, "cuda", "why")
+    monkeypatch.setattr(sl, "_record_backend_choice", lambda target, requested, reason=None: False)
+    with TestClient(app) as client:
+        r = client.post("/api/runtime/keep")
+    assert r.status_code == 500
+    assert sl._read_backend_choice(runtime_dir) is not None
+
+
+def test_check_reports_the_runtime_localm_loads(app, runtime_dir, monkeypatch):
+    sl._record_provisioned_backend(runtime_dir, "vulkan", build=sl._PINNED_TAG)
+    monkeypatch.setattr(sl, "runtime_in_use",
+                        lambda: {"dir": "x", "source": "binary_dir", "backend": "hip"})
+    with TestClient(app) as client:
+        body = client.get("/api/runtime/check").json()
+    assert body["in_use"] == "hip" and body["in_use_source"] == "binary_dir"

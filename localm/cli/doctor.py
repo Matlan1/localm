@@ -350,6 +350,38 @@ def _check_runtime_build(find_binary_dir) -> None:
                       "--tag latest' resumes tracking upstream[/dim]")
 
 
+def _check_backend_choice() -> None:
+    """Print the llama.cpp backend localm loads when it is not the provisioned
+    one (a binary_dir setting or LLAMA_CPP_LIB points elsewhere), and the
+    user's chosen backend when a different one is installed, with the reason.
+    Silent when the chosen, installed and loaded backends agree."""
+    from rich.markup import escape
+    try:
+        from localm.setup_llama import backend_choice, runtime_in_use
+        use = runtime_in_use()
+        choice = backend_choice()
+    except Exception as e:
+        console.print(f"  {_WARN_SYM}  could not read the backend choice "
+                      f"[dim]({escape(str(e))})[/dim]")
+        return
+    if use["source"] not in (None, "provisioned"):
+        what = ("LLAMA_CPP_LIB" if use["source"] == "LLAMA_CPP_LIB"
+                else "the binary_dir setting")
+        backend = escape(use["backend"] or "unknown backend")
+        console.print(f"  {_WARN_SYM}  llama.cpp runtime in use: {backend} from {what}, "
+                      "not the provisioned one")
+        console.print(f"     [dim]{escape(use['dir'] or '')}[/dim]")
+    if choice:
+        console.print(f"  {_WARN_SYM}  backend chosen: {escape(choice['requested'])}, "
+                      f"but {escape(choice['installed'])} is installed")
+        if choice["reason"]:
+            console.print(f"     [dim]why: {escape(choice['reason'])}[/dim]")
+        console.print(f"     [dim]retry: localm setup-llama --backend "
+                      f"{escape(choice['requested'])} --force  -  keep "
+                      f"{escape(choice['installed'])}: localm setup-llama --backend "
+                      f"{escape(choice['installed'])}[/dim]")
+
+
 def _probe_gpu_devices() -> Optional[dict]:
     """Load the provisioned runtime in a subprocess and enumerate the ggml
     compute devices it registers - the ground truth for whether localm runs
@@ -704,6 +736,7 @@ def doctor():
     lib_healthy = _check_llama_lib(find_binary_dir)
     # Immediately after the lib line and BEFORE the ABI check.
     _check_runtime_build(find_binary_dir)
+    _check_backend_choice()
     _check_staged_cuda(find_binary_dir)
     # native ABI self-check only when a healthy lib is present.
     if lib_healthy:

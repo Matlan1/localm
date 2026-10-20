@@ -18,6 +18,8 @@ mode            = "privacy"               # privacy | log | full
 seed            = 1234                    # RNG seed for reproducible sampling
 verify          = "pytest -x && ruff check"  # exit-code check for interactive
                                           # sessions; overrides auto-detection
+diagnostics     = false                   # no ruff pass after .py edits (default on
+                                          # when ruff is on PATH)
 
 The file is optional; absent keys fall through to CLI defaults.
 """
@@ -107,5 +109,5 @@ def load_project_config(cwd: Path) -> dict[str, Any]:
 
     _KNOWN = {"model", "max_turns", "auto_approve", "always_confirm",
               "memory_file", "max_tokens", "temperature", "mode",
-              "seed", "verify"}
+              "seed", "verify", "diagnostics"}
     return {k: v for k, v in raw.items() if k in _KNOWN}

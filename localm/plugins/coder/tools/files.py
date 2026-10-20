@@ -24,6 +24,7 @@ from .base import (
 # The indexer's skip and file-type tables, shared so grep and the project map
 # classify files the same way.
 from ..indexer import _SKIP_DIRS, _SYMBOL_LANGS, _TEXT_EXTS
+from .diagnostics import run_diagnostics
 
 def _render_notebook(nb: dict) -> str:
     """Convert a parsed .ipynb dict to a human-readable text representation."""
@@ -141,6 +142,22 @@ def _verify_syntax(path: Path, content: str) -> Optional[str]:
     return None
 
 
+def _with_diagnostics(result: ToolResult, cwd: Path, paths: list[Path],
+                      restricted: bool) -> ToolResult:
+    """*result* with the ruff block for the Python files in *paths* appended.
+
+    Unchanged for a restricted session (no process may be spawned) and when there is
+    nothing to report."""
+    if restricted:
+        return result
+    block = run_diagnostics(cwd, paths)
+    if not block:
+        return result
+    flag = " ⚠ ruff" if "issue(s):" in block else ""
+    return ToolResult.success(result.output + "\n\n" + block,
+                              summary=result.summary + flag)
+
+
 def _truncation_note(text: str, first_line: int, total_lines: int) -> str:
     """The notice after *text*, read from line *first_line* on, was cut to its
     head and tail by _truncate: the lines that did not arrive in full, so the
@@ -225,7 +242,8 @@ def tool_read_file(cwd: Path, path: str, offset: int = 0, limit: int = 0) -> Too
     )
 
 
-def tool_write_file(cwd: Path, path: str, content: str) -> ToolResult:
+def tool_write_file(cwd: Path, path: str, content: str,
+                    _restricted: bool = True) -> ToolResult:
     try:
         p = _confine(cwd, path)
     except PermissionError as e:
@@ -250,6 +268,8 @@ def tool_write_file(cwd: Path, path: str, content: str) -> ToolResult:
             result.output + f"\n\n[syntax check] {warn}",
             summary=result.summary + " ⚠ syntax error",
         )
+    else:
+        result = _with_diagnostics(result, cwd, [p], _restricted)
     return result
 
 
@@ -442,7 +462,8 @@ def _write_keeping_eol(p: Path, before_raw: str, new_text: str) -> None:
     p.write_text("".join(parts), encoding="utf-8", newline="")
 
 
-def tool_edit_file(cwd: Path, path: str, old: str, new: str) -> ToolResult:
+def tool_edit_file(cwd: Path, path: str, old: str, new: str,
+                   _restricted: bool = True) -> ToolResult:
     """Replace the first occurrence of `old` with `new` in `path`."""
     try:
         p = _confine(cwd, path)
@@ -487,6 +508,8 @@ def tool_edit_file(cwd: Path, path: str, old: str, new: str) -> ToolResult:
             result.output + f"\n\n[syntax check] {warn}",
             summary=result.summary + " ⚠ syntax error",
         )
+    else:
+        result = _with_diagnostics(result, cwd, [p], _restricted)
     return result
 
 
@@ -525,7 +548,7 @@ def _restore_snapshots(snapshots: dict, written: list) -> list[str]:
     return failures
 
 
-def tool_edit_files(cwd: Path, edits: list) -> ToolResult:
+def tool_edit_files(cwd: Path, edits: list, _restricted: bool = True) -> ToolResult:
     """
     Apply the same class of exact-string edit as ``edit_file`` across several
     files in ONE call, all-or-nothing.
@@ -633,11 +656,14 @@ def tool_edit_files(cwd: Path, edits: list) -> ToolResult:
 
     # ---- Phase 3: post-write syntax check (same soft check as edit_file) ----
     warnings: list[str] = []
+    syntax_ok: list[Path] = []
     for p in targets:
         warn = _verify_syntax(p, current[p])
         if warn:
             rel = p.relative_to(cwd) if p.is_relative_to(cwd) else p
             warnings.append(f"{rel}: {warn}")
+        else:
+            syntax_ok.append(p)
 
     touched = len(targets)
     lines = [f"Applied {len(planned)} edit(s) across {touched} file(s):"]
@@ -649,10 +675,12 @@ def tool_edit_files(cwd: Path, edits: list) -> ToolResult:
     if warnings:
         output += "\n\n[syntax check] " + "\n[syntax check] ".join(warnings)
         summary += " ⚠ syntax error"
-    return ToolResult.success(output, summary=summary)
+    return _with_diagnostics(ToolResult.success(output, summary=summary),
+                             cwd, syntax_ok, _restricted)
 
 
-def tool_patch_file(cwd: Path, path: str, diff: str) -> ToolResult:
+def tool_patch_file(cwd: Path, path: str, diff: str,
+                    _restricted: bool = True) -> ToolResult:
     """
     Apply a unified diff to a file.
 
@@ -715,6 +743,8 @@ def tool_patch_file(cwd: Path, path: str, diff: str) -> ToolResult:
             result.output + f"\n\n[syntax check] {warn}",
             summary=result.summary + " ⚠ syntax error",
         )
+    else:
+        result = _with_diagnostics(result, cwd, [p], _restricted)
     return result
 
 

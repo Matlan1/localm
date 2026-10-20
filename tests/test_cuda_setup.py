@@ -26,6 +26,9 @@ from localm import setup_llama as sl
 def _x64_process(monkeypatch):
     from localm import hwdetect
     monkeypatch.setattr(hwdetect, "machine_arch", lambda: "x64")
+    # The GPU-device load probe registers a GPU; a test that fakes a load
+    # outcome fakes this one too.
+    monkeypatch.setattr(sl, "_native_gpu_loads_ok", lambda: (True, ""))
 from tests._fake_https import patch_https_transport
 
 
@@ -197,42 +200,61 @@ def test_dialogue_driver_ok_confirm_fetches_cuda(monkeypatch):
     _confirm(monkeypatch, True)
     info = sl.NvidiaInfo(present=True, gpu_name="RTX 4070",
                          driver_version="552.22", cuda_capability="12.4")
-    assert sl._cuda_setup_dialogue(info, assume_yes=False) == ("cuda", True)
+    assert sl._cuda_setup_dialogue(info, assume_yes=False) == ("cuda", True, None)
 
 
-def test_dialogue_driver_ok_decline_falls_back_to_vulkan(monkeypatch):
+def test_dialogue_driver_ok_decline_uses_vulkan_and_keeps_the_cuda_choice(monkeypatch):
     _confirm(monkeypatch, False)
     info = sl.NvidiaInfo(present=True, cuda_capability="12.4")
-    assert sl._cuda_setup_dialogue(info, assume_yes=False) == ("vulkan", False)
+    assert sl._cuda_setup_dialogue(info, assume_yes=False) == (
+        "vulkan", False, "you declined the CUDA download")
 
 
-def test_dialogue_old_driver_recommends_vulkan(monkeypatch):
-    # No confirm should be needed; an old driver cannot be self-assembled.
-    _confirm(monkeypatch, True)
+def test_dialogue_old_driver_asks_before_vulkan_and_names_the_driver(monkeypatch):
+    asked = []
+    monkeypatch.setattr(sl.click, "confirm", lambda *a, **k: asked.append(a) or True)
     info = sl.NvidiaInfo(present=True, driver_version="460.0", cuda_capability="11.2")
-    assert sl._cuda_setup_dialogue(info, assume_yes=False) == ("vulkan", False)
+    backend, cudart, reason = sl._cuda_setup_dialogue(info, assume_yes=False)
+    assert (backend, cudart) == ("vulkan", False)
+    assert asked, "an old driver must not switch to vulkan without asking"
+    assert "460.0" in reason and "11.2" in reason
+
+
+def test_dialogue_old_driver_decline_stops_with_nothing_changed(monkeypatch):
+    _confirm(monkeypatch, False)
+    info = sl.NvidiaInfo(present=True, driver_version="460.0", cuda_capability="11.2")
+    with pytest.raises(SystemExit) as e:
+        sl._cuda_setup_dialogue(info, assume_yes=False)
+    assert e.value.code == 1
+
+
+def test_dialogue_old_driver_assume_yes_uses_vulkan_with_the_reason():
+    info = sl.NvidiaInfo(present=True, driver_version="460.0", cuda_capability="11.2")
+    backend, cudart, reason = sl._cuda_setup_dialogue(info, assume_yes=True)
+    assert (backend, cudart) == ("vulkan", False)
+    assert "460.0" in reason
 
 
 def test_dialogue_no_nvidia_continue_is_users_choice(monkeypatch):
     _confirm(monkeypatch, True)
     info = sl.NvidiaInfo(present=False)
-    assert sl._cuda_setup_dialogue(info, assume_yes=False) == ("cuda", True)
+    assert sl._cuda_setup_dialogue(info, assume_yes=False) == ("cuda", True, None)
 
 
 def test_dialogue_no_nvidia_decline_uses_vulkan(monkeypatch):
     _confirm(monkeypatch, False)
     info = sl.NvidiaInfo(present=False)
-    assert sl._cuda_setup_dialogue(info, assume_yes=False) == ("vulkan", False)
+    assert sl._cuda_setup_dialogue(info, assume_yes=False) == ("vulkan", False, None)
 
 
 def test_dialogue_assume_yes_fetches_when_driver_ok():
     info = sl.NvidiaInfo(present=True, cuda_capability="12.4")
-    assert sl._cuda_setup_dialogue(info, assume_yes=True) == ("cuda", True)
+    assert sl._cuda_setup_dialogue(info, assume_yes=True) == ("cuda", True, None)
 
 
-def test_dialogue_assume_yes_uses_vulkan_when_no_nvidia():
+def test_dialogue_assume_yes_attempts_the_chosen_cuda_when_no_nvidia_is_seen():
     info = sl.NvidiaInfo(present=False)
-    assert sl._cuda_setup_dialogue(info, assume_yes=True) == ("vulkan", False)
+    assert sl._cuda_setup_dialogue(info, assume_yes=True) == ("cuda", True, None)
 
 
 # ------------- known-vendor case: name it, recommend the REAL match -------- #
@@ -269,7 +291,7 @@ def test_dialogue_no_nvidia_known_amd_offers_three_way_choice(monkeypatch, capsy
 def test_dialogue_no_nvidia_known_amd_pick_continue(monkeypatch):
     monkeypatch.setattr(sl.click, "prompt", lambda *a, **k: "1")
     info = sl.NvidiaInfo(present=False)
-    assert sl._cuda_setup_dialogue(info, False, _amd_windows_det()) == ("cuda", True)
+    assert sl._cuda_setup_dialogue(info, False, _amd_windows_det()) == ("cuda", True, None)
 
 
 def test_dialogue_no_nvidia_known_amd_pick_switch_uses_real_recommendation(monkeypatch):
@@ -279,7 +301,7 @@ def test_dialogue_no_nvidia_known_amd_pick_switch_uses_real_recommendation(monke
     monkeypatch.setattr(hwdetect, "recommended_install_backend", lambda det: "amd-rocm")
     monkeypatch.setattr(sl.click, "prompt", lambda *a, **k: "2")
     info = sl.NvidiaInfo(present=False)
-    assert sl._cuda_setup_dialogue(info, False, _amd_windows_det()) == ("amd-rocm", False)
+    assert sl._cuda_setup_dialogue(info, False, _amd_windows_det()) == ("amd-rocm", False, None)
 
 
 def test_dialogue_no_nvidia_known_amd_pick_quit_exits(monkeypatch):
@@ -289,11 +311,11 @@ def test_dialogue_no_nvidia_known_amd_pick_quit_exits(monkeypatch):
         sl._cuda_setup_dialogue(info, False, _amd_windows_det())
 
 
-def test_dialogue_assume_yes_known_amd_uses_recommendation_not_hardcoded_vulkan(monkeypatch):
+def test_dialogue_assume_yes_known_amd_attempts_the_chosen_cuda(monkeypatch):
     from localm import hwdetect
     monkeypatch.setattr(hwdetect, "recommended_install_backend", lambda det: "amd-rocm")
     info = sl.NvidiaInfo(present=False)
-    assert sl._cuda_setup_dialogue(info, True, _amd_windows_det()) == ("amd-rocm", False)
+    assert sl._cuda_setup_dialogue(info, True, _amd_windows_det()) == ("cuda", True, None)
 
 
 def test_dialogue_det_with_only_nvidia_vendor_falls_back_to_generic(monkeypatch):
@@ -304,7 +326,7 @@ def test_dialogue_det_with_only_nvidia_vendor_falls_back_to_generic(monkeypatch)
     monkeypatch.setattr(sl.click, "confirm", lambda *a, **k: False)
     info = sl.NvidiaInfo(present=False)
     det = hwdetect.Detection(vendors=["nvidia"])
-    assert sl._cuda_setup_dialogue(info, False, det) == ("vulkan", False)
+    assert sl._cuda_setup_dialogue(info, False, det) == ("vulkan", False, None)
 
 
 def test_warn_off_profile_returns_detection_for_reuse(monkeypatch):
@@ -414,7 +436,7 @@ def test_dialogue_reprompts_on_invalid_input_then_accepts_real_answer(monkeypatc
     monkeypatch.setattr("sys.stdin", io.StringIO("asdf\nqwerty\ny\n"))
     info = sl.NvidiaInfo(present=False)   # -> the "continue with CUDA anyway?" prompt
     result = sl._cuda_setup_dialogue(info, assume_yes=False)
-    assert result == ("cuda", True)       # the real "y" was honoured
+    assert result == ("cuda", True, None)   # the real "y" was honoured
     out = capsys.readouterr().out
     assert out.count("Error: invalid input") == 2   # one reprompt per garbage line
     assert out.count("Continue with CUDA anyway?") == 3   # asked again each time
@@ -424,7 +446,7 @@ def test_dialogue_reprompts_then_declines(monkeypatch, capsys):
     monkeypatch.setattr("sys.stdin", io.StringIO("nope\nn\n"))
     info = sl.NvidiaInfo(present=False)
     result = sl._cuda_setup_dialogue(info, assume_yes=False)
-    assert result == ("vulkan", False)
+    assert result == ("vulkan", False, None)
     assert capsys.readouterr().out.count("Error: invalid input") == 1
 
 
