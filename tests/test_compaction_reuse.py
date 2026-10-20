@@ -181,3 +181,50 @@ def test_the_cache_drops_the_least_recently_used_entry():
                                               (32768, 3276), (0, 0)])
 def test_reply_reserve(capacity, reserve):
     assert compact.reply_reserve(capacity) == reserve
+
+
+def _with_pasted_document() -> list[dict]:
+    """A short conversation whose second user message is a ~8500-token paste."""
+    doc = "pasted " * 4300
+    msgs = [{"role": "system", "content": "S"},
+            {"role": "user", "content": "hi FACT-A"}, {"role": "assistant", "content": "hello"},
+            {"role": "user", "content": doc}, {"role": "assistant", "content": "read it"}]
+    for i in range(3):
+        msgs += [{"role": "user", "content": f"q{i}"}, {"role": "assistant", "content": f"a{i}"}]
+    msgs.append({"role": "user", "content": "q3"})
+    return msgs
+
+
+def test_a_large_old_message_is_not_pulled_back_into_the_kept_tail():
+    eng = _Engine(capacity=8192)
+    messages = _with_pasted_document()
+    out, changed = _compact(eng, messages)
+    assert changed is True
+    assert all("pasted pasted pasted" not in str(m["content"])[:200] for m in out[1:])
+    assert not hs._needs_compaction(eng.capacity, eng.count_messages_tokens(out), out)
+
+
+def test_a_resent_conversation_with_a_large_old_message_is_not_stuck_over_the_window():
+    eng = _Engine(capacity=8192)
+    messages = _with_pasted_document()
+    _compact(eng, messages)
+    out, _ = _compact(eng, messages + [{"role": "assistant", "content": "a3"},
+                                       {"role": "user", "content": "q4"}])
+    assert not hs._needs_compaction(eng.capacity, eng.count_messages_tokens(out), out)
+
+
+def test_a_failing_size_check_summarises_again_instead_of_raising():
+    eng = _Engine()
+    _compact(eng, _conversation(14))
+    calls = len(eng.prompts)
+
+    def _boom(_ms):
+        raise RuntimeError("worker gone")
+
+    out, changed = compact.compact_messages(
+        _conversation(15), lambda ms, n: next(eng.chat_stream(ms, max_tokens=n)),
+        limit_tokens=eng.capacity, count_tokens=eng.count_tokens,
+        target_tokens=eng.capacity // 2, cache=hs._compaction_cache(eng),
+        namespace=eng.display_name, fits=_boom)
+    assert changed is True
+    assert len(eng.prompts) > calls

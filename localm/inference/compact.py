@@ -533,12 +533,15 @@ def compact_messages(
     *target_tokens*, when positive, is the size the compacted conversation
     aims for: the tail keeps as many of the newest messages (at least
     KEEP_RECENT) as fit beside the system prompt and a summary of up to the
-    reply budget. Without it the tail is the last KEEP_RECENT messages.
+    reply budget. That tail is used only when it measures at most the budget or
+    the last-KEEP_RECENT tail, whichever is larger; otherwise, and without
+    *target_tokens*, the tail is the last KEEP_RECENT messages.
 
     With *cache*, a summary is stored under *namespace* for the prefix it
     covers. A conversation that starts with a stored prefix reuses that
     summary unchanged, with no model call, when the result passes *fits*
-    (always, when *fits* is None); otherwise only the messages after the
+    (always, when *fits* is None; a *fits* that raises counts as not passing,
+    logged at WARNING); otherwise only the messages after the
     stored prefix are summarised, continuing from the stored summary. A digest
     fallback is never stored.
     """
@@ -559,7 +562,14 @@ def compact_messages(
             if hit is None:
                 continue
             reused = [*head, *_bridge(hit, rest[:i], rest[i:]), *rest[i:]]
-            if fits is None or fits(reused):
+            try:
+                reusable = fits is None or bool(fits(reused))
+            except Exception as e:
+                from localm.debuglog import logger
+                logger.warning("compaction: could not size the stored summary's result "
+                               "(%s: %s); summarising again", type(e).__name__, e)
+                reusable = False
+            if reusable:
                 return reused, True
             start, earlier = i, hit
             break
@@ -568,7 +578,11 @@ def compact_messages(
         head_tokens = sum(measure(_text_of(m)) + 4 for m in head)
         keep = target_tokens - head_tokens - reply_tokens - template_margin(limit_tokens)
         budget_split = _split(messages, _tail_count(rest, keep, measure))
-        if budget_split[1]:
+
+        def _size(msgs: list[dict]) -> int:
+            return sum(measure(_text_of(m)) + 4 for m in msgs)
+
+        if budget_split[1] and _size(budget_split[2]) <= max(keep, _size(recent)):
             head, older, recent = budget_split
     cut = len(older)
     if start and cut <= start:
