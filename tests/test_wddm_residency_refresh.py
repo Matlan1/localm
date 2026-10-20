@@ -116,17 +116,23 @@ class TestDetection:
         assert _inits(api) == 0
         assert llm._residency_refresh is None
 
-    @pytest.mark.parametrize("free", [None, RuntimeError("probe failed")])
-    def test_unmeasurable_free_vram_is_left_alone(self, free):
+    @pytest.mark.parametrize("free, said", [
+        (None, "free VRAM is unmeasurable"),
+        (RuntimeError("probe failed"), "the free VRAM reading raised RuntimeError")])
+    def test_unmeasurable_free_vram_is_left_alone(self, free, said, caplog):
         llm = _llm()
         if isinstance(free, Exception):
             llm._vram_free.side_effect = free
         else:
             llm._vram_free.return_value = None
         api, _cp = _api()
-        out, _reads = _generate(llm, api, DEMOTED)
+        with caplog.at_level(logging.DEBUG, logger="localm"):
+            out, _reads = _generate(llm, api, DEMOTED)
         assert out == [42] * 4
         assert _inits(api) == 0
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(said in m for m in messages)
+        assert not any("raised" in m and "keeping the live context" in m for m in messages)
 
     def test_no_free_vram_source_is_left_alone(self):
         llm = _llm()
