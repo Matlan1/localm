@@ -380,8 +380,9 @@ def test_a_second_overflow_is_raised(proj, home):
     agent._messages = [{"role": "user", "content": "go"}]
     for i in range(12):
         _read_turn(agent, i)
-    backend.replies = [_overflow(), _overflow()]
+    backend.replies = [_overflow(), _overflow(), _overflow()]
     with patch.object(type(agent), "_llm_kwargs", return_value={}), \
+         patch.object(type(agent), "_compact_after_overflow", return_value=True), \
          pytest.raises(CoderServerError) as info:
         agent._call_llm(agent._build_messages(), interactive=False)
     assert "maximum context capacity" in str(info.value)
