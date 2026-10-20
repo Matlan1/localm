@@ -1427,3 +1427,55 @@ def test_no_pin_script_or_test_names_a_gitignored_path_in_its_comments_and_docst
         for n, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
             hits += [f"{f.name}:{n}: {b}" for b in _BANNED_IN_TRACKED_TEXT if b in line]
     assert hits == []
+
+
+def _rocm_fakes(monkeypatch, tags, pairs, unreadable=()):
+    """Point pw._load at a lemonade listing of *tags* (pin b100) and a bump_rocm_pin whose
+    fetch_candidate pairs only the tags in *pairs*; tags in *unreadable* raise
+    UpstreamUnreadable. Returns the list of tags fetch_candidate was asked about."""
+    from types import SimpleNamespace
+
+    class Refused(Exception):
+        pass
+
+    class UpstreamUnreadable(Refused):
+        pass
+
+    asked = []
+
+    def fetch_candidate(tag):
+        asked.append(tag)
+        if tag in unreadable:
+            raise UpstreamUnreadable("the upstream release list is not a list")
+        if tag not in pairs:
+            raise Refused(f"no upstream release was built from the commit {tag} names")
+        return SimpleNamespace(tag=tag)
+
+    def number(tag):
+        return int(tag[1:]) if tag.startswith("b") and tag[1:].isdigit() else None
+
+    check = SimpleNamespace(pinned_tag=lambda: "b100", _build_number=number,
+                            upstream_releases=lambda: ([{"tag": t} for t in tags], ""))
+    bump = SimpleNamespace(fetch_candidate=fetch_candidate, Refused=Refused,
+                           UpstreamUnreadable=UpstreamUnreadable)
+    monkeypatch.setattr(pw, "_load", lambda name, path: {"check_llama_rocm_pin": check,
+                                                         "bump_rocm_pin": bump}[name])
+    return asked
+
+
+def test_rocm_candidate_is_the_newest_release_that_pairs(monkeypatch):
+    asked = _rocm_fakes(monkeypatch, ["b104", "b103", "b102", "b100", "b99"], pairs={"b102"})
+    assert pw._rocm_candidate() == ("b100", "b102")
+    assert asked == ["b104", "b103", "b102"]
+
+
+def test_rocm_candidate_none_when_no_newer_release_pairs(monkeypatch):
+    asked = _rocm_fakes(monkeypatch, ["b102", "b101", "b100"], pairs=set())
+    assert pw._rocm_candidate() is None
+    assert asked == ["b102", "b101"]
+
+
+def test_rocm_candidate_unreadable_upstream_is_a_fetch_error(monkeypatch):
+    _rocm_fakes(monkeypatch, ["b102", "b100"], pairs={"b102"}, unreadable={"b102"})
+    with pytest.raises(pw.cp.FetchError):
+        pw._rocm_candidate()

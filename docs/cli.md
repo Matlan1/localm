@@ -1006,8 +1006,20 @@ measured, a GGUF reply can also depend on the requests the model answered before
 (see the prompt cache note in [server-api.md](server-api.md#behaviour-notes)), and
 `--anthropic` ignores the flag because the Anthropic API has no seed parameter.
 
+**When the session compacts.** The agent compacts on its own, in the terminal as well
+as in unattended runs, when the next request would take more than 85% of the model's
+context window (or would leave less than the server's reply reserve free), and brings it
+down to about half the window. It counts from the prompt size the server reported for
+the last request. First it drops the output of older tool calls from the context (a file
+read, a command's output), keeping a short note of which tool ran on what; the model runs
+the tool again when it needs that output. Only when that is not enough does it summarise
+older turns. Every message you wrote yourself is kept word for word in the summary. With
+a server that reports no context window, the agent compacts only when the server refuses
+a request as too long, and then sends it again once. When even a compacted session does
+not fit, it says once that the window is too small.
+
 **Compaction keeps the working state.** When a long session is compacted (`/compact`,
-or automatically near the context limit), older turns become a prose summary, and the
+or automatically near the context limit), older turns become a summary of facts, and the
 summary message ends with a block the summariser never rewrites: the files this session
 changed with their added and removed line counts (new, deleted, or created then
 deleted), the verification command and its last result, the code files written since

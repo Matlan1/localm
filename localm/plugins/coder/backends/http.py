@@ -249,6 +249,9 @@ class HTTPBackend(BaseLLMBackend):
             verify = tls.requests_verify(base_url)
         self._verify = verify
         self._last_usage: dict = {}
+        # True when the server compacted the conversation of the last request
+        # to fit its context window (so last_usage counts the compacted prompt).
+        self.last_reply_compacted = False
         # Most recent call's reasoning text (`reasoning_content`), the
         # non-streaming counterpart of chat_stream's on_reasoning callback - see
         # last_reasoning. Never mixed into chat()/chat_stream()'s returned or
@@ -729,6 +732,7 @@ class HTTPBackend(BaseLLMBackend):
     def chat(self, messages: list[dict], **kwargs) -> str:
         self._last_usage = {}
         self._last_reasoning = ""
+        self.last_reply_compacted = False
         resp = _post_with_retry(
             self._chat_url(),
             headers=self._headers(),
@@ -740,6 +744,8 @@ class HTTPBackend(BaseLLMBackend):
         )
         _raise_for_status(resp)
         self._note_routing(getattr(resp, "headers", None))
+        self.last_reply_compacted = (
+            _header(getattr(resp, "headers", None), "X-Localm-Context-Compacted") == "1")
         from localm.jsonreply import response_json
         data = response_json(resp)
         if self.anthropic:
@@ -779,6 +785,7 @@ class HTTPBackend(BaseLLMBackend):
         import json as _json
         self._last_usage = {}
         self._last_reasoning = ""
+        self.last_reply_compacted = False
         _reasoning_parts: list[str] = []
         _last_piece = ""
         # Accumulate streaming native tool_calls: index → {name, arguments_buf}
@@ -796,6 +803,8 @@ class HTTPBackend(BaseLLMBackend):
         ) as resp:
             _raise_for_status(resp)
             headers = getattr(resp, "headers", None)
+            if _header(headers, "X-Localm-Context-Compacted") == "1":
+                self.last_reply_compacted = True
             routing_noted = bool(_header(headers, "X-Localm-Model-Routing"))
             if routing_noted:
                 self._note_routing(headers)
@@ -829,6 +838,8 @@ class HTTPBackend(BaseLLMBackend):
                         f"server error: {_last_piece.strip() or 'generation failed'}")
                 delta = chunk.get("choices", [{}])[0].get("delta", {})
                 status = delta.get("status")
+                if delta.get("status_code") == "compacting":
+                    self.last_reply_compacted = True
                 if status and on_status is not None:
                     try:
                         on_status(status, delta.get("status_code"))

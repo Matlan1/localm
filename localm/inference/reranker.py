@@ -127,6 +127,7 @@ _KIND_WORDS = {
     "text-encoder": "a text encoder",
     "vae": "a VAE",
     "lora": "a LoRA adapter",
+    "upscaler": "an upscaler",
     "tts": "a text-to-speech model",
     "unknown": "a model of unknown type",
 }

@@ -70,9 +70,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `.localcoder/config.toml` to be asked every time.
 
 ### Changed
+- **The bundled llama.cpp runtime moved from b11541 to b11757.** An existing install picks it up with `localm setup-llama --force`.
+- **The bundled AMD (ROCm) llama.cpp runtime moved from build b1342 to b1349** (upstream llama.cpp b11719). An existing install picks it up with `localm setup-llama --force`.
 - **The bundled stable-diffusion.cpp runtime moved from master-964-1d0a58a to master-982-0518b34.** An existing install picks it up the next time image generation starts.
 - **The bundled koboldcpp runtime (native music generation) moved from v1.123 to v1.123.1.** An existing install picks it up the next time music generation starts.
-- **The bundled llama.cpp runtime moved from b11541 to b11756.** An existing install picks it up with `localm setup-llama --force`.
+- **Newer Python libraries.** The Hugging Face backend uses transformers 5.20 (from 5.15), the
+  browser tool uses Playwright 1.64, and the server, PDF, image and download libraries move to
+  their current releases. Running setup again picks them up.
 
 - **The coder starts a project's MCP servers only after you trust them.** A cloned repository
   can declare MCP servers in `.localcoder/config.toml`, so they now need the same trust as tool
@@ -99,6 +103,20 @@ permanent public record of what shipped and are never rewritten; the in-progress
   next request fits in it.
 
 ### Fixed
+- **`localm coder` no longer compacts after every turn.** With a model that leaves little room for context, the coder used to be summarised again on nearly every request, and reading a codebase file by file triggered a summary per file. It now compacts only when a request would take most of the context window, brings the session down to about half of it, and first drops the output of older tool calls (the model reads a file again when it needs it) before summarising anything. Everything you typed is kept word for word across compactions, and summaries list facts instead of prose. A model server that reports no context window, such as an online API, is no longer compacted at 4096 tokens.
+- **A vision projector is no longer offered as a model.** A pulled vision model registers its
+  projector (`...-mmproj`) as a separate entry, and `GET /v1/models` listed it as a chat model.
+  A request naming it unloaded the working model and then failed to load the projector. The
+  projector is now left out of `/v1/models`, and a chat, load or switch request that names it is
+  refused with a message naming the model it belongs to, before anything is unloaded.
+- **Image, video, music and speech components can no longer be loaded as a chat model.** A VAE,
+  text encoder, LoRA, upscaler, image or video checkpoint, or text-to-speech model could be named
+  in a chat, load or switch request, which unloaded the working model (or failed with an internal
+  server error) before the load failed. Such a request is now refused up front with a message
+  saying what the entry is. The image and video components are also left out of `GET /v1/models`;
+  text-to-speech models stay listed, since `/v1/audio/speech` takes them by name.
+- **"Delete saved data" also removes the coder's hook and MCP trust records** (`coder-hook-trust.json` in the data folder).
+- **A short request no longer throws away a running conversation's cached prompt.** A summary, title or other small request sent to the same model between two turns used to take over the conversation's cache, so its next turn processed the whole prompt again. It now uses another slot, and the conversation continues from its cache.
 - **A long conversation is no longer summarised again on every message.** When a chat client sends its whole history each turn and the server has to compact it to fit the context window, the server now reuses the summary it already wrote while the conversation still fits, and later only summarises the newly older messages. Each compaction also brings the conversation down to about half the window, so the next one is many turns away instead of one.
 - **The coder writes code to files instead of printing it.** When a reply shows code for the
   project but nothing was written, the agent is asked to write it with `write_file` or

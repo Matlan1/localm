@@ -12,6 +12,7 @@ import time
 from unittest.mock import MagicMock
 from fastapi.testclient import TestClient
 
+from localm.inference import http_server
 from localm.inference.http_server import (
     _decode_elapsed,
     _tokens_per_sec,
@@ -57,6 +58,10 @@ class TestMetricHelpers:
         # 50,000 tok/s, physically impossible for single-stream decode.
         assert _tokens_per_sec(19, 19 / 54786.62) is None
         assert _tokens_per_sec(29, 29 / 137701.81) is None
+
+    def test_tokens_per_sec_floor_is_one_millisecond_per_token(self):
+        assert _tokens_per_sec(20, 0.0199) is None
+        assert _tokens_per_sec(20, 0.0201) is not None
 
     def test_tokens_per_sec_accepts_realistic_rate_near_the_floor(self):
         # A real, plausible rate (19 tokens over a 0.172s decode window, ~110
@@ -127,6 +132,12 @@ def _burst_after_delay_engine(delay=0.3, pieces=20):
     engine.chat_stream.side_effect = _stream
     type(engine).loaded = property(lambda self: True)
     return engine
+
+
+# The plausibility floor the two streaming burst-arrival tests run with: above what
+# the test client itself spends streaming a chunk, so a zero-gap burst stays below it.
+# test_tokens_per_sec_floor_is_one_millisecond_per_token pins the shipped floor.
+_BURST_TEST_FLOOR = 0.01
 
 
 def _single_token_engine():
@@ -281,7 +292,8 @@ class TestUsageMetricsInResponses:
     # uncontended burst collapses the decode window toward zero. A rate that
     # cannot physically be true (see _MIN_SEC_PER_TOKEN) is not reported at all.
 
-    def test_streaming_chat_burst_arrival_omits_rate_keeps_ttft(self):
+    def test_streaming_chat_burst_arrival_omits_rate_keeps_ttft(self, monkeypatch):
+        monkeypatch.setattr(http_server, "_MIN_SEC_PER_TOKEN", _BURST_TEST_FLOOR)
         with TestClient(create_app(_burst_after_delay_engine())) as client:
             r = client.post("/v1/chat/completions",
                             json={**CHAT_PAYLOAD, "stream": True})
@@ -289,7 +301,8 @@ class TestUsageMetricsInResponses:
         assert usage["ttft_ms"] >= 250, usage    # the real delay is still reported
         assert usage["tokens_per_sec"] is None, usage
 
-    def test_streaming_completion_burst_arrival_omits_rate(self):
+    def test_streaming_completion_burst_arrival_omits_rate(self, monkeypatch):
+        monkeypatch.setattr(http_server, "_MIN_SEC_PER_TOKEN", _BURST_TEST_FLOOR)
         with TestClient(create_app(_burst_after_delay_engine())) as client:
             r = client.post("/v1/completions",
                             json={"model": "test-model", "prompt": "hi", "stream": True})
