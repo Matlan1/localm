@@ -150,10 +150,11 @@ class TestLaunchFailures:
         assert r.ok is False
 
     def test_generic_exception_sets_error(self, tmp_path):
-        r = run_subprocess([_PY, "-c", "pass"], tmp_path / "no-such-dir", timeout=5)
+        with patch_launch(side_effect=OSError("permission denied")):
+            r = run_subprocess(["cmd"], tmp_path, timeout=5)
         assert r.ok is False
         assert r.not_found is False
-        assert r.error
+        assert "permission denied" in r.error
 
 
 class TestEnvForwarding:
