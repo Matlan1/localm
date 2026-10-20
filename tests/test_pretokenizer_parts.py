@@ -48,17 +48,6 @@ def _llama_cpp_pieces(text: str, specials: list[str]) -> list[tuple[int, int]]:
     return [(s, e) for kind, s, e in frags if kind == "raw"]
 
 
-def _piece_spans(text: str, separators) -> list[tuple[int, int]]:
-    """Where split_at_separators' pieces sit in *text*."""
-    pieces = guard.split_at_separators(text, separators)
-    spans, pos = [], 0
-    for p in pieces:
-        at = text.find(p, pos)
-        spans.append((at, at + len(p)))
-        pos = at + len(p)
-    return spans
-
-
 def test_pieces_are_never_shorter_than_llama_cpp_cuts():
     rng = random.Random(7)
     alphabet = "ab<>|[] \n"
@@ -66,7 +55,7 @@ def test_pieces_are_never_shorter_than_llama_cpp_cuts():
         specials = list({"".join(rng.choice("ab<>|[]") for _ in range(rng.randint(1, 4)))
                          for _ in range(rng.randint(1, 5))})
         text = "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 80)))
-        mine = _piece_spans(text, specials)
+        mine = guard.piece_spans(text, specials)
         for order in (sorted(specials, key=len, reverse=True),
                       sorted(specials, key=lambda s: (-len(s), s[::-1]))):
             for s, e in _llama_cpp_pieces(text, order):
@@ -99,6 +88,12 @@ def test_without_separators_the_whole_text_is_the_piece():
 
 def test_an_unaffected_pre_tokenizer_is_not_checked():
     guard.check_parts("qwen2", _prose(_CAP * 3), ())
+
+
+def test_piece_spans_locate_each_piece():
+    assert guard.piece_spans("x<ab>y", ("<ab>",)) == [(0, 1), (5, 6)]
+    assert guard.piece_spans("|aba", ("ab",)) == [(0, 1), (3, 4)]
+    assert guard.piece_spans("plain", ("<s>",)) == [(0, 5)]
 
 
 def test_overlapping_separator_occurrences_are_not_cut():

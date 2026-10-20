@@ -354,6 +354,10 @@ def _make_chunk_id() -> str:
 class _Tokenizer:
     """Thin wrapper for the vocab / tokenisation layer."""
 
+    # The texts check() cuts input at; empty until a load reads them.
+    _separators: tuple = ()
+    _separators_untrusted: tuple = ()
+
     def __init__(self, model_ptr: int, ctx_ptr: int) -> None:
         self._vocab = api.llama_model_get_vocab(model_ptr)
         self._ctx   = ctx_ptr
@@ -362,8 +366,6 @@ class _Tokenizer:
         self._pre_type = pretokenizer_guard.read_pre_type(model_ptr, api)
         # Texts llama.cpp cuts the input at before the pre-tokenizer runs, read
         # only for a pre-tokenizer the guard bounds.
-        self._separators: tuple = ()
-        self._separators_untrusted: tuple = ()
         if pretokenizer_guard.policy_for(self._pre_type) is not None:
             self._separators, self._separators_untrusted = (
                 pretokenizer_guard.read_separators(self._vocab, api))

@@ -346,7 +346,14 @@ def read_separators(vocab, api) -> tuple[tuple[str, ...], tuple[str, ...]]:
 
 def split_at_separators(text: str, separators) -> list[str]:
     """*text* cut at every occurrence of a separator that overlaps no other
-    separator occurrence, with the separators removed.
+    separator occurrence, with the separators removed; the non-empty pieces of
+    :func:`piece_spans`."""
+    return [text[s:e] for s, e in piece_spans(text, separators) if e > s]
+
+
+def piece_spans(text: str, separators) -> list[tuple[int, int]]:
+    """``(start, end)`` of each piece of *text* between the separator
+    occurrences it is cut at (see :func:`split_at_separators`), in order.
 
     llama.cpp cuts at every occurrence it finds, in its own order, so every cut
     made here is one it also makes; an occurrence that overlaps another is left
@@ -363,7 +370,7 @@ def split_at_separators(text: str, separators) -> list[str]:
             spans.append((pos, pos + len(sep)))
             pos = text.find(sep, pos + 1)
     if not spans:
-        return [text]
+        return [(0, len(text))]
     spans = sorted(set(spans))
     clean: list[tuple[int, int]] = []
     prev_end = -1
@@ -374,10 +381,10 @@ def split_at_separators(text: str, separators) -> list[str]:
         prev_end = max(prev_end, e)
     pieces, pos = [], 0
     for s, e in clean:
-        pieces.append(text[pos:s])
+        pieces.append((pos, s))
         pos = e
-    pieces.append(text[pos:])
-    return [p for p in pieces if p]
+    pieces.append((pos, len(text)))
+    return pieces
 
 
 def check_parts(pre_type: Optional[str], text: str, separators=()) -> None:
