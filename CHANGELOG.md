@@ -65,6 +65,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ### Changed
 - **The bundled llama.cpp runtime moved from b11541 to b11756.** An existing install picks it up with `localm setup-llama --force`.
+- **Newer Python libraries.** The Hugging Face backend uses transformers 5.20 (from 5.15), the
+  browser tool uses Playwright 1.64, and the server, PDF, image and download libraries move to
+  their current releases. Running setup again picks them up.
 
 - **The coder starts a project's MCP servers only after you trust them.** A cloned repository
   can declare MCP servers in `.localcoder/config.toml`, so they now need the same trust as tool
