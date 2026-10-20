@@ -823,7 +823,7 @@ The agent auto-starts `localm serve` when needed and plans with tool calls: read
 
 ### Built-in tools
 
-The agent ships 44 built-in tools. "Confirms" means the agent stops and asks
+The agent ships 45 built-in tools. "Confirms" means the agent stops and asks
 before running it by default; "Restricted" means a shared, non-owner session may
 use it at all. The GUI coder has the same set (see [gui.md](gui.md)).
 
