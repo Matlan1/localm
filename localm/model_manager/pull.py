@@ -650,9 +650,12 @@ class _TerminalBar:
             detail += f"  {format_rate(rate)}"
         if eta is not None:
             detail += f"  ETA {format_duration(eta)}"
-        kw = {"total": total} if total else {}
-        self._progress.update(self._task, completed=downloaded, detail=detail,
-                              refresh=True, **kw)
+        task = self._task
+        if task is None:
+            return
+        if total:
+            self._progress.update(task, total=total)
+        self._progress.update(task, completed=downloaded, detail=detail, refresh=True)
 
     def stop(self) -> None:
         self._progress.stop()
@@ -729,7 +732,10 @@ class _ProgressRun:
                 return
 
     def _tick(self) -> None:
-        downloaded, rate, eta = self._tracker.sample(self._measure())
+        tracker = self._tracker
+        if tracker is None:
+            return
+        downloaded, rate, eta = tracker.sample(self._measure())
         if self._gui:
             key = (downloaded, None if rate is None else int(rate // 1000))
             if key != self._last_key:
