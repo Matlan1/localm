@@ -31,6 +31,7 @@ from localm.inference import pretokenizer_guard
 from localm.inference.backends.base import PerThread
 from localm.kv_cache import (
     apply_kv_cache_type, context_refused_note, ggml_type_id, kv_bytes_for_type,
+    refusal_status,
 )
 from localm.textguard import (
     content_spans_via_sentinels, map_untrusted_ranges, split_by_trust,
@@ -4396,7 +4397,8 @@ class LlamaCpp:
         context can hold is one the draft context can hold. Returns "" on
         success, otherwise the status naming why no draft context exists:
         "no-mtp-graph", "no-ctx-type-field", "context-refused" or
-        "hidden-state-refused".
+        "hidden-state-refused". "context-refused" carries a
+        ``:kv_cache_type=<type>`` suffix when the KV cache type is quantised.
         """
         if not api.llama_model_mtp_support(self._model_ptr)[0]:
             return "no-mtp-graph"
@@ -4423,7 +4425,7 @@ class LlamaCpp:
         if not self._mtp_ctx_ptr:
             self._mtp_ctx_ptr = None
             self._mtp_ctx_capacity = 0
-            return "context-refused"
+            return refusal_status("context-refused", self._kv_cache_type)
         self._mtp_ctx_capacity = cp_mtp.n_ctx
         self._n_embd = api.llama_model_n_embd(self._model_ptr)
         # The target exposes its hidden state; the draft consumes it masked. Both

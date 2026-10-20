@@ -339,6 +339,38 @@ class TestRefusalNamesTheSetting:
             llm._recreate_slots_context(4096, True)
         assert "kv_cache_type" in str(err.value)
 
+    @pytest.mark.parametrize("kind,want", [
+        ("q8_0", "context-refused:kv_cache_type=q8_0"), (None, "context-refused")])
+    def test_the_mtp_draft_context(self, kind, want):
+        from localm.inference.backends.gguf import _MTP_STOPPED, _mtp_status_kind
+        llm = make_bare_llama(_model_ptr=111, _ctx_ptr=222, _kv_cache_type=kind)
+        api, _seen = _recording_api(init_results=[None])
+        api.llama_model_mtp_support.return_value = (True, "ok")
+        with patch(API, api):
+            status = llm._create_mtp_context(4096)
+        assert status == want
+        assert _mtp_status_kind(status) in _MTP_STOPPED
+
+    def test_the_draft_model_context(self):
+        llm = make_bare_llama(_kv_cache_type="q8_0")
+        source = _draftmodel.DraftModelSource(llm, ctypes.c_void_p(5), 4)
+        api, _seen = _recording_api(init_results=[None])
+        with patch(API, api):
+            status = source.create_context(4096, True)
+        assert status == "draft-context-refused:kv_cache_type=q8_0"
+        text = _draftmodel.draft_status_message(status)
+        assert "could not be created" in text
+        assert "kv_cache_type" in text and "q8_0" in text and "f16" in text
+
+    def test_the_draft_model_context_under_f16_reads_as_before(self):
+        llm = make_bare_llama(_kv_cache_type=None)
+        source = _draftmodel.DraftModelSource(llm, ctypes.c_void_p(5), 4)
+        api, _seen = _recording_api(init_results=[None])
+        with patch(API, api):
+            status = source.create_context(4096, True)
+        assert status == "draft-context-refused"
+        assert "kv_cache_type" not in _draftmodel.draft_status_message(status)
+
     def test_the_load_failure_text_keeps_the_note(self):
         from localm.inference.backends.gguf import _load_failure_message
         reason = RuntimeError("Failed to create llama context."
@@ -409,6 +441,33 @@ class TestSizing:
                 ceilings[kind] = b._auto_ctx_max(capped=False)
         assert ceilings["q8_0"] > ceilings["f16"]
         assert ceilings["q8_0"] / ceilings["f16"] == pytest.approx(32 / 17, rel=0.02)
+
+    @pytest.mark.parametrize("kind,want", [("f16", 2048), ("q8_0", 1088)])
+    def test_the_mtp_draft_charge(self, tmp_path, kind, want):
+        f = _gguf(tmp_path / "m.gguf", _shape("qwen35", 48, 2048, 16, 4, extra=[
+            ("qwen35.nextn_predict_layers", 4, 1)]))
+        b = GgufBackend(str(f), mtp_enabled=True, kv_cache_type=kind)
+        assert b._mtp_draft_context_vram_bytes() > 0
+        assert b._mtp_draft_kv_per_token_cached == want
+
+    @pytest.mark.parametrize("kind,want", [("f16", 131072), ("q8_0", 69632)])
+    def test_the_draft_model_charge(self, tmp_path, kind, want):
+        target = _gguf(tmp_path / "t.gguf", _shape("llama", 40, 5120, 40, 8))
+        draft = _gguf(tmp_path / "d.gguf", _shape("llama", 32, 4096, 32, 8))
+        b = GgufBackend(str(target), spec_source="draft", spec_draft_model=str(draft),
+                        kv_cache_type=kind)
+        with patch.object(GgufBackend, "_draft_model_rejected_by_metadata",
+                          return_value=False):
+            assert b._draft_model_charge_bytes() > 0
+        assert b._draft_kv_per_token_cached == want
+
+    def test_the_engine_reports_its_backends_type(self, tmp_path):
+        from localm.inference import engine
+        f = _gguf(tmp_path / "m.gguf", _shape("llama", 32, 4096, 32, 8))
+        for kind in ("q8_0", "f16"):
+            cfg = dict(DEFAULT_CONFIG, kv_cache_type=kind)
+            with patch.object(engine, "load_config", return_value=cfg):
+                assert engine.Engine(str(f)).kv_cache_type == kind
 
     def test_estimate_vram_scales_the_header_figure(self):
         f16 = estimate_vram(4 * GB, 8192, kv_bytes_per_token=131072)

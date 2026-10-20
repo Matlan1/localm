@@ -13,7 +13,7 @@ import weakref
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
-from localm.kv_cache import apply_kv_cache_type
+from localm.kv_cache import apply_kv_cache_type, refusal_status, refused_type
 
 from ._drafting import SPEC_DRAFT, CountedSource
 from ._stepcosts import UNBOUNDED_REPLY_TOKENS, expected_tokens
@@ -63,9 +63,15 @@ def is_gguf_file(path) -> bool:
 
 def draft_status_message(status: str) -> str:
     """A plain-language reason for a draft-model source *status*; a
-    "draft-error:<type>" status reads as a setup error of that type."""
+    "draft-error:<type>" status reads as a setup error of that type, and a
+    status with a ``:kv_cache_type=<type>`` suffix names the setting."""
     if status.startswith("draft-error:"):
         return "setting up the draft model failed (%s)" % status.split(":", 1)[1]
+    kind = refused_type(status)
+    if kind is not None:
+        base = _DRAFT_STATUS_MESSAGES.get(status.split(":", 1)[0], "drafting is unavailable")
+        return (f"{base} with the {kind} KV cache (the kv_cache_type setting); "
+                f"set kv_cache_type to f16 to draft with this model")
     return _DRAFT_STATUS_MESSAGES.get(status, "drafting is unavailable")
 
 
@@ -258,7 +264,8 @@ class DraftModelSource(CountedSource):
             cp.n_threads_batch = self._n_threads
         ctx = api.llama_init_from_model(model, cp)
         if not ctx:
-            return "draft-context-refused"
+            return refusal_status("draft-context-refused", llm._kv_cache_type
+                                  if llm is not None else None)
         self._ctx = ctx
         self._ctx_capacity = cp.n_ctx
         self._ctx_offload = bool(cp.offload_kqv)

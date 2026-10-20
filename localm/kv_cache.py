@@ -94,6 +94,22 @@ def apply_kv_cache_type(cp: Any, kv_cache_type: Optional[str]) -> None:
     cp.type_v = type_id
 
 
+def refusal_status(status: str, kv_cache_type: Optional[str]) -> str:
+    """*status* for a refused context, with a ``:kv_cache_type=<type>`` detail
+    suffix when the KV cache was asked for in a quantised type. f16 or None
+    returns *status* unchanged."""
+    if kv_cache_type is None or kv_cache_type == KV_CACHE_F16:
+        return status
+    return f"{status}:kv_cache_type={kv_cache_type}"
+
+
+def refused_type(status: str) -> Optional[str]:
+    """The KV cache type a :func:`refusal_status` *status* names, or None when
+    it names none."""
+    _, _sep, detail = status.partition(":kv_cache_type=")
+    return detail or None
+
+
 def context_refused_note(kv_cache_type: Optional[str]) -> str:
     """The sentence a refused context creation appends when the KV cache was
     asked for in a quantised type, "" for f16 or None."""
