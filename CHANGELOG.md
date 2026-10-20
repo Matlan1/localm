@@ -84,6 +84,20 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the finished ones.
 
 ### Fixed
+- **The coder writes code to files instead of printing it.** When a reply shows code for the
+  project but nothing was written, the agent is asked to write it with `write_file` or
+  `edit_file`; if it still does not, the run ends as not finished instead of "Task finished". A
+  reply of only `[no tool needed]` no longer leaves you with an empty answer.
+- **Coder edit tools are harder to get wrong.** `edit_file`, `edit_files` and `patch_file` no
+  longer apply an edit that would break a Python, JSON or TOML file that was valid (the file stays
+  unchanged and the agent sees the region its edit would have produced), and a replacement written
+  without the indentation of the line it lands on is re-indented when that keeps the file valid.
+  Argument names other coding tools use (`old_str`, `new_str`, `file_path`) and arguments written
+  next to `args` are accepted, a call with missing arguments gets a reply naming them with an
+  example, a missed `old` text says how to add new text, and identical calls in one reply run once.
+- **A coder task no longer ends on "let me run the tests".** A reply whose last line announces a
+  step it did not take, or that leaves changed files unverified after the agent was asked to
+  verify them, is sent back once; a run that still stops there is reported as not finished.
 - **A coder shell command that starts with a quoted program path now runs on Windows.** A command such as `"D:\tools dir\tool.exe" --flag "a b"` used to fail with "is not recognized as an internal or external command", because `cmd` dropped the first and last quote.
 - **A shell command's timeout or cancel in `localm coder` is no longer held up by a stray
   background process.** A command that left a detached process holding its output open used to
