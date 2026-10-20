@@ -211,3 +211,28 @@ class TestRightsizeFailureKeepsSpeculation:
         assert llm._rightsize_plan(5000) == (8192, True)
         assert llm._rightsize_plan(5000) is None
         assert calls == [(8192, 8192)]
+
+
+class TestDraftContextFollowsTheTarget:
+    def _source(self, llm, capacity, offload):
+        import ctypes
+
+        from localm.inference.backends.llamacpp._draftmodel import DraftModelSource
+        src = DraftModelSource(llm, ctypes.c_void_p(5), 4)
+        src._ctx = ctypes.c_void_p(6)
+        src._ctx_capacity = capacity
+        src._ctx_offload = offload
+        return src
+
+    def test_a_shrunk_target_context_puts_the_draft_context_out_of_step(self):
+        llm = _llm(4096)
+        assert self._source(llm, 8192, True)._context_out_of_step() is True
+
+    def test_a_target_kv_cache_moved_to_vram_puts_it_out_of_step(self):
+        llm = _llm(8192, offload_kqv=True)
+        assert self._source(llm, 8192, False)._context_out_of_step() is True
+
+    def test_a_matching_draft_context_is_kept(self):
+        llm = _llm(8192, offload_kqv=True)
+        assert self._source(llm, 8192, True)._context_out_of_step() is False
+        assert self._source(llm, 8192, None)._context_out_of_step() is False
