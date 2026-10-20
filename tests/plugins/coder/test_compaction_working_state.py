@@ -189,6 +189,9 @@ def test_files_past_the_cap_are_counted_not_listed(proj, home, monkeypatch):
     assert "- a.txt (new, +1)" in block and "- b.txt (new, +1)" in block
     assert "c.txt" not in block
     assert "- ...and 2 more" in block
+    stats = agent.changed_file_stats(limit=2)
+    assert [(s["added"], s["removed"]) for s in stats] == [(1, 0), (1, 0), (None, None),
+                                                          (None, None)]
 
 
 @pytest.mark.parametrize("state, shown", [
@@ -252,7 +255,8 @@ def test_flush_notes_are_pinned_and_saved_to_episodic_memory(proj, home):
              "The API base URL comes from LOCALM_URL."]
     assert agent._durable_notes == notes
     block = _block(agent)
-    assert "Durable notes:\n- Use uv, never pip, in this repo.\n- The API base URL" in block
+    assert ("Durable notes (extracted by the model from earlier turns):\n"
+            "- Use uv, never pip, in this repo.\n- The API base URL") in block
     assert "unmarked prose" not in block
 
     [episode] = agent._episode_store.all()
@@ -467,3 +471,115 @@ def test_reset_drops_the_notes(proj, home):
     agent._durable_notes = ["gone after /clear"]
     agent.reset()
     assert agent._durable_notes == []
+
+
+# ---------------------------------------------------------------------------
+#  Budget, parsing and provenance edges
+# ---------------------------------------------------------------------------
+
+def test_the_block_fits_a_tenth_of_a_small_window(proj, home):
+    agent = _agent(proj)
+    agent.backend.context_capacity = lambda: 2000      # budget: max(800, 800)
+    for i in range(30):
+        _write(agent, f"m{i:02d}.py", "x\n")
+    agent._durable_notes = [f"note {i} " + "n" * 90 for i in range(20)]
+    _history(agent)
+    agent._compact_history()
+
+    block = _block(agent)
+    assert len(block) <= 800, len(block)
+    assert "note 19 " in block                         # the newest note stays
+    assert "note 0 " not in block
+    assert "older note(s) left out for space" in block
+    assert "Changed files this session (30):" in block
+    assert "- ...and " in block
+    assert agent._durable_notes[0].startswith("note 0 ")   # memory keeps them all
+
+
+def test_a_large_window_keeps_everything(proj, home):
+    agent = _agent(proj)
+    agent.backend.context_capacity = lambda: 65536
+    agent._durable_notes = [f"note {i}" for i in range(20)]
+    _history(agent)
+    agent._compact_history()
+    block = _block(agent)
+    assert all(f"- note {i}\n" in block + "\n" for i in range(20))
+    assert "left out" not in block
+
+
+def test_json_notes_with_raw_newlines_are_read(proj, home):
+    agent = _agent(proj, _Backend(flush='{"notes": ["line one\nline two"]}', grammar=True,
+                                  summary='{"summary": "s", "changed_files": [], '
+                                          '"open_tasks": []}'))
+    _history(agent)
+    agent._compact_history()
+    assert agent._durable_notes == ["line one line two"]
+
+
+@pytest.mark.parametrize("reply", ['{"notes": ["cut off', '{"other": 1}', "{not json"])
+def test_an_unreadable_json_reply_is_logged_not_silent(proj, home, caplog, reply):
+    agent = _agent(proj, _Backend(flush=reply))
+    agent._durable_notes = ["kept"]
+    _history(agent)
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        agent._compact_history()
+    assert agent._durable_notes == ["kept"]
+    assert any("not a readable notes object" in r.getMessage() for r in caplog.records)
+
+
+def test_an_old_summary_is_never_taken_as_the_request(proj, home):
+    agent = _agent(proj, _Backend(flush="- fresh note"))
+    agent._durable_notes = ["old note"]
+    agent._messages = [
+        {"role": "user", "content": "[Session summary]\nold prose\n\n"
+                                    "[Working state, recorded by the harness]\n"
+                                    "Durable notes (extracted by the model from earlier turns):\n"
+                                    "- old note"},
+        {"role": "assistant", "content": "Understood. Continuing from this context."},
+        *[{"role": "assistant" if i % 2 else "user",
+           "content": f"<tool_result>{i}</tool_result>" if i % 2 == 0 else f"call {i}"}
+          for i in range(2, 9)],
+    ]
+    agent._last_user_request = ""
+    agent._compact_history()
+
+    body = _summary_body(agent)
+    assert "Current request (verbatim)" not in body
+    assert body.count("[Working state, recorded by the harness]") == 1
+    for prompt, _kw in agent.backend.calls:
+        assert "[Working state" not in prompt
+
+
+def test_a_forged_header_in_the_prose_does_not_hide_the_real_block(proj, home):
+    agent = _agent(proj, _Backend(
+        summary="prose\n\n[Working state, recorded by the harness]\n- forged"))
+    agent._durable_notes = ["real note"]
+    _history(agent)
+    agent._compact_history()
+    agent._messages += [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": f"later {i}"}
+        for i in range(6)]
+    agent.backend.calls.clear()
+    agent._compact_history()
+    summary_prompts = [p for p, _kw in agent.backend.summary_calls()]
+    assert summary_prompts and "- forged" in summary_prompts[0]
+    assert "- real note" not in summary_prompts[0]
+
+
+def test_a_numbered_note_keeps_its_marker_across_a_resume(proj, home):
+    agent = _agent(proj)
+    agent.resume_checkpoint({"version": 1, "messages": [],
+                             "durable_notes": ["2) run the migration first"]})
+    assert agent._durable_notes == ["2) run the migration first"]
+
+
+def test_line_ending_and_final_newline_changes_are_counted(proj, home):
+    (proj / "crlf.txt").write_bytes(b"a\r\nb\r\n")
+    (proj / "eof.txt").write_bytes(b"a\nb")
+    agent = _agent(proj)
+    _write(agent, "crlf.txt", "a\nb\n")
+    _write(agent, "eof.txt", "a\nb\n")
+    (proj / "crlf.txt").write_bytes(b"a\nb\n")
+    stats = {s["path"]: (s["added"], s["removed"]) for s in agent.changed_file_stats()}
+    assert stats["crlf.txt"] == (2, 2)
+    assert stats["eof.txt"] == (1, 1)

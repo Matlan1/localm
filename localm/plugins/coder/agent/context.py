@@ -37,36 +37,39 @@ _MAX_NOTE_CHARS = 300
 _NOTE_MARKER_RE = re.compile(r"^\s*(?:[-*+]|\d{1,2}[.)])\s+")
 
 
-def _clean_note(text: str) -> str:
+def _clean_note(text: str, *, strip_marker: bool = True) -> str:
     """*text* as one durable note: defanged with ``neutralise``, whitespace
-    collapsed, a leading list marker removed, cut to ``_MAX_NOTE_CHARS``.
-    Returns ``""`` for an empty note or a bare "none"."""
+    collapsed, a leading list marker removed when *strip_marker*, cut to
+    ``_MAX_NOTE_CHARS``. Returns ``""`` for an empty note or a bare "none"."""
     from localm.textguard import neutralise
     note = " ".join(neutralise(str(text)).split())
-    note = _NOTE_MARKER_RE.sub("", note, count=1).strip()
+    if strip_marker:
+        note = _NOTE_MARKER_RE.sub("", note, count=1).strip()
     if note.casefold().rstrip(".") in ("", "none", "n/a"):
         return ""
     return note[:_MAX_NOTE_CHARS].rstrip()
 
 
-def _parse_flush_notes(raw: str) -> list[str]:
-    """The notes in a flush reply, deduplicated, at most ``_MAX_FLUSH_NOTES``.
+def _parse_flush_notes(raw: str) -> tuple[list[str], bool]:
+    """``(notes, readable)`` for a flush reply: the notes deduplicated, at
+    most ``_MAX_FLUSH_NOTES``.
 
-    A JSON object with a ``notes`` list contributes its string items; any
+    A reply starting with ``{`` is read as a JSON object (control characters
+    allowed inside strings) whose ``notes`` list contributes its string items;
+    *readable* is False when it does not parse or has no ``notes`` list. Any
     other reply contributes only its lines that start with a list marker
     (``-``, ``*``, ``+`` or ``1.``), so a preamble line is never a note."""
     text = str(raw or "").strip()
     items: list[str] = []
-    data = None
     if text.startswith("{"):
         try:
-            data = json.loads(text)
+            data = json.loads(text, strict=False)
         except (ValueError, RecursionError):
-            data = None
-    if isinstance(data, dict):
-        notes = data.get("notes")
-        if isinstance(notes, list):
-            items = [n for n in notes if isinstance(n, str)]
+            return [], False
+        notes = data.get("notes") if isinstance(data, dict) else None
+        if not isinstance(notes, list):
+            return [], False
+        items = [n for n in notes if isinstance(n, str)]
     else:
         items = [ln for ln in text.splitlines() if _NOTE_MARKER_RE.match(ln)]
     out: list[str] = []
@@ -77,7 +80,7 @@ def _parse_flush_notes(raw: str) -> list[str]:
         if note and key not in seen:
             seen.add(key)
             out.append(note)
-    return out[:_MAX_FLUSH_NOTES]
+    return out[:_MAX_FLUSH_NOTES], True
 
 
 def _merge_notes(existing: list[str], new: list[str]) -> tuple[list[str], list[str]]:
@@ -509,13 +512,16 @@ ws     ::= [ \t\n\r]*
 
     def _latest_request(self):
         """The most recent user request: ``_last_user_request`` when set, else
-        the last user message that is not a tool result, else ``""``."""
+        the last user message that is neither a tool result nor a compaction
+        summary, else ``""``."""
         request = getattr(self, "_last_user_request", "") or ""
         if request:
             return request
         for m in reversed(self._messages):
             if m.get("role") == "user" and not self._is_tool_result(m):
                 content = m.get("content", "")
+                if str(content).startswith("[Session summary]"):
+                    continue
                 return content if isinstance(content, str) else ""
         return ""
 
@@ -643,9 +649,13 @@ ws     ::= [ \t\n\r]*
             logger.warning("coder compaction: pre-compaction flush produced no "
                            "notes (%s)", failure)
             return
+        notes, readable = _parse_flush_notes(reply)
+        if not readable:
+            logger.warning("coder compaction: pre-compaction flush reply is not a "
+                           "readable notes object; no notes kept")
+            return
         merged, added = _merge_notes(
-            list(getattr(self, "_durable_notes", None) or []),
-            _parse_flush_notes(reply))
+            list(getattr(self, "_durable_notes", None) or []), notes)
         self._durable_notes = merged
         if not added:
             return
@@ -671,46 +681,82 @@ ws     ::= [ \t\n\r]*
         self._compaction_say(
             f"Kept {len(added)} durable note(s) from the compacted turns ({where}).")
 
+    def _working_state_chars(self) -> int:
+        """The size cap of the working-state block, in characters: a tenth of
+        the context window at four characters per token, at least 800."""
+        return max(800, self._ctx_window_tokens() * 4 // 10)
+
     def _working_state_block(self):
-        """The harness's own record of the session's working state, as the
-        block ``_compact_history`` appends after the prose summary: changed
-        files with line counts, the verify command's last state, code files
-        written since the last test run, and the durable notes (range-marked
-        untrusted). ``""`` when there is nothing to record."""
+        """The working-state block ``_compact_history`` appends after the prose
+        summary: changed files with line counts, the verify command's last
+        state and code files written since the last test run (all from the
+        session's own records), then the durable notes the model extracted
+        (range-marked untrusted). Fits ``_working_state_chars()``: the oldest
+        notes are left out first down to the newest three, then fewer files
+        are listed down to five, then the rest of the notes and files; each
+        omission is stated in the block. ``""`` when there is nothing to
+        record."""
         from localm.debuglog import logger
         from localm.textguard import compose, untrusted_span
-        lines: list[str] = []
         try:
-            stats = self.changed_file_stats()
+            stats = self.changed_file_stats(limit=_MAX_PINNED_FILES)
         except Exception as e:
             logger.debug("coder compaction: changed-file stats unavailable: %r", e)
             stats = []
-        if stats:
-            lines.append(f"Changed files this session ({len(stats)}):")
-            lines.extend("- " + _render_file_stat(f) for f in stats[:_MAX_PINNED_FILES])
-            if len(stats) > _MAX_PINNED_FILES:
-                lines.append(f"- ...and {len(stats) - _MAX_PINNED_FILES} more")
+        verify_line = ""
         verify_cmd = getattr(self, "verify_cmd", None)
         if verify_cmd is not None:
             from .. import verify as _verify
             state = (getattr(self, "_last_verify_state", None)
                      or "not run yet for the current request")
-            lines.append(f"Verification `{_verify.command_text(verify_cmd)}`: {state}")
+            verify_line = f"Verification `{_verify.command_text(verify_cmd)}`: {state}"
         unverified = sorted(getattr(self, "_unverified_writes", None) or ())
-        if unverified:
-            shown = ", ".join(unverified[:_MAX_PINNED_FILES])
-            more = (f" and {len(unverified) - _MAX_PINNED_FILES} more"
-                    if len(unverified) > _MAX_PINNED_FILES else "")
-            lines.append(f"Code files written since the last test run: {shown}{more}")
         notes = list(getattr(self, "_durable_notes", None) or [])
-        if not lines and not notes:
+        if not stats and not verify_line and not unverified and not notes:
             return ""
-        parts: list = [_WORKING_STATE_HEADER, *(f"\n{ln}" for ln in lines)]
-        if notes:
-            parts.append("\nDurable notes:")
-            for note in notes:
-                parts.extend(["\n- ", untrusted_span(note)])
-        return compose(*parts)
+
+        def _render(n_files: int, n_notes: int):
+            lines: list[str] = []
+            if stats:
+                lines.append(f"Changed files this session ({len(stats)}):")
+                lines.extend("- " + _render_file_stat(f) for f in stats[:n_files])
+                if len(stats) > n_files:
+                    lines.append(f"- ...and {len(stats) - n_files} more")
+            if verify_line:
+                lines.append(verify_line)
+            if unverified:
+                shown = unverified[:n_files]
+                rest = len(unverified) - len(shown)
+                text = (", ".join(shown) + (f" and {rest} more" if rest else "")
+                        if shown else f"{rest} file(s)")
+                lines.append(f"Code files written since the last test run: {text}")
+            parts: list = [_WORKING_STATE_HEADER, *(f"\n{ln}" for ln in lines)]
+            if notes:
+                parts.append("\nDurable notes (extracted by the model from earlier turns):")
+                if n_notes < len(notes):
+                    parts.append(f"\n- ({len(notes) - n_notes} older note(s) left out "
+                                 "for space)")
+                for note in (notes[len(notes) - n_notes:] if n_notes else []):
+                    parts.extend(["\n- ", untrusted_span(note)])
+            return compose(*parts)
+
+        budget = self._working_state_chars()
+        n_files = min(len(stats), _MAX_PINNED_FILES)
+        n_notes = len(notes)
+        block = _render(n_files, n_notes)
+        while len(block) > budget:
+            if n_notes > 3:
+                n_notes -= 1
+            elif n_files > 5:
+                n_files -= 1
+            elif n_notes > 0:
+                n_notes -= 1
+            elif n_files > 0:
+                n_files -= 1
+            else:
+                break
+            block = _render(n_files, n_notes)
+        return block
 
     def _compact_history(self) -> bool:
         """Replace everything before the kept tail (see ``_compaction_cut``)
@@ -758,7 +804,7 @@ ws     ::= [ \t\n\r]*
             content = str(content)
             if i == 0 and content.startswith("[Session summary]"):
                 # The previous working-state block is rebuilt from live state below.
-                cut_at = content.find("\n\n" + _WORKING_STATE_HEADER)
+                cut_at = content.rfind("\n\n" + _WORKING_STATE_HEADER)
                 if cut_at >= 0:
                     content = content[:cut_at]
             excerpt_parts.append(compose(untrusted_span(f"{role}: {str(content)[:600]}")))

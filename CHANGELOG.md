@@ -45,8 +45,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   it changed (with added and removed line counts), the verification command's last result and
   the code written since the last test run outside the summary, so they are never lost to
   paraphrase. Before compacting, the agent also keeps durable notes from the condensed turns;
-  outside privacy mode they are saved to episodic memory. `compaction_flush = false` in
-  `.localcoder/config.toml` turns the note pass off.
+  in `log` and `full` mode, with episodic memory on, they are saved as a lesson, and privacy
+  mode writes nothing. `compaction_flush = false` in `.localcoder/config.toml` turns the note
+  pass off.
 
 ### Changed
 

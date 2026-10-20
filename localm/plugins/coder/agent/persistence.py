@@ -43,7 +43,8 @@ def _restore_durable_notes(raw) -> list[str]:
     from .context import _MAX_DURABLE_NOTES, _clean_note
     if not isinstance(raw, list):
         return []
-    notes = [n for n in (_clean_note(item) for item in raw if isinstance(item, str)) if n]
+    notes = [n for n in (_clean_note(item, strip_marker=False)
+                         for item in raw if isinstance(item, str)) if n]
     return notes[-_MAX_DURABLE_NOTES:]
 
 
@@ -66,7 +67,11 @@ class _PersistenceMixin:
         """
         # Snapshot first - the GUI reads this from another thread while the
         # agent loop may be inserting entries.
-        snapshot = dict(self._changed_files)
+        return self._changed_files_of(dict(self._changed_files))
+
+    def _changed_files_of(self, snapshot: dict) -> list[dict]:
+        """:meth:`changed_files` entries for *snapshot*, a copy of
+        ``_changed_files``."""
         out = []
         for key in sorted(snapshot):
             e = snapshot[key]
@@ -83,22 +88,26 @@ class _PersistenceMixin:
     # A side larger than this is not diffed: its line counts are reported as None.
     _STATS_MAX_BYTES = 2_000_000
 
-    def changed_file_stats(self) -> list[dict]:
+    def changed_file_stats(self, limit: Optional[int] = None) -> list[dict]:
         """:meth:`changed_files` entries with line counts against each file's
         first-seen original.
 
         Each entry adds ``added`` and ``removed`` (ints: lines a cumulative
         unified diff adds and removes; a created file counts every line as
         added, a deleted one every original line as removed), or None for both
-        when either side is over ``_STATS_MAX_BYTES`` or the current file cannot
-        be read. Never raises."""
+        when either side is over ``_STATS_MAX_BYTES``, the current file cannot
+        be read, or the entry comes after the first *limit* entries (None: no
+        limit). Never raises."""
         snapshot = dict(self._changed_files)   # cross-thread read safety
         out = []
-        for entry in self.changed_files():
-            raw = snapshot.get(entry["path"])
+        for n, entry in enumerate(self._changed_files_of(snapshot)):
+            raw = snapshot[entry["path"]]
             added = removed = None
+            if limit is not None and n >= limit:
+                out.append({**entry, "added": None, "removed": None})
+                continue
             try:
-                original = raw["original"] if raw is not None else None
+                original = raw["original"]
                 abs_path = self.cwd / entry["path"]
                 if entry["exists"]:
                     size = abs_path.stat().st_size
@@ -112,7 +121,8 @@ class _PersistenceMixin:
                                 if original is not None else "")
                     added = removed = 0
                     matcher = difflib.SequenceMatcher(
-                        None, old_text.splitlines(), new_text.splitlines())
+                        None, old_text.splitlines(keepends=True),
+                        new_text.splitlines(keepends=True))
                     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
                         if tag in ("replace", "delete"):
                             removed += i2 - i1
