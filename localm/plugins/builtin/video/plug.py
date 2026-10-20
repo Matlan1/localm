@@ -64,9 +64,11 @@ class VideoRequest(BaseModel):
     # laid over Settings > Video for this job, and registered LoRAs.
     native_models: dict[str, str] | None = None
     loras: list[LoraChoice] | None = Field(default=None, max_length=MAX_LORAS)
-    # Native backend only: a sampler and scheduler by library name.
+    # Native backend only: a sampler and scheduler by library name, and the
+    # flow shift (None keeps Settings > Video or the model default).
     sample_method: str | None = None
     scheduler: str | None = None
+    flow_shift: float | None = Field(None, ge=0.0, le=100.0, allow_inf_nan=False)
 
 
 class MoveFileRequest(BaseModel):
@@ -150,9 +152,16 @@ async def video(req: VideoRequest, request: Request):
                 job.push({"type": "line", "text": refused})
                 return False
             s = apply_choice(s, native_choice)
+            if req.flow_shift is not None:
+                s = dict(s, native=dict(s.get("native") or {}, flow_shift=req.flow_shift))
         elif native_loras:
             job.push({"type": "line", "text":
                       "LoRAs chosen this way apply to the native backend only."})
+            return False
+        elif req.flow_shift is not None:
+            job.push({"type": "line", "text":
+                      "Flow shift applies to the native backend; with ComfyUI set it in "
+                      "the workflow."})
             return False
         elif native_extras:
             job.push({"type": "line", "text":
@@ -458,6 +467,8 @@ def register(host) -> None:
     host.mount_router(make_workflow_router("video"))
     from localm.media.native_models import make_router as make_native_models_router
     host.mount_router(make_native_models_router("video", "video", _backend))
+    from localm.media.native_workflows import make_router as make_native_workflow_router
+    host.mount_router(make_native_workflow_router("video"))
     # One-time: rescue any legacy personal override left INSIDE the package
     # (localm/video_gen/wan_workflow_local.json) into home/workflows, which
     # survives a self-update (the localm/ dir is whole-tree-replaced). No-op when absent.

@@ -25,7 +25,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from localm import pathsafe
 from localm.bindhost import is_loopback_host as _is_loopback_host  # noqa: F401  (re-export for back-compat)
@@ -437,6 +437,9 @@ class MediaPreflightRequest(BaseModel):
     # The native backend's per-job model choice (registered names), as the
     # generate request sends it.
     native_models: dict[str, str] | None = None
+    # A native workflow id: the answer lists that workflow's models that are
+    # not registered, with their downloads.
+    native_workflow: str | None = Field(default=None, max_length=100)
 
 
 class ComfyPullRequest(BaseModel):

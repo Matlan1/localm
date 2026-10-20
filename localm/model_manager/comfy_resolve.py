@@ -197,6 +197,14 @@ def _safe_repo_path(path: str) -> bool:
             and _is_name_part(name))
 
 
+def is_safe_hf_file(repo: str, path: str) -> bool:
+    """True when *repo* is an ``owner/name`` HuggingFace repository id and
+    *path* a file in it (``_safe_repo_path``) with one of ``SAFE_EXTENSIONS``."""
+    return (isinstance(repo, str) and isinstance(path, str)
+            and bool(_REPO_ID_RE.match(repo)) and _safe_repo_path(path)
+            and path.lower().endswith(SAFE_EXTENSIONS))
+
+
 def _is_name_part(part: str) -> bool:
     """True for one folder or file name localm can create on Windows, macOS
     and Linux: not empty, not ``.``/``..``, no control character or any of

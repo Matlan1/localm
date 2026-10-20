@@ -455,6 +455,8 @@ def register(host) -> None:
     host.mount_router(make_workflow_router("music"))
     from localm.media.native_models import make_music_router
     host.mount_router(make_music_router(_backend))
+    from localm.media.native_workflows import make_router as make_native_workflow_router
+    host.mount_router(make_native_workflow_router("music"))
     # One-time: rescue any legacy personal override left INSIDE the package
     # (localm/music_gen/ace_workflow_local.json) into home/workflows, which
     # survives a self-update (the localm/ dir is whole-tree-replaced). No-op when absent.

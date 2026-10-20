@@ -9,6 +9,7 @@ import { MIB, $, authHeaders, checkModelsBeforeGenerate, createJobPreview, fetch
 import { t } from "../app/i18n.js";
 import { bindReloadToggle, createGallery, playerDetail, reportMediaLoadFailure, videoPreview, refreshReloadToggle } from "../app/media-gallery.js";
 import { createNativeGenControls, createNativeModelPicker, mountEnhanceButton } from "../app/native-models.js";
+import { createNativeWorkflowCard, nwfNumber, nwfSetField, nwfSetSelect } from "../app/native-workflows.js";
 import { hideStop, showStop } from "./images.js";
 import { modelOverrides } from "./workflow.js";
 
@@ -76,6 +77,35 @@ export const videoModelPicker = createNativeModelPicker(
 
 const videoGen = createNativeGenControls({ prefix: "video" });
 
+/* The native workflow card: presets of models and the settings below. */
+export const videoWorkflowCard = createNativeWorkflowCard({
+  media: "video", mountId: "video-native-workflows", picker: videoModelPicker, logId: "video-log",
+  fields: {
+    read: () => ({
+      negative_prompt: $("video-negative").value.trim() || null,
+      seconds: nwfNumber("video-seconds"), fps: nwfNumber("video-fps"),
+      width: nwfNumber("video-width"), height: nwfNumber("video-height"),
+      steps: nwfNumber("video-steps"), cfg: nwfNumber("video-cfg"),
+      flow_shift: nwfNumber("video-flow-shift"),
+      sample_method: $("video-sampler")?.value || null, scheduler: $("video-scheduler")?.value || null,
+    }),
+    apply: (p) => {
+      if (p.prompt) nwfSetField("video-prompt", p.prompt);
+      if (p.negative_prompt !== undefined) nwfSetField("video-negative", p.negative_prompt);
+      for (const [key, id] of [["width", "video-width"], ["height", "video-height"],
+                               ["steps", "video-steps"], ["cfg", "video-cfg"],
+                               ["flow_shift", "video-flow-shift"]]) {
+        nwfSetField(id, p[key]);
+      }
+      if (p.seconds !== undefined) nwfSetField("video-seconds", p.seconds);
+      if (p.fps !== undefined) nwfSetField("video-fps", p.fps);
+      nwfSetSelect($("video-sampler"), p.sample_method || "");
+      nwfSetSelect($("video-scheduler"), p.scheduler || "");
+      revealFilledAdvanced($("view-video"));
+    },
+  },
+});
+
 mountEnhanceButton({
   media: "video", fieldId: "video-prompt",
   familyOf: () => ({ family: videoModelPicker.family(), label: videoModelPicker.familyLabel() }),
@@ -120,6 +150,13 @@ export async function refreshVideoBackend() {
   for (const node of document.querySelectorAll("#view-video .video-native-only")) {
     node.hidden = !native;
   }
+  const comfyCard = $("video-workflow-card");
+  if (comfyCard) comfyCard.hidden = native;
+  const workflows = $("video-native-workflow-card");
+  if (workflows) {
+    workflows.hidden = !native;
+    if (native) videoWorkflowCard.refresh();
+  }
   for (const [id, key] of COMFY_PLACEHOLDERS) {
     const input = $(id);
     if (input) input.placeholder = t(key);
@@ -156,9 +193,17 @@ $("video-generate").onclick = async () => {
   if (!native && modelOverrides.video && Object.keys(modelOverrides.video).length) {
     body.model_overrides = modelOverrides.video;
   }
+  if (native && videoWorkflowCard.pending) {
+    $("video-generate").disabled = true;
+    try { await videoWorkflowCard.prepare(); } finally { $("video-generate").disabled = false; }
+  }
   const nativeChoice = native ? videoModelPicker.choice() : {};
   Object.assign(body, nativeChoice);
-  if (native) Object.assign(body, videoGen.body());
+  if (native) {
+    Object.assign(body, videoGen.body());
+    const shift = nwfNumber("video-flow-shift");
+    if (shift !== null) body.flow_shift = shift;
+  }
 
   $("video-generate").disabled = true;
   videoLivePreview.clear();
