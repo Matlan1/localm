@@ -563,6 +563,43 @@ class TestFsSaveText:
         assert (save_dir / "chat-2.md").read_text(encoding="utf-8") == "new export"
         assert r.json()["name"] == "chat-2.md"
 
+    @pytest.mark.skipif(os.name != "nt", reason="case-insensitive names are a Windows filesystem property")
+    def test_a_name_taken_in_another_case_is_numbered(self, fs_app, save_dir):
+        (save_dir / "Notes.md").write_text("old", encoding="utf-8")
+        r = self._post(fs_app, {"path": str(save_dir), "name": "notes.md", "content": "new"})
+        assert r.status_code == 200, r.text
+        assert r.json()["name"] == "notes-2.md"
+        assert (save_dir / "Notes.md").read_text(encoding="utf-8") == "old"
+
+    def test_a_failed_write_leaves_no_partial_file(self, fs_app, save_dir, monkeypatch):
+        import builtins
+        from localm.plugins.gui.routes import admin
+        key = _cfgwrite_key()
+        real_open = builtins.open
+
+        class _Broken:
+            def __init__(self, f):
+                self._f = f
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                self._f.close()
+                return False
+
+            def write(self, data):
+                self._f.write(data[:3])
+                raise OSError(28, "No space left on device")
+
+        def fake_open(path, mode="r", *a, **kw):
+            f = real_open(path, mode, *a, **kw)
+            return _Broken(f) if mode == "xb" else f
+        monkeypatch.setattr(admin, "open", fake_open, raising=False)
+        r = self._post(fs_app, {"path": str(save_dir), "name": "a.md", "content": "hello"}, key)
+        assert r.status_code == 500, r.text
+        assert list(save_dir.iterdir()) == []
+
     @pytest.mark.parametrize("bad_name", ["../evil.md", "a/b.md", "run.bat", "noext",
                                           ".md", "evil:stream.md", ""])
     def test_unsafe_or_non_text_name_rejected_and_nothing_written(

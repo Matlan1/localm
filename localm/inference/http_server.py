@@ -5731,6 +5731,7 @@ async def _stream_sse_body(
             loop.call_soon_threadsafe(token_queue.put_nowait, _Records(records))
 
         from localm.inference.backends.base import stream_stop_check
+        cut = produced = False
         try:
             gen_opts = dict(gen_kwargs)
             gen_opts.pop("on_status", None)
@@ -5740,11 +5741,13 @@ async def _stream_sse_body(
                 gen = engine.chat_stream(messages, on_status=_on_status, **gen_opts)
                 for token in gen:
                     if cancel_event.is_set():
+                        cut = True
                         break
+                    produced = True
                     loop.call_soon_threadsafe(token_queue.put_nowait, token)
             # A cancel from an unload or switch ends the reply as an error.
             # See test_server_cancel_mid_stream_ends_as_error_not_stop.
-            if cancel_event.by_server:
+            if cancel_event.by_server and (cut or not produced):
                 loop.call_soon_threadsafe(
                     token_queue.put_nowait, RuntimeError(residency.SERVER_CANCEL_TEXT))
         except Exception as e:
@@ -6034,6 +6037,7 @@ async def _stream_sse_completion_body(
             loop.call_soon_threadsafe(token_queue.put_nowait, _Records(records))
 
         from localm.inference.backends.base import stream_stop_check
+        cut = produced = False
         try:
             gen_opts = dict(gen_kwargs)
             gen_opts.pop("on_status", None)
@@ -6043,9 +6047,11 @@ async def _stream_sse_completion_body(
                 gen = engine.chat_stream(messages, on_status=_on_status, **gen_opts)
                 for token in gen:
                     if cancel_event.is_set():
+                        cut = True
                         break
+                    produced = True
                     loop.call_soon_threadsafe(token_queue.put_nowait, token)
-            if cancel_event.by_server:
+            if cancel_event.by_server and (cut or not produced):
                 loop.call_soon_threadsafe(
                     token_queue.put_nowait, RuntimeError(residency.SERVER_CANCEL_TEXT))
         except Exception as e:
@@ -6566,10 +6572,12 @@ async def _generate_full(engine, messages: list, request=None, *,
         extra = {"on_logprobs": on_logprobs} if gen_kwargs.get("logprobs") is not None else {}
         gen = engine.chat_stream(messages, **gen_kwargs, **extra)
         parts: list[str] = []
+        cut = False
         try:
             with stream_stop_check(cancel_event.is_set):
                 for token in gen:
                     if cancel_event.is_set():
+                        cut = True
                         break
                     if timing is not None and "first_token_at" not in timing:
                         timing["first_token_at"] = time.perf_counter()
@@ -6589,7 +6597,7 @@ async def _generate_full(engine, messages: list, request=None, *,
                 _dbg.exception("closing non-stream generation stream failed")
             if timing is not None:
                 _snapshot_outcome(timing.setdefault("outcome", {}), engine)
-        if cancel_event.by_server:
+        if cancel_event.by_server and (cut or not parts):
             raise RuntimeError(residency.SERVER_CANCEL_TEXT)
         return "".join(parts)
 

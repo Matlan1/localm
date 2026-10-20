@@ -16,7 +16,7 @@ from fastapi import Depends, FastAPI, HTTPException
 
 from localm import scopes
 from localm.inference.http_server import require_fs_host, require_scope
-from localm.pathsafe import confined_name, reject_unsafe_path_string
+from localm.pathsafe import check_plain_name, confined_name, reject_unsafe_path_string
 from localm.plugins.gui.web import (
     FsMkdirRequest,
     FsRenameRequest,
@@ -510,17 +510,31 @@ def register(app: FastAPI, ctx) -> None:
         if not parent.is_dir():
             raise HTTPException(404, f"Not a directory: {parent_raw}")
         parent = parent.resolve()
+        check_plain_name(name)
         for n in range(1, 100):
             candidate = name if n == 1 else f"{stem}-{n}.{ext}"
+            check_plain_name(candidate)
+            # A name taken under another case or an 8.3 alias counts as taken.
+            if (parent / candidate).exists():
+                continue
             target = confined_name(parent, candidate)
             try:
-                with open(target, "xb") as f:
-                    f.write(data)
+                f = open(target, "xb")
             except FileExistsError:
                 continue
             except PermissionError as exc:
                 raise HTTPException(403, f"Permission denied: {candidate}") from exc
             except OSError as e:
+                raise HTTPException(500, f"Could not save the file: {e}") from e
+            try:
+                with f:
+                    f.write(data)
+            except OSError as e:
+                # A failed write removes the partial file it created.
+                try:
+                    target.unlink()
+                except OSError:
+                    pass
                 raise HTTPException(500, f"Could not save the file: {e}") from e
             return {"path": str(target), "parent": str(parent), "name": target.name}
         raise HTTPException(409, f"'{name}' and its numbered variants already exist")

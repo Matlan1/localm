@@ -8,7 +8,7 @@
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { iconEl } from "./icons.js";
 import { COMPACT_KEEP, addMessageRow, audioPart, chat, chatBusy, chatParams, compactConversation, currentConv, isToolEvent, lsSetScoped, maybeCompactConversation, mountStatusIndicator, msgAudioClips, msgImages, msgText, newConversation, newToolEvent, noteLabel, removeStatusIndicator, renderAttachChips, renderChat, renderConvList, saveConversations, scopedKeyPrivate, setConversationPin, stripUserAudio, stripUserImages, syncPinModelToggle, updateStatusIndicator, wireParts } from "./chat.js";
-import { $, CHAT_SURFACE_HEADERS, GIB, TOOL_CALL_DELIM, authHeaders, autoGrow, confirmDanger, el, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, safeStorageSet, setPreviewAllowed, splitThink, streamJob, stripThink, toast } from "./helpers.js";
+import { $, CHAT_SURFACE_HEADERS, GIB, TOOL_CALL_DELIM, authHeaders, autoGrow, confirmDanger, el, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setPreviewAllowed, splitThink, streamJob, stripThink, toast } from "./helpers.js";
 import { t } from "./i18n.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
 import { pickPath, saveTextFs } from "./picker.js";
@@ -2944,6 +2944,8 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   conv.messages.push(reply);
   saveConversations(conv);
   renderChat();
+  // A cut-off reply is partial: it is never spoken or parsed for tool calls.
+  if (reply.cut) return outcome;
 
   // Web-access loop: with the toggle on, a web call in the reply is run and the
   // model continues, until it answers or the loop stops looking things up (a
@@ -3060,16 +3062,16 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
 /** Whole messages that ask the model to go on with its previous reply, in
  *  several languages, compared by ``continueKey``. */
 export const CONTINUE_PHRASES = new Set([
-  "continue", "go on", "keep going", "carry on", "proceed", "resume", "more",
-  "continue writing", "keep writing", "go ahead", "continue the reply",
-  "continue your reply", "continue your answer", "finish", "finish it",
+  "continue", "go on", "keep going", "carry on", "resume", "more",
+  "continue writing", "keep writing", "continue the reply",
+  "continue your reply", "continue your answer",
   "weiter", "mach weiter", "weitermachen", "fortfahren", "fahre fort", "fahr fort",
   "schreib weiter", "weiterschreiben", "weiter so", "mehr",
   "continúa", "continua", "continuar", "sigue", "siga", "sigue escribiendo",
-  "continuez", "continuer", "poursuis", "poursuivez", "vas-y", "allez-y", "la suite",
+  "continuez", "continuer", "poursuis", "poursuivez", "la suite",
   "vai avanti", "prosegui", "prossiga", "ga door", "ga verder", "verder", "doorgaan",
   "kontynuuj", "dalej", "pokračuj", "folytasd", "jatka", "fortsätt", "fortsæt",
-  "fortsett", "devam", "devam et", "tiếp tục", "lanjut", "lanjutkan",
+  "fortsett", "devam","tiếp tục", "lanjut", "lanjutkan",
   "продолжай", "продолжи", "продолжить", "дальше", "продовжуй", "далі",
   "συνέχισε", "استمر", "أكمل", "जारी रखें", "続けて", "続き", "続けてください",
   "继续", "繼續", "계속", "계속해", "계속해줘", "ต่อ",
@@ -3535,8 +3537,10 @@ export function exportConversation() {
       lines.push(`**${exportLabel(m)}:**`, "", msgText(m), "");
     }
   }
-  const name = (conv.title.replace(/[^\w\- ]+/g, "").trim().replace(/\s+/g, "_") ||
-                "conversation") + ".md";
+  let stem = conv.title.replace(/[^\w\- ]+/g, "").trim().replace(/\s+/g, "_") || "conversation";
+  // A Windows device name (con, nul, com1 ...) cannot be a file name there.
+  if (/^(con|prn|aux|nul|com\d|lpt\d)$/i.test(stem)) stem += "_chat";
+  const name = stem + ".md";
   return saveTextFile(name, lines.join("\n"), "text/markdown");
 }
 
@@ -3566,7 +3570,7 @@ async function saveTextInApp(name, text) {
   if (!dir) return;
   try {
     const saved = await saveTextFs(dir, name, text);
-    safeStorageSet(EXPORT_DIR_KEY, saved.parent || dir);
+    lsSetScoped(EXPORT_DIR_KEY, saved.parent || dir);
     toast(t("chat.export.saved", { path: saved.path }));
   } catch (e) {
     toast(t("chat.export.failed", { name, message: e.message }), true);

@@ -886,6 +886,35 @@ def test_server_cancel_mid_stream_ends_as_error_not_stop(producer, lead):
     assert residency.SERVER_CANCEL_TEXT in joined
 
 
+class _CancelAtTeardownEngine(_LockingEngine):
+    """Yields its whole reply, then an unload cancels it during the
+    generator's own teardown, after the last token."""
+
+    def _stream(self):
+        yield "t0 "
+        yield "t1 "
+        residency.cancel_all(self.display_name)
+
+
+@pytest.mark.parametrize("producer", [_stream_sse, _stream_sse_completion])
+def test_a_reply_finished_before_the_server_cancel_still_ends_with_stop(producer):
+    async def scenario():
+        eng = _CancelAtTeardownEngine()
+        return await asyncio.wait_for(
+            _drain(producer(eng, _MSG, "lock-model", asyncio.Semaphore(1))), timeout=5.0)
+    chunks = asyncio.run(scenario())
+    done = _finish_chunk(chunks)
+    assert done is not None
+    assert done["choices"][0]["finish_reason"] == "stop"
+    assert residency.SERVER_CANCEL_TEXT not in "".join(chunks)
+
+
+def test_a_non_streaming_reply_finished_before_the_server_cancel_keeps_its_text():
+    from localm.inference.http_server import _generate_full
+    text = asyncio.run(_generate_full(_CancelAtTeardownEngine(), _MSG, None, max_tokens=0))
+    assert text == "t0 t1 "
+
+
 def test_client_disconnect_does_not_mark_the_cancel_as_the_servers():
     """A cancel the request itself raises leaves by_server False; only
     cancel_all marks it."""

@@ -67,6 +67,37 @@ test("a stream that ends without a finish reason is saved as cut off and marked"
   assert.match(shown, /cut off/, "the transcript shows the cut-off marker");
 });
 
+test("a cut reply holding half a web tool call is not re-prompted or run", async () => {
+  const { window, doc, calls } = setup([[content("Let me look. <tool_call>{\"name\": \"web_se")]]);
+  doc.getElementById("p-web").checked = true;
+  const conv = activate(window, { id: "c1", title: "t", messages: [{ role: "user", content: "news?" }] });
+  await window.runCompletion(conv);
+  assert.equal(chatPosts(calls).length, 1, "no follow-up completion after a cut stream");
+  const last = conv.messages[conv.messages.length - 1];
+  assert.equal(last.role, "assistant");
+  assert.equal(last.cut, true);
+});
+
+test("a cut reply is not read aloud", async () => {
+  const { window, doc } = setup([[content("Half of the answer")]]);
+  doc.getElementById("p-speak").checked = true;
+  const spoken = [];
+  window.speak = (text) => spoken.push(text);
+  const conv = activate(window, { id: "c1", title: "t", messages: [{ role: "user", content: "explain" }] });
+  await window.runCompletion(conv);
+  assert.deepEqual(spoken, []);
+});
+
+test("a finished reply is still read aloud", async () => {
+  const { window, doc } = setup([[content("Whole answer."), finish("stop")]]);
+  doc.getElementById("p-speak").checked = true;
+  const spoken = [];
+  window.speak = (text) => spoken.push(text);
+  const conv = activate(window, { id: "c1", title: "t", messages: [{ role: "user", content: "explain" }] });
+  await window.runCompletion(conv);
+  assert.deepEqual(spoken, ["Whole answer."]);
+});
+
 test("a reply that finished with stop carries no cut-off flag", async () => {
   const { window, doc } = setup([[content("All done."), finish("stop")]]);
   const conv = activate(window, { id: "c1", title: "t", messages: [{ role: "user", content: "explain" }] });
@@ -109,7 +140,8 @@ for (const phrase of ["continue", "Continue.", "continue please", "please contin
   });
 }
 
-for (const phrase of ["continue the list from item 3", "how does continue work in python",
+for (const phrase of ["go ahead", "yes, go ahead", "ok proceed", "Proceed!", "vas-y", "finish it",
+                      "continue the list from item 3", "how does continue work in python",
                       "what does the continue keyword do", "ok", "please", "", "weiter oben steht was?",
                       "explain derived_request"]) {
   test(`"${phrase}" is not a continue request`, () => {

@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 
 import { loadAppWithPages, runScript } from "./harness.mjs";
 
-function setup({ fsAccess, picked = "D:/exports", saveStatus = 200 }) {
+function setup({ fsAccess, picked = "D:/exports", saveStatus = 200, privacy = false }) {
   const posts = [];
   const fetchImpl = async (url, opts = {}) => {
     if (String(url) === "/api/fs/save-text") {
@@ -33,7 +33,8 @@ function setup({ fsAccess, picked = "D:/exports", saveStatus = 200 }) {
   };
   const pickerCalls = [];
   window.pickPath = async (opts) => { pickerCalls.push(opts); return picked; };
-  runScript(window, `caps.fsAccess = ${JSON.stringify(fsAccess)};`);
+  runScript(window, `caps.fsAccess = ${JSON.stringify(fsAccess)};
+    chat.modeKnown = true; chat.privacy = ${privacy}; chat.serverPrivacy = ${privacy};`);
   const conv = { id: "c1", title: "Derived request", messages: [
     { role: "user", content: "how does it work", id: "m1" },
     { role: "assistant", content: "It copies the scope.", id: "m2" },
@@ -63,6 +64,28 @@ test("the next export starts in the folder of the last one", async () => {
   await s.window.exportConversation();
   await s.window.exportConversation();
   assert.equal(s.pickerCalls[1].startPath, "D:/exports");
+});
+
+test("in privacy mode the save folder is not remembered in browser storage", async () => {
+  const s = setup({ fsAccess: "host", privacy: true });
+  await s.window.exportConversation();
+  assert.equal(s.posts.length, 1, "the export itself is saved");
+  assert.equal(s.window.localStorage.getItem("localm.exportDir"), null);
+  await s.window.exportConversation();
+  assert.equal(s.pickerCalls[1].startPath, "");
+});
+
+test("the remembered save folder is on the instance wipe list", () => {
+  const s = setup({ fsAccess: "host" });
+  runScript(s.window, "window.__keys = INSTANCE_SCOPED_KEYS;");
+  assert.ok(s.window.__keys.includes("localm.exportDir"));
+});
+
+test("a title that is a Windows device name gets a usable file name", async () => {
+  const s = setup({ fsAccess: "host" });
+  runScript(s.window, 'chat.conversations[0].title = "CON";');
+  await s.window.exportConversation();
+  assert.equal(s.posts[0].name, "CON_chat.md");
 });
 
 test("cancelling the picker saves nothing", async () => {

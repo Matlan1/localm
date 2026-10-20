@@ -3045,9 +3045,10 @@ class LlamaCpp:
                 self.last_finish_reason = "error" if self._stop.is_set() else "stop"
                 return
             stops = getattr(self, "_stop_strings", _STOP_STRINGS)
+            stop_ids = getattr(self, "_stop_token_ids", frozenset())
 
             def _ends_reply(token: int) -> bool:
-                if tokenizer.is_eog(token):
+                if tokenizer.is_eog(token) or token in stop_ids:
                     return True
                 piece = tokenizer.token_to_piece_bytes(token)
                 return piece.decode("utf-8", "replace") in stops
