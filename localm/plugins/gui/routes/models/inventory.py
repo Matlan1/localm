@@ -379,8 +379,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
 
     @app.post("/api/models/load", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def gui_load_model(req: LoadModelRequest):
-        from localm.model_manager.registry import projector_refusal
-        refusal = projector_refusal(req.model, _require_registered(req.model))
+        from localm.model_manager.registry import chat_load_refusal
+        refusal = chat_load_refusal(req.model, _require_registered(req.model))
         if refusal is not None:
             raise HTTPException(422, refusal)
         # Route every switch through the coordinator so a new selection preempts an
