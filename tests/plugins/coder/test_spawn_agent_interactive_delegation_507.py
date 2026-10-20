@@ -135,7 +135,7 @@ class TestInteractiveDelegation:
     def test_child_shell_is_asked_not_denied_in_interactive_repl(self, tmp_path):
         """run_shell is the tool the finding names: delegated shell work must be
         approvable, not hard-denied."""
-        call = ToolCall(name="run_shell", args={"command": "echo hi"},
+        call = ToolCall(name="run_shell", args={"command": "mkdir delegated"},
                         raw="", start=0, end=0)
         child = _spawn_and_capture_child(
             tmp_path, {"auto_approve": False}, interactive_parent=True)
