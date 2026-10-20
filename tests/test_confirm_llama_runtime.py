@@ -140,6 +140,26 @@ def test_the_probes_own_fail_and_inconclusive_are_kept():
     assert confirm.judge("vulkan", {"verdict": "WHAT"})[0] == confirm.INCONCLUSIVE
 
 
+@pytest.mark.parametrize("abi", ["unchecked", "skipped", "unavailable: OSError", None])
+def test_generation_without_an_ok_abi_verdict_is_never_a_pass(abi):
+    verdict, why = confirm.judge("vulkan", _generated(abi=abi), require_gpu=True)
+    assert verdict == confirm.INCONCLUSIVE and "ABI gate did not confirm" in why
+
+
+@pytest.mark.parametrize("devices", ["unavailable: OSError x", [], None])
+def test_an_unreadable_device_registry_is_inconclusive_not_a_bad_build(devices):
+    res = {"verdict": "LOADED", "why": "no GPU device registered", "abi": "ok", "devices": devices}
+    verdict, why = confirm.judge("vulkan", res, require_gpu=True)
+    assert verdict == confirm.INCONCLUSIVE and "could not be read" in why
+
+
+def test_the_abi_check_passes_only_on_ok():
+    for abi, status in (("ok", "PASS"), ("unchecked", "INCONCLUSIVE"), ("mismatch", "FAIL"),
+                        (None, "NOT MEASURED")):
+        checks = confirm.build_checks(_summary({"cpu": {"verdict": "PASS", "abi": abi}}))
+        assert checks["cpu:abi"]["status"] == status
+
+
 def test_no_model_is_inconclusive_for_cpu():
     res = {"verdict": "LOADED", "why": "no model to generate with: offline", "devices": []}
     assert confirm.judge("cpu", res)[0] == confirm.INCONCLUSIVE
@@ -236,7 +256,7 @@ def test_place_build_records_every_archive_and_whether_it_had_a_digest(monkeypat
     assert calls == [("cuda", "cuda-12", "b1", True)]
 
 
-def test_place_build_stops_at_a_digest_mismatch_without_retrying(monkeypatch, tmp_path):
+def test_place_build_retries_a_digest_mismatch_and_fails_only_when_it_persists(monkeypatch, tmp_path):
     from localm.setup_llama.download import ArtifactError
 
     def behaviour(sl, dest):
@@ -244,8 +264,84 @@ def test_place_build_stops_at_a_digest_mismatch_without_retrying(monkeypatch, tm
         raise ArtifactError(f"download sha256 {confirm._SHA_MISMATCH_TEXT} (expected b, got c)")
     calls = _fake_provision(monkeypatch, behaviour)
     lib, fetched, err, kind = confirm._place_build("vulkan", "b1", tmp_path / "d")
-    assert lib == "" and kind == "mismatch" and len(calls) == 1
+    assert lib == "" and kind == "mismatch" and len(calls) == 3
     assert fetched == [{"asset": "x.zip", "sha256": "b" * 64}]
+
+
+def test_place_build_recovers_when_a_mismatch_was_a_bad_transfer(monkeypatch, tmp_path):
+    from localm.setup_llama.download import ArtifactError
+    seen = []
+
+    def behaviour(sl, dest):
+        seen.append(1)
+        if len(seen) == 1:
+            raise ArtifactError(f"download sha256 {confirm._SHA_MISMATCH_TEXT} (truncated)")
+        (dest / sl._lib_name()).write_bytes(b"lib")
+    _fake_provision(monkeypatch, behaviour)
+    lib, _fetched, err, kind = confirm._place_build("vulkan", "b1", tmp_path / "d")
+    assert lib and err == "" and kind == "" and len(seen) == 2
+
+
+def test_place_build_does_not_retry_setup_llama_refusing_the_request(monkeypatch, tmp_path):
+    import click
+
+    def behaviour(sl, dest):
+        raise click.ClickException("llama.cpp release b1 has no sycl build for win32 on arm64")
+    calls = _fake_provision(monkeypatch, behaviour)
+    lib, _fetched, err, kind = confirm._place_build("sycl", "b1", tmp_path / "d")
+    assert lib == "" and kind == "" and len(calls) == 1 and "no sycl build" in err
+
+
+def test_a_placed_build_without_a_llama_library_is_a_fail(monkeypatch, tmp_path):
+    _fake_provision(monkeypatch, lambda sl, dest: None)
+    lib, _fetched, err, kind = confirm._place_build("cpu", "b1", tmp_path / "d")
+    assert lib == "" and kind == "nolib" and "contained no" in err
+
+
+def test_place_build_records_the_pypi_cuda_runtime_wheels_with_their_pinned_digest(monkeypatch, tmp_path):
+    from localm import setup_llama as sl
+    package, (_version, pinned) = next(iter(sl._CUDA_RUNTIME_PIN.items()))
+
+    def behaviour(sl_, dest):
+        sl_._fetch_pypi_runtime_lib(package, dest)
+        (dest / sl_._lib_name()).write_bytes(b"lib")
+    _fake_provision(monkeypatch, behaviour)
+    monkeypatch.setattr(sl, "_fetch_pypi_runtime_lib", lambda pkg, target: 1)
+    _lib, fetched, err, _kind = confirm._place_build("cuda", "b1", tmp_path / "d", "cuda-12")
+    assert err == "" and fetched == [{"asset": f"PyPI {package}", "sha256": pinned}]
+    assert sl._fetch_pypi_runtime_lib(package, tmp_path) == 1
+
+
+def _fake_foreign(monkeypatch, *, received, length):
+    from localm import setup_llama as sl
+    from localm.setup_llama.download import ArtifactError, _DownloadResult
+    name = "llama-b1-bin-macos-arm64.tar.gz"
+    monkeypatch.setattr(sl, "_release_assets", lambda tag, repo=None: [
+        {"name": name, "browser_download_url": f"https://h/{name}", "digest": "sha256:" + "c" * 64}])
+    calls = []
+
+    def download(url, dest):
+        calls.append(url)
+        return _DownloadResult(bytes_received=received, content_length=length,
+                               content_type="application/gzip", final_url=url)
+
+    def validate(path, expected_sha256=None, dl=None):
+        raise ArtifactError(f"download sha256 {confirm._SHA_MISMATCH_TEXT} (expected c, got d)")
+    monkeypatch.setattr(sl, "_download", download)
+    monkeypatch.setattr(sl, "_validate_archive", validate)
+    return calls
+
+
+def test_a_short_foreign_transfer_is_retried_and_never_called_a_mismatch(monkeypatch, tmp_path):
+    calls = _fake_foreign(monkeypatch, received=600, length=1000)
+    info = confirm._place_foreign("metal", "b1", tmp_path / "m")
+    assert len(calls) == 3 and info["error_kind"] == "" and "short transfer" in info["error"]
+
+
+def test_a_full_length_foreign_transfer_with_the_wrong_digest_is_a_mismatch(monkeypatch, tmp_path):
+    calls = _fake_foreign(monkeypatch, received=1000, length=1000)
+    info = confirm._place_foreign("metal", "b1", tmp_path / "m")
+    assert len(calls) == 3 and info["error_kind"] == "mismatch"
 
 
 def test_place_build_retries_a_transient_failure(monkeypatch, tmp_path):
@@ -272,6 +368,18 @@ def test_pe_imports_reads_a_real_extension_modules_import_table():
     assert f"python3{sys.version_info.minor}.dll" in names
     assert any(n.startswith("libffi") for n in names)
     assert len(names) == len(set(names))
+
+
+_WOW64_DLL = Path(r"C:/Windows/SysWOW64/version.dll")
+
+
+@pytest.mark.skipif(not _WOW64_DLL.is_file(), reason="needs a 32-bit Windows system DLL")
+def test_pe_imports_reads_a_32_bit_image():
+    data = _WOW64_DLL.read_bytes()
+    pe = int.from_bytes(data[0x3C:0x40], "little")
+    assert int.from_bytes(data[pe + 24:pe + 26], "little") == 0x10B
+    names = confirm.pe_imports(_WOW64_DLL)
+    assert names and all(n.lower().endswith(".dll") for n in names)
 
 
 def test_pe_imports_is_empty_for_anything_that_is_not_a_pe_image(tmp_path):

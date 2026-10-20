@@ -393,12 +393,14 @@ def _check_cuda_linux_source(now):
         return _unknown(name, group, advancer, e, pinned)
     expected = {f"llama-{pinned}-bin-ubuntu{suffix}" for suffix in _CUDA_LINUX_SUFFIXES}
     missing = sorted(n for n in table if n not in published)
-    wrong = sorted(n for n in table if n in published and published[n] != table[n])
-    if missing or wrong:
+    undigested = sorted(n for n in table if n in published and not published[n])
+    wrong = sorted(n for n in table if published.get(n) and published[n] != table[n])
+    if missing or wrong or undigested:
         return Row(name=name, status=STALE, pinned=pinned, advancer=advancer, group=group,
                    detail=(f"pinned CUDA asset(s) not in the release: {', '.join(missing)}; "
                            if missing else "")
                    + (f"published digest differs from the pin: {', '.join(wrong)}; " if wrong else "")
+                   + (f"no digest published for: {', '.join(undigested)}; " if undigested else "")
                    + "Linux CUDA users fall back to vulkan or fail the checksum")
     unpinned, stray = sorted(expected - table.keys()), sorted(table.keys() - expected)
     if unpinned or stray:

@@ -398,6 +398,16 @@ def test_cuda_linux_source_stale_when_a_pinned_asset_was_re_uploaded(monkeypatch
     assert row.status == cp.STALE and "digest differs" in row.detail and victim in row.detail
 
 
+def test_cuda_linux_source_names_an_asset_published_without_a_digest(monkeypatch):
+    table = _cuda_linux_table()
+    victim = sorted(table)[0]
+    _router(monkeypatch, {"llama-cpp-builder/releases/tags/": {"assets": [
+        {"name": n, "digest": "" if n == victim else "sha256:" + table[n]} for n in table]}})
+    row = next(s for s in cp.build_registry() if s.name == "Linux CUDA build source").check(NOW)
+    assert row.status == cp.STALE and f"no digest published for: {victim}" in row.detail
+    assert "differs" not in row.detail
+
+
 def test_cuda_linux_source_inconsistent_when_the_table_does_not_name_the_pinned_tag(monkeypatch, tmp_path):
     (tmp_path / "localm" / "setup_llama").mkdir(parents=True)
     (tmp_path / "localm" / "setup_llama" / "pins.py").write_text(

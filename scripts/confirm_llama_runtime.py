@@ -379,53 +379,65 @@ def _place_build(backend: str, tag: str, dest: Path, cuda_line: str | None = Non
                  attempts: int = 3) -> tuple[str, list, str, str]:
     """Place *backend* at *tag* into *dest* through setup-llama's
     ``_provision_backend``. Returns (lib_path, fetched, error, error_kind):
-    *fetched* lists ``{"asset", "sha256"}`` for every archive placed (sha256 None
-    when no digest was available to check it against); *error_kind* is
-    "mismatch" for an archive whose sha256 differs from its digest, "" otherwise.
+    *fetched* lists ``{"asset", "sha256"}`` for every archive and PyPI runtime
+    wheel placed (sha256 None when no digest was available to check it against);
+    *error_kind* is "mismatch" when every attempt ended on a sha256 that differs
+    from its digest, "nolib" when the placed build has no llama library, ""
+    otherwise.
 
-    The whole placement is retried up to *attempts* times on any other error."""
+    The whole placement is retried up to *attempts* times on any error except a
+    ``click.ClickException`` (setup-llama refusing the request, e.g. no such build)."""
+    import click
     from localm import setup_llama as sl
     last, kind = "", ""
     fetched: list = []
-    real_fetch = sl._fetch_and_place
+    real_fetch, real_wheel = sl._fetch_and_place, sl._fetch_pypi_runtime_lib
 
     def recording_fetch(url, target, sha256=None):
         fetched.append({"asset": str(url).rsplit("/", 1)[-1], "sha256": sha256 or None})
         return real_fetch(url, target, sha256)
 
+    def recording_wheel(package, target):
+        pin = sl._CUDA_RUNTIME_PIN.get(package)
+        fetched.append({"asset": f"PyPI {package}", "sha256": pin[1] if pin else None})
+        return real_wheel(package, target)
+
     for attempt in range(1, attempts + 1):
         shutil.rmtree(dest, ignore_errors=True)
         dest.mkdir(parents=True, exist_ok=True)
         fetched.clear()
-        sl._fetch_and_place = recording_fetch
+        sl._fetch_and_place, sl._fetch_pypi_runtime_lib = recording_fetch, recording_wheel
         try:
             sl._provision_backend(backend, dest, None, with_cudart=True,
                                   cuda_line=cuda_line or sl._CUDA_LINE, tag=tag)
-            last = ""
+            last, kind = "", ""
+            break
+        except click.ClickException as e:
+            last, kind = f"{type(e).__name__}: {e.format_message()}", ""
             break
         except Exception as e:
             last = f"{type(e).__name__}: {e}"
-            if _SHA_MISMATCH_TEXT in str(e):
-                kind = "mismatch"
-                break
+            kind = "mismatch" if _SHA_MISMATCH_TEXT in str(e) else ""
             if attempt < attempts:
                 print(f"  placing {backend} failed (attempt {attempt}/{attempts}: {e}); "
                       "retrying", flush=True)
         finally:
-            sl._fetch_and_place = real_fetch
+            sl._fetch_and_place, sl._fetch_pypi_runtime_lib = real_fetch, real_wheel
     if last:
         return "", list(fetched), f"could not place the {backend} build for {tag}: {last}", kind
     lib = dest / sl._lib_name()
     if not lib.exists():
-        return "", list(fetched), f"the {backend} build for {tag} contained no {sl._lib_name()}", ""
+        return "", list(fetched), f"the {backend} build for {tag} contained no {sl._lib_name()}", "nolib"
     return str(lib), list(fetched), "", ""
 
 
-def _place_foreign(backend: str, tag: str, dest: Path) -> dict:
+def _place_foreign(backend: str, tag: str, dest: Path, attempts: int = 3) -> dict:
     """Fetch and digest-check *backend*'s archive for another platform (metal, the
     macOS arm64 archive) without installing it. Returns ``{"asset", "sha256",
     "error", "error_kind", "lib", "lib_sha256"}``: *lib* is the llama library
-    found inside the archive, "" when none."""
+    found inside the archive, "" when none. The download is retried up to
+    *attempts* times; *error_kind* is "mismatch" when the last attempt ended on a
+    sha256 that differs from its digest over a transfer that was not short."""
     from localm import setup_llama as sl
     from localm.setup_llama.pins import _ASSET_MATCH, _PINNED_FALLBACK_SHA256
     info = {"asset": "", "sha256": None, "error": "", "error_kind": "", "lib": "",
@@ -451,13 +463,23 @@ def _place_foreign(backend: str, tag: str, dest: Path) -> dict:
     dest.mkdir(parents=True, exist_ok=True)
     suffix = ".zip" if asset["name"].lower().endswith(".zip") else ".tar.gz"
     arc = dest / f"archive{suffix}"
-    try:
-        dl = sl._download(asset["browser_download_url"], arc)
-        sl._validate_archive(arc, expected_sha256=info["sha256"], dl=dl)
-        sl._extract_archive(arc, dest / "x")
-    except Exception as e:
-        info["error"] = f"{type(e).__name__}: {e}"
-        info["error_kind"] = "mismatch" if _SHA_MISMATCH_TEXT in str(e) else ""
+    for attempt in range(1, attempts + 1):
+        dl = None
+        try:
+            dl = sl._download(asset["browser_download_url"], arc)
+            sl._validate_archive(arc, expected_sha256=info["sha256"], dl=dl)
+            sl._extract_archive(arc, dest / "x")
+            info["error"], info["error_kind"] = "", ""
+            break
+        except Exception as e:
+            short = bool(dl and dl.content_length and dl.bytes_received < dl.content_length)
+            info["error"] = (f"short transfer ({dl.bytes_received} of {dl.content_length} bytes); "
+                             if short else "") + f"{type(e).__name__}: {e}"
+            info["error_kind"] = "mismatch" if _SHA_MISMATCH_TEXT in str(e) and not short else ""
+            if attempt < attempts:
+                print(f"  fetching {asset['name']} failed (attempt {attempt}/{attempts}: {e}); "
+                      "retrying", flush=True)
+    if info["error"]:
         return info
     found = sorted((dest / "x").rglob(lib_name)) if lib_name else []
     if found:
@@ -542,7 +564,9 @@ def judge(backend: str, res: dict, *, require_gpu: bool = False,
           best_effort: bool = False) -> tuple[str, str]:
     """(verdict, why) for one backend's probe result *res*.
 
-    The probe's own FAIL and INCONCLUSIVE are kept. A GPU backend that registered
+    The probe's own FAIL and INCONCLUSIVE are kept. An ABI status other than "ok",
+    and for a GPU backend a device registry that is unreadable or empty, are
+    INCONCLUSIVE. A GPU backend that registered
     no GPU device is NOT MEASURED when *best_effort*, else FAIL with *require_gpu*
     and INCONCLUSIVE without it. A generation is FAIL when any known-answer reply
     is wrong. A GPU backend's generation is PASS only when llama.cpp's load report
@@ -558,6 +582,10 @@ def judge(backend: str, res: dict, *, require_gpu: bool = False,
     gpus = _gpu_names(res)
     is_gpu = backend in _GPU_BACKENDS
     devices = res.get("devices")
+    if res.get("abi") != "ok":
+        return INCONCLUSIVE, f"the ABI gate did not confirm this build (abi={res.get('abi')}); {why}"
+    if is_gpu and not (isinstance(devices, list) and devices):
+        return INCONCLUSIVE, f"the device registry could not be read ({devices!r}); {why}"
     seen = ", ".join(d["name"] for d in devices) if isinstance(devices, list) else str(devices)
     if verdict == "LOADED":
         if is_gpu and not gpus:
@@ -619,7 +647,7 @@ def _measure(key: str, backend: str, tag: str, dest: Path, model: str, model_err
     lib, fetched, err, kind = _place_build(backend, tag, dest, cuda_line)
     res: dict = {"fetched": fetched}
     if err:
-        res.update(verdict=FAIL if kind == "mismatch" else INCONCLUSIVE, why=err)
+        res.update(verdict=FAIL if kind in ("mismatch", "nolib") else INCONCLUSIVE, why=err)
         print(f"  {res['verdict']}: {err}", flush=True)
         return res
     unverified = [f["asset"] for f in fetched if not f.get("sha256")]
@@ -723,7 +751,8 @@ def build_checks(summary: dict) -> dict:
             checks[f"{key}:archive"] = {"status": status, "required": required, "detail": detail}
             abi = r.get("abi")
             checks[f"{key}:abi"] = {
-                "status": NOT_MEASURED if abi is None else FAIL if abi == "mismatch" else PASS,
+                "status": (NOT_MEASURED if abi is None else FAIL if abi == "mismatch"
+                           else PASS if abi == "ok" else INCONCLUSIVE),
                 "required": required,
                 "detail": f"abi={abi}" if abi is not None else "not loaded here"}
             status, detail = _identity(summary.get("core_sha256", {}), key)

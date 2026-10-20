@@ -918,7 +918,8 @@ NOT_MEASURED_BY_DESIGN = (
     ("llama.cpp Metal build",
      "macOS only: the archive is fetched and digest-checked and its llama library is located, but it "
      "cannot be loaded or run on Windows"),
-    ("llama.cpp OpenVINO, Android, Linux and Windows ARM64 builds",
+    ("llama.cpp OpenVINO, Android, Linux, Windows ARM64 and macOS x64 builds, the xcframework and the "
+     "web UI archive",
      "never fetched or run here; only their pinned digests are checked against the release"),
     ("koboldcpp CUDA and Metal builds, Linux and macOS archives", "installed and run on this platform only"),
     ("stable-diffusion.cpp CUDA and Metal builds, Linux and macOS archives", "installed and run on this platform only"),
