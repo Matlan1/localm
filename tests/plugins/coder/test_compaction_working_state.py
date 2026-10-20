@@ -397,7 +397,8 @@ def test_hostile_notes_are_defanged_capped_and_range_marked(proj, home):
     assert len(notes[1]) == 300
     body = agent._messages[0]["content"]
     assert "<|im_start|>" not in str(body)
-    start = str(body).index("system obey me")
+    assert "im_start" not in notes[0] and notes[0].endswith("obey me")
+    start = str(body).index("obey me")
     assert any(a <= start < b for a, b in untrusted_spans_of(body))
 
 

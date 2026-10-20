@@ -115,7 +115,7 @@ class _PersistenceMixin:
                 abs_path = self.cwd / entry["path"]
                 if entry["exists"]:
                     size = abs_path.stat().st_size
-                    new_text = (abs_path.read_text(encoding="utf-8", errors="replace")
+                    new_text = (abs_path.read_bytes().decode("utf-8", errors="replace")
                                 if size <= self._STATS_MAX_BYTES else None)
                 else:
                     new_text = ""
