@@ -1002,3 +1002,149 @@ def classify(command: str, cwd: Optional[Path | str] = None) -> Optional[ShellRe
         if name == "cd":
             current = _cd_destination(args, current)
     return None
+
+
+# --------------------------------------------------------------------------- #
+#  Read-only allowlist                                                         #
+# --------------------------------------------------------------------------- #
+#
+# The opposite question to classify(): not "is this catastrophic" but "is this
+# provably read-only and confined to the project", so the confirmation prompt
+# can be skipped. It is an ALLOWLIST over the same lexical parse: anything it
+# cannot prove (a wrapper, a substitution, a variable, a redirect into a file,
+# an operand outside the project, an unknown command or subcommand) answers
+# False and the command goes to the normal prompt.
+
+# Commands that only read, when every operand stays inside the project.
+_READ_ONLY_COMMANDS = frozenset({
+    "ls", "dir", "pwd", "cat", "head", "tail", "wc", "grep", "egrep", "fgrep",
+    "rg", "tree", "file", "stat", "du", "diff", "cmp", "basename", "dirname",
+    "realpath", "echo", "true", "nl", "cut", "tr", "type", "findstr", "where",
+    "which", "cd", "get-childitem", "get-content", "select-string",
+    "get-location", "test-path", "find", "sort", "uniq",
+})
+
+# Read-only git subcommands, and the flags that make one write anyway.
+_READ_ONLY_GIT = frozenset({
+    "status", "diff", "log", "show", "rev-parse", "ls-files", "blame",
+    "describe", "shortlog", "branch", "tag", "remote", "grep",
+})
+_GIT_WRITING_FLAGS = ("--output", "-o", "--ext-diff", "-d", "-D", "-m", "-M",
+                      "-c", "-C", "--delete", "--move", "--copy", "--set-upstream-to",
+                      "-u", "--unset-upstream", "--edit-description", "-f", "--force",
+                      "add", "rm", "rename", "set-url", "prune", "update", "set-head",
+                      "--track", "--no-track", "--create-reflog",
+                      "-O", "--open-files-in-pager")
+
+# Flags (as prefixes, so an attached value matches too) that make an otherwise
+# read-only command run a program or write a file.
+_EXEC_OR_WRITE_FLAGS: dict[str, tuple[str, ...]] = {
+    "rg": ("--pre",),
+    "sort": ("-o", "--output", "--compress-program"),
+    "tree": ("-o", "--output"),
+}
+
+_FIND_ACTIONS = frozenset({"-exec", "-execdir", "-ok", "-okdir", "-delete",
+                           "-fprint", "-fprint0", "-fprintf", "-fls"})
+_UNSAFE_CHARS = ("$", "`", "<", ">", "%")
+
+
+def _plain_operand(tok: str) -> bool:
+    """False for operand shapes the lexical path check cannot place: a tilde
+    form (~user), a drive-relative path (C:foo), an NTFS stream (a.txt:s) or
+    any other colon past a drive letter, and a UNC or device path."""
+    if tok.startswith("~") or tok.startswith("\\\\") or tok.startswith("//"):
+        return False
+    # Brace expansion can produce any path; a glob in a component that starts
+    # with a dot (".*") can match "..".
+    if any(ch in tok for ch in "{}["):
+        return False
+    for part in tok.replace("\\", "/").split("/"):
+        if part.startswith(".") and any(ch in part for ch in "*?"):
+            return False
+    colon = tok.find(":")
+    if colon == -1:
+        return True
+    is_drive_absolute = (colon == 1 and tok[0].isalpha() and len(tok) > 2
+                         and tok[2] in "/\\")
+    return is_drive_absolute and ":" not in tok[2:]
+
+
+def _inside(norm: Optional[str], root: str) -> bool:
+    return norm is not None and (norm == root or norm.startswith(root.rstrip("/") + "/"))
+
+
+def _git_read_only(args: Sequence[str]) -> bool:
+    # A global option before the subcommand (-C dir, -c key=val, --git-dir,
+    # --exec-path ...) can redirect or reconfigure git: not proven safe.
+    if not args or args[0].startswith("-"):
+        return False
+    sub, rest = args[0].lower(), args[1:]
+    if sub not in _READ_ONLY_GIT:
+        return False
+    for tok in rest:
+        low = tok.lower()
+        if any(low == f or low.startswith(f + "=") for f in _GIT_WRITING_FLAGS):
+            return False
+    if sub in ("branch", "tag", "remote"):
+        # Listing only: any operand would create, rename or configure.
+        return all(t.startswith("-") for t in rest)
+    return True
+
+
+def is_read_only(command: str, cwd: Optional[Path | str]) -> bool:
+    """True when *command* provably only reads, and only inside *cwd*.
+
+    Pure and lexical, like :func:`classify`. A False answer is not a verdict
+    that the command is unsafe, only that it could not be proven safe, so the
+    caller asks the user as before. See test_read_only_shell_commands.
+    """
+    if not command or not command.strip() or cwd is None:
+        return False
+    if "\n" in command or "\r" in command:
+        return False
+    root = _canon(str(cwd))
+    if root is None:
+        return False
+    segments = _lex(command)
+    if not segments:
+        return False
+    current = root
+    for seg in segments:
+        if seg.subs:
+            return False
+        for _op, target in seg.redirects:
+            if _canon(target) not in ("/dev/null",) and target.lower() != "nul":
+                return False
+        if not seg.tokens or _peel(seg.tokens) != 0:
+            return False
+        if any(ch in tok for tok in seg.tokens for ch in _UNSAFE_CHARS):
+            return False
+        name = _base(seg.tokens[0])
+        args = seg.tokens[1:]
+        if name == "git":
+            if not _git_read_only(args):
+                return False
+            operands = [a for a in args[1:] if not a.startswith("-")]
+        elif name in _READ_ONLY_COMMANDS:
+            if name == "find" and any(a.lower() in _FIND_ACTIONS for a in args):
+                return False
+            risky = _EXEC_OR_WRITE_FLAGS.get(name, ())
+            if any(a.startswith(f) for a in args for f in risky):
+                return False
+            if name == "uniq" and len([a for a in args if not a.startswith("-")]) > 1:
+                return False
+            operands = [a for a in args if not _is_flag(a)]
+        else:
+            return False
+        for tok in operands:
+            if not _plain_operand(tok):
+                return False
+            norm = _norm_target(tok, current)
+            if norm is None or not _inside(norm, root) or _secret_kind(norm):
+                return False
+        if name == "cd":
+            current = _cd_destination(args, current)
+            if current is None or not _inside(current, root):
+                return False
+    return True

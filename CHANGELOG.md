@@ -45,6 +45,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   search prints more than the agent is shown, the full text is kept in memory for the session
   (never written to disk) and the agent can read any part of it back with the new `read_output`
   tool, by line range or by pattern.
+- **`localm coder` no longer asks before read-only shell commands.** `ls`, `cat`, `grep`,
+  `git status`, `git diff`, `git log` and similar commands run without a prompt when every path
+  they name stays inside the project and nothing writes, redirects or runs another program.
+  Anything else asks as before. Set `auto_allow_read_only_shell = false` in
+  `.localcoder/config.toml` to be asked every time.
 
 ### Changed
 

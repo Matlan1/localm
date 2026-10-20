@@ -20,6 +20,8 @@ verify          = "pytest -x && ruff check"  # exit-code check for interactive
                                           # sessions; overrides auto-detection
 diagnostics     = false                   # no ruff pass after .py edits (default on
                                           # when ruff is on PATH)
+auto_allow_read_only_shell = true         # run provably read-only shell commands
+                                          # inside the project without asking
 
 The file is optional; absent keys fall through to CLI defaults.
 """
@@ -109,5 +111,5 @@ def load_project_config(cwd: Path) -> dict[str, Any]:
 
     _KNOWN = {"model", "max_turns", "auto_approve", "always_confirm",
               "memory_file", "max_tokens", "temperature", "mode",
-              "seed", "verify", "diagnostics"}
+              "seed", "verify", "diagnostics", "auto_allow_read_only_shell"}
     return {k: v for k, v in raw.items() if k in _KNOWN}
