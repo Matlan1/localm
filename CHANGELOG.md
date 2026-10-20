@@ -84,6 +84,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the finished ones.
 
 ### Fixed
+- **Long conversations on Mistral-family (tekken) models no longer fail with "Send less text
+  per request".** The pre-tokenizer length limit now applies to each message, the way llama.cpp
+  tokenizes a conversation, instead of to the whole conversation. When one message the coder built
+  (tool output, file contents) is still too long, the coder shortens it and retries; only text you
+  typed is reported back to you, with what to do about it.
 - **A coder shell command that starts with a quoted program path now runs on Windows.** A command such as `"D:\tools dir\tool.exe" --flag "a b"` used to fail with "is not recognized as an internal or external command", because `cmd` dropped the first and last quote.
 - **A shell command's timeout or cancel in `localm coder` is no longer held up by a stray
   background process.** A command that left a detached process holding its output open used to
