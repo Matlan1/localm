@@ -13,6 +13,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ### Added
 
+- **Pause, resume and cancel a model download in the GUI.** The Add a model card has Pause (stops
+  and keeps what is saved, Resume continues from it) and Cancel (stops and deletes the partial
+  download), the download line shows the steady speed and time left, and the Activity list has a
+  Stop button for a running operation.
 - **Ctrl-C in `localm pull` stops cleanly.** What has been downloaded is kept, and the message
   says to run the same command again to continue from there.
 - **`localm coder doctor` and `/doctor`.** One command checks that the model server answers and accepts the key, whether the session uses native tool calls or grammar-constrained ones, the context window against the size of the repo map, the git state, whether the verify command resolves, and that each configured MCP server starts. It exits 1 when a check fails and prints `--output-format json` or `jsonl` for scripts.
@@ -55,6 +59,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Image prompts with letters such as ß work with the native image backend on Windows.** A prompt
   containing ß failed with "failed to encode prompt", and letters such as ä, ö and ü reached the
   model garbled; the prompt now reaches stable-diffusion.cpp unchanged.
+- **A chat reply that was cut off says so.** A reply that stopped because the model was unloaded or
+  replaced while it was writing, or because the reply stream ended before the model finished, used
+  to look like a finished reply. It now carries a cut-off note in the chat, and API clients get
+  `finish_reason: "error"` with the reason instead of `"stop"`.
+- **"continue" carries on with the previous reply.** "continue", "weiter", "continúa" and the same
+  word in other languages continue the last reply instead of searching the selected Knowledge
+  collection for the word.
+
+### Changed
+
+- **Export saves inside the app.** On the computer running localm, Export (the chat's, and the
+  coder's session, result and patch exports) asks for a folder in the app's own file browser and
+  saves there, without the browser's download prompt. Other devices still download the file.
 
 ## [0.3.0] - 2026-10-14
 

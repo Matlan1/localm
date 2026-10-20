@@ -4,7 +4,7 @@
 
 // --- ES module imports ---
 import { lsSetScoped } from "./chat.js";
-import { $, GIB, authHeaders, confirmDangerAsync, el, fmtDuration, instanceCacheTrusted, openModal, streamJob, toast } from "./helpers.js";
+import { $, GIB, authHeaders, cancelJob, confirmDangerAsync, el, fmtDuration, instanceCacheTrusted, openModal, streamJob, toast } from "./helpers.js";
 import { t } from "./i18n.js";
 import { refreshPerfEstimate } from "./settings-perf.js";
 
@@ -283,6 +283,17 @@ function _buildActivityBody(body) {
     head.appendChild(el("span", "job-state st-" + op.status, activityState(op)));
     const age = activityAge(op);
     if (age) head.appendChild(el("span", "sub", age));
+    if (op.status === "running" && op.cancellable) {
+      const stop = el("button", "btn-secondary", "Stop");
+      stop.title = "Stop this operation. A download keeps what it has fetched so far; "
+        + "start it again to continue from there.";
+      stop.onclick = async () => {
+        stop.disabled = true;
+        await cancelJob(op.id);
+        await pollActivity();
+      };
+      head.appendChild(stop);
+    }
     row.appendChild(head);
     if (typeof op.pct === "number") {
       const dl = el("div", "dl-progress");

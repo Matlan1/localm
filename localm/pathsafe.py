@@ -54,6 +54,17 @@ def _refuses_device_names() -> bool:
     return os.name == "nt"
 
 
+def check_plain_name(name: str) -> None:
+    """Raise HTTPException(400) unless *name* is a single path component with
+    no reserved character and, on Windows, no device name. Pure string work:
+    no filesystem call. The lexical half of :func:`confined_name`."""
+    if name != Path(name).name or name in ("", ".", ".."):
+        raise HTTPException(400, "Invalid file name")
+    if set(name) & WINDOWS_RESERVED_NAME_CHARS or (
+            _refuses_device_names() and is_windows_device_name(name)):
+        raise HTTPException(400, "Invalid file name")
+
+
 def confined_name(base: Path, name: str) -> Path:
     """Resolve *name* and guarantee it stays directly inside *base*, without
     requiring it to exist (rename targets, new files).
@@ -77,11 +88,7 @@ def confined_name(base: Path, name: str) -> Path:
     (:func:`is_windows_device_name`: ``con``, ``nul.txt``, ``com1`` ...) is
     rejected lexically too: a write to one goes to the device and its data is
     discarded. Elsewhere such a name is an ordinary file name."""
-    if name != Path(name).name or name in ("", ".", ".."):
-        raise HTTPException(400, "Invalid file name")
-    if set(name) & WINDOWS_RESERVED_NAME_CHARS or (
-            _refuses_device_names() and is_windows_device_name(name)):
-        raise HTTPException(400, "Invalid file name")
+    check_plain_name(name)
     try:
         resolved = (base / name).resolve()
     except (OSError, ValueError) as e:

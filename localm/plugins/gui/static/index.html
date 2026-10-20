@@ -198,7 +198,7 @@
           <span>
             <button id="toggle-params" class="composer-action" data-i18n="chat.parameters"><span class="btn-ic" data-icon="sliders"></span>parameters</button>
             &nbsp;&nbsp;
-            <button id="export-conv" class="composer-action" title="Download this conversation"
+            <button id="export-conv" class="composer-action" title="Save this conversation"
                     data-i18n-title="chat.exportTitle" data-i18n="chat.export"><span class="btn-ic" data-icon="export"></span>export</button>
             &nbsp;&nbsp;
             <button id="compact-conv" class="composer-action" title="Summarise older messages to free context"
@@ -439,6 +439,11 @@
             <div class="dl-file" id="pull-file" hidden></div>
             <div class="dl-bar"><div class="dl-fill" id="pull-bar"></div></div>
             <div class="dl-label" id="pull-pct"></div>
+            <div class="row dl-actions">
+              <button class="btn-secondary" id="pull-pause" hidden data-i18n="models.pull.pauseButton" data-i18n-title="models.pull.pauseTitle" title="Stop the download and keep what has been downloaded so far. Resume continues from there.">Pause</button>
+              <button class="btn-primary" id="pull-resume" hidden data-i18n="models.pull.resumeButton">Resume</button>
+              <button class="btn-secondary" id="pull-cancel" hidden data-i18n="models.pull.cancelButton" data-i18n-title="models.pull.cancelTitle" title="Stop the download and delete what has been downloaded so far.">Cancel</button>
+            </div>
           </div>
           <pre id="pull-log" class="job-log" style="display:none"></pre>
           <div class="row" style="margin-top:8px">
