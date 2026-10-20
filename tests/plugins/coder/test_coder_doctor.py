@@ -281,6 +281,11 @@ def _write_mcp_config(tmp_path, servers: dict):
         lines.append(f"command = {json.dumps(spec['command'])}")
         lines.append(f"args = {json.dumps(spec.get('args', []))}")
     (cfg / "config.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # Trusted, as doctor starts only servers the user trusts.
+    from localm.plugins.coder.hook_trust import commands_digest, remember_trust
+    from localm.plugins.coder.project_config import read_project_config_file
+    remember_trust(cfg / "config.toml",
+                   commands_digest(read_project_config_file(cfg / "config.toml")))
 
 
 def test_mcp_none_configured_is_skip(tmp_path):

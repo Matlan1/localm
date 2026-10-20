@@ -253,8 +253,8 @@ def test_session_trust_starts_the_held_back_servers(proj):
     assert _spawned(marker) == 1
     assert agent._mcp_tool_names == {TOOL} and agent._mcp_deferred is None
     assert TOOL in _prompt(agent)
-    sent = agent.backend.set_tools.call_args.args[0]
-    assert TOOL in json.dumps(sent)
+    agent.backend.set_tools.assert_called_once()
+    assert agent.backend.set_tools.call_args.args[0] == agent._native_tool_defs()
     assert agent.start_deferred_mcp() == []          # only once
     assert _spawned(marker) == 1
 
