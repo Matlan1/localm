@@ -2016,6 +2016,8 @@ class HFWorker:
 
         tokenizer = self._tokenizer
         model = self._model
+        if tokenizer is None or model is None:
+            raise RuntimeError("Model not loaded - call load() first")
 
         # --- Extract and decode media, rebuild messages for the chat template ---
         from localm.inference.media import ImageBudget

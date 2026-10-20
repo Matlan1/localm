@@ -13,13 +13,14 @@ server from running.
 
 from __future__ import annotations
 
+import importlib
 import ntpath
 import os
 import sys
 import threading
 import webbrowser
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from localm.debuglog import logger
 
@@ -193,7 +194,7 @@ def _confine_qt_profile(path: str) -> None:
     storage and its HTTP cache inside *path*, where it would otherwise put the
     cache in the user's cache folder. Raises when the backend does not expose
     the profile class it is expected to."""
-    import webview.platforms.qt as qt
+    qt: Any = importlib.import_module("webview.platforms.qt")
     base = qt.QWebEngineProfile
     if getattr(base, "_localm_confined_to", None) == path:
         return

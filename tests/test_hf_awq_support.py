@@ -158,6 +158,13 @@ def test_register_native_awq_quantizer_in_transformers():
     assert quant_cls.__name__ == "NativeAwqQuantizer"
 
 
+def test_native_awq_quantizer_is_serializable_and_not_trainable():
+    quantizer_cls = _try_create_native_awq_quantizer_cls()
+    assert quantizer_cls is not None
+    assert quantizer_cls.is_serializable(None) is True
+    assert quantizer_cls.is_trainable.fget(None) is False
+
+
 def test_native_awq_automodel_loading_and_inference(tmp_path):
     """Verify AutoModelForCausalLM loads and runs an AWQ checkpoint via NativeAwqQuantizer."""
     from transformers import AutoModelForCausalLM

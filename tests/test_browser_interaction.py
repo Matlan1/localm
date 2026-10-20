@@ -470,6 +470,16 @@ class TestLiveViewAttach:
             "a half-attached DevTools session was left behind")
         assert first is False and second is False, (first, second)
 
+    def test_a_live_view_asked_for_before_a_page_exists_attaches_nothing(
+            self, looped):
+        sess = looped(None)
+        sess._ctx = _FakeContext()
+        started = sess.enable_live_view(lambda data: None, timeout_ms=300)
+        assert sess._ctx.sessions == [], (
+            "a DevTools session was opened for a page that does not exist yet")
+        assert sess._cdp is None
+        assert started is False
+
     def test_a_frame_is_acknowledged_on_the_session_that_sent_it(self, looped):
         sess = looped(_HungPage())
         cdp = _RecordingCDP()

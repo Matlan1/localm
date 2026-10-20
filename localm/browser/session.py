@@ -299,10 +299,13 @@ class BrowserSession:
         ``_cdp`` is set only once the screencast has started; an attach that
         fails or is cancelled detaches its DevTools session and leaves ``_cdp``
         None."""
+        page = self._page
+        if page is None:
+            return
         attached = []
 
         async def attach():
-            cdp = await self._ctx.new_cdp_session(self._page)
+            cdp = await self._ctx.new_cdp_session(page)
             attached.append(cdp)
             await cdp.send("Page.enable")
             cdp.on("Page.screencastFrame",
