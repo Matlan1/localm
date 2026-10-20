@@ -381,6 +381,11 @@ class Agent(
         # Notes the pre-compaction flush kept, oldest first; re-pinned into every
         # compaction summary verbatim (see context._compact_history).
         self._durable_notes: list[str] = []
+        # User requests carried verbatim into every compaction summary.
+        self._pinned_requests: list[str] = []
+        # Prompt token count of the last request and what it covered (see
+        # _ContextMixin._record_prompt_usage).
+        self._usage_base: Optional[tuple] = None
         # Work done by ISOLATED children (their own git worktree), which is NOT
         # in _changed_files: it never touched this tree, and
         # merging its keys would fabricate diffs (keys are relative to the writing

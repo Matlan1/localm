@@ -64,6 +64,8 @@ class _SessionMixin:
         self._had_any_failure = False
         self._unverified_writes.clear()
         self._durable_notes = []
+        self._pinned_requests = []
+        self._usage_base = None
         self._review_task = ""
         self._error_trace.clear()
         self._shell_baseline_captured = False

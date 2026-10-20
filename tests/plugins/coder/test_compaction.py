@@ -6,7 +6,7 @@ Covers:
   - _compact_history(): keeps last 4, calls backend.chat, returns False ≤4 msgs
   - _fill_ratio(): math against _ctx_window_tokens
   - _ctx_window_tokens(): falls back to _DEFAULT_CTX_TOKENS on exception
-  - _maybe_compact(): warns once in interactive mode; auto-compacts in non-interactive
+  - _maybe_compact(): compacts past the high bound in both modes
 """
 
 import pytest
@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 from localm.plugins.coder.agent import (
     Agent,
     _DEFAULT_CTX_TOKENS,
-    _COMPACT_WARN_RATIO,
+    _COMPACT_TARGET_RATIO,
     _COMPACT_AUTO_RATIO,
 )
 
@@ -194,35 +194,24 @@ class TestCtxWindowTokens:
 # ---------------------------------------------------------------------------
 
 class TestFillRatio:
-    def test_zero_when_context_chars_zero(self):
-        agent = _make_agent()
-        with patch.object(agent, "context_chars", return_value=0), \
-             patch.object(agent, "_ctx_window_tokens", return_value=4096):
-            ratio = agent._fill_ratio()
-        assert ratio == 0.0
-
     def test_ratio_math(self):
-        """Fill ratio = context_chars / 4 / ctx_window_tokens."""
+        """Fill ratio = expected prompt tokens / ctx_window_tokens."""
         agent = _make_agent()
-        # Fake 8000 chars → 2000 estimated tokens; ctx = 4000 → ratio = 0.5
-        with patch.object(agent, "context_chars", return_value=8000), \
-             patch.object(agent, "_ctx_window_tokens", return_value=4000):
+        with patch.object(agent, "_prompt_tokens_estimate", return_value=2000),              patch.object(agent, "_ctx_window_tokens", return_value=4000):
             assert agent._fill_ratio() == pytest.approx(0.5)
 
     def test_can_exceed_one(self):
         """Fill ratio can go above 1.0 when context is overflowing."""
         agent = _make_agent()
-        with patch.object(agent, "context_chars", return_value=80_000), \
-             patch.object(agent, "_ctx_window_tokens", return_value=4096):
-            ratio = agent._fill_ratio()
-        assert ratio > 1.0
+        agent._messages = [{"role": "user", "content": "x" * 80_000}]
+        with patch.object(agent, "_ctx_window_tokens", return_value=4096):
+            assert agent._fill_ratio() > 1.0
 
     def test_never_divides_by_zero(self):
         """_ctx_window_tokens = 0 edge case should not raise ZeroDivisionError."""
         agent = _make_agent()
         with patch.object(agent, "_ctx_window_tokens", return_value=0):
-            # max(1, 0) = 1, so no ZeroDivisionError
-            agent._fill_ratio()   # should not raise
+            agent._fill_ratio()
 
 
 # ---------------------------------------------------------------------------
@@ -230,71 +219,29 @@ class TestFillRatio:
 # ---------------------------------------------------------------------------
 
 class TestMaybeCompact:
-    # ---- interactive mode ----
-
-    def test_no_warning_below_threshold_interactive(self):
+    @pytest.mark.parametrize("interactive", [True, False])
+    def test_no_compact_at_or_below_the_high_bound(self, interactive):
         agent = _make_agent()
-        with patch.object(agent, "_fill_ratio", return_value=_COMPACT_WARN_RATIO - 0.05), \
-             patch("localm.plugins.coder.agent.print_warning") as mock_warn:
-            agent._maybe_compact(interactive=True)
-        mock_warn.assert_not_called()
-
-    def test_warning_at_threshold_interactive(self):
-        agent = _make_agent()
-        with patch.object(agent, "_fill_ratio", return_value=_COMPACT_WARN_RATIO), \
-             patch("localm.plugins.coder.agent.print_warning") as mock_warn:
-            agent._maybe_compact(interactive=True)
-        mock_warn.assert_called_once()
-        assert "compact" in mock_warn.call_args[0][0].lower()
-
-    def test_warning_only_once_per_session_interactive(self):
-        agent = _make_agent()
-        with patch.object(agent, "_fill_ratio", return_value=_COMPACT_WARN_RATIO + 0.05), \
-             patch("localm.plugins.coder.agent.print_warning") as mock_warn:
-            agent._maybe_compact(interactive=True)
-            agent._maybe_compact(interactive=True)
-            agent._maybe_compact(interactive=True)
-        mock_warn.assert_called_once()   # only the first time
-
-    def test_no_auto_compact_in_interactive_mode(self):
-        agent = _make_agent()
-        agent._messages = _messages(8)
-        with patch.object(agent, "_fill_ratio", return_value=_COMPACT_AUTO_RATIO + 0.05):
-            with patch.object(agent, "_compact_history") as mock_compact:
-                agent._maybe_compact(interactive=True)
-        # interactive mode should NOT auto-compact
+        agent.backend.context_capacity.return_value = 16384
+        high, _low = agent._compaction_bounds(16384)
+        with patch.object(agent, "_prompt_tokens_estimate", return_value=high),              patch.object(agent, "_compact_to") as mock_compact:
+            agent._maybe_compact(interactive=interactive)
         mock_compact.assert_not_called()
 
-    # ---- non-interactive mode ----
-
-    def test_no_compact_below_threshold_non_interactive(self):
+    @pytest.mark.parametrize("interactive", [True, False])
+    def test_compacts_to_the_low_bound_above_the_high_bound(self, interactive):
         agent = _make_agent()
-        with patch.object(agent, "_fill_ratio", return_value=_COMPACT_AUTO_RATIO - 0.05), \
-             patch.object(agent, "_compact_history") as mock_compact:
-            agent._maybe_compact(interactive=False)
-        mock_compact.assert_not_called()
+        agent.backend.context_capacity.return_value = 16384
+        high, low = agent._compaction_bounds(16384)
+        with patch.object(agent, "_prompt_tokens_estimate", side_effect=[high + 1, low]),              patch.object(agent, "_compact_to") as mock_compact:
+            agent._maybe_compact(interactive=interactive)
+        mock_compact.assert_called_once_with(low, 16384)
 
-    def test_auto_compact_at_threshold_non_interactive(self):
+    def test_high_bound_ratio(self):
         agent = _make_agent()
-        with patch.object(agent, "_fill_ratio", return_value=_COMPACT_AUTO_RATIO), \
-             patch.object(agent, "_compact_history") as mock_compact:
-            agent._maybe_compact(interactive=False)
-        mock_compact.assert_called_once()
-
-    def test_auto_compact_above_threshold_non_interactive(self):
-        agent = _make_agent()
-        with patch.object(agent, "_fill_ratio", return_value=_COMPACT_AUTO_RATIO + 0.05), \
-             patch.object(agent, "_compact_history") as mock_compact:
-            agent._maybe_compact(interactive=False)
-        mock_compact.assert_called_once()
-
-    def test_no_warning_in_non_interactive_mode(self):
-        agent = _make_agent()
-        with patch.object(agent, "_fill_ratio", return_value=_COMPACT_WARN_RATIO + 0.1), \
-             patch("localm.plugins.coder.agent.print_warning") as mock_warn, \
-             patch.object(agent, "_compact_history", return_value=False):
-            agent._maybe_compact(interactive=False)
-        mock_warn.assert_not_called()
+        high, low = agent._compaction_bounds(131072)
+        assert high == int(131072 * _COMPACT_AUTO_RATIO)
+        assert low == int(131072 * _COMPACT_TARGET_RATIO)
 
 
 # ---------------------------------------------------------------------------
