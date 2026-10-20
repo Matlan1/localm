@@ -74,7 +74,7 @@ class TestLoad:
                          "mmap": None, "adapters": [], "encoder_decoder": False,
                          "encoder_input_limit": 0, "diffusion": False,
                          "parallel_slots": 1, "parallel_note": "",
-                         "speculation": None}
+                         "speculation": None, "context": None}
         assert w._loaded is True
 
     def test_load_passes_through_weight_placement_from_llamacpp(self, tmp_path):

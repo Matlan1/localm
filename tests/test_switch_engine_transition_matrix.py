@@ -1612,7 +1612,8 @@ class TestBackendSizedAdmission:
 
         assert not a.loaded and hs._engines == {"model-b": b}
         assert b.gpu_placement == _PARTIAL and result["status"] == "loaded"
-        assert b.placement_heal is None
+        assert b.placement_heal == hs.PlacementHeal(frozenset(), False, True,
+                                                 b.placement_heal.recheck_at)
 
 
 class TestVictimReleaseWait:
@@ -1696,7 +1697,8 @@ class TestVictimReleaseWait:
             for r in caplog.records)
         assert not [r for r in caplog.records if r.levelname == "WARNING"
                     and r.getMessage().startswith("switch_engine: evicting")]
-        assert b.placement_heal is None
+        assert b.placement_heal == hs.PlacementHeal(frozenset(), False, True,
+                                                 b.placement_heal.recheck_at)
 
     def test_only_one_longer_wait_per_load(self, monkeypatch):
         a1 = GatedEngine("model-a1")
@@ -1724,7 +1726,8 @@ class TestVictimReleaseWait:
                     and r.getMessage().startswith("switch_engine: evicting")]
         assert any("evicting 'model-a': no VRAM release seen, none expected"
                    in r.getMessage() for r in caplog.records)
-        assert b.placement_heal is None
+        assert b.placement_heal == hs.PlacementHeal(frozenset(), False, True,
+                                                 b.placement_heal.recheck_at)
 
 
 class TestVictimVramEstimate:

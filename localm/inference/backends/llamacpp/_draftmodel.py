@@ -263,6 +263,16 @@ class DraftModelSource(CountedSource):
             self._sampler = _greedy_chain()
         return ""
 
+    def _context_out_of_step(self) -> bool:
+        """Whether the draft context must be recreated to match the target's
+        live context: a different size, or a KV placement other than the one
+        it was created with (when that is known)."""
+        llm = self._llm
+        if llm._ctx_capacity != self._ctx_capacity:
+            return True
+        want = bool(llm._offload_kqv and self.on_gpu)
+        return self._ctx_offload is not None and want != self._ctx_offload
+
     def free_context(self) -> None:
         from .llama import api
         ctx, self._ctx = self._ctx, None
@@ -333,7 +343,7 @@ class DraftModelSource(CountedSource):
         if costs is None:
             return True
         cached = self._llm._cached_tokens
-        if self._llm._ctx_capacity > self._ctx_capacity:
+        if self._context_out_of_step():
             pending = len(cached) + 1
         else:
             v = self._valid
@@ -383,8 +393,7 @@ class DraftModelSource(CountedSource):
         if len(cached) != pos:
             self.stop_this_call("draft-out-of-step")
             return []
-        if (llm._ctx_capacity != self._ctx_capacity
-                or bool(llm._offload_kqv and self.on_gpu) != self._ctx_offload):
+        if self._context_out_of_step():
             failure = self.create_context(llm._ctx_capacity, llm._offload_kqv)
             if failure:
                 self.disable(failure)

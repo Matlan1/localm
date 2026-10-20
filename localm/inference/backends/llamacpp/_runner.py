@@ -321,7 +321,7 @@ def _serve_stream(worker, payload: dict, emit: Callable, cancel_event) -> None:
             "mtp_paused_steps": worker.mtp_paused_steps,
             "mtp_skipped": worker.mtp_skipped,
             "speculation": worker.spec_report,
-            "context": worker.live_context,
+            "context": getattr(worker, "live_context", None),
         }))
     # Each arm below is a refusal raised before any native decode, or by a
     # native call that returned a status; the loaded model keeps serving.
