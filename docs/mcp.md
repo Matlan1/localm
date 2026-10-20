@@ -214,7 +214,7 @@ Each `[mcp.servers.NAME]` table declares:
 
 ### How tools appear
 
-When you run `localm coder`, it spawns each configured server and fetches its tool list. Tools are named `mcp_<server>_<tool>` and appear in the agent's system prompt. A restricted coder session (one opened with a shared, non-owner `coder` key, or a scheduled coder job without `--allow-shell`) starts none of these servers and cannot edit `.localcoder/config.toml`. For example:
+When you run `localm coder` in a project whose MCP servers you have trusted (see [Security: trusted vs. untrusted](#security-trusted-vs-untrusted)), it spawns each configured server and fetches its tool list. Tools are named `mcp_<server>_<tool>` and appear in the agent's system prompt. A restricted coder session (one opened with a shared, non-owner `coder` key, or a scheduled coder job without `--allow-shell`) starts none of these servers and cannot edit `.localcoder/config.toml`. For example:
 
 - Server `fs` with tool `search` becomes `mcp_fs_search`
 - Server `search` with tool `query` becomes `mcp_search_query`
@@ -238,6 +238,29 @@ MCP server 'search': command not found: npx
 ```
 
 ### Security: trusted vs. untrusted
+
+**No server starts until you trust the project's config.** A cloned repository
+can ship a `.localcoder/config.toml`, so the coder starts its MCP servers only
+after you have trusted them, the same trust that lets the project's
+[tool hooks](cli.md) run. An interactive `localm coder` lists every server (its
+command line and `env`) with the project's hooks and asks: `y` trusts them for
+this session, `a` trusts them and remembers it (in the localm data folder)
+until any server or hook in the file changes, anything else starts none. A
+non-interactive run never asks: pass `--trust-hooks` to trust and remember
+them. Untrusted servers are not started and their tools are not registered,
+and the session says so once (on stderr for a non-interactive run). In the
+REPL, `/hooks` lists them and whether they are trusted, `/hooks trust` trusts
+them and starts them, and `/hooks forget` withdraws the trust for later
+sessions (servers already started keep running until the session ends). In
+the GUI, the **hooks** button in the coder setup panel lists them and trusts
+them; a running session starts them when its next task starts. Changing a
+server's `command`, `args`, `env` or `trusted`, or adding a server, needs
+trusting again. `localm coder doctor` and `/doctor` start only trusted
+servers.
+
+Trusting the config is not the `trusted` flag below: trust decides whether a
+server is started at all, `trusted = true` only skips the per-call
+confirmation once it runs.
 
 `trusted` is a per-SERVER flag, not a per-tool one: the coder client does not
 inspect a remote tool's own annotations or guess what it does, it gates ALL of

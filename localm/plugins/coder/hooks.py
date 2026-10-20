@@ -347,12 +347,17 @@ class PostHookReport:
 class ToolHooks:
     """The hooks one project config declares, and whether they may run."""
 
-    def __init__(self, config_path: Path, table: Any, *, trusted: bool = False):
+    def __init__(self, config_path: Path, table: Any, *, trusted: bool = False,
+                 mcp_servers: Optional[dict] = None, digest: Optional[str] = None):
+        """*table* is the ``[hooks]`` table and *mcp_servers* the MCP servers
+        (mcp.mcp_servers_from) of the config at *config_path*. *digest* is what
+        trust is recorded against; it defaults to ``hooks_digest(table)``."""
         from .hook_trust import hooks_digest
         self.config_path = Path(config_path)
         self.project_dir = self.config_path.parent.parent
-        self.digest = hooks_digest(table)
+        self.digest = digest if digest is not None else hooks_digest(table)
         self.pre, self.post, self.warnings = parse_hooks(table)
+        self.mcp_servers: dict = dict(mcp_servers or {})
         self.trusted = trusted
         self.trust_source: Optional[str] = "store" if trusted else None
         self.revoked = False
@@ -362,21 +367,25 @@ class ToolHooks:
 
     @classmethod
     def load(cls, cwd: Path) -> Optional[ToolHooks]:
-        """The hooks in the project config nearest *cwd*, with ``trusted`` read
-        from the trust store. None when there is no config or it has no
-        ``hooks`` key. Raises ProjectConfigUnreadable when the config exists but
+        """The hooks and MCP servers in the project config nearest *cwd*, with
+        ``trusted`` read from the trust store against commands_digest of that
+        same read. None when there is no config, or it has no ``hooks`` key and
+        no MCP server. Raises ProjectConfigUnreadable when the config exists but
         cannot be read."""
         from .project_config import find_project_config, read_project_config_file
-        from .hook_trust import is_trusted
+        from .hook_trust import commands_digest, is_trusted
+        from .mcp import mcp_servers_from
         path = find_project_config(cwd)
         if path is None:
             return None
         raw = read_project_config_file(path)
-        if "hooks" not in raw:
+        servers = mcp_servers_from(raw)
+        if "hooks" not in raw and not servers:
             return None
-        hooks = cls(path, raw["hooks"])
+        hooks = cls(path, raw.get("hooks", {}), mcp_servers=servers,
+                    digest=commands_digest(raw))
         hooks.loaded_cwd = Path(cwd).resolve()
-        hooks.trusted = hooks.has_hooks() and is_trusted(path, hooks.digest)
+        hooks.trusted = hooks.has_commands() and is_trusted(path, hooks.digest)
         hooks.trust_source = "store" if hooks.trusted else None
         return hooks
 
@@ -396,6 +405,14 @@ class ToolHooks:
 
     def has_hooks(self) -> bool:
         return bool(self.pre or self.post)
+
+    def has_mcp(self) -> bool:
+        return bool(self.mcp_servers)
+
+    def has_commands(self) -> bool:
+        """Whether the config declares anything that needs trust: a hook or an
+        MCP server."""
+        return self.has_hooks() or self.has_mcp()
 
     def applies(self, event: str, tool: str) -> bool:
         specs = self.pre if event == PRE else self.post
@@ -417,7 +434,7 @@ class ToolHooks:
         """Re-read the trust store, so trust granted or withdrawn elsewhere
         (another session, the GUI) applies. Hooks trusted for this session only
         stay trusted; revoked hooks stay off. Returns ``trusted``."""
-        if self.revoked or not self.has_hooks() or self.trust_source in ("session", "fixed"):
+        if self.revoked or not self.has_commands() or self.trust_source in ("session", "fixed"):
             return self.trusted
         from .hook_trust import is_trusted
         stored = is_trusted(self.config_path, self.digest)
@@ -446,16 +463,44 @@ class ToolHooks:
             return True
 
     def untrusted_message(self) -> str:
-        return (f"Tool hooks in {self.config_path} are not trusted, so none of them "
-                "run: a tool call a pre_tool_use hook would check is refused, and "
-                "post_tool_use hooks are skipped. Review them and trust them with "
-                "/hooks trust or --trust-hooks, or remove them from the file.")
+        if not self.has_hooks():
+            from .mcp import untrusted_servers_message
+            return untrusted_servers_message(self.config_path, self.mcp_servers)
+        if not self.has_mcp():
+            return (f"Tool hooks in {self.config_path} are not trusted, so none of them "
+                    "run: a tool call a pre_tool_use hook would check is refused, and "
+                    "post_tool_use hooks are skipped. Review them and trust them with "
+                    "/hooks trust or --trust-hooks, or remove them from the file.")
+        return (f"Tool hooks and MCP servers in {self.config_path} are not trusted: "
+                "no MCP server was started, none of the hooks run, a tool call a "
+                "pre_tool_use hook would check is refused, and post_tool_use hooks "
+                "are skipped. Review them and trust them with /hooks trust or "
+                "--trust-hooks, or remove them from the file.")
 
     def untrusted_block_reason(self, tool: str) -> str:
         return (f"{tool} was not run: the project's pre_tool_use hooks in "
                 f"{self.config_path} would check it, and they are not trusted, so "
                 "the check cannot run. The user can trust them (/hooks trust or "
                 "--trust-hooks) or remove them.")
+
+    def describe_mcp(self) -> list[str]:
+        """One line per MCP server, for display to the user: its name, the
+        command line it starts as a JSON list, its env, and whether its tool
+        calls skip confirmation. Control and non-ASCII characters are shown as
+        ``\\uXXXX`` escapes."""
+        from .mcp import mcp_argv
+        lines = []
+        for name, spec in self.mcp_servers.items():
+            argv = mcp_argv(spec)
+            line = (f"MCP server {json.dumps(str(name), ensure_ascii=True)}: "
+                    f"{json.dumps(argv, ensure_ascii=True)}")
+            env = spec.get("env")
+            if env:
+                line += f" env {json.dumps(env, ensure_ascii=True, sort_keys=True, default=str)}"
+            if spec.get("trusted"):
+                line += " (trusted = true: its tool calls are not confirmed)"
+            lines.append(line)
+        return lines
 
     def describe(self) -> list[str]:
         """One line per hook, for display to the user."""

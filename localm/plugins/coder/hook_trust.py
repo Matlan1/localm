@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Which project tool hooks the user has trusted.
+"""Which project tool hooks and MCP servers the user has trusted.
 
 A project's ``.localcoder/config.toml`` can declare commands that run around
-every tool call (hooks.py). Those hooks run only once the user has trusted
-them. Trust is recorded per config file as a digest of the hooks it declares: editing, adding or removing a hook
-changes the digest, and the changed hooks need trusting again.
+every tool call (hooks.py) and MCP servers the coder starts (mcp.py). Those
+hooks run and those servers start only once the user has trusted them. Trust is
+recorded per config file as a digest of the hooks and servers it declares
+(commands_digest): editing, adding or removing a hook or a server changes the
+digest, and the changed config needs trusting again.
 
 The store is ``<data dir>/coder-hook-trust.json``, a JSON object mapping a
 config file's normalised absolute path to ``{"sha256": <digest>,
@@ -44,12 +46,34 @@ def config_key(config_path: Path) -> str:
     return os.path.normcase(str(Path(config_path).resolve()))
 
 
+def _canonical(value: Any) -> bytes:
+    return json.dumps(value, sort_keys=True, ensure_ascii=False,
+                      separators=(",", ":"), default=str).encode("utf-8")
+
+
 def hooks_digest(hooks_table: Any) -> str:
     """SHA-256 of the ``[hooks]`` table exactly as parsed, keys sorted, so any
     change to a command, matcher, timeout or the list of hooks changes it."""
-    canonical = json.dumps(hooks_table, sort_keys=True, ensure_ascii=False,
-                           separators=(",", ":"), default=str)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return hashlib.sha256(_canonical(hooks_table)).hexdigest()
+
+
+_COMMANDS_PREFIX = b"localm-coder-commands-v1\0"
+
+
+def commands_digest(raw: dict) -> str:
+    """The digest trust is recorded against for a parsed project config *raw*:
+    everything in it that runs commands, its ``[hooks]`` and ``[mcp]`` tables.
+
+    Without an ``mcp`` key it is ``hooks_digest`` of the ``[hooks]`` table. With
+    one it is the SHA-256 of a fixed prefix and both tables as parsed, so any
+    change to an MCP server's command, args, env or flags changes it, and it
+    never equals a hooks-only digest."""
+    if "mcp" not in raw:
+        return hooks_digest(raw.get("hooks"))
+    tables = {"mcp": raw["mcp"]}
+    if "hooks" in raw:
+        tables["hooks"] = raw["hooks"]
+    return hashlib.sha256(_COMMANDS_PREFIX + _canonical(tables)).hexdigest()
 
 
 class TrustStoreUnreadable(Exception):

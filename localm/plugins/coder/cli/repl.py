@@ -716,10 +716,13 @@ def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
         from ..doctor import format_text, run_doctor
         print_info("Checking the model server, context, git, verify command "
                    "and MCP servers...")
+        hooks = getattr(agent, "_tool_hooks", None)
         checks = run_doctor(
             agent.cwd, agent.backend, verify_cmd=agent.verify_cmd,
             verify_off=agent.verify_cmd is None,
-            project_map=agent._project_map)
+            project_map=agent._project_map,
+            trusted_mcp_servers=(hooks.mcp_servers
+                                 if hooks is not None and hooks.trusted else None))
         console.print(Text(format_text(checks)), soft_wrap=True)
 
     elif cmd == "verify":

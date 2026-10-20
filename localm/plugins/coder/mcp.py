@@ -14,6 +14,10 @@ Lets the coder agent use tools from any MCP server. Servers are declared in
     args = ["-y", "@modelcontextprotocol/server-sqlite", "app.db"]
     trusted = true          # skip the destructive-tool confirmation
 
+No server is started until the user has trusted the project config's commands
+(hook_trust.py), the same trust that lets its tool hooks run; ``trusted = true``
+only skips the per-call confirmation once the server runs.
+
 Each server is spawned as a child process speaking JSON-RPC 2.0 over
 newline-delimited JSON on stdin/stdout (the MCP stdio transport). Its tools
 are registered into TOOL_REGISTRY as ``mcp_<server>_<tool>`` so the agent
@@ -325,17 +329,9 @@ def stop_pooled_servers() -> None:
             pass
 
 
-def load_mcp_config(cwd: Path) -> dict[str, dict]:
-    """Read the [mcp.servers.*] tables from the nearest project config.
-
-    Returns an empty dict when there is no project config or it declares no
-    servers. Raises ProjectConfigUnreadable when the config file exists but
-    cannot be read or parsed."""
-    from .project_config import find_project_config, read_project_config_file
-    path = find_project_config(cwd)
-    if path is None:
-        return {}
-    raw = read_project_config_file(path)
+def mcp_servers_from(raw: dict) -> dict[str, dict]:
+    """The [mcp.servers.*] tables of a parsed project config *raw* that have a
+    string ``command``, by server name. Empty when there are none."""
     mcp_table = raw.get("mcp", {})
     servers = mcp_table.get("servers", {}) if isinstance(mcp_table, dict) else {}
     if not isinstance(servers, dict):
@@ -347,9 +343,60 @@ def load_mcp_config(cwd: Path) -> dict[str, dict]:
     return out
 
 
-def register_mcp_tools(cwd: Path) -> tuple[list[str], list[str]]:
+def mcp_argv(spec: dict) -> list[str]:
+    """The command line a server *spec* is started with, as strings."""
+    return [str(spec.get("command", "")), *(str(a) for a in (spec.get("args") or []))]
+
+
+def load_mcp_config(cwd: Path) -> dict[str, dict]:
+    """Read the [mcp.servers.*] tables from the nearest project config.
+
+    Returns an empty dict when there is no project config or it declares no
+    servers. Raises ProjectConfigUnreadable when the config file exists but
+    cannot be read or parsed. Says nothing about whether they are trusted."""
+    from .project_config import find_project_config, read_project_config_file
+    path = find_project_config(cwd)
+    if path is None:
+        return {}
+    return mcp_servers_from(read_project_config_file(path))
+
+
+def untrusted_servers_message(config_path: Path, names) -> str:
+    """The notice that the MCP servers *names* in *config_path* were not
+    started because they are not trusted."""
+    listed = ", ".join(f"'{n}'" for n in names)
+    return (f"MCP servers {listed} in {config_path} are not trusted, so none were "
+            "started. Review them and trust them with /hooks trust or --trust-hooks "
+            "(or the coder's hooks button in the GUI), or remove them from the file.")
+
+
+def load_trusted_mcp_config(cwd: Path) -> tuple[dict[str, dict], list[str]]:
+    """The MCP servers of the project config nearest *cwd* when the trust store
+    trusts that config as it is now, else none and a warning naming them.
+
+    The servers returned come from the same read the digest was taken of.
+    Raises ProjectConfigUnreadable like load_mcp_config."""
+    from .hook_trust import commands_digest, is_trusted
+    from .project_config import find_project_config, read_project_config_file
+    path = find_project_config(cwd)
+    if path is None:
+        return {}, []
+    raw = read_project_config_file(path)
+    servers = mcp_servers_from(raw)
+    if not servers or is_trusted(path, commands_digest(raw)):
+        return servers, []
+    return {}, [untrusted_servers_message(path, servers)]
+
+
+def register_mcp_tools(cwd: Path, servers: Optional[dict[str, dict]] = None,
+                       ) -> tuple[list[str], list[str]]:
     """
-    Start every configured MCP server and register its tools.
+    Start MCP servers and register their tools.
+
+    *servers* are started as given; the caller has established that the user
+    trusts them. Without *servers*, the servers of the project config nearest
+    *cwd* are started only when the trust store trusts that config as it is now
+    (load_trusted_mcp_config); otherwise none start and the warnings say so.
 
     Returns (registered_tool_names, warnings). A failing server produces a
     warning, never an exception - MCP problems must not break the agent.
@@ -359,10 +406,13 @@ def register_mcp_tools(cwd: Path) -> tuple[list[str], list[str]]:
     registered: list[str] = []
     warnings: list[str] = []
 
-    try:
-        configured = load_mcp_config(cwd)
-    except ProjectConfigUnreadable as e:
-        return registered, [f"MCP servers not loaded: project config unreadable ({e})"]
+    if servers is not None:
+        configured = servers
+    else:
+        try:
+            configured, warnings = load_trusted_mcp_config(cwd)
+        except ProjectConfigUnreadable as e:
+            return registered, [f"MCP servers not loaded: project config unreadable ({e})"]
 
     for name, spec in configured.items():
         try:

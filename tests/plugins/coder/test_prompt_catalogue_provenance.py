@@ -421,6 +421,10 @@ def test_a_real_mcp_servers_self_description_reaches_the_model_range_marked(tmp_
         command = {json.dumps(sys.executable)}
         args = [{json.dumps(str(script))}]
     """), encoding="utf-8")
+    from localm.plugins.coder.hook_trust import commands_digest, remember_trust
+    from localm.plugins.coder.project_config import read_project_config_file
+    remember_trust(cfg / "config.toml",
+                   commands_digest(read_project_config_file(cfg / "config.toml")))
 
     with patch.dict(TOOL_REGISTRY, {}, clear=False):
         names, warnings = register_mcp_tools(tmp_path)

@@ -1866,10 +1866,11 @@ export async function openEpisodesModal(view = "live") {
   }
 }
 
-/** The project's tool hooks and whether they are trusted, with buttons to trust
- *  or stop trusting them: the web form of the REPL's `/hooks`, `/hooks trust`
- *  and `/hooks forget`. Trusting sends back the digest of the hooks shown, so
- *  hooks that changed after they were shown are refused rather than trusted. */
+/** The project's tool hooks and MCP servers and whether they are trusted, with
+ *  buttons to trust or stop trusting them: the web form of the REPL's `/hooks`,
+ *  `/hooks trust` and `/hooks forget`. Trusting sends back the digest of what
+ *  was shown, so a config that changed after it was shown is refused rather
+ *  than trusted. */
 export async function openHooksModal() {
   const cwd = ($("setup-cwd")?.value || "").trim();
   if (!cwd) { toast(t("coder.episodes.enterDirectoryFirst"), true); return; }
@@ -1892,11 +1893,21 @@ export async function openHooksModal() {
           : t("coder.hooks.meta", { matcher: h.matcher, timeout: h.timeout })));
         body.appendChild(card);
       }
-      body.appendChild(el("p", "sub", data.trusted ? t("coder.hooks.trusted") : t("coder.hooks.untrusted")));
+      const servers = data.mcp_servers || [];
+      for (const m of servers) {
+        const card = el("div", "card");
+        card.appendChild(el("div", "row", m.line));
+        if (m.trusted_calls) card.appendChild(el("div", "sub", t("coder.hooks.mcpTrustedCalls")));
+        body.appendChild(card);
+      }
+      const mcp = servers.length > 0;
+      body.appendChild(el("p", "sub", data.trusted
+        ? t(mcp ? "coder.hooks.trustedMcp" : "coder.hooks.trusted")
+        : t(mcp ? "coder.hooks.untrustedMcp" : "coder.hooks.untrusted")));
       const foot = el("div", "actions");
       if (!data.trusted) {
-        body.appendChild(el("p", "sub", t("coder.hooks.trustWarning")));
-        const trust = el("button", "btn-primary", t("coder.hooks.trustBtn"));
+        body.appendChild(el("p", "sub", t(mcp ? "coder.hooks.trustWarningMcp" : "coder.hooks.trustWarning")));
+        const trust = el("button", "btn-primary", t(mcp ? "coder.hooks.trustBtnMcp" : "coder.hooks.trustBtn"));
         trust.onclick = async () => {
           trust.disabled = true;
           try {

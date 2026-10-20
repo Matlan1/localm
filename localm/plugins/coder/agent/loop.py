@@ -378,6 +378,12 @@ class _LoopMixin:
         # Record whether this session owns a terminal it can prompt on. A spawned
         # child always runs _loop(interactive=False).
         self._interactive = interactive
+        # Project MCP servers held back as untrusted start here once trusted
+        # (the GUI or another session may have trusted them since); while they
+        # stay untrusted the session says so once.
+        if self.parent is None:
+            self.start_deferred_mcp()
+            self.report_deferred_mcp(interactive)
         # Live attribute lookup, so a patched agent.parse_tool_calls / confirm /
         # print_warning / TOOL_REGISTRY is honoured.
         parse_tool_calls = _agent.parse_tool_calls
