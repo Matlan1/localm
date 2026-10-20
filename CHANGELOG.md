@@ -154,6 +154,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **A coder task no longer ends on "let me run the tests".** A reply whose last line announces a
   step it did not take is sent back once; a run that still stops there, or answers with nothing,
   is reported as not finished.
+- **Large split models plan their GPU placement correctly.** A split GGUF whose first part holds
+  only metadata, the layout big models such as Qwen3.8-Flash-Next ship in, was sized as if every
+  byte went to the GPU: the embedding tables that stay in system RAM were counted as VRAM, the
+  Mixture-of-Experts experts could not be kept in RAM, the multi-GPU split was not planned and the
+  KV cache was over-estimated, so only a few layers were offloaded across every GPU. Such models
+  are now placed with every layer on the GPUs and the experts that do not fit kept in system RAM.
+- **Multi-GPU loads use all the cards for a Mixture-of-Experts model.** When the experts of some
+  layers stay in system RAM, the remaining layers are packed onto the GPUs by size instead of by
+  free memory alone, so a small last card no longer forces most experts off the GPUs.
+- **A failed load no longer blames low VRAM when the planned load fit,** and the advice names a
+  GPU layer count that fits instead of a fixed `-g 24`. A worker crash in privacy mode says that
+  privacy mode kept no crash trace and how to keep one.
 - **A coder shell command that starts with a quoted program path now runs on Windows.** A command such as `"D:\tools dir\tool.exe" --flag "a b"` used to fail with "is not recognized as an internal or external command", because `cmd` dropped the first and last quote.
 - **A shell command's timeout or cancel in `localm coder` is no longer held up by a stray
   background process.** A command that left a detached process holding its output open used to

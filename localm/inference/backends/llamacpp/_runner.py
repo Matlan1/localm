@@ -786,6 +786,8 @@ class ModelRunner:
         # parent via debuglog.child_crash_trace_path and set in _spawn(); None
         # before the first spawn.
         self._crash_trace_path = None
+        # True when privacy mode kept the last spawn's trace from being armed.
+        self._trace_skipped_for_privacy = False
         # The load phase read from the last consumed fault trace (see
         # crash_phase_from_trace); None when none was captured.
         self._last_crash_phase = None
@@ -869,7 +871,8 @@ class ModelRunner:
         self._last_crash_phase = crash_phase_from_trace(trace)
         native = self._exit_was_native_fault(trace_captured=bool(trace))
         if not trace:
-            report = (native, " No native fault trace was captured for this exit.")
+            from localm.debuglog import no_native_trace_detail
+            report = (native, no_native_trace_detail(self._trace_skipped_for_privacy))
         else:
             from localm.debuglog import logger, native_fault_hint
             # The full trace goes to the debug log; the report carries its first line.
@@ -953,7 +956,8 @@ class ModelRunner:
         self._discard_native_crash_trace()
         from localm.audit import diagnostics_allowed, shared_coder_privacy_value
         coder_privacy = shared_coder_privacy_value()
-        if diagnostics_allowed():
+        self._trace_skipped_for_privacy = not diagnostics_allowed()
+        if not self._trace_skipped_for_privacy:
             from localm.debuglog import child_crash_trace_path, logger
             try:
                 self._crash_trace_path = child_crash_trace_path("gguf-worker")

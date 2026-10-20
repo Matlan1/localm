@@ -593,21 +593,47 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             # Propagate as-is, bypassing the load-failure handling below.
             raise
         except Exception as exc:
-            vram_hint = ""
-            if self.effective_gpu_layers:   # 0 = CPU-only, no VRAM probe needed
-                # Combined-when-split free VRAM budget; the helper never raises.
-                free, _split_total, _split_devices = self._split_free_total_bytes()
-                if free is None:
-                    free = self._free_vram_bytes()
-                if free is not None and free < self._model_bytes() + self._VRAM_OVERHEAD_BYTES:
-                    vram_hint = (
-                        " The GPU is low on memory - free VRAM or retry with "
-                        "fewer GPU layers (-g 24, or -g 0 for CPU)."
-                    )
+            vram_hint = self._load_failure_vram_hint()
             split_note = getattr(self, "_split_fit_note", "")
             if split_note:
                 vram_hint += f" {split_note}"
             raise RuntimeError(_load_failure_message(exc, vram_hint)) from exc
+
+    def _load_failure_vram_hint(self) -> str:
+        """The sentence a failed load adds about VRAM, or "".
+
+        Non-empty only for a GPU load (``effective_gpu_layers`` above 0) whose
+        planned VRAM need (``_planned_vram``) exceeded the free VRAM: the free
+        reading auto-sizing planned from (``last_gpu_sizing``) when there is
+        one, else a fresh reading. It names both figures, where they were read
+        (the GPU, or the N GPUs of a split) and the options
+        ``_vram_fit_options`` gives for that free figure. Never raises."""
+        layers = self.effective_gpu_layers
+        if not layers:
+            return ""
+        try:
+            planned = self._planned_vram(layers)
+            if planned is None:
+                return ""
+            need, free, _total, devices, kv_cache, overhead = planned
+            sizing = getattr(self, "last_gpu_sizing", None) or {}
+            if isinstance(sizing.get("free_bytes"), int):
+                free = sizing["free_bytes"]
+            if free >= need:
+                return ""
+            where = f"the {devices} GPUs" if devices >= 2 else "the GPU"
+            options = "; ".join(
+                f"{label.lower()} ({command.split('  ')[0]})"
+                for label, command in self._vram_fit_options(
+                    free, need, kv_cache, overhead, layers))
+            return (f" This load needed about {need / 1024**3:.1f} GB of VRAM and "
+                    f"{where} had {free / 1024**3:.1f} GB free - free VRAM, or: "
+                    f"{options}.")
+        except Exception as exc:  # a hint must never replace the load error
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("load-failure VRAM hint unavailable (%s: %s)",
+                       type(exc).__name__, exc)
+            return ""
 
     def _set_parallel_copies(self, copies: int) -> None:
         """Ask the next load for *copies* slots; the recurrent-state VRAM charge

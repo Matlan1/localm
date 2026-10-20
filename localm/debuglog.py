@@ -46,6 +46,17 @@ def debug_enabled() -> bool:
     return bool(os.environ.get(_ENV_VAR))
 
 
+def no_native_trace_detail(privacy_skipped: bool) -> str:
+    """The sentence a crash report carries when no native-fault trace was
+    captured. With *privacy_skipped* (privacy mode kept the trace from being
+    armed, ``audit.diagnostics_allowed`` False) it says so and how to keep one."""
+    if privacy_skipped:
+        return (" No native fault trace was captured: privacy mode keeps none. "
+                "Turn on keep diagnostics (Settings > Privacy, or  localm config "
+                "keep_diagnostics true) to capture one if it happens again.")
+    return " No native fault trace was captured for this exit."
+
+
 def native_fault_hint() -> str:
     """Trailing parenthetical for a native-fault message that already logged
     the full trace via ``logger.error``: names the debug log file when one
