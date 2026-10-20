@@ -570,6 +570,19 @@ _BUSY_VICTIM_IDLE_WAIT_S = 30.0
 _VICTIM_RELEASE_EXTRA_WAIT_S = 25.0
 
 
+def _refuse_projector_model(name: str, registry: dict | None = None) -> None:
+    """Raise HTTPException 422 when *name* is a registered vision projector.
+    Runs before any eviction or cancellation, so the resident model stays
+    loaded. *registry* defaults to the current registry."""
+    from localm.model_manager.registry import projector_refusal
+    if registry is None:
+        from localm.config import load_registry
+        registry = load_registry()
+    msg = projector_refusal(name, registry)
+    if msg is not None:
+        raise HTTPException(422, msg)
+
+
 async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool = True,
                         force: bool = False, activate: bool = True,
                         skip_if_latched: bool = False,
@@ -622,6 +635,8 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
     the ``_switch_*`` helpers below perform the effects.
     """
     global _engine_factory, _switch_desired
+
+    _refuse_projector_model(name)
 
     if preempt:
         _switch_desired = name
@@ -1776,6 +1791,7 @@ async def get_engine(model_name: str | None, *, load: bool = True,
             if registered:
                 msg += f" Registered models in your library: {', '.join(registered)}. Use 'localm pull' to add a new model."
             raise HTTPException(404, msg)
+        _refuse_projector_model(name, registry)
 
     # A name that resolved to nothing (an empty/"localm" request with no active,
     # no remembered last-active, AND no default model - e.g. `gui --no-model`
