@@ -34,7 +34,7 @@ tagged-envelope style of ``voice.py`` rather than shipping exception objects):
 ``req_q`` (parent -> child), one command processed at a time:
     ("load", {model_path, mmproj_path, n_ctx, n_gpu_layers, n_ctx_max, n_ctx_grow,
               vram_overhead_bytes, gpu_split_ratios, n_cpu_moe, use_mmap,
-              main_gpu?, adapters?, n_parallel?})
+              main_gpu?, adapters?, n_parallel?, kv_cache_type?})
     ("chat_stream", {messages, max_tokens, temperature, top_p, top_k,
                       repeat_penalty, grammar, grammar_lazy, grammar_triggers, seed,
                       thinking?, min_p?, presence_penalty?, frequency_penalty?,

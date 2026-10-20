@@ -561,6 +561,10 @@ DEFAULT_CONFIG: dict = {
     # available RAM can run from disk-backed memory, first tokens slower) or
     # "off" (the whole model is read into memory first).
     "use_mmap": "auto",
+    # Element type of the KV cache: "f16" (llama.cpp's default) or "q8_0"
+    # (1.0625 bytes per element instead of 2, so about 1.88x the context fits
+    # in the same VRAM; needs flash attention). Applies at the next model load.
+    "kv_cache_type": "f16",
     # When n_gpu_layers is left at its "everything" default, auto-size how many
     # layers actually go on the GPU from free VRAM at load: a model too big for
     # full GPU offload runs some layers on CPU (slower) and LOADS, instead of
