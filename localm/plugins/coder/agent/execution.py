@@ -548,6 +548,12 @@ class _ExecutionMixin:
                            summary="blocked by network policy (net_mode=off)")
                 return result
 
+        # Project pre_tool_use hooks run before confirmation, so a call a hook
+        # blocks never reaches the prompt.
+        hook_block = self._run_pre_tool_hooks(call, interactive)
+        if hook_block is not None:
+            return hook_block
+
         # Confirmation for destructive tools (diff preview for write_file), for
         # network tools when net_mode is "ask", and for a non-mutating tool that
         # opts in via ask_by_default (see ToolDef.ask_by_default, registry.py).
@@ -705,6 +711,7 @@ class _ExecutionMixin:
             result = ToolResult.error(f"Tool error: {e}")
         duration_s = time.monotonic() - t_start
 
+        result = self._run_post_tool_hooks(call, result, interactive)
         result = self._track_tool_failure(call, result)
         if result.ok and self._denied_unconfirmed:
             key = _call_key(call)
@@ -730,6 +737,88 @@ class _ExecutionMixin:
 
     def _cancel_check(self) -> bool:
         return self.cancelled
+
+    def _hooks_for(self, event: str, tool: str):
+        """The session's ToolHooks when they apply to *event* for *tool*, else
+        None (always None in a restricted session). When they are not trusted,
+        the first call they apply to reports that once per session; the caller
+        must check ``trusted`` before running anything."""
+        hooks = getattr(self, "_tool_hooks", None)
+        if hooks is None or self.restricted or not hooks.applies(event, tool):
+            return None
+        if not hooks.trusted and hooks.claim_untrusted_report():
+            msg = hooks.untrusted_message()
+            _agent.print_warning(msg)
+            self._emit("info", text=msg)
+            self._audit.notice("tool_hooks_untrusted", msg)
+        return hooks
+
+    def _hook_status(self, interactive: bool):
+        """A callback printing which hook is running, for an interactive session."""
+        if not interactive:
+            return None
+        from localm.console import markup_safe
+
+        def _show(spec) -> None:
+            console.print(f"    [dim]hook {spec.label}: "
+                          f"{markup_safe(spec.command_text(80))}[/dim]")
+        return _show
+
+    def _run_pre_tool_hooks(self, call: ToolCall,
+                            interactive: bool) -> Optional[ToolResult]:
+        """Run the project's pre_tool_use hooks for *call*. Returns the error
+        result when a hook blocks it, else None."""
+        from ..hooks import PRE
+        hooks = self._hooks_for(PRE, call.name)
+        if hooks is None:
+            return None
+        if not hooks.trusted:
+            reason = hooks.untrusted_block_reason(call.name)
+        else:
+            reason = hooks.run_pre(call.name, dict(call.args), self.cwd,
+                                   cancel=self._cancel_check,
+                                   on_start=self._hook_status(interactive))
+        if reason is None:
+            return None
+        from localm.textguard import compose, untrusted_span
+        result = ToolResult.error(compose(untrusted_span(reason)))
+        self._audit.notice("tool_hook_blocked", reason)
+        if interactive:
+            print_tool_error(call.name, str(result.output))
+        self._emit("tool_result", tool=call.name, ok=False,
+                   summary="blocked by a pre_tool_use hook")
+        return result
+
+    def _run_post_tool_hooks(self, call: ToolCall, result: ToolResult,
+                             interactive: bool) -> ToolResult:
+        """Run the project's post_tool_use hooks for *call* and return *result*
+        with any hook feedback appended to its output."""
+        from ..hooks import POST
+        hooks = self._hooks_for(POST, call.name)
+        if hooks is None or not hooks.trusted:
+            return result
+        report = hooks.run_post(call.name, dict(call.args), self.cwd,
+                                ok=result.ok, output=str(result.output),
+                                cancel=self._cancel_check,
+                                on_start=self._hook_status(interactive))
+        for w in report.warnings:
+            _agent.print_warning(w)
+            self._emit("info", text=w)
+            self._audit.notice("tool_hook_failed", w)
+        if not report.feedback:
+            return result
+        from dataclasses import replace
+        from localm.textguard import compose, untrusted_span
+        parts: list = [result.output]
+        for text in report.feedback:
+            parts += ["\n\n[post_tool_use hook]\n", untrusted_span(text)]
+            self._audit.notice("tool_hook_feedback", text)
+        if interactive:
+            from localm.console import markup_safe
+            for text in report.feedback:
+                console.print(f"    [dim yellow]post_tool_use hook:[/dim yellow] "
+                              f"{markup_safe(text.splitlines()[0][:200])}")
+        return replace(result, output=compose(*parts))
 
     def _track_tool_failure(self, call: ToolCall, result: ToolResult) -> ToolResult:
         """Update the per-tool + global failure streaks and arm the circuit

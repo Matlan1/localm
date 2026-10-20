@@ -446,6 +446,7 @@ class Agent(
         self._init_mcp_tools(cwd)
         self._init_plugin_tools()
         self._init_skill_tools(cwd)
+        self._init_tool_hooks(cwd)
         # Unconditional, unlike the narrowings below: browser automation is off
         # by default, so this runs for every session and only leaves the tools
         # in place when the capability was granted.
@@ -629,6 +630,31 @@ class Agent(
             self._mcp_tool_names = frozenset(mcp_names)
         except Exception as e:
             print_warning(f"MCP setup failed: {e}")
+
+    def _init_tool_hooks(self, cwd: Path) -> None:
+        """Load the project's tool hooks (hooks.py) into ``self._tool_hooks``.
+
+        None for a restricted session, and when the project config declares no
+        hooks. A child shares its parent's hooks object, so the parent's trust
+        decision covers it. An unreadable project config loads no hooks and is
+        reported."""
+        self._tool_hooks = None
+        if self.restricted:
+            return
+        if self.parent is not None:
+            self._tool_hooks = getattr(self.parent, "_tool_hooks", None)
+            return
+        from ..hooks import ToolHooks
+        from ..project_config import ProjectConfigUnreadable
+        try:
+            self._tool_hooks = ToolHooks.load(cwd)
+        except ProjectConfigUnreadable as e:
+            _agent.print_warning(f"Tool hooks not loaded: project config unreadable ({e})")
+            return
+        if self._tool_hooks is not None:
+            for w in self._tool_hooks.warnings:
+                _agent.print_warning(w)
+                self._audit.notice("tool_hook_config", w)
 
     def _init_plugin_tools(self) -> None:
         print_warning = _agent.print_warning

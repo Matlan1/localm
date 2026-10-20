@@ -21,6 +21,10 @@ verify          = "pytest -x && ruff check"  # exit-code check for interactive
 diagnostics     = false                   # no ruff pass after .py edits (default on
                                           # when ruff is on PATH)
 
+Tables read by their own loaders rather than by load_project_config:
+``[mcp.servers.*]`` (mcp.py) and ``[[hooks.pre_tool_use]]`` /
+``[[hooks.post_tool_use]]`` (hooks.py).
+
 The file is optional; absent keys fall through to CLI defaults.
 """
 
