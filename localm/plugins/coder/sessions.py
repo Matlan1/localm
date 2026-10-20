@@ -24,7 +24,6 @@ from typing import Optional
 
 from localm.audit import SessionMode
 from .diffutil import compute_multifile_diff, compute_tool_diff, read_old_content
-from .agent.planmode import INTERACTION_TOOLS
 from .parser import strip_tool_calls
 from .verify import VerifyCommand as _VerifyCommand, command_text as _verify_text
 
@@ -291,8 +290,7 @@ class CoderSession:
             scope=scope,
             dry_run=dry_run,
             patch_mode=patch_mode,
-            # The GUI has no channel for a typed answer or a plan verdict.
-            disabled_tools=frozenset(disabled_tools or ()) | INTERACTION_TOOLS,
+            disabled_tools=disabled_tools,
             restricted=restricted,
             browser_enabled=browser_enabled,
             # None -> Agent reads .localcoder/system.md; a GUI-supplied string

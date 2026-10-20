@@ -589,7 +589,7 @@ class _PersistenceMixin:
         # load_checkpoint()'s migration path already backfills it.
         self._session_title = data.get("title") or _first_user_text(self._messages)
         self.set_todos(normalize_todos(data.get("todos")))
-        if data.get("plan_mode") is True:
+        if data.get("plan_mode") is True and "exit_plan_mode" not in self.disabled_tools:
             self._plan_mode = True
         self._restore_delegated(data.get("delegated"))
         self._restore_changed_files(data.get("changed_files"))

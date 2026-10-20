@@ -47,6 +47,7 @@ def _agent(cwd, **kw):
         PM.build.return_value.truncated = False
         kw.setdefault("auto_approve", True)
         kw.setdefault("self_verify", False)
+        kw.setdefault("interactive_tools", True)
         return Agent(_Stub(), cwd=cwd, **kw)
 
 
@@ -633,3 +634,30 @@ def test_one_shot_tasks_and_the_gui_do_not_offer_the_interaction_tools(
         assert INTERACTION_TOOLS <= gui.agent.disabled_tools
     finally:
         gui.close()
+
+
+def test_an_agent_without_a_terminal_does_not_offer_the_interaction_tools(tmp_path):
+    from localm.plugins.coder.prompts import _full_tool_docs
+    plain = _agent(tmp_path, interactive_tools=False)
+    assert INTERACTION_TOOLS <= plain.disabled_tools
+    docs = str(_full_tool_docs(plain.disabled_tools))
+    assert "exit_plan_mode" not in docs and "ask_user" not in docs
+    r = plain._execute_tool(_call("ask_user", question="q?"), interactive=True)
+    assert not r.ok and "disabled" in r.output
+    repl = _agent(tmp_path)
+    assert not (INTERACTION_TOOLS & repl.disabled_tools)
+    assert "exit_plan_mode" in str(_full_tool_docs(repl.disabled_tools))
+
+
+def test_a_session_without_the_tools_does_not_resume_into_plan_mode(tmp_path, monkeypatch):
+    import localm.config as cfg
+    monkeypatch.setattr(cfg, "HOME_DIR", tmp_path / "home")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    first = _agent(proj, mode=SessionMode.LOG)
+    first.set_plan_mode(True)
+    first._messages = [{"role": "user", "content": "plan it"}]
+    assert first.save_checkpoint()
+    gui_like = _agent(proj, mode=SessionMode.LOG, interactive_tools=False)
+    gui_like.resume_checkpoint(gui_like.load_checkpoint())
+    assert not gui_like.plan_mode
