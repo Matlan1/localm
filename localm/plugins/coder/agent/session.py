@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import localm.plugins.coder.agent as _agent
 from localm.textguard import compose_join
@@ -28,6 +29,10 @@ _CLI_REFLECTION_DEADLINE_S = 30.0
 class _SessionMixin:
     _activated_tools: frozenset
     _activated_lock: threading.Lock
+
+    if TYPE_CHECKING:
+        # Set by Agent (core.py), which this class is mixed into.
+        def _init_tool_hooks(self, cwd: Path) -> None: ...
 
     def reset(self) -> None:
         """Clear conversation history. Allows answered with "a" end with it."""
