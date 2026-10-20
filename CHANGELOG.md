@@ -74,6 +74,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **The bundled AMD (ROCm) llama.cpp runtime moved from build b1342 to b1349** (upstream llama.cpp b11719). An existing install picks it up with `localm setup-llama --force`.
 - **The bundled stable-diffusion.cpp runtime moved from master-964-1d0a58a to master-982-0518b34.** An existing install picks it up the next time image generation starts.
 - **The bundled koboldcpp runtime (native music generation) moved from v1.123 to v1.123.1.** An existing install picks it up the next time music generation starts.
+- **Newer Python libraries.** The Hugging Face backend uses transformers 5.20 (from 5.15), the
+  browser tool uses Playwright 1.64, and the server, PDF, image and download libraries move to
+  their current releases. Running setup again picks them up.
 
 - **The coder starts a project's MCP servers only after you trust them.** A cloned repository
   can declare MCP servers in `.localcoder/config.toml`, so they now need the same trust as tool
