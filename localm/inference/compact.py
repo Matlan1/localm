@@ -388,10 +388,10 @@ def summarise_in_passes(
     from localm.textnorm import strip_think
     summary = str(earlier or "")
     for group in groups:
-        earlier = (fit_tokens(summary, earlier_summary_tokens(reply_tokens), measure)
-                   if summary else None)
+        so_far = (fit_tokens(summary, earlier_summary_tokens(reply_tokens), measure)
+                  if summary else None)
         try:
-            out = run_pass(earlier, compose_join("\n\n", group))
+            out = run_pass(so_far, compose_join("\n\n", group))
         except Exception as e:
             return "", f"{type(e).__name__}: {e}"
         # Keep only the visible answer; an all-reasoning reply becomes empty.
