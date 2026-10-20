@@ -749,10 +749,70 @@ class _ExecutionMixin:
             return None
         if not hooks.refresh_trust() and hooks.claim_untrusted_report():
             msg = hooks.untrusted_message()
-            _agent.print_warning(msg)
+            _agent.print_warning(msg, to_stderr=not getattr(self, "_interactive", False))
             self._emit("info", text=msg)
             self._audit.notice("tool_hooks_untrusted", msg)
         return hooks
+
+    def _hook_run_gate(self) -> Optional[str]:
+        """Whether a hook run needs more than trust in this session.
+
+        A hook can run a file the agent wrote. When file writes run without
+        confirmation but run_shell does not, a hook run gets run_shell's gate:
+        "confirm" when run_shell needs confirmation, "refuse" when it is
+        disabled. None when trust is enough."""
+        writes_unconfirmed = (self.auto_approve
+                              and not _UNDOABLE_TOOLS <= set(self.always_confirm))
+        if not writes_unconfirmed:
+            return None
+        if "run_shell" in self.disabled_tools:
+            return "refuse"
+        if "run_shell" in self.always_confirm:
+            return "confirm"
+        return None
+
+    def _hook_permit(self, interactive: bool):
+        """A callback deciding, per hook run, whether it may run: None to run
+        it, else the reason it does not. None when no check is needed."""
+        gate = self._hook_run_gate()
+        if gate is None:
+            return None
+
+        def _permit(spec) -> Optional[str]:
+            if gate == "refuse":
+                return "run_shell is disabled for this session and file writes run unconfirmed"
+            if self.confirm_handler is not None:
+                approved = invoke_confirm(
+                    self.confirm_handler,
+                    ToolCall(name="run_shell", args={"command": spec.command_text(400)}),
+                    agent=self._confirm_agent_label())
+            elif interactive:
+                approved = _agent.confirm(
+                    f"  Run the project's {spec.label} ({spec.command_text(80)})?")
+            else:
+                return ("it needs the confirmation run_shell needs in this session, "
+                        "and this run cannot ask for one (--yes allows both)")
+            return None if approved else "the user declined to run it"
+        return _permit
+
+    def _hook_project_dir(self, hooks) -> Path:
+        """The folder hooks run in for this agent: the project folder, or, for an
+        agent working in another tree (an isolated sub-agent), the matching
+        folder of that tree."""
+        project = hooks.project_dir.resolve()
+        cwd = Path(self.cwd).resolve()
+        if cwd == project or project in cwd.parents:
+            return project
+        base = hooks.loaded_cwd
+        if base is None:
+            return cwd
+        try:
+            rel = base.relative_to(project).parts
+        except ValueError:
+            return cwd
+        if rel and cwd.parts[-len(rel):] == rel:
+            return Path(*cwd.parts[:-len(rel)])
+        return cwd
 
     def _hook_status(self, interactive: bool):
         """A callback printing which hook is running, for an interactive session."""
@@ -778,7 +838,9 @@ class _ExecutionMixin:
         else:
             reason = hooks.run_pre(call.name, dict(call.args), self.cwd,
                                    cancel=self._cancel_check,
-                                   on_start=self._hook_status(interactive))
+                                   on_start=self._hook_status(interactive),
+                                   permit=self._hook_permit(interactive),
+                                   project_dir=self._hook_project_dir(hooks))
         if reason is None:
             return None
         from localm.textguard import compose, untrusted_span
@@ -801,9 +863,11 @@ class _ExecutionMixin:
         report = hooks.run_post(call.name, dict(call.args), self.cwd,
                                 ok=result.ok, output=str(result.output),
                                 cancel=self._cancel_check,
-                                on_start=self._hook_status(interactive))
+                                on_start=self._hook_status(interactive),
+                                permit=self._hook_permit(interactive),
+                                project_dir=self._hook_project_dir(hooks))
         for w in report.warnings:
-            _agent.print_warning(w)
+            _agent.print_warning(w, to_stderr=not interactive)
             self._emit("info", text=w)
             self._audit.notice("tool_hook_failed", w)
         if not report.feedback:

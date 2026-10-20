@@ -636,8 +636,9 @@ class Agent(
 
         None for a restricted session, and when the project config declares no
         hooks. A child shares its parent's hooks object, so the parent's trust
-        decision covers it. An unreadable project config loads no hooks and is
-        reported."""
+        decision covers it. A project config that cannot be parsed but mentions
+        hooks loads ToolHooks.unreadable, which refuses every tool call; one
+        that does not mention them loads none. Either is reported."""
         self._tool_hooks = None
         if self.restricted:
             return
@@ -649,11 +650,22 @@ class Agent(
         try:
             self._tool_hooks = ToolHooks.load(cwd)
         except ProjectConfigUnreadable as e:
-            _agent.print_warning(f"Tool hooks not loaded: project config unreadable ({e})")
-            return
+            mentions = True
+            if e.path is not None:
+                try:
+                    mentions = b"hooks" in Path(e.path).read_bytes()
+                except OSError:
+                    mentions = True
+            if mentions and e.path is not None:
+                self._tool_hooks = ToolHooks.unreadable(Path(e.path), str(e))
+            else:
+                _agent.print_warning(
+                    f"Tool hooks not loaded: project config unreadable ({e})",
+                    to_stderr=True)
+                return
         if self._tool_hooks is not None:
             for w in self._tool_hooks.warnings:
-                _agent.print_warning(w)
+                _agent.print_warning(w, to_stderr=True)
                 self._audit.notice("tool_hook_config", w)
 
     def _init_plugin_tools(self) -> None:

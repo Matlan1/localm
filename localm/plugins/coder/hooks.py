@@ -65,6 +65,8 @@ MAX_TIMEOUT = 600.0
 _FEEDBACK_CAP = 4000
 _PAYLOAD_OUTPUT_CAP = 100_000
 _POLL_SECONDS = 0.25
+_DRAIN_SECONDS = 2.0
+_OUTPUT_CAP = 1_000_000
 _ENTRY_KEYS = frozenset({"matcher", "command", "timeout"})
 
 
@@ -82,6 +84,8 @@ class HookSpec:
 
     @property
     def label(self) -> str:
+        if self.index == 0:
+            return "hooks table"
         return f"{self.event} hook #{self.index}"
 
     def command_text(self, limit: int = 120) -> str:
@@ -147,8 +151,9 @@ def _parse_entry(event: str, index: int, entry: Any) -> HookSpec:
     matcher = entry.get("matcher", "*")
     if not isinstance(matcher, str):
         return broken("'matcher' must be a string")
+    matcher = matcher.strip()
     regex = None
-    if matcher.strip() not in ("", "*"):
+    if matcher not in ("", "*"):
         try:
             regex = re.compile(matcher)
         except re.error as e:
@@ -169,20 +174,24 @@ def parse_hooks(table: Any) -> tuple[list[HookSpec], list[HookSpec], list[str]]:
 
     An invalid ``pre_tool_use`` entry is kept, with its error set, so it blocks
     every call; an invalid ``post_tool_use`` entry is dropped. Each invalid
-    entry or unknown key produces one warning. A ``[hooks]`` value that is not
-    a table becomes one invalid ``pre_tool_use`` entry."""
+    entry produces one warning. A ``[hooks]`` value that is not a table, and
+    each unknown event name in it, becomes one invalid ``pre_tool_use`` entry."""
     pre: list[HookSpec] = []
     post: list[HookSpec] = []
     warnings: list[str] = []
     if not isinstance(table, dict):
-        spec = HookSpec(event=PRE, index=1,
+        spec = HookSpec(event=PRE, index=0,
                         error="'hooks' must be a table of pre_tool_use / post_tool_use lists")
         warnings.append(f"Tool hooks: {spec.error}; every tool call is blocked until it is fixed.")
         return [spec], post, warnings
 
-    for key in sorted(set(table) - set(EVENTS)):
-        warnings.append(f"Tool hooks: unknown event '{key}' ignored "
-                        f"(known: {', '.join(EVENTS)}).")
+    unknown = [HookSpec(event=PRE, index=0,
+                        error=f"unknown event '{key}' (known: {', '.join(EVENTS)})")
+               for key in sorted(set(table) - set(EVENTS), key=str)]
+    for spec in unknown:
+        warnings.append(f"Tool hooks: {spec.error}; every tool call is blocked "
+                        "until it is fixed.")
+    pre.extend(unknown)
 
     for event, out in ((PRE, pre), (POST, post)):
         raw = table.get(event)
@@ -209,12 +218,46 @@ def _json_payload(payload: dict) -> str:
     return json.dumps(payload, ensure_ascii=False, default=str)
 
 
+def _drain(stream, sink: list, cap: int) -> None:
+    """Read *stream* to EOF into *sink*, keeping at most *cap* bytes."""
+    kept = 0
+    try:
+        while True:
+            chunk = stream.read1(65536)
+            if not chunk:
+                break
+            if kept < cap:
+                sink.append(chunk[:cap - kept])
+                kept += len(sink[-1])
+    except (OSError, ValueError):
+        pass
+
+
+def _feed(stream, data: bytes) -> None:
+    """Write *data* to *stream* and close it; a hook that exits or closes its
+    stdin early ends the write."""
+    try:
+        stream.write(data)
+    except (OSError, ValueError):
+        pass
+    finally:
+        try:
+            stream.close()
+        except (OSError, ValueError):
+            pass
+
+
 def run_hook(spec: HookSpec, payload: dict, project_dir: Path,
              cancel: Optional[Callable[[], bool]] = None) -> HookOutcome:
     """Run *spec*'s command with *payload* as JSON on stdin, in *project_dir*.
 
-    The process and everything it started are killed at the spec's timeout or
-    when *cancel* answers True. Never raises for a failure of the command."""
+    Stdin is written and stdout/stderr are read on their own threads, so the
+    spec's timeout and *cancel* are checked every _POLL_SECONDS whatever the
+    hook does with its pipes. At the timeout or on cancel the process and
+    everything it started are killed. After the hook process ends, output is
+    collected for at most _DRAIN_SECONDS more, so a process that escaped the
+    kill and still holds a pipe cannot hold the call. Each stream keeps at most
+    _OUTPUT_CAP bytes. Never raises for a failure of the command."""
     from .tools.base import _kill_tree, platform_shell
     from localm.config import user_command_env
 
@@ -227,42 +270,53 @@ def run_hook(spec: HookSpec, payload: dict, project_dir: Path,
     try:
         proc = subprocess.Popen(
             argv, cwd=str(project_dir), stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            encoding="utf-8", errors="replace", env=env)
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
     except Exception as e:
         return HookOutcome(start_error=str(e) or type(e).__name__)
 
-    pending_input: Optional[str] = _json_payload(payload)
+    out: list = []
+    err: list = []
+    threads = [
+        threading.Thread(target=_feed, args=(proc.stdin, _json_payload(payload).encode("utf-8")),
+                         daemon=True),
+        threading.Thread(target=_drain, args=(proc.stdout, out, _OUTPUT_CAP), daemon=True),
+        threading.Thread(target=_drain, args=(proc.stderr, err, _OUTPUT_CAP), daemon=True),
+    ]
+    for t in threads:
+        t.start()
+
+    def _collect(**flags) -> HookOutcome:
+        drain_deadline = time.monotonic() + _DRAIN_SECONDS
+        for t, stream in zip(threads[1:], (proc.stdout, proc.stderr), strict=True):
+            t.join(max(0.0, drain_deadline - time.monotonic()))
+            if not t.is_alive():
+                try:
+                    stream.close()
+                except (OSError, ValueError):
+                    pass
+        return HookOutcome(
+            stdout=b"".join(out).decode("utf-8", errors="replace"),
+            stderr=b"".join(err).decode("utf-8", errors="replace"), **flags)
+
     deadline = time.monotonic() + spec.timeout
     try:
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 _kill_tree(proc)
-                stdout, stderr = proc.communicate()
-                return HookOutcome(timed_out=True, stdout=stdout or "",
-                                   stderr=stderr or "")
+                return _collect(timed_out=True)
             if cancel is not None and cancel():
                 _kill_tree(proc)
-                stdout, stderr = proc.communicate()
-                return HookOutcome(cancelled=True, stdout=stdout or "",
-                                   stderr=stderr or "")
+                return _collect(cancelled=True)
             try:
-                stdout, stderr = proc.communicate(
-                    input=pending_input, timeout=min(remaining, _POLL_SECONDS))
+                proc.wait(timeout=min(remaining, _POLL_SECONDS))
             except subprocess.TimeoutExpired:
-                pending_input = None
                 continue
             break
     except BaseException:
         _kill_tree(proc)
-        try:
-            proc.communicate(timeout=5)
-        except Exception:
-            pass
         raise
-    return HookOutcome(returncode=proc.returncode, stdout=stdout or "",
-                       stderr=stderr or "")
+    return _collect(returncode=proc.returncode)
 
 
 @dataclass
@@ -283,6 +337,8 @@ class ToolHooks:
         self.digest = hooks_digest(table)
         self.pre, self.post, self.warnings = parse_hooks(table)
         self.trusted = trusted
+        self.revoked = False
+        self.loaded_cwd: Optional[Path] = None
         self._lock = threading.Lock()
         self._untrusted_reported = False
 
@@ -301,7 +357,21 @@ class ToolHooks:
         if "hooks" not in raw:
             return None
         hooks = cls(path, raw["hooks"])
+        hooks.loaded_cwd = Path(cwd).resolve()
         hooks.trusted = hooks.has_hooks() and is_trusted(path, hooks.digest)
+        return hooks
+
+    @classmethod
+    def unreadable(cls, config_path: Path, error: str) -> ToolHooks:
+        """Hooks for a project config that exists but cannot be parsed and
+        mentions hooks: one invalid ``pre_tool_use`` entry, so every tool call
+        is refused until the file is fixed."""
+        hooks = cls(config_path, {})
+        hooks.pre = [HookSpec(event=PRE, index=0,
+                              error=f"the project config could not be read ({error})")]
+        hooks.warnings = [f"Tool hooks: {config_path} could not be read and mentions "
+                          "hooks, so every tool call is blocked until it is fixed."]
+        hooks.trusted = True
         return hooks
 
     def has_hooks(self) -> bool:
@@ -313,11 +383,18 @@ class ToolHooks:
 
     def trust_for_session(self) -> None:
         self.trusted = True
+        self.revoked = False
+
+    def revoke(self) -> None:
+        """Stop these hooks for the rest of the session, whatever the trust
+        store says."""
+        self.trusted = False
+        self.revoked = True
 
     def refresh_trust(self) -> bool:
         """Re-read the trust store for untrusted hooks, so trust granted
         elsewhere (another session, the GUI) applies. Returns ``trusted``."""
-        if not self.trusted and self.has_hooks():
+        if not self.trusted and not self.revoked and self.has_hooks():
             from .hook_trust import is_trusted
             if is_trusted(self.config_path, self.digest):
                 self.trusted = True
@@ -329,6 +406,7 @@ class ToolHooks:
         hooks are trusted for this session either way."""
         from .hook_trust import remember_trust
         self.trusted = True
+        self.revoked = False
         remember_trust(self.config_path, self.digest)
 
     def claim_untrusted_report(self) -> bool:
@@ -363,18 +441,26 @@ class ToolHooks:
                              f"(timeout {spec.timeout:g}s)")
         return lines
 
-    def _payload(self, event: str, tool: str, args: dict, cwd: Path) -> dict:
+    def _payload(self, event: str, tool: str, args: dict, cwd: Path,
+                 project_dir: Path) -> dict:
         return {"event": event, "tool": tool, "args": args, "cwd": str(cwd),
-                "project_dir": str(self.project_dir)}
+                "project_dir": str(project_dir)}
 
     def run_pre(self, tool: str, args: dict, cwd: Path,
                 cancel: Optional[Callable[[], bool]] = None,
                 on_start: Optional[Callable[[HookSpec], None]] = None,
+                permit: Optional[Callable[[HookSpec], Optional[str]]] = None,
+                project_dir: Optional[Path] = None,
                 ) -> Optional[str]:
         """Run the matching pre hooks. Returns None when the call may proceed,
         else the reason it is blocked. Only for trusted hooks: the caller checks
-        ``trusted`` first."""
-        payload = self._payload(PRE, tool, args, cwd)
+        ``trusted`` first.
+
+        *permit*, when given, is asked before each hook runs and returns None
+        to run it or the reason it may not; a hook that may not run blocks the
+        call. *project_dir* overrides the folder the hooks run in."""
+        run_dir = Path(project_dir) if project_dir is not None else self.project_dir
+        payload = self._payload(PRE, tool, args, cwd, run_dir)
         for spec in self.pre:
             if not spec.matches(tool):
                 continue
@@ -382,9 +468,14 @@ class ToolHooks:
                 return (f"{tool} was not run: the project's {spec.label} in "
                         f"{self.config_path} is invalid ({spec.error}), and every "
                         "tool call is blocked until it is fixed.")
+            if permit is not None:
+                refusal = permit(spec)
+                if refusal is not None:
+                    return (f"{tool} was not run: the project's {spec.label} "
+                            f"({spec.command_text()}) did not run because {refusal}.")
             if on_start is not None:
                 on_start(spec)
-            outcome = run_hook(spec, payload, self.project_dir, cancel)
+            outcome = run_hook(spec, payload, run_dir, cancel)
             if outcome.returncode == 0:
                 continue
             if outcome.returncode == BLOCK_EXIT:
@@ -399,21 +490,32 @@ class ToolHooks:
     def run_post(self, tool: str, args: dict, cwd: Path, ok: bool, output: str,
                  cancel: Optional[Callable[[], bool]] = None,
                  on_start: Optional[Callable[[HookSpec], None]] = None,
+                 permit: Optional[Callable[[HookSpec], Optional[str]]] = None,
+                 project_dir: Optional[Path] = None,
                  ) -> PostHookReport:
         """Run the matching post hooks. Only for trusted hooks: the caller
-        checks ``trusted`` first."""
+        checks ``trusted`` first. *permit* and *project_dir* as for run_pre; a
+        hook *permit* refuses is skipped with a warning."""
         report = PostHookReport()
         text = str(output or "")
-        payload = self._payload(POST, tool, args, cwd)
+        run_dir = Path(project_dir) if project_dir is not None else self.project_dir
+        payload = self._payload(POST, tool, args, cwd, run_dir)
         payload["ok"] = bool(ok)
         payload["output"] = text[:_PAYLOAD_OUTPUT_CAP]
         payload["output_truncated"] = len(text) > _PAYLOAD_OUTPUT_CAP
         for spec in self.post:
             if not spec.matches(tool):
                 continue
+            if permit is not None:
+                refusal = permit(spec)
+                if refusal is not None:
+                    report.warnings.append(
+                        f"The project's {spec.label} ({spec.command_text()}) after {tool} "
+                        f"did not run because {refusal}.")
+                    continue
             if on_start is not None:
                 on_start(spec)
-            outcome = run_hook(spec, payload, self.project_dir, cancel)
+            outcome = run_hook(spec, payload, run_dir, cancel)
             if outcome.returncode == 0:
                 continue
             if outcome.returncode == BLOCK_EXIT:

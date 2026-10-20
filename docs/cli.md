@@ -1011,11 +1011,13 @@ folder that holds `.localcoder/`, with `LOCALM_CODER_HOOK_EVENT`, `LOCALM_CODER_
 `LOCALM_CODER_PROJECT_DIR` set. A `pre_tool_use` hook that exits 0 lets the call run;
 exit 2 blocks it and its stderr is the reason the agent is given. Any other result (another
 exit code, a timeout, a command that cannot start) also blocks the call, and so does an
-invalid `pre_tool_use` entry, until it is fixed. A `post_tool_use` hook that exits 2 adds
+invalid `pre_tool_use` entry or an unknown event name under `[hooks]`, until it is fixed. A
+`post_tool_use` hook that exits 2 adds
 its stderr to the tool result the agent sees (a linter's complaints, for example); any
 other failure is shown to you as a warning. Pre hooks run before the confirmation prompt,
 so a call a hook blocks is never offered for approval, and they do not run for a call
-`--dry-run` or `--patch-mode` skips.
+`--dry-run` or `--patch-mode` skips. On Windows a string command runs through `cmd /C`;
+use the list form when the program path contains spaces.
 
 A cloned repository can ship hooks, so a project's hooks run only after you trust them.
 An interactive session lists them and asks: `y` trusts them for this session, `a` trusts
@@ -1025,10 +1027,18 @@ trust and remember them. Untrusted hooks never run: a tool call an untrusted
 `pre_tool_use` hook would check is refused, because the check cannot run, and untrusted
 `post_tool_use` hooks are skipped, with a warning either way. In the REPL,
 `/hooks` lists them and whether they run, `/hooks trust` trusts and remembers them, and
-`/hooks forget` withdraws the trust. A hook's run time counts toward the tool call's own
-time limit. Trust covers the hook commands, not the scripts they run, so
-review a hook script when it changes. Sub-agents run under the same hooks; a restricted
-session (a shared `coder` key, a scheduled job without `--allow-shell`) never runs hooks.
+`/hooks forget` withdraws the trust. In the GUI the **hooks** button in the coder setup
+panel shows the same list and trusts or untrusts them; a running session picks up trust
+granted there at its next tool call.
+
+Trust covers the hook commands, not the scripts they run, and the agent can edit those
+scripts. So when file writes run without confirmation but `run_shell` does not (a one-shot
+`localm coder "TASK"` without `--yes`, or `run_shell` in `always_confirm`), every hook run
+needs the same confirmation `run_shell` would; a run that cannot ask refuses it, and a
+session with `run_shell` disabled does not run hooks at all. When several read-only calls
+run at once, their hooks count toward that batch's two-minute limit. Sub-agents run under
+the same hooks, in their own working tree; a restricted session (a shared `coder` key, a
+scheduled job without `--allow-shell`) never runs hooks.
 
 ---
 
