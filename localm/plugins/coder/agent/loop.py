@@ -274,11 +274,34 @@ _RE_CHANGE_REQUEST = re.compile(
     re.IGNORECASE)
 
 
-def _may_write_files(tool_name: str) -> bool:
-    """True for a tool that can change files without the write tracker seeing
-    it: a shell command, search_replace, or an MCP or plugin tool."""
-    return (tool_name in ("run_shell", "run_shell_background", "search_replace")
-            or tool_name.startswith(("mcp_", "plugin_")))
+# A shell command that runs a project's tests.
+_RE_TEST_COMMAND = re.compile(
+    r"^\s*(?:(?:python[\d.]*|py)\s+-m\s+)?(?:pytest|unittest|tox|nox|jest|vitest|mocha)\b"
+    r"|^\s*(?:npm|pnpm|yarn)\s+(?:run\s+)?test\b"
+    r"|^\s*(?:cargo|go|dotnet|mvn|gradle)\s+test\b"
+    r"|^\s*make\s+(?:test|check)\b",
+    re.IGNORECASE)
+
+
+def _may_write_files(call, cwd) -> bool:
+    """True for a call that can change files without the write tracker seeing
+    it: search_replace, an MCP or plugin tool, or a shell command that is
+    neither read-only nor a test run."""
+    name = call.name
+    if name == "search_replace" or name.startswith(("mcp_", "plugin_")):
+        return True
+    if name not in ("run_shell", "run_shell_background"):
+        return False
+    command = call.args.get("command") if isinstance(call.args, dict) else None
+    if not isinstance(command, str):
+        return True
+    if _RE_TEST_COMMAND.match(command):
+        return False
+    from ..shell_guard import is_read_only
+    try:
+        return not is_read_only(command, cwd)
+    except Exception:
+        return True
 
 
 def _has_file_code_block(text: str) -> bool:
@@ -515,7 +538,7 @@ class _LoopMixin:
                              partial_notice_count=0, partial_notice_cap_announced=False,
                              nocall_escalation=0, nocall_declined=False, tool_calls_made=0,
                              nocall_response="", code_nudged=False, announce_nudged=False,
-                             called_tools=set(), announced_step="",
+                             possible_write=False, announced_step="",
                              writes_at_start=self._write_total(),
                              files_at_start={f["path"]: f["writes"]
                                              for f in self.changed_files()},
@@ -674,7 +697,8 @@ class _LoopMixin:
                 # Recorded before execution: the escalation ladder asks whether
                 # the model can produce a CALL at all, not whether it succeeded.
                 st.tool_calls_made += len(calls)
-                st.called_tools.update(c.name for c in calls)
+                st.possible_write = st.possible_write or any(
+                    _may_write_files(c, self.cwd) for c in calls)
 
                 # Show the non-tool-call text parts when not already streamed
                 segments = split_response(response, parsed_calls)
@@ -1077,44 +1101,51 @@ class _LoopMixin:
     def _unfinished_work_gate(self, response, request, interactive, st):
         """Hold back a final answer that leaves the requested work undone.
 
-        Two cases, each nudged at most once per task while turns remain:
+        Two cases:
 
-        * the reply carries a code block meant for a file (not a shell block)
-          while a change the request asked for is still owed (see
-          :meth:`_change_still_owed`); after that nudge, any reply that still
-          leaves the change owed ends the run as not finished;
+        * a change the request asked for is still owed (see
+          :meth:`_change_still_owed`): the agent is told so once (worded for a
+          reply that shows code when it does), unless the no-tool-call ladder
+          already ran this task; a final answer with the change still owed after
+          that ends the run as not finished;
         * the reply's last line announces a next step ("Let me run the tests.")
-          after tools were used this task.
+          after tools were used this task: nudged once, and ending on an
+          announcement again ends the run as not finished.
 
         Returns ``(False, "")`` after a nudge (the loop continues), a note for
         the final answer when the run ends with the case still open (it is then
         reported as not finished), or ``""``."""
         turns_left = self._turns < self.max_turns and not self.plan_mode
-        owed = self._change_still_owed(request, st)
-        if owed and st.code_nudged:
-            return ("\n\n[not finished: nothing was written to any file in this task, "
-                    "so the change the request asked for was not made]")
-        if owed and _has_file_code_block(response):
-            if turns_left:
-                st.code_nudged = True
-                st.nocall_response = response
+        if self._change_still_owed(request, st):
+            if st.code_nudged or st.nocall_escalation or not turns_left:
+                return ("\n\n[not finished: nothing was written to any file in this "
+                        "task, so the change the request asked for was not made]")
+            st.code_nudged = True
+            st.nocall_response = response
+            if _has_file_code_block(response):
                 self._audit.notice("code_not_written",
                                    "reply carried code but nothing was written")
-                self._add_assistant(response)
-                self._add_user(
-                    "[code not written] Your reply contains code, but no file was "
-                    "written or edited in this task, so nothing on disk changed. If "
-                    "the code belongs in the project, write it now with a tool call: "
-                    "write_file for a new file or a complete rewrite, edit_file to "
-                    "change part of a file.")
-                if interactive:
-                    print_info("(code not written: asking the agent to write it to a file)")
-                self._emit("info", text=(
-                    "the reply showed code but wrote no file - asking the agent "
-                    "to write it"))
-                return (False, "")
-            return ("\n\n[not finished: nothing was written to any file in this task, "
-                    "so the change the request asked for was not made]")
+                prompt = ("[code not written] Your reply contains code, but no file "
+                          "was written or edited in this task, so nothing on disk "
+                          "changed. If the code belongs in the project, write it now "
+                          "with a tool call: write_file for a new file or a complete "
+                          "rewrite, edit_file to change part of a file.")
+                info = "the reply showed code but wrote no file - asking the agent to write it"
+            else:
+                self._audit.notice("change_not_made",
+                                   "change request answered with nothing written")
+                prompt = ("[nothing written] This request asks for a change to the "
+                          "project, but nothing has been written in this task, so "
+                          "nothing on disk changed. Make the change now with a tool "
+                          "call: write_file for a new file or a complete rewrite, "
+                          "edit_file to change part of a file.")
+                info = "the request asked for a change and nothing was written - asking the agent to make it"
+            self._add_assistant(response)
+            self._add_user(prompt)
+            if interactive:
+                print_info("(nothing written: asking the agent to make the change)")
+            self._emit("info", text=info)
+            return (False, "")
         announced = _announced_step(response)
         if st.announce_nudged and not announced and (
                 not response.strip() or _RE_NO_TOOL_NEEDED.fullmatch(response.strip())):
@@ -1149,8 +1180,8 @@ class _LoopMixin:
         """True when *request* tells the agent to change the project (an
         imperative with a change verb), the session can write files and is not
         in plan mode, and nothing that can write has run this task: no write
-        the tracker saw, no patch-mode capture, no shell, search_replace, MCP or
-        plugin call."""
+        the tracker saw, no unverified changed file, no patch-mode capture, and
+        no call :func:`_may_write_files` counts as a possible write."""
         if self.plan_mode:
             return False
         if not {"write_file", "edit_file", "patch_file"} - self.disabled_tools:
@@ -1158,7 +1189,7 @@ class _LoopMixin:
         if not (demands_action(request) and _RE_CHANGE_REQUEST.search(request)):
             return False
         return not (self._write_total() > st.writes_at_start or self.patch_mode
-                    or any(_may_write_files(name) for name in st.called_tools))
+                    or st.possible_write or bool(self._unverified_writes))
 
     def _used_tools_this_task(self, st) -> bool:
         """Has the model demonstrated, THIS TASK, that it can drive a tool?

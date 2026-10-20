@@ -352,9 +352,41 @@ def test_work_written_through_patch_mode_or_a_shell_is_not_sent_back(tmp_path):
         patched.run_task("implement add and sub in calc.py")
     assert not any("[code not written]" in t for t in _user_texts(patched))
     shell = _make_agent(tmp_path, max_turns=6)
-    with _scripted(shell, [_call("run_shell", {"command": "echo hi"}), _CODE_REPLY]):
+    with _scripted(shell, [_call("run_shell", {"command": "echo x > out.txt"}), _CODE_REPLY]):
         shell.run_task("implement add and sub in calc.py")
     assert not any("[code not written]" in t for t in _user_texts(shell))
+    assert shell.last_run_ok is True
+
+
+def test_a_test_run_is_not_a_write(tmp_path):
+    """The live failure: forced to call a tool, the model ran pytest, wrote
+    nothing, and the run was reported finished."""
+    (tmp_path / "calc.py").write_text("# calc\n", encoding="utf-8")
+    agent = _make_agent(tmp_path, max_turns=8)
+    with _scripted(agent, [
+        _call("run_shell", {"command": "python -m pytest tests/ -x"}),
+        "pytest is not installed. Install it with pip, then run the tests again.",
+        "Install pytest first.",
+    ]):
+        result = agent.run_task("implement add and sub in calc.py")
+    assert any("[nothing written]" in t for t in _user_texts(agent))
+    assert "[not finished: nothing was written to any file" in result
+    assert agent.last_run_ok is False
+
+
+def test_a_change_request_answered_without_code_is_sent_back(tmp_path):
+    (tmp_path / "calc.py").write_text("# calc\n", encoding="utf-8")
+    agent = _make_agent(tmp_path, max_turns=8)
+    with _scripted(agent, [
+        _call("read_file", {"path": "calc.py"}),
+        "It is already done.",
+        _call("write_file", {"path": "calc.py", "content": "def add(a, b):\n    return a + b\n"}),
+        "Wrote add to calc.py.",
+    ]):
+        result = agent.run_task("implement add in calc.py")
+    assert sum("[nothing written]" in t for t in _user_texts(agent)) == 1
+    assert _final_answer(result) == "Wrote add to calc.py."
+    assert agent.last_run_ok is True
 
 
 def test_a_shell_block_is_not_file_code():
