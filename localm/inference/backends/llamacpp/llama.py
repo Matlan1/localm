@@ -2674,7 +2674,7 @@ class LlamaCpp:
                                         stepped = (full_needed is not None
                                                    and self._target_ctx(full_needed)
                                                    > self._ctx_capacity)
-                                        if stepped:
+                                        if stepped and full_needed is not None:
                                             current_needed = self._step_reserve(
                                                 full_needed, current_needed)
                                         target = self._target_ctx(current_needed)
