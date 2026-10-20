@@ -13,7 +13,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ### Added
 - **More context fits in VRAM with a q8_0 KV cache.** The new `kv_cache_type` setting (Settings,
-  Engine, or `localm config kv_cache_type q8_0`) stores the KV cache in about half the memory of
+  Model, Runtime & GPU, or `localm config kv_cache_type q8_0`) stores the KV cache in about half the memory of
   the default `f16`, so roughly 1.9x the context fits before the window stops growing, with
   slightly slower decoding. The automatic context ceiling and the VRAM estimate account for it. It
   applies at the next model load; a model that cannot use flash attention refuses to load under
