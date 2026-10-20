@@ -171,6 +171,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         use_mmap: str = "auto",
         adapters: Optional[list] = None,
         parallel_slots: ParallelSetting = 1,
+        kv_cache_type: str = "f16",
     ) -> None:
         self.model_path = str(Path(model_path).resolve())
         self.mmproj_path = mmproj_path   # multimodal projection GGUF
@@ -194,6 +195,13 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         self.mmap_forced_by_ram = False
         self.mmap_cpu_from_disk = False
         self.mmap_ram_short_note = ""
+        # Element type of the KV cache (localm.kv_cache.KV_CACHE_TYPES).
+        from localm.kv_cache import KV_CACHE_TYPES, coerce_kv_cache_type
+        kv_type = coerce_kv_cache_type(kv_cache_type)
+        if kv_type is None:
+            raise ValueError("kv_cache_type must be one of %s, got %r"
+                             % (", ".join(KV_CACHE_TYPES), kv_cache_type))
+        self.kv_cache_type = kv_type
         # The draft source (off, mtp, ngram); None follows mtp_enabled. MTP is
         # enabled exactly when the source is mtp.
         from .llamacpp._drafting import SPEC_MTP, resolve_spec_source
@@ -817,6 +825,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                     params[key] = value
         if self.parallel_copies > 1:
             params["n_parallel"] = self.parallel_copies
+        if self.kv_cache_type != "f16":
+            params["kv_cache_type"] = self.kv_cache_type
         timeout = self._load_timeout_seconds()
 
         cap_label = f"→{ctx_max}" if ctx_max else "→∞"

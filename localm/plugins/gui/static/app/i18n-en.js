@@ -1524,6 +1524,8 @@ export const I18N_EN = {
   "settings.field.nCpuMoe.help": "MoE models only. Keeps this many layers' expert weights in system RAM, not VRAM. 0 is automatic: with auto-sized GPU layers, only as many as needed, before a whole layer moves to the CPU.",
   "settings.field.useMmap.label": "Memory-map model files",
   "settings.field.useMmap.help": "auto runs from disk-backed memory when the model may not fit in available RAM. on forces it; off reads the whole model into memory first.",
+  "settings.field.kvCacheType.label": "KV cache type",
+  "settings.field.kvCacheType.help": "f16 is the default. q8_0 stores the KV cache in about half the memory, so about 1.9x the context fits in VRAM, with slightly slower decoding. q8_0 needs flash attention.",
   "settings.field.nGpuLayersAuto.label": "Auto-size GPU layers from VRAM",
   "settings.field.nGpuLayersAuto.help": "When GPU layers is left at 99 (all), fit as many as free VRAM allows at load: an oversized model runs some layers on CPU and still loads instead of being refused. An explicit value is kept.",
   "settings.field.mtpEnabled.label": "Multi-Token Prediction (MTP)",

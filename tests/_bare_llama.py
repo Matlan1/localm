@@ -32,6 +32,7 @@ def make_bare_llama(**overrides) -> LlamaCpp:
     before-any-native-call default, then apply *overrides* on top."""
     llm = LlamaCpp.__new__(LlamaCpp)
     llm._n_ctx = 4096
+    llm._kv_cache_type = None
     llm._mtp_enabled = True
     llm._vram_check = None
     llm._n_ctx_max = None
