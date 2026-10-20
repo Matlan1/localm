@@ -90,6 +90,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   seconds and jumping; the same line appears in a terminal `localm pull`, in the GUI and as MCP
   `pull_model` progress. A full-repository download counts the files still downloading, not only
   the finished ones.
+- **A reply no longer moves the KV cache to system RAM before it needs the room.** When the
+  whole reply budget (`max_tokens`) would not fit in free VRAM but the prompt plus the first 512
+  tokens of the reply does, the context is sized for that much with the KV cache in VRAM and
+  grows as the reply gets longer, so a short reply on a card with little free VRAM decodes at GPU
+  speed. A reply that does grow that long moves to system RAM at that point and is never cut
+  short. A KV cache already in system RAM also moves back to VRAM at a smaller size when the
+  next request fits in it.
 
 ### Fixed
 - **A long conversation is no longer summarised again on every message.** When a chat client sends its whole history each turn and the server has to compact it to fit the context window, the server now reuses the summary it already wrote while the conversation still fits, and later only summarises the newly older messages. Each compaction also brings the conversation down to about half the window, so the next one is many turns away instead of one.
