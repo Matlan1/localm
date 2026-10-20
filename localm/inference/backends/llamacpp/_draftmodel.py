@@ -223,6 +223,7 @@ class DraftModelSource(CountedSource):
         self.on_gpu = on_gpu
         self._ctx = None
         self._ctx_capacity = 0
+        self._ctx_offload: Optional[bool] = None
         self._ctx_batch = 0
         self._sampler = None
         self._tokens: list[int] = []
@@ -256,6 +257,7 @@ class DraftModelSource(CountedSource):
             return "draft-context-refused"
         self._ctx = ctx
         self._ctx_capacity = cp.n_ctx
+        self._ctx_offload = bool(cp.offload_kqv)
         self._ctx_batch = cp.n_batch
         if self._sampler is None:
             self._sampler = _greedy_chain()
@@ -381,7 +383,8 @@ class DraftModelSource(CountedSource):
         if len(cached) != pos:
             self.stop_this_call("draft-out-of-step")
             return []
-        if llm._ctx_capacity > self._ctx_capacity:
+        if (llm._ctx_capacity != self._ctx_capacity
+                or bool(llm._offload_kqv and self.on_gpu) != self._ctx_offload):
             failure = self.create_context(llm._ctx_capacity, llm._offload_kqv)
             if failure:
                 self.disable(failure)

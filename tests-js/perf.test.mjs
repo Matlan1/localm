@@ -24,7 +24,7 @@ async function waitFor(fn, timeout = 800) {
 // Records calls; serves config + estimate + the bootstrap endpoints.
 function makeFetch(calls, { fits = true, gpus = [], gpuSplitIndices = null,
                             gpuSplitRatios = null, free = 11 * GIB, held = undefined,
-                            active = "", unloadStatus = "unloaded" } = {}) {
+                            active = "", unloadStatus = "unloaded", loadFails = false } = {}) {
   return async (url, opts = {}) => {
     const u = String(url);
     const method = (opts.method || "GET").toUpperCase();
@@ -41,6 +41,8 @@ function makeFetch(calls, { fits = true, gpus = [], gpuSplitIndices = null,
     if (u.includes("/api/models/unload") && method === "POST")
       return { ok: true, status: 200, json: async () => ({ status: unloadStatus }) };
     if (u.includes("/api/models/load") && method === "POST") {
+      if (loadFails)
+        return { ok: false, status: 500, statusText: "Server Error", json: async () => ({ detail: "boom" }) };
       const body = JSON.parse(opts.body || "{}");
       return { ok: true, status: 200, json: async () => ({ status: "loaded", model: body.model }) };
     }
@@ -568,4 +570,15 @@ test("Apply on a busy running model saves and does not load it again", async () 
   assert.ok(await waitFor(() => calls.some((c) => c.u.includes("/api/models/unload"))));
   await settle(100);
   assert.equal(calls.some((c) => c.u.includes("/api/models/load") && c.method === "POST"), false);
+});
+
+test("Apply whose reload fails leaves the status on the failure, not on loading", async () => {
+  const calls = [];
+  const { window } = loadApp({ fetchImpl: makeFetch(calls, { active: "m", loadFails: true }) });
+  await waitFor(() => window.document.getElementById("model-select").value === "m");
+  window.document.getElementById("perf-apply").click();
+  const status = window.document.getElementById("status-text");
+  assert.ok(await waitFor(() => /load failed/.test(status.textContent)),
+    "the failed reload is shown");
+  assert.doesNotMatch(status.textContent, /Loading/);
 });

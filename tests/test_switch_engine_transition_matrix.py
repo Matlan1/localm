@@ -1829,3 +1829,27 @@ class TestPlacementRecheck:
         assert b.placement_heal is None
         asyncio.run(hs.get_engine("model-b", activate=False))
         assert b.load_calls == 1
+
+    def test_a_pin_taken_while_the_recheck_reads_vram_stops_the_reload(self, monkeypatch):
+        b, _env = self._partial(monkeypatch)
+
+        def _estimate_while_pinned(engine):
+            engine.active_requests = 1
+            return NEED
+
+        monkeypatch.setattr(hs, "_victim_vram_estimate", _estimate_while_pinned)
+        b.placement_heal = b.placement_heal._replace(recheck_at=0.0)
+
+        asyncio.run(hs.switch_engine("model-b", None, preempt=False))
+
+        assert b.load_calls == 1 and b.unload_calls == 0 and b.loaded
+
+    def test_an_inconclusive_probe_postpones_the_recheck(self, monkeypatch):
+        b, env = self._partial(monkeypatch)
+        stalled = probe_double(lambda: {"total": 20 * GB}, status=GPU_PROBE_TIMEOUT)
+        monkeypatch.setattr("localm.discover.vram_capacity", stalled)
+        b.placement_heal = b.placement_heal._replace(recheck_at=0.0)
+
+        asyncio.run(hs.get_engine("model-b", activate=False))
+
+        assert b.load_calls == 1 and b.placement_heal.recheck_at > 0.0

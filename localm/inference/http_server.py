@@ -649,14 +649,17 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                     from localm.debuglog import logger as _dbg
                     _dbg.info("switch_engine: not reloading '%s' for a better placement, "
                               "it is used as loaded: %s", name, exc.detail)
+                    _postpone_placement_recheck(resident)
             if heal_budget is not None:
                 heal_budget = await _switch_with_backend_need(loop, heal_budget, resident)
                 heal_probe = await _switch_probe_vram(loop, heal_budget)
-                due = (heal_probe.probe_ok and heal_probe.measurable
-                       and _engines.get(name) is resident
-                       and _placement_heal_due(name, resident))
-                if not (due and await _placement_recheck_fits(
-                        loop, name, resident, heal_probe, heal_budget.needed_bytes)):
+                fits = (heal_probe.probe_ok and heal_probe.measurable
+                        and await _placement_recheck_fits(
+                            loop, name, resident, heal_probe, heal_budget.needed_bytes))
+                if not fits:
+                    _postpone_placement_recheck(resident)
+                if not (fits and _engines.get(name) is resident
+                        and _placement_heal_due(name, resident)):
                     heal_budget = None
             if heal_budget is None and _engines.get(name) is resident and _is_reusable(resident):
                 _switch_reuse_resident(name, sem, activate=activate, on_active=on_active)
@@ -1497,9 +1500,8 @@ async def _placement_recheck_fits(loop, name: str, engine,
     placement may go ahead. True unless its ``placement_heal`` is a
     ``recheck`` heal. For one, True when *probe*'s free VRAM plus what the
     current load holds (``_victim_vram_estimate``) covers *needed*; otherwise
-    False, and the heal's next reading is moved ``_PLACEMENT_RECHECK_S`` on.
-    A reading that counts only this process's allocations
-    (``probe.process_scoped``) is not used and answers False the same way."""
+    False. A reading that counts only this process's allocations
+    (``probe.process_scoped``) is not used and answers False."""
     heal = getattr(engine, "placement_heal", None)
     if not (isinstance(heal, PlacementHeal) and heal.recheck):
         return True
@@ -1518,10 +1520,17 @@ async def _placement_recheck_fits(loop, name: str, engine,
                name, None if probe.free is None else probe.free // 1024 ** 2,
                held // 1024 ** 2, needed // 1024 ** 2, probe.process_scoped,
                _PLACEMENT_RECHECK_S)
-    if getattr(engine, "placement_heal", None) is heal:
+    _postpone_placement_recheck(engine)
+    return False
+
+
+def _postpone_placement_recheck(engine) -> None:
+    """Move the next reading of *engine*'s ``recheck`` heal
+    ``_PLACEMENT_RECHECK_S`` on. Leaves any other ``placement_heal`` as it is."""
+    heal = getattr(engine, "placement_heal", None)
+    if isinstance(heal, PlacementHeal) and heal.recheck:
         engine.placement_heal = heal._replace(
             recheck_at=time.monotonic() + _PLACEMENT_RECHECK_S)
-    return False
 
 
 async def _switch_free_for_reload(loop, name: str, engine,

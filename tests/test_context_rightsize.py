@@ -188,3 +188,26 @@ class TestThreadsOnARecreatedContext:
         with patch(API, api):
             llm._prefill_fresh_context(list(range(100)), needed=5000)
         assert cp.n_threads == 4 and cp.n_threads_batch == 4
+
+
+class TestRightsizeFailureKeepsSpeculation:
+    def test_a_failed_vram_context_keeps_the_mtp_draft_context(self):
+        llm = _llm(8192, offload_kqv=False, vram_check=lambda t, c: True)
+        llm._mtp_ctx_ptr = 333
+        llm._mtp_usable = True
+        llm._free_backend_draft_sampler = MagicMock()
+        llm._rebuild_mtp_context = MagicMock()
+        llm._disable_mtp = MagicMock()
+        api, _cp = _api(init=[0, 555])
+        assert _generate(llm, api, prompt=list(range(1, 5000))) == [42, 42]
+        llm._disable_mtp.assert_not_called()
+        llm._rebuild_mtp_context.assert_called_once_with(8192, False)
+        assert llm._ctx_ptr == 555 and llm._offload_kqv is False
+
+    def test_a_promotion_is_not_asked_again_right_after_one_was_tried(self):
+        calls = []
+        llm = _llm(8192, offload_kqv=False,
+                   vram_check=lambda t, c: calls.append((t, c)) or True)
+        assert llm._rightsize_plan(5000) == (8192, True)
+        assert llm._rightsize_plan(5000) is None
+        assert calls == [(8192, 8192)]

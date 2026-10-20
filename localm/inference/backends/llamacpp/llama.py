@@ -3509,7 +3509,8 @@ class LlamaCpp:
         the live capacity, with the KV cache in VRAM unless ``_vram_check``
         answers False. Otherwise, when the live KV cache is in system RAM,
         moves it to VRAM at the same size once ``_vram_check`` answers True;
-        a refusal is not asked again for ``_KV_PROMOTE_RETRY_S`` seconds.
+        the check is not asked again for ``_KV_PROMOTE_RETRY_S`` seconds after
+        it is asked.
         Caller holds ``_gen_lock``. ``_vram_check`` may raise."""
         if not self._ctx_ptr or needed > self._ctx_capacity:
             return None
@@ -3524,9 +3525,9 @@ class LlamaCpp:
             now = time.monotonic()
             if check is None or now < self._kv_promote_after:
                 return None
+            self._kv_promote_after = now + self._KV_PROMOTE_RETRY_S
             if check(capacity, capacity) is True:
                 return capacity, True
-            self._kv_promote_after = now + self._KV_PROMOTE_RETRY_S
             return None
         decision = check(target, capacity) if check is not None else None
         return target, decision is not False
@@ -3546,8 +3547,8 @@ class LlamaCpp:
         False when the live one is kept (no plan, or ``_vram_check`` raised,
         logged at INFO). When a plan with the KV cache in VRAM cannot create
         its context, the same size is created with the KV cache in system RAM
-        instead. Raises what ``_prefill_fresh_context`` raises otherwise.
-        Caller holds ``_gen_lock``."""
+        instead (``ram_fallback``). Raises what ``_prefill_fresh_context``
+        raises otherwise. Caller holds ``_gen_lock``."""
         from localm.debuglog import logger
         try:
             plan = self._rightsize_plan(needed)
@@ -3558,16 +3559,7 @@ class LlamaCpp:
         if plan is None:
             return False
         self._log_rightsize(*plan)
-        try:
-            self._prefill_fresh_context(prompt_tokens, needed, plan)
-        except RuntimeError:
-            if self._ctx_ptr or not plan[1]:
-                raise
-            self._kv_promote_after = time.monotonic() + self._KV_PROMOTE_RETRY_S
-            logger.info("gguf context: a %d-token context with the KV cache in VRAM "
-                        "could not be created, keeping the KV cache in system RAM",
-                        plan[0])
-            self._prefill_fresh_context(prompt_tokens, needed, (plan[0], False))
+        self._prefill_fresh_context(prompt_tokens, needed, plan, ram_fallback=True)
         return True
 
     def _resolve_parallel(self, requested: int, n_ctx: int) -> tuple[int, str]:
@@ -4667,11 +4659,14 @@ class LlamaCpp:
         self._cached_tokens = list(prompt_tokens)
 
     def _prefill_fresh_context(self, prompt_tokens: list[int], needed: int,
-                               plan: Optional[tuple[int, bool]] = None) -> None:
+                               plan: Optional[tuple[int, bool]] = None,
+                               ram_fallback: bool = False) -> None:
         """Recreate the context (empty KV cache) and prefill the full prompt.
 
         *plan*, when given, is the ``(n_ctx, offload_kqv)`` to create, already
         decided by ``_rightsize_plan``; ``_vram_check`` is then not consulted.
+        With *ram_fallback*, a context that cannot be created with the KV cache
+        in VRAM is created again at the same size with it in system RAM.
 
         Otherwise consults ``self._vram_check`` (when set) with the target n_ctx BEFORE
         freeing the live context, so a refusal leaves the old, still-working
@@ -4727,6 +4722,13 @@ class LlamaCpp:
             cp.n_rs_seq = self._spec_rollback_snapshots(cp)
 
         self._ctx_ptr = api.llama_init_from_model(self._model_ptr, cp)
+        if not self._ctx_ptr and offload_kqv and ram_fallback:
+            from localm.debuglog import logger
+            logger.info("gguf context: a %d-token context with the KV cache in VRAM could "
+                        "not be created, keeping the KV cache in system RAM", target)
+            offload_kqv = False
+            cp.offload_kqv = False
+            self._ctx_ptr = api.llama_init_from_model(self._model_ptr, cp)
         if self._ctx_ptr and self.is_diffusion:
             api.llama_set_causal_attn(self._ctx_ptr, False)
         if self._ctx_ptr:
