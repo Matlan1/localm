@@ -19,6 +19,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any
+from typing import Callable
 from typing import Optional
 from rich.progress import BarColumn
 from rich.progress import DownloadColumn
@@ -30,6 +31,14 @@ from ..debuglog import logger
 from ._shared import _emit_progress
 from ._shared import _verify_digest
 from ._shared import console
+from ._transfer import METER
+from ._transfer import RateWindow
+from ._transfer import describe as _describe_progress
+from ._transfer import eta_seconds
+from ._transfer import format_duration
+from ._transfer import format_rate
+from ._transfer import format_size
+from ._transfer import meter_tqdm_class
 from .gguf import _safe_models_filename
 from .gguf import first_split_part
 from .gguf import gguf_n_embd
@@ -43,6 +52,21 @@ from .registry import find_aliases_by_path
 # explicitly at every huggingface_hub call site below so a stray env var in
 # the user's shell can never silently redirect a model pull elsewhere.
 _HF_ENDPOINT = "https://huggingface.co"
+
+
+def _hf_token() -> Optional[str]:
+    """The Hugging Face token saved in localm's settings, else the HF_TOKEN
+    environment variable, else None (huggingface_hub then falls back to its own
+    saved login)."""
+    from ..model_source_credentials import get_hf_token
+    return get_hf_token()
+
+
+def _hf_api():
+    """A ``huggingface_hub.HfApi`` on the pinned endpoint that sends the
+    configured token."""
+    from huggingface_hub import HfApi
+    return HfApi(endpoint=_HF_ENDPOINT, token=_hf_token())
 
 
 _PARTIAL_OWNER_SUFFIX = ".owner"
@@ -119,20 +143,26 @@ def _partial_in_flight(partial: Path) -> bool:
         return str(partial) in _INFLIGHT_PARTIALS
 
 
-def _partial_owner_is_gone(partial: Path) -> bool:
+def _partial_owner_is_gone(partial: Path, *, lock_held: bool = False) -> bool:
     """True only when the recorded owner of *partial* is PROVEN dead.
 
-    Returns False for a missing or unreadable sidecar, an unparsable pid, a
-    record written in another pid space (see :func:`_same_pid_space`), a live
-    pid whose start identity matches the record or cannot be compared with it
-    (see :func:`localm.instances.start_identity_differs`), a live pid in a
-    record that names no pid space, and any probe failure. A pid that is this
+    Returns False for an unparsable pid, a record written in another pid space
+    (see :func:`_same_pid_space`), a live pid whose start identity matches the
+    record or cannot be compared with it (see
+    :func:`localm.instances.start_identity_differs`), a live pid in a record
+    that names no pid space, and any probe failure. A pid that is this
     process's own is gone when no download in this process currently holds
     the file.
+
+    A missing or unreadable sidecar (a partial written by huggingface_hub
+    itself or by a localm that wrote none) counts as gone only when
+    *lock_held* is True: the caller holds huggingface_hub's per-file download
+    lock for this blob, which every huggingface_hub writer of the file holds
+    for the whole transfer, so no other writer is appending to it.
     """
     rec = _read_partial_owner(partial)
     if rec is None:
-        return False
+        return lock_held
     try:
         pid = int(rec.get("pid", -1))
     except (TypeError, ValueError):
@@ -176,13 +206,18 @@ def _partial_size(p: Path) -> int:
 
 
 def _reusable_partial_bytes(incomplete_path: Path,
-                            expected_size: "int | None" = None) -> int:
+                            expected_size: "int | None" = None, *,
+                            lock_free: bool = False) -> int:
     """Bytes a download of this blob would resume from: the size of the largest
-    candidate that this process holds or whose owner is proven gone. Candidates
-    larger than a known *expected_size* are not counted."""
+    candidate that this process holds or whose owner is proven gone (see
+    :func:`_partial_owner_is_gone`; *lock_free* True means huggingface_hub's
+    per-file download lock for this blob is free right now, so a partial with
+    no owner record has no writer). Candidates larger than a known
+    *expected_size* are not counted."""
     best = 0
     for c in _partial_candidates(incomplete_path):
-        if not (_partial_in_flight(c) or _partial_owner_is_gone(c)):
+        if not (_partial_in_flight(c)
+                or _partial_owner_is_gone(c, lock_held=lock_free)):
             continue
         n = _partial_size(c)
         if n < 0:
@@ -198,11 +233,13 @@ def _adopt_partial(incomplete_path: Path, tmp_path: Path,
     """Rename the largest usable proven-orphan candidate for this blob onto
     *tmp_path* and delete every other proven-orphan candidate; with *adopt*
     False every proven-orphan candidate is deleted instead. Candidates whose
-    owner is not proven gone are left untouched. Returns the adopted size, 0
-    when nothing was adopted."""
+    owner is not proven gone are left untouched. The caller holds
+    huggingface_hub's download lock for this blob, so a candidate with no
+    owner record is adoptable. Returns the adopted size, 0 when nothing was
+    adopted."""
     adoptable = []
     for c in _partial_candidates(incomplete_path):
-        if c == tmp_path or not _partial_owner_is_gone(c):
+        if c == tmp_path or not _partial_owner_is_gone(c, lock_held=True):
             continue
         n = _partial_size(c)
         if n >= 0:
@@ -227,9 +264,20 @@ def _adopt_partial(incomplete_path: Path, tmp_path: Path,
     return adopted
 
 
+def _in_local_dir_layout(path: Path) -> bool:
+    """True when *path* sits in a ``<local_dir>/.cache/huggingface/download``
+    folder, where huggingface_hub's download lock is per destination file
+    rather than per etag."""
+    parts = path.parent.parts[-3:]
+    return len(parts) == 3 and parts == (".cache", "huggingface", "download")
+
+
 def _reap_stale_etag_partials(incomplete_path: Path) -> None:
     """Delete proven-orphan temp files of the same destination file but a
-    different etag. Files whose owner is not proven gone are left alone."""
+    different etag. Files whose owner is not proven gone are left alone. In a
+    local-dir folder the caller holds the destination file's download lock, so
+    a temp file with no owner record is deleted too."""
+    lock_held = _in_local_dir_layout(incomplete_path)
     name = incomplete_path.name
     short = name.split(".")[0]
     stem = incomplete_path.stem
@@ -243,7 +291,7 @@ def _reap_stale_etag_partials(incomplete_path: Path) -> None:
             continue
         if n == name or n.startswith(stem + "."):
             continue
-        if not _partial_owner_is_gone(p):
+        if not _partial_owner_is_gone(p, lock_held=lock_held):
             continue
         try:
             p.unlink()
@@ -393,6 +441,35 @@ def _hf_incomplete_path(base_dir: Path, rel: str, etag: str) -> "Path | None":
         return None
 
 
+def _lock_file_is_free(lock_path: Path) -> bool:
+    """True when nobody holds the file lock at *lock_path* right now. False when
+    it is held, or when the probe cannot tell."""
+    try:
+        from filelock import FileLock, Timeout
+        lock = FileLock(str(lock_path), timeout=0)
+        try:
+            lock.acquire(timeout=0)
+        except Timeout:
+            return False
+        lock.release()
+        return True
+    except Exception as e:
+        logger.debug("cannot probe the download lock %s: %s", lock_path, e)
+        return False
+
+
+def _hf_blob_lock_is_free(base_dir: Path, rel: str) -> bool:
+    """True when huggingface_hub's per-file download lock for *rel* under
+    *base_dir* is free right now: no download of that file is running, so a
+    temp file of it with no owner record has no writer."""
+    try:
+        from huggingface_hub._local_folder import get_local_download_paths
+        return _lock_file_is_free(get_local_download_paths(Path(base_dir), rel).lock_path)
+    except Exception as e:
+        logger.debug("cannot compute the download lock path for %s: %s", rel, e)
+        return False
+
+
 _REPO_PATH_PART_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._+-]*\Z")
 
 
@@ -499,35 +576,232 @@ def _incomplete_prefixes(base_dir: Path, rel_parts: list[str],
         return None
 
 
+def _download_lock_paths(base_dir: Path, rel_parts: list[str]) -> "dict[str, Path]":
+    """The download-lock path of each of *rel_parts*, keyed by the same
+    short-hash prefix as :func:`_incomplete_prefixes`; empty when the layout
+    cannot be computed."""
+    try:
+        from huggingface_hub._local_folder import _short_hash
+        from huggingface_hub._local_folder import get_local_download_paths
+        out: dict[str, Path] = {}
+        for rel in rel_parts:
+            paths = get_local_download_paths(Path(base_dir), rel)
+            out[_short_hash(paths.metadata_path.name)] = paths.lock_path
+        return out
+    except Exception as e:
+        logger.debug("cannot compute the download lock paths: %s", e)
+        return {}
+
+
+_PROGRESS_POLL_S = 0.7
+
+# Seconds between the progress lines handed to a progress listener.
+_LISTENER_EVERY_S = 2.0
+
+_PROGRESS_LISTENER: "Optional[Callable[[str], None]]" = None
+
+
+@contextlib.contextmanager
+def progress_listener(callback: "Callable[[str], None]"):
+    """For the duration of the block, hand a one-line description of the running
+    download's progress to *callback*, about every two seconds. The MCP server
+    uses it to pass pull progress to its client."""
+    global _PROGRESS_LISTENER
+    previous = _PROGRESS_LISTENER
+    _PROGRESS_LISTENER = callback
+    try:
+        yield
+    finally:
+        _PROGRESS_LISTENER = previous
+
+
+def _progress_wanted() -> bool:
+    """True when something shows download progress: the GUI job runner, a
+    terminal, or a progress listener."""
+    return (os.environ.get("LOCALM_PROGRESS_JSON") == "1"
+            or _PROGRESS_LISTENER is not None
+            or console.is_terminal)
+
+
+class _TerminalBar:
+    """A one-line progress bar on the terminal showing percent, bytes, speed and
+    time left. It is removed when the download ends."""
+
+    def __init__(self, label: str) -> None:
+        from rich.markup import escape
+        self._label = escape(label)
+        self._progress = Progress(
+            TextColumn("[bold blue]{task.description}"),
+            BarColumn(),
+            TextColumn("{task.fields[detail]}"),
+            console=console, transient=True, auto_refresh=False)
+        self._task = None
+
+    def start(self) -> None:
+        self._progress.start()
+        self._task = self._progress.add_task(self._label, total=None, detail="")
+
+    def update(self, downloaded: int, total: int, rate: "float | None",
+               eta: "int | None") -> None:
+        detail = format_size(downloaded)
+        if total:
+            detail += f" / {format_size(total)}"
+        if rate is not None:
+            detail += f"  {format_rate(rate)}"
+        if eta is not None:
+            detail += f"  ETA {format_duration(eta)}"
+        task = self._task
+        if task is None:
+            return
+        if total:
+            self._progress.update(task, total=total)
+        self._progress.update(task, completed=downloaded, detail=detail, refresh=True)
+
+    def stop(self) -> None:
+        self._progress.stop()
+
+
+class _ByteTracker:
+    """Combines the bytes on disk with the bytes the transfer meter counted into
+    one downloaded figure, a transfer rate and the time left.
+
+    The figure is the larger of the bytes on disk and the bytes already on disk
+    when the download started plus the bytes received since, so it keeps moving
+    while a Xet download holds data back from the file. The rate is the network
+    rate; a download that reports no network bytes gets the rate its disk size
+    grows at."""
+
+    def __init__(self, total: int, base: int) -> None:
+        self._total = total
+        self._base = base
+        self._disk_rate = RateWindow()
+
+    def sample(self, on_disk: int) -> "tuple[int, float | None, int | None]":
+        self._base = min(self._base, on_disk)
+        downloaded = max(on_disk, self._base + METER.transferred)
+        if self._total:
+            downloaded = min(downloaded, self._total)
+        rate = METER.rate()
+        if rate is None:
+            self._disk_rate.add(downloaded)
+            rate = self._disk_rate.rate()
+        return downloaded, rate, eta_seconds(downloaded, self._total, rate)
+
+
+class _ProgressRun:
+    """Reports one download's progress while it runs: frames for the GUI job
+    runner (LOCALM_PROGRESS_JSON=1), a bar on a terminal, and lines for a
+    progress listener. Does nothing when none of them is wanted."""
+
+    def __init__(self, measure, total: int, *, parts: "list[Path] | None" = None,
+                 label: str = "") -> None:
+        self._measure = measure
+        self._total = total
+        self._parts = parts or []
+        self._label = label
+        self._gui = os.environ.get("LOCALM_PROGRESS_JSON") == "1"
+        self._listener = _PROGRESS_LISTENER
+        self._bar = (_TerminalBar(label)
+                     if not self._gui and console.is_terminal else None)
+        self.active = self._gui or self._listener is not None or self._bar is not None
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._tracker: _ByteTracker | None = None
+        self._last_key: tuple | None = None
+        self._last_listener_at = 0.0
+        self._failed = False
+
+    def start(self) -> None:
+        if not self.active:
+            return
+        METER.reset()
+        self._tracker = _ByteTracker(self._total, self._measure())
+        if self._bar is not None:
+            self._bar.start()
+        try:
+            self._tick()
+        except Exception as e:
+            self._failed = True
+            logger.warning("download progress reporting stopped: %s", e)
+            return
+        self._thread = threading.Thread(target=self._poll, daemon=True)
+        self._thread.start()
+
+    def _poll(self) -> None:
+        while not self._stop.wait(_PROGRESS_POLL_S):
+            try:
+                self._tick()
+            except Exception as e:
+                if not self._failed:
+                    self._failed = True
+                    logger.warning("download progress reporting stopped: %s", e)
+                return
+
+    def _tick(self) -> None:
+        tracker = self._tracker
+        if tracker is None:
+            return
+        downloaded, rate, eta = tracker.sample(self._measure())
+        if self._gui:
+            key = (downloaded, None if rate is None else int(rate // 1000))
+            if key != self._last_key:
+                self._last_key = key
+                fn, fi, fc = _progress_file_info(self._parts)
+                _emit_progress(downloaded, self._total, name=fn, index=fi, count=fc,
+                               zero_is_unknown=True, rate=rate, eta=eta)
+        if self._bar is not None:
+            self._bar.update(downloaded, self._total, rate, eta)
+        if self._listener is not None:
+            now = time.monotonic()
+            if now - self._last_listener_at >= _LISTENER_EVERY_S:
+                self._last_listener_at = now
+                self._listener(_describe_progress(downloaded, self._total, rate,
+                                                  self._label))
+
+    def finish(self, succeeded: bool) -> None:
+        if not self.active:
+            return
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+        if self._bar is not None:
+            self._bar.stop()
+        if self._gui:
+            fn, fi, fc = _progress_file_info(self._parts)
+            final = self._total if (succeeded and self._total) else self._measure()
+            _emit_progress(final, self._total, name=fn, index=fi, count=fc)
+
+
 @contextlib.contextmanager
 def _download_progress(target_parts: list[Path], total_size: int, *,
                        base_dir: "Path | None" = None,
                        rel_parts: "list[str] | None" = None,
                        etags: "dict[str, str | None] | None" = None):
-    """Stream JSON download progress while files land under *base_dir*.
-
-    Active in GUI mode (LOCALM_PROGRESS_JSON=1). A total of 0 means the size
-    could not be determined: progress still streams with ``pct: null`` so the
-    GUI shows a busy bar with a running byte count, matching
-    _snapshot_progress.
+    """Report progress while files land under *base_dir*: JSON frames in GUI
+    mode (LOCALM_PROGRESS_JSON=1), a bar on a terminal, and lines for a
+    progress listener. A total of 0 means the size could not be determined:
+    progress still streams with ``pct: null`` so the GUI shows a busy bar with
+    a running byte count, matching _snapshot_progress.
 
     In-flight bytes are counted from the ``.incomplete`` temp files of THIS
     job's parts (and, when *etags* names them, of the current etag only) that
     this process holds or whose owner is proven gone: the largest such file
-    per part, which is the one a resume reuses.
+    per part, which is the one a resume reuses. The download's transfer rate
+    comes from the bytes received (see :mod:`._transfer`).
 
     Yields a _ProgressOutcome; call ``.ok()`` on the success path or the closing
     event reports the measured partial instead of 100%.
     """
     outcome = _ProgressOutcome()
-    if os.environ.get("LOCALM_PROGRESS_JSON") != "1":
+    if not _progress_wanted():
         yield outcome
         return
 
-    stop = threading.Event()
     cache_root = (Path(base_dir) if base_dir is not None else _mm.MODELS_DIR) / ".cache"
     prefixes = _incomplete_prefixes(Path(base_dir), rel_parts, etags) \
         if base_dir is not None and rel_parts else None
+    lock_paths = _download_lock_paths(Path(base_dir), rel_parts) \
+        if base_dir is not None and rel_parts else {}
 
     def _downloaded_bytes() -> int:
         done = 0
@@ -549,7 +823,12 @@ def _download_progress(target_parts: list[Path], total_size: int, *,
                         want = prefixes[segs[0]]
                         if want is not None and (len(segs) < 2 or segs[1] != want):
                             continue
-                    if not (_partial_in_flight(f) or _partial_owner_is_gone(f)):
+                    lock_path = lock_paths.get(segs[0])
+                    no_writer = (lock_path is not None
+                                 and _read_partial_owner(f) is None
+                                 and _lock_file_is_free(lock_path))
+                    if not (_partial_in_flight(f)
+                            or _partial_owner_is_gone(f, lock_held=no_writer)):
                         continue
                     n = _partial_size(f)
                     if n < 0:
@@ -564,89 +843,42 @@ def _download_progress(target_parts: list[Path], total_size: int, *,
         # which would pin an indeterminate download's byte count at zero.
         return min(total_now, total_size) if total_size else total_now
 
-    def _poll() -> None:
-        last = -1
-        while not stop.is_set():
-            dl = _downloaded_bytes()
-            if dl != last:
-                last = dl
-                fn, fi, fc = _progress_file_info(target_parts)
-                _emit_progress(dl, total_size, name=fn, index=fi, count=fc,
-                               zero_is_unknown=True)
-            stop.wait(0.7)
-
-    t = threading.Thread(target=_poll, daemon=True)
-    t.start()
-    fn0, fi0, fc0 = _progress_file_info(target_parts)
-    # Seed from the MEASUREMENT, not from a literal 0: on a resume, parts
-    # already on disk make 0 wrong. zero_is_unknown covers the fresh case,
-    # where the measurement is 0 and a rendered 0% would be a confident claim
-    # before any byte moved.
-    _emit_progress(_downloaded_bytes(), total_size, name=fn0, index=fi0, count=fc0,
-                   zero_is_unknown=True)
+    label = target_parts[0].name if target_parts else ""
+    if len(target_parts) > 1:
+        label += f" (+{len(target_parts) - 1} more)"
+    run = _ProgressRun(_downloaded_bytes, total_size, parts=target_parts, label=label)
+    run.start()
     try:
         yield outcome
     finally:
-        stop.set()
-        t.join(timeout=2)
-        fn1, fi1, fc1 = _progress_file_info(target_parts)
-        # Only the success path reports 100%; otherwise report what is
-        # actually on disk.
-        final = total_size if (outcome.succeeded and total_size) else _downloaded_bytes()
-        _emit_progress(final, total_size, name=fn1, index=fi1, count=fc1)
-
-
+        run.finish(outcome.succeeded)
 
 
 @contextlib.contextmanager
-def _snapshot_progress(disk_bytes_fn, total_size: int):
+def _snapshot_progress(disk_bytes_fn, total_size: int, label: str = ""):
     """Like _download_progress but for snapshot_download (many files): byte
     count comes from a caller-supplied directory-size function. Indeterminate
     (total_size == 0) still streams a 'downloading' phase so the GUI can show
-    a busy bar; no-op outside GUI mode.
+    a busy bar; no-op when nothing shows progress.
 
     Yields a _ProgressOutcome; call ``.ok()`` on the success path or the closing
     event reports the measured partial instead of 100%.
     """
     outcome = _ProgressOutcome()
-    if os.environ.get("LOCALM_PROGRESS_JSON") != "1":
+    if not _progress_wanted():
         yield outcome
         return
-
-    stop = threading.Event()
 
     def _measured() -> int:
         dl = disk_bytes_fn()
         return min(dl, total_size) if total_size else dl
 
-    def _poll() -> None:
-        last = -1
-        while not stop.is_set():
-            dl = _measured()
-            if dl != last:
-                last = dl
-                _emit_progress(dl, total_size, zero_is_unknown=True)
-            stop.wait(0.7)
-
-    t = threading.Thread(target=_poll, daemon=True)
-    t.start()
-    # Seed from the measurement: a resumed snapshot or a resumed .part file
-    # already has bytes on disk. zero_is_unknown covers the fresh case, where
-    # the measurement is 0 and a rendered "0%" cannot be told from a stall.
-    _emit_progress(_measured(), total_size, zero_is_unknown=True)
+    run = _ProgressRun(_measured, total_size, label=label)
+    run.start()
     try:
         yield outcome
     finally:
-        stop.set()
-        t.join(timeout=2)
-        # Only a successful run reports the total; a failure reports what
-        # actually landed.
-        if outcome.succeeded and total_size:
-            _emit_progress(total_size, total_size)
-        else:
-            _emit_progress(_measured(), total_size)
-
-
+        run.finish(outcome.succeeded)
 
 
 def _report_success(rich_msg: str, plain_msg: str) -> None:
@@ -979,12 +1211,12 @@ def _hf_file_sha256(repo_id: str, filename: str,
     Returns a :class:`_PublishedDigest`, or None when offline, on any API error
     (logged at debug), or for non-LFS files.
 
-    *token*: optional HF API token - needed for a gated repo's metadata.
+    *token*: optional HF API token - needed for a gated repo's metadata. The
+    configured token is used when none is given.
     """
     try:
-        from huggingface_hub import HfApi
-        info = HfApi(endpoint=_HF_ENDPOINT).get_paths_info(
-            repo_id, [filename], token=token, expand=True)
+        info = _hf_api().get_paths_info(
+            repo_id, [filename], token=token or _hf_token(), expand=True)
         if info:
             lfs = getattr(info[0], "lfs", None)
             digest = getattr(lfs, "sha256", None) if lfs else None
@@ -1045,8 +1277,7 @@ def _hf_repo_files(repo_id: str) -> Optional[list[str]]:
     None is kept distinct from an empty listing: a listing FAILURE is never
     read as "this repo has no projector"."""
     try:
-        from huggingface_hub import HfApi
-        return HfApi(endpoint=_HF_ENDPOINT).list_repo_files(repo_id)
+        return _hf_api().list_repo_files(repo_id)
     except Exception as e:
         logger.debug("could not list files for %s to look for an mmproj "
                      "sibling: %s", repo_id, e)
@@ -1194,15 +1425,19 @@ def _download_mmproj_file(repo_id: str, remote_name: str, dest: Path, base_dir: 
     expected = _mm._hf_file_sha256(repo_id, remote_name)
     extra = _at_commit(expected)
     plain = base_dir / remote_name
+    token = _hf_token()
     if dest == plain:
         local = hf_hub_download(repo_id=repo_id, filename=remote_name,
-                                 local_dir=str(base_dir), endpoint=_HF_ENDPOINT, **extra)
+                                 local_dir=str(base_dir), endpoint=_HF_ENDPOINT,
+                                 token=token, tqdm_class=meter_tqdm_class(), **extra)
         if Path(local) != dest:
             shutil.move(local, dest)
     else:
         with tempfile.TemporaryDirectory(dir=base_dir, prefix=".mmproj-") as scratch:
             local = hf_hub_download(repo_id=repo_id, filename=remote_name,
-                                     local_dir=scratch, endpoint=_HF_ENDPOINT, **extra)
+                                     local_dir=scratch, endpoint=_HF_ENDPOINT,
+                                     token=token, tqdm_class=meter_tqdm_class(),
+                                     **extra)
             shutil.move(local, dest)
     if expected is None:
         _note_unverified(repo_id, [remote_name])
@@ -1767,7 +2002,9 @@ def _pull_gguf_file(
         inc = _hf_incomplete_path(stage_dir, _remote(part), etag)
         if inc is None:
             continue
-        already_have += _reusable_partial_bytes(inc, part_sizes.get(part))
+        already_have += _reusable_partial_bytes(
+            inc, part_sizes.get(part),
+            lock_free=_hf_blob_lock_is_free(stage_dir, _remote(part)))
 
     if not _mm._check_disk_space(
             base_dir, max(0, total_size + projector_size - already_have)):
@@ -1804,6 +2041,8 @@ def _pull_gguf_file(
                     filename=_remote(part),
                     local_dir=str(stage_dir),
                     endpoint=_HF_ENDPOINT,
+                    token=_hf_token(),
+                    tqdm_class=meter_tqdm_class(),
                     **_at_commit(published.get(part)),
                 )
                 final = base_dir / part
@@ -1925,13 +2164,132 @@ def _snapshot_files_failing_digest(dest: Path, repo_siblings, repo_id: str) -> l
 
 
 def _snapshot_bytes_on_disk(dest: Path) -> int:
-    """Bytes of *dest* that a snapshot resume would not re-fetch. Excludes
-    huggingface_hub's own .cache scratch, which is not part of the model."""
+    """Bytes of *dest* that a snapshot resume would not re-fetch: the finished
+    files, plus the temp files of the files still downloading. Excludes the
+    rest of huggingface_hub's own .cache scratch, which is not part of the
+    model."""
+    total = 0
     try:
-        return sum(f.stat().st_size for f in dest.rglob("*")
-                   if f.is_file() and ".cache" not in f.parts)
+        files = list(dest.rglob("*"))
     except OSError:
         return 0
+    pending = dest / ".cache" / "huggingface" / "download"
+    for f in files:
+        in_cache = ".cache" in f.parts
+        if in_cache and not (f.parent == pending and f.name.endswith(".incomplete")):
+            continue
+        try:
+            if f.is_file():
+                total += f.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def _delete_hf_temp_files(base_dir: Path, rels: "list[str] | None") -> int:
+    """Delete the temp files (and their owner records) of downloads under
+    *base_dir*: those of the files *rels*, or every one when *rels* is None.
+    Returns the bytes freed.
+
+    Raises :class:`PullInFlight` when a download of one of *rels* holds its
+    download lock. With *rels* None only temp files whose owner is proven gone
+    are deleted."""
+    root = Path(base_dir) / ".cache" / "huggingface" / "download"
+    if rels is None:
+        if not root.is_dir():
+            return 0
+        return _unlink_temp_files(
+            [f for f in root.rglob("*.incomplete")
+             if _partial_owner_is_gone(f, lock_held=False)])
+    from huggingface_hub._local_folder import _short_hash
+    from huggingface_hub._local_folder import get_local_download_paths
+    with contextlib.ExitStack() as held:
+        targets: list[tuple[Path, str]] = []
+        for rel in rels:
+            paths = get_local_download_paths(Path(base_dir), rel)
+            if not paths.lock_path.parent.is_dir():
+                continue
+            held.enter_context(_hold_download_lock(paths.lock_path))
+            targets.append((paths.metadata_path.parent,
+                            _short_hash(paths.metadata_path.name) + "."))
+        files = []
+        for folder, prefix in targets:
+            if folder.is_dir():
+                files += [f for f in folder.glob("*.incomplete")
+                          if f.name.startswith(prefix)]
+        return _unlink_temp_files(files)
+
+
+@contextlib.contextmanager
+def _hold_download_lock(lock_path: Path):
+    """Hold the file lock at *lock_path* for the block; raises
+    :class:`PullInFlight` when a download holds it."""
+    from filelock import FileLock, Timeout
+    lock = FileLock(str(lock_path), timeout=0)
+    try:
+        lock.acquire(timeout=0)
+    except Timeout as e:
+        raise PullInFlight(
+            "a download of this file is running; stop it before deleting "
+            "its partial data") from e
+    try:
+        yield
+    finally:
+        lock.release()
+
+
+def _unlink_temp_files(files: "list[Path]") -> int:
+    """Delete the temp files *files* and their owner records; returns the bytes
+    freed."""
+    freed = 0
+    for f in files:
+        size = _partial_size(f)
+        try:
+            f.unlink()
+        except OSError as e:
+            logger.warning("could not delete the partial download %s: %s", f, e)
+            continue
+        _unlink_quiet(_partial_owner_path(f))
+        freed += max(0, size)
+    return freed
+
+
+def discard_partial_download(spec: str, name: Optional[str] = None) -> int:
+    """Delete the partial data a stopped pull of *spec* left behind: the temp
+    files of its file or files, or the ``.part`` file of a direct URL. Finished
+    files are never touched. *name* is the ``--name`` the pull was given
+    (it names a full-repo download's folder). Returns the bytes freed.
+
+    Raises :class:`PullInFlight` when a download of it is running."""
+    spec = _mm.resolve_spec(spec.strip())
+    if spec.startswith(("http://", "https://")):
+        stem = _stem_from_url(spec)
+        filename = _safe_models_filename(stem + ".gguf") if stem else None
+        if filename is None:
+            return 0
+        part_file = _mm.MODELS_DIR / (filename + ".part")
+        with _part_lock(filename):
+            freed = max(0, _partial_size(part_file))
+            _discard_part(part_file)
+        return freed
+    if "/" not in spec or spec.startswith("civitai:"):
+        return 0
+    if ":" in spec or spec.rsplit("/", 1)[-1].endswith(".gguf"):
+        if ":" in spec:
+            remote = spec.split(":", 1)[1]
+        else:
+            remote = spec.rsplit("/", 1)[1]
+        remote_dir, in_folder, filename = remote.rpartition("/")
+        base_dir = _mm.MODELS_DIR / _REPO_FOLDER_STAGING if in_folder else _mm.MODELS_DIR
+        if in_folder and not _safe_repo_subdir(remote_dir, base_dir):
+            return 0
+        parts = split_gguf_parts(filename) or [filename]
+        if any(_safe_models_filename(p, base_dir) is None for p in parts):
+            return 0
+        rels = [f"{remote_dir}/{p}" if remote_dir else p for p in parts]
+        return _delete_hf_temp_files(base_dir, rels)
+    dest = _mm.MODELS_DIR / _sanitize_name(name or spec.split("/")[-1])
+    return _delete_hf_temp_files(dest, None)
 
 
 def _warn_if_repo_ships_code(dest: Path, repo_id: str) -> None:
@@ -2097,8 +2455,7 @@ def _pull_hf_snapshot(
     commit = None
     total_size = 0
     try:
-        from huggingface_hub import HfApi
-        info = HfApi(endpoint=_HF_ENDPOINT).model_info(repo_id, files_metadata=True)
+        info = _hf_api().model_info(repo_id, files_metadata=True)
         repo_siblings = info.siblings
         total_size = sum(getattr(s, "size", None) or 0 for s in repo_siblings)
         info_sha = getattr(info, "sha", None)
@@ -2209,11 +2566,13 @@ def _pull_hf_snapshot(
 
     try:
         _ensure_hf_resumable_download()
-        with _snapshot_progress(_disk_bytes, total_size) as _prog:
+        with _snapshot_progress(_disk_bytes, total_size, label=repo_id) as _prog:
             snapshot_download(
                 repo_id=repo_id,
                 local_dir=str(dest),
                 endpoint=_HF_ENDPOINT,
+                token=_hf_token(),
+                tqdm_class=meter_tqdm_class(),
                 **_revision_kwargs(commit),
             )
             _prog.ok()
@@ -2328,17 +2687,24 @@ def _policy_head(url: str):
     with ``history`` set to the earlier hops' responses, first hop first.
     Raises NetworkPolicyError when a hop is refused, ``UnresolvableHost`` (a
     NetworkPolicyError) when a hop's host cannot be resolved; transport
-    errors propagate."""
+    errors propagate. The configured Hugging Face token is sent only to the
+    hub endpoint's own host, never to a redirect target."""
     import urllib.parse
 
     from localm import netpolicy
+    from localm.discover import _hf_auth_headers
     allow_off = netpolicy.downloads_allowed_when_off()
+    hub_host = urllib.parse.urlparse(_HF_ENDPOINT).hostname
+    token = _hf_token()
     history: list = []
     current = url
     while True:
         netpolicy.check_url(current, allow_when_off=allow_off)
+        headers = (_hf_auth_headers(token)
+                   if urllib.parse.urlparse(current).hostname == hub_host
+                   else None)
         resp = netpolicy.pinned_request(
-            "HEAD", current, allow_redirects=False, timeout=10)
+            "HEAD", current, allow_redirects=False, timeout=10, headers=headers)
         location = (resp.headers.get("Location")
                     if resp.status_code in (301, 302, 303, 307, 308) else None)
         if not location or len(history) == 5:
@@ -3033,7 +3399,7 @@ def _pull_url_locked(
                 return part_file.stat().st_size
             except OSError:
                 return 0
-        with _snapshot_progress(_part_bytes, total_display or 0) as _prog:
+        with _snapshot_progress(_part_bytes, total_display or 0, label=filename) as _prog:
             _write_chunks()
             if not stream_error:
                 _prog.ok()

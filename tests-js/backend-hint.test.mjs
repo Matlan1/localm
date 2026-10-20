@@ -179,3 +179,42 @@ test("dismissing in privacy mode hides it now but leaves no localStorage trace",
   assert.equal(window.localStorage.getItem("localm.backendHintDismissed"), null,
     "privacy mode leaves no localStorage trace, mirroring dismissInstallGate");
 });
+
+test("backendChoiceNotes: the chosen backend and an override are both named", () => {
+  const { window } = loadApp({ fetchImpl: makeFetch([]) });
+  const run = (data) => {
+    runScript(window, `window.__r = backendChoiceNotes(${JSON.stringify(data)});`);
+    return window.__r;
+  };
+  assert.equal(run({ installed: "vulkan", in_use: "vulkan", in_use_source: "provisioned" }).length, 0);
+  const choice = run({ installed: "vulkan", requested: "cuda", requested_reason: "no GPU device.",
+                       in_use: "vulkan", in_use_source: "provisioned" });
+  assert.equal(choice.length, 1);
+  assert.match(choice[0], /You chose cuda, but vulkan is installed: no GPU device/);
+  const over = run({ installed: "cuda", in_use: "vulkan", in_use_source: "binary_dir" });
+  assert.equal(over.length, 1);
+  assert.match(over[0], /localm loads vulkan from the llama.cpp binary folder setting/);
+  assert.match(run({ installed: "cuda", in_use: "hip", in_use_source: "LLAMA_CPP_LIB" })[0],
+    /LLAMA_CPP_LIB/);
+});
+
+test("Backend row shows the loaded backend and the recorded choice; no CUDA hint then", async () => {
+  const calls = [];
+  const fetchImpl = async (url, opts) => {
+    if (String(url).includes("/api/backend"))
+      return { ok: true, status: 200, json: async () => ({
+        installed: "vulkan", vendor: "nvidia", recommended: "cuda", warning: null,
+        requested: "cuda", requested_reason: "driver too old.", in_use: "vulkan",
+        in_use_source: "provisioned" }) };
+    return makeFetch(calls)(url, opts);
+  };
+  const { window } = loadApp({ fetchImpl });
+  const doc = window.document;
+  const row = doc.getElementById("perf-backend-row");
+  const choice = doc.getElementById("perf-backend-choice");
+  assert.ok(await waitFor(() => row.hidden === false));
+  assert.ok(await waitFor(() => choice.hidden === false), "the choice note shows");
+  assert.match(choice.textContent, /You chose cuda/);
+  assert.equal(doc.getElementById("perf-backend-hint").hidden, true,
+    "the 'try cuda' hint is redundant when cuda is the recorded choice");
+});

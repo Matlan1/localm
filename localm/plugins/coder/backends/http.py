@@ -352,6 +352,41 @@ class HTTPBackend(BaseLLMBackend):
         self._ctx_capacity_cached = latch
         return self._ctx_capacity
 
+    def probe(self, timeout: float = 10.0) -> dict:
+        """One read-only GET of ``<base_url>/models``, reporting whether the
+        server answers at all.
+
+        Returns ``{"url": str, "status": int | None, "models": list[str] | None,
+        "error": str | None}``. ``url`` is the address probed; ``status`` is
+        the HTTP status (None when no response arrived, with the reason in
+        ``error``); ``models`` is the id
+        list when the body is an OpenAI-style ``{"data": [{"id": ...}]}`` list,
+        else None. Never raises."""
+        url = f"{self._base_url}/models"
+        try:
+            if self._pinned:
+                from localm import netpolicy
+                resp = netpolicy.pinned_request(
+                    "GET", url, headers=self._headers(), timeout=timeout,
+                    verify=self._verify, allow_redirects=False)
+            else:
+                resp = requests.get(url, headers=self._headers(), timeout=timeout,
+                                    verify=self._verify, allow_redirects=False)
+        except Exception as exc:                               # noqa: BLE001
+            return {"url": url, "status": None, "models": None,
+                    "error": f"{type(exc).__name__}: {exc}"}
+        models = None
+        if resp.ok:
+            try:
+                data = resp.json().get("data")
+                if isinstance(data, list):
+                    models = [str(m["id"]) for m in data
+                              if isinstance(m, dict) and "id" in m]
+            except Exception:                                  # noqa: BLE001
+                models = None
+        return {"url": url, "status": resp.status_code, "models": models,
+                "error": None}
+
     @property
     def can_load_models(self) -> bool:
         """True when this backend's server is localm's own, so ``load_model``

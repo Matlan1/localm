@@ -255,7 +255,9 @@ def _hf_pipeline_tag_to_type(repo_id: str) -> str:
     'llm' - on a failed/offline query, so an ambiguous pull is registered
     honestly and is not auto-loaded as the chat model."""
     try:
-        data = _get(f"{HF_API}/api/models/{repo_id}", {"full": "false"})
+        from localm.model_source_credentials import get_hf_token
+        data = _get(f"{HF_API}/api/models/{repo_id}", {"full": "false"},
+                    token=get_hf_token())
         if isinstance(data, dict):
             return classify_hf_metadata(
                 data.get("pipeline_tag"), data.get("library_name"), data.get("tags", []))

@@ -797,6 +797,8 @@ localm coder "add type hints" --cwd D:\path\to\repo --scope "src/**/*.py"   # ot
 localm coder "review this" --online --model gpt-4o           # OpenAI (--anthropic for Anthropic, via ANTHROPIC_API_KEY)
 localm coder --url http://localhost:11434/v1 --model llama3.2 --no-server   # any OpenAI-compatible server
 localm coder "fix the bug" --ci --output-format json         # CI: auto-approve, no colors; exit 0 done, 1 incomplete (max turns), 2 startup error
+localm coder "fix the bug" --yes --output-format jsonl     # unattended: the agent's events on stdout, one JSON object per line
+localm coder doctor --model mymodel                       # check the model server, context window, tool calls, git, verify command and MCP servers
 ```
 
 `localm coder` and `localcoder` refuse to run (exit 1) until the coder plugin is installed and enabled: `localm plugin install coder`. The rest of the options:
@@ -806,7 +808,9 @@ localm coder "fix the bug" --ci --output-format json         # CI: auto-approve,
 - `--max-turns` (default 40) and `--max-tokens` (default 2048) may also come from `.localcoder/config.toml`; `--temperature`, `--verbose`.
 - `-y/--yes` auto-approves destructive tool calls, `--interactive-confirm` auto-approves file writes but still asks before shell commands, `--dry-run` runs without executing destructive tools.
 - `--estimate` plans only and exits; `--patch-mode FILE` captures all file writes as a unified diff written to FILE (`-` for stdout); `--native-tools` uses the OpenAI-compatible tools API (automatic for `--online` and `--anthropic`).
-- `--mode privacy|log|full` (default `privacy`); `--output-format text|json` for non-interactive runs; `-r/--resume [ID]` resumes the last saved session or a checkpoint.
+- `--mode privacy|log|full` (default `privacy`); `--output-format text|json|jsonl` for non-interactive runs; `-r/--resume [ID]` resumes the last saved session or a checkpoint.
+- `--output-format jsonl` writes each agent event (`tool_call`, `tool_result`, `token`, `turn`, `info`, ...) to stdout as one JSON object per line as it happens, then a closing `{"type": "final", "success", "response", "turns", "total_tokens", "denied"}` line; everything else the CLI prints goes to stderr, and so it does for `--output-format json`, whose stdout is exactly the one result document. `jsonl` needs a TASK.
+- `localm coder doctor` (also `/doctor` in a session) checks the model server is reachable and accepts the key, which tool-call protocol the session uses (native tools API or grammar-constrained XML), the context window against the repo map, the git state, whether the verify command resolves, the project config, and that each configured MCP server starts. It starts no server of its own; it attaches to the one running for the project or to `--url`/`--port`. Exit 1 when a check fails. `--output-format json|jsonl` for scripts.
 
 Every request the agent makes needs structured tool calls. When `--model`
 names a model whose chat template cannot format them and an installed model

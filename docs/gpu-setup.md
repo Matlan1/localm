@@ -189,9 +189,11 @@ needs: NVIDIA Blackwell (RTX 50-series and datacenter B100/B200) automatically
 gets the newer 13.x line - which needs a newer driver in turn (CUDA >= 13.4) -
 since the 12.x build has no kernels for Blackwell; every earlier architecture
 stays on the 12.x line. Setup checks your driver against whichever line your
-GPU needs and, if it is too old or no NVIDIA is found, uses Vulkan for now and
-tells you what to do; after updating a driver, re-run
-`localm setup-llama --backend cuda --force`.
+GPU needs and, if it is too old, says so and installs Vulkan only if you agree
+(declining changes nothing); after updating a driver, re-run
+`localm setup-llama --backend cuda --force`. When no NVIDIA GPU is found, setup
+asks whether to continue with CUDA; a non-interactive run (`--yes`, the Settings
+page) installs CUDA as asked and lets the load test decide.
 
 **On Linux**, `--backend cuda` is self-contained the same way: upstream
 llama.cpp does not publish a Linux CUDA binary itself, so setup fetches one
@@ -206,7 +208,20 @@ After provisioning, setup **load-tests** the library exactly as `localm run`
 will, on every platform. If the CUDA build cannot load on your machine,
 setup says why and offers the universal Vulkan build (declining stops setup so
 you can fix the cause; a non-interactive run falls back to Vulkan, then CPU,
-with a warning), so setup never leaves you with a silently broken runtime.
+with a warning), so setup never leaves you with a silently broken runtime. A
+CUDA build that loads but cannot use the GPU (it would run on the CPU) counts as
+not loading.
+
+Whenever another backend is installed in place of the one you chose, your choice
+is kept on record with the reason: `localm doctor` and Settings > Updates >
+Inference runtime show "you chose cuda, vulkan is installed" with why, and offer
+to retry your choice or keep what is installed. `localm update` keeps that record.
+To keep the installed backend from the terminal, ask for it by name:
+`localm setup-llama --backend vulkan`.
+
+If the **llama.cpp binary folder** setting (`binary_dir`) or the `LLAMA_CPP_LIB`
+environment variable points at another build, localm loads that build instead of
+the one setup installed; setup, `localm doctor` and Settings say so.
 
 > `--sha256 <hex>` pins the **CUDA build** archive only; the cudart runtime
 > bundle (Windows) or the CUDA runtime libraries (Linux) are verified by their

@@ -34,7 +34,8 @@ PROGRESS_SENTINEL = "\x1flocalm-progress\x1f"
 
 def _emit_progress(downloaded: int, total: int, *, phase: str = "download",
                    name: "str | None" = None, index: int = 0, count: int = 0,
-                   zero_is_unknown: bool = False) -> None:
+                   zero_is_unknown: bool = False,
+                   rate: "float | None" = None, eta: "int | None" = None) -> None:
     """Write one progress frame on the sentinel channel.
 
     *zero_is_unknown* suppresses the percentage while NOTHING has landed yet, and
@@ -55,6 +56,11 @@ def _emit_progress(downloaded: int, total: int, *, phase: str = "download",
     if zero_is_unknown and not downloaded:
         pct = None
     payload = {"phase": phase, "downloaded": downloaded, "total": total, "pct": pct}
+    # Transfer speed in bytes per second and seconds left, when measured.
+    if rate is not None:
+        payload["rate"] = int(rate)
+    if eta is not None:
+        payload["eta"] = int(eta)
     # For a multi-file download (a split GGUF), tell the GUI which file is in
     # flight so it can show "file 2 of 3: <name>". Omitted for a single file.
     if count > 1:

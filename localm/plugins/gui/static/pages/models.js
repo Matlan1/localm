@@ -4,12 +4,12 @@
 
 // --- ES module imports ---
 import { pickDirectory } from "../app/picker.js";
-import { $, GIB, authHeaders, confirmDanger, confirmDangerAsync, downloadRate, el, fmtBytes, fmtDuration, openModal, promptText, renderMarkdown, streamJob, toast, whileBusy } from "../app/helpers.js";
+import { $, GIB, authHeaders, cancelJob, confirmDanger, confirmDangerAsync, downloadRate, el, fmtBytes, fmtDuration, openModal, promptText, renderMarkdown, streamJob, toast, whileBusy } from "../app/helpers.js";
 import { t, tn } from "../app/i18n.js";
 import { onServerUnreachable } from "../app/init.js";
 import { emptyState, iconEl } from "../app/icons.js";
 import { refreshModels, showKeyGate, switchModel, toastLoadResult } from "../app/models-sidebar.js";
-import { refreshPerfEstimate } from "../app/settings-perf.js";
+import { backendOverrideNote, refreshBackendInfo, refreshPerfEstimate } from "../app/settings-perf.js";
 
 /* ================================================================ */
 /*  Models page                                                      */
@@ -2187,6 +2187,93 @@ export function syncRuntimeApply() {
   btn.hidden = !runtimeCheckState.newer;
 }
 
+/** The runtime-card line for a /api/runtime/check payload whose recorded
+ *  choice is not the installed backend, or null when they agree. Pure. */
+export function runtimeChoiceText(d) {
+  if (!d || !d.installed || !d.requested || d.requested === d.backend) return null;
+  return d.requested_reason
+    ? t("settings.runtime.choiceNotInUse",
+        { requested: d.requested, installed: d.backend, reason: d.requested_reason })
+    : t("settings.runtime.choiceNotInUseNoReason",
+        { requested: d.requested, installed: d.backend });
+}
+
+/** Show or hide the "your choice is not in use" row and its Retry / Keep
+ *  buttons, from the last check. */
+export function syncRuntimeChoice() {
+  const box = $("runtime-choice");
+  if (!box) return;
+  const d = runtimeCheckState;
+  const text = runtimeChoiceText(d);
+  box.hidden = !text;
+  if (!text) return;
+  const textEl = $("runtime-choice-text");
+  if (textEl) textEl.textContent = text;
+  const retry = $("runtime-choice-retry"), keep = $("runtime-choice-keep");
+  if (retry) {
+    retry.textContent = t("settings.runtime.choiceRetry", { requested: d.requested });
+    retry.onclick = () => runtimeProvision(d.requested, "");
+  }
+  if (keep) {
+    keep.textContent = t("settings.runtime.choiceKeep", { installed: d.backend });
+    keep.onclick = () => runtimeKeepInstalled(d.backend);
+  }
+}
+
+/** POST /api/runtime/keep: keep the installed backend and forget the recorded
+ *  choice, then re-check. */
+export async function runtimeKeepInstalled(installed) {
+  const out = $("runtime-update-status");
+  try {
+    const r = await fetch("/api/runtime/keep", { method: "POST", headers: authHeaders() });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.detail || r.statusText);
+    if (out) { out.hidden = false; out.textContent = t("settings.runtime.choiceKept", { installed }); }
+  } catch (e) {
+    if (out) {
+      out.hidden = false;
+      out.textContent = t("settings.runtime.choiceKeepFailed", { installed, message: e.message });
+    }
+    return;
+  }
+  runtimeUpdateCheck();
+  refreshBackendInfo();
+}
+
+// What each vendor-specific backend needs, by detected GPU vendor.
+const BACKEND_VENDOR = { cuda: "nvidia", "amd-rocm": "amd", hip: "amd", sycl: "intel", metal: "apple" };
+const VENDOR_NAMES = { nvidia: "NVIDIA", amd: "AMD", intel: "Intel", apple: "Apple" };
+
+/** Whether installing *wanted* on a machine whose detected GPU vendors are
+ *  *vendors* (an array, or one vendor string) needs a warning first: a
+ *  vendor-specific backend whose vendor is not among the detected ones.
+ *  Unknown hardware (no vendor) never warns. Pure. */
+export function backendVendorMismatch(wanted, vendors) {
+  const needs = BACKEND_VENDOR[wanted];
+  const seen = (Array.isArray(vendors) ? vendors : [vendors]).filter(Boolean);
+  return !!(needs && seen.length && !seen.includes(needs));
+}
+
+/** Run *proceed* after confirming a vendor mismatch, or straight away when
+ *  /api/backend shows none (or cannot be read). */
+async function confirmBackendHardware(wanted, proceed) {
+  let vendors = [];
+  try {
+    const r = await fetch("/api/backend", { headers: authHeaders() });
+    if (r.ok) {
+      const d = await r.json();
+      vendors = Array.isArray(d.vendors) ? d.vendors : [d.vendor].filter(Boolean);
+    }
+  } catch { /* unreadable: treated as unknown hardware */ }
+  if (!backendVendorMismatch(wanted, vendors)) { proceed(); return; }
+  confirmDanger(
+    t("settings.runtime.mismatchTitle", { wanted }),
+    t("settings.runtime.mismatchBody", {
+      wanted, vendor: vendors.map((v) => VENDOR_NAMES[v] || v).join(" + "),
+      needs: VENDOR_NAMES[BACKEND_VENDOR[wanted]] + " graphics" }),
+    t("settings.runtime.mismatchConfirm", { wanted }), proceed);
+}
+
 export async function runtimeUpdateCheck() {
   const out = $("runtime-update-status");
   if (out) { out.hidden = false; out.textContent = t("settings.runtime.checking"); }
@@ -2199,9 +2286,11 @@ export async function runtimeUpdateCheck() {
       } else {
         const current = d.current || t("settings.runtime.unrecordedBuild");
         const pinnedSuffix = d.pinned ? t("settings.runtime.pinnedSuffix", { pinned: d.pinned }) : "";
+        const override = backendOverrideNote(d.in_use, d.in_use_source, d.backend);
         out.textContent = (d.newer
           ? t("settings.runtime.availableBuild", { backend: d.backend, target: d.target, current })
-          : t("settings.runtime.upToDate", { backend: d.backend, current })) + pinnedSuffix;
+          : t("settings.runtime.upToDate", { backend: d.backend, current })) + pinnedSuffix
+          + (override ? " " + override : "");
       }
     }
   } catch (e) {
@@ -2210,6 +2299,7 @@ export async function runtimeUpdateCheck() {
   }
   syncRuntimeApply();
   syncRuntimeRollback();
+  syncRuntimeChoice();
 }
 
 /** Show or hide the Roll back button, from the last check's "previous" field. */
@@ -2273,7 +2363,10 @@ export async function runtimeProvision(backend, tag, rollback) {
     // The request has been carried out, so clear the selection.
     if ($("runtime-backend")) $("runtime-backend").value = "";
     if ($("runtime-tag")) $("runtime-tag").value = "";
-    runtimeUpdateCheck();   // re-checks; settles both the update and rollback buttons
+    await runtimeUpdateCheck();   // re-checks; settles the update, rollback and choice rows
+    const choice = runtimeChoiceText(runtimeCheckState);
+    if (out && choice) out.textContent = choice;
+    refreshBackendInfo();
   } else {
     syncRuntimeApply();     // failed: keep the retry affordance, correctly labelled
     syncRuntimeRollback();
@@ -2290,6 +2383,7 @@ export function runtimeUpdateApply() {
   // first install and a same-backend re-provision go straight through. "auto"
   // counts as different: it resolves from hardware detection and can land on
   // another backend.
+  const go = () => confirmBackendHardware(wanted, () => runtimeProvision(wanted, tag));
   if (installed && wanted && wanted !== installed) {
     const target = wanted === "auto"
       ? t("settings.runtime.switchTargetAuto")
@@ -2297,10 +2391,10 @@ export function runtimeUpdateApply() {
     confirmDanger(
       t("settings.runtime.switchTitle"),
       t("settings.runtime.switchBody", { installed, target }),
-      t("settings.runtime.switchConfirm"), () => runtimeProvision(wanted, tag));
+      t("settings.runtime.switchConfirm"), go);
     return;
   }
-  runtimeProvision(wanted, tag);
+  go();
 }
 /** Roll back the INSTALLED backend to its previous recorded build. Always
  *  confirms first. */
@@ -2515,21 +2609,38 @@ if ($("upload-send")) {
   };
 }
 
-$("pull-start").onclick = async () => {
-  const spec = $("pull-spec").value.trim();
-  if (!spec) { toast(t("models.pull.enterSpec"), true); return; }
-  if (spec.startsWith("-")) {
-    toast(t("models.pull.specNoDash"), true);
-    return;
-  }
-  const name = $("pull-name").value.trim();
-  const mmprojInput = $("pull-mmproj");
-  const mmproj = mmprojInput && mmprojInput.style.display !== "none" ? mmprojInput.value : null;
-  const sha256Input = $("pull-sha256");
-  const sha256 = sha256Input ? sha256Input.value.trim() : "";
-  const storeInput = $("pull-store");
-  const store = storeInput && storeInput.value ? storeInput.value : null;
+// The download in flight (null when none): its job id, the request that
+// started it, and what the user asked to do to it. "pause" keeps the
+// partially downloaded data so Resume continues from it; "cancel" deletes it.
+let activePull = null;
+// The request of the last pull that was paused, so Resume can send it again.
+let pausedPull = null;
 
+function setPullButtons(state) {
+  $("pull-pause").hidden = state !== "running";
+  $("pull-resume").hidden = state !== "paused";
+  $("pull-cancel").hidden = state === "idle";
+}
+
+async function discardPartialPull(payload) {
+  try {
+    const r = await fetch("/api/models/pull/discard", {
+      method: "POST", headers: authHeaders(),
+      body: JSON.stringify({ spec: payload.spec, name: payload.name || null }),
+    });
+    if (!r.ok) {
+      const data = await r.json().catch(() => ({}));
+      throw new Error(data.detail || r.statusText);
+    }
+  } catch (e) {
+    toast(t("models.pull.discardFailed", { message: e.message }), true);
+  }
+}
+
+async function runPull(payload) {
+  const sha256Input = $("pull-sha256");
+  const storeInput = $("pull-store");
+  pausedPull = null;
   $("pull-start").disabled = true;
   const log = $("pull-log");
   log.style.display = "block";
@@ -2545,24 +2656,18 @@ $("pull-start").onclick = async () => {
   bar.style.width = "35%";
   pct.textContent = t("models.pull.starting");
   if ($("pull-file")) { $("pull-file").hidden = true; $("pull-file").textContent = ""; }
-  const samples = [];   // rolling {t, downloaded} window for speed/ETA
+  setPullButtons("running");
+  const samples = [];   // rolling {t, downloaded} window, used when the server sends no rate
+  let last = { downloaded: 0, total: 0, pct: null };
   try {
-    const payload = { spec, name: name || null };
-    if (mmproj) payload.mmproj = mmproj;
-    if (sha256) payload.sha256 = sha256;
-    if (store) payload.store = store;
-    // Attach the type hint only while the spec still matches exactly what it was
-    // prefilled for; a hand-edited spec falls back to auto-detect.
-    if (pendingPullTypeHint && pendingPullTypeHint.spec === spec) {
-      payload.model_type = pendingPullTypeHint.type;
-    }
-
     const r = await fetch("/api/models/pull", {
       method: "POST", headers: authHeaders(),
       body: JSON.stringify(payload),
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
+    const mine = { id: data.job_id, payload, intent: null };
+    activePull = mine;
     const end = await streamJob(data.job_id, (line) => {
       log.textContent += line + "\n";
       log.scrollTop = log.scrollHeight;
@@ -2579,15 +2684,30 @@ $("pull-start").onclick = async () => {
           fileLine.hidden = true;
         }
       }
+      if (ev.phase === "verify") {
+        bar.classList.remove("indeterminate");
+        if (ev.pct != null) {
+          bar.style.width = ev.pct + "%";
+          pct.textContent = t("models.pull.verifying", { pct: Math.round(ev.pct) });
+        }
+        return;
+      }
+      last = { downloaded: ev.downloaded, total: ev.total, pct: ev.pct };
       if (ev.pct != null && ev.total) {
         bar.classList.remove("indeterminate");
         bar.style.width = ev.pct + "%";
-        // Smoothed speed + ETA from a rolling ~10-sample window.
-        samples.push({ t: Date.now(), downloaded: ev.downloaded });
-        if (samples.length > 10) samples.shift();
-        const { bytesPerSec, etaSec } = downloadRate(samples, ev.total);
+        // Speed and ETA come from the server, measured on the bytes received;
+        // a rolling window over the byte counts is the fallback.
+        let bytesPerSec = ev.rate;
+        let etaSec = ev.eta;
+        if (bytesPerSec == null) {
+          samples.push({ t: Date.now(), downloaded: ev.downloaded });
+          if (samples.length > 10) samples.shift();
+          ({ bytesPerSec, etaSec } = downloadRate(samples, ev.total));
+        }
         let extra = "";
         if (bytesPerSec) extra += `  ·  ${fmtBytes(bytesPerSec)}/s`;
+        else if (ev.rate === 0 && ev.downloaded > 0) extra += `  ·  ${t("models.pull.stalled")}`;
         if (etaSec != null) extra += `  ·  ETA ${fmtDuration(etaSec)}`;
         pct.textContent =
           `${ev.pct.toFixed(0)}%  ·  ${fmtBytes(ev.downloaded)} / ${fmtBytes(ev.total)}${extra}`;
@@ -2595,9 +2715,12 @@ $("pull-start").onclick = async () => {
         // Unknown total - busy bar with a running byte count
         bar.classList.add("indeterminate");
         bar.style.width = "100%";
-        pct.textContent = t("models.pull.downloading", { bytes: fmtBytes(ev.downloaded) });
+        let extra = ev.rate ? `  ·  ${fmtBytes(ev.rate)}/s` : "";
+        pct.textContent = t("models.pull.downloading", { bytes: fmtBytes(ev.downloaded) }) + extra;
       }
     });
+    const intent = mine.intent;
+    activePull = null;
     if (end.status === "done") {
       bar.classList.remove("indeterminate");
       bar.style.width = "100%";
@@ -2608,7 +2731,23 @@ $("pull-start").onclick = async () => {
       if (sha256Input) sha256Input.value = "";
       if (storeInput) storeInput.value = "";
       pendingPullTypeHint = null;
+      setPullButtons("idle");
       refreshModelsPage();
+    } else if (end.status === "cancelled" && intent !== "cancel") {
+      // Paused here, or stopped from the Activity list: the partial download stays
+      // on disk and Resume sends the same request.
+      bar.classList.remove("indeterminate");
+      if (last.pct != null) bar.style.width = last.pct + "%";
+      pct.textContent = t("models.pull.pausedStatus");
+      pausedPull = payload;
+      setPullButtons("paused");
+    } else if (end.status === "cancelled") {
+      await discardPartialPull(payload);
+      bar.classList.remove("indeterminate");
+      bar.style.width = "0%";
+      pct.textContent = t("models.pull.cancelledStatus");
+      toast(t("models.pull.cancelledToast"));
+      setPullButtons("idle");
     } else if (end.status === "disconnected") {
       // streamJob gave up reconnecting, or the job was already gone. Not a job
       // failure: a dropped SSE connection does not stop the pull, so the bar is
@@ -2620,6 +2759,7 @@ $("pull-start").onclick = async () => {
       // retry.
       bar.classList.remove("indeterminate");
       bar.classList.add("failed");
+      setPullButtons("idle");
       const code = end.returncode != null ? `, exit ${end.returncode}` : "";
       pct.textContent = t("models.pull.failedStatus", { code });
       toast(t("models.pull.failedToast", { status: end.status, code }), true);
@@ -2641,13 +2781,71 @@ $("pull-start").onclick = async () => {
       } catch { /* best-effort hint only */ }
     }
   } catch (e) {
+    activePull = null;
     bar.classList.remove("indeterminate");
     bar.classList.add("failed");
+    setPullButtons("idle");
     pct.textContent = t("models.pull.failedStatusShort");
     toast(t("models.pull.failedException", { message: e.message }), true);
   } finally {
     $("pull-start").disabled = false;
   }
+}
+
+$("pull-start").onclick = async () => {
+  const spec = $("pull-spec").value.trim();
+  if (!spec) { toast(t("models.pull.enterSpec"), true); return; }
+  if (spec.startsWith("-")) {
+    toast(t("models.pull.specNoDash"), true);
+    return;
+  }
+  const name = $("pull-name").value.trim();
+  const mmprojInput = $("pull-mmproj");
+  const mmproj = mmprojInput && mmprojInput.style.display !== "none" ? mmprojInput.value : null;
+  const sha256Input = $("pull-sha256");
+  const sha256 = sha256Input ? sha256Input.value.trim() : "";
+  const storeInput = $("pull-store");
+  const store = storeInput && storeInput.value ? storeInput.value : null;
+
+  const payload = { spec, name: name || null };
+  if (mmproj) payload.mmproj = mmproj;
+  if (sha256) payload.sha256 = sha256;
+  if (store) payload.store = store;
+  // Attach the type hint only while the spec still matches exactly what it was
+  // prefilled for; a hand-edited spec falls back to auto-detect.
+  if (pendingPullTypeHint && pendingPullTypeHint.spec === spec) {
+    payload.model_type = pendingPullTypeHint.type;
+  }
+  await runPull(payload);
+};
+
+$("pull-pause").onclick = async () => {
+  if (!activePull) return;
+  activePull.intent = "pause";
+  $("pull-pause").disabled = true;
+  await cancelJob(activePull.id);
+  $("pull-pause").disabled = false;
+};
+
+$("pull-cancel").onclick = async () => {
+  if (activePull) {
+    activePull.intent = "cancel";
+    $("pull-cancel").disabled = true;
+    await cancelJob(activePull.id);
+    $("pull-cancel").disabled = false;
+  } else if (pausedPull) {
+    const payload = pausedPull;
+    pausedPull = null;
+    await discardPartialPull(payload);
+    $("pull-pct").textContent = t("models.pull.cancelledStatus");
+    $("pull-bar").style.width = "0%";
+    setPullButtons("idle");
+  }
+};
+
+$("pull-resume").onclick = async () => {
+  if (!pausedPull) return;
+  await runPull(pausedPull);
 };
 
 

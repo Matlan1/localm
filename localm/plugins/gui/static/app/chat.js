@@ -240,7 +240,7 @@ export function truncateAtWord(text, max) {
 export function archiveCopy(m) {
   if (isToolEvent(m)) return { ...m };
   const out = { role: m.role, content: msgText(m) };
-  for (const k of ["id", "tag", "model", "truncated", "stopped", "failed", "webUnfinished", "noWebEvidence", "bridge"]) {
+  for (const k of ["id", "tag", "model", "truncated", "stopped", "failed", "cut", "continues", "webUnfinished", "noWebEvidence", "bridge"]) {
     if (m[k] !== undefined) out[k] = m[k];
   }
   const media = msgImages(m).length + msgAudioClips(m).length +
@@ -2164,6 +2164,8 @@ export function renderChat() {
       ? "\n\n*[stopped at the max-tokens limit - raise “Max tokens” in parameters, or reply “continue”]*"
       : m.stopped
       ? "\n\n*[stopped]*"
+      : m.cut
+      ? "\n\n*[" + t("chat.reply.cut") + "]*"
       : m.webUnfinished
       ? "\n\n*[" + t("chat.web.unfinished") + "]*"
       : "";

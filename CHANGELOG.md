@@ -11,6 +11,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Added
+
+- **Pause, resume and cancel a model download in the GUI.** The Add a model card has Pause (stops
+  and keeps what is saved, Resume continues from it) and Cancel (stops and deletes the partial
+  download), the download line shows the steady speed and time left, and the Activity list has a
+  Stop button for a running operation.
+- **Ctrl-C in `localm pull` stops cleanly.** What has been downloaded is kept, and the message
+  says to run the same command again to continue from there.
+- **`localm coder doctor` and `/doctor`.** One command checks that the model server answers and accepts the key, whether the session uses native tool calls or grammar-constrained ones, the context window against the size of the repo map, the git state, whether the verify command resolves, and that each configured MCP server starts. It exits 1 when a check fails and prints `--output-format json` or `jsonl` for scripts.
+- **`--output-format jsonl` for unattended coder runs.** `localm coder TASK --output-format jsonl` writes every agent event (tool calls and results, tokens, turns) to stdout as one JSON object per line as it happens, then a closing `final` line with the outcome; everything else the CLI prints goes to stderr.
+
 ### Changed
 
 - **The coder's system prompt is shorter.** Less frequent tools (git commit, branch and push,
@@ -19,12 +30,54 @@ permanent public record of what shipped and are never rewritten; the in-progress
   and with `--native-tools` the prompt no longer repeats the argument schemas the tools API
   already carries. The prompt stays identical from turn to turn, so the server can reuse its
   prompt cache.
+- **Download progress and speed follow the bytes received.** The progress bar, the speed and the
+  time left now come from the data arriving, so they move steadily instead of stalling for
+  seconds and jumping; the same line appears in a terminal `localm pull`, in the GUI and as MCP
+  `pull_model` progress. A full-repository download counts the files still downloading, not only
+  the finished ones.
 
 ### Fixed
 
+- **The Hugging Face token saved in Settings is used for every download.** Model pulls, projector
+  and embedding-model downloads, speech-model downloads and the model-type lookup now send it, so
+  the "unauthenticated requests to the HF Hub" warning no longer appears when a token is saved,
+  and gated models and the higher rate limits apply.
+- **An interrupted download resumes from the partial file.** A partial file written by an older
+  localm or by Hugging Face's own tools was ignored and the download started again from zero,
+  leaving the old file behind; it is now continued, and a leftover from an older upload of the
+  file is removed.
+- **The coder's shell safety check now sees every line of a multi-line command.** A dangerous
+  command on the second line of a shell command (for example `rm -rf /` or `git reset --hard`
+  after a line break) was not checked and could run. Each line is now checked like a command
+  after `;`.
+- **`localm coder TASK --output-format json` prints only the JSON document on stdout.** The reply text and the session record used to be printed on stdout ahead of the document, so parsing stdout failed; they now go to stderr.
+- **A chosen llama.cpp backend is no longer replaced without your say.** Choosing CUDA in the
+  installer or in Settings could end with Vulkan installed and shown as if it were your pick. Now
+  CUDA is installed as asked; when it cannot be used (an old driver, no usable NVIDIA GPU, a
+  library that will not load, or a CUDA build that would only run on the CPU), setup says exactly
+  why and installs Vulkan only so localm keeps working. Your choice and the reason stay on record:
+  `localm doctor` and Settings show "you chose cuda, vulkan is installed", with buttons to retry
+  CUDA or keep Vulkan, and `localm update` keeps the record. An old NVIDIA driver now asks before
+  Vulkan is installed.
+- **Settings and `localm doctor` show the llama.cpp runtime that is actually loaded.** When the
+  llama.cpp binary folder setting or `LLAMA_CPP_LIB` points at another build, localm loads that
+  build instead of the one setup installed; setup, `localm doctor` and Settings now say so.
 - **Image prompts with letters such as ß work with the native image backend on Windows.** A prompt
   containing ß failed with "failed to encode prompt", and letters such as ä, ö and ü reached the
   model garbled; the prompt now reaches stable-diffusion.cpp unchanged.
+- **A chat reply that was cut off says so.** A reply that stopped because the model was unloaded or
+  replaced while it was writing, or because the reply stream ended before the model finished, used
+  to look like a finished reply. It now carries a cut-off note in the chat, and API clients get
+  `finish_reason: "error"` with the reason instead of `"stop"`.
+- **"continue" carries on with the previous reply.** "continue", "weiter", "continúa" and the same
+  word in other languages continue the last reply instead of searching the selected Knowledge
+  collection for the word.
+
+### Changed
+
+- **Export saves inside the app.** On the computer running localm, Export (the chat's, and the
+  coder's session, result and patch exports) asks for a folder in the app's own file browser and
+  saves there, without the browser's download prompt. Other devices still download the file.
 
 ## [0.3.0] - 2026-10-14
 

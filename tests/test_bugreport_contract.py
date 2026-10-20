@@ -200,6 +200,9 @@ def world(monkeypatch, tmp_path):
     monkeypatch.setattr(setup_llama, "installed_build", lambda: "b1234")
     monkeypatch.setattr(setup_llama, "installed_backend", lambda: "cuda")
     monkeypatch.setattr(setup_llama, "pinned_tag", lambda: "b1234")
+    monkeypatch.setattr(setup_llama, "backend_choice", lambda: None)
+    monkeypatch.setattr(setup_llama, "runtime_in_use",
+                        lambda: {"dir": "rt", "source": "provisioned", "backend": "cuda"})
     gb = 1024 ** 3
     monkeypatch.setattr(discover, "last_gpu_reading", lambda: [
         {"index": 0, "name": "Contract GPU 9000", "free": 8 * gb,
