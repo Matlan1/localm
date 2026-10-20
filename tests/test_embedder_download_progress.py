@@ -17,7 +17,8 @@ MB = 1024 * 1024
 def _fake_hf_download(chunks, total):
     """An ``hf_hub_download`` stand-in that drives ``tqdm_class`` through
     huggingface_hub's own progress-bar factory, as its HTTP download does."""
-    def _download(repo, filename, local_dir=None, endpoint=None, tqdm_class=None):
+    def _download(repo, filename, local_dir=None, endpoint=None, tqdm_class=None,
+                  token=None):
         from pathlib import Path
         from huggingface_hub.utils.tqdm import _create_progress_bar, tqdm
         bar = _create_progress_bar(cls=tqdm_class or tqdm, log_level=logging.INFO,

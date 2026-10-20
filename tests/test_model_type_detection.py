@@ -77,7 +77,7 @@ def _hf_dir(root, name, *, architectures=None, adapter=False):
 
 def _patch_hf(monkeypatch, payload):
     import localm.discover as discover
-    monkeypatch.setattr(discover, "_get", lambda url, params=None: payload)
+    monkeypatch.setattr(discover, "_get", lambda url, params=None, **kw: payload)
 
 
 def test_hf_tag_substring_does_not_misclassify(monkeypatch):

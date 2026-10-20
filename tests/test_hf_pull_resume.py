@@ -344,22 +344,31 @@ class TestPartialOwnership:
                        "host": host_id(), "local": path_is_local(cache),
                        "start": process_start_identity(os.getpid())}
 
-    def test_partial_without_owner_record_is_neither_adopted_nor_deleted(
+    def test_partials_without_owner_record_are_resumed_under_the_download_lock(
             self, cache, tmp_path, monkeypatch):
         inc_path = cache / "file.etag.incomplete"
         unknown = cache / "file.etag.cccc3333.incomplete"
-        unknown.write_bytes(b"WHO-OWNS-THIS")
+        unknown.write_bytes(b"HELLO")
         legacy = cache / "file.etag.incomplete"
-        legacy.write_bytes(b"OLD-SHARED")
+        legacy.write_bytes(b"HE")
         dest = tmp_path / "dest.gguf"
-        captured = _wire_http(monkeypatch, b"FRESH")
+        captured = _wire_http(monkeypatch, b" WORLD")
 
-        _call(inc_path, dest, expected_size=5)
+        _call(inc_path, dest, expected_size=11)
 
-        assert unknown.read_bytes() == b"WHO-OWNS-THIS"
-        assert legacy.read_bytes() == b"OLD-SHARED"
-        assert captured["resume_size"] == 0
-        assert dest.read_bytes() == b"FRESH"
+        assert captured["resume_size"] == 5
+        assert dest.read_bytes() == b"HELLO WORLD"
+        assert _partials(cache) == []
+
+    def test_a_partial_without_owner_record_is_not_counted_while_the_lock_is_held(
+            self, cache):
+        inc_path = cache / "file.etag.incomplete"
+        stock = cache / "file.etag.incomplete"
+        stock.write_bytes(b"HELLO")
+
+        from localm.model_manager.pull import _reusable_partial_bytes
+        assert _reusable_partial_bytes(inc_path, 11, lock_free=False) == 0
+        assert _reusable_partial_bytes(inc_path, 11, lock_free=True) == 5
 
     def test_smaller_proven_orphans_are_removed_after_adoption(
             self, cache, tmp_path, monkeypatch, dead_pid):
@@ -811,3 +820,115 @@ class TestGgufPullVerifiesHfDigest:
         assert (models / "test.gguf").read_bytes() == body
         assert reg_spy.call_args.kwargs["sha256"] == digest
         assert "SHA256 verified" in capsys.readouterr().out
+
+
+class TestOwnerlessPartialResume:
+    """A temp file written by huggingface_hub itself, or by a localm that wrote no
+    owner record, resumes whenever no download of that file holds its lock."""
+
+    @staticmethod
+    def _preflight(hf_env, monkeypatch, partial_bytes: bytes):
+        models, _ = hf_env
+        inc = _hf_incomplete(models, "test.gguf", "newetag")
+        inc.write_bytes(partial_bytes)
+        checked = []
+        monkeypatch.setattr(mm, "_check_disk_space",
+                            lambda path, size: checked.append(size) or True)
+        monkeypatch.setattr(mm, "_hf_file_sha256", lambda *a: None)
+        _fake_head(monkeypatch, 10, "newetag")
+        _fake_download(monkeypatch, b"0" * 10)
+        return models, checked
+
+    def test_preflight_charges_and_announces_a_stock_partial(
+            self, hf_env, monkeypatch, capsys):
+        _, checked = self._preflight(hf_env, monkeypatch, b"123456")
+
+        assert mm._pull_gguf_file("owner/repo:test.gguf", name="test") is True
+        assert checked == [4]
+        assert "Resuming" in capsys.readouterr().out
+
+    def test_preflight_ignores_it_while_another_download_holds_the_file_lock(
+            self, hf_env, monkeypatch, capsys):
+        from filelock import FileLock
+        from huggingface_hub._local_folder import get_local_download_paths
+        models, checked = self._preflight(hf_env, monkeypatch, b"123456")
+        holder = FileLock(str(get_local_download_paths(models, "test.gguf").lock_path))
+        holder.acquire()
+        try:
+            assert mm._pull_gguf_file("owner/repo:test.gguf", name="test") is True
+        finally:
+            holder.release()
+        assert checked == [10], "a partial a live download holds was charged as reusable"
+        assert "Resuming" not in capsys.readouterr().out
+
+    def test_the_lock_probe_sees_a_held_lock_and_a_free_one(self, tmp_path):
+        from filelock import FileLock
+        from localm.model_manager.pull import _lock_file_is_free
+        lock_path = tmp_path / "f.lock"
+        assert _lock_file_is_free(lock_path) is True
+        holder = FileLock(str(lock_path))
+        holder.acquire()
+        try:
+            assert _lock_file_is_free(lock_path) is False
+        finally:
+            holder.release()
+        assert _lock_file_is_free(lock_path) is True
+
+    def test_a_stale_etag_partial_with_no_owner_record_is_reaped_in_a_local_dir_folder(
+            self, tmp_path, monkeypatch):
+        folder = tmp_path / ".cache" / "huggingface" / "download"
+        folder.mkdir(parents=True)
+        inc_path = folder / "file.etag.incomplete"
+        stale = folder / "file.oldetag.incomplete"
+        stale.write_bytes(b"0" * 6)
+        dest = tmp_path / "dest.gguf"
+        captured = _wire_http(monkeypatch, b"0123456789")
+
+        _call(inc_path, dest, expected_size=10)
+
+        assert not stale.exists()
+        assert captured["resume_size"] == 0
+        assert dest.read_bytes() == b"0123456789"
+
+    def test_a_stale_etag_partial_with_no_owner_record_is_kept_elsewhere(
+            self, cache, tmp_path, monkeypatch):
+        inc_path = cache / "file.etag.incomplete"
+        stale = cache / "file.oldetag.incomplete"
+        stale.write_bytes(b"0" * 6)
+        dest = tmp_path / "dest.gguf"
+        _wire_http(monkeypatch, b"0123456789")
+
+        _call(inc_path, dest, expected_size=10)
+
+        assert stale.read_bytes() == b"0" * 6
+
+    def test_progress_counts_a_stock_partial_only_while_the_file_lock_is_free(
+            self, tmp_path, monkeypatch, capsys):
+        import json as _json
+        from filelock import FileLock
+        from huggingface_hub._local_folder import get_local_download_paths
+        monkeypatch.setenv("LOCALM_PROGRESS_JSON", "1")
+        base = tmp_path / "models"
+        base.mkdir()
+        paths = get_local_download_paths(base, "m.gguf")
+        paths.incomplete_path("deadbeef").write_bytes(b"z" * 123)
+
+        def seen() -> list:
+            out = capsys.readouterr().out
+            return [_json.loads(line.split(mm.PROGRESS_SENTINEL, 1)[1])["downloaded"]
+                    for line in out.splitlines() if mm.PROGRESS_SENTINEL in line]
+
+        with mm._download_progress([base / "m.gguf"], 1000, base_dir=base,
+                                   rel_parts=["m.gguf"]) as prog:
+            prog.ok()
+        assert 123 in seen()[:-1]
+
+        holder = FileLock(str(paths.lock_path))
+        holder.acquire()
+        try:
+            with mm._download_progress([base / "m.gguf"], 1000, base_dir=base,
+                                       rel_parts=["m.gguf"]) as prog:
+                prog.ok()
+            assert 123 not in seen()[:-1]
+        finally:
+            holder.release()
