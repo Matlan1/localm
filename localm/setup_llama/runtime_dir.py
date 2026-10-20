@@ -201,7 +201,7 @@ def _read_backend_choice(target: Path) -> Optional[dict]:
     there is none or it is unreadable, not JSON, or names no known backend."""
     try:
         data = json.loads((target / _CHOICE_MARKER).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
     if not isinstance(data, dict):
         return None
