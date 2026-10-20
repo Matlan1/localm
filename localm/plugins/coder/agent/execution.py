@@ -778,13 +778,14 @@ class _ExecutionMixin:
 
     def _hooks_for(self, event: str, tool: str):
         """The session's ToolHooks when they apply to *event* for *tool*, else
-        None (always None in a restricted session). When they are not trusted,
-        the first call they apply to reports that once per session; the caller
-        must check ``trusted`` before running anything."""
+        None (always None in a restricted session). Untrusted hooks re-read the
+        trust store first; while they stay untrusted, the first call they apply
+        to reports that once per session. The caller must check ``trusted``
+        before running anything."""
         hooks = getattr(self, "_tool_hooks", None)
         if hooks is None or self.restricted or not hooks.applies(event, tool):
             return None
-        if not hooks.trusted and hooks.claim_untrusted_report():
+        if not hooks.refresh_trust() and hooks.claim_untrusted_report():
             msg = hooks.untrusted_message()
             _agent.print_warning(msg)
             self._emit("info", text=msg)
