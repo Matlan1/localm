@@ -1262,7 +1262,7 @@ class _LoopMixin:
         if not getattr(self, "_untrusted_provenance", True):
             return result.to_xml(call.name)
         from ..provenance import build_result_block, is_untrusted_tool
-        untrusted = is_untrusted_tool(call.name, TOOL_REGISTRY.get(call.name))
+        untrusted = is_untrusted_tool(call.name, TOOL_REGISTRY.get(call.name), result)
         return build_result_block(call.name, result, untrusted)
 
     def _stopped_text(self) -> str:

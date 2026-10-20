@@ -823,7 +823,7 @@ The agent auto-starts `localm serve` when needed and plans with tool calls: read
 
 ### Built-in tools
 
-The agent ships 47 built-in tools. "Confirms" means the agent stops and asks
+The agent ships 48 built-in tools. "Confirms" means the agent stops and asks
 before running it by default; "Restricted" means a shared, non-owner session may
 use it at all. The GUI coder has the same set (see [gui.md](gui.md)).
 
@@ -844,6 +844,7 @@ use it at all. The GUI coder has the same set (see [gui.md](gui.md)).
 | `ask_user` | Ask the user a question, optionally with numbered options (REPL only) | no | no |
 | `enter_plan_mode` | Switch to plan mode: only read-only tools run until a plan is approved | no | no |
 | `exit_plan_mode` | Present the plan for approval and leave plan mode when approved | no | no |
+| `search_tools` | Return the full usage of tools the prompt lists by name only | no | no |
 | `write_file` | Write or overwrite a file | yes | yes |
 | `edit_file` | Replace the first occurrence of exact text | yes | yes |
 | `edit_files` | Apply the same exact-string edit across several files, all-or-nothing | yes | yes |
@@ -876,6 +877,15 @@ use it at all. The GUI coder has the same set (see [gui.md](gui.md)).
 | `browser_console` | Read the page's console messages | no | no |
 | `browser_network` | List requests the page made and any the network policy refused | no | no |
 | `browser_close` | Close the browser session | no | no |
+
+To keep the prompt short, the system prompt documents the everyday tools in full and lists
+the less frequent ones (the git commit, branch and push tools, background shell jobs and
+sub-agents, `dispatch_parallel`, `edit_notebook_cell`, `read_env`, `generate_image`, the
+Knowledge and `browser_*` tools, and every MCP and plugin tool) by name and one line. The
+agent calls `search_tools` for a tool's arguments before its first use. With `--native-tools`
+the prompt lists every tool in one line, since the tools API carries the arguments, and a
+listed-only tool is declared to the API once `search_tools` has returned it. A small model
+(the phi family and `tiny` models) still sees every tool in its one-line list.
 
 The eight `browser_*` tools appear only when the `browser` plugin is
 installed and enabled, and are always unavailable to a restricted session -

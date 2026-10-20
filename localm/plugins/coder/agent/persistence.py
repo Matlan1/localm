@@ -10,6 +10,7 @@ import dataclasses
 import datetime
 import difflib
 import json
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
@@ -40,6 +41,9 @@ class _PersistenceMixin:
         # Set by Agent (core.py), which this class is mixed into.
         @property
         def disabled_tools(self) -> frozenset: ...
+
+    _activated_tools: frozenset
+    _activated_lock: threading.Lock
 
     def changed_files(self) -> list[dict]:
         """
@@ -480,6 +484,9 @@ class _PersistenceMixin:
             # Plan mode, so a resumed session is still read-only until its plan
             # is approved. An older checkpoint restores as plan mode off.
             "plan_mode": bool(self._plan_mode),
+            # The tools search_tools activated, so a resumed native-tools session
+            # declares the schemas its restored conversation already relies on.
+            "activated_tools": sorted(getattr(self, "_activated_tools", ())),
             # Pointers to work delegated children COMMITTED on their own branches.
             # The branches are durable; this keeps the pointer to them durable too,
             # so a resumed session still shows the footer. The change-sets are
@@ -599,8 +606,19 @@ class _PersistenceMixin:
         self.set_todos(normalize_todos(data.get("todos")))
         if data.get("plan_mode") is True and "exit_plan_mode" not in self.disabled_tools:
             self._plan_mode = True
+        self._restore_activated_tools(data.get("activated_tools"))
         self._restore_delegated(data.get("delegated"))
         self._restore_changed_files(data.get("changed_files"))
+
+    def _restore_activated_tools(self, raw) -> None:
+        """Restore the search_tools activations from a checkpoint: only string
+        names of tools registered now are kept; anything else (a missing key,
+        a non-list, an unknown name) restores as no activation."""
+        registry = _agent.TOOL_REGISTRY
+        names = raw if isinstance(raw, list) else []
+        with self._activated_lock:
+            self._activated_tools = frozenset(
+                n for n in names if isinstance(n, str) and n in registry)
 
     def _restore_changed_files(self, raw) -> None:
         """Rebuild the changed-files tracker from a checkpoint.

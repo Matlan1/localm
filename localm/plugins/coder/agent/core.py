@@ -37,12 +37,28 @@ from .session import _SessionMixin
 from .tooldefs import _build_openai_tool_defs
 
 
+_FOREIGN_SUMMARY_MAX = 160
+
+
+def _foreign_summary(description) -> str:
+    """The first line and sentence of a foreign tool's description, at most
+    ``_FOREIGN_SUMMARY_MAX`` chars (a cut one ends in "...")."""
+    text = str(description).strip().splitlines()[0] if str(description).strip() else ""
+    text = text.split(". ")[0].rstrip(".")
+    if len(text) > _FOREIGN_SUMMARY_MAX:
+        text = text[:_FOREIGN_SUMMARY_MAX - 3].rstrip() + "..."
+    return text
+
+
 def _foreign_tool_docs(heading: str, names, registry) -> GuardedText:
-    """*heading* followed by one ``- name: description`` line per registered
-    tool in *names*, as a ``GuardedText`` whose untrusted ranges cover each
-    line's name and description (they came from the MCP server or plugin)."""
+    """*heading* followed by one ``- name: summary`` line per registered tool
+    in *names*, as a ``GuardedText`` whose untrusted ranges cover each line's
+    name and summary (they came from the MCP server or plugin). The summary is
+    the description's first sentence, cut to ``_FOREIGN_SUMMARY_MAX`` chars; the
+    full usage comes from search_tools or, when that is disabled, the tool's
+    own catalogue block."""
     lines = [
-        compose("- ", untrusted_span(f"{n}: {registry[n].description}"))
+        compose("- ", untrusted_span(f"{n}: {_foreign_summary(registry[n].description)}"))
         for n in names if n in registry
     ]
     return compose(heading, compose_join("\n", lines))
@@ -380,6 +396,10 @@ class Agent(
         # it against the parallel non-destructive tool batch (loop.py).
         self._todos: list[dict] = []
         self._todos_lock = threading.Lock()
+        # Deferred tools search_tools has returned the full usage of this
+        # session; a native-tools backend declares their schemas from then on.
+        self._activated_tools: frozenset = frozenset()
+        self._activated_lock = threading.Lock()
         self._model_name: str = getattr(backend, "model_id", "")
         # Family-detection identity: enrich the (possibly opaque) alias with its
         # registry source (e.g. "hf:google/gemma-4-4b") so family-specific prompt
@@ -461,12 +481,11 @@ class Agent(
         self._rebuild_system_prompt()
 
         # Register OpenAI-format tool definitions when the backend supports it
-        # (excluding any tool disabled for this session).
+        # (excluding any tool disabled for this session, and every deferred tool
+        # search_tools has not activated). Each request also carries this
+        # session's own list (_llm_kwargs), since a sub-agent shares the backend.
         if getattr(backend, "native_tools", False):
-            backend.set_tools([
-                d for d in _build_openai_tool_defs()
-                if d.get("function", {}).get("name") not in self.disabled_tools
-            ])
+            backend.set_tools(self._native_tool_defs())
 
     # ------------------------------------------------------------------ #
     #  Inherited-from-the-parent state: READ LIVE, never snapshotted      #
@@ -852,7 +871,8 @@ class Agent(
             allowed = self._active_skill_tools
             names = ", ".join(self._active_skill_names)
         if (allowed is None or tool_name in allowed or tool_name in SKILL_META_TOOLS
-                or tool_name in INTERACTION_TOOLS):
+                or tool_name in INTERACTION_TOOLS
+                or tool_name == "search_tools"):
             return None
         return (
             f"'{tool_name}' was not run: the active skill ({names}) declares "
@@ -979,6 +999,33 @@ class Agent(
     @disabled_tools.setter
     def disabled_tools(self, value) -> None:
         self._disabled_tools = frozenset(value or ())
+
+    @property
+    def _native_tools_effective(self) -> bool:
+        """True when the backend sends tool schemas natively with each request
+        (``native_tools`` is True and the connected server supports it)."""
+        return (getattr(self.backend, "native_tools", False) is True
+                and getattr(self.backend, "supports_native_tools", True) is not False)
+
+    def _activate_tools(self, names) -> None:
+        """Mark *names* as activated by search_tools. Never rebuilds the system
+        prompt. Thread-safe."""
+        with self._activated_lock:
+            self._activated_tools = self._activated_tools | frozenset(names)
+
+    def _native_tool_defs(self) -> list:
+        """The OpenAI-format tool definitions this session declares: every
+        enabled tool except deferred ones search_tools has not activated. For a
+        small-family model nothing is deferred and search_tools is left out,
+        matching its system prompt."""
+        from ..prompts import deferred_tool_names, detect_model_family
+        family_id = getattr(self, "_family_id", "") or self._model_name
+        disabled = self.disabled_tools
+        hidden = deferred_tool_names(disabled, family_id) - self._activated_tools
+        if family_id and detect_model_family(family_id) == "small":
+            hidden = hidden | {"search_tools"}
+        return [d for d in _build_openai_tool_defs()
+                if d.get("function", {}).get("name") not in disabled | hidden]
 
     def _foreign_mcp_names(self) -> frozenset:
         mine = getattr(self, "_mcp_tool_names", frozenset())

@@ -140,10 +140,49 @@ def _catalogue_entry(tool, text: str):
     return text
 
 
-def _full_tool_docs(disabled: frozenset = frozenset()) -> GuardedText:
+def tool_doc_block(name: str, tool) -> str:
+    """The full catalogue block of one tool: ``## name - description``, a
+    concrete example call, and the optional params. Plain text; the caller
+    decides whether it is an untrusted range."""
+    example = json.dumps({"name": name, "args": _example_args(name, tool)},
+                         ensure_ascii=False)
+    lines = [f"## {name} - {tool.description}", example]
+    optional = [f"{n} ({s.get('type', 'string')})"
+                for n, s in _tool_params(tool).items() if not s.get("required")]
+    if optional:
+        lines.append(f"optional args: {', '.join(optional)}")
+    return "\n".join(lines)
+
+
+def _first_sentence(description) -> str:
+    """The first sentence of a tool description, without its full stop."""
+    return str(description).split(". ")[0].rstrip(".")
+
+
+def deferred_tool_names(disabled: frozenset = frozenset(),
+                        model_name: str = "") -> frozenset:
+    """The enabled tools documented on demand rather than in full: empty when
+    ``search_tools`` is not registered or is in *disabled*, or when
+    *model_name* is of the small family (then every enabled tool is documented
+    in full), else every enabled tool ``is_deferred`` reports."""
+    from .agent.constants import expand_shell_disable
+    from .tools import TOOL_REGISTRY
+    from .tools.registry import TOOL_SEARCH_TOOL, is_deferred
+    disabled = expand_shell_disable(disabled)
+    if TOOL_SEARCH_TOOL not in TOOL_REGISTRY or TOOL_SEARCH_TOOL in disabled:
+        return frozenset()
+    if model_name and detect_model_family(model_name) == "small":
+        return frozenset()
+    return frozenset(n for n, t in TOOL_REGISTRY.items()
+                     if n not in disabled and is_deferred(n, t))
+
+
+def _full_tool_docs(disabled: frozenset = frozenset(),
+                    deferred: frozenset = frozenset()) -> GuardedText:
     """One block per registered tool: description (the 'when to use this'
     signal), a concrete example call, and the optional params. Tools in
-    *disabled* are omitted (e.g. run_shell for a restricted, shareable key).
+    *disabled* (e.g. run_shell for a restricted, shareable key) and in
+    *deferred* are omitted.
 
     Returns a ``GuardedText`` (a ``str``) whose untrusted ranges cover the
     whole block of every tool flagged ``untrusted_docs``; a registry with no
@@ -157,22 +196,16 @@ def _full_tool_docs(disabled: frozenset = frozenset()) -> GuardedText:
     disabled = expand_shell_disable(disabled)
     blocks = []
     for name, tool in TOOL_REGISTRY.items():
-        if name in disabled:
+        if name in disabled or name in deferred:
             continue
-        example = json.dumps({"name": name, "args": _example_args(name, tool)},
-                             ensure_ascii=False)
-        lines = [f"## {name} - {tool.description}", example]
-        optional = [f"{n} ({s.get('type', 'string')})"
-                    for n, s in _tool_params(tool).items() if not s.get("required")]
-        if optional:
-            lines.append(f"optional args: {', '.join(optional)}")
-        blocks.append(_catalogue_entry(tool, "\n".join(lines)))
+        blocks.append(_catalogue_entry(tool, tool_doc_block(name, tool)))
     return compose_join("\n\n", blocks)
 
 
-def _brief_tool_docs(disabled: frozenset = frozenset()) -> GuardedText:
-    """Condensed list for small models - one line per tool, no JSON examples.
-    Tools in *disabled* are omitted.
+def _brief_tool_docs(disabled: frozenset = frozenset(),
+                     deferred: frozenset = frozenset()) -> GuardedText:
+    """Condensed list - one line per tool, no JSON examples. Tools in
+    *disabled* and in *deferred* are omitted.
 
     Returns a ``GuardedText`` (a ``str``) whose untrusted ranges cover the
     line of every tool flagged ``untrusted_docs``."""
@@ -181,15 +214,32 @@ def _brief_tool_docs(disabled: frozenset = frozenset()) -> GuardedText:
     disabled = expand_shell_disable(disabled)
     lines = []
     for name, tool in TOOL_REGISTRY.items():
-        if name in disabled:
+        if name in disabled or name in deferred:
             continue
         params = _tool_params(tool)
         req = [n for n, s in params.items() if s.get("required")]
         opt = [f"[{n}]" for n, s in params.items() if not s.get("required")]
         sig = ", ".join(req + opt)
-        first_sentence = str(tool.description).split(". ")[0].rstrip(".")
-        lines.append(_catalogue_entry(tool, f"{name}({sig}) - {first_sentence}"))
+        lines.append(_catalogue_entry(
+            tool, f"{name}({sig}) - {_first_sentence(tool.description)}"))
     return compose_join("\n", lines)
+
+
+def _deferred_tool_index(deferred: frozenset) -> str:
+    """The OTHER TOOLS section: one ``- name - first sentence`` line per
+    built-in tool in *deferred*, in registry order, under a heading that points
+    at search_tools. Tools flagged ``untrusted_docs`` are left out (they are
+    listed in their own EXTERNAL section). Empty when *deferred* is empty."""
+    from .tools import TOOL_REGISTRY
+    if not deferred:
+        return ""
+    lines = [f"- {n} - {_first_sentence(t.description)}"
+             for n, t in TOOL_REGISTRY.items()
+             if n in deferred and getattr(t, "untrusted_docs", False) is not True]
+    head = ("OTHER TOOLS: the tools below, and any EXTERNAL tools, are listed "
+            "without their arguments. Call search_tools (keywords, or "
+            "\"select:name\") to get a tool's full usage before its first call.")
+    return "\n".join([head, *lines]) + "\n"
 
 
 # ---------------------------------------------------------------------------
@@ -419,6 +469,7 @@ def build_system_prompt(
     untrusted_provenance: bool = True,
     custom_instructions: str = "",
     role_brief: str = "",
+    native_tools: bool = False,
 ) -> GuardedText:
     """
     Build the system prompt for the main agent.
@@ -455,6 +506,17 @@ def build_system_prompt(
         Sub-agent role section (see ``build_subagent_system_prompt``); empty for a
         main agent. Placed after the RULES so a role's focus is the last thing the
         model reads, and so it cannot displace the safety sections above it.
+    native_tools:
+        True when the backend sends the tools' JSON schemas with each request
+        (native tool calling). The tool list is then one line per tool instead
+        of full blocks with example calls. Ignored for the small family, whose
+        list is one line per tool already.
+
+    While ``search_tools`` is enabled (and the family is not small), deferred
+    tools (``deferred_tool_names``) get no full block: built-in ones are listed
+    by name and first sentence under OTHER TOOLS, foreign ones only in
+    *extra_tool_docs*. The result depends only on the arguments and the
+    registry, never on which tools search_tools has activated.
     """
     # Lazy import: agent/ imports this module, so a top-level import would cycle.
     from .agent.constants import expand_shell_disable
@@ -475,8 +537,17 @@ def build_system_prompt(
     if custom_instructions:
         custom_section = f"\n## User Instructions\n\n{custom_instructions}\n"
 
-    tool_docs = (_brief_tool_docs(disabled_tools) if family == "small"
-                 else _full_tool_docs(disabled_tools))
+    if family == "small":
+        # Nothing is deferred for a small model, so search_tools is not listed.
+        tool_docs = _brief_tool_docs(disabled_tools | {"search_tools"})
+        deferred_index = ""
+    else:
+        deferred = deferred_tool_names(disabled_tools)
+        tool_docs = (_brief_tool_docs(disabled_tools, deferred) if native_tools
+                     else _full_tool_docs(disabled_tools, deferred))
+        deferred_index = _deferred_tool_index(deferred)
+        if deferred_index:
+            deferred_index = "\n" + deferred_index
     tool_block = _tool_call_block(family)
     think_hint = _thinking_hint(family)
     rules      = _rules_section(family, disabled_tools)
@@ -526,6 +597,7 @@ def build_system_prompt(
         "AVAILABLE TOOLS\n",
         "━━━━━━━━━━━━━━━\n\n",
         tool_docs, "\n",
+        deferred_index,
         extra_section, "\n",
         rules, "\n",
         role_brief,

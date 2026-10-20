@@ -680,12 +680,14 @@ class _ExecutionMixin:
             args["_parent_agent"] = self
         # The task-list tools operate on THIS session's state (tools/tasks.py),
         # use_skill arms this session's active-skill restriction (skills.py), and
-        # find_references reads this session's live ProjectMap (tools/references.py).
+        # find_references reads this session's live ProjectMap (tools/references.py),
+        # and search_tools activates tools on this session (tools/toolsearch.py).
         # Injected after the copy, so a model-supplied "_session" cannot win and
         # choose its own restriction.
         if call.name in _TODO_TOOLS or call.name in _SKILL_STATE_TOOLS \
                 or call.name in _PROJECT_MAP_TOOLS \
-                or call.name in _BROWSER_TOOLS:
+                or call.name in _BROWSER_TOOLS \
+                or call.name == "search_tools":
             args["_session"] = self
         # search_replace and the diagnosed file tools are told whether this session
         # is restricted. Injected after the copy, so a model-supplied "_restricted"
