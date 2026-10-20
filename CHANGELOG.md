@@ -64,6 +64,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `.localcoder/config.toml` to be asked every time.
 
 ### Changed
+- **The bundled llama.cpp runtime moved from b11756 to b11757.** An existing install picks it up with `localm setup-llama --force`.
 - **The bundled llama.cpp runtime moved from b11541 to b11756.** An existing install picks it up with `localm setup-llama --force`.
 
 - **The coder starts a project's MCP servers only after you trust them.** A cloned repository
