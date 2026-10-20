@@ -669,10 +669,14 @@ def test_cancel_holds_when_the_hook_ignores_a_large_stdin(tmp_path):
 
 
 def test_an_escaped_grandchild_holding_the_pipe_does_not_hold_the_call(tmp_path):
-    argv = _py_hook_noread(tmp_path, "escape", """\
+    console_probe = tmp_path / "grandchild-console.txt"
+    argv = _py_hook_noread(tmp_path, "escape", f"""\
         import subprocess
-        flags = 0x00000008 if sys.platform == "win32" else 0
-        subprocess.Popen([sys.executable, "-c", "import time; time.sleep(20)"],
+        grand = ("import ctypes, sys, time; "
+                 "w = ctypes.windll.kernel32.GetConsoleWindow() if sys.platform == 'win32' else 0; "
+                 "open(sys.argv[1], 'w').write(str(w)); time.sleep(20)")
+        flags = 0x08000000 if sys.platform == "win32" else 0
+        subprocess.Popen([sys.executable, "-c", grand, {console_probe.as_posix()!r}],
                          stdout=1, stderr=2, creationflags=flags,
                          start_new_session=sys.platform != "win32")
         sys.stderr.write("left a child behind")
@@ -684,6 +688,11 @@ def test_an_escaped_grandchild_holding_the_pipe_does_not_hold_the_call(tmp_path)
     out = run_hook(spec, {"tool": "t"}, tmp_path)
     assert time.monotonic() - t0 < 10
     assert out.returncode == 2 and "left a child behind" in out.stderr
+    for _ in range(50):
+        if console_probe.exists() and console_probe.read_text():
+            break
+        time.sleep(0.1)
+    assert console_probe.read_text() == "0", "the grandchild opened a console window"
 
 
 def test_hook_output_is_capped(tmp_path):
