@@ -330,6 +330,12 @@ def _lex(text: str) -> list[_Segment]:
             subs.append(body)
             cur.append(ch + "(" + body + ")")
             continue
+        # A line break ends a command, so it is checked before the generic
+        # whitespace branch. See test_a_newline_separates_commands.
+        if ch in "\r\n":
+            flush_segment(True)
+            i += 1
+            continue
         if ch.isspace():
             flush_token()
             i += 1

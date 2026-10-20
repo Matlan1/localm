@@ -34,6 +34,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   localm or by Hugging Face's own tools was ignored and the download started again from zero,
   leaving the old file behind; it is now continued, and a leftover from an older upload of the
   file is removed.
+- **The coder's shell safety check now sees every line of a multi-line command.** A dangerous
+  command on the second line of a shell command (for example `rm -rf /` or `git reset --hard`
+  after a line break) was not checked and could run. Each line is now checked like a command
+  after `;`.
 - **Image prompts with letters such as ß work with the native image backend on Windows.** A prompt
   containing ß failed with "failed to encode prompt", and letters such as ä, ö and ü reached the
   model garbled; the prompt now reaches stable-diffusion.cpp unchanged.
