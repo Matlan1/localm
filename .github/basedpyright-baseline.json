@@ -7600,14 +7600,6 @@
                     "endColumn": 57,
                     "lineCount": 1
                 }
-            },
-            {
-                "code": "reportAttributeAccessIssue",
-                "range": {
-                    "startColumn": 31,
-                    "endColumn": 43,
-                    "lineCount": 1
-                }
             }
         ],
         "./localm/plugins/coder/tools/agents.py": [
