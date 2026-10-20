@@ -12,6 +12,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **More context fits in VRAM with a q8_0 KV cache.** The new `kv_cache_type` setting (Settings,
+  Model, Runtime & GPU, or `localm config kv_cache_type q8_0`) stores the KV cache in about half the memory of
+  the default `f16`, so roughly 1.9x the context fits before the window stops growing, with
+  slightly slower decoding. The automatic context ceiling and the VRAM estimate account for it. It
+  applies at the next model load; a model that cannot use flash attention refuses to load under
+  `q8_0` and the error names the setting.
 - **`localm coder` shows what it is doing.** A live spinner runs while the model thinks, while
   it writes a file (with the file name and line count) and while a tool runs. `set_todos` shows
   the task list. Type `@path` or `@path:10-40` to attach a file to your message, and a
@@ -64,6 +70,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `.localcoder/config.toml` to be asked every time.
 
 ### Changed
+- **The bundled stable-diffusion.cpp runtime moved from master-964-1d0a58a to master-982-0518b34.** An existing install picks it up the next time image generation starts.
+- **The bundled koboldcpp runtime (native music generation) moved from v1.123 to v1.123.1.** An existing install picks it up the next time music generation starts.
 - **The bundled llama.cpp runtime moved from b11541 to b11756.** An existing install picks it up with `localm setup-llama --force`.
 - **Newer Python libraries.** The Hugging Face backend uses transformers 5.20 (from 5.15), the
   browser tool uses Playwright 1.64, and the server, PDF, image and download libraries move to
@@ -85,8 +93,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   seconds and jumping; the same line appears in a terminal `localm pull`, in the GUI and as MCP
   `pull_model` progress. A full-repository download counts the files still downloading, not only
   the finished ones.
+- **A reply no longer moves the KV cache to system RAM before it needs the room.** When the
+  whole reply budget (`max_tokens`) would not fit in free VRAM but the prompt plus the first 512
+  tokens of the reply does, the context is sized for that much with the KV cache in VRAM and
+  grows as the reply gets longer, so a short reply on a card with little free VRAM decodes at GPU
+  speed. A reply that does grow that long moves to system RAM at that point and is never cut
+  short. A KV cache already in system RAM also moves back to VRAM at a smaller size when the
+  next request fits in it.
 
 ### Fixed
+- **"Delete saved data" also removes the coder's hook and MCP trust records** (`coder-hook-trust.json` in the data folder).
+- **A short request no longer throws away a running conversation's cached prompt.** A summary, title or other small request sent to the same model between two turns used to take over the conversation's cache, so its next turn processed the whole prompt again. It now uses another slot, and the conversation continues from its cache.
+- **A long conversation is no longer summarised again on every message.** When a chat client sends its whole history each turn and the server has to compact it to fit the context window, the server now reuses the summary it already wrote while the conversation still fits, and later only summarises the newly older messages. Each compaction also brings the conversation down to about half the window, so the next one is many turns away instead of one.
 - **A coder shell command that starts with a quoted program path now runs on Windows.** A command such as `"D:\tools dir\tool.exe" --flag "a b"` used to fail with "is not recognized as an internal or external command", because `cmd` dropped the first and last quote.
 - **A shell command's timeout or cancel in `localm coder` is no longer held up by a stray
   background process.** A command that left a detached process holding its output open used to
@@ -132,6 +150,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   layers, a model that loaded partly on the CPU because another program held VRAM is reloaded
   on the GPU at a later request once enough VRAM is free. An explicit GPU layer count is never
   changed.
+- **Replies speed up again after Windows moved part of a model out of VRAM.** When another
+  program takes VRAM, Windows can move part of a loaded model to system memory, and replies
+  stayed several times slower even after that program closed. When a reply decodes far slower
+  than the model managed before at the same context length, localm now rebuilds the model's
+  context before the next request, which restores the speed without reloading the model. This
+  applies to models loaded fully on the GPU, never while other replies are running, and at most
+  once a minute.
 - **The Live tuning VRAM estimate counts the running model's own memory.** The VRAM the running
   model holds was counted as used, so settings that fit read "may not fit"; it is now shown
   beside the free VRAM and counted as available. Apply now reloads the running model with the

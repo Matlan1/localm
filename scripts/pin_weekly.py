@@ -727,17 +727,32 @@ def _amd_wheels_candidate(mod=None) -> tuple[str, str] | None:
 
 
 def _rocm_candidate() -> tuple[str, str] | None:
+    """(pinned, candidate) for the lemonade ROCm build, where the candidate is the newest
+    release newer than the pin whose llama.cpp commit an upstream release was built from
+    (so its SIMD CPU archive can be paired); None when no newer release pairs. Raises
+    FetchError when the lemonade or upstream release data cannot be read."""
     mod = _load("check_llama_rocm_pin", SCRIPTS / "check_llama_rocm_pin.py")
+    bump = _load("bump_rocm_pin", SCRIPTS / "bump_rocm_pin.py")
     pin = mod.pinned_tag()
     releases, err = mod.upstream_releases()
     if err or not releases:
         raise cp.FetchError(f"lemonade releases unreadable: {err or 'empty'}")
     pin_n = mod._build_number(pin)
-    best = max(releases, key=lambda r: mod._build_number(r["tag"]) or -1)
-    best_n = mod._build_number(best["tag"])
-    if pin_n is None or best_n is None or best_n <= pin_n:
+    if pin_n is None:
         return None
-    return pin, best["tag"]
+    newer = sorted((r["tag"] for r in releases
+                    if (mod._build_number(r["tag"]) or -1) > pin_n),
+                   key=mod._build_number, reverse=True)
+    for tag in newer:
+        try:
+            bump.fetch_candidate(tag)
+        except bump.UpstreamUnreadable as e:
+            raise cp.FetchError(f"cannot pair lemonade {tag}: {e}") from e
+        except bump.Refused as e:
+            print(f"currency: lemonade {tag} skipped: {e}")
+            continue
+        return pin, tag
+    return None
 
 
 def _semver_major(tag: str) -> int | None:

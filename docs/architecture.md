@@ -345,7 +345,13 @@ The summary is written with the model's reasoning channel off; when it still
 comes back empty, the bridge carries a bounded digest of excerpts from the
 removed turns instead, and compaction never raises. Used by `localm run`
 interactive chat and by the server before a chat request that nearly fills
-the context; a client disconnect stops the server's summary generation. The
+the context; a client disconnect stops the server's summary generation.
+The server compacts down to half the window, keeping as many recent messages
+as fit, and keeps each summary in memory per engine, keyed by a hash of the
+messages it covers: a later request that resends the same conversation gets
+the same summary back with no model call while it fits, and once it no longer
+fits only the messages after the summarised part are summarised, continuing
+from the stored summary. Nothing of this cache is written to disk. The
 GUI (itself a plugin surface now) implements the same protocol client-side.
 The coder agent has its own GBNF-structured compaction in the
 `localm/plugins/coder/agent/` package, which also carries the current request

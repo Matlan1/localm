@@ -23,6 +23,7 @@ from rich.progress import Progress
 from rich.progress import TextColumn
 from rich.progress import TimeRemainingColumn
 from ..debuglog import logger
+from ..kv_cache import kv_bytes_for_type
 from ._shared import console
 from .unsupported import GGUF_IMATRIX_REFUSAL, gguf_file_refusal, gguf_header_refusal, gguf_version_supported
 
@@ -1006,7 +1007,16 @@ def _gguf_attending_layer_count(path: Path, n_layers: int) -> int:
     return len(attending) if 0 < len(attending) <= n_layers else 0
 
 
-def gguf_kv_bytes_per_token(path: Path) -> int:
+def gguf_kv_bytes_per_token(path: Path, kv_cache_type: Optional[str] = None) -> int:
+    """KV-cache bytes per token for *path* with the cache stored as
+    *kv_cache_type* (``localm.kv_cache.KV_CACHE_TYPES``; None means f16), read
+    from the file's GGUF header. 0 under the same conditions as
+    :func:`_gguf_f16_kv_bytes_per_token`. Raises ValueError for a
+    *kv_cache_type* that is not a known type."""
+    return kv_bytes_for_type(_gguf_f16_kv_bytes_per_token(path), kv_cache_type)
+
+
+def _gguf_f16_kv_bytes_per_token(path: Path) -> int:
     """f16 KV-cache bytes per token, computed from *path*'s own GGUF header.
 
     Same formula as ``LlamaCpp._read_kv_bytes_per_token``, but read from the
@@ -1229,7 +1239,17 @@ def gguf_nextn_predict_layers(path: Path) -> "tuple[str, int]":
     return architecture, 0
 
 
-def gguf_mtp_draft_kv_bytes_per_token(path: Path, nextn_layers: int) -> int:
+def gguf_mtp_draft_kv_bytes_per_token(path: Path, nextn_layers: int,
+                                      kv_cache_type: Optional[str] = None) -> int:
+    """MTP draft-context KV bytes per token for *nextn_layers* layers of *path*,
+    with the cache stored as *kv_cache_type* (None means f16). 0 under the same
+    conditions as :func:`_gguf_f16_mtp_draft_kv_bytes_per_token`. Raises
+    ValueError for a *kv_cache_type* that is not a known type."""
+    return kv_bytes_for_type(
+        _gguf_f16_mtp_draft_kv_bytes_per_token(path, nextn_layers), kv_cache_type)
+
+
+def _gguf_f16_mtp_draft_kv_bytes_per_token(path: Path, nextn_layers: int) -> int:
     """f16 KV-cache bytes per token for *nextn_layers* MTP/draft layers only -
     the rate llama.py's separate, smaller MTP draft context (its own KV cache,
     not the main model's) actually pays per token - read from *path*'s own
