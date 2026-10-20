@@ -17,7 +17,6 @@ import pytest
 
 from localm.media import native_models as nm
 from localm.media.sdcpp import families, pairing
-from localm.media.sdcpp.files import ModelFileError
 from localm.plugins.builtin.image.backends import native as image_native
 from tests.test_sdcpp_families import (  # noqa: F401
     FLUX_DEV, QWEN_IMAGE, SD1_UNET, SDXL_UNET, _finish, _register, flux_set, media_app, runner,
@@ -70,7 +69,8 @@ def _url(data: bytes, mime="image/png") -> str:
 def _mask(size=(64, 64), box=(16, 16, 48, 48)) -> bytes:
     from PIL import Image, ImageDraw
     im = Image.new("L", size, 0)
-    ImageDraw.Draw(im).rectangle(box, fill=255)
+    if box is not None:
+        ImageDraw.Draw(im).rectangle(box, fill=255)
     out = io.BytesIO()
     im.save(out, format="PNG")
     return out.getvalue()
@@ -232,7 +232,7 @@ def test_addons_must_be_registered_names_of_their_type():
 # --------------------------------------------------------------------------- #
 
 @pytest.fixture
-def addon_set(flux_set, tmp_path):
+def addon_set(flux_set, tmp_path):  # noqa: F811
     d = tmp_path / "addons"
     d.mkdir()
     files = {
@@ -255,7 +255,7 @@ def addon_set(flux_set, tmp_path):
     return {**flux_set, **{k: v[0] for k, v in files.items()}}
 
 
-def _gen(runner, tmp_path, native: dict, prompt="a fox", **kw):
+def _gen(runner, tmp_path, native: dict, prompt="a fox", **kw):  # noqa: F811
     lines: list = []
     out = tmp_path / "o.png"
     ok, msg = image_native.generate({"backend": "native", "native": native}, prompt, out,
@@ -265,7 +265,7 @@ def _gen(runner, tmp_path, native: dict, prompt="a fox", **kw):
     return ok, msg, lines, record
 
 
-def test_a_controlnet_and_embeddings_load_with_the_model_and_drive_the_job(addon_set, runner,
+def test_a_controlnet_and_embeddings_load_with_the_model_and_drive_the_job(addon_set, runner,  # noqa: F811
                                                                          tmp_path):
     ok, msg, lines, rec = _gen(
         runner, tmp_path,
@@ -288,7 +288,7 @@ def test_a_controlnet_and_embeddings_load_with_the_model_and_drive_the_job(addon
     assert not any("no effect" in line for line in lines)
 
 
-def test_an_embedding_missing_from_the_prompt_is_noted(addon_set, runner, tmp_path):
+def test_an_embedding_missing_from_the_prompt_is_noted(addon_set, runner, tmp_path):  # noqa: F811
     ok, _, lines, _ = _gen(runner, tmp_path, {"model": "sd15", "embeddings": ["EasyNeg"]},
                            width=64, height=64)
     assert ok
@@ -318,7 +318,7 @@ def test_an_unknown_typed_controlnet_from_an_old_scan_is_accepted_by_its_header(
     ({"model": "sd15", "embeddings": ["EasyNeg", "dup-emb"]}, "both use the trigger word"),
     ({"model": "canny15"}, "is a ControlNet, not an image model"),
 ])
-def test_an_addon_that_cannot_work_is_refused_before_any_load(addon_set, runner, tmp_path,
+def test_an_addon_that_cannot_work_is_refused_before_any_load(addon_set, runner, tmp_path,  # noqa: F811
                                                              native, needle):
     ok, msg, _, _ = _gen(runner, tmp_path, native, width=64, height=64,
                          control_image=_png() if native.get("control_net") else None)
@@ -326,7 +326,7 @@ def test_an_addon_that_cannot_work_is_refused_before_any_load(addon_set, runner,
     assert runner.loads == []
 
 
-def test_reference_images_reach_an_edit_family_and_are_refused_elsewhere(addon_set, runner,
+def test_reference_images_reach_an_edit_family_and_are_refused_elsewhere(addon_set, runner,  # noqa: F811
                                                                        tmp_path):
     refs = [_png((300, 150)), _png((40, 80))]
     ok, msg, _, rec = _gen(runner, tmp_path, {"model": "fluxunchained"}, width=64, height=64,
@@ -341,7 +341,7 @@ def test_reference_images_reach_an_edit_family_and_are_refused_elsewhere(addon_s
     assert image_native.input_refusal({"native": {"model": "sd15"}}, ref_images=refs) == msg
 
 
-def test_a_mask_repaints_on_the_base_image_and_is_recorded(addon_set, runner, tmp_path):
+def test_a_mask_repaints_on_the_base_image_and_is_recorded(addon_set, runner, tmp_path):  # noqa: F811
     ok, msg, lines, rec = _gen(runner, tmp_path, {"model": "sd15-inpaint"},
                                init_image_data=_png((96, 64)), mask_image=_mask((48, 32),
                                                                                 (0, 0, 24, 32)))
@@ -359,15 +359,15 @@ def test_a_mask_repaints_on_the_base_image_and_is_recorded(addon_set, runner, tm
 
 @pytest.mark.parametrize("kw,needle", [
     ({"mask_image": _mask()}, "needs a base image"),
-    ({"mask_image": _mask(box=(0, 0, -1, -1)), "init_image_data": _png()}, "mask is empty"),
+    ({"mask_image": _mask(box=None), "init_image_data": _png()}, "mask is empty"),
 ])
-def test_a_mask_that_cannot_work_fails_with_a_reason(addon_set, runner, tmp_path, kw, needle):
+def test_a_mask_that_cannot_work_fails_with_a_reason(addon_set, runner, tmp_path, kw, needle):  # noqa: F811
     ok, msg, _, _ = _gen(runner, tmp_path, {"model": "sd15"}, **kw)
     assert not ok and needle in msg, msg
     assert runner.generates == []
 
 
-def test_a_control_image_without_a_controlnet_and_the_reverse_are_refused(addon_set, runner,
+def test_a_control_image_without_a_controlnet_and_the_reverse_are_refused(addon_set, runner,  # noqa: F811
                                                                        tmp_path):
     ok, msg, _, _ = _gen(runner, tmp_path, {"model": "sd15"}, control_image=_png())
     assert not ok and "needs a ControlNet" in msg
@@ -483,7 +483,7 @@ def test_the_worker_load_passes_the_controlnet_and_embeddings(monkeypatch):
 #  routes                                                                     #
 # --------------------------------------------------------------------------- #
 
-def test_imagine_route_runs_mask_controlnet_and_embeddings(media_app, addon_set, runner):
+def test_imagine_route_runs_mask_controlnet_and_embeddings(media_app, addon_set, runner):  # noqa: F811
     from fastapi.testclient import TestClient
     with TestClient(media_app) as c:
         r = c.post("/api/imagine", json={
@@ -513,7 +513,7 @@ def test_imagine_route_runs_mask_controlnet_and_embeddings(media_app, addon_set,
     ({"embeddings": ["../../EasyNegative"]}, "not a registered embedding"),
     ({"ref_images": ["data:image/png;base64,AA"] * 5}, ""),
 ])
-def test_imagine_route_refuses_bad_image_inputs_up_front(media_app, addon_set, runner, body,
+def test_imagine_route_refuses_bad_image_inputs_up_front(media_app, addon_set, runner, body,  # noqa: F811
                                                          needle):
     from fastapi.testclient import TestClient
     with TestClient(media_app) as c:
@@ -525,7 +525,7 @@ def test_imagine_route_refuses_bad_image_inputs_up_front(media_app, addon_set, r
 
 
 def test_imagine_route_refuses_references_for_a_model_without_them_before_any_load(
-        media_app, addon_set, runner):
+        media_app, addon_set, runner):  # noqa: F811
     from fastapi.testclient import TestClient
     with TestClient(media_app) as c:
         r = c.post("/api/imagine", json={"prompt": "p", "native_models": {"model": "sd15"},
@@ -538,7 +538,7 @@ def test_imagine_route_refuses_references_for_a_model_without_them_before_any_lo
     assert runner.loads == []
 
 
-def test_native_models_route_lists_controlnets_embeddings_and_capabilities(media_app,
+def test_native_models_route_lists_controlnets_embeddings_and_capabilities(media_app,  # noqa: F811
                                                                          addon_set):
     from fastapi.testclient import TestClient
     with TestClient(media_app) as c:
@@ -558,7 +558,7 @@ def test_native_models_route_lists_controlnets_embeddings_and_capabilities(media
     assert str(Path(addon_set["canny15"]).parent).replace("\\", "/") not in shown
 
 
-def test_a_comfyui_job_refuses_native_image_inputs(media_app, addon_set, runner, monkeypatch):
+def test_a_comfyui_job_refuses_native_image_inputs(media_app, addon_set, runner, monkeypatch):  # noqa: F811
     from fastapi.testclient import TestClient
 
     from localm.config import update_config
@@ -625,7 +625,7 @@ def test_the_qwen_vision_encoder_is_optional_and_picked_when_registered(qwen_set
     assert got["components"]["llm_vision"] == {"name": "qwen-mmproj", "auto": True}
 
 
-def test_qwen_reference_images_without_a_vision_encoder_say_so(qwen_set, runner, tmp_path):
+def test_qwen_reference_images_without_a_vision_encoder_say_so(qwen_set, runner, tmp_path):  # noqa: F811
     ok, msg, lines, _ = _gen(runner, tmp_path, {"model": "qwen-edit"}, width=64, height=64,
                              ref_images=[_png()])
     assert ok, msg

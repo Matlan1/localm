@@ -175,7 +175,10 @@ saved anywhere else.
 - **Reference images** (up to 4) feed edit models: FLUX.1 Kontext, FLUX.2, Qwen-Image-Edit,
   and other Qwen-Image, Z-Image and Anima models, or an instruct-pix2pix model. Describe the
   change in the prompt. A model that does not take them is refused with a reason. Request
-  field: `ref_images` (data URLs).
+  field: `ref_images` (data URLs). Qwen-Image-Edit reads them through its Qwen2.5-VL text
+  encoder's vision tower: a GGUF text encoder needs the matching mmproj file registered (type
+  `mmproj`), which the page picks as the *LLM vision encoder* (request slot `llm_vision` in
+  `native_models`); without it the job says the edit follows the images less closely.
 - **ControlNet** for Stable Diffusion 1.x, 2.x and SDXL models: pick a registered ControlNet,
   choose a control image, and optionally its strength (default 0.9) and *edge map (canny)* to
   turn a photo into edges first. The ControlNet loads with the model, so switching it reloads
