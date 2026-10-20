@@ -624,14 +624,16 @@ class TestReviewFindings:
         agent._messages = [{"role": "user" if i % 2 == 0 else "assistant",
                             "content": f"message {i} " * 20} for i in range(12)]
         from localm.plugins.coder.agent import context
-        for interactive, expected in ((False, 0), (True, 1)):
+        for interactive, expected in (
+                (False, []),
+                (True, ["Keeping durable notes...", "Compacting session history..."])):
             agent._interactive = interactive
             with patch.object(context, "ActivitySpinner") as spin, \
                  patch("localm.inference.compact.summarise_in_passes",
                        return_value=("summary", None)), \
                  patch.object(context, "print_info"):
                 agent._compact_history()
-            assert spin.call_count == expected, interactive
+            assert [c.args[0] for c in spin.call_args_list] == expected, interactive
 
     def test_goal_mode_keeps_attachments_out_of_the_request(self, tmp_path, monkeypatch):
         from localm.plugins.coder.cli import goal
