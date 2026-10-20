@@ -206,6 +206,12 @@ def test_unreadable_or_unknown_choice_record_reads_as_none(tmp_path, content):
     assert sl._read_backend_choice(tmp_path) is None
 
 
+def test_deeply_nested_choice_record_reads_as_none(tmp_path):
+    (tmp_path / sl._CHOICE_MARKER).write_text("[" * 200_000 + "]" * 200_000,
+                                              encoding="utf-8")
+    assert sl._read_backend_choice(tmp_path) is None
+
+
 def test_choice_reason_is_one_bounded_line(tmp_path):
     sl._record_backend_choice(tmp_path, "cuda", "a\nb\r\n  c" + "x" * 5000)
     rec = sl._read_backend_choice(tmp_path)
