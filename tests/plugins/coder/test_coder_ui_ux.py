@@ -235,6 +235,34 @@ class TestDiffPreviewAndConfirmationUX:
         assert "Rejected by user: keep existing config" in res.output
 
 
+    def test_free_text_at_prompt_rejects_and_passes_the_text_back(self, tmp_path, monkeypatch):
+        agent = _make_agent(tmp_path, auto_approve=False)
+        monkeypatch.setattr(display.console, "input",
+                            lambda _prompt="": "put it in src/ instead")
+        call = ToolCall(name="write_file", args={"path": "cfg.py", "content": "x = 2\n"},
+                        raw="", start=0, end=0)
+        res = agent._execute_tool(call, interactive=True)
+        assert res.ok is False
+        assert "Rejected by user: put it in src/ instead" in res.output
+        assert not (tmp_path / "cfg.py").exists()
+
+    def test_bare_enter_and_n_reject_without_a_reason(self):
+        assert display._parse_confirm_answer("") == ("no", "")
+        assert display._parse_confirm_answer("N") == ("no", "")
+        assert display._parse_confirm_answer(" y ") == ("yes", "")
+
+
+class TestContextWarningText:
+    def test_compact_warning_carries_no_literal_markup(self, tmp_path):
+        agent = _make_agent(tmp_path)
+        warnings = []
+        with patch("localm.plugins.coder.agent.print_warning", side_effect=warnings.append), \
+             patch.object(type(agent), "_fill_ratio", return_value=0.9):
+            agent._maybe_compact(interactive=True)
+        assert warnings and "/compact" in warnings[0]
+        assert "[bold]" not in warnings[0]
+
+
 class TestToolResultAndCallFormatting:
     def test_failed_tool_prints_error_excerpt_even_when_not_verbose(self, capsys):
         res = ToolResult(

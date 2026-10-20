@@ -632,7 +632,7 @@ ws     ::= [ \t\n\r]*
             if ratio >= _COMPACT_WARN_RATIO and not getattr(self, "_compact_warned", False):
                 print_warning(
                     f"Context is ~{ratio:.0%} full. "
-                    "Use [bold]/compact[/bold] to summarise old turns."
+                    "Use /compact to summarise old turns."
                 )
                 self._compact_warned = True   # warn once per session
         else:

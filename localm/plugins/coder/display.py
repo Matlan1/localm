@@ -601,7 +601,8 @@ def _parse_confirm_answer(raw: str) -> tuple[str, str]:
     for prefix in ("n:", "no:", "n ", "no "):
         if lower.startswith(prefix):
             return "no", s[len(prefix):].strip()
-    return "no", ""
+    # Any other text is a rejection that tells the agent what to do instead.
+    return "no", s
 
 
 def confirm_diff(path_label: str) -> bool:

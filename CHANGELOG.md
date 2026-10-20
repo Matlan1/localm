@@ -12,20 +12,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
-- **CLI coder terminal UI and interactive approval upgrades.** `localm coder` now displays a
-  scrollback-safe inline spinner while waiting for the first token or running tools, shows live
-  line- and character-count progress when the model streams large file writes or patches inside
-  `<tool_call>` blocks, renders `set_todos` as a color-coded terminal checklist, supports inline
-  `@path` and `@path:start-end` context mentions in prompts, coalesces multi-line pastes in the
-  REPL, and expands write/edit/bash approval prompts to `[y/N/a=always/f=full]` (or
-  `[y/N/a=always]` for commands) with optional rejection feedback routed back to the agent.
+- **`localm coder` shows what it is doing.** A live spinner runs while the model thinks, while
+  it writes a file (with the file name and line count) and while a tool runs. `set_todos` shows
+  the task list. Type `@path` or `@path:10-40` to attach a file to your message, and a
+  multi-line paste arrives as one message.
+- **Approval prompts in `localm coder` take more answers.** `a` allows that tool for the rest of
+  the session (for a shell command, that exact command only), `f` shows the full diff, and
+  `n: <reason>` tells the agent why you said no.
 
 ### Fixed
-- **CLI coder console output during file creation, streaming, and tool failures.** New-file
-  previews now cap to a compact preview instead of dumping entire files line by line, streamed
-  assistant responses no longer print a second time as a Markdown panel after completion, and
-  failed tool calls now print a compact error excerpt in normal mode instead of hiding the
-  failure behind `--verbose`.
+- **`localm coder` no longer floods the terminal.** A new file shows a short preview instead of
+  every line, a reply is no longer printed twice, and a failed tool shows the end of its error
+  output without needing `/verbose`. Warnings at the end of a task now appear in the terminal.
 
 - **Image prompts with letters such as ß work with the native image backend on Windows.** A prompt
   containing ß failed with "failed to encode prompt", and letters such as ä, ö and ü reached the
