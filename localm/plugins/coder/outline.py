@@ -23,6 +23,7 @@ import re
 import warnings
 from bisect import bisect_right
 from dataclasses import dataclass
+from typing import Any
 
 from .indexer import _SYMBOL_LANGS, _lang_for_ext
 
@@ -82,12 +83,26 @@ def _py_signature(node: ast.AST) -> str:
     return f"{prefix} {node.name}({ast.unparse(node.args)}){ret}"
 
 
-def _py_start(node: ast.AST) -> int:
-    decorators = getattr(node, "decorator_list", [])
-    return min([node.lineno, *(d.lineno for d in decorators)])
+def _py_start(node: ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef) -> int:
+    return min([node.lineno, *(d.lineno for d in node.decorator_list)])
 
 
-_Match = getattr(ast, "Match", None)
+_Match: Any = getattr(ast, "Match", None)
+_TryStar: Any = getattr(ast, "TryStar", None)
+
+
+def _py_collect_try(node: Any, depth: int, in_class: bool, out: list[OutlineEntry]) -> None:
+    """A ``try`` / ``try*`` statement's body, handlers, else and finally blocks."""
+    _py_collect(node.body, depth, in_class, out)
+    for handler in node.handlers:
+        _py_collect(handler.body, depth, in_class, out)
+    _py_collect(node.orelse, depth, in_class, out)
+    _py_collect(node.finalbody, depth, in_class, out)
+
+
+def _py_collect_match(node: Any, depth: int, in_class: bool, out: list[OutlineEntry]) -> None:
+    for case in node.cases:
+        _py_collect(case.body, depth, in_class, out)
 
 
 def _py_collect(body: list[ast.stmt], depth: int, in_class: bool,
@@ -110,15 +125,10 @@ def _py_collect(body: list[ast.stmt], depth: int, in_class: bool,
             _py_collect(node.orelse, depth, in_class, out)
         elif isinstance(node, (ast.With, ast.AsyncWith)):
             _py_collect(node.body, depth, in_class, out)
-        elif isinstance(node, ast.Try) or type(node).__name__ == "TryStar":
-            _py_collect(node.body, depth, in_class, out)
-            for handler in node.handlers:
-                _py_collect(handler.body, depth, in_class, out)
-            _py_collect(node.orelse, depth, in_class, out)
-            _py_collect(node.finalbody, depth, in_class, out)
+        elif isinstance(node, ast.Try) or (_TryStar is not None and isinstance(node, _TryStar)):
+            _py_collect_try(node, depth, in_class, out)
         elif _Match is not None and isinstance(node, _Match):
-            for case in node.cases:
-                _py_collect(case.body, depth, in_class, out)
+            _py_collect_match(node, depth, in_class, out)
 
 
 _AST_LINE_BREAK = re.compile(r"\r\n|\r|\n")
@@ -363,12 +373,11 @@ def format_outline(outline: Outline, max_chars: int, from_line: int = 1) -> Form
     all fit, the rest are cut from the end and ``next_from`` is the *from_line*
     that continues from the first one left out."""
     rows = [e for e in outline.entries if e.end >= from_line]
-    width = len(str(outline.lines))
     used = 0
     lines: list[str] = []
     next_from: int | None = None
     for e in rows:
-        line = f"{'  ' * e.depth}L{e.start:>{width}}-{e.end:<{width}}  {e.text}"
+        line = f"{'  ' * e.depth}L{e.start}-{e.end}  {e.text}"
         cost = len(line) + (1 if lines else 0)
         if lines and used + cost > max_chars:
             next_from = e.start
