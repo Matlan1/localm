@@ -12,7 +12,7 @@ import re
 import shlex
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import localm.plugins.coder.agent as _agent
 from ..display import (
@@ -97,6 +97,14 @@ class _ExecutionMixin:
         cwd: Path
         restricted: bool
         _audit: AuditLogT
+        always_confirm: set
+        confirm_handler: Any
+
+        @property
+        def auto_approve(self) -> bool: ...
+
+        @property
+        def disabled_tools(self) -> frozenset: ...
 
         def _emit(self, event_type: str, **data) -> None: ...
 
@@ -822,7 +830,8 @@ class _ExecutionMixin:
             if self.confirm_handler is not None:
                 approved = invoke_confirm(
                     self.confirm_handler,
-                    ToolCall(name="run_shell", args={"command": spec.command_text(400)}),
+                    ToolCall(name="run_shell", args={"command": spec.command_text(400)},
+                             raw="", start=0, end=0),
                     agent=self._confirm_agent_label())
             elif interactive:
                 approved = _agent.confirm(

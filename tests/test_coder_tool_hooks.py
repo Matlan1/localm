@@ -80,7 +80,11 @@ def _make_agent(cwd: Path, **kwargs):
 
 
 def _write_call(path: str = "out.txt", content: str = "hello") -> ToolCall:
-    return ToolCall(name="write_file", args={"path": path, "content": content})
+    return _call("write_file", {"path": path, "content": content})
+
+
+def _call(name: str, args: dict) -> ToolCall:
+    return ToolCall(name=name, args=args, raw="", start=0, end=0)
 
 
 def _hooks_toml(event: str, argv: list[str], matcher: str = "write_file",
@@ -340,7 +344,7 @@ def test_invalid_pre_entry_blocks_every_tool_once_trusted(tmp_path):
     proj = _project(tmp_path, '[[hooks.pre_tool_use]]\ncommand = ""\n')
     agent = _trusted_agent(proj)
     res = agent._execute_tool(
-        ToolCall(name="list_dir", args={"path": "."}), interactive=False)
+        _call("list_dir", {"path": "."}), interactive=False)
     assert not res.ok and "is invalid" in str(res.output)
 
 
@@ -397,7 +401,7 @@ def test_post_hook_sees_a_failed_tool(tmp_path):
     proj = _project(tmp_path, _hooks_toml(POST, argv, matcher="read_file"))
     agent = _trusted_agent(proj)
     res = agent._execute_tool(
-        ToolCall(name="read_file", args={"path": "missing.txt"}), interactive=False)
+        _call("read_file", {"path": "missing.txt"}), interactive=False)
     assert not res.ok
     (payload,) = _log(tmp_path, "post")
     assert payload["ok"] is False
@@ -412,7 +416,7 @@ def test_untrusted_pre_hook_never_runs_and_refuses_what_it_matches(tmp_path):
         r1 = agent._execute_tool(_write_call("a.txt"), interactive=False)
         r2 = agent._execute_tool(_write_call("b.txt"), interactive=False)
         other = agent._execute_tool(
-            ToolCall(name="list_dir", args={"path": "."}), interactive=False)
+            _call("list_dir", {"path": "."}), interactive=False)
     assert _log(tmp_path, "pre") == []
     assert not r1.ok and not r2.ok and "not trusted" in str(r1.output)
     assert not (proj / "a.txt").exists() and not (proj / "b.txt").exists()
@@ -438,7 +442,7 @@ def test_restricted_session_never_loads_hooks_even_when_trusted(tmp_path):
     agent = _make_agent(proj, restricted=True)
     assert agent._tool_hooks is None
     res = agent._execute_tool(
-        ToolCall(name="list_dir", args={"path": "."}), interactive=False)
+        _call("list_dir", {"path": "."}), interactive=False)
     assert res.ok and _log(tmp_path, "pre") == []
 
 
@@ -449,7 +453,7 @@ def test_a_restricted_agent_handed_hooks_still_runs_none(tmp_path):
     agent._tool_hooks = ToolHooks.load(proj)
     agent._tool_hooks.trust_for_session()
     res = agent._execute_tool(
-        ToolCall(name="list_dir", args={"path": "."}), interactive=False)
+        _call("list_dir", {"path": "."}), interactive=False)
     assert res.ok and _log(tmp_path, "pre") == []
 
 
@@ -745,7 +749,7 @@ def test_confirmed_writes_need_no_extra_hook_gate(tmp_path):
 def test_unreadable_config_that_mentions_hooks_refuses_every_tool(tmp_path):
     proj = _project(tmp_path, '[[hooks.pre_tool_use]]\ncommand = "x\n')
     agent = _make_agent(proj)
-    res = agent._execute_tool(ToolCall(name="list_dir", args={"path": "."}), interactive=False)
+    res = agent._execute_tool(_call("list_dir", {"path": "."}), interactive=False)
     assert not res.ok and "could not be read" in str(res.output)
 
 
@@ -764,7 +768,7 @@ def test_a_child_in_another_tree_runs_hooks_there(tmp_path):
     parent = _trusted_agent(proj)
     child = _make_agent(other, parent=parent)
     assert child._tool_hooks is parent._tool_hooks
-    res = child._execute_tool(ToolCall(name="list_dir", args={"path": "."}), interactive=False)
+    res = child._execute_tool(_call("list_dir", {"path": "."}), interactive=False)
     assert res.ok
     (rec,) = _log(tmp_path, "pre")
     assert Path(rec["cwd"]).resolve() == other.resolve()
