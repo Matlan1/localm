@@ -299,3 +299,69 @@ class TestCliInterrupt:
         with patch("localm.cli.models.pull_model", return_value=False):
             result = CliRunner().invoke(main, ["pull", "--", "owner/repo:m.gguf"])
         assert result.exit_code == 1
+
+
+class TestReviewedEdges:
+    """Edges found in review: subfolders, the file's own lock, a restart from zero."""
+
+    @pytest.fixture()
+    def models(self, tmp_path, monkeypatch):
+        models = tmp_path / "models"
+        models.mkdir()
+        monkeypatch.setattr(mm, "MODELS_DIR", models)
+        return models
+
+    @staticmethod
+    def _temp(base, rel, size):
+        from huggingface_hub._local_folder import get_local_download_paths
+        inc = get_local_download_paths(base, rel).incomplete_path("e1")
+        inc.parent.mkdir(parents=True, exist_ok=True)
+        f = inc.with_name(f"{inc.stem}.aaaa1111.incomplete")
+        f.write_bytes(b"x" * size)
+        return f
+
+    def test_a_file_inside_a_repo_folder_loses_its_temp_file(self, models):
+        staging = models / pull_mod._REPO_FOLDER_STAGING
+        temp = self._temp(staging, "sub/dir/m.gguf", 70)
+        assert pull_mod.discard_partial_download("owner/repo:sub/dir/m.gguf") == 70
+        assert not temp.exists()
+
+    def test_a_full_repo_download_loses_the_temp_files_in_its_subfolders(self, models):
+        dest = models / "snap"
+        top = self._temp(dest, "model.safetensors", 10)
+        nested = self._temp(dest, "unet/diffusion.safetensors", 20)
+        for f in (top, nested):
+            pull_mod._partial_owner_path(f).write_text(
+                json.dumps({"pid": 2 ** 22 + 12345, "space": None}), encoding="utf-8")
+        assert pull_mod.discard_partial_download("owner/snap", "snap") == 30
+        assert not top.exists() and not nested.exists()
+
+    def test_the_download_lock_is_free_again_after_a_discard(self, models):
+        from huggingface_hub._local_folder import get_local_download_paths
+        self._temp(models, "m.gguf", 5)
+        pull_mod.discard_partial_download("owner/repo:m.gguf")
+        assert pull_mod._lock_file_is_free(
+            get_local_download_paths(models, "m.gguf").lock_path)
+
+    def test_a_restart_from_zero_lowers_the_starting_figure(self, monkeypatch):
+        monkeypatch.setattr(pull_mod, "METER", FakeMeter(transferred=100, rate=10.0))
+        tracker = pull_mod._ByteTracker(total=1000, base=500)
+        assert tracker.sample(on_disk=0)[0] == 100
+
+    def test_a_failing_first_report_does_not_abort_the_download(self, monkeypatch):
+        monkeypatch.delenv("LOCALM_PROGRESS_JSON", raising=False)
+        monkeypatch.setattr(pull_mod, "METER", FakeMeter(transferred=10, rate=1.0))
+
+        def boom(text):
+            raise RuntimeError("sink gone")
+
+        with pull_mod.progress_listener(boom):
+            run = pull_mod._ProgressRun(lambda: 0, 100)
+            run.start()
+            run.finish(succeeded=False)
+
+    def test_the_snapshot_aggregate_bars_can_read_the_bar_they_are_given(self):
+        from huggingface_hub.utils._xet_progress_reporting import _set_aggregate_rate_postfix
+
+        from localm.model_manager._transfer import MeterBar
+        _set_aggregate_rate_postfix(MeterBar(desc="Downloading bytes", unit="B"))

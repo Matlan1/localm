@@ -677,6 +677,7 @@ class _ByteTracker:
         self._disk_rate = RateWindow()
 
     def sample(self, on_disk: int) -> "tuple[int, float | None, int | None]":
+        self._base = min(self._base, on_disk)
         downloaded = max(on_disk, self._base + METER.transferred)
         if self._total:
             downloaded = min(downloaded, self._total)
@@ -717,7 +718,12 @@ class _ProgressRun:
         self._tracker = _ByteTracker(self._total, self._measure())
         if self._bar is not None:
             self._bar.start()
-        self._tick()
+        try:
+            self._tick()
+        except Exception as e:
+            self._failed = True
+            logger.warning("download progress reporting stopped: %s", e)
+            return
         self._thread = threading.Thread(target=self._poll, daemon=True)
         self._thread.start()
 
@@ -2188,30 +2194,55 @@ def _delete_hf_temp_files(base_dir: Path, rels: "list[str] | None") -> int:
     Raises :class:`PullInFlight` when a download of one of *rels* holds its
     download lock. With *rels* None only temp files whose owner is proven gone
     are deleted."""
-    folder = Path(base_dir) / ".cache" / "huggingface" / "download"
-    if not folder.is_dir():
-        return 0
-    prefixes: set[str] | None = None
-    if rels is not None:
-        locks = _download_lock_paths(Path(base_dir), rels)
-        for lock_path in locks.values():
-            if not _lock_file_is_free(lock_path):
-                raise PullInFlight(
-                    "a download of this file is running; stop it before "
-                    "deleting its partial data")
-        prefixes = set(locks)
-    freed = 0
-    for f in list(folder.iterdir()):
-        name = f.name
-        if name.endswith(_PARTIAL_OWNER_SUFFIX):
-            continue
-        if not name.endswith(".incomplete"):
-            continue
-        if prefixes is not None:
-            if name.split(".")[0] not in prefixes:
+    root = Path(base_dir) / ".cache" / "huggingface" / "download"
+    if rels is None:
+        if not root.is_dir():
+            return 0
+        return _unlink_temp_files(
+            [f for f in root.rglob("*.incomplete")
+             if _partial_owner_is_gone(f, lock_held=False)])
+    from huggingface_hub._local_folder import _short_hash
+    from huggingface_hub._local_folder import get_local_download_paths
+    with contextlib.ExitStack() as held:
+        targets: list[tuple[Path, str]] = []
+        for rel in rels:
+            paths = get_local_download_paths(Path(base_dir), rel)
+            if not paths.lock_path.parent.is_dir():
                 continue
-        elif not _partial_owner_is_gone(f, lock_held=False):
-            continue
+            held.enter_context(_hold_download_lock(paths.lock_path))
+            targets.append((paths.metadata_path.parent,
+                            _short_hash(paths.metadata_path.name) + "."))
+        files = []
+        for folder, prefix in targets:
+            if folder.is_dir():
+                files += [f for f in folder.glob("*.incomplete")
+                          if f.name.startswith(prefix)]
+        return _unlink_temp_files(files)
+
+
+@contextlib.contextmanager
+def _hold_download_lock(lock_path: Path):
+    """Hold the file lock at *lock_path* for the block; raises
+    :class:`PullInFlight` when a download holds it."""
+    from filelock import FileLock, Timeout
+    lock = FileLock(str(lock_path), timeout=0)
+    try:
+        lock.acquire(timeout=0)
+    except Timeout as e:
+        raise PullInFlight(
+            "a download of this file is running; stop it before deleting "
+            "its partial data") from e
+    try:
+        yield
+    finally:
+        lock.release()
+
+
+def _unlink_temp_files(files: "list[Path]") -> int:
+    """Delete the temp files *files* and their owner records; returns the bytes
+    freed."""
+    freed = 0
+    for f in files:
         size = _partial_size(f)
         try:
             f.unlink()

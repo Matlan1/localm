@@ -91,9 +91,7 @@ class TransferMeter:
             self._transferred = max(0, self._transferred + int(n))
             if n > 0:
                 self._last_activity = now
-            total = self._transferred
-            rate = self._rate
-        rate.add(total, now)
+            self._rate.add(self._transferred, now)
 
     def add_written(self, n: int) -> None:
         """Count *n* bytes written to the destination file."""
@@ -172,6 +170,10 @@ class MeterBar:
     def update_transfer(self, n=1) -> None:
         if self._role != "ignore":
             METER.add_transferred(int(n or 0))
+
+    @property
+    def format_dict(self) -> dict:
+        return {"rate": None}
 
     def set_postfix_str(self, *args, **kwargs) -> None:
         return None
