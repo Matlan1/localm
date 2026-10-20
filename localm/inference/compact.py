@@ -567,9 +567,11 @@ def compact_messages(
     if target_tokens > 0:
         head_tokens = sum(measure(_text_of(m)) + 4 for m in head)
         keep = target_tokens - head_tokens - reply_tokens - template_margin(limit_tokens)
-        head, older, recent = _split(messages, _tail_count(rest, keep, measure))
+        budget_split = _split(messages, _tail_count(rest, keep, measure))
+        if budget_split[1]:
+            head, older, recent = budget_split
     cut = len(older)
-    if cut <= start:
+    if start and cut <= start:
         return [*head, *_bridge(earlier, rest[:start], rest[start:]),
                 *rest[start:]], True
     fresh = rest[start:cut]
