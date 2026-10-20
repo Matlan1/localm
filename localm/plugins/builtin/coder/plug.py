@@ -30,6 +30,9 @@ Routes (mounted by the engine, auto-scoped to the ``coder`` capability):
   DELETE /api/coder/checkpoints                 - delete one past session
   DELETE /api/coder/projects                    - forget a project, delete its past sessions
   GET    /api/coder/episodes                    - stored lessons for a project
+  GET    /api/coder/hooks                       - a project's tool hooks and their trust
+  POST   /api/coder/hooks/trust                 - trust and remember them
+  POST   /api/coder/hooks/forget                - withdraw that trust
 
 The REPL's own session controls have a web form here for the same reason
 (parity audit O6): /approve, /scope and /verify are the settings route, /cd is
@@ -1946,6 +1949,121 @@ async def coder_episodes_consolidate(request: Request, req: EpisodeTargetRequest
         return consolidate(EpisodeStore(root), complete=_complete)
 
     return await _episode_op(_consolidate)
+
+
+class HooksTrustRequest(BaseModel):
+    """Trust the tool hooks of one project: its folder and the digest of the
+    hooks the user was shown, from GET /api/coder/hooks."""
+    cwd: str
+    digest: str
+
+
+async def _hooks_op(fn):
+    """Run a hooks operation off the event loop; a failure becomes a 5xx that
+    names it."""
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(get_plugin_executor(), fn)
+    except HTTPException:
+        raise
+    except Exception as e:                                     # noqa: BLE001
+        raise HTTPException(
+            500, f"Tool hooks operation failed: {type(e).__name__}: {e}") from e
+
+
+def _load_hooks(root: Path):
+    """The ToolHooks for *root*, or None. An unreadable project config is a 422."""
+    from localm.plugins.coder.hooks import ToolHooks
+    from localm.plugins.coder.project_config import ProjectConfigUnreadable
+    try:
+        return ToolHooks.load(root)
+    except ProjectConfigUnreadable as e:
+        raise HTTPException(422, f"Project config could not be read: {e}") from e
+
+
+@_router.get("/api/coder/hooks")
+async def coder_hooks(request: Request, cwd: str = ""):
+    """The tool hooks the project config nearest *cwd* declares, and whether
+    they are trusted: the web form of the REPL's ``/hooks``.
+
+    Owner-only: trusting hooks lets them run commands on this machine. A
+    non-owner gets ``configured: false`` and nothing else. ``digest`` is what
+    POST /api/coder/hooks/trust must echo back."""
+    if not _is_owner(request):
+        return {"configured": False, "cwd": None}
+    root = _episode_root(cwd)
+
+    def _read():
+        hooks = _load_hooks(root)
+        if hooks is None or not hooks.has_hooks():
+            return {"configured": False, "cwd": str(root),
+                    "warnings": list(hooks.warnings) if hooks else []}
+        return {
+            "configured": True, "cwd": str(root),
+            "config_path": str(hooks.config_path),
+            "trusted": hooks.trusted, "digest": hooks.digest,
+            "warnings": list(hooks.warnings),
+            "hooks": [
+                {"event": s.event, "index": s.index, "matcher": s.matcher,
+                 "command": s.command_text(400), "timeout": s.timeout,
+                 "error": s.error}
+                for s in (*hooks.pre, *hooks.post)
+            ],
+        }
+
+    return await _hooks_op(_read)
+
+
+@_router.post("/api/coder/hooks/trust")
+async def coder_hooks_trust(request: Request, req: HooksTrustRequest):
+    """Trust and remember the project's tool hooks: the web form of
+    ``--trust-hooks`` / ``/hooks trust``.
+
+    409 when the hooks no longer match ``digest`` (they changed after they
+    were shown), so only hooks the user saw are trusted. A running session
+    whose hooks were untrusted picks the trust up at its next matching call."""
+    if not _is_owner(request):
+        raise HTTPException(404, "No tool hooks")
+    root = _episode_root(req.cwd)
+
+    def _trust():
+        from localm.plugins.coder.hook_trust import TrustStoreUnreadable
+        hooks = _load_hooks(root)
+        if hooks is None or not hooks.has_hooks():
+            raise HTTPException(404, "No tool hooks are configured for this project.")
+        if req.digest != hooks.digest:
+            raise HTTPException(
+                409, "The tool hooks changed since they were shown. Review them "
+                     "again before trusting them.")
+        try:
+            hooks.remember_trust()
+        except TrustStoreUnreadable as e:
+            raise HTTPException(500, f"The hook trust record could not be read: {e}") from e
+        return {"trusted": True, "digest": hooks.digest}
+
+    return await _hooks_op(_trust)
+
+
+@_router.post("/api/coder/hooks/forget")
+async def coder_hooks_forget(request: Request, req: EpisodeTargetRequest):
+    """Withdraw the remembered trust for the project's tool hooks: the web form
+    of ``/hooks forget``. Sessions started after this do not run them."""
+    if not _is_owner(request):
+        raise HTTPException(404, "No tool hooks")
+    root = _episode_root(req.cwd)
+
+    def _forget():
+        from localm.plugins.coder.hook_trust import TrustStoreUnreadable, forget_trust
+        from localm.plugins.coder.project_config import find_project_config
+        path = find_project_config(root)
+        if path is None:
+            raise HTTPException(404, "No project config found for this folder.")
+        try:
+            return {"forgotten": forget_trust(path)}
+        except TrustStoreUnreadable as e:
+            raise HTTPException(500, f"The hook trust record could not be read: {e}") from e
+
+    return await _hooks_op(_forget)
 
 
 def register(host) -> None:

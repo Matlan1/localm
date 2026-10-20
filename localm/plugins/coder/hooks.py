@@ -314,6 +314,15 @@ class ToolHooks:
     def trust_for_session(self) -> None:
         self.trusted = True
 
+    def refresh_trust(self) -> bool:
+        """Re-read the trust store for untrusted hooks, so trust granted
+        elsewhere (another session, the GUI) applies. Returns ``trusted``."""
+        if not self.trusted and self.has_hooks():
+            from .hook_trust import is_trusted
+            if is_trusted(self.config_path, self.digest):
+                self.trusted = True
+        return self.trusted
+
     def remember_trust(self) -> None:
         """Trust these hooks now and record it for later sessions. Raises
         OSError or TrustStoreUnreadable when the record cannot be written; the

@@ -523,3 +523,106 @@ def test_hooks_command_trust_and_forget(tmp_path):
     assert agent._tool_hooks.trusted and ToolHooks.load(agent.cwd).trusted
     handle_hooks_command("forget", agent)
     assert not agent._tool_hooks.trusted and not ToolHooks.load(agent.cwd).trusted
+
+
+# --------------------------------------------------------------------------- #
+#  web routes (the GUI's form of /hooks)
+# --------------------------------------------------------------------------- #
+
+def _owner_app(tmp_path, monkeypatch, proj):
+    from fastapi import FastAPI
+    home = tmp_path / ".localm"
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    monkeypatch.setenv("LOCALM_API_KEY", "ownersecret")
+    monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+    import localm.config as _cfg
+    monkeypatch.setattr(_cfg, "HOME_DIR", home)
+    monkeypatch.setattr(_cfg, "MODELS_DIR", home / "models")
+    monkeypatch.setattr(_cfg, "CONFIG_FILE", home / "config.json")
+    monkeypatch.setattr(_cfg, "REGISTRY_FILE", home / "registry.json")
+    from localm.plugins.engine import PluginManager
+    app = FastAPI()
+    PluginManager(app, external_root=tmp_path / "noplugins").install("coder")
+
+    async def switch_model(name):
+        pass
+
+    from localm.plugins.gui.web import attach_gui
+    attach_gui(app, self_url="http://127.0.0.1:9/v1",
+               switch_model=switch_model, active_model=lambda: "m")
+    app.state.root_dir = str(proj)
+    return app, {"Authorization": "Bearer ownersecret"}
+
+
+def test_hooks_routes_show_trust_and_forget(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    argv = _py_hook(tmp_path, "pre", "record(payload)\n")
+    proj = _project(tmp_path, _hooks_toml(PRE, argv))
+    app, owner = _owner_app(tmp_path, monkeypatch, proj)
+    with TestClient(app) as client:
+        got = client.get("/api/coder/hooks", headers=owner, params={"cwd": str(proj)})
+        assert got.status_code == 200, got.text
+        data = got.json()
+        assert data["configured"] and not data["trusted"]
+        assert data["hooks"][0]["event"] == PRE and data["hooks"][0]["matcher"] == "write_file"
+
+        stale = client.post("/api/coder/hooks/trust", headers=owner,
+                            json={"cwd": str(proj), "digest": "0" * 64})
+        assert stale.status_code == 409
+        assert not ToolHooks.load(proj).trusted
+
+        ok = client.post("/api/coder/hooks/trust", headers=owner,
+                         json={"cwd": str(proj), "digest": data["digest"]})
+        assert ok.status_code == 200, ok.text
+        assert ToolHooks.load(proj).trusted
+        assert client.get("/api/coder/hooks", headers=owner,
+                          params={"cwd": str(proj)}).json()["trusted"] is True
+
+        fg = client.post("/api/coder/hooks/forget", headers=owner, json={"cwd": str(proj)})
+        assert fg.status_code == 200 and fg.json()["forgotten"] is True
+        assert not ToolHooks.load(proj).trusted
+
+
+def test_hooks_routes_are_owner_only_and_refuse_unc(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from localm import auth
+    proj = _project(tmp_path, '[[hooks.pre_tool_use]]\ncommand = "x"\n')
+    app, owner = _owner_app(tmp_path, monkeypatch, proj)
+    with TestClient(app) as client:
+        digest = client.get("/api/coder/hooks", headers=owner,
+                            params={"cwd": str(proj)}).json()["digest"]
+        scoped = auth.create_key("phone", ["coder"])
+        sh = {"Authorization": "Bearer %s" % scoped["key"]}
+        seen = client.get("/api/coder/hooks", headers=sh, params={"cwd": str(proj)}).json()
+        assert seen == {"configured": False, "cwd": None}
+        assert client.post("/api/coder/hooks/trust", headers=sh,
+                           json={"cwd": str(proj), "digest": digest}).status_code == 404
+        assert client.post("/api/coder/hooks/forget", headers=sh,
+                           json={"cwd": str(proj)}).status_code == 404
+        assert not ToolHooks.load(proj).trusted
+        unc = client.get("/api/coder/hooks", headers=owner,
+                         params={"cwd": "\\192.0.2.1\share"})
+        assert unc.status_code == 400
+
+
+def test_hooks_route_without_hooks_and_with_a_broken_config(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    proj = _project(tmp_path, 'max_turns = 3\n')
+    app, owner = _owner_app(tmp_path, monkeypatch, proj)
+    with TestClient(app) as client:
+        none = client.get("/api/coder/hooks", headers=owner, params={"cwd": str(proj)})
+        assert none.status_code == 200 and none.json()["configured"] is False
+        (proj / ".localcoder" / "config.toml").write_text("hooks = [", encoding="utf-8")
+        bad = client.get("/api/coder/hooks", headers=owner, params={"cwd": str(proj)})
+        assert bad.status_code == 422
+
+
+def test_a_running_session_picks_up_trust_granted_later(tmp_path):
+    argv = _py_hook(tmp_path, "pre", "sys.stderr.write('late-trust'); sys.exit(2)\n")
+    proj = _project(tmp_path, _hooks_toml(PRE, argv))
+    agent = _make_agent(proj)
+    first = agent._execute_tool(_write_call(), interactive=False)
+    assert not first.ok and "not trusted" in str(first.output)
+    ToolHooks.load(proj).remember_trust()
+    second = agent._execute_tool(_write_call(), interactive=False)
+    assert not second.ok and "late-trust" in str(second.output)
