@@ -341,7 +341,7 @@ def outline_source(text: str, suffix: str) -> Outline:
     The result's method is "unsupported" (and entries empty) for a file type
     with no outline support, so a caller can tell that apart from a file that
     declares nothing."""
-    text = text.removeprefix("﻿")
+    text = text.removeprefix(chr(0xFEFF))
     lang = _lang_of(suffix)
     lines = text.count("\n") + 1
     if lang == "python":
