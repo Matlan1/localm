@@ -2286,11 +2286,11 @@ wheels = [
 
 [[package]]
 name = "triton-windows"
-version = "3.8.0.post28"
+version = "3.8.0.post29"
 source = { registry = "https://pypi.org/simple" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/61/e9/2eab61f500e118d83249b09b10722957f71e551c2b6502135bcfcb32512a/triton_windows-3.8.0.post28-cp312-cp312-win_amd64.whl", hash = "sha256:06435b922ebabbfcb3fb0f4b4b2257a2676dd39cc263a562be356bd58c15c9b8", size = 52810394, upload-time = "2026-08-29T12:13:59.864Z" },
-    { url = "https://files.pythonhosted.org/packages/35/96/9424cb34eb4581de2e2ccdd01266635478f15ecf1586c73e3d4383dd38f3/triton_windows-3.8.0.post28-cp312-cp312-win_arm64.whl", hash = "sha256:3512109cdc21734e51ca3a0f33f273d2970d95a25922d3306e10a8f7813e8e4d", size = 48390004, upload-time = "2026-08-29T12:14:08.7Z" },
+    { url = "https://files.pythonhosted.org/packages/ec/bc/b027bba13beb00cd4993a33b7fa89a84ef3a42ecd05d8a0e346526a7dc80/triton_windows-3.8.0.post29-cp312-cp312-win_amd64.whl", hash = "sha256:937ba2ee53b6e664709898537de3eb9eab427a498c04da58f2bd42e1af93e298", size = 52810080, upload-time = "2026-09-28T21:58:35.034Z" },
+    { url = "https://files.pythonhosted.org/packages/89/54/a450dc8f9daf8df9d86630b1feffc9f19a14d5474f507657a22505a41343/triton_windows-3.8.0.post29-cp312-cp312-win_arm64.whl", hash = "sha256:525bc89392c08d6d8531407e0c4f5b1dff35d9a484647b6e5af616a004dd9d5e", size = 48390313, upload-time = "2026-09-28T21:58:42.016Z" },
 ]
 
 [[package]]
