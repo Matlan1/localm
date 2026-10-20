@@ -236,3 +236,118 @@ class TestDraftContextFollowsTheTarget:
         llm = _llm(8192, offload_kqv=True)
         assert self._source(llm, 8192, True)._context_out_of_step() is False
         assert self._source(llm, 8192, None)._context_out_of_step() is False
+
+
+def _vram_upto(limit, calls):
+    def check(target, current, hint=True):
+        calls.append((target, current, hint))
+        return target <= limit
+    return check
+
+
+def _capacity_api(llm):
+    """A fake api whose decode fails once a position reaches the live context's
+    capacity, and that records (n_ctx, offload_kqv) of every created context."""
+    from tests._fake_batch import batch_backing
+    api, cp = _api()
+    created = []
+
+    def init(_model, params):
+        created.append((params.n_ctx, params.offload_kqv))
+        return 444 + len(created)
+
+    def decode(_ctx, batch):
+        last = batch_backing(batch)["pos"][batch.n_tokens - 1]
+        return 1 if last >= llm._ctx_capacity else 0
+
+    api.llama_init_from_model.side_effect = init
+    api.llama_decode.side_effect = decode
+    return api, cp, created
+
+
+class TestStepReserve:
+    PROMPT = list(range(1, 301))
+
+    def test_a_budget_that_would_push_the_kv_cache_to_ram_starts_with_one_step_in_vram(self):
+        calls = []
+        llm = _llm(4096, vram_check=_vram_upto(4096, calls), cached=[])
+        api, _cp, created = _capacity_api(llm)
+        out = _generate(llm, api, prompt=self.PROMPT, max_new_tokens=4096)
+        assert len(out) == 4096
+        assert llm.last_finish_reason == "length"
+        assert calls[:2] == [(4096, 4096, False), (8192, 4096, False)]
+        assert created == [(8192, False)]
+        assert calls[2:] == [(8192, 4096, True)]
+        assert llm._ctx_capacity == 8192 and llm._offload_kqv is False
+
+    def test_a_budget_that_fits_vram_is_reserved_whole(self):
+        calls = []
+        llm = _llm(4096, vram_check=_vram_upto(8192, calls), cached=[])
+        api, _cp, created = _capacity_api(llm)
+        out = _generate(llm, api, prompt=self.PROMPT, max_new_tokens=4096)
+        assert len(out) == 4096
+        assert created == [(8192, True)]
+        assert calls == [(4096, 4096, False), (8192, 4096, False), (8192, 4096, True)]
+
+    def test_a_vram_context_that_holds_the_budget_is_not_probed(self):
+        calls = []
+        llm = _llm(8192, vram_check=_vram_upto(4096, calls), cached=[])
+        api, _cp, created = _capacity_api(llm)
+        assert len(_generate(llm, api, prompt=self.PROMPT, max_new_tokens=4096)) == 4096
+        assert calls == [] and created == []
+
+    def test_a_small_budget_is_reserved_whole_without_a_probe(self):
+        calls = []
+        llm = _llm(4096, vram_check=_vram_upto(4096, calls), cached=[])
+        api, _cp, created = _capacity_api(llm)
+        assert len(_generate(llm, api, prompt=self.PROMPT, max_new_tokens=400)) == 400
+        assert calls == [] and created == []
+
+    def test_a_ram_context_from_an_earlier_reply_gives_way_to_a_step_in_vram(self):
+        calls = []
+        llm = _llm(12288, offload_kqv=False, vram_check=_vram_upto(4096, calls), cached=[])
+        api, _cp, created = _capacity_api(llm)
+        out = _generate(llm, api, prompt=self.PROMPT, max_new_tokens=4096)
+        assert len(out) == 4096
+        assert created == [(4096, True), (8192, False)]
+
+    def test_a_raising_check_reserves_the_whole_budget(self):
+        def boom(target, current, hint=True):
+            if not hint:
+                raise RuntimeError("probe failed")
+            return False
+        llm = _llm(4096, vram_check=boom, cached=[])
+        api, _cp, created = _capacity_api(llm)
+        assert len(_generate(llm, api, prompt=self.PROMPT, max_new_tokens=4096)) == 4096
+        assert created == [(8192, False)]
+
+    @pytest.mark.parametrize("capacity,offload,throttled,expected", [
+        (4096, True, False, 876),
+        (8192, True, False, 4460),
+        (12288, False, False, 876),
+        (12288, False, True, 4460),
+    ])
+    def test_step_reserve(self, capacity, offload, throttled, expected):
+        llm = _llm(capacity, offload_kqv=offload, vram_check=_vram_upto(4096, []))
+        if throttled:
+            llm._kv_promote_after = float("inf")
+        assert llm._step_reserve(4460, 876) == expected
+
+    def test_no_live_context_counts_as_a_growth(self):
+        llm = _llm(4096, vram_check=_vram_upto(4096, []))
+        llm._ctx_ptr = None
+        assert llm._step_reserve(4460, 876) == 876
+
+
+class TestPromoteToASmallerContext:
+    def test_a_refused_same_size_promotion_moves_to_vram_at_the_needed_size(self):
+        calls = []
+        llm = _llm(12288, offload_kqv=False, vram_check=_vram_upto(8192, calls))
+        assert llm._rightsize_plan(5000) == (8192, True)
+        assert calls == [(12288, 12288, True), (8192, 12288, False)]
+
+    def test_nothing_smaller_fits_either(self):
+        calls = []
+        llm = _llm(12288, offload_kqv=False, vram_check=_vram_upto(4096, calls))
+        assert llm._rightsize_plan(5000) is None
+        assert len(calls) == 2

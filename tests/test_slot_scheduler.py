@@ -80,6 +80,8 @@ class _SimContext:
         self.seq_rms = []
         self.rightsize_plan = None
         self.rightsize_calls = []
+        self.step_choice = None   # (need, step, others) -> cells, or None for need
+        self.step_calls = []
         self.recreate_fail = []
         self.stop = threading.Event()
         self.fail = None          # entries -> rc, or None to decode normally
@@ -104,7 +106,11 @@ class _SimContext:
         return min(t, self.max) if self.max else t
 
     def vram_fit(self, target):
-        return self.vram_fits
+        return self.vram_fits(target) if callable(self.vram_fits) else self.vram_fits
+
+    def step_reserve(self, need, step, others):
+        self.step_calls.append((need, step, others))
+        return need if self.step_choice is None else self.step_choice(need, step, others)
 
     def rightsize(self, need, others):
         self.rightsize_calls.append((need, others))
@@ -1074,3 +1080,129 @@ def test_rightsize_counts_the_other_slots_cached_cells(made):
     ctx.rightsize_calls.clear()
     _collect(sched, PROMPTS[1], 20)
     assert ctx.rightsize_calls[0][1] == cached
+
+
+def _take_step(need, step, others):
+    return step
+
+
+def test_a_budgeted_reply_reserves_one_step_and_still_reaches_its_budget(made):
+    ctx = _SimContext(capacity=256, n_ctx_max=4096, grow=256, vram_fits=lambda t: t <= 768)
+    ctx.step_choice = _take_step
+    sched = made(ctx, 2)
+    rec = _collect(sched, PROMPTS[0], 1000)
+    assert (rec["out"], rec["reason"]) == _reference(PROMPTS[0], 1000)
+    step = len(PROMPTS[0]) + UNLIMITED_STEP + RESERVE_PAD
+    assert ctx.step_calls == [(len(PROMPTS[0]) + 1000 + RESERVE_PAD, step, 0)]
+    assert ctx.recreated == [(768, True), (1280, False)]
+
+
+def test_a_reply_whose_budget_fits_is_reserved_whole(made):
+    ctx = _SimContext(capacity=256, n_ctx_max=4096, grow=256, vram_fits=True)
+    sched = made(ctx, 2)
+    rec = _collect(sched, PROMPTS[0], 1000)
+    assert (rec["out"], rec["reason"]) == _reference(PROMPTS[0], 1000)
+    assert ctx.recreated == [(1280, True)]
+
+
+def test_a_small_budget_never_asks_for_a_step(made):
+    ctx = _SimContext(capacity=4096)
+    ctx.step_choice = _take_step
+    sched = made(ctx, 2)
+    _collect(sched, PROMPTS[0], UNLIMITED_STEP)
+    _collect(sched, PROMPTS[0], 0, sampler=_Sampler(eog_at=3))
+    assert ctx.step_calls == []
+
+
+def test_a_raising_step_check_reserves_the_whole_budget(made):
+    ctx = _SimContext(capacity=256, n_ctx_max=4096, grow=256, vram_fits=True)
+
+    def boom(need, step, others):
+        raise RuntimeError("probe failed")
+    ctx.step_choice = boom
+    sched = made(ctx, 2)
+    rec = _collect(sched, PROMPTS[0], 1000)
+    assert (rec["out"], rec["reason"]) == _reference(PROMPTS[0], 1000)
+    assert ctx.recreated == [(1280, True)]
+
+
+def test_a_request_admitted_beside_a_running_reply_reserves_its_whole_budget(made):
+    ctx = _SimContext(capacity=4096, n_ctx_max=4096)
+    ctx.step_delay = 0.005
+    ctx.step_choice = _take_step
+    sched = made(ctx, 2)
+    first = sched.submit(PROMPTS[0], 100, _Sampler())
+    next(first)
+    rec = _collect(sched, PROMPTS[1], 1000)
+    _drain(first)
+    assert rec["out"] == _reference(PROMPTS[1], 1000)[0]
+    assert ctx.step_calls == []
+
+
+def test_a_promised_reply_grows_beside_another_reply_and_neither_is_cut(made):
+    ctx = _SimContext(capacity=256, n_ctx_max=2048, grow=256, vram_fits=lambda t: t <= 1536)
+    ctx.step_delay = 0.001
+    ctx.step_choice = _take_step
+    sched = made(ctx, 2)
+    first = sched.submit(PROMPTS[0], 900, _Sampler())
+    got = [next(first)]
+    rec = _collect(sched, PROMPTS[1], 700)
+    rest, reason = _drain(first)
+    assert (got + rest, reason) == _reference(PROMPTS[0], 900)
+    assert (rec["out"], rec["reason"]) == _reference(PROMPTS[1], 700)
+    assert ctx.recreated == [(768, True), (1536, True), (1792, False)]
+
+
+def test_a_request_waits_rather_than_take_cells_promised_below_the_ceiling(made):
+    ctx = _SimContext(capacity=256, n_ctx_max=1300, grow=256, vram_fits=lambda t: t <= 1280)
+    ctx.step_delay = 0.001
+    ctx.step_choice = _take_step
+    sched = made(ctx, 2)
+    first = sched.submit(PROMPTS[0], 900, _Sampler())
+    got = [next(first)]
+    results = {}
+    waiter = threading.Thread(
+        target=lambda: _collect(sched, PROMPTS[1], 600, results=results, key="b"),
+        daemon=True)
+    waiter.start()
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and sched.counts()[1] == 0:
+        time.sleep(0.005)
+    assert sched.counts() == (1, 1)
+    rest, reason = _drain(first)
+    assert (got + rest, reason) == _reference(PROMPTS[0], 900)
+    waiter.join(30)
+    assert results["b"]["out"] == _reference(PROMPTS[1], 600)[0]
+
+
+def test_a_reply_with_no_budget_waits_for_cells_promised_to_another(made):
+    ctx = _SimContext(capacity=256, n_ctx_max=1900, grow=256, vram_fits=True)
+    ctx.step_delay = 0.001
+    ctx.step_choice = lambda need, step, others: step + 200
+    sched = made(ctx, 2)
+    first = sched.submit(PROMPTS[0], 900, _Sampler())
+    got = [next(first)]
+    unlimited = sched.submit(PROMPTS[1], 0, _Sampler())
+    results = {}
+    _run_threads([lambda: results.__setitem__("p", _drain(first)),
+                  lambda: results.__setitem__("u", _drain(unlimited))], timeout=60)
+    rest, reason = results["p"]
+    assert (got + rest, reason) == _reference(PROMPTS[0], 900)
+    out, reason = results["u"]
+    assert reason == "length"
+    assert out == _reference(PROMPTS[1], len(out))[0]
+    assert len(PROMPTS[1]) + len(out) >= 1900 - 1
+
+
+def test_a_promised_reply_whose_growth_fails_ends_with_the_error(made):
+    ctx = _SimContext(capacity=256, n_ctx_max=4096, grow=256, vram_fits=lambda t: t <= 768)
+    ctx.step_choice = _take_step
+    ctx.recreate_fail = [(1280, False)]
+    sched = made(ctx, 2)
+    stream = sched.submit(PROMPTS[0], 1000, _Sampler())
+    out = []
+    with pytest.raises(RuntimeError, match="Not enough memory"):
+        for tok in stream:
+            out.append(tok)
+    assert out == _reference(PROMPTS[0], len(out))[0]
+    assert len(out) > UNLIMITED_STEP

@@ -2340,6 +2340,8 @@ class LlamaCpp:
             # If unlimited (<= 0), allocate a modest chunk up front and grow later
             initial_budget = max_new_tokens if max_new_tokens > 0 else 512
             needed = n_prompt + initial_budget + 64
+            # Cells the whole reply needs, for a reply with a budget.
+            full_needed = needed if max_new_tokens > 0 else None
 
             # BOUNDARY LOGGING: between "model loaded" and either a token or a
             # corpse, this worker would otherwise emit nothing at any level, so a
@@ -2376,6 +2378,9 @@ class LlamaCpp:
                 with self._gen_lock:
                     if self._stop.is_set():
                         return
+                    if full_needed is not None:
+                        needed = self._step_reserve(
+                            full_needed, n_prompt + self.RESERVE_STEP + self.RESERVE_PAD)
                     reuse = self._can_reuse_kv(needed)
                     with _ctx():
                         if reuse and self._rightsize_context(prompt_tokens, needed):
@@ -2664,6 +2669,9 @@ class LlamaCpp:
                                         # KV cache full or error.
                                         # Attempt mid-generation context growth if there is headroom.
                                         current_needed = pos + 512
+                                        if full_needed is not None:
+                                            current_needed = self._step_reserve(
+                                                full_needed, current_needed)
                                         target = self._target_ctx(current_needed)
                                         if target > self._ctx_capacity:
                                             grew = True
@@ -3557,9 +3565,10 @@ class LlamaCpp:
         Shrinks to ``_target_ctx(needed + others)`` when that is at most half
         the live capacity, with the KV cache in VRAM unless ``_vram_check``
         answers False. Otherwise, when the live KV cache is in system RAM,
-        moves it to VRAM at the same size once ``_vram_check`` answers True;
-        the check is not asked again for ``_KV_PROMOTE_RETRY_S`` seconds after
-        it is asked.
+        moves it to VRAM at the same size once ``_vram_check`` answers True,
+        or else at ``_target_ctx(needed + others)`` when that is smaller and
+        ``_vram_check`` answers True for it; the check is not asked again for
+        ``_KV_PROMOTE_RETRY_S`` seconds after it is asked.
         Caller holds ``_gen_lock``. ``_vram_check`` may raise."""
         if not self._ctx_ptr or needed > self._ctx_capacity:
             return None
@@ -3577,9 +3586,59 @@ class LlamaCpp:
             self._kv_promote_after = now + self._KV_PROMOTE_RETRY_S
             if check(capacity, capacity) is True:
                 return capacity, True
+            if target < capacity and check(target, capacity, hint=False) is True:
+                return target, True
             return None
         decision = check(target, capacity) if check is not None else None
         return target, decision is not False
+
+    # Cells a budgeted reply reserves at first when its whole budget would put
+    # the KV cache in system RAM (``_step_reserve``), grown as the reply runs.
+    RESERVE_STEP = 512
+    RESERVE_PAD = 64
+
+    def _step_reserve(self, needed: int, step: int, others: int = 0) -> int:
+        """The cells to reserve now for a reply that needs at most *needed*:
+        *step* when a context sized for *needed* would keep its KV cache in
+        system RAM while one sized for *step* keeps it in VRAM, else *needed*.
+
+        When the live context holds *needed*, *others* counts the cells other
+        sequences' caches hold (as in ``_rightsize_plan``), the answer is
+        *needed* without asking ``_vram_check`` while its KV cache is in VRAM
+        or while the promotion check is held off (``_kv_promote_after``).
+        Asks ``_vram_check`` with ``hint=False``, at most twice, *step* first;
+        never asks when the two sizes round to the same context. Never raises:
+        a raising check answers *needed*, logged at INFO. Caller holds
+        ``_gen_lock``."""
+        check = getattr(self, "_vram_check", None)
+        if step >= needed or check is None:
+            return needed
+        capacity = self._ctx_capacity if self._ctx_ptr else 0
+        if self._ctx_ptr and needed <= capacity:
+            if self._offload_kqv is not False or time.monotonic() < self._kv_promote_after:
+                return needed
+            extra = max(0, others)
+        else:
+            extra = 0
+        small = self._target_ctx(step + extra)
+        full = self._target_ctx(needed + extra)
+        if small >= full:
+            return needed
+        try:
+            if check(small, capacity, hint=False) is not True:
+                return needed
+            if check(full, capacity, hint=False) is not False:
+                return needed
+        except Exception as exc:
+            from localm.debuglog import logger
+            logger.info("gguf context: reserving the whole reply, the VRAM check raised %s",
+                        type(exc).__name__)
+            return needed
+        from localm.debuglog import logger
+        logger.info("gguf context: reserving %d of %d cells, a %d-token context keeps the "
+                    "KV cache in VRAM where a %d-token one would not", step, needed,
+                    small, full)
+        return step
 
     def _log_rightsize(self, n_ctx: int, offload_kqv: bool) -> None:
         """Log at INFO that the live context is replaced by one of *n_ctx*

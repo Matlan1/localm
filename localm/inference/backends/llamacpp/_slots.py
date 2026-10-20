@@ -15,14 +15,21 @@ sampler (so a grammar applies to its own sequence only).
 
 Admission reserves ``prompt + budget + RESERVE_PAD`` cells per request
 (``prompt + UNLIMITED_STEP + RESERVE_PAD`` for a reply with no budget, extended
-as it runs), never more than the context ceiling. A request that does not fit
-first takes the cells idle slots keep for prefix reuse (least recently used
+as it runs), never more than the context ceiling. A budgeted request admitted
+while no reply runs reserves ``prompt + UNLIMITED_STEP + RESERVE_PAD`` instead
+when ``ops.step_reserve`` says only that keeps the KV cache in VRAM; it is
+promised its whole reservation and extended as it runs. A request that does not
+fit first takes the cells idle slots keep for prefix reuse (least recently used
 first), then a bigger context, and otherwise waits, FIFO, while the other
-replies run. Growing the context with replies in flight re-decodes their
-cached tokens into the new context, and only happens when the VRAM check says
-the bigger cache fits on the GPU. A reply with no budget that needs more cells
-while other replies hold them pauses until one of those ends; it ends with
-"length" only when every other running reply is paused the same way.
+replies run; it also waits while it would take cells promised to a running
+reply below the ceiling. Growing the context with replies in flight re-decodes
+their cached tokens into the new context, and only happens when the VRAM check
+says the bigger cache fits on the GPU, except to extend a promised reply: that
+grows with the KV cache in system RAM when VRAM is short, and then to the
+whole promise at once. A reply with no budget that needs more cells while
+other replies hold or are promised them pauses until one of those ends; it ends
+with "length" only when every other running reply is paused the same way. A
+promised reply never pauses.
 
 While one native decode runs for ``STEP_BEAT_S`` or longer, a second thread
 repeats the last status to every cancelled reply and, for a decode that carries
@@ -179,6 +186,7 @@ class _Slot:
         self.pending: Optional[int] = None  # emitted token not yet decoded
         self.generated = 0
         self.reserve = 0
+        self.promise = 0                  # the whole reservation while reserve is below it, else 0
         self.first = False                # the next sample is the reply's first
         self.extend = False               # needs more reserved cells before its next decode
         self.room_wait = False            # paused until another reply frees cells
@@ -196,7 +204,7 @@ class SlotScheduler:
     *ops* is the native seam (:class:`LlamaSlotOps` for a loaded model):
     ``lock()``, ``stopped()``, ``capacity()``, ``max_capacity()``,
     ``target_ctx(n)``, ``vram_fit(n)``, ``recreate(n, offload_kqv)``,
-    ``rightsize(need, others)``,
+    ``rightsize(need, others)``, ``step_reserve(need, step, others)``,
     ``n_batch()``, ``decode(entries)``, ``sample(sampler, row)``,
     ``is_eog(tok)``, ``seq_rm(seq, p0, p1)``, ``clear_memory()``,
     ``free_sampler(sampler)``, ``stderr_scope()``, and, for a reply submitted
@@ -509,9 +517,11 @@ class SlotScheduler:
                     self._heartbeat_queued()
                 return
             slot = self._pick(free, stream.prompt)
+            need = stream.reserve
             if all(s.stream is None for s in self._slots):
-                self._rightsize(stream.reserve, slot)
-            fit = self._fit(stream.reserve, slot)
+                need = self._step_need(stream, slot)
+                self._rightsize(need, slot)
+            fit = self._fit(need, slot)
             if fit is _WAIT:
                 with self._cond:
                     self._heartbeat_queued()
@@ -526,7 +536,25 @@ class SlotScheduler:
             if isinstance(fit, BaseException):
                 self._release(stream, _End("error", fit))
                 continue
-            self._assign(slot, stream)
+            self._assign(slot, stream, need)
+
+    def _step_need(self, stream: SlotStream, slot: _Slot) -> int:
+        """The cells a budgeted *stream* reserves at admission while no reply
+        runs: ``ops.step_reserve`` of its whole reservation and
+        ``prompt + UNLIMITED_STEP + RESERVE_PAD``. A raising call answers the
+        whole reservation, logged at INFO."""
+        step = len(stream.prompt) + UNLIMITED_STEP + RESERVE_PAD
+        if stream.budget <= 0 or step >= stream.reserve:
+            return stream.reserve
+        others = sum(len(s.kv) for s in self._slots if s is not slot)
+        try:
+            need = int(self._ops.step_reserve(stream.reserve, step, others))
+        except Exception as exc:
+            from localm.debuglog import logger
+            logger.info("gguf slots: reserving the whole reply, the VRAM check raised %s",
+                        type(exc).__name__)
+            return stream.reserve
+        return need if step <= need <= stream.reserve else stream.reserve
 
     def _pick(self, free: list[_Slot], prompt: list[int]) -> _Slot:
         """The free slot whose cache shares the longest prefix with *prompt*;
@@ -544,12 +572,22 @@ class SlotScheduler:
     def _committed(self) -> int:
         return sum(s.reserve for s in self._slots if s.stream is not None)
 
+    def _owed(self, but: Optional[_Slot] = None) -> int:
+        """Cells promised to running replies (except *but*) beyond their
+        reservations."""
+        return sum(max(0, s.promise - s.reserve) for s in self._slots
+                   if s.stream is not None and s is not but)
+
     def _fit(self, need: int, slot: _Slot) -> Any:
         """True when *need* cells fit beside the active replies (after dropping
         idle caches or growing the context), ``_WAIT`` when the request has to
         wait for active replies, or the exception a failed growth raised."""
         cap = self._ops.capacity()
         committed = self._committed()
+        owed = self._owed()
+        ceiling = self._ops.max_capacity()
+        if owed and ceiling and committed + owed + need > ceiling:
+            return _WAIT
         idle = [s for s in self._slots
                 if s.stream is None and s is not slot and s.kv]
         if committed + need + sum(len(s.kv) for s in idle) <= cap:
@@ -644,9 +682,10 @@ class SlotScheduler:
                     if other.stream is not None:
                         other.stream._put(_HEARTBEAT)
 
-    def _assign(self, slot: _Slot, stream: SlotStream) -> None:
-        """Set up *slot*, already claimed for *stream*, to prefill its prompt:
-        keep the cached prefix the prompt shares, drop the rest."""
+    def _assign(self, slot: _Slot, stream: SlotStream, reserve: int) -> None:
+        """Set up *slot*, already claimed for *stream* with *reserve* cells, to
+        prefill its prompt: keep the cached prefix the prompt shares, drop the
+        rest. The rest of the stream's reservation is promised to it."""
         from localm.debuglog import logger
         keep = min(_common_prefix_len(slot.kv, stream.prompt), len(stream.prompt) - 1)
         if keep <= 0:
@@ -665,7 +704,8 @@ class SlotScheduler:
         slot.extend = False
         slot.room_wait = False
         slot.room_seen = None
-        slot.reserve = stream.reserve
+        slot.reserve = reserve
+        slot.promise = stream.reserve if reserve < stream.reserve else 0
         slot.order = next(self._admissions)
         logger.info("gguf slots: slot %d prefill starting, %d prompt token(s), %d reused",
                     slot.seq, len(stream.prompt), keep)
@@ -801,10 +841,16 @@ class SlotScheduler:
             stream._put(_HEARTBEAT)
 
     def _extend(self, slot: _Slot) -> Any:
-        """Reserve ``UNLIMITED_STEP`` more cells for a reply with no budget.
-        True once reserved, ``_WAIT`` when other running replies hold the cells
-        it needs, False when neither the context nor its ceiling has room."""
-        if slot.stream is None or slot.stream.budget > 0:
+        """Reserve ``UNLIMITED_STEP`` more cells for a reply with no budget, or
+        more of a promised reply's promise (``_extend_promised``). True once
+        reserved, ``_WAIT`` when other running replies hold or are promised
+        the cells it needs, False when neither the context nor its ceiling has
+        room or a growth failed."""
+        if slot.stream is None:
+            return False
+        if slot.promise > slot.reserve:
+            return self._extend_promised(slot)
+        if slot.stream.budget > 0:
             return False
         ceiling = self._ops.max_capacity()
         want = slot.reserve + UNLIMITED_STEP
@@ -815,6 +861,9 @@ class SlotScheduler:
         extra = want - slot.reserve
         cap = self._ops.capacity()
         committed = self._committed()
+        owed = self._owed(slot)
+        if owed and ceiling and committed + extra + owed > ceiling:
+            return _WAIT
         idle = [s for s in self._slots if s.stream is None and s.kv]
         if committed + extra > cap:
             for other in sorted(idle, key=lambda s: s.last_used):
@@ -837,6 +886,44 @@ class SlotScheduler:
             for other in sorted(idle, key=lambda s: s.last_used):
                 self._drop_cache(other)
                 if committed + extra + sum(len(s.kv) for s in idle) <= cap:
+                    break
+        slot.reserve = want
+        return True
+
+    def _extend_promised(self, slot: _Slot) -> bool:
+        """Reserve up to ``UNLIMITED_STEP`` more of *slot*'s promise, growing
+        the context beside other running replies when it must: with the KV
+        cache in VRAM when the VRAM check allows the bigger context, else with
+        it in system RAM and to the whole promise at once. False when the
+        ceiling has no room or a growth failed (``_grow`` ended the replies)."""
+        want = min(slot.reserve + UNLIMITED_STEP, slot.promise)
+        cap = self._ops.capacity()
+        committed = self._committed()
+        idle = [s for s in self._slots if s.stream is None and s.kv]
+        if committed + want - slot.reserve > cap:
+            for other in sorted(idle, key=lambda s: s.last_used):
+                self._drop_cache(other)
+            total = committed + want - slot.reserve
+            target = self._ops.target_ctx(total)
+            if target < total:
+                return False
+            decision = self._ops.vram_fit(target)
+            if decision is False and want < slot.promise:
+                want = slot.promise
+                total = committed + want - slot.reserve
+                target = self._ops.target_ctx(total)
+                if target < total:
+                    return False
+            try:
+                self._grow(target, decision is not False)
+            except Exception:
+                return False
+            if slot.stream is None:
+                return False
+        elif committed + want - slot.reserve + sum(len(s.kv) for s in idle) > cap:
+            for other in sorted(idle, key=lambda s: s.last_used):
+                self._drop_cache(other)
+                if committed + want - slot.reserve + sum(len(s.kv) for s in idle) <= cap:
                     break
         slot.reserve = want
         return True
@@ -883,6 +970,7 @@ class SlotScheduler:
         slot.room_wait = False
         slot.room_seen = None
         slot.reserve = 0
+        slot.promise = 0
         slot.last_used = self._clock()
         with self._cond:
             slot.stream = None
@@ -952,6 +1040,9 @@ class LlamaSlotOps:
         if plan is not None:
             llm._log_rightsize(*plan)
         return plan
+
+    def step_reserve(self, need: int, step: int, others: int) -> int:
+        return self._llm._step_reserve(need, step, others)
 
     def n_batch(self) -> int:
         return min(self.capacity() or BATCH_CAP, BATCH_CAP)
