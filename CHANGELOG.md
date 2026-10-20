@@ -13,6 +13,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ### Added
 
+- **Pause, resume and cancel a model download in the GUI.** The Add a model card has Pause (stops
+  and keeps what is saved, Resume continues from it) and Cancel (stops and deletes the partial
+  download), the download line shows the steady speed and time left, and the Activity list has a
+  Stop button for a running operation.
 - **Ctrl-C in `localm pull` stops cleanly.** What has been downloaded is kept, and the message
   says to run the same command again to continue from there.
 
