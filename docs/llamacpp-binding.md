@@ -81,8 +81,8 @@ moved, `load_mode` inserted, three booleans folded into it), then inserted a
 `tensor_read_lazy` until b10679), so localm binds
 `LlamaModelParamsV1` (<= lemonade b1288 / upstream b10103),
 `LlamaModelParamsV2` (lemonade b1307 / upstream b10105..b10649) and
-`LlamaModelParamsV3` (upstream >= b10653; lemonade b1342, built from upstream
-b11513, is V3) and picks one per loaded library at load time. There is deliberately no bare `LlamaModelParams` name - go through
+`LlamaModelParamsV3` (upstream >= b10653; lemonade b1349, built from upstream
+b11719, is V3) and picks one per loaded library at load time. There is deliberately no bare `LlamaModelParams` name - go through
 `_abi.model_params_class()` / `_api.llama_model_default_params()`.
 
 | Offset | Type | V1 field | V2 field | V3 field | Default |
@@ -121,7 +121,7 @@ ggml-org b11480 then inserted a `size_t moe_cache_size` (device cache in bytes
 for MoE experts kept in host memory, default 0 = disabled) directly after
 `type_v`; b11479 is the last release without it. Every field from
 `abort_callback` onward moved 8 bytes later, which is `LlamaContextParamsV3`
-(the bundled amd-rocm build, lemonade b1342 / upstream b11513, has it).
+(the bundled amd-rocm build, lemonade b1349 / upstream b11719, has it).
 No bare `LlamaContextParams` name - go through `_abi.context_params_class()` /
 `_api.llama_context_default_params()`.
 
