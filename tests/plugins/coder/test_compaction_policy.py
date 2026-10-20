@@ -486,3 +486,14 @@ def test_a_result_quoting_a_tool_result_header_drops_as_one_result(proj, home):
     assert agent._drop_old_tool_output(0) == 1
     stub = agent._messages[2]["content"]
     assert stub.count("<tool_result") == 1 and 'name="read_file"' in stub
+
+
+def test_a_sub_agent_task_is_not_pinned_as_a_user_request(proj, home):
+    parent = _agent(proj, _Backend(window=16384))
+    child = _agent(proj, _Backend(window=16384), parent=parent)
+    with patch.object(type(child), "_loop", return_value="done"):
+        child.run_task("a task the parent model wrote")
+    with patch.object(type(parent), "_loop", return_value="done"):
+        parent.run_task("a task the user typed")
+    assert child._pinned_requests == []
+    assert parent._pinned_requests == ["a task the user typed"]
