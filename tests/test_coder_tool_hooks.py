@@ -52,6 +52,13 @@ def _log(tmp_path: Path, name: str) -> list[dict]:
     return [json.loads(line) for line in p.read_text(encoding="utf-8").splitlines()]
 
 
+def _py_hook_noread(tmp_path: Path, name: str, body: str) -> list[str]:
+    """An argv running a Python hook script that never reads its stdin."""
+    script = tmp_path / f"{name}.py"
+    script.write_text("import sys\n" + textwrap.dedent(body), encoding="utf-8")
+    return [sys.executable, str(script)]
+
+
 def _project(tmp_path: Path, hooks_toml: str) -> Path:
     proj = tmp_path / "proj"
     (proj / ".localcoder").mkdir(parents=True)
@@ -124,11 +131,17 @@ def test_invalid_post_entry_is_dropped_with_a_warning():
     assert len(warnings) == 1 and "will not run" in warnings[0]
 
 
-def test_unknown_event_and_non_table_hooks():
-    _, _, warnings = parse_hooks({"pretooluse": []})
+def test_unknown_event_and_non_table_hooks_block_every_tool():
+    pre, _, warnings = parse_hooks({"pretooluse": []})
     assert any("unknown event 'pretooluse'" in w for w in warnings)
+    assert pre[0].error and "pretooluse" in pre[0].error and pre[0].matches("list_dir")
     pre, _, warnings = parse_hooks("nope")
     assert pre[0].error and pre[0].matches("list_dir")
+
+
+def test_matcher_whitespace_is_ignored():
+    (spec,), _, _ = parse_hooks({"pre_tool_use": [{"matcher": " write_file ", "command": "x"}]})
+    assert spec.matches("write_file")
 
 
 def test_matcher_is_a_full_match_on_the_tool_name():
@@ -601,7 +614,7 @@ def test_hooks_routes_are_owner_only_and_refuse_unc(tmp_path, monkeypatch):
                            json={"cwd": str(proj)}).status_code == 404
         assert not ToolHooks.load(proj).trusted
         unc = client.get("/api/coder/hooks", headers=owner,
-                         params={"cwd": "\\192.0.2.1\share"})
+                         params={"cwd": r"\\192.0.2.1\share"})
         assert unc.status_code == 400
 
 
@@ -626,3 +639,147 @@ def test_a_running_session_picks_up_trust_granted_later(tmp_path):
     ToolHooks.load(proj).remember_trust()
     second = agent._execute_tool(_write_call(), interactive=False)
     assert not second.ok and "late-trust" in str(second.output)
+
+
+# --------------------------------------------------------------------------- #
+#  review fixes
+# --------------------------------------------------------------------------- #
+
+def test_timeout_holds_when_the_hook_ignores_a_large_stdin(tmp_path):
+    argv = _py_hook_noread(tmp_path, "deaf", "import time; time.sleep(4); sys.exit(0)\n")
+    spec = HookSpec(event=PRE, index=1, command=tuple(argv), timeout=1.0)
+    payload = {"tool": "write_file", "args": {"content": "x" * 2_000_000}}
+    t0 = time.monotonic()
+    out = run_hook(spec, payload, tmp_path)
+    assert time.monotonic() - t0 < 3.5
+    assert out.timed_out and out.returncode is None
+
+
+def test_cancel_holds_when_the_hook_ignores_a_large_stdin(tmp_path):
+    argv = _py_hook_noread(tmp_path, "deaf", "import time; time.sleep(30)\n")
+    spec = HookSpec(event=PRE, index=1, command=tuple(argv), timeout=60)
+    start = time.monotonic()
+    out = run_hook(spec, {"tool": "t", "args": {"content": "x" * 2_000_000}}, tmp_path,
+                   cancel=lambda: time.monotonic() - start > 0.5)
+    assert out.cancelled and time.monotonic() - start < 10
+
+
+def test_an_escaped_grandchild_holding_the_pipe_does_not_hold_the_call(tmp_path):
+    argv = _py_hook_noread(tmp_path, "escape", """\
+        import subprocess
+        flags = 0x00000008 if sys.platform == "win32" else 0
+        subprocess.Popen([sys.executable, "-c", "import time; time.sleep(20)"],
+                         stdout=1, stderr=2, creationflags=flags,
+                         start_new_session=sys.platform != "win32")
+        sys.stderr.write("left a child behind")
+        sys.stderr.flush()
+        sys.exit(2)
+        """)
+    spec = HookSpec(event=PRE, index=1, command=tuple(argv), timeout=30)
+    t0 = time.monotonic()
+    out = run_hook(spec, {"tool": "t"}, tmp_path)
+    assert time.monotonic() - t0 < 10
+    assert out.returncode == 2 and "left a child behind" in out.stderr
+
+
+def test_hook_output_is_capped(tmp_path):
+    from localm.plugins.coder import hooks as hooks_mod
+    argv = _py_hook_noread(tmp_path, "loud", "sys.stderr.write('e' * 3_000_000); sys.exit(2)\n")
+    spec = HookSpec(event=PRE, index=1, command=tuple(argv), timeout=30)
+    out = run_hook(spec, {"tool": "t"}, tmp_path)
+    assert out.returncode == 2
+    assert len(out.stderr) == hooks_mod._OUTPUT_CAP
+
+
+@pytest.mark.parametrize("handler_answer", [None, True, False])
+def test_hooks_get_run_shells_gate_when_writes_are_unconfirmed(tmp_path, handler_answer):
+    argv = _py_hook(tmp_path, "pre", "record(payload)\n")
+    proj = _project(tmp_path, _hooks_toml(PRE, argv))
+    agent = _trusted_agent(proj, auto_approve=True, always_confirm={"run_shell"})
+    if handler_answer is not None:
+        agent.confirm_handler = MagicMock(return_value=handler_answer)
+    res = agent._execute_tool(_write_call(), interactive=False)
+    if handler_answer is True:
+        assert res.ok and len(_log(tmp_path, "pre")) == 1
+        call = agent.confirm_handler.call_args.args[0]
+        assert call.name == "run_shell" and "pre.py" in call.args["command"]
+    else:
+        assert not res.ok and not (proj / "out.txt").exists()
+        assert _log(tmp_path, "pre") == []
+        expected = "--yes allows both" if handler_answer is None else "declined"
+        assert expected in str(res.output)
+
+
+def test_post_hook_skipped_under_the_shell_gate(tmp_path):
+    argv = _py_hook(tmp_path, "post", "record(payload); sys.exit(2)\n")
+    proj = _project(tmp_path, _hooks_toml(POST, argv))
+    agent = _trusted_agent(proj, auto_approve=True, always_confirm={"run_shell"})
+    with patch("localm.plugins.coder.agent.print_warning") as warn:
+        res = agent._execute_tool(_write_call(), interactive=False)
+    assert res.ok and _log(tmp_path, "post") == []
+    assert any("did not run because" in c.args[0] for c in warn.call_args_list)
+
+
+def test_disabled_shell_with_unconfirmed_writes_refuses_hooks(tmp_path):
+    argv = _py_hook(tmp_path, "pre", "record(payload)\n")
+    proj = _project(tmp_path, _hooks_toml(PRE, argv))
+    agent = _trusted_agent(proj, auto_approve=True,
+                           disabled_tools=frozenset({"run_shell"}))
+    res = agent._execute_tool(_write_call(), interactive=False)
+    assert not res.ok and "run_shell is disabled" in str(res.output)
+    assert _log(tmp_path, "pre") == []
+
+
+def test_confirmed_writes_need_no_extra_hook_gate(tmp_path):
+    from localm.plugins.coder.agent.constants import _UNDOABLE_TOOLS
+    argv = _py_hook(tmp_path, "pre", "record(payload)\n")
+    proj = _project(tmp_path, _hooks_toml(PRE, argv))
+    agent = _trusted_agent(proj, auto_approve=True,
+                           always_confirm=set(_UNDOABLE_TOOLS) | {"run_shell"})
+    agent.confirm_handler = MagicMock(return_value=True)
+    res = agent._execute_tool(_write_call(), interactive=False)
+    assert res.ok and len(_log(tmp_path, "pre")) == 1
+    assert [c.args[0].name for c in agent.confirm_handler.call_args_list] == ["write_file"]
+
+
+def test_unreadable_config_that_mentions_hooks_refuses_every_tool(tmp_path):
+    proj = _project(tmp_path, '[[hooks.pre_tool_use]]\ncommand = "x\n')
+    agent = _make_agent(proj)
+    res = agent._execute_tool(ToolCall(name="list_dir", args={"path": "."}), interactive=False)
+    assert not res.ok and "could not be read" in str(res.output)
+
+
+def test_unreadable_config_without_hooks_loads_none(tmp_path):
+    proj = _project(tmp_path, 'max_turns = \n')
+    agent = _make_agent(proj)
+    assert agent._tool_hooks is None
+
+
+def test_a_child_in_another_tree_runs_hooks_there(tmp_path):
+    argv = _py_hook(tmp_path, "pre",
+                    "record({'cwd': os.getcwd(), 'pd': payload['project_dir']})\n")
+    proj = _project(tmp_path, _hooks_toml(PRE, argv, matcher="list_dir"))
+    other = tmp_path / "isolated-tree"
+    other.mkdir()
+    parent = _trusted_agent(proj)
+    child = _make_agent(other, parent=parent)
+    assert child._tool_hooks is parent._tool_hooks
+    res = child._execute_tool(ToolCall(name="list_dir", args={"path": "."}), interactive=False)
+    assert res.ok
+    (rec,) = _log(tmp_path, "pre")
+    assert Path(rec["cwd"]).resolve() == other.resolve()
+    assert Path(rec["pd"]).resolve() == other.resolve()
+
+
+def test_forget_that_cannot_write_still_stops_the_hooks(tmp_path):
+    from localm.plugins.coder.cli.hooks_cli import handle_hooks_command
+    argv = _py_hook(tmp_path, "pre", "record(payload)\n")
+    proj = _project(tmp_path, _hooks_toml(PRE, argv))
+    agent = _trusted_agent(proj)
+    with patch("localm.plugins.coder.hook_trust.forget_trust",
+               side_effect=OSError("disk full")):
+        handle_hooks_command("forget", agent)
+    assert ToolHooks.load(proj).trusted
+    res = agent._execute_tool(_write_call(), interactive=False)
+    assert not res.ok and "not trusted" in str(res.output)
+    assert _log(tmp_path, "pre") == []

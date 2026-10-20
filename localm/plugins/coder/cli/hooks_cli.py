@@ -75,6 +75,7 @@ def resolve_hook_trust(agent, *, trust_flag: bool, can_prompt: bool) -> None:
         hooks.trust_for_session()
         print_info("Tool hooks trusted for this session.")
     else:
+        hooks.revoke()
         hooks.claim_untrusted_report()
         print_warning("Tool hooks not trusted: none of them run, and a tool call a "
                       "pre_tool_use hook would check is refused (/hooks trust to "
@@ -101,7 +102,7 @@ def handle_hooks_command(arg: str, agent) -> None:
         return
     if sub == "forget":
         from ..hook_trust import TrustStoreUnreadable, forget_trust
-        hooks.trusted = False
+        hooks.revoke()
         try:
             forget_trust(hooks.config_path)
         except (OSError, TrustStoreUnreadable) as e:
