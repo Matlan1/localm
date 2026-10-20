@@ -211,6 +211,19 @@ class TestSingleSlot:
         assert llm._decode_refresh is None
         assert llm._decode_samples is None
 
+    def test_a_reply_without_prompt_cache_on_a_slotted_model_is_judged(self):
+        import contextlib
+        llm = _llm()
+        llm._slots = MagicMock()
+        llm._slots.exclusive.return_value = contextlib.nullcontext()
+        api, _cp = _api(llm)
+        _generate(llm, api, cost=0.02, cache_prompt=False)
+        _generate(llm, api, cost=0.2, cache_prompt=False)
+        assert llm._slots.exclusive.call_count == 2
+        assert llm._decode_refresh is not None
+        _generate(llm, api, cost=0.02, cache_prompt=False)
+        assert api.llama_init_from_model.call_count == 1
+
     def test_a_speculating_reply_counts_main_decodes_not_tokens(self):
         llm = _llm()
         api, _cp = _api(llm, sample_cost=0.005)
