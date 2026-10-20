@@ -370,16 +370,49 @@ def test_pe_imports_reads_a_real_extension_modules_import_table():
     assert len(names) == len(set(names))
 
 
-_WOW64_DLL = Path(r"C:/Windows/SysWOW64/version.dll")
+def _pe_image(magic: int, imports: list[str], delayed: list[str]) -> bytes:
+    """A minimal PE image (PE32 for magic 0x10B, PE32+ for 0x20B) with one section
+    holding an import table naming *imports* and a delay-load table naming *delayed*."""
+    import struct
+    opt_size = 224 if magic == 0x10B else 240
+    dirs_at = 96 if magic == 0x10B else 112
+    va, raw = 0x1000, 0x400
+    names, name_rva = b"", {}
+    strings_at = 20 * (len(imports) + 1) + 32 * (len(delayed) + 1)
+    for n in imports + delayed:
+        name_rva[n] = va + strings_at + len(names)
+        names += n.encode() + b"\0"
+    body = b"".join(struct.pack("<IIIII", 0, 0, 0, name_rva[n], 0) for n in imports) + b"\0" * 20
+    body += b"".join(struct.pack("<8I", 1, name_rva[n], 0, 0, 0, 0, 0, 0) for n in delayed) + b"\0" * 32
+    body += names
+    opt = bytearray(opt_size)
+    struct.pack_into("<H", opt, 0, magic)
+    struct.pack_into("<I", opt, dirs_at - 4, 16)
+    struct.pack_into("<II", opt, dirs_at + 8 * 1, va, 20 * (len(imports) + 1))
+    struct.pack_into("<II", opt, dirs_at + 8 * 13, va + 20 * (len(imports) + 1), 32 * (len(delayed) + 1))
+    section = b".idata\0\0" + struct.pack("<IIII", len(body), va, len(body), raw) + b"\0" * 16
+    head = bytearray(0x40)
+    head[:2] = b"MZ"
+    struct.pack_into("<I", head, 0x3C, 0x40)
+    image = bytes(head) + b"PE\0\0" + struct.pack("<HHIIIHH", 0x14C, 1, 0, 0, 0, opt_size, 0)
+    image += bytes(opt) + section
+    return image + b"\0" * (raw - len(image)) + body
 
 
-@pytest.mark.skipif(not _WOW64_DLL.is_file(), reason="needs a 32-bit Windows system DLL")
-def test_pe_imports_reads_a_32_bit_image():
-    data = _WOW64_DLL.read_bytes()
-    pe = int.from_bytes(data[0x3C:0x40], "little")
-    assert int.from_bytes(data[pe + 24:pe + 26], "little") == 0x10B
-    names = confirm.pe_imports(_WOW64_DLL)
-    assert names and all(n.lower().endswith(".dll") for n in names)
+@pytest.mark.parametrize("magic", [0x10B, 0x20B])
+def test_pe_imports_reads_normal_and_delay_load_tables_of_pe32_and_pe32_plus(tmp_path, magic):
+    path = tmp_path / "plugin.dll"
+    path.write_bytes(_pe_image(magic, ["KERNEL32.dll", "cudart64_12.dll"], ["nvcuda.dll", "KERNEL32.dll"]))
+    assert confirm.pe_imports(path) == ["KERNEL32.dll", "cudart64_12.dll", "nvcuda.dll"]
+
+
+def test_pe_imports_keeps_the_normal_imports_when_the_delay_table_is_unmappable(tmp_path):
+    import struct
+    data = bytearray(_pe_image(0x20B, ["a.dll"], ["b.dll"]))
+    struct.pack_into("<I", data, 0x40 + 24 + 112 + 8 * 13, 0x7FFF0000)
+    path = tmp_path / "plugin.dll"
+    path.write_bytes(bytes(data))
+    assert confirm.pe_imports(path) == ["a.dll"]
 
 
 def test_pe_imports_is_empty_for_anything_that_is_not_a_pe_image(tmp_path):
