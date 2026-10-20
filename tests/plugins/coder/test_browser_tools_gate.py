@@ -83,15 +83,24 @@ class TestTheModelIsNotOfferedThem:
                  patch("localm.plugins.coder.agent.load_memory", return_value=""):
                 PM.build.return_value.file_count.return_value = 0
                 PM.build.return_value.truncated = False
-                Agent(backend, cwd=tmp_path, self_verify=False,
-                      mode=SessionMode.LOG, auto_approve=True, **kw)
-            return set(backend.given or [])
+                agent = Agent(backend, cwd=tmp_path, self_verify=False,
+                              mode=SessionMode.LOG, auto_approve=True, **kw)
+            return set(backend.given or []), agent
 
-        names_off = build()
-        names_on = build(browser_enabled=True)
+        def declared_after_search(agent):
+            agent._activate_tools(_BROWSER_TOOLS)
+            return {d["function"]["name"] for d in agent._native_tool_defs()}
+
+        names_off, agent_off = build()
+        names_on, agent_on = build(browser_enabled=True)
         assert names_off, "the backend was handed no tools at all"
         assert not (names_off & _BROWSER_TOOLS), sorted(names_off & _BROWSER_TOOLS)
-        assert _BROWSER_TOOLS <= names_on, sorted(_BROWSER_TOOLS - names_on)
+        # Browser tools are deferred: declared once search_tools returns them,
+        # and never while the capability is off.
+        assert "search_tools" in names_on
+        assert not (declared_after_search(agent_off) & _BROWSER_TOOLS)
+        on = declared_after_search(agent_on)
+        assert _BROWSER_TOOLS <= on, sorted(_BROWSER_TOOLS - on)
 
 
 class TestEachToolRechecks:

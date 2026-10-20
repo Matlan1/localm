@@ -136,7 +136,7 @@ def test_foreign_tool_is_deferred_and_its_block_leaves_the_prompt():
         assert f"## {name}" not in str(sp)
         # Not repeated in OTHER TOOLS: foreign tools have their own section.
         assert f"- {name} - " not in str(sp)
-        assert untrusted_spans_of(sp) == []
+        assert not untrusted_spans_of(sp)
 
 
 def test_foreign_tool_keeps_its_full_untrusted_block_when_search_is_disabled():
@@ -197,6 +197,16 @@ def test_no_match_lists_the_deferred_names_and_activates_nothing():
     assert s.activated == []
     assert "No tool matches" in r.output
     assert "git_commit" in r.output and "## " not in r.output
+
+
+def test_no_match_listing_with_a_foreign_name_is_fenced():
+    with patch.dict(TOOL_REGISTRY, {}, clear=False):
+        name = _register_mcp(name="mcp_srv_odd")
+        r = tool_search_tools(CWD, query="zzqqxx", _session=_session())
+        assert name in r.output
+        assert r.untrusted_output is True
+    r = tool_search_tools(CWD, query="zzqqxx", _session=_session())
+    assert getattr(r, "untrusted_output", False) is False
 
 
 def test_empty_query_and_missing_session_are_errors():
@@ -299,6 +309,19 @@ def test_native_requests_declare_core_plus_activated_tools(tmp_path):
                          **agent._llm_kwargs())
     assert "git_commit" in _declared(body)
     assert "git_push" not in _declared(body)
+
+
+def test_small_family_native_declares_every_enabled_tool_but_search_tools(tmp_path):
+    from localm.plugins.coder.backends.http import HTTPBackend
+    backend = HTTPBackend("http://127.0.0.1:9/v1", "phi-3-mini", native_tools=True,
+                          verify=False)
+    agent = _agent(tmp_path, backend=backend)
+    names = _declared(backend._body([{"role": "user", "content": "x"}], stream=False,
+                                    **agent._llm_kwargs()))
+    assert DEFERRED_TOOLS <= set(names) | agent.disabled_tools
+    assert "git_commit" in names
+    assert "search_tools" not in names
+    assert "search_tools" not in agent._system_prompt
 
 
 def test_a_child_sharing_the_backend_does_not_change_the_parents_declared_tools(tmp_path):

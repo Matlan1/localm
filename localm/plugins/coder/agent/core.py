@@ -1006,10 +1006,15 @@ class Agent(
 
     def _native_tool_defs(self) -> list:
         """The OpenAI-format tool definitions this session declares: every
-        enabled tool except deferred ones search_tools has not activated."""
-        from ..prompts import deferred_tool_names
+        enabled tool except deferred ones search_tools has not activated. For a
+        small-family model nothing is deferred and search_tools is left out,
+        matching its system prompt."""
+        from ..prompts import deferred_tool_names, detect_model_family
+        family_id = getattr(self, "_family_id", "") or self._model_name
         disabled = self.disabled_tools
-        hidden = deferred_tool_names(disabled) - self._activated_tools
+        hidden = deferred_tool_names(disabled, family_id) - self._activated_tools
+        if family_id and detect_model_family(family_id) == "small":
+            hidden = hidden | {"search_tools"}
         return [d for d in _build_openai_tool_defs()
                 if d.get("function", {}).get("name") not in disabled | hidden]
 

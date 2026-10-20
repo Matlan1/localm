@@ -105,7 +105,8 @@ def tool_search_tools(cwd: Path, query: str | None = None, _session=None,
         listing = ", ".join(deferred) if deferred else "none"
         head = (f"No enabled tool named: {', '.join(missing)}." if missing
                 else f"No tool matches {q!r}.")
-        return ToolResult.success(
+        foreign = any(getattr(cands[n], "untrusted_docs", False) is True for n in deferred)
+        return (_ForeignDocsResult if foreign else ToolResult).success(
             f"{head} Tools listed without their usage: {listing}. "
             'Try other keywords, or "select:<name>".',
             summary="no matching tool")

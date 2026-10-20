@@ -154,16 +154,19 @@ def _first_sentence(description) -> str:
     return str(description).split(". ")[0].rstrip(".")
 
 
-def deferred_tool_names(disabled: frozenset = frozenset()) -> frozenset:
+def deferred_tool_names(disabled: frozenset = frozenset(),
+                        model_name: str = "") -> frozenset:
     """The enabled tools documented on demand rather than in full: empty when
-    ``search_tools`` is not registered or is in *disabled* (then every enabled
-    tool is documented in full), else every enabled tool ``is_deferred``
-    reports."""
+    ``search_tools`` is not registered or is in *disabled*, or when
+    *model_name* is of the small family (then every enabled tool is documented
+    in full), else every enabled tool ``is_deferred`` reports."""
     from .agent.constants import expand_shell_disable
     from .tools import TOOL_REGISTRY
     from .tools.registry import TOOL_SEARCH_TOOL, is_deferred
     disabled = expand_shell_disable(disabled)
     if TOOL_SEARCH_TOOL not in TOOL_REGISTRY or TOOL_SEARCH_TOOL in disabled:
+        return frozenset()
+    if model_name and detect_model_family(model_name) == "small":
         return frozenset()
     return frozenset(n for n, t in TOOL_REGISTRY.items()
                      if n not in disabled and is_deferred(n, t))
