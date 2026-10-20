@@ -13,7 +13,11 @@ The map includes:
   - Per-source-file: top-level symbol names (functions, classes, exports)
 
 The whole thing is kept under ~3 000 characters so it doesn't dominate
-context.  When the agent writes/edits a file, the map is refreshed for
+context.  A project that fits is listed file by file.  A larger one is
+rendered in two tiers: a directory summary that counts every file the walk
+found (up to _MAX_WALK_FILES), then per-file detail for the shallowest indexed
+files that fit; only _MAX_FILE_COUNT files are read and indexed in detail.
+When the agent writes/edits a file, the map is refreshed for
 that file only (cheap incremental update).
 
 Alongside the forward index (what a file defines) each file also carries a
@@ -40,6 +44,7 @@ when nothing is dirty.
 
 from __future__ import annotations
 
+import heapq
 import json
 import os
 import re
@@ -95,9 +100,16 @@ _TEXT_EXTS: frozenset[str] = frozenset({
     ".lock", ".cfg", ".ini", ".conf",
 })
 
-_MAX_MAP_CHARS  = 3_000   # soft cap on the whole map string
-_MAX_FILE_COUNT = 300     # stop scanning after this many files
+_MAX_MAP_CHARS  = 3_000   # cap on the whole map string
+_MAX_FILE_COUNT = 300     # files indexed in detail (symbols, line counts, call sites)
+_MAX_WALK_FILES = 20_000  # files the directory walk counts before it stops
 _MAX_SYMBOLS    = 12      # max symbol names shown per file
+
+# Share of _MAX_MAP_CHARS the directory tier of a two-tier map may use; the file
+# tier gets whatever the directory tier leaves.
+_DIR_TIER_SHARE = 0.5
+# Characters kept free at the end of a two-tier map for its closing line.
+_FOOTER_RESERVE = 160
 
 # Wall-clock cap (seconds) on the startup scan. When it is hit, the map is marked
 # truncated. Overridable per call and via the coder_index_timeout config key;
@@ -119,6 +131,38 @@ def _lang_for_ext(ext: str) -> str:
     per-file passes can never drift out of sync with each other.
     """
     return _SYMBOL_LANGS.get(ext) or ("text" if ext in _TEXT_EXTS else "unknown")
+
+
+def _is_indexable_ext(ext: str) -> bool:
+    """Whether a file with lowercased suffix *ext* is counted in the map: a known
+    language or text type, or no suffix at all, or a lock file."""
+    return _lang_for_ext(ext) != "unknown" or ext in ("", ".lock")
+
+
+def _breadth_order(items, path_of) -> list:
+    """*items* ordered shallowest first; within one depth, round-robin across
+    directories (every directory's first file before any directory's second), ties
+    by path. *path_of* maps an item to its path relative to the project root.
+
+    Spreads a limited number of detail slots over the whole tree instead of
+    spending them all on the alphabetically first directories."""
+    by_path = sorted(items, key=lambda it: (len(path_of(it).parts), path_of(it)))
+    taken: dict[Path, int] = {}
+    ranked: list[tuple[int, int, int]] = []
+    for idx, it in enumerate(by_path):
+        rel = path_of(it)
+        rank = taken.get(rel.parent, 0)
+        taken[rel.parent] = rank + 1
+        ranked.append((len(rel.parts), rank, idx))
+    ranked.sort()
+    return [by_path[idx] for _depth, _rank, idx in ranked]
+
+
+def _dir_key(rel_parent: Path) -> str:
+    """The key a file's parent directory is filed under: a POSIX path relative to
+    the project root, "" for the root itself."""
+    key = rel_parent.as_posix()
+    return "" if key == "." else key
 
 
 # ---------------------------------------------------------------------------
@@ -343,6 +387,14 @@ class ProjectMap:
     # signal, because a listdir sweep cannot tell a never-a-candidate file apart
     # from one run_shell just created.
     files_capped: bool = False
+    # True when the directory walk itself stopped early (the wall-clock deadline or
+    # _MAX_WALK_FILES), so even the per-directory counts are a lower bound.
+    walk_capped: bool = False
+    # Files the walk counted but build() did not index in detail because
+    # max_files was reached, as POSIX paths relative to the root. They appear in
+    # the directory tier of to_context_string() and nowhere else; refresh_file()
+    # removes a path from here when it indexes that file.
+    unindexed_paths: set[str] = field(default_factory=set)
     # Set by mark_dirty() after a tool that can write files with no resolvable
     # `path` arg (run_shell). Consumed by _rescan_if_dirty(), which every read
     # (to_context_string / file_count) calls first, so N shell calls before the
@@ -363,17 +415,18 @@ class ProjectMap:
               deadline_s: float | None = _BUILD_DEADLINE_S,
               on_progress=None,
               cache_path: Path | None = None) -> ProjectMap:
-        """Scan *root* and summarise up to *max_files* files.
+        """Scan *root*: index up to *max_files* files in detail and count the rest.
 
         Walks with ``os.walk`` and PRUNES uninteresting directories in place
         (hidden, ``_SKIP_DIRS``, gitignored) so it never descends into
-        ``node_modules`` / ``.git`` or a huge root like ``C:\\``. Candidates are
-        collected with bounded headroom and
-        ONLY that bounded subset is sorted, so a giant tree cannot make startup
-        hang on a full materialise-and-sort. A wall-clock *deadline_s* (None to
-        disable) caps even a pathological walk; *on_progress*, if given, is
-        called with the running candidate count. Either limit sets
-        ``truncated`` so the map (and the model) shows the index is partial.
+        ``node_modules`` / ``.git`` or a huge root like ``C:\\``. Up to
+        ``_MAX_WALK_FILES`` candidates are collected by name alone (no read), and
+        the first *max_files* of them in ``_breadth_order`` (shallowest first,
+        round-robin across directories) are read and indexed in detail; every
+        other candidate is only recorded (``unindexed_paths``). A wall-clock *deadline_s* (None to disable) caps even a
+        pathological walk; *on_progress*, if given, is called with the running
+        candidate count. Indexing fewer files than were found sets ``truncated``
+        and ``files_capped``; a walk cut short also sets ``walk_capped``.
 
         When *cache_path* is given, this is ALSO the entry point for the
         cross-session cache: a usable cache is reconciled and returned directly,
@@ -393,9 +446,8 @@ class ProjectMap:
         gi_patterns = _load_gitignore_patterns(root)
         start = time.monotonic()
         # Collect a bounded set of candidate files, then sort only those. Headroom
-        # over max_files because some candidates are dropped below (binary or
-        # unreadable).
-        candidate_cap = max(max_files * 4, max_files + 50)
+        # over max_files because some candidates are dropped below (unreadable).
+        candidate_cap = max(_MAX_WALK_FILES, max_files * 4, max_files + 50)
         candidates: list[Path] = []
         hit_cap = False
         root_resolved = root.resolve()
@@ -414,7 +466,7 @@ class ProjectMap:
 
         for dirpath, dirnames, filenames in os.walk(root):
             if deadline_s is not None and (time.monotonic() - start) > deadline_s:
-                pm.truncated = pm.files_capped = True
+                pm.truncated = pm.files_capped = pm.walk_capped = True
                 break
             # Prune in place so os.walk never DESCENDS into these dirs. Sorted for
             # a deterministic traversal, so the candidate subset is stable.
@@ -435,9 +487,11 @@ class ProjectMap:
                     continue
                 if _is_ignored(rel, gi_patterns):
                     continue
+                if not _is_indexable_ext(abs_path.suffix.lower()):
+                    continue                       # binary: counted nowhere
                 candidates.append(abs_path)
                 if len(candidates) >= candidate_cap:
-                    pm.truncated = pm.files_capped = True
+                    pm.truncated = pm.files_capped = pm.walk_capped = True
                     hit_cap = True
                     break
             if on_progress is not None:
@@ -449,9 +503,11 @@ class ProjectMap:
                 break
 
         count = 0
-        for abs_path in sorted(candidates):
+        ordered = _breadth_order(candidates, lambda p: p.relative_to(root))
+        for pos, abs_path in enumerate(ordered):
             if count >= max_files:
-                pm.truncated = pm.files_capped = True
+                if pm._tally_unindexed(ordered[pos:]):
+                    pm.truncated = pm.files_capped = True
                 break
             try:
                 rel = abs_path.relative_to(root)
@@ -472,10 +528,6 @@ class ProjectMap:
             ext  = abs_path.suffix.lower()
             lang = _lang_for_ext(ext)
 
-            # Skip truly binary files fast
-            if lang == "unknown" and ext not in ("", ".lock"):
-                continue
-
             try:
                 text  = abs_path.read_text(encoding="utf-8", errors="ignore")
                 lines = text.count("\n") + (1 if text and not text.endswith("\n") else 0)
@@ -492,9 +544,24 @@ class ProjectMap:
                                          mtime=st.st_mtime, size=st.st_size, refs=refs))
             count += 1
 
+        pm.files.sort(key=lambda f: f.path)
         if cache_path is not None:
             pm.save_cache(cache_path)
         return pm
+
+    def _tally_unindexed(self, abs_paths) -> int:
+        """Record the files at *abs_paths* in ``unindexed_paths`` without reading
+        them, and return how many were recorded. A symbolic link (including a
+        dangling one or one leaving the root) is not recorded: the files build()
+        indexes in detail are checked for that, and the count must not include
+        what detail indexing would have dropped."""
+        added = 0
+        for abs_path in abs_paths:
+            if os.path.islink(abs_path):
+                continue
+            self.unindexed_paths.add(abs_path.relative_to(self.root).as_posix())
+            added += 1
+        return added
 
     # ------------------------------------------------------------------
     #  Cross-session cache: persist the built map, reconcile it against the
@@ -514,6 +581,8 @@ class ProjectMap:
             "cached_at": time.time(),
             "truncated": self.truncated,
             "files_capped": self.files_capped,
+            "walk_capped": self.walk_capped,
+            "unindexed": sorted(self.unindexed_paths),
             "files": [
                 {"path": str(f.path), "lang": f.lang, "lines": f.lines,
                  "symbols": f.symbols, "mtime": f.mtime, "size": f.size,
@@ -547,9 +616,21 @@ class ProjectMap:
             ]
         except (KeyError, TypeError, ValueError):
             return None
+        files_capped = bool(data.get("files_capped", False))
+        unindexed = data.get("unindexed")
+        if unindexed is None:
+            # A capped map written before the directory tier existed does not
+            # record the files it left out: rebuild rather than present it as whole.
+            if files_capped:
+                return None
+            unindexed = []
+        if not isinstance(unindexed, list) or not all(isinstance(p, str) for p in unindexed):
+            return None
         return cls(root=root, files=files,
                    truncated=bool(data.get("truncated", False)),
-                   files_capped=bool(data.get("files_capped", False)))
+                   files_capped=files_capped,
+                   walk_capped=bool(data.get("walk_capped", False)),
+                   unindexed_paths=set(unindexed))
 
     @classmethod
     def load_cached_and_reconcile(cls, root: Path, cache_path: Path,
@@ -617,6 +698,7 @@ class ProjectMap:
         lang = _lang_for_ext(ext)
 
         self.files = [f for f in self.files if f.path != rel]
+        self.unindexed_paths.discard(rel.as_posix())
 
         try:
             st = abs_path.stat()
@@ -746,20 +828,137 @@ class ProjectMap:
 
         lines: list[str] = [f"## Codebase map  ({shown_root})"]
         chars_used = len(lines[0])
+        flat_fits = not self.unindexed_paths
 
+        if flat_fits:
+            for f in self.files:
+                line = f.one_line()
+                if chars_used + len(line) + 1 > _MAX_MAP_CHARS:
+                    flat_fits = False
+                    break
+                lines.append(line)
+                chars_used += len(line) + 1
+
+        if flat_fits:
+            if self.truncated:
+                lines.append("  (index truncated - some files not shown)")
+            return "\n".join(lines)
+
+        self.truncated = True
+        return self._render_two_tier(shown_root)
+
+    # ------------------------------------------------------------------
+    #  Two-tier render: a directory summary of EVERY counted file, then
+    #  per-file detail for as many indexed files as the budget allows.
+    # ------------------------------------------------------------------
+
+    def _dir_rollup(self):
+        """Per-directory totals over indexed and unindexed files.
+
+        Returns ``(total, langs, children)``: for each directory key (see
+        ``_dir_key``; "" is the root) the recursive file count, the recursive
+        {language: count}, and the set of its immediate subdirectory keys."""
+        total: dict[str, int] = {}
+        langs: dict[str, dict[str, int]] = {}
+        children: dict[str, set[str]] = {}
+
+        def add(dir_key: str, by_lang: dict[str, int]) -> None:
+            key = dir_key
+            while True:
+                tot_langs = langs.setdefault(key, {})
+                for lang, n in by_lang.items():
+                    tot_langs[lang] = tot_langs.get(lang, 0) + n
+                    total[key] = total.get(key, 0) + n
+                if key == "":
+                    return
+                parent = key.rpartition("/")[0]
+                children.setdefault(parent, set()).add(key)
+                key = parent
+
+        own: dict[str, dict[str, int]] = {}
         for f in self.files:
+            by_lang = own.setdefault(_dir_key(f.path.parent), {})
+            by_lang[f.lang] = by_lang.get(f.lang, 0) + 1
+        for rel_path in self.unindexed_paths:
+            by_lang = own.setdefault(rel_path.rpartition("/")[0], {})
+            lang = _lang_for_ext(os.path.splitext(rel_path)[1].lower())
+            by_lang[lang] = by_lang.get(lang, 0) + 1
+        for dir_key, by_lang in own.items():
+            add(dir_key, by_lang)
+        return total, langs, children
+
+    @staticmethod
+    def _dir_row(key: str, count: int, by_lang: dict[str, int], hidden: int) -> str:
+        depth = key.count("/")
+        name = key.rpartition("/")[2]
+        top = sorted(by_lang.items(), key=lambda kv: (-kv[1], kv[0]))[:3]
+        mix = ", ".join(f"{lang} {n}" for lang, n in top)
+        more = f"  (+{hidden} subdirs)" if hidden else ""
+        return f"{'  ' * (depth + 1)}{name}/  {count} files  [{mix}]{more}"
+
+    def _render_two_tier(self, shown_root: str) -> str:
+        total, langs, children = self._dir_rollup()
+        n_files = total.get("", 0)
+        n_dirs = len(total) - (1 if "" in total else 0)
+        partial = (" The directory walk stopped early, so counts are a lower bound."
+                   if self.walk_capped else "")
+        out: list[str] = [
+            f"## Codebase map  ({shown_root})",
+            f"{n_files} files in {n_dirs} directories; {len(self.files)} indexed in "
+            f"detail (shallowest first).{partial} Go deeper with tree(path), "
+            "outline_file(path), grep, find_references.",
+            "Directories (recursive file counts):",
+        ]
+        used = sum(len(line) + 1 for line in out)
+
+        # Greedy: largest directories first, a directory only once its parent is
+        # shown, until the directory tier's share of the budget is spent.
+        dir_budget = used + int((_MAX_MAP_CHARS - used) * _DIR_TIER_SHARE)
+        shown: set[str] = set()
+        heap = [(-total[c], c) for c in children.get("", ())]
+        heapq.heapify(heap)
+        while heap:
+            _neg, key = heapq.heappop(heap)
+            row_len = len(self._dir_row(key, total[key], langs[key],
+                                        len(children.get(key, ())))) + 16
+            if used + row_len > dir_budget:
+                continue
+            shown.add(key)
+            used += row_len
+            for child in children.get(key, ()):
+                heapq.heappush(heap, (-total[child], child))
+
+        dir_lines: list[str] = []
+        for key in sorted(shown, key=lambda k: k.split("/")):
+            hidden = len(children.get(key, set()) - shown)
+            dir_lines.append(self._dir_row(key, total[key], langs[key], hidden))
+        top_hidden = len(children.get("", set()) - shown)
+        if top_hidden:
+            dir_lines.append(f"  (+{top_hidden} more top-level directories)")
+        out.extend(dir_lines)
+        used = sum(len(line) + 1 for line in out)
+
+        out.append("Files:")
+        used += len("Files:") + 1
+        listed = 0
+        for f in _breadth_order(self.files, lambda f: f.path):
             line = f.one_line()
-            if chars_used + len(line) + 1 > _MAX_MAP_CHARS:
-                lines.append("  … (truncated - use list_dir / search_files to explore further)")
-                self.truncated = True
+            if used + len(line) + 1 > _MAX_MAP_CHARS - _FOOTER_RESERVE:
                 break
-            lines.append(line)
-            chars_used += len(line) + 1
+            out.append(line)
+            used += len(line) + 1
+            listed += 1
 
-        if self.truncated:
-            lines.append("  (index truncated - some files not shown)")
-
-        return "\n".join(lines)
+        unlisted = len(self.files) - listed
+        unindexed_n = len(self.unindexed_paths)
+        parts = []
+        if unlisted:
+            parts.append(f"{unlisted} indexed file(s) not listed")
+        if unindexed_n:
+            parts.append(f"{unindexed_n} file(s) not indexed in detail")
+        if parts:
+            out.append(f"  … {'; '.join(parts)} - use tree / outline_file / grep")
+        return "\n".join(out)
 
     def file_count(self) -> int:
         self._rescan_if_dirty()

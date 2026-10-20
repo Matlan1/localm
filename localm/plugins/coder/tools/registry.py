@@ -59,6 +59,7 @@ from .browser import (
     tool_browser_screenshot,
 )
 from .rag import tool_rag_list_collections, tool_rag_search
+from .outline import tool_outline_file
 from .references import tool_find_references
 from .tasks import tool_read_todos, tool_set_todos
 
@@ -96,6 +97,7 @@ class ToolDef:
 # and every dynamically-registered MCP, plugin or skill tool.
 SAFE_RESTRICTED_TOOLS: frozenset[str] = frozenset({
     "read_file", "list_dir", "tree", "grep", "search_files", "find_references",
+    "outline_file",
     "write_file", "edit_file", "edit_files", "patch_file", "search_replace",
     "edit_notebook_cell",
     "git_status", "git_diff", "git_log",
@@ -309,6 +311,22 @@ TOOL_REGISTRY: dict[str, ToolDef] = {
             "max_per_file":     {"type": "int", "description": "Matches shown per file (0 = all; default 20)",       "required": False},
             "max_output_lines": {"type": "int", "description": "Output lines before stopping (0 = no cap; default 300)", "required": False},
             "max_file_bytes":   {"type": "int", "description": "Skip files larger than this (0 = no cap; default 4 MB)",  "required": False},
+        },
+    ),
+    "outline_file": ToolDef(
+        name="outline_file",
+        fn=tool_outline_file,
+        description=(
+            "List the classes, functions and methods a source file declares, "
+            "each with its exact line span (L<first>-<last>). Use it on a large "
+            "file before read_file, then read only the span you need with "
+            "read_file(path, offset, limit). Python is parsed exactly; other "
+            "languages are scanned by pattern and the result is labelled "
+            "approximate."
+        ),
+        params={
+            "path": {"type": "string", "description": "Source file path (relative to cwd)", "required": True},
+            "from_line": {"type": "int", "description": "List only declarations ending at or after this 1-based line; use it to continue an outline that was cut (optional)", "required": False},
         },
     ),
     "find_references": ToolDef(

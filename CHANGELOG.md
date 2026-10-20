@@ -25,6 +25,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   PATH, a write or edit to a `.py` file appends up to 10 `ruff` findings (unused imports,
   undefined names) to the result so the agent can fix them in the same turn. Off with
   `diagnostics = false` in `.localcoder/config.toml`.
+- **The coder sees the shape of a large project and of a large file.** A new `outline_file` tool lists a
+  source file's classes, functions and methods with their exact line spans (Python is parsed; other
+  languages are scanned by pattern and labelled approximate), so the agent can read just the part it
+  needs. On a project with more than 300 files the codebase map is now a directory summary of every
+  file found plus detail for the shallowest files, instead of stopping after the first 300.
 
 ### Changed
 
