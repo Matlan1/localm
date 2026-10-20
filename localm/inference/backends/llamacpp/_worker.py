@@ -76,6 +76,7 @@ class GgufWorker(VramSizingMixin):
         diffusion_steps: Optional[int] = None,
         diffusion_max_tokens: Optional[int] = None,
         n_parallel: int = 1,
+        kv_cache_type: Optional[str] = None,
     ) -> None:
         self.model_path = model_path
         self.mmproj_path = mmproj_path
@@ -121,6 +122,8 @@ class GgufWorker(VramSizingMixin):
         # recurrent-state VRAM charge counts one copy per slot asked for.
         self.n_parallel = n_parallel
         self.parallel_copies = max(1, int(n_parallel or 1))
+        # The parent's KV cache element type, None for llama.cpp's default (f16).
+        self.kv_cache_type = kv_cache_type
         self._llm = None
         self._loaded = False
         self._ram_kv_hint_shown = False
@@ -294,6 +297,7 @@ class GgufWorker(VramSizingMixin):
                 ("spec_draft_model", self.spec_draft_model),
                 ("diffusion_steps", self.diffusion_steps),
                 ("diffusion_max_tokens", self.diffusion_max_tokens),
+                ("kv_cache_type", self.kv_cache_type),
             ) if value is not None}
         if self.n_parallel and self.n_parallel > 1:
             optional["n_parallel"] = self.n_parallel

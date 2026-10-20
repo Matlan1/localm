@@ -954,6 +954,31 @@ class TestVramEstimate:
         assert data["held"] == estimate_vram(22 * _GB, 8192, 16, n_layers=32)["needed"]
         assert data["held"] < estimate_vram(22 * _GB, 8192, 32, n_layers=32)["needed"]
 
+    def test_the_saved_kv_cache_type_sizes_the_estimate(
+            self, gui_app, tmp_path, monkeypatch):
+        from localm.config import DEFAULT_CONFIG
+        from localm.sysstats import estimate_vram
+        cfg = dict(DEFAULT_CONFIG, kv_cache_type="q8_0")
+        with patch("localm.config.load_config", return_value=cfg):
+            data = self._running_estimate(gui_app, tmp_path, monkeypatch, None,
+                                          {"n_ctx": 8192, "n_gpu_layers": 99})
+        f16 = estimate_vram(22 * _GB, 8192, 99, n_layers=32)
+        q8 = estimate_vram(22 * _GB, 8192, 99, n_layers=32, kv_cache_type="q8_0")
+        assert q8["kv_cache"] < f16["kv_cache"]
+        assert data["kv_cache"] == q8["kv_cache"]
+
+    def test_the_running_load_is_held_at_its_own_kv_cache_type(
+            self, gui_app, tmp_path, monkeypatch):
+        from localm.sysstats import estimate_vram
+        engine = self._engine()
+        engine.kv_cache_type = "q8_0"
+        data = self._running_estimate(gui_app, tmp_path, monkeypatch, engine,
+                                      {"n_ctx": 4096, "n_gpu_layers": 99})
+        assert data["held"] == estimate_vram(22 * _GB, 8192, 32, n_layers=32,
+                                             kv_cache_type="q8_0")["needed"]
+        assert data["kv_cache"] == estimate_vram(22 * _GB, 4096, 99,
+                                                 n_layers=32)["kv_cache"]
+
     def test_a_model_that_is_not_loaded_holds_nothing(
             self, gui_app, tmp_path, monkeypatch):
         data = self._running_estimate(gui_app, tmp_path, monkeypatch, None,

@@ -420,9 +420,13 @@ jobs:
         run: echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
       - name: Install uv
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+      # The optional stacks are installed so basedpyright type-checks the modules
+      # that use torch, transformers, av, pywebview and playwright against their
+      # real types. torch comes first, from the CPU index.
       - name: Install
         run: |
-          uv export --quiet --locked --no-emit-project --extra dev --extra rag -o "$RUNNER_TEMP/requirements.txt"
+          pip install --require-hashes --no-deps -r .github/requirements/torch-cpu.txt
+          uv export --quiet --locked --no-emit-project --prune torch --extra dev --extra rag --extra hf --extra voice --extra browser --extra desktop -o "$RUNNER_TEMP/requirements.txt"
           pip install --require-hashes --no-deps -r "$RUNNER_TEMP/requirements.txt"
           pip install --no-deps -e .
       - name: Lint (ruff)

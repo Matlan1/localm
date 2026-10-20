@@ -1475,7 +1475,7 @@ class TestEveryCountingCallIsClassified:
       correct for every shape but that one.
     """
 
-    EXPECTED_CALLS = 13
+    EXPECTED_CALLS = 14
 
     @staticmethod
     def _server_files():

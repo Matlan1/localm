@@ -805,7 +805,7 @@ class VramSizingMixin:
             arch, nextn_layers = gguf_nextn_predict_layers(path)
             if arch in MTP_GRAPH_ARCHITECTURES and nextn_layers > 0:
                 kv_per_token = gguf_mtp_draft_kv_bytes_per_token(
-                    path, nextn_layers)
+                    path, nextn_layers, getattr(self, "kv_cache_type", None))
                 self._mtp_draft_kv_per_token_cached = int(kv_per_token)
                 charge = self.n_ctx * kv_per_token + self._mtp_draft_compute_bytes(path)
         except Exception as exc:
@@ -917,7 +917,8 @@ class VramSizingMixin:
                                in _GGUF_ENCODER_DECODER_ARCHITECTURES)
             if (path is not None and path.is_file() and not encoder_decoder
                     and not self._draft_model_rejected_by_metadata(path)):
-                kv_per_token = int(gguf_kv_bytes_per_token(path))
+                kv_per_token = int(gguf_kv_bytes_per_token(
+                    path, getattr(self, "kv_cache_type", None)))
                 meta = _gguf_split_layout_meta(path)
                 n_vocab = meta[1] if meta else 0
                 self._draft_kv_per_token_cached = kv_per_token
@@ -1269,8 +1270,9 @@ class VramSizingMixin:
         3. ``_bytes_per_token(file size)`` - the size-class heuristic, used
            only for a file whose header cannot be read.
 
-        Step 2 is memoised per instance: it reads a bounded prefix of the file.
-        Returns 0 for a model that keeps no KV cache at all (a diffusion
+        Steps 2 and 3 are in the instance's ``kv_cache_type`` (f16 when unset);
+        step 1 already is. Step 2 is memoised per instance: it reads a bounded
+        prefix of the file. Returns 0 for a model that keeps no KV cache at all (a diffusion
         language model, see :meth:`_keeps_no_kv_cache`); never 0 otherwise -
         step 3's floor is 16 KB."""
         if self._keeps_no_kv_cache():
@@ -1278,11 +1280,12 @@ class VramSizingMixin:
         accurate = getattr(getattr(self, "_llm", None), "kv_bytes_per_token", 0)
         if accurate:
             return int(accurate)
+        kv_cache_type = getattr(self, "kv_cache_type", None)
         cached = getattr(self, "_gguf_kv_bpt", None)
         if cached is None:
             from localm.model_manager.gguf import gguf_kv_bytes_per_token
             try:
-                cached = int(gguf_kv_bytes_per_token(Path(self.model_path)))
+                cached = int(gguf_kv_bytes_per_token(Path(self.model_path), kv_cache_type))
             except Exception as exc:  # contracted not to raise - surface if it does
                 from localm.debuglog import logger as _dbg
                 _dbg.debug("gguf KV-shape probe failed (%s); falling back to the "
@@ -1291,7 +1294,8 @@ class VramSizingMixin:
             self._gguf_kv_bpt = cached
         if cached:
             return cached
-        return self._bytes_per_token(self._model_bytes())
+        from localm.kv_cache import kv_bytes_for_type
+        return kv_bytes_for_type(self._bytes_per_token(self._model_bytes()), kv_cache_type)
 
     def _keeps_no_kv_cache(self) -> bool:
         """True for a model llama.cpp creates no KV cache for: a diffusion
@@ -1459,7 +1463,8 @@ class VramSizingMixin:
                 return n
         return None
 
-    def _check_context_fit(self, n_ctx: int, current_ctx: int = 0) -> Optional[bool]:
+    def _check_context_fit(self, n_ctx: int, current_ctx: int = 0,
+                           hint: bool = True) -> Optional[bool]:
         """Decide WHERE the KV cache for a context of *n_ctx* tokens must live -
         wired as LlamaCpp's ``vram_check`` hook, consulted by
         ``_prefill_fresh_context()`` before it (re)creates a bigger context.
@@ -1479,6 +1484,9 @@ class VramSizingMixin:
         is charged. Weights and the compute buffers are already resident and do
         not change with the context length (n_batch is unchanged), so neither is
         charged.
+
+        With *hint* False the once-per-session system-RAM warning is not
+        emitted; the answer is the same.
         """
         # Gate on the RESOLVED offload count, not the raw configured
         # n_gpu_layers: a CPU-only auto load (effective 0) still carries
@@ -1529,7 +1537,7 @@ class VramSizingMixin:
             return True                                # KV cache fits VRAM - keep it there
         # Does not fit VRAM: keep the FULL window and put the KV cache in system
         # RAM. The hint is emitted once per loaded-model session.
-        if not self._ram_kv_hint_shown:
+        if hint and not self._ram_kv_hint_shown:
             self._ram_kv_hint_shown = True
             from localm.debuglog import logger as _dbg
             # The quoted GB figure can still be the raw, cross-process-blind

@@ -17,6 +17,7 @@ from localm.console import console
 from localm.debuglog import logger
 from localm.inference.backends.base import LOADING_MODEL_STATUS, BaseBackend
 from localm.inference.mmap_setting import describe_mmap, resolve_use_mmap
+from localm.kv_cache import resolve_kv_cache_type
 from localm.inference.parallel_setting import resolve_parallel_slots
 from localm.textnorm import scrub_stream
 
@@ -222,6 +223,7 @@ def create_backend(
             n_gpu_layers_auto=bool(cfg.get("n_gpu_layers_auto", True)),
             n_cpu_moe=int(cfg.get("n_cpu_moe", 0) or 0),
             use_mmap=resolve_use_mmap(cfg),
+            kv_cache_type=resolve_kv_cache_type(cfg),
             mtp_enabled=source == "mtp",
             spec_source=source,
             spec_draft_tokens=_resolve_spec_draft_tokens(cfg, spec_draft_tokens),
@@ -507,6 +509,14 @@ class Engine:
         or None for a backend that does not report it or before a load."""
         context = getattr(self._backend, "live_context", None)
         return dict(context) if isinstance(context, dict) else None
+
+    @property
+    def kv_cache_type(self) -> Optional[str]:
+        """The KV cache element type the backend loads with
+        (``localm.kv_cache.KV_CACHE_TYPES``), or None for a backend that has no
+        such setting."""
+        kind = getattr(self._backend, "kv_cache_type", None)
+        return kind if isinstance(kind, str) else None
 
     @property
     def gpu_sizing(self) -> Optional[dict]:
