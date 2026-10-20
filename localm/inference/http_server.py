@@ -1791,7 +1791,6 @@ async def get_engine(model_name: str | None, *, load: bool = True,
             if registered:
                 msg += f" Registered models in your library: {', '.join(registered)}. Use 'localm pull' to add a new model."
             raise HTTPException(404, msg)
-        _refuse_projector_model(name, registry)
 
     # A name that resolved to nothing (an empty/"localm" request with no active,
     # no remembered last-active, AND no default model - e.g. `gui --no-model`
@@ -1801,6 +1800,8 @@ async def get_engine(model_name: str | None, *, load: bool = True,
     if not name:
         raise HTTPException(503, "No model is loaded and none was specified. "
                             "Load a model first or name one explicitly.")
+
+    _refuse_projector_model(name, registry)
 
     # `not unloading`: never hand back (and let the caller pin) an engine that an
     # eviction/unload path is mid-freeing - that is the pin-arrives-during-the-
