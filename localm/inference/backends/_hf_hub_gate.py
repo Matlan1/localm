@@ -95,28 +95,38 @@ def record_kernel_version_ref(repo_id: str, version) -> Optional[Path]:
     Hub cache folder of *repo_id*'s kernel loaded in this process, which is
     what kernels reads to resolve a kernel version offline.
 
+    A loaded kernel belongs to *repo_id* when its ``repo_info`` names it, or,
+    when kernels recorded no ``repo_info`` (a kernel resolved from the local
+    Hub cache), when its module sits in *repo_id*'s Hub cache folder.
+
     Returns the ref written, or None when *version* is None, no kernel from
-    *repo_id* was loaded through ``get_kernel``, its module path is not inside
-    a ``snapshots/<commit>`` folder for that commit, or the ref already exists.
+    *repo_id* is loaded, its module path is not inside a ``snapshots/<commit>``
+    folder (for ``repo_info``'s commit, when there is one), or the ref already
+    exists.
     """
     if version is None:
         return None
     from kernels import get_loaded_kernels
+    cache_folder = "kernels--" + repo_id.replace("/", "--")
     for loaded in get_loaded_kernels():
-        info = loaded.repo_info
-        if info is None or info.repo_id != repo_id:
-            continue
         parts = Path(getattr(loaded.module, "__file__", "") or "").parts
         if "snapshots" not in parts:
             continue
         i = len(parts) - 1 - parts[::-1].index("snapshots")
-        if i + 1 >= len(parts) or parts[i + 1] != info.revision:
+        if i < 1 or i + 1 >= len(parts):
+            continue
+        commit = parts[i + 1]
+        info = loaded.repo_info
+        if info is not None:
+            if info.repo_id != repo_id or info.revision != commit:
+                continue
+        elif parts[i - 1] != cache_folder:
             continue
         ref = Path(*parts[:i]) / "refs" / f"v{version}"
         if ref.exists():
             return None
         ref.parent.mkdir(exist_ok=True)
-        ref.write_text(info.revision, encoding="utf-8")
-        logger.debug("hf worker: recorded %s -> %s for offline use", ref, info.revision)
+        ref.write_text(commit, encoding="utf-8")
+        logger.debug("hf worker: recorded %s -> %s for offline use", ref, commit)
         return ref
     return None
