@@ -62,7 +62,7 @@ class TestShellWrapMode:
         launched = captured["argv"]
         if sys.platform == "win32":
             # The command is passed as a raw command line, not an argv list.
-            assert launched == "cmd /C echo hi && echo bye"
+            assert launched == 'cmd /S /C "echo hi && echo bye"'
         else:
             assert launched[0] == "/bin/sh" and launched[1] == "-c"
             assert launched[-1] == "echo hi && echo bye"

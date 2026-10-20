@@ -425,9 +425,15 @@ def platform_shell(command: str) -> Union[list, str]:
     bare quote on the command line. A command STRING is passed to
     ``CreateProcess`` verbatim instead, so cmd applies its own quoting rules to
     exactly what was written.
+
+    The string is ``cmd /S /C "<command>"``. Without ``/S``, ``cmd /C`` strips
+    the first and last quote of the line whenever it starts with a quote and
+    holds more than two, so a command beginning with a quoted program path
+    reaches cmd with its quotes eaten. With ``/S`` cmd removes exactly the one
+    outer pair added here, and *command* reaches cmd byte for byte.
     """
     if sys.platform == "win32":
-        return "cmd /C " + command
+        return 'cmd /S /C "' + command + '"'
     return ["/bin/sh", "-c", command]
 
 

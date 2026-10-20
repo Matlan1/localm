@@ -70,7 +70,7 @@ def _shell_argv(command: str) -> list[str] | str:
     When the command contains no shell operators (pipes, redirects, globs,
     variable expansion, etc.) it is parsed with :func:`_split_command` and
     returned as a plain argument list - no shell injection possible. Otherwise
-    it falls back to the system shell (cmd /C on Windows, /bin/sh -c elsewhere),
+    it falls back to the system shell (cmd /S /C on Windows, /bin/sh -c elsewhere),
     whose launch form is a raw command-line STRING on Windows and a list on
     POSIX (see :func:`base.platform_shell`).
 
