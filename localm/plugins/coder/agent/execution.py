@@ -16,8 +16,10 @@ from typing import TYPE_CHECKING, Optional
 
 import localm.plugins.coder.agent as _agent
 from ..display import (
-    console, print_progress_tool_call, print_tool_call, print_tool_error,
-    print_tool_result, tool_call_text,
+    ActivitySpinner, console, consume_confirm_always, consume_reject_reason,
+    offering_session_allow, print_info, print_progress_tool_call,
+    print_tool_call, print_tool_error, print_tool_result, reset_diff_preview,
+    tool_call_text,
 )
 from ..diffutil import (
     compute_multifile_diff, compute_search_replace_diff, compute_tool_diff,
@@ -593,12 +595,34 @@ class _ExecutionMixin:
             lenient_call and gated and not shell_unchecked
             and self.auto_approve and call.name not in self.always_confirm
         )
+        # A session allow ("a" at an interactive prompt) never waives a
+        # shell-guard verdict, a lenient call or a configured always_confirm.
+        # See test_session_allow_never_waives_always_confirm_or_lenient.
+        allow_key = self._session_allow_key(call)
+        session_allowable = (
+            allow_key is not None and not shell_unchecked and not lenient_call
+            and call.name not in self.always_confirm
+        )
+        session_allowed = getattr(self, "_session_allowed", None)
+        if session_allowed is None:
+            session_allowed = self._session_allowed = set()
+        if needs_confirm and session_allowable and allow_key in session_allowed:
+            needs_confirm = False
         if needs_confirm:
-            if self.confirm_handler is not None:
-                approved = invoke_confirm(self.confirm_handler, call,
-                                          agent=self._confirm_agent_label())
-            elif interactive:
-                approved = self._confirm_tool(call)
+            if self.confirm_handler is not None or interactive:
+                # The terminal prompt (this agent's, or an interactive parent's
+                # reached through confirm_handler) offers "a" only for a call
+                # that can be session-allowed. A GUI handler never sets the
+                # answer flags, so consuming them there reads False and "".
+                with offering_session_allow(session_allowable):
+                    if self.confirm_handler is not None:
+                        approved = invoke_confirm(self.confirm_handler, call,
+                                                  agent=self._confirm_agent_label())
+                    else:
+                        approved = self._confirm_tool(call)
+                if consume_confirm_always() and approved and session_allowable:
+                    session_allowed.add(allow_key)
+                    print_info("  " + self._session_allow_notice(call))
             else:
                 # Fail CLOSED: this tool requires confirmation and there is no way
                 # to obtain it (non-interactive run, no approval handler), so deny
@@ -630,9 +654,16 @@ class _ExecutionMixin:
                            summary="denied: confirmation required, none available")
                 return result
             if not approved:
-                result = ToolResult.error("Rejected by user.")
+                reject_reason = consume_reject_reason()
+                err_msg = (
+                    f"Rejected by user: {reject_reason}"
+                    if reject_reason else "Rejected by user."
+                )
+                result = ToolResult.error(err_msg)
                 if interactive:
                     print_tool_result(call.name, result, verbose=False)
+                # The GUI matches this exact summary to drop its duplicate card.
+                # See test_rejection_event_summary_is_the_literal_the_gui_matches.
                 self._emit("tool_result", tool=call.name, ok=False,
                            summary="rejected by user")
                 return result
@@ -718,7 +749,11 @@ class _ExecutionMixin:
         # how long the tool took - the number the GUI shows next to the card.
         t_start = time.monotonic()
         try:
-            result = tool_def.fn(self.cwd, **args)
+            if interactive and self._spins_while_running(call.name):
+                with ActivitySpinner(f"Running {call.name}..."):
+                    result = tool_def.fn(self.cwd, **args)
+            else:
+                result = tool_def.fn(self.cwd, **args)
         except TypeError as e:
             result = ToolResult.error(f"Bad arguments for {call.name}: {e}")
         except Exception as e:
@@ -735,7 +770,10 @@ class _ExecutionMixin:
 
         self._audit.tool_result(call.name, result.ok, result.summary)
         if interactive:
-            print_tool_result(call.name, result, verbose=self.verbose)
+            print_tool_result(
+                call.name, result, verbose=self.verbose,
+                elapsed=duration_s, args=call.args,
+            )
         self._emit("tool_result", tool=call.name, ok=result.ok,
                    summary=result.summary, output=result.output[:4000],
                    duration_s=duration_s)
@@ -917,6 +955,48 @@ class _ExecutionMixin:
             return None
         return self.name or "sub-agent"
 
+    @staticmethod
+    def _spins_while_running(name: str) -> bool:
+        """Whether the live spinner animates while tool *name* runs. Not for a
+        tool that may hand the terminal to a subprocess prompt (a shell, git
+        asking for credentials or a passphrase), that prompts the user itself
+        (ask_user, the plan-mode tools) or that prints its own progress
+        (sub-agents). See test_spinner_skips_tools_that_can_prompt_on_the_terminal."""
+        return not (name in _PARENT_AGENT_TOOLS or name in _SHELL_GUARDED_TOOLS
+                    or name in INTERACTION_TOOLS
+                    or name == "run_tests" or name.startswith("git_"))
+
+    @staticmethod
+    def _session_allow_key(call: ToolCall):
+        """The key an "always" answer stores for *call*, or None if it cannot
+        be session-allowed. Shell-executing tools are keyed by the exact
+        command string, URL tools by host, every other tool by its name."""
+        args = call.args if isinstance(call.args, dict) else {}
+        if call.name in _SHELL_GUARDED_TOOLS:
+            cmd = args.get("command")
+            if not isinstance(cmd, str) or not cmd.strip():
+                return None
+            return (call.name, cmd.strip())
+        if "url" in args:
+            from urllib.parse import urlsplit
+            try:
+                host = urlsplit(str(args.get("url") or "")).hostname
+            except ValueError:
+                host = None
+            return (call.name, "host", host) if host else None
+        return call.name
+
+    @classmethod
+    def _session_allow_notice(cls, call: ToolCall) -> str:
+        key = cls._session_allow_key(call)
+        if call.name in _SHELL_GUARDED_TOOLS:
+            return (f"Allowing this exact {call.name} command without asking "
+                    "for the rest of this session.")
+        if isinstance(key, tuple) and len(key) == 3:
+            return (f"Allowing {call.name} to {key[2]} without asking for the "
+                    "rest of this session.")
+        return f"Allowing {call.name} without asking for the rest of this session."
+
     def _confirm_tool(self, call: ToolCall) -> bool:
         """
         Ask the user to approve a destructive tool call.
@@ -930,6 +1010,7 @@ class _ExecutionMixin:
         confirm = _agent.confirm
         confirm_diff = _agent.confirm_diff
         print_diff_preview = _agent.print_diff_preview
+        reset_diff_preview()
         if call.name in ("write_file", "edit_file"):
             path_arg = call.args.get("path", "")
             old_content, readable = read_old_content_checked(self.cwd, path_arg)

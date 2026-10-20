@@ -14,9 +14,9 @@ from typing import TYPE_CHECKING
 
 import localm.plugins.coder.agent as _agent
 from ..display import (
-    console, print_assistant_response, print_info, print_success,
-    print_tool_call, print_tool_error, print_tool_result, print_turn_divider,
-    safe_markup,
+    ActivitySpinner, console, print_assistant_response, print_info,
+    print_success, print_task_footer, print_tool_call, print_tool_error,
+    print_tool_result, print_turn_divider, safe_markup,
 )
 from ..parser import looks_like_tool_attempt, split_response, strip_orphan_closers
 from ..tools import ToolResult
@@ -261,9 +261,12 @@ class _LoopMixin:
         def _add_user_with_plan_note(self, content) -> None: ...
         def _end_plan_autorun(self) -> None: ...
 
-    def run_task(self, task: str) -> str:
+    def run_task(self, task: str, attachments: str = "") -> str:
         """
         Run a single task to completion (non-interactive).
+
+        *attachments* is appended to what the model receives only, as in
+        :meth:`chat`.
 
         Returns the agent's final text response.
         Used by spawn_agent and the CLI `run` command.
@@ -276,7 +279,8 @@ class _LoopMixin:
             self._session_title = task   # resume-listing display title
         # The raw request, before _with_episodes can prepend a lessons preamble.
         self._last_user_request = task
-        self._add_user_with_plan_note(self._with_episodes(task))
+        message = self._with_episodes(task)
+        self._add_user_with_plan_note(compose(message, attachments) if attachments else message)
         return self._loop(interactive=False)
 
     def continue_task(self, message: str) -> str:
@@ -292,9 +296,14 @@ class _LoopMixin:
         self._add_user_with_plan_note(message)
         return self._loop(interactive=False)
 
-    def chat(self, user_input: str) -> str:
+    def chat(self, user_input: str, attachments: str = "") -> str:
         """
         Send one user message in an ongoing interactive session.
+
+        *attachments* (the REPL's @file blocks) is appended to the message the
+        model receives but is not part of the request text the session title,
+        action classification, episode recall and reviewer read.
+        See test_attachment_text_does_not_turn_a_question_into_an_action.
 
         History is preserved between calls.
         Returns the agent's final text response for this turn.
@@ -310,7 +319,7 @@ class _LoopMixin:
             user_input = self._with_episodes(user_input)
         if not self._review_task:
             self._review_task = user_input
-        self._add_user_with_plan_note(user_input)
+        self._add_user_with_plan_note(compose(user_input, attachments) if attachments else user_input)
         return self._loop(interactive=True)
 
     def _with_episodes(self, task: str) -> str:
@@ -397,13 +406,11 @@ class _LoopMixin:
                              verify_retries=0, verify_settled=False,
                              verify_checked_at=self._write_total(),
                              partial_notice_count=0, partial_notice_cap_announced=False,
-                             # Zero-tool-call escalation: how many rungs of the
-                             # ladder this task has used, and whether the model
-                             # has produced any call yet.
                              nocall_escalation=0, nocall_declined=False, tool_calls_made=0,
                              writes_at_start=self._write_total(),
-                             # The one-shot re-prompt for code that is not in
-                             # the file the reply names (unfounded_code).
+                             files_at_start={f["path"]: f["writes"]
+                                             for f in self.changed_files()},
+                             start_turns=start_turns,
                              unfounded_checked=False)
 
         try:
@@ -558,9 +565,9 @@ class _LoopMixin:
                 # the model can produce a CALL at all, not whether it succeeded.
                 st.tool_calls_made += len(calls)
 
-                # Show the non-tool-call text parts first
+                # Show the non-tool-call text parts when not already streamed
                 segments = split_response(response, calls)
-                if interactive:
+                if interactive and not getattr(self, "_streamed_to_terminal", False):
                     for seg in segments:
                         if isinstance(seg, str) and seg.strip():
                             console.print(safe_markup(seg.strip()))
@@ -595,6 +602,11 @@ class _LoopMixin:
                 if looks_like_tool_attempt(leftover, tool_names):
                     if st.partial_notice_count < _MAX_TOOL_REPAIRS:
                         st.partial_notice_count += 1
+                        if interactive:
+                            _agent.print_warning(
+                                "  Part of the reply looked like a tool call but "
+                                "could not be read, so it was not run. The model "
+                                "was told.")
                         result_blocks.append(
                             "[tool-call format] Part of this response looked "
                             "like another tool call, but it could not be "
@@ -894,7 +906,24 @@ class _LoopMixin:
         footer = self._grounding_footer()
         sensitive = self._sensitive_changes_notice()
         final_text = response + enforcement + unverified + (footer or "") + sensitive
-        if not interactive and self.on_event is None:
+        if interactive and self.on_event is None:
+            print_warning = _agent.print_warning
+            if enforcement.strip():
+                print_warning(enforcement.strip())
+            if unverified.strip():
+                print_warning(unverified.strip())
+            task_files = self._files_changed_this_task(st)
+            task_sensitive = self._sensitive_changes_notice(task_files) if task_files else ""
+            if task_sensitive.strip():
+                print_warning(task_sensitive.strip())
+            if st.tool_calls_made > 0:
+                print_task_footer(
+                    turns_used=max(1, self._turns - getattr(st, "start_turns", self._turns - 1)),
+                    files_changed=[c["path"] for c in task_files],
+                    verify_status=self._last_verify_state,
+                    ctx_ratio=self._fill_ratio(),
+                )
+        elif not interactive and self.on_event is None:
             print_assistant_response(final_text, name=self.name)
         self._add_assistant(response)
         return (True, final_text)
@@ -1048,7 +1077,13 @@ class _LoopMixin:
             parts.append(f"verify: {self._last_verify_state}")
         return "\n\n[session record: " + "; ".join(parts) + "]"
 
-    def _sensitive_changes_notice(self) -> str:
+    def _files_changed_this_task(self, st) -> list[dict]:
+        """changed_files() entries written since this task started."""
+        before = getattr(st, "files_at_start", None) or {}
+        return [f for f in self.changed_files()
+                if f.get("writes", 0) > before.get(f.get("path"), 0)]
+
+    def _sensitive_changes_notice(self, files: list[dict] | None = None) -> str:
         """A footer noting files a passing check cannot vouch for on its own
         (a rewritten test, a loosened CI/lint gate), or ``""`` when none.
 
@@ -1063,7 +1098,8 @@ class _LoopMixin:
         """
         try:
             from ..review_guard import classify_sensitive_changes, render_warning
-            message = render_warning(classify_sensitive_changes(self.changed_files()))
+            message = render_warning(classify_sensitive_changes(
+                self.changed_files() if files is None else files))
         except Exception as e:
             from localm.debuglog import logger
             logger.debug("sensitive-changes notice skipped: %r", e)   # See test_classify_sensitive_changes_tolerates_malformed_entries.
@@ -1097,7 +1133,11 @@ class _LoopMixin:
         except Exception as e:
             from localm.debuglog import logger
             logger.debug("sensitive-changes reviewer note skipped: %r", e)   # See test_classify_sensitive_changes_tolerates_malformed_entries.
-        result = self._reviewer.review(diff, self._review_task, sensitive_note=sensitive_note)
+        if getattr(self, "_interactive", False):
+            with ActivitySpinner("Running pre-done code review..."):
+                result = self._reviewer.review(diff, self._review_task, sensitive_note=sensitive_note)
+        else:
+            result = self._reviewer.review(diff, self._review_task, sensitive_note=sensitive_note)
         warning = self._reviewer.failure_warning(result)
         if warning:
             print_warning(warning)
@@ -1148,7 +1188,10 @@ class _LoopMixin:
         self._emit("info", text=f"verification: running `{label}`")
         if interactive:
             print_info(f"(verification: running `{label}`)")
-        outcome = _verify.run_verify(cmd, self.cwd)
+            with ActivitySpinner(f"Verifying with `{label}`..."):
+                outcome = _verify.run_verify(cmd, self.cwd)
+        else:
+            outcome = _verify.run_verify(cmd, self.cwd)
         code, output = outcome
         # Whether the command STARTED is carried on the outcome, never inferred
         # from the exit code.
@@ -1380,6 +1423,11 @@ class _LoopMixin:
                     pool.submit(self._execute_tool, call, False): (i, call)
                     for i, call in enumerate(group)
                 }
+                batch_spinner = ActivitySpinner(
+                    f"Running {len(group)} tools in parallel..."
+                )
+                if interactive:
+                    batch_spinner.start()
                 try:
                     for fut in as_completed(futures,
                                             timeout=self._PARALLEL_BATCH_TIMEOUT_S):
@@ -1388,12 +1436,19 @@ class _LoopMixin:
                             result = fut.result()
                         except Exception as exc:
                             result = ToolResult.error(f"Parallel execution error: {exc}")
-                        # Print results in original order when interactive
                         ordered[i] = self._result_block(call, result)
                         if interactive:
+                            batch_spinner.stop()
                             print_tool_call(call.name, call.args)
-                            print_tool_result(call.name, result, verbose=self.verbose)
+                            print_tool_result(
+                                call.name, result, verbose=self.verbose, args=call.args
+                            )
+                            rem = len(group) - len(ordered)
+                            if rem > 0:
+                                batch_spinner.start(f"Running {rem} remaining tool(s)...")
                 except TimeoutError:
+                    if interactive:
+                        batch_spinner.stop()
                     for fut, (i, call) in futures.items():
                         if i not in ordered:
                             fut.cancel()
@@ -1411,6 +1466,8 @@ class _LoopMixin:
                             if interactive:
                                 print_tool_error(call.name, result.output)
                 finally:
+                    if interactive:
+                        batch_spinner.stop()
                     pool.shutdown(wait=False)
                 for i in range(len(group)):
                     result_blocks.append(ordered[i])

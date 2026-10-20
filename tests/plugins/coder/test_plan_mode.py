@@ -479,7 +479,7 @@ def test_repl_plan_mode_bypasses_goal_mode(tmp_path, monkeypatch):
     agent = _agent(tmp_path)
     agent.goal_cmd = "pytest"
     agent.set_plan_mode(True)
-    inputs = iter(["plan the cache"])
+    inputs = iter([("plan the cache", [])])
 
     def fake_read():
         try:
@@ -488,10 +488,10 @@ def test_repl_plan_mode_bypasses_goal_mode(tmp_path, monkeypatch):
             raise EOFError from None
 
     calls = []
-    monkeypatch.setattr(repl, "_read_multiline", fake_read)
+    monkeypatch.setattr(repl, "_read_input", fake_read)
     monkeypatch.setattr(repl, "_setup_readline", lambda a: None)
     monkeypatch.setattr(repl, "_run_goal_loop", lambda *a, **k: calls.append("goal"))
-    monkeypatch.setattr(agent, "chat", lambda text: calls.append("chat"))
+    monkeypatch.setattr(agent, "chat", lambda text, **k: calls.append("chat"))
     repl._repl(agent)
     assert calls == ["chat"]
 
@@ -661,3 +661,30 @@ def test_a_session_without_the_tools_does_not_resume_into_plan_mode(tmp_path, mo
     gui_like = _agent(proj, mode=SessionMode.LOG, interactive_tools=False)
     gui_like.resume_checkpoint(gui_like.load_checkpoint())
     assert not gui_like.plan_mode
+
+
+def test_no_spinner_runs_while_an_interaction_tool_prompts(tmp_path, monkeypatch):
+    from localm.plugins.coder.agent import execution
+    from localm.plugins.coder.agent.execution import _ExecutionMixin as M
+    for name in INTERACTION_TOOLS:
+        assert M._spins_while_running(name) is False, name
+    spun = []
+
+    class _Recorder:
+        def __init__(self, label, *a, **k):
+            spun.append(label)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(execution, "ActivitySpinner", _Recorder)
+    _answers(monkeypatch, "yes")
+    agent = _agent(tmp_path)
+    r = agent._execute_tool(_call("ask_user", question="q?"), interactive=True)
+    assert r.ok and spun == []
+    (tmp_path / "a.txt").write_text("x\n")
+    agent._execute_tool(_call("read_file", path="a.txt"), interactive=True)
+    assert spun, "control: read_file runs under the spinner"

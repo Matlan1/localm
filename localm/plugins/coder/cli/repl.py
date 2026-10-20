@@ -5,6 +5,8 @@ loop, and the /command handler."""
 from __future__ import annotations
 
 import os
+import re
+import sys
 import time
 from pathlib import Path
 
@@ -24,14 +26,43 @@ from ..display import (
 from ..review_guard import classify_sensitive_changes, render_warning
 from .goal import _run_goal_loop
 
+_AT_MENTION_RE = re.compile(
+    r"(?:^|(?<=\s))@([A-Za-z0-9_./\\-]+(?::\d+(?:-\d+)?)?)(?=\s|$|[.,;!?])"
+)
+
+
+def _stdin_has_buffered_data() -> bool:
+    """Return True when interactive stdin already has buffered pasted bytes waiting."""
+    try:
+        if not getattr(sys.stdin, "isatty", lambda: False)():
+            return False
+        if os.name == "nt":
+            import msvcrt
+            return bool(msvcrt.kbhit())
+        import select
+        ready, _, _ = select.select([sys.stdin], [], [], 0.0)
+        return bool(ready)
+    except Exception:
+        return False
+
+
 def _read_multiline() -> str:
     """
-    Read one user message, supporting backslash line continuation.
-
-    End a line with \\ to keep typing on the next line.  The backslash is
-    stripped and the lines are joined with a newline before being sent.
+    Read one user message, supporting backslash line continuation and
+    coalescing multi-line terminal pastes into a single message.
     """
+    typed, pasted = _read_input()
+    return "\n".join([typed, *pasted])
+
+
+def _read_input() -> tuple[str, list[str]]:
+    """Read one message as (typed text, pasted lines that followed it).
+
+    The typed part is what the prompt returned, with backslash continuations
+    joined. Pasted lines arrive in the same read and are kept apart so a
+    /command is never built from them."""
     lines: list[str] = []
+    extra_lines: list[str] = []
     first = True
     while True:
         prompt = "\n[bold green]You[/bold green]: " if first else "[dim]...[/dim] "
@@ -44,8 +75,105 @@ def _read_multiline() -> str:
             first = False
         else:
             lines.append(line)
+            extra_lines = _drain_pasted_lines()
+            if len(extra_lines) >= 2:
+                print_info(f"  (pasted {len(extra_lines) + 1} lines)")
             break
-    return "\n".join(lines)
+    return "\n".join(lines), extra_lines
+
+
+def _drain_with_readline() -> list[str]:
+    """Pasted lines still waiting in the console input buffer (Windows)."""
+    lines = []
+    while _stdin_has_buffered_data():
+        extra = sys.stdin.readline()
+        if not extra:
+            break
+        lines.append(extra.rstrip("\r\n"))
+    return lines
+
+
+def _drain_fd() -> list[str]:
+    """Pasted lines still waiting on the terminal (POSIX), read straight from
+    the file descriptor: one read can return several pasted lines, and a
+    buffered readline would keep the rest where select() cannot see them.
+    See test_paste_into_a_real_pty_arrives_as_one_message."""
+    try:
+        if not sys.stdin.isatty():
+            return []
+        import select
+        fd = sys.stdin.fileno()
+        chunks: list[bytes] = []
+        while select.select([fd], [], [], 0.05 if chunks else 0.0)[0]:
+            data = os.read(fd, 65536)
+            if not data:
+                break
+            chunks.append(data)
+    except (OSError, ValueError):
+        return []
+    text = b"".join(chunks).decode(sys.stdin.encoding or "utf-8", errors="replace")
+    return text.replace("\r\n", "\n").replace("\r", "\n").splitlines()
+
+
+def _drain_pasted_lines() -> list[str]:
+    """Lines of a paste that arrived after the first one, read without waiting
+    for more typing."""
+    return _drain_with_readline() if os.name == "nt" else _drain_fd()
+
+
+def _at_attachments(user_input: str, cwd: Path, scope_allows=None) -> str:
+    """Attach existing workspace files referenced as @path or @path:start-end.
+
+    Each file is read through the read_file tool, so confinement, notebook
+    rendering and size truncation match what the model would see from its own
+    read. A path outside *scope_allows* (the session's /scope) is not attached.
+    Tokens that name no file (a decorator, an @handle) are left alone."""
+    if "@" not in user_input:
+        return ""
+    from ..tools.files import tool_read_file
+
+    attachments: list[str] = []
+    seen: set[str] = set()
+    for match in _AT_MENTION_RE.finditer(user_input):
+        spec = match.group(1).rstrip(".")
+        if not spec or spec in seen:
+            continue
+        seen.add(spec)
+        path_part, offset, limit = spec, 0, 0
+        if ":" in spec:
+            base, rng = spec.rsplit(":", 1)
+            m = re.fullmatch(r"(\d+)(?:-(\d+))?", rng)
+            if m:
+                path_part = base
+                offset = max(1, int(m.group(1)))
+                end_ln = max(offset, int(m.group(2))) if m.group(2) else offset
+                limit = end_ln - offset + 1
+        candidate = cwd / path_part
+        try:
+            if not candidate.is_file():
+                continue
+        except OSError:
+            continue
+        if scope_allows is not None and not scope_allows(path_part):
+            print_info(f"  @{path_part} is outside this session's scope - not attached")
+            continue
+        result = tool_read_file(cwd, path_part, offset, limit)
+        if not result.ok:
+            print_info(f"  @{spec} not attached: {result.output}")
+            continue
+        trunc_note = " (truncated)" if result.truncated else ""
+        print_info(f"  Attached {result.summary}{trunc_note}")
+        attachments.append(
+            f'<attached_file path="{spec}">\n{result.output}\n</attached_file>')
+
+    if not attachments:
+        return ""
+    return "\n\n" + "\n\n".join(attachments)
+
+
+def _expand_at_mentions(user_input: str, cwd: Path, scope_allows=None) -> str:
+    """*user_input* with its @file attachments appended."""
+    return user_input + _at_attachments(user_input, cwd, scope_allows)
 
 
 # Every REPL slash command, for tab completion and /help
@@ -85,16 +213,19 @@ def _setup_readline(agent: Agent) -> None:
             except Exception:
                 options = []
         else:
-            # Complete the current token as a path relative to the project
+            # Complete the current token as a path relative to the project (with or without @ prefix)
             import glob as _g
+            at_prefix = "@" if text.startswith("@") else ""
+            lookup = text[1:] if at_prefix else text
             try:
-                matches = _g.glob(str(agent.cwd / (text + "*")))
+                matches = _g.glob(str(agent.cwd / (lookup + "*")))
             except Exception:
                 matches = []
             options = []
             for m in matches[:50]:
                 rel = os.path.relpath(m, agent.cwd)
-                options.append(rel + os.sep if os.path.isdir(m) else rel)
+                suffix = os.sep if os.path.isdir(m) else ""
+                options.append(at_prefix + rel + suffix)
         try:
             return options[state]
         except IndexError:
@@ -135,7 +266,7 @@ def _warn_goal_run_sensitive_changes(agent: Agent, before: dict) -> None:
     See test_goal_run_warning_is_scoped_to_that_run_not_the_whole_session."""
     try:
         touched = [f for f in agent.changed_files()
-                  if f["writes"] > before.get(f["path"], 0)]
+                   if f["writes"] > before.get(f["path"], 0)]
         message = render_warning(classify_sensitive_changes(touched))
         if message:
             print_warning(message)
@@ -148,12 +279,13 @@ def _repl(agent: Agent) -> None:
     _setup_readline(agent)
     while True:
         try:
-            user_input = _read_multiline().strip()
+            typed, pasted = _read_input()
         except (KeyboardInterrupt, EOFError):
             console.print("\n[dim]Bye.[/dim]")
             break
 
-        if not user_input:
+        user_input = typed.strip()
+        if not user_input and not any(p.strip() for p in pasted):
             continue
 
         if user_input.lower() in ("exit", "quit", "q", "bye"):
@@ -161,10 +293,17 @@ def _repl(agent: Agent) -> None:
             break
 
         if user_input.startswith("/"):
+            if pasted:
+                print_info("  Lines pasted after a /command were not used.")
             stop = _handle_command(user_input, agent)
             if stop:
                 break
             continue
+
+        attachments = _at_attachments(
+            user_input, agent.cwd,
+            scope_allows=agent._scope_allows if agent.scope else None)
+        user_input = "\n".join([typed, *pasted]).strip()
 
         try:
             # The saved checkpoint is not cleared before the turn; the turn
@@ -173,12 +312,20 @@ def _repl(agent: Agent) -> None:
             if agent.goal_cmd is not None and not agent.plan_mode:
                 before = {f["path"]: f["writes"] for f in agent.changed_files()}
                 try:
-                    _run_goal_loop(agent, user_input, agent.goal_cmd,
-                                   agent.goal_max_iters, agent.cwd)
+                    if attachments:
+                        _run_goal_loop(agent, user_input, agent.goal_cmd,
+                                       agent.goal_max_iters, agent.cwd,
+                                       attachments=attachments)
+                    else:
+                        _run_goal_loop(agent, user_input, agent.goal_cmd,
+                                       agent.goal_max_iters, agent.cwd)
                 finally:
                     _warn_goal_run_sensitive_changes(agent, before)
             else:
-                agent.chat(user_input)
+                if attachments:
+                    agent.chat(user_input, attachments=attachments)
+                else:
+                    agent.chat(user_input)
         except KeyboardInterrupt:
             # _loop has already dealt with the checkpoint; swallow the
             # interrupt here.

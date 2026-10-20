@@ -30,8 +30,9 @@ class _SessionMixin:
     _activated_lock: threading.Lock
 
     def reset(self) -> None:
-        """Clear conversation history."""
+        """Clear conversation history. Allows answered with "a" end with it."""
         self._messages = []
+        self._session_allowed = set()
         self._turns = 0
         self._total_tokens = 0
         self._last_turn_tokens = 0
@@ -178,6 +179,8 @@ class _SessionMixin:
         failure is logged, and the old checkpoint stays where it was.
         """
         self._migrate_checkpoint(self.cwd, cwd)
+        # An "a" answer was given for the old project; the new one asks again.
+        self._session_allowed = set()
         load_memory = _agent.load_memory  # live: honour a patched agent.load_memory
         load_custom_instructions = _agent.load_custom_instructions
         self.cwd = cwd
