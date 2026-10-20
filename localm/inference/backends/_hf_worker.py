@@ -288,7 +288,8 @@ def _load_fp8_kernel(model_path: str, plan):
             model_path, f"the finegrained-fp8 kernel could not be loaded ({error})")
     if not plan.offline:
         try:
-            _hf_hub_gate.record_kernel_version_ref(FP8_KERNEL_REPO, FP8_KERNEL_VERSION)
+            _hf_hub_gate.record_kernel_version_ref(FP8_KERNEL_REPO, FP8_KERNEL_VERSION,
+                                                   FP8_KERNEL_REVISION)
         except Exception as e:
             logger.debug("hf load: could not record the finegrained-fp8 kernel "
                          "version for offline use: %s", e)

@@ -59,6 +59,10 @@ class TestMetricHelpers:
         assert _tokens_per_sec(19, 19 / 54786.62) is None
         assert _tokens_per_sec(29, 29 / 137701.81) is None
 
+    def test_tokens_per_sec_floor_is_one_millisecond_per_token(self):
+        assert _tokens_per_sec(20, 0.0199) is None
+        assert _tokens_per_sec(20, 0.0201) is not None
+
     def test_tokens_per_sec_accepts_realistic_rate_near_the_floor(self):
         # A real, plausible rate (19 tokens over a 0.172s decode window, ~110
         # tok/s) is NOT rejected by the plausibility floor.
@@ -130,9 +134,9 @@ def _burst_after_delay_engine(delay=0.3, pieces=20):
     return engine
 
 
-# The plausibility floor the two burst-arrival tests run with: above what the test
-# client itself spends streaming a chunk, so a zero-gap burst stays below it.
-# _tokens_per_sec's own cases pin the shipped _MIN_SEC_PER_TOKEN.
+# The plausibility floor the two streaming burst-arrival tests run with: above what
+# the test client itself spends streaming a chunk, so a zero-gap burst stays below it.
+# test_tokens_per_sec_floor_is_one_millisecond_per_token pins the shipped floor.
 _BURST_TEST_FLOOR = 0.01
 
 

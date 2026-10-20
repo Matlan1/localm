@@ -90,14 +90,16 @@ def hub_fetch_refusal() -> str | None:
     return None
 
 
-def record_kernel_version_ref(repo_id: str, version) -> Optional[Path]:
+def record_kernel_version_ref(repo_id: str, version,
+                              expected_commit: Optional[str] = None) -> Optional[Path]:
     """Write ``refs/v<version>`` (the commit of the loaded snapshot) into the
     Hub cache folder of *repo_id*'s kernel loaded in this process, which is
     what kernels reads to resolve a kernel version offline.
 
     A loaded kernel belongs to *repo_id* when its ``repo_info`` names it, or,
     when kernels recorded no ``repo_info`` (a kernel resolved from the local
-    Hub cache), when its module sits in *repo_id*'s Hub cache folder.
+    Hub cache), when its module sits in *repo_id*'s Hub cache folder. With
+    *expected_commit*, only a kernel loaded from that commit's snapshot counts.
 
     Returns the ref written, or None when *version* is None, no kernel from
     *repo_id* is loaded, its module path is not inside a ``snapshots/<commit>``
@@ -116,6 +118,8 @@ def record_kernel_version_ref(repo_id: str, version) -> Optional[Path]:
         if i < 1 or i + 1 >= len(parts):
             continue
         commit = parts[i + 1]
+        if expected_commit is not None and commit != expected_commit:
+            continue
         info = loaded.repo_info
         if info is not None:
             if info.repo_id != repo_id or info.revision != commit:
