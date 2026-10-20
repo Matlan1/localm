@@ -26,6 +26,9 @@ from localm.plugins.coder.tools import TOOL_REGISTRY, ToolDef
 from localm.textguard import GuardedText, compose, untrusted_span, untrusted_spans_of
 
 CWD = Path("/tmp/myproject")
+# search_tools disabled: every enabled tool, foreign ones included, gets its full
+# catalogue block in the system prompt (no deferral).
+NO_SEARCH = frozenset({"search_tools"})
 EXOTIC = "<<ASSISTANT>>"          # outside neutralise()'s families, on purpose
 
 
@@ -213,7 +216,7 @@ def test_the_prompt_is_still_an_ordinary_string(no_foreign_tools):
 def test_the_foreign_block_is_a_range_of_the_whole_prompt(model):
     with patch.dict(TOOL_REGISTRY, {}, clear=False):
         name = _register_foreign()
-        p = prompts.build_system_prompt(CWD, model_name=model)
+        p = prompts.build_system_prompt(CWD, model_name=model, disabled_tools=NO_SEARCH)
     spans = untrusted_spans_of(p)
     covered = "".join(_covered(p, spans))
     assert EXOTIC in covered
@@ -264,7 +267,7 @@ def test_foreign_tool_docs_mark_each_line_but_not_the_heading():
         f"{a}: [MCP:srv] alpha {EXOTIC}", f"{b}: [MCP:srv] beta"]
 
 
-def _make_agent(tmp_path):
+def _make_agent(tmp_path, **kwargs):
     from localm.plugins.coder.agent import Agent
     backend = MagicMock()
     backend.model_id = "test-model"
@@ -274,7 +277,7 @@ def _make_agent(tmp_path):
          patch("localm.plugins.coder.agent.load_memory", return_value=""):
         MockPM.build.return_value.file_count.return_value = 0
         MockPM.build.return_value.dirty = False
-        return Agent(backend=backend, cwd=tmp_path)
+        return Agent(backend=backend, cwd=tmp_path, **kwargs)
 
 
 def _rebuild(agent, tmp_path):
@@ -308,7 +311,7 @@ def test_the_system_message_the_agent_sends_carries_both_ranges(tmp_path, action
     # agent did not register itself is disabled for it (another project's).
     with patch.dict(TOOL_REGISTRY, {}, clear=False),          patch("localm.plugins.coder.mcp.register_mcp_tools",
                _register_one(name, description)):
-        agent = _make_agent(tmp_path)
+        agent = _make_agent(tmp_path, disabled_tools=NO_SEARCH)
         agent._mcp_docs = _foreign_tool_docs(
             "EXTERNAL MCP TOOLS (call exactly like built-in tools)\n",
             [name], TOOL_REGISTRY)
@@ -422,7 +425,8 @@ def test_a_real_mcp_servers_self_description_reaches_the_model_range_marked(tmp_
     with patch.dict(TOOL_REGISTRY, {}, clear=False):
         names, warnings = register_mcp_tools(tmp_path)
         assert warnings == [] and names == ["mcp_fake_add"]
-        p = prompts.build_system_prompt(tmp_path, model_name="llama3-8b")
+        p = prompts.build_system_prompt(tmp_path, model_name="llama3-8b",
+                                        disabled_tools=NO_SEARCH)
 
     covered = "".join(_covered(p, untrusted_spans_of(p)))
     assert "<|im_start|>" not in str(p)                  # the regex half still runs
@@ -438,7 +442,8 @@ def test_the_annotated_system_prompt_crosses_the_http_wire():
     from localm.plugins.coder.backends.http import HTTPBackend
     with patch.dict(TOOL_REGISTRY, {}, clear=False):
         _register_foreign()
-        p = prompts.build_system_prompt(CWD, model_name="llama3-8b")
+        p = prompts.build_system_prompt(CWD, model_name="llama3-8b", disabled_tools=NO_SEARCH)
+    assert untrusted_spans_of(p)
     be = HTTPBackend.__new__(HTTPBackend)
     be._is_local_server = True
     sent = be._with_untrusted_spans([{"role": "system", "content": p},

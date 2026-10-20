@@ -31,9 +31,20 @@ permanent public record of what shipped and are never rewritten; the in-progress
   PATH, a write or edit to a `.py` file appends up to 10 `ruff` findings (unused imports,
   undefined names) to the result so the agent can fix them in the same turn. Off with
   `diagnostics = false` in `.localcoder/config.toml`.
+- **The coder sees the shape of a large project and of a large file.** A new `outline_file` tool lists a
+  source file's classes, functions and methods with their exact line spans (Python is parsed; other
+  languages are scanned by pattern and labelled approximate), so the agent can read just the part it
+  needs. On a project with more than 300 files the codebase map is now a directory summary of every
+  file found plus detail for the shallowest files, instead of stopping after the first 300.
 
 ### Changed
 
+- **The coder's system prompt is shorter.** Less frequent tools (git commit, branch and push,
+  background jobs, notebooks, image generation, Knowledge search, the browser, and MCP and
+  plugin tools) are listed by name and fetched with the new `search_tools` tool when needed,
+  and with `--native-tools` the prompt no longer repeats the argument schemas the tools API
+  already carries. The prompt stays identical from turn to turn, so the server can reuse its
+  prompt cache.
 - **Download progress and speed follow the bytes received.** The progress bar, the speed and the
   time left now come from the data arriving, so they move steadily instead of stalling for
   seconds and jumping; the same line appears in a terminal `localm pull`, in the GUI and as MCP

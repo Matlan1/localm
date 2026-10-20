@@ -987,6 +987,10 @@ ws     ::= [ \t\n\r]*
             if triggers:
                 kw["grammar_triggers"] = triggers
                 kw["grammar_lazy"] = True
+        native = getattr(getattr(self, "backend", None), "native_tools", False) is True
+        defs = getattr(self, "_native_tool_defs", None)
+        if native and defs is not None and "tool_defs" not in kw:
+            kw["tool_defs"] = defs()
         return kw
 
     def _stream_and_record(self, messages: list[dict], *, on_token, on_reasoning,

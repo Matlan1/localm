@@ -10,6 +10,7 @@ import dataclasses
 import datetime
 import difflib
 import json
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -36,6 +37,9 @@ def _spawned_by(agent, job) -> bool:
 
 
 class _PersistenceMixin:
+    _activated_tools: frozenset
+    _activated_lock: threading.Lock
+
     def changed_files(self) -> list[dict]:
         """
         Files this session has written, with change counts.
@@ -415,8 +419,11 @@ class _PersistenceMixin:
         pm = ProjectMap.build(cwd, deadline_s=_index_deadline(), cache_path=cache_path)
         took = time.monotonic() - t0
         if pm.truncated or took > 2.0:
-            suffix = (" (large project - index truncated; the agent can still "
-                      "list_dir / search_files)" if pm.truncated else "")
+            unindexed = getattr(pm, "unindexed_paths", None)
+            extra = len(unindexed) if isinstance(unindexed, set) else 0
+            counted = f"; {extra} more counted by directory" if extra else ""
+            suffix = (f" (large project - index truncated{counted}; the agent can "
+                      "still tree / outline_file / search_files)" if pm.truncated else "")
             source = "from cache" if getattr(pm, "from_cache", False) else "scanned"
             self._emit("info",
                        text=f"Indexed {pm.file_count()} files ({source}) "
@@ -469,6 +476,9 @@ class _PersistenceMixin:
             # The model's own task list (tools/tasks.py). An older build ignores
             # the extra key, and an older checkpoint restores as no todos.
             "todos": self.get_todos(),
+            # The tools search_tools activated, so a resumed native-tools session
+            # declares the schemas its restored conversation already relies on.
+            "activated_tools": sorted(getattr(self, "_activated_tools", ())),
             # Pointers to work delegated children COMMITTED on their own branches.
             # The branches are durable; this keeps the pointer to them durable too,
             # so a resumed session still shows the footer. The change-sets are
@@ -586,8 +596,19 @@ class _PersistenceMixin:
         # load_checkpoint()'s migration path already backfills it.
         self._session_title = data.get("title") or _first_user_text(self._messages)
         self.set_todos(normalize_todos(data.get("todos")))
+        self._restore_activated_tools(data.get("activated_tools"))
         self._restore_delegated(data.get("delegated"))
         self._restore_changed_files(data.get("changed_files"))
+
+    def _restore_activated_tools(self, raw) -> None:
+        """Restore the search_tools activations from a checkpoint: only string
+        names of tools registered now are kept; anything else (a missing key,
+        a non-list, an unknown name) restores as no activation."""
+        registry = _agent.TOOL_REGISTRY
+        names = raw if isinstance(raw, list) else []
+        with self._activated_lock:
+            self._activated_tools = frozenset(
+                n for n in names if isinstance(n, str) and n in registry)
 
     def _restore_changed_files(self, raw) -> None:
         """Rebuild the changed-files tracker from a checkpoint.
