@@ -70,6 +70,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `.localcoder/config.toml` to be asked every time.
 
 ### Changed
+- **The bundled llama.cpp runtime moved from b11756 to b11757.** An existing install picks it up with `localm setup-llama --force`.
 - **The bundled stable-diffusion.cpp runtime moved from master-964-1d0a58a to master-982-0518b34.** An existing install picks it up the next time image generation starts.
 - **The bundled koboldcpp runtime (native music generation) moved from v1.123 to v1.123.1.** An existing install picks it up the next time music generation starts.
 - **The bundled llama.cpp runtime moved from b11541 to b11756.** An existing install picks it up with `localm setup-llama --force`.
@@ -104,6 +105,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
   A request naming it unloaded the working model and then failed to load the projector. The
   projector is now left out of `/v1/models`, and a chat, load or switch request that names it is
   refused with a message naming the model it belongs to, before anything is unloaded.
+- **"Delete saved data" also removes the coder's hook and MCP trust records** (`coder-hook-trust.json` in the data folder).
+- **A short request no longer throws away a running conversation's cached prompt.** A summary, title or other small request sent to the same model between two turns used to take over the conversation's cache, so its next turn processed the whole prompt again. It now uses another slot, and the conversation continues from its cache.
 - **A long conversation is no longer summarised again on every message.** When a chat client sends its whole history each turn and the server has to compact it to fit the context window, the server now reuses the summary it already wrote while the conversation still fits, and later only summarises the newly older messages. Each compaction also brings the conversation down to about half the window, so the next one is many turns away instead of one.
 - **A coder shell command that starts with a quoted program path now runs on Windows.** A command such as `"D:\tools dir\tool.exe" --flag "a b"` used to fail with "is not recognized as an internal or external command", because `cmd` dropped the first and last quote.
 - **A shell command's timeout or cancel in `localm coder` is no longer held up by a stray

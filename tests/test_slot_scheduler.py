@@ -1093,6 +1093,83 @@ def test_rightsize_counts_the_other_slots_cached_cells(made):
     assert ctx.rightsize_calls[0][1] == cached
 
 
+def _conversation_then_side_request(made, n_slots):
+    """A 600-token conversation turn, a short side request that shares only its
+    first 3 tokens, then the conversation's next turn."""
+    ctx = _SimContext(capacity=2048, n_ctx_max=4096, base=256, grow=256)
+    sched = made(ctx, n_slots)
+    convo = [5, 3, 8] + [(i * 7) % 90 + 1 for i in range(600)]
+    first = _collect(sched, convo, 20)
+    side = [5, 3, 8, 44, 45, 46]
+    ctx.rightsize_calls.clear()
+    _collect(sched, side, 10)
+    side_others = ctx.rightsize_calls[0][1]
+    next_turn = convo + first["out"] + [11, 12, 13]
+    statuses = []
+    stream = sched.submit(next_turn, 10, _Sampler(), on_status=statuses.append)
+    out, _ = _drain(stream)
+    conv_slot = max(sched._slots, key=lambda s: len(s.kv))
+    return ctx, sched, side_others, out, next_turn, conv_slot
+
+
+def test_a_short_side_request_leaves_the_conversation_cache_whole(made, caplog):
+    import logging
+    with caplog.at_level(logging.INFO, logger="localm"):
+        ctx, sched, side_others, out, next_turn, _slot = _conversation_then_side_request(made, 4)
+    assert out == _reference(next_turn, 10)[0]
+    lines = [r.getMessage() for r in caplog.records if "prefill starting" in r.getMessage()]
+    reused = int(lines[-1].rsplit(", ", 1)[1].split()[0])
+    assert reused >= 600, lines[-1]
+
+
+def test_the_rightsize_beside_a_side_request_counts_the_conversation(made):
+    _ctx, _sched, side_others, *_ = _conversation_then_side_request(made, 4)
+    assert side_others >= 600
+
+
+def test_a_prompt_that_continues_a_cache_still_takes_that_slot(made):
+    ctx = _SimContext(capacity=2048, n_ctx_max=4096, base=256, grow=256)
+    sched = made(ctx, 4)
+    convo = [(i * 5) % 90 + 1 for i in range(300)]
+    first = _collect(sched, convo, 15)
+    seq = next(s.seq for s in sched._slots if s.kv)
+    _collect(sched, convo + first["out"] + [7, 8], 5)
+    assert max(sched._slots, key=lambda s: len(s.kv)).seq == seq
+
+
+def _last_reused(caplog) -> int:
+    lines = [r.getMessage() for r in caplog.records if "prefill starting" in r.getMessage()]
+    return int(lines[-1].rsplit(", ", 1)[1].split()[0])
+
+
+def test_a_follow_up_without_the_long_reply_keeps_its_slot(made, caplog):
+    import logging
+    ctx = _SimContext(capacity=4096, n_ctx_max=8192, base=256, grow=256)
+    sched = made(ctx, 4)
+    prompt = [(i * 3) % 90 + 1 for i in range(250)]
+    _collect(sched, prompt, 1500)
+    follow = prompt + [61, 62, 63]
+    with caplog.at_level(logging.INFO, logger="localm"):
+        rec = _collect(sched, follow, 10)
+    assert rec["out"] == _reference(follow, 10)[0]
+    assert _last_reused(caplog) == 250
+
+
+def test_a_shrink_before_a_side_request_keeps_the_conversation_cache(made, caplog):
+    import logging
+    ctx = _SimContext(capacity=4096, n_ctx_max=8192, base=256, grow=256)
+    sched = made(ctx, 4)
+    convo = [5, 3, 8] + [(i * 7) % 90 + 1 for i in range(600)]
+    first = _collect(sched, convo, 20)
+    ctx.rightsize_plan = (1024, True)
+    _collect(sched, [5, 3, 8, 44, 45, 46], 10)
+    assert ctx.recreated[-1] == (1024, True)
+    ctx.rightsize_plan = None
+    next_turn = convo + first["out"] + [11, 12, 13]
+    with caplog.at_level(logging.INFO, logger="localm"):
+        rec = _collect(sched, next_turn, 10)
+    assert rec["out"] == _reference(next_turn, 10)[0]
+    assert _last_reused(caplog) >= 600
 class _RateContext(_SimContext):
     """A simulated context whose decode rate and refresh plan come from a real
     LlamaCpp's _note_decode_rate and _rightsize_plan."""
