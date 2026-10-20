@@ -161,6 +161,37 @@ def upstream_releases() -> tuple[list, str]:
     return out, ""
 
 
+_CUDA_LINUX_REPO_RE = re.compile(r'^_CUDA_LINUX_REPO\s*=\s*"([^"]+)"', re.M)
+
+
+def cuda_linux_repo(path: Path = _SETUP_PATH) -> str:
+    """_CUDA_LINUX_REPO out of localm/setup_llama/pins.py, by text like
+    pinned_tag(). Raises SystemExit when the file or the assignment is missing."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as e:
+        raise SystemExit(f"could not read {path}: {e}") from e
+    m = _CUDA_LINUX_REPO_RE.search(text)
+    if not m:
+        raise SystemExit(f"no _CUDA_LINUX_REPO assignment found in {path}")
+    return m.group(1)
+
+
+def cuda_linux_tags() -> tuple[set, str]:
+    """(bNNNNN tags with uploaded assets on the Linux CUDA build repo, error).
+    Never raises; a failed lookup is reported as an error string."""
+    url = f"https://api.github.com/repos/{cuda_linux_repo()}/releases?per_page={_PER_PAGE}"
+    releases, err = _get_json(url)
+    if err:
+        return set(), err
+    if not isinstance(releases, list):
+        return set(), "the releases API returned something that is not a list"
+    return {rel["tag_name"] for rel in releases
+            if isinstance(rel, dict) and not rel.get("draft") and rel.get("assets")
+            and isinstance(rel.get("tag_name"), str)
+            and _build_number(rel["tag_name"]) is not None}, ""
+
+
 def upstream_tags() -> tuple[list, str]:
     """(tags newest-first, error): upstream_releases() reduced to tag names."""
     releases, err = upstream_releases()
