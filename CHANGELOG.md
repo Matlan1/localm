@@ -105,6 +105,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   A request naming it unloaded the working model and then failed to load the projector. The
   projector is now left out of `/v1/models`, and a chat, load or switch request that names it is
   refused with a message naming the model it belongs to, before anything is unloaded.
+- **Image, video, music and speech components can no longer be loaded as a chat model.** A VAE,
+  text encoder, LoRA, upscaler, image or video checkpoint, or text-to-speech model could be named
+  in a chat, load or switch request, which unloaded the working model (or failed with an internal
+  server error) before the load failed. Such a request is now refused up front with a message
+  saying what the entry is. The image and video components are also left out of `GET /v1/models`;
+  text-to-speech models stay listed, since `/v1/audio/speech` takes them by name.
 - **"Delete saved data" also removes the coder's hook and MCP trust records** (`coder-hook-trust.json` in the data folder).
 - **A short request no longer throws away a running conversation's cached prompt.** A summary, title or other small request sent to the same model between two turns used to take over the conversation's cache, so its next turn processed the whole prompt again. It now uses another slot, and the conversation continues from its cache.
 - **A long conversation is no longer summarised again on every message.** When a chat client sends its whole history each turn and the server has to compact it to fit the context window, the server now reuses the summary it already wrote while the conversation still fits, and later only summarises the newly older messages. Each compaction also brings the conversation down to about half the window, so the next one is many turns away instead of one.

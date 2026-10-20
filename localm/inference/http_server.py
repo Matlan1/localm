@@ -570,15 +570,16 @@ _BUSY_VICTIM_IDLE_WAIT_S = 30.0
 _VICTIM_RELEASE_EXTRA_WAIT_S = 25.0
 
 
-def _refuse_projector_model(name: str, registry: dict | None = None) -> None:
-    """Raise HTTPException 422 when *name* is a registered vision projector.
-    Runs before any eviction or cancellation, so the resident model stays
-    loaded. *registry* defaults to the current registry."""
-    from localm.model_manager.registry import projector_refusal
+def _refuse_non_chat_model(name: str, registry: dict | None = None) -> None:
+    """Raise HTTPException 422 when *name* is a registered entry the chat engine
+    can never load (a vision projector, an image or video component, a
+    text-to-speech model). Runs before any eviction or cancellation, so the
+    resident model stays loaded. *registry* defaults to the current registry."""
+    from localm.model_manager.registry import chat_load_refusal
     if registry is None:
         from localm.config import load_registry
         registry = load_registry()
-    msg = projector_refusal(name, registry)
+    msg = chat_load_refusal(name, registry)
     if msg is not None:
         raise HTTPException(422, msg)
 
@@ -636,7 +637,7 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
     """
     global _engine_factory, _switch_desired
 
-    _refuse_projector_model(name)
+    _refuse_non_chat_model(name)
 
     if preempt:
         _switch_desired = name
@@ -1801,7 +1802,7 @@ async def get_engine(model_name: str | None, *, load: bool = True,
         raise HTTPException(503, "No model is loaded and none was specified. "
                             "Load a model first or name one explicitly.")
 
-    _refuse_projector_model(name, registry)
+    _refuse_non_chat_model(name, registry)
 
     # `not unloading`: never hand back (and let the caller pin) an engine that an
     # eviction/unload path is mid-freeing - that is the pin-arrives-during-the-
