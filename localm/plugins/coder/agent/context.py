@@ -461,6 +461,9 @@ class _ContextMixin:
         cwd: Path
         backend: Any
         _episode_store: Any
+        _system_prompt: str
+
+        def _emit(self, event_type: str, **data) -> None: ...
 
         def changed_files(self) -> list[dict]: ...
 
