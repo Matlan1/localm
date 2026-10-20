@@ -27,6 +27,7 @@ from localm.model_manager.gguf import (
     gguf_split_layout,
 )
 
+KB = 1024
 MB = 1024 ** 2
 
 _T_UINT32 = 4
@@ -41,10 +42,10 @@ HEADS_KV = 2
 KEY_LEN = 16
 CONV_KERNEL, STATE, INNER, GROUPS = 4, 8, 32, 2
 
-INPUT_BYTES = {"token_embd.weight": 3 * MB, "per_layer_token_embd.weight": 40 * MB}
-EXPERT_BYTES = 6 * MB          # each of gate/up/down per block
-OTHER_BLOCK_BYTES = 64 * 1024  # each non-expert tensor per block
-OUTPUT_BYTES = 3 * MB
+INPUT_BYTES = {"token_embd.weight": 48 * KB, "per_layer_token_embd.weight": 640 * KB}
+EXPERT_BYTES = 96 * KB         # each of gate/up/down per block
+OTHER_BLOCK_BYTES = KB         # each non-expert tensor per block
+OUTPUT_BYTES = 48 * KB
 
 
 def _s(text):
@@ -227,7 +228,7 @@ class TestLayersSpreadOverParts:
 #  The load planning that reads them                                           #
 # --------------------------------------------------------------------------- #
 
-OVERHEAD = 256 * 1024
+OVERHEAD = 4 * KB
 
 
 def _backend(first):
@@ -251,7 +252,7 @@ class TestPlanningOnAMetadataOnlyFirstPart:
         experts of the first two blocks."""
         b = _backend(_metadata_only_split(tmp_path))
         resident = b._model_bytes() - sum(INPUT_BYTES.values())
-        free = resident - 2 * 3 * EXPERT_BYTES + 4 * MB
+        free = resident - 2 * 3 * EXPERT_BYTES + 64 * KB
         with patch.object(GgufBackend, "_split_free_total_bytes",
                           return_value=(None, None, 0)), \
                 patch.object(GgufBackend, "_free_vram_bytes", return_value=free), \
@@ -265,7 +266,7 @@ class TestPlanningOnAMetadataOnlyFirstPart:
         made from the header (it needs every tensor's size)."""
         b = _backend(_metadata_only_split(tmp_path))
         devices = [{"index": i, "name": f"GPU{i}", "type": _loader.GGML_DEV_TYPE_GPU,
-                    "free": 200 * MB, "total": 256 * MB} for i in range(2)]
+                    "free": 8 * MB, "total": 16 * MB} for i in range(2)]
         with patch.object(discover, "_native_gpu_index_space_is_opaque",
                           return_value=True), \
                 patch.object(discover, "native_gpu_devices", return_value=devices), \
@@ -342,7 +343,7 @@ class TestLoadFailureVramHint:
         (the input layer stays in system RAM): no claim that VRAM ran short."""
         first = _metadata_only_split(tmp_path)
         b = _backend(first)
-        free = b._vram_model_bytes(0) + 2 * MB
+        free = b._vram_model_bytes(0) + 128 * KB
         assert free < b._model_bytes()
         msg, _b = self._failed_load_message(tmp_path, free=free)
         assert "worker died" in msg
@@ -351,11 +352,11 @@ class TestLoadFailureVramHint:
         assert "-g 24" not in msg
 
     def test_a_short_plan_names_both_figures_and_a_fitting_layer_count(self, tmp_path):
-        msg, b = self._failed_load_message(tmp_path, free=20 * MB)
+        msg, b = self._failed_load_message(tmp_path, free=600 * KB)
         assert "needed about" in msg and "GB free" in msg
         assert "the 2 GPUs" in msg
         assert "-g 24" not in msg
-        expected = b._gpu_layers_fitting(20 * MB, b.n_ctx * b._kv_bytes_per_token(),
+        expected = b._gpu_layers_fitting(600 * KB, b.n_ctx * b._kv_bytes_per_token(),
                                          b._split_overhead_bytes(2)
                                          + b._recurrent_state_vram_bytes())
         assert 0 < expected < N_LAYERS
