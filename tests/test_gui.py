@@ -899,6 +899,77 @@ class TestVramEstimate:
         assert half["weights"] < full["weights"]
         assert half["weights"] == pytest.approx(full["weights"] / 2, rel=0.02)
 
+    def _running_estimate(self, gui_app, tmp_path, monkeypatch, engine, params):
+        import localm.inference.http_server as hs
+        app, _ = gui_app
+        model_file = tmp_path / "m.gguf"
+        model_file.write_bytes(b"\0" * 1024)
+        reg = {"m": {"path": str(model_file), "source": "local"}}
+        if engine is not None:
+            monkeypatch.setitem(hs._engines, "m", engine)
+        with patch("localm.config.load_registry", return_value=reg),              patch("localm.model_manager.gguf.gguf_file_bytes", return_value=22 * _GB),              patch("localm.model_meta.cached_n_layers", return_value=32),              patch("localm.discover.list_gpus",
+                   side_effect=_list_gpus_double([_DEVICE_GPU], GPU_PROBE_OK)):
+            with TestClient(app) as client:
+                return client.get("/api/vram-estimate",
+                                  params={"model": "m", **params}).json()
+
+    @staticmethod
+    def _engine(kv_in_vram=True, offloaded=32):
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            loaded=True, unloading=False,
+            gpu_placement={"gpu_layers_offloaded": offloaded, "gpu_layers_total": 32,
+                           "degraded": offloaded < 32},
+            live_context={"n_ctx": 8192, "kv_in_vram": kv_in_vram},
+            gpu_sizing={"mode": "auto", "n_cpu_moe": 0})
+
+    def test_the_running_models_own_vram_counts_as_available(
+            self, gui_app, tmp_path, monkeypatch):
+        """Reloading the running model at new settings frees what its current
+        load holds first, so that share is available to the new load."""
+        from localm.sysstats import estimate_vram
+        data = self._running_estimate(gui_app, tmp_path, monkeypatch, self._engine(),
+                                      {"n_ctx": 4096, "n_gpu_layers": 99})
+        held = estimate_vram(22 * _GB, 8192, 32, n_layers=32)["needed"]
+        assert data["free"] == 20 * _GB
+        assert data["needed"] > data["free"]
+        assert data["held"] == held
+        assert data["available"] == 20 * _GB + held
+        assert data["fits"] is True
+
+    def test_a_kv_cache_in_system_ram_is_not_counted_as_held(
+            self, gui_app, tmp_path, monkeypatch):
+        from localm.sysstats import estimate_vram
+        data = self._running_estimate(gui_app, tmp_path, monkeypatch,
+                                      self._engine(kv_in_vram=False),
+                                      {"n_ctx": 4096, "n_gpu_layers": 99})
+        assert data["held"] == estimate_vram(22 * _GB, 0, 32, n_layers=32)["needed"]
+
+    def test_only_the_gpu_share_of_a_partial_load_is_held(
+            self, gui_app, tmp_path, monkeypatch):
+        from localm.sysstats import estimate_vram
+        data = self._running_estimate(gui_app, tmp_path, monkeypatch,
+                                      self._engine(offloaded=16),
+                                      {"n_ctx": 4096, "n_gpu_layers": 99})
+        assert data["held"] == estimate_vram(22 * _GB, 8192, 16, n_layers=32)["needed"]
+        assert data["held"] < estimate_vram(22 * _GB, 8192, 32, n_layers=32)["needed"]
+
+    def test_a_model_that_is_not_loaded_holds_nothing(
+            self, gui_app, tmp_path, monkeypatch):
+        data = self._running_estimate(gui_app, tmp_path, monkeypatch, None,
+                                      {"n_ctx": 4096, "n_gpu_layers": 99})
+        assert data["held"] is None and data["available"] is None
+        assert data["fits"] is False
+
+    def test_estimate_charges_kv_for_the_gpu_layers_only(self):
+        from localm.sysstats import estimate_vram
+        full = estimate_vram(8 * _GB, 8192, 32, n_layers=32, kv_bytes_per_token=1000)
+        half = estimate_vram(8 * _GB, 8192, 16, n_layers=32, kv_bytes_per_token=1000)
+        none = estimate_vram(8 * _GB, 8192, 0, n_layers=32, kv_bytes_per_token=1000)
+        assert full["kv_cache"] == 8192 * 1000
+        assert half["kv_cache"] == 8192 * 500
+        assert none["needed"] == 0
+
     def test_estimate_withholds_free_on_stale_probe(self, gui_app):
         """A timed-out probe serves a last-known-good (possibly frozen) reading. Its
         free must NOT be weighed as if current: free -> None, fits -> None, so a

@@ -16,6 +16,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Image prompts with letters such as ß work with the native image backend on Windows.** A prompt
   containing ß failed with "failed to encode prompt", and letters such as ä, ö and ü reached the
   model garbled; the prompt now reaches stable-diffusion.cpp unchanged.
+- **VRAM is given back and used again during a conversation.** A context that had grown for a
+  long conversation kept its size and its VRAM after the conversation was compacted; it now
+  shrinks once the conversation needs at most half of it. A context whose cache had to move to
+  system RAM because VRAM was short, where replies run several times slower, now moves back to
+  VRAM once there is room.
+- **A model loaded partly on the CPU moves onto the GPU once VRAM frees up.** With automatic GPU
+  layers, a model that loaded partly on the CPU because another program held VRAM is reloaded
+  on the GPU at a later request once enough VRAM is free. An explicit GPU layer count is never
+  changed.
+- **The Live tuning VRAM estimate counts the running model's own memory.** The VRAM the running
+  model holds was counted as used, so settings that fit read "may not fit"; it is now shown
+  beside the free VRAM and counted as available. Apply now reloads the running model with the
+  new settings instead of only saving them for the next load.
 
 ## [0.3.0] - 2026-10-14
 

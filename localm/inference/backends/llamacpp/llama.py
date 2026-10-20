@@ -2330,7 +2330,9 @@ class LlamaCpp:
                         return
                     reuse = self._can_reuse_kv(needed)
                     with _ctx():
-                        if reuse:
+                        if reuse and self._rightsize_context(prompt_tokens, needed):
+                            reuse = False
+                        elif reuse:
                             self._prefill_with_reuse(prompt_tokens, keep_prefix=cache_prompt)
                         else:
                             self._prefill_fresh_context(prompt_tokens, needed)
@@ -3386,6 +3388,8 @@ class LlamaCpp:
         keep = 0
         if needed > self._ctx_capacity:
             self._prefill_fresh_context([], needed)
+        elif self._can_reuse_kv(needed) and self._rightsize_context([], needed):
+            pass
         elif self._vision_kv is not None and self._can_reuse_kv(needed):
             keep = min(_common_prefix_len(self._vision_kv, units), len(units) - 1)
             if keep > 0:
@@ -3489,6 +3493,82 @@ class LlamaCpp:
             # _fit_generation_budget guarantees needed <= n_ctx_max here
             target = min(target, self._n_ctx_max)
         return target
+
+    # Seconds after a failed check before a KV cache kept in system RAM is
+    # checked against free VRAM again.
+    _KV_PROMOTE_RETRY_S = 20.0
+    _kv_promote_after = 0.0
+
+    def _rightsize_plan(self, needed: int, others: int = 0) -> Optional[tuple[int, bool]]:
+        """``(n_ctx, offload_kqv)`` for a context to recreate before a request
+        of *needed* cells that the live context can already hold, or None to
+        keep the live context. *others* counts the cells other sequences'
+        caches hold.
+
+        Shrinks to ``_target_ctx(needed + others)`` when that is at most half
+        the live capacity, with the KV cache in VRAM unless ``_vram_check``
+        answers False. Otherwise, when the live KV cache is in system RAM,
+        moves it to VRAM at the same size once ``_vram_check`` answers True;
+        a refusal is not asked again for ``_KV_PROMOTE_RETRY_S`` seconds.
+        Caller holds ``_gen_lock``. ``_vram_check`` may raise."""
+        if not self._ctx_ptr or needed > self._ctx_capacity:
+            return None
+        capacity = self._ctx_capacity
+        target = self._target_ctx(needed + max(0, others))
+        shrink = target <= capacity // 2
+        promote = self._offload_kqv is False
+        if not (shrink or promote):
+            return None
+        check = getattr(self, "_vram_check", None)
+        if not shrink:
+            now = time.monotonic()
+            if check is None or now < self._kv_promote_after:
+                return None
+            if check(capacity, capacity) is True:
+                return capacity, True
+            self._kv_promote_after = now + self._KV_PROMOTE_RETRY_S
+            return None
+        decision = check(target, capacity) if check is not None else None
+        return target, decision is not False
+
+    def _log_rightsize(self, n_ctx: int, offload_kqv: bool) -> None:
+        """Log at INFO that the live context is replaced by one of *n_ctx*
+        cells with its KV cache in VRAM (*offload_kqv*) or system RAM."""
+        from localm.debuglog import logger
+        logger.info("gguf context: replacing the %d-token context (KV cache in %s) "
+                    "with a %d-token one (KV cache in %s)", self._ctx_capacity,
+                    "VRAM" if self._offload_kqv else "system RAM", n_ctx,
+                    "VRAM" if offload_kqv else "system RAM")
+
+    def _rightsize_context(self, prompt_tokens: list[int], needed: int) -> bool:
+        """Recreate the live context per ``_rightsize_plan(needed)`` and
+        prefill *prompt_tokens* into it. True when the context was replaced,
+        False when the live one is kept (no plan, or ``_vram_check`` raised,
+        logged at INFO). When a plan with the KV cache in VRAM cannot create
+        its context, the same size is created with the KV cache in system RAM
+        instead. Raises what ``_prefill_fresh_context`` raises otherwise.
+        Caller holds ``_gen_lock``."""
+        from localm.debuglog import logger
+        try:
+            plan = self._rightsize_plan(needed)
+        except Exception as exc:
+            logger.info("gguf context: keeping the live context, the VRAM check "
+                        "raised %s", type(exc).__name__)
+            return False
+        if plan is None:
+            return False
+        self._log_rightsize(*plan)
+        try:
+            self._prefill_fresh_context(prompt_tokens, needed, plan)
+        except RuntimeError:
+            if self._ctx_ptr or not plan[1]:
+                raise
+            self._kv_promote_after = time.monotonic() + self._KV_PROMOTE_RETRY_S
+            logger.info("gguf context: a %d-token context with the KV cache in VRAM "
+                        "could not be created, keeping the KV cache in system RAM",
+                        plan[0])
+            self._prefill_fresh_context(prompt_tokens, needed, (plan[0], False))
+        return True
 
     def _resolve_parallel(self, requested: int, n_ctx: int) -> tuple[int, str]:
         """The sequences this model's context holds for *requested* slots, and
@@ -4586,10 +4666,14 @@ class LlamaCpp:
 
         self._cached_tokens = list(prompt_tokens)
 
-    def _prefill_fresh_context(self, prompt_tokens: list[int], needed: int) -> None:
+    def _prefill_fresh_context(self, prompt_tokens: list[int], needed: int,
+                               plan: Optional[tuple[int, bool]] = None) -> None:
         """Recreate the context (empty KV cache) and prefill the full prompt.
 
-        Consults ``self._vram_check`` (when set) with the target n_ctx BEFORE
+        *plan*, when given, is the ``(n_ctx, offload_kqv)`` to create, already
+        decided by ``_rightsize_plan``; ``_vram_check`` is then not consulted.
+
+        Otherwise consults ``self._vram_check`` (when set) with the target n_ctx BEFORE
         freeing the live context, so a refusal leaves the old, still-working
         context and its cache intact instead of destroying it first and only
         then discovering the bigger replacement cannot fit. This is the same
@@ -4602,7 +4686,9 @@ class LlamaCpp:
         target = self._target_ctx(needed)
         offload_kqv = True
         vram_check = getattr(self, "_vram_check", None)
-        if vram_check is not None:
+        if plan is not None:
+            target, offload_kqv = plan
+        elif vram_check is not None:
             # Ask WHERE this context's KV cache must live. The check reads
             # self._offload_kqv (the CURRENT placement) to charge correctly: the net
             # growth when the old KV is in VRAM and reclaimed by the free below, or the

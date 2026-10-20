@@ -1098,6 +1098,36 @@ export async function switchModel(model) {
   return data;
 }
 
+// Unload *model* and load it again, so a reload picks up the saved load
+// settings. Asks before unloading a model that is in use. Returns the
+// switchModel() result, or {status: "cancelled"} when the user declined, or
+// {status: "in_use"} when the model is busy and was not unloaded.
+export async function reloadModel(model) {
+  setStatus("busy", t("sidebar.status.unloading", { model }));
+  let data;
+  try {
+    data = await _postUnload(model, false);
+    if (data.status === "confirm_required") {
+      const confirmed = await confirmDangerAsync(
+        t("models.unload.confirmTitle"), data.detail, t("models.unload.confirmLabel"));
+      if (!confirmed) {
+        setStatus("ok", model);
+        return { status: "cancelled", reason: "declined by user", model };
+      }
+      setStatus("busy", t("sidebar.status.unloading", { model }));
+      data = await _postUnload(model, true);
+    }
+  } catch (e) {
+    setStatus("err", t("sidebar.status.unloadFailed"));
+    throw e;
+  }
+  if (data.status === "in_use") {
+    setStatus("ok", model);
+    return { status: "in_use", model };
+  }
+  return await switchModel(model);
+}
+
 // Toast the outcome of a switchModel() call. A model too big to fully fit
 // VRAM still loads (the backend deliberately defers to a partial/zero GPU
 // offload rather than refusing), so a plain "switched" toast would read as

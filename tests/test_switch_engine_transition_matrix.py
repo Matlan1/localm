@@ -24,6 +24,7 @@ loaded_dim and localm.vram.wait_for_vram_release.
 """
 
 import asyncio
+import dataclasses
 import re
 import threading
 from types import SimpleNamespace
@@ -1395,20 +1396,24 @@ class TestPlacementHeal:
         assert res == {"status": "already_active", "model": "model-b", **_PARTIAL}
         assert b.load_calls == 1
 
-    def test_a_load_without_a_blocker_records_nothing_to_heal(self, monkeypatch):
+    def test_a_load_without_a_blocker_records_a_recheck_heal(self, monkeypatch):
         b = _SizedEngine("model-b", (_PARTIAL,))
         env = _install(monkeypatch, {"model-b": b})
 
         asyncio.run(hs.switch_engine("model-b", env.factory, preempt=False))
 
-        assert b.gpu_placement == _PARTIAL and b.placement_heal is None
+        heal = b.placement_heal
+        assert b.gpu_placement == _PARTIAL
+        assert heal.recheck is True and heal.blockers == frozenset()
+        assert heal.release_unconfirmed is False
 
     def test_a_pinned_models_entry_is_never_a_blocker(self, monkeypatch):
         _knobs(monkeypatch, pinned_models=["model-a"])
         a, b, env = _degraded_beside(monkeypatch, a_busy=0)
 
         assert a.loaded and a.unload_calls == 0
-        assert b.gpu_placement == _PARTIAL and b.placement_heal is None
+        assert b.gpu_placement == _PARTIAL
+        assert b.placement_heal.recheck is True and b.placement_heal.blockers == frozenset()
 
     def test_an_active_degraded_model_stays_active_after_its_reload(self, monkeypatch):
         a, b, env = _degraded_beside(monkeypatch)
@@ -1453,7 +1458,7 @@ class TestPlacementHeal:
         got = asyncio.run(hs.get_engine("model-b", activate=False))
 
         assert got is b and b.load_calls == 1 and b.unload_calls == 0
-        assert b.placement_heal is None
+        assert b.placement_heal.recheck is True and b.placement_heal.blockers == frozenset()
 
     def test_no_reload_while_the_vram_probe_is_inconclusive(self, monkeypatch):
         a, b, env = _degraded_beside(monkeypatch)
@@ -1744,3 +1749,83 @@ class TestVictimVramEstimate:
         e.model_path = str(f)
         e.load()
         assert hs._victim_vram_estimate(e) == 0
+
+
+class TestPlacementRecheck:
+    """A load left partly on the CPU with nothing localm could evict is
+    reloaded once free VRAM covers a full placement."""
+
+    def _partial(self, monkeypatch, *, total=20 * GB, reading=None,
+                 placements=(_PARTIAL, _FULL)):
+        b = _SizedEngine("model-b", placements)
+        env = _install(monkeypatch, {"model-b": b}, total=total, reading=reading)
+        monkeypatch.setattr(hs, "_engine_factory", env.factory)
+        asyncio.run(hs.switch_engine("model-b", env.factory, preempt=False))
+        assert b.gpu_placement == _PARTIAL and b.placement_heal.recheck
+        return b, env
+
+    def test_reloaded_once_free_vram_and_its_own_share_cover_a_full_placement(
+            self, monkeypatch, caplog):
+        b, _env = self._partial(monkeypatch)
+        monkeypatch.setattr(hs, "_victim_vram_estimate", lambda engine: NEED)
+        b.placement_heal = b.placement_heal._replace(recheck_at=0.0)
+
+        with caplog.at_level("INFO", logger="localm"):
+            got = asyncio.run(hs.get_engine("model-b", activate=False))
+
+        assert got is b and b.load_calls == 2 and b.unload_calls == 1
+        assert b.gpu_placement == _FULL and b.placement_heal is None
+        assert any("enough VRAM is free now" in r.getMessage() for r in caplog.records)
+
+    def test_not_before_the_first_recheck_is_due(self, monkeypatch):
+        b, env = self._partial(monkeypatch)
+        monkeypatch.setattr(hs, "_victim_vram_estimate", lambda engine: NEED)
+        probes = env.probes
+
+        asyncio.run(hs.get_engine("model-b", activate=False))
+
+        assert b.load_calls == 1 and env.probes == probes
+
+    def test_kept_and_rechecked_later_while_vram_is_short(self, monkeypatch):
+        b, env = self._partial(monkeypatch, reading=lambda: {"total": 20 * GB, "free": GB})
+        monkeypatch.setattr(hs, "_victim_vram_estimate", lambda engine: GB)
+        b.placement_heal = b.placement_heal._replace(recheck_at=0.0)
+
+        got = asyncio.run(hs.get_engine("model-b", activate=False))
+
+        assert got is b and b.load_calls == 1 and b.unload_calls == 0
+        heal = b.placement_heal
+        assert heal.recheck and heal.recheck_at > 0.0
+        probes = env.probes
+        asyncio.run(hs.get_engine("model-b", activate=False))
+        assert env.probes == probes, "a short reading is not re-taken before recheck_at"
+
+    def test_a_process_scoped_reading_never_triggers_a_reload(self, monkeypatch):
+        b, _env = self._partial(monkeypatch)
+        monkeypatch.setattr(hs, "_victim_vram_estimate", lambda engine: NEED)
+        real = hs._switch_probe_vram
+
+        async def _scoped(loop, budget):
+            probe = await real(loop, budget)
+            return dataclasses.replace(probe, process_scoped=True)
+
+        monkeypatch.setattr(hs, "_switch_probe_vram", _scoped)
+        b.placement_heal = b.placement_heal._replace(recheck_at=0.0)
+
+        asyncio.run(hs.get_engine("model-b", activate=False))
+
+        assert b.load_calls == 1 and b.placement_heal.recheck_at > 0.0
+
+    def test_a_configured_partial_load_is_never_healed(self, monkeypatch):
+        class _Configured(_SizedEngine):
+            def load(self):
+                super().load()
+                self.gpu_sizing = dict(self.gpu_sizing, mode="configured")
+
+        b = _Configured("model-b", (_PARTIAL, _FULL))
+        env = _install(monkeypatch, {"model-b": b}, total=20 * GB)
+        asyncio.run(hs.switch_engine("model-b", env.factory, preempt=False))
+
+        assert b.placement_heal is None
+        asyncio.run(hs.get_engine("model-b", activate=False))
+        assert b.load_calls == 1

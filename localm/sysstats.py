@@ -849,7 +849,9 @@ def estimate_vram(model_bytes: int, n_ctx: int,
     function as moe_pinned_bytes above; applied first, unconditionally.
 
     *keeps_kv* False (a diffusion language model, which llama.cpp gives no KV
-    cache) charges no KV cache at all."""
+    cache) charges no KV cache at all. Otherwise the KV cache is charged for the
+    same share of layers as the weights: a CPU layer keeps its KV cache in
+    system RAM."""
     model_bytes = max(0, int(model_bytes or 0))
     n_ctx = max(0, int(n_ctx or 0))
     # The input-layer share never touches VRAM for any load, dense or MoE -
@@ -878,7 +880,7 @@ def estimate_vram(model_bytes: int, n_ctx: int,
     else:
         from localm.inference.backends.gguf import GgufBackend
         bytes_per_token = GgufBackend._bytes_per_token(model_bytes)
-    kv_cache = int(n_ctx * bytes_per_token)
+    kv_cache = int(n_ctx * bytes_per_token * frac)
     overhead = _VRAM_OVERHEAD_BYTES if (weights or kv_cache) else 0
     return {"weights": weights, "kv_cache": kv_cache, "overhead": overhead,
             "needed": weights + kv_cache + overhead}

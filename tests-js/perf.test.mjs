@@ -23,7 +23,8 @@ async function waitFor(fn, timeout = 800) {
 
 // Records calls; serves config + estimate + the bootstrap endpoints.
 function makeFetch(calls, { fits = true, gpus = [], gpuSplitIndices = null,
-                            gpuSplitRatios = null, free = 11 * GIB } = {}) {
+                            gpuSplitRatios = null, free = 11 * GIB, held = undefined,
+                            active = "", unloadStatus = "unloaded" } = {}) {
   return async (url, opts = {}) => {
     const u = String(url);
     const method = (opts.method || "GET").toUpperCase();
@@ -36,7 +37,9 @@ function makeFetch(calls, { fits = true, gpus = [], gpuSplitIndices = null,
       return { ok: true, status: 200, json: async () => ({
         model: "m", model_bytes: 4 * GIB, weights: 4 * GIB, kv_cache: 0.6 * GIB,
         overhead: 1.5 * GIB, needed: 6.1 * GIB, free, total: 16 * GIB,
-        fits, approximate: true }) };
+        fits, approximate: true, ...(held === undefined ? {} : { held }) }) };
+    if (u.includes("/api/models/unload") && method === "POST")
+      return { ok: true, status: 200, json: async () => ({ status: unloadStatus }) };
     if (u.includes("/api/models/load") && method === "POST") {
       const body = JSON.parse(opts.body || "{}");
       return { ok: true, status: 200, json: async () => ({ status: "loaded", model: body.model }) };
@@ -46,7 +49,8 @@ function makeFetch(calls, { fits = true, gpus = [], gpuSplitIndices = null,
     if (u.endsWith("/v1/config") && method === "PATCH")
       return { ok: true, status: 200, json: async () => ({ ok: true }) };
     if (u.includes("/api/models"))
-      return { ok: true, status: 200, json: async () => ({ models: [], active: "" }) };
+      return { ok: true, status: 200, json: async () => ({
+        models: active ? [{ name: active, active: true, size_bytes: 4 * GIB }] : [], active }) };
     if (u.includes("/api/plugins"))
       return { ok: true, status: 200, json: async () => ({ plugins: [] }) };
     return { ok: true, status: 200, json: async () => ({}) };
@@ -515,4 +519,53 @@ test("unchecking a GPU down to 1 clears the ratio-weight row too", async () => {
   boxes[0].dispatchEvent(new window.Event("change", { bubbles: true }));
   assert.ok(await waitFor(() => ratioList.querySelectorAll("input[type=number]").length === 0),
     "fewer than 2 checked GPUs leaves no ratio inputs to fill in");
+});
+
+test("estimate counts what the running model holds beside the free VRAM", async () => {
+  const calls = [];
+  const { window } = loadApp({ fetchImpl: makeFetch(calls, { free: 3.5 * GIB, held: 7.6 * GIB }) });
+  const est = window.document.getElementById("perf-estimate");
+  assert.ok(await waitFor(() => /held by this model/.test(est.textContent)),
+    "the running model's own share is shown");
+  assert.match(est.textContent, /3\.5 GB free \+ 7\.6 GB held by this model/);
+  assert.match(est.textContent, /fits/);
+});
+
+test("Apply reloads the running model after saving", async () => {
+  const calls = [];
+  const { window } = loadApp({ fetchImpl: makeFetch(calls, { active: "m" }) });
+  await waitFor(() => window.document.getElementById("perf-ctx").value === "8192");
+  assert.ok(await waitFor(() => window.document.getElementById("model-select").value === "m"),
+    "the running model is known to the page");
+  window.document.getElementById("perf-apply").click();
+  assert.ok(await waitFor(() => calls.some(
+    (c) => c.u.includes("/api/models/load") && c.method === "POST")), "the model is loaded again");
+  const order = calls.filter((c) => c.method !== "GET").map((c) =>
+    c.u.endsWith("/v1/config") ? "patch" : c.u.includes("/api/models/unload") ? "unload"
+      : c.u.includes("/api/models/load") ? "load" : "other");
+  assert.deepEqual(order.filter((o) => o !== "other"), ["patch", "unload", "load"]);
+  const unload = calls.find((c) => c.u.includes("/api/models/unload"));
+  assert.equal(JSON.parse(unload.body).model, "m");
+});
+
+test("Apply with no running model only saves", async () => {
+  const calls = [];
+  const { window } = loadApp({ fetchImpl: makeFetch(calls) });
+  await waitFor(() => window.document.getElementById("perf-ctx").value === "8192");
+  window.document.getElementById("perf-apply").click();
+  assert.ok(await waitFor(() => calls.some(
+    (c) => c.u.endsWith("/v1/config") && c.method === "PATCH")), "Apply issues a PATCH");
+  await settle(100);
+  assert.equal(calls.some((c) => c.u.includes("/api/models/unload")), false);
+  assert.equal(calls.some((c) => c.u.includes("/api/models/load") && c.method === "POST"), false);
+});
+
+test("Apply on a busy running model saves and does not load it again", async () => {
+  const calls = [];
+  const { window } = loadApp({ fetchImpl: makeFetch(calls, { active: "m", unloadStatus: "in_use" }) });
+  await waitFor(() => window.document.getElementById("model-select").value === "m");
+  window.document.getElementById("perf-apply").click();
+  assert.ok(await waitFor(() => calls.some((c) => c.u.includes("/api/models/unload"))));
+  await settle(100);
+  assert.equal(calls.some((c) => c.u.includes("/api/models/load") && c.method === "POST"), false);
 });
