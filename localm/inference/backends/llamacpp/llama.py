@@ -4722,13 +4722,14 @@ class LlamaCpp:
             cp.n_rs_seq = self._spec_rollback_snapshots(cp)
 
         self._ctx_ptr = api.llama_init_from_model(self._model_ptr, cp)
-        if not self._ctx_ptr and offload_kqv and ram_fallback:
+        model = self._model_ptr
+        if not self._ctx_ptr and offload_kqv and ram_fallback and model is not None:
             from localm.debuglog import logger
             logger.info("gguf context: a %d-token context with the KV cache in VRAM could "
                         "not be created, keeping the KV cache in system RAM", target)
             offload_kqv = False
             cp.offload_kqv = False
-            self._ctx_ptr = api.llama_init_from_model(self._model_ptr, cp)
+            self._ctx_ptr = api.llama_init_from_model(model, cp)
         if self._ctx_ptr and self.is_diffusion:
             api.llama_set_causal_attn(self._ctx_ptr, False)
         if self._ctx_ptr:
