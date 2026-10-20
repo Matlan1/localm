@@ -577,8 +577,10 @@ test("Apply whose reload fails leaves the status on the failure, not on loading"
   const { window } = loadApp({ fetchImpl: makeFetch(calls, { active: "m", loadFails: true }) });
   await waitFor(() => window.document.getElementById("model-select").value === "m");
   window.document.getElementById("perf-apply").click();
-  const status = window.document.getElementById("status-text");
-  assert.ok(await waitFor(() => /load failed/.test(status.textContent)),
+  const toastEl = window.document.getElementById("toast");
+  assert.ok(await waitFor(() => /reloading m failed: boom/.test(toastEl.textContent), 3000),
     "the failed reload is shown");
-  assert.doesNotMatch(status.textContent, /Loading/);
+  await settle(100);
+  const status = window.document.getElementById("status-text");
+  assert.doesNotMatch(status.textContent, /loading/i, "the status does not stay on loading");
 });
