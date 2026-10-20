@@ -87,6 +87,18 @@ def test_read_only_command_runs_without_asking(tmp_path, monkeypatch):
     assert prompts == []
 
 
+def test_plan_mode_still_refuses_a_read_only_command(tmp_path, monkeypatch):
+    (tmp_path / "a.txt").write_text("hello\n", encoding="utf-8")
+    agent = _make_agent(tmp_path)
+    agent.set_plan_mode(True)
+    prompts = []
+    monkeypatch.setattr(display.console, "input",
+                        lambda prompt="": prompts.append(prompt) or "y")
+    res = agent._execute_tool(_shell("cat a.txt"), interactive=True)
+    assert not res.ok and "hello" not in res.output
+    assert prompts == []
+
+
 def test_writing_command_still_asks(tmp_path, monkeypatch):
     agent = _make_agent(tmp_path)
     prompts = []
