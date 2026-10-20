@@ -182,7 +182,7 @@ _SLASH_COMMANDS = (
     "/reindex", "/verbose", "/approve", "/history", "/undo", "/resume",
     "/sessions", "/compact", "/memory", "/remember", "/forget", "/save",
     "/export", "/scope", "/changes", "/diff", "/bg", "/verify", "/goal",
-    "/review", "/doctor", "/plan",
+    "/review", "/doctor", "/hooks", "/plan",
 )
 
 
@@ -402,6 +402,8 @@ def _handle_command(raw: str, agent: Agent) -> bool:
                 else:
                     agent.set_cwd(new_dir)
                     print_info(f"Working directory: {new_dir}")
+                    from .hooks_cli import resolve_hook_trust
+                    resolve_hook_trust(agent, trust_flag=False, can_prompt=True)
 
     elif cmd == "verbose":
         agent.verbose = not agent.verbose
@@ -828,6 +830,10 @@ def _handle_command_extended(cmd: str, arg: str, agent: Agent) -> bool:
                 partial = reviewer.partial_warning(result)
                 if partial:
                     print_warning(partial)
+
+    elif cmd == "hooks":
+        from .hooks_cli import handle_hooks_command
+        handle_hooks_command(arg, agent)
 
     elif cmd == "scope":
         if not arg:

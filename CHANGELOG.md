@@ -48,7 +48,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   in `log` and `full` mode, with episodic memory on, they are saved as a lesson, and privacy
   mode writes nothing. `compaction_flush = false` in `.localcoder/config.toml` turns the note
   pass off.
-
+- **Coder tool hooks.** `.localcoder/config.toml` can declare `pre_tool_use` and
+  `post_tool_use` commands that run around the agent's tool calls, matched by tool name. A pre
+  hook that exits 2 blocks the call and tells the agent why; a post hook that exits 2 sends its
+  output to the agent, for example a linter's complaints. A project's hooks run only after you
+  trust them, and never in a restricted session.
 - **`localm coder` keeps long tool output instead of cutting out the middle.** When a command or
   search prints more than the agent is shown, the full text is kept in memory for the session
   (never written to disk) and the agent can read any part of it back with the new `read_output`

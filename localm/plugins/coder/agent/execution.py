@@ -12,7 +12,7 @@ import re
 import shlex
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import localm.plugins.coder.agent as _agent
 from ..display import (
@@ -100,6 +100,14 @@ class _ExecutionMixin:
         @property
         def plan_mode(self) -> bool: ...
         _audit: AuditLogT
+        always_confirm: set
+        confirm_handler: Any
+
+        @property
+        def auto_approve(self) -> bool: ...
+
+        @property
+        def disabled_tools(self) -> frozenset: ...
 
         def _emit(self, event_type: str, **data) -> None: ...
 
@@ -564,6 +572,12 @@ class _ExecutionMixin:
                            summary="blocked by network policy (net_mode=off)")
                 return result
 
+        # Project pre_tool_use hooks run before confirmation, so a call a hook
+        # blocks never reaches the prompt.
+        hook_block = self._run_pre_tool_hooks(call, interactive)
+        if hook_block is not None:
+            return hook_block
+
         # Confirmation for destructive tools (diff preview for write_file), for
         # network tools when net_mode is "ask", and for a non-mutating tool that
         # opts in via ask_by_default (see ToolDef.ask_by_default, registry.py).
@@ -778,6 +792,7 @@ class _ExecutionMixin:
             result = ToolResult.error(f"Tool error: {e}")
         duration_s = time.monotonic() - t_start
 
+        result = self._run_post_tool_hooks(call, result, interactive)
         result = self._track_tool_failure(call, result)
         if result.ok and self._denied_unconfirmed:
             key = _call_key(call)
@@ -806,6 +821,159 @@ class _ExecutionMixin:
 
     def _cancel_check(self) -> bool:
         return self.cancelled
+
+    def _hooks_for(self, event: str, tool: str):
+        """The session's ToolHooks when they apply to *event* for *tool*, else
+        None (always None in a restricted session). Untrusted hooks re-read the
+        trust store first; while they stay untrusted, the first call they apply
+        to reports that once per session. The caller must check ``trusted``
+        before running anything."""
+        hooks = getattr(self, "_tool_hooks", None)
+        if hooks is None or self.restricted or not hooks.applies(event, tool):
+            return None
+        if not hooks.refresh_trust() and hooks.claim_untrusted_report():
+            msg = hooks.untrusted_message()
+            _agent.print_warning(msg, to_stderr=not getattr(self, "_interactive", False))
+            self._emit("info", text=msg)
+            self._audit.notice("tool_hooks_untrusted", msg)
+        return hooks
+
+    def _hook_run_gate(self) -> Optional[str]:
+        """Whether a hook run needs more than trust in this session.
+
+        When some enabled destructive tool other than the shell tools runs
+        without confirmation but run_shell does not, a hook run gets
+        run_shell's gate: "confirm" when run_shell needs confirmation, "refuse"
+        when it is disabled. None when trust is enough."""
+        if not self.auto_approve:
+            return None
+        disabled = self.disabled_tools
+        confirmed = set(self.always_confirm)
+        writes_unconfirmed = any(
+            td.destructive and name not in _SHELL_EXEC_TOOLS
+            and name not in disabled and name not in confirmed
+            for name, td in _agent.TOOL_REGISTRY.items())
+        if not writes_unconfirmed:
+            return None
+        if "run_shell" in disabled:
+            return "refuse"
+        if "run_shell" in confirmed:
+            return "confirm"
+        return None
+
+    def _hook_permit(self, interactive: bool):
+        """A callback deciding, per hook run, whether it may run: None to run
+        it, else the reason it does not. None when no check is needed."""
+        gate = self._hook_run_gate()
+        if gate is None:
+            return None
+
+        def _permit(spec) -> Optional[str]:
+            if gate == "refuse":
+                return "run_shell is disabled for this session and file writes run unconfirmed"
+            if self.confirm_handler is not None:
+                approved = invoke_confirm(
+                    self.confirm_handler,
+                    ToolCall(name="run_shell", args={"command": spec.command_text(400)},
+                             raw="", start=0, end=0),
+                    agent=self._confirm_agent_label())
+            elif interactive:
+                approved = _agent.confirm(
+                    f"  Run the project's {spec.label} ({spec.command_text(80)})?")
+            else:
+                return ("it needs the confirmation run_shell needs in this session, "
+                        "and none can be asked for here (a non-interactive run, or "
+                        "several tool calls running at once)")
+            return None if approved else "the user declined to run it"
+        return _permit
+
+    def _hook_project_dir(self, hooks) -> Path:
+        """The folder hooks run in for this agent: the project folder, or, for a
+        sub-agent whose working folder differs from the one the hooks were
+        loaded for (an isolated worktree), the matching folder of its tree."""
+        project = hooks.project_dir.resolve()
+        cwd = Path(self.cwd).resolve()
+        base = hooks.loaded_cwd
+        if getattr(self, "parent", None) is None or base is None or cwd == base:
+            return project
+        try:
+            rel = base.relative_to(project).parts
+        except ValueError:
+            return cwd
+        if rel and cwd.parts[-len(rel):] == rel:
+            return Path(*cwd.parts[:-len(rel)])
+        return cwd
+
+    def _hook_status(self, interactive: bool):
+        """A callback printing which hook is running, for an interactive session."""
+        if not interactive:
+            return None
+        from localm.console import markup_safe
+
+        def _show(spec) -> None:
+            console.print(f"    [dim]running {spec.label}: "
+                          f"{markup_safe(spec.command_text(80))}[/dim]")
+        return _show
+
+    def _run_pre_tool_hooks(self, call: ToolCall,
+                            interactive: bool) -> Optional[ToolResult]:
+        """Run the project's pre_tool_use hooks for *call*. Returns the error
+        result when a hook blocks it, else None."""
+        from ..hooks import PRE
+        hooks = self._hooks_for(PRE, call.name)
+        if hooks is None:
+            return None
+        if not hooks.trusted:
+            reason = hooks.untrusted_block_reason(call.name)
+        else:
+            reason = hooks.run_pre(call.name, dict(call.args), self.cwd,
+                                   cancel=self._cancel_check,
+                                   on_start=self._hook_status(interactive),
+                                   permit=self._hook_permit(interactive),
+                                   project_dir=self._hook_project_dir(hooks))
+        if reason is None:
+            return None
+        from localm.textguard import compose, untrusted_span
+        result = ToolResult.error(compose(untrusted_span(reason)))
+        self._audit.notice("tool_hook_blocked", reason)
+        if interactive:
+            print_tool_error(call.name, str(result.output))
+        self._emit("tool_result", tool=call.name, ok=False,
+                   summary="blocked by a pre_tool_use hook")
+        return result
+
+    def _run_post_tool_hooks(self, call: ToolCall, result: ToolResult,
+                             interactive: bool) -> ToolResult:
+        """Run the project's post_tool_use hooks for *call* and return *result*
+        with any hook feedback appended to its output."""
+        from ..hooks import POST
+        hooks = self._hooks_for(POST, call.name)
+        if hooks is None or not hooks.trusted:
+            return result
+        report = hooks.run_post(call.name, dict(call.args), self.cwd,
+                                ok=result.ok, output=str(result.output),
+                                cancel=self._cancel_check,
+                                on_start=self._hook_status(interactive),
+                                permit=self._hook_permit(interactive),
+                                project_dir=self._hook_project_dir(hooks))
+        for w in report.warnings:
+            _agent.print_warning(w, to_stderr=not interactive)
+            self._emit("info", text=w)
+            self._audit.notice("tool_hook_failed", w)
+        if not report.feedback:
+            return result
+        from dataclasses import replace
+        from localm.textguard import compose, untrusted_span
+        parts: list = [result.output]
+        for text in report.feedback:
+            parts += ["\n\n[post_tool_use hook]\n", untrusted_span(text)]
+            self._audit.notice("tool_hook_feedback", text)
+        if interactive:
+            from localm.console import markup_safe
+            for text in report.feedback:
+                console.print(f"    [dim yellow]post_tool_use hook:[/dim yellow] "
+                              f"{markup_safe(text.splitlines()[0][:200])}")
+        return replace(result, output=compose(*parts))
 
     def _track_tool_failure(self, call: ToolCall, result: ToolResult) -> ToolResult:
         """Update the per-tool + global failure streaks and arm the circuit

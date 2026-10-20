@@ -1028,6 +1028,56 @@ Give the agent standing guidance (conventions, style, constraints) with a `.loca
 
 Both files are injected into every system prompt, so both are capped at 3000 characters each to leave room for the repo map and the conversation. Going over is not silent: the agent prints which file was over budget and by how much, and the prompt itself carries a note saying the file was cut. Normal-sized files are injected verbatim.
 
+**Tool hooks.** Run your own commands before and after the agent's tool calls, declared in
+`.localcoder/config.toml`:
+
+```toml
+[[hooks.pre_tool_use]]
+matcher = "write_file|edit_file|patch_file"   # regex on the whole tool name; "*" = every tool
+command = "python scripts/guard.py"           # a string runs in the shell, a list runs as-is
+timeout = 30                                  # seconds, default 60, at most 600
+
+[[hooks.post_tool_use]]
+matcher = "write_file|edit_file|patch_file"
+command = ["ruff", "check", "--quiet", "."]
+```
+
+Each hook reads one JSON object on stdin: `event`, `tool`, `args`, `cwd` and `project_dir`,
+plus `ok`, `output` and `output_truncated` for a `post_tool_use` hook. It runs in the
+folder that holds `.localcoder/`, with `LOCALM_CODER_HOOK_EVENT`, `LOCALM_CODER_TOOL` and
+`LOCALM_CODER_PROJECT_DIR` set. A `pre_tool_use` hook that exits 0 lets the call run;
+exit 2 blocks it and its stderr is the reason the agent is given. Any other result (another
+exit code, a timeout, a command that cannot start) also blocks the call, and so does an
+invalid `pre_tool_use` entry or an unknown event name under `[hooks]`, until it is fixed. A
+`post_tool_use` hook that exits 2 adds
+its stderr to the tool result the agent sees (a linter's complaints, for example); any
+other failure is shown to you as a warning. Pre hooks run before the confirmation prompt,
+so a call a hook blocks is never offered for approval, and they do not run for a call
+`--dry-run` or `--patch-mode` skips. The JSON is ASCII-only (other characters arrive as
+`\uXXXX` escapes), so a hook can read it whatever its console encoding.
+
+A cloned repository can ship hooks, so a project's hooks run only after you trust them.
+An interactive session lists them and asks: `y` trusts them for this session, `a` trusts
+them and remembers it (in the localm data folder) until any hook in the file changes, and
+anything else leaves them off. A non-interactive run never asks: pass `--trust-hooks` to
+trust and remember them. Untrusted hooks never run: a tool call an untrusted
+`pre_tool_use` hook would check is refused, because the check cannot run, and untrusted
+`post_tool_use` hooks are skipped, with a warning either way. In the REPL,
+`/hooks` lists them and whether they run, `/hooks trust` trusts and remembers them, and
+`/hooks forget` withdraws the trust. In the GUI the **hooks** button in the coder setup
+panel shows the same list and trusts or untrusts them; a running session picks up trust
+granted or withdrawn there at its next tool call. After `/cd`, the new folder's hooks
+apply, with their own trust.
+
+Trust covers the hook commands, not the scripts they run, and the agent can edit those
+scripts. So when file writes run without confirmation but `run_shell` does not (a one-shot
+`localm coder "TASK"` without `--yes`, or `run_shell` in `always_confirm`), every hook run
+needs the same confirmation `run_shell` would, and a run that cannot ask refuses it; if
+`run_shell` is disabled in such a session, its hooks do not run at all. When several read-only calls
+run at once, their hooks count toward that batch's two-minute limit. Sub-agents run under
+the same hooks, in their own working tree; a restricted session (a shared `coder` key, a
+scheduled job without `--allow-shell`) never runs hooks.
+
 ---
 
 ## MCP server

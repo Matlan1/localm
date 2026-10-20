@@ -25,6 +25,10 @@ compaction_flush = false                  # skip the durable-notes pass before
 auto_allow_read_only_shell = true         # run provably read-only shell commands
                                           # inside the project without asking
 
+Tables read by their own loaders rather than by load_project_config:
+``[mcp.servers.*]`` (mcp.py) and ``[[hooks.pre_tool_use]]`` /
+``[[hooks.post_tool_use]]`` (hooks.py).
+
 The file is optional; absent keys fall through to CLI defaults.
 """
 

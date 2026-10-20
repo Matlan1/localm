@@ -729,6 +729,7 @@ HELP_TEXT = """\
                         issues right now, even with coder_review off
   [bold]/doctor[/bold]               check the model server, tool calls, context window,
                         git, verify command and MCP servers
+  [bold]/hooks \\[trust|forget][/bold]  show this project's tool hooks, or trust / untrust them
 
 [dim]Tab completes commands and project paths (where readline is available);
 REPL history persists across sessions in log/full modes, never in privacy.[/dim]
