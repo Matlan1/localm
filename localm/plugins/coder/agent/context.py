@@ -441,6 +441,10 @@ class _ContextMixin:
 
         def changed_file_stats(self, limit: Optional[int] = None) -> list[dict]: ...
 
+        _audit: Any
+
+        def _emit(self, event_type: str, **data) -> None: ...
+
     def _ctx_window_tokens(self) -> int:
         """The context window to budget history against, in tokens.
 

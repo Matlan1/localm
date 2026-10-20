@@ -3260,7 +3260,7 @@ class LlamaCpp:
                 # mtmd_tokenize runs the same pre-tokenizer over the text parts
                 # of this prompt, so the vision path needs the same check the
                 # text path gets in _Tokenizer.encode.
-                self._tokenizer.check(prompt)
+                self._loaded_tokenizer().check(prompt)
 
                 # Stays on _quiet_stderr rather than _generate()'s
                 # dedup_native_stderr: below, _ctx() is entered once for the mtmd
