@@ -1862,14 +1862,21 @@ class TestPlacementRecheck:
         asyncio.run(hs.switch_engine("model-b", env.factory, preempt=False))
         assert b.placement_heal.recheck
 
-    def test_a_blocker_heal_is_not_recorded_past_total_vram(self):
+    @pytest.mark.parametrize("deferred, released", [(False, False), (True, True)])
+    def test_a_blocker_or_unconfirmed_heal_is_kept_past_total_vram(
+            self, monkeypatch, deferred, released):
+        monkeypatch.setattr(hs, "_engines_lru", ["other", "m"])
         engine = SimpleNamespace(
             gpu_placement=dict(_PARTIAL), placement_heal="unset",
             gpu_sizing={"mode": "auto", "n_cpu_moe_auto": False, "total_bytes": 16 * GB,
                         "model_bytes": 30 * GB, "kv_bytes": GB, "overhead_bytes": GB})
-        release = SimpleNamespace(released=False, expected=True)
-        hs._record_placement_heal("m", engine, (), [release], allowed=True, deferred=False)
-        assert engine.placement_heal is None
+        release = SimpleNamespace(released=released, expected=True)
+        hs._record_placement_heal("m", engine, (), [release], allowed=True,
+                                  deferred=deferred)
+        heal = engine.placement_heal
+        assert isinstance(heal, hs.PlacementHeal) and not heal.recheck
+        assert heal.blockers == (frozenset({"other"}) if deferred else frozenset())
+        assert heal.release_unconfirmed is not released
 
     @pytest.mark.parametrize("sizing", [
         {"total_bytes": None, "model_bytes": 30 * GB, "kv_bytes": GB, "overhead_bytes": GB},

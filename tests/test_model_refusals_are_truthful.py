@@ -139,6 +139,8 @@ def test_an_unreadable_gguf_prints_as_a_refusal(tmp_path, monkeypatch):
      "No such file or directory"),
     ("gguf_init_from_reader: alignment 3 is not a power of 2", None),
     ("could not load the native library", None),
+    ("gguf_init_from_file: failed to open GGUF file '" + "x" * 1025 + "' (Permission denied)",
+     None),
 ])
 def test_unopenable_file_reason_reads_the_system_reason(text, expected):
     assert _unopenable_file_reason(RuntimeError(text)) == expected

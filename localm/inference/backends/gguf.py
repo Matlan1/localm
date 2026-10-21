@@ -85,9 +85,10 @@ _DAMAGED_FILE_RE = re.compile(
 
 
 # The gguf reader's line when it cannot open the file, ending in the C
-# library's reason in parentheses.
+# library's reason in parentheses. The quoted path is bounded so a match stays
+# linear in the text's length. See test_unopenable_file_reason_reads_the_system_reason.
 _OPEN_FAILED_RE = re.compile(
-    r"gguf_init_from_\w+: failed to open GGUF file '[^\r\n]*' \(([^\r\n()]{1,200})\)")
+    r"gguf_init_from_\w+: failed to open GGUF file '[^\r\n]{0,1024}' \(([^\r\n()]{1,200})\)")
 
 
 def _damaged_file_reason(exc: BaseException) -> Optional[str]:
@@ -679,9 +680,9 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                 if unreadable is not None:
                     raise ModelFileUnreadableError(
                         f"{Path(self.model_path).name} could not be opened: llama.cpp "
-                        f"reported \"{unreadable}\". Check that this account may read "
-                        f"the file and that no other program holds it open, then try "
-                        f"again.") from exc
+                        f"reported \"{unreadable}\". Check that the file exists, that "
+                        f"this account may read it and that no other program holds it "
+                        f"open, then try again.") from exc
                 damaged = _damaged_file_reason(exc)
                 if damaged is not None:
                     raise ModelFileDamagedError(

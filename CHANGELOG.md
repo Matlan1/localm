@@ -353,8 +353,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **A model loaded partly on the CPU moves onto the GPU once VRAM frees up.** With automatic GPU
   layers, a model that loaded partly on the CPU because another program held VRAM is reloaded
   on the GPU at a later request once enough VRAM is free. An explicit GPU layer count is never
-  changed, and a model that would not fit even in the GPU's total VRAM is not checked again, so
-  its replies do not wait for VRAM readings.
+  changed, and a model that would not fit even in the GPU's total VRAM is not re-checked for
+  free VRAM every 30 seconds, so its replies do not wait for those readings.
 - **Replies speed up again after Windows moved part of a model out of VRAM.** When another
   program takes VRAM, Windows can move part of a loaded model to system memory, and replies
   stayed several times slower even after that program closed. When a reply decodes far slower
