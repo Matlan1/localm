@@ -162,6 +162,24 @@ latter would flag these two as violations:
                                  is not a call to localm's own gated routes,
                                  so resolve_bearer_headers does not apply.
 
+  localm/gpu_registry.py, _get_status()
+                                 the attach token of an instance of THIS
+                                 install, read from this install's own 0600
+                                 run/ entry, sent only on GET
+                                 /v1/instances/status to the loopback
+                                 address and port that entry records for
+                                 that instance id, after /whoami answered as
+                                 that id and the listener on the port was
+                                 shown to belong to this OS user
+                                 (_same_install_token). It reads the full
+                                 coordination status of a same-install
+                                 sibling for a reader that has no listener
+                                 of its own to be called back on (the MCP
+                                 stdio server). The status route compares
+                                 it to its own instance_token and grants
+                                 nothing else, so resolve_bearer_headers
+                                 (the owner key first) does not apply.
+
 If you land a new site here, EITHER route it through
 ``auth.resolve_bearer_headers`` (the common case) OR add it to the allowlist
 below with a review comment matching the rigor above - never widen the scan
@@ -190,6 +208,7 @@ _REVIEWED_SITES = {
     ("localm/model_manager/sources.py", "_civitai_get", "f'Bearer {api_key}'"),
     ("localm/peer_routing.py", "_auth_headers", "f'Bearer {api_key}'"),
     ("localm/media/koboldcpp/server.py", "_Server.request", "'Bearer ' + self.password"),
+    ("localm/gpu_registry.py", "_get_status", "f'Bearer {token}'"),
 }
 
 

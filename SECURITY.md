@@ -30,12 +30,12 @@ localm is a local-first, single-owner application. API access is gated by a
   (the CA certificate, never the key), `GET /` on a `localm serve` API-only
   instance (a redirect to the API docs), and the three session routes
   `GET /api/session`, `POST /api/session` and `POST /api/session/logout` -
-  login exchanges a key for a cookie, so it cannot require one. Four more
+  login exchanges a key for a cookie, so it cannot require one. Five more
   routes take no bearer key but carry a credential of their own:
   `POST /v1/surfaces/gui` (this instance's attach token, or an owner key) and
-  `GET /v1/instances/status`, `POST /v1/instances/vouch` and
-  `POST /v1/instances/cooperate-unload` (multi-instance GPU coordination; see
-  *State-changing endpoints* below).
+  `GET /v1/instances/status`, `POST /v1/instances/status`,
+  `POST /v1/instances/vouch` and `POST /v1/instances/cooperate-unload`
+  (multi-instance GPU coordination; see *State-changing endpoints* below).
 
 Manage the key from the CLI: `localm key show` / `generate` / `set` / `clear`, and
 mint named, scope-limited keys with `localm key create --scope <scope>` - by
@@ -108,8 +108,12 @@ GUI mount), gated on its own attach token or the owner key; and
 `/v1/instances/cooperate-unload`, `/v1/instances/vouch` and
 `/v1/instances/status` (multi-instance GPU coordination between instances on one
 machine): they answer only on an instance that coordinates, refuse any request
-that carries an `Origin` header, and an unload happens only after the asking
-instance confirms the request on `/vouch`. Every one of these is matched as an
+that carries an `Origin` header, and an unload, or the full status by `POST`,
+happens only after the asking instance, listening under the same OS account,
+confirms the request on `/vouch`. Without that, or this instance's attach token
+or a key granting `models:read`, `GET /v1/instances/status` omits the process id
+and every model's path and digest, and on a key-protected instance lists no
+models. Every one of these is matched as an
 exact route, not a prefix - a route added under one of them is not exempt, and
 exempting a new route needs its own deliberate addition. A configured
 `"cors_origins"` (or `"*"`) opts specific origins into cross-origin use for
