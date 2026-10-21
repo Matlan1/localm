@@ -764,3 +764,29 @@ def test_a_loaded_model_that_takes_no_reference_images_is_refused_after_the_load
                          ref_images=[_png()])
     assert not ok and "does not take reference images" in msg and "FLUX Fill" in msg
     assert runner.generates == []
+
+
+def test_clip_only_models_get_non_ascii_letters_lowercased_like_clip(addon_set, runner,  # noqa: F811
+                                                                      tmp_path):
+    d = tmp_path / "Zusätze Öß"
+    d.mkdir()
+    _register("oel-stil", write_safetensors(d / "Öl-Stil.safetensors", TI_SD1),
+              "textual-inversion")
+    ok, msg, lines, rec = _gen(runner, tmp_path, {"model": "sd15", "embeddings": ["oel-stil"]},
+                               prompt="Öl-Stil, Ein großer ÖLBAUM über dem Fluß",
+                               negative_prompt="ÄRGER", width=64, height=64)
+    assert ok, msg
+    params = runner.generates[-1]
+    assert params["prompt"] == "öl-Stil, Ein großer öLBAUM über dem Fluß"
+    assert params["negative_prompt"] == "äRGER"
+    assert runner.loads[-1]["embeddings"] == (("öl-Stil", str(d / "Öl-Stil.safetensors")),)
+    assert rec["prompt"] == "Öl-Stil, Ein großer ÖLBAUM über dem Fluß"
+    assert not any("no effect" in line for line in lines)
+
+
+def test_a_model_with_a_case_sensitive_encoder_gets_the_prompt_unchanged(addon_set, runner,  # noqa: F811
+                                                                         tmp_path):
+    ok, msg, _, _ = _gen(runner, tmp_path, {"model": "fluxunchained"},
+                         prompt="Ein großer ÖLBAUM", width=64, height=64)
+    assert ok, msg
+    assert runner.generates[-1]["prompt"] == "Ein großer ÖLBAUM"

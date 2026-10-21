@@ -386,7 +386,7 @@ def _is_sentence_transformers_folder(path: Path) -> bool:
 
 _MEDIA_KIND_TYPES = MEDIA_KIND_TYPES
 _MEDIA_COMPONENT_TYPES = frozenset({"diffusion-unet", "text-encoder", "vae", "lora",
-                                    "controlnet", "textual-inversion"})
+                                    "controlnet", "textual-inversion", "upscaler"})
 
 
 def _media_component_type(path: Path, model_type: Optional[str]) -> Optional[str]:
