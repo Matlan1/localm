@@ -462,6 +462,50 @@ def _write_keeping_eol(p: Path, before_raw: str, new_text: str) -> None:
     p.write_text("".join(parts), encoding="utf-8", newline="")
 
 
+def _reindented(text: str, start: int, new: str) -> Optional[str]:
+    """*new* with every non-blank line after its first prefixed by the
+    indentation of the line *start* falls on, when *start* sits right after
+    that line's indentation; None when that does not apply (no indentation
+    before *start*, other text before it on the line, or a one-line *new*)."""
+    line_start = text.rfind("\n", 0, start) + 1
+    indent = text[line_start:start]
+    if not indent or indent.strip() or "\n" not in new:
+        return None
+    first, *rest = new.split("\n")
+    return "\n".join([first] + [indent + line if line.strip() else line for line in rest])
+
+
+def _numbered_region(text: str, first_line: int, last_line: int) -> str:
+    """Lines *first_line*..*last_line* (1-based, clamped) of *text*, numbered."""
+    lines = text.split("\n")
+    lo, hi = max(1, first_line), min(len(lines), last_line)
+    return "\n".join(f"{n:4d}: {lines[n - 1]}" for n in range(lo, hi + 1))
+
+
+def _broken_by_edit(p: Path, before: str, after: str) -> Optional[str]:
+    """The syntax error *after* has when *before* had none, else None. Only
+    ``.py`` and ``.toml`` files are judged; any other file returns None."""
+    if p.suffix.lower() not in (".py", ".toml"):
+        return None
+    if _verify_syntax(p, before) is not None:
+        return None
+    return _verify_syntax(p, after)
+
+
+def _syntax_refusal(rel, warn: str, after: str, start: int, new: str) -> str:
+    """The error for an edit refused because it would break the file's syntax,
+    with the region as the edit would have left it."""
+    line = after.count("\n", 0, start) + 1
+    span = new.count("\n")
+    return (
+        f"Edit NOT applied - {rel} is unchanged: the result would have a {warn}. "
+        "Check the indentation of `new` against the lines around it, and make a "
+        "change that spans several lines (a new block and its body) in one edit. "
+        "The edited region would have read:\n"
+        + _numbered_region(after, line - 2, line + span + 2)
+    )
+
+
 def tool_edit_file(cwd: Path, path: str, old: str, new: str,
                    _restricted: bool = True) -> ToolResult:
     """Replace the first occurrence of `old` with `new` in `path`."""
@@ -489,17 +533,30 @@ def tool_edit_file(cwd: Path, path: str, old: str, new: str,
     if located is None:
         return ToolResult.error(_edit_miss_message(path, old, text))
     start, end, count, tolerant = located
+    rel = p.relative_to(cwd) if p.is_relative_to(cwd) else p
     new_text = text[:start] + new + text[end:]
+    inote = ""
+    broken = _broken_by_edit(p, text, new_text)
+    if broken:
+        # An edit that would break a file that parsed is retried with `new`
+        # indented to the line it lands on; if that does not parse either, the
+        # file is left unchanged.
+        shifted = _reindented(text, start, new)
+        shifted_text = text[:start] + shifted + text[end:] if shifted is not None else None
+        if shifted_text is not None and _verify_syntax(p, shifted_text) is None:
+            new_text = shifted_text
+            inote = " (`new` re-indented to match the line it replaces)"
+        else:
+            return ToolResult.error(_syntax_refusal(rel, broken, new_text, start, new))
     try:
         _write_keeping_eol(p, raw, new_text)
     except Exception as e:
         return ToolResult.error(str(e))
 
-    rel = p.relative_to(cwd) if p.is_relative_to(cwd) else p
     note = f" ({count - 1} more occurrence(s) unchanged)" if count > 1 else ""
     tnote = " (matched ignoring whitespace differences)" if tolerant else ""
     result = ToolResult.success(
-        f"Replaced 1 occurrence in {rel}{note}{tnote}",
+        f"Replaced 1 occurrence in {rel}{note}{tnote}{inote}",
         summary=f"edited {rel}{note}",
     )
     warn = _verify_syntax(p, new_text)
@@ -520,12 +577,19 @@ def _edit_miss_message(path: str, old: str, text: str) -> str:
     wanted = textwrap.shorten(repr(old[:120]), width=120)
     nearest = _closest_snippet(text, old)
     hint = f"Closest match in the file:\n{nearest}\n" if nearest else ""
+    first = next((ln for ln in text.splitlines() if ln.strip()), "")
+    add = ("To ADD text rather than change it, set `old` to an existing line "
+           "next to where it goes and repeat that line in `new` before or after "
+           "the added text")
+    add += (f" (the file's first line is {textwrap.shorten(repr(first), width=100)})."
+            if first else ".")
     return (
         f"String not found in {path}.\n"
         f"Looking for: {wanted}\n"
         f"{hint}"
         "Hint: `old` must match the file exactly (whitespace and "
-        "indentation included) - read the file first and copy the text."
+        "indentation included) - read the file first and copy the text. "
+        f"{add}"
     )
 
 
@@ -631,6 +695,15 @@ def tool_edit_files(cwd: Path, edits: list, _restricted: bool = True) -> ToolRes
     for p, _text in planned:
         if p not in targets:
             targets.append(p)
+    # Nothing is written when the batch would break a file that parsed before.
+    for p in targets:
+        broken = _broken_by_edit(p, snapshots[p].decode("utf-8", "replace"), current[p])
+        if broken:
+            rel = p.relative_to(cwd) if p.is_relative_to(cwd) else p
+            return ToolResult.error(
+                f"Edits NOT applied - no file was changed: {rel} would have a "
+                f"{broken}. Check the indentation of each `new` against the lines "
+                "around it.")
     written: list[Path] = []
     for p in targets:
         try:
@@ -721,6 +794,13 @@ def tool_patch_file(cwd: Path, path: str, diff: str,
         return ToolResult.error(str(e))
     except Exception as e:
         return ToolResult.error(f"Unexpected patch error: {e}")
+
+    broken = _broken_by_edit(p, original, patched)
+    if broken:
+        rel = p.relative_to(cwd) if p.is_relative_to(cwd) else p
+        return ToolResult.error(
+            f"Patch NOT applied - {rel} is unchanged: the result would have a "
+            f"{broken}. Check the indentation of the added lines.")
 
     try:
         _write_keeping_eol(p, raw, patched)

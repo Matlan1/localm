@@ -352,7 +352,7 @@ class TestUnderTheDefaultAutoswitch:
     def test_a_long_coder_task_stays_on_the_default_model(self, reg, coder_project):
         TestCoderTaskRuns._small_default(reg)
         engines = _cache(lazy=True)
-        task = "Refactor the parser as this log shows. " + "trace line " * 2400
+        task = "Review the parser as this log shows. " + "trace line " * 2400
         res = _run_coder_task(engines, coder_project, task=task)
         text = res["content"][0]["text"]
         assert list(engines.made) == ["plain"]
@@ -693,7 +693,7 @@ class TestCoderTaskRuns:
             self, reg, coder_project):
         TestCoderTaskRuns._small_default(reg)
         engines = _cache(lazy=True)
-        task = "Refactor the parser as this log shows. " + "trace line " * 2400
+        task = "Review the parser as this log shows. " + "trace line " * 2400
         res = _run_coder_task(engines, coder_project, task=task)
         text = res["content"][0]["text"]
         assert "tooly" in engines.made and "plain" not in engines.made, \

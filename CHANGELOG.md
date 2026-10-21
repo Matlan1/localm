@@ -124,6 +124,21 @@ permanent public record of what shipped and are never rewritten; the in-progress
   tokenizes a conversation, instead of to the whole conversation. When one message the coder built
   (tool output, file contents) is still too long, the coder shortens it and retries; only text you
   typed is reported back to you, with what to do about it.
+- **The coder makes the change instead of printing it.** When you ask for a change and the coder
+  writes nothing (it puts the code in its reply, says the change is already there, or only runs
+  the tests), it is told once that nothing was written; a run that still ends with nothing
+  written is reported as not finished instead of "Task finished". A reply of only
+  `[no tool needed]` no longer leaves you with an empty answer.
+- **Coder edit tools are harder to get wrong.** `edit_file`, `edit_files` and `patch_file` no
+  longer apply an edit that would break a Python or TOML file that was valid (the file stays
+  unchanged and the agent sees the region its edit would have produced), and a replacement written
+  without the indentation of the line it lands on is re-indented when that keeps the file valid.
+  Argument names other coding tools use (`old_str`, `new_str`, `file_path`) are accepted, as are
+  arguments written next to `args` when the tool takes them; a call with missing arguments gets a
+  reply naming them with an example, a missed `old` text says how to add new text, and identical calls in one reply run once.
+- **A coder task no longer ends on "let me run the tests".** A reply whose last line announces a
+  step it did not take is sent back once; a run that still stops there, or answers with nothing,
+  is reported as not finished.
 - **A coder shell command that starts with a quoted program path now runs on Windows.** A command such as `"D:\tools dir\tool.exe" --flag "a b"` used to fail with "is not recognized as an internal or external command", because `cmd` dropped the first and last quote.
 - **A shell command's timeout or cancel in `localm coder` is no longer held up by a stray
   background process.** A command that left a detached process holding its output open used to
