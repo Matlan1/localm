@@ -367,27 +367,48 @@ def _check_uv(now):
     return row
 
 
+_CUDA_LINUX_SUFFIXES = ("-cuda-x64.tar.gz", "-cuda-13-x64.tar.gz")
+
+
 def _check_cuda_linux_source(now):
+    """The Linux x64 CUDA builds setup-llama installs: each asset name the resolver
+    builds for the pinned tag (one per CUDA line) must be pinned in
+    _CUDA_LINUX_PINNED_SHA256, and each pinned asset must be in the third-party release
+    with the pinned digest. STALE when one is missing or differs, INCONSISTENT when the
+    table does not match the pinned tag."""
     name, group = "Linux CUDA build source", "cuda"
     advancer = "rides the llama.cpp pin"
+    pins = "localm/setup_llama/pins.py"
     pinned = ""
     try:
-        pinned = _read_const("localm/setup_llama/pins.py", r'^_PINNED_TAG = "([^"]+)"')
-        repo = _read_const("localm/setup_llama/pins.py", r'^_CUDA_LINUX_REPO = "([^"]+)"')
-        rel = _get_json(f"https://api.github.com/repos/{repo}/releases/tags/{pinned}")
+        pinned = _read_const(pins, r'^_PINNED_TAG = "([^"]+)"')
+        repo = _read_const(pins, r'^_CUDA_LINUX_REPO = "([^"]+)"')
+        table = _pinned_table(pins, _CUDA_LINUX_TABLE_RE, "_CUDA_LINUX_PINNED_SHA256")
+        published = _published_digests(repo, pinned)
     except FetchError as e:
         if e.status == 404 and not isinstance(e, LocalReadError):
             return Row(name=name, status=STALE, pinned=pinned, advancer=advancer, group=group,
                        detail="the CUDA build source has no release for the pinned llama.cpp tag; "
                               "Linux CUDA users silently fall back to vulkan")
         return _unknown(name, group, advancer, e, pinned)
-    assets = [a.get("name", "") for a in rel.get("assets", []) if isinstance(a, dict)]
-    cuda = [a for a in assets if "cuda" in a]
-    if not cuda:
+    expected = {f"llama-{pinned}-bin-ubuntu{suffix}" for suffix in _CUDA_LINUX_SUFFIXES}
+    missing = sorted(n for n in table if n not in published)
+    undigested = sorted(n for n in table if n in published and not published[n])
+    wrong = sorted(n for n in table if published.get(n) and published[n] != table[n])
+    if missing or wrong or undigested:
         return Row(name=name, status=STALE, pinned=pinned, advancer=advancer, group=group,
-                   detail="the release for the pinned tag carries no CUDA asset")
+                   detail=(f"pinned CUDA asset(s) not in the release: {', '.join(missing)}; "
+                           if missing else "")
+                   + (f"published digest differs from the pin: {', '.join(wrong)}; " if wrong else "")
+                   + (f"no digest published for: {', '.join(undigested)}; " if undigested else "")
+                   + "Linux CUDA users fall back to vulkan or fail the checksum")
+    unpinned, stray = sorted(expected - table.keys()), sorted(table.keys() - expected)
+    if unpinned or stray:
+        return Row(name=name, status=INCONSISTENT, pinned=pinned, advancer=advancer, group=group,
+                   detail=(f"no pinned checksum for {', '.join(unpinned)}; " if unpinned else "")
+                   + (f"pinned for another tag or name: {', '.join(stray)}" if stray else ""))
     return Row(name=name, status=CURRENT, pinned=pinned, latest=pinned, days=0, advancer=advancer,
-               group=group, detail=f"{len(cuda)} CUDA asset(s) for the pinned tag")
+               group=group, detail=f"{len(table)} pinned CUDA asset(s) published with the pinned digests")
 
 
 def _check_rocm_cpu_asset(now):
@@ -477,13 +498,36 @@ def _check_docker_base(now):
 
 
 _ASSET_TABLE_RE = re.compile(r"^_PINNED_FALLBACK_SHA256 = \{\n(.*?)^\}", re.MULTILINE | re.DOTALL)
+_CUDA_LINUX_TABLE_RE = re.compile(r"^_CUDA_LINUX_PINNED_SHA256 = \{\n(.*?)^\}",
+                                  re.MULTILINE | re.DOTALL)
 _ASSET_ENTRY_RE = re.compile(r'"([^"]+\.(?:zip|tar\.gz))":\s*"([0-9a-f]{64})"')
 _LEMONADE_REPO = "lemonade-sdk/llamacpp-rocm"
 
 
+def _pinned_table(rel: str, table_re: re.Pattern, label: str) -> dict:
+    """{asset name: sha256} of the *label* table in *rel*. Raises LocalReadError when
+    the table is absent or holds no entry."""
+    block = table_re.search(_read_text(rel))
+    if not block:
+        raise LocalReadError(f"{rel}: {label} table not found")
+    table = dict(_ASSET_ENTRY_RE.findall(block.group(1)))
+    if not table:
+        raise LocalReadError(f"{rel}: {label} table is empty")
+    return table
+
+
+def _published_digests(repo: str, tag: str) -> dict:
+    """{asset name: lowercase sha256 hex, "" when unpublished} of *repo*'s release *tag*.
+    Raises FetchError."""
+    release = _get_json(f"https://api.github.com/repos/{repo}/releases/tags/{tag}")
+    return {a.get("name"): str(a.get("digest") or "").removeprefix("sha256:").lower()
+            for a in release.get("assets", []) if isinstance(a, dict)}
+
+
 def _check_llama_asset_checksums(now):
-    """Every sha256 pinned for a llama.cpp or ROCm build against the digest GitHub now
-    publishes for that asset, so a re-uploaded asset or a mistyped checksum is seen."""
+    """Every sha256 pinned for a llama.cpp, Linux CUDA or ROCm build against the digest
+    GitHub now publishes for that asset, so a re-uploaded asset, a removed one or a
+    mistyped checksum is seen."""
     name, group, advancer = "llama.cpp asset checksums", "llama", "pin_weekly.py (llama, rocm)"
     pins = "localm/setup_llama/pins.py"
     try:
@@ -491,13 +535,11 @@ def _check_llama_asset_checksums(now):
         rocm_tag = _read_const(pins, r'^_ROCM_TAG = "([^"]+)"')
         cpu_tag = _read_const(pins, r'^_ROCM_CPU_TAG = "([^"]+)"')
         upstream = _read_const(pins, r'^_UPSTREAM_REPO = "([^"]+)"')
-        block = _ASSET_TABLE_RE.search(_read_text(pins))
-        if not block:
-            raise LocalReadError(f"{pins}: _PINNED_FALLBACK_SHA256 table not found")
-        table = dict(_ASSET_ENTRY_RE.findall(block.group(1)))
-        if not table:
-            raise LocalReadError(f"{pins}: _PINNED_FALLBACK_SHA256 table is empty")
-        sources = {(upstream, tag): {}, (upstream, cpu_tag): {}, (_LEMONADE_REPO, rocm_tag): {}}
+        table = _pinned_table(pins, _ASSET_TABLE_RE, "_PINNED_FALLBACK_SHA256")
+        cuda_repo = _read_const(pins, r'^_CUDA_LINUX_REPO = "([^"]+)"')
+        cuda_table = _pinned_table(pins, _CUDA_LINUX_TABLE_RE, "_CUDA_LINUX_PINNED_SHA256")
+        sources = {(upstream, tag): {}, (upstream, cpu_tag): {}, (_LEMONADE_REPO, rocm_tag): {},
+                   (cuda_repo, tag): dict(cuda_table)}
         for asset, sha in table.items():
             if asset.startswith(f"llama-{rocm_tag}-"):
                 sources[(_LEMONADE_REPO, rocm_tag)][asset] = sha
@@ -509,13 +551,10 @@ def _check_llama_asset_checksums(now):
         for (repo, release_tag), pinned in sources.items():
             if not pinned:
                 continue
-            release = _get_json(f"https://api.github.com/repos/{repo}/releases/tags/{release_tag}")
-            published = {a.get("name"): str(a.get("digest") or "").removeprefix("sha256:").lower()
-                         for a in release.get("assets", []) if isinstance(a, dict)}
+            published = _published_digests(repo, release_tag)
             for asset, sha in pinned.items():
                 if asset not in published:
-                    if release_tag in asset:
-                        missing.append(asset)
+                    missing.append(asset)
                     continue
                 checked += 1
                 if published[asset] != sha:

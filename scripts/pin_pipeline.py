@@ -86,6 +86,16 @@ CI_WAIT_TIMEOUT_SECONDS = 75 * 60
 CI_POLL_INTERVAL_SECONDS = 20
 
 REQUIRE_BACKENDS = ("cpu", "vulkan")
+ALSO_MEASURE_BACKENDS = ("cuda", "sycl", "hip", "metal")
+
+
+def llama_confirm_args() -> list[str]:
+    """confirm_llama_runtime.py's backend arguments for this machine: every
+    REQUIRE_BACKENDS entry must PASS on a GPU device where it is a GPU backend, and
+    every ALSO_MEASURE_BACKENDS entry is measured as far as this machine can."""
+    args = [a for b in REQUIRE_BACKENDS for a in ("--backend", b)]
+    args.append("--require-gpu")
+    return args + [a for b in ALSO_MEASURE_BACKENDS for a in ("--also-measure", b)]
 
 # Upper bounds for every external command, so a hung confirm, git or gh call cannot hold
 # the GPU lease and the pipeline lock until the scheduled task's own limit.
@@ -291,8 +301,8 @@ def run_under_gpu_lease(cmd: list[str], *, purpose: str, cwd: Path,
 
 
 def run_confirm(candidate: str, receipt_path: Path) -> int:
-    """scripts/confirm_llama_runtime.py --tag candidate --backend cpu --backend
-    vulkan --receipt receipt_path, from the MAIN checkout (read-only: it
+    """scripts/confirm_llama_runtime.py --tag candidate, the llama_confirm_args()
+    backends and --receipt receipt_path, from the MAIN checkout (read-only: it
     downloads to a throwaway dir and never edits a tracked file), held under
     the GPU lease for the whole invocation - cpu does not need the GPU, but
     running it outside the lease buys nothing, and holding one lease for the
@@ -301,8 +311,7 @@ def run_confirm(candidate: str, receipt_path: Path) -> int:
     confirm_llama_runtime's own exit code (0/1/2), or LEASE_BUSY_EXIT if the
     lease could not be acquired at all."""
     cmd = [sys.executable, str(REPO / "scripts" / "confirm_llama_runtime.py"),
-           "--tag", candidate, "--backend", "cpu", "--backend", "vulkan",
-           "--receipt", str(receipt_path)]
+           "--tag", candidate, *llama_confirm_args(), "--receipt", str(receipt_path)]
     return run_under_gpu_lease(cmd, purpose=f"pin_pipeline llama confirm {candidate}", cwd=REPO)
 
 

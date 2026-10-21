@@ -815,8 +815,7 @@ def _comfyui_delegate(dry_run: bool) -> int:
 def _llama_verify_cmd(work: Path, receipt: Path) -> list[str]:
     pinned = _load("check_llama_pin", SCRIPTS / "check_llama_pin.py").pinned_tag()
     return [sys.executable, str(SCRIPTS / "confirm_llama_runtime.py"), "--tag", pinned,
-            "--backend", "cpu", "--backend", "vulkan", "--workdir", str(work),
-            "--receipt", str(receipt)]
+            *pp.llama_confirm_args(), "--workdir", str(work), "--receipt", str(receipt)]
 
 
 def _comfyui_verify_cmd(work: Path, receipt: Path) -> list[str]:
@@ -909,8 +908,19 @@ def _review_only_advancers() -> list[Advancer]:
 # --------------------------------------------------------------------------- #
 
 NOT_MEASURED_BY_DESIGN = (
-    ("llama.cpp CUDA, HIP, SYCL, Metal, OpenVINO and Android builds",
-     "no such hardware here; they share one llama library with the measured cpu and vulkan builds"),
+    ("llama.cpp CUDA (both lines) and SYCL generation",
+     "no NVIDIA or Intel GPU here: their archives are fetched and digest-checked, their llama and ggml "
+     "core libraries are hashed against the cpu build's and loaded through the ABI gate, and the "
+     "imports their GPU plugin cannot find are named; tokens on that hardware are not measured"),
+    ("llama.cpp HIP generation on a GPU",
+     "measured only when the HIP build registers a GPU device here and llama.cpp places the weights "
+     "on it; otherwise reported with the reason, beside the same archive, core-library and ABI checks"),
+    ("llama.cpp Metal build",
+     "macOS only: the archive is fetched and digest-checked and its llama library is located, but it "
+     "cannot be loaded or run on Windows"),
+    ("llama.cpp OpenVINO, Android, Linux, Windows ARM64 and macOS x64 builds, the xcframework and the "
+     "web UI archive",
+     "never fetched or run here; only their pinned digests are checked against the release"),
     ("koboldcpp CUDA and Metal builds, Linux and macOS archives", "installed and run on this platform only"),
     ("stable-diffusion.cpp CUDA and Metal builds, Linux and macOS archives", "installed and run on this platform only"),
     ("AMD ROCm builds for gfx110X, gfx120X and other families", "only this machine's gfx103X family can be run"),

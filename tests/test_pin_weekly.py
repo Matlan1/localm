@@ -1482,3 +1482,14 @@ def test_rocm_candidate_unreadable_upstream_is_a_fetch_error(monkeypatch):
     _rocm_fakes(monkeypatch, ["b102", "b100"], pairs={"b102"}, unreadable={"b102"})
     with pytest.raises(pw.cp.FetchError):
         pw._rocm_candidate()
+
+
+def test_the_weekly_llama_proof_requires_gpu_use_and_measures_every_other_backend(tmp_path):
+    cmd = pw._llama_verify_cmd(tmp_path, tmp_path / "r.json")
+    assert cmd[1].endswith("confirm_llama_runtime.py") and "--require-gpu" in cmd
+    pairs = list(zip(cmd, cmd[1:], strict=False))
+    assert {v for f, v in pairs if f == "--backend"} == {"cpu", "vulkan"}
+    assert {v for f, v in pairs if f == "--also-measure"} == {"cuda", "sycl", "hip", "metal"}
+    confirm_src = (pw.SCRIPTS / "confirm_llama_runtime.py").read_text(encoding="utf-8")
+    for flag in ("--require-gpu", "--also-measure", "--backend", "--workdir", "--receipt", "--tag"):
+        assert f'"{flag}"' in confirm_src

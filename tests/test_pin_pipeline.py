@@ -568,6 +568,9 @@ def test_run_confirm_requests_cpu_and_vulkan_and_the_given_receipt(monkeypatch, 
     assert "confirm_llama_runtime.py" in " ".join(cmd)
     assert cmd.count("--backend") == 2
     assert "cpu" in cmd and "vulkan" in cmd
+    assert "--require-gpu" in cmd
+    assert [cmd[i + 1] for i, a in enumerate(cmd) if a == "--also-measure"] == list(
+        pipeline.ALSO_MEASURE_BACKENDS)
     assert "--tag" in cmd and "b10999" in cmd
     assert str(receipt) in cmd
 
