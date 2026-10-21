@@ -365,6 +365,44 @@ class TestJobAndPrivacy:
             asyncio.run(run())
         assert seen_cancel.is_set()
 
+    def test_a_client_that_goes_away_mid_stream_of_progress_cancels_the_job(
+            self, home, monkeypatch):
+        from localm.plugins.builtin.tts import speech_route
+        from localm.plugins.gui.jobs import JobManager
+        started, seen_cancel = threading.Event(), threading.Event()
+
+        def chatty(model, text, *, on_progress=None, should_cancel=None, **kw):
+            started.set()
+            for frames in range(1, 400):
+                if should_cancel():
+                    seen_cancel.set()
+                    raise g.SpeechCancelled()
+                on_progress({"stage": "speaking", "frames": frames, "seconds": 0.1})
+                threading.Event().wait(0.01)
+            raise AssertionError("never cancelled")
+
+        monkeypatch.setattr(speech, "synthesize", chatty)
+
+        async def gone():
+            return True
+        monkeypatch.setattr(speech_route, "_resolve_disconnect_poll", lambda request: gone)
+        monkeypatch.setattr(speech_route, "_JOB_POLL_SECONDS", 0.2)
+        params = speech_route.SpeechParams(None, "hi", "default", "wav", None, None, None)
+        model = speech.SpeechModel("m", "m.gguf", "p.gguf")
+        jobs = JobManager()
+        holder = {}
+
+        async def run():
+            job = jobs.start_fn("speak", speech_route._make_speak(model, params, None, {}))
+            holder["job"] = job
+            started.wait(5)
+            await speech_route._await_job(job, request=None)
+
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(run())
+        assert seen_cancel.is_set()
+        assert holder["job"].cancel_requested
+
 
 class TestRealSdkWireFormat:
     """The bytes the official openai SDK sent for ``audio.speech.create``

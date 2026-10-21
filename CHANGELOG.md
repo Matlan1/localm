@@ -126,6 +126,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
   next request fits in it.
 
 ### Fixed
+- **A ComfyUI that hangs on its port is named at once.** After a GPU crash a ComfyUI that localm did not launch can keep its port and stop answering. `localm comfy restart` and any generation that needs ComfyUI now say right away which process holds the port (its pid and name) and that localm will not stop it, instead of relaunching into the held port and waiting five minutes; `localm comfy status` shows the same line.
+- **Closing the connection during text-to-speech stops the job.** A client that went away while `/v1/audio/speech` was synthesising did not cancel the job, because the check only ran while the job was silent. The job is now cancelled within a second of the disconnect.
 - **Privacy mode leaves no crash exit file.** After a hard crash on Windows the crash watchdog wrote a `server-crash-exit` file in the data folder even in privacy mode, and nothing removed it. It is no longer written when the run started in privacy mode, and the next start deletes any left over.
 - **The launcher writes no error log in privacy mode.** `logs/launcher.log`, which holds error lines that can name your model paths, is now written only when the privacy mode is not `privacy` or "Keep diagnostics for bug reports" is ticked.
 - **A rejected grammar's text stays out of the debug log in privacy mode.** When a malformed grammar was only found while the reply was generated, the native parser's error and the grammar source reached the debug log and the recent-activity view of a bug report; both now stay clear of it unless chat content is allowed in the debug log.
