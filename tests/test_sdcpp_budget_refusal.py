@@ -334,3 +334,55 @@ def test_weights_streamed_in_per_step_add_no_load_lines(module):
     assert len(steps) == 2
     assert loads and all(i < steps[0] for i in loads)
     assert any(line.startswith("Decoding") for line in said[steps[-1]:])
+
+
+def test_a_cancel_after_the_refusal_loads_nothing_more(media_env, tmp_path):
+    runner, s, _backend = media_env
+    refused = []
+    orig = runner._refuse
+
+    def refuse_then_note(params, on_event):
+        try:
+            orig(params, on_event)
+        except SdBudgetRefused:
+            refused.append(True)
+            raise
+    runner._refuse = refuse_then_note
+    ok, msg = image_native.generate(s, "p", tmp_path / "a.png", write_sidecar=False,
+                                    width=64, height=64, cancel_check=lambda: bool(refused))
+    assert not (tmp_path / "a.png").exists()
+    assert not ok and msg == "Cancelled."
+    assert len(runner.loads) == 1 and len(runner.generates) == 1
+
+
+def test_a_refusal_reply_to_a_cancelled_request_is_a_cancel():
+    from localm.media.sdcpp.runner import SdCancelled
+    r = SdRunner()
+    r._proc, r._resp_q, r._cancel = _Proc(), queue.Queue(), threading.Event()
+    r._resp_q.put(("budget_refused", "generation failed: x"))
+    with pytest.raises(SdCancelled):
+        r._wait("generate_image", 5, cancel_check=lambda: True)
+
+
+@pytest.mark.parametrize("module", [image_native, video_native], ids=["image", "video"])
+def test_lines_held_before_the_refused_attempt_are_still_shown(module):
+    said = []
+    relay = module._event_relay(said.append)
+    earlier = "vae decode compute failed"
+    relay(("log", b.SD_LOG_ERROR, earlier))
+    relay.begin_attempt()
+    for level, text in REFUSED_LINES:
+        relay(("log", level, text.split(" --- ")[0]))
+    relay.budget_retry()
+    relay.flush()
+    assert said == [f"stable-diffusion.cpp: {earlier}"]
+
+
+@pytest.mark.parametrize("module", [image_native, video_native], ids=["image", "video"])
+def test_the_reload_after_a_refusal_shows_its_progress(module):
+    said = []
+    relay = module._event_relay(said.append)
+    relay(_progress("sampling", 1, 4, 5.0))
+    relay.budget_retry()
+    relay(_progress("loading", 0, 3))
+    assert said[-1] == "Loading weights..."

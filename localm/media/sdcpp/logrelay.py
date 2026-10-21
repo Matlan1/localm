@@ -123,7 +123,8 @@ class RecoveredWarnings:
 
     def budget_retry(self) -> None:
         """The generation is retried without its VRAM budget: drop the held
-        lines of the refused attempt."""
+        lines of the refused attempt. Call ``flush`` when an attempt starts, so
+        only that attempt's lines are held here."""
         self._pending.clear()
         self._retry_mode = None
 

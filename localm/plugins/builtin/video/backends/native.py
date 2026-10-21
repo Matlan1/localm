@@ -427,8 +427,15 @@ class _EventRelay:
     def flush(self) -> None:
         self._warnings.flush()
 
+    def begin_attempt(self) -> None:
+        """A generation starts: show the lines held from before it."""
+        self._warnings.flush()
+
     def budget_retry(self) -> None:
+        """The generation is retried without its VRAM budget: drop the held
+        lines of the refused attempt and show the reload's progress."""
         self._warnings.budget_retry()
+        self._sampled = False
 
     def __call__(self, event) -> None:
         kind = event[0]
@@ -604,10 +611,11 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
                 runner.ensure_loaded(key, rt.path, load, extra_dirs=rt.extra_dirs,
                                      on_event=relay, cancel_check=cancel_check)
 
+            relay.begin_attempt()
             result = sd_budget.call_within_budget(
                 runner, lambda: runner.generate_video(params, on_event=relay,
                                                       cancel_check=cancel_check),
-                reload_model, say, on_retry=relay.budget_retry)
+                reload_model, say, on_retry=relay.budget_retry, cancel_check=cancel_check)
         except SdCancelled:
             return False, "Cancelled."
         except SdWorkerError as e:

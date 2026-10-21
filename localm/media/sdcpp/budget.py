@@ -223,14 +223,21 @@ def reload_ctx(runner, ctx: dict, backend: str, say: Callable[[str], None],
 
 def call_within_budget(runner, call: Callable[[], T], reload: Callable[[dict], object],
                        say: Callable[[str], None], *,
-                       on_retry: Optional[Callable[[], None]] = None) -> T:
+                       on_retry: Optional[Callable[[], None]] = None,
+                       cancel_check: Optional[Callable[[], bool]] = None) -> T:
     """``call()``, the generation on *runner*'s loaded model. When it raises
     ``SdBudgetRefused`` and the model was loaded with a ``max_vram`` budget,
     calls *on_retry*, says ``UNBUDGETED_RETRY``, stops the worker, passes the
     loaded context without ``max_vram`` to *reload* (which loads it) and
     returns ``call()`` once more. Any other failure, and a refusal of a load
-    without a budget, propagates."""
-    from .runner import SdBudgetRefused
+    without a budget, propagates. Raises ``SdCancelled`` when *cancel_check*
+    returns True after the refusal, before the worker is stopped or after."""
+    from .runner import SdBudgetRefused, SdCancelled
+
+    def check_cancel() -> None:
+        if cancel_check is not None and cancel_check():
+            raise SdCancelled("Generation cancelled.")
+
     try:
         return call()
     except SdBudgetRefused as e:
@@ -240,10 +247,12 @@ def call_within_budget(runner, call: Callable[[], T], reload: Callable[[dict], o
         from localm.debuglog import logger
         logger.info("native media VRAM budget: the runtime refused to run within "
                     "max_vram=%s (%s); reloading without a budget", loaded["max_vram"], e)
+    check_cancel()
     if on_retry is not None:
         on_retry()
     say(UNBUDGETED_RETRY)
     loaded.pop("max_vram", None)
     runner.shutdown()
+    check_cancel()
     reload(loaded)
     return call()

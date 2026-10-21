@@ -161,7 +161,7 @@ class SdRunner:
                 continue
             if cancel_deadline is not None:
                 cancel.clear()
-                if kind == "ok":
+                if kind in ("ok", "budget_refused"):
                     raise SdCancelled("Generation cancelled.")
             if kind == "ok":
                 return msg[1]
