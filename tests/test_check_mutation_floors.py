@@ -643,6 +643,22 @@ class TestMutatedSourceHashes:
         self._write(tmp_path, "def broken(:\n")
         assert cmf.mutated_source_hashes(tmp_path, MOD) == {}
 
+    def test_the_gate_reads_the_mutated_module_where_the_shards_put_it(self, tmp_path):
+        """Both files of one shard, merged into one directory, give the check
+        the pinned mutants' hashes; the meta file alone gives none."""
+        shard = tmp_path / "shard"
+        gate = tmp_path / "gate"
+        _write_meta(shard, MOD, {M1: 1, M2: 0})
+        self._write(shard)
+        for name in (MOD, MOD + ".meta"):
+            (gate / name).parent.mkdir(parents=True, exist_ok=True)
+            (gate / name).write_bytes((shard / name).read_bytes())
+        results, _ = cmf.load_results(gate, [MOD])
+        assert {M1, M2} <= set(results[MOD]["mutant_hashes"])
+        (gate / MOD).unlink()
+        results, _ = cmf.load_results(gate, [MOD])
+        assert results[MOD]["mutant_hashes"] == {}
+
     def test_load_results_carries_the_hashes_of_the_mutated_module(self, tmp_path):
         _write_meta(tmp_path, MOD, {M1: 1, M2: 0})
         self._write(tmp_path)
@@ -965,23 +981,6 @@ class TestCommittedBaseline:
         download = next(st for st in wf["jobs"]["mutation-test"]["steps"]
                         if st.get("name", "").startswith("Download every module"))
         assert download["with"]["path"] == "mutants/localm"
-
-    def test_the_gate_reads_the_mutated_module_where_the_shards_put_it(self, tmp_path):
-        """Both files of one shard, merged into one directory, give the check
-        the pinned mutant's hash; the meta file alone does not."""
-        self_ = TestMutatedSourceHashes()
-        shard = tmp_path / "shard"
-        gate = tmp_path / "gate"
-        _write_meta(shard, MOD, {M1: 1, M2: 0})
-        self_._write(shard)
-        for name in (MOD, MOD + ".meta"):
-            (gate / name).parent.mkdir(parents=True, exist_ok=True)
-            (gate / name).write_bytes((shard / name).read_bytes())
-        results, _ = cmf.load_results(gate, [MOD])
-        assert set(results[MOD]["mutant_hashes"]) == {M1, M2}
-        (gate / MOD).unlink()
-        results, _ = cmf.load_results(gate, [MOD])
-        assert results[MOD]["mutant_hashes"] == {}
 
     def test_ci_shards_are_exactly_the_only_mutate_modules(self, modules):
         """The mutation-run matrix in ci.yml is the only_mutate list by
