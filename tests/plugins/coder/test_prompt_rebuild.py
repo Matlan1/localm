@@ -68,16 +68,16 @@ def _set_cwd(agent, tmp_path):
     agent.set_cwd(tmp_path)
 
 
-def _per_write_refresh(agent, tmp_path):
-    (tmp_path / "x.py").write_text("x = 1", encoding="utf-8")
-    agent._refresh_map_for_tool(_make_call("write_file", path="x.py"))
+def _compact(agent, tmp_path):
+    with patch.object(agent, "_compact_history", return_value=True):
+        assert agent.compact() is True
 
 
-def _build_messages_when_dirty(agent, tmp_path):
-    # This rebuild site is reached only through _build_messages's own dirty
-    # check.
-    agent._project_map.dirty = True
-    agent._build_messages()
+def _compact_to(agent, tmp_path):
+    with patch.object(agent, "_compact_history", return_value=True), \
+         patch.object(agent, "_drop_old_tool_output", return_value=0), \
+         patch.object(agent, "_prompt_tokens_estimate", return_value=10_000):
+        assert agent._compact_to(100, 1000) is True
 
 
 @pytest.mark.parametrize(
@@ -87,8 +87,8 @@ def _build_messages_when_dirty(agent, tmp_path):
         pytest.param(_reindex, id="reindex"),
         pytest.param(_reload_memory, id="reload_memory"),
         pytest.param(_set_cwd, id="set_cwd"),
-        pytest.param(_per_write_refresh, id="per_write_refresh"),
-        pytest.param(_build_messages_when_dirty, id="build_messages_when_dirty"),
+        pytest.param(_compact, id="compact"),
+        pytest.param(_compact_to, id="compact_to"),
     ],
 )
 def test_rebuild_keeps_plugin_and_skill_docs(tmp_path, action):
@@ -166,11 +166,8 @@ class TestIncrementalMapRefreshCoverage:
         agent._project_map.refresh_file.assert_not_called()
 
     def test_run_shell_does_not_eagerly_rebuild_the_prompt(self, tmp_path):
-        """Marking dirty must NOT be immediately followed by a rebuild here,
-        unlike every other tool this method handles - see this method's own
-        docstring for why: an eager rebuild would scan on every run_shell call
-        instead of once for however many happen before the map is next
-        actually read (context._build_messages, once per turn)."""
+        """Marking dirty is not followed by a rebuild: the map reconciles at
+        its next read."""
         agent = _make_agent(tmp_path)
         with patch.object(agent, "_rebuild_system_prompt") as mock_rebuild:
             call = _make_call("run_shell", command="echo hi")
@@ -178,44 +175,37 @@ class TestIncrementalMapRefreshCoverage:
             mock_rebuild.assert_not_called()
 
 
-class TestBuildMessagesDeferredRescan:
-    """_build_messages (context.py) is where a run_shell-dirtied map actually
-    gets reconciled - the one place guaranteed to run before the model's next
-    turn. These pin the gate itself, separately from the "docs preserved"
-    property already covered by build_messages_when_dirty above."""
+class TestPromptPrefixStaysStable:
+    """Tool calls update the project map, never the system prompt: the
+    prompt every turn starts with stays identical until a compaction, which
+    rebuilds it with the current map."""
 
-    def test_rebuilds_when_dirty(self, tmp_path):
+    def test_a_write_tool_does_not_rebuild_the_prompt(self, tmp_path):
+        agent = _make_agent(tmp_path)
+        with patch.object(agent, "_rebuild_system_prompt") as mock_rebuild:
+            agent._refresh_map_for_tool(_make_call("write_file", path="a.py"))
+            mock_rebuild.assert_not_called()
+        agent._project_map.refresh_file.assert_called_once_with(
+            (tmp_path / "a.py").resolve())
+
+    def test_build_messages_does_not_rebuild_a_dirty_map(self, tmp_path):
         agent = _make_agent(tmp_path)
         agent._project_map.dirty = True
         with patch.object(agent, "_rebuild_system_prompt") as mock_rebuild:
             agent._build_messages()
-            mock_rebuild.assert_called_once()
-
-    def test_does_not_rebuild_when_clean(self, tmp_path):
-        agent = _make_agent(tmp_path)
-        agent._project_map.dirty = False
-        with patch.object(agent, "_rebuild_system_prompt") as mock_rebuild:
-            agent._build_messages()
             mock_rebuild.assert_not_called()
 
-    def test_a_mocked_project_map_never_spuriously_rebuilds(self, tmp_path):
-        """A MagicMock's un-configured `.dirty` attribute is itself a
-        MagicMock, which is truthy - if the gate used plain truthiness instead
-        of `is True`, every test in this file (and any other that mocks
-        ProjectMap wholesale) would rebuild on every _build_messages call."""
+    def test_a_compaction_that_changes_nothing_does_not_rebuild(self, tmp_path):
         agent = _make_agent(tmp_path)
-        assert not isinstance(agent._project_map.dirty, bool)   # sanity: it's a MagicMock
-        with patch.object(agent, "_rebuild_system_prompt") as mock_rebuild:
-            agent._build_messages()
+        with patch.object(agent, "_compact_history", return_value=False), \
+             patch.object(agent, "_rebuild_system_prompt") as mock_rebuild:
+            assert agent.compact() is False
             mock_rebuild.assert_not_called()
 
 
-class TestRunShellEndToEnd:
-    """A REAL Agent with a REAL ProjectMap (unlike _make_agent above, which
-    mocks ProjectMap entirely) driven through the actual dispatch path -
-    the integration-level counterpart to the unit-level tests above. Runs a
-    real `echo` via the real run_shell tool; nothing here is mocked except
-    the LLM backend, which is never called."""
+class TestToolChangesEndToEnd:
+    """A REAL Agent with a REAL ProjectMap driven through the actual tool
+    dispatch path; only the LLM backend is a mock, never called."""
 
     def _make_real_agent(self, tmp_path: Path):
         from localm.plugins.coder.agent import Agent
@@ -224,26 +214,46 @@ class TestRunShellEndToEnd:
         backend.native_tools = False
         return Agent(backend=backend, cwd=tmp_path, auto_approve=True)
 
-    def test_file_created_by_run_shell_is_stale_mid_turn_fresh_next_turn(self, tmp_path):
+    def test_files_changed_by_tools_reach_the_prompt_at_compaction_not_before(self, tmp_path):
         from localm.plugins.coder.parser import ToolCall
 
         (tmp_path / "a.py").write_text("def existing():\n    pass\n", encoding="utf-8")
         agent = self._make_real_agent(tmp_path)
         assert agent._project_map.file_count() == 1
+        before = agent._system_prompt
+        assert "existing" in before
 
         # What a real `run_shell(command="echo ... > b.py")` would leave behind.
         (tmp_path / "b.py").write_text("def brand_new():\n    pass\n", encoding="utf-8")
-        call = ToolCall(name="run_shell", args={"command": "echo done"},
+        shell = ToolCall(name="run_shell", args={"command": "echo done"},
                          raw="", start=0, end=0)
-        result = agent._execute_tool(call, interactive=False)
-        assert result.ok
+        assert agent._execute_tool(shell, interactive=False).ok
+        write = ToolCall(name="write_file",
+                         args={"path": "c.py", "content": "def made_by_write():\n    pass\n"},
+                         raw="", start=0, end=0)
+        assert agent._execute_tool(write, interactive=False).ok
+        assert (tmp_path / "c.py").is_file()
 
-        # Same turn: still stale by design (mark_dirty defers the rescan).
-        assert agent._project_map.dirty is True
+        messages = agent._build_messages()
+        assert messages[0] == {"role": "system", "content": before}
+        assert agent._system_prompt == before
+        assert agent._project_map.file_count() == 3
+
+        with patch.object(agent, "_compact_history", return_value=True):
+            assert agent.compact() is True
+        assert "brand_new" in agent._system_prompt
+        assert "made_by_write" in agent._system_prompt
+
+    def test_an_automatic_compaction_refreshes_the_map_in_the_prompt(self, tmp_path):
+        (tmp_path / "a.py").write_text("def existing():\n    pass\n", encoding="utf-8")
+        agent = self._make_real_agent(tmp_path)
+        (tmp_path / "b.py").write_text("def brand_new():\n    pass\n", encoding="utf-8")
+        agent._project_map.mark_dirty()
+        agent._build_messages()
         assert "brand_new" not in agent._system_prompt
 
-        # The next turn's _build_messages call is where it catches up.
-        agent._build_messages()
-        assert agent._project_map.dirty is False
-        assert agent._project_map.file_count() == 2
+        with patch.object(agent, "_compact_history", return_value=True), \
+             patch.object(agent, "_drop_old_tool_output", return_value=0), \
+             patch.object(agent, "_prompt_tokens_estimate", return_value=10_000):
+            assert agent._compact_to(100, 1000) is True
         assert "brand_new" in agent._system_prompt

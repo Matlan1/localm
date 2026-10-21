@@ -17,7 +17,7 @@ from __future__ import annotations
 # ahead of time is possible. _refresh_map_for_tool special-cases it: mark the
 # whole map dirty (ProjectMap.mark_dirty) and let the next read reconcile it
 # against the filesystem with a bounded stat-diff (ProjectMap._rescan_if_dirty,
-# triggered from context._build_messages once per turn). No git and no
+# run by the next read of the map). No git and no
 # subprocess on this path.
 _MUTATING_TOOLS: frozenset[str] = frozenset({
     "write_file", "edit_file", "edit_files", "run_shell",

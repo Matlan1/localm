@@ -41,7 +41,7 @@ LOAD_CONFIG_KEYS = (
     "n_ctx", "n_ctx_max", "n_ctx_grow", "ctx_auto",
     "n_gpu_layers", "n_gpu_layers_auto", "n_cpu_moe", "use_mmap", "kv_cache_type", "mtp_enabled",
     "mtp_draft_tokens", "spec_source", "spec_draft_tokens", "spec_draft_model",
-    "vram_overhead_mb", "gpu_split_ratios", "gpu_split_indices",
+    "vram_overhead_mb", "moe_cache_mib", "gpu_split_ratios", "gpu_split_indices",
     "main_gpu_index", "gguf_load_timeout_s", "hf_load_timeout_s",
     "hf_trust_remote_code", "binary_dir", "llama_runtime_pin", "parallel_slots",
 )

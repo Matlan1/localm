@@ -193,7 +193,7 @@ def collect_diagnostics(context: Optional[dict] = None) -> dict:
 # never config.json.
 _SAFE_CONFIG_KEYS = (
     "binary_dir", "n_ctx", "n_ctx_max", "n_ctx_grow", "ctx_auto", "n_gpu_layers",
-    "n_gpu_layers_auto", "n_cpu_moe", "use_mmap", "kv_cache_type", "mtp_enabled", "mtp_draft_tokens",
+    "n_gpu_layers_auto", "n_cpu_moe", "moe_cache_mib", "use_mmap", "kv_cache_type", "mtp_enabled", "mtp_draft_tokens",
     "spec_source", "spec_draft_tokens", "spec_draft_model", "parallel_slots",
     "main_gpu_index",
     "gpu_split_indices", "gpu_split_ratios", "max_tokens",

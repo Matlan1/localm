@@ -143,6 +143,19 @@ def _resolve_vram_overhead_bytes(cfg: dict) -> int:
         return VRAM_OVERHEAD_BYTES
 
 
+def _resolve_moe_cache_mib(cfg: dict) -> int:
+    """``moe_cache_mib`` from config, or 0 for a missing, negative or
+    unparseable value (an unparseable one is logged at WARNING)."""
+    raw = cfg.get("moe_cache_mib", 0)
+    try:
+        return max(0, int(raw or 0))
+    except (TypeError, ValueError):
+        from localm.debuglog import logger as _dbg
+        _dbg.warning("moe_cache_mib is set but not a valid number (%r); the MoE "
+                     "expert cache stays off", raw)
+        return 0
+
+
 def _resolve_mtp_draft_tokens(cfg: dict, override: Optional[int]) -> int:
     """Draft tokens per MTP step: *override* when given, else the
     ``mtp_draft_tokens`` config key, else the default; clamped to 1..max.
@@ -284,6 +297,7 @@ def create_backend(
                               if source == "draft" else None),
             mtp_draft_tokens=_resolve_mtp_draft_tokens(cfg, mtp_draft_tokens),
             vram_overhead_bytes=_resolve_vram_overhead_bytes(cfg),
+            moe_cache_mib=_resolve_moe_cache_mib(cfg),
             parallel_slots=resolve_parallel_slots(cfg),
         )
 

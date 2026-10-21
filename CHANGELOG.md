@@ -12,6 +12,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **A VRAM cache for the MoE experts kept in system RAM.** The new `moe_cache_mib` setting
+  (Settings, Engine, or `localm config moe_cache_mib 3072`) keeps the most used experts of a
+  Mixture-of-Experts model whose experts stay in system RAM on the GPU, so they are not copied
+  there again for every batch, which makes generation faster. It applies when those experts are
+  read into memory rather than memory-mapped, sets that much VRAM aside for any model with
+  experts, and is off by default (experimental in llama.cpp).
 - **More context fits in VRAM with a q8_0 KV cache.** The new `kv_cache_type` setting (Settings,
   Model, Runtime & GPU, or `localm config kv_cache_type q8_0`) stores the KV cache in about half the memory of
   the default `f16`, so roughly 1.9x the context fits before the window stops growing, with
@@ -92,6 +98,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `.localcoder/config.toml` to be asked every time.
 
 ### Changed
+- **Long agent and chat sessions stop re-reading the whole conversation every turn.** On models
+  with recurrent layers (Qwen3.5, Qwen3-Next, LFM2 and other hybrid models) each reply now
+  continues from a saved state near the end of the previous prompt instead of processing the
+  entire conversation again, and a context that has to grow keeps what it already holds when
+  there is system RAM for the copy. `localm coder` keeps its system prompt the same for the
+  whole session (the codebase map in it is refreshed when the context is compacted), so a file
+  edit no longer makes the model re-read everything. The server log shows how many prompt tokens
+  each reply reused.
 - **localm's managed ComfyUI now installs v0.42.1, up from v0.39.0.** An existing install picks it up with `localm comfy update --reinstall-requirements` (this release's Python requirements changed).
 - **The bundled llama.cpp runtime moved from b11541 to b11757.** An existing install picks it up with `localm setup-llama --force`.
 - **The bundled AMD (ROCm) llama.cpp runtime moved from build b1342 to b1349** (upstream llama.cpp b11719). An existing install picks it up with `localm setup-llama --force`.

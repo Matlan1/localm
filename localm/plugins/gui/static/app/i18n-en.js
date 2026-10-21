@@ -1529,6 +1529,8 @@ export const I18N_EN = {
   "settings.field.nGpuLayers.help": "Model layers to run on the GPU. 99 puts the whole model on the GPU; lower it if you run out of VRAM.",
   "settings.field.nCpuMoe.label": "MoE expert layers on CPU",
   "settings.field.nCpuMoe.help": "MoE models only. Keeps this many layers' expert weights in system RAM, not VRAM. 0 is automatic: with auto-sized GPU layers, only as many as needed, before a whole layer moves to the CPU.",
+  "settings.field.moeCacheMib.label": "MoE expert GPU cache (MB)",
+  "settings.field.moeCacheMib.help": "MoE models only. VRAM that keeps the most used experts of the layers whose experts stay in system RAM. Used when those experts are not memory-mapped; set aside for any model with experts. 0 is off.",
   "settings.field.useMmap.label": "Memory-map model files",
   "settings.field.useMmap.help": "auto runs from disk-backed memory when the model may not fit in available RAM. on forces it; off reads the whole model into memory first.",
   "settings.field.kvCacheType.label": "KV cache type",

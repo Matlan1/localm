@@ -202,6 +202,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         ctx_auto: bool = False,
         n_gpu_layers_auto: bool = False,
         vram_overhead_bytes: Optional[int] = None,
+        moe_cache_mib: int = 0,
         n_cpu_moe: int = 0,
         mtp_enabled: bool = False,
         mtp_draft_tokens: Optional[int] = None,
@@ -261,6 +262,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # None leaves the inherited class attribute untouched.
         if vram_overhead_bytes is not None:
             self._VRAM_OVERHEAD_BYTES = vram_overhead_bytes
+        self._MOE_CACHE_BYTES = max(0, int(moe_cache_mib or 0)) * 1024 ** 2
         self.effective_ctx_max: Optional[int] = None   # resolved ceiling of the last load
         self.effective_gpu_layers: Optional[int] = None  # resolved gpu layers of the last load
         # {"n_ctx", "kv_in_vram"} of the worker's live context, from the load
@@ -926,6 +928,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             params["n_parallel"] = self.parallel_copies
         if self.kv_cache_type != "f16":
             params["kv_cache_type"] = self.kv_cache_type
+        if self._MOE_CACHE_BYTES > 0:
+            params["moe_cache_size"] = self._MOE_CACHE_BYTES
         timeout = self._load_timeout_seconds()
 
         cap_label = f"→{ctx_max}" if ctx_max else "→∞"
