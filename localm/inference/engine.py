@@ -32,6 +32,10 @@ from localm.textnorm import scrub_stream
 # embedder._LOCK must NEVER acquire _LOAD_LOCK or start a load. A dead embedder
 # or reranker worker restarts under _LOAD_LOCK (outer) with the instance's
 # IsolatedEmbedder._rpc_lock or HFReranker._call_lock (inner).
+#
+# create_backend, run under this lock by a reload, may load backend plugins and
+# take localm.plugins.engine._backend_manager_lock (inner), then
+# backend_registry._LOCK (innermost); neither is ever held while taking this one.
 class _LoadLock:
     """A re-entrant lock that counts its outermost acquires and releases.
 

@@ -124,6 +124,14 @@ class TestCreateBackend:
         backend_registry.register(_descriptor([], name="second", plugin="b"))
         assert backend_registry.backend_for(str(d)).name == "first"
 
+    def test_re_registering_keeps_the_claim_order(self, tmp_path):
+        d = _exl2_dir(tmp_path)
+        backend_registry.register(_descriptor([], name="first", plugin="a"))
+        backend_registry.register(_descriptor([], name="second", plugin="b"))
+        backend_registry.register(_descriptor([], name="first", plugin="a"))
+        assert [x.name for x in backend_registry.registered()] == ["first", "second"]
+        assert backend_registry.backend_for(str(d)).name == "first"
+
     def test_claims_runs_without_the_registry_lock(self, tmp_path):
         d = _exl2_dir(tmp_path)
         free = []

@@ -183,7 +183,9 @@ class TestVramSizing:
         d = _model_dir(tmp_path / "m", EXL2_QUANT, {"max_position_embeddings": 3000})
         assert exl_backend.cache_tokens_for(str(d), 1000) == 1024
         assert exl_backend.cache_tokens_for(str(d), 1024) == 1024
-        assert exl_backend.cache_tokens_for(str(d), 100000) == 3072
+        assert exl_backend.cache_tokens_for(str(d), 100000) == 2816
+        tiny = _model_dir(tmp_path / "tiny", EXL2_QUANT, {"max_position_embeddings": 100})
+        assert exl_backend.cache_tokens_for(str(tiny), 4096) == 256
 
     def test_cache_tokens_default_to_the_n_ctx_setting(self, tmp_path, monkeypatch):
         monkeypatch.setattr("localm.config.load_config", lambda: {"n_ctx": 5000})
@@ -591,6 +593,16 @@ class TestWorkerInProcess:
         w = _worker(_model_dir(tmp_path / "m", EXL3_QUANT), "exl3")
         with pytest.raises(ChatTemplateMissingError):
             list(w.chat_stream(HI))
+
+    def test_counting_falls_back_to_an_estimate_where_the_reply_would_refuse(
+            self, tmp_path, fakes, monkeypatch):
+        monkeypatch.setenv("FAKE_CHAT_TEMPLATE", "")
+        w = _worker(_model_dir(tmp_path / "m", EXL3_QUANT), "exl3")
+        long_text = [{"role": "user", "content": "x" * 40}]
+        assert w.count_messages_tokens(long_text) == 10
+        audio = [{"role": "user", "content": [{"type": "text", "text": "y" * 8},
+                                              {"type": "input_audio", "input_audio": {}}]}]
+        assert w.count_messages_tokens(audio) == 2
 
     @pytest.mark.parametrize("env,why", [
         ({"FAKE_TORCH_HIP": "7.1"}, "is a ROCm build"),

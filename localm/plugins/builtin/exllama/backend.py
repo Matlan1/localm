@@ -105,17 +105,18 @@ def _positive_int(value) -> Optional[int]:
 
 
 def cache_tokens_for(model_path: str, n_ctx: Optional[int]) -> int:
-    """Tokens the ExLlama cache holds: *n_ctx*, else the ``n_ctx`` setting,
-    capped at the model's ``max_position_embeddings`` and rounded up to a whole
-    :data:`CACHE_PAGE_TOKENS` page."""
+    """Tokens the ExLlama cache holds, a whole number of
+    :data:`CACHE_PAGE_TOKENS` pages: *n_ctx* (else the ``n_ctx`` setting) rounded
+    up to a page, or, when that exceeds the model's ``max_position_embeddings``,
+    that limit rounded down to a page. Never less than one page."""
     wanted = _positive_int(n_ctx)
     if wanted is None:
         from localm.config import load_config
         wanted = _positive_int(load_config().get("n_ctx")) or 4096
+    pages = -(-wanted // CACHE_PAGE_TOKENS)
     limit = _positive_int(_text_config(_read_config(model_path)).get("max_position_embeddings"))
     if limit is not None:
-        wanted = min(wanted, limit)
-    pages = -(-wanted // CACHE_PAGE_TOKENS)
+        pages = min(pages, limit // CACHE_PAGE_TOKENS)
     return max(1, pages) * CACHE_PAGE_TOKENS
 
 

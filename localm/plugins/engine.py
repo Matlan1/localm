@@ -1911,6 +1911,8 @@ class PluginManager:
 
 _backend_manager: Optional[PluginManager] = None
 _server_manager_attached = False
+# Inner to localm.inference.engine._LOAD_LOCK (taken under it by create_backend's
+# lazy plugin load), outer to backend_registry._LOCK; never takes _LOAD_LOCK.
 _backend_manager_lock = threading.Lock()
 
 

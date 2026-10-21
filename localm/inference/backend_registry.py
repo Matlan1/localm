@@ -22,19 +22,21 @@ _DESCRIPTORS: list = []
 
 
 def register(descriptor: Any) -> None:
-    """Add *descriptor*, replacing an earlier one with the same ``name`` from the
-    same plugin. Raises ValueError for an empty name or a ``claims``/``create``
-    that is not callable."""
+    """Add *descriptor* at the end, or in the place of an earlier one with the
+    same ``name`` from the same plugin. Raises ValueError for an empty name or a
+    ``claims``/``create`` that is not callable."""
     if not getattr(descriptor, "name", ""):
         raise ValueError("an inference backend descriptor needs a name")
     if not callable(getattr(descriptor, "claims", None)):
         raise ValueError(f"inference backend {descriptor.name!r}: claims is not callable")
     if not callable(getattr(descriptor, "create", None)):
         raise ValueError(f"inference backend {descriptor.name!r}: create is not callable")
+    key = (descriptor.name, descriptor.plugin_name)
     with _LOCK:
-        _DESCRIPTORS[:] = [d for d in _DESCRIPTORS
-                           if (d.name, d.plugin_name)
-                           != (descriptor.name, descriptor.plugin_name)]
+        for i, d in enumerate(_DESCRIPTORS):
+            if (d.name, d.plugin_name) == key:
+                _DESCRIPTORS[i] = descriptor
+                return
         _DESCRIPTORS.append(descriptor)
 
 

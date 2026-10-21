@@ -225,17 +225,36 @@ class ExllamaWorker:
         return text, prompt, template_kwargs
 
     def count_tokens(self, text: str) -> int:
-        """Token count of *text* with the model's tokenizer."""
-        return max(1, len(self._loaded_tokenizer().encode(text, add_special_tokens=False)))
+        """Token count of *text* with the model's tokenizer, or the chars/4
+        estimate (logged at debug) when the tokenizer fails."""
+        try:
+            return max(1, len(self._loaded_tokenizer().encode(text, add_special_tokens=False)))
+        except Exception as e:
+            logger.debug("exllama worker: tokenizer.encode failed (%s); using the "
+                         "chars/4 estimate", type(e).__name__)
+            return max(1, len(text) // 4)
 
     def count_messages_tokens(self, messages: list[dict]) -> int:
-        """Token count of *messages* rendered with the chat template."""
-        template_messages = _template_messages(messages)
-        text, prompt, kwargs = self._render(template_messages, None)
-        from localm.inference.backends._hf_worker import _tokenize_prompt
-        ids = _tokenize_prompt(self._tokenizer, template_messages, text, "cpu",
-                               template_kwargs=kwargs, prompt=prompt)["input_ids"]
-        return int(ids.shape[-1])
+        """Token count of *messages* rendered with the chat template, or an
+        estimate (logged at debug) when they cannot be rendered: no chat
+        template, or a part the model cannot take. The reply itself then
+        refuses with the typed error."""
+        try:
+            template_messages = _template_messages(messages)
+            text, prompt, kwargs = self._render(template_messages, None)
+            from localm.inference.backends._hf_worker import _tokenize_prompt
+            ids = _tokenize_prompt(self._tokenizer, template_messages, text, "cpu",
+                                   template_kwargs=kwargs, prompt=prompt)["input_ids"]
+            return int(ids.shape[-1])
+        except Exception as e:
+            logger.debug("exllama worker: chat-template token count failed (%s); "
+                         "using an estimate", type(e).__name__)
+        text = " ".join(
+            m.get("content") if isinstance(m.get("content"), str)
+            else " ".join(p.get("text", "") for p in (m.get("content") or [])
+                          if p.get("type") == "text")
+            for m in messages)
+        return max(1, len(text) // 4)
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         raise NotImplementedError("EXL2 and EXL3 models do not produce embeddings in localm")
