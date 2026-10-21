@@ -214,6 +214,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
   coder's session, result and patch exports) asks for a folder in the app's own file browser and
   saves there, without the browser's download prompt. Other devices still download the file.
 
+### Security
+
+- **A sentence-transformers model can no longer make localm read files outside its folder.** The
+  `path` of each stage in a model's `modules.json` is now checked before anything is opened: a
+  path with `..`, an absolute or drive path, a Windows network share (which could send your
+  Windows sign-in hash to that server) or a link leading out of the folder makes the load fail
+  with a message naming the stage. A sharded model added in place from the Hugging Face cache is
+  no longer refused as pointing outside its folder.
+
 ## [0.3.0] - 2026-10-14
 
 ### Added

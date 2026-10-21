@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 import types
+from pathlib import Path
 
 import pytest
 
@@ -148,6 +150,140 @@ class TestPlanParsing:
         _write(tmp_path, "modules.json", _modules("transformer", "normalize"))
         with pytest.raises(StUnsupportedError, match="Pooling"):
             load_plan(str(tmp_path))
+
+
+def _symlink(link, target, is_dir=False):
+    link.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        link.symlink_to(target, target_is_directory=is_dir)
+    except (OSError, NotImplementedError) as e:
+        pytest.skip(f"symlink creation not permitted here: {e}")
+
+
+def _outside_stage(tmp_path, config, weights=False):
+    out = tmp_path / "outside"
+    _write(out, "config.json", config)
+    if weights:
+        (out / "model.safetensors").write_bytes(b"outside")
+    return out
+
+
+@pytest.fixture
+def network_paths_touched(monkeypatch):
+    """Refuses, and records, every read_text/is_file/resolve/is_symlink call on a
+    path naming the host ``attacker.invalid``."""
+    touched = []
+    for name in ("read_text", "is_file", "resolve", "is_symlink"):
+        real = getattr(Path, name)
+
+        def spy(self, *a, _real=real, **k):
+            if "attacker.invalid" in str(self):
+                touched.append(str(self))
+                raise OSError("network path refused by the test")
+            return _real(self, *a, **k)
+        monkeypatch.setattr(Path, name, spy)
+    return touched
+
+
+class TestStagePathsStayInsideTheFolder:
+    @pytest.mark.parametrize("hostile", [
+        "../outside", "..\\outside", "1_Pooling/../../outside", "C:outside",
+        "\\\\attacker.invalid\\share", "//attacker.invalid/share",
+        "\\\\?\\UNC\\attacker.invalid\\share", "\\\\.\\attacker.invalid",
+    ])
+    def test_a_pooling_path_outside_the_folder_is_refused_without_touching_it(
+            self, tmp_path, hostile, network_paths_touched):
+        folder = tmp_path / "model"
+        _outside_stage(tmp_path, {"pooling_mode": "cls"})
+        mods = _modules("transformer", "pooling")
+        mods[1]["path"] = hostile
+        _write(folder, "modules.json", mods)
+        with pytest.raises(StUnsupportedError, match="not inside the folder"):
+            load_plan(str(folder))
+        assert network_paths_touched == []
+
+    def test_an_absolute_pooling_path_is_refused(self, tmp_path):
+        folder = tmp_path / "model"
+        out = _outside_stage(tmp_path, {"pooling_mode": "cls"})
+        mods = _modules("transformer", "pooling")
+        mods[1]["path"] = str(out)
+        _write(folder, "modules.json", mods)
+        with pytest.raises(StUnsupportedError, match="not inside the folder"):
+            load_plan(str(folder))
+
+    def test_a_dense_path_outside_the_folder_is_refused(self, tmp_path):
+        folder = tmp_path / "model"
+        _outside_stage(tmp_path, {"activation_function": "torch.nn.modules.linear.Identity"},
+                       weights=True)
+        mods = _modules("transformer", "pooling", "dense")
+        mods[2]["path"] = "../outside"
+        _write(folder, "modules.json", mods)
+        _write(folder, "1_Pooling/config.json", {"pooling_mode": "mean"})
+        with pytest.raises(StUnsupportedError, match="not inside the folder"):
+            load_plan(str(folder))
+
+    def test_a_stage_folder_linked_outside_is_refused(self, tmp_path):
+        folder = tmp_path / "model"
+        out = _outside_stage(tmp_path, {"pooling_mode": "cls"})
+        _write(folder, "modules.json", _modules("transformer", "pooling"))
+        _symlink(folder / "1_Pooling", out, is_dir=True)
+        with pytest.raises(StUnsupportedError, match="not inside the folder"):
+            load_plan(str(folder))
+
+    def test_a_stage_config_linked_outside_is_refused(self, tmp_path):
+        folder = tmp_path / "model"
+        out = _outside_stage(tmp_path, {"pooling_mode": "cls"})
+        _write(folder, "modules.json", _modules("transformer", "pooling"))
+        _symlink(folder / "1_Pooling" / "config.json", out / "config.json")
+        with pytest.raises(StUnsupportedError, match="not inside the folder"):
+            load_plan(str(folder))
+
+    def test_dense_weights_linked_outside_are_refused(self, tmp_path):
+        folder = tmp_path / "model"
+        out = _outside_stage(tmp_path, {}, weights=True)
+        _write(folder, "modules.json", _modules("transformer", "pooling", "dense"))
+        _write(folder, "1_Pooling/config.json", {"pooling_mode": "mean"})
+        _write(folder, "2_Dense/config.json",
+               {"activation_function": "torch.nn.modules.linear.Identity"})
+        _symlink(folder / "2_Dense" / "model.safetensors", out / "model.safetensors")
+        with pytest.raises(StUnsupportedError, match="not inside the folder"):
+            load_plan(str(folder))
+
+    def test_an_empty_pooling_path_reads_the_folder_itself(self, tmp_path):
+        mods = _modules("transformer", "pooling")
+        mods[1]["path"] = ""
+        _write(tmp_path, "modules.json", mods)
+        _write(tmp_path, "config.json", {"pooling_mode": "cls"})
+        assert load_plan(str(tmp_path)).stages[0].pooling_modes == ("cls",)
+
+    @staticmethod
+    def _hub_snapshot(tmp_path, blobs_repo="models--org--st"):
+        snap = tmp_path / "hub" / "models--org--st" / "snapshots" / "rev1"
+        blobs = tmp_path / "hub" / blobs_repo / "blobs"
+        blobs.mkdir(parents=True, exist_ok=True)
+        files = {"1_Pooling/config.json": json.dumps({"pooling_mode": "cls"}),
+                 "2_Dense/config.json": json.dumps(
+                     {"activation_function": "torch.nn.modules.linear.Identity"}),
+                 "2_Dense/model.safetensors": "weights"}
+        _write(snap, "modules.json", _modules("transformer", "pooling", "dense"))
+        for i, (rel, body) in enumerate(files.items()):
+            (blobs / f"blob{i}").write_text(body, encoding="utf-8")
+            link = snap / rel
+            link.parent.mkdir(parents=True, exist_ok=True)
+            _symlink(link, os.path.relpath(blobs / f"blob{i}", link.parent))
+        return snap
+
+    def test_a_hub_cache_snapshot_whose_files_link_into_its_blobs_loads(self, tmp_path):
+        plan = load_plan(str(self._hub_snapshot(tmp_path)))
+        assert [s.kind for s in plan.stages] == ["pooling", "dense"]
+        assert plan.stages[0].pooling_modes == ("cls",)
+        assert plan.stages[1].weight_file.name == "model.safetensors"
+        assert plan.stages[1].weight_file.read_text(encoding="utf-8") == "weights"
+
+    def test_a_hub_cache_link_into_another_repos_blobs_is_refused(self, tmp_path):
+        snap = self._hub_snapshot(tmp_path, blobs_repo="models--other--repo")
+        with pytest.raises(StUnsupportedError, match="not inside the folder"):
+            load_plan(str(snap))
 
 
 class TestRegistryType:

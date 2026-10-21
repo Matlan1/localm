@@ -146,6 +146,30 @@ def confined_under(base: Path, relpath: str) -> Path:
     check below can refuse it) has to guard *base* itself first; this
     function cannot do it for them without widening its own contract.
     """
+    parts = _confined_parts(relpath)
+    try:
+        resolved = base.joinpath(*parts).resolve()
+        base_resolved = base.resolve()
+    except (OSError, ValueError) as e:
+        raise ValueError(f"path could not be resolved: {relpath!r} ({e})") from e
+    # Strictly below base: base itself is not a valid target.
+    if base_resolved not in resolved.parents:
+        raise ValueError(f"path escapes {base_resolved}: {relpath!r}")
+    # Reject a component whose resolved name differs from the requested one,
+    # at every nesting level.
+    node = resolved
+    for part in reversed(parts):
+        if node.name != part:
+            raise ValueError(
+                f"path component resolved to a different name than requested, "
+                f"possibly a short-name alias: {relpath!r}")
+        node = node.parent
+    return resolved
+
+
+def _confined_parts(relpath: str) -> list[str]:
+    """The components of *relpath* after the lexical checks of
+    :func:`confined_under`, which raise ``ValueError``. Makes no filesystem call."""
     norm = (relpath or "").strip().replace("\\", "/")
     if not norm:
         raise ValueError("empty path")
@@ -166,24 +190,48 @@ def confined_under(base: Path, relpath: str) -> Path:
     for p in parts:
         if set(p) & WINDOWS_RESERVED_NAME_CHARS:
             raise ValueError(f"reserved character in path component not allowed: {relpath!r}")
+    return parts
+
+
+def confined_model_file(base: Path, relpath: str) -> Path:
+    """:func:`confined_under` for a file a model folder names inside itself, which
+    also accepts a Hugging Face hub-cache link: when *base* is a hub-cache snapshot
+    folder (``models--<repo>/snapshots/<revision>``), a final component that is a
+    symlink into that same repo's ``blobs`` folder, its folders strictly below *base*.
+
+    Returns the resolved path, or for an accepted hub-cache link the link itself
+    with its folders resolved. Raises ``ValueError`` like :func:`confined_under`,
+    whose lexical checks run first, before any filesystem call. The same CONTRACT
+    on *base* applies."""
+    parts = _confined_parts(relpath)
     try:
-        resolved = base.joinpath(*parts).resolve()
+        return confined_under(base, relpath)
+    except ValueError:
+        link = _hub_blob_link(base, parts)
+        if link is None:
+            raise
+        return link
+
+
+def _hub_blob_link(base: Path, parts: list[str]) -> Path | None:
+    """``base/parts`` with its folders resolved when *base* is a hub-cache snapshot
+    folder, those folders are confined under it, and the last component is a
+    symlink whose one-hop target is a file name in the same repo's ``blobs``
+    folder; else None."""
+    try:
         base_resolved = base.resolve()
-    except (OSError, ValueError) as e:
-        raise ValueError(f"path could not be resolved: {relpath!r} ({e})") from e
-    # Strictly below base: base itself is not a valid target.
-    if base_resolved not in resolved.parents:
-        raise ValueError(f"path escapes {base_resolved}: {relpath!r}")
-    # Reject a component whose resolved name differs from the requested one,
-    # at every nesting level.
-    node = resolved
-    for part in reversed(parts):
-        if node.name != part:
-            raise ValueError(
-                f"path component resolved to a different name than requested, "
-                f"possibly a short-name alias: {relpath!r}")
-        node = node.parent
-    return resolved
+        repo = base_resolved.parent.parent
+        if base_resolved.parent.name != "snapshots" or not repo.name.startswith("models--"):
+            return None
+        parent = (confined_under(base, "/".join(parts[:-1])) if len(parts) > 1
+                  else base_resolved)
+        link = parent / parts[-1]
+        if not link.is_symlink():
+            return None
+        target = Path(os.path.normpath(parent / os.readlink(link)))
+    except (OSError, ValueError):
+        return None
+    return link if target.parent == repo / "blobs" else None
 
 
 def confined_absolute_or_under(base: Path, raw: str) -> Path:
