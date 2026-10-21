@@ -548,33 +548,42 @@ async def _await_job(job, request: Request) -> tuple[str, str]:
 
     When the client goes away while it runs, cancels the job, waits up to
     ``CANCEL_SETTLE_SECONDS`` for it to finish writing and stop, then raises
-    ``asyncio.CancelledError``."""
+    ``asyncio.CancelledError``.
+
+    The disconnect poll runs every ``JOB_POLL_SECONDS`` whether the job is
+    silent or streaming line events."""
     queue = job.subscribe()
     poll = _resolve_disconnect_poll(request)
     last_line = ""
     outcome = ""
     deadline = None
+    next_poll = time.monotonic() + JOB_POLL_SECONDS
     try:
         while True:
+            event = None
             try:
                 event = await asyncio.wait_for(queue.get(), timeout=JOB_POLL_SECONDS)
             except TimeoutError:
-                if deadline is None:
+                pass
+            if event is not None:
+                kind = event.get("type")
+                if kind == "line":
+                    last_line = str(event.get("text", ""))
+                    if event.get("outcome"):
+                        outcome = last_line
+                elif kind == "end":
+                    if deadline is not None:
+                        raise asyncio.CancelledError()
+                    return str(event.get("status", "failed")), outcome or last_line
+            now = time.monotonic()
+            if deadline is None:
+                if now >= next_poll:
+                    next_poll = now + JOB_POLL_SECONDS
                     if poll is not None and await poll():
                         job.cancel()
                         deadline = time.monotonic() + CANCEL_SETTLE_SECONDS
-                elif time.monotonic() >= deadline:
-                    raise asyncio.CancelledError() from None
-                continue
-            kind = event.get("type")
-            if kind == "line":
-                last_line = str(event.get("text", ""))
-                if event.get("outcome"):
-                    outcome = last_line
-            elif kind == "end":
-                if deadline is not None:
-                    raise asyncio.CancelledError()
-                return str(event.get("status", "failed")), outcome or last_line
+            elif now >= deadline:
+                raise asyncio.CancelledError()
     finally:
         job.unsubscribe(queue)
 
