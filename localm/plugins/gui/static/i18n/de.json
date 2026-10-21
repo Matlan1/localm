@@ -696,6 +696,7 @@
   "imageInputs.loadFailed": "Das Bild konnte nicht geladen werden.",
   "imageInputs.loadFailedNamed": "{name} konnte nicht geladen werden: {message}",
   "imageInputs.maskLabel": "Maske (Inpainting / Outpainting)",
+  "imageInputs.maskReset": "Die frühere Maske konnte nicht geladen werden; der Editor beginnt mit einer leeren Maske.",
   "imageInputs.maskSet": "Maske für ein Bild mit {w}x{h} gesetzt.",
   "imageInputs.needBase": "Ein Eingabebild setzen oder eine Bilddatei laden, um darauf eine Maske zu malen.",
   "imageInputs.needControlImage": "Ein Steuerbild für das ControlNet wählen oder das ControlNet auf Keins stellen.",

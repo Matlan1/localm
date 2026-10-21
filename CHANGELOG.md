@@ -191,6 +191,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   privacy mode kept no crash trace and how to keep one.
 - **A textual-inversion embedding downloaded from CivitAI no longer registers as a text embedding
   model**, so it no longer appears as an embedding model in the model list Ollama clients see.
+- **A textual-inversion embedding downloaded from CivitAI now registers as an image embedding**,
+  not as a text embedding model, so it no longer appears as an embedding model in the model list
+  Ollama clients see. One downloaded earlier is still offered on the Images page; `localm
+  set-type <name> textual-inversion` also takes it out of that list.
 - **A coder shell command that starts with a quoted program path now runs on Windows.** A command such as `"D:\tools dir\tool.exe" --flag "a b"` used to fail with "is not recognized as an internal or external command", because `cmd` dropped the first and last quote.
 - **A shell command's timeout or cancel in `localm coder` is no longer held up by a stray
   background process.** A command that left a detached process holding its output open used to

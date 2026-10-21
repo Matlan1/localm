@@ -2537,6 +2537,7 @@ export const I18N_EN = {
   "imageInputs.loadFailed": "The image could not be loaded.",
   "imageInputs.loadFailedNamed": "{name} could not be loaded: {message}",
   "imageInputs.maskLabel": "Mask (inpaint / outpaint)",
+  "imageInputs.maskReset": "The earlier mask could not be loaded; the editor starts with an empty mask.",
   "imageInputs.maskSet": "Mask set on a {w}x{h} image.",
   "imageInputs.needBase": "Set an input image, or load an image file, to paint a mask on.",
   "imageInputs.needControlImage": "Choose a control image for the ControlNet, or set the ControlNet to None.",

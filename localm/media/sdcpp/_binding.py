@@ -354,10 +354,9 @@ def lib_filename() -> str:
 
 
 def _declare(lib: ctypes.CDLL) -> None:
-    """Set argtypes/restype for every function this module calls. A function
-    a library of another commit lacks is left undeclared only when it is
-    optional here (``sd_ctx_supports_ref_image_conditioning``), so
-    :func:`verify_abi` can still name the commit mismatch."""
+    """Set argtypes/restype for every function this module calls. The
+    optional ``sd_ctx_supports_ref_image_conditioning`` is declared only when
+    the library has it; every other function must exist."""
     def fn(name, restype, *argtypes):
         f = getattr(lib, name)
         f.restype = restype

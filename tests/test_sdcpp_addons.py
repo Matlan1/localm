@@ -363,11 +363,14 @@ def test_a_mask_repaints_on_the_base_image_and_is_recorded(addon_set, runner, tm
 @pytest.mark.parametrize("kw,needle", [
     ({"mask_image": _mask()}, "needs a base image"),
     ({"mask_image": _mask(box=None), "init_image_data": _png()}, "mask is empty"),
+    ({"mask_image": _mask(), "init_image_data": _png()[:60]}, "base image could not be read"),
+    ({"init_image_data": _png(), "control_image": _png()[:60]},
+     "control image could not be read"),
 ])
 def test_a_mask_that_cannot_work_fails_with_a_reason(addon_set, runner, tmp_path, kw, needle):  # noqa: F811
     ok, msg, _, _ = _gen(runner, tmp_path, {"model": "sd15"}, **kw)
     assert not ok and needle in msg, msg
-    assert runner.generates == []
+    assert runner.loads == [] and runner.generates == []
 
 
 def test_a_control_image_without_a_controlnet_and_the_reverse_are_refused(addon_set, runner,  # noqa: F811
@@ -541,7 +544,72 @@ def test_imagine_route_refuses_references_for_a_model_without_them_before_any_lo
     lines = [e.get("text", "") for e in job._history if e.get("type") == "line"]
     assert job.status != "done"
     assert any("does not take reference images" in line for line in lines)
+    assert not any("backend ready" in line for line in lines), lines
     assert runner.loads == []
+
+
+def test_imagine_route_refuses_an_empty_mask_before_the_backend_is_prepared(
+        media_app, addon_set, runner):  # noqa: F811
+    from fastapi.testclient import TestClient
+    with TestClient(media_app) as c:
+        r = c.post("/api/imagine", json={"prompt": "p", "native_models": {"model": "sd15"},
+                                         "input_image_data": _url(_png()),
+                                         "mask": _url(_mask(box=None))})
+        assert r.status_code == 200, r.text
+        job = _finish(media_app, r.json()["job_id"])
+    lines = [e.get("text", "") for e in job._history if e.get("type") == "line"]
+    assert any("mask is empty" in line for line in lines), lines
+    assert not any("backend ready" in line for line in lines), lines
+    assert runner.loads == []
+
+
+def test_a_camera_jpeg_with_several_frames_is_accepted():
+    from PIL import Image
+    out = io.BytesIO()
+    Image.new("RGB", (32, 24), (1, 2, 3)).save(
+        out, format="MPO", save_all=True, append_images=[Image.new("RGB", (32, 24))])
+    data = out.getvalue()
+    assert Image.open(io.BytesIO(data)).format == "MPO"
+    assert nm.decode_image_data(_url(data, "image/jpeg"), "x") == data
+
+
+def test_exif_orientation_is_applied_to_input_images():
+    from PIL import Image
+    im = Image.new("RGB", (40, 20), (200, 0, 0))
+    exif = im.getexif()
+    exif[0x0112] = 6
+    out = io.BytesIO()
+    im.save(out, format="JPEG", exif=exif.tobytes())
+    data = out.getvalue()
+    got = image_native._load_rgb(data)
+    assert (got["width"], got["height"]) == (24, 40)
+    init = image_native._load_init_image(data, None, None)
+    assert (init["width"], init["height"]) == (24, 40)
+
+
+def test_an_embedding_from_an_older_civitai_download_still_works(addon_set, runner,  # noqa: F811
+                                                                  tmp_path):
+    from localm.media.sdcpp import pairing as pr
+    path = write_safetensors(tmp_path / "old_style.safetensors", TI_SD1)
+    _register("old-civitai-ti", path, "embedding")
+    assert nm.validate_addons(None, ["old-civitai-ti"])["embeddings"] == ["old-civitai-ti"]
+    m = image_native.resolve_models({"native": {"model": "sd15",
+                                                "embeddings": ["old-civitai-ti"]}})
+    assert m["ctx"]["embeddings"] == (("old_style", str(path)),)
+    opts = pr.native_options("image", family="sd1")["embeddings"]
+    assert any(o["name"] == "old-civitai-ti" and o["fits"] for o in opts)
+    assert not any(c.name == "old-civitai-ti" and c.info.kind == "llm"
+                   for c in pr.registry_candidates())
+
+
+def test_the_same_embeddings_in_another_order_keep_the_load_key(addon_set, tmp_path):
+    _register("second", write_safetensors(tmp_path / "Second.safetensors", TI_SD1),
+              "textual-inversion")
+    a = image_native.resolve_models({"native": {"model": "sd15",
+                                                "embeddings": ["EasyNeg", "second"]}})
+    b = image_native.resolve_models({"native": {"model": "sd15",
+                                                "embeddings": ["second", "EasyNeg"]}})
+    assert a["key"] == b["key"]
 
 
 def test_native_models_route_lists_controlnets_embeddings_and_capabilities(media_app,  # noqa: F811

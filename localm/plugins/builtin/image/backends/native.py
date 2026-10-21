@@ -308,13 +308,19 @@ def _open_image(src):
     return Image.open(io.BytesIO(src) if isinstance(src, (bytes, bytearray)) else src)
 
 
+def _upright(im):
+    """*im* turned the way its EXIF orientation says it is shown."""
+    from PIL import ImageOps
+    return ImageOps.exif_transpose(im)
+
+
 def _load_init_image(src, width: Optional[int], height: Optional[int]) -> dict:
     """The base image *src* (a path or encoded bytes) as RGB pixels at
     *width* x *height*, or at its own size fitted by ``fit_size`` when either
     is None."""
     from PIL import Image
     with _open_image(src) as im:
-        im = im.convert("RGB")
+        im = _upright(im).convert("RGB")
         if width is None or height is None:
             width, height = fit_size(im.width, im.height)
         if (im.width, im.height) != (width, height):
@@ -332,7 +338,7 @@ def _load_mask(data: bytes, width: int, height: int) -> dict:
     no pixel is lighter than black."""
     from PIL import Image
     with _open_image(data) as im:
-        im = im.convert("L")
+        im = _upright(im).convert("L")
         if (im.width, im.height) != (width, height):
             im = im.resize((width, height), Image.Resampling.NEAREST)
         if im.getextrema()[1] == 0:
@@ -345,11 +351,32 @@ def _load_rgb(data: bytes, size: Optional[tuple] = None) -> dict:
     fitted by ``fit_size`` when *size* is None."""
     from PIL import Image
     with _open_image(data) as im:
-        im = im.convert("RGB")
+        im = _upright(im).convert("RGB")
         width, height = size if size is not None else fit_size(im.width, im.height)
         if (im.width, im.height) != (width, height):
             im = im.resize((width, height), Image.Resampling.LANCZOS)
         return {"width": width, "height": height, "channel": 3, "data": im.tobytes()}
+
+
+def image_data_refusal(*, init_image_data=None, mask_image=None, ref_images=None,
+                       control_image=None) -> Optional[str]:
+    """Why the encoded images of a request cannot be used (one does not decode
+    in full, or the mask is all black: ``EMPTY_MASK``), or None. Decodes every
+    pixel; nothing is loaded onto the GPU."""
+    items = [("base image", init_image_data), ("mask", mask_image),
+             ("control image", control_image)]
+    items += [(f"reference image {i + 1}", r) for i, r in enumerate(ref_images or [])]
+    for what, data in items:
+        if data is None:
+            continue
+        try:
+            with _open_image(data) as im:
+                im.load()
+                if what == "mask" and im.convert("L").getextrema()[1] == 0:
+                    return EMPTY_MASK
+        except (OSError, ValueError, SyntaxError) as e:
+            return f"The {what} could not be read: {e}"
+    return None
 
 
 NO_REFERENCES = ("{model} ({family}) does not take reference images. They work with edit "
@@ -381,10 +408,16 @@ def input_refusal(s: dict, *, input_image=None, ref_images=None, control_image=N
     """Why the native backend cannot run the image inputs of a request with
     settings *s* (a model that does not take reference images, a ControlNet
     without a control image or for another family, a mask without a base
-    image), or None. A model set that does not resolve is left to
-    ``ensure_available``, which reports it. Checked before any VRAM handover."""
+    image, an image that does not decode or an empty mask:
+    ``image_data_refusal``), or None. A model set that does not resolve is left
+    to ``ensure_available``, which reports it. Checked before any VRAM
+    handover."""
     if mask_image is not None and init_image_data is None and input_image is None:
         return "A mask needs a base image: set the input image first."
+    bad = image_data_refusal(init_image_data=init_image_data, mask_image=mask_image,
+                             ref_images=ref_images, control_image=control_image)
+    if bad:
+        return bad
     if not (ref_images or control_image is not None or _native_block(s).get("control_net")):
         return None
     try:
@@ -662,11 +695,13 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
     blk = _native_block(s)
     rec = models["recommended"]
     defaults = models.get("defaults")
-    refused = _input_refusal(models, ref_images=ref_images, control_image=control_image)
-    if refused:
-        return False, refused
     if mask_image is not None and init_image_data is None and input_image is None:
         return False, "A mask needs a base image: set the input image first."
+    refused = (image_data_refusal(init_image_data=init_image_data, mask_image=mask_image,
+                                  ref_images=ref_images, control_image=control_image)
+               or _input_refusal(models, ref_images=ref_images, control_image=control_image))
+    if refused:
+        return False, refused
     wanted = list(loras or [])
     if lora_name:
         wanted.append({"name": lora_name, "strength": lora_strength_model})

@@ -125,7 +125,11 @@ async function iinOpenMaskEditor({ base, mask, onDone }) {
   mg.fillStyle = "#000";
   mg.fillRect(0, 0, maskC.width, maskC.height);
   if (mask) {
-    try { mg.drawImage(await iinLoadImage(mask), 0, 0, maskC.width, maskC.height); } catch { /* starts empty */ }
+    try {
+      mg.drawImage(await iinLoadImage(mask), 0, 0, maskC.width, maskC.height);
+    } catch {
+      toast(t("imageInputs.maskReset"), true);
+    }
   }
   let extended = false;
   let erase = false;

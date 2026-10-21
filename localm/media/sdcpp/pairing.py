@@ -203,6 +203,8 @@ def registry_candidates(reg: Optional[dict] = None) -> list[Candidate]:
         except OSError:
             continue
         if mtype == "embedding" and entry.get("architecture") not in ("t5encoder", "t5"):
+            if families.inspect_file(p).kind == "textual_inversion":
+                out.append(Candidate(str(name), p, families.inspect_file(p), mtype))
             continue
         if mtype == "llm":
             arch = entry.get("architecture")
@@ -464,6 +466,13 @@ def resolve_loras(entries: list, family: Optional[str],
 
 
 ADDON_TYPES = {"controlnet": "controlnet", "textual_inversion": "textual-inversion"}
+# Other registry types an add-on entry is accepted under when its file reads as
+# that add-on.
+_ADDON_ALSO_TYPES = {"controlnet": ("unknown",), "textual_inversion": ("unknown", "embedding")}
+
+
+def _addon_types(kind: str) -> tuple:
+    return (ADDON_TYPES[kind],) + _ADDON_ALSO_TYPES[kind]
 ADDON_LABELS = {"controlnet": "ControlNet", "textual_inversion": "embedding"}
 
 
@@ -478,7 +487,8 @@ def resolve_addon(name: str, kind: str, family: Optional[str],
     """The registered ControlNet or textual-inversion embedding (*kind*
     ``controlnet`` / ``textual_inversion``) named *name*, for a *family* model:
     ``{"name", "path", "family"}``. Only a registry name of the matching type,
-    or of type ``unknown`` whose file reads as that kind, is accepted. Raises ``ModelFileError`` with a user-facing reason when *name* is
+    or of an older type (``_ADDON_ALSO_TYPES``) whose file reads as that kind,
+    is accepted. Raises ``ModelFileError`` with a user-facing reason when *name* is
     not one, has no file, its file is missing or on a network or device path,
     does not read as that kind, or does not work with *family*
     (``families.fits_unet_addon``)."""
@@ -488,8 +498,7 @@ def resolve_addon(name: str, kind: str, family: Optional[str],
     reg = load_registry() if reg is None else reg
     label = ADDON_LABELS[kind]
     entry = reg.get(name) if name else None
-    if not isinstance(entry, dict) or entry.get("model_type") not in (ADDON_TYPES[kind],
-                                                                       "unknown"):
+    if not isinstance(entry, dict) or entry.get("model_type") not in _addon_types(kind):
         raise ModelFileError(f"'{name}' is not a registered {label}. Add it on the Models page "
                              f"(type {ADDON_TYPES[kind]}) first.")
     raw = _entry_path(entry)
@@ -527,12 +536,13 @@ def resolve_addon(name: str, kind: str, family: Optional[str],
 def resolve_embeddings(names: list, family: Optional[str],
                        reg: Optional[dict] = None) -> list[dict]:
     """``[{"name", "path", "trigger"}]`` for the registered textual-inversion
-    embeddings *names* (``resolve_addon``) for a *family* model, each once.
+    embeddings *names* (``resolve_addon``) for a *family* model, each once,
+    sorted by name.
     Raises ``ModelFileError`` as ``resolve_addon`` does, and when two share a
     trigger word."""
     out: list = []
     seen: dict = {}
-    for name in names:
+    for name in sorted(set(names)):
         hit = resolve_addon(name, "textual_inversion", family, reg)
         trigger = embedding_trigger(Path(hit["path"]))
         other = seen.get(trigger.lower())
@@ -551,7 +561,7 @@ def addon_options(kind: str, cands: list, family: Optional[str]) -> list[dict]:
     that fit first), and ``trigger`` for an embedding."""
     out = []
     for c in cands:
-        if c.info.kind != kind or c.model_type not in (ADDON_TYPES[kind], "unknown"):
+        if c.info.kind != kind or c.model_type not in _addon_types(kind):
             continue
         opt = _option(c)
         if kind == "textual_inversion":

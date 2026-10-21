@@ -60,7 +60,7 @@ MIN_INPUT_SIDE = 8
 CONTROL_PREPROCESS = ("none", "canny")
 _DATA_URL_PREFIXES = ("data:image/png;base64,", "data:image/jpeg;base64,",
                       "data:image/webp;base64,")
-_IMAGE_FORMATS = frozenset({"PNG", "JPEG", "WEBP"})
+_IMAGE_FORMATS = frozenset({"PNG", "JPEG", "MPO", "WEBP"})
 
 
 class ControlChoice(BaseModel):
@@ -137,10 +137,10 @@ def check_image_inputs(*, input_image: Optional[str], input_image_data: Optional
     }
 
 
-def _check_typed_name(name: str, model_type: str, label: str, reg: dict) -> str:
+def _check_typed_name(name: str, model_types: tuple, label: str, reg: dict) -> str:
     name = (name or "").strip()
     entry = reg.get(name) if name else None
-    if not isinstance(entry, dict) or entry.get("model_type") not in (model_type, "unknown"):
+    if not isinstance(entry, dict) or entry.get("model_type") not in model_types:
         raise ValueError(f"'{name}' is not a registered {label}." if name
                          else f"Pick a {label}.")
     return name
@@ -151,8 +151,8 @@ def validate_addons(control: Optional[ControlChoice], embeddings: Optional[list]
     """A request's ControlNet and embeddings by registered name:
     ``{"control_net", "control_strength", "control_preprocess", "embeddings"}``
     (None / ``[]`` when unset). A name must be a registry entry of type
-    ``controlnet`` / ``textual-inversion`` (or ``unknown``; the backend checks
-    the file is one). Raises ``ValueError`` with a user-facing reason."""
+    ``controlnet`` / ``textual-inversion``, or ``unknown`` (and ``embedding``
+    for an embedding); the backend checks the file is one. Raises ``ValueError`` with a user-facing reason."""
     names = [str(n) for n in (embeddings or [])]
     if len(names) > MAX_EMBEDDINGS:
         raise ValueError(f"At most {MAX_EMBEDDINGS} embeddings per job.")
@@ -165,12 +165,14 @@ def validate_addons(control: Optional[ControlChoice], embeddings: Optional[list]
     out = {"control_net": None, "control_strength": None, "control_preprocess": None,
            "embeddings": []}
     if control is not None:
-        out["control_net"] = _check_typed_name(control.model, "controlnet", "ControlNet", reg)
+        out["control_net"] = _check_typed_name(control.model, ("controlnet", "unknown"),
+                                               "ControlNet", reg)
         out["control_strength"] = float(control.strength)
         out["control_preprocess"] = control.preprocess
     seen = []
     for n in names:
-        n = _check_typed_name(n, "textual-inversion", "embedding", reg)
+        n = _check_typed_name(n, ("textual-inversion", "unknown", "embedding"), "embedding",
+                              reg)
         if n not in seen:
             seen.append(n)
     out["embeddings"] = seen
