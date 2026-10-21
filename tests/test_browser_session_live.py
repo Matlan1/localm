@@ -93,6 +93,9 @@ _PAGES = {
         b"setTimeout(()=>window.open('/popup-page'),100);</script></body></html>"),
 }
 
+#: Worker test files by path, as (content type, text); set by the worker tests.
+_WORKER_FILES: dict = {}
+
 #: Seconds the origin takes to answer /slow.png.
 _SLOW_SECONDS = 8
 
@@ -117,7 +120,10 @@ class _Recorder(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
-        if self.path in _PAGES:
+        if self.path.split("?")[0] in _WORKER_FILES:
+            ctype, text = _WORKER_FILES[self.path.split("?")[0]]
+            body = text.encode()
+        elif self.path in _PAGES:
             body = _PAGES[self.path].replace(b"PORT", str(port).encode())
             ctype = "text/html"
         elif self.path == "/slow.png":
@@ -307,6 +313,164 @@ def test_an_allowed_websocket_is_refused_for_the_stated_reason(browser, origin):
     blocked = [x for x in b.blocked_requests() if x["url"].startswith("ws")]
     assert blocked, "the refusal was not recorded, so nothing tells the caller"
     assert "not available" in blocked[0]["reason"], blocked
+
+
+# --------------------------------------------------------------------------- #
+#  Workers. Their WebSockets, and a SharedWorker's requests, are not routed, so
+#  they must fail inside the browser without connecting anywhere.
+# --------------------------------------------------------------------------- #
+
+class _ConnectCounter:
+    """A raw TCP listener on loopback (IPv4 by default, ::1 when *ipv6*) that
+    counts every connection accepted."""
+
+    def __init__(self, ipv6: bool = False):
+        import socket
+        self.accepted = 0
+        if ipv6:
+            self._sock = socket.socket(socket.AF_INET6)
+            self._sock.bind(("::1", 0))
+        else:
+            self._sock = socket.socket()
+            self._sock.bind(("127.0.0.1", 0))
+        self._sock.listen(16)
+        self._sock.settimeout(0.2)
+        self.port = self._sock.getsockname()[1]
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        while not self._stop.is_set():
+            try:
+                conn, _ = self._sock.accept()
+            except OSError:
+                continue
+            self.accepted += 1
+            conn.close()
+
+    def close(self):
+        self._stop.set()
+        self._thread.join(timeout=2)
+        self._sock.close()
+
+
+@pytest.fixture
+def counter(request):
+    c = _ConnectCounter(ipv6=getattr(request, "param", None) == "[::1]")
+    try:
+        yield c
+    finally:
+        c.close()
+
+
+def _worker_page(kind: str, ws_url: str) -> None:
+    """Serve /wk-page, which starts one *kind* of worker that opens a WebSocket
+    to *ws_url* and then reports that it ran by a request for /ran?src=KIND."""
+    opener = ("try { new WebSocket(%r); } catch (e) {} " % ws_url)
+    if kind == "worker":
+        page = "new Worker('/wk.js');"
+        script = opener + "fetch('/ran?src=worker');"
+    elif kind == "shared":
+        page = ("const w = new SharedWorker('/wk.js'); "
+                "w.port.onmessage = () => fetch('/ran?src=shared'); w.port.start();")
+        script = opener + "onconnect = (e) => e.ports[0].postMessage('ran');"
+    else:
+        page = "navigator.serviceWorker.register('/wk.js');"
+        script = ("self.addEventListener('install', (e) => { self.skipWaiting(); "
+                  + opener + "fetch('/ran?src=sw'); });")
+    _WORKER_FILES.clear()
+    _WORKER_FILES["/wk-page"] = (
+        "text/html", "<html><body>workers<script>" + page + "</script></body></html>")
+    _WORKER_FILES["/wk.js"] = ("text/javascript", script)
+
+
+def _wait_for(path_prefix: str, timeout: float = 15.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if any(p.startswith(path_prefix) for p in _Recorder.seen):
+            return True
+        time.sleep(0.1)
+    return False
+
+
+@pytest.mark.parametrize("kind", ["worker", "shared", "sw"])
+@pytest.mark.parametrize("counter, host", [
+    ("127.0.0.1", "127.0.0.1"), ("127.0.0.1", "localhost"), ("[::1]", "[::1]"),
+], indirect=["counter"])
+def test_a_worker_websocket_never_connects(browser, origin, counter, kind, host):
+    """A WebSocket opened from a dedicated worker, a SharedWorker or a service
+    worker never makes a TCP connection, even to a host the policy allows."""
+    port = origin.server_address[1]
+    _set(net_mode="allow", net_allow_private=True)
+    _worker_page(kind, "ws://%s:%d/ws" % (host, counter.port))
+    b = browser()
+    assert b.navigate("http://localhost:%d/wk-page" % port)["ok"] is True
+    assert _wait_for("/ran?src=" + kind), (
+        "the %s never ran, so nothing was measured: %r" % (kind, _Recorder.seen))
+    time.sleep(1.5)
+    assert counter.accepted == 0, (
+        "a %s WebSocket connected to its host %d time(s)" % (kind, counter.accepted))
+
+
+def test_the_system_engine_carries_the_resolver_rule(browser, origin, counter,
+                                                     monkeypatch):
+    """The system engine, driven with the downloaded Chromium as the installed
+    browser, keeps a worker's WebSocket from connecting too."""
+    from localm.browser import discovery, provision
+    exe = provision.chromium_executable_path()
+    if exe is None or not exe.exists():
+        pytest.skip("the downloaded Chromium is not installed")
+    monkeypatch.setattr(discovery, "find_system_browsers",
+                        lambda **kw: [discovery.SystemBrowser("Chromium", str(exe))])
+    port = origin.server_address[1]
+    _set(net_mode="allow", net_allow_private=True)
+    _worker_page("worker", "ws://127.0.0.1:%d/ws" % counter.port)
+    b = browser(engine="system")
+    assert b.browser_name == "Chromium"
+    assert b.navigate("http://localhost:%d/wk-page" % port)["ok"] is True
+    assert _wait_for("/ran?src=worker"), _Recorder.seen
+    time.sleep(1.5)
+    assert counter.accepted == 0, (
+        "a worker WebSocket from the system engine connected %d time(s)"
+        % counter.accepted)
+
+
+def test_a_shared_worker_request_never_reaches_its_host(browser, origin):
+    """A SharedWorker's fetch is not routed, so it must not leave the browser."""
+    port = origin.server_address[1]
+    _set(net_mode="allow", net_allow_private=True)
+    _WORKER_FILES.clear()
+    _WORKER_FILES["/wk-page"] = (
+        "text/html",
+        "<html><body>shared<script>const w = new SharedWorker('/wk.js'); "
+        "w.port.onmessage = () => fetch('/ran?src=shared'); w.port.start();"
+        "</script></body></html>")
+    _WORKER_FILES["/wk.js"] = (
+        "text/javascript",
+        "onconnect = (e) => { fetch('/shared-fetch')"
+        ".catch(() => {}).finally(() => e.ports[0].postMessage('ran')); };")
+    b = browser()
+    assert b.navigate("http://localhost:%d/wk-page" % port)["ok"] is True
+    assert _wait_for("/ran?src=shared"), _Recorder.seen
+    assert not any(p.startswith("/shared-fetch") for p in _Recorder.seen), (
+        "a SharedWorker request reached its host: %r" % (_Recorder.seen,))
+
+
+def test_a_routed_request_still_loads_under_the_resolver_rule(browser, origin):
+    """The control for the worker tests: a dedicated worker's own fetch is
+    routed, so it is decided by the gate and reaches an allowed host."""
+    port = origin.server_address[1]
+    _set(net_mode="allow", net_allow_private=True)
+    _WORKER_FILES.clear()
+    _WORKER_FILES["/wk-page"] = (
+        "text/html", "<html><body>w<script>new Worker('/wk.js');</script></body></html>")
+    _WORKER_FILES["/wk.js"] = (
+        "text/javascript", "fetch('http://127.0.0.1:%d/routed-fetch');" % port)
+    b = browser()
+    assert b.navigate("http://localhost:%d/wk-page" % port)["ok"] is True
+    assert _wait_for("/routed-fetch"), _Recorder.seen
+    assert any(u.endswith("/routed-fetch") for u in b.allowed_requests())
 
 
 # --------------------------------------------------------------------------- #

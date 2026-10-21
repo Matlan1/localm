@@ -114,6 +114,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **A rejected grammar's text stays out of the debug log in privacy mode.** When a malformed grammar was only found while the reply was generated, the native parser's error and the grammar source reached the debug log and the recent-activity view of a bug report; both now stay clear of it unless chat content is allowed in the debug log.
 - **A pasted log no longer lets chat text into a bug report's log digest.** After a debug record that carries chat content, several pasted localm log lines could end the withholding early and let the chat text after them through. Only log lines stamped after that record end it now.
 - **Bug reports keep ordinary words that are also your computer's name.** A machine named `server`, `desktop`, `workstation`, `gpu`, `main` or `build` had every such word in the report, and in the issue title, replaced by `<host>`. Common generic names are left alone; other machine names are still redacted.
+- **The automated browser no longer lets a worker reach the network around its gate.** A
+  WebSocket opened from a Worker, SharedWorker or service worker, and a `fetch()` from a
+  SharedWorker, used to connect directly without passing the network policy. The
+  browser now resolves no host on its own, so these fail without connecting anywhere; every
+  other request is still decided by the policy as before.
 - **`localm coder` no longer compacts after every turn.** With a model that leaves little room for context, the coder used to be summarised again on nearly every request, and reading a codebase file by file triggered a summary per file. It now compacts only when a request would take most of the context window, brings the session down to about half of it, and first drops the output of older tool calls (the model reads a file again when it needs it) before summarising anything. Everything you typed is kept word for word across compactions, and summaries list facts instead of prose. A model server that reports no context window, such as an online API, is no longer compacted at 4096 tokens.
 - **A vision projector is no longer offered as a model.** A pulled vision model registers its
   projector (`...-mmproj`) as a separate entry, and `GET /v1/models` listed it as a chat model.

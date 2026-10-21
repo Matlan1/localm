@@ -14,10 +14,10 @@ browser-specific narrowing that can refuse more but never permit more.
 ``check_url`` resolves DNS, so ``decide()`` blocks. Call it off the event loop
 that owns the browser session (see ``decide_async``).
 
-LIMIT: a URL allowed here is re-resolved by Chromium before it connects, because
-the browser does its own DNS and its own networking. So this path does NOT pin
-the resolved address the way ``netpolicy.pinned_request`` does for localm's own
-HTTP client, and a host that answers differently between the check and the
+LIMIT: a URL allowed here is fetched by the playwright driver (``route.fetch``),
+which resolves the host again before it connects. So this path does NOT pin the
+resolved address the way ``netpolicy.pinned_request`` does for localm's own HTTP
+client, and a host that answers differently between the check and the
 connection is not caught.
 """
 

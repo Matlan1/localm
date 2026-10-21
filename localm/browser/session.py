@@ -8,9 +8,13 @@ route handler or an agent tool happens to be on; each marshals its work onto tha
 loop with ``run_coroutine_threadsafe`` and waits for it. Never touch ``_page``,
 ``_browser`` or ``_ctx`` from outside that loop.
 
-Every request the browser makes is put through ``netgate`` before it may
+Every request the context routes see is put through ``netgate`` before it may
 proceed, and a refusal is recorded so a caller can be told which destination was
-blocked and why.
+blocked and why. The browser is launched with a host-resolver rule that makes
+its own network stack resolve no host, IP literals included, so a WebSocket
+opened from a worker and a SharedWorker's requests, which the routes never see,
+fail without connecting anywhere. Routed requests are fetched by the playwright
+driver, not by the browser, so they are unaffected.
 
 A session keeps exactly one page open. A new window that a click opened becomes
 the page every call drives and the live view shows, and the page before it is
@@ -62,6 +66,11 @@ _PAGE_SETUP_MS = 10000
 #: Milliseconds a blank window a click opened is given to start loading a URL
 #: before it is shown as it is.
 _BLANK_WINDOW_WAIT_MS = 5000
+
+#: Chromium switches every launch carries. The rule resolves every host,
+#: including IP literals and localhost, to not-found inside the browser.
+#: See test_a_worker_websocket_never_connects.
+_LAUNCH_ARGS = ("--host-resolver-rules=MAP * ~NOTFOUND",)
 
 
 class BrowserUnavailableError(RuntimeError):
@@ -257,7 +266,8 @@ class BrowserSession:
     async def _launch_bundled(self):
         """Launch the Chromium build localm downloads, in a fresh profile."""
         try:
-            browser = await self._pw.chromium.launch(headless=self.headless)
+            browser = await self._pw.chromium.launch(
+                headless=self.headless, args=list(_LAUNCH_ARGS))
         except Exception as exc:
             logger.debug("bundled browser launch failed: %s", exc)
             provision.note_missing_executable(exc)
@@ -279,7 +289,8 @@ class BrowserSession:
         for candidate in candidates:
             try:
                 browser = await self._pw.chromium.launch(
-                    headless=self.headless, **candidate.launch_options())
+                    headless=self.headless, args=list(_LAUNCH_ARGS),
+                    **candidate.launch_options())
             except Exception as exc:
                 logger.debug("system browser %s launch failed: %s",
                              candidate.name, exc)
