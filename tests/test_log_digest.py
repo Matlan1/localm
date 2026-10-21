@@ -539,3 +539,58 @@ class TestFullPipelineMatchesIssue617Shape:
         assert "repeated" in digest    # the polling spam collapsed
         # The collapsed digest is meaningfully smaller than the raw noise block.
         assert len(digest) < len(text)
+
+
+_PASTED = "gguf slots: slot 0 prefill starting, {n} prompt token(s)"
+
+
+class TestPastedLogLinesDoNotResync:
+    """A localm log pasted into a chat session was written before the content
+    record that carries the session, so its lines can never end the withholding
+    that the content record started."""
+
+    def _pasted_block(self, count):
+        return "\n".join(
+            f"2026-07-13 09:00:{i:02d},000 DEBUG   localm: " + _PASTED.format(n=100 + i)
+            for i in range(count))
+
+    def test_four_pasted_log_lines_do_not_release_the_chat_text_after_them(self):
+        text = (
+            "2026-07-13 15:24:50,000 DEBUG   localm: memory consolidate prompt:\n"
+            + self._pasted_block(4) + "\n"
+            "SECRET-CHAT-TEXT the user wrote after pasting the log\n"
+            "2026-07-13 15:24:52,000 INFO    localm: request served\n")
+        digest = ld.build_digest(text)
+        assert "SECRET-CHAT-TEXT" not in digest
+        assert "prefill starting" not in digest
+        assert "debug record(s) withheld" in digest
+
+    def test_real_traffic_stamped_after_the_content_record_still_resyncs(self):
+        text = (
+            "2026-07-13 15:24:50,000 DEBUG   localm: memory consolidate prompt:\n"
+            + self._pasted_block(4) + "\n"
+            "SECRET-CHAT-TEXT\n"
+            + "\n".join(_polling_line(f"2026-07-13 15:24:{51+i:02d}", 7, 0.2)
+                        for i in range(4)))
+        digest = ld.build_digest(text)
+        assert "SECRET-CHAT-TEXT" not in digest
+        assert "GET /api/stats" in digest
+
+    def test_a_record_stamped_within_the_skew_of_the_content_record_still_resyncs(self):
+        text = (
+            "2026-07-13 15:24:50,500 DEBUG   localm: memory consolidate prompt:\n"
+            + "\n".join(_polling_line("2026-07-13 15:24:50", 7, 0.2) for _ in range(3)))
+        assert "GET /api/stats" in ld.build_digest(text)
+
+    def test_a_record_stamped_before_the_skew_does_not_resync(self):
+        text = (
+            "2026-07-13 15:24:50,000 DEBUG   localm: memory consolidate prompt:\n"
+            + "\n".join(_polling_line("2026-07-13 15:24:48", 7, 0.2) for _ in range(3)))
+        assert "GET /api/stats" not in ld.build_digest(text)
+
+    def test_a_tainted_start_resyncs_on_the_run_alone(self):
+        text = "chat text continues\n" + "\n".join(
+            _polling_line(f"2026-07-13 15:24:{50+i:02d}", 7, 0.2) for i in range(3))
+        digest = ld.build_digest(text, start_tainted=True)
+        assert "chat text continues" not in digest
+        assert "GET /api/stats" in digest

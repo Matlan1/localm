@@ -300,8 +300,13 @@ def _scrub_lan_hosts(text: str) -> str:
 
 # Host names never treated as this machine's own: placeholders and default
 # names that are also ordinary words in a report.
-_OWN_NAME_SKIP = frozenset({"archlinux", "debian", "fedora", "host", "kali", "localhost",
-                            "localm", "raspberrypi", "redacted", "ubuntu", "user"})
+_OWN_NAME_SKIP = frozenset({"admin", "archlinux", "build", "builder", "client", "cloud", "computer",
+                            "container", "debian", "default", "desktop", "dev", "devbox", "docker",
+                            "fedora", "gpu", "home", "host", "kali", "laptop", "linux", "localhost",
+                            "localm", "macbook", "machine", "main", "node", "notebook", "office",
+                            "prod", "production", "raspberrypi", "redacted", "root", "runner",
+                            "server", "staging", "system", "test", "ubuntu", "user", "windows",
+                            "work", "worker", "workstation"})
 
 
 def _own_host_names() -> list:
