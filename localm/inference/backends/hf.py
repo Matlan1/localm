@@ -201,6 +201,13 @@ class HFBackend(BaseBackend):
         return True if is_alive is None else bool(is_alive())
 
     @property
+    def streams_waiting(self) -> int:
+        """Generations queued behind one already running on the worker; 0 when
+        the model is unloaded."""
+        runner = self._runner
+        return runner.streams_waiting if runner is not None else 0
+
+    @property
     def supports_images(self) -> bool:
         """True once loaded with a working multimodal processor.
 

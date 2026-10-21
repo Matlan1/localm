@@ -276,5 +276,95 @@ def test_the_scheduled_memory_job_stops_when_a_chat_request_is_waiting(memhome):
     assert plug._chat_store().all() == []
 
 
+def test_hf_runner_counts_a_stream_waiting_for_the_worker():
+    import queue
+
+    from localm.inference.backends._hf_runner import HFRunner
+    r = HFRunner()
+    r._req_q, r._resp_q = queue.Queue(), queue.Queue()
+    r._proc = _FakeProc()
+    assert r.streams_waiting == 0
+    out: list[str] = []
+    r._q_lock.acquire()
+    t = threading.Thread(target=lambda: out.extend(r.chat_stream()), daemon=True)
+    t.start()
+    try:
+        deadline = time.monotonic() + 5
+        while r.streams_waiting != 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert r.streams_waiting == 1
+    finally:
+        r._q_lock.release()
+    r._resp_q.put(("chunk", "x"))
+    r._resp_q.put(("done", {"finish_reason": "stop"}))
+    t.join(5)
+
+    assert not t.is_alive()
+    assert out == ["x"]
+    assert r.streams_waiting == 0
+
+
+def test_backends_report_the_runners_waiting_count():
+    from localm.inference.backends.gguf import GgufBackend
+    from localm.inference.backends.hf import HFBackend
+
+    class _Runner:
+        streams_waiting = 2
+
+    for cls in (GgufBackend, HFBackend):
+        backend = cls.__new__(cls)
+        backend._runner = None
+        assert backend.streams_waiting == 0
+        backend._runner = _Runner()
+        assert backend.streams_waiting == 2
+
+
+def test_a_yield_mid_episodic_pass_keeps_the_sessions_already_summarised(memhome):
+    import os
+    for stem, topic in (("a1", "the billing service Postgres migration"),
+                        ("a2", "the release checklist")):
+        rows = [{"type": "user", "data": {"content": f"let us work through {topic} in "
+                                                     "detail and decide the next steps for it"}},
+                {"type": "llm", "data": {"content": f"Here is a plan for {topic}."}}]
+        p = memhome / "sessions" / f"{stem}.jsonl"
+        p.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+        old = time.time() - 7200 + (0 if stem == "a1" else 10)
+        os.utime(p, (old, old))
+    store = plug._chat_store()
+    calls = []
+
+    def complete(prompt):
+        calls.append(prompt)
+        if len(calls) == 2:
+            raise BackgroundYield()
+        return "Planned the billing service Postgres migration"
+
+    with pytest.raises(BackgroundYield):
+        plug._store_episodes(store, complete, embed_fn=None)
+    assert len(calls) == 2
+
+    retry_prompts = []
+
+    def retry(prompt):
+        retry_prompts.append(prompt)
+        return "Worked through the release checklist"
+
+    assert plug._store_episodes(store, retry, embed_fn=None) == 1
+    assert len(retry_prompts) == 1 and "release checklist" in retry_prompts[0]
+
+
+def test_a_deferred_pass_retries_soon_whatever_the_debounce_interval(memhome, monkeypatch):
+    monkeypatch.setenv("LOCALM_MEMORY_AUTO_INTERVAL", "3600")
+    eng = _Engine(chunks=list(_FACTS))
+    eng.wait_after = 3
+    monkeypatch.setattr(plug, "_live_engine", lambda: eng)
+    plug._auto_running = True
+
+    plug._auto_consolidate_bg()
+
+    due_in = 3600 - (time.time() - plug._auto_last_run())
+    assert plug.MEMORY_AUTO_RETRY_AFTER - 5 <= due_in <= plug.MEMORY_AUTO_RETRY_AFTER + 5
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

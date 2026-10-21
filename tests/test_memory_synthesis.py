@@ -135,7 +135,7 @@ def test_run_job_memory_kind(memhome):
     from localm.plugins.builtin.jobs.store import Job
 
     class FakeEng:
-        def chat_stream(self, messages):
+        def chat_stream(self, messages, **kw):
             yield '{"facts": [{"fact": "User is named Sam", "confidence": 0.9}]}'
 
     job = Job(name="m", task_kind="memory", prompt="",
@@ -161,7 +161,7 @@ def test_run_job_memory_surfaces_pending_corrections(memhome):
     ]), encoding="utf-8")
 
     class FakeEng:
-        def chat_stream(self, messages):
+        def chat_stream(self, messages, **kw):
             p = messages[0]["content"]
             if "Extract ONLY durable" in p:
                 yield '{"facts": [{"fact": "User lives in Munich", "confidence": 0.9}]}'

@@ -981,6 +981,7 @@ def _store_episodes(store, complete, embed_fn=_UNSET, now=None, errors=None,
         import time as _time
         from difflib import SequenceMatcher
 
+        from localm.inference.background_generation import BackgroundYield
         from localm.memory import ConsolidationModelError, MemoryRecord, summarize_session
         sdir = _home() / "sessions"
         if not sdir.is_dir():
@@ -1048,6 +1049,9 @@ def _store_episodes(store, complete, embed_fn=_UNSET, now=None, errors=None,
             logger.info("memory consolidation: summarizing session %s (%d chars)...", f.stem, len(text))
             try:
                 summ = summarize_session(complete, text)
+            except BackgroundYield:
+                _write_episodic_watermark(store, newest, newest_stems, failures)
+                raise
             except ConsolidationModelError as e:
                 if errors is not None:
                     errors.append(str(e))
@@ -1128,6 +1132,16 @@ def _store_episodes(store, complete, embed_fn=_UNSET, now=None, errors=None,
 
 MEMORY_AUTO_MIN_INTERVAL = 900.0     # >= 15 min between auto-consolidation runs
 MEMORY_AUTO_RETRY_AFTER = 60.0       # a pass that yielded to a chat request may run again after this
+
+
+def _auto_interval() -> float:
+    """Seconds between auto-consolidation runs: LOCALM_MEMORY_AUTO_INTERVAL when it
+    parses as a number, else MEMORY_AUTO_MIN_INTERVAL."""
+    import os
+    try:
+        return float(os.environ.get("LOCALM_MEMORY_AUTO_INTERVAL", MEMORY_AUTO_MIN_INTERVAL))
+    except (TypeError, ValueError):
+        return MEMORY_AUTO_MIN_INTERVAL
 _auto_lock = _threading.Lock()       # guards the marker read + in-progress flag
 _auto_running = False                 # True while a background pass is in flight
 
@@ -1211,7 +1225,7 @@ def _auto_consolidate_bg(principal: str | None = None) -> None:
     finally:
         import time as _time
         now = _time.time()
-        _auto_stamp(now - (MEMORY_AUTO_MIN_INTERVAL - MEMORY_AUTO_RETRY_AFTER)
+        _auto_stamp(now - (_auto_interval() - MEMORY_AUTO_RETRY_AFTER)
                     if deferred else now)
         with _auto_lock:
             _auto_running = False
@@ -1247,15 +1261,8 @@ def _maybe_auto_consolidate(principal: str | None = None) -> None:
         logger.debug("memory auto-consolidate: no engine currently loaded, "
                      "skipping this turn")
         return                                # no model to distil with
-    import os
     import time as _time
-    # The debounce interval is overridable via env; malformed values fall back to the
-    # default.
-    try:
-        interval = float(os.environ.get(
-            "LOCALM_MEMORY_AUTO_INTERVAL", MEMORY_AUTO_MIN_INTERVAL))
-    except (TypeError, ValueError):
-        interval = MEMORY_AUTO_MIN_INTERVAL
+    interval = _auto_interval()
     now = _time.time()
     with _auto_lock:
         if _auto_running:
