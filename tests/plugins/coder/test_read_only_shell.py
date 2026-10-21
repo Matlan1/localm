@@ -166,8 +166,46 @@ def test_dotdot_after_a_link_back_into_the_project_that_climbs_out_is_not_read_o
     assert is_read_only("cat x/y/j/../../../z.txt", proj) is False
 
 
-@pytest.mark.skipif(sys.platform != "win32",
-                    reason="POSIX realpath resolves each link before its .., so the two readings agree")
+def test_a_glob_after_a_link_and_dotdot_is_not_read_only_even_with_no_match_inside(tmp_path):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    sibling = tmp_path / "sibling"
+    (sibling / ".git").mkdir(parents=True)
+    (tmp_path / "secret.txt").write_text("s", encoding="utf-8")
+    _symlink(proj / "jup", sibling, directory=True)
+    assert is_read_only("cat jup/.git/../../secre*", proj) is False
+    assert is_read_only("cat j*/../../secret.txt", proj) is False
+
+
+def test_a_long_path_is_checked_without_resolving_every_prefix(tmp_path, monkeypatch):
+    import localm.plugins.coder.shell_guard as sg
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    calls = []
+    real = os.path.realpath
+
+    def counting(path, *a, **k):
+        calls.append(path)
+        return real(path, *a, **k)
+
+    monkeypatch.setattr(sg.os.path, "realpath", counting)
+    assert is_read_only("cat " + "x/" * 3000 + "a.txt", proj) is True
+    assert len(calls) < 20, len(calls)
+
+
+def test_git_after_cd_through_a_link_checks_the_repository_git_uses(tmp_path):
+    proj = tmp_path / "proj"
+    (proj / "vendor" / "repo2" / "sub").mkdir(parents=True)
+    (proj / "vendor" / "repo2" / ".git").mkdir()
+    (proj / "vendor" / "repo2" / ".git" / "config").write_text(
+        "[core]\n\tpager = ./p.sh\n", encoding="utf-8")
+    (proj / "x").mkdir()
+    assert is_read_only("cd vendor/repo2/sub && git log", proj) is False
+    _symlink(proj / "x" / "j", proj / "vendor" / "repo2" / "sub", directory=True)
+    assert is_read_only("cd x && ls", proj) is True
+    assert is_read_only("cd x/j && git log", proj) is False
+
+
 def test_a_gitdir_whose_dotdot_climbs_out_through_a_link_is_not_read_only(tmp_path):
     proj = tmp_path / "proj"
     (proj / "x" / "y").mkdir(parents=True)

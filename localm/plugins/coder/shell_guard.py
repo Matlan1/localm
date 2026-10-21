@@ -1173,32 +1173,35 @@ def _real(path: str) -> str:
     return os.path.normcase(os.path.realpath(path))
 
 
-def _real_stepwise(path: str) -> str:
-    """*path* resolved one component at a time, each ``..`` applied to the
-    already resolved prefix (how a POSIX-style tool walks it through a symlink or
-    junction; :func:`_real` collapses ``..`` before resolving on Windows),
-    case-normalised. A relative *path* is taken from the current directory."""
+def _dotdot_after_link(path: str) -> bool:
+    """True when a ``..`` in absolute *path* comes after a component that is a
+    symlink or junction, or after a wildcard component that could match one: a
+    POSIX-style tool applies that ``..`` to the link's target, while
+    :func:`_real` collapses it first on Windows. One ``lstat`` per component.
+    Raises OSError or ValueError when a component cannot be examined."""
     drive, rest = os.path.splitdrive(path)
-    if drive or rest[:1] in ("/", "\\"):
-        current = drive + os.sep
-    else:
-        current = os.getcwd()
+    current = drive + (os.sep if rest[:1] in ("/", "\\") else "")
+    linked = False
     for part in rest.replace("\\", "/").split("/"):
         if part in ("", "."):
             continue
         if part == "..":
-            current = os.path.dirname(current.rstrip(os.sep)) or current
-        else:
-            current = os.path.realpath(os.path.join(current, part))
-    return os.path.normcase(current)
+            if linked:
+                return True
+            current = os.path.dirname(current)
+            continue
+        current = os.path.join(current, part)
+        if (any(ch in part for ch in "*?[") or os.path.islink(current)
+                or os.path.isjunction(current)):
+            linked = True
+    return False
 
 
 def _real_inside(path: str, root_real: str) -> bool:
-    """Whether *path* stays in *root_real* both when ``..`` is collapsed before
-    links are resolved and when it is applied after each link. Raises OSError
-    or ValueError when the path cannot be resolved."""
-    return (_real_within(_real(path), root_real)
-            and _real_within(_real_stepwise(path), root_real))
+    """Whether absolute *path* stays in *root_real* with links resolved, and has
+    no ``..`` after a link (see :func:`_dotdot_after_link`). Raises OSError or
+    ValueError when the path cannot be resolved."""
+    return not _dotdot_after_link(path) and _real_within(_real(path), root_real)
 
 
 def _real_within(real: str, root_real: str) -> bool:
@@ -1243,6 +1246,8 @@ def _operand_ok(tok: str, current: str, root: str, root_real: str) -> bool:
         return False
     path = tok if _canon(tok) is not None else os.path.join(current, tok)
     try:
+        if _dotdot_after_link(path):
+            return False
         hits = glob.glob(path) if any(ch in tok for ch in "*?") else [path]
         return all(_real_inside(p, root_real) for p in hits)
     except (OSError, ValueError):
@@ -1354,9 +1359,8 @@ def _repo_config_risky(dotgit: str, base: str, root: str) -> bool:
     followed. Only files whose resolved path lies in the project *root* are
     read: a target outside it is not looked at, and a network or device
     target makes the answer True without being touched. A gitdir or commondir
-    whose ``..`` lands elsewhere when applied after its links than when
-    collapsed first also makes the answer True. True when a file cannot be
-    read."""
+    with a ``..`` after a link (see :func:`_dotdot_after_link`) also makes the
+    answer True. True when a file cannot be read."""
     prefix = os.path.realpath(root).rstrip(os.sep) + os.sep
     real = os.path.realpath(dotgit)
     if not real.startswith(prefix):
@@ -1375,7 +1379,7 @@ def _repo_config_risky(dotgit: str, base: str, root: str) -> bool:
     seen: set[str] = set()
     while gitdirs:
         nxt = gitdirs.pop()
-        if _real(nxt) != _real_stepwise(nxt):
+        if _dotdot_after_link(nxt):
             return True
         real = os.path.realpath(nxt)
         if not real.startswith(prefix) or real in seen:
@@ -1409,18 +1413,38 @@ def _repo_config_risky(dotgit: str, base: str, root: str) -> bool:
 def _git_runs_programs(start: str, root: str) -> bool:
     """True when the repository git uses for a command run in *start* is
     inside the project and its local configuration or hook scripts can make a
-    read command run a program, or cannot be read. A repository above the project is not looked
-    at."""
+    read command run a program, or cannot be read. The repository is looked up
+    from *start* as written and from *start* with its links resolved (git uses
+    the resolved one); either being risky makes the answer True. A repository
+    above the project is not looked at."""
     d = start
     while _inside(d, root):
+        dotgit = os.path.join(d, ".git")
+        try:
+            if os.path.lexists(dotgit):
+                if _repo_config_risky(dotgit, d, root):
+                    return True
+                break
+        except (OSError, ValueError):
+            return True
+        parent = _canon(posixpath.dirname(d))
+        if parent is None or parent == d:
+            break
+        d = parent
+    try:
+        d = os.path.realpath(start)
+        root_real = _real(root)
+    except (OSError, ValueError):
+        return True
+    while _real_within(os.path.normcase(d), root_real):
         dotgit = os.path.join(d, ".git")
         try:
             if os.path.lexists(dotgit):
                 return _repo_config_risky(dotgit, d, root)
         except (OSError, ValueError):
             return True
-        parent = _canon(posixpath.dirname(d))
-        if parent is None or parent == d:
+        parent = os.path.dirname(d)
+        if parent == d:
             break
         d = parent
     return False
