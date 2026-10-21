@@ -406,6 +406,29 @@ def test_a_worker_websocket_never_connects(browser, origin, counter, kind, host)
         "a %s WebSocket connected to its host %d time(s)" % (kind, counter.accepted))
 
 
+def test_the_system_engine_carries_the_resolver_rule(browser, origin, counter,
+                                                     monkeypatch):
+    """The system engine, driven with the downloaded Chromium as the installed
+    browser, keeps a worker's WebSocket from connecting too."""
+    from localm.browser import discovery, provision
+    exe = provision.chromium_executable_path()
+    if exe is None or not exe.exists():
+        pytest.skip("the downloaded Chromium is not installed")
+    monkeypatch.setattr(discovery, "find_system_browsers",
+                        lambda **kw: [discovery.SystemBrowser("Chromium", str(exe))])
+    port = origin.server_address[1]
+    _set(net_mode="allow", net_allow_private=True)
+    _worker_page("worker", "ws://127.0.0.1:%d/ws" % counter.port)
+    b = browser(engine="system")
+    assert b.browser_name == "Chromium"
+    assert b.navigate("http://localhost:%d/wk-page" % port)["ok"] is True
+    assert _wait_for("/ran?src=worker"), _Recorder.seen
+    time.sleep(1.5)
+    assert counter.accepted == 0, (
+        "a worker WebSocket from the system engine connected %d time(s)"
+        % counter.accepted)
+
+
 def test_a_shared_worker_request_never_reaches_its_host(browser, origin):
     """A SharedWorker's fetch is not routed, so it must not leave the browser."""
     port = origin.server_address[1]

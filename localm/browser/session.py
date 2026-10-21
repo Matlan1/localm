@@ -8,13 +8,13 @@ route handler or an agent tool happens to be on; each marshals its work onto tha
 loop with ``run_coroutine_threadsafe`` and waits for it. Never touch ``_page``,
 ``_browser`` or ``_ctx`` from outside that loop.
 
-Every request the browser makes is put through ``netgate`` before it may
+Every request the context routes see is put through ``netgate`` before it may
 proceed, and a refusal is recorded so a caller can be told which destination was
 blocked and why. The browser is launched with a host-resolver rule that makes
-its own network stack resolve no host, IP literals included, so traffic the
-routes never see (a WebSocket or fetch from a worker, a SharedWorker's requests,
-a preconnect) fails without connecting anywhere. Routed requests are fetched by
-the playwright driver, not by the browser, so they are unaffected.
+its own network stack resolve no host, IP literals included, so a WebSocket
+opened from a worker and a SharedWorker's requests, which the routes never see,
+fail without connecting anywhere. Routed requests are fetched by the playwright
+driver, not by the browser, so they are unaffected.
 
 A session keeps exactly one page open. A new window that a click opened becomes
 the page every call drives and the live view shows, and the page before it is
