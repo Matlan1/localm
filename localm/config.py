@@ -352,6 +352,7 @@ _GPU_CACHE_PINS = (
     ("MESA_SHADER_CACHE_DIR", "mesa"),
     ("__GL_SHADER_DISK_CACHE_PATH", "glcache"),
     ("CUDA_CACHE_PATH", "cuda"),
+    ("TORCH_EXTENSIONS_DIR", "torch_extensions"),
 )
 
 
@@ -369,6 +370,8 @@ def gpu_cache_dirs() -> dict:
     (``__GL_SHADER_DISK_CACHE_PATH``) keep compiled OpenGL shaders under ``~/.cache``,
     and the NVIDIA CUDA driver (``CUDA_CACHE_PATH``) keeps JIT-compiled kernels under
     ``~/.nv/ComputeCache`` (``%APPDATA%\\NVIDIA\\ComputeCache`` on Windows).
+    PyTorch (``TORCH_EXTENSIONS_DIR``) keeps the C++/CUDA extensions it compiles on
+    first import (ExLlama's, for one) under the user's cache folder.
     Those are per-user locations OUTSIDE the data dir that "delete saved data" never
     reaches. Siblings of the pip / uv / whisper / Hugging Face caches under
     ``cache_dir()``."""
