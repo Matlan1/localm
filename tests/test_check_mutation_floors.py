@@ -589,6 +589,22 @@ class Foo:
 """
 
 
+PORTABLE_SOURCE = '''from typing import Optional
+def x_check_plain_name__mutmut_6(
+    name: str,
+    *,
+    allow_dots: bool = False,
+) -> Optional[str]:
+    if name is None or not name:
+        return f"empty {name!r}"
+    return None if allow_dots else name.strip()  # trailing comment
+
+
+async def x_fetch__mutmut_1(url, /, timeout=5):
+    return await url.get(timeout=timeout)
+'''
+
+
 class TestMutatedSourceHashes:
     def _write(self, root: Path, text: str = MUTATED_SOURCE) -> None:
         path = root / MOD
@@ -614,10 +630,34 @@ class TestMutatedSourceHashes:
         assert after["localm.scopes.x_grants__mutmut_1"] == before["localm.scopes.x_grants__mutmut_2"]
         assert after["localm.scopes.x_grants__mutmut_2"] == before["localm.scopes.x_grants__mutmut_1"]
 
+    def test_the_hash_is_the_same_value_on_every_python(self, tmp_path):
+        """Golden values taken from Python 3.12 and 3.13: an ``ast.dump``-based
+        hash gives different values on the two (3.13 omits empty lists)."""
+        self._write(tmp_path, PORTABLE_SOURCE)
+        assert cmf.mutated_source_hashes(tmp_path, MOD) == {
+            "localm.scopes.x_check_plain_name__mutmut_6": "234ea09af4b2",
+            "localm.scopes.x_fetch__mutmut_1": "80f6d43ae7ff"}
+
     def test_a_missing_or_unparsable_mutated_module_gives_no_hashes(self, tmp_path):
         assert cmf.mutated_source_hashes(tmp_path, MOD) == {}
         self._write(tmp_path, "def broken(:\n")
         assert cmf.mutated_source_hashes(tmp_path, MOD) == {}
+
+    def test_the_gate_reads_the_mutated_module_where_the_shards_put_it(self, tmp_path):
+        """Both files of one shard, merged into one directory, give the check
+        the pinned mutants' hashes; the meta file alone gives none."""
+        shard = tmp_path / "shard"
+        gate = tmp_path / "gate"
+        _write_meta(shard, MOD, {M1: 1, M2: 0})
+        self._write(shard)
+        for name in (MOD, MOD + ".meta"):
+            (gate / name).parent.mkdir(parents=True, exist_ok=True)
+            (gate / name).write_bytes((shard / name).read_bytes())
+        results, _ = cmf.load_results(gate, [MOD])
+        assert {M1, M2} <= set(results[MOD]["mutant_hashes"])
+        (gate / MOD).unlink()
+        results, _ = cmf.load_results(gate, [MOD])
+        assert results[MOD]["mutant_hashes"] == {}
 
     def test_load_results_carries_the_hashes_of_the_mutated_module(self, tmp_path):
         _write_meta(tmp_path, MOD, {M1: 1, M2: 0})
@@ -925,6 +965,22 @@ class TestCommittedBaseline:
         assert 'echo "PYTHONHASHSEED=${PYTHONHASHSEED}"' in before
         assert any(ln.startswith("PYTHONHASHSEED=") and "secrets.randbelow(2**32)" in ln
                    for ln in before), before
+
+    def test_ci_shards_upload_the_mutated_module_beside_its_meta_file(self):
+        """The gate job hashes the mutated module mutmut writes next to each
+        .meta file, so a shard must upload both and the gate must download
+        them into the directory the check reads."""
+        import yaml
+        wf = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
+        upload = next(st for st in wf["jobs"]["mutation-run"]["steps"]
+                      if st.get("name", "").startswith("Upload this module"))
+        paths = [p.strip() for p in upload["with"]["path"].splitlines() if p.strip()]
+        assert sorted(paths) == [
+            "mutants/localm/${{ matrix.module }}.py",
+            "mutants/localm/${{ matrix.module }}.py.meta"]
+        download = next(st for st in wf["jobs"]["mutation-test"]["steps"]
+                        if st.get("name", "").startswith("Download every module"))
+        assert download["with"]["path"] == "mutants/localm"
 
     def test_ci_shards_are_exactly_the_only_mutate_modules(self, modules):
         """The mutation-run matrix in ci.yml is the only_mutate list by

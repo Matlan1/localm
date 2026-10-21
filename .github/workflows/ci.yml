@@ -768,7 +768,9 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: mutation-meta-${{ matrix.module }}
-          path: mutants/localm/${{ matrix.module }}.py.meta
+          path: |
+            mutants/localm/${{ matrix.module }}.py
+            mutants/localm/${{ matrix.module }}.py.meta
           if-no-files-found: ignore
           retention-days: 14
 
@@ -813,6 +815,8 @@ jobs:
         run: |
           pip install --require-hashes --no-deps -r .github/requirements/mutmut.txt
 
+      # Each shard's artifact holds the .meta file and the mutated module
+      # beside it; the floors check hashes the mutated functions of the latter.
       - name: Download every module's mutation results
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
