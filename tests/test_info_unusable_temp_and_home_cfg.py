@@ -9,8 +9,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 from localm import config
 
 ROOT = Path(__file__).resolve().parents[1]

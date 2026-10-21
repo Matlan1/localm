@@ -1480,6 +1480,17 @@ def test_net_mode_off_downloads_nothing_and_changes_nothing(world, monkeypatch, 
     assert world.pin() is None and world.history() == []
 
 
+def test_net_mode_off_refuses_a_replacement_without_announcing_one(world, monkeypatch):
+    monkeypatch.setenv("LOCALM_NET_MODE", "off")
+    world.seed_target("llama.dll", marker="cpu")
+    before = world.files()
+    r = world.invoke("--backend", "vulkan", "--yes")
+    assert r.exit_code != 0
+    assert "net_mode=off" in r.text and "Replacing" not in r.text
+    assert world.files() == before and world.marker() == "cpu\n"
+    assert world.requests == []
+
+
 def test_net_mode_off_keeps_the_runtime_that_is_already_installed(world, monkeypatch):
     monkeypatch.setenv("LOCALM_NET_MODE", "off")
     world.seed_target("llama.dll", marker="cpu")

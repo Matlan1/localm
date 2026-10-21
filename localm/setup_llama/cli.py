@@ -142,7 +142,7 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
             keep_choice = True
     target.mkdir(parents=True, exist_ok=True)
 
-    if _keeps_existing_install(target, lib_name, backend, force, assume_yes):
+    if _keeps_existing_install(target, lib_name, backend, force, assume_yes, from_dir):
         return
     if not from_dir:
         _refuse_when_net_off()
@@ -242,7 +242,7 @@ def _provision_staged_cuda(cuda_line: str, target: Path, lib_name: str,
 
 
 def _keeps_existing_install(target: Path, lib_name: str, backend: str, force: bool,
-                            assume_yes: bool) -> bool:
+                            assume_yes: bool, from_dir: Optional[str] = None) -> bool:
     """Whether the runtime already in *target* is kept, which ends the command.
     False means provisioning goes ahead; what it replaces has then been
     printed."""
@@ -274,6 +274,8 @@ def _keeps_existing_install(target: Path, lib_name: str, backend: str, force: bo
                     _print_pending_choice(target)
                 _sl._ensure_importable()
                 return True
+        if not from_dir:
+            _refuse_when_net_off()
         # Four distinct situations. Two of them need their own wording: the
         # same backend is a RE-DOWNLOAD, not a replacement, and "auto" is not a
         # backend but how one gets chosen.
