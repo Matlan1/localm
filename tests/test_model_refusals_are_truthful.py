@@ -14,9 +14,10 @@ from click.testing import CliRunner
 
 from localm.cli import _GracefulGroup
 from localm.inference.backends.base import (
-    AdapterLoadError, ModelFileDamagedError, ModelRefusedError,
+    AdapterLoadError, ModelFileDamagedError, ModelFileUnreadableError, ModelRefusedError,
     PretokenizerUnusableModelError, UnsupportedModelRoleError)
-from localm.inference.backends.gguf import GgufBackend, _damaged_file_reason
+from localm.inference.backends.gguf import (GgufBackend, _damaged_file_reason,
+                                            _unopenable_file_reason)
 
 _T_STRING = 8
 
@@ -101,6 +102,48 @@ def test_a_gguf_llama_cpp_cannot_read_is_named_as_damaged(tmp_path, monkeypatch)
     assert "setup-llama" not in text and "runtime" not in text.lower()
 
 
+_OPEN_FAILURE = (
+    "Failed to load model: {path}\n"
+    "gguf_init_from_file: failed to open GGUF file '{path}' (Permission denied)\n"
+    "llama_model_load: error loading model: llama_model_loader: failed to load model "
+    "from {path}")
+
+
+def test_a_gguf_llama_cpp_cannot_open_is_not_called_damaged(tmp_path, monkeypatch):
+    path = str(tmp_path / "bad-model.gguf")
+    backend = _backend_failing_with(tmp_path, monkeypatch, _OPEN_FAILURE.format(path=path))
+    with pytest.raises(ModelFileUnreadableError) as caught:
+        backend.load()
+    text = str(caught.value)
+    assert not isinstance(caught.value, ModelFileDamagedError)
+    assert text.startswith("bad-model.gguf could not be opened")
+    assert '"Permission denied"' in text
+    assert "damaged" not in text and "Download" not in text
+    assert "setup-llama" not in text
+
+
+def test_an_unreadable_gguf_prints_as_a_refusal(tmp_path, monkeypatch):
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path)
+    monkeypatch.setenv("LOCALM_KEEP_DIAGNOSTICS", "1")
+    res = CliRunner().invoke(
+        _group(ModelFileUnreadableError("m.gguf could not be opened")), ["load"])
+    assert res.exit_code == 1
+    assert "m.gguf could not be opened" in res.output and "Sorry -" not in res.output
+
+
+@pytest.mark.parametrize("text,expected", [
+    (_OPEN_FAILURE.format(path="/models/m.gguf"), "Permission denied"),
+    ("gguf_init_from_file: failed to open GGUF file '/it's (here)/m.gguf' "
+     "(Permission denied)\nnext", "Permission denied"),
+    ("gguf_init_from_file: failed to open GGUF file '/m.gguf' (No such file or directory)",
+     "No such file or directory"),
+    ("gguf_init_from_reader: alignment 3 is not a power of 2", None),
+    ("could not load the native library", None),
+])
+def test_unopenable_file_reason_reads_the_system_reason(text, expected):
+    assert _unopenable_file_reason(RuntimeError(text)) == expected
+
+
 def test_a_runtime_failure_without_a_file_reason_keeps_the_runtime_advice(
         tmp_path, monkeypatch):
     backend = _backend_failing_with(
@@ -123,6 +166,7 @@ def test_a_runtime_failure_without_a_file_reason_keeps_the_runtime_advice(
     ("Failed to create llama context", None),
     ("unknown model architecture: 'clip'", None),
     ("could not load the native library", None),
+    (_OPEN_FAILURE.format(path="m.gguf"), None),
 ])
 def test_damaged_file_reason_matches_only_file_reader_lines(text, expected):
     assert _damaged_file_reason(RuntimeError(text)) == expected

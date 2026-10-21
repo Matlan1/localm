@@ -4,6 +4,7 @@ and placement gets the context recreated, same size and placement, before the
 next request."""
 
 import logging
+import sys
 import time
 from unittest.mock import MagicMock, patch
 
@@ -13,6 +14,11 @@ from tests._bare_llama import make_bare_llama
 from tests._fake_batch import fake_batch_init
 
 API = "localm.inference.backends.llamacpp.llama.api"
+
+
+@pytest.fixture(autouse=True)
+def _on_windows(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "win32")
 
 
 class _Clock:
@@ -210,6 +216,17 @@ class TestSingleSlot:
         _generate(llm, api, cost=0.2)
         assert llm._decode_refresh is None
         assert llm._decode_samples is None
+
+    @pytest.mark.parametrize("platform", ["linux", "darwin"])
+    def test_other_platforms_never_judge_or_refresh(self, monkeypatch, platform):
+        monkeypatch.setattr(sys, "platform", platform)
+        llm = _llm()
+        api, _cp = _api(llm)
+        _generate(llm, api, cost=0.02)
+        _generate(llm, api, cost=0.2)
+        _generate(llm, api, cost=0.02)
+        assert llm._decode_refresh is None and llm._decode_samples is None
+        assert _inits(api) == 0
 
     def test_a_reply_without_prompt_cache_on_a_slotted_model_is_judged(self):
         import contextlib

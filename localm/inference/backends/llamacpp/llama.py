@@ -3797,9 +3797,12 @@ class LlamaCpp:
         ``_DECODE_SLOW_RATIO`` of it marks the context for a refresh at the next
         ``_rightsize_plan`` unless a refresh ran less than the backoff ago.
         Replies with fewer than ``_DECODE_MIN_STEPS`` steps are ignored, and
-        every reply is ignored when ``_decode_judged`` is False (a load not
-        fully on a GPU). Caller holds ``_gen_lock``."""
-        if (not self._decode_judged or steps < self._DECODE_MIN_STEPS
+        every reply is ignored on platforms other than Windows and when
+        ``_decode_judged`` is False (a load not fully on a GPU). Caller holds
+        ``_gen_lock``."""
+        import sys
+        if (sys.platform != "win32" or not self._decode_judged
+                or steps < self._DECODE_MIN_STEPS
                 or seconds <= 0 or not self._ctx_ptr):
             return
         rate = steps / seconds

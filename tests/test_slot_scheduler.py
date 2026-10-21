@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import sys
 import threading
 import time
 
@@ -1497,7 +1498,8 @@ def test_a_reply_ended_by_an_error_reports_nothing(made):
     assert ctx.notes == []
 
 
-def test_one_slow_solo_reply_refreshes_the_idle_context_once(made, caplog):
+def test_one_slow_solo_reply_refreshes_the_idle_context_once(made, caplog, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "win32")
     ctx = _RateContext(capacity=2048, n_ctx_max=4096, base=2048, grow=256)
     sched = made(ctx, 2)
     ctx.step_cost = 0.02
@@ -1516,6 +1518,17 @@ def test_one_slow_solo_reply_refreshes_the_idle_context_once(made, caplog):
                for r in caplog.records) == 1
     _collect(sched, PROMPTS[2], 40, timed=True)
     assert ctx.recreated == [(2048, True)]
+
+
+def test_a_slow_solo_reply_off_windows_never_refreshes(made, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    ctx = _RateContext(capacity=2048, n_ctx_max=4096, base=2048, grow=256)
+    sched = made(ctx, 2)
+    for cost in (0.02, 0.2, 0.02):
+        ctx.step_cost = cost
+        _collect(sched, PROMPTS[0], 40, timed=True)
+    assert len(ctx.notes) == 3
+    assert ctx.llm._decode_refresh is None and ctx.recreated == []
 
 
 def test_a_due_refresh_waits_while_replies_run(made):

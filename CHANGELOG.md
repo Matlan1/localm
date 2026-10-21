@@ -353,14 +353,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **A model loaded partly on the CPU moves onto the GPU once VRAM frees up.** With automatic GPU
   layers, a model that loaded partly on the CPU because another program held VRAM is reloaded
   on the GPU at a later request once enough VRAM is free. An explicit GPU layer count is never
-  changed.
+  changed, and a model that would not fit even in the GPU's total VRAM is not checked again, so
+  its replies do not wait for VRAM readings.
 - **Replies speed up again after Windows moved part of a model out of VRAM.** When another
   program takes VRAM, Windows can move part of a loaded model to system memory, and replies
   stayed several times slower even after that program closed. When a reply decodes far slower
   than the model managed before at the same context length, localm now rebuilds the model's
   context before the next request, which restores the speed without reloading the model. This
-  applies to models loaded fully on the GPU, never while other replies are running, and at most
-  once a minute.
+  applies on Windows to models loaded fully on the GPU, never while other replies are running,
+  and at most once a minute; on other systems a slow reply never rebuilds the context.
 - **On Windows, a reply beside another program's VRAM use keeps the model in VRAM.** When other
   programs use VRAM, Windows lets each program keep only part of what is free and moves the rest
   of its memory to system memory, where replies decode about half as fast. When the whole reply
@@ -437,7 +438,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   unsupported format, a model that is not a chat model (an ACE-Step component, a vision
   projector), a draft head or a damaged file now print the reason and exit 1 instead of "Sorry -
   localm hit an unexpected error". A GGUF that llama.cpp cannot read (for example one with an
-  invalid alignment) is named as a damaged file instead of blaming the runtime, and a runtime
+  invalid alignment) is named as a damaged file instead of blaming the runtime, a GGUF that
+  cannot be opened (no read permission, or another program holds it open) says so and names the
+  system's reason instead of calling the file damaged, and a runtime
   ABI mismatch is reported as a runtime problem with `localm setup-llama --force`. A GGUF in an
   Ollama store, a llamafile or a Jan folder that is refused for its version says so instead of
   "not a GGUF file", a truncated llamafile is named as one, and `localm list` shows a lone

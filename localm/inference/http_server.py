@@ -1547,14 +1547,17 @@ def _record_placement_heal(name: str, engine, pinned, evictions, *,
     release (from *evictions*), or is a ``recheck`` heal when it has neither.
     Resident models are blockers only when *deferred* (the load went ahead
     below the whole-model estimate because nothing more could be evicted);
-    models in *pinned* never are."""
+    models in *pinned* never are. No heal is recorded when the sizing's full
+    placement (weights, KV cache and overhead) exceeds the total VRAM it was
+    sized against (``_full_placement_exceeds_total``)."""
     placement = getattr(engine, "gpu_placement", None)
     sizing = getattr(engine, "gpu_sizing", None)
     heal = None
     if (allowed and isinstance(placement, dict) and placement.get("degraded")
             and isinstance(sizing, dict) and sizing.get("mode") == "auto"
             and (placement.get("gpu_layers_offloaded", 0) < placement.get("gpu_layers_total", 0)
-                 or sizing.get("n_cpu_moe_auto"))):
+                 or sizing.get("n_cpu_moe_auto"))
+            and not _full_placement_exceeds_total(sizing)):
         blockers = (frozenset(n for n in _engines_lru if n != name and n not in pinned)
                     if deferred else frozenset())
         unconfirmed = any(e.released is False and e.expected for e in evictions)
@@ -1564,6 +1567,19 @@ def _record_placement_heal(name: str, engine, pinned, evictions, *,
             heal = PlacementHeal(frozenset(), False, True,
                                  time.monotonic() + _PLACEMENT_RECHECK_S)
     engine.placement_heal = heal
+
+
+def _full_placement_exceeds_total(sizing: dict) -> bool:
+    """Whether auto sizing record *sizing* (``Engine.gpu_sizing``) shows that
+    its ``model_bytes + kv_bytes + overhead_bytes`` exceed its
+    ``total_bytes``, the total VRAM of the devices the load spreads over.
+    False when any of them is missing or not a positive int."""
+    parts = [sizing.get(k) for k in ("total_bytes", "model_bytes", "kv_bytes",
+                                      "overhead_bytes")]
+    if not all(isinstance(p, int) and not isinstance(p, bool) for p in parts):
+        return False
+    total, model, kv, overhead = parts
+    return total > 0 and model > 0 and model + kv + overhead > total
 
 
 def _placement_heal_due(name: str, engine) -> bool:
