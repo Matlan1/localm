@@ -151,6 +151,8 @@ def register(app: FastAPI, ctx) -> None:
                                       _bugreport_upload_available)
         issues_avail = _probe_available("issues view", _issues_available)
         update_avail = _probe_available("update channel", _update_available)
+        fs_access = effective_fs_access(request)
+        bind_host = getattr(app.state, "bind_host", "127.0.0.1")
         return {"scopes": sorted(held) if held else [], "open": held is None,
                 "core": core, "plugins": plugins, "suggest_plugins": suggest,
                 "bugreport_upload": bug_upload,
@@ -158,7 +160,12 @@ def register(app: FastAPI, ctx) -> None:
                 # Host-filesystem reach for this caller ("none"|"shared"|"host"),
                 # so the GUI hides host-path config fields and the host file
                 # browser from a key that lacks it (server still enforces).
-                "fs_access": effective_fs_access(request),
+                "fs_access": fs_access,
+                # Whether /api/fs/save-text (host fs reach AND config:write)
+                # accepts this caller, and whether the server listens past
+                # loopback (a browser on another device may then be the caller).
+                "fs_save": fs_access == "host" and granted(scopes.CONFIG_WRITE),
+                "network_bind": not _web._is_loopback_host(bind_host),
                 # Whether to offer the sandboxed artifact preview canvas to this
                 # caller (gui_preview_enabled, then gui_preview_owner_only).
                 "preview": preview_allowed(request)}

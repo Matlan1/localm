@@ -202,6 +202,42 @@ def _fetch_release_by_tag_http(repo: str, tag: str):
         return json.loads(r.read().decode("utf-8"))
 
 
+def _pairs_with_upstream(tag: str) -> bool:
+    """True when lemonade release *tag* can be adopted by the pin pipeline (its
+    llama.cpp commit pairs with an upstream release that has the CPU archive);
+    False when the pipeline refuses it. Raises bump_rocm_pin.UpstreamUnreadable
+    when the evidence could not be read."""
+    import bump_rocm_pin
+    try:
+        bump_rocm_pin.fetch_candidate(tag)
+    except bump_rocm_pin.UpstreamUnreadable:
+        raise
+    except bump_rocm_pin.Refused:
+        return False
+    return True
+
+
+def adoptable_releases(releases: list, pin_n: int, probe=None) -> tuple[list, str]:
+    """(releases, error): *releases* (newest-first) cut down to what the pin
+    pipeline may move to. Releases not newer than build *pin_n* are kept; of the
+    newer ones only the newest for which *probe* (default _pairs_with_upstream)
+    is True is kept. error is non-empty when the probe could not decide."""
+    probe = probe or _pairs_with_upstream
+    kept, chosen = [], False
+    for r in releases:
+        n = _build_number(r["tag"])
+        if n is None or n <= pin_n:
+            kept.append(r)
+        elif not chosen:
+            try:
+                chosen = probe(r["tag"])
+            except Exception as e:
+                return [], f"could not tell whether {r['tag']} can be adopted: {e}"
+            if chosen:
+                kept.append(r)
+    return kept, ""
+
+
 def assess(pin: str, releases: list, pin_date, max_age_days: int) -> dict:
     """Pure comparison of *pin* against *releases* (newest-first, as returned
     by upstream_releases()). Identical shape to check_llama_pin.py's own
@@ -331,10 +367,15 @@ def main(argv=None) -> int:
     pin_date = next((r["published_at"] for r in releases if r["tag"] == pin), None)
     if pin_date is None:
         pin_date = release_date(pin)
+    releases, err = adoptable_releases(releases, pin_n)
+    if err:
+        return _report_unknown_gate(pin, err)
+    if not releases:
+        releases = [{"tag": pin, "published_at": pin_date}]
     result = assess(pin, releases, pin_date, args.max_age_days)
     newest = result["newest"]
     print(f"  pinned release date: {_date_str(pin_date)}")
-    print(f"upstream newest with assets: {newest} "
+    print(f"newest adoptable release: {newest} "
           f"(released {_date_str(result['newest_date'])})")
 
     if result["status"] == CURRENT:
