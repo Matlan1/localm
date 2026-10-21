@@ -197,7 +197,8 @@ def confined_model_file(base: Path, relpath: str) -> Path:
     """:func:`confined_under` for a file a model folder names inside itself, which
     also accepts a Hugging Face hub-cache link: when *base* is a hub-cache snapshot
     folder (``models--<repo>/snapshots/<revision>``), a final component that is a
-    symlink into that same repo's ``blobs`` folder, its folders strictly below *base*.
+    symlink into that same repo's ``blobs`` folder, its folders strictly below *base*,
+    to a blob that is not itself a symlink.
 
     Returns the resolved path, or for an accepted hub-cache link the link itself
     with its folders resolved. Raises ``ValueError`` like :func:`confined_under`,
@@ -216,8 +217,8 @@ def confined_model_file(base: Path, relpath: str) -> Path:
 def _hub_blob_link(base: Path, parts: list[str]) -> Path | None:
     """``base/parts`` with its folders resolved when *base* is a hub-cache snapshot
     folder, those folders are confined under it, and the last component is a
-    symlink whose one-hop target is a file name in the same repo's ``blobs``
-    folder; else None."""
+    symlink whose one-hop target is a name in the same repo's ``blobs`` folder
+    that is not itself a symlink; else None."""
     try:
         base_resolved = base.resolve()
         repo = base_resolved.parent.parent
@@ -229,9 +230,11 @@ def _hub_blob_link(base: Path, parts: list[str]) -> Path | None:
         if not link.is_symlink():
             return None
         target = Path(os.path.normpath(parent / os.readlink(link)))
+        if target.parent != repo / "blobs" or target.is_symlink():
+            return None
     except (OSError, ValueError):
         return None
-    return link if target.parent == repo / "blobs" else None
+    return link
 
 
 def confined_absolute_or_under(base: Path, raw: str) -> Path:

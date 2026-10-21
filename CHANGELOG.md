@@ -216,12 +216,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ### Security
 
-- **A sentence-transformers model can no longer make localm read files outside its folder.** The
-  `path` of each stage in a model's `modules.json` is now checked before anything is opened: a
-  path with `..`, an absolute or drive path, a Windows network share (which could send your
-  Windows sign-in hash to that server) or a link leading out of the folder makes the load fail
-  with a message naming the stage. A sharded model added in place from the Hugging Face cache is
-  no longer refused as pointing outside its folder.
+- **A Hugging Face model can no longer make localm read files outside its folder.** The `path`
+  of each stage in a sentence-transformers model's `modules.json`, and each shard file a model's
+  `model.safetensors.index.json` names (read when sizing the model and when loading it as a
+  reranker), is now checked before anything is opened: a path with `..`, an absolute or drive
+  path, a Windows network share (which could send your Windows sign-in hash to that server) or a
+  link leading out of the folder makes the load fail. A sharded model added in place from the
+  Hugging Face cache is no longer refused as pointing outside its folder.
 
 ## [0.3.0] - 2026-10-14
 

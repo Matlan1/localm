@@ -213,6 +213,35 @@ def test_hub_cache_shard_linked_into_another_repos_blobs_is_refused(tmp_path):
         safety.validate_shard_index(str(_hub_sharded(tmp_path, "models--other--repo")))
 
 
+@pytest.mark.parametrize("shard", [
+    "\\\\attacker.invalid\\share\\x.safetensors", "//attacker.invalid/share/x.safetensors",
+    "\\\\?\\UNC\\attacker.invalid\\share\\x.safetensors",
+])
+def test_weight_files_refuses_a_network_shard_without_touching_it(tmp_path, monkeypatch, shard):
+    from localm.inference.backends import _hf_fp8
+    touched = []
+    for name in ("resolve", "is_file", "stat", "is_symlink"):
+        real = getattr(Path, name)
+
+        def spy(self, *a, _real=real, **k):
+            if "attacker.invalid" in str(self):
+                touched.append(str(self))
+                raise OSError("network path refused by the test")
+            return _real(self, *a, **k)
+        monkeypatch.setattr(Path, name, spy)
+    d = _model_dir(tmp_path, {"a.weight": shard})
+    assert _hf_fp8.weight_files(str(d)) == []
+    assert touched == []
+
+
+def test_weight_files_names_the_shards_of_a_hub_cache_snapshot(tmp_path):
+    from localm.inference.backends import _hf_fp8
+    snap = _hub_sharded(tmp_path)
+    files = _hf_fp8.weight_files(str(snap))
+    assert [f.name for f in files] == ["model-00001-of-00001.safetensors"]
+    assert files[0].read_bytes() == b"x"
+
+
 def test_hub_cache_shard_linked_outside_any_blobs_is_refused(tmp_path):
     snap = _hub_sharded(tmp_path)
     secret = _secret(tmp_path)

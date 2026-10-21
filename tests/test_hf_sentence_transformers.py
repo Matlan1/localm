@@ -285,6 +285,23 @@ class TestStagePathsStayInsideTheFolder:
         with pytest.raises(StUnsupportedError, match="not inside the folder"):
             load_plan(str(snap))
 
+    def test_a_hub_cache_blob_that_links_outside_is_refused(self, tmp_path):
+        snap = self._hub_snapshot(tmp_path)
+        out = _outside_stage(tmp_path, {"pooling_mode": "cls"})
+        blob = tmp_path / "hub" / "models--org--st" / "blobs" / "blob0"
+        blob.unlink()
+        _symlink(blob, out / "config.json")
+        with pytest.raises(StUnsupportedError, match="not inside the folder"):
+            load_plan(str(snap))
+
+    def test_a_hub_cache_stage_folder_linked_outside_is_refused(self, tmp_path):
+        snap = self._hub_snapshot(tmp_path)
+        moved = tmp_path / "hub" / "models--org--st" / "moved_pooling"
+        (snap / "1_Pooling").rename(moved)
+        _symlink(snap / "1_Pooling", moved, is_dir=True)
+        with pytest.raises(StUnsupportedError, match="not inside the folder"):
+            load_plan(str(snap))
+
 
 class TestRegistryType:
     def test_a_sentence_transformers_folder_registers_as_embedding(self, tmp_path):
