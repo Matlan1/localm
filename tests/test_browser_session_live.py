@@ -418,8 +418,8 @@ def test_a_shared_worker_request_never_reaches_its_host(browser, origin):
         "</script></body></html>")
     _WORKER_FILES["/wk.js"] = (
         "text/javascript",
-        "onconnect = (e) => { fetch('http://127.0.0.1:%d/shared-fetch')"
-        ".catch(() => {}).finally(() => e.ports[0].postMessage('ran')); };" % port)
+        "onconnect = (e) => { fetch('/shared-fetch')"
+        ".catch(() => {}).finally(() => e.ports[0].postMessage('ran')); };")
     b = browser()
     assert b.navigate("http://localhost:%d/wk-page" % port)["ok"] is True
     assert _wait_for("/ran?src=shared"), _Recorder.seen
