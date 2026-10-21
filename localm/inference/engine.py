@@ -58,6 +58,10 @@ class _LoadLock:
             self.generation += 1
         self._lock.release()
 
+    def _is_owned(self) -> bool:
+        """Whether the calling thread holds the lock."""
+        return self._lock._is_owned()
+
     def __enter__(self) -> bool:
         return self.acquire()
 
