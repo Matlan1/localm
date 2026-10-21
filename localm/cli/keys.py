@@ -24,12 +24,12 @@ def _mask_key(key: str) -> str:
 
 
 def _stdin_is_interactive() -> bool:
-    """True when stdin is an attached terminal. False for piped or redirected
-    input, a closed stdin, and a child process given no console."""
-    try:
-        return bool(sys.stdin is not None and sys.stdin.isatty())
-    except (AttributeError, ValueError, OSError):
-        return False
+    """True when stdin is a terminal a person can answer at
+    (``bugreport.stdin_is_interactive``: on Windows also a console, which the
+    NUL device is not). False for piped or redirected input, the null device
+    and a closed stdin."""
+    from localm.bugreport._common import stdin_is_interactive
+    return stdin_is_interactive()
 
 
 def _refuse_unattended_last_key_removal(action: str) -> None:

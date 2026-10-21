@@ -82,14 +82,16 @@ def test_rm_while_an_owner_key_exists_still_works():
     assert auth.list_keys() == []
 
 
-def test_a_real_process_with_piped_stdin_cannot_clear_the_key():
+@pytest.mark.parametrize("stdin", ["pipe", "null-device"])
+def test_a_real_process_without_a_terminal_cannot_clear_the_key(stdin):
     auth.set_api_key(STRONG_KEY)
     env = dict(os.environ)
     env.pop("LOCALM_API_KEY", None)
     env["PYTHONPATH"] = str(REPO)
+    kw = ({"input": "y\n"} if stdin == "pipe" else {"stdin": subprocess.DEVNULL})
     p = subprocess.run([sys.executable, "-m", "localm", "key", "clear", "--yes"],
-                       input="y\n", capture_output=True, text=True, env=env,
-                       cwd=str(REPO), timeout=120)
+                       capture_output=True, text=True, env=env,
+                       cwd=str(REPO), timeout=120, **kw)
     assert p.returncode == 1, (p.stdout, p.stderr)
     assert "Refusing to clear the API key" in p.stdout
     assert auth.key_file().read_text(encoding="utf-8").strip() == STRONG_KEY
