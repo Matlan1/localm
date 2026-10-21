@@ -16,7 +16,7 @@ scoped key minted with `localm key create` / the GUI's key manager /
 (`GET /api/session`, `POST /api/session`, `POST /api/session/logout`), which stay
 public once a key exists. In open mode only `GET /api/session` is exempt from the
 management gate: `POST /api/session` without the GUI shell token is a 403 from that
-gate, and with it a 400 (there is no key to log in with). `POST /v1/surfaces/gui` and `GET /v1/instances/status`, `POST
+gate, and with it a 400 (there is no key to log in with). `POST /v1/surfaces/gui` and `GET /v1/instances/status`, `POST /v1/instances/status`, `POST
 /v1/instances/vouch` and `POST /v1/instances/cooperate-unload` take no bearer key
 either, but carry a credential of their own (an attach token or an instance
 vouch; see [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md)). Most authenticated

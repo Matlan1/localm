@@ -65,15 +65,14 @@ def _holds_full_status_credential(request: Request) -> bool:
     granting ``models:read``. Blocking (a key check can take the keystore
     lock)."""
     from localm import scopes
-    from localm.auth import ct_equal
+    from localm.auth import any_key_configured, ct_equal
     presented, source = _hs._request_token(request)
     if source != "header" or not presented:
         return False
     inst_token = getattr(request.app.state, "instance_token", None)
     if inst_token and ct_equal(presented, inst_token):
         return True
-    held = _hs.caller_scopes(request)
-    return held is not None and scopes.grants(held, scopes.MODELS_READ)
+    return any_key_configured() and _hs.caller_grants(request, scopes.MODELS_READ)
 
 
 def _own_port(coord: dict) -> Optional[int]:
