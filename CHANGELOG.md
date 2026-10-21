@@ -126,6 +126,26 @@ permanent public record of what shipped and are never rewritten; the in-progress
   next request fits in it.
 
 ### Fixed
+- **`localm config pinned_models '["a"]'` pins `a`.** A JSON list typed on the command line was
+  stored as one model name with the brackets and quotes in it, so nothing was pinned. A list
+  setting given as JSON text is now read as that list.
+- **`localm coder --output-format json` prints only the JSON on stdout.** A warning about an
+  unreadable skill, a plugin tool or an MCP server printed ahead of the document; startup
+  warnings go to stderr.
+- **The coder counts the lines of a file the way `wc -l` does.** A file of 1000 lines was
+  reported as 1001 in `read_file`'s header and cut-off notice, and in `write_file`'s "(N lines)".
+- **A background sub-agent that ran out of turns is listed as failed.** The session's job list
+  showed it as done while the report to the model said it did not complete.
+- **The prompt token count follows how fetched text is read.** A request that marks part of its
+  text as untrusted reported the count of a prompt in which that text's control tokens were
+  parsed, which is not how it is read.
+- **A scheduled job does not run a web search written inside a thought that never closes.** The
+  chat already ignored it; a reply cut off mid-thought no longer triggers a lookup.
+- **Listing the coder's sessions no longer stalls the server.** Closing a session that had been
+  idle for a day (its browser, its checkpoint) ran inside the request and froze every other
+  request until it finished.
+- **The browser names a blocked popup by its address.** A window a page opened to an address that
+  did not answer was listed as blocked under an internal error page's address instead of its own.
 - **A ComfyUI that hangs on its port is named at once.** After a GPU crash a ComfyUI that localm did not launch can keep its port and stop answering. `localm comfy restart` and any generation that needs ComfyUI now say right away which process holds the port (its pid and name) and that localm will not stop it, instead of relaunching into the held port and waiting five minutes; `localm comfy status` shows the same line.
 - **Closing the connection during text-to-speech stops the job.** A client that went away while `/v1/audio/speech` was synthesising did not cancel the job, because the check only ran while the job was silent. The job is now cancelled within a second of the disconnect.
 - **`localm update` exits non-zero when it fails.** A refused update (bad signature, unreadable trust file, failed apply), a failed update check and a failed `--rollback` printed their message and exited 0, so a script could not tell the update had not happened.
