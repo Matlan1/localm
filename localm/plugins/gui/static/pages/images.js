@@ -12,6 +12,7 @@ import { t } from "../app/i18n.js";
 import { createImageInputs } from "../app/image-inputs.js";
 import { bindReloadToggle, createGallery, imagePreview, refreshReloadToggle } from "../app/media-gallery.js";
 import { createNativeGenControls, createNativeModelPicker, mountEnhanceButton } from "../app/native-models.js";
+import { createNativeWorkflowCard, nwfNumber, nwfSetField, nwfSetSelect } from "../app/native-workflows.js";
 import { showView } from "../app/tabs.js";
 import { modelOverrides } from "./workflow.js";
 
@@ -165,6 +166,35 @@ const imageLivePreview = createJobPreview("img-preview");
 
 const imageGen = createNativeGenControls({ prefix: "img" });
 
+/* The native workflow card: presets of models and the settings below. */
+export const imageWorkflowCard = createNativeWorkflowCard({
+  media: "image", mountId: "img-native-workflows", picker: imageModelPicker, logId: "img-log",
+  fields: {
+    read: () => {
+      const size = /^(\d+)\s*x\s*(\d+)$/i.exec($("img-size").value.trim());
+      return {
+        negative_prompt: $("img-negative").value.trim() || null,
+        steps: nwfNumber("img-steps"), cfg: nwfNumber("img-cfg"),
+        guidance: nwfNumber("img-guidance"), clip_skip: nwfNumber("img-clip-skip"),
+        width: size ? Number(size[1]) : null, height: size ? Number(size[2]) : null,
+        sample_method: $("img-sampler")?.value || null, scheduler: $("img-scheduler")?.value || null,
+      };
+    },
+    apply: (p) => {
+      if (p.prompt) nwfSetField("img-prompt", p.prompt);
+      if (p.negative_prompt !== undefined) nwfSetField("img-negative", p.negative_prompt);
+      for (const [key, id] of [["steps", "img-steps"], ["cfg", "img-cfg"],
+                               ["guidance", "img-guidance"], ["clip_skip", "img-clip-skip"]]) {
+        nwfSetField(id, p[key]);
+      }
+      nwfSetField("img-size", p.width && p.height ? `${p.width}x${p.height}` : "");
+      nwfSetSelect($("img-sampler"), p.sample_method || "");
+      nwfSetSelect($("img-scheduler"), p.scheduler || "");
+      revealFilledAdvanced($("view-images"));
+    },
+  },
+});
+
 /* The detail-view "Upscale" control: a registered upscaler model and a button
    that starts the upscale job (a new gallery image). */
 function buildUpscaleAction(item, ctx) {
@@ -224,6 +254,11 @@ export async function refreshImageBackend() {
   for (const id of ["img-lora-field", "img-workflow-card"]) {
     const node = $(id);
     if (node) node.hidden = native;
+  }
+  const workflows = $("img-native-workflow-card");
+  if (workflows) {
+    workflows.hidden = !native;
+    if (native) imageWorkflowCard.refresh();
   }
   const picker = $("img-native-models");
   if (picker) {
@@ -364,6 +399,12 @@ $("img-generate").onclick = async () => {
   }
   if (!native && modelOverrides.image && Object.keys(modelOverrides.image).length) {
     body.model_overrides = modelOverrides.image;
+  }
+  if (native && imageWorkflowCard.pending) {
+    $("img-generate").disabled = true;
+    let ready;
+    try { ready = await imageWorkflowCard.prepare(); } finally { $("img-generate").disabled = false; }
+    if (!ready) return;
   }
   const nativeChoice = native ? imageModelPicker.choice() : {};
   Object.assign(body, nativeChoice);

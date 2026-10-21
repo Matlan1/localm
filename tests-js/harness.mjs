@@ -85,8 +85,8 @@ function installStubs(win, { fetchImpl } = {}) {
 // environment, so this order must be preserved.
 const APP_SCRIPTS = [
   "client-log", "helpers", "i18n-en", "i18n", "icons", "picker", "theme", "logo", "tabs", "models-sidebar",
-  "chat", "media-gallery", "native-models", "image-inputs", "cmdk", "settings-perf", "coder", "slash",
-  "init",
+  "chat", "media-gallery", "native-models", "native-workflows", "image-inputs", "cmdk", "settings-perf",
+  "coder", "slash", "init",
 ];
 
 /**

@@ -238,7 +238,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         """The client-facing view of a comfy_resolve.ComfyDownload."""
         return {"repo": download.repo, "file": download.path,
                 "size_bytes": download.size_bytes, "model_type": download.model_type,
-                "origin": download.origin}
+                "sha256": download.sha256, "origin": download.origin}
 
     def _download_dest(download, plugin):
         """The ComfyUI folder *download* goes into for *plugin*
@@ -348,7 +348,27 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                            "model_type": m["model_type"], "origin": "curated"},
             } for m in st["missing"]]}
 
+        def _workflow_check(wid: str):
+            """The models of native workflow *wid* that are not registered,
+            with their downloads (``native_workflows.resolve``)."""
+            from localm.media import native_workflows
+            try:
+                wf = native_workflows.get_workflow(kind, wid)
+            except native_workflows.WorkflowNotFound:
+                return {"status": "unavailable", "missing": [],
+                        "warning": f"No such {kind} workflow: {wid}."}
+            res = native_workflows.resolve(wf, kind)
+            return {"status": "verified", "missing": res["missing"],
+                    "warning": " ".join(res["notes"]) or None}
+
         def _check():
+            if req.native_workflow:
+                try:
+                    return _workflow_check(req.native_workflow)
+                except Exception as e:
+                    logger.warning("%s workflow preflight failed: %s", kind, e)
+                    return {"status": "unavailable", "missing": [],
+                            "warning": f"Could not check the workflow's {kind} models: {e}"}
             if kind in ("image", "video", "music"):
                 try:
                     native_answer = (_native_music_check() if kind == "music"

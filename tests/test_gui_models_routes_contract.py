@@ -738,8 +738,11 @@ class TestMediaPreflight:
             assert set(entry) == {"class_type", "input_name", "filename", "source", "dest_dir",
                                   "searchable", "reason", "detail"}
         assert curated["filename"] == "flux1-dev-Q8_0.gguf"
-        assert set(curated["source"]) == {"repo", "file", "size_bytes", "model_type", "origin"}
+        assert set(curated["source"]) == {"repo", "file", "size_bytes", "model_type", "sha256",
+                                          "origin"}
         assert curated["source"]["origin"] == "curated"
+        assert curated["source"]["sha256"] == (
+            "129032f32224bf7138f16e18673d8008ba5f84c1ec74063bf4511a8bb4cf553d")
         assert curated["source"]["repo"] == "city96/FLUX.1-dev-gguf"
         assert curated["source"]["file"] == "flux1-dev-Q8_0.gguf"
         assert homemade["source"] is None and homemade["dest_dir"] is None
