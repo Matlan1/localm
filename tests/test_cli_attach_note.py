@@ -3,6 +3,13 @@
 to a background server: it says why, or that none was found. --no-server stays
 quiet."""
 
+import os
+import signal
+import subprocess
+import sys
+
+import pytest
+
 from localm.cli import _attach_fallback_note
 
 
@@ -82,3 +89,53 @@ def test_chat_cli_sys_unbound_error(monkeypatch):
         runner = CliRunner()
         result = runner.invoke(run, ["gemma", "-p", "hello"])
         assert result.exit_code == 0
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the POSIX detached-server launch")
+def test_run_autostart_gives_the_server_no_shared_stdio(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from click.testing import CliRunner
+
+    from localm.audit import SessionMode
+    from localm.cli.chat import run
+
+    seen = {}
+
+    def fake_popen(cmd, **kw):
+        seen.update(kw)
+        return MagicMock()
+
+    monkeypatch.setattr("localm.instances.attach_target", lambda *a, **k: None)
+    monkeypatch.setattr("localm.instances.resolve_root_dir", lambda *a, **k: ".")
+    monkeypatch.setattr("subprocess.Popen", fake_popen)
+    monkeypatch.setattr("time.sleep", lambda *a, **k: None)
+    monkeypatch.setattr("localm.audit.effective_mode", lambda *a, **k: SessionMode.LOG)
+    CliRunner().invoke(run, ["definitely-not-a-real-model-xyz", "-p", "hi"])
+    assert seen["start_new_session"] is True
+    for stream in ("stdin", "stdout", "stderr"):
+        assert seen[stream] == subprocess.DEVNULL
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the POSIX detached-server launch")
+def test_a_detached_server_does_not_hold_the_callers_pipe_open(tmp_path):
+    pidfile = tmp_path / "pid"
+    script = "; ".join([
+        "import subprocess, sys",
+        "from localm.cli.chat import _detached_stdio_kwargs",
+        "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'],"
+        " **_detached_stdio_kwargs())",
+        f"open({str(pidfile)!r}, 'w').write(str(p.pid))",
+        "print('reply')",
+    ])
+    proc = subprocess.Popen([sys.executable, "-c", script], stdout=subprocess.PIPE)
+    try:
+        out, _ = proc.communicate(timeout=30)
+        assert out.strip() == b"reply"
+    finally:
+        proc.kill()
+        if pidfile.exists():
+            try:
+                os.kill(int(pidfile.read_text()), signal.SIGKILL)
+            except (OSError, ValueError):
+                pass

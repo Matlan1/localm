@@ -371,12 +371,12 @@ def _load_engine(model: Optional[str]) -> tuple[Optional[object], bool]:
                 return _live, True    # reuse the shared engine - no VRAM cost, no load
             
             # VRAM gate: unload the live engine if VRAM is tight. Uses
-            # vram_capacity() (combined free across a configured multi-GPU split,
-            # else the single-GPU vram_info() number), the same ceiling
-            # switch_engine's eviction gate uses.
+            # vram_capacity_joined() (combined free across a configured multi-GPU
+            # split, else the single-GPU vram_info() number, waiting for a probe
+            # already in flight), the same ceiling switch_engine's eviction gate uses.
             from localm import vram as _vram
-            from localm.discover import vram_capacity
-            free = vram_capacity().get("free")
+            from localm.discover import vram_capacity_joined
+            free = vram_capacity_joined()[0].get("free")
             est = _vram.media_estimate_bytes("chat")
             if _vram.should_swap_for_media(free, est):
                 # Route the eviction through the guarded server-loop path instead of

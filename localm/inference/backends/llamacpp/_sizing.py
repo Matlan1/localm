@@ -567,10 +567,20 @@ class VramSizingMixin:
                        "against the single main GPU instead", type(e).__name__)
             return None, None, 0
 
+    # VRAM the MoE expert cache takes (moe_cache_mib), 0 when it is off.
+    _MOE_CACHE_BYTES = 0
+
+    def _moe_cache_charge(self) -> int:
+        """``_MOE_CACHE_BYTES`` for a model with routed experts, else 0."""
+        if self._MOE_CACHE_BYTES <= 0:
+            return 0
+        return self._MOE_CACHE_BYTES if self._moe_expert_bytes_by_layer() else 0
+
     def _split_overhead_bytes(self, devices: int) -> int:
         """``_VRAM_OVERHEAD_BYTES`` scaled by how many devices the load spreads
         over - the flat constant when it spreads over one, or when the count is
-        not known.
+        not known - plus ``_moe_cache_charge()`` once (the cache is split among
+        the devices).
 
         The constant covers "KV cache + compute buffers beyond model weights",
         and COMPUTE BUFFERS ARE PER DEVICE: llama.cpp reserves a compute buffer
@@ -579,7 +589,7 @@ class VramSizingMixin:
         behind: layers are integral, so a device can receive at most one layer
         more than its exact share, and the free reading is a snapshot another
         process can invalidate between the probe and the load."""
-        return self._VRAM_OVERHEAD_BYTES * max(1, int(devices or 1))
+        return self._VRAM_OVERHEAD_BYTES * max(1, int(devices or 1)) + self._moe_cache_charge()
 
     # Largest n_batch/n_ubatch llama.py gives a context: n_batch = min(n_ctx,
     # this), n_ubatch = n_batch.

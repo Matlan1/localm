@@ -621,6 +621,18 @@ layers on CPU"). See
 [docs/gpu-setup.md](gpu-setup.md#mixture-of-experts-reducing-vram-footprint)
 for measured numbers.
 
+`moe_cache_mib` gives the experts kept in system RAM a cache in VRAM: the most
+used ones stay on the GPU instead of being copied there again for every batch.
+It applies only when those experts are read into memory, not memory-mapped
+(`use_mmap` auto does that when they fit in available RAM), and the VRAM is set
+aside for any model with experts. It is off by default (0) and experimental in
+llama.cpp.
+
+```bash
+localm config moe_cache_mib 3072  # a 3 GB expert cache
+localm config moe_cache_mib 0     # off - the default
+```
+
 ### KV cache type: more context in the same VRAM
 
 `kv_cache_type` sets the element type of the KV cache (the per-token memory the

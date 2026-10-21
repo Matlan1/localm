@@ -41,7 +41,7 @@ if "%FINISHONLY%"=="1" goto finish_only
 
 echo.
 setlocal DisableDelayedExpansion
-echo  LocaLM setup - self-contained install in: %CD%
+echo  LocaLM setup - self-contained install in: "%CD%"
 endlocal
 echo.
 
@@ -894,7 +894,7 @@ rem ===========================================================================
 echo.
 echo  LocaLM uninstall for this folder:
 setlocal DisableDelayedExpansion
-echo    %CD%
+echo    "%CD%"
 endlocal
 echo.
 call :find_python

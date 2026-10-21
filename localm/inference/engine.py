@@ -32,7 +32,60 @@ from localm.textnorm import scrub_stream
 # embedder._LOCK must NEVER acquire _LOAD_LOCK or start a load. A dead embedder
 # or reranker worker restarts under _LOAD_LOCK (outer) with the instance's
 # IsolatedEmbedder._rpc_lock or HFReranker._call_lock (inner).
-_LOAD_LOCK = threading.RLock()
+class _LoadLock:
+    """A re-entrant lock that counts its outermost acquires and releases.
+
+    ``generation`` grows by one when a thread takes the lock while no thread
+    holds it and by one when the holder releases it fully, so it is even
+    exactly when the lock is free. Only the holder changes it."""
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._owner: Optional[int] = None
+        self._depth = 0
+        self.generation = 0
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        got = self._lock.acquire(blocking, timeout)
+        if got:
+            self._depth += 1
+            if self._depth == 1:
+                self._owner = threading.get_ident()
+                self.generation += 1
+        return got
+
+    def release(self) -> None:
+        """Release one level. Raises RuntimeError when the calling thread does
+        not hold the lock."""
+        if not self._is_owned():
+            raise RuntimeError("cannot release un-acquired lock")
+        self._depth -= 1
+        if self._depth == 0:
+            self._owner = None
+            self.generation += 1
+        self._lock.release()
+
+    def _is_owned(self) -> bool:
+        """Whether the calling thread holds the lock."""
+        return self._owner == threading.get_ident()
+
+    def __enter__(self) -> bool:
+        return self.acquire()
+
+    def __exit__(self, *exc) -> None:
+        self.release()
+
+
+_LOAD_LOCK = _LoadLock()
+
+
+def load_lock_mark() -> Optional[int]:
+    """``_LOAD_LOCK``'s generation when no thread holds it, else None. Equal
+    marks taken at two moments mean no thread took the lock in between."""
+    generation = getattr(_LOAD_LOCK, "generation", None)
+    if not isinstance(generation, int) or generation % 2:
+        return None
+    return generation
 
 
 # Files that mark a directory as a real HF model. A config.json alone is not
@@ -88,6 +141,19 @@ def _resolve_vram_overhead_bytes(cfg: dict) -> int:
         _dbg.warning("vram_overhead_mb is set but not a valid number (%r); "
                      "using the default %.1f GB", raw, VRAM_OVERHEAD_BYTES / 1024 ** 3)
         return VRAM_OVERHEAD_BYTES
+
+
+def _resolve_moe_cache_mib(cfg: dict) -> int:
+    """``moe_cache_mib`` from config, or 0 for a missing, negative or
+    unparseable value (an unparseable one is logged at WARNING)."""
+    raw = cfg.get("moe_cache_mib", 0)
+    try:
+        return max(0, int(raw or 0))
+    except (TypeError, ValueError):
+        from localm.debuglog import logger as _dbg
+        _dbg.warning("moe_cache_mib is set but not a valid number (%r); the MoE "
+                     "expert cache stays off", raw)
+        return 0
 
 
 def _resolve_mtp_draft_tokens(cfg: dict, override: Optional[int]) -> int:
@@ -231,6 +297,7 @@ def create_backend(
                               if source == "draft" else None),
             mtp_draft_tokens=_resolve_mtp_draft_tokens(cfg, mtp_draft_tokens),
             vram_overhead_bytes=_resolve_vram_overhead_bytes(cfg),
+            moe_cache_mib=_resolve_moe_cache_mib(cfg),
             parallel_slots=resolve_parallel_slots(cfg),
         )
 

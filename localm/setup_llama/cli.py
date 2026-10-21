@@ -11,8 +11,8 @@ from typing import Optional
 import click
 
 from localm.debuglog import logger
-from localm.setup_llama._common import console
-from localm.setup_llama.assets import _require_prebuilt
+from localm.setup_llama._common import _net_allowed, _require_network_allowed, console
+from localm.setup_llama.assets import _require_backend_here, _require_prebuilt
 from localm.setup_llama.pins import _ROCM_BUILD, _ROCM_TAG
 from localm.setup_llama.download import ArtifactError
 from localm.setup_llama.runtime_dir import (_exit_provisioning_busy, _exit_runtime_in_use,
@@ -124,6 +124,10 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
     if cuda_line:
         cuda_line = cuda_line.lower()
         _require_staging_context(backend, cuda_line, from_dir, url, rollback)
+    if not (from_dir or url):
+        _require_backend_here(backend.lower())
+    if not from_dir and (tag is not None or rollback or force):
+        _refuse_when_net_off()
     _apply_version_request(tag, rollback, backend, from_dir, url)
     # A version request is inherently a re-provision: the guard below compares
     # BACKENDS, and the whole point here is to change the BUILD while the
@@ -138,8 +142,10 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
             keep_choice = True
     target.mkdir(parents=True, exist_ok=True)
 
-    if _keeps_existing_install(target, lib_name, backend, force, assume_yes):
+    if _keeps_existing_install(target, lib_name, backend, force, assume_yes, from_dir):
         return
+    if not from_dir:
+        _refuse_when_net_off()
 
     # Everything below actually MUTATES target (clear + refill), so it is guarded
     # by the cross-process provisioning lock: two processes provisioning the same
@@ -163,6 +169,17 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
             _sl._verify()
     except ProvisioningBusyError as e:
         _exit_provisioning_busy(e)
+
+
+def _refuse_when_net_off() -> None:
+    """Exit non-zero, having changed nothing, when ``net_mode`` is ``off``
+    (unless ``net_allow_model_downloads`` exempts downloads)."""
+    from localm import netpolicy
+    try:
+        _require_network_allowed()
+    except netpolicy.NetworkPolicyError as e:
+        console.print(f"[red]{e}[/red]")
+        sys.exit(1)
 
 
 def _require_staging_context(backend: str, cuda_line: str, from_dir: Optional[str],
@@ -225,7 +242,7 @@ def _provision_staged_cuda(cuda_line: str, target: Path, lib_name: str,
 
 
 def _keeps_existing_install(target: Path, lib_name: str, backend: str, force: bool,
-                            assume_yes: bool) -> bool:
+                            assume_yes: bool, from_dir: Optional[str] = None) -> bool:
     """Whether the runtime already in *target* is kept, which ends the command.
     False means provisioning goes ahead; what it replaces has then been
     printed."""
@@ -247,7 +264,8 @@ def _keeps_existing_install(target: Path, lib_name: str, backend: str, force: bo
             build = _sl._provisioned_build(target) if have else None
             label = f" ({have} {build})" if build else (f" ({have})" if have else "")
             console.print(f"[green]Already provisioned[/green]{label} at {target}")
-            if not assume_yes and sys.stdin and sys.stdin.isatty() and click.confirm("Do you want to re-download/replace them?", default=False):
+            if (not assume_yes and sys.stdin and sys.stdin.isatty() and _net_allowed()
+                    and click.confirm("Do you want to re-download/replace them?", default=False)):
                 force = True
                 console.print("[yellow]Replacing existing build...[/yellow]")
             else:
@@ -257,6 +275,8 @@ def _keeps_existing_install(target: Path, lib_name: str, backend: str, force: bo
                     _print_pending_choice(target)
                 _sl._ensure_importable()
                 return True
+        if not from_dir:
+            _refuse_when_net_off()
         # Four distinct situations. Two of them need their own wording: the
         # same backend is a RE-DOWNLOAD, not a replacement, and "auto" is not a
         # backend but how one gets chosen.

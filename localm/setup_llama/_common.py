@@ -11,6 +11,27 @@ from localm.console import SafeConsole as Console
 console = Console(highlight=False)
 
 
+def _net_allowed() -> bool:
+    """Whether the network policy lets setup-llama download: False when
+    ``net_mode`` is ``off`` and ``net_allow_model_downloads`` does not exempt
+    downloads. Reads the policy only."""
+    from localm import netpolicy
+    return not (netpolicy.network_mode() == "off"
+                and not netpolicy.downloads_allowed_when_off())
+
+
+def _require_network_allowed() -> None:
+    """Raise :class:`localm.netpolicy.NetworkPolicyError` when :func:`_net_allowed`
+    is False. Reads the policy only; performs no network or DNS access."""
+    from localm import netpolicy
+    if not _net_allowed():
+        raise netpolicy.NetworkPolicyError(
+            "setup-llama downloads the llama.cpp runtime, and network access is "
+            "disabled (net_mode=off). Enable it with:  localm config net_mode ask  "
+            "or provision from a local build:  localm setup-llama --from <build-dir>",
+            off=True)
+
+
 def _flush_stdin() -> None:
     """Discard any input the OS/terminal buffered while we were NOT actually
     waiting on it (e.g. a stray Enter pressed while a driver probe or a

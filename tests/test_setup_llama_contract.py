@@ -1463,6 +1463,54 @@ def test_an_already_provisioned_runtime_is_left_alone(world, marker, args, label
     assert world.files() == before
 
 
+@pytest.mark.parametrize("args", [
+    ["--backend", "vulkan"], ["--backend", "cpu", "--yes"], [],
+    ["--backend", "vulkan", "--tag", "b10000"], ["--rollback"],
+    ["--url", "https://example.invalid/llama.zip"], ["--force"],
+])
+def test_net_mode_off_downloads_nothing_and_changes_nothing(world, monkeypatch, args):
+    monkeypatch.setenv("LOCALM_NET_MODE", "off")
+    _upstream_win_vulkan(world)
+    before = world.files()
+    r = world.invoke(*args)
+    assert r.exit_code != 0
+    assert "net_mode=off" in r.text
+    assert world.requests == []
+    assert world.files() == before and world.marker() is None
+    assert world.pin() is None and world.history() == []
+
+
+def test_net_mode_off_refuses_a_replacement_without_announcing_one(world, monkeypatch):
+    monkeypatch.setenv("LOCALM_NET_MODE", "off")
+    world.seed_target("llama.dll", marker="cpu")
+    before = world.files()
+    r = world.invoke("--backend", "vulkan", "--yes")
+    assert r.exit_code != 0
+    assert "net_mode=off" in r.text and "Replacing" not in r.text
+    assert world.files() == before and world.marker() == "cpu\n"
+    assert world.requests == []
+
+
+def test_net_mode_off_keeps_the_runtime_that_is_already_installed(world, monkeypatch):
+    monkeypatch.setenv("LOCALM_NET_MODE", "off")
+    world.seed_target("llama.dll", marker="cpu")
+    r = world.invoke("--backend", "cpu")
+    assert r.exit_code == 0, r.output
+    assert "Already provisioned" in r.text
+    assert world.requests == []
+
+
+def test_net_mode_off_still_installs_a_local_build(world, monkeypatch, tmp_path):
+    monkeypatch.setenv("LOCALM_NET_MODE", "off")
+    src = tmp_path / "build"
+    src.mkdir()
+    (src / "llama.dll").write_bytes(b"x")
+    r = world.invoke("--from", str(src), "--yes")
+    assert "net_mode=off" not in r.text
+    assert world.requests == []
+    assert (world.lib / "llama.dll").exists()
+
+
 @pytest.mark.parametrize("marker, message", [
     ("cpu b1", "Replacing cpu build with vulkan."),
     (None, "Replacing unrecorded build with vulkan."),
@@ -1631,7 +1679,7 @@ def test_offline_resolution_reads_the_pinned_asset_table(world, plat, backend, l
 
 @pytest.mark.parametrize("plat, backend, message", [
     ("win32", "metal", "backend 'metal' is not available on this platform (win32). Available: "
-                       "cpu, cuda, hip, sycl, vulkan."),
+                       "amd-rocm, cpu, cuda, hip, sycl, vulkan."),
     ("linux", "metal", "backend 'metal' is not available on this platform (linux). Available: "
                        "cpu, cuda, hip, sycl, vulkan."),
     ("darwin", "vulkan", "backend 'vulkan' is not available on this platform (darwin). "
@@ -1645,6 +1693,38 @@ def test_unresolvable_backends_are_refused_with_a_reason(world, plat, backend, m
     with pytest.raises(click.ClickException) as ei:
         sl._resolve_backend_asset(backend)
     assert ei.value.message == message
+
+
+@pytest.mark.parametrize("plat, backend", [
+    ("win32", "metal"), ("linux", "metal"), ("darwin", "vulkan"), ("linux", "amd-rocm"),
+])
+def test_an_unavailable_backend_is_refused_before_anything_changes(world, plat, backend):
+    world.platform(plat)
+    world.arch = "arm64" if plat == "darwin" else "x64"
+    world.seed_target("llama.dll", "ggml.dll", marker="vulkan")
+    before = world.files()
+    r = world.invoke("--backend", backend, "--yes")
+    assert r.exit_code != 0
+    assert "Replacing" not in r.output
+    assert "Heads up" not in r.output
+    assert world.files() == before and world.marker() == "vulkan\n"
+    assert world.requests == [] and world.probe_calls == 0
+    assert world.pin() is None and world.history() == []
+
+
+def test_the_refusal_of_an_unavailable_backend_lists_amd_rocm_on_windows(world):
+    world.seed_target("llama.dll", marker="vulkan")
+    r = world.invoke("--backend", "metal", "--yes")
+    assert ("backend 'metal' is not available on this platform (win32). Available: "
+            "amd-rocm, cpu, cuda, hip, sycl, vulkan.") in r.text
+
+
+def test_an_unavailable_backend_is_still_accepted_with_a_local_build(world, tmp_path):
+    src = tmp_path / "build"
+    src.mkdir()
+    (src / "llama.dll").write_bytes(b"x")
+    r = world.invoke("--backend", "metal", "--from", str(src), "--yes")
+    assert "is not available on this platform" not in r.output
 
 
 def test_an_unpinned_linux_cuda_tag_with_no_listing_is_refused_with_a_reason(world):
@@ -1753,3 +1833,18 @@ def test_runtime_lib_dir_falls_back_to_the_repo_when_the_wheel_is_absent(monkeyp
     repo = Path(localm.__file__).resolve().parent.parent
     assert sl._repo_runtime_lib() == repo / "runtime" / "localm_llama_runtime" / "lib"
     assert sl._runtime_pkg_dir() == repo / "runtime"
+
+
+def test_net_mode_off_does_not_offer_the_redownload_prompt(world, monkeypatch, capsys):
+    monkeypatch.setenv("LOCALM_NET_MODE", "off")
+    world.seed_target("llama.dll", marker="cpu")
+
+    def _no_prompt(*a, **kw):
+        raise AssertionError("the re-download prompt was offered with net_mode off")
+
+    monkeypatch.setattr(click, "confirm", _no_prompt)
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    sl.main.callback(from_dir=None, backend="cpu", url=None, sha256=None, force=False,
+                     tag=None, rollback=False, assume_yes=False)
+    text = " ".join(capsys.readouterr().out.split())
+    assert "Already provisioned" in text and "Replacing" not in text

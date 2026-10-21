@@ -12,6 +12,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **A VRAM cache for the MoE experts kept in system RAM.** The new `moe_cache_mib` setting
+  (Settings, Engine, or `localm config moe_cache_mib 3072`) keeps the most used experts of a
+  Mixture-of-Experts model whose experts stay in system RAM on the GPU, so they are not copied
+  there again for every batch, which makes generation faster. It applies when those experts are
+  read into memory rather than memory-mapped, sets that much VRAM aside for any model with
+  experts, and is off by default (experimental in llama.cpp).
 - **More context fits in VRAM with a q8_0 KV cache.** The new `kv_cache_type` setting (Settings,
   Model, Runtime & GPU, or `localm config kv_cache_type q8_0`) stores the KV cache in about half the memory of
   the default `f16`, so roughly 1.9x the context fits before the window stops growing, with
@@ -92,6 +98,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `.localcoder/config.toml` to be asked every time.
 
 ### Changed
+- **Long agent and chat sessions stop re-reading the whole conversation every turn.** On models
+  with recurrent layers (Qwen3.5, Qwen3-Next, LFM2 and other hybrid models) each reply now
+  continues from a saved state near the end of the previous prompt instead of processing the
+  entire conversation again, and a context that has to grow keeps what it already holds when
+  there is system RAM for the copy. `localm coder` keeps its system prompt the same for the
+  whole session (the codebase map in it is refreshed when the context is compacted), so a file
+  edit no longer makes the model re-read everything. The server log shows how many prompt tokens
+  each reply reused.
 - **localm's managed ComfyUI now installs v0.42.1, up from v0.39.0.** An existing install picks it up with `localm comfy update --reinstall-requirements` (this release's Python requirements changed).
 - **The bundled llama.cpp runtime moved from b11541 to b11757.** An existing install picks it up with `localm setup-llama --force`.
 - **The bundled AMD (ROCm) llama.cpp runtime moved from build b1342 to b1349** (upstream llama.cpp b11719). An existing install picks it up with `localm setup-llama --force`.
@@ -126,6 +140,28 @@ permanent public record of what shipped and are never rewritten; the in-progress
   next request fits in it.
 
 ### Fixed
+- **The global `localm` command works from a Shared install and uninstalls cleanly.** On Linux and
+  macOS setup made `~/.local/bin/localm` a symlink with a relative target that pointed nowhere,
+  and uninstall left it behind; on Windows it added the relative entry `bin` to your user PATH.
+  Setup now records the full path, and uninstall removes the link, including one an older setup
+  made.
+- **`localm setup-llama --backend metal` on Windows is refused up front.** It printed "Replacing
+  the vulkan build" and then installed Vulkan. A backend with no build for this system is now
+  refused before anything changes, and the list of backends that have one includes `amd-rocm`
+  where it exists.
+- **`localm run ... | cat` returns when the reply is printed on Linux and macOS.** When `run`
+  started the background server itself, the server kept the pipe open, so the command waited
+  until the server stopped. The server no longer shares the terminal's streams.
+- **`setup.bat` works from a folder whose name contains `&`.** The setup and uninstall banners
+  split the command at the `&` and printed an error; the folder is now shown in quotes.
+- **`localm info` names the temp folder that is in use.** After `LOCALM_TMPDIR` pointed at a
+  folder that could not be created, it still listed that folder instead of the system temp
+  folder. An unreadable `localm-home.cfg` is now reported once, not once per setting read.
+- **An embedding or speech model is placed by a current VRAM reading.** When another GPU reading
+  was running (the GUI refreshing its stats, or just after a chat model loaded), the embedding and
+  speech models skipped their fit check and went onto the GPU even with too little VRAM free, and
+  the decision to unload the chat model for them or for an image, video or music job used an
+  older figure. They now wait for that reading.
 - **Pulling a ControlNet or a textual-inversion embedding no longer fails after the download.** `localm pull` (and the Models page's Add a model, with no type chosen) crashed once the file was on disk, so nothing was registered and a second pull crashed the same way. The file is now typed from its tensors and registered as a ControlNet or an embedding.
 - **Cancelling a download on the Models page says what was actually deleted.** The status line used to claim the partial download was deleted every time, including for CivitAI files and whole-repo downloads whose files stay on disk, and when the delete request failed. It now reports the case.
 - **Restarting a ComfyUI that localm launched waits for the old one to release its port.** The restart used to be refused with "localm did not start it" while the process that had just been stopped still held the port.
@@ -417,10 +453,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   word (Qwen3-ASR) is picked only when no other model is eligible.
 - **The usage line explains why MTP is off on a turn with audio.** It used to show the raw reason
   word.
-- **A GGUF model loads several seconds faster.** Sizing a load (GPU layers, the VRAM check, the
-  GPU placement and the context ceiling) now reads the GPUs once instead of once per step; on
-  Windows each reading starts a separate process. A small model's first reply after loading
-  arrives in about 11 seconds instead of about 19 on an RX 6900 XT.
+- **A GGUF model loads several seconds faster.** Checking that a model fits and sizing its load
+  (GPU layers, the VRAM check, the GPU placement and the context ceiling) now read the GPUs once
+  instead of once per step, unless a model has to be unloaded first or another load runs in
+  between; on Windows each reading starts a separate process. The VRAM usage line in the server
+  log no longer holds up the load: it is printed just after "Model loaded". A small model's
+  first reply after loading arrives in about 5.5 seconds instead of about 19 on an RX 6900 XT.
 - **Loads that spread over two or more GPUs are no longer sized against one of them when torch
   is loaded in the server.** A model that fits across the GPUs is no longer refused as too large
   for "this GPU" when the combined reading is not available.
@@ -519,6 +557,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **A key limited to reading or writing settings can no longer see or change the ComfyUI output
   folder.** `comfy_output_dir`, and the same folder set per media plugin, is now owner-only like
   the other host paths: it is left out of what such a key reads, and saving it needs the owner key.
+- **`localm setup-llama` makes no download when `net_mode` is `off`.** `setup.sh` and `setup.bat`
+  fetched the llama.cpp runtime with network access switched off. `setup-llama` now refuses to
+  download, names `net_mode`, and still installs a runtime from a local build (`--from`) or keeps
+  the one already installed. `net_allow_model_downloads` lifts the refusal as it does for model
+  downloads.
 
 ## [0.3.0] - 2026-10-14
 
