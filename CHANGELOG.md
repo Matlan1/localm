@@ -157,6 +157,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **A model worker that was killed is reported as terminated.** The Windows exit code -1 was printed unsigned as `worker exit 4294967295`; it now reads `-1 (the process was terminated)`.
 - **`localm run` no longer prints a traceback when the model process dies mid-reply, and records the failed turn.** The console gets one line (the traceback is in the debug log), and the session log and transcript keep the failed turn with its error and a `finish_reason` of `error`, as the server does.
 - **A tiny model no longer answers "I." to plain questions.** The chat plugin's reminder to say "I" instead of "the model" is reworded as a style note after an instruction to answer every question fully.
+- **A damaged download that is already on disk is replaced, not kept.** Pulling a Hugging Face
+  repo again now re-checks every weight file against the digest the hub publishes and fetches a
+  damaged one again (it used to say "Already downloaded"); a damaged vision projector of the same
+  repo is replaced instead of being left beside a second copy; a cached Whisper `model.bin` that
+  no longer matches its pinned digest is deleted and refused at load; and `localm
+  setup-embeddings` (and the Knowledge page's embedding setup) fetches the embedding model again
+  when the file on disk does not match its pinned digest.
 - **Privacy mode leaves no crash exit file.** After a hard crash on Windows the crash watchdog wrote a `server-crash-exit` file in the data folder even in privacy mode, and nothing removed it. It is no longer written when the run started in privacy mode, and the next start deletes any left over.
 - **The launcher writes no error log in privacy mode.** `logs/launcher.log`, which holds error lines that can name your model paths, is now written only when the privacy mode is not `privacy` or "Keep diagnostics for bug reports" is ticked.
 - **A rejected grammar's text stays out of the debug log in privacy mode.** When a malformed grammar was only found while the reply was generated, the native parser's error and the grammar source reached the debug log and the recent-activity view of a bug report; both now stay clear of it unless chat content is allowed in the debug log.
