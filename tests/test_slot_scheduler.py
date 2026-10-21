@@ -547,8 +547,8 @@ def test_copies_stop_at_the_ram_limit(made):
     third = _two_idle_caches(ctx)
     rec = _collect(sched, third, 3)
     assert rec["out"] == _reference(third, 3)[0]
-    decoded = {e[2] for call in ctx.calls[before:] for e in call}
-    assert decoded, "a copy over the limit was taken"
+    seq1 = [e for call in ctx.calls[before:] for e in call if e[2] == 1]
+    assert seq1, "a copy over the limit was taken"
 
 
 def test_a_recurrent_slot_cache_survives_rightsizing(made):
