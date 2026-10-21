@@ -54,3 +54,37 @@ def test_a_refused_download_surfaces_as_an_artifact_error(monkeypatch, opener, t
         sl._download("https://example.invalid/llama.zip", tmp_path / "a.zip")
     assert "net_mode" in str(ei.value)
     assert opener == []
+
+
+def _fake_wheel_install(monkeypatch):
+    import sys
+    from pathlib import Path
+    captured = {}
+
+    class _R:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(cmd, **kw):
+        captured["env"] = kw.get("env")
+        return _R()
+
+    monkeypatch.setattr(sl.subprocess, "run", fake_run)
+    monkeypatch.setitem(sys.modules, "localm_llama_runtime", None)
+    assert sl._install_runtime_wheel(Path("some/pkg/dir")) is True
+    return captured["env"]
+
+
+def test_the_runtime_wheel_install_is_offline_with_net_mode_off(monkeypatch):
+    monkeypatch.setenv("LOCALM_NET_MODE", "off")
+    env = _fake_wheel_install(monkeypatch)
+    assert env["UV_OFFLINE"] == "1" and env["PIP_NO_INDEX"] == "1"
+
+
+def test_the_runtime_wheel_install_may_use_the_index_when_net_mode_allows(monkeypatch):
+    monkeypatch.setenv("LOCALM_NET_MODE", "ask")
+    monkeypatch.delenv("UV_OFFLINE", raising=False)
+    monkeypatch.delenv("PIP_NO_INDEX", raising=False)
+    env = _fake_wheel_install(monkeypatch)
+    assert "UV_OFFLINE" not in env and "PIP_NO_INDEX" not in env

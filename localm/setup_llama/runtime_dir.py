@@ -17,7 +17,7 @@ from typing import Optional
 
 from localm import config, hwdetect
 from localm.debuglog import logger
-from localm.setup_llama._common import console
+from localm.setup_llama._common import _net_allowed, console
 from localm.setup_llama.library_files import _BLAS_LIBRARY_DIRS
 import localm.setup_llama as _sl
 
@@ -329,6 +329,8 @@ def _install_runtime_wheel(pkg_dir: Path) -> bool:
     except Exception:
         pass
     env = config.contained_pip_env()
+    if not _net_allowed():
+        env = {**env, "UV_OFFLINE": "1", "PIP_NO_INDEX": "1"}
     last_err = ""
     for cmd in (["uv", "pip", "install", "-e", str(pkg_dir)],
                 [sys.executable, "-m", "pip", "install", "-e", str(pkg_dir)]):

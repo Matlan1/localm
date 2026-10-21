@@ -11,7 +11,7 @@ from typing import Optional
 import click
 
 from localm.debuglog import logger
-from localm.setup_llama._common import console
+from localm.setup_llama._common import _net_allowed, _require_network_allowed, console
 from localm.setup_llama.assets import _require_backend_here, _require_prebuilt
 from localm.setup_llama.pins import _ROCM_BUILD, _ROCM_TAG
 from localm.setup_llama.download import ArtifactError
@@ -176,7 +176,7 @@ def _refuse_when_net_off() -> None:
     (unless ``net_allow_model_downloads`` exempts downloads)."""
     from localm import netpolicy
     try:
-        _sl._require_network_allowed()
+        _require_network_allowed()
     except netpolicy.NetworkPolicyError as e:
         console.print(f"[red]{e}[/red]")
         sys.exit(1)
@@ -264,7 +264,8 @@ def _keeps_existing_install(target: Path, lib_name: str, backend: str, force: bo
             build = _sl._provisioned_build(target) if have else None
             label = f" ({have} {build})" if build else (f" ({have})" if have else "")
             console.print(f"[green]Already provisioned[/green]{label} at {target}")
-            if not assume_yes and sys.stdin and sys.stdin.isatty() and click.confirm("Do you want to re-download/replace them?", default=False):
+            if (not assume_yes and sys.stdin and sys.stdin.isatty() and _net_allowed()
+                    and click.confirm("Do you want to re-download/replace them?", default=False)):
                 force = True
                 console.print("[yellow]Replacing existing build...[/yellow]")
             else:

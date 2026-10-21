@@ -87,7 +87,7 @@ import click  # noqa: F401
 from localm import config  # noqa: F401
 from localm.http_ssl import verified_urlopen as _verified_urlopen
 from localm.setup_llama._common import (
-    console, _flush_stdin,
+    console, _flush_stdin, _net_allowed, _require_network_allowed,
 )
 from localm.setup_llama.pins import (
     DEFAULT_URL, DEFAULT_URL_SHA256, _ROCM_TAG, _ROCM_BUILD, _ROCM_CPU_ASSET, _ROCM_CPU_TAG,
@@ -159,19 +159,6 @@ from localm.setup_llama.provision import (
 from localm.setup_llama.cli import (
     BACKENDS, main, _refresh_install_record, _ensure_importable, _verify,
 )
-
-
-def _require_network_allowed() -> None:
-    """Raise :class:`localm.netpolicy.NetworkPolicyError` when ``net_mode`` is
-    ``off`` and downloads are not exempted by ``net_allow_model_downloads``.
-    Reads the policy only; performs no network or DNS access."""
-    from localm import netpolicy
-    if netpolicy.network_mode() == "off" and not netpolicy.downloads_allowed_when_off():
-        raise netpolicy.NetworkPolicyError(
-            "setup-llama downloads the llama.cpp runtime, and network access is "
-            "disabled (net_mode=off). Enable it with:  localm config net_mode ask  "
-            "or provision from a local build:  localm setup-llama --from <build-dir>",
-            off=True)
 
 
 def verified_urlopen(req, *, timeout=None, handlers=()):

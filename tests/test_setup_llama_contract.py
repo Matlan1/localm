@@ -1833,3 +1833,18 @@ def test_runtime_lib_dir_falls_back_to_the_repo_when_the_wheel_is_absent(monkeyp
     repo = Path(localm.__file__).resolve().parent.parent
     assert sl._repo_runtime_lib() == repo / "runtime" / "localm_llama_runtime" / "lib"
     assert sl._runtime_pkg_dir() == repo / "runtime"
+
+
+def test_net_mode_off_does_not_offer_the_redownload_prompt(world, monkeypatch, capsys):
+    monkeypatch.setenv("LOCALM_NET_MODE", "off")
+    world.seed_target("llama.dll", marker="cpu")
+
+    def _no_prompt(*a, **kw):
+        raise AssertionError("the re-download prompt was offered with net_mode off")
+
+    monkeypatch.setattr(click, "confirm", _no_prompt)
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    sl.main.callback(from_dir=None, backend="cpu", url=None, sha256=None, force=False,
+                     tag=None, rollback=False, assume_yes=False)
+    text = " ".join(capsys.readouterr().out.split())
+    assert "Already provisioned" in text and "Replacing" not in text

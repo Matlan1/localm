@@ -541,7 +541,7 @@ def _top_install_message_block(bat_text):
     """The `setlocal DisableDelayedExpansion` / echo / `endlocal` wrapper
     around the very first line that names the install directory."""
     literal = ('setlocal DisableDelayedExpansion\n'
-               'echo  LocaLM setup - self-contained install in: %CD%\n'
+               'echo  LocaLM setup - self-contained install in: "%CD%"\n'
                'endlocal')
     assert literal in bat_text, "the top install-directory message wrapper moved"
     i = bat_text.index(literal)
@@ -630,7 +630,7 @@ def _flush_block(bat_text):
 
 def _uninstall_header_block(bat_text):
     """The `:uninstall` label's clone-path banner."""
-    literal = 'setlocal DisableDelayedExpansion\necho    %CD%\nendlocal'
+    literal = 'setlocal DisableDelayedExpansion\necho    "%CD%"\nendlocal'
     assert literal in bat_text, "the uninstall banner's wrapper moved"
     i = bat_text.index(literal)
     return bat_text[i:i + len(literal)]
@@ -723,7 +723,7 @@ class TestCdDerivedVarsSurviveBangInInstallPath:
         bangdir = tmp_path / "bang!dir"
         bangdir.mkdir()
         out = self._run(bangdir, "", block, "")
-        assert f"self-contained install in: {bangdir}" in out.stdout, out.stdout
+        assert f'self-contained install in: "{bangdir}"' in out.stdout, out.stdout
 
     def test_uv_dirs_survive_a_bang_in_the_install_path(self, bat, tmp_path):
         block = _uv_dirs_block(bat)

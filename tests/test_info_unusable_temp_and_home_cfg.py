@@ -77,3 +77,12 @@ def test_an_unreadable_home_cfg_is_reported_once(tmp_path, monkeypatch, capsys):
     err = capsys.readouterr().err
     assert err.count("cannot read") == 1
     assert "falling back to the default data dir" in err
+
+
+def test_temp_dir_in_use_does_not_repeat_the_start_up_warnings(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv(config.TEMP_DIR_ENV, "relative/folder")
+    capsys.readouterr()
+    config.temp_dir_in_use(tmp_path / "data")
+    assert capsys.readouterr().err == ""
+    config.temp_dir(tmp_path / "data")
+    assert "is not an absolute folder" in capsys.readouterr().err
