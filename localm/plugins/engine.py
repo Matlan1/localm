@@ -1906,8 +1906,8 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
     async def install_external_plugin_engine(body: dict):
         """Install a THIRD-PARTY plugin from a local directory (the GUI's
         External plugins card). The HTTP sibling of `localm plugin install
-        <dir>`, using the same manager call. Copy + verify only, no live mount:
-        the plugin loads on the next server start."""
+        <dir>`, using the same manager call. Copy + verify only: the plugin is
+        mounted the next time the plugin list is read."""
         from pathlib import Path as _P
         source = (body or {}).get("source", "")
         if not source:

@@ -99,6 +99,7 @@ def test_an_already_loaded_plugin_is_not_loaded_twice(env):
     app, mgr = _server(env)
     src = _make_plugin(env / "src", "once", _ping("once"))
     mgr.install_external(src)
+    mounted = len(app.router.routes)
     assert mgr.load_enabled_pending() == []
-    routes = [r for r in app.router.routes if getattr(r, "path", "") == "/api/once/ping"]
-    assert len(routes) == 1
+    assert len(app.router.routes) == mounted
+    assert TestClient(app).get("/api/once/ping").json() == {"pong": True}
