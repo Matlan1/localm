@@ -652,3 +652,27 @@ class TestReviewFindings:
                             attachments="\n\n<attached_file>body</attached_file>")
         assert "body" not in seen["task"]
         assert "body" in seen["attachments"]
+
+
+def test_an_always_answer_is_read_only_by_the_prompt_that_got_it(monkeypatch):
+    import threading
+    monkeypatch.setattr(display.console, "input",
+                        lambda prompt="": "a" if "write_file" in str(prompt) else "y")
+    with display.offering_session_allow(True):
+        assert display.confirm("  Allow run_shell?") is True
+    answered, consumed, got = threading.Event(), threading.Event(), {}
+
+    def child():
+        with display.offering_session_allow(True):
+            got["child_approved"] = display.confirm("  Allow write_file?")
+        answered.set()
+        consumed.wait(10)
+        got["child"] = display.consume_confirm_always()
+
+    worker = threading.Thread(target=child)
+    worker.start()
+    assert answered.wait(10)
+    got["parent"] = display.consume_confirm_always()
+    consumed.set()
+    worker.join(10)
+    assert got == {"child_approved": True, "parent": False, "child": True}

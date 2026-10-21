@@ -6,8 +6,8 @@
 * a file in localm's data folder (``config.home_dir()``) that holds a credential
   or the settings: the owner key, the scoped key store, the owner key records,
   the browser session store, ``config.json`` and its ``.bak``, the model-source
-  credentials, the running-instance registry (attach tokens) and the TLS
-  private keys;
+  credentials, the running-instance registry (attach tokens), the TLS
+  private keys and the coder's hook and MCP server trust store;
 * the data folder itself (listing, reading or archiving it whole);
 * a shell command naming one of those paths (also as ``$LOCALM_HOME/...`` and
   in a ``--opt=value`` flag), deleting, moving or changing the permissions of a
@@ -44,6 +44,7 @@ _FILE_LABELS: tuple[tuple[str, str], ...] = (
     ("run", "localm's running-instance registry"),
     ("tls/ca.key", "localm's local CA private key"),
     ("tls/server.key", "localm's TLS server private key"),
+    ("coder-hook-trust.json", "localm's coder hook and MCP server trust store"),
 )
 _FOLDER_LABEL = "localm's data folder"
 
@@ -213,9 +214,18 @@ def _nested_command(name: str, args: Iterable[str]) -> Optional[str]:
 
 def _check_shell(command: str, cwd: Optional[Path], targets: Targets, home: Path,
                  depth: int = 0) -> Optional[str]:
-    cwd_s = _sg._canon(str(cwd)) if cwd is not None else None
-    segments, _ = _sg._collect(command, 0, 0)
-    current = cwd_s
+    """The first protected target *command* reaches in any of the shell
+    guard's quoting dialects, or None."""
+    for segments in _sg._parses(command):
+        label = _check_segments(segments, cwd, targets, home, depth)
+        if label:
+            return label
+    return None
+
+
+def _check_segments(segments, cwd: Optional[Path], targets: Targets, home: Path,
+                    depth: int) -> Optional[str]:
+    current = _sg._canon(str(cwd)) if cwd is not None else None
     for seg in segments:
         name, args = _sg._argv(seg)
         if not name:

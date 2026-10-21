@@ -123,6 +123,23 @@ def test_ordinary_commands_are_not_flagged(tmp_path, cmd):
     assert _shell(cmd.format(h=home.as_posix()), tmp_path / "proj", home) is None
 
 
+def test_a_continued_or_cmd_quoted_command_is_checked(tmp_path):
+    home = tmp_path / "home"
+    bs = chr(92)
+    assert _shell("cat " + bs + "\n" + home.as_posix() + "/auth.key",
+                  tmp_path / "proj", home)
+    assert _shell("echo 'x & type " + str(home) + bs + "auth.key & '",
+                  tmp_path / "proj", home)
+
+
+def test_the_hook_trust_store_is_protected(tmp_path):
+    home = tmp_path / "home"
+    label = data_guard.check("write_file", {"path": f"{home.as_posix()}/coder-hook-trust.json"},
+                             tmp_path, path_args=("path",), home=home)
+    assert label is not None and "trust store" in label
+    assert _shell(f"rm {home.as_posix()}/coder-hook-trust.json", tmp_path, home)
+
+
 def test_relative_path_into_the_data_folder_from_its_parent(tmp_path):
     home = tmp_path / "home"
     assert _shell("rm home/auth.key", tmp_path, home) is not None

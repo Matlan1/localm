@@ -1992,12 +1992,15 @@ async def coder_hooks(request: Request, cwd: str = ""):
     non-owner gets ``configured: false`` and nothing else. ``digest`` is what
     POST /api/coder/hooks/trust must echo back. ``mcp_servers`` lists each
     server as ``{"name", "argv", "env", "trusted_calls", "line"}``, where
-    ``line`` is the one-line description the REPL shows."""
+    ``line`` is the one-line description the REPL shows. Each hook's
+    ``matcher``, ``command`` and ``error`` come escaped by
+    ``hooks.display_safe`` (non-ASCII as ``\\uXXXX``)."""
     if not _is_owner(request):
         return {"configured": False, "cwd": None}
     root = _episode_root(cwd)
 
     def _read():
+        from localm.plugins.coder.hooks import display_safe
         from localm.plugins.coder.mcp import mcp_argv
         hooks = _load_hooks(root)
         if hooks is None or not hooks.has_commands():
@@ -2010,8 +2013,10 @@ async def coder_hooks(request: Request, cwd: str = ""):
             "warnings": list(hooks.warnings),
             "hooks": [
                 {"event": s.event, "index": s.index, "label": s.label,
-                 "matcher": s.matcher, "command": s.command_text(None),
-                 "timeout": s.timeout, "error": s.error}
+                 "matcher": display_safe(s.matcher),
+                 "command": display_safe(s.command_text(None)),
+                 "timeout": s.timeout,
+                 "error": None if s.error is None else display_safe(s.error)}
                 for s in (*hooks.pre, *hooks.post)
             ],
             "mcp_servers": [

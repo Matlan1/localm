@@ -911,3 +911,123 @@ def test_payload_is_ascii_json(tmp_path):
     from localm.plugins.coder.hooks import _json_payload
     text = _json_payload({"args": {"path": "\u00e9\u4e2d.txt"}})
     assert text.isascii() and json.loads(text)["args"]["path"] == "\u00e9\u4e2d.txt"
+
+
+# --------------------------------------------------------------------------- #
+#  writes allowed for the rest of the session
+# --------------------------------------------------------------------------- #
+
+class _GuiSession:
+    """The GUI session's confirm handler: tools in allowed_tools are approved
+    without asking, anything else gets *answer*."""
+
+    def __init__(self, allowed, answer):
+        self.allowed_tools = set(allowed)
+        self.answer = answer
+        self.asked = []
+
+    def confirm(self, call, agent=None):
+        if call.name in self.allowed_tools:
+            return True
+        self.asked.append(call)
+        return self.answer
+
+
+def test_a_terminal_session_allow_of_writes_gives_hooks_the_shell_gate(tmp_path):
+    argv = _py_hook(tmp_path, "pre", "record(payload)\n")
+    proj = _project(tmp_path, _hooks_toml(PRE, argv))
+    agent = _trusted_agent(proj, auto_approve=False)
+    assert agent._hook_run_gate() is None
+    agent._session_allowed.add("write_file")
+    assert agent._hook_run_gate() == "confirm"
+    agent.confirm_handler = MagicMock(return_value=False)
+    res = agent._execute_tool(_write_call(), interactive=False)
+    assert not res.ok and not (proj / "out.txt").exists()
+    assert _log(tmp_path, "pre") == []
+    assert [c.args[0].name for c in agent.confirm_handler.call_args_list] == ["run_shell"]
+
+
+@pytest.mark.parametrize("answer", [True, False])
+def test_a_gui_always_allow_of_writes_gives_hooks_the_shell_gate(tmp_path, answer):
+    argv = _py_hook(tmp_path, "pre", "record(payload)\n")
+    proj = _project(tmp_path, _hooks_toml(PRE, argv))
+    agent = _trusted_agent(proj, auto_approve=False)
+    gui = _GuiSession({"write_file"}, answer)
+    agent.confirm_handler = gui.confirm
+    assert agent._hook_run_gate() == "confirm"
+    res = agent._execute_tool(_write_call(), interactive=False)
+    assert [c.name for c in gui.asked] == ["run_shell"]
+    assert "pre.py" in gui.asked[0].args["command"]
+    assert res.ok is answer and (proj / "out.txt").exists() is answer
+    assert len(_log(tmp_path, "pre")) == (1 if answer else 0)
+
+
+def test_a_child_inherits_the_parents_session_allow_for_the_hook_gate(tmp_path):
+    proj = _project(tmp_path, _hooks_toml(PRE, ["x"]))
+    parent = _trusted_agent(proj, auto_approve=False)
+    child = _make_agent(proj, auto_approve=False)
+    child.parent = parent
+    assert child._hook_run_gate() is None
+    parent._session_allowed.add("edit_file")
+    assert child._hook_run_gate() == "confirm"
+
+
+def test_one_allowed_shell_command_or_an_allowed_shell_adds_no_gate(tmp_path):
+    proj = _project(tmp_path, _hooks_toml(PRE, ["x"]))
+    agent = _trusted_agent(proj, auto_approve=False)
+    agent._session_allowed.add(("run_shell", "make"))
+    assert agent._hook_run_gate() is None
+    agent._session_allowed.add("write_file")
+    assert agent._hook_run_gate() == "confirm"
+    agent.confirm_handler = _GuiSession({"run_shell"}, False).confirm
+    assert agent._hook_run_gate() is None
+    agent.disabled_tools = frozenset({"run_shell"})
+    assert agent._hook_run_gate() == "refuse"
+
+
+# --------------------------------------------------------------------------- #
+#  what the trust decision shows, and a corrupt trust store
+# --------------------------------------------------------------------------- #
+
+_DISGUISED = (r'[[hooks.pre_tool_use]]' '\n'
+              r'matcher = "write_file\u200b"' '\n'
+              r'command = "python lint.py #\u202e yp.live\u2066"' '\n')
+
+
+def test_hook_commands_are_escaped_where_trust_is_decided(tmp_path):
+    proj = _project(tmp_path, _DISGUISED)
+    hooks = ToolHooks.load(proj)
+    assert "\u202e" in hooks.pre[0].command_text(None)
+    text = "\n".join(hooks.describe())
+    assert text.isascii()
+    assert "\\u202e" in text and "\\u2066" in text and "\\u200b" in text
+    assert "python lint.py #" in text
+
+
+def test_hook_commands_are_escaped_in_the_hooks_route(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    proj = _project(tmp_path, _DISGUISED)
+    app, owner = _owner_app(tmp_path, monkeypatch, proj)
+    with TestClient(app) as client:
+        hook = client.get("/api/coder/hooks", headers=owner,
+                          params={"cwd": str(proj)}).json()["hooks"][0]
+    assert hook["command"].isascii() and "\\u202e" in hook["command"]
+    assert hook["matcher"] == "write_file\\u200b"
+
+
+def test_a_corrupt_trust_store_warns_once_until_it_is_readable_again(tmp_path, monkeypatch):
+    proj = _project(tmp_path, '[[hooks.pre_tool_use]]\ncommand = "a"\n')
+    hooks = ToolHooks.load(proj)
+    store = hook_trust._store()
+    store.parent.mkdir(parents=True, exist_ok=True)
+    store.write_text("{not json", encoding="utf-8")
+    log = MagicMock()
+    monkeypatch.setattr(hook_trust, "logger", log)
+    for _ in range(5):
+        assert hooks.refresh_trust() is False
+    assert log.warning.call_count == 1 and log.debug.call_count == 4
+    store.write_text("{}", encoding="utf-8")
+    assert hooks.refresh_trust() is False
+    store.write_text("{not json", encoding="utf-8")
+    assert hooks.refresh_trust() is False
+    assert log.warning.call_count == 2

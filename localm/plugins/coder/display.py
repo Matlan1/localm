@@ -28,8 +28,12 @@ err_console = Console(stderr=True, highlight=False)
 _SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
 _last_diff_preview: tuple[str, str, str, bool] | None = None
-_last_confirm_always: bool = False
-_last_reject_reason: str = ""
+# The answer flags of the last confirmation prompt, one value per thread (or
+# context).
+_last_confirm_always: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "coder_last_confirm_always", default=False)
+_last_reject_reason: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "coder_last_reject_reason", default="")
 _offer_session_allow: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "coder_offer_session_allow", default=False)
 _exact_approval: contextvars.ContextVar[bool] = contextvars.ContextVar(
@@ -37,18 +41,18 @@ _exact_approval: contextvars.ContextVar[bool] = contextvars.ContextVar(
 
 
 def consume_confirm_always() -> bool:
-    """Return and clear the session auto-approve flag set by the last confirmation prompt."""
-    global _last_confirm_always
-    val = _last_confirm_always
-    _last_confirm_always = False
+    """Return and clear the session auto-approve flag set by the last
+    confirmation prompt asked in the calling thread."""
+    val = _last_confirm_always.get()
+    _last_confirm_always.set(False)
     return val
 
 
 def consume_reject_reason() -> str:
-    """Return and clear the optional rejection reason entered at the last confirmation prompt."""
-    global _last_reject_reason
-    val = _last_reject_reason
-    _last_reject_reason = ""
+    """Return and clear the optional rejection reason entered at the last
+    confirmation prompt asked in the calling thread."""
+    val = _last_reject_reason.get()
+    _last_reject_reason.set("")
     return val
 
 
@@ -655,22 +659,20 @@ def _answer_hint(full: bool = False) -> str:
 
 
 def _record_answer(action: str, reason: str) -> bool:
-    global _last_confirm_always, _last_reject_reason
     if action == "always":
-        _last_confirm_always = _offer_session_allow.get()
+        _last_confirm_always.set(_offer_session_allow.get())
         return True
     if action == "yes":
         return True
-    _last_reject_reason = reason
+    _last_reject_reason.set(reason)
     return False
 
 
 def confirm_diff(path_label: str) -> bool:
     """Prompt to apply changes to *path_label*. [f] reprints the full diff, and
     is offered only when the stored preview is this file's and was cut short."""
-    global _last_confirm_always, _last_reject_reason
-    _last_confirm_always = False
-    _last_reject_reason = ""
+    _last_confirm_always.set(False)
+    _last_reject_reason.set("")
     try:
         while True:
             preview = _last_diff_preview
@@ -695,9 +697,8 @@ def confirm_diff(path_label: str) -> bool:
 # ---------------------------------------------------------------------------
 
 def confirm(prompt: str) -> bool:
-    global _last_confirm_always, _last_reject_reason
-    _last_confirm_always = False
-    _last_reject_reason = ""
+    _last_confirm_always.set(False)
+    _last_reject_reason.set("")
     try:
         line = _sanitized_text(f"{prompt} {_answer_hint()}", style="yellow")
         raw = console.input(line)
