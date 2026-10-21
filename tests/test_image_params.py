@@ -111,6 +111,26 @@ class TestA1111:
         with pytest.raises(ip.ImageParamsError):
             ip.parse_a1111("just a prompt\nNegative prompt: x")
 
+    def test_clip_skip_is_imported(self):
+        p = ip.parse_a1111("a cat\nSteps: 8, Seed: 1, Size: 64x64, Clip skip: 2")
+        assert p["clip_skip"] == 2
+
+    def test_a_clip_skip_that_is_not_a_number_is_absent(self):
+        assert "clip_skip" not in ip.parse_a1111("a cat\nSteps: 8, Clip skip: lots")
+
+    def test_hires_settings_are_reported_as_not_imported(self):
+        line = ("Steps: 20, Seed: 3, Size: 512x512, Denoising strength: 0.5, "
+                "Hires upscale: 2, Hires steps: 10, Hires upscaler: Latent")
+        got = ip.params_from_bytes(_png([_text("parameters", "a cat\n" + line)]))
+        assert got["source"] == "a1111"
+        assert got["unsupported"] == ["Hires fix"]
+        assert "Not imported: Hires fix." in got["notes"]
+        assert "hires" not in got["params"]
+
+    def test_an_image_without_hires_reports_nothing_unsupported(self):
+        got = ip.params_from_bytes(_png([_text("parameters", A1111_SAMPLE)]))
+        assert "unsupported" not in got and got["notes"] == []
+
     def test_png_with_only_a_parameters_chunk(self):
         got = ip.params_from_bytes(_png([_text("parameters", A1111_SAMPLE)]))
         assert got["source"] == "a1111" and got["params"]["seed"] == 123456789

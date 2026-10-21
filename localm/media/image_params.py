@@ -244,10 +244,21 @@ def _strip_lora_tags(prompt: str) -> tuple[str, list]:
     return "".join(out).strip(), loras
 
 
+A1111_UNSUPPORTED = {"Hires fix": "Hires"}
+
+
 def parse_a1111(text: str) -> dict:
     """Parameters from an A1111 ``parameters`` string. Raises
     ``ImageParamsError`` when it has no settings line or is over
     ``MAX_PARAMETERS_CHARS``."""
+    return parse_a1111_with_unsupported(text)[0]
+
+
+def parse_a1111_with_unsupported(text: str) -> tuple[dict, list[str]]:
+    """``(parameters, unsupported)`` for an A1111 ``parameters`` string:
+    *unsupported* names the settings the string holds that have no
+    counterpart here (``A1111_UNSUPPORTED``). Raises ``ImageParamsError`` as
+    ``parse_a1111`` does."""
     if len(text) > MAX_PARAMETERS_CHARS:
         raise ImageParamsError("the parameters text is too long")
     lines = text.replace("\r\n", "\n").split("\n")
@@ -273,6 +284,7 @@ def parse_a1111(text: str) -> dict:
     out["cfg"] = _num(pairs.get("CFG scale"), float)
     out["guidance"] = _num(pairs.get("Distilled CFG Scale"), float)
     out["denoise"] = _num(pairs.get("Denoising strength"), float)
+    out["clip_skip"] = _num(pairs.get("Clip skip"), int)
     width, sep, height = pairs.get("Size", "").partition("x")
     if sep and width.isdigit() and height.isdigit() and len(width) < 7 and len(height) < 7:
         out["width"], out["height"] = int(width), int(height)
@@ -281,7 +293,9 @@ def parse_a1111(text: str) -> dict:
     out["scheduler"] = pairs.get("Schedule type") or None
     if loras:
         out["loras"] = loras
-    return {k: v for k, v in out.items() if v is not None}
+    unsupported = [label for label, prefix in A1111_UNSUPPORTED.items()
+                   if any(key.startswith(prefix) for key in pairs)]
+    return {k: v for k, v in out.items() if v is not None}, unsupported
 
 
 _SAMPLER_NODES = ("KSampler", "KSamplerAdvanced", "SamplerCustom", "SamplerCustomAdvanced")
@@ -420,7 +434,7 @@ def parse_comfy_prompt(graph: Any) -> dict:
 
 _MAX_STR = 32000
 _STR_KEYS = ("prompt", "negative_prompt", "model", "sampler", "scheduler", "sample_method")
-_INT_KEYS = ("seed", "steps", "width", "height")
+_INT_KEYS = ("seed", "steps", "width", "height", "clip_skip")
 _FLOAT_KEYS = ("cfg", "guidance", "denoise")
 
 
@@ -495,7 +509,9 @@ def _from_localm(blob: Any) -> dict:
 def params_from_bytes(data: bytes) -> dict:
     """``{"source", "params", "notes"}`` for an uploaded image or sidecar.
 
-    *source* is ``localm``, ``a1111``, ``comfyui`` or ``sidecar``. *params*
+    *source* is ``localm``, ``a1111``, ``comfyui`` or ``sidecar``. An A1111
+    image whose settings include some with no counterpart here also carries
+    ``unsupported`` (their names). *params*
     uses the sidecar's key names (``prompt``, ``negative_prompt``, ``seed``,
     ``steps``, ``cfg``, ``guidance``, ``denoise``, ``width``, ``height``,
     ``model``, ``components``, ``loras``, plus ``sampler``/``scheduler`` when
@@ -520,8 +536,12 @@ def params_from_bytes(data: bytes) -> dict:
             notes.append("The localm parameters in this image could not be read.")
     if "parameters" in text:
         try:
-            return {"source": "a1111", "params": _from_localm(parse_a1111(text["parameters"])),
-                    "notes": notes}
+            params, unsupported = parse_a1111_with_unsupported(text["parameters"])
+            result = {"source": "a1111", "params": _from_localm(params), "notes": notes}
+            if unsupported:
+                notes.append(f"Not imported: {', '.join(unsupported)}.")
+                result["unsupported"] = unsupported
+            return result
         except ImageParamsError as e:
             notes.append(str(e) + ".")
     if "prompt" in text:

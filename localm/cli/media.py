@@ -53,11 +53,10 @@ def _open_file(path: Path) -> None:
 
 
 def _is_interactive() -> bool:
-    """True when we have an interactive terminal to prompt on (not piped/scripted)."""
-    try:
-        return bool(sys.stdin and sys.stdin.isatty())
-    except Exception:
-        return False
+    """True when stdin is a terminal a person can answer at: not piped, not the
+    null device, not scripted."""
+    from ..bugreport import stdin_is_interactive
+    return stdin_is_interactive()
 
 
 def _offer_open(path: Path) -> None:

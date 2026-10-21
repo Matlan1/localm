@@ -1789,6 +1789,18 @@ def _pull_gguf_file(
     model_name = _sanitize_name(name or filename.removesuffix(".gguf"))
     dest = base_dir / filename
 
+    if register:
+        held_at = _name_held_by_external_file(model_name, dest)
+        if held_at is not None:
+            console.print(
+                f"[red]Name already in use:[/red] {escape(model_name)} is registered "
+                f"to a file outside the models folder ({escape(held_at)}), which "
+                f"this pull would replace in the registry. Pull with another name "
+                f"([bold]--name[/bold]), or remove the registration first "
+                f"([bold]localm rm {escape(model_name)}[/bold], which keeps that file)."
+            )
+            return False
+
     # Expected digest from HF metadata - free, no download needed. Each file is
     # downloaded at the commit its digest was read at.
     expected = _mm._hf_file_sha256(repo_id, _remote(filename))
@@ -3720,6 +3732,28 @@ def _civitai_owners(dest: Path) -> "list[tuple[str, str]]":
     reg = _mm.load_registry()
     return [(n, str(reg[n].get("source") or ""))
             for n in find_aliases_by_path(dest, reg)]
+
+
+def _name_held_by_external_file(model_name: str, dest: Path) -> "str | None":
+    """The path *model_name* is registered to when that is an existing file
+    outside the models folder other than *dest*, else None. A registration
+    whose file is gone, or that lives in the models folder, is not held."""
+    reg = _mm.load_registry()
+    entry = reg.get(model_name)
+    if not isinstance(entry, dict):
+        return None
+    held = _mm._entry_path(entry)
+    if not held:
+        return None
+    if model_name in _mm.find_aliases_by_path(dest, reg):
+        return None
+    try:
+        held_path = Path(held)
+        if not held_path.exists() or _mm.is_owned_model_path(held_path):
+            return None
+    except OSError:
+        return None
+    return str(held)
 
 
 def _hf_file_name_taken_by(dest: Path, repo_id: str) -> "list[tuple[str, str]]":

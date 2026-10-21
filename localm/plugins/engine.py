@@ -765,7 +765,7 @@ class PluginManager:
             except OSError:
                 children = []
             for child in children:
-                if not child.is_dir() or not (child / "plugin.toml").is_file():
+                if child.name.startswith(".") or not child.is_dir()                         or not (child / "plugin.toml").is_file():
                     continue
                 try:
                     warns: list = []
@@ -850,6 +850,8 @@ class PluginManager:
         if root:
             try:
                 for child in Path(root).glob("*"):
+                    if child.name.startswith("."):
+                        continue
                     if child.is_dir() and (child / "plugin.toml").is_file():
                         out.add(child.name)
             except OSError:
@@ -1360,15 +1362,29 @@ class PluginManager:
         # shutil.rmtree just below, and copytree after.
         dest = self._installed_dir(name)
         if dest.exists():
-            if not force:
+            if (dest / "plugin.toml").is_file() and not force:
                 raise ValueError(f"plugin {name!r} is already installed")
-            self._remove_installed_dir(name)
+            if not self._remove_installed_dir(name):
+                raise ValueError(
+                    f"plugin {name!r}: the existing installed directory could not "
+                    f"be removed; see the log")
         dest.parent.mkdir(parents=True, exist_ok=True)
-        # symlinks=True keeps a link that appeared after _reject_source_links
-        # walked the tree from being DEREFERENCED. It does not cover a Windows
-        # junction, which copytree demotes and recurses into.
-        shutil.copytree(src, dest, symlinks=True)
-        _write_marker(dest, "external", _dir_content_hash(src))
+        # The copy is built beside dest and renamed into place, so an install
+        # that dies mid-copy leaves a hidden staging folder, never a
+        # half-filled plugin folder.
+        tmp = dest.parent / f".{name}.install.tmp"
+        if tmp.exists():
+            shutil.rmtree(tmp, ignore_errors=True)
+        try:
+            # symlinks=True keeps a link that appeared after _reject_source_links
+            # walked the tree from being DEREFERENCED. It does not cover a Windows
+            # junction, which copytree demotes and recurses into.
+            shutil.copytree(src, tmp, symlinks=True)
+            _write_marker(tmp, "external", _dir_content_hash(src))
+            tmp.rename(dest)
+        except BaseException:
+            shutil.rmtree(tmp, ignore_errors=True)
+            raise
         return spec0, dest
 
     def _provision_and_verify(self, name: str, *, rollback_on_fail: bool = True,
