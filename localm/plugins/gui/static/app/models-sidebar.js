@@ -1198,6 +1198,9 @@ export function toastLoadResult(res, model) {
     }
     if (res.moe_cpu_layers > 0) {
       parts.push(`experts of ${res.moe_cpu_layers} layers in system RAM`);
+      if (res.moe_ram_read_bytes > 0) {
+        parts.push(`about ${(res.moe_ram_read_bytes / 1024 ** 3).toFixed(2)} GB read from RAM per token`);
+      }
     }
     const slow = `${parts.join(", ") || "partly on CPU"} - slower`;
     const extra = fromDisk ? `; ${diskNote}` : (res.mmap_ram_short && res.mmap_note ? `; ${res.mmap_note}` : "");

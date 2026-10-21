@@ -184,6 +184,8 @@ async def conversations_list(meta: bool = False, limit: int = 0, offset: int = 0
                     data = json.loads(p.read_text(encoding="utf-8"))
                     data["id"] = p.stem
                     rows.append(data)
+            except FileNotFoundError:
+                continue
             except Exception as e:
                 unreadable.append(p.stem)
                 _log_unreadable(p, e)
