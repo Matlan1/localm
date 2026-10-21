@@ -1069,6 +1069,7 @@ def test_clip_text_matches_clip_lowercasing(family):
     assert out.lower() == text.lower()
     assert [c for c in out if c.isascii()] == [c for c in text if c.isascii()]
     assert families.clip_text("İ", family) == "İ".lower()
+    assert families.clip_text("ΟΔΟΣ ΚΑΙ ΣΑ", family) == "οδος και σα"
 
 
 @pytest.mark.parametrize("family", ["flux", "sd3", "wan2.1", "qwen-image", None])

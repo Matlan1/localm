@@ -256,7 +256,16 @@ def clip_text(text: str, family: Optional[str]) -> str:
     families get *text* unchanged. See test_clip_text_matches_clip_lowercasing."""
     if family not in UNET_FAMILIES or text.isascii():
         return text
-    return "".join(c.lower() if ord(c) > 127 else c for c in text)
+    low = text.lower()
+    out = []
+    for i, c in enumerate(text):
+        if ord(c) < 128:
+            out.append(c)
+        elif c == "Σ":
+            out.append(low[len(text[:i].lower())])
+        else:
+            out.append(c.lower())
+    return "".join(out)
 
 
 def capabilities(info: FileInfo) -> dict:

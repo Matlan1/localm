@@ -713,3 +713,30 @@ def test_a_real_non_ascii_music_model_path_maps_to_an_ascii_name_of_the_same_fil
         return
     assert mapped.text_encoder.isascii() and os.path.samefile(mapped.text_encoder, f)
     assert mapped.lm is None
+
+
+@pytest.mark.skipif(sys.platform != "win32" or not os.environ.get("ProgramFiles"),
+                    reason="short (8.3) names are Windows-only")
+def test_the_short_path_of_a_folder_with_a_short_name_is_its_ascii_8dot3_form():
+    import ctypes
+    long = os.environ["ProgramFiles"]
+    buf = ctypes.create_unicode_buffer(1024)
+    n = ctypes.windll.kernel32.GetShortPathNameW(long, buf, 1024)
+    if not n or buf.value == long:
+        pytest.skip(f"{long} has no short name on this system")
+    short = music._short_path(long)
+    assert short == buf.value
+    assert short.isascii() and "~" in short and " " not in short
+    assert os.path.samefile(short, long)
+    assert os.path.abspath(short) == short
+
+
+def test_prepare_refuses_a_non_ascii_model_path_before_installing_the_runtime(monkeypatch):
+    monkeypatch.setattr(music.sys, "platform", "win32")
+    monkeypatch.setattr(music, "_short_path", lambda p: p)
+    monkeypatch.setattr(music, "resolve_models", lambda *a, **k: UMLAUT_MODELS)
+    monkeypatch.setattr(music, "backend_order", lambda choice: ["vulkan"])
+    monkeypatch.setattr(music, "_ensure_runtime",
+                        lambda *a, **k: pytest.fail("the runtime was installed first"))
+    with pytest.raises(music.ModelError, match="short"):
+        music.prepare({}, "vulkan")

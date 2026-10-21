@@ -72,15 +72,16 @@ def _short_path(path: str) -> str:
     if not size:
         return path
     buf = ctypes.create_unicode_buffer(size)
-    return buf.value if fn(path, buf, size) else path
+    return buf.value if 0 < fn(path, buf, size) < size else path
 
 
 def runtime_paths(models: server.ModelSet) -> server.ModelSet:
     """*models* with every path the music runtime can open on Windows: a path
     with non-ASCII characters becomes its ASCII short (8.3) form, because
     KoboldCpp's music loaders read a path in the ANSI code page. Raises
-    :class:`ModelError` naming the file when it has no ASCII short form (the
-    drive keeps no short names). Unchanged on other platforms.
+    :class:`ModelError` naming the file when it has no ASCII short form (for
+    example on a drive that keeps no short names). Unchanged on other
+    platforms.
     See test_a_non_ascii_music_model_path_is_given_to_the_runtime_in_short_form."""
     if sys.platform != "win32":
         return models
@@ -93,7 +94,7 @@ def runtime_paths(models: server.ModelSet) -> server.ModelSet:
         if not short.isascii():
             raise ModelError(
                 f"the music runtime cannot open {path}: its path has characters outside "
-                "ASCII and the drive keeps no short (8.3) name for it. Keep the music "
+                "ASCII and Windows gives no ASCII short (8.3) name for it. Keep the music "
                 "model files in a folder whose path is ASCII only (set them in the Music "
                 "settings), or move the localm data folder to such a path.")
         fields[name] = short
@@ -114,8 +115,8 @@ def prepare(native_cfg: dict, choice: str, *, plan: bool = True,
     :class:`Cancelled`."""
     say = on_progress or (lambda _m: None)
     backend = backend_order(choice)[0]
-    models = resolve_models(native_cfg, use_lm=plan, pull_missing=False,
-                            on_progress=say, cancel_check=cancel_check)
+    models = runtime_paths(resolve_models(native_cfg, use_lm=plan, pull_missing=False,
+                                          on_progress=say, cancel_check=cancel_check))
     _ensure_runtime(backend, say, cancel_check)
     return backend, models
 
