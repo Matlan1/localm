@@ -1645,6 +1645,7 @@ def test_a_promised_reply_beside_another_without_a_ceiling(made):
 def test_a_promised_reply_cancelled_after_it_grew_frees_its_cells(made):
     ctx = _SimContext(capacity=256, n_ctx_max=1100, grow=256, vram_fits=lambda t: t <= 768)
     ctx.step_choice = _take_step
+    ctx.step_delay = 0.002
     sched = made(ctx, 2)
     stream = sched.submit(PROMPTS[0], 1000, _Sampler())
     got = [next(stream) for _ in range(UNLIMITED_STEP + 100)]
