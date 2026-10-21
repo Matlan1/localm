@@ -249,12 +249,14 @@ class ExllamaWorker:
         except Exception as e:
             logger.debug("exllama worker: chat-template token count failed (%s); "
                          "using an estimate", type(e).__name__)
-        text = " ".join(
-            m.get("content") if isinstance(m.get("content"), str)
-            else " ".join(p.get("text", "") for p in (m.get("content") or [])
-                          if p.get("type") == "text")
-            for m in messages)
-        return max(1, len(text) // 4)
+        pieces: list[str] = []
+        for m in messages:
+            content = m.get("content")
+            if isinstance(content, str):
+                pieces.append(content)
+            elif isinstance(content, list):
+                pieces.extend(str(p.get("text", "")) for p in content if p.get("type") == "text")
+        return max(1, len(" ".join(pieces)) // 4)
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         raise NotImplementedError("EXL2 and EXL3 models do not produce embeddings in localm")
