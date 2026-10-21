@@ -522,3 +522,22 @@ def test_two_missing_models_never_share_a_pull_name():
     names = [m["source"]["name"] for m in nw.resolve(wf, "image", {})["missing"]]
     assert sorted(names, key=str) == ["ae", None] or sorted(names, key=str) == [None, "ae"]
     assert names.count("ae") == 1
+
+
+def test_an_unexpected_error_in_a_stored_file_is_listed_not_raised(monkeypatch):
+    nw.save_workflow("image", _wf(name="Broken"))
+    nw.save_workflow("image", _wf(name="Fine"))
+    real = nw.parse_workflow
+
+    def flaky(data, media):
+        if isinstance(data, dict) and data.get("name") == "Broken":
+            raise TypeError("unexpected shape")
+        return real(data, media)
+
+    monkeypatch.setattr(nw, "parse_workflow", flaky)
+    with _client() as c:
+        r = c.get("/api/image/native-workflows")
+        assert r.status_code == 200, r.text
+        user = {w["id"]: w for w in r.json()["workflows"] if not w["builtin"]}
+        assert "unexpected shape" in user["Broken"]["error"] and "error" not in user["Fine"]
+        assert c.get("/api/image/native-workflows/Broken").status_code == 400
