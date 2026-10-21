@@ -540,3 +540,18 @@ def test_discover_without_a_problems_list_still_skips_quietly(tmp_path, monkeypa
     _make_skill(root, "locked")
     _deny_locked_skill_md(monkeypatch)
     assert [s.name for s in S.discover_skills(tmp_path)] == ["good"]
+
+
+def test_agent_init_reports_an_unreadable_skill_on_stderr_not_stdout(
+        tmp_path, monkeypatch, clean_registry, capsys):
+    """`--output-format json` prints one JSON document on stdout; a warning
+    raised while the agent starts must not precede it there."""
+    root = tmp_path / ".localcoder" / "skills"
+    _make_skill(root, "good")
+    _make_skill(root, "locked")
+    _deny_locked_skill_md(monkeypatch)
+    from localm.plugins.coder.agent import Agent
+    Agent(_StubBackend(), cwd=tmp_path)
+    captured = capsys.readouterr()
+    assert "locked" in captured.err, captured
+    assert "locked" not in captured.out, captured.out

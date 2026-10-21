@@ -229,7 +229,7 @@ def _viewable_agent_browsers(request: Request) -> list:
     except Exception:                      # noqa: BLE001
         return []                          # no identity: show nothing
     found = []
-    for info in mgr.list(principal=principal, is_owner=is_owner):
+    for info in mgr.list(principal=principal, is_owner=is_owner, reap=False):
         sess = mgr.get(info.get("id"))
         if sess is None:
             continue

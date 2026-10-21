@@ -554,3 +554,45 @@ def test_create_chat_completion_hands_the_ranges_to_the_tokenizer():
     assert expected, "the fixture must produce ranges or this proves nothing"
     assert tok.encode.called, "the chat path never tokenised"
     assert tok.encode.call_args.kwargs.get("untrusted_ranges") == expected
+
+
+# --------------------------------------------------------------------------- #
+#  The reported prompt token count follows the same marking                    #
+# --------------------------------------------------------------------------- #
+
+def _worker_count(native, messages):
+    """What GgufWorker.count_messages_tokens reports for *messages*."""
+    from types import SimpleNamespace
+
+    from localm.inference.backends.llamacpp._worker import GgufWorker
+
+    worker = GgufWorker.__new__(GgufWorker)
+    worker._llm = SimpleNamespace(
+        _model_ptr=object(), is_encoder_decoder=False,
+        tokenize=lambda text, add_bos=True, untrusted_ranges=():
+            _tokenizer().encode(text, add_bos=add_bos,
+                                untrusted_ranges=untrusted_ranges))
+    with native.patches()[0], native.patches()[1], native.patches()[2]:
+        return worker.count_messages_tokens(messages)
+
+
+def test_the_counted_prompt_tokens_match_the_marked_encode():
+    head, tail = _fenced()
+    guarded = compose(head, untrusted_span(ATTACK), tail)
+    messages = [{"role": "user", "content": guarded}]
+    native = FakeNative()
+    with native.patches()[0], native.patches()[1], native.patches()[2]:
+        prompt, reason = _apply_model_template(object(), messages)
+        ranges = _untrusted_prompt_ranges(object(), messages, prompt, reason)
+        ids = _tokenizer().encode(prompt, add_bos=True, untrusted_ranges=ranges)
+
+    assert ranges
+    assert _worker_count(FakeNative(), messages) == len(ids)
+
+
+def test_a_forged_marker_in_an_untrusted_span_costs_more_than_a_special_token():
+    head, tail = _fenced()
+    marked = [{"role": "user", "content": compose(head, untrusted_span(ATTACK), tail)}]
+    unmarked = [{"role": "user", "content": head + neutralise(ATTACK) + tail}]
+
+    assert _worker_count(FakeNative(), marked) > _worker_count(FakeNative(), unmarked)

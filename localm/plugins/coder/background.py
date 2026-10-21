@@ -812,6 +812,10 @@ class AgentJob(BackgroundJob):
         # Promote a child-raised exception to the job's own error field.
         if result and result.get("error") and not error:
             error, state = result["error"], "failed"
+        # A child that returned its failure (max_turns, circuit breaker) did not
+        # complete its task: the job is "failed", with no error text.
+        elif state == "done" and result and result.get("ok") is False:
+            state = "failed"
         try:
             super()._finish(state, result, error)
         finally:

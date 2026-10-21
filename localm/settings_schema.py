@@ -13,6 +13,7 @@ own section.
 
 from __future__ import annotations
 
+import json
 import math
 import re
 from dataclasses import dataclass
@@ -1355,10 +1356,29 @@ def _to_number(key: str, val, *, want_int: bool, lo, hi):
 
 def _to_str_list(key: str, val):
     if isinstance(val, str):
-        return [s.strip() for s in val.split(",") if s.strip()]
+        listed = _json_list(val)
+        if listed is not None:
+            val = listed
+        else:
+            return [s.strip() for s in val.split(",") if s.strip()]
     if isinstance(val, (list, tuple)):
         return [str(s).strip() for s in val if str(s).strip()]
     raise ValueError(f"{key}: expected a list of strings, got {val!r}")
+
+
+def _json_list(text: str):
+    """The list *text* spells as a JSON array (``["a", "b"]``), else None.
+
+    A bracketed string that is not valid JSON (an IPv6 literal such as
+    ``[::1]``) is None, so it stays a comma-separated entry."""
+    s = text.strip()
+    if not (s.startswith("[") and s.endswith("]")):
+        return None
+    try:
+        parsed = json.loads(s)
+    except ValueError:
+        return None
+    return parsed if isinstance(parsed, list) else None
 
 
 def _validate_key_presets(val):

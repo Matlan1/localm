@@ -2262,8 +2262,10 @@ class LlamaCpp:
 
     # Tokenisation (public helpers used by tests / introspection)
 
-    def tokenize(self, text: str, add_bos: bool = True) -> list[int]:
-        return self._tokenizer.encode(text, add_bos=add_bos)
+    def tokenize(self, text: str, add_bos: bool = True,
+                 untrusted_ranges=()) -> list[int]:
+        return self._tokenizer.encode(text, add_bos=add_bos,
+                                      untrusted_ranges=untrusted_ranges)
 
     def detokenize(self, tokens: Iterable[int]) -> str:
         # Join the raw token bytes first, then decode once, so a multibyte

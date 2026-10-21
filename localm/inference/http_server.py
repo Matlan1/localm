@@ -1979,7 +1979,7 @@ def _coder_sessions_using(name: str) -> list[str]:
     if mgr is None:
         return []
     try:
-        infos = mgr.list(is_owner=True)
+        infos = mgr.list(is_owner=True, reap=False)
     except Exception:
         return []
     return [f"a coder session in {info.get('cwd') or info.get('id')}"

@@ -37,7 +37,7 @@ class TestReadFileSlicing:
         assert r.ok
         assert "line 40" in r.output and "line 42" in r.output
         assert "line 39" not in r.output and "line 43" not in r.output
-        assert "<lines>40-42 of 101</lines>" in r.output
+        assert "<lines>40-42 of 100</lines>" in r.output
 
     def test_offset_without_limit_reads_to_end(self, big):
         r = tool_read_file(big, "big.txt", offset=99)
@@ -81,7 +81,7 @@ class TestReadFileTruncationNamesTheMissingLines:
         assert r.truncated
         assert "line 0100" in r.output and "line 0901" in r.output
         assert "line 0101" not in r.output.split("[file truncated")[0]
-        assert "lines 101-900 of 1001 are missing" in r.output
+        assert "lines 101-900 of 1000 are missing" in r.output
         assert "offset=101" in r.output
         assert "re-read specific parts" in r.output
 
@@ -92,12 +92,12 @@ class TestReadFileTruncationNamesTheMissingLines:
         # 48-character lines: the 4000-character head stops 16 characters into
         # line 84, and the tail (from character 44000) starts 32 characters
         # into line 917, so both of those lines are cut short.
-        assert "lines 84-917 of 1001 are missing" in r.output
+        assert "lines 84-917 of 1000 are missing" in r.output
 
     def test_a_truncated_slice_names_file_line_numbers(self, forty):
         r = tool_read_file(forty, "f.txt", offset=200, limit=400)
         assert r.truncated
-        assert "lines 300-499 of 1001 are missing" in r.output
+        assert "lines 300-499 of 1000 are missing" in r.output
         assert "offset=300" in r.output
 
 
@@ -287,3 +287,30 @@ class TestEditNotebookCell:
         (tmp_path / "a.py").write_text("x = 1", encoding="utf-8")
         r = tool_edit_notebook_cell(tmp_path, "a.py", 0, "x")
         assert not r.ok and "Not a notebook" in r.output
+
+
+
+class TestLineCountIsWhatWcReports:
+    """A final newline ends the last line; it does not start another."""
+
+    def test_a_thousand_line_file_is_a_thousand_lines(self, tmp_path):
+        (tmp_path / "t.txt").write_text("x\n" * 1000, encoding="utf-8")
+        r = tool_read_file(tmp_path, "t.txt")
+        assert "<lines>1000</lines>" in r.output
+        assert "1000 lines" in r.summary
+
+    def test_a_file_without_a_final_newline_counts_its_last_line(self, tmp_path):
+        (tmp_path / "t.txt").write_text("a\nb\nc", encoding="utf-8")
+        assert "<lines>3</lines>" in tool_read_file(tmp_path, "t.txt").output
+
+    def test_an_offset_one_past_the_last_line_is_refused(self, tmp_path):
+        (tmp_path / "t.txt").write_text("a\nb\n", encoding="utf-8")
+        r = tool_read_file(tmp_path, "t.txt", offset=3)
+        assert not r.ok
+        assert "(2 lines)" in r.output
+
+    def test_write_file_reports_the_lines_it_wrote(self, tmp_path):
+        from localm.plugins.coder.tools import tool_write_file
+        r = tool_write_file(tmp_path, "w.txt", "a\nb\n")
+        assert r.ok
+        assert "(2 lines)" in r.output

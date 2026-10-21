@@ -58,7 +58,9 @@ def _render_notebook(nb: dict) -> str:
 
 
 def _line_count(text: str) -> int:
-    return text.count("\n") + 1
+    """Lines in *text* as ``wc -l`` counts them: a final newline ends the last
+    line instead of starting another. An empty text is one empty line."""
+    return text.count("\n") + (0 if text.endswith("\n") else 1)
 
 
 def _closest_snippet(text: str, old: str, min_score: float = 0.55) -> str:
