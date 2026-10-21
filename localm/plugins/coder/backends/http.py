@@ -15,7 +15,7 @@ from __future__ import annotations
 import os
 import threading
 import time
-from typing import Callable, Iterator, Optional
+from typing import TYPE_CHECKING, Any, Callable, Iterator, Optional
 
 import requests
 
@@ -180,21 +180,22 @@ class _PerThread:
     set. Holds the state of the request a thread made last, so agents that
     share one backend on different threads never read each other's."""
 
-    def __init__(self, default):
+    def __init__(self, default: Any) -> None:
         self._default = default
 
     def __set_name__(self, owner, name):
         self._slot = name
 
-    def __get__(self, obj, owner=None):
+    def __get__(self, obj: Any, owner: Any = None) -> Any:
         if obj is None:
             return self
         local = obj.__dict__.get("_per_thread")
         if local is None or not hasattr(local, self._slot):
-            return dict(self._default) if isinstance(self._default, dict) else self._default
+            default: Any = self._default
+            return dict(default) if isinstance(default, dict) else default
         return getattr(local, self._slot)
 
-    def __set__(self, obj, value):
+    def __set__(self, obj: Any, value: Any) -> None:
         local = obj.__dict__.get("_per_thread")
         if local is None:
             local = obj.__dict__.setdefault("_per_thread", threading.local())
@@ -242,9 +243,14 @@ class HTTPBackend(BaseLLMBackend):
     reports no context window, the agent budgets against the configured
     ``n_ctx`` instead of not compacting ahead of the server's refusal."""
 
-    _last_usage = _PerThread({})
-    last_reply_compacted = _PerThread(False)
-    _last_reasoning = _PerThread("")
+    if TYPE_CHECKING:
+        _last_usage: dict
+        last_reply_compacted: bool
+        _last_reasoning: str
+    else:
+        _last_usage = _PerThread({})
+        last_reply_compacted = _PerThread(False)
+        _last_reasoning = _PerThread("")
 
     def __init__(
         self,
@@ -285,7 +291,7 @@ class HTTPBackend(BaseLLMBackend):
             from localm import tls
             verify = tls.requests_verify(base_url)
         self._verify = verify
-        self._last_usage: dict = {}
+        self._last_usage = {}
         # True when the server compacted the conversation of the last request
         # to fit its context window (so last_usage counts the compacted prompt).
         self.last_reply_compacted = False
@@ -293,7 +299,7 @@ class HTTPBackend(BaseLLMBackend):
         # non-streaming counterpart of chat_stream's on_reasoning callback - see
         # last_reasoning. Never mixed into chat()/chat_stream()'s returned or
         # yielded text.
-        self._last_reasoning: str = ""
+        self._last_reasoning = ""
         self.native_tools  = native_tools
         # Anthropic speaks the Messages API (/v1/messages, x-api-key,
         # anthropic-version, content-block responses) - NOT the OpenAI
