@@ -147,6 +147,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the data folder, so "delete saved data" never removed them. They now go to `cache/cuda` inside it.
   A location you set yourself with `CUDA_CACHE_PATH` is used as you set it. Files already in the old
   location are left where they are.
+- **Native music works when the model files sit in a folder with non-ASCII characters on Windows.**
+  KoboldCpp could not open music model files whose path held characters such as ü, ö or ß (in the
+  localm data folder or a user name, for example), and the failure was reported as "the vulkan
+  backend did not start" before a retry on the CPU. localm now hands KoboldCpp the file's short
+  Windows name. On a drive that keeps no short names, the job stops before starting and says which
+  file to move to a folder whose path is ASCII only.
+- **Stable Diffusion 1.x, 2.x and SDXL read capital umlauts and other non-ASCII capitals in a
+  prompt as their CLIP text encoders were trained to.** "Ölbaum" now reaches the model as
+  "ölbaum", as the original CLIP tokenizer lowercases it; before, capital non-ASCII letters were
+  split into unrelated byte tokens. Textual-inversion trigger words with such letters still match.
+  Models with case-sensitive text encoders (FLUX, SD3, Wan and others) get the prompt unchanged.
+- **`localm add <file>.safetensors --type upscaler` registers the upscaler.** It was refused as an
+  incomplete model.
 - **The built-in image backend decodes on the GPU with the Vulkan runtime.** On a GPU whose Vulkan
   driver limits a single buffer (2 GB on an AMD Radeon RX 6900 XT, for example), the final image decode of a larger
   image (FLUX at 1024x1024, for example) ran on the CPU and took about three minutes. localm now

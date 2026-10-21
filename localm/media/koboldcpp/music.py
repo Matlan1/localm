@@ -60,7 +60,9 @@ def backend_order(choice: str) -> list[str]:
 
 def _short_path(path: str) -> str:
     """The Windows short (8.3) form of the existing file *path*, or *path* when
-    the system returns none."""
+    the system returns none or this is not Windows."""
+    if sys.platform != "win32":
+        return path
     import ctypes
     from ctypes import wintypes
     fn = ctypes.windll.kernel32.GetShortPathNameW
