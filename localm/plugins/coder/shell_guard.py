@@ -1301,36 +1301,59 @@ def _git_config_risky(text: str) -> bool:
     return False
 
 
-def _read_text(path: str) -> str:
-    with open(path, encoding="utf-8", errors="replace") as fh:
-        return fh.read()
+def _network_path(path: str) -> bool:
+    """True for a UNC, device or other double-slash path."""
+    return path.replace("\\", "/").startswith("//")
 
 
-def _repo_config_risky(dotgit: str, base: str) -> bool:
+def _repo_config_risky(dotgit: str, base: str, root: str) -> bool:
     """:func:`_git_config_risky` over every local config file of the repository
     whose ``.git`` entry is *dotgit* in directory *base*, its submodules'
     (under ``modules/``) included; a ``gitdir:`` file and a ``commondir`` are
-    followed. True when one cannot be read."""
-    gitdir = dotgit
-    if os.path.isfile(dotgit):
-        first = _read_text(dotgit).strip()
+    followed. Only files whose resolved path lies in the project *root* are
+    read: a target outside it is not looked at, and a network or device
+    target makes the answer True without being touched. True when a file
+    cannot be read."""
+    prefix = os.path.realpath(root).rstrip(os.sep) + os.sep
+    real = os.path.realpath(dotgit)
+    if not real.startswith(prefix):
+        return False
+    gitdirs = [real]
+    if os.path.isfile(real):
+        with open(real, encoding="utf-8", errors="replace") as fh:
+            first = fh.read().strip()
         if not first.lower().startswith("gitdir:"):
             return True
         target = first[len("gitdir:"):].strip()
-        gitdir = target if os.path.isabs(target) else os.path.join(base, target)
-    gitdirs = [gitdir]
-    common = os.path.join(gitdir, "commondir")
-    if os.path.isfile(common):
-        target = _read_text(common).strip()
-        gitdirs.append(target if os.path.isabs(target) else os.path.join(gitdir, target))
+        if _network_path(target):
+            return True
+        gitdirs = [target if os.path.isabs(target) else os.path.join(base, target)]
     configs = []
-    for g in gitdirs:
-        configs += [os.path.join(g, "config"), os.path.join(g, "config.worktree")]
-        for top, _dirs, files in os.walk(os.path.join(g, "modules")):
+    seen: set[str] = set()
+    while gitdirs:
+        real = os.path.realpath(gitdirs.pop())
+        if not real.startswith(prefix) or real in seen:
+            continue
+        seen.add(real)
+        configs += [os.path.join(real, "config"), os.path.join(real, "config.worktree")]
+        for top, _dirs, files in os.walk(os.path.join(real, "modules")):
             configs += [os.path.join(top, f) for f in files
                         if f in ("config", "config.worktree")]
-    return any(os.path.lexists(path) and _git_config_risky(_read_text(path))
-               for path in configs)
+        common = os.path.join(real, "commondir")
+        if os.path.isfile(common):
+            with open(common, encoding="utf-8", errors="replace") as fh:
+                target = fh.read().strip()
+            if _network_path(target):
+                return True
+            gitdirs.append(target if os.path.isabs(target) else os.path.join(real, target))
+    for path in configs:
+        real = os.path.realpath(path)
+        if not real.startswith(prefix) or not os.path.isfile(real):
+            continue
+        with open(real, encoding="utf-8", errors="replace") as fh:
+            if _git_config_risky(fh.read()):
+                return True
+    return False
 
 
 def _git_runs_programs(start: str, root: str) -> bool:
@@ -1343,7 +1366,7 @@ def _git_runs_programs(start: str, root: str) -> bool:
         dotgit = os.path.join(d, ".git")
         try:
             if os.path.lexists(dotgit):
-                return _repo_config_risky(dotgit, d)
+                return _repo_config_risky(dotgit, d, root)
         except (OSError, ValueError):
             return True
         parent = _canon(posixpath.dirname(d))

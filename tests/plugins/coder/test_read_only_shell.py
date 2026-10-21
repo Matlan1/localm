@@ -201,6 +201,36 @@ def test_git_config_is_found_through_a_gitdir_file_and_a_nested_repo(tmp_path):
     assert is_read_only("git status", proj) is False
 
 
+def test_a_gitdir_outside_the_project_is_not_read(tmp_path, monkeypatch):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    outside = tmp_path / "elsewhere-w20"
+    outside.mkdir()
+    (outside / "config").write_text("[core]\n\tfsmonitor = ./hook.sh\n", encoding="utf-8")
+    (proj / ".git").write_text(f"gitdir: {outside.as_posix()}\n", encoding="utf-8")
+    opened = []
+    real_open = open
+    monkeypatch.setattr("builtins.open",
+                        lambda f, *a, **k: opened.append(str(f)) or real_open(f, *a, **k))
+    assert is_read_only("git status", proj) is True
+    assert opened and not any("elsewhere-w20" in f for f in opened)
+
+
+@pytest.mark.parametrize("target", ["//w20-no-such-host/share/.git",
+                                    _BS * 2 + "w20-no-such-host" + _BS + "share",
+                                    _BS * 2 + "?" + _BS + "C:" + _BS + "x"])
+def test_a_network_gitdir_is_refused_without_being_touched(tmp_path, monkeypatch, target):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / ".git").write_text("gitdir: " + target + "\n", encoding="utf-8")
+    resolved = []
+    real_realpath = os.path.realpath
+    monkeypatch.setattr(os.path, "realpath",
+                        lambda p, *a, **k: resolved.append(str(p)) or real_realpath(p, *a, **k))
+    assert is_read_only("git status", proj) is False
+    assert not any("w20-no-such-host" in p or "?" in p for p in resolved)
+
+
 def test_a_submodule_config_that_runs_programs_is_not_read_only(tmp_path):
     proj = tmp_path / "proj"
     sub = proj / ".git" / "modules" / "lib"
