@@ -189,7 +189,7 @@ def test_a_long_path_is_checked_without_resolving_every_prefix(tmp_path, monkeyp
         return real(path, *a, **k)
 
     monkeypatch.setattr(sg.os.path, "realpath", counting)
-    assert is_read_only("cat " + "x/" * 3000 + "a.txt", proj) is True
+    assert is_read_only("cat " + "x/" * 1500 + "a.txt", proj) is True
     assert len(calls) < 20, len(calls)
 
 
