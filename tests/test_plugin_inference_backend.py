@@ -230,20 +230,19 @@ class TestPluginLifecycle:
         assert isinstance(create_backend(str(_exl2_dir(tmp_path))), HFBackend)
         assert backend_registry.registered() == []
 
-    def test_lazy_plugin_load_under_the_engine_load_lock(self, tmp_path):
+    def test_lazy_plugin_load_takes_no_engine_load_lock(self, tmp_path):
         from localm.inference.engine import _LOAD_LOCK, create_backend
         _make_backend_plugin(tmp_path / "home" / "plugins")
         _enable("fakeexl")
         d = _exl2_dir(tmp_path)
         out: list = []
-
-        def run():
-            with _LOAD_LOCK:
-                out.append(create_backend(str(d)))
-        t = threading.Thread(target=run, daemon=True)
-        t.start()
+        t = threading.Thread(target=lambda: out.append(create_backend(str(d))), daemon=True)
+        with _LOAD_LOCK:
+            t.start()
+            t.join(timeout=60)
+            blocked = t.is_alive()
         t.join(timeout=60)
-        assert not t.is_alive(), "create_backend deadlocked under the engine load lock"
+        assert not blocked, "the lazy plugin load waited for the engine load lock"
         assert type(out[0]).__name__ == "Made"
 
 
