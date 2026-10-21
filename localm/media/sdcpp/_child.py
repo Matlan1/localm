@@ -449,9 +449,10 @@ def _do_attention_rate(payload) -> Optional[float]:
         raise RuntimeError("no stable-diffusion.cpp runtime is loaded")
     rates = [b.attention_rate(lib, Path(payload["runtime_dir"]), name)
              for name, _desc in b.list_devices(lib) if name.upper() != "CPU"]
-    if not rates or any(r is None for r in rates):
+    known = [r for r in rates if r is not None]
+    if not rates or len(known) != len(rates):
         return None
-    return min(rates)
+    return min(known)
 
 
 def _set_embeddings(b, params, embeddings):

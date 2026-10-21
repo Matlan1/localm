@@ -20,7 +20,7 @@ import sys
 from ctypes import (POINTER, Structure, c_bool, c_char_p, c_float, c_int,
                     c_int64, c_size_t, c_uint8, c_uint32, c_uint64, c_void_p)
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from . import pins, sampling
 
@@ -778,7 +778,7 @@ def attention_rate(lib, runtime_dir: Path, device_name: str) -> Optional[float]:
     after :func:`load_library`."""
     import time
     handles = _ggml_handles(lib, runtime_dir)
-    fn = {name: _ggml_fn(handles, name, restype, *argtypes) for name, restype, argtypes in (
+    found = {name: _ggml_fn(handles, name, restype, *argtypes) for name, restype, argtypes in (
         ("ggml_init", c_void_p, (_GgmlInitParams,)),
         ("ggml_free", None, (c_void_p,)),
         ("ggml_new_tensor_3d", c_void_p, (c_void_p, _enum, c_int64, c_int64, c_int64)),
@@ -796,8 +796,9 @@ def attention_rate(lib, runtime_dir: Path, device_name: str) -> Optional[float]:
         ("ggml_backend_buffer_free", None, (c_void_p,)),
         ("ggml_backend_graph_compute", _enum, (c_void_p, c_void_p)),
     )}
-    if any(f is None for f in fn.values()):
+    if any(f is None for f in found.values()):
         return None
+    fn: dict[str, Any] = found
     dev = fn["ggml_backend_dev_by_name"](device_name.encode("utf-8"))
     if not dev:
         return None

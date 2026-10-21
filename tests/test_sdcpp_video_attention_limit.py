@@ -9,7 +9,6 @@ VAE decode, and the HunyuanVideo VAE decode is tiled under the limit."""
 from __future__ import annotations
 
 import queue
-import threading
 
 import pytest
 
@@ -17,7 +16,7 @@ from localm.media.sdcpp import _binding as b
 from localm.media.sdcpp import _child, attention, runner as sd_runner, vaetile
 from localm.media.sdcpp.runner import SdWorkerError
 
-from tests.test_sdcpp_vae_decode_tiling import GIB, _Lib, _generate, _generate_video
+from tests.test_sdcpp_vae_decode_tiling import GIB, _generate, _generate_video
 
 RX6900XT_VULKAN_RATE = 0.455e12
 WAN13 = attention.video_attention("Wan 2.x", "Wan2.1-T2V-1.3B")
