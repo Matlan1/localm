@@ -419,6 +419,17 @@ class TestWorkflow:
         push = next(s for s in steps if s.get("id") == "push")
         assert 'if [ "$PUSH" = "true" ]; then' in push["run"]
 
+    def test_attest_logs_in_to_ghcr_before_pushing_the_attestation(self):
+        steps = _workflow()["jobs"]["attest"]["steps"]
+        names = [s.get("name") for s in steps]
+        attest = next(s for s in steps if s.get("uses", "").startswith("actions/attest-build-provenance@"))
+        assert attest["with"]["push-to-registry"] is True
+        assert names.index("Log in to GHCR") < steps.index(attest)
+        login = steps[names.index("Log in to GHCR")]
+        assert "docker login ghcr.io" in login["run"]
+        assert "--password-stdin" in login["run"]
+        assert login["env"]["REGISTRY_TOKEN"] == "${{ secrets.GITHUB_TOKEN }}"
+
     def test_every_backend_is_built_published_and_attested(self):
         wf = _workflow()
         expected = ["cpu", "vulkan", "cuda", "cuda13"]

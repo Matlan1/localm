@@ -475,6 +475,9 @@ export async function applyImportedParams(result) {
   put("img-size", p.width && p.height ? `${p.width}x${p.height}` : null);
   if (!own && (p.prompt === undefined || p.prompt === null)) skipped.push("prompt");
   if (p.steps !== undefined && p.steps !== null && !put("img-steps", p.steps)) skipped.push("steps");
+  if (!own && p.clip_skip !== undefined && p.clip_skip !== null && !put("img-clip-skip", p.clip_skip)) {
+    skipped.push("clip skip");
+  }
   if (own) {
     imageGen.set(p);
   } else {
@@ -521,7 +524,7 @@ export async function importParamsFromFile(file) {
   let data = null;
   try { data = await r.json(); } catch { /* reported below by status */ }
   if (!r.ok) throw new Error((data && data.detail) || r.statusText);
-  const skipped = await applyImportedParams(data);
+  const skipped = [...(await applyImportedParams(data)), ...(data.unsupported || [])];
   const source = IMPORT_SOURCES.has(data.source) ? t(`images.import.source.${data.source}`) : data.source;
   toast(skipped.length
     ? t("images.import.doneSkipped", { source, items: skipped.join(", ") })

@@ -157,6 +157,62 @@ def test_a_failure_after_the_recovery_still_shows_its_lines(debug_log):
     assert said == [TILES, f"stable-diffusion.cpp: {TILE_FAILED}"]
 
 
+def test_a_retry_that_changes_the_mode_is_not_announced_as_a_first_failure(debug_log):
+    said, relay = _relay()
+    relay.line("VAE decode ran out of memory; retrying with temporal tiling --- backend_fit.cpp:523")
+    relay.line("VAE decode ran out of memory; retrying with spatial+temporal tiling "
+               "--- backend_fit.cpp:523")
+    assert said == ["Not enough VRAM to decode in one piece; decoding in time slices.",
+                    "Still not enough VRAM; decoding in tiles and time slices."]
+
+
+def test_a_decode_after_sampling_resumes_gets_the_first_message_again(debug_log):
+    said, relay = _relay()
+    relay.line("VAE decode ran out of memory; retrying with temporal tiling --- backend_fit.cpp:523")
+    relay.sampling()
+    relay.line("VAE decode ran out of memory; retrying with spatial+temporal tiling "
+               "--- backend_fit.cpp:523")
+    assert said == ["Not enough VRAM to decode in one piece; decoding in time slices.",
+                    "Not enough VRAM to decode in one piece; decoding in tiles and time slices."]
+
+
+SAMPLING_FAILED = ("diffusion model compute failed --- diffusion_engine.cpp:2725")
+SAMPLING_FAILED_2 = ("Diffusion model sampling failed --- diffusion_engine.cpp:2730 "
+                     "failed after 5.72s")
+
+
+@pytest.mark.parametrize("module", [image_native, video_native])
+def test_a_cancel_does_not_print_the_workers_failure_lines(debug_log, module):
+    said, cancelled = [], [False]
+    relay = module._event_relay(said.append, None, lambda: cancelled[0])
+    cancelled[0] = True
+    relay(("log", 4, SAMPLING_FAILED))
+    relay(("log", 4, SAMPLING_FAILED_2))
+    relay.flush()
+    assert said == []
+    assert debug_log.lines == [f"sd.cpp: {SAMPLING_FAILED}", f"sd.cpp: {SAMPLING_FAILED_2}"]
+
+
+@pytest.mark.parametrize("module", [image_native, video_native])
+def test_the_same_failure_lines_are_shown_when_nothing_was_cancelled(debug_log, module):
+    said = []
+    relay = module._event_relay(said.append, None, lambda: False)
+    relay(("log", 4, SAMPLING_FAILED))
+    relay(("log", 4, SAMPLING_FAILED_2))
+    relay.flush()
+    assert said == [f"stable-diffusion.cpp: {SAMPLING_FAILED}",
+                    f"stable-diffusion.cpp: {SAMPLING_FAILED_2}"]
+
+
+def test_held_precursors_are_dropped_with_a_cancel(debug_log):
+    said, cancelled = [], [False]
+    relay = logrelay.RecoveredWarnings(said.append, lambda: cancelled[0])
+    relay.line(NO_MEMORY)
+    cancelled[0] = True
+    relay.flush()
+    assert said == []
+
+
 @pytest.mark.parametrize("module", [image_native, video_native])
 def test_the_backend_relays_collapse_the_recovery_and_flush_on_end(debug_log, module):
     said = []

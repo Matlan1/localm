@@ -110,6 +110,13 @@ WAN21_VAE = {"conv1.weight": (32, 32, 1, 1, 1), "conv2.weight": (16, 16, 1, 1, 1
 WAN22_VAE = dict(WAN21_VAE, **{"conv2.weight": (48, 48, 1, 1, 1)})
 FLUX_LORA = {"lora_unet_double_blocks_0_img_attn_proj.lora_down.weight": (2, 3072),
              "lora_unet_double_blocks_0_img_attn_proj.lora_up.weight": (3072, 2)}
+XLABS_FLUX_LORA = {
+    "double_blocks.0.processor.proj_lora1.down.weight": (16, 3072),
+    "double_blocks.0.processor.proj_lora1.up.weight": (3072, 16),
+    "double_blocks.0.processor.proj_lora2.down.weight": (16, 3072),
+    "double_blocks.0.processor.proj_lora2.up.weight": (3072, 16),
+    "double_blocks.0.processor.qkv_lora1.down.weight": (16, 3072),
+    "double_blocks.0.processor.qkv_lora1.up.weight": (9216, 16)}
 SDXL_LORA = {"lora_te1_text_model_encoder_layers_0_mlp_fc1.lora_down.weight": (4, 768),
              "lora_unet_input_blocks_4_1_proj_in.lora_down.weight": (4, 640)}
 SDXL_UNET_LORA_CROSS_ATTN = {
@@ -162,6 +169,7 @@ WAN22_5B_LORA = {"diffusion_model.blocks.0.cross_attn.k.lora_down.weight": (128,
     (WAN21_VAE, "st", None, "vae", "wan2.1"),
     (WAN22_VAE, "st", None, "vae", "wan2.2"),
     (FLUX_LORA, "st", None, "lora", "flux"),
+    (XLABS_FLUX_LORA, "st", None, "lora", "flux"),
     (SDXL_LORA, "st", None, "lora", "sdxl"),
     (SDXL_UNET_LORA_CROSS_ATTN, "st", None, "lora", "sdxl"),
     (SDXL_UNET_LORA_DEPTH, "st", None, "lora", "sdxl"),
@@ -268,10 +276,19 @@ def flux_set(tmp_path):
         "aidma-flux": (write_safetensors(d / "aidmaNSFWunlock-FLUX-V0.2.safetensors", FLUX_LORA),
                        "lora"),
         "sdxl-style": (write_safetensors(d / "sdxl_style.safetensors", SDXL_LORA), "lora"),
+        "xlabs-realism": (write_safetensors(d / "xlabs_realism.safetensors", XLABS_FLUX_LORA),
+                          "lora"),
     }
     for name, (path, mtype) in files.items():
         _register(name, path, mtype)
     return {k: v[0] for k, v in files.items()}
+
+
+def test_the_xlabs_flux_lora_is_offered_as_a_lora_not_as_a_flux_model(flux_set):
+    from localm.media.sdcpp import pairing
+    opts = pairing.native_options("image")
+    assert "xlabs-realism" not in {m["name"] for m in opts["models"]}
+    assert "xlabs-realism" in {m["name"] for m in opts["loras"]}
 
 
 def test_a_flux_model_alone_gets_its_encoders_and_vae_from_the_registry(flux_set):

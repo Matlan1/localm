@@ -827,7 +827,7 @@ def sanitize_comfy_url_checked(url: str) -> tuple:
             from localm.debuglog import logger
             logger.warning(
                 "comfy_api_url %r targets a link-local/metadata address; ignoring "
-                "it and using the loopback default (CHK-COMFY-APIURL)", url)
+                "it and using the loopback default", url)
             return _COMFY_LOOPBACK_DEFAULT, (
                 f"comfy_api_url {url!r} targets a link-local/metadata address; "
                 f"ignoring it and using the loopback default instead")
@@ -840,7 +840,7 @@ def sanitize_comfy_url_checked(url: str) -> tuple:
         from localm.debuglog import logger
         logger.warning(
             "comfy_api_url %r could not be validated (%s); ignoring it and "
-            "using the loopback default (CHK-COMFY-APIURL)", url, e)
+            "using the loopback default", url, e)
         return _COMFY_LOOPBACK_DEFAULT, (
             f"comfy_api_url {url!r} could not be validated ({e}); ignoring it "
             f"and using the loopback default instead")
