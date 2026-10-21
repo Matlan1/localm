@@ -466,10 +466,6 @@ def resolve_embedding_model_path(*, allow_download: Optional[bool] = None,
         logger.warning("%s; fetching it again", damaged)
     result = _download_known(spec, repo, filename, dest, allow_download,
                              on_progress=on_progress)
-    if damaged and not result:
-        _record_resolve_failure(
-            spec, f"{damaged}, and it could not be fetched again "
-                  f"({last_error() or 'no reason recorded'})")
     if result:
         _record_resolve_success(spec)
     return result
