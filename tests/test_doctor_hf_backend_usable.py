@@ -459,3 +459,63 @@ def test_missing_dist_metadata_does_not_turn_a_broken_module_into_not_installed(
         "goes unreported")
     assert "transformers (HF backend) - not installed" not in buf.getvalue(), (
         "an imported-but-broken module was reported as not installed")
+
+
+# --------------------------------------------------------------------------- #
+#  A torch that raises ImportError is installed, not "not installed"           #
+# --------------------------------------------------------------------------- #
+
+_TORCH_RAISES = "raise ImportError(\"simulated: cannot import name 'cuda'\")\n"
+
+
+def _console_to_buffer(monkeypatch):
+    buf = io.StringIO()
+    monkeypatch.setattr(doctor_mod, "console",
+                        Console(file=buf, force_terminal=False, width=400))
+    return buf
+
+
+def test_a_torch_whose_import_raises_is_reported_as_unimportable_with_a_worker_line(
+        fake_hf, monkeypatch):
+    from localm.inference.backends.llamacpp import _loader
+    monkeypatch.setattr(_loader, "native_lib_loaded", lambda: False)
+    fake_hf(torch_src=_TORCH_RAISES)
+    buf = _console_to_buffer(monkeypatch)
+
+    modules = doctor_mod._check_packages()
+    doctor_mod._check_hf_backend_usable(modules.get("torch"),
+                                        modules.get("transformers"))
+
+    out = buf.getvalue()
+    torch_line = next(line for line in out.splitlines() if "torch (HF backend" in line)
+    assert "installed but cannot be imported" in torch_line
+    assert "cannot import name 'cuda'" in torch_line
+    assert "not installed" not in torch_line
+    assert "UNUSABLE" in out and "cannot import name 'cuda'" in out
+
+
+def test_a_torch_that_is_absent_is_still_called_not_installed(fake_hf, monkeypatch):
+    from localm.inference.backends.llamacpp import _loader
+    monkeypatch.setattr(_loader, "native_lib_loaded", lambda: False)
+    monkeypatch.setitem(sys.modules, "torch", None)
+    buf = _console_to_buffer(monkeypatch)
+
+    modules = doctor_mod._check_packages()
+
+    torch_line = next(line for line in buf.getvalue().splitlines()
+                      if "torch (HF backend" in line)
+    assert torch_line.rstrip().endswith("not installed")
+    assert modules["torch"] is None
+
+
+def test_the_vram_probe_does_not_call_a_broken_torch_not_installed(fake_hf, monkeypatch):
+    from localm.inference.backends.llamacpp import _loader
+    monkeypatch.setattr(_loader, "native_lib_loaded", lambda: False)
+    fake_hf(torch_src=_TORCH_RAISES)
+    buf = _console_to_buffer(monkeypatch)
+
+    assert doctor_mod._check_vram_torch() is False
+
+    out = buf.getvalue()
+    assert "torch is installed but cannot be imported" in out
+    assert "torch not installed" not in out

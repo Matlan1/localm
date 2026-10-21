@@ -66,6 +66,22 @@ def test_the_pinned_release_publishes_the_arm64_cuda_assets_the_resolver_names()
     assert CUDART in sl._PINNED_FALLBACK_SHA256
 
 
+@pytest.mark.parametrize("caps,arch,expected", [
+    ([(8, 7)], "arm64", "vulkan"),
+    ([(9, 0)], "arm64", "vulkan"),
+    ([], "arm64", "vulkan"),
+    ([(12, 0)], "arm64", "cuda"),
+    ([(8, 6), (10, 0)], "arm64", "cuda"),
+    ([(8, 6)], "x64", "cuda"),
+])
+def test_arm64_recommendation_follows_the_gpus_cuda_line(monkeypatch, caps, arch, expected):
+    monkeypatch.setattr(hwdetect, "platform_key", lambda: "linux")
+    monkeypatch.setattr(hwdetect, "machine_arch", lambda: arch)
+    monkeypatch.setattr(hwdetect, "_cuda_compute_capabilities", lambda: caps)
+    det = hwdetect.Detection(vendors=["nvidia"], gpu_names="nvidia gpu")
+    assert hwdetect.recommended_install_backend(det) == expected
+
+
 # ------------------------------ the build ---------------------------------- #
 
 @pytest.mark.parametrize("listing", [None, []], ids=["listing", "offline"])

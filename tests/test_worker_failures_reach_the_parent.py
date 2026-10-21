@@ -26,6 +26,23 @@ def test_load_error_text(exc, text):
     assert load_error_text(exc) == text
 
 
+def test_load_error_text_shortens_a_huge_number_from_a_model_config():
+    from localm.inference.backends.llamacpp._runner import load_error_text
+    huge = "7" * 4300
+    text = load_error_text(ValueError(
+        f"The hidden size ({huge}) is not a multiple of the number of attention "
+        f"heads ({huge})."))
+    assert len(text) < 200
+    assert text.count("(4300 digits)") == 2
+    assert "ValueError: The hidden size (777777777777...(4300 digits))" in text
+
+
+def test_load_error_text_keeps_a_number_that_is_not_huge():
+    from localm.inference.backends.llamacpp._runner import load_error_text
+    assert load_error_text(ValueError("id 12345678901234567890123456789012345678 is odd")) == (
+        "ValueError: id 12345678901234567890123456789012345678 is odd")
+
+
 def _drive(main, worker_module, worker_attr, worker_cls, monkeypatch, *, hf=False):
     import localm._mp_spawn as mp_spawn
     monkeypatch.setattr(mp_spawn, "install_parent_death_watchdog", lambda *a: None)
@@ -80,6 +97,25 @@ def test_hf_load_error_envelope_keeps_the_type(monkeypatch):
     finally:
         req_q.put(None)
         t.join(timeout=5)
+
+
+def test_an_abi_mismatch_travels_as_a_runtime_failure(monkeypatch):
+    from localm.inference.backends.gguf import _load_failure_message
+    from localm.inference.backends.llamacpp import _runner, _worker
+    from localm.inference.backends.llamacpp._abi import AbiMismatch
+    req_q, resp_q, t = _drive(_runner._runner_main, _worker, "GgufWorker",
+                              _failing_worker(AbiMismatch("struct layout drifted")),
+                              monkeypatch)
+    try:
+        req_q.put(("load", {}))
+        envelope = resp_q.get(timeout=5)
+    finally:
+        req_q.put(None)
+        t.join(timeout=5)
+    assert envelope == ("error", "struct layout drifted")
+    msg = _load_failure_message(RuntimeError(envelope[1]))
+    assert "unexpected error in localm" not in msg
+    assert "struct layout drifted" in msg and "setup-llama" in msg
 
 
 def test_an_unexpected_load_error_is_not_blamed_on_the_runtime():

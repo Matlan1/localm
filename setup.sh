@@ -333,10 +333,10 @@ jr_failed() {
     say "  [!] Could not write $JOURNAL - if this setup is interrupted it cannot say where it stopped."
   fi
 }
-jr() {  # jr begin|done STEP  |  jr intend KIND PATH  |  jr complete|resume
+jr() {  # jr begin|done|abandon STEP  |  jr intend KIND PATH  |  jr complete|resume
   case "$1" in
     intend)     printf 'intend\t%s\t%s\n' "$2" "$3" ;;
-    begin|done) printf '%s\t%s\n' "$1" "$2" ;;
+    begin|done|abandon) printf '%s\t%s\n' "$1" "$2" ;;
     *)          printf '%s\n' "$1" ;;
   esac >> "$JOURNAL" 2>/dev/null || jr_failed
 }
@@ -355,6 +355,7 @@ journal_summary() {  # prints: <complete|incomplete> TAB <last finished step> TA
   journal_lines | awk -F'\t' '
     $1 == "begin"    { comp = 0; open[$2] = 1; order[++n] = $2 }
     $1 == "done"     { delete open[$2]; last = $2 }
+    $1 == "abandon"  { delete open[$2] }
     $1 == "complete" { comp = 1; for (k in open) delete open[k] }
     END { o = ""; all = ""
           for (i = 1; i <= n; i++) if (order[i] in open) { o = order[i]; if (!(o in seen)) { seen[o] = 1; all = all (all == "" ? "" : " ") o } }
@@ -508,6 +509,8 @@ if [ "$uv_present" != 1 ]; then
   UVTMP="$(mktemp -d 2>/dev/null)" || { UVTMP="$(pwd)/.uv-installer-tmp"; mkdir -p "$UVTMP"; }
   if fetch_uv_installer "$UVTMP/uv-installer.sh"; then
     sh "$UVTMP/uv-installer.sh" || true
+  else
+    jr abandon "$UVSTEP"
   fi
   rm -rf "$UVTMP"
   # uv lands in ~/.local/bin (older builds used ~/.cargo/bin) unless UV_INSTALL_DIR

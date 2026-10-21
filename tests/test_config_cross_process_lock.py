@@ -150,6 +150,50 @@ def test_cross_process_lock_times_out_on_a_live_holder(home, monkeypatch):
         lockpath.unlink()
 
 
+def test_a_lock_timeout_is_a_config_lock_timeout(home, monkeypatch):
+    monkeypatch.setattr(cfg, "_CROSS_LOCK_STALE_AGE", 3600.0)
+    monkeypatch.setattr(cfg, "_CROSS_LOCK_TIMEOUT", 0.2)
+    lockpath = cfg.CONFIG_FILE.with_name(cfg.CONFIG_FILE.name + ".lock")
+    cfg.ensure_dirs()
+    lockpath.write_text("12345", encoding="utf-8")
+    try:
+        with pytest.raises(cfg.ConfigLockTimeout):
+            cfg.update_config(lambda c: c.__setitem__("temperature", 0.5))
+    finally:
+        lockpath.unlink()
+
+
+def test_settings_write_blocked_by_another_process_answers_busy_not_500(
+        home, monkeypatch, caplog):
+    """PATCH /v1/config while another localm process holds config.json.lock
+    answers 503 with Retry-After, says nothing was saved, and logs no traceback."""
+    import logging
+
+    from fastapi.testclient import TestClient
+
+    from localm.inference.http_server import create_app
+
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+    monkeypatch.setattr(cfg, "_CROSS_LOCK_STALE_AGE", 3600.0)
+    monkeypatch.setattr(cfg, "_CROSS_LOCK_TIMEOUT", 0.3)
+    cfg.save_config({"temperature": 0.7})
+    lockpath = cfg.CONFIG_FILE.with_name(cfg.CONFIG_FILE.name + ".lock")
+    caplog.set_level(logging.WARNING, logger="localm")
+    with TestClient(create_app(None), raise_server_exceptions=False) as client:
+        lockpath.write_text("12345", encoding="utf-8")
+        try:
+            response = client.patch("/v1/config", json={"temperature": 0.2})
+        finally:
+            lockpath.unlink()
+    assert response.status_code == 503
+    assert response.headers.get("retry-after")
+    assert "busy" in response.json()["detail"]
+    assert "Internal server error" not in response.text
+    assert cfg.load_config()["temperature"] == 0.7
+    assert not [r for r in caplog.records if r.exc_info]
+
+
 def test_cross_process_lock_is_released_on_mutator_exception(home):
     """A mutator that raises must not leave the lock file behind - a failed
     write must never wedge every future writer."""

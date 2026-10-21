@@ -188,7 +188,20 @@ class PretokenizerUnsafeInputError(ValueError):
     """
 
 
-class PretokenizerUnusableModelError(RuntimeError):
+class ModelRefusedError(RuntimeError):
+    """A load refusal that is the expected answer for the file or folder it was
+    given (an unsupported format, a model that is not a chat model, a damaged
+    file), not a defect in localm. The message is final and is shown as-is;
+    the CLI prints it as a refusal and exits 1 without offering a bug report."""
+
+
+class ModelFileDamagedError(ModelRefusedError):
+    """Raised by a load when llama.cpp refused to read the model file itself
+    because its contents are malformed or incomplete. The message names the
+    file and quotes the native reader's reason."""
+
+
+class PretokenizerUnusableModelError(ModelRefusedError):
     """Raised by a load when the model declares a pre-tokenizer whose safe
     input bound falls inside ordinary prose, so the model could not hold a
     conversation and is refused up front instead of loaded.
@@ -296,14 +309,14 @@ class RerankerHeadMissingError(RuntimeError):
     arbitrary pooled embedding value rather than a relevance score."""
 
 
-class UnsupportedModelRoleError(RuntimeError):
+class UnsupportedModelRoleError(ModelRefusedError):
     """Raised by a load when the file is a model localm cannot chat with (a
     speculative-decoding draft head, an encoder-decoder model, an audio codec,
     a text-to-speech model, an image or video checkpoint). The message says
     which and is reported as-is, with no runtime-repair advice appended."""
 
 
-class AdapterLoadError(RuntimeError):
+class AdapterLoadError(ModelRefusedError):
     """Raised by a load when a LoRA adapter attached to the model cannot be
     applied: its architecture differs from the base's, its file is missing or
     unreadable, or the native loader rejected it. The message names the adapter

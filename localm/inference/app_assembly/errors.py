@@ -20,7 +20,16 @@ def register_exception_handlers(app: FastAPI) -> None:
     # audio is validated before the native path, and surfaced via the crash marker.)
     @app.exception_handler(Exception)
     async def _unhandled_error(request, exc):  # noqa: ANN001 - framework signature
+        from localm.config import ConfigLockTimeout
         from localm.debuglog import logger as _dbg
+        if isinstance(exc, ConfigLockTimeout):
+            _dbg.warning("%s %s not saved: %s", request.method, request.url.path, exc)
+            return JSONResponse(
+                status_code=503,
+                content={"detail": "localm's settings are busy: another localm "
+                                   "process is writing them. Nothing was saved; "
+                                   "try again in a moment."},
+                headers={"Retry-After": "5"})
         _dbg.exception("unhandled error: %s %s", request.method, request.url.path)
         return JSONResponse(status_code=500,
                             content={"detail": "Internal server error"})

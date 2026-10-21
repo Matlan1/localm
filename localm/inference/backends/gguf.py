@@ -28,7 +28,8 @@ from typing import TYPE_CHECKING, Callable, Iterator, Optional, Sequence
 
 from localm.console import console
 
-from .base import (AdapterLoadError, BaseBackend, ModelLoadCancelled, PerThread,
+from .base import (AdapterLoadError, BaseBackend, ModelFileDamagedError,
+                   ModelLoadCancelled, PerThread,
                    PretokenizerUnsafeInputError, PretokenizerUnusableModelError,
                    UnsupportedModelRoleError)
 from .llamacpp._runner import RunnerBusy
@@ -71,6 +72,22 @@ _CONTEXT_FAILED_MSG = "Failed to create llama context"
 # llama.cpp's own error when a GGUF names an architecture the runtime has no
 # model class for.
 _UNKNOWN_ARCH_RE = re.compile(r"unknown model architecture: '([^'\r\n]{1,64})'")
+
+
+# llama.cpp's own reasons for refusing to read a GGUF file: the gguf reader's
+# "gguf_init_from_*" lines and the loader's corrupt/incomplete-file lines.
+_DAMAGED_FILE_RE = re.compile(
+    r"(gguf_init_from_\w+: [^\r\n]{1,300}"
+    r"|[^\r\n]{0,200}(?:model is corrupted|corrupted or incomplete|"
+    r"data is not within the file bounds)[^\r\n]{0,100})")
+
+
+def _damaged_file_reason(exc: BaseException) -> Optional[str]:
+    """The native reader's one-line reason when *exc*'s text shows llama.cpp
+    refused to read the model file because its contents are malformed or
+    incomplete, else None."""
+    match = _DAMAGED_FILE_RE.search(str(exc))
+    return match.group(1).strip() if match else None
 
 
 def _load_failure_message(exc: BaseException, hint: str = "") -> str:
@@ -568,6 +585,12 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         role_refusal = gguf_chat_refusal(gguf_architecture(Path(self.model_path)))
         if role_refusal is not None:
             raise UnsupportedModelRoleError(role_refusal)
+        from localm.model_manager import gguf_is_mmproj
+        if gguf_is_mmproj(Path(self.model_path)):
+            raise UnsupportedModelRoleError(
+                f"{Path(self.model_path).name} is a vision projector (mmproj), "
+                f"not a model, so localm cannot chat with it. Load the model it "
+                f"belongs to; the projector is attached with --mmproj.")
         from localm.model_manager import gguf_adapter_chat_refusal
         adapter_refusal = gguf_adapter_chat_refusal(Path(self.model_path))
         if adapter_refusal is not None:
@@ -606,6 +629,12 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             # Propagate as-is, bypassing the load-failure handling below.
             raise
         except Exception as exc:
+            damaged = _damaged_file_reason(exc)
+            if damaged is not None:
+                raise ModelFileDamagedError(
+                    f"{Path(self.model_path).name} is damaged or not a valid "
+                    f"model file: llama.cpp could not read it ({damaged}). "
+                    f"Download it again, or use a different file.") from exc
             vram_hint = self._load_failure_vram_hint()
             split_note = getattr(self, "_split_fit_note", "")
             if split_note:

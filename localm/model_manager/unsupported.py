@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import struct
+import zipfile
 from pathlib import Path
 from typing import Optional
 
@@ -363,6 +364,28 @@ _FOLDER_MARKER_EXPLANATIONS = (
 )
 
 
+_TRUNCATED_LLAMAFILE_SENTENCE = (
+    "This looks like a llamafile that was not downloaded completely: the model "
+    "archive that a llamafile carries at its end is missing. Download it again.")
+
+# The first bytes of an Actually Portable Executable, which every llamafile is.
+_LLAMAFILE_MAGIC = b"MZqFpD"
+
+
+def _is_truncated_llamafile(path: Path) -> bool:
+    """True when *path* is named ``*.llamafile`` or starts with the llamafile
+    executable header, but is not a readable ZIP archive (a complete llamafile
+    ends in the archive that holds its model)."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(len(_LLAMAFILE_MAGIC))
+        if path.suffix.lower() != ".llamafile" and head != _LLAMAFILE_MAGIC:
+            return False
+        return not zipfile.is_zipfile(path)
+    except OSError:
+        return False
+
+
 def explain_unsupported_model(path: Path) -> Optional[str]:
     """One sentence naming the format of *path*, why localm cannot run it, and the
     nearest runnable alternative; None for a model localm can run or for anything
@@ -378,6 +401,8 @@ def explain_unsupported_model(path: Path) -> Optional[str]:
             if legacy is not None:
                 return legacy
             suffix = path.suffix.lower()
+            if _is_truncated_llamafile(path):
+                return _TRUNCATED_LLAMAFILE_SENTENCE
             if suffix in _BINARY_ONLY_SUFFIXES and not _looks_binary(path):
                 return None
             return _FILE_SUFFIX_EXPLANATIONS.get(suffix)

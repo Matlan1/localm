@@ -913,6 +913,13 @@ def _load_keystore_checked() -> tuple:
     return data, read_ok
 
 
+def keystore_readable() -> bool:
+    """False when auth.json is present but could not be read or does not hold a
+    JSON list, so an empty ``list_keys()`` there does not mean no keys exist.
+    True when the file is absent or holds a list."""
+    return _load_keystore_checked()[1]
+
+
 def _load_keystore() -> list:
     """The keystore records, or [] when the file is absent, corrupt, or
     unreadable. For a plain READ - verify(), list_keys(), fs_access_for(),
