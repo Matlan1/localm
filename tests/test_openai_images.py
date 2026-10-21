@@ -501,18 +501,21 @@ class TestAwaitJob:
         asyncio.run(run())
         assert events == [True]
 
-    def test_disconnect_cancels_a_job_that_keeps_streaming_lines(self, plug):
+    def test_disconnect_cancels_a_job_that_keeps_streaming_lines(self, plug, monkeypatch):
         import asyncio
+        import time
+        monkeypatch.setattr(plug, "JOB_POLL_SECONDS", 0.2)
         job = _FakeJob([])
 
         async def run():
             task = asyncio.ensure_future(plug._await_job(job, _FakeRequest(True)))
             await asyncio.sleep(0)
-            for n in range(150):
-                if job.cancelled:
-                    break
+            end = time.monotonic() + 2.0
+            n = 0
+            while not job.cancelled and time.monotonic() < end:
+                n += 1
                 job._queue.put_nowait({"type": "line", "text": f"step {n}"})
-                await asyncio.sleep(0.005)
+                await asyncio.sleep(0.03)
             cancelled = job.cancelled
             job._queue.put_nowait({"type": "end", "status": "cancelled"})
             try:
