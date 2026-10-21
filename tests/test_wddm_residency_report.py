@@ -330,3 +330,32 @@ class TestProcessGpuMemory:
             pytest.skip("no process holds dedicated VRAM on this machine")
         for dedicated, shared in held:
             assert dedicated >= gpu_usage._PROC_ADAPTER_MIN_DEDICATED and shared >= 0
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="pywin32 exists on Windows only")
+class TestWin32pdhWithoutSite:
+    def _run(self, code):
+        import os
+        import subprocess
+        from pathlib import Path
+        pdh = pytest.importorskip("win32pdh")
+        site_packages = Path(pdh.__file__).resolve().parent.parent
+        base = Path(sys.base_prefix) / "python.exe"
+        if not base.is_file():
+            pytest.skip("no base interpreter next to sys.base_prefix")
+        root = Path(__file__).resolve().parent.parent
+        env = dict(os.environ, PYTHONPATH=os.pathsep.join(
+            [str(root), str(site_packages), str(site_packages / "win32"),
+             str(site_packages / "win32" / "lib")]))
+        return subprocess.run([str(base), "-S", "-c", code], env=env, capture_output=True,
+                              text=True, timeout=120)
+
+    def test_the_plain_import_fails_there(self):
+        r = self._run("import win32pdh")
+        assert r.returncode != 0 and "DLL load failed" in r.stderr
+
+    def test_win32pdh_imports_without_site(self):
+        r = self._run("from localm.gpu_usage import _import_win32pdh\n"
+                      "print(_import_win32pdh().__name__)")
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.strip() == "win32pdh"

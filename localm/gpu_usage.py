@@ -441,6 +441,20 @@ def amd_whole_gpu_activity() -> Optional[float]:
     return round(max(by_bus.values()), 1)
 
 
+def _import_win32pdh():
+    """Import and return ``win32pdh`` after importing ``pywin32_bootstrap``,
+    which registers pywin32's DLL directory, also in a process whose
+    site-packages are on ``sys.path`` without ``pywin32.pth`` having run (a
+    worker started as the base interpreter). Raises what ``import win32pdh``
+    raises."""
+    try:
+        import pywin32_bootstrap  # noqa: F401
+    except ImportError:
+        pass   # the win32pdh import below reports the failure. See test_win32pdh_imports_without_site
+    import win32pdh
+    return win32pdh
+
+
 def _pdh_adapter_used() -> list:
     """Device-global used bytes per WDDM adapter instance, via the vendor-neutral
     PDH counter, or [] when unavailable.
@@ -456,7 +470,7 @@ def _pdh_adapter_used() -> list:
     if _pdh_state is not None and not _pdh_state:
         return []
     try:
-        import win32pdh
+        win32pdh = _import_win32pdh()
     except Exception as e:
         logger.debug("gpu_usage: win32pdh unavailable: %s", e)
         _pdh_state = {}
@@ -533,7 +547,7 @@ def adapter_utilisation() -> dict[str, float]:
     if _pdh_util_state is not None and not _pdh_util_state:
         return {}
     try:
-        import win32pdh
+        win32pdh = _import_win32pdh()
     except Exception as e:
         logger.debug("gpu_usage: win32pdh unavailable for utilisation: %s", e)
         _pdh_util_state = {}
@@ -612,7 +626,7 @@ def process_gpu_memory(pid: Optional[int] = None) -> Optional[tuple[int, int]]:
         if _pdh_proc_state is not None and not _pdh_proc_state:
             return None
         try:
-            import win32pdh
+            win32pdh = _import_win32pdh()
         except Exception as e:
             logger.debug("gpu_usage: win32pdh unavailable for process GPU memory: %s", e)
             _pdh_proc_state = {}
