@@ -797,6 +797,7 @@ class VramSizingMixin:
         if cached is not None:
             return cached
         charge = 0
+        self._mtp_draft_score_per_token_cached = 0
         try:
             from localm.inference.backends.llamacpp._api import (
                 MTP_GRAPH_ARCHITECTURES)
@@ -814,6 +815,8 @@ class VramSizingMixin:
             _dbg.debug("mtp draft-context VRAM probe failed (%s); charging "
                        "nothing extra for it", type(exc).__name__)
             charge = 0
+            self._mtp_draft_kv_per_token_cached = 0
+            self._mtp_draft_score_per_token_cached = 0
         self._mtp_draft_vram_bytes_cached = charge
         return charge
 
@@ -824,17 +827,22 @@ class VramSizingMixin:
         ``MTP_DRAFT_SCORE_BYTES`` per attention head per token of ``n_ctx``;
         plus ``MTP_DRAFT_COMPUTE_MARGIN_BYTES``. ``_VRAM_OVERHEAD_BYTES`` when
         the GGUF header gives no vocabulary size; the attention term is 0 when
-        it gives no head count."""
+        it gives no head count. Stores the attention term's bytes per token of
+        ``n_ctx`` in ``_mtp_draft_score_per_token_cached`` (0 when there is
+        none)."""
         from localm.model_manager.gguf import _gguf_split_layout_meta, gguf_attention_head_count
         from .llama import _MTP_DRAFT_BATCH
         meta = _gguf_split_layout_meta(path)
         n_vocab = meta[1] if meta else 0
         if not n_vocab:
+            self._mtp_draft_score_per_token_cached = 0
             return self._VRAM_OVERHEAD_BYTES
         rows = max(1, min(int(self.n_ctx), _MTP_DRAFT_BATCH))
         n_head = gguf_attention_head_count(path)
+        score_per_token = rows * n_head * MTP_DRAFT_SCORE_BYTES
+        self._mtp_draft_score_per_token_cached = score_per_token
         return (rows * int(n_vocab) * MTP_DRAFT_BYTES_PER_VOCAB_ROW
-                + rows * n_head * int(self.n_ctx) * MTP_DRAFT_SCORE_BYTES
+                + score_per_token * int(self.n_ctx)
                 + MTP_DRAFT_COMPUTE_MARGIN_BYTES)
 
     def _recurrent_state_vram_bytes(self) -> int:
@@ -1004,13 +1012,22 @@ class VramSizingMixin:
         return self._mtp_draft_context_vram_bytes() + self._draft_model_vram_bytes()
 
     def _spec_kv_per_token(self) -> int:
-        """KV bytes per token of context a draft source adds on the GPU: the MTP
-        draft context's or the draft model's while it is on the GPU, both of
-        which grow with the main one."""
+        """Bytes per token of context a draft source adds on the GPU: the MTP
+        draft context's KV cache and attention scores
+        (:meth:`_mtp_draft_score_per_token`), or the draft model's KV cache
+        while it is on the GPU, all of which grow with the main context."""
         draft = 0
         if self._draft_model_vram_bytes():
             draft = int(getattr(self, "_draft_kv_per_token_cached", 0) or 0)
-        return self._mtp_draft_kv_per_token() + draft
+        return (self._mtp_draft_kv_per_token() + self._mtp_draft_score_per_token()
+                + draft)
+
+    def _mtp_draft_score_per_token(self) -> int:
+        """The MTP draft context's attention-score bytes per token of context
+        (part of :meth:`_mtp_draft_compute_bytes`), 0 when this load has no
+        MTP draft context or the GGUF header gives no vocabulary size."""
+        self._mtp_draft_context_vram_bytes()
+        return int(getattr(self, "_mtp_draft_score_per_token_cached", 0) or 0)
 
     def _mtp_draft_kv_per_token(self) -> int:
         """Draft-context KV bytes per token of context, 0 when this load has no
