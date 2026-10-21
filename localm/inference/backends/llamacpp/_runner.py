@@ -389,7 +389,7 @@ class UnexpectedLoadError(RuntimeError):
 _LONG_DIGITS_RE = re.compile(r"\d{40,}")
 
 
-def _digits_summary(match: "re.Match[str]") -> str:
+def _digits_summary(match: re.Match[str]) -> str:
     """A run of 40 or more digits as its first 12 digits and its length."""
     run = match.group()
     return f"{run[:12]}...({len(run)} digits)"
