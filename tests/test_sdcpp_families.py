@@ -1063,11 +1063,12 @@ def _no_live_vram_budget(monkeypatch):
 
 @pytest.mark.parametrize("family", sorted(families.UNET_FAMILIES))
 def test_clip_text_matches_clip_lowercasing(family):
-    text = "Öl-Stil (ÄPFEL:1.2) BREAK Straße <lora:Ünder:1> İ"
+    text = "Öl-Stil (ÄPFEL:1.2) BREAK Straße <lora:Ünder:1>"
     out = families.clip_text(text, family)
-    assert out == "öl-Stil (äPFEL:1.2) BREAK Straße <lora:ünder:1> i̇"
+    assert out == "öl-Stil (äPFEL:1.2) BREAK Straße <lora:ünder:1>"
     assert out.lower() == text.lower()
     assert [c for c in out if c.isascii()] == [c for c in text if c.isascii()]
+    assert families.clip_text("İ", family) == "İ".lower()
 
 
 @pytest.mark.parametrize("family", ["flux", "sd3", "wan2.1", "qwen-image", None])

@@ -65,7 +65,8 @@ def _run_worker(monkeypatch, prompt: str) -> list:
     def call(name, payload, timeout):
         req.put((name, payload))
         while True:
-            kind, value = resp.get(timeout=timeout)
+            kind, *rest = resp.get(timeout=timeout)
+            value = rest[-1] if rest else None
             if kind in ("ok", "error", "budget_refused", "cancelled"):
                 assert kind == "ok", value
                 return value
