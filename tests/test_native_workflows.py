@@ -291,6 +291,16 @@ class TestResolve:
         assert m["source"]["spec"] == "Green-Sky/SD-Turbo-GGUF:sd_turbo-f16-q8_0.gguf"
         assert res["native_models"] == {} and res["params"]["steps"] == 2
 
+    def test_a_pinned_file_with_another_sha256_is_not_curated(self):
+        pin = nw.get_workflow("image", "builtin:sd-turbo")["models"]["model"]["source"]
+        wf = nw.parse_workflow(_wf(models={"model": {"name": "t", "source": dict(
+            pin, sha256="b" * 64)}}), "image")
+        (m,) = nw.resolve(wf, "image", {})["missing"]
+        assert m["source"]["origin"] == "workflow"
+        wf = nw.parse_workflow(_wf(models={"model": {"name": "t", "source": dict(pin)}}), "image")
+        (m,) = nw.resolve(wf, "image", {})["missing"]
+        assert m["source"]["origin"] == "curated"
+
     def test_a_pinned_file_from_another_repo_is_not_curated(self):
         wf = nw.parse_workflow(_wf(models={"vae": {"name": "ae", "source": _src(
             file="ae.safetensors", model_type="vae")}}), "image")
