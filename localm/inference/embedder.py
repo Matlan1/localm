@@ -372,6 +372,9 @@ def resolve_embedding_model_path(*, allow_download: Optional[bool] = None,
     (downloaded into <home>/models/embeddings if missing and the net policy allows).
     ``allow_download`` overrides the policy (used by ``localm setup-embeddings`` to
     force the fetch); default follows net_mode (auto only under 'allow').
+    ``allow_download=True`` also re-hashes an already-present known model file
+    against its pin and fetches it again when it differs; every other call
+    trusts a present file without reading it.
 
     Every failure to resolve is recorded via ``last_error()`` (see
     ``_record_resolve_failure``/``_record_resolve_success``) - including a
@@ -453,11 +456,20 @@ def resolve_embedding_model_path(*, allow_download: Optional[bool] = None,
         return None
     repo, filename = known
     dest = _embeddings_dir() / filename
+    damaged = None
     if dest.is_file():
-        _record_resolve_success(spec)
-        return str(dest)
+        damaged = _pin_mismatch(dest, _EMBEDDING_PINS.get((repo, filename))) \
+            if allow_download is True else None
+        if damaged is None:
+            _record_resolve_success(spec)
+            return str(dest)
+        logger.warning("%s; fetching it again", damaged)
     result = _download_known(spec, repo, filename, dest, allow_download,
                              on_progress=on_progress)
+    if damaged and not result:
+        _record_resolve_failure(
+            spec, f"{damaged}, and it could not be fetched again "
+                  f"({last_error() or 'no reason recorded'})")
     if result:
         _record_resolve_success(spec)
     return result
@@ -521,6 +533,18 @@ def file_sha256(path: Path) -> str:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _pin_mismatch(path: Path, pin: Optional[tuple]) -> Optional[str]:
+    """Why the file at *path* is not the file *pin* (``(commit, sha256)``)
+    names, or None when it is that file or *pin* is None."""
+    if pin is None:
+        return None
+    actual = file_sha256(path)
+    if actual == pin[1].lower():
+        return None
+    return (f"the embedding model file {path.name} has sha256 {actual}, not the "
+            f"pinned {pin[1]}")
 
 
 def _download_pinned(name: str, repo: str, filename: str, dest: Path,

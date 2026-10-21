@@ -1383,6 +1383,26 @@ def _mmproj_reuse_confirmed(dest: Path, repo_id: str, candidate: str,
     return None
 
 
+def _mmproj_recorded_only_from(dest: Path, repo_id: str) -> bool:
+    """True when at least one registry entry records *dest* (as its file or its
+    projector) and every such entry was pulled from ``hf:<repo_id>``: the file is
+    that repo's own, so a digest that differs from the repo's published one means
+    it is damaged or outdated, not another repo's projector of the same name."""
+    sources = []
+    for info in _mm.load_registry().values():
+        for field in ("path", "mmproj"):
+            recorded = _mm._entry_path(info, field) if isinstance(info, dict) else None
+            if recorded is None:
+                continue
+            try:
+                same = Path(recorded).resolve() == dest.resolve()
+            except OSError:
+                continue
+            if same:
+                sources.append(str(info.get("source") or ""))
+    return bool(sources) and all(s == f"hf:{repo_id}" for s in sources)
+
+
 def _mmproj_download_dest(base_dir: Path, candidate: str, repo_id: str,
                           model_path: "Path | None") -> "tuple[Path | None, bool]":
     """Where to place *candidate* (a vision projector from *repo_id*) under
@@ -1394,13 +1414,24 @@ def _mmproj_download_dest(base_dir: Path, candidate: str, repo_id: str,
     projector - in which case the first free ``<candidate stem>-<n>.gguf`` is
     returned instead, and the occupied file is never read from beyond that
     one comparison or written to; it may be another entry's own correctly
-    recorded projector. Returns ``(None, False)`` when every numbered name up
-    to ``_MAX_MMPROJ_COLLISION_SUFFIX`` is also taken."""
+    recorded projector. When the occupied file differs from the digest the repo
+    publishes and the registry records it only from *repo_id* itself, it is that
+    repo's own damaged or outdated copy: it is deleted and the plain name is
+    returned for a fresh download. Returns ``(None, False)`` when every
+    numbered name up to ``_MAX_MMPROJ_COLLISION_SUFFIX`` is also taken."""
     dest = base_dir / candidate
     if not dest.exists():
         return dest, False
-    if _mmproj_reuse_confirmed(dest, repo_id, candidate, model_path) is not False:
+    confirmed = _mmproj_reuse_confirmed(dest, repo_id, candidate, model_path)
+    if confirmed is not False:
         return dest, True
+    if _mm._hf_file_sha256(repo_id, candidate) and _mmproj_recorded_only_from(dest, repo_id):
+        from rich.markup import escape
+        console.print(
+            f"[yellow]{escape(dest.name)} does not match the digest {escape(repo_id)} "
+            "publishes - deleted, fetching it again.[/yellow]")
+        dest.unlink(missing_ok=True)
+        return dest, False
     stem, suffix = Path(candidate).stem, Path(candidate).suffix
     for n in range(2, _MAX_MMPROJ_COLLISION_SUFFIX + 1):
         free = base_dir / f"{stem}-{n}{suffix}"
@@ -2478,14 +2509,24 @@ def _pull_hf_snapshot(
         logger.debug("could not fetch file listing for %s (%s); falling back "
                      "to a config.json-only completeness check", repo_id, e)
 
+    repairing = False
     if dest.exists() and _snapshot_is_complete(dest, repo_siblings, repo_id):
-        console.print(f"[yellow]Already downloaded:[/yellow] {escape(model_name)}")
-        _mm._register_with_dedup(model_name, dest, f"hf:{repo_id}",
-                                 model_type=_resolve_snapshot_type(dest, model_type))
-        return True
+        damaged = (_snapshot_files_failing_digest(dest, repo_siblings, repo_id)
+                   if repo_siblings is not None else [])
+        if not damaged:
+            console.print(f"[yellow]Already downloaded:[/yellow] {escape(model_name)}")
+            _mm._register_with_dedup(model_name, dest, f"hf:{repo_id}",
+                                     model_type=_resolve_snapshot_type(dest, model_type))
+            return True
+        repairing = True
+        shown = ", ".join(escape(n) for n in damaged[:3]) + (" ..." if len(damaged) > 3 else "")
+        console.print(
+            f"[yellow]{len(damaged)} file(s) of {escape(model_name)} do not match the "
+            f"digests Hugging Face publishes ({shown}) - deleted, fetching them again."
+            "[/yellow]")
 
     # Same repo already pulled under a different name?
-    if not redownload:
+    if not redownload and not repairing:
         reg = _mm.load_registry()
 
         def _is_same_repo(info) -> bool:
