@@ -59,6 +59,10 @@ _CLICKED_WINDOW_TTL = 30.0
 #: Windows opened by a click that are remembered while they load.
 _CLICKED_WINDOW_CAP = 32
 
+#: Seconds the address of any window a page opened is remembered, to name a
+#: window that is only reported once its load has failed.
+_OPENED_WINDOW_TTL = 120.0
+
 #: Milliseconds allowed for attaching a DevTools session to a page, for the
 #: window watch and for the screencast.
 _PAGE_SETUP_MS = 10000
@@ -162,6 +166,7 @@ class BrowserSession:
         self._page_lock = asyncio.Lock()
         #: (url, expiry) for each window a click opened that has not yet loaded.
         self._clicked_windows: list = []
+        self._opened_windows: list = []
         #: time.monotonic() of the last click or key press sent to the page.
         self._last_input = float("-inf")
         #: Clicks and key presses currently being sent to the page.
@@ -428,6 +433,9 @@ class BrowserSession:
         one within _INPUT_ACTIVATION seconds. See
         test_a_gesture_flag_without_recent_input_is_not_a_click."""
         now = time.monotonic()
+        opened = [(u, t) for (u, t) in self._opened_windows if t > now]
+        opened.append((str(params.get("url") or ""), now + _OPENED_WINDOW_TTL))
+        self._opened_windows = opened[-_CLICKED_WINDOW_CAP:]
         if not params.get("userGesture"):
             return
         if not self._inputs_in_flight and now - self._last_input > _INPUT_ACTIVATION:
@@ -446,6 +454,23 @@ class BrowserSession:
                 return True
         return False
 
+    def _window_name(self, shown: str) -> str:
+        """The address to record for a window the browser reports as *shown*.
+
+        A window whose load failed is reported as a chrome-error page, and one
+        still blank has no address yet; both are named by the oldest remembered
+        window address the page asked for. Any other URL is its own name."""
+        now = time.monotonic()
+        live = [(u, t) for (u, t) in self._opened_windows if t > now]
+        self._opened_windows = live
+        for i, (opened, _expiry) in enumerate(live):
+            if opened == shown:
+                del live[i]
+                return shown
+        if (shown.startswith("chrome-error:") or shown == "about:blank") and live:
+            return live.pop(0)[0] or shown
+        return shown
+
     async def _on_new_page(self, page) -> None:
         """Show a loaded window that a click opened, in place of the page before
         it. Close any other new window and record it as refused.
@@ -460,10 +485,12 @@ class BrowserSession:
                     return
                 url = page.url
                 if url.startswith("chrome-error:"):
-                    self._refuse(url, "a new window the page opened did not "
-                                      "load, so it was closed", kind="window")
+                    self._refuse(self._window_name(url),
+                                 "a new window the page opened did not "
+                                 "load, so it was closed", kind="window")
                     await self._close_quietly(page)
                 elif self._take_clicked_window(url):
+                    self._window_name(url)
                     if url == "about:blank":
                         await self._await_navigation(page)
                         if page.is_closed():
@@ -476,8 +503,9 @@ class BrowserSession:
                     self._note("showing the new window %s in place of %s, "
                                "which was closed" % (page.url, previous_url))
                 else:
-                    self._refuse(url, "the page opened a new window without a "
-                                      "click, so it was closed", kind="window")
+                    self._refuse(self._window_name(url),
+                                 "the page opened a new window without a "
+                                 "click, so it was closed", kind="window")
                     await self._close_quietly(page)
         except Exception as exc:                     # noqa: BLE001
             logger.warning("browser %s could not handle a new window: %s",

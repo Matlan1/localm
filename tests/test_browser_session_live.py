@@ -597,6 +597,33 @@ def test_a_window_opened_without_a_click_is_closed(browser, origin):
     assert "click" in refused()[0]["reason"], refused()
 
 
+def test_a_scripted_window_that_does_not_load_is_recorded_by_its_address(
+        browser, origin, monkeypatch):
+    import socket
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    dead_port = probe.getsockname()[1]
+    probe.close()
+    target = "http://127.0.0.1:%d/popup-target" % dead_port
+    monkeypatch.setitem(_PAGES, "/scripted-dead", (
+        b"<html><body>scripted<script>setTimeout(()=>window.open('"
+        + target.encode() + b"'),300);</script></body></html>"))
+    port = origin.server_address[1]
+    _set(net_mode="allow", net_allow_private=True)
+    b = browser()
+    start = "http://localhost:%d/scripted-dead" % port
+    assert b.navigate(start)["ok"] is True
+
+    def refused():
+        return [x for x in b.blocked_requests() if x["url"] == target]
+    _wait_until(lambda: refused() and len(_pages(b)[0]) == 1)
+    urls, _driven = _pages(b)
+    assert urls == [start], "open pages: %r" % (urls,)
+    assert refused(), (
+        "the closed window was not recorded by its address: %r" % (b.blocked_requests(),))
+    assert "did not load" in refused()[0]["reason"], refused()
+
+
 def test_a_shown_window_that_closes_itself_leaves_a_working_page(browser, origin):
     port = origin.server_address[1]
     _set(net_mode="allow", net_allow_private=True)

@@ -126,7 +126,29 @@ permanent public record of what shipped and are never rewritten; the in-progress
   next request fits in it.
 
 ### Fixed
+- **`localm config pinned_models '["a"]'` pins `a`.** A JSON list typed on the command line was
+  stored as one model name with the brackets and quotes in it, so nothing was pinned. A list
+  setting given as JSON text is now read as that list.
+- **`localm coder --output-format json` prints only the JSON on stdout.** A warning about an
+  unreadable skill, a plugin tool or an MCP server printed ahead of the document; startup
+  warnings go to stderr.
+- **The coder counts the lines of a file the way `wc -l` does.** A file of 1000 lines was
+  reported as 1001 in `read_file`'s header and cut-off notice, and in `write_file`'s "(N lines)".
+- **A background sub-agent that ran out of turns is listed as failed.** The session's job list
+  showed it as done while the report to the model said it did not complete.
+- **The prompt token count follows how fetched text is read.** A request that marks part of its
+  text as untrusted reported the count of a prompt in which that text's control tokens were
+  parsed, which is not how it is read.
+- **A scheduled job does not run a web search written inside a thought that never closes.** The
+  chat already ignored it; a reply cut off mid-thought no longer triggers a lookup.
+- **Listing the coder's sessions no longer stalls the server.** Closing a session that had been
+  idle for a day (its browser, its checkpoint) ran inside the request and froze every other
+  request until it finished.
+- **The browser names a blocked popup by its address.** A window a page opened to an address that
+  did not answer was listed as blocked under an internal error page's address instead of its own.
+- **Pulling a whole Hugging Face folder works again.** `localm pull <owner>/<repo>` for a full model folder failed when the download finished, with "'MeterBar' object has no attribute 'set_description_str'", under the huggingface-hub release localm now installs.
 - **A ComfyUI that hangs on its port is named at once.** After a GPU crash a ComfyUI that localm did not launch can keep its port and stop answering. `localm comfy restart` and any generation that needs ComfyUI now say right away which process holds the port (its pid and name) and that localm will not stop it, instead of relaunching into the held port and waiting five minutes; `localm comfy status` shows the same line.
+- **Closing the connection during image generation stops the job.** A client that went away from `/v1/images/generations` while the job was reporting progress did not cancel it, because the check only ran while the job was silent. The job is now cancelled within a second of the disconnect.
 - **Closing the connection during text-to-speech stops the job.** A client that went away while `/v1/audio/speech` was synthesising did not cancel the job, because the check only ran while the job was silent. The job is now cancelled within a second of the disconnect.
 - **`localm update` exits non-zero when it fails.** A refused update (bad signature, unreadable trust file, failed apply), a failed update check and a failed `--rollback` printed their message and exited 0, so a script could not tell the update had not happened.
 - **`localm doctor` no longer tells you to reinstall the voice extra after a slow first run.** When the recording-decode check does not finish in 60 seconds (common right after an install) doctor says it could not tell and to run it again; the reinstall advice stays for a real decode failure.
@@ -334,6 +356,25 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **`localm image`, `video` and `music` no longer ask "Open it now?" when input is `NUL`.** On
   Windows the null device passed for a terminal.
 - **The message for a refused ComfyUI address no longer ends with an internal tag.**
+- **`/web` with no model loaded says so before it searches.** It used to run the search and then
+  show a raw "Model parameter is required" error; it now gives the same "No model loaded" answer
+  as a plain send, and a send made while a model is still loading says which model is loading.
+- **A page reloaded while a model is loading follows the load.** The sidebar shows "loading
+  <model>" and checks again every 2 seconds, instead of showing "No model loaded" and refusing
+  sends for up to 30 seconds.
+- **A plugin installed with `localm plugin install` while the GUI is running works at once.**
+  Its routes are mounted the next time the page reads the plugin list, so `/web` no longer
+  answers "Method Not Allowed" until a restart.
+- **A plugin's tab opens right after you install it.** The tab entry used to appear before the
+  plugin's page was loaded, and clicking it showed Chat until a reload.
+- **`localm key create` warns when no owner key is set.** The new key turns authentication on, so
+  the GUI asks for a key and the scoped key is the only one that exists; the note says to run
+  `localm key generate` first.
+- **`localm serve` and `localm gui` no longer start with a speech-to-text model.** With no model
+  named, a registered model whose name or file name has a standalone `asr`, `whisper` or `stt`
+  word (Qwen3-ASR) is picked only when no other model is eligible.
+- **The usage line explains why MTP is off on a turn with audio.** It used to show the raw reason
+  word.
 
 ### Changed
 

@@ -806,6 +806,23 @@ def _untrusted_prompt_ranges(tokenizer, template_messages, text,
     return map_untrusted_ranges(spans, per_message)
 
 
+def _segment_token_ids(tokenizer, text, ranges):
+    """Token ids of *text*, each trust segment tokenised on its own with special
+    tokens split inside the untrusted ranges only."""
+    from localm.textguard import split_by_trust
+
+    ids = []
+    for segment, is_untrusted in split_by_trust(text, ranges):
+        if not segment:
+            continue
+        ids.extend(tokenizer(
+            segment,
+            add_special_tokens=False,
+            split_special_tokens=bool(is_untrusted),
+        )["input_ids"])
+    return ids
+
+
 def _tokenize_prompt(tokenizer, template_messages, text, device, *,
                      template_kwargs=None, prompt=None):
     """Tokenise *prompt* (default *text*), splitting special tokens inside
@@ -836,19 +853,9 @@ def _tokenize_prompt(tokenizer, template_messages, text, device, *,
     if not ranges:
         return plain()
 
-    from localm.textguard import split_by_trust
-
     try:
         import torch
-        ids = []
-        for segment, is_untrusted in split_by_trust(final, ranges):
-            if not segment:
-                continue
-            ids.extend(tokenizer(
-                segment,
-                add_special_tokens=False,
-                split_special_tokens=bool(is_untrusted),
-            )["input_ids"])
+        ids = _segment_token_ids(tokenizer, final, ranges)
         if not ids:
             return plain()
         input_ids = torch.tensor([ids], dtype=torch.long)
@@ -1751,6 +1758,10 @@ class HFWorker:
                     text = self._tokenizer.apply_chat_template(
                         template_messages, tokenize=False, add_generation_prompt=True
                     )
+                ranges = _untrusted_prompt_ranges(
+                    self._tokenizer, template_messages, text)
+                if ranges:
+                    return len(_segment_token_ids(self._tokenizer, text, ranges))
                 return len(self._tokenizer.encode(text, add_special_tokens=False))
             except Exception as e:
                 # Surface under --debug (mirroring count_tokens above): the

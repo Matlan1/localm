@@ -16,7 +16,7 @@ abort only ever kills this process, never the server."""
 from __future__ import annotations
 
 import threading
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, cast
 
 from localm.inference.backends.base import PerThread
 
@@ -378,7 +378,7 @@ class GgufWorker(VramSizingMixin):
         llm = self._llm
         if llm is not None and getattr(llm, "is_encoder_decoder", False):
             return len(llm.encoder_tokens(messages))
-        from .llama import _apply_model_template
+        from .llama import _apply_model_template, _untrusted_prompt_ranges
         text_messages = []
         for m in messages:
             content = m.get("content")
@@ -396,7 +396,14 @@ class GgufWorker(VramSizingMixin):
         prompt, _fallback_reason = _apply_model_template(self._llm._model_ptr, text_messages)
         bos_markers = ("<bos>", "<s>", "﻿")
         add_bos = not any(prompt.startswith(m) for m in bos_markers)
-        return len(self._llm.tokenize(prompt, add_bos=add_bos))
+        if llm is None:
+            raise RuntimeError("no model is loaded")
+        untrusted_ranges = _untrusted_prompt_ranges(
+            cast(int, llm._model_ptr), text_messages, prompt, _fallback_reason)
+        if untrusted_ranges:
+            return len(llm.tokenize(
+                prompt, add_bos=add_bos, untrusted_ranges=untrusted_ranges))
+        return len(llm.tokenize(prompt, add_bos=add_bos))
 
     def check_grammar(self, grammar: str) -> None:
         """Raises InvalidGrammarError for a malformed GBNF string - see

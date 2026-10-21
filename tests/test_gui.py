@@ -1941,6 +1941,21 @@ class TestModelEndpoints:
         assert data["active"] == ""
         assert "resumable" not in data
 
+    def test_models_reports_the_model_whose_load_is_in_flight(self):
+        """A page loaded mid-load reads `loading` to tell "still loading" from "no
+        model", and the key is absent when no load is running."""
+        from localm.inference import http_server as _hs
+        app = self._app_with_no_active_model()
+        with patch("localm.config.load_registry", return_value=_FAKE_REGISTRY),              patch.object(_hs, "_switch_loading", "model-a"):
+            with TestClient(app) as client:
+                loading = client.get("/api/models").json()
+        with patch("localm.config.load_registry", return_value=_FAKE_REGISTRY),              patch.object(_hs, "_switch_loading", None):
+            with TestClient(app) as client:
+                idle = client.get("/api/models").json()
+        assert loading["loading"] == "model-a"
+        assert loading["active"] == ""
+        assert "loading" not in idle
+
     def test_models_filter_by_type(self, gui_app):
         # The `type` query param must resolve its annotation and validate at
         # request time. Under `from __future__ import annotations`, an annotation
