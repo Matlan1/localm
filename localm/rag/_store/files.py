@@ -15,7 +15,8 @@ from localm.rag import store as _st
 from .cache import (_COLLECTION_CACHE, _Snapshot, _cache_key, _copy_json,
                     _files_changing, _freeze_snapshot)
 from .sidecar import _REJECTED_VECTORS
-from .vectors import _first_dim, _vectors_finite, _well_formed_vectors
+from .vectors import (_first_dim, _vectors_finite, _warn_numpy_degrade,
+                      _well_formed_vectors)
 
 
 #: Warn-once keys already logged in THIS process: vector degrades
@@ -272,7 +273,8 @@ class _CollectionFiles:
                     norms = np.where(norms == 0, 1.0, norms)
                     normalized = mat / norms
                     self._norm_matrix = np.where(np.isfinite(normalized), normalized, 0.0)
-            except Exception:
+            except Exception as e:
+                _warn_numpy_degrade(e, "matrix scoring")
                 self._norm_matrix = None
 
     def _min_cached_nbytes(self) -> int:

@@ -1199,7 +1199,8 @@ class MCPStdioServer:
             try:
                 msg = json.loads(line)
             except (ValueError, RecursionError):
-                _log("skipping non-JSON input line")
+                _log("replying -32700 to an input line that is not parseable JSON")
+                self._write(self._error(None, -32700, "Parse error: the line is not valid JSON"))
                 continue
             # A JSON-RPC payload may be a single request object or a batch
             # array; a bare scalar / null is invalid. handle() replies -32600

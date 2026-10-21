@@ -290,7 +290,8 @@ class TestLoadCarriesTheChoice:
         engine = object.__new__(Engine)
         engine._backend = b
         assert engine.gpu_placement == {"gpu_layers_offloaded": 4, "gpu_layers_total": 4,
-                                        "degraded": True, "moe_cpu_layers": 2}
+                                        "degraded": True, "moe_cpu_layers": 2,
+                                        "moe_ram_read_bytes": 52500}
 
     def test_a_skipped_override_reports_no_experts_in_ram(self, tmp_path):
         b = _backend(_moe_model(tmp_path))

@@ -301,6 +301,9 @@ def describe_gpu_placement(placement: dict) -> str:
     moe = placement.get("moe_cpu_layers")
     if isinstance(moe, int) and moe > 0:
         text += f", routed experts of {moe} layers in system RAM"
+        read = placement.get("moe_ram_read_bytes")
+        if isinstance(read, int) and read > 0:
+            text += f" (about {read / 1024 ** 3:.2f} GB read from RAM per token)"
     return text
 
 
@@ -491,6 +494,9 @@ class Engine:
         }
         if moe:
             placement["moe_cpu_layers"] = moe
+            read = getattr(self._backend, "moe_ram_read_bytes", None)
+            if isinstance(read, int) and read > 0:
+                placement["moe_ram_read_bytes"] = read
         return placement
 
     def full_offload_vram_bytes(self) -> Optional[int]:
