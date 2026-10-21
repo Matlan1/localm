@@ -576,6 +576,8 @@ test("web OFF: a tool-shaped reply is NOT intercepted (no web rounds run)", asyn
 async function runSlashWeb(webResults, query = "price of bitcoin today") {
   const { impl, calls } = recordingFetch(webResults);
   const { window } = loadApp({ fetchImpl: impl });
+  await new Promise((r) => setTimeout(r, 300));          // let the boot model refresh settle
+  runScript(window, "modelCache.active = 'm';");
   window.maybeCompactConversation = async () => {};
   window.readSSE = async (_r, onData) => {
     for (const d of content("answer")) onData(JSON.stringify(d));

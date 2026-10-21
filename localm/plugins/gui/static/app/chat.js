@@ -2002,7 +2002,7 @@ export function mtpUsageText(mtp) {
              title: t("chat.usage.mtpPaused.title", { steps: mtp.paused_steps || 0 }) };
   }
   if (mtp.state === "off") {
-    const why = { image: "chat.usage.mtpOff.image" }[mtp.reason];
+    const why = { image: "chat.usage.mtpOff.image", audio: "chat.usage.mtpOff.audio" }[mtp.reason];
     return { text: t("chat.usage.mtpOff"),
              title: why ? t(why) : t("chat.usage.mtpReason", { reason: mtp.reason || "" }) };
   }

@@ -122,4 +122,4 @@ class TestReadFileEmptyWithRange:
         (tmp_path / "three.txt").write_text("a\nb\nc\n", encoding="utf-8")
         r = tool_read_file(tmp_path, "three.txt", offset=2, limit=2)
         assert r.ok is True
-        assert "<lines>2-3 of 4</lines>" in r.output
+        assert "<lines>2-3 of 3</lines>" in r.output

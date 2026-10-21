@@ -1702,26 +1702,42 @@ export function onVoicePick() {
 /** Load client-side plugin modules: for each ACTIVE plugin that ships a
  *  client_entry, import it and call register(ctx). Failures are isolated so a
  *  broken plugin module never breaks chat. */
-export async function loadClientPlugins() {
-  let plugins = [];
-  try {
-    // /api/capabilities (not /api/plugins) so client-entry modules load for a
-    // scoped key too, and ONLY the plugins this key's scopes grant are imported.
-    const r = await fetch("/api/capabilities", { headers: authHeaders() });
-    if (r.ok) plugins = (await r.json()).plugins || [];
-  } catch {
-    return; // server unreachable; the built-in browser voice still works
+const _clientPluginLoads = new Map();   // plugin name -> its import + register() promise
+
+function _loadClientPlugin(p, ctx) {
+  if (!_clientPluginLoads.has(p.name)) {
+    const base = p.assets_base || `/plugins/${p.name}`;
+    _clientPluginLoads.set(p.name, (async () => {
+      try {
+        const mod = await import(`${base}/${p.client_entry}`);
+        if (mod && typeof mod.register === "function") await mod.register(ctx);
+      } catch (e) {
+        console.error(`client plugin ${p.name} failed to load`, e);
+      }
+    })());
+  }
+  return _clientPluginLoads.get(p.name);
+}
+
+/** Import and register the client entry of every active plugin in *plugins*
+ *  (the /api/capabilities list; fetched when omitted) that has not been loaded
+ *  in this page yet. Settles when each of them has finished loading. */
+export async function loadClientPlugins(plugins) {
+  if (!plugins) {
+    plugins = [];
+    try {
+      // /api/capabilities (not /api/plugins) so client-entry modules load for a
+      // scoped key too, and ONLY the plugins this key's scopes grant are imported.
+      const r = await fetch("/api/capabilities", { headers: authHeaders() });
+      if (r.ok) plugins = (await r.json()).plugins || [];
+    } catch {
+      return; // server unreachable; the built-in browser voice still works
+    }
   }
   const ctx = { registerTTS, toast, authHeaders, voicesChanged: populateVoicePicker };
   for (const p of plugins) {
     if (!p.active || !p.client_entry) continue;
-    const base = p.assets_base || `/plugins/${p.name}`;
-    try {
-      const mod = await import(`${base}/${p.client_entry}`);
-      if (mod && typeof mod.register === "function") await mod.register(ctx);
-    } catch (e) {
-      console.error(`client plugin ${p.name} failed to load`, e);
-    }
+    await _loadClientPlugin(p, ctx);
   }
 }
 
@@ -1811,6 +1827,7 @@ export async function refreshPluginCommands() {
     if (typeof window.__localmRollbackCheck === "function") window.__localmRollbackCheck();
     const isSec = $("sec-issues");
     if (isSec) isSec.hidden = !data.issues_available;
+    await loadClientPlugins(pluginState);
     renderNav();
   } catch { /* server unreachable; fall back to plain unknown-command */ }
   finally { _markCapsReady(); }   // see capsReady: must settle on EVERY exit path
@@ -3467,6 +3484,17 @@ export async function dispatchChatTurn(conv, text, attachments = [], docs = [], 
   });
 }
 
+/** True, after a toast, when no chat model is loaded or resumable. */
+export function refuseWithoutModel() {
+  if (modelCache.active || modelCache.resumable) return false;
+  if (modelCache.loading) {
+    toast(`${modelCache.loading} is still loading - try again in a moment.`, true);
+    return true;
+  }
+  toast("No model loaded - load a model on the sidebar before chatting.", true);
+  return true;
+}
+
 export async function sendChat() {
   const input = $("chat-input");
   const text = input ? input.value.trim() : "";
@@ -3493,10 +3521,7 @@ export async function sendChat() {
     return;
   }
 
-  if (!modelCache.active && !modelCache.resumable) {
-    toast("No model loaded - load a model on the sidebar before chatting.", true);
-    return;
-  }
+  if (refuseWithoutModel()) return;
 
   if (!currentConv()) newConversation();
   const conv = currentConv();

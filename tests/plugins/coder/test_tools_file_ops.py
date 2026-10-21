@@ -32,8 +32,8 @@ class TestReadFile:
         f.write_text("x = 1\ny = 2\n", encoding="utf-8")
         r = tool_read_file(tmp_path, "code.py")
         assert r.ok
-        # "x = 1\ny = 2\n" → count("\n")+1 = 3 (trailing newline counts)
-        assert "<lines>3</lines>" in r.output
+        # "x = 1\ny = 2\n" is two lines: the final newline ends the second
+        assert "<lines>2</lines>" in r.output
         assert "code.py" in r.output
 
     def test_file_not_found_returns_error(self, tmp_path):

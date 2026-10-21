@@ -233,3 +233,25 @@ def test_the_knob_covers_special_added_tokens_only():
 
     assert plain_id in ids("<|PLAINADD|>", False)
     assert plain_id in ids("<|PLAINADD|>", True)          # NOT covered, by design
+
+
+def _worker_count(tokenizer, content):
+    from localm.inference.backends._hf_worker import HFWorker
+
+    worker = object.__new__(HFWorker)
+    worker._tokenizer = tokenizer
+    worker._processor = None
+    worker._is_multimodal = False
+    return worker.count_messages_tokens([{"role": "user", "content": content}])
+
+
+def test_the_counted_prompt_tokens_match_the_marked_tokenisation(tokenizer):
+    guarded = compose("<fence>\n", untrusted_span(BODY), "\n</fence>")
+    _text, ids = _ids_for(tokenizer, guarded)
+    assert _worker_count(tokenizer, guarded) == len(ids)
+
+
+def test_a_marked_control_token_is_counted_as_the_text_it_is_read_as(tokenizer):
+    guarded = compose("<fence>\n", untrusted_span(BODY), "\n</fence>")
+    plain = "<fence>\n" + neutralise(BODY) + "\n</fence>"
+    assert _worker_count(tokenizer, guarded) > _worker_count(tokenizer, plain)

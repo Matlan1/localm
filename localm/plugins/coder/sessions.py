@@ -1015,6 +1015,7 @@ class SessionManager:
     def __init__(self) -> None:
         self._sessions: dict[str, CoderSession] = {}
         self._lock = threading.Lock()
+        self._reaping = False
         with _live_managers_lock:
             _live_managers.add(self)
 
@@ -1042,11 +1043,17 @@ class SessionManager:
                     return s
         return None
 
-    def list(self, *, principal: Optional[str] = None, is_owner: bool = True) -> list:
+    def list(self, *, principal: Optional[str] = None, is_owner: bool = True,
+             reap: bool = True) -> list:
         """Session summaries. The owner sees all; a scoped caller (is_owner=False)
         sees only the sessions matching its *principal* - so a handed-out key
-        cannot enumerate the owner's sessions."""
-        self.reap_idle()
+        cannot enumerate the owner's sessions.
+
+        With *reap* (the default) idle sessions are closed first, which blocks
+        for as long as their close() takes. A caller on the event loop passes
+        ``reap=False`` and calls :meth:`reap_idle_in_background` instead."""
+        if reap:
+            self.reap_idle()
         with self._lock:
             sessions = list(self._sessions.values())
         if not is_owner:
@@ -1066,6 +1073,13 @@ class SessionManager:
             session.close()
         return session
 
+    def _idle_ids(self, max_idle_s: float, now: Optional[float] = None) -> list[str]:
+        """Ids of the sessions :meth:`reap_idle` would close."""
+        now = time.time() if now is None else now
+        with self._lock:
+            return [s.id for s in self._sessions.values()
+                    if not s.busy and (now - s.last_activity_at) > max_idle_s]
+
     def reap_idle(self, *, max_idle_s: float = _IDLE_REAP_SECONDS,
                  now: Optional[float] = None) -> list[str]:
         """Close and remove sessions that have been idle (no ``_push()``
@@ -1083,14 +1097,49 @@ class SessionManager:
         send_message()'s "started"/"queued" gate and close() decide when a busy
         session ends."""
         now = time.time() if now is None else now
-        with self._lock:
-            idle_ids = [s.id for s in self._sessions.values()
-                       if not s.busy and (now - s.last_activity_at) > max_idle_s]
         reaped = []
-        for session_id in idle_ids:
-            if self.remove(session_id) is not None:
-                reaped.append(session_id)
+        for session_id in self._idle_ids(max_idle_s, now):
+            with self._lock:
+                session = self._sessions.get(session_id)
+                if (session is None or session.busy
+                        or (now - session.last_activity_at) <= max_idle_s):
+                    continue
+                del self._sessions[session_id]
+            session.close()
+            reaped.append(session_id)
         return reaped
+
+    def reap_idle_in_background(self) -> bool:
+        """Run :meth:`reap_idle` on a daemon thread and return at once. False
+        when no session is idle, or a reap started earlier is still running; in
+        either case nothing starts. Never raises."""
+        if not self._idle_ids(_IDLE_REAP_SECONDS):
+            return False
+        with self._lock:
+            if self._reaping:
+                return False
+            self._reaping = True
+
+        def _run() -> None:
+            try:
+                self.reap_idle()
+            except Exception:
+                from localm.debuglog import logger
+                logger.warning("coder: reaping idle sessions failed", exc_info=True)
+            finally:
+                with self._lock:
+                    self._reaping = False
+
+        try:
+            threading.Thread(target=_run, name="coder-reap-idle", daemon=True).start()
+        except Exception:
+            with self._lock:
+                self._reaping = False
+            from localm.debuglog import logger
+            logger.warning("coder: could not start the idle-session reaper",
+                           exc_info=True)
+            return False
+        return True
 
     def close_all(self) -> int:
         """Remove and close every session. Returns how many closed. A session

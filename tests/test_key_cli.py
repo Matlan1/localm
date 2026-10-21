@@ -189,6 +189,19 @@ class TestNamedKeys:
         secret = _SECRET_RE.findall(r.output)
         assert secret, "the new key must be printed once"
 
+    def test_create_without_an_owner_key_says_auth_is_now_on(self, runner):
+        r = runner.invoke(main, ["key", "create", "dashboard", "--scope", "models:read"])
+        assert r.exit_code == 0
+        assert auth.get_api_key() is None
+        assert "no owner key is set" in r.output
+        assert "localm key generate" in r.output
+
+    def test_create_with_an_owner_key_prints_no_owner_key_note(self, runner):
+        runner.invoke(main, ["key", "generate"])
+        r = runner.invoke(main, ["key", "create", "dashboard", "--scope", "models:read"])
+        assert r.exit_code == 0
+        assert "no owner key is set" not in r.output
+
     def test_create_with_rag_roots_round_trips_and_lists(self, runner):
         # --rag-root is repeatable, following the exact CLI shape as --fs-access:
         # a key created with it is CONFINED to exactly those folders for RAG.
