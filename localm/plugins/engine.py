@@ -912,6 +912,25 @@ class PluginManager:
                 else:
                     _emit(name, "failed", self._errors.get(name))
 
+    def load_enabled_pending(self) -> list:
+        """Load every installed, enabled plugin that is not loaded yet and has no
+        recorded load error, mounting its routes on the live app. Covers a plugin
+        installed or enabled by another process (``localm plugin install``) while
+        this server runs. Returns the names loaded. Never raises: a failing plugin
+        is recorded in errors, as at startup. Runs on the event loop thread, like
+        enable(). Returns [] without loading when the manager has no app."""
+        if self.app is None:
+            return []
+        self.discover()
+        enabled = self._enabled_set()
+        loaded = []
+        for name in sorted(self._specs):
+            if name in enabled and name not in self._loaded and name not in self._errors:
+                self._safe_load(self._specs[name])
+                if name in self._loaded:
+                    loaded.append(name)
+        return loaded
+
     def _ensure_preinstalled(self) -> None:
         """First-run provisioning for preinstalled plugins (chat is plugin #0).
         Copy each from the store into the installed folder if absent, and enable
@@ -1867,6 +1886,7 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
 
     @app.get("/api/plugins", dependencies=[Depends(require_scope(scopes.PLUGINS_READ))])
     async def list_plugins_engine():
+        manager.load_enabled_pending()
         return manager.api_state()
 
     @app.post("/api/plugins/{name}/install",

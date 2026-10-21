@@ -305,6 +305,25 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **`localm image`, `video` and `music` no longer ask "Open it now?" when input is `NUL`.** On
   Windows the null device passed for a terminal.
 - **The message for a refused ComfyUI address no longer ends with an internal tag.**
+- **`/web` with no model loaded says so before it searches.** It used to run the search and then
+  show a raw "Model parameter is required" error; it now gives the same "No model loaded" answer
+  as a plain send, and a send made while a model is still loading says which model is loading.
+- **A page reloaded while a model is loading follows the load.** The sidebar shows "loading
+  <model>" and checks again every 2 seconds, instead of showing "No model loaded" and refusing
+  sends for up to 30 seconds.
+- **A plugin installed with `localm plugin install` while the GUI is running works at once.**
+  Its routes are mounted the next time the page reads the plugin list, so `/web` no longer
+  answers "Method Not Allowed" until a restart.
+- **A plugin's tab opens right after you install it.** The tab entry used to appear before the
+  plugin's page was loaded, and clicking it showed Chat until a reload.
+- **`localm key create` warns when no owner key is set.** The new key turns authentication on, so
+  the GUI asks for a key and the scoped key is the only one that exists; the note says to run
+  `localm key generate` first.
+- **`localm serve` and `localm gui` no longer start with a speech-to-text model.** With no model
+  named, a registered model whose name or file name has a standalone `asr`, `whisper` or `stt`
+  word (Qwen3-ASR) is picked only when no other model is eligible.
+- **The usage line explains why MTP is off on a turn with audio.** It used to show the raw reason
+  word.
 
 ### Changed
 

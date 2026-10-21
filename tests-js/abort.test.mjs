@@ -153,6 +153,12 @@ test("the usage line shows MTP acceptance, a pause, a stop, an off reply or unav
   assert.match(usage("chat-usage").textContent, /MTP off/);
   assert.match(usage("chat-usage").title, /with an image/);
 
+  window.updateUsageDisplay({ total_tokens: 7, mtp: { state: "off", drafted: 0, accepted: 0,
+                                                       reason: "audio" } });
+  assert.match(usage("chat-usage").textContent, /MTP off/);
+  assert.match(usage("chat-usage").title, /with audio/,
+    "the audio skip reason has its own label, not the raw reason string");
+
   window.updateUsageDisplay({ total_tokens: 7, mtp: { state: "idle", drafted: 0, accepted: 0 } });
   assert.doesNotMatch(usage("chat-usage").textContent, /MTP/);
   assert.equal(usage("chat-usage").title, "");
