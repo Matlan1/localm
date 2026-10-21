@@ -750,7 +750,8 @@ class SlotScheduler:
         from localm.debuglog import logger
         logger.info("gguf slots: the cache of slot %d did not load into the new context; "
                     "decoding it again", slot.seq)
-        self._ops.seq_rm(slot.seq, 0, -1)
+        if not self._ops.seq_rm(slot.seq, 0, -1):
+            self._dirty = True
         return False
 
     def _restore_caches(self, kept: list[tuple[_Slot, list[int]]],

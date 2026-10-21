@@ -515,6 +515,58 @@ def test_rightsizing_takes_the_idle_caches_without_decoding_them_again(made):
     assert seq1 == []
 
 
+def _two_idle_caches(ctx):
+    """A scheduler whose slots 0 and 1 hold PROMPTS[0] and PROMPTS[1] with
+    their replies, and the prompt that extends slot 0's cache."""
+    return PROMPTS[0] + _reference(PROMPTS[0], 3)[0][:2] + [70, 71]
+
+
+def test_rightsizing_decodes_a_cache_whose_copy_does_not_load(made):
+    ctx = _SimContext()
+    ctx.copy_limit = 1 << 20
+    sched = made(ctx, 2)
+    _collect(sched, PROMPTS[0], 3)
+    _collect(sched, PROMPTS[1], 3)
+    ctx.rightsize_plan = (2048, True)
+    ctx.copy_fail = True
+    third = _two_idle_caches(ctx)
+    rec = _collect(sched, third, 3)
+    assert rec["out"] == _reference(third, 3)[0]
+    after = _collect(sched, PROMPTS[1] + _reference(PROMPTS[1], 3)[0][:2] + [80], 3)
+    assert after["out"] == _reference(PROMPTS[1] + _reference(PROMPTS[1], 3)[0][:2] + [80], 3)[0]
+
+
+def test_copies_stop_at_the_ram_limit(made):
+    ctx = _SimContext()
+    ctx.copy_limit = len(PROMPTS[1]) + 3
+    sched = made(ctx, 2)
+    _collect(sched, PROMPTS[0], 3)
+    _collect(sched, PROMPTS[1], 3)
+    ctx.rightsize_plan = (2048, True)
+    before = len(ctx.calls)
+    third = _two_idle_caches(ctx)
+    rec = _collect(sched, third, 3)
+    assert rec["out"] == _reference(third, 3)[0]
+    decoded = {e[2] for call in ctx.calls[before:] for e in call}
+    assert decoded, "a copy over the limit was taken"
+
+
+def test_a_recurrent_slot_cache_survives_rightsizing(made):
+    ctx = _SimContext(recurrent=True)
+    ctx.copy_limit = 1 << 20
+    sched = made(ctx, 2)
+    first = list(range(10, 50))
+    _collect(sched, first, 3)
+    _collect(sched, PROMPTS[1], 3)
+    ctx.rightsize_plan = (2048, True)
+    second = first + _reference(first, 3)[0][:2] + [90, 91]
+    before = len(ctx.calls)
+    rec = _collect(sched, second, 3)
+    assert rec["out"] == _reference(second, 3)[0]
+    seq0 = [e[1] for call in ctx.calls[before:] for e in call if e[2] == 0]
+    assert seq0 and min(seq0) >= len(first)
+
+
 def test_no_growth_beside_running_replies_when_vram_says_it_does_not_fit(made):
     ctx = _SimContext(capacity=256, n_ctx_max=4096, grow=256, vram_fits=False)
     ctx.step_delay = 0.01
