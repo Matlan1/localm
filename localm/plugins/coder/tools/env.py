@@ -86,8 +86,8 @@ def _redact_env_value(name: str, value: str,
     format. Otherwise the value is passed through ``_scrub_secrets``, which
     replaces URL ``user:pass@`` credentials, credential-named query
     parameters, bearer tokens, ``sk-`` API keys, email addresses and the home
-    directory / account name in paths, then every email address left (the
-    bug-report scrubber keeps the maintainer's) is replaced, then each of
+    directory / account name in paths, then every email address left is
+    replaced, the maintainer's included, then each of
     *accounts* is replaced by ``<user>`` where it is a whole path segment.
     *redacted* is True when the shown value differs from the original."""
     lowered = name.lower()

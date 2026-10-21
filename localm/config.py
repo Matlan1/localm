@@ -1718,10 +1718,9 @@ def instance_id() -> str:
 
 def _drop_stray_credentials(stored: dict) -> None:
     """Remove model-source credential keys (``hf_token``, ``civitai_api_key``)
-    from *stored* in place. Their values live only in the credential store, so
-    a copy written into config.json by hand is never read, served or kept: it
-    is dropped from the file on the next config save. Warns once per process
-    per key on stderr, naming the key, never the value."""
+    from *stored* in place, so a copy in config.json is never read or served
+    and is dropped from the file on the next config save. Warns once per
+    process per key on stderr, naming the key, never the value."""
     from localm.model_source_credentials import CREDENTIAL_KEYS
     for key in sorted(CREDENTIAL_KEYS & set(stored)):
         stored.pop(key, None)

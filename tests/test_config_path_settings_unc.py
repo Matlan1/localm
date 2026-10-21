@@ -9,6 +9,7 @@ an ordinary local path is still saved.
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 from fastapi.testclient import TestClient
@@ -19,7 +20,8 @@ _OWNER_KEY = "owner-admin-key-unc-paths-0123456789"
 _OWNER = {"Authorization": f"Bearer {_OWNER_KEY}"}
 
 _UNSAFE = [
-    "\\??\\UNC\\localhost\\c$",
+    pytest.param("\\??\\UNC\\localhost\\c$", marks=pytest.mark.skipif(
+        os.name != "nt", reason="the NT object-namespace prefix is refused on Windows")),
     "\\\\localhost\\c$\\work",
     "\\\\?\\C:\\work",
     "\\\\.\\PhysicalDrive0",
@@ -89,3 +91,31 @@ def test_a_blank_folder_still_clears_the_setting(client, tmp_path):
     r = c.patch("/v1/config", json={"comfy_workdir": ""}, headers=_OWNER)
     assert r.status_code == 200, r.text
     assert "comfy_workdir" not in _stored(home)
+
+
+@pytest.mark.parametrize("widget", ["path", "folder"])
+def test_a_plugin_path_setting_refuses_a_unc_path(widget):
+    from localm.plugins.contract import PluginSettingField
+    from localm.settings_schema import validate_plugin_settings_update
+    fields = [PluginSettingField("target", widget, "Target")]
+    with pytest.raises(ValueError, match="UNC and device paths are not allowed"):
+        validate_plugin_settings_update(fields, {"target": "\\\\server\\share\\x"})
+    assert validate_plugin_settings_update(fields, {"target": "  "}) == {"target": None}
+
+
+def test_a_scoped_key_save_does_not_echo_an_owner_only_media_folder(client, tmp_path):
+    """A non-owner config:write key's PATCH response leaves out the per-plugin
+    ComfyUI folder, an owner-only value, as GET /v1/config does."""
+    from localm import auth
+    c, home = client
+    folder = str(tmp_path / "owner-only-comfy-folder")
+    assert c.post("/v1/media/config/image", json={"workdir": folder},
+                  headers=_OWNER).status_code == 200
+    scoped = auth.create_key("writer", ["config:read", "config:write"],
+                             allow_privileged=True)["key"]
+    hdr = {"Authorization": f"Bearer {scoped}"}
+    r = c.patch("/v1/config", json={"temperature": 0.4}, headers=hdr)
+    assert r.status_code == 200, r.text
+    assert "owner-only-comfy-folder" not in r.text
+    assert "owner-only-comfy-folder" not in c.get("/v1/config", headers=hdr).text
+    assert "owner-only-comfy-folder" in c.get("/v1/config", headers=_OWNER).text

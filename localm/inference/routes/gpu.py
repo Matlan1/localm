@@ -4,10 +4,11 @@
 The endpoints a sibling localm instance on this machine uses to talk to this one:
 
 - ``GET /v1/instances/status``: this instance's live model / VRAM status. Without
-  a credential it is redacted: no ``pid`` or ``root_dir``, each loaded model by name, file name
-  and size only (no path, no sha256), and on a key-protected instance no model
-  at all. This instance's attach token,
-  or an API key granting ``models:read``, reads the full status.
+  a credential it is redacted: no ``pid`` or ``root_dir``, each loaded model
+  by name, file name and size only (no path, no sha256), and on a
+  key-protected instance no model at all. This instance's attach token, or an
+  API key granting ``models:read``, reads the full status; for a key that is
+  not the owner's, without ``root_dir`` and with model paths scrubbed.
 - ``POST /v1/instances/status``: the full status for a sibling that names itself
   as the requester, verified exactly like an unload request below.
 - ``POST /v1/instances/cooperate-unload``: a sibling, itself out of local eviction
@@ -59,19 +60,29 @@ async def _json_body(request: Request) -> dict:
     return body if isinstance(body, dict) else {}
 
 
+def _presents_attach_token(request: Request) -> bool:
+    """Whether *request* presents this instance's attach token in its
+    ``Authorization`` or ``x-api-key`` header (never a session cookie)."""
+    from localm.auth import ct_equal
+    presented, source = _hs._request_token(request)
+    if source != "header" or not presented:
+        return False
+    inst_token = getattr(request.app.state, "instance_token", None)
+    return bool(inst_token) and ct_equal(presented, inst_token)
+
+
 def _holds_full_status_credential(request: Request) -> bool:
     """Whether *request* presents, in its ``Authorization`` or ``x-api-key``
     header (never a session cookie), this instance's attach token or an API key
     granting ``models:read``. Blocking (a key check can take the keystore
     lock)."""
     from localm import scopes
-    from localm.auth import any_key_configured, ct_equal
+    from localm.auth import any_key_configured
+    if _presents_attach_token(request):
+        return True
     presented, source = _hs._request_token(request)
     if source != "header" or not presented:
         return False
-    inst_token = getattr(request.app.state, "instance_token", None)
-    if inst_token and ct_equal(presented, inst_token):
-        return True
     return any_key_configured() and _hs.caller_grants(request, scopes.MODELS_READ)
 
 
@@ -110,13 +121,34 @@ def _redacted(status: dict) -> dict:
     return out
 
 
+def _for_a_scoped_key(status: dict, fmt) -> dict:
+    """*status* with ``root_dir`` set to None and each loaded model's ``path``
+    passed through *fmt*."""
+    out = dict(status)
+    out["root_dir"] = None
+    models = []
+    for m in status.get("models") or []:
+        if isinstance(m, dict) and isinstance(m.get("path"), str) and m["path"]:
+            m = {**m, "path": fmt(m["path"])}
+        models.append(m)
+    out["models"] = models
+    return out
+
+
 def _status_for(request: Request) -> Optional[dict]:
     """``_hs._gpu_status``, redacted unless *request* holds a full-status
-    credential. Blocking."""
+    credential. With the attach token or as the operator (open mode or an
+    owner key) the full status is returned as it is; for any other
+    ``models:read`` key ``root_dir`` is None and each model path goes through
+    ``_hs.path_formatter``. Blocking."""
     status = _hs._gpu_status()
-    if status is None or _holds_full_status_credential(request):
+    if status is None:
+        return None
+    if not _holds_full_status_credential(request):
+        return _redacted(status)
+    if _presents_attach_token(request) or _hs.caller_is_operator(request):
         return status
-    return _redacted(status)
+    return _for_a_scoped_key(status, _hs.path_formatter(request))
 
 
 def register(app: FastAPI, ctx) -> None:

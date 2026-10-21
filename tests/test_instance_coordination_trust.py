@@ -324,6 +324,30 @@ class TestFullStatus:
             "/v1/instances/status", headers={"x-api-key": key})
         self._assert_full(r.json())
 
+    def test_a_scoped_models_read_key_gets_no_host_path(self, monkeypatch):
+        """A models:read key that is not the owner's reads the full status
+        without root_dir, and with each model path scrubbed of the data
+        folder."""
+        from localm import auth
+        from localm.config import home_dir
+        from localm.pathscrub import DATA_DIR_LABEL
+        monkeypatch.setenv("LOCALM_API_KEY", "o" * 40)
+        scoped = auth.create_key("reader", ["models:read"])["key"]
+        model_path = str(home_dir() / "models" / "secret-model.gguf")
+        monkeypatch.setattr(hs, "_loaded_model_identities", lambda: [
+            {"name": "secret-model", "path": model_path, "size": 1234,
+             "sha256": _DIGEST}])
+        r = TestClient(_coordinating_app(model="secret-model")).get(
+            "/v1/instances/status", headers={"Authorization": "Bearer " + scoped})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["root_dir"] is None
+        assert "alice-s1" not in r.text
+        assert body["pid"] == os.getpid()
+        assert body["models"][0]["sha256"] == _DIGEST
+        assert body["models"][0]["path"].startswith(DATA_DIR_LABEL)
+        assert str(home_dir()) not in body["models"][0]["path"]
+
     def test_a_browser_page_cannot_read_it_even_with_the_attach_token(self):
         app = _coordinating_app(model="secret-model")
         app.state.instance_token = "attach-" + "t" * 30

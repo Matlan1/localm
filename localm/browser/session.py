@@ -75,7 +75,7 @@ _BLANK_WINDOW_WAIT_MS = 5000
 #: Chromium switches every launch carries. The rule resolves every host,
 #: including IP literals and localhost, to not-found inside the browser. The
 #: WebRTC policy stops a page's peer connections from sending UDP (STUN, TURN
-#: over UDP, connectivity checks), which does not go through the resolver.
+#: over UDP, connectivity checks).
 #: See test_a_worker_websocket_never_connects and
 #: test_webrtc_sends_nothing_to_an_ip_literal.
 _LAUNCH_ARGS = ("--host-resolver-rules=MAP * ~NOTFOUND",

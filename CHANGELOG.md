@@ -426,7 +426,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **A key that is not the owner's no longer sees your project folders.** The instance list
   (Settings, Instances) shows each instance's project folder only to the owner; any other key
   sees the instances without it. The identity check any local program can make (`/whoami`) no
-  longer names the project folder at all; another instance of yours still shows it.
+  longer names the project folder at all; another instance of yours still shows it. A
+  non-owner key allowed to read model details gets the instance status without the project
+  folder and with model file paths shortened like everywhere else.
 - **A token typed into config.json by hand is no longer handed out.** localm never reads
   `hf_token` or `civitai_api_key` from config.json (they live in their own store), but a copy
   written there by hand was returned by the settings API and kept on every save. It is now left

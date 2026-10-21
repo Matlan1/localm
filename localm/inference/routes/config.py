@@ -293,6 +293,7 @@ def register(app: FastAPI, ctx) -> None:
             return result
         for k in admin_only_keys():
             result.pop(k, None)
+        _scrub_media_admin_only(result)
         return result
 
     # ---------------------------------------------------------------- #

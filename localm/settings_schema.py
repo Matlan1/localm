@@ -2571,8 +2571,11 @@ def _coerce_plugin_field_value(f, val):
     # save_plugin_config with the RESOLVED value, or the plugin author reads
     # this block back through plugin_config() and validates there - this
     # generic layer only guarantees the value round-trips as the widget's
-    # basic type, the same floor tts/media give TEXT/FOLDER fields.
+    # basic type, the same floor tts/media give TEXT/FOLDER fields. A PATH or
+    # FOLDER value is also refused when it is a UNC or device path.
     s = str(val).strip()
+    if s and f.widget in (Widget.FOLDER, Widget.PATH):
+        _refuse_unsafe_path(f.key, s)
     return s or None
 
 
