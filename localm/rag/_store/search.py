@@ -15,7 +15,7 @@ from localm.rag import store as _st
 from ..bm25 import BM25, ENGLISH_STOP_WORDS, tokenize
 from .cache import _COLLECTION_CACHE
 from .types import EmbedFn, RerankFn
-from .vectors import _cosine, _maxnorm, _vectors_finite
+from .vectors import _cosine, _maxnorm, _vectors_finite, _warn_numpy_degrade
 
 
 #: Chunks handed to the reranker when ``Collection.query`` is given a
@@ -371,6 +371,6 @@ class _CollectionSearch:
                     return [float(s) for s in sims]
                 else:
                     return [0.0] * len(self._vectors)
-            except Exception:
-                pass
+            except Exception as e:
+                _warn_numpy_degrade(e, "matrix scoring")
         return [_cosine(qvec, v) if v else 0.0 for v in self._vectors]

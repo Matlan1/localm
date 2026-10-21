@@ -273,7 +273,7 @@ def register(app: FastAPI, ctx) -> None:
             raise HTTPException(409, str(e)) from e
         if cred_updates:
             try:
-                set_credentials(cred_updates)
+                await run_in_threadpool(set_credentials, cred_updates)
             except ConfigUnreadable as e:
                 raise HTTPException(409, _credentials_not_saved(str(e), bool(validated))) from e
             except OSError as e:

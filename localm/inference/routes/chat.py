@@ -89,6 +89,21 @@ def register(app: FastAPI, ctx) -> None:
     def _no_status(_text: str) -> None:
         return None
 
+    _shadow_warned: set = set()
+
+    def _warn_folder_shadows_pinned_embedder(name: str) -> None:
+        """Log once per name that a registered model folder shares its name with
+        the pinned embedding model, which answers /v1/embeddings for that name."""
+        if name in _shadow_warned:
+            return
+        _shadow_warned.add(name)
+        from localm.debuglog import logger as _log
+        _log.warning(
+            "a registered model folder is named '%s', the same as the pinned "
+            "embedding model; /v1/embeddings for that name is answered by the "
+            "pinned model, not the folder. Rename the folder (localm rename) to "
+            "use it for embeddings.", name)
+
     _SAMPLING_FIELDS = ("min_p", "presence_penalty", "frequency_penalty")
 
     def _sampling_kwargs(req) -> dict:
@@ -650,6 +665,14 @@ def register(app: FastAPI, ctx) -> None:
                     "model: it scores query and document pairs (POST /v1/rerank).")
         _is_folder_model = (isinstance(_entry, dict)
                             and Path(str(_entry.get("path") or "")).is_dir())
+        if _is_folder_model:
+            from localm.inference.embedder import (DEFAULT_EMBEDDING_MODEL,
+                                                   KNOWN_EMBEDDING_MODELS)
+            _pinned_name = _emb_cfg_name or DEFAULT_EMBEDDING_MODEL
+            if (resolved_model or "").strip() == _pinned_name and _pinned_name in KNOWN_EMBEDDING_MODELS:
+                _warn_folder_shadows_pinned_embedder(_pinned_name)
+                _is_folder_model = False
+                _is_configured_embedder = True
         if (_is_registered_embedder or _is_configured_embedder) and not _is_folder_model:
             from localm.inference.embedder import embed_texts, last_error
             loop = asyncio.get_running_loop()

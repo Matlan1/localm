@@ -320,6 +320,23 @@ _OFFSET_POSITION_MODELS = frozenset(
 _RERANK_CHARS_PER_TOKEN = 32
 _RERANK_WINDOW_CEILING = 2048
 
+_QWEN3_RERANK_ARCHITECTURE = "Qwen3ForSequenceClassification"
+_QWEN3_RERANK_PREFIX = (
+    "<|im_start|>system\nJudge whether the Document meets the requirements based "
+    "on the Query and the Instruct provided. Note that the answer can only be "
+    '"yes" or "no".<|im_end|>\n<|im_start|>user\n')
+_QWEN3_RERANK_SUFFIX = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+_QWEN3_RERANK_INSTRUCTION = (
+    "Given a web search query, retrieve relevant passages that answer the query")
+
+
+def qwen3_rerank_head(query: str) -> str:
+    """The text of a Qwen3 sequence-classification reranker prompt up to the
+    document: system prefix, instruction and query. The prompt is this, the
+    document, then ``_QWEN3_RERANK_SUFFIX``."""
+    return (f"{_QWEN3_RERANK_PREFIX}<Instruct>: {_QWEN3_RERANK_INSTRUCTION}\n"
+            f"<Query>: {query}\n<Document>: ")
+
 
 def _head_label_names(model) -> list[str]:
     """The names of the sequence-classification head's outputs, in output order,
@@ -1375,6 +1392,9 @@ class HFWorker:
         self.task = task
         # Names of the classification head's outputs when it has several.
         self.rerank_labels: list[str] = []
+        # True for a Qwen3 sequence-classification reranker, which scores a
+        # templated prompt rather than a tokenizer sentence pair.
+        self._qwen3_rerank = False
         self._model = None
         self._processor = None     # AutoProcessor (multimodal)
         self._tokenizer = None     # AutoTokenizer fallback
@@ -1610,6 +1630,9 @@ class HFWorker:
                               if self._supports_image else None)
         if self.task == "rerank":
             self.rerank_labels = _head_label_names(self._model)
+            architectures = getattr(getattr(self._model, "config", None), "architectures", None)
+            self._qwen3_rerank = (isinstance(architectures, (list, tuple))
+                                  and _QWEN3_RERANK_ARCHITECTURE in architectures)
 
         config = getattr(self._model, "config", None)
         self.context_capacity = None
@@ -1950,6 +1973,9 @@ class HFWorker:
                     raise RerankInputError(
                         f"the query is {len(query)} characters, far beyond this model's "
                         f"{window}-token window; shorten the query")
+                if self._qwen3_rerank:
+                    results.append(self._score_qwen3_pair(query, document, window, reach))
+                    continue
                 clipped = document[:reach]
                 full = tokenizer(query, clipped, truncation=False)["input_ids"]
                 truncated = len(clipped) < len(document) or len(full) > window
@@ -1967,6 +1993,41 @@ class HFWorker:
                 results.append({"scores": logits, "tokens": int(enc["input_ids"].shape[1]),
                                 "truncated": bool(truncated)})
         return results
+
+    def _score_qwen3_pair(self, query: str, document: str, window: int, reach: int) -> dict:
+        """Score one pair with a Qwen3 sequence-classification reranker, which was
+        trained on the templated prompt of :func:`qwen3_rerank_head`. A pair past
+        *window* tokens is cut in the document; a query that leaves no room for
+        one raises ``RerankInputError``."""
+        import torch
+        from .base import RerankInputError
+        tokenizer, model = self._tokenizer, self._model
+        head = qwen3_rerank_head(query)
+        clipped = document[:reach]
+        truncated = len(clipped) < len(document)
+
+        def encode(body: str) -> list[int]:
+            return tokenizer(head + body + _QWEN3_RERANK_SUFFIX,
+                             add_special_tokens=False)["input_ids"]
+
+        ids = encode(clipped)
+        if len(ids) > window:
+            truncated = True
+            fixed = len(encode(""))
+            if fixed >= window:
+                raise RerankInputError(
+                    f"the query takes {fixed} tokens, which leaves no room for a "
+                    f"document in this model's {window}-token window; shorten the query")
+            doc_ids = tokenizer(clipped, add_special_tokens=False)["input_ids"][:window - fixed]
+            while True:
+                ids = encode(tokenizer.decode(doc_ids))
+                if len(ids) <= window or not doc_ids:
+                    break
+                doc_ids = doc_ids[:-max(1, len(ids) - window)]
+        input_ids = torch.tensor([ids], device=model.device)
+        logits = model(input_ids=input_ids,
+                       attention_mask=torch.ones_like(input_ids)).logits[0].float().cpu().tolist()
+        return {"scores": logits, "tokens": len(ids), "truncated": bool(truncated)}
 
     # ------------------------------------------------------------------ #
     #  Inference                                                           #

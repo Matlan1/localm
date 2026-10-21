@@ -442,7 +442,7 @@ export const I18N_EN = {
   "coder.controls.modalTitle": "Session controls - {label}",
   "coder.controls.busyError": "Cannot switch model while coder session is busy.",
   "coder.controls.modelHint":
-    "Repoint this session at a different model in place. Conversation history and agent state are untouched.",
+    "Repoint this session at a different model in place. Conversation history and agent state are untouched. A local model replaces the active engine for chat, other coder sessions and MCP too.",
   "coder.controls.modelLabel": "Model",
   "coder.controls.modelSwitchFailed": "Could not switch model: ",
   "coder.controls.modelSwitched": "Model switched to {model}",

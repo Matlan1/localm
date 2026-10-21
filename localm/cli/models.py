@@ -616,7 +616,8 @@ def spec_drafts(model):
     from ..inference.backends.llamacpp._draftmodel import (
         draft_role_refusal, draft_vocab_mismatch, gguf_vocab_view)
     from localm.model_manager import load_registry
-    from ..model_manager.gguf import gguf_file_bytes, gguf_vocab_signature
+    from ..model_manager.gguf import (_gguf_declared_min_size, gguf_file_bytes,
+                                      gguf_vocab_signature)
 
     info = get_operator_model_info(model)
     if info is None:
@@ -636,6 +637,9 @@ def spec_drafts(model):
         if (path is None or path.suffix.lower() != ".gguf" or not path.is_file()
                 or path.resolve() == target_path.resolve()
                 or entry.get("model_type", "llm") != "llm"):
+            continue
+        declared_min = _gguf_declared_min_size(path)
+        if declared_min is not None and (gguf_file_bytes(path) or 0) < declared_min:
             continue
         sig = gguf_vocab_signature(path)
         if sig is None or draft_vocab_mismatch(target, gguf_vocab_view(sig)) is not None:
