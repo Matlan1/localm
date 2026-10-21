@@ -426,9 +426,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   cannot switch the server to open mode.
 - **The coder asks before it touches localm's own keys and settings.** With auto-approve on, or in
   an unattended `localm coder` task, a shell command or file tool that reads, writes or deletes
-  localm's key files, session store, `config.json` or instance registry, or that runs `localm key`
-  or `localm config <key> <value>`, now needs your approval of that exact call, and an unattended
-  run refuses it. Shell commands the coder runs no longer read from its terminal.
+  localm's key files, TLS private keys, session store, `config.json` or instance registry (or
+  the data folder as a whole), or that runs `localm key` or `localm config <key> <value>`, now
+  needs your approval of that exact call; an "always allow" in the GUI does not cover it, and an
+  unattended run refuses it. A project-wide grep or search and replace skips those files and says
+  so. Shell commands the coder runs no longer read from its terminal.
 - **A Hugging Face model can no longer make localm read files outside its folder.** The `path`
   of each stage in a sentence-transformers model's `modules.json`, and each shard file a model's
   `model.safetensors.index.json` names (read when sizing the model and when loading it as a
