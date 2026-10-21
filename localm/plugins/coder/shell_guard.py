@@ -1130,10 +1130,11 @@ _UNSAFE_CHARS = ("$", "`", "<", ">", "%", "!")
 # git configuration that makes a read command run a program, or pulls in
 # another file: whole sections, and keys within a section. core.fsmonitor
 # names a program unless it is a boolean (true selects git's built-in
-# monitor); log.showSignature runs the signature program when true.
+# monitor); log.showSignature runs the signature program when true;
+# core.hooksPath points git at hook scripts.
 _GIT_RISKY_SECTIONS = frozenset({"include", "includeif", "filter", "pager"})
 _GIT_RISKY_KEYS = {
-    "core": frozenset({"fsmonitor", "pager"}),
+    "core": frozenset({"fsmonitor", "pager", "hookspath"}),
     "diff": frozenset({"external", "textconv", "command"}),
     "log": frozenset({"showsignature"}),
     "gpg": frozenset({"program"}),
@@ -1301,15 +1302,27 @@ def _git_config_risky(text: str) -> bool:
     return False
 
 
+def _has_hook(hooks_dir: str) -> bool:
+    """True when *hooks_dir* holds a file other than git's ``*.sample``
+    templates."""
+    try:
+        names = os.listdir(hooks_dir)
+    except FileNotFoundError:
+        return False
+    return any(not n.endswith(".sample")
+               and os.path.isfile(os.path.join(hooks_dir, n)) for n in names)
+
+
 def _network_path(path: str) -> bool:
     """True for a UNC, device or other double-slash path."""
     return path.replace("\\", "/").startswith("//")
 
 
 def _repo_config_risky(dotgit: str, base: str, root: str) -> bool:
-    """:func:`_git_config_risky` over every local config file of the repository
-    whose ``.git`` entry is *dotgit* in directory *base*, its submodules'
-    (under ``modules/``) included; a ``gitdir:`` file and a ``commondir`` are
+    """True when a local config file of the repository whose ``.git`` entry is
+    *dotgit* in directory *base* passes :func:`_git_config_risky`, or a
+    ``hooks`` folder of it holds a hook script (:func:`_has_hook`), its
+    submodules' (under ``modules/``) included; a ``gitdir:`` file and a ``commondir`` are
     followed. Only files whose resolved path lies in the project *root* are
     read: a target outside it is not looked at, and a network or device
     target makes the answer True without being touched. True when a file
@@ -1336,9 +1349,13 @@ def _repo_config_risky(dotgit: str, base: str, root: str) -> bool:
             continue
         seen.add(real)
         configs += [os.path.join(real, "config"), os.path.join(real, "config.worktree")]
+        if _has_hook(os.path.join(real, "hooks")):
+            return True
         for top, _dirs, files in os.walk(os.path.join(real, "modules")):
             configs += [os.path.join(top, f) for f in files
                         if f in ("config", "config.worktree")]
+            if os.path.basename(top) == "hooks" and _has_hook(top):
+                return True
         common = os.path.join(real, "commondir")
         if os.path.isfile(common):
             with open(common, encoding="utf-8", errors="replace") as fh:
@@ -1358,8 +1375,8 @@ def _repo_config_risky(dotgit: str, base: str, root: str) -> bool:
 
 def _git_runs_programs(start: str, root: str) -> bool:
     """True when the repository git uses for a command run in *start* is
-    inside the project and its local configuration makes a read command run a
-    program, or cannot be read. A repository above the project is not looked
+    inside the project and its local configuration or hook scripts can make a
+    read command run a program, or cannot be read. A repository above the project is not looked
     at."""
     d = start
     while _inside(d, root):
@@ -1421,7 +1438,8 @@ def _read_only_segments(segments: Sequence[_Segment], root: str, root_real: str,
         short, long = _RISKY_OPTIONS.get(name, ("", ()))
         if any(_risky_option(o, short, long) for o in options):
             return False
-        if any(ch in o.split("=", 1)[0] for o in options for ch in "/\\"):
+        if any(o.startswith("-") and ch in o.split("=", 1)[0]
+               for o in options for ch in "/\\"):
             return False
         values = [o.split("=", 1)[1] for o in options
                   if o.startswith("--") and "=" in o]
@@ -1448,7 +1466,7 @@ def is_read_only(command: str, cwd: Optional[Path | str]) -> bool:
     symlinks followed, a project file that a command name could run (a PATH
     entry inside the project, or on Windows the working directory) makes it
     False, and a git command is False when the project's git configuration
-    can run a program. A False answer is not a verdict that the command is
+    can run a program or its repository holds a hook script. A False answer is not a verdict that the command is
     unsafe, only that it could not be proven safe, so the caller asks the
     user as before. See test_read_only_shell_commands.
     """

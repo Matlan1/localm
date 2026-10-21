@@ -28,8 +28,8 @@ err_console = Console(stderr=True, highlight=False)
 _SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
 _last_diff_preview: tuple[str, str, str, bool] | None = None
-# The answer flags of the last confirmation prompt asked in this thread (or
-# context), so a prompt answered in one thread cannot be read by another.
+# The answer flags of the last confirmation prompt, one value per thread (or
+# context).
 _last_confirm_always: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "coder_last_confirm_always", default=False)
 _last_reject_reason: contextvars.ContextVar[str] = contextvars.ContextVar(

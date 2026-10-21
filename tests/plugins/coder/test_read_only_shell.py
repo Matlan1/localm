@@ -97,7 +97,8 @@ def test_options_programs_and_quoting_that_escape_the_check(command):
 @pytest.mark.parametrize("command", [
     "grep TODO src", 'grep "^def" src', "grep -rn 'TODO' src", "git diff -U3",
     "rg -n parse src", "grep --color=never TODO src", "sort -k2 data.txt",
-    "type src" + _BS + "app.py",
+    "type src" + _BS + "app.py", "dir /b", "dir /b src", "findstr /i x a.txt",
+    "findstr /n x a.txt", "where /q grep", "cd /d src",
 ])
 def test_ordinary_read_only_forms_still_skip_the_prompt(command):
     assert is_read_only(command, PROJECT) is True, command
@@ -179,6 +180,7 @@ def test_a_batch_file_in_the_folder_shadows_the_command_on_windows(tmp_path):
     ("[log]\n\tshowSignature\n", False),
     ("[gpg]\n\tprogram = ./g.sh\n", False),
     ("[core] fsmonitor = ./hook.sh\n", False),
+    ("[core]\n\thooksPath = .husky\n", False),
 ])
 def test_git_config_that_runs_programs_is_not_read_only(tmp_path, config, read_only):
     proj = tmp_path / "proj"
@@ -198,6 +200,24 @@ def test_git_config_is_found_through_a_gitdir_file_and_a_nested_repo(tmp_path):
     assert is_read_only("git status", proj) is True
     assert is_read_only("cd sub && git status", proj) is False
     (proj / ".git").write_text("gitdir: store\n", encoding="utf-8")
+    assert is_read_only("git status", proj) is False
+
+
+def test_a_git_hook_script_is_not_read_only(tmp_path):
+    proj = tmp_path / "proj"
+    hooks = proj / ".git" / "hooks"
+    hooks.mkdir(parents=True)
+    (proj / ".git" / "config").write_text("[core]\n\tbare = false\n", encoding="utf-8")
+    (hooks / "pre-commit.sample").write_text("#!/bin/sh\n", encoding="utf-8")
+    (hooks / "post-index-change.d").mkdir()
+    assert is_read_only("git status", proj) is True
+    (hooks / "post-index-change").write_text("#!/bin/sh\n", encoding="utf-8")
+    assert is_read_only("git status", proj) is False
+    (hooks / "post-index-change").unlink()
+    sub_hooks = proj / ".git" / "modules" / "lib" / "hooks"
+    sub_hooks.mkdir(parents=True)
+    assert is_read_only("git status", proj) is True
+    (sub_hooks / "post-index-change").write_text("#!/bin/sh\n", encoding="utf-8")
     assert is_read_only("git status", proj) is False
 
 
