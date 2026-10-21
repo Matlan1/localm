@@ -201,6 +201,12 @@ class ModelFileDamagedError(ModelRefusedError):
     file and quotes the native reader's reason."""
 
 
+class ModelFileUnreadableError(ModelRefusedError):
+    """Raised by a load when llama.cpp could not open the model file at all
+    (no read permission for this account, or another program holds it open).
+    The message names the file and the operating system's reason."""
+
+
 class PretokenizerUnusableModelError(ModelRefusedError):
     """Raised by a load when the model declares a pre-tokenizer whose safe
     input bound falls inside ordinary prose, so the model could not hold a

@@ -1833,6 +1833,60 @@ class TestPlacementRecheck:
         asyncio.run(hs.get_engine("model-b", activate=False))
         assert b.load_calls == 1
 
+    @staticmethod
+    def _sized(total, model=12 * GB, kv=2 * GB, overhead=GB):
+        class _Sized(_SizedEngine):
+            def load(self):
+                super().load()
+                self.gpu_sizing.update(total_bytes=total, model_bytes=model,
+                                       kv_bytes=kv, overhead_bytes=overhead)
+        return _Sized("model-b", (_PARTIAL, _FULL))
+
+    def test_a_model_larger_than_total_vram_never_reads_vram_again(self, monkeypatch):
+        monkeypatch.setattr(hs, "_PLACEMENT_RECHECK_S", 0.0)
+        monkeypatch.setattr(hs, "_victim_vram_estimate", lambda engine: NEED)
+        b = self._sized(total=15 * GB - 1)
+        env = _install(monkeypatch, {"model-b": b}, total=20 * GB)
+        monkeypatch.setattr(hs, "_engine_factory", env.factory)
+        asyncio.run(hs.switch_engine("model-b", env.factory, preempt=False))
+        assert b.gpu_placement == _PARTIAL and b.placement_heal is None
+        probes = env.probes
+
+        got = asyncio.run(hs.get_engine("model-b", activate=False))
+
+        assert got is b and b.load_calls == 1 and env.probes == probes
+
+    def test_a_model_that_fits_total_vram_exactly_is_rechecked(self, monkeypatch):
+        b = self._sized(total=15 * GB)
+        env = _install(monkeypatch, {"model-b": b}, total=20 * GB)
+        asyncio.run(hs.switch_engine("model-b", env.factory, preempt=False))
+        assert b.placement_heal.recheck
+
+    @pytest.mark.parametrize("deferred, released", [(False, False), (True, True)])
+    def test_a_blocker_or_unconfirmed_heal_is_kept_past_total_vram(
+            self, monkeypatch, deferred, released):
+        monkeypatch.setattr(hs, "_engines_lru", ["other", "m"])
+        engine = SimpleNamespace(
+            gpu_placement=dict(_PARTIAL), placement_heal="unset",
+            gpu_sizing={"mode": "auto", "n_cpu_moe_auto": False, "total_bytes": 16 * GB,
+                        "model_bytes": 30 * GB, "kv_bytes": GB, "overhead_bytes": GB})
+        release = SimpleNamespace(released=released, expected=True)
+        hs._record_placement_heal("m", engine, (), [release], allowed=True,
+                                  deferred=deferred)
+        heal = engine.placement_heal
+        assert isinstance(heal, hs.PlacementHeal) and not heal.recheck
+        assert heal.blockers == (frozenset({"other"}) if deferred else frozenset())
+        assert heal.release_unconfirmed is not released
+
+    @pytest.mark.parametrize("sizing", [
+        {"total_bytes": None, "model_bytes": 30 * GB, "kv_bytes": GB, "overhead_bytes": GB},
+        {"total_bytes": 16 * GB, "model_bytes": 0, "kv_bytes": 0, "overhead_bytes": 0},
+        {"total_bytes": 16 * GB, "model_bytes": 30 * GB},
+        {"total_bytes": True, "model_bytes": 30 * GB, "kv_bytes": GB, "overhead_bytes": GB},
+    ])
+    def test_an_incomplete_sizing_record_keeps_the_recheck(self, sizing):
+        assert hs._full_placement_exceeds_total(sizing) is False
+
     def test_a_pin_taken_while_the_recheck_reads_vram_stops_the_reload(self, monkeypatch):
         b, _env = self._partial(monkeypatch)
 

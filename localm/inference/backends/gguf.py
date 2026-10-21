@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, Callable, Iterator, Optional, Sequence
 from localm.console import console
 
 from .base import (AdapterLoadError, BaseBackend, ModelFileDamagedError,
-                   ModelLoadCancelled, PerThread,
+                   ModelFileUnreadableError, ModelLoadCancelled, PerThread,
                    PretokenizerUnsafeInputError, PretokenizerUnusableModelError,
                    UnsupportedModelRoleError)
 from .llamacpp._runner import RunnerBusy
@@ -84,15 +84,32 @@ _DAMAGED_FILE_RE = re.compile(
     r"data is not within the file bounds)[^\r\n]{0,100})")
 
 
+# The gguf reader's line when it cannot open the file, ending in the C
+# library's reason in parentheses. The quoted path is bounded so a match stays
+# linear in the text's length. See test_unopenable_file_reason_reads_the_system_reason.
+_OPEN_FAILED_RE = re.compile(
+    r"gguf_init_from_\w+: failed to open GGUF file '[^\r\n]{0,1024}' \(([^\r\n()]{1,200})\)")
+
+
 def _damaged_file_reason(exc: BaseException) -> Optional[str]:
     """The native reader's one-line reason when *exc*'s text shows llama.cpp
     refused to read the model file because its contents are malformed or
     incomplete, else None. A tensor type this runtime does not know ("invalid
-    ggml type") is a file newer than the runtime, not a damaged one."""
+    ggml type") is a file newer than the runtime, and a file the reader could
+    not open (``_unopenable_file_reason``) is not known to be damaged."""
     match = _DAMAGED_FILE_RE.search(str(exc))
-    if match is None or "ggml type" in match.group(1):
+    if (match is None or "ggml type" in match.group(1)
+            or "failed to open" in match.group(1)):
         return None
     return match.group(1).strip()
+
+
+def _unopenable_file_reason(exc: BaseException) -> Optional[str]:
+    """The operating system's reason (for example "Permission denied") when
+    *exc*'s text shows llama.cpp's gguf reader could not open the model file,
+    else None."""
+    match = _OPEN_FAILED_RE.search(str(exc))
+    return match.group(1).strip() if match is not None else None
 
 
 def _load_failure_message(exc: BaseException, hint: str = "") -> str:
@@ -659,6 +676,13 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                 # Propagate as-is, bypassing the load-failure handling below.
                 raise
             except Exception as exc:
+                unreadable = _unopenable_file_reason(exc)
+                if unreadable is not None:
+                    raise ModelFileUnreadableError(
+                        f"{Path(self.model_path).name} could not be opened: llama.cpp "
+                        f"reported \"{unreadable}\". Check that the file exists, that "
+                        f"this account may read it and that no other program holds it "
+                        f"open, then try again.") from exc
                 damaged = _damaged_file_reason(exc)
                 if damaged is not None:
                     raise ModelFileDamagedError(
