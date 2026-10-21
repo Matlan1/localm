@@ -102,6 +102,15 @@ def _quiet_stderr(to_log: bool = True):
             os.close(saved_fd)
 
 
+def _grammar_parse_stderr():
+    """Context manager around a native grammar parse: the parser's stderr (its
+    error and the whole grammar source) goes to /dev/null, and to the debug
+    log only when ``debug_content_enabled()`` allows chat content there. Takes
+    ``_stderr_lock`` for the block."""
+    from localm.debuglog import debug_content_enabled
+    return _quiet_stderr(to_log=debug_content_enabled())
+
+
 def _stderr_ctx_for_generate(verbose: bool):
     """Return the context manager used to wrap generation stderr:
     nullcontext when verbose is True, otherwise dedup_native_stderr with
@@ -1142,10 +1151,11 @@ def _build_sampler(
     # letting a malformed grammar reach the crash-and-latch path.
     if grammar and grammar_lazy:
         if grammar_triggers and api.has_lazy_grammar():
-            gsampler = api.llama_sampler_init_grammar_lazy_patterns(
-                vocab, grammar.encode(), b"root",
-                [t.encode() for t in grammar_triggers],
-            )
+            with _grammar_parse_stderr():
+                gsampler = api.llama_sampler_init_grammar_lazy_patterns(
+                    vocab, grammar.encode(), b"root",
+                    [t.encode() for t in grammar_triggers],
+                )
             if gsampler is None:
                 api.llama_sampler_free(chain)
                 raise InvalidGrammarError(_INVALID_GRAMMAR_MSG)
@@ -1181,7 +1191,8 @@ def _build_sampler(
                 GRAMMAR_LAZY_NO_TRIGGERS_MESSAGE if not grammar_triggers
                 else GRAMMAR_LAZY_RUNTIME_OLD_MESSAGE)
     elif grammar:
-        gsampler = api.llama_sampler_init_grammar(vocab, grammar.encode(), b"root")
+        with _grammar_parse_stderr():
+            gsampler = api.llama_sampler_init_grammar(vocab, grammar.encode(), b"root")
         if gsampler is None:
             api.llama_sampler_free(chain)
             raise InvalidGrammarError(_INVALID_GRAMMAR_MSG)
@@ -2268,8 +2279,7 @@ class LlamaCpp:
         # The native parser prints its error and the whole grammar source to
         # stderr on rejection. It is kept off the terminal, and reaches the debug
         # log only when debug_content_enabled() allows chat content there.
-        from localm.debuglog import debug_content_enabled
-        with _quiet_stderr(to_log=debug_content_enabled()):
+        with _grammar_parse_stderr():
             sampler = api.llama_sampler_init_grammar(
                 self._tokenizer._vocab, grammar.encode(), b"root")
         if sampler is None:

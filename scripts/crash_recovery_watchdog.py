@@ -192,6 +192,26 @@ def write_exit_record(crash_dir: Path, instance_id: str, *, pid: int,
         _log(log_path, f"could not write the exit record: {e}")
 
 
+def marker_allows_exit_record(marker: Path) -> bool:
+    """False when *marker* records ``"diagnostics": false`` (a run armed in
+    privacy mode, which writes no automatic trace). A missing, unreadable or
+    key-less marker returns True."""
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return True
+    return not (isinstance(data, dict) and data.get("diagnostics") is False)
+
+
+def remove_exit_record(crash_dir: Path, instance_id: str,
+                       log_path: Optional[Path]) -> None:
+    """Delete the exit record for *instance_id*; a missing file is fine."""
+    try:
+        exit_record_path(crash_dir, instance_id).unlink(missing_ok=True)
+    except OSError as e:
+        _log(log_path, f"could not remove the exit record: {e}")
+
+
 def read_marker_pid(marker: Path) -> Optional[int]:
     """The pid recorded in *marker*, or None if it is missing/unreadable."""
     try:
@@ -389,8 +409,10 @@ def run(*, pid: int, host: str, port: int, scheme: str, instance_id: str,
     else:
         _log(log_path, f"pid {pid} is gone with exit code {exit_code} "
                        f"(0x{exit_code:08X}) after {watched_for:.1f}s watched")
-        write_exit_record(crash_dir, instance_id, pid=pid, exit_code=exit_code,
-                          watched_for_s=watched_for, log_path=log_path)
+        if marker_allows_exit_record(marker):
+            write_exit_record(crash_dir, instance_id, pid=pid,
+                              exit_code=exit_code, watched_for_s=watched_for,
+                              log_path=log_path)
     _log(log_path, f"waiting up to {grace_s}s for a "
                    "replacement to come up on its own")
     replacement = poll_for_new_instance(
@@ -405,6 +427,7 @@ def run(*, pid: int, host: str, port: int, scheme: str, instance_id: str,
         return EXIT_OK
 
     if not marker.exists():
+        remove_exit_record(crash_dir, instance_id, log_path)
         _log(log_path,
             f"no replacement appeared and {marker.name} is gone - this was "
             "a clean, intentional shutdown. Nothing to recover.")

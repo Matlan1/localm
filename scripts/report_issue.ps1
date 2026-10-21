@@ -84,7 +84,7 @@ function Scrub([string]$t) {
     $n = "$n".Trim().TrimEnd('.')
     if ($n) { $own[$n] = 1; $own[$n.Split('.')[0]] = 1 }
   }
-  $keep = @($own.Keys | Where-Object { $_.Length -ge 3 -and @('archlinux', 'debian', 'fedora', 'host', 'kali', 'localhost', 'localm', 'raspberrypi', 'redacted', 'ubuntu', 'user') -notcontains $_.ToLower() } | Sort-Object -Property @{ Expression = { $_.Length }; Descending = $true }, @{ Expression = { $_ } })
+  $keep = @($own.Keys | Where-Object { $_.Length -ge 3 -and @('admin', 'archlinux', 'build', 'builder', 'client', 'cloud', 'computer', 'container', 'debian', 'default', 'desktop', 'dev', 'devbox', 'docker', 'fedora', 'gpu', 'home', 'host', 'kali', 'laptop', 'linux', 'localhost', 'localm', 'macbook', 'machine', 'main', 'node', 'notebook', 'office', 'prod', 'production', 'raspberrypi', 'redacted', 'root', 'runner', 'server', 'staging', 'system', 'test', 'ubuntu', 'user', 'windows', 'work', 'worker', 'workstation') -notcontains $_.ToLower() } | Sort-Object -Property @{ Expression = { $_.Length }; Descending = $true }, @{ Expression = { $_ } })
   if ($keep.Count -gt 0) {
     $alt = ($keep | ForEach-Object { [regex]::Escape($_) }) -join '|'
     $t = [regex]::Replace($t, '(?<![A-Za-z0-9_./\\-])(?:' + $alt + ')(?![A-Za-z0-9_-]|[./\\][A-Za-z0-9_])', '<host>', $ic)

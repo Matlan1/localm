@@ -67,6 +67,7 @@ def test_an_error_status_is_appended_to_the_launcher_log(monkeypatch, tmp_path):
     mod = _load_launcher()
     app = _app(mod, monkeypatch, tmp_path)
     try:
+        app.privacy_global.set("log")
         app.status_msg(_LONG, error=True)
         app.status_msg("Up to date (3 models).")
     finally:
@@ -74,3 +75,52 @@ def test_an_error_status_is_appended_to_the_launcher_log(monkeypatch, tmp_path):
     log = (tmp_path / "logs" / "launcher.log").read_text(encoding="utf-8")
     assert _LONG in log
     assert "Up to date" not in log
+
+
+_PATH_ERROR = "Import failed: /private/models/x.gguf is not a GGUF file"
+
+
+def _error_log(tmp_path):
+    return tmp_path / "logs" / "launcher.log"
+
+
+def test_privacy_mode_writes_no_launcher_log(monkeypatch, tmp_path):
+    mod = _load_launcher()
+    app = _app(mod, monkeypatch, tmp_path)
+    try:
+        assert app.privacy_global.get() == "privacy"
+        app.keep_diagnostics.set(False)
+        app.status_msg(_PATH_ERROR, error=True)
+        assert app.status.cget("text").startswith("Import failed")
+    finally:
+        app.destroy()
+    assert not _error_log(tmp_path).exists()
+    assert not (tmp_path / "logs").exists()
+
+
+def test_privacy_mode_with_keep_diagnostics_writes_the_launcher_log(monkeypatch, tmp_path):
+    mod = _load_launcher()
+    app = _app(mod, monkeypatch, tmp_path)
+    try:
+        app.privacy_global.set("privacy")
+        app.keep_diagnostics.set(True)
+        app.status_msg(_PATH_ERROR, error=True)
+    finally:
+        app.destroy()
+    assert _PATH_ERROR in _error_log(tmp_path).read_text(encoding="utf-8")
+
+
+def test_switching_privacy_off_then_back_on_stops_the_log(monkeypatch, tmp_path):
+    mod = _load_launcher()
+    app = _app(mod, monkeypatch, tmp_path)
+    try:
+        app.privacy_global.set("full")
+        app.status_msg("first error", error=True)
+        app.privacy_global.set("privacy")
+        app.keep_diagnostics.set(False)
+        app.status_msg("second error", error=True)
+    finally:
+        app.destroy()
+    text = _error_log(tmp_path).read_text(encoding="utf-8")
+    assert "first error" in text
+    assert "second error" not in text
