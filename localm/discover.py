@@ -2641,6 +2641,22 @@ def _lone_discrete_gpu_index(readings) -> Optional[int]:
     return idx if isinstance(idx, int) else None
 
 
+def load_spans_several_gpus(config: dict, torch_device_count: int) -> bool:
+    """True when a GGUF load under *config* spreads over 2+ GPUs: a
+    ``gpu_split_indices`` that is not a 1-entry list, or none configured and
+    llama.cpp's default layer split covering 2+ devices. Those devices are the
+    ones :func:`_llama_visible_torch_devices` keeps of the last completed
+    :func:`list_gpus` reading, or, with no reading, the *torch_device_count*
+    devices torch sees. Never probes."""
+    configured = config.get("gpu_split_indices")
+    if configured:
+        return not (isinstance(configured, (list, tuple)) and len(configured) == 1)
+    readings = [g for g in (last_gpu_reading() or []) if isinstance(g, dict)]
+    if readings:
+        return len(_llama_visible_torch_devices(readings)) >= 2
+    return torch_device_count >= 2
+
+
 def resolve_load_gpu_index(config: Optional[dict] = None, *,
                            gpus: Optional[list] = None, quiet: bool = False) -> int:
     """The device a GGUF load's single-device VRAM readings are taken from, in

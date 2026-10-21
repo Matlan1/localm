@@ -954,7 +954,9 @@ class TestOneGpuWhenOnlyOneFits:
         cuda = mock.Mock()
         cuda.is_available.return_value = True
         cuda.mem_get_info.side_effect = lambda i: (i * 100, i * 1000)
-        with mock.patch.dict("sys.modules", {"torch": mock.Mock(cuda=cuda)}),                 mock.patch.object(discover, "resolve_load_gpu_index", return_value=1):
+        cuda.device_count.return_value = 2
+        with mock.patch.dict("sys.modules", {"torch": mock.Mock(cuda=cuda)}),                 mock.patch("localm.config.load_config",
+                           return_value={"gpu_split_indices": [1]}),                 mock.patch.object(discover, "resolve_load_gpu_index", return_value=1):
             assert GgufBackend._torch_free_total_uncapped() == (100, 1000)
         cuda.mem_get_info.assert_called_once_with(1)
 

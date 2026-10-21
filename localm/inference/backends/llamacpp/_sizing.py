@@ -193,7 +193,8 @@ class VramSizingMixin:
         """(free, total) bytes on the device a load's single-device readings
         come from (``discover.resolve_load_gpu_index``: the one device a 1-entry
         gpu_split_indices names, else main_gpu_index, device 0 when unset), or
-        (None, None) when not measurable. Shared by _free_vram_bytes() and
+        (None, None) when not measurable or the load spreads over 2+ GPUs
+        (:meth:`_torch_free_total_uncapped`). Shared by _free_vram_bytes() and
         _total_vram_bytes() so both read the same device in one call.
 
         NEVER BLOCKS ITS CALLER WITHOUT A BOUND. Two guards sit in front of the
@@ -300,7 +301,8 @@ class VramSizingMixin:
     @staticmethod
     def _torch_free_total_uncapped() -> tuple[Optional[int], Optional[int]]:
         """The actual torch read, with NO bound - call
-        :meth:`_free_total_vram_bytes`, not this."""
+        :meth:`_free_total_vram_bytes`, not this. (None, None) for a load that
+        spreads over 2+ GPUs (``discover.load_spans_several_gpus``)."""
         try:
             import torch
         except Exception as e:
@@ -312,8 +314,15 @@ class VramSizingMixin:
             return None, None
         try:
             if torch.cuda.is_available():
-                from localm.discover import resolve_load_gpu_index
-                idx = resolve_load_gpu_index()
+                from localm.config import load_config
+                from localm.discover import load_spans_several_gpus, resolve_load_gpu_index
+                cfg = load_config()
+                if load_spans_several_gpus(cfg, int(torch.cuda.device_count())):
+                    from localm.debuglog import logger as _dbg
+                    _dbg.debug("free-vram: the load spreads over 2+ GPUs; the "
+                               "torch read of one device does not answer for it")
+                    return None, None
+                idx = resolve_load_gpu_index(cfg)
                 free, total = torch.cuda.mem_get_info(idx)
                 return int(free), int(total)
         except Exception as e:
@@ -509,10 +518,10 @@ class VramSizingMixin:
         runtime with 2+ GPU devices (``_loader._resolve_gpu_memory``), and
         ``discover.load_device_memory_isolated`` then answers only for a
         1-entry ``gpu_split_indices``, or for no split on a runtime that lists
-        exactly one GPU-type device. A 2+-GPU load with no combined reading is
-        therefore unmeasurable rather than sized against one of its devices
-        (the torch path, which reads ``resolve_load_gpu_index`` alone, is the
-        exception).
+        exactly one GPU-type device, and the torch read answers only for a load
+        that does not spread over 2+ GPUs (``discover.load_spans_several_gpus``).
+        A 2+-GPU load with no combined reading is therefore unmeasurable rather
+        than sized against one of its devices.
 
         Never raises: a failure to fetch a combined reading is surfaced at
         debug and answered as "no combined reading"."""

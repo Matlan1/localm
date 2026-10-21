@@ -510,15 +510,22 @@ class TestVramReport:
 
 
 class TestFreeVramBytesDeviceSelection:
-    """_free_vram_bytes() must read the CONFIGURED main GPU device, not always
-    device 0, once a multi-GPU main_gpu_index is set."""
+    """_free_vram_bytes() reads the device a one-device load runs on: the one a
+    1-entry gpu_split_indices names, else main_gpu_index on a box where the load
+    uses one GPU. A load that llama.cpp spreads over 2+ GPUs is not read from
+    one of them."""
 
     @pytest.fixture(autouse=True)
     def _uncorrected_reading(self, monkeypatch):
         # These tests are about WHICH DEVICE is read, so the cross-process
-        # correction is pinned off.
+        # correction is pinned off and the non-torch readings answer nothing.
         monkeypatch.setattr("localm.gpu_usage.raw_reading_is_process_scoped",
                             lambda: False)
+        monkeypatch.setattr("localm.discover.last_gpu_reading", lambda: None)
+        monkeypatch.setattr(
+            "localm.inference.backends.llamacpp._loader.gpu_memory_isolated", lambda: None)
+        monkeypatch.setattr("localm.discover.load_device_memory_isolated",
+                            lambda *a, **k: None)
 
     def _fake_torch(self, per_device_free_total):
         fake = MagicMock()
@@ -527,19 +534,29 @@ class TestFreeVramBytesDeviceSelection:
         fake.cuda.mem_get_info.side_effect = lambda i: per_device_free_total[i]
         return patch.dict(sys.modules, {"torch": fake})
 
-    def test_reads_configured_device(self, monkeypatch):
+    def test_reads_the_device_a_one_entry_split_names(self, monkeypatch):
+        monkeypatch.setattr("localm.config.load_config",
+                            lambda: {"gpu_split_indices": [1], "main_gpu_index": None})
+        monkeypatch.setattr("localm.discover.list_gpus",
+                            lambda: [{"index": 0}, {"index": 1}])
+        monkeypatch.setattr("localm.discover._native_gpu_index_space_is_opaque",
+                            lambda: False)
+        with self._fake_torch([(1_000, 2_000), (5_000, 8_000)]):
+            free = GgufBackend._free_vram_bytes()
+        assert free == 5_000
+
+    def test_main_gpu_index_on_two_gpus_with_no_split_is_not_read_as_one(self, monkeypatch):
         monkeypatch.setattr("localm.config.load_config",
                             lambda: {"main_gpu_index": 1})
         monkeypatch.setattr("localm.discover.list_gpus",
                             lambda: [{"index": 0}, {"index": 1}])
         with self._fake_torch([(1_000, 2_000), (5_000, 8_000)]):
-            free = GgufBackend._free_vram_bytes()
-        assert free == 5_000
+            assert GgufBackend._free_vram_bytes() is None
 
-    def test_defaults_to_device_zero_when_unconfigured(self, monkeypatch):
+    def test_reads_device_zero_on_a_one_gpu_box(self, monkeypatch):
         monkeypatch.setattr("localm.config.load_config",
                             lambda: {"main_gpu_index": None})
-        with self._fake_torch([(1_000, 2_000), (5_000, 8_000)]):
+        with self._fake_torch([(1_000, 2_000)]):
             free = GgufBackend._free_vram_bytes()
         assert free == 1_000
 
