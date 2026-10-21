@@ -3,6 +3,7 @@
 
 import logging
 import sys
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -275,6 +276,135 @@ class TestCheckContextFit:
         assert not any("may not see other processes" in r.getMessage()
                       for r in caplog.records)
 
+
+class TestContextFitsBudget:
+    """GgufBackend._context_fits_budget() answers whether a grow stays within the
+    Windows per-process video memory budget (gpu_usage.process_vram_budget:
+    budget - usage), charged like _check_context_fit: the net growth while the
+    live KV is in VRAM, the whole target while it is in system RAM."""
+
+    GB = 1024 ** 3
+
+    def _fits(self, b, budget, n_ctx=8192, current=4096):
+        with patch("localm.gpu_usage.process_vram_budget", return_value=budget):
+            return b._context_fits_budget(n_ctx, current)
+
+    def test_growth_past_the_budget_does_not_fit(self, tmp_path):
+        # Net growth 4096 -> 8192 at 90 KB/token is ~0.37 GB; 0.1 GB of room.
+        b = _backend(tmp_path, size_bytes=9_000_000_000, n_ctx=4096)
+        assert self._fits(b, (10 * self.GB, 10 * self.GB - 100_000_000)) is False
+
+    def test_growth_within_the_budget_fits(self, tmp_path):
+        b = _backend(tmp_path, size_bytes=9_000_000_000, n_ctx=4096)
+        assert self._fits(b, (10 * self.GB, 8 * self.GB)) is True
+
+    def test_a_process_over_its_budget_fits_nothing_new(self, tmp_path):
+        b = _backend(tmp_path, size_bytes=9_000_000_000, n_ctx=4096)
+        assert self._fits(b, (9 * self.GB, 10 * self.GB)) is False
+
+    def test_a_shrink_fits_when_it_brings_usage_under_the_budget(self, tmp_path):
+        # Shrinking 8192 -> 4096 frees ~0.37 GB of KV.
+        b = _backend(tmp_path, size_bytes=9_000_000_000, n_ctx=4096)
+        assert self._fits(b, (9 * self.GB, 9 * self.GB + 200_000_000),
+                          n_ctx=4096, current=8192) is True
+        assert self._fits(b, (9 * self.GB, 10 * self.GB), n_ctx=4096, current=8192) is False
+
+    def test_kv_in_ram_is_charged_in_full(self, tmp_path):
+        # The whole 8192-token KV (~0.74 GB) is charged when the live KV is in
+        # RAM: 0.5 GB of room holds the net growth but not the whole cache.
+        b = _backend(tmp_path, size_bytes=9_000_000_000, n_ctx=4096)
+        room = (10 * self.GB, 10 * self.GB - 500_000_000)
+        b._llm = SimpleNamespace(_offload_kqv=False)
+        assert self._fits(b, room) is False
+        b._llm = SimpleNamespace(_offload_kqv=True)
+        assert self._fits(b, room) is True
+
+    def test_no_budget_reading_is_unknown(self, tmp_path):
+        b = _backend(tmp_path, size_bytes=9_000_000_000, n_ctx=4096)
+        assert self._fits(b, None) is None
+
+    def test_cpu_only_run_is_unknown_without_reading_the_budget(self, tmp_path):
+        b = _backend(tmp_path, size_bytes=9_000_000_000, n_gpu_layers=0)
+        with patch("localm.gpu_usage.process_vram_budget") as read:
+            assert b._context_fits_budget(8192, 4096) is None
+        read.assert_not_called()
+
+    def test_a_failing_charge_is_unknown(self, tmp_path):
+        b = _backend(tmp_path, size_bytes=9_000_000_000, n_ctx=4096)
+        with patch.object(GgufBackend, "_kv_bytes_per_token", side_effect=OSError("bad header")):
+            assert self._fits(b, (10 * self.GB, 1 * self.GB)) is None
+
+    def test_budget_overrun_keeps_the_kv_cache_in_vram(self, tmp_path):
+        """_check_context_fit places the KV cache on free VRAM alone: a grow past
+        the budget whose growth fits free VRAM stays in VRAM, where it decodes
+        faster than with the KV cache in system RAM."""
+        b = _backend(tmp_path, size_bytes=9_000_000_000, n_ctx=4096)
+        with patch.object(GgufBackend, "_free_vram_bytes", return_value=4 * self.GB), \
+             patch("localm.gpu_usage.process_vram_budget",
+                   return_value=(10 * self.GB, 10 * self.GB)):
+            assert b._check_context_fit(8192, current_ctx=4096) is True
+
+    def test_ctx_grow_debug_line_carries_the_budget(self, tmp_path, caplog):
+        b = _backend(tmp_path, size_bytes=9_000_000_000, n_ctx=4096)
+        with patch.object(GgufBackend, "_free_vram_bytes", return_value=4 * self.GB), \
+             patch("localm.gpu_usage.process_vram_budget",
+                   return_value=(10 * self.GB, 9 * self.GB)), \
+             caplog.at_level(logging.DEBUG, logger="localm"):
+            b._check_context_fit(8192, current_ctx=4096)
+        line = next(r.getMessage() for r in caplog.records
+                    if r.getMessage().startswith("ctx-grow fit:"))
+        assert f"free={4 * self.GB} budget={10 * self.GB} usage={9 * self.GB}" in line
+
+    def test_ctx_grow_skips_the_budget_read_when_debug_is_off(self, tmp_path, caplog):
+        b = _backend(tmp_path, size_bytes=9_000_000_000, n_ctx=4096)
+        with patch.object(GgufBackend, "_free_vram_bytes", return_value=4 * self.GB), \
+             patch("localm.gpu_usage.process_vram_budget") as read, \
+             caplog.at_level(logging.INFO, logger="localm"):
+            assert b._check_context_fit(8192, current_ctx=4096) is True
+        read.assert_not_called()
+
+
+class TestProcessVramBudget:
+    """gpu_usage.process_vram_budget picks the one hardware adapter on which this
+    process holds VRAM and answers None everywhere else."""
+
+    MB = 1024 ** 2
+
+    def test_none_off_windows(self, monkeypatch):
+        from localm import gpu_usage
+        monkeypatch.setattr(gpu_usage.sys, "platform", "linux")
+        with patch.object(gpu_usage, "_dxgi_local_memory") as read:
+            assert gpu_usage.process_vram_budget() is None
+        read.assert_not_called()
+
+    @pytest.mark.parametrize("readings, expected", [
+        ([(16_000 * MB, 9_000 * MB)], (16_000 * MB, 9_000 * MB)),
+        ([(16_000 * MB, 100 * MB)], None),
+        ([(16_000 * MB, 0), (8_000 * MB, 5_000 * MB)], (8_000 * MB, 5_000 * MB)),
+        ([(16_000 * MB, 9_000 * MB), (8_000 * MB, 5_000 * MB)], None),
+        ([], None),
+    ])
+    def test_adapter_selection(self, monkeypatch, readings, expected):
+        from localm import gpu_usage
+        monkeypatch.setattr(gpu_usage.sys, "platform", "win32")
+        with patch.object(gpu_usage, "_dxgi_local_memory", return_value=readings):
+            assert gpu_usage.process_vram_budget() == expected
+
+    def test_dxgi_failure_is_none(self, monkeypatch):
+        from localm import gpu_usage
+        monkeypatch.setattr(gpu_usage.sys, "platform", "win32")
+        with patch.object(gpu_usage, "_dxgi_local_memory", side_effect=OSError("no dxgi")):
+            assert gpu_usage.process_vram_budget() is None
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="DXGI is Windows-only")
+    def test_real_dxgi_query(self):
+        from localm import gpu_usage
+        readings = gpu_usage._dxgi_local_memory()
+        if not readings:
+            pytest.skip("no hardware DXGI adapter")
+        for budget, usage in readings:
+            assert budget > 0
+            assert usage >= 0
 
 
 class TestVramReport:
