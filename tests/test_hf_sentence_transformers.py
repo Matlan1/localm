@@ -296,8 +296,10 @@ class TestStagePathsStayInsideTheFolder:
 
     def test_a_hub_cache_stage_folder_linked_outside_is_refused(self, tmp_path):
         snap = self._hub_snapshot(tmp_path)
-        moved = tmp_path / "hub" / "models--org--st" / "moved_pooling"
+        moved = tmp_path / "hub" / "models--org--st" / "snapshots" / "rev2" / "1_Pooling"
+        moved.parent.mkdir(parents=True)
         (snap / "1_Pooling").rename(moved)
+        assert (moved / "config.json").read_text(encoding="utf-8")
         _symlink(snap / "1_Pooling", moved, is_dir=True)
         with pytest.raises(StUnsupportedError, match="not inside the folder"):
             load_plan(str(snap))
