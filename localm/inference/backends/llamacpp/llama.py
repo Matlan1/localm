@@ -1754,6 +1754,7 @@ class LlamaCpp:
                  or any(not b.get("is_ram") for b in self.weight_placement)))
 
         self._residency_watch = True
+        self._prime_residency_counters()
 
         self.n_parallel, self.parallel_note = self._resolve_parallel(n_parallel, n_ctx)
 
@@ -3662,6 +3663,23 @@ class LlamaCpp:
     _residency_reported = False        # the current over-threshold spell was logged
     _residency_unavailable_said = False
 
+    def _prime_residency_counters(self) -> Optional[threading.Thread]:
+        """On Windows, for a load ``_note_residency`` checks, open this
+        process's ``GPU Process Memory`` query on a daemon thread so the
+        first check does not pay the one-time PDH setup. Returns the started
+        thread, or None when nothing is checked. Never raises."""
+        import sys
+        if sys.platform != "win32" or not self._decode_judged:
+            return None
+        from localm import gpu_usage
+        try:
+            t = threading.Thread(target=gpu_usage.process_gpu_memory,
+                                 name="localm-residency-prime", daemon=True)
+            t.start()
+        except RuntimeError:
+            return None   # the first check opens the query instead. See test_a_failed_prime_still_checks
+        return t
+
     def _note_residency(self) -> None:
         """On Windows, log at INFO when the WDDM counters show this process
         holding at least ``_RESIDENCY_SHARED_MIN`` bytes and
@@ -3672,8 +3690,10 @@ class LlamaCpp:
         Reads at most once per ``_RESIDENCY_RECHECK_S`` seconds, and at the
         first call after a load or a context recreate. Does nothing on other
         platforms, for an instance ``__init__`` did not build, while
-        ``_decode_judged`` is False, or while the KV cache is in system RAM. Unavailable counters are logged once at DEBUG. Never
-        raises. Caller holds ``_gen_lock``."""
+        ``_decode_judged`` is False, or while the KV cache is in system RAM.
+        The first unavailable reading is logged here at DEBUG
+        (``gpu_usage.process_gpu_memory`` logs each failed query itself).
+        Never raises. Caller holds ``_gen_lock``."""
         import sys
         if (sys.platform != "win32" or not self._residency_watch or not self._decode_judged
                 or not self._ctx_ptr or self._offload_kqv is False):

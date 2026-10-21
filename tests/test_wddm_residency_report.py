@@ -352,10 +352,68 @@ class TestWin32pdhWithoutSite:
 
     def test_the_plain_import_fails_there(self):
         r = self._run("import win32pdh")
-        assert r.returncode != 0 and "DLL load failed" in r.stderr
+        if r.returncode == 0:
+            pytest.skip("pywin32's DLLs are on this machine's system DLL path")
+        assert "DLL load failed" in r.stderr
+
 
     def test_win32pdh_imports_without_site(self):
         r = self._run("from localm.gpu_usage import _import_win32pdh\n"
                       "print(_import_win32pdh().__name__)")
         assert r.returncode == 0, r.stderr
         assert r.stdout.strip() == "win32pdh"
+
+
+class TestPdhImportSites:
+    @pytest.mark.usefixtures("fresh_proc_state")
+    @pytest.mark.parametrize("call", ["_pdh_adapter_used", "adapter_utilisation"])
+    def test_every_pdh_reader_imports_through_the_bootstrap(self, call, monkeypatch):
+        state = {"_pdh_adapter_used": "_pdh_state", "adapter_utilisation": "_pdh_util_state"}[call]
+        monkeypatch.setattr(gpu_usage, state, None)
+        imported = MagicMock(side_effect=ImportError("blocked"))
+        with patch.object(gpu_usage, "_import_win32pdh", imported):
+            getattr(gpu_usage, call)()
+        imported.assert_called_once_with()
+        assert getattr(gpu_usage, state) == {}
+
+
+class TestPrime:
+    def _bare(self):
+        llm = _llm()
+        llm._residency_watch = False
+        return llm
+
+    def test_a_windows_load_opens_the_query_off_the_request_path(self):
+        llm = self._bare()
+        read = MagicMock(return_value=HEALTHY)
+        with patch(READ, read), patch.object(sys, "platform", "win32"):
+            t = llm._prime_residency_counters()
+            assert t is not None and t.daemon
+            t.join(5)
+        read.assert_called_once_with()
+
+    @pytest.mark.parametrize("platform, judged", [("linux", True), ("win32", False)])
+    def test_nothing_is_primed_when_nothing_is_checked(self, platform, judged):
+        llm = self._bare()
+        llm._decode_judged = judged
+        read = MagicMock()
+        with patch(READ, read), patch.object(sys, "platform", platform):
+            assert llm._prime_residency_counters() is None
+        read.assert_not_called()
+
+    def test_a_failed_prime_still_checks(self):
+        llm = _llm()
+        with patch("threading.Thread.start", side_effect=RuntimeError("can't start new thread")), \
+             patch.object(sys, "platform", "win32"):
+            assert llm._prime_residency_counters() is None
+        api, _cp = _api()
+        _out, reads = _generate(llm, api, HEALTHY)
+        assert reads == 1
+
+    def test_init_primes_after_judging_the_load(self):
+        import inspect
+        from localm.inference.backends.llamacpp.llama import LlamaCpp
+        src = inspect.getsource(LlamaCpp.__init__)
+        judged = src.index("self._decode_judged = (")
+        prime = src.index("self._prime_residency_counters()")
+        assert judged < prime
