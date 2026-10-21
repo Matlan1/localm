@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 from localm.debuglog import logger
+from localm.pathsafe import confined_model_file
 
 FP8_QUANT_METHOD = "fp8"
 NATIVE_FP8_MIN_CAPABILITY = (8, 9)
@@ -158,14 +159,14 @@ def weight_files(model_path: str) -> list:
         except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError) as e:
             logger.debug("hf fp8: could not read %s: %s", index, e)
             return []
-        base = root.resolve()
         files = []
         for name in names:
-            path = (root / name).resolve()
-            if not path.is_relative_to(base):
-                logger.debug("hf fp8: %s names %r outside the model directory", index, name)
+            try:
+                files.append(confined_model_file(root, name))
+            except ValueError as e:
+                logger.debug("hf fp8: %s names %r outside the model directory: %s",
+                             index, name, e)
                 return []
-            files.append(path)
         return files
     single = root / "model.safetensors"
     return [single] if single.is_file() else []
