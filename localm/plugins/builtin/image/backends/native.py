@@ -13,6 +13,7 @@ idle period, or when the server exits.
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import secrets
@@ -503,16 +504,28 @@ def _write_sidecar(out_path: Path, record: dict) -> str:
 class _EventRelay:
     """The worker-event handler for one job: status lines to *say*, preview
     frames to *on_preview*. ``flush`` shows any held warning lines and must be
-    called when the job ends."""
+    called when the job ends. Weight loads reported after sampling has started
+    (weights streamed in per step) are not shown."""
 
     def __init__(self, say, on_preview=None, cancel_check=None):
         self._say = say
         self._on_preview = on_preview
         self._phase = None
+        self._sampled = False
         self._warnings = RecoveredWarnings(say, cancel_check)
 
     def flush(self) -> None:
         self._warnings.flush()
+
+    def begin_attempt(self) -> None:
+        """A generation starts: show the lines held from before it."""
+        self._warnings.flush()
+
+    def budget_retry(self) -> None:
+        """The generation is retried without its VRAM budget: drop the held
+        lines of the refused attempt and show the reload's progress."""
+        self._warnings.budget_retry()
+        self._sampled = False
 
     def __call__(self, event) -> None:
         kind = event[0]
@@ -525,7 +538,11 @@ class _EventRelay:
             return
         info = event[1]
         phase, step, steps = info.get("phase"), info.get("step", 0), info.get("steps", 0)
+        if phase == "loading" and self._sampled:
+            self._phase = phase
+            return
         if phase == "sampling":
+            self._sampled = True
             self._warnings.sampling()
             secs = info.get("secs") or 0.0
             rate = f" ({secs:.2f} s/step)" if secs else ""
@@ -811,6 +828,11 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
             components = {k: v["name"] for k, v in (models.get("components") or {}).items()} or None
             if negative_prompt and cfg_scale is not None and abs(float(cfg_scale) - 1.0) < 1e-5:
                 say(NEGATIVE_AT_CFG_1)
+
+            def reload_model(load: dict) -> None:
+                runner.ensure_loaded(key, rt.path, load, extra_dirs=rt.extra_dirs,
+                                     on_event=relay, cancel_check=cancel_check)
+
             batch_started = time.monotonic()
             for index in range(batch):
                 if cancel_check is not None and cancel_check():
@@ -841,7 +863,11 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
                     + (f", hires x{hires['scale']:g}" if hires else "")
                     + f", seed {image_seed}...")
                 image_started = time.monotonic()
-                result = runner.generate_image(params, on_event=relay, cancel_check=cancel_check)
+                relay.begin_attempt()
+                result = sd_budget.call_within_budget(
+                    runner, functools.partial(runner.generate_image, params, on_event=relay,
+                                              cancel_check=cancel_check),
+                    reload_model, say, on_retry=relay.budget_retry, cancel_check=cancel_check)
                 if _is_blank_white(result):
                     raise SdWorkerError(BLANK_IMAGE)
                 path = _batch_path(Path(out_path), index)

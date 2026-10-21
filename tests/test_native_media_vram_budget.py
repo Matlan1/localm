@@ -25,11 +25,19 @@ def _gpu(index=0, free=10 * GIB, total=16 * GIB, scope=discover.FREE_SCOPE_DEVIC
 #  vram_budget                                                                #
 # --------------------------------------------------------------------------- #
 
-@pytest.mark.parametrize("backend", ["rocm", "vulkan"])
-def test_one_gpu_gets_its_free_vram_less_the_margin(backend):
+@pytest.mark.parametrize("backend,setting", [("rocm", "9.50"), ("vulkan", "8.50")])
+def test_one_gpu_gets_its_free_vram_less_the_margin(backend, setting):
     got = sd_budget.vram_budget(backend, gpus=[_gpu(free=10 * GIB)],
                                 status=discover.GPU_PROBE_OK, platform="win32")
-    assert got == sd_budget.Budget(setting="9.50", free=10 * GIB, total=16 * GIB)
+    assert got == sd_budget.Budget(setting=setting, free=10 * GIB, total=16 * GIB)
+
+
+def test_a_vulkan_budget_leaves_room_for_the_runtimes_overshoot():
+    free = int(8.4 * GIB)
+    got = sd_budget.vram_budget("vulkan", gpus=[_gpu(free=free)],
+                                status=discover.GPU_PROBE_OK, platform="win32")
+    overshoot = int(0.5 * GIB)
+    assert free - float(got.setting) * GIB >= overshoot + 512 * 1024 ** 2
 
 
 @pytest.mark.parametrize("backend", ["cpu", "cuda", "metal"])
@@ -166,7 +174,7 @@ def test_the_live_probe_is_asked_for_a_fresh_reading(monkeypatch):
         return [_gpu(free=6 * GIB)], discover.GPU_PROBE_OK
     monkeypatch.setattr(sd_budget, "_platform", lambda: "win32")
     monkeypatch.setattr(discover, "list_gpus", probe)
-    assert sd_budget.vram_budget("vulkan").setting == "5.50"
+    assert sd_budget.vram_budget("vulkan").setting == "4.50"
     assert calls == [{"return_status": True, "wait_for_inflight": True}]
 
 
@@ -297,7 +305,7 @@ def test_a_vulkan_load_gets_the_budget_without_flash_attention(image_env, tmp_pa
     assert ok, msg
     (_key, ctx), = runner.loads
     assert "diffusion_flash_attn" not in ctx
-    assert ctx["max_vram"] == "12.50"
+    assert ctx["max_vram"] == "11.50"
 
 
 def test_a_loaded_model_is_reused_without_a_new_probe(image_env, tmp_path):
@@ -317,7 +325,7 @@ def test_a_runtime_change_reloads_the_same_model(image_env, tmp_path):
                                     width=64, height=64)
     assert ok, msg
     assert [k[1] for k, _ctx in runner.loads] == ["rocm", "vulkan"]
-    assert [ctx["max_vram"] for _k, ctx in runner.loads] == ["12.50", "12.50"]
+    assert [ctx["max_vram"] for _k, ctx in runner.loads] == ["12.50", "11.50"]
     assert len(probes) == 3
 
 

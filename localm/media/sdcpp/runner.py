@@ -32,11 +32,17 @@ class SdWorkerError(RuntimeError):
     """The worker reported a failure, crashed or timed out."""
 
 
+class SdBudgetRefused(SdWorkerError):
+    """The runtime refused a generation because a graph segment did not fit
+    the ``max_vram`` budget the model was loaded with."""
+
+
 EventCallback = Callable[[tuple], None]
 
 
 class SdRunner:
-    """One isolated sd.cpp worker. ``loaded_key`` names the model set it holds."""
+    """One isolated sd.cpp worker. ``loaded_key`` names the model set it holds
+    and ``loaded_ctx`` is the context fields it was loaded with."""
 
     def __init__(self) -> None:
         self._proc = None
@@ -46,6 +52,7 @@ class SdRunner:
         self._crash_trace_path = None
         self.loaded_key: Optional[Any] = None
         self.load_info: Optional[dict] = None
+        self.loaded_ctx: Optional[dict] = None
 
     def is_alive(self) -> bool:
         proc = self._proc
@@ -154,7 +161,7 @@ class SdRunner:
                 continue
             if cancel_deadline is not None:
                 cancel.clear()
-                if kind == "ok":
+                if kind in ("ok", "budget_refused"):
                     raise SdCancelled("Generation cancelled.")
             if kind == "ok":
                 return msg[1]
@@ -162,6 +169,8 @@ class SdRunner:
                 raise SdCancelled(msg[1] or "Generation cancelled.")
             if kind == "error":
                 raise SdWorkerError(str(msg[1]))
+            if kind == "budget_refused":
+                raise SdBudgetRefused(str(msg[1]))
             raise SdWorkerError(f"Unexpected reply from the media worker: {msg!r}")
 
     def _request(self, name: str, payload, timeout: float, **kw):
@@ -204,6 +213,7 @@ class SdRunner:
             raise
         self.loaded_key = key
         self.load_info = info
+        self.loaded_ctx = dict(ctx)
         return info
 
     def generate_image(self, params: dict, *, timeout: float = GENERATE_TIMEOUT,
@@ -211,7 +221,8 @@ class SdRunner:
                        cancel_check: Optional[Callable[[], bool]] = None) -> dict:
         """Generate one image with the loaded model. Returns ``{"width",
         "height", "channel", "data", "seed"}``; raises :class:`SdCancelled` or
-        :class:`SdWorkerError`."""
+        :class:`SdWorkerError` (:class:`SdBudgetRefused` when the load's
+        ``max_vram`` budget was too small)."""
         return self._request("generate_image", params, timeout,
                              on_event=on_event, cancel_check=cancel_check)
 
@@ -239,7 +250,8 @@ class SdRunner:
         "height", "channel", "frames", "fps", "audio", "seed"}`` (``frames`` a
         list of raw pixel buffers; ``audio`` None or interleaved float32 samples
         with ``sample_rate``, ``channels`` and ``sample_count``); raises
-        :class:`SdCancelled` or :class:`SdWorkerError`."""
+        :class:`SdCancelled` or :class:`SdWorkerError` (:class:`SdBudgetRefused`
+        when the load's ``max_vram`` budget was too small)."""
         return self._request("generate_video", params, timeout,
                              on_event=on_event, cancel_check=cancel_check)
 
@@ -257,6 +269,7 @@ class SdRunner:
         self._cancel = None
         self.loaded_key = None
         self.load_info = None
+        self.loaded_ctx = None
 
     def shutdown(self, grace: float = 5.0) -> None:
         """Stop the worker (asking first, then killing). Process exit releases

@@ -173,6 +173,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Cancelling a download on the Models page says what was actually deleted.** The status line used to claim the partial download was deleted every time, including for CivitAI files and whole-repo downloads whose files stay on disk, and when the delete request failed. It now reports the case.
 - **Restarting a ComfyUI that localm launched waits for the old one to release its port.** The restart used to be refused with "localm did not start it" while the process that had just been stopped still held the port.
 - **`localm pull` prints progress when its output is piped or redirected.** With stdout not a terminal it showed nothing for the whole transfer; it now writes a plain progress line to stderr every few seconds.
+- **Native image and video generation works when other programs hold most of the VRAM.** On
+  Windows with the Vulkan or ROCm runtime, a model loaded with little free VRAM was given a VRAM
+  limit too small for any part of it, and every generation failed at once with "diffusion model
+  compute failed". When the runtime refuses to run within that limit, localm now says so, loads
+  the model again without the limit, and generates. On the Vulkan runtime the limit also leaves
+  more room below the free VRAM, so a model larger than the free VRAM (FLUX.1-dev Q8 with about
+  8 GB free) no longer runs out of VRAM part-way through sampling.
 - **Export saves in the app only where it can.** A key with access to the computer's files but
   without permission to change settings got a folder picker and then an error instead of a file,
   and the owner on another device (a phone, a second PC) had the file written on the computer

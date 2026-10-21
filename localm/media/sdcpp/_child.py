@@ -29,6 +29,8 @@ command at a time:
                                                         in-progress image; only when
                                                         the request sets "preview"
     ("ok", value) | ("cancelled", message) | ("error", message)   final
+    ("budget_refused", message)   final, a generation the runtime refused to run
+                                  within the load's max_vram budget
 
 A native abort produces no reply; the parent sees the dead process.
 """
@@ -73,6 +75,12 @@ class _State:
     model_desc = ""
     last_errors: list = []
     last_progress = 0.0
+    capacity_short = False
+    budget_refused = False
+
+
+class _BudgetRefused(RuntimeError):
+    """The runtime could not fit a graph segment into its max_vram budget."""
 
 
 def _simulate_fault(mode: str) -> None:
@@ -137,6 +145,9 @@ def _set_rocblas_tensile(extra_dirs) -> None:
 
 _MODEL_DESC_RE = re.compile(r"\AWan\d\.[\dx]-[A-Za-z0-9.]+-[A-Za-z0-9.]+\Z")
 
+_CAPACITY_SHORT_TEXT = "cannot make enough memory available"
+_SEGMENT_REFUSED_RE = re.compile(r"\bsegment \d+/\d+ \([^)]*\) failed during weight preparation")
+
 
 def _redacted(text: str) -> str:
     """*text* with the prompt replaced by ``<prompt>`` and every loaded model
@@ -188,9 +199,13 @@ def _make_callbacks(resp_q):
         if not _State.model_desc and _MODEL_DESC_RE.match(head):
             _State.model_desc = head
         if level >= b.SD_LOG_WARN:
+            if _CAPACITY_SHORT_TEXT in low:
+                _State.capacity_short = True
             msg = _redacted(msg)
             if level >= b.SD_LOG_ERROR:
                 _State.last_errors = (_State.last_errors + [msg])[-5:]
+                if _State.capacity_short and _SEGMENT_REFUSED_RE.search(head):
+                    _State.budget_refused = True
             try:
                 resp_q.put(("log", int(level), msg))
             except Exception:
@@ -289,6 +304,20 @@ def _error_with_native(message: str) -> str:
     if _State.last_errors:
         return f"{message}: {' | '.join(_State.last_errors[-3:])}"
     return message
+
+
+def _reset_generation_state() -> None:
+    _State.last_errors = []
+    _State.capacity_short = False
+    _State.budget_refused = False
+
+
+def _generation_failed(message: str) -> Exception:
+    """The exception for a failed generation: :class:`_BudgetRefused` when the
+    runtime logged that a segment did not fit its memory budget, else
+    ``RuntimeError``."""
+    text = _error_with_native(message)
+    return _BudgetRefused(text) if _State.budget_refused else RuntimeError(text)
 
 
 def _do_probe(payload):
@@ -545,7 +574,7 @@ def _do_generate_image(payload, cancel_event):
     out = ctypes.POINTER(b.sd_image_t)()
     count = ctypes.c_int(0)
     lib.sd_cancel_generation(ctx, b.SD_CANCEL_RESET)
-    _State.last_errors = []
+    _reset_generation_state()
     _State.sample_steps = int(p.sample_params.sample_steps)
     _State.hires_steps = (int(p.hires.steps) or _State.sample_steps) if p.hires.enabled else 0
     _State.decoding = False
@@ -564,7 +593,7 @@ def _do_generate_image(payload, cancel_event):
         if not ok or count.value < 1 or not out:
             if cancelled:
                 return "cancelled", "Generation cancelled."
-            raise RuntimeError(_error_with_native("stable-diffusion.cpp generation failed"))
+            raise _generation_failed("stable-diffusion.cpp generation failed")
         img = out[0]
         if not img.data:
             if cancelled:
@@ -679,7 +708,7 @@ def _do_generate_video(payload, cancel_event):
     audio = ctypes.POINTER(b.sd_audio_t)()
     fps_out = ctypes.c_int(0)
     lib.sd_cancel_generation(ctx, b.SD_CANCEL_RESET)
-    _State.last_errors = []
+    _reset_generation_state()
     _State.sample_steps = int(p.sample_params.sample_steps)
     _State.hires_steps = 0
     _State.decoding = False
@@ -699,7 +728,7 @@ def _do_generate_video(payload, cancel_event):
         if not ok or count.value < 1 or not frames:
             if cancelled:
                 return "cancelled", "Generation cancelled."
-            raise RuntimeError(_error_with_native("stable-diffusion.cpp video generation failed"))
+            raise _generation_failed("stable-diffusion.cpp video generation failed")
         first = frames[0]
         w, h, c = int(first.width), int(first.height), int(first.channel)
         out_frames = []
@@ -783,5 +812,7 @@ def worker_main(req_q, resp_q, cancel_event, crash_trace_path=None) -> None:
                 resp_q.put((kind, value))
             else:
                 resp_q.put(("error", f"unknown sd.cpp worker command: {name!r}"))
+        except _BudgetRefused as e:
+            resp_q.put(("budget_refused", str(e)))
         except Exception as e:  # noqa: BLE001
             resp_q.put(("error", f"{type(e).__name__}: {e}" if not str(e) else str(e)))

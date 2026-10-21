@@ -13,17 +13,27 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, Optional, TypeVar
+
+T = TypeVar("T")
 
 PROCESS_SCOPED_BACKENDS = ("rocm", "vulkan")
 
 MARGIN_BYTES = 512 * 1024 ** 2
+
+# The Vulkan runtime allocates beyond max_vram, and a Vulkan allocation past the
+# card's free VRAM fails. See test_a_vulkan_budget_leaves_room_for_the_runtimes_overshoot.
+VULKAN_MARGIN_BYTES = 1536 * 1024 ** 2
 
 MIN_BUDGET_BYTES = 256 * 1024 ** 2
 
 RELEASE_TIMEOUT_S = 5.0
 
 _GIB = 1024 ** 3
+
+UNBUDGETED_RETRY = ("The free VRAM is too little for this model to run within it. Loading it "
+                    "again without that limit; Windows may move part of it to system "
+                    "memory, which is slower.")
 
 
 @dataclass(frozen=True)
@@ -43,6 +53,12 @@ def _platform() -> str:
 
 def _gib(n: int) -> str:
     return f"{max(n, MIN_BUDGET_BYTES) / _GIB:.2f}"
+
+
+def margin_bytes(backend: str) -> int:
+    """The VRAM left free below a *backend* load's budget: ``VULKAN_MARGIN_BYTES``
+    on Vulkan, else ``MARGIN_BYTES``."""
+    return VULKAN_MARGIN_BYTES if backend == "vulkan" else MARGIN_BYTES
 
 
 def _is_int(v) -> bool:
@@ -106,8 +122,8 @@ def vram_budget(backend: str, *, gpus: Optional[list] = None, status: Optional[s
     device-global or is incomplete, there are several GPUs on Vulkan, or
     several GPUs on ROCm cannot be matched to the runtime's devices.
 
-    Each GPU's budget is its device-global free VRAM less ``MARGIN_BYTES``, at
-    least ``MIN_BUDGET_BYTES``. One GPU gives a plain GiB value. Several ROCm
+    Each GPU's budget is its device-global free VRAM less ``margin_bytes(backend)``,
+    at least ``MIN_BUDGET_BYTES``. One GPU gives a plain GiB value. Several ROCm
     GPUs give each runtime device ``<device name>=<GiB>`` (``ROCm0=...``),
     matched to a GPU by name (:func:`_per_device_setting`); *devices* is the
     runtime's
@@ -135,7 +151,7 @@ def vram_budget(backend: str, *, gpus: Optional[list] = None, status: Optional[s
         return Budget(None, reason="several GPUs on the Vulkan runtime")
     if len(usable) == 1:
         g = usable[0]
-        return Budget(setting=_gib(g["free"] - MARGIN_BYTES), free=g["free"],
+        return Budget(setting=_gib(g["free"] - margin_bytes(backend)), free=g["free"],
                       total=g["total"])
     setting, matched, reason = _per_device_setting(usable, _runtime_gpus(devices))
     if setting is None:
@@ -213,3 +229,40 @@ def reload_ctx(runner, ctx: dict, backend: str, say: Callable[[str], None],
         logger.warning("native media VRAM budget: free VRAM did not rise within %.0f s "
                        "of stopping the previous model", RELEASE_TIMEOUT_S)
     return with_budget(ctx, backend, say, good[0] or last[0], devices=devices)
+
+
+def call_within_budget(runner, call: Callable[[], T], reload: Callable[[dict], object],
+                       say: Callable[[str], None], *,
+                       on_retry: Optional[Callable[[], None]] = None,
+                       cancel_check: Optional[Callable[[], bool]] = None) -> T:
+    """``call()``, the generation on *runner*'s loaded model. When it raises
+    ``SdBudgetRefused`` and the model was loaded with a ``max_vram`` budget,
+    calls *on_retry*, says ``UNBUDGETED_RETRY``, stops the worker, passes the
+    loaded context without ``max_vram`` to *reload* (which loads it) and
+    returns ``call()`` once more. Any other failure, and a refusal of a load
+    without a budget, propagates. Raises ``SdCancelled`` when *cancel_check*
+    returns True after the refusal, before the worker is stopped or after."""
+    from .runner import SdBudgetRefused, SdCancelled
+
+    def check_cancel() -> None:
+        if cancel_check is not None and cancel_check():
+            raise SdCancelled("Generation cancelled.")
+
+    try:
+        return call()
+    except SdBudgetRefused as e:
+        loaded = dict(runner.loaded_ctx or {})
+        if not loaded.get("max_vram"):
+            raise
+        from localm.debuglog import logger
+        logger.info("native media VRAM budget: the runtime refused to run within "
+                    "max_vram=%s (%s); reloading without a budget", loaded["max_vram"], e)
+    check_cancel()
+    if on_retry is not None:
+        on_retry()
+    say(UNBUDGETED_RETRY)
+    loaded.pop("max_vram", None)
+    runner.shutdown()
+    check_cancel()
+    reload(loaded)
+    return call()
