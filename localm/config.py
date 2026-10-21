@@ -544,18 +544,12 @@ DEFAULT_CONFIG: dict = {
     # starts at n_ctx and grows on demand. False = use fixed n_ctx_max.
     "ctx_auto": True,
     "n_gpu_layers": 99,    # 99 = offload everything to GPU
-    # Opt-in MoE expert placement: keep the EXPERT weights of the first N
-    # layers in system RAM while the rest of the model follows the normal
-    # layer assignment (llama.cpp's --n-cpu-moe). 0 = off.
-    #
-    # This is a VRAM-FOOTPRINT dial, not a speed-up, and it is off by
-    # default because the opposite was assumed first and measured false: at
-    # MATCHED VRAM it is throughput-neutral (52.23 vs 52.04 tok/s on a
-    # 64-expert/8-active MoE). What it buys is reaching a given speed in far
-    # less VRAM - 21.28 tok/s in 241 MiB where whole-layer offload needed
-    # 859 MiB for 20.19 - which matters when something else wants the card.
-    # Only affects Mixture-of-Experts models; a dense model has no expert
-    # tensors to move, so any value is a no-op there.
+    # MoE expert placement: keep the EXPERT weights of the first N layers in
+    # system RAM while the rest of the model follows the normal layer
+    # assignment (llama.cpp's --n-cpu-moe). 0 = automatic: with auto-sized GPU
+    # layers, only as many layers as the model needs to fit, before a whole
+    # layer moves to the CPU. Only affects Mixture-of-Experts models; a dense
+    # model has no expert tensors to move, so any value is a no-op there.
     "n_cpu_moe": 0,
     # Memory-map the model file: "auto" (the loader decides), "on" (only the
     # pages a run touches are resident, so a model that may not fit in
@@ -1036,10 +1030,12 @@ DEFAULT_CONFIG: dict = {
     # When a chat request that does not pin its model may be answered by another
     # installed model (capability_routing.AUTOSWITCH_MODES):
     #   off    = never; the selected or loaded model always answers
+    #   image  = only for an image or audio clip the current model cannot read
+    #            (default)
     #   ask    = never on its own; the reply offers the model it would switch to
     #   loaded = only to a model that is already loaded (nothing is loaded or evicted)
     #   auto   = to an installed model when the current one is confirmed to lack
-    #            a capability the request needs (default)
+    #            a capability the request needs
     #   eager  = as auto, and also when the current model's capability is unknown
     "model_autoswitch": "image",
     # Free the loaded model from VRAM after this many idle seconds, so a running

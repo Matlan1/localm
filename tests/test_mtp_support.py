@@ -1888,6 +1888,53 @@ def test_the_draft_batch_holds_every_draft_decode_outside_a_refill():
     assert LlamaCppModule._MTP_DRAFT_BATCH > LlamaCppModule._MTP_QUEUED_ROWS_MAX + 1
 
 
+def _scaled_mtp_charges(base_ctx, grown_ctx):
+    def backend(n_ctx):
+        return _mtp_sizing_backend(n_ctx=n_ctx)
+    with patch("localm.model_manager.gguf.gguf_nextn_predict_layers",
+               return_value=("qwen35", 1)), \
+         patch("localm.model_manager.gguf.gguf_mtp_draft_kv_bytes_per_token",
+               return_value=1000), \
+         patch("localm.model_manager.gguf._gguf_split_layout_meta",
+               return_value=(24, 248_320)), \
+         patch("localm.model_manager.gguf.gguf_attention_head_count", return_value=32):
+        base = backend(base_ctx)
+        scaled = (base._spec_extra_vram_bytes()
+                  + (grown_ctx - base_ctx) * base._spec_kv_per_token())
+        actual = backend(grown_ctx)._spec_extra_vram_bytes()
+    return scaled, actual
+
+
+@pytest.mark.parametrize("base_ctx,grown_ctx", [(4096, 65536), (8192, 131072)])
+def test_the_per_token_draft_charge_scales_the_attention_scores_with_the_context(
+        base_ctx, grown_ctx):
+    scaled, actual = _scaled_mtp_charges(base_ctx, grown_ctx)
+    assert scaled == actual
+
+
+def test_the_auto_ceiling_budgets_the_draft_attention_scores_per_token():
+    b = _mtp_sizing_backend(n_ctx=4096, ctx_auto=True)
+    b._kv_bytes_per_token = lambda: 1000
+    b._effective_model_bytes_for_vram = lambda: 0
+    b._recurrent_state_vram_bytes = lambda: 0
+    with patch("localm.model_manager.gguf.gguf_nextn_predict_layers",
+               return_value=("qwen35", 1)), \
+         patch("localm.model_manager.gguf.gguf_mtp_draft_kv_bytes_per_token",
+               return_value=1000), \
+         patch("localm.model_manager.gguf._gguf_split_layout_meta",
+               return_value=(24, 1000)), \
+         patch("localm.model_manager.gguf.gguf_attention_head_count", return_value=32), \
+         patch.object(GgufBackend, "_split_free_total_bytes", return_value=(None, None, 1)), \
+         patch.object(GgufBackend, "_free_vram_bytes", return_value=40 * 1024 ** 3), \
+         patch("localm.inference.backends.llamacpp._sizing.embedder_ctx_reservation_bytes",
+               return_value=0):
+        ceiling = b._auto_ctx_max(capped=False)
+        grown = _mtp_sizing_backend(n_ctx=ceiling)
+        need = (ceiling * 1000 + grown._spec_extra_vram_bytes()
+                + b._split_overhead_bytes(1))
+    assert need <= 40 * 1024 ** 3
+
+
 def test_a_context_growth_charges_the_draft_contexts_kv_too():
     def decision(draft_per_token):
         b = _mtp_sizing_backend(n_ctx=4096)

@@ -620,29 +620,36 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                              "on the CPU", Path(str(self.spec_draft_model)).name,
                              Path(self.model_path).name)
         self._set_parallel_copies(self._requested_parallel_slots())
-        # Resolve the effective GPU-layer count once, so _check_vram and
-        # _load_native both read the same value.
-        self.effective_gpu_layers = self._effective_gpu_layers()
-        self._check_vram()
-        from localm.discover import GpuSplitConfigError
+        from localm.discover import (GpuSplitConfigError, end_shared_gpu_reading,
+                                     start_shared_gpu_reading)
+        # The sizing below reads the GPUs through one list_gpus probe;
+        # _load_native ends the shared reading before it spawns the worker.
+        start_shared_gpu_reading()
         try:
-            self._load_native()
-        except (ModelLoadCancelled, PretokenizerUnusableModelError,
-                UnsupportedModelRoleError, AdapterLoadError, GpuSplitConfigError):
-            # Propagate as-is, bypassing the load-failure handling below.
-            raise
-        except Exception as exc:
-            damaged = _damaged_file_reason(exc)
-            if damaged is not None:
-                raise ModelFileDamagedError(
-                    f"{Path(self.model_path).name} is damaged or not a valid "
-                    f"model file: llama.cpp could not read it ({damaged}). "
-                    f"Download it again, or use a different file.") from exc
-            vram_hint = self._load_failure_vram_hint()
-            split_note = getattr(self, "_split_fit_note", "")
-            if split_note:
-                vram_hint += f" {split_note}"
-            raise RuntimeError(_load_failure_message(exc, vram_hint)) from exc
+            # Resolve the effective GPU-layer count once, so _check_vram and
+            # _load_native both read the same value.
+            self.effective_gpu_layers = self._effective_gpu_layers()
+            self._check_vram()
+            try:
+                self._load_native()
+            except (ModelLoadCancelled, PretokenizerUnusableModelError,
+                    UnsupportedModelRoleError, AdapterLoadError, GpuSplitConfigError):
+                # Propagate as-is, bypassing the load-failure handling below.
+                raise
+            except Exception as exc:
+                damaged = _damaged_file_reason(exc)
+                if damaged is not None:
+                    raise ModelFileDamagedError(
+                        f"{Path(self.model_path).name} is damaged or not a valid "
+                        f"model file: llama.cpp could not read it ({damaged}). "
+                        f"Download it again, or use a different file.") from exc
+                vram_hint = self._load_failure_vram_hint()
+                split_note = getattr(self, "_split_fit_note", "")
+                if split_note:
+                    vram_hint += f" {split_note}"
+                raise RuntimeError(_load_failure_message(exc, vram_hint)) from exc
+        finally:
+            end_shared_gpu_reading()
 
     def _load_failure_vram_hint(self) -> str:
         """The sentence a failed load adds about VRAM, or "".
@@ -917,6 +924,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             )
             # cancel_event aborts the load mid-flight if superseded, relayed to the
             # child over its control queue.
+            from localm.discover import end_shared_gpu_reading
+            end_shared_gpu_reading()
             meta = self._runner.spawn_and_load(
                 params, cancel_event=self._load_cancel, timeout=timeout)
 

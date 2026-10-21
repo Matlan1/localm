@@ -216,3 +216,89 @@ def test_check_vram_does_not_refuse_a_model_that_fits_across_two_gpus(
     monkeypatch.setattr(GgufBackend, "_split_free_total_bytes",
                         classmethod(lambda cls: (None, None, 0)))
     b._check_vram()
+
+
+class _FakeCuda:
+    def __init__(self, count):
+        self.count = count
+        self.read = []
+
+    def is_available(self):
+        return True
+
+    def device_count(self):
+        return self.count
+
+    def mem_get_info(self, idx):
+        self.read.append(idx)
+        return (10 + idx) * GIB, 16 * GIB
+
+
+@pytest.fixture
+def torch_resident(monkeypatch):
+    """Linux with torch imported in this process (the torch read path), two
+    discrete GPUs in the last reading, no split configured, and the isolated
+    probe and the per-device registry reading both declining."""
+    import types
+    cuda = _FakeCuda(2)
+    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(cuda=cuda))
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(gpu_usage, "raw_reading_is_process_scoped", lambda: False)
+    monkeypatch.setattr(_loader, "native_lib_loaded", lambda: False)
+    monkeypatch.setattr(_loader, "gpu_memory_isolated", lambda: None)
+    monkeypatch.setattr(discover, "load_device_memory_isolated", lambda *a, **k: None)
+    monkeypatch.setattr(VramSizingMixin, "_torch_rocm_init_broken", False)
+    monkeypatch.setattr(VramSizingMixin, "_torch_vram_read_wedged", False)
+    monkeypatch.setattr(discover, "_native_gpu_index_space_is_opaque", lambda: False)
+    monkeypatch.setattr(discover, "last_gpu_reading", lambda: [dict(g) for g in TWO_DISCRETE])
+    monkeypatch.setattr("localm.config.load_config", lambda: {})
+    return cuda
+
+
+def test_the_torch_read_does_not_answer_for_an_implicit_split(torch_resident):
+    assert VramSizingMixin._torch_free_total_uncapped() == (None, None)
+    assert VramSizingMixin._free_vram_bytes() is None
+    assert VramSizingMixin._total_vram_bytes() is None
+    assert torch_resident.read == []
+
+
+def test_the_torch_read_does_not_answer_for_a_configured_two_gpu_split(
+        torch_resident, monkeypatch):
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda: {"gpu_split_indices": [0, 1], "main_gpu_index": 1})
+    assert VramSizingMixin._torch_free_total_uncapped() == (None, None)
+    assert torch_resident.read == []
+
+
+def test_the_torch_read_answers_for_a_one_entry_split(torch_resident, monkeypatch):
+    monkeypatch.setattr("localm.config.load_config", lambda: {"gpu_split_indices": [1]})
+    assert VramSizingMixin._torch_free_total_uncapped() == (11 * GIB, 16 * GIB)
+    assert torch_resident.read[-1] == 1
+
+
+def test_the_torch_read_answers_for_a_lone_discrete_gpu_beside_an_integrated_one(
+        torch_resident, monkeypatch):
+    monkeypatch.setattr(discover, "last_gpu_reading", lambda: [dict(g) for g in READINGS])
+    assert VramSizingMixin._torch_free_total_uncapped() == (11 * GIB, 16 * GIB)
+    assert torch_resident.read == [1]
+
+
+@pytest.mark.parametrize("count,expected", [(1, (10 * GIB, 16 * GIB)), (2, (None, None))])
+def test_with_no_reading_the_torch_device_count_decides(
+        torch_resident, monkeypatch, count, expected):
+    monkeypatch.setattr(discover, "last_gpu_reading", lambda: None)
+    torch_resident.count = count
+    assert VramSizingMixin._torch_free_total_uncapped() == expected
+
+
+def test_check_vram_with_torch_does_not_refuse_a_model_that_fits_across_two_gpus(
+        torch_resident, monkeypatch, tmp_path):
+    from localm.inference.backends.gguf import GgufBackend
+    f = tmp_path / "model.gguf"
+    f.write_bytes(b"\0" * 4096)
+    b = GgufBackend(str(f), n_gpu_layers=99, n_gpu_layers_auto=False, n_ctx=4096)
+    b._model_bytes = lambda: 20 * GIB
+    b.effective_gpu_layers = 99
+    monkeypatch.setattr(GgufBackend, "_split_free_total_bytes",
+                        classmethod(lambda cls: (None, None, 0)))
+    b._check_vram()

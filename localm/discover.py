@@ -897,9 +897,45 @@ def list_gpus(*, deadline: float = _GPU_PROBE_DEADLINE, return_status: bool = Fa
     Does NOT fall back to the Windows display-adapter registry: that tier (see
     vram_info()) can only report one aggregate "largest adapter" number with no
     per-device identity, so it cannot support GPU *selection* - only
-    vram_info()'s single-number "total VRAM for fit badges" use case."""
-    gpus, status = _list_gpus_with_status(deadline, wait_for_inflight)
+    vram_info()'s single-number "total VRAM for fit badges" use case.
+
+    Between :func:`start_shared_gpu_reading` and :func:`end_shared_gpu_reading`
+    on the calling thread, a call after one that completed with
+    :data:`GPU_PROBE_OK` answers with a copy of that reading and status OK
+    without probing."""
+    shared = getattr(_shared_reading, "state", None)
+    result: tuple
+    if shared is not None and shared["gpus"] is not None:
+        result = ([dict(g) for g in shared["gpus"]], GPU_PROBE_OK)
+    else:
+        result = _list_gpus_with_status(deadline, wait_for_inflight)
+        if shared is not None and result[1] == GPU_PROBE_OK:
+            shared["gpus"] = [dict(g) for g in result[0]]
+    gpus, status = result
     return (gpus, status) if return_status else gpus
+
+
+# The calling thread's shared list_gpus reading: {"gpus": list | None} between
+# start_shared_gpu_reading() and end_shared_gpu_reading(), else absent or None.
+_shared_reading = threading.local()
+
+
+def start_shared_gpu_reading() -> None:
+    """Make :func:`list_gpus` on THIS thread probe at most once until
+    :func:`end_shared_gpu_reading`: the first call that completes with
+    :data:`GPU_PROBE_OK` stores its reading and later calls answer with a copy
+    of it. A call that completes with any other status stores nothing, so the
+    next call probes again. Other threads are not affected. For one model
+    load's sizing, which reads the same devices several times in a row.
+    Calling it while a shared reading is already open keeps that reading."""
+    if getattr(_shared_reading, "state", None) is None:
+        _shared_reading.state = {"gpus": None}
+
+
+def end_shared_gpu_reading() -> None:
+    """End THIS thread's shared reading (see :func:`start_shared_gpu_reading`);
+    later :func:`list_gpus` calls probe again. A no-op when none is open."""
+    _shared_reading.state = None
 
 
 def _list_gpus_with_status(deadline: float, wait_for_inflight: bool = False) -> tuple:
@@ -1005,7 +1041,9 @@ def _list_gpus_with_status(deadline: float, wait_for_inflight: bool = False) -> 
             # mutates, and this probe thread is the only writer while it runs.
             conclusive = not (not value and (_isolated_torch_unavailable
                                              or _isolated_torch_unanswered
-                                             or _torch_gpu_probe_known_doomed()))
+                                             or (_torch_gpu_probe_known_doomed()
+                                                 and _torch_gpu_probe_doomed_reason()
+                                                 != "sycl")))
             if _gpu_probe_epoch != my_epoch:
                 # A reset retired this probe while it ran: its reading describes a
                 # state the owner has explicitly dropped, and the in-flight slot is
@@ -1260,7 +1298,12 @@ def _announce_torch_doomed(doomed: bool) -> bool:
 
 
 def _torch_gpu_probe_known_doomed() -> bool:
-    """True when :func:`_list_gpus_probe`'s ``import torch`` attempt below is
+    """True when :func:`_torch_gpu_probe_doomed_reason` names a combination."""
+    return _torch_gpu_probe_doomed_reason() is not None
+
+
+def _torch_gpu_probe_doomed_reason() -> str | None:
+    """``"hip"`` or ``"sycl"`` when :func:`_list_gpus_probe`'s ``import torch`` attempt below is
     KNOWN, ahead of time, to fail in this exact process state - so the probe
     skips it at the root instead of triggering the failure and catching the
     aftermath.
@@ -1342,10 +1385,12 @@ def _torch_gpu_probe_known_doomed() -> bool:
     the collision itself is not. It is still wired in because the cost of
     being wrong is asymmetric and small: this probe enumerates only
     torch.cuda devices (the HF backend separately enumerates torch.xpu, in
-    ``backends/_hf_worker.py``), so skipping the torch.cuda attempt here
-    changes nothing this probe currently returns, while catching it if the
-    collision is real avoids the HIP case's exact symptoms (a crash-prone
-    import, a repeating stderr trace).
+    ``backends/_hf_worker.py``), and :func:`_list_gpus_probe` treats this
+    skip as torch answering no CUDA device (no AMD single-adapter fallback,
+    a conclusive empty answer), so skipping the torch.cuda attempt here
+    changes nothing this probe returns, while catching it if the collision
+    is real avoids the HIP case's exact symptoms (a crash-prone import, a
+    repeating stderr trace).
 
     Fails OPEN: if either detector pair errors, the probe proceeds with its
     normal torch attempt (which catches its own failures) - detection must
@@ -1359,7 +1404,7 @@ def _torch_gpu_probe_known_doomed() -> bool:
     distribution lookup - is resolved once per process, so a caller polling
     this on every GPU probe re-runs none of them. Only the ``sys.modules``
     membership test is re-evaluated, which is what lets the answer still
-    flip when torch becomes resident."""
+    flip when torch becomes resident. None when neither combination applies."""
     import sys
     if "torch" in sys.modules:
         # A resident torch (imported for real before the runtime loaded, or a
@@ -1369,7 +1414,7 @@ def _torch_gpu_probe_known_doomed() -> bool:
         # resident - the faulted module is evicted on every attempt - so this
         # never defuses the real guard.
         _announce_torch_doomed(False)
-        return False
+        return None
     doomed_reason: str | None = None
     try:
         if native_hip_runtime_resident() and _rocm_sdk_installed():
@@ -1380,12 +1425,12 @@ def _torch_gpu_probe_known_doomed() -> bool:
         logger.debug("list_gpus: torch-conflict detector failed (%s); "
                      "proceeding with the normal torch attempt", type(e).__name__)
         _announce_torch_doomed(False)
-        return False
+        return None
     if doomed_reason is None:
         _announce_torch_doomed(False)
-        return False
+        return None
     if not _announce_torch_doomed(True):
-        return True
+        return doomed_reason
     if doomed_reason == "hip":
         logger.debug(
             "list_gpus: skipping the torch GPU probe: the bundled HIP llama.cpp "
@@ -1402,7 +1447,7 @@ def _torch_gpu_probe_known_doomed() -> bool:
             "DLL-identity conflict as the proven HIP case - unconfirmed on real "
             "Intel hardware; see _torch_gpu_probe_known_doomed's docstring); using "
             "the non-torch sources")
-    return True
+    return doomed_reason
 
 
 # How long the out-of-process torch enumeration may take before it is abandoned
@@ -1896,6 +1941,7 @@ def _list_gpus_probe() -> list:
     with _gpu_probe_lock:
         _isolated_torch_unanswered = False
     torch_asked = not _torch_gpu_probe_known_doomed()
+    skipped_for_sycl = not torch_asked and _torch_gpu_probe_doomed_reason() == "sycl"
     if torch_asked:
         try:
             out = _torch_gpus_resident_bounded() if _torch_is_resident() \
@@ -1954,11 +2000,13 @@ def _list_gpus_probe() -> list:
     # AMD/Windows single-adapter fallback: pair the one registry-reported
     # adapter via ADL/PDH, same source and rule as vram_info()'s registry
     # tier. Runs ONLY when torch itself could not be trusted this round
-    # (never asked, or the isolated-torch latch is engaged) - never when
-    # torch was asked and answered honestly empty. See
+    # (skipped for the HIP conflict, or the isolated-torch latch is engaged)
+    # - never when torch was asked and answered honestly empty, or skipped
+    # for the SYCL conflict, where it would answer no CUDA device. See
     # test_amd_single_adapter_fallback_is_conclusive and
     # test_fires_control_genuine_no_gpu_box_stays_ok.
-    if not torch_asked or _isolated_torch_unavailable or _isolated_torch_unanswered:
+    if ((not torch_asked and not skipped_for_sycl)
+            or _isolated_torch_unavailable or _isolated_torch_unanswered):
         entry = _windows_largest_adapter_registry_entry()
         if entry is not None:
             _apply_device_global_free([entry])
@@ -2639,6 +2687,22 @@ def _lone_discrete_gpu_index(readings) -> Optional[int]:
         return None
     idx = kept[0].get("index") if isinstance(kept[0], dict) else None
     return idx if isinstance(idx, int) else None
+
+
+def load_spans_several_gpus(config: dict, torch_device_count: int) -> bool:
+    """True when a GGUF load under *config* spreads over 2+ GPUs: a
+    ``gpu_split_indices`` that is not a 1-entry list, or none configured and
+    llama.cpp's default layer split covering 2+ devices. Those devices are the
+    ones :func:`_llama_visible_torch_devices` keeps of the last completed
+    :func:`list_gpus` reading, or, with no reading, the *torch_device_count*
+    devices torch sees. Never probes."""
+    configured = config.get("gpu_split_indices")
+    if configured:
+        return not (isinstance(configured, (list, tuple)) and len(configured) == 1)
+    readings = [g for g in (last_gpu_reading() or []) if isinstance(g, dict)]
+    if readings:
+        return len(_llama_visible_torch_devices(readings)) >= 2
+    return torch_device_count >= 2
 
 
 def resolve_load_gpu_index(config: Optional[dict] = None, *,

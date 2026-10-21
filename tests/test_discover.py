@@ -1622,6 +1622,28 @@ class TestListGpusAmdSingleAdapterFallback:
                              "DriverDesc": name}}
         monkeypatch.setitem(sys.modules, "winreg", _FakeWinreg(adapters))
 
+    @pytest.mark.parametrize("sycl_resident", [False, True])
+    def test_the_sycl_skip_answers_what_an_xpu_torch_would(self, monkeypatch, sycl_resident):
+        monkeypatch.delitem(sys.modules, "torch", raising=False)
+        monkeypatch.setattr(discover, "native_hip_runtime_resident", lambda: False)
+        monkeypatch.setattr(discover, "native_sycl_runtime_resident", lambda: sycl_resident)
+        monkeypatch.setattr(discover, "_intel_sycl_rt_installed", lambda: True)
+        monkeypatch.setattr(discover, "_torch_is_resident", lambda: False)
+        children = []
+        monkeypatch.setattr(discover, "_torch_gpus_isolated_once",
+                            lambda: children.append(1) or [])
+        self._blind_nvidia_smi(monkeypatch)
+        self._arm_single_adapter_registry(monkeypatch, name="Intel(R) Iris(R) Xe Graphics")
+        monkeypatch.setattr("localm.gpu_usage.device_global_used_bytes",
+                            lambda gpus: {0: self._USED})
+
+        gpus, status = list_gpus(return_status=True)
+
+        assert discover._torch_gpu_probe_known_doomed() is sycl_resident
+        assert children == ([] if sycl_resident else [1])
+        assert gpus == []
+        assert status == discover.GPU_PROBE_OK
+
     def test_torch_known_doomed_single_adapter_is_conclusive(self, monkeypatch):
         """The incident this fallback fixes: llama.cpp's bundled HIP runtime
         is resident so torch is skipped outright (known-doomed), and

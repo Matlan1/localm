@@ -205,6 +205,29 @@ class TestRoute(unittest.TestCase):
         self._post(engine, _AUDIO_MSG)
         engine.load.assert_called_once()
 
+    def test_a_load_for_audio_after_an_unload_holds_the_gate_alone(self):
+        from localm.inference import http_server as hs
+        engine = _mock_engine(audio=False, can_be_multimodal=True, loaded=False,
+                              mmproj_path="p.gguf")
+        held = []
+        mark_loaded = engine.load.side_effect
+
+        def _load():
+            gate = hs._inference_sems.get("test-model")
+            held.append((gate._exclusive, gate.active))
+            mark_loaded()
+        engine.load.side_effect = _load
+
+        async def _unloaded_engine(*a, **k):
+            return engine
+        original = hs.get_engine
+        hs.get_engine = _unloaded_engine
+        try:
+            self._post(engine, _AUDIO_MSG)
+        finally:
+            hs.get_engine = original
+        self.assertEqual(held, [(True, 0)])
+
     def test_a_model_that_hears_gets_the_audio(self):
         engine = _mock_engine(audio=True, can_be_multimodal=True)
         r = self._post(engine, _AUDIO_MSG)

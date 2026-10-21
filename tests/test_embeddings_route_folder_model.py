@@ -104,3 +104,56 @@ def test_a_folder_named_differently_from_the_pinned_embedder_is_still_served_by_
     r = app_client.post("/v1/embeddings", json={"model": "bge-st", "input": "hello"})
     assert r.status_code == 200, r.text
     assert r.json()["data"][0]["embedding"] == [1.0, 2.0]
+
+
+@pytest.mark.parametrize("raw", ["", None])
+def test_an_embedder_entry_with_no_path_is_not_read_as_the_current_folder(
+        app_client, monkeypatch, raw):
+    registry = {"emb": {"path": raw, "source": "local", "model_type": "embedding"}}
+    monkeypatch.setattr("localm.config.load_registry", lambda: registry)
+    monkeypatch.setattr("localm.config.load_config", lambda: {"embedding_model": "other"})
+
+    async def folder_engine_must_not_run(name, load=True):
+        raise AssertionError("an entry with no path was served as a folder model")
+
+    monkeypatch.setattr(hs, "get_engine", folder_engine_must_not_run)
+    monkeypatch.setattr("localm.inference.embedder.embed_texts",
+                        lambda texts: [[0.5, 0.25] for _ in texts])
+    r = app_client.post("/v1/embeddings", json={"model": "emb", "input": "hello"})
+    assert r.status_code == 200, r.text
+    assert r.json()["data"][0]["embedding"] == [0.5, 0.25]
+
+
+def test_the_folder_check_runs_off_the_event_loop(app_client, monkeypatch, tmp_path):
+    import asyncio
+    import pathlib
+    folder = tmp_path / "bge-st"
+    folder.mkdir()
+    registry = {"bge-st": {"path": str(folder), "source": "local", "model_type": "embedding",
+                           "reranker": False}}
+    monkeypatch.setattr("localm.config.load_registry", lambda: registry)
+    monkeypatch.setattr("localm.config.load_config", lambda: {})
+    on_loop = []
+    real_is_dir = pathlib.Path.is_dir
+
+    def _is_dir(self):
+        if self == folder:
+            try:
+                asyncio.get_running_loop()
+                on_loop.append(True)
+            except RuntimeError:
+                on_loop.append(False)
+        return real_is_dir(self)
+
+    monkeypatch.setattr(pathlib.Path, "is_dir", _is_dir)
+    engine = types.SimpleNamespace(
+        display_name="bge-st", _backend=types.SimpleNamespace(can_embed=True),
+        embed=lambda texts: [[1.0, 2.0] for _ in texts], count_tokens=lambda text: 3)
+
+    async def fake_get_engine(name, load=True):
+        return engine
+
+    monkeypatch.setattr(hs, "get_engine", fake_get_engine)
+    r = app_client.post("/v1/embeddings", json={"model": "bge-st", "input": "hello"})
+    assert r.status_code == 200, r.text
+    assert on_loop == [False]

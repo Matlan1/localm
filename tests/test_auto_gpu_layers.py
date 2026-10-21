@@ -303,6 +303,14 @@ class TestEffectiveGpuLayers:
         assert "this gpu only has" not in out
         assert "kv cache for a" not in out
 
+    def test_a_holder_hint_with_brackets_is_printed_as_text(self, tmp_path, capsys):
+        b = _model(tmp_path, 8 * GB, n_gpu_layers=99, auto=True, n_ctx=4096)
+        hint = "another localm instance is running 'm[/yellow] [v2]'."
+        with _vram(6 * GB, 16 * GB),              patch.object(GgufBackend, "_vram_holder_hint", return_value=hint):
+            n = b._effective_gpu_layers()
+        assert 0 < n < 99
+        assert "running 'm[/yellow] [v2]'" in " ".join(capsys.readouterr().out.split())
+
     def test_partial_offload_cause_kv_cache_too_large(self, tmp_path, capsys):
         # Weights alone would fit the currently-free VRAM (free == total:
         # nothing else is holding memory), but weights + this context's KV

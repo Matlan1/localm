@@ -269,13 +269,14 @@ def _model_file_size(name: str) -> Optional[int]:
     """Best-effort on-disk size for registered model *name*, or None when not
     resolvable (e.g. under pytest with no registry). Mirrors switch_engine's
     own file_size computation (residency.model_footprint_bytes) for the
-    single-file-vs-directory STAT LOGIC, so the VRAM estimate written to the
-    coordination registry is consistent with the number switch_engine itself
-    used to decide whether eviction was needed - but NOT for the
-    empty-directory return value: model_footprint_bytes returns int (never
-    None) because its caller always needs a numeric eviction-admission input,
-    even a 0 one, while this function feeds a registry field other instances
-    treat as "how much VRAM does this peer hold", where a 0 is read as a REAL
+    single-file-vs-directory STAT LOGIC, so the VRAM estimate this instance
+    reports in its GPU status (``vram_estimate_bytes``, see _gpu_status) is
+    consistent with the number switch_engine itself used to decide whether
+    eviction was needed - but NOT for the empty-directory return value:
+    model_footprint_bytes returns int (never None) because its caller always
+    needs a numeric eviction-admission input, even a 0 one, while this function
+    feeds a status field other instances treat as "how much VRAM does this
+    peer hold", where a 0 is read as a REAL
     measurement (see gpu_registry.py's vram_estimate_bytes and its one
     consumer's `isinstance(e, int) and e > 0` guard). rglob() matching no
     files - an empty directory, or one whose real weights sit somewhere
@@ -330,8 +331,8 @@ def _loaded_gpu_index(name: Optional[str]) -> Optional[int]:
 
 
 def _loaded_model_identities() -> list:
-    """Every loaded chat model as ``{"name", "path", "size", "sha256"}`` for the
-    cross-install coordination registry. ``path`` is the resolved model file or
+    """Every loaded chat model as ``{"name", "path", "size", "sha256"}`` for this
+    instance's GPU status (``models``, see _gpu_status). ``path`` is the resolved model file or
     directory, ``size`` its byte size when it is a file, ``sha256`` the
     registry-recorded digest; each is None when unknown. Best-effort: an entry
     that cannot be resolved is listed by name alone."""
@@ -437,8 +438,8 @@ def _load_gpu_indices() -> set:
 def _attempt_cooperative_unload(*, needed_bytes: Optional[int] = None,
                                 free_bytes: Optional[int] = None,
                                 asked: Optional[set] = None) -> bool:
-    """Best-effort: ask a live sibling localm instance (found via the
-    cross-install GPU-coordination registry) to release its own VRAM, so this
+    """Best-effort: ask a live sibling localm instance (found live by
+    ``localm.gpu_registry.list_gpu_peers``) to release its own VRAM, so this
     instance does not have to give up and 503 just because ITS OWN local
     eviction candidates are all busy. Returns True once a peer confirms it
     freed its model.
@@ -2370,8 +2371,8 @@ async def _unload_speech_if_matches(name: str, loop) -> Optional[dict]:
 async def unload_one_model(name: str, *, force: bool = False) -> dict:
     """Release ONE currently-loaded model from GPU/CPU memory, leaving any
     other loaded models untouched - the targeted counterpart to
-    ``unload_all_models()`` (same VRAM-release-wait + gpu-registry-sync
-    behavior, just scoped to a single engine). Clears the active-model
+    ``unload_all_models()`` (same VRAM-release wait, just scoped to a single
+    engine). Clears the active-model
     pointers only when *name* was the active model, so unloading a background
     (loaded-but-not-active) model never disturbs the one actually serving
     requests. A *name* that is registered but not currently loaded is a

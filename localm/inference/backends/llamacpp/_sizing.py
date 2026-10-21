@@ -193,7 +193,8 @@ class VramSizingMixin:
         """(free, total) bytes on the device a load's single-device readings
         come from (``discover.resolve_load_gpu_index``: the one device a 1-entry
         gpu_split_indices names, else main_gpu_index, device 0 when unset), or
-        (None, None) when not measurable. Shared by _free_vram_bytes() and
+        (None, None) when not measurable or the load spreads over 2+ GPUs
+        (:meth:`_torch_free_total_uncapped`). Shared by _free_vram_bytes() and
         _total_vram_bytes() so both read the same device in one call.
 
         NEVER BLOCKS ITS CALLER WITHOUT A BOUND. Two guards sit in front of the
@@ -300,7 +301,8 @@ class VramSizingMixin:
     @staticmethod
     def _torch_free_total_uncapped() -> tuple[Optional[int], Optional[int]]:
         """The actual torch read, with NO bound - call
-        :meth:`_free_total_vram_bytes`, not this."""
+        :meth:`_free_total_vram_bytes`, not this. (None, None) for a load that
+        spreads over 2+ GPUs (``discover.load_spans_several_gpus``)."""
         try:
             import torch
         except Exception as e:
@@ -312,8 +314,15 @@ class VramSizingMixin:
             return None, None
         try:
             if torch.cuda.is_available():
-                from localm.discover import resolve_load_gpu_index
-                idx = resolve_load_gpu_index()
+                from localm.config import load_config
+                from localm.discover import load_spans_several_gpus, resolve_load_gpu_index
+                cfg = load_config()
+                if load_spans_several_gpus(cfg, int(torch.cuda.device_count())):
+                    from localm.debuglog import logger as _dbg
+                    _dbg.debug("free-vram: the load spreads over 2+ GPUs; the "
+                               "torch read of one device does not answer for it")
+                    return None, None
+                idx = resolve_load_gpu_index(cfg)
                 free, total = torch.cuda.mem_get_info(idx)
                 return int(free), int(total)
         except Exception as e:
@@ -509,10 +518,10 @@ class VramSizingMixin:
         runtime with 2+ GPU devices (``_loader._resolve_gpu_memory``), and
         ``discover.load_device_memory_isolated`` then answers only for a
         1-entry ``gpu_split_indices``, or for no split on a runtime that lists
-        exactly one GPU-type device. A 2+-GPU load with no combined reading is
-        therefore unmeasurable rather than sized against one of its devices
-        (the torch path, which reads ``resolve_load_gpu_index`` alone, is the
-        exception).
+        exactly one GPU-type device, and the torch read answers only for a load
+        that does not spread over 2+ GPUs (``discover.load_spans_several_gpus``).
+        A 2+-GPU load with no combined reading is therefore unmeasurable rather
+        than sized against one of its devices.
 
         Never raises: a failure to fetch a combined reading is surfaced at
         debug and answered as "no combined reading"."""
@@ -797,6 +806,7 @@ class VramSizingMixin:
         if cached is not None:
             return cached
         charge = 0
+        self._mtp_draft_score_per_token_cached = 0
         try:
             from localm.inference.backends.llamacpp._api import (
                 MTP_GRAPH_ARCHITECTURES)
@@ -814,6 +824,8 @@ class VramSizingMixin:
             _dbg.debug("mtp draft-context VRAM probe failed (%s); charging "
                        "nothing extra for it", type(exc).__name__)
             charge = 0
+            self._mtp_draft_kv_per_token_cached = 0
+            self._mtp_draft_score_per_token_cached = 0
         self._mtp_draft_vram_bytes_cached = charge
         return charge
 
@@ -824,17 +836,22 @@ class VramSizingMixin:
         ``MTP_DRAFT_SCORE_BYTES`` per attention head per token of ``n_ctx``;
         plus ``MTP_DRAFT_COMPUTE_MARGIN_BYTES``. ``_VRAM_OVERHEAD_BYTES`` when
         the GGUF header gives no vocabulary size; the attention term is 0 when
-        it gives no head count."""
+        it gives no head count. Stores the attention term's bytes per token of
+        ``n_ctx`` in ``_mtp_draft_score_per_token_cached`` (0 when there is
+        none)."""
         from localm.model_manager.gguf import _gguf_split_layout_meta, gguf_attention_head_count
         from .llama import _MTP_DRAFT_BATCH
         meta = _gguf_split_layout_meta(path)
         n_vocab = meta[1] if meta else 0
         if not n_vocab:
+            self._mtp_draft_score_per_token_cached = 0
             return self._VRAM_OVERHEAD_BYTES
         rows = max(1, min(int(self.n_ctx), _MTP_DRAFT_BATCH))
         n_head = gguf_attention_head_count(path)
+        score_per_token = rows * n_head * MTP_DRAFT_SCORE_BYTES
+        self._mtp_draft_score_per_token_cached = score_per_token
         return (rows * int(n_vocab) * MTP_DRAFT_BYTES_PER_VOCAB_ROW
-                + rows * n_head * int(self.n_ctx) * MTP_DRAFT_SCORE_BYTES
+                + score_per_token * int(self.n_ctx)
                 + MTP_DRAFT_COMPUTE_MARGIN_BYTES)
 
     def _recurrent_state_vram_bytes(self) -> int:
@@ -1004,13 +1021,22 @@ class VramSizingMixin:
         return self._mtp_draft_context_vram_bytes() + self._draft_model_vram_bytes()
 
     def _spec_kv_per_token(self) -> int:
-        """KV bytes per token of context a draft source adds on the GPU: the MTP
-        draft context's or the draft model's while it is on the GPU, both of
-        which grow with the main one."""
+        """Bytes per token of context a draft source adds on the GPU: the MTP
+        draft context's KV cache and attention scores
+        (:meth:`_mtp_draft_score_per_token`), or the draft model's KV cache
+        while it is on the GPU, all of which grow with the main context."""
         draft = 0
         if self._draft_model_vram_bytes():
             draft = int(getattr(self, "_draft_kv_per_token_cached", 0) or 0)
-        return self._mtp_draft_kv_per_token() + draft
+        return (self._mtp_draft_kv_per_token() + self._mtp_draft_score_per_token()
+                + draft)
+
+    def _mtp_draft_score_per_token(self) -> int:
+        """The MTP draft context's attention-score bytes per token of context
+        (part of :meth:`_mtp_draft_compute_bytes`), 0 when this load has no
+        MTP draft context or the GGUF header gives no vocabulary size."""
+        self._mtp_draft_context_vram_bytes()
+        return int(getattr(self, "_mtp_draft_score_per_token_cached", 0) or 0)
 
     def _mtp_draft_kv_per_token(self) -> int:
         """Draft-context KV bytes per token of context, 0 when this load has no
@@ -1385,11 +1411,12 @@ class VramSizingMixin:
             f"    • {label}:  [bold]{command}[/bold]\n"
             for label, command in self._vram_fit_options(
                 free, need, kv_cache, overhead, gpu_layers))
+        from rich.markup import escape
         console.print(
             f"[yellow]⚠ Low VRAM:[/yellow] this model needs roughly "
             f"[bold]{need / 1024**3:.1f} GB[/bold] ({ctx_hint}) but only "
             f"[bold]{free / 1024**3:.1f} GB[/bold] is free{where}.{blind_note}\n"
-            f"  [dim]Likely cause: {self._vram_holder_hint()}[/dim]\n"
+            f"  [dim]Likely cause: {escape(self._vram_holder_hint())}[/dim]\n"
             f"  Options:\n"
             f"    • Free VRAM first (close the other app, or POST "
             f"/v1/models/unload on its server)\n"
@@ -2010,7 +2037,7 @@ class VramSizingMixin:
         gpu_start = max(max(blocks) + 2 - gpu_layers, 0)
         n_cpu_moe = self._load_n_cpu_moe()
         outside_blocks = max(0, model_bytes - sum(total for total, _ in blocks.values()))
-        input_bytes = max(0, model_bytes - self._vram_model_bytes(0))
+        input_bytes = max(0, model_bytes - self._base_vram_model_bytes(0))
         held = min(outside_blocks, input_bytes)
         for block, (total, experts) in blocks.items():
             if block < gpu_start:
@@ -2177,8 +2204,9 @@ class VramSizingMixin:
             what = (f"offloading {auto}/{of} layers to the GPU, the rest on CPU "
                     f"(slower)")
             override = "Set n_gpu_layers to override"
+        from rich.markup import escape
         console.print(
-            f"[yellow]  gpu layers auto:[/yellow] {what} - {cause}.{blind_note} "
+            f"[yellow]  gpu layers auto:[/yellow] {what} - {escape(cause)}.{blind_note} "
             f"{override}, or n_gpu_layers_auto false."
         )
         from localm.debuglog import logger as _dbg

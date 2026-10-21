@@ -1277,14 +1277,15 @@ async def test_switch_engine_vram_probe_does_not_block_event_loop(monkeypatch):
     hs._engine = None
     hs._inference_sem = None
 
-    probe_entered = threading.Event()
+    loop = asyncio.get_running_loop()
+    probe_entered = asyncio.Event()
     release = threading.Event()
 
     def _blocking_probe():
         # Simulate a slow/wedged GPU driver call. If vram_capacity() (or
         # gpu_split_shortfall()) ran this on the event loop instead of a
         # worker thread, the whole server would freeze here until release.
-        probe_entered.set()
+        loop.call_soon_threadsafe(probe_entered.set)
         release.wait(3)
         return [{"index": 0, "name": "X", "total": 16 * 1024 ** 3, "free": 16 * 1024 ** 3},
                 {"index": 1, "name": "Y", "total": 16 * 1024 ** 3, "free": 16 * 1024 ** 3}]
@@ -1303,18 +1304,16 @@ async def test_switch_engine_vram_probe_does_not_block_event_loop(monkeypatch):
         switch_task = asyncio.ensure_future(
             hs.switch_engine("model-a", hs._engine_factory, preempt=False))
 
-        # A precondition wait (has the executor thread actually been scheduled by
-        # the OS yet), not the property under test: the later ticks_before and
-        # ticks_after assertions are what prove the event loop stayed responsive.
-        # The budget is generous because under heavy parallel load the OS can
-        # take seconds to give this test's own worker thread its first timeslice.
-        probe_started = False
-        for _ in range(1500):
-            if probe_entered.is_set():
-                probe_started = True
-                break
-            await asyncio.sleep(0.01)
-        assert probe_started, "probe never started (executor not reached)"
+        # Precondition: the probe was entered, or switch_engine ended without it.
+        # Event-driven, so the executor hops before the probe may take any time.
+        entered = asyncio.ensure_future(probe_entered.wait())
+        done, _ = await asyncio.wait({entered, switch_task}, timeout=300,
+                                     return_when=asyncio.FIRST_COMPLETED)
+        if entered not in done:
+            entered.cancel()
+        assert entered in done, (
+            "switch_engine " + ("finished" if switch_task.done() else "was still running")
+            + " without entering the VRAM probe")
 
         ticks_before = ticks["n"]
         await asyncio.sleep(0.5)   # the probe is still blocked (releases at 3s)

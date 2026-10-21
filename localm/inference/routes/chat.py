@@ -58,6 +58,14 @@ from localm.inference.protocol import (
 )
 
 
+def _entry_path_is_folder(entry: dict) -> bool:
+    """True when registry *entry*'s ``path`` names an existing folder; False
+    for an empty or missing path without touching the filesystem. Blocking:
+    call it off the event loop."""
+    raw = str(entry.get("path") or "")
+    return bool(raw) and Path(raw).is_dir()
+
+
 def register(app: FastAPI, ctx) -> None:
     # Session-scoped objects, unpacked before the handler bodies (each of which
     # rebinds a local ``ctx`` for its own chat-pipeline turn).
@@ -273,7 +281,7 @@ def register(app: FastAPI, ctx) -> None:
                 if not engine.loaded and engine.can_be_multimodal:
                     say(LOADING_MODEL_STATUS)
                     loop = asyncio.get_running_loop()
-                    async with sem:
+                    async with exclusively(sem):
                         await loop.run_in_executor(None, engine.load)
                 if getattr(engine, "supports_audio", False) is not True:
                     from localm.model_manager import audio_input_guidance
@@ -664,7 +672,8 @@ def register(app: FastAPI, ctx) -> None:
                     422, f"Model {resolved_model!r} is a reranker, not an embedding "
                     "model: it scores query and document pairs (POST /v1/rerank).")
         _is_folder_model = (isinstance(_entry, dict)
-                            and Path(str(_entry.get("path") or "")).is_dir())
+                            and await asyncio.get_running_loop().run_in_executor(
+                                None, _entry_path_is_folder, _entry))
         if _is_folder_model:
             from localm.inference.embedder import (DEFAULT_EMBEDDING_MODEL,
                                                    KNOWN_EMBEDDING_MODELS)

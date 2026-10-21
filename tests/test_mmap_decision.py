@@ -223,6 +223,19 @@ class TestCpuHeldWeightBytes:
         assert (_backend(path, n_cpu_moe=2)._cpu_held_weight_bytes(2)
                 == _backend(path)._cpu_held_weight_bytes(2))
 
+    @pytest.mark.parametrize("adapter_size", [700, 7_000_000])
+    def test_an_attached_adapter_leaves_the_input_layer_count_unchanged(
+            self, tmp_path, adapter_size):
+        model = _dense_model(tmp_path)
+        adapter = tmp_path / "adapter.gguf"
+        adapter.write_bytes(b"\0" * adapter_size)
+        base = _backend(model)
+        tuned = GgufBackend(str(model), n_ctx=64, adapters=[(str(adapter), 1.0)])
+        for gpu_layers in (2, 5, 98):
+            assert (tuned._cpu_held_weight_bytes(gpu_layers)
+                    == base._cpu_held_weight_bytes(gpu_layers))
+        assert tuned._cpu_held_weight_bytes(98) == base._host_resident_bytes()
+
     def test_an_unreadable_header_is_unknown(self, tmp_path):
         bad = tmp_path / "bad.gguf"
         bad.write_bytes(b"\0" * 4096)
