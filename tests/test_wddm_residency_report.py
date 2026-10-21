@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """On Windows, a model fully on a GPU whose process the WDDM counters show
-holding a large share of its GPU memory in shared system memory, while enough
-VRAM is free to hold it, gets the context recreated, same size and placement,
-before the next request."""
+holding a large share of its GPU memory in shared system memory gets one INFO
+line with the amounts, and one more when Windows moves it back. The live
+context is never recreated for it."""
 
 import logging
 import sys
@@ -18,15 +18,17 @@ from tests._fake_batch import fake_batch_init
 API = "localm.inference.backends.llamacpp.llama.api"
 READ = "localm.gpu_usage.process_gpu_memory"
 GB = 1024 ** 3
+SAID = "of this model's GPU memory in shared system memory"
+BACK = "moved this model's GPU memory back to VRAM"
 
 
-def _llm(capacity=4096, *, offload_kqv=True, free=6 * GB):
+def _llm(capacity=4096, *, offload_kqv=True):
     llm = make_bare_llama(_model_ptr=111, _ctx_ptr=222, _n_ctx=4096,
                           _n_ctx_max=65536, _n_ctx_grow=4096,
                           _ctx_capacity=capacity, _offload_kqv=offload_kqv,
                           _kv_supported=True)
     llm._tokenizer.is_eog.return_value = False
-    llm._vram_free = MagicMock(return_value=free)
+    llm._residency_watch = True
     return llm
 
 
@@ -42,114 +44,110 @@ def _api():
     return api, cp
 
 
-def _generate(llm, api, reading, prompt=(1, 2, 3), n=4):
+def _generate(llm, api, reading, prompt=(1, 2, 3), n=4, platform="win32"):
     read = MagicMock(return_value=reading)
-    with patch(API, api), patch(READ, read), patch.object(sys, "platform", "win32"), \
+    with patch(API, api), patch(READ, read), patch.object(sys, "platform", platform), \
          patch("localm.inference.backends.llamacpp.llama._build_sampler", return_value=999):
         out = list(llm._generate(prompt_tokens=list(prompt), max_new_tokens=n,
                                  temperature=0.0, top_k=1, top_p=1.0, repeat_penalty=1.0))
     return out, read.call_count
 
 
-DEMOTED = (int(9.78 * GB), int(3.90 * GB))
-HEALTHY = (int(11.11 * GB), int(0.78 * GB))
+def _due(llm):
+    llm._residency_check_after = 0.0
+
+
+def _lines(caplog, text):
+    return [r for r in caplog.records if text in r.getMessage()]
+
+
+DEMOTED = (int(9.64 * GB), int(3.30 * GB))
+HEALTHY = (int(11.11 * GB), int(0.48 * GB))
 
 
 def _inits(api):
     return api.llama_init_from_model.call_count
 
 
-class TestDetection:
-    def test_a_demoted_process_gets_its_context_recreated_before_the_request(self, caplog):
-        llm = _llm(free=int(4.2 * GB))
-        api, cp = _api()
-        with caplog.at_level(logging.INFO, logger="localm"):
-            out, reads = _generate(llm, api, DEMOTED)
-        assert out == [42] * 4
-        assert reads == 1
-        assert _inits(api) == 1
-        assert cp.n_ctx == 4096 and cp.offload_kqv is True
-        assert llm._ctx_ptr == 444 and llm._residency_refresh is None
-        lines = [r.getMessage() for r in caplog.records if "recreating the" in r.getMessage()]
-        assert len(lines) == 1
-        assert ("Windows holds 3.90 GB of this process's GPU memory in shared system "
-                "memory (9.78 GB in VRAM) while 4.20 GB of VRAM is free") in lines[0]
-
-    def test_the_reading_after_the_refresh_is_logged_with_the_one_before(self, caplog):
+class TestReport:
+    def test_a_demoted_process_is_reported_once_with_the_amounts(self, caplog):
         llm = _llm()
         api, _cp = _api()
-        _generate(llm, api, DEMOTED)
+        with caplog.at_level(logging.INFO, logger="localm"):
+            out, reads = _generate(llm, api, DEMOTED)
+            _due(llm)
+            _generate(llm, api, DEMOTED)
+        assert out == [42] * 4 and reads == 1
+        lines = _lines(caplog, SAID)
+        assert len(lines) == 1 and lines[0].levelno == logging.INFO
+        assert ("Windows holds 3.30 GB of this model's GPU memory in shared system memory "
+                "(9.64 GB in VRAM)") in lines[0].getMessage()
+
+    def test_the_context_is_never_recreated_for_it(self):
+        llm = _llm()
+        api, _cp = _api()
+        for _ in range(3):
+            _due(llm)
+            _generate(llm, api, DEMOTED)
+        assert _inits(api) == 0
+        assert llm._ctx_ptr == 222 and llm._decode_refresh is None
+
+    def test_the_move_back_is_reported_and_a_new_spell_reports_again(self, caplog):
+        llm = _llm()
+        api, _cp = _api()
+        with caplog.at_level(logging.INFO, logger="localm"):
+            _generate(llm, api, DEMOTED)
+            _due(llm)
+            _generate(llm, api, HEALTHY)
+            _due(llm)
+            _generate(llm, api, HEALTHY)
+            _due(llm)
+            _generate(llm, api, DEMOTED)
+        back = _lines(caplog, BACK)
+        assert len(back) == 1
+        assert "(11.11 GB in VRAM, 0.48 GB in shared system memory)" in back[0].getMessage()
+        assert len(_lines(caplog, SAID)) == 2
+
+    def test_a_healthy_process_says_nothing(self, caplog):
+        llm = _llm()
+        api, _cp = _api()
         with caplog.at_level(logging.INFO, logger="localm"):
             _out, reads = _generate(llm, api, HEALTHY)
         assert reads == 1
-        assert _inits(api) == 1
-        lines = [r.getMessage() for r in caplog.records if "after the refresh" in r.getMessage()]
-        assert lines == ["gguf context: after the refresh Windows holds 0.78 GB of this "
-                         "process's GPU memory in shared system memory (3.90 GB before)"]
+        assert not _lines(caplog, SAID) and not _lines(caplog, BACK)
 
-    def test_a_healthy_process_keeps_its_context(self):
+    def test_shared_under_the_minimum_says_nothing(self, caplog):
         llm = _llm()
         api, _cp = _api()
-        _out, reads = _generate(llm, api, HEALTHY)
-        assert reads == 1 and _inits(api) == 0
-        llm._vram_free.assert_not_called()
+        with caplog.at_level(logging.INFO, logger="localm"):
+            _generate(llm, api, (int(2 * GB), llm._RESIDENCY_SHARED_MIN - 1))
+        assert not _lines(caplog, SAID)
 
-    def test_shared_under_the_minimum_is_left_alone(self):
+    def test_shared_at_the_minimum_is_reported(self, caplog):
         llm = _llm()
         api, _cp = _api()
-        _generate(llm, api, (int(2 * GB), llm._RESIDENCY_SHARED_MIN - 1))
-        assert _inits(api) == 0
+        with caplog.at_level(logging.INFO, logger="localm"):
+            _generate(llm, api, (int(2 * GB), llm._RESIDENCY_SHARED_MIN))
+        assert len(_lines(caplog, SAID)) == 1
 
-    def test_shared_under_the_share_of_dedicated_is_left_alone(self):
+    def test_shared_under_the_share_of_dedicated_says_nothing(self, caplog):
         llm = _llm()
         api, _cp = _api()
         dedicated = 20 * GB
         shared = int(llm._RESIDENCY_SHARED_RATIO * dedicated) - 1
         assert shared > llm._RESIDENCY_SHARED_MIN
-        _generate(llm, api, (dedicated, shared))
-        assert _inits(api) == 0
-
-    def test_too_little_free_vram_is_left_alone(self):
-        llm = _llm(free=int(3.89 * GB))
-        api, _cp = _api()
-        _generate(llm, api, DEMOTED)
-        assert _inits(api) == 0
-        assert llm._residency_refresh is None
-
-    @pytest.mark.parametrize("free, said", [
-        (None, "free VRAM is unmeasurable"),
-        (RuntimeError("probe failed"), "the free VRAM reading raised RuntimeError")])
-    def test_unmeasurable_free_vram_is_left_alone(self, free, said, caplog):
-        llm = _llm()
-        if isinstance(free, Exception):
-            llm._vram_free.side_effect = free
-        else:
-            llm._vram_free.return_value = None
-        api, _cp = _api()
-        with caplog.at_level(logging.DEBUG, logger="localm"):
-            out, _reads = _generate(llm, api, DEMOTED)
-        assert out == [42] * 4
-        assert _inits(api) == 0
-        messages = [r.getMessage() for r in caplog.records]
-        assert any(said in m for m in messages)
-        assert not any("raised" in m and "keeping the live context" in m for m in messages)
-
-    def test_no_free_vram_source_never_reads_the_counters(self):
-        llm = _llm()
-        llm._vram_free = None
-        api, _cp = _api()
-        _out, reads = _generate(llm, api, DEMOTED)
-        assert reads == 0 and _inits(api) == 0
+        with caplog.at_level(logging.INFO, logger="localm"):
+            _generate(llm, api, (dedicated, shared))
+        assert not _lines(caplog, SAID)
 
     def test_unavailable_counters_are_said_once_at_debug(self, caplog):
         llm = _llm()
         api, _cp = _api()
         with caplog.at_level(logging.DEBUG, logger="localm"):
             _generate(llm, api, None)
-            llm._residency_check_after = 0.0
+            _due(llm)
             _generate(llm, api, None)
-        assert _inits(api) == 0
-        lines = [r for r in caplog.records if "counters are unavailable" in r.getMessage()]
+        lines = _lines(caplog, "counters are unavailable")
         assert len(lines) == 1 and lines[0].levelno == logging.DEBUG
 
 
@@ -157,19 +155,28 @@ class TestGating:
     def test_other_platforms_never_read_the_counters(self):
         llm = _llm()
         api, _cp = _api()
-        read = MagicMock(return_value=DEMOTED)
-        with patch(API, api), patch(READ, read), patch.object(sys, "platform", "linux"), \
-             patch("localm.inference.backends.llamacpp.llama._build_sampler", return_value=999):
-            list(llm._generate(prompt_tokens=[1, 2, 3], max_new_tokens=4, temperature=0.0,
-                               top_k=1, top_p=1.0, repeat_penalty=1.0))
-        assert read.call_count == 0 and _inits(api) == 0
+        _out, reads = _generate(llm, api, DEMOTED, platform="linux")
+        assert reads == 0
+
+    def test_an_instance_init_did_not_build_never_reads_the_counters(self):
+        llm = _llm()
+        llm._residency_watch = False
+        api, _cp = _api()
+        _out, reads = _generate(llm, api, DEMOTED)
+        assert reads == 0
+
+    def test_init_turns_the_check_on(self):
+        import inspect
+        from localm.inference.backends.llamacpp.llama import LlamaCpp
+        assert LlamaCpp._residency_watch is False
+        assert "self._residency_watch = True" in inspect.getsource(LlamaCpp.__init__)
 
     def test_a_load_not_fully_on_a_gpu_is_not_checked(self):
         llm = _llm()
         llm._decode_judged = False
         api, _cp = _api()
         _out, reads = _generate(llm, api, DEMOTED)
-        assert reads == 0 and _inits(api) == 0
+        assert reads == 0
 
     def test_a_kv_cache_in_ram_is_not_checked(self):
         llm = _llm(offload_kqv=False)
@@ -196,80 +203,24 @@ class TestGating:
         _out, reads = _generate(llm, api, HEALTHY)
         assert reads == 1
 
-
-class TestBackoff:
-    def test_a_second_demotion_waits_out_the_backoff(self):
-        llm = _llm()
-        api, _cp = _api()
-        _generate(llm, api, DEMOTED)
-        assert _inits(api) == 1
-        _generate(llm, api, HEALTHY)
-        llm._residency_check_after = 0.0
-        _generate(llm, api, DEMOTED)
-        assert _inits(api) == 1
-        llm._decode_refresh_after -= llm._DECODE_REFRESH_BACKOFF_S + 1
-        llm._residency_check_after = 0.0
-        _generate(llm, api, DEMOTED)
-        assert _inits(api) == 2
-        assert llm._decode_refresh_backoff == 2 * llm._DECODE_REFRESH_BACKOFF_S
-
-
-class TestFutileRefresh:
-    def test_a_refresh_that_leaves_it_demoted_is_not_repeated(self, caplog):
-        llm = _llm()
-        api, _cp = _api()
-        _generate(llm, api, DEMOTED)
-        with caplog.at_level(logging.INFO, logger="localm"):
-            _generate(llm, api, DEMOTED)
-        assert any("did not move it back" in r.getMessage() for r in caplog.records)
-        for _ in range(5):
-            llm._decode_refresh_after = 0.0
-            llm._residency_check_after = 0.0
-            _generate(llm, api, DEMOTED)
-        assert _inits(api) == 1
-        llm._vram_free.assert_called_once()
-
-    def test_a_reading_under_the_threshold_rearms_it(self):
-        llm = _llm()
-        api, _cp = _api()
-        _generate(llm, api, DEMOTED)
-        _generate(llm, api, DEMOTED)
-        assert llm._residency_futile is True
-        llm._residency_check_after = 0.0
-        _generate(llm, api, HEALTHY)
-        assert llm._residency_futile is False
-        llm._decode_refresh_after = 0.0
-        llm._residency_check_after = 0.0
-        _generate(llm, api, DEMOTED)
-        assert _inits(api) == 2
-
-    def test_a_refresh_that_worked_is_not_latched(self, caplog):
-        llm = _llm()
-        api, _cp = _api()
-        _generate(llm, api, DEMOTED)
-        with caplog.at_level(logging.INFO, logger="localm"):
-            _generate(llm, api, HEALTHY)
-        assert llm._residency_futile is False
-        assert not any("did not move it back" in r.getMessage() for r in caplog.records)
-
-    def test_a_pending_decode_rate_refresh_is_not_doubled(self, caplog):
+    def test_a_pending_decode_rate_refresh_still_runs(self, caplog):
         llm = _llm()
         llm._decode_refresh = (5.0, 50.0)
         api, _cp = _api()
         with caplog.at_level(logging.INFO, logger="localm"):
             _out, reads = _generate(llm, api, DEMOTED)
-        assert reads == 0 and _inits(api) == 1
-        assert any("5.0 steps/s where 50.0 was expected" in r.getMessage()
-                   for r in caplog.records)
+        assert reads == 1 and _inits(api) == 1
+        assert _lines(caplog, "5.0 steps/s where 50.0 was expected")
 
 
 class TestSlotSeam:
-    def test_the_slot_seam_plans_a_same_size_refresh(self):
+    def test_the_slot_seam_checks_and_plans_nothing_for_it(self):
         from localm.inference.backends.llamacpp._slots import LlamaSlotOps
         llm = _llm(capacity=8192)
-        with patch(READ, return_value=DEMOTED), patch.object(sys, "platform", "win32"):
-            assert LlamaSlotOps(llm).rightsize(100, 5000) == (8192, True)
-        assert llm._residency_refresh is not None
+        read = MagicMock(return_value=DEMOTED)
+        with patch(READ, read), patch.object(sys, "platform", "win32"):
+            assert LlamaSlotOps(llm).rightsize(100, 5000) is None
+        assert read.call_count == 1 and llm._residency_reported is True
 
 
 def _fake_pdh(arrays, fail=None):
@@ -379,46 +330,3 @@ class TestProcessGpuMemory:
             pytest.skip("no process holds dedicated VRAM on this machine")
         for dedicated, shared in held:
             assert dedicated >= gpu_usage._PROC_ADAPTER_MIN_DEDICATED and shared >= 0
-
-
-class TestWiring:
-    def test_the_worker_passes_its_device_global_free_reading(self, tmp_path):
-        from tests.test_gguf_worker import _StubLlm, _worker
-        w = _worker(str(tmp_path / "m.gguf"))
-        fake = MagicMock()
-        fake.LlamaCpp.return_value = _StubLlm()
-        with patch("localm.inference.backends.llamacpp._loader.load_lib"), \
-             patch.dict(sys.modules, {"localm.inference.backends.llamacpp": fake}):
-            w.load()
-        _, kwargs = fake.LlamaCpp.call_args
-        assert kwargs.get("vram_free") == w._global_free_vram_bytes
-
-    def test_the_constructor_keeps_the_free_reading(self):
-        import inspect
-        from localm.inference.backends.llamacpp.llama import LlamaCpp
-        assert "vram_free" in inspect.signature(LlamaCpp.__init__).parameters
-        assert "self._vram_free = vram_free" in inspect.getsource(LlamaCpp.__init__)
-
-
-class TestGlobalFreeReading:
-    @pytest.mark.parametrize("corrected, blind, strict, expected", [
-        (None, True, True, None),
-        (None, True, False, 900),
-        (None, False, True, 900),
-        (700, True, True, 700),
-    ])
-    def test_a_blind_uncorrected_reading_is_none_only_when_strict(
-            self, corrected, blind, strict, expected):
-        from localm.inference.backends.llamacpp._sizing import VramSizingMixin as cls
-        with patch.object(cls, "_free_total_vram_bytes", return_value=(None, 1000)), \
-             patch("localm.inference.backends.llamacpp._loader.gpu_memory_isolated",
-                   return_value=(900, 1000)), \
-             patch.object(cls, "_device_global_free_bytes", return_value=corrected), \
-             patch.object(cls, "_free_reading_may_be_blind", return_value=blind):
-            assert cls._free_vram_bytes(strict=strict) == expected
-
-    def test_the_global_reading_is_the_strict_one(self):
-        from localm.inference.backends.llamacpp._sizing import VramSizingMixin as cls
-        with patch.object(cls, "_free_vram_bytes", return_value=5) as read:
-            assert cls._global_free_vram_bytes() == 5
-        read.assert_called_once_with(strict=True)

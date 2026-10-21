@@ -29,6 +29,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   and keeps what is saved, Resume continues from it) and Cancel (stops and deletes the partial
   download), the download line shows the steady speed and time left, and the Activity list has a
   Stop button for a running operation.
+- **The server log says when Windows keeps part of a model in system memory.** On Windows, when
+  another program holds VRAM, Windows can place part of a model loaded fully on the GPU in shared
+  system memory, and replies run slower until that program releases it. localm now reads the
+  model's share of shared memory and logs one line with the amounts when it is large, and
+  another when Windows moves it back.
 - **Ctrl-C in `localm pull` stops cleanly.** What has been downloaded is kept, and the message
   says to run the same command again to continue from there.
 - **`localm coder doctor` and `/doctor`.** One command checks that the model server answers and accepts the key, whether the session uses native tool calls or grammar-constrained ones, the context window against the size of the repo map, the git state, whether the verify command resolves, and that each configured MCP server starts. It exits 1 when a check fails and prints `--output-format json` or `jsonl` for scripts.
@@ -160,12 +165,6 @@ permanent public record of what shipped and are never rewritten; the in-progress
   context before the next request, which restores the speed without reloading the model. This
   applies to models loaded fully on the GPU, never while other replies are running, and at most
   once a minute.
-- **A model Windows kept partly in system memory from the start runs at full speed.** On
-  Windows, a model loaded fully on the GPU could have part of its memory placed in shared system
-  memory from its first reply onward, with no faster reply to compare against, and stayed
-  several times slower. localm now reads how much of the model's GPU memory Windows holds in
-  shared memory, and when that is large while enough VRAM is free, rebuilds the context before
-  the next request, at most once a minute and never while other replies are running.
 - **The Live tuning VRAM estimate counts the running model's own memory.** The VRAM the running
   model holds was counted as used, so settings that fit read "may not fit"; it is now shown
   beside the free VRAM and counted as available. Apply now reloads the running model with the
