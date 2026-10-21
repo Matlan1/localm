@@ -126,6 +126,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   next request fits in it.
 
 ### Fixed
+- **An embedding or speech model is placed by a current VRAM reading.** When another GPU reading
+  was running (the GUI refreshing its stats, or just after a chat model loaded), the embedding and
+  speech models skipped their fit check and went onto the GPU even with too little VRAM free, and
+  the decision to unload the chat model for them or for an image, video or music job used an
+  older figure. They now wait for that reading.
 - **Pulling a ControlNet or a textual-inversion embedding no longer fails after the download.** `localm pull` (and the Models page's Add a model, with no type chosen) crashed once the file was on disk, so nothing was registered and a second pull crashed the same way. The file is now typed from its tensors and registered as a ControlNet or an embedding.
 - **Cancelling a download on the Models page says what was actually deleted.** The status line used to claim the partial download was deleted every time, including for CivitAI files and whole-repo downloads whose files stay on disk, and when the delete request failed. It now reports the case.
 - **Restarting a ComfyUI that localm launched waits for the old one to release its port.** The restart used to be refused with "localm did not start it" while the process that had just been stopped still held the port.
