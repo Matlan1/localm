@@ -176,7 +176,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
   broke the desktop shortcut and the checks for a OneDrive folder and for programs still running
   from the environment, and a `^` next to a `!` was dropped from the folders setup used for
   Python and its cache. Setup now passes the folder to PowerShell without quoting it and keeps
-  the name exactly.
+  the name exactly. A `^` in a folder already on your `PATH` is also kept when setup adds its
+  own `uv` to the front of it.
 - **`localm info` names the temp folder that is in use.** After `LOCALM_TMPDIR` pointed at a
   folder that could not be created, it still listed that folder instead of the system temp
   folder. An unreadable `localm-home.cfg` is now reported once, not once per setting read.

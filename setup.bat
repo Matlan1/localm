@@ -174,7 +174,7 @@ goto uv_missing
 :uv_check_portable
 if "%RESUMING%"=="1" if not "!OPENSET:;uv-portable;=!"=="!OPENSET!" if exist ".uv" call :redo_uv
 if exist ".uv\uv.exe" (
-    set "PATH=!CD!\.uv;%PATH%"
+    set "PATH=!CD!\.uv;!PATH!"
     set "UVDIR=!CD!\.uv"
     goto uv_ready
 )
@@ -230,7 +230,7 @@ set "UVDIRS=%USERPROFILE%\.local\bin;%USERPROFILE%\.cargo\bin;%HOMEDRIVE%%HOMEPA
 set "PATH=%UVDIRS%;%PATH%"
 rem  UV_INSTALL_DIR itself is prepended fresh from !CD! here rather than
 rem  read back - see test_uv_install_dir_is_actually_findable_on_path_after_a_bang_install.
-if defined UV_INSTALL_DIR set "PATH=!CD!\.uv;%PATH%"
+if defined UV_INSTALL_DIR set "PATH=!CD!\.uv;!PATH!"
 where uv >nul 2>nul
 if not errorlevel 1 goto uv_ready
 
