@@ -656,6 +656,13 @@ def test_an_explicit_backend_that_does_not_start_is_not_swapped(two_backends, fa
 #  Model paths with non-ASCII characters on Windows                            #
 # --------------------------------------------------------------------------- #
 
+def _music_platform(monkeypatch, platform: str) -> None:
+    """Make music.py alone see *platform* as sys.platform."""
+    import types
+    monkeypatch.setattr(music, "sys", types.SimpleNamespace(platform=platform,
+                                                            byteorder=sys.byteorder))
+
+
 UMLAUT_MODELS = server.ModelSet(text_encoder="D:/Jürgen/te.gguf", dit="D:/Jürgen/dit.gguf",
                                 vae="D:/ascii/vae.gguf", lm="D:/Öl ß/lm.gguf")
 SHORT = {"D:/Jürgen/te.gguf": "D:/JRGEN~1/te.gguf", "D:/Jürgen/dit.gguf": "D:/JRGEN~1/dit.gguf",
@@ -664,7 +671,7 @@ SHORT = {"D:/Jürgen/te.gguf": "D:/JRGEN~1/te.gguf", "D:/Jürgen/dit.gguf": "D:/
 
 def test_a_non_ascii_music_model_path_is_given_to_the_runtime_in_short_form(
         two_backends, fake_kcpp, monkeypatch):
-    monkeypatch.setattr(music.sys, "platform", "win32")
+    _music_platform(monkeypatch, "win32")
     monkeypatch.setattr(music, "_short_path", lambda p: SHORT.get(p, p))
     monkeypatch.setattr(music, "resolve_models", lambda *a, **k: UMLAUT_MODELS)
     server.stop()
@@ -679,7 +686,7 @@ def test_a_non_ascii_music_model_path_is_given_to_the_runtime_in_short_form(
 
 def test_a_non_ascii_music_model_path_without_a_short_form_is_refused_before_starting(
         two_backends, fake_kcpp, monkeypatch):
-    monkeypatch.setattr(music.sys, "platform", "win32")
+    _music_platform(monkeypatch, "win32")
     monkeypatch.setattr(music, "_short_path", lambda p: p)
     monkeypatch.setattr(music, "resolve_models", lambda *a, **k: UMLAUT_MODELS)
     server.stop()
@@ -693,7 +700,7 @@ def test_a_non_ascii_music_model_path_without_a_short_form_is_refused_before_sta
 
 
 def test_music_model_paths_are_unchanged_off_windows(monkeypatch):
-    monkeypatch.setattr(music.sys, "platform", "linux")
+    _music_platform(monkeypatch, "linux")
     monkeypatch.setattr(music, "_short_path", lambda p: pytest.fail("no short path off Windows"))
     assert music.runtime_paths(UMLAUT_MODELS) is UMLAUT_MODELS
 
@@ -732,7 +739,7 @@ def test_the_short_path_of_a_folder_with_a_short_name_is_its_ascii_8dot3_form():
 
 
 def test_prepare_refuses_a_non_ascii_model_path_before_installing_the_runtime(monkeypatch):
-    monkeypatch.setattr(music.sys, "platform", "win32")
+    _music_platform(monkeypatch, "win32")
     monkeypatch.setattr(music, "_short_path", lambda p: p)
     monkeypatch.setattr(music, "resolve_models", lambda *a, **k: UMLAUT_MODELS)
     monkeypatch.setattr(music, "backend_order", lambda choice: ["vulkan"])
