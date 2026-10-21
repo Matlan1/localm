@@ -946,6 +946,7 @@ def test_a_reply_with_no_budget_waits_for_cells_a_budgeted_reply_holds(made):
 def test_no_new_reply_is_admitted_while_a_reply_waits_for_cells(made):
     ceiling = 2048
     ctx = _SimContext(capacity=ceiling, n_ctx_max=ceiling)
+    ctx.step_delay = 0.002
     sched = made(ctx, 3)
     with ctx.lock():
         budgeted = sched.submit(PROMPTS[1], 900, _Sampler())

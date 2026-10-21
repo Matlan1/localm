@@ -2492,8 +2492,9 @@ class LlamaCpp:
                                 ram_fallback=full_needed is not None and needed < full_needed,
                                 keep_prefix=cache_prompt)
 
-                logger.info("gguf generate: prefill complete in %.2fs (%d of %d prompt "
-                            "token(s) reused)", time.monotonic() - _t0,
+                logger.info("gguf generate: prefill complete in %.2fs (kv_reuse=%s, %d of %d "
+                            "prompt token(s) reused)", time.monotonic() - _t0,
+                            bool((reuse and cache_prompt) or self.prompt_reused),
                             self.prompt_reused, n_prompt)
 
                 # Build sampler

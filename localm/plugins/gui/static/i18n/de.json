@@ -1676,7 +1676,7 @@
   "settings.field.mtpDraftTokens.label": "MTP-Entwurfstokens",
   "settings.field.nCpuMoe.help": "Nur für MoE-Modelle. Hält die Expertengewichte so vieler Layer im System-RAM statt im VRAM. 0 ist automatisch: bei automatisch bemessenen GPU-Layern nur so viele wie nötig, bevor ein ganzer Layer auf die CPU wechselt.",
   "settings.field.nCpuMoe.label": "MoE-Experten-Layer auf der CPU",
-  "settings.field.moeCacheMib.help": "Nur für MoE-Modelle. VRAM, das die meistgenutzten Experten der Layer hält, deren Experten im System-RAM bleiben, damit sie nicht erneut auf die GPU kopiert werden. Wirkt nur, wenn diese Experten in den Speicher gelesen (nicht memory-mapped) werden; das VRAM wird bei jedem Modell mit Experten reserviert. 0 schaltet es aus. In llama.cpp experimentell.",
+  "settings.field.moeCacheMib.help": "Nur für MoE-Modelle. VRAM, das die meistgenutzten Experten der Layer hält, deren Experten im System-RAM bleiben. Wirkt, wenn diese nicht memory-mapped sind; wird bei jedem Modell mit Experten reserviert. 0 ist aus.",
   "settings.field.moeCacheMib.label": "GPU-Cache für MoE-Experten (MB)",
   "settings.field.nCtx.help": "Anzahl der Verlaufs-Tokens, mit denen das Modell startet; es wächst bei Bedarf bis zu Kontextfenster (max).",
   "settings.field.nCtx.label": "Kontextfenster (initial)",

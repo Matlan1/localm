@@ -1526,7 +1526,7 @@ export const I18N_EN = {
   "settings.field.nCpuMoe.label": "MoE expert layers on CPU",
   "settings.field.nCpuMoe.help": "MoE models only. Keeps this many layers' expert weights in system RAM, not VRAM. 0 is automatic: with auto-sized GPU layers, only as many as needed, before a whole layer moves to the CPU.",
   "settings.field.moeCacheMib.label": "MoE expert GPU cache (MB)",
-  "settings.field.moeCacheMib.help": "MoE models only. VRAM that keeps the most used experts of the layers whose experts stay in system RAM, so they are not copied to the GPU again. Used only when those experts are read into memory (not memory-mapped); the VRAM is set aside whenever the model has experts. 0 turns it off. Experimental in llama.cpp.",
+  "settings.field.moeCacheMib.help": "MoE models only. VRAM that keeps the most used experts of the layers whose experts stay in system RAM. Used when those experts are not memory-mapped; set aside for any model with experts. 0 is off.",
   "settings.field.useMmap.label": "Memory-map model files",
   "settings.field.useMmap.help": "auto runs from disk-backed memory when the model may not fit in available RAM. on forces it; off reads the whole model into memory first.",
   "settings.field.kvCacheType.label": "KV cache type",

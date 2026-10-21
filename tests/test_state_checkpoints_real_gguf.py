@@ -51,7 +51,7 @@ def _uncached_reply_split_at(llm, messages, cut: int) -> str:
     def decode(prompt_tokens, start, step):
         n = len(prompt_tokens)
         bounds = [start, cut, n - L.LlamaCpp.CHECKPOINT_TAIL, n]
-        for a, b in zip(bounds, bounds[1:]):
+        for a, b in zip(bounds[:-1], bounds[1:], strict=True):
             chunk = prompt_tokens[a:b]
             batch = llm._create_batch(chunk, a, logits_at_last_only=True)
             ret = L.api.llama_decode(llm._ctx_ptr, batch)
