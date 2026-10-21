@@ -383,6 +383,10 @@ def _port_answers(port: int) -> bool:
         return False
 
 
+# Seconds the scratch venv's torch probe (a first import of its torch) may run.
+TORCH_PROBE_TIMEOUT_S = 300
+
+
 def _bare_torch_probe(venv_python: Path) -> dict:
     """Ask the SCRATCH VENV's own interpreter (never this process's) what
     torch it has and what device it sees - independent of whatever ComfyUI
@@ -405,7 +409,7 @@ def _bare_torch_probe(venv_python: Path) -> dict:
     )
     try:
         r = subprocess.run([str(venv_python), "-c", code],
-                           capture_output=True, text=True, timeout=60)
+                           capture_output=True, text=True, timeout=TORCH_PROBE_TIMEOUT_S)
         return json.loads(r.stdout.strip().splitlines()[-1])
     except Exception as e:
         return {"error": str(e)}
