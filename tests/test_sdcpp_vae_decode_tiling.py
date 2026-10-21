@@ -420,6 +420,11 @@ def test_a_2d_wan_export_never_doubles_frames():
             < vaetile.wan_decode_peak_bytes(WAN21, 320, 320, 81))
 
 
+def test_a_2d_wan_export_peaks_at_its_last_upsample_conv():
+    vae = vaetile.wan_vae("Qwen Image", "2D")
+    assert vaetile.wan_decode_peak_bytes(vae, 1024, 1024, 1) == 192 * 9 * 2 * 1024 * 1024
+
+
 def test_the_worker_reads_the_wan_vae_from_the_load_log(monkeypatch):
     monkeypatch.setattr(_child._State, "wan_vae_conv", None)
     log_cb, _progress, _preview = _child._make_callbacks(queue.Queue())
