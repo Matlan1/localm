@@ -258,6 +258,9 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                     row_out["applied_adapters"] = applied
             models.append(row_out)
         out = {"models": models, "active": current}
+        loading = _hs._switch_loading
+        if loading:
+            out["loading"] = loading
         # Models this instance answers through a peer instance on the same
         # machine, keyed by name (see localm.peer_routing).
         from localm import peer_routing

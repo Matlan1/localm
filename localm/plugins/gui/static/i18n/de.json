@@ -126,6 +126,7 @@
   "chat.usage.mtpPaused.title": "Multi-Token Prediction war bei diesem Modell messbar langsamer als die Erzeugung Token für Token und pausierte deshalb für {steps} Schritte dieser Antwort",
   "chat.usage.mtpOff": "MTP aus",
   "chat.usage.mtpOff.image": "Multi-Token Prediction läuft nicht bei einer Nachricht mit Bild",
+  "chat.usage.mtpOff.audio": "Multi-Token Prediction läuft nicht bei einer Nachricht mit Audio",
   "chat.usage.mtpStopped": "MTP gestoppt",
   "chat.usage.mtpUnavailable": "MTP nicht verfügbar",
   "chat.usage.mtpReason": "Multi-Token Prediction: {reason}",
