@@ -1463,6 +1463,43 @@ def test_an_already_provisioned_runtime_is_left_alone(world, marker, args, label
     assert world.files() == before
 
 
+@pytest.mark.parametrize("args", [
+    ["--backend", "vulkan"], ["--backend", "cpu", "--yes"], [],
+    ["--backend", "vulkan", "--tag", "b10000"], ["--rollback"],
+    ["--url", "https://example.invalid/llama.zip"], ["--force"],
+])
+def test_net_mode_off_downloads_nothing_and_changes_nothing(world, monkeypatch, args):
+    monkeypatch.setenv("LOCALM_NET_MODE", "off")
+    _upstream_win_vulkan(world)
+    before = world.files()
+    r = world.invoke(*args)
+    assert r.exit_code != 0
+    assert "net_mode=off" in r.text
+    assert world.requests == []
+    assert world.files() == before and world.marker() is None
+    assert world.pin() is None and world.history() == []
+
+
+def test_net_mode_off_keeps_the_runtime_that_is_already_installed(world, monkeypatch):
+    monkeypatch.setenv("LOCALM_NET_MODE", "off")
+    world.seed_target("llama.dll", marker="cpu")
+    r = world.invoke("--backend", "cpu")
+    assert r.exit_code == 0, r.output
+    assert "Already provisioned" in r.text
+    assert world.requests == []
+
+
+def test_net_mode_off_still_installs_a_local_build(world, monkeypatch, tmp_path):
+    monkeypatch.setenv("LOCALM_NET_MODE", "off")
+    src = tmp_path / "build"
+    src.mkdir()
+    (src / "llama.dll").write_bytes(b"x")
+    r = world.invoke("--from", str(src), "--yes")
+    assert "net_mode=off" not in r.text
+    assert world.requests == []
+    assert (world.lib / "llama.dll").exists()
+
+
 @pytest.mark.parametrize("marker, message", [
     ("cpu b1", "Replacing cpu build with vulkan."),
     (None, "Replacing unrecorded build with vulkan."),

@@ -126,6 +126,8 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
         _require_staging_context(backend, cuda_line, from_dir, url, rollback)
     if not (from_dir or url):
         _require_backend_here(backend.lower())
+    if not from_dir and (tag is not None or rollback or force):
+        _refuse_when_net_off()
     _apply_version_request(tag, rollback, backend, from_dir, url)
     # A version request is inherently a re-provision: the guard below compares
     # BACKENDS, and the whole point here is to change the BUILD while the
@@ -142,6 +144,8 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
 
     if _keeps_existing_install(target, lib_name, backend, force, assume_yes):
         return
+    if not from_dir:
+        _refuse_when_net_off()
 
     # Everything below actually MUTATES target (clear + refill), so it is guarded
     # by the cross-process provisioning lock: two processes provisioning the same
@@ -165,6 +169,17 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
             _sl._verify()
     except ProvisioningBusyError as e:
         _exit_provisioning_busy(e)
+
+
+def _refuse_when_net_off() -> None:
+    """Exit non-zero, having changed nothing, when ``net_mode`` is ``off``
+    (unless ``net_allow_model_downloads`` exempts downloads)."""
+    from localm import netpolicy
+    try:
+        _sl._require_network_allowed()
+    except netpolicy.NetworkPolicyError as e:
+        console.print(f"[red]{e}[/red]")
+        sys.exit(1)
 
 
 def _require_staging_context(backend: str, cuda_line: str, from_dir: Optional[str],
