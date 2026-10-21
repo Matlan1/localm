@@ -289,6 +289,21 @@ class TestProjectorRepull:
         assert projector.read_bytes() == right + b"damaged"
         assert (models_dir / "mmproj-main-f16-2.gguf").read_bytes() == right
 
+    def test_a_hostile_origin_file_is_read_as_no_origin(
+            self, fake_registry, monkeypatch, blobs):
+        store, models_dir = fake_registry
+        model, right = blobs
+        _wire_hub_by_repo(monkeypatch, {
+            ("o/r", "main.gguf"): model, ("o/r", "mmproj-main-f16.gguf"): right})
+        assert mm._pull_gguf_file("o/r:main.gguf", None) is True
+        projector = models_dir / "mmproj-main-f16.gguf"
+        projector.write_bytes(right + b"damaged")
+        (models_dir / "mmproj-main-f16.gguf.origin.json").write_text("[" * 200000, encoding="utf-8")
+
+        assert mm._pull_gguf_file("o/r:main.gguf", None) is True
+
+        assert projector.read_bytes() == right + b"damaged"
+
     def test_a_projector_chosen_from_another_repo_is_not_replaced_by_the_model_repos(
             self, fake_registry, monkeypatch, blobs):
         store, models_dir = fake_registry

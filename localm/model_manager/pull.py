@@ -1410,7 +1410,7 @@ def _mmproj_origin_is(dest: Path, repo_id: str, remote_name: str) -> bool:
     not another repo's projector of the same name."""
     try:
         recorded = json.loads(_mmproj_origin_path(dest).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return False
     return (isinstance(recorded, dict) and recorded.get("source") == f"hf:{repo_id}"
             and recorded.get("file") == remote_name)
