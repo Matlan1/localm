@@ -501,6 +501,35 @@ class TestSyncModelsDirBackfillsExistingEntry:
         assert result.mmproj_backfilled == 1
         assert result.changed is True
 
+    def test_a_speech_gguf_registered_as_llm_backfills_the_q8_projector(
+            self, fake_registry, monkeypatch):
+        store, models_dir = fake_registry
+        name = "Qwen3-TTS-12Hz-0.6B-Base.Q8_0"
+        (models_dir / f"{name}.gguf").write_bytes(_gguf_bytes("qwen3tts"))
+        store[name] = {"path": str((models_dir / f"{name}.gguf").resolve()),
+                       "source": "hf:o/r", "model_type": "llm"}
+        q8 = "Qwen3-TTS-12Hz-0.6B-Base.mmproj-Q8_0.gguf"
+        f16 = "Qwen3-TTS-12Hz-0.6B-Base.mmproj-f16.gguf"
+        _wire_repo_listing(monkeypatch, [f"{name}.gguf", q8, f16])
+        downloaded = _wire_download(monkeypatch, {q8: _CLIP_BYTES, f16: _CLIP_BYTES})
+
+        mm.sync_models_dir()
+
+        assert downloaded == [q8]
+        assert store[name]["mmproj"] == str((models_dir / q8).resolve())
+
+    def test_a_vision_gguf_registered_as_llm_still_backfills_f16(
+            self, fake_registry, monkeypatch):
+        store, models_dir = fake_registry
+        self._preexisting_entry(store, models_dir, name="main.Q8_0")
+        q8, f16 = "main.mmproj-Q8_0.gguf", "main.mmproj-f16.gguf"
+        _wire_repo_listing(monkeypatch, ["main.Q8_0.gguf", q8, f16])
+        downloaded = _wire_download(monkeypatch, {q8: _CLIP_BYTES, f16: _CLIP_BYTES})
+
+        mm.sync_models_dir()
+
+        assert downloaded == [f16]
+
     def test_entry_already_carrying_mmproj_is_never_re_fetched(
             self, fake_registry, monkeypatch):
         """An entry with mmproj already recorded (even resolved-empty in some

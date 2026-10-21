@@ -2010,7 +2010,7 @@ class VramSizingMixin:
         gpu_start = max(max(blocks) + 2 - gpu_layers, 0)
         n_cpu_moe = self._load_n_cpu_moe()
         outside_blocks = max(0, model_bytes - sum(total for total, _ in blocks.values()))
-        input_bytes = max(0, model_bytes - self._vram_model_bytes(0))
+        input_bytes = max(0, model_bytes - self._base_vram_model_bytes(0))
         held = min(outside_blocks, input_bytes)
         for block, (total, experts) in blocks.items():
             if block < gpu_start:
