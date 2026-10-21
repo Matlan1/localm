@@ -302,8 +302,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   registered folder with that name is being passed over.
 - **Memory recall ignores a word that most facts contain.** A query such as "what database does
   Project Atlas use" no longer brings back every fact that says "use" behind the one that matches.
-- **`localm spec-drafts` leaves out a model file cut short**, and the load report for a model with
-  experts in system RAM says how much of that RAM each generated token reads.
+- **`localm spec-drafts` leaves out a model file cut short**, and the load response and the
+  model-switch toast for a model with experts in system RAM say how much of that RAM each
+  generated token reads.
 - **Saving a token in Settings and opening a Knowledge collection no longer stall the server.**
   The credential write of a config save and the collection open of add, upload, re-embed, repair
   and remove-document run off the event loop. A numpy failure while scoring a collection is now

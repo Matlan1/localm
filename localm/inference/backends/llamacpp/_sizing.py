@@ -1153,21 +1153,6 @@ class VramSizingMixin:
         return sum(size for layer, size in self._moe_expert_bytes_by_layer().items()
                    if layer < n_cpu_moe)
 
-    def _moe_ram_read_bytes_per_token(self, n_cpu_moe: int) -> Optional[int]:
-        """Bytes of routed-expert weights one generated token reads from system
-        RAM when the first *n_cpu_moe* layers keep their experts there: the
-        pinned bytes scaled by the share of experts the router selects per
-        token. None when the GGUF header declares no expert counts, or nothing
-        is pinned."""
-        pinned = self._moe_pinned_bytes(n_cpu_moe)
-        if pinned <= 0:
-            return None
-        from localm.model_manager.gguf import gguf_expert_counts
-        experts, used = gguf_expert_counts(Path(self.model_path))
-        if experts <= 0 or used <= 0:
-            return None
-        return int(pinned * min(used, experts) / experts)
-
     def _adapter_bytes(self) -> int:
         """Bytes on disk of the LoRA adapters attached to this load; a missing
         or unreadable adapter file counts as 0."""

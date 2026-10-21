@@ -1004,12 +1004,6 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                 by_layer = self._moe_expert_bytes_by_layer()
                 self.moe_cpu_layers = (sum(1 for layer in by_layer if layer < n_cpu_moe)
                                        if by_layer else n_cpu_moe)
-                self.moe_ram_read_bytes = self._moe_ram_read_bytes_per_token(n_cpu_moe)
-                if self.moe_ram_read_bytes:
-                    console.print(
-                        f"[dim]  moe per-token read: about "
-                        f"{self.moe_ram_read_bytes / 1024 ** 3:.2f} GB of expert weights "
-                        f"from system RAM for each generated token[/dim]")
                 placement = meta.get("weight_placement") or []
                 if placement:
                     ram_mib = sum(b["mib"] for b in placement if b["is_ram"])
@@ -1025,6 +1019,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                         "requested)[/dim]")
                 per_token = self._moe_ram_bytes_per_token(n_cpu_moe)
                 if per_token > 0:
+                    self.moe_ram_read_bytes = per_token
                     gb = per_token / 1e9
                     console.print(
                         f"[dim]  moe speed: each generated token reads about "

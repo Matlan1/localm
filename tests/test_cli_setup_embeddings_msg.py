@@ -290,7 +290,7 @@ class TestSwitchHintsForLexicalOnlyCollections:
         result = cli_runner.invoke(setup_embeddings, ["--model", "other-model", "--yes"])
 
         assert result.exit_code == 0, result.output
-        assert "rag reembed" in result.output.lower()
+        assert "rag reembed" in " ".join(result.output.lower().split())
 
     def test_a_switch_with_no_collections_says_nothing_about_reembedding(
             self, cli_runner, monkeypatch, tmp_path):
@@ -300,7 +300,7 @@ class TestSwitchHintsForLexicalOnlyCollections:
         result = cli_runner.invoke(setup_embeddings, ["--model", "other-model", "--yes"])
 
         assert result.exit_code == 0, result.output
-        assert "rag reembed" not in result.output.lower()
+        assert "rag reembed" not in " ".join(result.output.lower().split())
 
 
 class TestMixedProvenanceIsSaidSo:
