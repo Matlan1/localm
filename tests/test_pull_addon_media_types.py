@@ -27,7 +27,7 @@ CASES = [
 
 
 @pytest.mark.parametrize("spec,filename,shapes,want", CASES)
-def test_an_auto_typed_pull_registers_the_addon_type(hf_network, spec, filename, shapes, want):
+def test_an_auto_typed_pull_registers_the_addon_type(hf_network, spec, filename, shapes, want):  # noqa: F811
     hf_network["body"] = _safetensors_bytes(shapes)
     assert mm.pull_model(spec) is True
     assert hf_network["downloads"] == 1
@@ -36,7 +36,7 @@ def test_an_auto_typed_pull_registers_the_addon_type(hf_network, spec, filename,
 
 @pytest.mark.parametrize("spec,filename,shapes,want", CASES)
 def test_a_re_pull_of_an_already_downloaded_addon_registers_it(
-        hf_network, spec, filename, shapes, want):
+        hf_network, spec, filename, shapes, want):  # noqa: F811
     hf_network["body"] = _safetensors_bytes(shapes)
     (hf_network["models"] / filename).write_bytes(hf_network["body"])
     assert mm.pull_model(spec) is True
