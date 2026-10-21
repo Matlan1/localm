@@ -4,7 +4,8 @@
 The HIP runtime's comgr and MIOpen write kernel caches under the user profile unless
 AMD_COMGR_CACHE_DIR, MIOPEN_USER_DB_PATH and MIOPEN_CUSTOM_CACHE_DIR are set, and Mesa and
 the NVIDIA Linux driver write shader caches under ~/.cache unless MESA_SHADER_CACHE_DIR and
-__GL_SHADER_DISK_CACHE_PATH are set.
+__GL_SHADER_DISK_CACHE_PATH are set, and the CUDA driver writes its JIT cache under
+~/.nv/ComputeCache (Windows: %APPDATA%\\NVIDIA\\ComputeCache) unless CUDA_CACHE_PATH is set.
 config.contain_gpu_caches() pins them inside the data dir when localm.config is imported.
 """
 import os
@@ -22,6 +23,7 @@ _PINNED = {
     "MIOPEN_CUSTOM_CACHE_DIR": ("cache", "miopen", "cache"),
     "MESA_SHADER_CACHE_DIR": ("cache", "mesa"),
     "__GL_SHADER_DISK_CACHE_PATH": ("cache", "glcache"),
+    "CUDA_CACHE_PATH": ("cache", "cuda"),
 }
 _VARS = tuple(_PINNED) + tuple(config._gpu_pin_marker(v) for v in _PINNED)
 

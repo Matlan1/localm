@@ -142,6 +142,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   next request fits in it.
 
 ### Fixed
+- **The NVIDIA CUDA kernel cache stays in the data folder.** The CUDA driver keeps kernels it
+  compiles on first use in `~/.nv/ComputeCache` (`%APPDATA%\NVIDIA\ComputeCache` on Windows), outside
+  the data folder, so "delete saved data" never removed them. They now go to `cache/cuda` inside it.
+  A location you set yourself with `CUDA_CACHE_PATH` is used as you set it. Files already in the old
+  location are left where they are.
 - **The built-in image backend decodes on the GPU with the Vulkan runtime.** On a GPU whose Vulkan
   driver limits a single buffer (2 GB on an AMD Radeon RX 6900 XT, for example), the final image decode of a larger
   image (FLUX at 1024x1024, for example) ran on the CPU and took about three minutes. localm now
