@@ -477,6 +477,7 @@ def _generate_video(monkeypatch, tmp_path, info, **kw):
     monkeypatch.setattr(sd_budget, "_platform", lambda: "linux")
     monkeypatch.setattr(discover, "list_gpus", lambda **k: ([], discover.GPU_PROBE_OK))
     monkeypatch.setattr(video_native, "_write_mp4", lambda out, result, fps: None)
+    monkeypatch.setattr(video_native, "_pyav_problem", lambda: None)
     files = {}
     for k in ("dit", "t5", "vae"):
         files[k] = tmp_path / f"{k}.gguf"
