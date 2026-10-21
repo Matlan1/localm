@@ -118,6 +118,8 @@ def test_a_runtime_failure_without_a_file_reason_keeps_the_runtime_advice(
      "file bounds, model is corrupted or incomplete",
      "llama_model_load: error loading model: tensor 'x' data is not within the "
      "file bounds, model is corrupted or incomplete"),
+    ("Failed to load model: m.gguf\ngguf_init_from_reader: tensor 'blk.0.ffn_down.weight' "
+     "has invalid ggml type 41 (NONE)", None),
     ("Failed to create llama context", None),
     ("unknown model architecture: 'clip'", None),
     ("could not load the native library", None),

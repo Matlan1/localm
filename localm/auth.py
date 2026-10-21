@@ -916,8 +916,16 @@ def _load_keystore_checked() -> tuple:
 def keystore_readable() -> bool:
     """False when auth.json is present but could not be read or does not hold a
     JSON list, so an empty ``list_keys()`` there does not mean no keys exist.
-    True when the file is absent or holds a list."""
-    return _load_keystore_checked()[1]
+    True when the file is absent or holds a list. Reads auth.json itself, as
+    ``list_keys`` does, never a ``.bak`` beside it."""
+    path = keystore_file()
+    if not path.exists():
+        return True
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return False
+    return isinstance(data, list)
 
 
 def _load_keystore() -> list:

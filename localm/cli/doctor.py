@@ -26,8 +26,7 @@ _UNIMPORTABLE = object()
 def _import_error_says_absent(name: str, exc: ImportError) -> bool:
     """True when *exc* says the package *name* itself is not installed, not that
     something it needs is missing or broken."""
-    return (isinstance(exc, ModuleNotFoundError)
-            and (exc.name or "").partition(".")[0] == name)
+    return isinstance(exc, ModuleNotFoundError) and exc.name == name
 
 
 def _import_failure_text(exc: BaseException) -> str:

@@ -85,9 +85,12 @@ _DAMAGED_FILE_RE = re.compile(
 def _damaged_file_reason(exc: BaseException) -> Optional[str]:
     """The native reader's one-line reason when *exc*'s text shows llama.cpp
     refused to read the model file because its contents are malformed or
-    incomplete, else None."""
+    incomplete, else None. A tensor type this runtime does not know ("invalid
+    ggml type") is a file newer than the runtime, not a damaged one."""
     match = _DAMAGED_FILE_RE.search(str(exc))
-    return match.group(1).strip() if match else None
+    if match is None or "ggml type" in match.group(1):
+        return None
+    return match.group(1).strip()
 
 
 def _load_failure_message(exc: BaseException, hint: str = "") -> str:

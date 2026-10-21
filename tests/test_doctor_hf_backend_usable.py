@@ -519,3 +519,19 @@ def test_the_vram_probe_does_not_call_a_broken_torch_not_installed(fake_hf, monk
     out = buf.getvalue()
     assert "torch is installed but cannot be imported" in out
     assert "torch not installed" not in out
+
+
+def test_a_torch_missing_one_of_its_own_submodules_is_not_called_not_installed(
+        fake_hf, monkeypatch):
+    from localm.inference.backends.llamacpp import _loader
+    monkeypatch.setattr(_loader, "native_lib_loaded", lambda: False)
+    fake_hf(torch_src="import torch._no_such_submodule\n")
+    buf = _console_to_buffer(monkeypatch)
+
+    modules = doctor_mod._check_packages()
+
+    torch_line = next(line for line in buf.getvalue().splitlines()
+                      if "torch (HF backend" in line)
+    assert "installed but cannot be imported" in torch_line
+    assert "not installed" not in torch_line
+    assert modules["torch"] is not None
