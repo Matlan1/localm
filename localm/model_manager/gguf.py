@@ -2336,13 +2336,13 @@ def gguf_classifier_head_tensors(path: Path) -> Optional[frozenset]:
     present in the GGUF at *path*, as a possibly empty frozenset.
 
     None - "could not tell" - when the tensor list cannot be read in full: an
-    unreadable or malformed header, or one part of a split GGUF (the head may sit
-    in another part). An empty frozenset is a confirmed answer: the complete
+    unreadable or malformed header, a header that lists no tensors, or one part
+    of a split GGUF (the head may sit in another part). An empty frozenset is a confirmed answer: the complete
     tensor list was read and holds no head."""
     if _SPLIT_GGUF_RE.match(Path(path).name):
         return None
     parsed = _gguf_tensor_offset_entries(Path(path))
-    if parsed is None:
+    if parsed is None or not parsed[0]:
         return None
     return frozenset(name for name, _offset in parsed[0]
                      if name in _GGUF_CLASSIFIER_HEAD_TENSORS)
@@ -2370,8 +2370,8 @@ def gguf_media_component_type(path: Path, meta: Optional[dict] = None) -> Option
     bare tensor names, such as a FLUX.1 transformer's ``double_blocks.``),
     ``text-encoder`` for a CLIP/T5 text encoder, ``vae`` for a VAE and ``lora``
     for an image-model LoRA. None when it declares an architecture, is one
-    part of a split GGUF, its tensors cannot be read, or they are none of
-    these (an LLM's tensors included).
+    part of a split GGUF, its tensors cannot be read or it lists none, or they
+    are none of these (an LLM's tensors included).
 
     *meta* is an already-computed ``_gguf_metadata_probe(path)`` result."""
     if meta is None:
@@ -2381,7 +2381,7 @@ def gguf_media_component_type(path: Path, meta: Optional[dict] = None) -> Option
     if _SPLIT_GGUF_RE.match(Path(path).name):
         return None
     parsed = _gguf_tensor_offset_entries(Path(path))
-    if parsed is None:
+    if parsed is None or not parsed[0]:
         return None
     if any(name.startswith(_GGUF_SD_TENSOR_PREFIXES) for name, _offset in parsed[0]):
         return "diffusion-unet"
