@@ -32,6 +32,7 @@ def _fresh_registry(monkeypatch, tmp_path):
     import localm.plugins.engine as plugins_engine
     monkeypatch.setattr(backend_registry, "_DESCRIPTORS", [])
     monkeypatch.setattr(plugins_engine, "_backend_manager", None)
+    monkeypatch.setattr(plugins_engine, "_server_manager_attached", False)
     monkeypatch.setattr(cfg, "HOME_DIR", tmp_path / "home")
     monkeypatch.setattr(cfg, "CONFIG_FILE", tmp_path / "home" / "config.json")
     monkeypatch.setenv("LOCALM_HOME", str(tmp_path / "home"))
@@ -149,7 +150,13 @@ class TestCreateBackend:
 
 
 BACKEND_PLUGIN = '''
+import os
 from localm.plugins.contract import InferenceBackendDescriptor
+
+_count = os.environ.get("FAKEEXL_IMPORTS")
+if _count:
+    with open(_count, "a", encoding="utf-8") as f:
+        f.write("x")
 
 class Made:
     def __init__(self, path, opts):
@@ -244,6 +251,23 @@ class TestPluginLifecycle:
         t.join(timeout=60)
         assert not blocked, "the lazy plugin load waited for the engine load lock"
         assert type(out[0]).__name__ == "Made"
+
+
+    def test_a_server_with_attached_plugins_never_loads_them_again(
+            self, tmp_path, monkeypatch):
+        from localm.inference.backends.hf import HFBackend
+        from localm.inference.engine import create_backend
+        from localm.plugins.engine import attach_engine
+        imports = tmp_path / "imports.txt"
+        monkeypatch.setenv("FAKEEXL_IMPORTS", str(imports))
+        _make_backend_plugin(tmp_path / "home" / "plugins")
+        _enable("fakeexl")
+        attach_engine(FastAPI())
+        assert imports.read_text() == "x"
+        exl3 = _hf_dir(tmp_path / "exl3", {"architectures": ["LlamaForCausalLM"],
+                                           "quantization_config": {"quant_method": "exl3"}})
+        assert isinstance(create_backend(str(exl3)), HFBackend)
+        assert imports.read_text() == "x"
 
 
 class TestRegistryNote:

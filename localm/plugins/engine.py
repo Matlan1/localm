@@ -1910,16 +1910,18 @@ class PluginManager:
 # --------------------------------------------------------------------------- #
 
 _backend_manager: Optional[PluginManager] = None
+_server_manager_attached = False
 _backend_manager_lock = threading.Lock()
 
 
 def load_inference_backend_plugins() -> list:
     """For a process without a server app: load the installed, enabled plugins
     that register an inference backend (``PluginManager.load_backend_plugins``),
-    once per process. Returns the names loaded by this call; [] on later calls."""
+    once per process. Returns the names loaded by this call; [] on later calls
+    and once :func:`attach_engine` has attached a server plugin manager."""
     global _backend_manager
     with _backend_manager_lock:
-        if _backend_manager is not None:
+        if _backend_manager is not None or _server_manager_attached:
             return []
         _backend_manager = PluginManager(app=None)
         return _backend_manager.load_backend_plugins()
@@ -1932,6 +1934,9 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
     from localm import scopes
     from localm.inference.http_server import require_scope
 
+    global _server_manager_attached
+    with _backend_manager_lock:
+        _server_manager_attached = True
     manager = PluginManager(app, inference_engine=inference_engine)
     manager.load_enabled()
     app.state.plugin_manager = manager
