@@ -335,27 +335,35 @@ _CANCEL_SETTLE_SECONDS = 30.0
 async def _await_job(job, request: Request) -> str:
     """Wait for *job* to end and return its status. A client that goes away
     cancels the job; the wait then ends once the job stops (at most
-    ``_CANCEL_SETTLE_SECONDS``) by raising ``asyncio.CancelledError``."""
+    ``_CANCEL_SETTLE_SECONDS``) by raising ``asyncio.CancelledError``.
+
+    The disconnect poll runs every ``_JOB_POLL_SECONDS`` whether the job is
+    silent or streaming progress events."""
     import asyncio
     import time
     queue = job.subscribe()
     poll = _resolve_disconnect_poll(request)
     deadline = None
+    next_poll = time.monotonic() + _JOB_POLL_SECONDS
     try:
         while True:
+            event = None
             try:
                 event = await asyncio.wait_for(queue.get(), timeout=_JOB_POLL_SECONDS)
             except TimeoutError:
-                if deadline is None:
-                    if poll is not None and await poll():
-                        job.cancel()
-                        deadline = time.monotonic() + _CANCEL_SETTLE_SECONDS
-                elif time.monotonic() >= deadline:
-                    raise asyncio.CancelledError() from None
-                continue
-            if event.get("type") == "end":
+                pass
+            if event is not None and event.get("type") == "end":
                 if deadline is not None:
                     raise asyncio.CancelledError()
                 return str(event.get("status", "failed"))
+            now = time.monotonic()
+            if deadline is None:
+                if now >= next_poll:
+                    next_poll = now + _JOB_POLL_SECONDS
+                    if poll is not None and await poll():
+                        job.cancel()
+                        deadline = time.monotonic() + _CANCEL_SETTLE_SECONDS
+            elif now >= deadline:
+                raise asyncio.CancelledError()
     finally:
         job.unsubscribe(queue)

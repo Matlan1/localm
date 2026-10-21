@@ -100,6 +100,11 @@ def _print_process_status(api_url: str, ping: bool) -> None:
             console.print("  Running           : "
                           + ("[green]yes[/green]" if alive else "[yellow]no[/yellow]"))
             if not alive:
+                held = (payload or {}).get("port_held")
+                if held:
+                    from rich.markup import escape
+                    console.print(f"  [yellow]{escape(str(held.get('message', '')))}[/yellow]")
+                    return
                 console.print("  [dim]Start it with[/dim] localm comfy start")
                 return
             console.print(f"  Launched by localm: {'yes' if ours else 'no'}")
