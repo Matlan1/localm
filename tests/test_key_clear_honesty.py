@@ -100,7 +100,7 @@ class TestClearApiKeyReportsWhatSurvived:
 class TestKeyClearCliDoesNotClaimSuccess:
     def test_success_still_says_cleared(self, runner):
         runner.invoke(main, ["key", "generate"])
-        r = runner.invoke(main, ["key", "clear", "--yes"])
+        r = runner.invoke(main, ["key", "clear", "--yes"], input="y\n")
         assert r.exit_code == 0
         assert "cleared" in r.output.lower()
         assert "not fully cleared" not in r.output.lower()
@@ -109,7 +109,7 @@ class TestKeyClearCliDoesNotClaimSuccess:
         runner.invoke(main, ["key", "generate"])
         _unlink_denied_for(monkeypatch, auth.key_file().name)
 
-        r = runner.invoke(main, ["key", "clear", "--yes"])
+        r = runner.invoke(main, ["key", "clear", "--yes"], input="y\n")
 
         out = r.output.lower()
         assert "not fully cleared" in out, (

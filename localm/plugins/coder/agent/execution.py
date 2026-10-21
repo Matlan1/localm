@@ -18,6 +18,7 @@ import localm.plugins.coder.agent as _agent
 from ..display import (
     ActivitySpinner, console, consume_confirm_always, consume_reject_reason,
     offering_session_allow, print_info, print_progress_tool_call,
+    requiring_exact_approval,
     print_tool_call, print_tool_error, print_tool_result, reset_diff_preview,
     tool_call_text,
 )
@@ -364,8 +365,9 @@ class _ExecutionMixin:
         "localm's data folder (the check could not run)", warned and audited,
         so the call still needs an explicit approval."""
         if call.name in _SHELL_COMMAND_ARGS:
-            shell_args = _SHELL_COMMAND_ARGS[call.name]
-            path_args: tuple[str, ...] = ()
+            path_args: tuple[str, ...] = _SHELL_DECLARED_PATH_ARGS.get(call.name, ())
+            shell_args = tuple(a for a in _SHELL_COMMAND_ARGS[call.name]
+                               if a not in path_args)
         elif call.name.startswith(("mcp_", "plugin_")):
             shell_args, path_args = (), _MCP_SCOPE_PATH_ARGS
         elif call.name in _SCOPED_TOOLS:
@@ -375,6 +377,8 @@ class _ExecutionMixin:
         else:
             return None
         args = dict(call.args or {})
+        if call.name == "run_tests" and isinstance(args.get("extra_args"), str):
+            args["extra_args"] = "pytest " + args["extra_args"]
         try:
             return data_guard.check(
                 call.name, args, self.cwd, shell_args=shell_args,
@@ -697,7 +701,8 @@ class _ExecutionMixin:
                 # reached through confirm_handler) offers "a" only for a call
                 # that can be session-allowed. A GUI handler never sets the
                 # answer flags, so consuming them there reads False and "".
-                with offering_session_allow(session_allowable):
+                with offering_session_allow(session_allowable), \
+                        requiring_exact_approval(data_hit is not None):
                     if self.confirm_handler is not None:
                         approved = invoke_confirm(self.confirm_handler, call,
                                                   agent=self._confirm_agent_label())

@@ -32,6 +32,8 @@ _last_confirm_always: bool = False
 _last_reject_reason: str = ""
 _offer_session_allow: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "coder_offer_session_allow", default=False)
+_exact_approval: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "coder_exact_approval", default=False)
 
 
 def consume_confirm_always() -> bool:
@@ -624,6 +626,23 @@ def offering_session_allow(offer: bool):
         yield
     finally:
         _offer_session_allow.reset(token)
+
+
+@contextlib.contextmanager
+def requiring_exact_approval(required: bool):
+    """Within the block, an approval with *required* true covers only the call
+    being asked about: a confirm handler must not answer it from, or add it
+    to, an allow-list kept by tool name. See exact_approval_required."""
+    token = _exact_approval.set(bool(required))
+    try:
+        yield
+    finally:
+        _exact_approval.reset(token)
+
+
+def exact_approval_required() -> bool:
+    """True inside a ``requiring_exact_approval(True)`` block."""
+    return _exact_approval.get()
 
 
 def _answer_hint(full: bool = False) -> str:

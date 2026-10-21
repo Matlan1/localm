@@ -421,9 +421,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   anyone on the network. `/health` and `/whoami` still answer, a server started with `--insecure`
   keeps running open, and on such a server the GUI's Clear key and the revoke of the last device
   key are refused with a note to set a new key instead.
-- **`localm key clear`, and `localm key rm` of the last key, need you at a terminal.** Piped input
-  and `--yes` from a script or another program are refused, so an automated run cannot switch the
-  server to open mode.
+- **`localm key clear`, and `localm key rm` of the last key, need you at a terminal.** They always
+  ask for confirmation, `--yes` included, and refuse piped input, so a script or another program
+  cannot switch the server to open mode.
 - **The coder asks before it touches localm's own keys and settings.** With auto-approve on, or in
   an unattended `localm coder` task, a shell command or file tool that reads, writes or deletes
   localm's key files, session store, `config.json` or instance registry, or that runs `localm key`

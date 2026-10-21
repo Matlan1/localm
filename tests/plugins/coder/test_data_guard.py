@@ -69,9 +69,10 @@ def _shell(cmd: str, cwd: Path, home: Path):
     ("echo x > {h}/auth.kdf.json", "owner key records"),
     ("cp evil.json {h}/model_source_credentials.json", "model-source credentials"),
     ("rm -rf {h}/run", "running-instance registry"),
-    ("cd {h} && rm auth.key", "owner API key"),
-    ("rm -rf {h}", "owner API key"),
-    ("mv {h} /tmp/elsewhere", "owner API key"),
+    ("cd {h} && rm auth.key", "data folder"),
+    ("rm -rf {h}", "data folder"),
+    ("mv {h} /tmp/elsewhere", "data folder"),
+    ("rm -rf {h}/..", "owner API key"),
     ("localm key clear --yes", "localm key"),
     ("echo y | localm key clear", "localm key"),
     ("localm key rm abc123 --yes", "localm key"),
@@ -79,6 +80,23 @@ def _shell(cmd: str, cwd: Path, home: Path):
     ("python -m localm key generate", "localm key"),
     ("uv run localm config require_auth false", "localm config"),
     ("localm --debug config bind_host 0.0.0.0", "localm config"),
+    ("ls {h}", "data folder"),
+    ("cat {h}/*", "data folder"),
+    ("grep -r . {h}", "data folder"),
+    ("tar czf out.tgz {h}", "data folder"),
+    ("cat {h}/tls/ca.key", "CA private key"),
+    ("cp {h}/tls/server.key /tmp/k", "TLS server private key"),
+    ('bash -c "rm {h}/auth.key"', "owner API key"),
+    ("sh -c 'cat {h}/config.json'", "settings"),
+    ("cmd /c del {hw}\\auth.key", "owner API key"),
+    ("powershell -Command Remove-Item {hw}\\auth.json", "API key store"),
+    ('bash -c "localm key clear --yes"', "localm key"),
+    ("rm $LOCALM_HOME/auth.key", "owner API key"),
+    ("rm ${{LOCALM_HOME}}/auth.key", "owner API key"),
+    ("del %LOCALM_HOME%\\auth.key", "owner API key"),
+    ("cat {h}/auth.json.", "API key store"),
+    ("type {hw}\\auth.key::$DATA", "owner API key"),
+    ("pytest --basetemp={h}", "data folder"),
 ])
 def test_protected_shell_commands_are_named(tmp_path, cmd_t, label):
     home = tmp_path / "home"
@@ -95,8 +113,10 @@ def test_protected_shell_commands_are_named(tmp_path, cmd_t, label):
     "localm config",
     "git status",
     "cat README.md",
-    "ls {h}",
     "grep -r hf_ {h}/models",
+    "ls {h}/models",
+    'bash -c "pytest -q"',
+    "rm $OTHER_VAR/auth.key",
 ])
 def test_ordinary_commands_are_not_flagged(tmp_path, cmd):
     home = tmp_path / "home"
@@ -272,3 +292,124 @@ def test_shell_subprocesses_get_no_stdin(monkeypatch, tmp_path):
     r = tools_base.run_subprocess([sys.executable, "-c", "print(1)"], tmp_path, timeout=60)
     assert r.ok
     assert seen.get("stdin") is subprocess.DEVNULL
+
+
+# --------------------------------------------------------------------------- #
+#  run_tests, the sweep tools and the GUI approval                              #
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("args", [
+    {"path": "{h}/auth.key"},
+    {"path": "tests", "extra_args": "--basetemp={h}"},
+    {"path": "tests", "extra_args": "--basetemp {h}"},
+])
+def test_run_tests_paths_and_flag_values_are_checked(keyed, args):
+    h = home_dir().as_posix()
+    a = {k: v.format(h=h) for k, v in args.items()}
+    agent = Agent(_StubBackend(), cwd=keyed, auto_approve=True, always_confirm=set())
+    assert agent._data_guard_verdict(_call("run_tests", **a)), a
+
+
+def test_ordinary_run_tests_is_not_flagged(keyed):
+    agent = Agent(_StubBackend(), cwd=keyed, auto_approve=True, always_confirm=set())
+    assert agent._data_guard_verdict(
+        _call("run_tests", path="tests", extra_args="-q -k smoke")) is None
+
+
+def test_a_project_wide_grep_does_not_read_the_key(keyed):
+    from localm.plugins.coder.tools.files import tool_grep
+    project = home_dir().parent
+    (project / "notes.txt").write_text(STRONG_KEY[:12] + " in notes\n", encoding="utf-8")
+    r = tool_grep(project, STRONG_KEY[:12])
+    assert r.ok, r.output
+    assert "notes.txt" in r.output
+    assert STRONG_KEY not in r.output
+    assert "auth.key" not in r.output.split("[not searched")[0]
+    assert "localm's own keys or settings" in r.output
+
+
+def test_a_project_wide_search_replace_leaves_the_settings_alone(keyed):
+    from localm.plugins.coder.tools.files import tool_search_replace
+    project = home_dir().parent
+    cfg = home_dir() / "config.json"
+    cfg.write_text('{"require_auth": true}', encoding="utf-8")
+    (project / "app.json").write_text('{"require_auth": true}', encoding="utf-8")
+    r = tool_search_replace(project, "true", "false", glob="**/*.json")
+    assert r.ok, r.output
+    assert (project / "app.json").read_text(encoding="utf-8") == '{"require_auth": false}'
+    assert cfg.read_text(encoding="utf-8") == '{"require_auth": true}'
+    assert "localm's own keys or settings" in r.output
+
+
+def test_protected_file(tmp_path):
+    home = tmp_path / "home"
+    assert data_guard.protected_file(home / "auth.key", home)
+    assert data_guard.protected_file(home / "run" / "abc.json", home)
+    assert data_guard.protected_file(home / "models" / "x.gguf", home) is None
+    assert data_guard.protected_file(tmp_path / "auth.key", home) is None
+
+
+def _gui_session(cwd):
+    from localm.plugins.coder.sessions import CoderSession
+    return CoderSession(cwd, _StubBackend(), auto_approve=True, auto_verify=False)
+
+
+def _answer_when_asked(session, approved, always_allow=False):
+    import threading
+
+    def _run():
+        waiter = threading.Event()
+        for _ in range(1000):
+            with session._lock:
+                pending = list(session._pending)
+            for cid in pending:
+                session.answer_confirm(cid, approved, always_allow=always_allow)
+            if pending:
+                return
+            waiter.wait(0.01)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    return t
+
+
+def test_a_gui_always_allow_does_not_cover_the_data_folder(keyed):
+    key = home_dir() / "auth.key"
+    session = _gui_session(keyed)
+    try:
+        session.allowed_tools.add("run_shell")
+        t = _answer_when_asked(session, approved=False)
+        result = session.agent._execute_tool(_call("run_shell", command=_rm(key)),
+                                             interactive=False)
+        t.join(10)
+        asked = [e for e in session.history if e.get("type") == "confirm_request"]
+        assert len(asked) == 1, "the always-allow grant answered for the data folder"
+        assert not result.ok
+        assert key.exists()
+    finally:
+        session.close()
+
+
+def test_a_gui_always_allow_answer_is_not_kept_for_the_data_folder(keyed):
+    key = home_dir() / "auth.key"
+    session = _gui_session(keyed)
+    try:
+        t = _answer_when_asked(session, approved=True, always_allow=True)
+        result = session.agent._execute_tool(_call("run_shell", command=_rm(key)),
+                                             interactive=False)
+        t.join(10)
+        assert result.ok, result.output
+        assert not key.exists()
+        assert "run_shell" not in session.allowed_tools
+    finally:
+        session.close()
+
+
+def test_a_gui_always_allow_still_covers_ordinary_calls(keyed):
+    session = _gui_session(keyed)
+    try:
+        session.allowed_tools.add("run_shell")
+        assert session._confirm(_call("run_shell", command="echo hi")) is True
+        assert not [e for e in session.history if e.get("type") == "confirm_request"]
+    finally:
+        session.close()

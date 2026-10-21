@@ -242,7 +242,7 @@ class TestKeyCliDoesNotClaimSessionsWereSignedOut:
         from localm.cli import main
         auth.set_api_key(KEY)
         _mint_owner_session()
-        r = runner.invoke(main, ["key", "clear", "--yes"])
+        r = runner.invoke(main, ["key", "clear", "--yes"], input="y\n")
         assert r.exit_code == 0
         out = _flat(r.output)
         assert "were signed out" in out
@@ -256,7 +256,7 @@ class TestKeyCliDoesNotClaimSessionsWereSignedOut:
         _mint_owner_session()
         _store_writes_fail(monkeypatch)
 
-        r = runner.invoke(main, ["key", "clear", "--yes"])
+        r = runner.invoke(main, ["key", "clear", "--yes"], input="y\n")
 
         out = _flat(r.output)
         assert "not signed out" in out, \

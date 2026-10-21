@@ -6,15 +6,23 @@
 * a file in localm's data folder (``config.home_dir()``) that holds a credential
   or the settings: the owner key, the scoped key store, the owner key records,
   the browser session store, ``config.json`` and its ``.bak``, the model-source
-  credentials, and the running-instance registry (attach tokens);
-* a shell command naming one of those paths, deleting, moving or changing the
-  permissions of a folder that contains one, or running ``localm key <sub>``
-  (any subcommand except ``list``) or ``localm config <key> <value>``.
+  credentials, the running-instance registry (attach tokens) and the TLS
+  private keys;
+* the data folder itself (listing, reading or archiving it whole);
+* a shell command naming one of those paths (also as ``$LOCALM_HOME/...`` and
+  in a ``--opt=value`` flag), deleting, moving or changing the permissions of a
+  folder that contains one, running ``localm key <sub>`` (any subcommand except
+  ``list``) or ``localm config <key> <value>``, or running a nested shell
+  (``sh -c``, ``cmd /c``, ``powershell -Command``) whose command line does.
+
+:func:`protected_file` answers the same question for one resolved path; the
+sweep tools (grep, search_replace) skip such files.
 
 The agent requires an explicit approval of the exact call for a hit, under
 ``auto_approve`` too, and denies it when no one can be asked. A best-effort
 lexical check (plus ``os.path.realpath`` for file-tool paths), not a sandbox:
-variables, ``eval`` and encodings defeat the shell half.
+other variables, ``eval``, interpreter one-liners and encodings defeat the shell
+half.
 """
 
 from __future__ import annotations
@@ -34,57 +42,89 @@ _FILE_LABELS: tuple[tuple[str, str], ...] = (
     ("config.json.bak", "localm's settings backup"),
     ("model_source_credentials.json", "localm's model-source credentials"),
     ("run", "localm's running-instance registry"),
+    ("tls/ca.key", "localm's local CA private key"),
+    ("tls/server.key", "localm's TLS server private key"),
 )
+_FOLDER_LABEL = "localm's data folder"
 
 _TREE_VERBS = _sg._SECRET_DELETERS | _sg._SECRET_DEST_WRITERS | _sg._SECRET_PERM_WRITERS
 _PYTHON_NAMES = frozenset({"python", "python3", "py", "pythonw"})
+_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "ash", "fish", "cmd",
+                     "powershell", "pwsh"})
+_SHELL_COMMAND_FLAGS = frozenset({"-c", "/c", "/k", "-command"})
+_HOME_VARS = ("${localm_home}", "$localm_home", "%localm_home%", "$env:localm_home")
+_MAX_NESTING = 3
 
 
 def _norm(text: str) -> str:
-    return text.replace("\\", "/").rstrip("/").casefold()
+    """Forward slashes, casefolded, no trailing slash, and each segment without
+    the trailing dots and spaces and the ``:stream`` suffix Windows ignores."""
+    parts = text.replace("\\", "/").casefold().split("/")
+    out = []
+    for i, seg in enumerate(parts):
+        drive = i == 0 and len(seg) == 2 and seg[1] == ":"
+        if not drive and seg not in (".", ".."):
+            seg = seg.split(":", 1)[0].rstrip(" .")
+        out.append(seg)
+    return "/".join(out).rstrip("/")
 
 
-def protected_targets(home: Optional[Path] = None) -> list[tuple[str, str]]:
-    """``(normalised path, label)`` for every protected entry under *home*
-    (default ``config.home_dir()``). Each entry appears in canonical absolute
-    form and, when *home* is under the user's home directory, also in the
-    shell guard's ``<home>/...`` form. Normalised: forward slashes, casefolded,
-    no trailing slash."""
+class Targets(list):
+    """``(normalised path, label)`` entries; ``folders`` holds the normalised
+    forms of the data folder itself."""
+
+    folders: list[str]
+
+
+def protected_targets(home: Optional[Path] = None) -> Targets:
+    """The protected entries under *home* (default ``config.home_dir()``), for
+    the path as given and its symlink-resolved form, each in canonical
+    absolute form and, when under the user's home directory, also in the shell
+    guard's ``<home>/...`` form. Normalised by :func:`_norm`."""
     if home is None:
         from localm.config import home_dir
         home = home_dir()
-    bases = []
-    canon = _sg._canon(str(home))
-    if canon:
-        bases.append(canon)
-    try:
-        rel = Path(os.path.abspath(home)).relative_to(Path.home())
-        bases.append(_sg._HOME + "/" + rel.as_posix() if rel.parts else _sg._HOME)
-    except (ValueError, RuntimeError, OSError):
-        pass
-    out = []
+    bases: list[str] = []
+    for form in (os.path.abspath(home), os.path.realpath(home)):
+        canon = _sg._canon(form)
+        if canon and canon not in bases:
+            bases.append(canon)
+        try:
+            rel = Path(form).relative_to(Path.home())
+        except (ValueError, RuntimeError, OSError):
+            continue
+        sentinel = _sg._HOME + "/" + rel.as_posix() if rel.parts else _sg._HOME
+        if sentinel not in bases:
+            bases.append(sentinel)
+    out = Targets()
+    out.folders = [_norm(b) for b in bases]
     for base in bases:
         for name, label in _FILE_LABELS:
             out.append((_norm(base.rstrip("/") + "/" + name), label))
     return out
 
 
-def _match(norm_path: Optional[str], targets, *, tree: bool) -> Optional[str]:
-    """The label of the target *norm_path* equals or lies inside, or, with
-    *tree*, also of a target lying inside *norm_path*."""
+def _match(norm_path: Optional[str], targets: Targets, *, tree: bool) -> Optional[str]:
+    """The label of the target *norm_path* equals or lies inside, the data
+    folder label when *norm_path* is the data folder itself, or, with *tree*,
+    the label of a target lying inside *norm_path*."""
     if not norm_path:
         return None
     p = _norm(norm_path)
     for target, label in targets:
         if p == target or p.startswith(target + "/"):
             return label
-        if tree and target.startswith(p + "/"):
-            return label
+    if p in targets.folders:
+        return _FOLDER_LABEL
+    if tree:
+        for target, label in targets:
+            if target.startswith(p + "/"):
+                return label
     return None
 
 
-def _file_forms(value: str, cwd: Optional[Path]) -> Iterable[str]:
-    """Normalised forms of a file-tool path: lexical, then symlink-resolved."""
+def _file_forms(value: str, cwd: Optional[Path]) -> list[str]:
+    """Canonical forms of a file-tool path: lexical, then symlink-resolved."""
     raw = os.path.expanduser(str(value).strip())
     if not raw:
         return []
@@ -97,6 +137,21 @@ def _file_forms(value: str, cwd: Optional[Path]) -> Iterable[str]:
     except (OSError, ValueError):
         pass
     return [f for f in (_sg._canon(x) for x in forms) if f]
+
+
+def protected_file(path: Path, home: Optional[Path] = None, *,
+                   targets: Optional[Targets] = None) -> Optional[str]:
+    """The label when *path* is, or lies inside, a protected entry of localm's
+    data folder (compared lexically and symlink-resolved), else None. Pass
+    *targets* (``protected_targets()``) to reuse them across many paths."""
+    if targets is None:
+        targets = protected_targets(home)
+    for form in _file_forms(str(path), None):
+        p = _norm(form)
+        for target, label in targets:
+            if p == target or p.startswith(target + "/"):
+                return label
+    return None
 
 
 def _localm_command(name: str, args: list[str]) -> Optional[str]:
@@ -123,7 +178,41 @@ def _localm_command(name: str, args: list[str]) -> Optional[str]:
     return None
 
 
-def _check_shell(command: str, cwd: Optional[Path], targets) -> Optional[str]:
+def _expand_home_vars(token: str, home: Path) -> str:
+    """*token* with a leading LOCALM_HOME variable replaced by *home*."""
+    low = token.casefold()
+    for var in _HOME_VARS:
+        if low.startswith(var) and (len(token) == len(var) or token[len(var)] in "/\\"):
+            return str(home) + token[len(var):]
+    return token
+
+
+def _operands(args: Iterable[str]) -> Iterable[str]:
+    """Each non-flag arg, and the value of a ``--opt=value`` flag."""
+    for tok in args:
+        if _sg._is_flag(tok):
+            if "=" in tok:
+                yield tok.split("=", 1)[1]
+            continue
+        yield tok
+
+
+def _nested_command(name: str, args: Iterable[str]) -> Optional[str]:
+    """The command line a shell is told to run (``sh -c``, ``cmd /c``,
+    ``powershell -Command``), or None."""
+    if name not in _SHELLS:
+        return None
+    argv = list(args)
+    for i, tok in enumerate(argv):
+        if tok.casefold() in _SHELL_COMMAND_FLAGS and i + 1 < len(argv):
+            rest = argv[i + 1:]
+            rest[0] = rest[0].strip("'\"")
+            return " ".join(rest)
+    return None
+
+
+def _check_shell(command: str, cwd: Optional[Path], targets: Targets, home: Path,
+                 depth: int = 0) -> Optional[str]:
     cwd_s = _sg._canon(str(cwd)) if cwd is not None else None
     segments, _ = _sg._collect(command, 0, 0)
     current = cwd_s
@@ -134,14 +223,19 @@ def _check_shell(command: str, cwd: Optional[Path], targets) -> Optional[str]:
         label = _localm_command(name, list(args))
         if label:
             return label
+        nested = _nested_command(name, args)
+        if nested and depth < _MAX_NESTING:
+            label = _check_shell(nested, cwd, targets, home, depth + 1)
+            if label:
+                return label
         tree = name in _TREE_VERBS
-        for tok in args:
-            if _sg._is_flag(tok):
-                continue
+        for tok in _operands(args):
+            tok = _expand_home_vars(tok, home)
             label = _match(_sg._norm_target(tok, current), targets, tree=tree)
             if label:
                 return label
         for _op, target in seg.redirects:
+            target = _expand_home_vars(target, home)
             label = _match(_sg._norm_target(target, current), targets, tree=False)
             if label:
                 return label
@@ -172,14 +266,16 @@ def check(call_name: str, args: dict, cwd: Optional[Path], *,
     is checked), and *paths* are further target paths (nested or list args).
     A ``search_replace`` glob also hits when its fixed part names a folder that
     contains a protected entry; a glob with no fixed part (the working folder)
-    does not.
-    ``patch_file``'s diff headers are checked as paths too. Raises
+    does not. ``patch_file``'s diff headers are checked as paths too. Raises
     on an internal error; the caller must then treat the call as a hit."""
+    if home is None:
+        from localm.config import home_dir
+        home = home_dir()
     targets = protected_targets(home)
     for arg in shell_args:
         command = args.get(arg)
         if isinstance(command, str) and command.strip():
-            label = _check_shell(command, cwd, targets)
+            label = _check_shell(command, cwd, targets, home)
             if label:
                 return label
     values = [args.get(a) for a in path_args]

@@ -44,10 +44,35 @@ def test_clear_piped_confirmation_is_refused():
 def test_clear_at_an_interactive_terminal_still_works(monkeypatch):
     monkeypatch.setattr(keys_cli, "_stdin_is_interactive", lambda: True)
     auth.set_api_key(STRONG_KEY)
-    r = CliRunner().invoke(main, ["key", "clear", "--yes"])
+    r = CliRunner().invoke(main, ["key", "clear", "--yes"], input="y\n")
     assert r.exit_code == 0, r.output
+    assert "Clear the API key?" in r.output
     assert "API key cleared" in r.output
     assert not auth.key_file().exists()
+
+
+@pytest.mark.parametrize("argv", [["key", "clear", "--yes"], ["key", "rm", "{id}", "--yes"]])
+def test_yes_does_not_skip_the_question_for_the_last_key(monkeypatch, argv):
+    monkeypatch.setattr(keys_cli, "_stdin_is_interactive", lambda: True)
+    rec = auth.create_key("only", ["models:read"])
+    if argv[1] == "clear":
+        auth.set_api_key(STRONG_KEY)
+    argv = [a.format(id=rec["id"]) for a in argv]
+    r = CliRunner().invoke(main, argv, input="n\n")
+    assert "?" in r.output, r.output
+    assert "Cancelled" in r.output, r.output
+    assert [k["id"] for k in auth.list_keys()] == [rec["id"]]
+    if argv[1] == "clear":
+        assert auth.get_api_key() == STRONG_KEY
+
+
+def test_yes_still_skips_the_question_when_a_key_remains():
+    keep = auth.create_key("keep", ["models:read"])
+    gone = auth.create_key("gone", ["models:read"])
+    r = CliRunner().invoke(main, ["key", "rm", gone["id"], "--yes"])
+    assert r.exit_code == 0, r.output
+    assert "?" not in r.output
+    assert [k["id"] for k in auth.list_keys()] == [keep["id"]]
 
 
 def test_clear_is_not_refused_while_an_env_key_survives(monkeypatch):
