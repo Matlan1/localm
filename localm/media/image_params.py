@@ -245,6 +245,7 @@ def _strip_lora_tags(prompt: str) -> tuple[str, list]:
 
 
 A1111_UNSUPPORTED = {"Hires fix": "Hires"}
+MAX_CLIP_SKIP = 12
 
 
 def parse_a1111(text: str) -> dict:
@@ -284,7 +285,8 @@ def parse_a1111_with_unsupported(text: str) -> tuple[dict, list[str]]:
     out["cfg"] = _num(pairs.get("CFG scale"), float)
     out["guidance"] = _num(pairs.get("Distilled CFG Scale"), float)
     out["denoise"] = _num(pairs.get("Denoising strength"), float)
-    out["clip_skip"] = _num(pairs.get("Clip skip"), int)
+    clip_skip = _num(pairs.get("Clip skip"), int)
+    out["clip_skip"] = clip_skip if clip_skip is not None and 1 <= clip_skip <= MAX_CLIP_SKIP else None
     width, sep, height = pairs.get("Size", "").partition("x")
     if sep and width.isdigit() and height.isdigit() and len(width) < 7 and len(height) < 7:
         out["width"], out["height"] = int(width), int(height)

@@ -611,7 +611,9 @@ class SpeechSynthesizer:
         self._m.mtmd_helper_gen_audio_free(self._helper)
         self._helper = None
         self._last_gen_seed = None
-        moved = self._mtmd.switch_device(gpu=gpu)
+        from .llama import _stderr_ctx_for_generate
+        with _stderr_ctx_for_generate(False)():
+            moved = self._mtmd.switch_device(gpu=gpu)
         if not self._mtmd._ctx:
             raise SpeechUnavailable(
                 "The speech model's projector could not be reopened; the model is "

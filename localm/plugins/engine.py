@@ -1363,17 +1363,13 @@ class PluginManager:
         # _installed_dir re-checks it. This feeds _remove_installed_dir ->
         # shutil.rmtree just below, and copytree after.
         dest = self._installed_dir(name)
-        if dest.exists():
-            if (dest / "plugin.toml").is_file() and not force:
-                raise ValueError(f"plugin {name!r} is already installed")
-            if not self._remove_installed_dir(name):
-                raise ValueError(
-                    f"plugin {name!r}: the existing installed directory could not "
-                    f"be removed; see the log")
+        if dest.exists() and (dest / "plugin.toml").is_file() and not force:
+            raise ValueError(f"plugin {name!r} is already installed")
         dest.parent.mkdir(parents=True, exist_ok=True)
         # The copy is built beside dest and renamed into place, so an install
         # that dies mid-copy leaves a hidden staging folder, never a
-        # half-filled plugin folder.
+        # half-filled plugin folder, and a failed forced reinstall leaves the
+        # existing plugin in place.
         tmp = dest.parent / f".{name}.install.tmp"
         if tmp.exists():
             shutil.rmtree(tmp, ignore_errors=True)
@@ -1383,6 +1379,10 @@ class PluginManager:
             # junction, which copytree demotes and recurses into.
             shutil.copytree(src, tmp, symlinks=True)
             _write_marker(tmp, "external", _dir_content_hash(src))
+            if dest.exists() and not self._remove_installed_dir(name):
+                raise ValueError(
+                    f"plugin {name!r}: the existing installed directory could not "
+                    f"be removed; see the log")
             tmp.rename(dest)
         except BaseException:
             shutil.rmtree(tmp, ignore_errors=True)

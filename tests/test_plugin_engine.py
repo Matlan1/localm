@@ -1795,6 +1795,27 @@ def test_a_staging_folder_is_not_scanned_as_a_plugin_by_the_other_scanners(env, 
     assert media_config.active_plugins({"plugins_enabled": ["killed", ".killed.install.tmp"]}) == set()
 
 
+def test_a_forced_reinstall_whose_copy_fails_keeps_the_existing_plugin(env, monkeypatch):
+    import shutil
+    from pathlib import Path
+    src = _make_plugin(env / "src", "keeper", _ping("keeper"))
+    mgr = _third_party_manager(env)
+    mgr.set_installed_from_dir(src)
+    installed = env / "installed" / "keeper"
+    (installed / "plug.py").write_text("# the working copy", encoding="utf-8")
+
+    def dying_copytree(s, d, **kw):
+        Path(d).mkdir(parents=True)
+        raise OSError("disk full")
+
+    monkeypatch.setattr(shutil, "copytree", dying_copytree)
+    with pytest.raises(OSError, match="disk full"):
+        mgr.set_installed_from_dir(src, force=True)
+    assert (installed / "plugin.toml").is_file()
+    assert (installed / "plug.py").read_text(encoding="utf-8") == "# the working copy"
+    assert not (env / "installed" / ".keeper.install.tmp").exists()
+
+
 def test_a_complete_install_is_still_reported_as_installed(env):
     src = _make_plugin(env / "src", "whole", _ping("whole"))
     mgr = _third_party_manager(env)

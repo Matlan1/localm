@@ -115,6 +115,10 @@ class TestA1111:
         p = ip.parse_a1111("a cat\nSteps: 8, Seed: 1, Size: 64x64, Clip skip: 2")
         assert p["clip_skip"] == 2
 
+    @pytest.mark.parametrize("value", ["0", "13", "-1", "20"])
+    def test_a_clip_skip_outside_the_supported_range_is_absent(self, value):
+        assert "clip_skip" not in ip.parse_a1111("a cat" + chr(10) + "Steps: 8, Clip skip: " + value)
+
     def test_a_clip_skip_that_is_not_a_number_is_absent(self):
         assert "clip_skip" not in ip.parse_a1111("a cat\nSteps: 8, Clip skip: lots")
 
