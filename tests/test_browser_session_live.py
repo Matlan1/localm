@@ -436,6 +436,67 @@ def test_the_system_engine_carries_the_resolver_rule(browser, origin, counter,
         % counter.accepted)
 
 
+@pytest.fixture(params=["Google Chrome", "Microsoft Edge"])
+def branded(request, monkeypatch):
+    """Only the installed browser named by the parameter is offered to the
+    system engine."""
+    from localm.browser import discovery
+    found = [b for b in discovery.find_system_browsers() if b.name == request.param]
+    if not found:
+        pytest.skip("%s is not installed" % request.param)
+    monkeypatch.setattr(discovery, "find_system_browsers", lambda **kw: found)
+    return request.param
+
+
+@pytest.mark.parametrize("kind", ["worker", "shared", "sw"])
+def test_a_branded_browser_keeps_a_worker_websocket_from_connecting(
+        browser, origin, counter, branded, kind):
+    port = origin.server_address[1]
+    _set(net_mode="allow", net_allow_private=True)
+    _worker_page(kind, "ws://127.0.0.1:%d/ws" % counter.port)
+    b = browser(engine="system")
+    assert b.browser_name == branded
+    assert b.navigate("http://localhost:%d/wk-page" % port)["ok"] is True
+    assert _wait_for("/ran?src=" + kind), _Recorder.seen
+    time.sleep(1.5)
+    assert counter.accepted == 0, (
+        "a %s WebSocket from %s connected %d time(s)"
+        % (kind, branded, counter.accepted))
+
+
+def test_a_branded_browser_leaves_no_profile_folder_after_stop(
+        browser, origin, branded):
+    import glob
+    import os
+    import tempfile
+    pattern = os.path.join(tempfile.gettempdir(), "localm-browser-*")
+    before = set(glob.glob(pattern))
+    _set(net_mode="allow", net_allow_private=True)
+    b = browser(engine="system")
+    assert b.navigate("http://localhost:%d/index.html" % origin.server_address[1])["ok"]
+    during = set(glob.glob(pattern)) - before
+    assert len(during) == 1, during
+    b.stop()
+    assert not (set(glob.glob(pattern)) - before)
+
+
+def test_a_branded_browser_connects_without_the_resolver_rule(
+        browser, origin, counter, branded, monkeypatch):
+    """The control for the test above: the same page, with the launch switches
+    dropped, does reach the listener, so a zero there is a measurement."""
+    port = origin.server_address[1]
+    _set(net_mode="allow", net_allow_private=True)
+    monkeypatch.setattr(bsession, "_LAUNCH_ARGS", ())
+    _worker_page("worker", "ws://127.0.0.1:%d/ws" % counter.port)
+    b = browser(engine="system")
+    assert b.navigate("http://localhost:%d/wk-page" % port)["ok"] is True
+    assert _wait_for("/ran?src=worker"), _Recorder.seen
+    deadline = time.monotonic() + 5
+    while counter.accepted == 0 and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert counter.accepted > 0, "%s never connected without the rule" % branded
+
+
 def test_a_shared_worker_request_never_reaches_its_host(browser, origin):
     """A SharedWorker's fetch is not routed, so it must not leave the browser."""
     port = origin.server_address[1]
@@ -558,6 +619,21 @@ def test_webrtc_sends_nothing_to_an_ip_literal(browser, origin, counter, datagra
         "WebRTC sent %d UDP datagram(s) to an IP literal" % datagrams.received)
     assert counter.accepted == 0, (
         "WebRTC opened %d TCP connection(s) to an IP literal" % counter.accepted)
+
+
+def test_a_branded_browser_sends_no_webrtc_traffic_to_an_ip_literal(
+        browser, origin, counter, datagrams, branded):
+    port = origin.server_address[1]
+    _set(net_mode="allow", net_allow_private=True)
+    _rtc_page(datagrams.port, counter.port)
+    b = browser(engine="system")
+    assert b.navigate("http://localhost:%d/rtc-page" % port)["ok"] is True
+    assert _wait_for("/ran?step=4"), _Recorder.seen
+    time.sleep(1.5)
+    assert datagrams.received == 0, (
+        "%s sent %d UDP datagram(s) to an IP literal" % (branded, datagrams.received))
+    assert counter.accepted == 0, (
+        "%s opened %d TCP connection(s) to an IP literal" % (branded, counter.accepted))
 
 
 # --------------------------------------------------------------------------- #
