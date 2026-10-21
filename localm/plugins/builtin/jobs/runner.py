@@ -310,9 +310,8 @@ def _default_chat_model() -> Optional[str]:
     name = cfg.get("default_model") or cfg.get("model")
     if name:
         return name
-    from localm.model_manager import is_auto_chat_eligible
-    reg = load_registry()
-    return next((n for n in sorted(reg) if is_auto_chat_eligible(reg[n])), None)
+    from localm.model_manager import auto_chat_candidates
+    return next(iter(auto_chat_candidates(load_registry())), None)
 
 
 def _headless_routed_model(job: Job) -> Optional[str]:
@@ -396,11 +395,10 @@ def _load_engine(model: Optional[str]) -> tuple[Optional[object], bool]:
         cfg = load_config()
         name = cfg.get("default_model") or cfg.get("model")
     if not name:
-        from localm.model_manager import is_auto_chat_eligible
-        reg = load_registry()
+        from localm.model_manager import auto_chat_candidates
         # Auto-pick the first chat-eligible model; skip a type='unknown' model. It
         # stays runnable when a job explicitly configures default_model/model above.
-        name = next((n for n in sorted(reg) if is_auto_chat_eligible(reg[n])), None)
+        name = next(iter(auto_chat_candidates(load_registry())), None)
     if not name:
         return None, False
     info = get_model_info(name)
