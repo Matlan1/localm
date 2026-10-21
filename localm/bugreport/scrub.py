@@ -191,29 +191,33 @@ _EMAIL_RE = re.compile(
 )
 
 
-def _email_replacement(m: re.Match) -> str:
+def _email_replacement(m: re.Match, keep_maintainer: bool = True) -> str:
     token = m.group(0)
     core = token.lstrip("'")
     lead = token[:len(token) - len(core)]
     core = core.rstrip("'.")
     trail = token[len(lead) + len(core):]
     address = core.replace("%40", "@")
-    if address.isascii() and address.lower() == MAINTAINER_EMAIL.lower():
+    if (keep_maintainer and address.isascii()
+            and address.lower() == MAINTAINER_EMAIL.lower()):
         return token
     return lead + "<redacted-email>" + trail
 
 
-def _scrub_emails(text: str) -> str:
+def _scrub_emails(text: str, *, keep_maintainer: bool = True) -> str:
     """Replace every token that contains an email address with
     ``<redacted-email>``, keeping its leading single quotes and its trailing
-    single quotes and periods. A token that is exactly ``MAINTAINER_EMAIL``
-    once those are set aside (ASCII, compared case-insensitively, ``%40`` read
-    as ``@``) is kept as written. Idempotent: the
+    single quotes and periods. With *keep_maintainer* (the default), a token
+    that is exactly ``MAINTAINER_EMAIL`` once those are set aside (ASCII,
+    compared case-insensitively, ``%40`` read as ``@``) is kept as written;
+    without it, that address is redacted like any other. Idempotent: the
     replacement contains no ``@``. A ``user@`` URL credential already rewritten
     to ``<redacted>@`` by ``_scrub_url_creds`` is left as it is."""
     if not text:
         return text
-    return _EMAIL_RE.sub(_email_replacement, text)
+    if keep_maintainer:
+        return _EMAIL_RE.sub(_email_replacement, text)
+    return _EMAIL_RE.sub(lambda m: _email_replacement(m, keep_maintainer=False), text)
 
 
 # The machine name of a UNC path: ``\\NAME\share``, its doubled form

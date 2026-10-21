@@ -402,13 +402,13 @@ class TestSensitiveGetCrossOriginRefused:
         assert r.status_code == 403
 
     def test_same_origin_whoami_allowed(self, client):
-        # The legitimate loopback GUI / same-origin discovery case keeps working
-        # (and this is exactly what still discloses root_dir to a trusted caller).
+        # The legitimate loopback GUI / same-origin discovery case keeps working.
         client.app.state.root_dir = "/home/someuser/project"
         r = client.get("/whoami",
                        headers={"Origin": "http://testserver", "Host": "testserver"})
         assert r.status_code == 200
-        assert r.json().get("root_dir") == "/home/someuser/project"
+        assert r.json().get("app") == "localm"
+        assert "someuser" not in r.text
 
     def test_no_origin_whoami_allowed(self, client):
         # A non-browser client (CLI instance discovery) sends no Origin at all -

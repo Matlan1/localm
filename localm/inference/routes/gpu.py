@@ -4,7 +4,7 @@
 The endpoints a sibling localm instance on this machine uses to talk to this one:
 
 - ``GET /v1/instances/status``: this instance's live model / VRAM status. Without
-  a credential it is redacted: no ``pid``, each loaded model by name, file name
+  a credential it is redacted: no ``pid`` or ``root_dir``, each loaded model by name, file name
   and size only (no path, no sha256), and on a key-protected instance no model
   at all. This instance's attach token,
   or an API key granting ``models:read``, reads the full status.
@@ -96,11 +96,11 @@ def _redacted_model(m: dict) -> dict:
 
 
 def _redacted(status: dict) -> dict:
-    """*status* without ``pid`` and with each loaded model reduced to its name,
-    file name and size (:func:`_redacted_model`); on a key-protected instance,
-    without any model at all."""
+    """*status* without ``pid`` and ``root_dir`` and with each loaded model
+    reduced to its name, file name and size (:func:`_redacted_model`); on a
+    key-protected instance, without any model at all."""
     from localm.auth import any_key_configured, require_auth_enabled
-    out = {k: v for k, v in status.items() if k != "pid"}
+    out = {k: v for k, v in status.items() if k not in ("pid", "root_dir")}
     if any_key_configured() or require_auth_enabled():
         out["model"] = None
         out["models"] = []

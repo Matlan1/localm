@@ -1673,6 +1673,7 @@ def _validate_one(key: str, val, field: SettingField, default):
         s = "" if val is None else str(val).strip()
         if not s:
             return ""
+        _refuse_unsafe_path(key, s)
         try:
             is_file = Path(s).is_file()
         except OSError:
@@ -1720,8 +1721,21 @@ def _validate_one(key: str, val, field: SettingField, default):
         return _to_str_list(key, s)
     if isinstance(val, str):
         s = val.strip()
+        if s and widget in (Widget.FOLDER, Widget.PATH):
+            _refuse_unsafe_path(key, s)
         return s or (None if nullable else "")
     raise ValueError(f"{key}: expected a string, got {val!r}")
+
+
+def _refuse_unsafe_path(key: str, path: str) -> None:
+    """Raise ValueError naming *key* when *path* is a UNC or device path, by the
+    same rule the job folder and model relocate apply
+    (``pathsafe.reject_unsafe_path_string``)."""
+    from localm.pathsafe import reject_unsafe_path_string
+    try:
+        reject_unsafe_path_string(path)
+    except ValueError as e:
+        raise ValueError(f"{key}: {e}: {path!r}") from e
 
 
 def validate_update(updates: dict) -> dict:
@@ -2118,6 +2132,8 @@ def _coerce_media_value(f: MediaField, val):
     if val is None:
         return None
     s = str(val).strip()
+    if s and f.widget in (Widget.FOLDER, Widget.PATH):
+        _refuse_unsafe_path(f.key, s)
     return s or None
 
 

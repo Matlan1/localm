@@ -19,6 +19,7 @@ _warned_unconfigured_home = False
 # non-dict config.json is surfaced once per process, not on every load_config
 # call (see _merge_stored_config).
 _warned_bad_config: set = set()
+_warned_stray_credentials: set = set()
 
 # The three states of gui_proxy_remote_images, least to most permissive.
 #   off  the route refuses; a reply's remote image never leaves this machine.
@@ -1715,8 +1716,26 @@ def instance_id() -> str:
         return val
 
 
+def _drop_stray_credentials(stored: dict) -> None:
+    """Remove model-source credential keys (``hf_token``, ``civitai_api_key``)
+    from *stored* in place. Their values live only in the credential store, so
+    a copy written into config.json by hand is never read, served or kept: it
+    is dropped from the file on the next config save. Warns once per process
+    per key on stderr, naming the key, never the value."""
+    from localm.model_source_credentials import CREDENTIAL_KEYS
+    for key in sorted(CREDENTIAL_KEYS & set(stored)):
+        stored.pop(key, None)
+        if key not in _warned_stray_credentials:
+            _warned_stray_credentials.add(key)
+            print(f"[localm] {CONFIG_FILE.name} holds {key}, which localm does not "
+                  f"read from there; it is ignored and removed on the next settings "
+                  f"save. Set it with `localm config {key} <value>` or in "
+                  "Settings instead.", file=sys.stderr)
+
+
 def _merge_stored_config(cfg: dict, stored) -> None:
-    """Overlay the persisted config delta *stored* onto *cfg* (the defaults).
+    """Overlay the persisted config delta *stored* onto *cfg* (the defaults),
+    without any model-source credential key (see _drop_stray_credentials).
 
     A present-but-non-dict config.json - valid JSON that is a list / string /
     number / null, or any non-object - is ignored so it cannot corrupt the merge,
@@ -1725,6 +1744,7 @@ def _merge_stored_config(cfg: dict, stored) -> None:
     genuinely unparseable file already warned in _read_json and also arrives as
     ``{}``. stderr, not the logger (see _detect_home)."""
     if isinstance(stored, dict):
+        _drop_stray_credentials(stored)
         cfg.update(stored)
         return
     key = str(CONFIG_FILE)

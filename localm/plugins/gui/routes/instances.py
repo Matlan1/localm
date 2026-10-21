@@ -31,10 +31,10 @@ neither blocks the event loop.
 
 from __future__ import annotations
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 
 from localm import scopes
-from localm.inference.http_server import require_scope
+from localm.inference.http_server import caller_is_operator, require_scope
 
 # The fields a listing may show a client. Whitelisted explicitly: instances
 # .snapshot()'s row also carries `_path` (this machine's filesystem path to the
@@ -47,7 +47,7 @@ _LIST_FIELDS = ("instance_id", "alive", "root_dir", "mode", "scheme", "host",
 def register(app: FastAPI, ctx) -> None:
 
     @app.get("/api/instances", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
-    def instances_list_ep():
+    def instances_list_ep(request: Request):
         """Every live localm instance on this machine - the GUI form of
         `localm ps`, widened past it.
 
@@ -63,7 +63,10 @@ def register(app: FastAPI, ctx) -> None:
         nowhere (http_server.py gates its coordination entry on exactly this
         condition), and reading a registry it does not write would let a run
         documented as invisible to discovery both see and probe every other
-        localm on the box."""
+        localm on the box.
+
+        ``root_dir`` (a host path) is shown to the operator only (open mode or
+        an owner key); for any other caller it is None on every row."""
         from localm import instances
         from localm.bindhost import url_host
         from localm.config import home_dir
@@ -72,9 +75,12 @@ def register(app: FastAPI, ctx) -> None:
         rows = [dict(r, same_install=True) for r in instances.snapshot(home)]
         if self_id and not getattr(app.state, "instance_isolated", False):
             rows += instances.list_machine_peers(home)
+        operator = caller_is_operator(request)
         out = []
         for r in rows:
             row = {k: r.get(k) for k in _LIST_FIELDS}
+            if not operator:
+                row["root_dir"] = None
             row["self"] = row["instance_id"] == self_id
             # Pre-bracketed display address (the BIND host, the same choice
             # cli/models.py's ps_cmd makes): this answers "what did this

@@ -13,7 +13,8 @@ proceed, and a refusal is recorded so a caller can be told which destination was
 blocked and why. The browser is launched with a host-resolver rule that makes
 its own network stack resolve no host, IP literals included, so a WebSocket
 opened from a worker and a SharedWorker's requests, which the routes never see,
-fail without connecting anywhere. Routed requests are fetched by the playwright
+fail without connecting anywhere, and with a WebRTC policy that sends no UDP
+from a page's peer connections. Routed requests are fetched by the playwright
 driver, not by the browser, so they are unaffected.
 
 A session keeps exactly one page open. A new window that a click opened becomes
@@ -72,9 +73,13 @@ _PAGE_SETUP_MS = 10000
 _BLANK_WINDOW_WAIT_MS = 5000
 
 #: Chromium switches every launch carries. The rule resolves every host,
-#: including IP literals and localhost, to not-found inside the browser.
-#: See test_a_worker_websocket_never_connects.
-_LAUNCH_ARGS = ("--host-resolver-rules=MAP * ~NOTFOUND",)
+#: including IP literals and localhost, to not-found inside the browser. The
+#: WebRTC policy stops a page's peer connections from sending UDP (STUN, TURN
+#: over UDP, connectivity checks), which does not go through the resolver.
+#: See test_a_worker_websocket_never_connects and
+#: test_webrtc_sends_nothing_to_an_ip_literal.
+_LAUNCH_ARGS = ("--host-resolver-rules=MAP * ~NOTFOUND",
+                "--force-webrtc-ip-handling-policy=disable_non_proxied_udp")
 
 
 class BrowserUnavailableError(RuntimeError):

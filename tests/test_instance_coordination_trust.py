@@ -37,6 +37,7 @@ from tests._peer_servers import (FOREIGN_PID, _Handler, default_status,
 
 _PRIVATE_PATH = os.path.join(os.sep, "home", "alice-s1", "models", "secret-model.gguf")
 _DIGEST = "ab" * 32
+_PRIVATE_ROOT = os.path.join(os.sep, "home", "alice-s1", "project")
 _IDENTITIES = [{"name": "secret-model", "path": _PRIVATE_PATH, "size": 1234,
                 "sha256": _DIGEST}]
 
@@ -70,9 +71,10 @@ def _coordinating_app(bind_host="127.0.0.1", port=8700, model=None):
     app = create_app(None)
     app.state.bind_host = bind_host
     app.state.instance_id = "self-1"
+    app.state.root_dir = _PRIVATE_ROOT
     hs._active_model_name = model
     hs._gpu_coord = {"instance_id": "self-1", "port": port, "host": bind_host,
-                     "scheme": "http"}
+                     "scheme": "http", "root_dir": _PRIVATE_ROOT}
     return app
 
 
@@ -248,7 +250,7 @@ class TestStatusWithoutACredential:
         assert r.status_code == 200
         body = r.json()
         assert "alice-s1" not in r.text and _DIGEST not in r.text
-        assert "pid" not in body
+        assert "pid" not in body and "root_dir" not in body
         assert body["models"] == [{"name": "secret-model", "file": "secret-model.gguf",
                                    "size": 1234}]
         assert body["model"] == "secret-model"
@@ -293,6 +295,7 @@ class TestFullStatus:
     def _assert_full(self, body):
         assert body["pid"] == os.getpid()
         assert body["models"] == _IDENTITIES
+        assert body["root_dir"] == _PRIVATE_ROOT
 
     def test_this_instances_attach_token_reads_it(self):
         app = _coordinating_app(model="secret-model")
@@ -407,6 +410,7 @@ class TestPeerDiscoveryReadsTheFullStatus:
         assert [p["instance_id"] for p in peers] == ["self-1"]
         assert peers[0]["models"] == _IDENTITIES
         assert peers[0]["pid"] == FOREIGN_PID
+        assert peers[0]["root_dir"] == _PRIVATE_ROOT
         assert "alice-s1" not in plain.text and "pid" not in plain.json()
 
     def test_a_reader_without_coordination_gets_the_redacted_status(self, monkeypatch):
@@ -417,6 +421,7 @@ class TestPeerDiscoveryReadsTheFullStatus:
         assert peers[0]["models"] == [{"name": "secret-model", "file": "secret-model.gguf",
                                        "size": 1234}]
         assert "pid" not in peers[0]
+        assert peers[0]["root_dir"] is None
 
     def test_a_same_install_reader_presents_the_attach_token(self, monkeypatch):
         from localm import instances

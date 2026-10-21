@@ -14,7 +14,6 @@ from fastapi.responses import Response
 
 import localm.inference.http_server as _hs
 from localm import scopes
-from localm.bindhost import is_loopback_host
 
 
 def register(app: FastAPI, ctx) -> None:
@@ -48,24 +47,18 @@ def register(app: FastAPI, ctx) -> None:
     @app.get("/whoami", include_in_schema=False)
     async def whoami(request: Request):
         """Identity handshake for instance discovery: confirms this really is a
-        localm server and which instance/project it serves. Unauthenticated like
-        /health; never returns the attach token or pid. Fields are set on
-        app.state by the surface's advertise() wrapper (None before startup
-        wiring, e.g. an app mounted standalone in tests).
+        localm server and which instance it is. Unauthenticated like /health;
+        never returns the attach token, the pid or the project directory. Fields
+        are set on app.state by the surface's advertise() wrapper (None before
+        startup wiring, e.g. an app mounted standalone in tests).
 
-        root_dir is an absolute host path that can carry the OS username, so it is
-        disclosed only on a loopback bind and omitted over the network. Discovery
-        matches root_dir from the 0600 registry file, not from /whoami."""
+        Discovery matches the project directory from the 0600 registry file; a
+        sibling instance of this OS user reads it from the verified full
+        ``/v1/instances/status``."""
         from localm import instances
         st = request.app.state
-        root = getattr(st, "root_dir", None)
-        if root is not None:
-            bind = getattr(st, "bind_host", "127.0.0.1")
-            if not is_loopback_host(bind):
-                root = None
         return instances.whoami_payload(
             instance_id=getattr(st, "instance_id", None),
-            root_dir=root,
             mode=getattr(st, "instance_mode", None),
         )
 

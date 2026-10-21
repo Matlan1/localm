@@ -579,8 +579,9 @@ def test_the_real_missing_headless_shell_marks_a_half_installed_build(
 
 
 #: The switches a launch must carry so the browser's own network stack resolves
-#: no host.
-_NO_OWN_NETWORK = ["--host-resolver-rules=MAP * ~NOTFOUND"]
+#: no host and a page's WebRTC sends no UDP.
+_NO_OWN_NETWORK = ["--host-resolver-rules=MAP * ~NOTFOUND",
+                   "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"]
 
 
 def test_a_bundled_launch_passes_the_headless_setting_and_no_channel():
