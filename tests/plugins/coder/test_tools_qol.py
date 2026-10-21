@@ -314,3 +314,10 @@ class TestLineCountIsWhatWcReports:
         r = tool_write_file(tmp_path, "w.txt", "a\nb\n")
         assert r.ok
         assert "(2 lines)" in r.output
+
+
+    def test_the_count_agrees_with_how_a_slice_splits_the_lines(self, tmp_path):
+        (tmp_path / "t.txt").write_text("a\x0cb\n", encoding="utf-8")
+        assert "<lines>2</lines>" in tool_read_file(tmp_path, "t.txt").output
+        r = tool_read_file(tmp_path, "t.txt", offset=2)
+        assert r.ok and "b" in r.output

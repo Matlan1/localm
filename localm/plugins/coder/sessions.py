@@ -1096,11 +1096,17 @@ class SessionManager:
         long-running task may not have pushed a new event recently. Only
         send_message()'s "started"/"queued" gate and close() decide when a busy
         session ends."""
-        idle_ids = self._idle_ids(max_idle_s, now)
+        now = time.time() if now is None else now
         reaped = []
-        for session_id in idle_ids:
-            if self.remove(session_id) is not None:
-                reaped.append(session_id)
+        for session_id in self._idle_ids(max_idle_s, now):
+            with self._lock:
+                session = self._sessions.get(session_id)
+                if (session is None or session.busy
+                        or (now - session.last_activity_at) <= max_idle_s):
+                    continue
+                del self._sessions[session_id]
+            session.close()
+            reaped.append(session_id)
         return reaped
 
     def reap_idle_in_background(self) -> bool:
@@ -1124,7 +1130,15 @@ class SessionManager:
                 with self._lock:
                     self._reaping = False
 
-        threading.Thread(target=_run, name="coder-reap-idle", daemon=True).start()
+        try:
+            threading.Thread(target=_run, name="coder-reap-idle", daemon=True).start()
+        except Exception:
+            with self._lock:
+                self._reaping = False
+            from localm.debuglog import logger
+            logger.warning("coder: could not start the idle-session reaper",
+                           exc_info=True)
+            return False
         return True
 
     def close_all(self) -> int:

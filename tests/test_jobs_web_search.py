@@ -548,3 +548,8 @@ class TestThinkingBlocks:
 
     def test_a_call_before_an_unclosed_think_block_still_runs(self):
         assert webtool.parse_web_call(self.CALL + "<think>and then") is not None
+
+
+    def test_a_closed_think_block_after_an_unclosed_reasoning_opener_is_left_alone(self):
+        text = "<r>stray <think>plan</think>" + self.CALL
+        assert webtool.parse_web_call(text) is not None

@@ -759,3 +759,8 @@ def test_a_bracketed_entry_that_is_not_a_json_list_stays_a_plain_entry():
 def test_a_list_setting_given_as_json_text_is_the_list():
     assert ss.validate_update({"net_allow": '["a.example", "b.example"]'}
                               )["net_allow"] == ["a.example", "b.example"]
+
+
+def test_a_deeply_nested_bracket_string_is_one_entry_not_a_crash():
+    text = "[" * 100000 + "]" * 100000
+    assert ss.validate_update({"pinned_models": text})["pinned_models"] == [text]

@@ -1376,7 +1376,7 @@ def _json_list(text: str):
         return None
     try:
         parsed = json.loads(s)
-    except ValueError:
+    except (ValueError, RecursionError):
         return None
     return parsed if isinstance(parsed, list) else None
 
