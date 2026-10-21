@@ -199,6 +199,19 @@ class _FakeProjector:
         self.on_gpu = on_gpu
         self._ctx = 5
         self.retries = 0
+        self.moves = []
+        self.can_return_to_gpu = True
+        self.broken = False
+
+    def switch_device(self, *, gpu):
+        if self.on_gpu == gpu:
+            return True
+        self.moves.append("gpu" if gpu else "cpu")
+        if self.broken:
+            self._ctx = None
+            return False
+        self.on_gpu = gpu if (not gpu or self.can_return_to_gpu) else False
+        return self.on_gpu == gpu
 
     def retry_on_cpu(self):
         self.retries += 1
@@ -324,7 +337,7 @@ class TestSynthesisLoop:
     def test_a_gpu_stage_failure_is_retried_once_on_the_cpu(self, synth):
         synth._mtmd.on_gpu = True
         synth._m.fail_step = 2
-        out = synth.synthesize("hello", seed=1)
+        out = synth.synthesize("hello")
         assert synth._mtmd.retries == 1 and out.frames == 4
         assert synth._m.calls.count("init") == 1 and synth._m.calls.count("free") == 1
 
@@ -333,9 +346,61 @@ class TestSynthesisLoop:
         synth._mtmd.retry_on_cpu = lambda: False
         synth._m.fail_step = 2
         with pytest.raises(g.SpeechUnavailable, match="could not be reopened"):
-            synth.synthesize("hello", seed=1)
+            synth.synthesize("hello")
         with pytest.raises(g.SpeechUnavailable, match="closed"):
             synth.synthesize("hello", seed=1)
+
+    def test_a_seeded_request_runs_the_projector_on_the_cpu_and_returns_it_to_the_gpu(self, synth):
+        synth._mtmd.on_gpu = True
+        device_at_set_input = []
+        real = synth._m.mtmd_helper_gen_audio_set_input
+
+        def spy(helper, inp_ref):
+            device_at_set_input.append("gpu" if synth._mtmd.on_gpu else "cpu")
+            return real(helper, inp_ref)
+
+        synth._m.mtmd_helper_gen_audio_set_input = spy
+        out = synth.synthesize("hello", seed=5)
+        assert out.seed == 5
+        assert device_at_set_input == ["cpu"]
+        assert synth._mtmd.moves == ["cpu", "gpu"]
+        assert synth._mtmd.on_gpu is True
+        assert synth._m.calls.count("free") == 2 and synth._m.calls.count("init") == 2
+        assert synth._helper == 7
+
+    def test_a_request_without_a_seed_keeps_the_projector_on_the_gpu(self, synth):
+        synth._mtmd.on_gpu = True
+        synth.synthesize("hello")
+        assert synth._mtmd.moves == [] and synth._mtmd.on_gpu is True
+
+    def test_a_seeded_request_with_the_projector_already_on_the_cpu_moves_nothing(self, synth):
+        synth.synthesize("hello", seed=5)
+        assert synth._mtmd.moves == [] and synth._mtmd.on_gpu is False
+        assert synth._m.calls.count("free") == 0
+
+    def test_the_gpu_is_restored_after_a_failed_seeded_request(self, synth, monkeypatch):
+        synth._mtmd.on_gpu = True
+        synth._m.frames = 10 ** 6
+        monkeypatch.setattr(g, "frame_budget", lambda n_ctx, n, has_reference: 3)
+        with pytest.raises(g.SpeechBudgetExceeded):
+            synth.synthesize("hello", seed=5)
+        assert synth._mtmd.moves == ["cpu", "gpu"] and synth._mtmd.on_gpu is True
+
+    def test_a_projector_that_cannot_return_to_the_gpu_stays_on_the_cpu(self, synth):
+        synth._mtmd.on_gpu = True
+        synth._mtmd.can_return_to_gpu = False
+        out = synth.synthesize("hello", seed=5)
+        assert out.frames == 4
+        assert synth._mtmd.on_gpu is False and synth._helper == 7
+        assert synth.synthesize("hello", seed=6).frames == 4
+
+    def test_a_projector_that_cannot_be_rebuilt_for_a_seeded_request_closes_the_model(self, synth):
+        synth._mtmd.on_gpu = True
+        synth._mtmd.broken = True
+        with pytest.raises(g.SpeechUnavailable, match="could not be reopened"):
+            synth.synthesize("hello", seed=5)
+        with pytest.raises(g.SpeechUnavailable, match="closed"):
+            synth.synthesize("hello")
 
     def test_a_cpu_stage_failure_is_reported(self, synth):
         synth._m.fail_step = 2
