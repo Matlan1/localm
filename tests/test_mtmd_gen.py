@@ -140,7 +140,8 @@ class _FakeMtmd:
 
     def mtmd_helper_gen_audio_set_input(self, helper, inp_ref):
         inp = inp_ref._obj
-        self.inputs.append({"seed": inp.seed, "top_k": inp.top_k, "lang": inp.lang,
+        self.inputs.append({"seed": inp.seed, "top_k": inp.top_k, "top_p": inp.top_p,
+                            "lang": inp.lang,
                             "prompt": inp.prompt, "speaker": bool(inp.speaker_ref)})
         self.step = 0
         self.calls.append("set_input")
@@ -200,18 +201,11 @@ class _FakeProjector:
         self._ctx = 5
         self.retries = 0
         self.moves = []
-        self.can_return_to_gpu = True
-        self.broken = False
 
     def switch_device(self, *, gpu):
-        if self.on_gpu == gpu:
-            return True
         self.moves.append("gpu" if gpu else "cpu")
-        if self.broken:
-            self._ctx = None
-            return False
-        self.on_gpu = gpu if (not gpu or self.can_return_to_gpu) else False
-        return self.on_gpu == gpu
+        self.on_gpu = gpu
+        return True
 
     def retry_on_cpu(self):
         self.retries += 1
@@ -272,6 +266,22 @@ def _tokenize(raw: bytes, buf, parse_special: bool) -> int:
             buf[n] = 5
             n += 1
     return n
+
+
+class TestProjectorTopP:
+    def test_the_projector_top_p_makes_it_sort_its_candidates(self):
+        sent = ctypes.c_float(g.projector_top_p(1.0)).value
+        assert sent < 1.0
+        assert sent == 1.0 - 2.0 ** -24
+        assert ctypes.c_float(sent + 2.0 ** -25).value == 1.0
+
+    @pytest.mark.parametrize("value", [1.0, 0.0, -0.5, 2.0, float("inf"), float("nan")])
+    def test_a_value_outside_zero_and_one_is_capped(self, value):
+        assert g.projector_top_p(value) == 1.0 - 2.0 ** -24
+
+    @pytest.mark.parametrize("value", [0.95, 0.5, 1e-6])
+    def test_a_value_between_zero_and_one_is_kept(self, value):
+        assert g.projector_top_p(value) == value
 
 
 class TestSynthesisLoop:
@@ -350,7 +360,7 @@ class TestSynthesisLoop:
         with pytest.raises(g.SpeechUnavailable, match="closed"):
             synth.synthesize("hello", seed=1)
 
-    def test_a_seeded_request_runs_the_projector_on_the_cpu_and_returns_it_to_the_gpu(self, synth):
+    def test_a_seeded_request_keeps_the_projector_on_the_gpu(self, synth):
         synth._mtmd.on_gpu = True
         device_at_set_input = []
         real = synth._m.mtmd_helper_gen_audio_set_input
@@ -361,46 +371,27 @@ class TestSynthesisLoop:
 
         synth._m.mtmd_helper_gen_audio_set_input = spy
         out = synth.synthesize("hello", seed=5)
-        assert out.seed == 5
-        assert device_at_set_input == ["cpu"]
-        assert synth._mtmd.moves == ["cpu", "gpu"]
-        assert synth._mtmd.on_gpu is True
-        assert synth._m.calls.count("free") == 2 and synth._m.calls.count("init") == 2
-        assert synth._helper == 7
-
-    def test_a_request_without_a_seed_keeps_the_projector_on_the_gpu(self, synth):
-        synth._mtmd.on_gpu = True
-        synth.synthesize("hello")
+        assert out.seed == 5 and out.frames == 4
+        assert device_at_set_input == ["gpu"]
         assert synth._mtmd.moves == [] and synth._mtmd.on_gpu is True
+        assert synth._m.calls.count("free") == 0 and synth._m.calls.count("init") == 0
 
-    def test_a_seeded_request_with_the_projector_already_on_the_cpu_moves_nothing(self, synth):
+    @pytest.mark.parametrize("model_top_p", [1.0, 0.0, -1.0, 1.5])
+    def test_the_projector_gets_a_top_p_below_one_when_the_model_keeps_everything(
+            self, synth, model_top_p):
+        synth._sampling = g.sampling_params_from_meta(
+            lambda key: {g._META_TOP_K: "50", g._META_TOP_P: str(model_top_p)}.get(key))
         synth.synthesize("hello", seed=5)
-        assert synth._mtmd.moves == [] and synth._mtmd.on_gpu is False
-        assert synth._m.calls.count("free") == 0
+        sent = synth._m.inputs[0]["top_p"]
+        assert sent < 1.0 and sent == 1.0 - 2.0 ** -24
+        assert synth._m.inputs[0]["top_k"] == 50
 
-    def test_the_gpu_is_restored_after_a_failed_seeded_request(self, synth, monkeypatch):
-        synth._mtmd.on_gpu = True
-        synth._m.frames = 10 ** 6
-        monkeypatch.setattr(g, "frame_budget", lambda n_ctx, n, has_reference: 3)
-        with pytest.raises(g.SpeechBudgetExceeded):
-            synth.synthesize("hello", seed=5)
-        assert synth._mtmd.moves == ["cpu", "gpu"] and synth._mtmd.on_gpu is True
-
-    def test_a_projector_that_cannot_return_to_the_gpu_stays_on_the_cpu(self, synth):
-        synth._mtmd.on_gpu = True
-        synth._mtmd.can_return_to_gpu = False
-        out = synth.synthesize("hello", seed=5)
-        assert out.frames == 4
-        assert synth._mtmd.on_gpu is False and synth._helper == 7
-        assert synth.synthesize("hello", seed=6).frames == 4
-
-    def test_a_projector_that_cannot_be_rebuilt_for_a_seeded_request_closes_the_model(self, synth):
-        synth._mtmd.on_gpu = True
-        synth._mtmd.broken = True
-        with pytest.raises(g.SpeechUnavailable, match="could not be reopened"):
-            synth.synthesize("hello", seed=5)
-        with pytest.raises(g.SpeechUnavailable, match="closed"):
-            synth.synthesize("hello")
+    @pytest.mark.parametrize("model_top_p", [0.95, 0.5])
+    def test_the_projector_gets_the_model_top_p_when_it_is_below_one(self, synth, model_top_p):
+        synth._sampling = g.sampling_params_from_meta(
+            lambda key: {g._META_TOP_P: str(model_top_p)}.get(key))
+        synth.synthesize("hello")
+        assert synth._m.inputs[0]["top_p"] == ctypes.c_float(model_top_p).value
 
     def test_a_cpu_stage_failure_is_reported(self, synth):
         synth._m.fail_step = 2

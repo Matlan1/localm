@@ -342,10 +342,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   logged instead of silently slowing every query.
 - **A conversation deleted while the list loads is no longer reported as unreadable.**
 - **The same speech seed gives the same audio.** `localm speak --seed N` and the `seed` field of
-  `/v1/audio/speech` gave a different recording on every run on a GPU. A request with a seed now
-  runs the speech model's projector on the CPU and puts it back on the GPU afterwards, so the
-  audio is identical from run to run; such a request takes longer. Requests without a seed are
-  unchanged.
+  `/v1/audio/speech` gave a different recording on every run on a GPU. The speech model's
+  projector now draws each code from a fixed order of candidates, so the same seed gives
+  identical audio from run to run on the GPU too, at full GPU speed.
 - **A FLUX LoRA from XLabs is a LoRA.** It is no longer offered as a FLUX model in the Images
   model picker; it is listed with the other LoRAs.
 - **A plugin install that is interrupted can be repeated.** A `localm plugin install` that dies

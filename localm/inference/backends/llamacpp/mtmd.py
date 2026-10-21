@@ -788,26 +788,6 @@ class MtmdContext:
         self._ctx = self._open(use_gpu=False)
         return bool(self._ctx)
 
-    def switch_device(self, *, gpu: bool) -> bool:
-        """Rebuild this context on the GPU (*gpu* True) or the CPU, dropping the
-        cached embeddings. Returns True when it is on the requested device
-        afterwards; a GPU rebuild that fails leaves it on the CPU (False). When
-        even the CPU rebuild fails the context is unusable (``_ctx`` is falsy)."""
-        if self.on_gpu == gpu:
-            return True
-        try:
-            self._m.mtmd_free(self._ctx)
-        except Exception:   # noqa: BLE001 - freeing a wedged context must not mask the switch
-            pass
-        self._ctx = None
-        self.clear_embeddings()
-        self.on_gpu = gpu
-        self._ctx = self._open(use_gpu=gpu)
-        if not self._ctx and gpu:
-            self.on_gpu = False
-            self._ctx = self._open(use_gpu=False)
-        return bool(self._ctx) and self.on_gpu == gpu
-
     def tokenize(self, prompt: str, images: list, *,
                  add_special: bool) -> MtmdPrompt:
         """Tokenize *prompt* (which contains one ``self.marker`` per media item, in
