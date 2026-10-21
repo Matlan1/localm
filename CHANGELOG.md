@@ -29,6 +29,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   and keeps what is saved, Resume continues from it) and Cancel (stops and deletes the partial
   download), the download line shows the steady speed and time left, and the Activity list has a
   Stop button for a running operation.
+- **The server log says when Windows keeps part of a model in system memory.** On Windows, when
+  another program holds VRAM, Windows can place part of a model loaded fully on the GPU in shared
+  system memory, and replies run slower until that program releases it. localm now reads the
+  model's share of shared memory and logs one line with the amounts when it is large, and
+  another when Windows moves it back.
 - **Ctrl-C in `localm pull` stops cleanly.** What has been downloaded is kept, and the message
   says to run the same command again to continue from there.
 - **`localm coder doctor` and `/doctor`.** One command checks that the model server answers and accepts the key, whether the session uses native tool calls or grammar-constrained ones, the context window against the size of the repo map, the git state, whether the verify command resolves, and that each configured MCP server starts. It exits 1 when a check fails and prints `--output-format json` or `jsonl` for scripts.
