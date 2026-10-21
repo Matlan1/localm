@@ -1574,11 +1574,11 @@ def _full_placement_exceeds_total(sizing: dict) -> bool:
     its ``model_bytes + kv_bytes + overhead_bytes`` exceed its
     ``total_bytes``, the total VRAM of the devices the load spreads over.
     False when any of them is missing or not a positive int."""
-    parts = [sizing.get(k) for k in ("total_bytes", "model_bytes", "kv_bytes",
-                                      "overhead_bytes")]
-    if not all(isinstance(p, int) and not isinstance(p, bool) for p in parts):
+    total, model, kv, overhead = (sizing.get(k) for k in (
+        "total_bytes", "model_bytes", "kv_bytes", "overhead_bytes"))
+    if not (type(total) is int and type(model) is int and type(kv) is int
+            and type(overhead) is int):
         return False
-    total, model, kv, overhead = parts
     return total > 0 and model > 0 and model + kv + overhead > total
 
 
