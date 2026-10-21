@@ -21,6 +21,10 @@ PROCESS_SCOPED_BACKENDS = ("rocm", "vulkan")
 
 MARGIN_BYTES = 512 * 1024 ** 2
 
+# The Vulkan runtime allocates beyond max_vram, and a Vulkan allocation past the
+# card's free VRAM fails. See test_a_vulkan_budget_leaves_room_for_the_runtimes_overshoot.
+VULKAN_MARGIN_BYTES = 1536 * 1024 ** 2
+
 MIN_BUDGET_BYTES = 256 * 1024 ** 2
 
 RELEASE_TIMEOUT_S = 5.0
@@ -49,6 +53,12 @@ def _platform() -> str:
 
 def _gib(n: int) -> str:
     return f"{max(n, MIN_BUDGET_BYTES) / _GIB:.2f}"
+
+
+def margin_bytes(backend: str) -> int:
+    """The VRAM left free below a *backend* load's budget: ``VULKAN_MARGIN_BYTES``
+    on Vulkan, else ``MARGIN_BYTES``."""
+    return VULKAN_MARGIN_BYTES if backend == "vulkan" else MARGIN_BYTES
 
 
 def _is_int(v) -> bool:
@@ -112,8 +122,8 @@ def vram_budget(backend: str, *, gpus: Optional[list] = None, status: Optional[s
     device-global or is incomplete, there are several GPUs on Vulkan, or
     several GPUs on ROCm cannot be matched to the runtime's devices.
 
-    Each GPU's budget is its device-global free VRAM less ``MARGIN_BYTES``, at
-    least ``MIN_BUDGET_BYTES``. One GPU gives a plain GiB value. Several ROCm
+    Each GPU's budget is its device-global free VRAM less ``margin_bytes(backend)``,
+    at least ``MIN_BUDGET_BYTES``. One GPU gives a plain GiB value. Several ROCm
     GPUs give each runtime device ``<device name>=<GiB>`` (``ROCm0=...``),
     matched to a GPU by name (:func:`_per_device_setting`); *devices* is the
     runtime's
@@ -141,7 +151,7 @@ def vram_budget(backend: str, *, gpus: Optional[list] = None, status: Optional[s
         return Budget(None, reason="several GPUs on the Vulkan runtime")
     if len(usable) == 1:
         g = usable[0]
-        return Budget(setting=_gib(g["free"] - MARGIN_BYTES), free=g["free"],
+        return Budget(setting=_gib(g["free"] - margin_bytes(backend)), free=g["free"],
                       total=g["total"])
     setting, matched, reason = _per_device_setting(usable, _runtime_gpus(devices))
     if setting is None:

@@ -134,7 +134,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   Windows with the Vulkan or ROCm runtime, a model loaded with little free VRAM was given a VRAM
   limit too small for any part of it, and every generation failed at once with "diffusion model
   compute failed". When the runtime refuses to run within that limit, localm now says so, loads
-  the model again without the limit, and generates.
+  the model again without the limit, and generates. On the Vulkan runtime the limit also leaves
+  more room below the free VRAM, so a model larger than the free VRAM (FLUX.1-dev Q8 with about
+  8 GB free) no longer runs out of VRAM part-way through sampling.
 - **A scheduled job with no model set no longer picks a speech-to-text model.** The job took the first registered chat model by name, so a Qwen3-ASR or Whisper model could answer a job that named no model; those models now come last, behind every other chat model.
 - **`localm config pinned_models '["a"]'` pins `a`.** A JSON list typed on the command line was
   stored as one model name with the brackets and quotes in it, so nothing was pinned. A list
