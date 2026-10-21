@@ -85,9 +85,9 @@ import sys  # noqa: F401
 import click  # noqa: F401
 
 from localm import config  # noqa: F401
-from localm.http_ssl import verified_urlopen
+from localm.http_ssl import verified_urlopen as _verified_urlopen
 from localm.setup_llama._common import (
-    console, _flush_stdin,
+    console, _flush_stdin, _require_network_allowed,
 )
 from localm.setup_llama.pins import (
     DEFAULT_URL, DEFAULT_URL_SHA256, _ROCM_TAG, _ROCM_BUILD, _ROCM_CPU_ASSET, _ROCM_CPU_TAG,
@@ -160,6 +160,14 @@ from localm.setup_llama.cli import (
     BACKENDS, main, _refresh_install_record, _ensure_importable, _verify,
 )
 
+
+def verified_urlopen(req, *, timeout=None, handlers=()):
+    """``localm.http_ssl.verified_urlopen`` behind the ``net_mode`` check: every
+    urllib request this package makes goes through it."""
+    _require_network_allowed()
+    return _verified_urlopen(req, timeout=timeout, handlers=handlers)
+
+
 __all__ = [
     "_ABI_REJECT_PREFIX", "_AMD_ROCM_ASSET_TAG", "_apply_version_request",
     "_CHOICE_MARKER", "_record_backend_choice", "_read_backend_choice", "backend_choice",
@@ -208,5 +216,6 @@ __all__ = [
     "_sniff_content_kind", "_sycl_backend_note", "_tag_for", "TAG_HELP", "_TAG_SAFE_RE",
     "_TRACK_DEFAULT", "_TRACK_LATEST", "tracks_latest", "_UPSTREAM_BACKENDS",
     "_UPSTREAM_REPO", "_validate_archive", "_validated_tag", "_ver_at_least",
-    "_ver_tuple", "verified_urlopen", "_verify", "_warn_off_profile",
+    "_ver_tuple", "verified_urlopen", "_require_network_allowed", "_verify",
+    "_warn_off_profile",
 ]

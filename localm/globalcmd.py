@@ -36,6 +36,12 @@ from typing import Optional
 #  Deterministic locations (the caller records these; no output capture needed) #
 # --------------------------------------------------------------------------- #
 
+def _abs_root(clone_root) -> Path:
+    """*clone_root* as an absolute path (no symlink resolution), so the shim
+    target and the PATH entry never depend on the caller's working directory."""
+    return Path(os.path.abspath(str(clone_root)))
+
+
 def bin_dir(clone_root) -> Path:
     """The single directory that goes on PATH for the global command.
 
@@ -43,7 +49,7 @@ def bin_dir(clone_root) -> Path:
     conventional per-user bin dir). It holds ONLY the localm shim, never the venv
     scripts dir."""
     if sys.platform == "win32":
-        return Path(clone_root) / "bin"
+        return _abs_root(clone_root) / "bin"
     return Path.home() / ".local" / "bin"
 
 
@@ -55,7 +61,7 @@ def shim_path(clone_root) -> Path:
 
 def _venv_localm(clone_root) -> Path:
     """The real localm entry point inside this clone's venv."""
-    root = Path(clone_root)
+    root = _abs_root(clone_root)
     if sys.platform == "win32":
         return root / ".venv" / "Scripts" / "localm.exe"
     return root / ".venv" / "bin" / "localm"
@@ -92,7 +98,7 @@ def existing_localm(our_shim: Path, clone_root=None) -> Optional[str]:
     # Lexical rejections first: no filesystem I/O.
     absolute = os.path.abspath(found)          # cwd-relative -> absolute, no I/O
     if clone_root is not None:
-        root = _norm(clone_root)
+        root = _norm(_abs_root(clone_root))
         candidate = _norm(absolute)
         if candidate == root or candidate.startswith(root + os.sep):
             return None

@@ -140,6 +140,23 @@ permanent public record of what shipped and are never rewritten; the in-progress
   next request fits in it.
 
 ### Fixed
+- **The global `localm` command works from a Shared install and uninstalls cleanly.** On Linux and
+  macOS setup made `~/.local/bin/localm` a symlink with a relative target that pointed nowhere,
+  and uninstall left it behind; on Windows it added the relative entry `bin` to your user PATH.
+  Setup now records the full path, and uninstall removes the link, including one an older setup
+  made.
+- **`localm setup-llama --backend metal` on Windows is refused up front.** It printed "Replacing
+  the vulkan build" and then installed Vulkan. A backend with no build for this system is now
+  refused before anything changes, and the list of backends that have one includes `amd-rocm`
+  where it exists.
+- **`localm run ... | cat` returns when the reply is printed on Linux and macOS.** When `run`
+  started the background server itself, the server kept the pipe open, so the command waited
+  until the server stopped. The server no longer shares the terminal's streams.
+- **`setup.bat` works from a folder whose name contains `&`.** The setup and uninstall banners
+  split the command at the `&` and printed an error; the folder is now shown in quotes.
+- **`localm info` names the temp folder that is in use.** After `LOCALM_TMPDIR` pointed at a
+  folder that could not be created, it still listed that folder instead of the system temp
+  folder. An unreadable `localm-home.cfg` is now reported once, not once per setting read.
 - **An embedding or speech model is placed by a current VRAM reading.** When another GPU reading
   was running (the GUI refreshing its stats, or just after a chat model loaded), the embedding and
   speech models skipped their fit check and went onto the GPU even with too little VRAM free, and
@@ -533,6 +550,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **A key limited to reading or writing settings can no longer see or change the ComfyUI output
   folder.** `comfy_output_dir`, and the same folder set per media plugin, is now owner-only like
   the other host paths: it is left out of what such a key reads, and saving it needs the owner key.
+- **`localm setup-llama` makes no download when `net_mode` is `off`.** `setup.sh` and `setup.bat`
+  fetched the llama.cpp runtime with network access switched off. `setup-llama` now refuses to
+  download, names `net_mode`, and still installs a runtime from a local build (`--from`) or keeps
+  the one already installed. `net_allow_model_downloads` lifts the refusal as it does for model
+  downloads.
 
 ## [0.3.0] - 2026-10-14
 

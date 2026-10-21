@@ -1519,15 +1519,22 @@ def _is_full_path(p: str) -> bool:
     return os.path.isabs(p)
 
 
+_LEGACY_RELATIVE_TARGET = os.path.join(".venv", "bin", "localm")
+
+
 def _shim_points_into(shim: Path, root: Path) -> bool:
     """Whether the command *shim* belongs to the install at *root*: a symlink
-    whose target is inside it, or a file inside it. True when it is gone."""
+    whose target is inside it, or a file inside it. True when it is gone. A
+    symlink to the relative ``.venv/bin/localm`` (written by older setups)
+    counts as ours."""
     if shim.is_symlink():
         try:
             target = os.readlink(shim)
         except OSError:
             return False
         if not os.path.isabs(target):
+            if target == _LEGACY_RELATIVE_TARGET:
+                return True
             target = os.path.join(str(shim.parent), target)
         return _inside(target, root)
     return not shim.exists() or _inside(shim, root)

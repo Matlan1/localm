@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Optional
 
 from localm.http_ssl import RedirectDowngradeRefused
+from localm.netpolicy import NetworkPolicyError
 from localm.setup_llama._common import console
 import localm.setup_llama as _sl
 
@@ -120,6 +121,8 @@ def _download(url: str, dest: Path) -> _DownloadResult:
                 f.write(chunk)
                 nread += len(chunk)
                 _report(nread, total)
+    except NetworkPolicyError as e:
+        raise ArtifactError(str(e)) from e
     except RedirectDowngradeRefused as e:
         # BEFORE the OSError clause below, which it would otherwise hit
         # (RedirectDowngradeRefused is a URLError, and URLError is an OSError):

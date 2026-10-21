@@ -265,6 +265,8 @@ def _invoke_provision_notice(monkeypatch, tmp_path, capsys, *, have, have_build,
     would read back; want is the requested --backend. The interactive confirm
     gate (`want == "auto" or have == want`) is always satisfied, by a fake tty
     plus a patched click.confirm."""
+    monkeypatch.setattr(setup_llama, "_platform_key", lambda: "win32")
+    monkeypatch.setattr(setup_llama, "_machine_arch", lambda: "x64")
     monkeypatch.setattr(setup_llama, "_repo_runtime_lib", lambda: tmp_path)
     monkeypatch.setattr(setup_llama, "_provisioned_backend", lambda target: have)
     monkeypatch.setattr(setup_llama, "_provisioned_build", lambda target: have_build)

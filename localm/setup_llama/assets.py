@@ -164,9 +164,7 @@ def _resolve_amd_rocm_asset() -> tuple[str, Optional[str], None]:
     pinned URL and checksum for that family. Raises ``click.ClickException``
     off Windows, and on a CPU architecture the build is not published for."""
     if sys.platform != "win32":
-        raise click.ClickException(
-            "the self-contained 'amd-rocm' build is Windows-only; on Linux "
-            "use --backend hip (needs ROCm) or build with --from.")
+        raise click.ClickException(_AMD_ROCM_WINDOWS_ONLY)
     _require_prebuilt("amd-rocm", "win32", _sl._machine_arch())
     # Try to resolve dynamically first
     tag = _ROCM_TAG
@@ -334,10 +332,30 @@ def _require_prebuilt(backend: str, plat: str, arch: str) -> None:
 
 
 def _available_here(plat: str, arch: str) -> str:
-    """The upstream backends with a prebuilt build for *plat* on *arch*, sorted
-    and comma-separated ("" when there are none)."""
-    return ", ".join(sorted(b for b in _ASSET_MATCH.get(plat, {})
-                            if hwdetect.has_prebuilt(b, plat, arch)))
+    """The backends with a prebuilt build for *plat* on *arch*, sorted and
+    comma-separated ("" when there are none)."""
+    return ", ".join(sorted(hwdetect.prebuilt_backends(plat, arch)))
+
+
+_AMD_ROCM_WINDOWS_ONLY = ("the self-contained 'amd-rocm' build is Windows-only; on "
+                          "Linux use --backend hip (needs ROCm) or build with --from.")
+
+
+def _require_backend_here(backend: str) -> None:
+    """Raise ``click.ClickException`` when the explicit *backend* has no
+    prebuilt build for this platform and CPU architecture, naming the ones
+    that do. ``auto`` always passes. Performs no I/O and changes nothing."""
+    if backend == "auto":
+        return
+    plat = _sl._platform_key()
+    arch = _sl._machine_arch()
+    if backend == "amd-rocm" and plat != "win32":
+        raise click.ClickException(_AMD_ROCM_WINDOWS_ONLY)
+    if backend not in hwdetect.PREBUILT_ARCHES.get(plat, {}):
+        raise click.ClickException(
+            f"backend {backend!r} is not available on this platform "
+            f"({plat}). Available: {_available_here(plat, arch) or 'none'}.")
+    _require_prebuilt(backend, plat, arch)
 
 
 def _no_build_in_release(tag: str, backend: str, plat: str, arch: str) -> click.ClickException:

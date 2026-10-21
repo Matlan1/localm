@@ -1141,6 +1141,36 @@ def test_the_global_command_symlink_is_removed_not_its_target(tmp_path, isolated
 
 
 @pytest.mark.skipif(os.name == "nt", reason="the command is a symlink on Linux/macOS")
+def test_a_command_installed_from_a_relative_root_is_uninstalled(
+        tmp_path, isolated, monkeypatch):
+    monkeypatch.setattr(gc.shutil, "which", lambda name: None)
+    clone = tmp_path / "clone"
+    target = clone / ".venv" / "bin" / "localm"
+    target.parent.mkdir(parents=True)
+    target.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.chdir(clone)
+    res = gc.install(".")
+    shim = Path(res["shim"])
+    assert shim.exists()
+    im.record(clone, command_shim=str(shim), path_dir=res["path_dir"])
+    im.uninstall(clone, force=True)
+    assert not os.path.lexists(shim)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the command is a symlink on Linux/macOS")
+def test_a_dangling_relative_command_from_an_older_setup_is_removed(tmp_path, isolated):
+    clone = tmp_path / "clone"
+    (clone / ".venv" / "bin").mkdir(parents=True)
+    shim = isolated["home"] / ".local" / "bin" / "localm"
+    shim.parent.mkdir(parents=True)
+    shim.symlink_to(os.path.join(".venv", "bin", "localm"))
+    assert not shim.exists()
+    im.record(clone, command_shim=str(shim), path_dir=str(shim.parent))
+    im.uninstall(clone, force=True)
+    assert not os.path.lexists(shim)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the command is a symlink on Linux/macOS")
 def test_an_older_record_of_the_command_still_removes_the_symlink(tmp_path, isolated):
     clone = tmp_path / "clone"
     target = clone / ".venv" / "bin" / "localm"

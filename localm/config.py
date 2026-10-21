@@ -14,6 +14,8 @@ from typing import Callable, Optional
 
 
 _warned_unconfigured_home = False
+_warned_unreadable_home_cfg: set = set()
+_unusable_temp_dirs: set = set()
 
 # config files already warned about (present but not a JSON object), so a
 # non-dict config.json is surfaced once per process, not on every load_config
@@ -172,8 +174,11 @@ def _detect_home() -> Path:
                 # rather than the logger - this runs at import time, before
                 # logging is wired, and importing debuglog here would be
                 # circular.
-                print(f"[localm] WARNING: cannot read {cfg_marker} ({e}); "
-                      "falling back to the default data dir.", file=sys.stderr)
+                warning = (f"[localm] WARNING: cannot read {cfg_marker} ({e}); "
+                           "falling back to the default data dir.")
+                if warning not in _warned_unreadable_home_cfg:
+                    _warned_unreadable_home_cfg.add(warning)
+                    print(warning, file=sys.stderr)
         portable = repo_root / "home"
         if portable.is_dir():
             return portable
@@ -455,7 +460,7 @@ def _absolute_folder(text: str) -> Optional[Path]:
     return candidate if candidate.is_absolute() else None
 
 
-def temp_dir(home: Optional[Path] = None) -> Optional[Path]:
+def temp_dir(home: Optional[Path] = None, warn: bool = True) -> Optional[Path]:
     """Where localm's temporary files go, or None to leave the system temp folder.
 
     In order: the ``LOCALM_TMPDIR`` environment variable; the ``temp_location``
@@ -463,15 +468,17 @@ def temp_dir(home: Optional[Path] = None) -> Optional[Path]:
     an absolute folder path); then ``auto`` (the default), which keeps temp files
     in ``<data dir>/tmp`` for a self-contained checkout and leaves the system temp
     folder for any other install. A ``temp_location`` that is neither of those words
-    nor an absolute path is reported on stderr and treated as ``auto``."""
+    nor an absolute path is reported on stderr (unless *warn* is False) and treated as
+    ``auto``."""
     home = Path(home) if home is not None else home_dir()
     override = os.environ.get(TEMP_DIR_ENV, "").strip()
     if override:
         folder = _absolute_folder(override)
         if folder is not None:
             return folder
-        print(f"[localm] WARNING: {TEMP_DIR_ENV}={override!r} is not an absolute "
-              "folder; ignoring it.", file=sys.stderr)
+        if warn:
+            print(f"[localm] WARNING: {TEMP_DIR_ENV}={override!r} is not an absolute "
+                  "folder; ignoring it.", file=sys.stderr)
     choice = _stored_temp_location(home)
     if choice.lower() == "data":
         return home / "tmp"
@@ -481,9 +488,10 @@ def temp_dir(home: Optional[Path] = None) -> Optional[Path]:
         folder = _absolute_folder(choice)
         if folder is not None:
             return folder
-        print(f"[localm] WARNING: temp_location {choice!r} in config.json is not "
-              "'auto', 'data', 'system' or an absolute folder; using 'auto'.",
-              file=sys.stderr)
+        if warn:
+            print(f"[localm] WARNING: temp_location {choice!r} in config.json is not "
+                  "'auto', 'data', 'system' or an absolute folder; using 'auto'.",
+                  file=sys.stderr)
     return home / "tmp" if _is_portable_home(home) else None
 
 
@@ -500,6 +508,7 @@ def contain_temp_dir() -> None:
     try:
         os.makedirs(path, exist_ok=True)
     except OSError as e:
+        _unusable_temp_dirs.add(path)
         print(f"[localm] WARNING: cannot create the temp folder {path} ({e}); "
               "temporary files will go to the system temp folder instead.",
               file=sys.stderr)
@@ -507,6 +516,15 @@ def contain_temp_dir() -> None:
     for var in ("TMP", "TEMP", "TMPDIR"):
         os.environ[var] = path
     tempfile.tempdir = path
+
+
+def temp_dir_in_use(home: Optional[Path] = None) -> Optional[Path]:
+    """:func:`temp_dir`, or None when that folder could not be created at start-up
+    (:func:`contain_temp_dir` then left the system temp folder in use)."""
+    target = temp_dir(home, warn=False)
+    if target is not None and os.path.abspath(str(target)) in _unusable_temp_dirs:
+        return None
+    return target
 
 
 HOME_DIR = _detect_home()
