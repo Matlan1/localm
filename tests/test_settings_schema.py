@@ -737,3 +737,30 @@ def test_every_settings_field_entry_has_a_german_translation():
                      / "i18n" / "de.json").read_text(encoding="utf-8"))
     missing = sorted(k for k in _gui_catalog() if not de.get(k))
     assert not missing, f"no German text for: {missing}"
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("gptoss", ["gptoss"]),
+    ("a, b", ["a", "b"]),
+    ('["gptoss"]', ["gptoss"]),
+    (' ["a", "b"] ', ["a", "b"]),
+    ("[]", None),
+])
+def test_pinned_models_from_the_command_line_text(text, expected):
+    """`localm config pinned_models '["x"]'` pins x, not a model named '["x"]'."""
+    assert ss.validate_update({"pinned_models": text})["pinned_models"] == expected
+
+
+def test_a_bracketed_entry_that_is_not_a_json_list_stays_a_plain_entry():
+    out = ss.validate_update({"net_allow": "[::1], example.com"})["net_allow"]
+    assert out == ["[::1]", "example.com"]
+
+
+def test_a_list_setting_given_as_json_text_is_the_list():
+    assert ss.validate_update({"net_allow": '["a.example", "b.example"]'}
+                              )["net_allow"] == ["a.example", "b.example"]
+
+
+def test_a_deeply_nested_bracket_string_is_one_entry_not_a_crash():
+    text = "[" * 100000 + "]" * 100000
+    assert ss.validate_update({"pinned_models": text})["pinned_models"] == [text]

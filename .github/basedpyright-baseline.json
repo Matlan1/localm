@@ -2152,14 +2152,6 @@
             {
                 "code": "reportOptionalMemberAccess",
                 "range": {
-                    "startColumn": 29,
-                    "endColumn": 37,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportOptionalMemberAccess",
-                "range": {
                     "startColumn": 22,
                     "endColumn": 35,
                     "lineCount": 1

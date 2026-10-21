@@ -614,7 +614,8 @@ def _set_session_model(session: CoderSession, model: str,
 async def list_sessions(request: Request):
     mgr = _sessions(request)
     is_owner, principal = _principal_from_request(request)
-    return {"sessions": mgr.list(principal=principal, is_owner=is_owner),
+    mgr.reap_idle_in_background()
+    return {"sessions": mgr.list(principal=principal, is_owner=is_owner, reap=False),
             "active_model": request.app.state.active_model()}
 
 
