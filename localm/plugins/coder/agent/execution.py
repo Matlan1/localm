@@ -18,6 +18,7 @@ import localm.plugins.coder.agent as _agent
 from ..display import (
     ActivitySpinner, console, consume_confirm_always, consume_reject_reason,
     offering_session_allow, print_info, print_progress_tool_call,
+    requiring_exact_approval,
     print_tool_call, print_tool_error, print_tool_result, reset_diff_preview,
     tool_call_text,
 )
@@ -26,7 +27,7 @@ from ..diffutil import (
     read_old_content, read_old_content_checked, resolve_new_content,
 )
 from ..confirm import invoke_confirm
-from .. import shell_guard
+from .. import data_guard, shell_guard
 from ..parser import ToolCall
 from ..tools import ToolResult
 from ..tools.base import restricted_write_refusal
@@ -358,6 +359,39 @@ class _ExecutionMixin:
             return None, True
         return None, False
 
+    def _data_guard_verdict(self, call: ToolCall) -> Optional[str]:
+        """The label of the localm credential or settings target the call
+        reaches (``data_guard.check``), or None. A check that raises answers
+        "localm's data folder (the check could not run)", warned and audited,
+        so the call still needs an explicit approval."""
+        if call.name in _SHELL_COMMAND_ARGS:
+            path_args: tuple[str, ...] = _SHELL_DECLARED_PATH_ARGS.get(call.name, ())
+            shell_args = tuple(a for a in _SHELL_COMMAND_ARGS[call.name]
+                               if a not in path_args)
+        elif call.name.startswith(("mcp_", "plugin_")):
+            shell_args, path_args = (), _MCP_SCOPE_PATH_ARGS
+        elif call.name in _SCOPED_TOOLS:
+            shell_args = ()
+            path_args = tuple(dict.fromkeys(
+                (*_SCOPE_PATH_ARGS.get(call.name, ("path",)), "path")))
+        else:
+            return None
+        args = dict(call.args or {})
+        if call.name == "run_tests" and isinstance(args.get("extra_args"), str):
+            args["extra_args"] = "pytest " + args["extra_args"]
+        try:
+            return data_guard.check(
+                call.name, args, self.cwd, shell_args=shell_args,
+                path_args=path_args, paths=_call_target_paths(call.name, args))
+        except Exception as exc:
+            msg = (f"{call.name}: the localm data-folder check could not run "
+                   f"({type(exc).__name__}: {exc}), so this call now requires "
+                   "an explicit approval.")
+            _agent.print_warning(msg)
+            self._emit("info", text=msg)
+            self._audit.notice("data_guard_error", msg)
+            return "localm's data folder (the check could not run)"
+
     def _execute_tool(self, call: ToolCall, interactive: bool) -> ToolResult:
         TOOL_REGISTRY = _agent.TOOL_REGISTRY  # live: honour a patched agent.TOOL_REGISTRY
         # A cancelled run executes nothing, whatever the model emits.
@@ -555,6 +589,10 @@ class _ExecutionMixin:
                                    f"({refusal.rule})")
                 return result
 
+        # A call reaching localm's own credentials or settings needs an explicit
+        # approval of this exact call, under auto_approve too.
+        data_hit = self._data_guard_verdict(call)
+
         # Dry-run: show destructive calls but don't execute them
         if self.dry_run and tool_def.destructive:
             result = ToolResult.success(
@@ -613,7 +651,7 @@ class _ExecutionMixin:
         # non-lenient.
         gated = tool_def.destructive or net_mode == "ask" or tool_def.ask_by_default
         lenient_call = isinstance(call, ToolCall) and call.lenient
-        needs_confirm = shell_unchecked or (
+        needs_confirm = shell_unchecked or data_hit is not None or (
             gated and (
                 not self.auto_approve or call.name in self.always_confirm
                 or lenient_call
@@ -622,7 +660,7 @@ class _ExecutionMixin:
         # True when the loose call format is the ONLY reason confirmation is
         # required: the same call in the <tool_call> wrapper would run.
         lenient_only = (
-            lenient_call and gated and not shell_unchecked
+            lenient_call and gated and not shell_unchecked and data_hit is None
             and self.auto_approve and call.name not in self.always_confirm
         )
         # A session allow ("a" at an interactive prompt) never waives a
@@ -631,7 +669,7 @@ class _ExecutionMixin:
         allow_key = self._session_allow_key(call)
         session_allowable = (
             allow_key is not None and not shell_unchecked and not lenient_call
-            and call.name not in self.always_confirm
+            and data_hit is None and call.name not in self.always_confirm
         )
         # session_allowable already excludes a failed shell check, a lenient
         # call and always_confirm, which the read-only shortcut honours too.
@@ -650,13 +688,21 @@ class _ExecutionMixin:
             session_allowed = self._session_allowed = set()
         if needs_confirm and session_allowable and allow_key in session_allowed:
             needs_confirm = False
+        if needs_confirm and data_hit is not None:
+            note = (f"{call.name} reaches {data_hit}, so it needs your approval "
+                    "for this exact call.")
+            if interactive:
+                print_info(f"  ({note})")
+            self._emit("info", text=note)
+            self._audit.notice("data_guard_confirm", note)
         if needs_confirm:
             if self.confirm_handler is not None or interactive:
                 # The terminal prompt (this agent's, or an interactive parent's
                 # reached through confirm_handler) offers "a" only for a call
                 # that can be session-allowed. A GUI handler never sets the
                 # answer flags, so consuming them there reads False and "".
-                with offering_session_allow(session_allowable):
+                with offering_session_allow(session_allowable), \
+                        requiring_exact_approval(data_hit is not None):
                     if self.confirm_handler is not None:
                         approved = invoke_confirm(self.confirm_handler, call,
                                                   agent=self._confirm_agent_label())
@@ -673,7 +719,13 @@ class _ExecutionMixin:
                 # auto_approve=off is honoured and an unattended run cannot be
                 # steered into an unconfirmed destructive or network action.
                 # The denial is recorded on the run (Agent.denied_unconfirmed).
-                if lenient_only:
+                if data_hit is not None:
+                    result = ToolResult.error(
+                        f"{call.name} was not run: it reaches {data_hit}, which "
+                        "needs an explicit approval of this exact call, and this "
+                        "run is non-interactive with no approval handler - denied.")
+                    reason = "localm-data"
+                elif lenient_only:
                     result = ToolResult.error(
                         f"{call.name} requires confirmation: the call was not "
                         "written in the <tool_call> format, and a loosely "

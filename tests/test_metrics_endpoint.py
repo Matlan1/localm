@@ -58,6 +58,7 @@ def _client(engine=None, *, bind_host=None):
     app = create_app(engine or _engine())
     if bind_host is not None:
         app.state.bind_host = bind_host
+        app.state.insecure_bind = True
     return app, TestClient(app)
 
 

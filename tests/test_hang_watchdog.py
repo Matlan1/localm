@@ -568,6 +568,7 @@ def test_debug_stacks_hidden_on_network_bind(app):
     # Still 404 (not 403) with NO credential: the shell-token gate is applied
     # only on a loopback bind, so the route stays hidden rather than
     # exists-but-needs-auth.
+    app.state.insecure_bind = True
     for host in ("0.0.0.0", "192.168.1.50", "10.0.0.7"):
         app.state.bind_host = host
         r = TestClient(app).get("/debug/stacks")

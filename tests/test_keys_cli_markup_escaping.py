@@ -51,6 +51,7 @@ def _wide_console(monkeypatch):
 def runner(cli_runner, monkeypatch):
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+    monkeypatch.setattr("localm.cli.keys._stdin_is_interactive", lambda: True)
     return cli_runner
 
 
@@ -70,6 +71,7 @@ def bracketed_home_runner(tmp_path, monkeypatch):
     monkeypatch.setattr(cfg, "REGISTRY_FILE", home / "registry.json")
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+    monkeypatch.setattr("localm.cli.keys._stdin_is_interactive", lambda: True)
     return CliRunner()
 
 
@@ -156,7 +158,7 @@ class TestKeyClearMarkupEscaping:
             return real_unlink(self, *a, **kw)
         monkeypatch.setattr(Path, "unlink", fake_unlink)
 
-        r = bracketed_home_runner.invoke(main, ["key", "clear", "--yes"])
+        r = bracketed_home_runner.invoke(main, ["key", "clear", "--yes"], input="y\n")
         assert r.exit_code == 0, r.output
         assert "not fully cleared" in r.output.lower()
         assert str(auth.key_file()) in r.output, (
@@ -170,7 +172,7 @@ class TestKeyClearMarkupEscaping:
         bracketed_home_runner.invoke(main, ["key", "generate"])
         monkeypatch.setattr(sessions, "revoke_all", lambda: None)
 
-        r = bracketed_home_runner.invoke(main, ["key", "clear", "--yes"])
+        r = bracketed_home_runner.invoke(main, ["key", "clear", "--yes"], input="y\n")
         assert r.exit_code == 0, r.output
         assert "not signed out" in r.output.lower()
         assert str(sessions.sessions_file()) in r.output, (
@@ -297,7 +299,7 @@ class TestKeyRmMarkupEscaping:
         from localm import auth
         bracketed_id = f"totally-made-up-id{BRACKET_DROP}"
         monkeypatch.setattr(auth, "revoke_key", lambda key_id: True)
-        r = runner.invoke(main, ["key", "rm", bracketed_id, "--yes"])
+        r = runner.invoke(main, ["key", "rm", bracketed_id, "--yes"], input="y\n")
         assert r.exit_code == 0, r.output
         assert bracketed_id in r.output, (
             f"the revoked-confirmation message must echo the id verbatim: "
@@ -305,7 +307,7 @@ class TestKeyRmMarkupEscaping:
 
     def test_unknown_key_id_error_shows_bracketed_id_verbatim(self, runner):
         bracketed_id = f"totally-made-up-id{BRACKET_STYLE}"
-        r = runner.invoke(main, ["key", "rm", bracketed_id, "--yes"])
+        r = runner.invoke(main, ["key", "rm", bracketed_id, "--yes"], input="y\n")
         assert r.exit_code == 1, r.output
         assert bracketed_id in r.output, (
             f"the 'No such key' error must echo the caller's id verbatim: "

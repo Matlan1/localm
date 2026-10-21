@@ -543,6 +543,7 @@ class TestVerifyRequester:
 def _coordinating_app(bind_host="127.0.0.1"):
     app = create_app(None)
     app.state.bind_host = bind_host
+    app.state.insecure_bind = True
     hs._gpu_coord = {"instance_id": "self-1", "port": 8700, "host": bind_host,
                      "scheme": "http"}
     return app

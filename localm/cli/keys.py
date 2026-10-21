@@ -23,6 +23,30 @@ def _mask_key(key: str) -> str:
     return f"{key[:4]}...{key[-4:]}"
 
 
+def _stdin_is_interactive() -> bool:
+    """True when stdin is a terminal a person can answer at
+    (``bugreport.stdin_is_interactive``: on Windows also a console, which the
+    NUL device is not). False for piped or redirected input, the null device
+    and a closed stdin."""
+    from localm.bugreport._common import stdin_is_interactive
+    return stdin_is_interactive()
+
+
+def _refuse_unattended_last_key_removal(action: str) -> None:
+    """Exit 1 unless stdin is an attached terminal. Called before *action* when
+    it would leave no API key configured (``auth.removal_leaves_no_key``); a
+    piped answer and ``--yes`` do not waive it. The caller then asks for the
+    confirmation even under ``--yes``."""
+    if _stdin_is_interactive():
+        return
+    console.print(
+        f"[red]Refusing to {action}:[/red] it removes the last API key and "
+        "returns the server to open mode, so it needs the owner at an "
+        "interactive terminal. Piped input and --yes from a script are not "
+        "accepted.")
+    sys.exit(1)
+
+
 def _fmt_ts(ts) -> str:
     """A readable local timestamp for a single-line message (the 'key create'
     confirmation), or '-' when unset. Full precision, unlike the table
@@ -187,14 +211,21 @@ def key_set(key):
 
 
 @key_group.command("clear")
-@click.option("-y", "--yes", is_flag=True, help="Skip the confirmation prompt.")
+@click.option("-y", "--yes", is_flag=True,
+              help="Skip the confirmation prompt (not for removing the last key).")
 def key_clear(yes):
-    """Remove the owner key, returning the server to open mode."""
+    """Remove the owner key, returning the server to open mode.
+
+    Removing the last key needs an interactive terminal and always asks, --yes
+    included; piped input is refused."""
     from localm import auth, sessions
     if auth.get_api_key() is None:
         console.print("[dim]No API key set (already open mode).[/dim]")
         return
-    if not yes and not click.confirm(
+    last = auth.removal_leaves_no_key(clear_all=True)
+    if last:
+        _refuse_unattended_last_key_removal("clear the API key")
+    if (not yes or last) and not click.confirm(
             "Clear the API key? The server will then accept unauthenticated "
             "requests (unless require_auth is on)"):
         console.print("[dim]Cancelled.[/dim]")
@@ -447,17 +478,25 @@ def key_create(name, scopes, fs_access, rag_roots, expires_in, allow_privileged)
 
 @key_group.command("rm")
 @click.argument("key_id")
-@click.option("-y", "--yes", is_flag=True, help="Skip the confirmation prompt.")
+@click.option("-y", "--yes", is_flag=True,
+              help="Skip the confirmation prompt (not for removing the last key).")
 def key_rm(key_id, yes):
-    """Revoke a named key by ID (see 'localm key list')."""
+    """Revoke a named key by ID (see 'localm key list').
+
+    Revoking the last key needs an interactive terminal and always asks, --yes
+    included; piped input is refused."""
     from localm import auth
     from localm.config import ConfigUnreadable
     from rich.markup import escape
 
+    last = auth.removal_leaves_no_key(revoke_id=key_id)
+    if last:
+        _refuse_unattended_last_key_removal(f"revoke named key '{escape(key_id)}'")
+
     # click.confirm() goes through Click's own prompt, not Rich, so key_id is NOT
     # escaped here: escape() would show a literal backslash to the user instead
     # of protecting anything.
-    if not yes and not click.confirm(f"Revoke named key '{key_id}'?"):
+    if (not yes or last) and not click.confirm(f"Revoke named key '{key_id}'?"):
         console.print("[dim]Cancelled.[/dim]")
         return
     # key_id is an unvalidated CLI argument, only ever compared by equality

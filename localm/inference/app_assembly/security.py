@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The kernel's security middleware: CORS, the origin / open-mode shell-token
-gate, the security response headers (an enforcing CSP with a per-request nonce)
-and the API-docs disclosure guard.
+gate, the keyless network-bind gate, the security response headers (an
+enforcing CSP with a per-request nonce) and the API-docs disclosure guard.
 
 ``create_app()`` adds them in that order. Each ``add_middleware`` wraps what was
 added before it, so a request meets the docs guard first and CORS last, and a
@@ -294,6 +294,41 @@ def add_origin_guard(app: FastAPI, cors_cfg: Any) -> None:
                                  "(run 'localm key generate')."},
                     )
         return await call_next(request)
+
+
+def add_keyless_network_gate(app: FastAPI) -> None:
+    """Refuse every request with 401 while no API key is configured on a server
+    that ``_hs.network_bind_needs_key`` says must hold one (bound past loopback,
+    started without ``--insecure``). The startup bind guard applies the same
+    rule once; this applies it to every request, so removing the last key while
+    the server runs does not open it to the network.
+
+    Exempt: ``/health`` and ``/whoami`` (unauthenticated in protected mode too),
+    and a request presenting this instance's attach token
+    (``app.state.instance_token``, a 0600 file only the local OS user can read).
+    The check re-reads ``any_key_configured()`` per request, so setting a key
+    lifts it without a restart. The first refusal per app is logged at WARNING."""
+    _EXEMPT = frozenset({"/health", "/whoami"})
+
+    @app.middleware("http")
+    async def _keyless_network_gate(request, call_next):
+        st = request.app.state
+        if request.url.path in _EXEMPT or not _hs.network_bind_needs_key(request.app):
+            return await call_next(request)
+        from localm.auth import any_key_configured, ct_equal
+        if any_key_configured():
+            return await call_next(request)
+        inst_token = getattr(st, "instance_token", None)
+        if inst_token and ct_equal(_hs._bearer_token(request), inst_token):
+            return await call_next(request)
+        if not getattr(st, "keyless_network_refusal_logged", False):
+            st.keyless_network_refusal_logged = True
+            from localm.debuglog import logger as _klog
+            _klog.warning(
+                "no API key is configured while bound to %s: refusing requests "
+                "until a key is set", getattr(st, "bind_host", "?"))
+        return JSONResponse(status_code=401,
+                            content={"detail": _hs.KEYLESS_NETWORK_DETAIL})
 
 
 def add_security_headers(app: FastAPI) -> None:

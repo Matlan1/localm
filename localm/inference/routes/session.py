@@ -136,6 +136,9 @@ def register(app: FastAPI, ctx) -> None:
         False (assuming no LOCALM_API_KEY env var and an empty keystore), and all
         subsequent web UI requests that rely on the session cookie will fail auth and
         be redirected to the key gate by the client.
+
+        Refused with 409 on a server that must hold a key
+        (``network_bind_needs_key``) when the clear would leave none.
         """
         _, source = _request_token(request)
         if source == "cookie" and not _csrf_ok(request):
@@ -143,7 +146,10 @@ def register(app: FastAPI, ctx) -> None:
                 403,
                 "Missing or invalid CSRF token. Send the session's csrf token "
                 "(from GET /api/session) in the X-CSRF-Token header.")
-        from localm.auth import clear_api_key
+        from localm.auth import clear_api_key, removal_leaves_no_key
+        if (_hs.network_bind_needs_key(request.app)
+                and removal_leaves_no_key(clear_all=True)):
+            raise HTTPException(409, _hs.LAST_KEY_NETWORK_DETAIL)
         failed = clear_api_key()
         # The key that minted every current session is gone; those sessions carry
         # their own ADMIN scope snapshot, so they MUST be revoked or a leftover

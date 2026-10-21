@@ -26,6 +26,7 @@ KEY = "owner-key-for-revocation-honesty-abc"
 def runner(cli_runner, monkeypatch):
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+    monkeypatch.setattr("localm.cli.keys._stdin_is_interactive", lambda: True)
     # The store cache is process-wide; reset it so a prior test's cached view is
     # never read through this test's throwaway store.
     from localm import sessions
@@ -241,7 +242,7 @@ class TestKeyCliDoesNotClaimSessionsWereSignedOut:
         from localm.cli import main
         auth.set_api_key(KEY)
         _mint_owner_session()
-        r = runner.invoke(main, ["key", "clear", "--yes"])
+        r = runner.invoke(main, ["key", "clear", "--yes"], input="y\n")
         assert r.exit_code == 0
         out = _flat(r.output)
         assert "were signed out" in out
@@ -255,7 +256,7 @@ class TestKeyCliDoesNotClaimSessionsWereSignedOut:
         _mint_owner_session()
         _store_writes_fail(monkeypatch)
 
-        r = runner.invoke(main, ["key", "clear", "--yes"])
+        r = runner.invoke(main, ["key", "clear", "--yes"], input="y\n")
 
         out = _flat(r.output)
         assert "not signed out" in out, \

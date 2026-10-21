@@ -174,7 +174,7 @@ def test_wrong_shape_keystore_is_a_409_on_the_key_routes_and_exit_1_on_the_cli(
         created = c.post("/v1/keys", json={"name": "gamma", "scopes": []}, headers=headers)
         revoked = c.delete("/v1/keys/any-id", headers=headers)
     cli_create = CliRunner().invoke(main, ["key", "create", "gamma", "--scope", "chat"])
-    cli_rm = CliRunner().invoke(main, ["key", "rm", "any-id", "--yes"])
+    cli_rm = CliRunner().invoke(main, ["key", "rm", "any-id", "--yes"], input="y\n")
 
     assert path.read_bytes() == before, "the wrong-shape keystore was overwritten"
     assert (created.status_code, revoked.status_code) == (409, 409), (
