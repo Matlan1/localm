@@ -1022,6 +1022,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # None).
         n_cpu_moe = self._load_n_cpu_moe()
         self.moe_cpu_layers = 0
+        self.moe_ram_read_bytes = None
         if n_cpu_moe > 0:
             # Why the override did not apply, rendered here in the parent from the
             # metadata the child returned. The child must never console.print.
@@ -1050,6 +1051,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                         "requested)[/dim]")
                 per_token = self._moe_ram_bytes_per_token(n_cpu_moe)
                 if per_token > 0:
+                    self.moe_ram_read_bytes = per_token
                     gb = per_token / 1e9
                     console.print(
                         f"[dim]  moe speed: each generated token reads about "

@@ -126,6 +126,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   next request fits in it.
 
 ### Fixed
+- **A scheduled job with no model set no longer picks a speech-to-text model.** The job took the first registered chat model by name, so a Qwen3-ASR or Whisper model could answer a job that named no model; those models now come last, behind every other chat model.
 - **`localm config pinned_models '["a"]'` pins `a`.** A JSON list typed on the command line was
   stored as one model name with the brackets and quotes in it, so nothing was pinned. A list
   setting given as JSON text is now read as that list.
@@ -301,6 +302,37 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **"continue" carries on with the previous reply.** "continue", "weiter", "continúa" and the same
   word in other languages continue the last reply instead of searching the selected Knowledge
   collection for the word.
+- **The MCP server answers a line it cannot parse.** Malformed JSON, a number or id with more than
+  4300 digits and JSON nested thousands deep used to get no reply, so a client waited forever. They
+  now get a JSON-RPC parse error (-32700) and the server keeps serving.
+- **`/v1/models` lists whether each model sees images or hears audio.** The list entries carry the
+  same `vision` and `audio_input` fields as `/v1/models/{id}`.
+- **The audio transcription error no longer tells you to install Whisper when it is installed.**
+  Asking an audio model for `srt`, `vtt` or `verbose_json` now says to send model `whisper-1` when
+  faster-whisper is present.
+- **`localm setup-embeddings --model` refuses a reranker.** A registered reranker or a reranker
+  GGUF path is rejected before anything is saved, and the re-embed reminder still appears when your
+  collections have no vectors yet. A collection holding vectors from more than one embedding model
+  is marked as mixed in the switch warning.
+- **Qwen3 sequence-classification rerankers score the prompt they were trained on.** A Hugging
+  Face Qwen3 reranker folder now gets the instruction, query and document template its model card
+  specifies instead of a plain sentence pair, which separates relevant from irrelevant passages
+  much more clearly.
+- **A refused `localm rag add` leaves no empty collection behind.** Pointing a new collection at a
+  credential folder or a UNC path removes the collection that the failed add had created.
+- **A model folder named like the built-in embedding model no longer replaces it.** `/v1/embeddings`
+  for `bge-small-en-v1.5` is answered by the pinned embedding model, and the log says when a
+  registered folder with that name is being passed over.
+- **Memory recall ignores a word that most facts contain.** A query such as "what database does
+  Project Atlas use" no longer brings back every fact that says "use" behind the one that matches.
+- **`localm spec-drafts` leaves out a model file cut short**, and the load response and the
+  model-switch toast for a model with experts in system RAM say how much of that RAM each
+  generated token reads.
+- **Saving a token in Settings and opening a Knowledge collection no longer stall the server.**
+  The credential write of a config save and the collection open of add, upload, re-embed, repair
+  and remove-document run off the event loop. A numpy failure while scoring a collection is now
+  logged instead of silently slowing every query.
+- **A conversation deleted while the list loads is no longer reported as unreadable.**
 - **The same speech seed gives the same audio.** `localm speak --seed N` and the `seed` field of
   `/v1/audio/speech` gave a different recording on every run on a GPU. A request with a seed now
   runs the speech model's projector on the CPU and puts it back on the GPU afterwards, so the

@@ -3366,6 +3366,40 @@ class TestConversationStore:
         assert any("broken" in m for m in msgs) and any("shape" in m for m in msgs)
         assert not any("secret title" in m for m in msgs)
 
+    @pytest.mark.parametrize("meta", [False, True])
+    def test_a_conversation_deleted_while_the_list_is_read_is_not_reported_unreadable(
+            self, persist_app, monkeypatch, caplog, meta):
+        import logging
+        from pathlib import Path
+        monkeypatch.setenv("LOCALM_MODE", "log")
+        app, chats = persist_app
+        chats.mkdir(parents=True)
+        (chats / "ghost.json").write_text("{}", encoding="utf-8")
+        real_read_text, real_stat = Path.read_text, Path.stat
+
+        def vanishing_read(self, *a, **k):
+            if self.stem == "ghost":
+                raise FileNotFoundError(self.name)
+            return real_read_text(self, *a, **k)
+
+        def vanishing_stat(self, *a, **k):
+            if self.stem == "ghost" and self.suffix == ".json":
+                raise FileNotFoundError(self.name)
+            return real_stat(self, *a, **k)
+
+        url = "/api/conversations?meta=true" if meta else "/api/conversations"
+        with TestClient(app) as client:
+            client.put("/api/conversations/ok",
+                       json={"title": "ok", "updated_at": 1, "messages": []})
+            monkeypatch.setattr(Path, "read_text", vanishing_read)
+            monkeypatch.setattr(Path, "stat", vanishing_stat)
+            with caplog.at_level(logging.WARNING, logger="localm"):
+                data = client.get(url).json()
+            monkeypatch.undo()
+        assert [c["id"] for c in data["conversations"]] == ["ok"]
+        assert data["unreadable"] == []
+        assert not [r for r in caplog.records if "ghost" in r.getMessage()]
+
     def test_list_with_nothing_unreadable_reports_an_empty_list(
             self, persist_app, monkeypatch):
         monkeypatch.setenv("LOCALM_MODE", "log")

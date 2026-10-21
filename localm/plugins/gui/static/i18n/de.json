@@ -316,7 +316,7 @@
   "coder.controls.intro": "Änderungen gelten sofort für diese laufende Sitzung - auch während eine Aufgabe läuft, was der Sinn des Auto-Freigabe-Schalters ist.",
   "coder.controls.modalTitle": "Sitzungssteuerung - {label}",
   "coder.controls.busyError": "Modell kann nicht gewechselt werden, während die Coder-Sitzung beschäftigt ist.",
-  "coder.controls.modelHint": "Diese Sitzung direkt auf ein anderes Modell umstellen. Konversationsverlauf und Agentenstatus bleiben erhalten.",
+  "coder.controls.modelHint": "Diese Sitzung direkt auf ein anderes Modell umstellen. Konversationsverlauf und Agentenstatus bleiben erhalten. Ein lokales Modell ersetzt die aktive Engine auch für den Chat, andere Coder-Sitzungen und MCP.",
   "coder.controls.modelLabel": "Modell",
   "coder.controls.modelSwitchFailed": "Modell konnte nicht gewechselt werden: ",
   "coder.controls.modelSwitched": "Modell gewechselt zu {model}",

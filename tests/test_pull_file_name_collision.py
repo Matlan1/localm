@@ -140,6 +140,33 @@ class TestNameRegisteredInPlace:
         assert _pull("b/vae-fix:" + NAME, "myvae") is True
         assert Path(mm.load_registry()["myvae"]["path"]) == hub.models_dir / NAME
 
+    def test_a_direct_url_pull_is_refused_before_anything_is_downloaded(self, hub, tmp_path,
+                                                                       monkeypatch, capsys):
+        mine = self._registered_in_place(hub, tmp_path)
+        before = dict(mm.load_registry()["myvae"])
+        requested = []
+
+        class _Resp:
+            status_code = 200
+            headers = {"content-length": "4"}
+
+            def raise_for_status(self):
+                pass
+
+            def iter_content(self, n):
+                yield b"data"
+
+        monkeypatch.setattr("socket.getaddrinfo",
+                            lambda *a, **k: [(2, 1, 6, "", ("93.184.216.34", 0))])
+        monkeypatch.setattr("localm.netpolicy.pinned_request",
+                            lambda method, url, **k: requested.append(url) or _Resp())
+        assert mm._pull_url("https://x.test/url-model.gguf", "myvae", model_type="vae") is False
+        assert requested == []
+        assert not (hub.models_dir / "url-model.gguf").exists()
+        assert mm.load_registry()["myvae"] == before
+        assert Path(before["path"]) == mine
+        assert "Name already in use" in _text(capsys)
+
     def test_a_name_held_by_a_file_in_the_models_folder_is_not_blocked(self, hub):
         hub.files[("a/vae", NAME)] = FIRST
         assert _pull("a/vae:" + NAME, "myvae") is True

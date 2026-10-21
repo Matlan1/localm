@@ -1634,6 +1634,30 @@ def test_spec_drafts_lists_only_models_that_share_the_vocabulary(cli_runner, tmp
     assert [r.split()[1] for r in rows] == ["tiny", "small"]
 
 
+def _cut_before_its_last_tensor(path):
+    """Declare one tensor whose data starts 4096 bytes into the data section and
+    stop the file at the start of that section: a copy cut short."""
+    raw = bytearray(path.read_bytes())
+    raw[8:16] = struct.pack("<Q", 1)
+    name = b"blk.0.weight"
+    raw += struct.pack("<Q", len(name)) + name
+    raw += struct.pack("<I", 1) + struct.pack("<Q", 4) + struct.pack("<I", 0)
+    raw += struct.pack("<Q", 4096)
+    raw += b"\0" * (-len(raw) % 32)
+    path.write_bytes(bytes(raw))
+
+
+def test_spec_drafts_leaves_out_a_copy_cut_short(cli_runner, tmp_path):
+    from localm.cli import models as models_mod
+    target, registry = _registry_models(tmp_path)
+    _cut_before_its_last_tensor(tmp_path / "small.gguf")
+    with patch.object(models_mod, "get_operator_model_info", return_value=(str(target), None)),          patch("localm.model_manager.load_registry", return_value=registry):
+        res = cli_runner.invoke(models_mod.main, ["spec-drafts", "big"], terminal_width=200)
+    assert res.exit_code == 0, res.output
+    rows = [ln for ln in res.output.splitlines() if " GB " in ln]
+    assert [r.split()[1] for r in rows] == ["tiny"]
+
+
 def test_spec_drafts_says_so_when_nothing_fits(cli_runner, tmp_path):
     from localm.cli import models as models_mod
     target, registry = _registry_models(tmp_path)

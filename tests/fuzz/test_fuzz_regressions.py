@@ -207,7 +207,8 @@ class TestMcpStdioServer:
         stdin = io.TextIOWrapper(io.BytesIO(raw), encoding="utf-8", errors="strict")
         out = io.StringIO()
         self._server().run_stdio(stdin, out)
-        assert json.loads(out.getvalue()) == {"jsonrpc": "2.0", "id": 1, "result": {}}
+        replies = [json.loads(line) for line in out.getvalue().splitlines()]
+        assert replies[-1] == {"jsonrpc": "2.0", "id": 1, "result": {}}
 
     @staticmethod
     def _server():
@@ -224,11 +225,13 @@ class TestMcpStdioServer:
     @pytest.mark.parametrize("line", [
         pytest.param("9" * 5000, id="integer_past_the_conversion_limit"),
         pytest.param("[" * 100_000, id="deeply_nested")])
-    def test_a_hostile_line_is_skipped_and_the_next_line_is_served(self, line):
+    def test_a_hostile_line_is_answered_with_a_parse_error_and_the_next_line_is_served(self, line):
         out = io.StringIO()
         self._server().run_stdio(
             io.StringIO(line + '\n{"jsonrpc": "2.0", "id": 1, "method": "ping"}\n'), out)
-        assert json.loads(out.getvalue()) == {"jsonrpc": "2.0", "id": 1, "result": {}}
+        replies = [json.loads(text) for text in out.getvalue().splitlines()]
+        assert replies[0]["error"]["code"] == -32700 and replies[0]["id"] is None
+        assert replies[-1] == {"jsonrpc": "2.0", "id": 1, "result": {}}
 
 
 class TestHostileHuggingFaceModelDirectory:

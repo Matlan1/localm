@@ -61,7 +61,7 @@ from ._store.indexing import (  # noqa: F401
 from ._store.introspect import _CollectionIntrospection
 from ._store.provenance import (  # noqa: F401
     _provenance_excludable, collection_provenance_note,
-    collection_provenance_report)
+    collection_provenance_report, lexical_only_collection_names)
 from ._store.resync import _CollectionResync
 from ._store.search import (  # noqa: F401
     _CONVERSATION_REF_RE, LEXICAL_RELEVANCE_COVERAGE, RELEVANCE_FLOORS,

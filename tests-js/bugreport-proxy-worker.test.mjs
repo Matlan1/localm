@@ -150,7 +150,7 @@ test("a body without the report's sections is still filed, flagged in the note",
     assert.equal(res.status, 201, "a report is never refused for its shape");
     assert.equal(upstream.length, 1);
     const filed = upstream[0].body.body;
-    assert.ok(filed.startsWith("> Filed through the localm bug reporter on behalf of a user."), filed.slice(0, 120));
+    assert.ok(filed.startsWith("> Submitted by a localm user through the built-in bug reporter."), filed.slice(0, 120));
     assert.match(filed, /does not have the sections a report built by localm contains/);
     assert.ok(filed.endsWith(payload.body));
   }
@@ -164,7 +164,7 @@ test("a report built by localm is filed, prefixed with the reporter note", async
   assert.equal(body.number, 1);
   assert.equal(upstream.length, 1);
   const filed = upstream[0].body.body;
-  assert.ok(filed.startsWith("> Filed through the localm bug reporter on behalf of a user."), filed.slice(0, 120));
+  assert.ok(filed.startsWith("> Submitted by a localm user through the built-in bug reporter."), filed.slice(0, 120));
   assert.ok(filed.endsWith(report), "the report follows the note unchanged");
   assert.doesNotMatch(filed, /does not have the sections/, "a real report is not flagged");
 });

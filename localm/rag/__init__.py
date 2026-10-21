@@ -23,7 +23,7 @@ from .extract import (EXTRACTABLE_SUFFIXES, ExtractError, classify_format,
                       extract_bytes, extract_text, sniff_text_format)
 from .store import (Collection, check_collection_name, collection_names,
                     collection_provenance_note, collection_provenance_report,
-                    delete_collection, rag_dir)
+                    delete_collection, lexical_only_collection_names, rag_dir)
 
 __all__ = [
     "BM25",
@@ -38,6 +38,7 @@ __all__ = [
     "collection_provenance_note",
     "collection_provenance_report",
     "delete_collection",
+    "lexical_only_collection_names",
     "extract_bytes",
     "extract_text",
     "rag_dir",
