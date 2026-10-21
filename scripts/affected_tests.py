@@ -18,6 +18,9 @@ A test file is selected when any of these holds:
     package mapped in _REEXPORT_MODULE_FACADES also counts as a change to the
     module it is mapped from, for both rules above, and that module counts as
     importing every module the package's modules import;
+  - it is listed in _TREE_SCANNERS for the folder a changed .py file sits in
+    (it reads every file under that folder instead of importing the changed
+    one);
   - it imports a changed dependency, names it in a string literal, imports a
     module that imports it (with --depth N, also that module's importers, up
     to N hops), or sits under the folder of a conftest.py that imports it. A
@@ -90,6 +93,42 @@ _REQUIREMENT_KEYS = ("dependencies", "optional-dependencies")
 # Modules whose callers import and patch the module itself, which re-exports the
 # names of the modules in the package mapped to it.
 _REEXPORT_MODULE_FACADES = {"localm.rag.store": "localm.rag._store"}
+# Test files that read a whole source tree instead of importing the module that
+# changed, so the import graph never reaches them. Each maps to the path
+# prefixes whose .py files it reads and what it does with them. A .py file added,
+# changed or deleted under a prefix selects the tests listed for it.
+_LOCALM, _TESTS, _SCRIPTS = "localm/", "tests/", "scripts/"
+_ALL_SOURCES = (_LOCALM, _TESTS, _SCRIPTS)
+_TREE_SCANNERS: dict[str, tuple[tuple[str, ...], str]] = {
+    "tests/test_check_pins.py": ((_LOCALM,), "greps every tracked localm/*.py for pin-shaped constants"),
+    "tests/test_no_gitignored_path_leak.py": (_ALL_SOURCES, "scans the string literals of every tracked .py"),
+    "tests/test_no_stray_encoding_cookie.py": (_ALL_SOURCES, "reads the first lines of every .py"),
+    "tests/test_check_hygiene.py": (_ALL_SOURCES, "runs the hygiene checks over every tracked file"),
+    "tests/test_check_hygiene_layering.py": (_ALL_SOURCES, "checks import direction over every tracked localm file"),
+    "tests/test_check_hygiene_response_keys.py": (_ALL_SOURCES, "checks the JSON keys of every tracked route"),
+    "tests/test_bump_uv_pin.py": ((_LOCALM,), "lists every tracked file outside tests/ and scripts/ that pins uv"),
+    "tests/test_native_stderr_redirect_scope.py": ((_LOCALM,), "walks the AST of every localm .py for stderr redirects"),
+    "tests/test_terminal_control_safety.py": ((_LOCALM,), "walks the AST of every localm .py for rich Console imports"),
+    "tests/test_model_name_gate.py": ((_LOCALM,), "reads every localm .py for trust_remote_code=True"),
+    "tests/test_no_unguarded_json_parse.py": ((_LOCALM,), "walks the AST of every localm .py for unguarded JSON parses"),
+    "tests/test_owner_predicate_single_owner.py": ((_LOCALM,), "walks the AST of every localm .py for inline owner checks"),
+    "tests/test_no_bare_secret_chmod.py": ((_LOCALM,), "walks the AST of every localm .py for chmod 0o600 calls"),
+    "tests/test_no_untracked_authorization_header_writes.py": (
+        (_LOCALM,), "walks the AST of every localm .py for Authorization header writes"),
+    "tests/test_hwdetect_recommended_is_legacy.py": ((_LOCALM,), "walks the AST of every localm .py for .recommended reads"),
+    "tests/test_install_manifest.py": ((_LOCALM,), "walks the AST of every localm .py for data-dir children"),
+    "tests/test_gui_js_route_contract.py": ((_LOCALM,), "reads every localm .py for declared routes"),
+    "tests/test_ctrlc_clean_stop.py": ((_LOCALM,), "reads every localm .py for parent-death watchdog installs"),
+    "tests/test_residency.py": ((_LOCALM,), "greps every localm .py for active_requests mutations"),
+    "tests/test_discover.py": ((_LOCALM,), "walks the AST of every localm .py for calls to the discovery helpers"),
+    "tests/test_native_fault_debug_log_hint.py": (("localm/inference/",), "scans every localm/inference .py"),
+    "tests/test_debug_scrub.py": ((_TESTS,), "walks the AST of every test file for delenv of LOCALM_DEBUG"),
+    "tests/test_real_gguf_gate.py": ((_TESTS,), "scans every test file for broad skips around model loads"),
+    "tests/test_tk_root.py": ((_TESTS,), "scans every test file that builds Tk windows"),
+    "tests/test_bugreport_live_lookups.py": ((_TESTS,), "scans every test file that mentions bugreport"),
+    "tests/test_ci_runner_files.py": ((_SCRIPTS,), "reads every scripts/*.py for runner-file variable reads"),
+    "tests/test_pin_weekly.py": ((_SCRIPTS,), "reads the pin, bump and confirm scripts for gitignored paths"),
+}
 _ROOT_DECLARATIONS = ("dependencies", "optional-dependencies", "dev-dependencies")
 _ROOT_METADATA_DECLARATIONS = ("requires-dist", "requires-dev", "provides-extras")
 _SOURCE_ROOTS = ("localm", "scripts", "tests")
@@ -498,6 +537,14 @@ def select(changed: list[str], graph: Graph, depth: int = 0,
         for t in graph.test_files:
             add(t, f"every test file: {which} changed")
         return reasons
+
+    for rel in changed:
+        if not rel.endswith(".py"):
+            continue
+        for t, (prefixes, why) in _TREE_SCANNERS.items():
+            under = [p for p in prefixes if rel.startswith(p)]
+            if under and t in graph.test_imports:
+                add(t, f"{why} under {under[0]}: {rel} changed")
 
     changed_modules: set[str] = set()
     facades: set[str] = set()
