@@ -46,6 +46,17 @@ def test_extra_requirements_double_quote_marker(monkeypatch):
     assert deps.extra_requirements("audio") == ["soundfile>=0.12"]
 
 
+def test_extra_requirements_leaves_out_requirements_for_another_platform(monkeypatch):
+    other = "win32" if not __import__("sys").platform.startswith("win") else "linux"
+    _patch_metadata(monkeypatch, [
+        f'onlythere>=1; sys_platform == "{other}" and extra == "exllama"',
+        'everywhere>=2; extra == "exllama"',
+        f'gone>=3; sys_platform == "{other}" and extra == "solo"',
+    ])
+    assert deps.extra_requirements("exllama") == ["everywhere>=2"]
+    assert deps.extra_requirements("solo") == []
+
+
 def test_extra_requirements_unknown_extra_falls_back(monkeypatch):
     _patch_metadata(monkeypatch, ["faster-whisper>=1.0; extra == 'voice'"])
     # An extra with no matching Requires-Dist falls back to the localm[extra] form

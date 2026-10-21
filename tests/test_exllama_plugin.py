@@ -349,6 +349,10 @@ FAKES = {
                 if m == "endless":
                     import time
                     time.sleep(0.02)
+                    if n >= 50:
+                        self.jobs.remove(job)
+                        return [{"job": job, "stage": "streaming", "eos": True,
+                                 "eos_reason": "max_new_tokens", "text": "x"}]
                     return [{"job": job, "stage": "streaming", "eos": False, "text": "x"}]
                 last_word = n >= len(REPLY)
                 last_budget = n >= job.max_new_tokens

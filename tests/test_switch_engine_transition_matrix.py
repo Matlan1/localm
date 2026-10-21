@@ -1549,6 +1549,26 @@ class TestBackendSizedAdmission:
                    for r in caplog.records)
         assert result["status"] == "loaded"
 
+    @pytest.mark.parametrize("claimed", [True, False])
+    def test_a_plugin_backend_model_is_sized_by_its_backend(self, monkeypatch, claimed):
+        from localm.inference import backend_registry
+        from localm.plugins.contract import InferenceBackendDescriptor
+        monkeypatch.setattr(backend_registry, "_DESCRIPTORS", [])
+        monkeypatch.setattr(backend_registry, "_load_plugin_backends", lambda: False)
+        if claimed:
+            backend_registry.register(InferenceBackendDescriptor(
+                name="exl", claims=lambda p: p.endswith("model-b"),
+                create=lambda p, **o: None, plugin_name="exl"))
+        a = GatedEngine("model-a")
+        b = _BackendSizedEngine("model-b", 8 * GB)
+        env = _install(monkeypatch, {"model-a": a, "model-b": b}, total=12 * GB, suffix="")
+        _seat("model-a", a, active=True)
+        asyncio.run(hs.switch_engine("model-b", env.factory, preempt=False, activate=False))
+
+        assert b.need_calls == (1 if claimed else 0)
+        assert a.loaded is (not claimed)
+        assert env.shortfall_calls == 0
+
     def test_the_split_check_keeps_the_estimate(self, monkeypatch):
         a = GatedEngine("model-a")
         b = _BackendSizedEngine("model-b", 8 * GB)
