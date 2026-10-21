@@ -539,6 +539,51 @@ def test_a_uv_config_change_selects_only_the_tests_naming_pyproject(dep_repo):
         "tests/test_reads_pyproject.py": ["names pyproject.toml"]}
 
 
+_MUTMUT_READERS = ("tests/test_check_mutation_floors.py", "tests/test_mutation_scope.py")
+
+
+@pytest.fixture
+def mutmut_repo(dep_repo):
+    """dep_repo with a [tool.mutmut] table and the two tests that read it,
+    committed."""
+    mod, root = dep_repo
+    _edit(root, "pyproject.toml", "[tool.ruff.lint]",
+          '[tool.mutmut]\nonly_mutate = ["localm/a.py"]\n'
+          'pytest_add_cli_args_test_selection = ["tests/test_pdf.py"]\n\n[tool.ruff.lint]')
+    for rel in _MUTMUT_READERS:
+        (root / rel).write_text("def test_it():\n    assert True\n", encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "mutmut table")
+    return mod, root
+
+
+def test_a_mutmut_config_change_selects_the_tests_reading_it_not_every_test(mutmut_repo):
+    mod, root = mutmut_repo
+    _edit(root, "pyproject.toml", 'pytest_add_cli_args_test_selection = ["tests/test_pdf.py"]',
+          'pytest_add_cli_args_test_selection = ["tests/test_pdf.py", "tests/test_app.py"]')
+    selected = _select(mod, ["pyproject.toml"])
+    assert not _everything(mod, selected, "pyproject.toml")
+    assert selected == {
+        "tests/test_check_mutation_floors.py": ["reads pyproject.toml [tool.mutmut]: it changed"],
+        "tests/test_mutation_scope.py": ["reads pyproject.toml [tool.mutmut]: it changed"],
+        "tests/test_reads_pyproject.py": ["names pyproject.toml"]}
+
+
+def test_an_unlisted_table_change_beside_a_mutmut_table_still_affects_every_test(mutmut_repo):
+    mod, root = mutmut_repo
+    _edit(root, "pyproject.toml", 'addopts = "-q"', 'addopts = "-q -x"')
+    selected = _select(mod, ["pyproject.toml"])
+    assert set(selected) == set(mod.Graph().test_files)
+    assert all(r == ["every test file: pyproject.toml changed"] for r in selected.values())
+
+
+def test_an_unchanged_mutmut_table_selects_none_of_its_readers(mutmut_repo):
+    mod, root = mutmut_repo
+    _edit(root, "pyproject.toml", 'select = ["F"]', 'select = ["F", "B"]')
+    assert _select(mod, ["pyproject.toml"]) == {
+        "tests/test_reads_pyproject.py": ["names pyproject.toml"]}
+
+
 def test_a_lock_fork_marker_change_selects_no_test_when_the_packages_are_unchanged(dep_repo):
     mod, root = dep_repo
     markers = "[\n    \"sys_platform == 'linux'\",\n]"

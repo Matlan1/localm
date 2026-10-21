@@ -30,7 +30,8 @@ A test file is selected when any of these holds:
 
 A change to tests/conftest.py affects every test file. So does a change to
 pyproject.toml or uv.lock outside the [project] requirement lists, the
-[tool.ruff], [tool.basedpyright] and [tool.uv] tables, the lock's
+[tool.ruff], [tool.basedpyright], [tool.mutmut] and [tool.uv] tables (a
+change to [tool.mutmut] selects the tests listed in _TOOL_TABLE_READERS), the lock's
 resolution-markers and supported-markers and the locked packages, either file
 missing or unparsable on either side, a listed
 pyproject.toml or uv.lock that does not differ from the base (a committed
@@ -87,6 +88,11 @@ _REEXPORT_FACADES = ("localm.setup_llama", "localm.bugreport")
 _DEPENDENCY_FILES = ("pyproject.toml", "uv.lock")
 _UNREAD_TOOL_TABLES = ("ruff", "basedpyright")
 _RESOLVER_TOOL_TABLES = ("uv",)
+# Tool tables of pyproject.toml that only the listed test files read. A change
+# confined to one selects those tests instead of every test file.
+_TOOL_TABLE_READERS = {
+    "mutmut": ("tests/test_check_mutation_floors.py", "tests/test_mutation_scope.py"),
+}
 _LOCK_FORK_KEYS = ("resolution-markers", "supported-markers")
 _DEV_EXTRA = "dev"
 _REQUIREMENT_KEYS = ("dependencies", "optional-dependencies")
@@ -350,12 +356,29 @@ def _requirements(pyproject: dict) -> dict[str, list[tuple[str, str]]] | None:
 
 def _pyproject_rest(pyproject: dict) -> dict:
     """*pyproject* without the [project] requirement lists, the tool tables no
-    test reads and the [tool.uv] table, whose effect on the locked packages
+    test reads, the tool tables in _TOOL_TABLE_READERS, which
+    changed_tool_table_readers() handles, and the [tool.uv] table, whose effect on the locked packages
     dependency_change() reads from the lock instead."""
     project = {k: v for k, v in pyproject.get("project", {}).items() if k not in _REQUIREMENT_KEYS}
-    skipped = _UNREAD_TOOL_TABLES + _RESOLVER_TOOL_TABLES
+    skipped = _UNREAD_TOOL_TABLES + _RESOLVER_TOOL_TABLES + tuple(_TOOL_TABLE_READERS)
     tool = {k: v for k, v in pyproject.get("tool", {}).items() if k not in skipped}
     return {**pyproject, "project": project, "tool": tool}
+
+
+def changed_tool_table_readers(old_pyproject: str, new_pyproject: str) -> dict[str, list[str]]:
+    """{test file: reasons} for the test files that read a [tool.*] table of
+    _TOOL_TABLE_READERS that differs between the two pyproject.toml texts.
+    Empty when either side is empty or does not parse."""
+    try:
+        old, new = tomllib.loads(old_pyproject), tomllib.loads(new_pyproject)
+    except tomllib.TOMLDecodeError:
+        return {}
+    out: dict[str, list[str]] = {}
+    for table, readers in _TOOL_TABLE_READERS.items():
+        if old.get("tool", {}).get(table) != new.get("tool", {}).get(table):
+            for t in readers:
+                out.setdefault(t, []).append(f"reads pyproject.toml [tool.{table}]: it changed")
+    return out
 
 
 def _lock_packages(lock: dict, project: str) -> dict[str, list[str]]:
@@ -537,6 +560,14 @@ def select(changed: list[str], graph: Graph, depth: int = 0,
         for t in graph.test_files:
             add(t, f"every test file: {which} changed")
         return reasons
+
+    if "pyproject.toml" in listed:
+        readers = changed_tool_table_readers(_read_at(base_ref, "pyproject.toml"),
+                                             _read("pyproject.toml"))
+        for t, whys in readers.items():
+            if t in graph.test_imports:
+                for why in whys:
+                    add(t, why)
 
     for rel in changed:
         if not rel.endswith(".py"):
