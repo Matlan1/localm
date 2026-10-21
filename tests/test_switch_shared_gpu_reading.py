@@ -198,6 +198,16 @@ def test_vram_capacity_joined_joins_and_tolerates_a_bare_double(monkeypatch):
     assert seen == {"return_status": True, "wait_for_inflight": True}
     monkeypatch.setattr(discover, "vram_capacity", lambda: {"free": 7})
     assert discover.vram_capacity_joined() == ({"free": 7}, discover.GPU_PROBE_OK)
+    monkeypatch.setattr(discover, "vram_capacity", lambda **kw: {"free": 8})
+    assert discover.vram_capacity_joined() == ({"free": 8}, discover.GPU_PROBE_OK)
+
+
+def test_vram_capacity_joined_calls_through_a_bare_list_gpus_double(monkeypatch):
+    monkeypatch.setattr("localm.config.load_config", lambda: {})
+    monkeypatch.setattr(discover, "list_gpus", lambda: [
+        {"index": 0, "name": "A", "total": 16 * GIB, "free": 10 * GIB}])
+    info, status = discover.vram_capacity_joined()
+    assert status == discover.GPU_PROBE_OK and info.get("total") == 16 * GIB
 
 
 def test_switch_engine_returns_before_the_after_load_reading_lands(box, capsys):

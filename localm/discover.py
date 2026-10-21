@@ -4293,24 +4293,31 @@ def vram_capacity_joined() -> tuple:
     the last reading, so it can block up to :func:`list_gpus`' default
     deadline: never call it on the event loop.
 
-    A test double patched in for ``vram_capacity`` whose signature does not
-    name ``return_status`` is called bare and its answer treated as
-    :data:`GPU_PROBE_OK`; ``wait_for_inflight`` is passed only to a callable
-    that accepts it."""
+    Tolerant of test doubles patched in for ``vram_capacity``, ``vram_info``
+    or ``list_gpus``: ``return_status`` and ``wait_for_inflight`` are passed
+    only when all three accept them, and an answer that is not an
+    ``(info, status)`` pair is read as ``info`` with :data:`GPU_PROBE_OK`."""
+    chain = (vram_capacity, vram_info, list_gpus)
+    kw = {}
+    if all(_takes_kwarg(f, "return_status") for f in chain):
+        kw["return_status"] = True
+        if all(_takes_kwarg(f, "wait_for_inflight") for f in chain):
+            kw["wait_for_inflight"] = True
+    result = vram_capacity(**kw)
+    if isinstance(result, tuple) and len(result) == 2:
+        return result
+    return result, GPU_PROBE_OK
+
+
+def _takes_kwarg(fn, name: str) -> bool:
+    """Whether callable *fn* accepts keyword argument *name* (by name or
+    through ``**kwargs``); False when its signature cannot be read."""
     try:
-        params = inspect.signature(vram_capacity).parameters
-        accepts = "return_status" in params
-        accepts_wfi = ("wait_for_inflight" in params or any(
-            p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()))
+        params = inspect.signature(fn).parameters
     except (TypeError, ValueError):
-        accepts = False
-        accepts_wfi = False
-    if not accepts:
-        return vram_capacity(), GPU_PROBE_OK
-    kw = {"return_status": True}
-    if accepts_wfi:
-        kw["wait_for_inflight"] = True
-    return vram_capacity(**kw)
+        return False
+    return name in params or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 
 def gpu_split_shortfall(vram_required: int, config: Optional[dict] = None,
