@@ -568,15 +568,22 @@ def _event_relay(say, on_preview=None, cancel_check=None) -> _EventRelay:
 
 def _decode_tile(info: dict, width: int, height: int, hires: Optional[dict],
                  say: Callable[[str], None]) -> Optional[int]:
-    """The VAE decode tile size (``vaetile.decode_tile_size``) for a job whose
-    largest decode is *width* x *height*, or its hires target, from the load
-    *info*'s ``max_tensor_bytes`` and ``vae_decoder_ch``; says the tiling
-    through *say* when there is one. None decodes in one piece."""
+    """The VAE decode tile size for a job whose largest decode is *width* x
+    *height*, or its hires target, from the load *info*'s ``max_tensor_bytes``
+    and its VAE: ``vaetile.wan_decode_tile_size`` for a Wan VAE (``version``
+    and ``wan_vae_conv``), else ``vaetile.decode_tile_size`` for a 2D
+    AutoencoderKL (``vae_decoder_ch``). Says the tiling through *say* when
+    there is one. None decodes in one piece. Raises ``vaetile.DecodeTooLarge``
+    when no tile fits the device."""
     if hires:
         width = sampling.hires_side(width, float(hires["scale"]))
         height = sampling.hires_side(height, float(hires["scale"]))
     limit = info.get("max_tensor_bytes")
-    tile = vaetile.decode_tile_size(width, height, limit, info.get("vae_decoder_ch"))
+    wan = vaetile.wan_vae(info.get("version") or "", info.get("wan_vae_conv"))
+    if wan is not None:
+        tile = vaetile.wan_decode_tile_size(width, height, 1, limit, wan)
+    else:
+        tile = vaetile.decode_tile_size(width, height, limit, info.get("vae_decoder_ch"))
     if tile and limit:
         say(f"Decoding in {tile} px tiles: this GPU runtime takes buffers of up to "
             f"{limit / 1024 ** 3:.1f} GB, too small to decode {width}x{height} in one piece "

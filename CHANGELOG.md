@@ -149,6 +149,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   says when it tiles. The log also no longer prints "Decoding: done" as the decode starts, and no
   longer repeats "Loading weights: done" for every block of weights streamed in during the first
   step.
+- **Videos and Qwen-Image images decode on the GPU with the Vulkan runtime.** The same buffer limit
+  put part of the decode of a video (Wan 2.1 at its default 832x480) and of a Qwen-Image or Anima
+  image at 1024x1024 on the CPU. localm now decodes them in tiles that fit the limit too, and
+  refuses a job that would not fit even in the smallest tile instead of running it on the CPU.
 - **The global `localm` command works from a Shared install and uninstalls cleanly.** On Linux and
   macOS setup made `~/.local/bin/localm` a symlink with a relative target that pointed nowhere,
   and uninstall left it behind; on Windows it added the relative entry `bin` to your user PATH.

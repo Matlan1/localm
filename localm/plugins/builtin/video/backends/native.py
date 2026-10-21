@@ -21,7 +21,7 @@ from typing import Callable, Optional
 from localm.media.sdcpp import budget as sd_budget
 from localm.media.sdcpp import families, pairing, sampling
 from localm.media.sdcpp import runtime as sd_runtime
-from localm.media.sdcpp import shared
+from localm.media.sdcpp import shared, vaetile
 from localm.media.sdcpp.logrelay import RecoveredWarnings
 from localm.media.sdcpp.files import ModelFileError as _ModelError
 from localm.media.sdcpp.files import display_name, registered_file, resolve_model_file
@@ -466,6 +466,23 @@ def _event_relay(say, on_preview=None, cancel_check=None) -> _EventRelay:
     return _EventRelay(say, on_preview, cancel_check)
 
 
+def _decode_tile(info: dict, width: int, height: int, frames: int,
+                 say: Callable[[str], None]) -> Optional[int]:
+    """The VAE decode tile size (``vaetile.wan_decode_tile_size``) for a
+    *width* x *height* clip of *frames* frames, from the load *info*'s
+    ``max_tensor_bytes``, ``version`` and ``wan_vae_conv``; says the tiling
+    through *say* when there is one. None decodes in one piece. Raises
+    ``vaetile.DecodeTooLarge`` when no tile fits the device."""
+    limit = info.get("max_tensor_bytes")
+    vae = vaetile.wan_vae(info.get("version") or "", info.get("wan_vae_conv"))
+    tile = vaetile.wan_decode_tile_size(width, height, frames, limit, vae)
+    if tile and limit:
+        say(f"Decoding in {tile} px tiles: this GPU runtime takes buffers of up to "
+            f"{limit / 1024 ** 3:.1f} GB, too small to decode {width}x{height} in one piece "
+            "on the GPU.")
+    return tile
+
+
 def generate(s: dict, prompt: str, out_path: Path, **kwargs) -> tuple[bool, str]:
     """Generate one clip of *prompt* into *out_path*; see ``_generate``.
     Never raises: an unexpected error becomes ``(False, message)``."""
@@ -591,6 +608,11 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
             if input_image and "-T2V-" in (info.get("desc") or ""):
                 return False, _start_image_refusal(models["label"])
             init = _load_init_image(Path(input_image), width, height) if input_image else None
+            try:
+                tile = _decode_tile(info, width, height, frames, say)
+            except vaetile.DecodeTooLarge as e:
+                return False, (f"This video cannot be decoded on the GPU: {e}. Lower the size "
+                               "or pick another GPU runtime in Settings > Video.")
             params = {
                 "prompt": prompt, "negative_prompt": negative,
                 "width": width, "height": height, "seed": int(seed),
@@ -601,6 +623,7 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
                 "init_image": init, "preview": on_preview is not None,
                 "loras": [{"path": x["path"], "multiplier": x["multiplier"]}
                           for x in lora_files],
+                "vae_tile_size": tile,
             }
             if negative_prompt and cfg_scale is not None and abs(float(cfg_scale) - 1.0) < 1e-5:
                 say("The negative prompt has no effect at CFG 1. Raise CFG to apply it.")
