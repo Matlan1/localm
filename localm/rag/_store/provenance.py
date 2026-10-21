@@ -57,8 +57,11 @@ def collection_provenance_report(candidate_model: Optional[str] = None) -> list:
                 mixed = bool(found[2].get("embedding_model_mixed")) if found else False
                 if _provenance_excludable(built_with, mixed, candidate_model):
                     continue
-                out.append({"name": name, "built_with": built_with,
-                            "n_chunks": peeked.get("n_chunks")})
+                row = {"name": name, "built_with": built_with,
+                       "n_chunks": peeked.get("n_chunks")}
+                if mixed:
+                    row["mixed"] = True
+                out.append(row)
                 continue
             coll = _st.Collection(name, cache=False)
             stats = coll.stats()
@@ -71,11 +74,32 @@ def collection_provenance_report(candidate_model: Optional[str] = None) -> list:
         if not stats.get("has_vectors"):
             continue
         built_with = coll.embedding_model()
-        if _provenance_excludable(built_with, coll.embedding_model_mixed(),
-                                   candidate_model):
+        mixed = coll.embedding_model_mixed()
+        if _provenance_excludable(built_with, mixed, candidate_model):
             continue
-        out.append({"name": name, "built_with": built_with,
-                    "n_chunks": stats["n_chunks"]})
+        row = {"name": name, "built_with": built_with, "n_chunks": stats["n_chunks"]}
+        if mixed:
+            row["mixed"] = True
+        out.append(row)
+    return out
+
+
+def lexical_only_collection_names() -> list:
+    """Names of the collections that hold chunks but no vectors, so they search
+    by BM25 alone until re-embedded. A collection that cannot be read is
+    logged and left out (``collection_provenance_report`` names it)."""
+    out: list = []
+    for name in _st.collection_names():
+        try:
+            stats = _st.Collection.peek_stats(name)
+            if stats is None:
+                stats = _st.Collection(name, cache=False).stats()
+        except Exception as e:
+            _log.warning("rag: %r could not be read for the lexical-only check (%s: %s)",
+                         name, type(e).__name__, e)
+            continue
+        if stats.get("n_chunks") and not stats.get("has_vectors"):
+            out.append(name)
     return out
 
 
@@ -93,12 +117,17 @@ def collection_provenance_note(model: str, affected: list, *,
     indistinguishable from "nothing has embeddings" - which is not what is
     known in this case, only that nothing is CHANGING."""
     if affected:
-        return (
+        note = (
             f"Switching to '{model}' may invalidate the semantic search of "
             f"{len(affected)} existing collection(s) until they are "
             "re-embedded. The exact impact cannot be confirmed until the "
             "new model is loaded and tested - re-embed after switching if "
             "any of them drop to BM25/lexical-only.")
+        if any(c.get("mixed") for c in affected):
+            note += (" A collection marked mixed holds vectors from more than "
+                     "one embedding model, so it is listed even when one of "
+                     "those models is the one you are switching to.")
+        return note
     if unchanged:
         return (f"'{model}' is already the active embedding model, so there "
                 "is nothing to invalidate.")

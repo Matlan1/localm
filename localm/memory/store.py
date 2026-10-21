@@ -922,8 +922,13 @@ class MemoryStore:
         is_episode = [r.kind == "episodic" and r.source not in TRUSTED_SOURCES
                       for r in self._records]
         generic = generic_tokens([t for t, e in zip(rec_tokens, is_episode, strict=True) if e])
+        # A word present in many of the store's records says nothing about which one
+        # a query means, so it alone does not make a fact eligible - unless the
+        # query has no other content word.
+        frequent = generic_tokens(rec_tokens)
+        fact_tokens = (q_tokens - frequent) or q_tokens
         lex_hits = [lexical_match(q_tokens, rec_tokens[i], generic) if is_episode[i]
-                    else bool(q_tokens & rec_tokens[i])
+                    else bool(fact_tokens & rec_tokens[i])
                     for i in range(len(self._records))]
         sem_hits = [cos is not None and cos[i] >= REL_COS_MIN
                     for i in range(len(self._records))]

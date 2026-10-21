@@ -132,6 +132,22 @@ test("/web with no query reports its usage", async () => {
   assert.equal(toastText(window), "Usage: /web <query>");
 });
 
+test("/web with no model loaded refuses before the search and adds no turn", async () => {
+  const calls = [];
+  const fetchImpl = async (url) => {
+    calls.push(String(url));
+    return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+  };
+  const { window } = loadApp({ fetchImpl });
+  runScript(window, "modelCache.active = ''; modelCache.resumable = '';");
+  await window.runWebInChat("price of bitcoin");
+  assert.match(toastText(window), /No model loaded/);
+  assert.equal(calls.filter((u) => u.includes("/api/web/")).length, 0,
+    "the search must not run when the answer cannot be generated");
+  const conv = window.currentConv();
+  assert.equal(conv ? conv.messages.length : 0, 0, "no user turn or search event was added");
+});
+
 test("/rename with no title reports its usage", () => {
   const { window } = loadApp();
   window.execChatCommand("rename", "");

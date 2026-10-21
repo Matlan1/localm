@@ -320,7 +320,9 @@ class _PersistenceMixin:
                 child_ok = result.get("ok")
                 if child_ok is None:
                     child_ok = getattr(child, "last_run_ok", True) if child else True
-                if state != "done":
+                if state == "failed" and not st.get("error"):
+                    status = "error"
+                elif state != "done":
                     status = state
                 else:
                     status = "ok" if child_ok else "error"

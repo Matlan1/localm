@@ -119,11 +119,11 @@ def _weights(unit: Path, paths: dict[str, str], data_folder: Path) -> tuple[Opti
             return None, "the weights file is missing (model.gguf)"
     if candidate.suffix.lower() != ".gguf":
         return None, f"{candidate.name} is not a GGUF file"
-    if not _has_gguf_magic(candidate):
-        return None, f"{candidate.name} is not a complete GGUF file"
     unusable = gguf_unusable_reason(candidate)
     if unusable is not None:
         return None, unusable
+    if not _has_gguf_magic(candidate):
+        return None, f"{candidate.name} is not a complete GGUF file"
     return candidate, ""
 
 

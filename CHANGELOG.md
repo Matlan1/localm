@@ -126,6 +126,44 @@ permanent public record of what shipped and are never rewritten; the in-progress
   next request fits in it.
 
 ### Fixed
+- **A scheduled job with no model set no longer picks a speech-to-text model.** The job took the first registered chat model by name, so a Qwen3-ASR or Whisper model could answer a job that named no model; those models now come last, behind every other chat model.
+- **`localm config pinned_models '["a"]'` pins `a`.** A JSON list typed on the command line was
+  stored as one model name with the brackets and quotes in it, so nothing was pinned. A list
+  setting given as JSON text is now read as that list.
+- **`localm coder --output-format json` prints only the JSON on stdout.** A warning about an
+  unreadable skill, a plugin tool or an MCP server printed ahead of the document; startup
+  warnings go to stderr.
+- **The coder counts the lines of a file the way `wc -l` does.** A file of 1000 lines was
+  reported as 1001 in `read_file`'s header and cut-off notice, and in `write_file`'s "(N lines)".
+- **A background sub-agent that ran out of turns is listed as failed.** The session's job list
+  showed it as done while the report to the model said it did not complete.
+- **The prompt token count follows how fetched text is read.** A request that marks part of its
+  text as untrusted reported the count of a prompt in which that text's control tokens were
+  parsed, which is not how it is read.
+- **A scheduled job does not run a web search written inside a thought that never closes.** The
+  chat already ignored it; a reply cut off mid-thought no longer triggers a lookup.
+- **Listing the coder's sessions no longer stalls the server.** Closing a session that had been
+  idle for a day (its browser, its checkpoint) ran inside the request and froze every other
+  request until it finished.
+- **The browser names a blocked popup by its address.** A window a page opened to an address that
+  did not answer was listed as blocked under an internal error page's address instead of its own.
+- **Pulling a whole Hugging Face folder works again.** `localm pull <owner>/<repo>` for a full model folder failed when the download finished, with "'MeterBar' object has no attribute 'set_description_str'", under the huggingface-hub release localm now installs.
+- **Memory consolidation no longer stalls the chat you are typing into.** The automatic and scheduled memory passes asked a reasoning model to think through each decision, and on a model that answers one request at a time a chat message sent meanwhile waited behind it (over three minutes in one report). Those calls now run with thinking off and a reply limit, and stop as soon as a chat message is waiting, picking up again shortly after.
+- **A ComfyUI that hangs on its port is named at once.** After a GPU crash a ComfyUI that localm did not launch can keep its port and stop answering. `localm comfy restart` and any generation that needs ComfyUI now say right away which process holds the port (its pid and name) and that localm will not stop it, instead of relaunching into the held port and waiting five minutes; `localm comfy status` shows the same line.
+- **Closing the connection during image generation stops the job.** A client that went away from `/v1/images/generations` while the job was reporting progress did not cancel it, because the check only ran while the job was silent. The job is now cancelled within a second of the disconnect.
+- **Closing the connection during text-to-speech stops the job.** A client that went away while `/v1/audio/speech` was synthesising did not cancel the job, because the check only ran while the job was silent. The job is now cancelled within a second of the disconnect.
+- **`localm update` exits non-zero when it fails.** A refused update (bad signature, unreadable trust file, failed apply), a failed update check and a failed `--rollback` printed their message and exited 0, so a script could not tell the update had not happened.
+- **`localm doctor` no longer tells you to reinstall the voice extra after a slow first run.** When the recording-decode check does not finish in 60 seconds (common right after an install) doctor says it could not tell and to run it again; the reinstall advice stays for a real decode failure.
+- **A model worker that was killed is reported as terminated.** The Windows exit code -1 was printed unsigned as `worker exit 4294967295`; it now reads `-1 (the process was terminated)`.
+- **`localm run` no longer prints a traceback when the model process dies mid-reply, and records the failed turn.** The console gets one line (the traceback is in the debug log), and the session log and transcript keep the failed turn with its error and a `finish_reason` of `error`, as the server does.
+- **A tiny model no longer answers "I." to plain questions.** The chat plugin's reminder to say "I" instead of "the model" is reworded as a style note after an instruction to answer every question fully.
+- **A damaged download that is already on disk is replaced, not kept.** Pulling a Hugging Face
+  repo again now re-checks every weight file against the digest the hub publishes and fetches a
+  damaged one again (it used to say "Already downloaded"); a damaged vision projector of the same
+  repo is replaced instead of being left beside a second copy; a cached Whisper `model.bin` that
+  no longer matches its pinned digest is deleted and refused at load; and `localm
+  setup-embeddings` (and the Knowledge page's embedding setup) fetches the embedding model again
+  when the file on disk does not match its pinned digest.
 - **Privacy mode leaves no crash exit file.** After a hard crash on Windows the crash watchdog wrote a `server-crash-exit` file in the data folder even in privacy mode, and nothing removed it. It is no longer written when the run started in privacy mode, and the next start deletes any left over.
 - **The launcher writes no error log in privacy mode.** `logs/launcher.log`, which holds error lines that can name your model paths, is now written only when the privacy mode is not `privacy` or "Keep diagnostics for bug reports" is ticked.
 - **A rejected grammar's text stays out of the debug log in privacy mode.** When a malformed grammar was only found while the reply was generated, the native parser's error and the grammar source reached the debug log and the recent-activity view of a bug report; both now stay clear of it unless chat content is allowed in the debug log.
@@ -272,6 +310,102 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **"continue" carries on with the previous reply.** "continue", "weiter", "continúa" and the same
   word in other languages continue the last reply instead of searching the selected Knowledge
   collection for the word.
+- **The MCP server answers a line it cannot parse.** Malformed JSON, a number or id with more than
+  4300 digits and JSON nested thousands deep used to get no reply, so a client waited forever. They
+  now get a JSON-RPC parse error (-32700) and the server keeps serving.
+- **`/v1/models` lists whether each model sees images or hears audio.** The list entries carry the
+  same `vision` and `audio_input` fields as `/v1/models/{id}`.
+- **The audio transcription error no longer tells you to install Whisper when it is installed.**
+  Asking an audio model for `srt`, `vtt` or `verbose_json` now says to send model `whisper-1` when
+  faster-whisper is present.
+- **`localm setup-embeddings --model` refuses a reranker.** A registered reranker or a reranker
+  GGUF path is rejected before anything is saved, and the re-embed reminder still appears when your
+  collections have no vectors yet. A collection holding vectors from more than one embedding model
+  is marked as mixed in the switch warning.
+- **Qwen3 sequence-classification rerankers score the prompt they were trained on.** A Hugging
+  Face Qwen3 reranker folder now gets the instruction, query and document template its model card
+  specifies instead of a plain sentence pair, which separates relevant from irrelevant passages
+  much more clearly.
+- **A refused `localm rag add` leaves no empty collection behind.** Pointing a new collection at a
+  credential folder or a UNC path removes the collection that the failed add had created.
+- **A model folder named like the built-in embedding model no longer replaces it.** `/v1/embeddings`
+  for `bge-small-en-v1.5` is answered by the pinned embedding model, and the log says when a
+  registered folder with that name is being passed over.
+- **Memory recall ignores a word that most facts contain.** A query such as "what database does
+  Project Atlas use" no longer brings back every fact that says "use" behind the one that matches.
+- **`localm spec-drafts` leaves out a model file cut short**, and the load response and the
+  model-switch toast for a model with experts in system RAM say how much of that RAM each
+  generated token reads.
+- **Saving a token in Settings and opening a Knowledge collection no longer stall the server.**
+  The credential write of a config save and the collection open of add, upload, re-embed, repair
+  and remove-document run off the event loop. A numpy failure while scoring a collection is now
+  logged instead of silently slowing every query.
+- **A conversation deleted while the list loads is no longer reported as unreadable.**
+- **The same speech seed gives the same audio.** `localm speak --seed N` and the `seed` field of
+  `/v1/audio/speech` gave a different recording on every run on a GPU. The speech model's
+  projector now draws each code from a fixed order of candidates, so the same seed gives
+  identical audio from run to run on the GPU too, at full GPU speed. A seed noted with 0.3.0
+  can give different audio than it did there.
+- **A FLUX LoRA from XLabs is a LoRA.** It is no longer offered as a FLUX model in the Images
+  model picker; it is listed with the other LoRAs.
+- **A plugin install that is interrupted can be repeated.** A `localm plugin install` that dies
+  mid-copy no longer leaves a half-copied plugin folder that the next install answers with
+  "already installed"; the copy is built next to the plugin folder and moved into place once it
+  is complete, and a folder without a manifest left by an older interrupted install is replaced.
+- **`localm pull` no longer replaces a model you registered in place.** A pull whose name is
+  already registered to a file kept outside the models folder (`localm add` without copying)
+  stops and says so instead of replacing the registration; pick another name with `--name`.
+- **Importing an A1111 image fills Clip skip and says what it left out.** The Images page's
+  Import parameters takes the Clip skip value from a Stable Diffusion WebUI image and reports
+  Hires fix settings as not applied instead of dropping them silently.
+- **Cancelling an image or video job no longer prints the engine's raw failure lines.** The
+  "sampling failed" lines the stable-diffusion.cpp engine logs while it stops are kept in the
+  debug log. A second out-of-memory retry while decoding says "Still not enough VRAM" instead of
+  repeating the first message.
+- **`localm image`, `video` and `music` no longer ask "Open it now?" when input is `NUL`.** On
+  Windows the null device passed for a terminal.
+- **The message for a refused ComfyUI address no longer ends with an internal tag.**
+- **A model localm will not load is reported as a refusal, with the real reason.** An
+  unsupported format, a model that is not a chat model (an ACE-Step component, a vision
+  projector), a draft head or a damaged file now print the reason and exit 1 instead of "Sorry -
+  localm hit an unexpected error". A GGUF that llama.cpp cannot read (for example one with an
+  invalid alignment) is named as a damaged file instead of blaming the runtime, and a runtime
+  ABI mismatch is reported as a runtime problem with `localm setup-llama --force`. A GGUF in an
+  Ollama store, a llamafile or a Jan folder that is refused for its version says so instead of
+  "not a GGUF file", a truncated llamafile is named as one, and `localm list` shows a lone
+  `.safetensors` file as `safetensors`. A huge number in a model's config is shortened in the
+  load error, and a model that fails to load prints one error line on the console instead of a
+  Python traceback (the trace goes to the debug log).
+- **Setup recommends the right backend on Linux ARM64 with an older NVIDIA GPU.** Only
+  Blackwell-class GPUs have an ARM64 CUDA build, so a Jetson Orin or GH200 is now recommended
+  Vulkan instead of CUDA that then installs Vulkan anyway. A refused uv download no longer
+  leaves an uninstall note that setup stopped while creating uv.
+- **`localm key list` on an unreadable `auth.json` says so.** It no longer prints "No named
+  keys" for a keystore it could not read, and exits non-zero.
+- **A settings save that cannot get the lock answers "busy".** When another localm process holds
+  the settings file, the save returns 503 with a short message and nothing is saved, instead of a
+  500 and a traceback in the console.
+- **`localm doctor` tells a broken torch from a missing one.** A torch that is installed but
+  raises on import is reported as such, and the Hugging Face worker check still runs.
+- **`/web` with no model loaded says so before it searches.** It used to run the search and then
+  show a raw "Model parameter is required" error; it now gives the same "No model loaded" answer
+  as a plain send, and a send made while a model is still loading says which model is loading.
+- **A page reloaded while a model is loading follows the load.** The sidebar shows "loading
+  <model>" and checks again every 2 seconds, instead of showing "No model loaded" and refusing
+  sends for up to 30 seconds.
+- **A plugin installed with `localm plugin install` while the GUI is running works at once.**
+  Its routes are mounted the next time the page reads the plugin list, so `/web` no longer
+  answers "Method Not Allowed" until a restart.
+- **A plugin's tab opens right after you install it.** The tab entry used to appear before the
+  plugin's page was loaded, and clicking it showed Chat until a reload.
+- **`localm key create` warns when no owner key is set.** The new key turns authentication on, so
+  the GUI asks for a key and the scoped key is the only one that exists; the note says to run
+  `localm key generate` first.
+- **`localm serve` and `localm gui` no longer start with a speech-to-text model.** With no model
+  named, a registered model whose name or file name has a standalone `asr`, `whisper` or `stt`
+  word (Qwen3-ASR) is picked only when no other model is eligible.
+- **The usage line explains why MTP is off on a turn with audio.** It used to show the raw reason
+  word.
 
 ### Changed
 

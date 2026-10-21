@@ -7,7 +7,7 @@ import { addMessageRow, chat, chatBusy, currentConv, newConversation, newToolEve
 import { activeSession, exportCoderSession, openFilesModal, switchActiveSessionModel } from "./coder.js";
 import { $, authHeaders, autoGrow, el, jobStatusWord, nearBottom, openModal, streamJob, toast } from "./helpers.js";
 import { t } from "./i18n.js";
-import { GROUNDING_PAGE_BACKED, applyPersona, exportConversation, openMemoryModal, personaCache, pluginSuggestion, rememberFact, requestWebTool, runCompletion } from "./settings-perf.js";
+import { GROUNDING_PAGE_BACKED, applyPersona, exportConversation, openMemoryModal, personaCache, pluginSuggestion, refuseWithoutModel, rememberFact, requestWebTool, runCompletion } from "./settings-perf.js";
 
 /* ================================================================ */
 /*  Slash commands                                                   */
@@ -95,6 +95,7 @@ export async function runImagineInChat(promptText) {
 export async function runWebInChat(query) {
   if (!query) { toast(t("slash.usage.web"), true); return; }
   if (chatBusy()) { toast(t("chat.waitForReply"), true); return; }
+  if (refuseWithoutModel()) return;
   if (!currentConv()) newConversation();
   const conv = currentConv();
   conv.messages.push({ role: "user", content: "/web " + query });

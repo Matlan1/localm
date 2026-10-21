@@ -169,6 +169,25 @@ class TestNamedKeys:
         assert r.exit_code == 0
         assert "no named keys" in r.output.lower()
 
+    @pytest.mark.parametrize("content", ['{"oops": 1}', "not json at all", '"text"'])
+    def test_list_of_an_unreadable_keystore_is_not_reported_as_empty(self, runner, content):
+        auth.keystore_file().parent.mkdir(parents=True, exist_ok=True)
+        auth.keystore_file().write_text(content, encoding="utf-8")
+        r = runner.invoke(main, ["key", "list"])
+        assert r.exit_code != 0
+        assert "no named keys" not in r.output.lower()
+        assert "could not be read" in " ".join(r.output.split())
+        assert auth.keystore_file().read_text(encoding="utf-8") == content
+
+    def test_a_valid_backup_does_not_hide_an_unreadable_keystore(self, runner):
+        auth.keystore_file().parent.mkdir(parents=True, exist_ok=True)
+        auth.keystore_file().write_text("not json at all", encoding="utf-8")
+        auth.keystore_file().with_name(auth.keystore_file().name + ".bak").write_text(
+            "[]", encoding="utf-8")
+        r = runner.invoke(main, ["key", "list"])
+        assert r.exit_code != 0
+        assert "no named keys" not in r.output.lower()
+
     def test_create_scoped_key_shown_once(self, runner):
         r = runner.invoke(main, ["key", "create", "dashboard",
                                  "--scope", "models:read"])
@@ -178,6 +197,19 @@ class TestNamedKeys:
         assert keys[0]["scopes"] == ["models:read"]
         secret = _SECRET_RE.findall(r.output)
         assert secret, "the new key must be printed once"
+
+    def test_create_without_an_owner_key_says_auth_is_now_on(self, runner):
+        r = runner.invoke(main, ["key", "create", "dashboard", "--scope", "models:read"])
+        assert r.exit_code == 0
+        assert auth.get_api_key() is None
+        assert "no owner key is set" in r.output
+        assert "localm key generate" in r.output
+
+    def test_create_with_an_owner_key_prints_no_owner_key_note(self, runner):
+        runner.invoke(main, ["key", "generate"])
+        r = runner.invoke(main, ["key", "create", "dashboard", "--scope", "models:read"])
+        assert r.exit_code == 0
+        assert "no owner key is set" not in r.output
 
     def test_create_with_rag_roots_round_trips_and_lists(self, runner):
         # --rag-root is repeatable, following the exact CLI shape as --fs-access:

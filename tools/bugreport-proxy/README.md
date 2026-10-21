@@ -87,7 +87,31 @@ cannot do safely. (Free Worker tier is far more than enough for 1-2 testers.)
 - Set `SHARED_SECRET` so random scanners that find the URL cannot file issues.
 - Add a Cloudflare **Rate limiting rule** (dashboard -> your Worker -> Security ->
   Rate limiting) capping requests per IP if you want a hard ceiling.
-- Issues are created by the token's identity; you can label/triage/close as usual.
+- Issues are created by the token's identity (with the GitHub App below, the app's
+  bot account); you can label/triage/close as usual.
+
+## Filing issues as a bot (GitHub App)
+
+With a personal access token, every proxy-filed issue shows your account as its
+author. With a GitHub App, it shows the app's bot account instead
+(`<app-name>[bot]`), and the Worker uses short-lived installation tokens.
+
+1. Create the app (GitHub -> Settings -> Developer settings -> GitHub Apps -> New
+   GitHub App): any name and homepage URL, **Webhook -> Active off**, Repository
+   permissions **Issues: Read and write** (nothing else), "Only on this account".
+2. On the app's page, note the **App ID**, then **Generate a private key** (a
+   `.pem` file downloads).
+3. **Install App** -> only the target repository. The installation id is the
+   number at the end of the installation's settings URL
+   (`.../settings/installations/<id>`).
+4. Set three Worker secrets (dashboard -> the Worker -> Settings -> Variables and
+   Secrets, type Secret; or `wrangler secret put`):
+   `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, and `GITHUB_APP_PRIVATE_KEY`
+   (the whole `.pem` file content).
+
+With all three set, the issue routes use the app; a failed app token request
+returns 502 and never falls back to `GITHUB_TOKEN`. Setting only some of the three
+is refused as a misconfiguration. Once the app works, `GITHUB_TOKEN` can be deleted.
 
 ## Protocol
 

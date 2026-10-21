@@ -31,6 +31,9 @@ TARGET_REPO = "Matlan1/localm"
 
 # Secrets are NOT stored in this file. Set them once with wrangler (encrypted):
 #   wrangler secret put GITHUB_TOKEN          # PAT: Issues = Read and write (report + issues list)
+# Or, to file issues as a GitHub App's bot account instead of GITHUB_TOKEN's owner,
+# set all three of GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID and GITHUB_APP_PRIVATE_KEY
+# (see README.md, "Filing issues as a bot").
 #   wrangler secret put SHARED_SECRET         # required for the update routes (gate)
 #   wrangler secret put UPDATE_GITHUB_TOKEN   # SEPARATE PAT: Contents = Read only (releases/builds)
 # The issue token cannot read code; the update token cannot write. SHARED_SECRET is

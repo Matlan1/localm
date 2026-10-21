@@ -236,9 +236,41 @@ def _verify_pinned_model(name: str, cache_root) -> Optional[str]:
     actual = _sha256_of(model_bin)
     if actual == pin[1]:
         return None
-    shutil.rmtree(repo_dir, ignore_errors=True)
+    leftover = _discard_snapshot(repo_dir, pin[0])
+    outcome = ("the downloaded files were deleted." if not leftover else
+               "they could not all be deleted (in use?): " + ", ".join(leftover))
     return (f"Whisper model '{name}' failed its integrity check (sha256 {actual[:16]}..., "
-            f"expected {pin[1][:16]}...); the downloaded files were deleted.")
+            f"expected {pin[1][:16]}...); {outcome}")
+
+
+def _discard_snapshot(repo_dir: Path, commit: str) -> list[str]:
+    """Delete the snapshot *commit* of the hub cache folder *repo_dir*, and the
+    file it holds model.bin in. The whole folder goes when no other snapshot is
+    in it; otherwise the other snapshots stay and the folder's default reference
+    is pointed at the newest of them when it named *commit*. Returns what could
+    not be deleted."""
+    snapshots = repo_dir / "snapshots"
+    others = sorted((d for d in snapshots.iterdir() if d.is_dir() and d.name != commit),
+                    key=lambda d: d.stat().st_mtime) if snapshots.is_dir() else []
+    if not others:
+        shutil.rmtree(repo_dir, ignore_errors=True)
+        return [str(repo_dir)] if repo_dir.exists() else []
+    target = snapshots / commit
+    blob = (target / "model.bin").resolve()
+    shutil.rmtree(target, ignore_errors=True)
+    leftover = [str(target)] if target.exists() else []
+    if blob.is_file() and repo_dir.resolve() in blob.parents:
+        try:
+            blob.unlink()
+        except OSError:
+            leftover.append(str(blob))
+    ref = repo_dir / "refs" / "main"
+    try:
+        if ref.is_file() and ref.read_text(encoding="utf-8").strip() == commit:
+            ref.write_text(others[-1].name, encoding="utf-8")
+    except OSError:
+        leftover.append(str(ref))
+    return leftover
 
 
 def stt_model_cached() -> tuple[bool, str]:
@@ -400,7 +432,9 @@ def _load_whisper(model_cls: Callable[..., Any], name: str, download_root, local
     WhisperModel). A pinned model that has to be downloaded is fetched at its
     pinned commit and its model.bin is checked before it is loaded; a failed
     check raises. A cached model loads offline, from the pinned snapshot when it
-    is there and from the cache's default snapshot otherwise."""
+    is there (its model.bin is checked first and a failed check raises) and from
+    the cache's default snapshot otherwise (not checked: no digest is known for
+    it)."""
     revision = _stt_revision(name, download_root, local_files_only)
     if revision is not None and not local_files_only:
         path = fetch(name, download_root, revision)
@@ -408,6 +442,10 @@ def _load_whisper(model_cls: Callable[..., Any], name: str, download_root, local
         if integrity is not None:
             raise RuntimeError(integrity)
         return model_cls(path, device="cpu", compute_type="int8")
+    if revision is not None:
+        integrity = _verify_pinned_model(name, download_root)
+        if integrity is not None:
+            raise RuntimeError(integrity)
     extra = {"revision": revision} if revision else {}
     return model_cls(name, device="cpu", compute_type="int8",
                      download_root=download_root, local_files_only=local_files_only, **extra)
@@ -522,9 +560,10 @@ def decode_self_test(timeout: float = 60.0) -> tuple[str, str]:
     process so a native fault cannot take the caller down.
 
     Returns ``(state, detail)``: ``("absent", ...)`` when the voice extra is not
-    installed, ``("ok", "PyAV x, faster-whisper y")`` when decoding works, or
-    ``("fail", reason)`` naming the exception, a timeout, or the child's exit
-    code."""
+    installed, ``("ok", "PyAV x, faster-whisper y")`` when decoding works,
+    ``("timeout", reason)`` when the child did not finish in ``timeout`` seconds
+    (decoding was not proven broken, only not proven to work), or
+    ``("fail", reason)`` naming the exception or the child's exit code."""
     import importlib.metadata as md
     import subprocess
 
@@ -537,7 +576,7 @@ def decode_self_test(timeout: float = 60.0) -> tuple[str, str]:
         proc = subprocess.run([interpreter_for_localm_children(), "-c", code],
                               capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
-        return "fail", f"decoding a short recording did not finish within {timeout:g}s"
+        return "timeout", f"decoding a short recording did not finish within {timeout:g}s"
     except OSError as e:
         return "fail", f"could not start the decoder check: {e}"
     out = (proc.stdout or "").strip().splitlines()

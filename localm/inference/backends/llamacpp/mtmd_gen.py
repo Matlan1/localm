@@ -92,6 +92,21 @@ _LANGUAGE_NAME_RE = re.compile(r"^[a-z][a-z_]{1,31}$")
 _UINT32_MAX = 0xFFFFFFFF
 _WAV_HEADER_BYTES = 44
 
+# The largest float32 below 1.0. A top_p below 1.0 makes the projector sort its
+# top-k candidates before its random draw. See
+# test_the_projector_top_p_makes_it_sort_its_candidates.
+_PROJECTOR_TOP_P_CAP = 1.0 - 2.0 ** -24
+
+
+def projector_top_p(top_p: float) -> float:
+    """The top_p handed to the projector's code sampler for a model whose
+    top_p is *top_p*: *top_p* itself when, as a float32, it is above 0 and
+    below the largest float32 below 1.0, else that largest float32, which
+    keeps practically every candidate."""
+    if 0.0 < ctypes.c_float(top_p).value < _PROJECTOR_TOP_P_CAP:
+        return float(top_p)
+    return _PROJECTOR_TOP_P_CAP
+
 
 class SpeechUnavailable(RuntimeError):
     """The runtime or the model files cannot synthesize speech: an mtmd build
@@ -635,7 +650,8 @@ class SpeechSynthesizer:
             raw = text.encode("utf-8")
             sp = self._sampling
             inp = _HelperInput(0, raw, len(raw), bitmap,
-                               (lang or "").encode("ascii"), sp.top_k, sp.top_p,
+                               (lang or "").encode("ascii"), sp.top_k,
+                               projector_top_p(sp.top_p),
                                seed, _OUTTYPE_WAV)
             if m.mtmd_helper_gen_audio_set_input(helper, ctypes.byref(inp)) != 0:
                 raise SpeechStageFailed("the speech prompt could not be prepared")

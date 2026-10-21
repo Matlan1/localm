@@ -310,9 +310,8 @@ def _default_chat_model() -> Optional[str]:
     name = cfg.get("default_model") or cfg.get("model")
     if name:
         return name
-    from localm.model_manager import is_auto_chat_eligible
-    reg = load_registry()
-    return next((n for n in sorted(reg) if is_auto_chat_eligible(reg[n])), None)
+    from localm.model_manager import auto_chat_candidates
+    return next(iter(auto_chat_candidates(load_registry())), None)
 
 
 def _headless_routed_model(job: Job) -> Optional[str]:
@@ -396,11 +395,10 @@ def _load_engine(model: Optional[str]) -> tuple[Optional[object], bool]:
         cfg = load_config()
         name = cfg.get("default_model") or cfg.get("model")
     if not name:
-        from localm.model_manager import is_auto_chat_eligible
-        reg = load_registry()
+        from localm.model_manager import auto_chat_candidates
         # Auto-pick the first chat-eligible model; skip a type='unknown' model. It
         # stays runnable when a job explicitly configures default_model/model above.
-        name = next((n for n in sorted(reg) if is_auto_chat_eligible(reg[n])), None)
+        name = next(iter(auto_chat_candidates(load_registry())), None)
     if not name:
         return None, False
     info = get_model_info(name)
@@ -437,6 +435,8 @@ def _run_memory(job: Job, *, engine=None) -> str:
         raise RuntimeError(
             "no inference engine available (pass one, or register a model)")
 
+    from localm.inference.background_generation import (
+        BackgroundYield, background_complete)
     from localm.textnorm import strip_think
 
     # Track when a reply was ALL reasoning (empty after the strip), so the no-facts
@@ -444,8 +444,7 @@ def _run_memory(job: Job, *, engine=None) -> str:
     state = {"empty_replies": 0}
 
     def complete(prompt: str) -> str:
-        raw = "".join(
-            eng.chat_stream([{"role": "user", "content": prompt}])).strip()
+        raw = background_complete(eng, prompt, yield_to_foreground=True).strip()
         # strip_think: memory must never ingest the reasoning channel.
         text = strip_think(raw).strip()
         if raw and not text:
@@ -456,8 +455,12 @@ def _run_memory(job: Job, *, engine=None) -> str:
     # (synthesize_memory can call complete() several times), so idle-unload cannot
     # unload it mid-run.
     from localm.inference.http_server import driving_engine
-    with driving_engine(eng):
-        result = synthesize_memory(complete)
+    try:
+        with driving_engine(eng):
+            result = synthesize_memory(complete)
+    except BackgroundYield:
+        return ("memory synthesis stopped: a chat request was waiting for the model. "
+                "It will run again at the next scheduled time.")
     if result.get("status") == "skipped":
         return f"memory synthesis skipped ({result.get('reason')})"
     if result.get("status") == "error":

@@ -345,6 +345,13 @@ class TestResponseFormats:
         r = _post(client, data={"response_format": "srt"})
         assert r.status_code == 200
 
+    def test_the_hint_offers_the_install_only_when_whisper_is_missing(self, client, state):
+        missing = _post(client, data={"response_format": "srt"}).json()["detail"]
+        assert "install faster-whisper" in missing and "whisper-1" in missing
+        state.whisper = True
+        installed = _post(client, data={"model": MODEL, "response_format": "srt"}).json()["detail"]
+        assert "install" not in installed and "send model 'whisper-1'" in installed
+
 
 class TestFailures:
     def test_a_model_without_an_audio_encoder_is_400_with_guidance(self, client, state):

@@ -13,8 +13,26 @@ from ._core import console, main
 _OK_SYM   = "[green]✓[/green]"
 _WARN_SYM = "[yellow]![/yellow]"
 _FAIL_SYM = "[red]✗[/red]"
+
 # Neutral info marker for discovery hints that are NOT pass/fail checks.
 _HINT_SYM = "[cyan]i[/cyan]"
+
+# Stands in for a package's module in _check_packages' result when the package
+# is installed but its import raised: it counts as present for the HF-backend
+# worker check, which reports what is wrong with it.
+_UNIMPORTABLE = object()
+
+
+def _import_error_says_absent(name: str, exc: ImportError) -> bool:
+    """True when *exc* says the package *name* itself is not installed, not that
+    something it needs is missing or broken."""
+    return isinstance(exc, ModuleNotFoundError) and exc.name == name
+
+
+def _import_failure_text(exc: BaseException) -> str:
+    """*exc* as one bounded line."""
+    return " ".join(f"{type(exc).__name__}: {exc}".split())[:200]
+
 
 _SYM_FOR = {diagnostics.OK: _OK_SYM,
             diagnostics.WARN: _WARN_SYM,
@@ -234,8 +252,12 @@ def _check_vram_torch() -> bool:
                 torch_gpu_found = True
         else:
             console.print(f"  {_WARN_SYM}  torch available but torch.cuda.is_available() = False")
-    except ImportError:
-        console.print(f"  {_WARN_SYM}  torch not installed - GPU VRAM check skipped")
+    except ImportError as e:
+        if _import_error_says_absent("torch", e):
+            console.print(f"  {_WARN_SYM}  torch not installed - GPU VRAM check skipped")
+        else:
+            console.print(f"  {_WARN_SYM}  torch is installed but cannot be imported "
+                          f"({escape(_import_failure_text(e))}) - GPU VRAM check skipped")
     except Exception as e:
         from localm.debuglog import logger as _dbg
         _dbg.debug("doctor: torch GPU/VRAM probe failed with %s (not a plain "
@@ -579,10 +601,15 @@ def _check_packages() -> dict:
             # `ver` comes from a third-party package's distribution metadata
             # or __version__ attribute, so it is escaped.
             ver_str = f" {escape(ver)}" if ver else ""
-        except ImportError:
-            modules[mod] = None
+        except ImportError as e:
             sym     = _WARN_SYM if (mod, label) in optional_pkgs else _FAIL_SYM
-            ver_str = " - not installed"
+            if _import_error_says_absent(mod, e):
+                modules[mod] = None
+                ver_str = " - not installed"
+            else:
+                modules[mod] = _UNIMPORTABLE
+                ver_str = (" - installed but cannot be imported "
+                           f"({escape(_import_failure_text(e))})")
         except Exception as e:
             # ONLY torch has the DLL-identity conflict above; any other
             # package raising something other than ImportError is re-raised
@@ -655,6 +682,13 @@ def _check_voice_decode() -> None:
         return
     if state == "ok":
         console.print(f"  {_OK_SYM}  voice: recordings decode ({escape(detail)})")
+        return
+    if state == "timeout":
+        console.print(f"  {_WARN_SYM}  voice: could not tell whether recordings decode: "
+                      f"{escape(detail)}")
+        console.print("       [dim]The first run after an install can be slow. Run "
+                      "[bold]localm doctor[/bold] again; reinstall the voice extra only "
+                      "if it reports a failure.[/dim]")
         return
     console.print(f"  {_WARN_SYM}  voice: decoding a recording fails: {escape(detail)}")
     fix = escape('pip install --upgrade --force-reinstall "localm[voice]"')

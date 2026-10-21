@@ -1611,6 +1611,12 @@ class ConfigUnreadable(RuntimeError):
     which share this same refuse-on-unreadable contract."""
 
 
+class ConfigLockTimeout(TimeoutError):
+    """Another localm process held a store file's cross-process lock for the
+    whole wait budget, so the write was not made. Nothing was written; trying
+    again later is safe. Raised by ``_cross_process_lock``."""
+
+
 def _read_json(path: Path, default):
     """Read JSON from *path*, falling back to its .bak then *default* on any
     corruption - a damaged file must never take the whole app down."""
@@ -2036,7 +2042,7 @@ def _cross_process_lock(target: Path, *, timeout: Optional[float] = None):
                       "have crashed without releasing it.", file=sys.stderr)
                 continue
             if time.time() >= deadline:
-                raise TimeoutError(
+                raise ConfigLockTimeout(
                     f"timed out after {budget:g}s waiting for "
                     f"{lockpath.name}, held by another localm process") from None
             _cross_lock_backoff(attempt)

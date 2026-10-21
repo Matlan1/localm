@@ -93,6 +93,27 @@ def is_auto_chat_eligible(entry: dict) -> bool:
             and not is_gguf_adapter_entry(entry))
 
 
+_TRANSCRIPTION_NAME_RE = re.compile(r"(?<![a-z0-9])(?:asr|whisper|stt)(?![a-z0-9])", re.IGNORECASE)
+
+
+def is_transcription_model(name: str, entry: dict) -> bool:
+    """True when the registered *name*, or the file name of *entry*'s path, has
+    a standalone ``asr``, ``whisper`` or ``stt`` word in it (``Qwen3-ASR-0.6B``,
+    ``whisper-small``): a speech-to-text model that is registered as an
+    ``llm`` because it loads through the chat path, not one to answer chat."""
+    path = entry.get("path") if isinstance(entry, dict) else None
+    stem = Path(path).stem if isinstance(path, str) and path else ""
+    return any(_TRANSCRIPTION_NAME_RE.search(s) for s in (str(name), stem))
+
+
+def auto_chat_candidates(registry: dict) -> list:
+    """Names of the registry entries that may be auto-selected as the default
+    chat model, in preference order: by name, with speech-to-text models
+    (:func:`is_transcription_model`) after every other candidate."""
+    names = [n for n in sorted(registry) if is_auto_chat_eligible(registry[n])]
+    return sorted(names, key=lambda n: is_transcription_model(n, registry[n]))
+
+
 def is_gguf_adapter_entry(entry) -> bool:
     """True when a registry *entry* is a GGUF LoRA adapter: type ``lora`` whose
     stored file is a ``.gguf``. ComfyUI LoRAs and HuggingFace adapter folders
@@ -1653,7 +1674,7 @@ def list_models(type_filter: Optional[str] = None) -> None:
             size = "[dim]dir[/dim]"
             name_cell = escape(name)
         elif path.exists():
-            kind = "gguf"
+            kind = "safetensors" if path.suffix.lower() in (".safetensors", ".sft") else "gguf"
             b = path.stat().st_size
             size = f"{b/1024**3:.2f} GB" if b >= 1024**3 else f"{b/1024**2:.0f} MB"
             name_cell = escape(name)
@@ -4367,6 +4388,9 @@ def _extract_gguf_member(archive: zipfile.ZipFile, info: zipfile.ZipInfo,
         if written != info.file_size:
             raise RuntimeError(f"{filename} came out {written} bytes, expected "
                                f"{info.file_size}")
+        unusable = gguf_unusable_reason(part)
+        if unusable is not None:
+            raise RuntimeError(f"{filename} in {source_name} cannot be used: {unusable}")
         if not _has_gguf_magic(part):
             raise RuntimeError(f"{filename} in {source_name} is not a GGUF file")
         sha = digest.hexdigest()
@@ -4595,6 +4619,10 @@ def _scan_ollama_root(root: Path):
         if blob is None:
             if problem:
                 problems.append(f"{label}: {problem}")
+            continue
+        blob_unusable = gguf_unusable_reason(blob)
+        if blob_unusable is not None:
+            problems.append(f"{label}: {blob_unusable}")
             continue
         if not _has_gguf_magic(blob):
             problems.append(f"{label}: the model is not a GGUF file")

@@ -1383,6 +1383,39 @@ def _mmproj_reuse_confirmed(dest: Path, repo_id: str, candidate: str,
     return None
 
 
+def _mmproj_origin_path(dest: Path) -> Path:
+    """The file beside the projector *dest* that records where it was
+    downloaded from."""
+    return dest.with_name(dest.name + ".origin.json")
+
+
+def _record_mmproj_origin(dest: Path, repo_id: str, remote_name: str,
+                          sha256: Optional[str]) -> None:
+    """Record that *dest* was downloaded from ``hf:<repo_id>`` as *remote_name*.
+    A failed write is logged and leaves *dest* without a recorded origin, which
+    only means a differing copy is never replaced automatically. See
+    test_a_projector_without_a_recorded_origin_is_never_replaced."""
+    from ..storekit import atomic_write
+    try:
+        atomic_write(_mmproj_origin_path(dest), json.dumps(
+            {"source": f"hf:{repo_id}", "file": remote_name, "sha256": sha256}))
+    except OSError as e:
+        logger.warning("could not record where %s came from: %s", dest, e)
+
+
+def _mmproj_origin_is(dest: Path, repo_id: str, remote_name: str) -> bool:
+    """True when the origin recorded beside *dest* says it was downloaded from
+    ``hf:<repo_id>`` as *remote_name*: the file is that repo's own, so a digest
+    that differs from the repo's published one means it is damaged or outdated,
+    not another repo's projector of the same name."""
+    try:
+        recorded = json.loads(_mmproj_origin_path(dest).read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return False
+    return (isinstance(recorded, dict) and recorded.get("source") == f"hf:{repo_id}"
+            and recorded.get("file") == remote_name)
+
+
 def _mmproj_download_dest(base_dir: Path, candidate: str, repo_id: str,
                           model_path: "Path | None") -> "tuple[Path | None, bool]":
     """Where to place *candidate* (a vision projector from *repo_id*) under
@@ -1394,13 +1427,28 @@ def _mmproj_download_dest(base_dir: Path, candidate: str, repo_id: str,
     projector - in which case the first free ``<candidate stem>-<n>.gguf`` is
     returned instead, and the occupied file is never read from beyond that
     one comparison or written to; it may be another entry's own correctly
-    recorded projector. Returns ``(None, False)`` when every numbered name up
-    to ``_MAX_MMPROJ_COLLISION_SUFFIX`` is also taken."""
+    recorded projector. When the occupied file differs from the digest the repo
+    publishes and the origin recorded beside it says it came from *repo_id* as
+    *candidate*, it is that repo's own damaged or outdated copy: it is deleted and the plain name is
+    returned for a fresh download. Returns ``(None, False)`` when every
+    numbered name up to ``_MAX_MMPROJ_COLLISION_SUFFIX`` is also taken."""
     dest = base_dir / candidate
     if not dest.exists():
         return dest, False
-    if _mmproj_reuse_confirmed(dest, repo_id, candidate, model_path) is not False:
+    confirmed = _mmproj_reuse_confirmed(dest, repo_id, candidate, model_path)
+    if confirmed is not False:
         return dest, True
+    if _mm._hf_file_sha256(repo_id, candidate) and _mmproj_origin_is(dest, repo_id, candidate):
+        from rich.markup import escape
+        try:
+            dest.unlink(missing_ok=True)
+        except OSError as e:
+            logger.warning("could not delete the damaged %s: %s", dest, e)
+        else:
+            console.print(
+                f"[yellow]{escape(dest.name)} does not match the digest {escape(repo_id)} "
+                "publishes - deleted, fetching it again.[/yellow]")
+            return dest, False
     stem, suffix = Path(candidate).stem, Path(candidate).suffix
     for n in range(2, _MAX_MMPROJ_COLLISION_SUFFIX + 1):
         free = base_dir / f"{stem}-{n}{suffix}"
@@ -1441,6 +1489,7 @@ def _download_mmproj_file(repo_id: str, remote_name: str, dest: Path, base_dir: 
             shutil.move(local, dest)
     if expected is None:
         _note_unverified(repo_id, [remote_name])
+        _record_mmproj_origin(dest, repo_id, remote_name, None)
         return
     actual = _verify_digest(dest, purpose="to check the vision projector").lower()
     if actual != expected:
@@ -1448,6 +1497,7 @@ def _download_mmproj_file(repo_id: str, remote_name: str, dest: Path, base_dir: 
         raise RuntimeError(
             f"sha256 mismatch for {remote_name}: expected {expected[:16]}..., "
             f"got {actual[:16]}... - the file was deleted")
+    _record_mmproj_origin(dest, repo_id, remote_name, actual)
 
 
 def _maybe_fetch_repo_mmproj(repo_id: str, filename: str, base_dir: Path, *,
@@ -1788,6 +1838,9 @@ def _pull_gguf_file(
 
     model_name = _sanitize_name(name or filename.removesuffix(".gguf"))
     dest = base_dir / filename
+
+    if register and _refuse_name_held_by_external_file(model_name, dest):
+        return False
 
     # Expected digest from HF metadata - free, no download needed. Each file is
     # downloaded at the commit its digest was read at.
@@ -2137,7 +2190,8 @@ def _snapshot_files_failing_digest(dest: Path, repo_siblings, repo_id: str) -> l
     """Names of the files of the snapshot at *dest* that do not hash to the LFS
     sha256 *repo_siblings* (a ``model_info(files_metadata=True)`` listing) gives
     them. A listed file with a digest that is absent from disk counts as failing.
-    Each failing file is deleted, so a second pull fetches it again."""
+    Each failing file is deleted, so a second pull fetches it again; one that
+    cannot be deleted is logged and still counts as failing."""
     from localm import pathsafe
     failing = []
     for sib in repo_siblings:
@@ -2158,9 +2212,51 @@ def _snapshot_files_failing_digest(dest: Path, repo_siblings, repo_id: str) -> l
             continue
         actual = _verify_digest(fp, purpose=f"to check {name}").lower()
         if actual != str(published).lower():
-            fp.unlink(missing_ok=True)
+            try:
+                fp.unlink(missing_ok=True)
+            except OSError as e:
+                logger.warning("could not delete the damaged %s: %s", fp, e)
             failing.append(name)
     return failing
+
+
+def _snapshot_files_damaged(dest: Path, repo_siblings, repo_id: str) -> list[str]:
+    """Names of the files of the snapshot at *dest* that are present but do not
+    have the size, or the LFS sha256, *repo_siblings* gives them. A file that is
+    absent is not listed (a download fetches it). Deletes nothing."""
+    from localm import pathsafe
+    damaged = []
+    for sib in repo_siblings:
+        name = str(sib.rfilename)
+        try:
+            fp = pathsafe.confined_under(dest, name)
+        except ValueError:
+            continue
+        if not fp.is_file():
+            continue
+        size = getattr(sib, "size", None)
+        if size is not None and fp.stat().st_size != size:
+            damaged.append(name)
+            continue
+        lfs = getattr(sib, "lfs", None)
+        published = (lfs.get("sha256") if isinstance(lfs, dict) else getattr(lfs, "sha256", None)) if lfs else None
+        if published and _verify_digest(fp, purpose=f"to check {name}").lower() != str(published).lower():
+            damaged.append(name)
+    return damaged
+
+
+def _delete_snapshot_files(dest: Path, names: list[str]) -> list[str]:
+    """Delete the files *names* of the snapshot at *dest*; the names of those
+    that could not be deleted (in use, no permission) are returned."""
+    from localm import pathsafe
+    stuck = []
+    for name in names:
+        try:
+            pathsafe.confined_under(dest, name).unlink(missing_ok=True)
+        except (OSError, ValueError) as e:
+            logger.warning("could not delete the damaged %s: %s", name, e)
+            stuck.append(name)
+    return stuck
 
 
 def _snapshot_bytes_on_disk(dest: Path) -> int:
@@ -2466,14 +2562,21 @@ def _pull_hf_snapshot(
         logger.debug("could not fetch file listing for %s (%s); falling back "
                      "to a config.json-only completeness check", repo_id, e)
 
-    if dest.exists() and _snapshot_is_complete(dest, repo_siblings, repo_id):
+    damaged: list[str] = []
+    if dest.exists() and repo_siblings is not None:
+        damaged = _snapshot_files_damaged(dest, repo_siblings, repo_id)
+    if dest.exists() and not damaged and _snapshot_is_complete(dest, repo_siblings, repo_id):
         console.print(f"[yellow]Already downloaded:[/yellow] {escape(model_name)}")
         _mm._register_with_dedup(model_name, dest, f"hf:{repo_id}",
                                  model_type=_resolve_snapshot_type(dest, model_type))
         return True
+    repairing = bool(damaged) or (
+        dest.exists() and any(
+            _mm.load_registry()[n].get("source") == f"hf:{repo_id}"
+            for n in find_aliases_by_path(dest, _mm.load_registry())))
 
     # Same repo already pulled under a different name?
-    if not redownload:
+    if not redownload and not repairing:
         reg = _mm.load_registry()
 
         def _is_same_repo(info) -> bool:
@@ -2544,6 +2647,20 @@ def _pull_hf_snapshot(
             )
             return False
 
+    if damaged:
+        shown = ", ".join(escape(n) for n in damaged[:3]) + (" ..." if len(damaged) > 3 else "")
+        stuck = _delete_snapshot_files(dest, damaged)
+        if stuck:
+            console.print(
+                f"[red]Could not delete {len(stuck)} damaged file(s) of {escape(model_name)}"
+                f"[/red] ({escape(', '.join(stuck[:3]))}): a running model or another program "
+                "may be using them. Unload the model and pull again.")
+            return False
+        console.print(
+            f"[yellow]{len(damaged)} file(s) of {escape(model_name)} do not match the size or "
+            f"digest Hugging Face publishes ({shown}) - deleted, fetching them again."
+            "[/yellow]")
+
     def _disk_bytes() -> int:
         return _snapshot_bytes_on_disk(dest)
 
@@ -2578,6 +2695,8 @@ def _pull_hf_snapshot(
             _prog.ok()
     except Exception as e:
         console.print(f"[red]Download failed:[/red] {escape(str(e))}")
+        if damaged:
+            console.print("The damaged files were deleted; pull again to fetch them.")
         return False
 
     if repo_siblings is None:
@@ -3268,6 +3387,9 @@ def _pull_url_locked(
         _mm._register_with_dedup(name, dest, url, model_type=model_type)
         return True
 
+    if _refuse_name_held_by_external_file(name, dest):
+        return False
+
     # Pre-download check by user-supplied hash (URL servers can't tell us one)
     if expected_sha256 and not redownload:
         dups = _mm.find_by_sha256(expected_sha256)
@@ -3720,6 +3842,46 @@ def _civitai_owners(dest: Path) -> "list[tuple[str, str]]":
     reg = _mm.load_registry()
     return [(n, str(reg[n].get("source") or ""))
             for n in find_aliases_by_path(dest, reg)]
+
+
+def _name_held_by_external_file(model_name: str, dest: Path) -> "str | None":
+    """The path *model_name* is registered to when that is an existing file
+    outside the models folder other than *dest*, else None. A registration
+    whose file is gone, or that lives in the models folder, is not held."""
+    reg = _mm.load_registry()
+    entry = reg.get(model_name)
+    if not isinstance(entry, dict):
+        return None
+    held = _mm._entry_path(entry)
+    if not held:
+        return None
+    if model_name in _mm.find_aliases_by_path(dest, reg):
+        return None
+    try:
+        held_path = Path(held)
+        if not held_path.exists() or _mm.is_owned_model_path(held_path):
+            return None
+    except OSError:
+        return None
+    return str(held)
+
+
+def _refuse_name_held_by_external_file(model_name: str, dest: Path) -> bool:
+    """Print why the pull stops and return True when *model_name* is registered
+    to an existing file outside the models folder other than *dest*
+    (``_name_held_by_external_file``)."""
+    from rich.markup import escape
+    held_at = _name_held_by_external_file(model_name, dest)
+    if held_at is None:
+        return False
+    console.print(
+        f"[red]Name already in use:[/red] {escape(model_name)} is registered "
+        f"to a file outside the models folder ({escape(held_at)}), which "
+        f"this pull would replace in the registry. Pull with another name "
+        f"([bold]--name[/bold]), or remove the registration first "
+        f"([bold]localm rm {escape(model_name)}[/bold], which keeps that file)."
+    )
+    return True
 
 
 def _hf_file_name_taken_by(dest: Path, repo_id: str) -> "list[tuple[str, str]]":

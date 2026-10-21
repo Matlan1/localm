@@ -153,7 +153,7 @@ def test_in_use_description_names_a_busy_coder_session(isolated, monkeypatch):
     e = _install("m", active=1)
 
     class _FakeManager:
-        def list(self, is_owner=True):
+        def list(self, is_owner=True, reap=True):
             return [{"id": "s1", "cwd": "/proj", "busy": True, "model": "m"},
                     {"id": "s2", "cwd": "/other", "busy": False, "model": "m"},
                     {"id": "s3", "cwd": "/x", "busy": True, "model": "different-model"}]
@@ -177,7 +177,7 @@ def test_coder_sessions_using_is_empty_with_no_coder_gui_mounted(isolated):
 
 def test_coder_sessions_using_never_raises_on_a_broken_manager(isolated, monkeypatch):
     class _Broken:
-        def list(self, is_owner=True):
+        def list(self, is_owner=True, reap=True):
             raise RuntimeError("boom")
 
     monkeypatch.setattr(hs, "_coder_session_manager", _Broken())

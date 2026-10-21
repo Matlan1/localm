@@ -838,6 +838,25 @@ def _stream_once(engine, messages: list, **kwargs) -> str:
 
 
 
+def _record_failed_turn(audit, transcript, user_input: str, partial: str,
+                        exc: BaseException) -> None:
+    """Record a turn whose generation failed, the way the server does: the
+    partial text plus an ``[inference error: ...]`` line in the audit log with
+    a ``finish_reason`` notice of ``error``, and in the transcript with a
+    trailing ``[finish_reason: error]``. Best-effort; never raises."""
+    from localm.pathscrub import scrub_paths
+    reply = f"{partial}\n[inference error: {scrub_paths(str(exc))}]"
+    try:
+        if audit:
+            audit.llm(reply)
+            audit.notice("finish_reason", "error")
+        if transcript:
+            transcript.exchange(user_input, f"{reply}\n\n[finish_reason: error]")
+    except Exception as e:
+        from localm.debuglog import logger as _dbg
+        _dbg.warning("audit/transcript write failed: %s; this turn was not recorded", e)
+
+
 def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
                  audit=None, transcript=None, router=None,
                  images: Optional[list] = None,
@@ -978,6 +997,7 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
             continue
         except Exception as e:
             console.print(f"\n[red]Inference error: {escape(str(e))}[/red]")
+            _record_failed_turn(audit, transcript, user_input, "".join(parts), e)
             # The failed message is withdrawn so the next one is not sent after
             # an unanswered turn.
             if messages and messages[-1] is msg:

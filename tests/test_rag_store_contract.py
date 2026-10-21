@@ -1029,10 +1029,10 @@ class TestRelabelAndProvenance:
         assert collection_provenance_report() == [
             {"name": "cold", "built_with": None, "n_chunks": 1},
             {"name": "emb", "built_with": "m1", "n_chunks": 1},
-            {"name": "mix", "built_with": "m1", "n_chunks": 2}]
+            {"name": "mix", "built_with": "m1", "n_chunks": 2, "mixed": True}]
         assert collection_provenance_report("m1") == [
             {"name": "cold", "built_with": None, "n_chunks": 1},
-            {"name": "mix", "built_with": "m1", "n_chunks": 2}]
+            {"name": "mix", "built_with": "m1", "n_chunks": 2, "mixed": True}]
 
     def test_provenance_names_a_collection_it_could_not_read(self, monkeypatch, caplog):
         base = store.rag_dir()

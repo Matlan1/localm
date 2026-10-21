@@ -184,6 +184,8 @@ async def conversations_list(meta: bool = False, limit: int = 0, offset: int = 0
                     data = json.loads(p.read_text(encoding="utf-8"))
                     data["id"] = p.stem
                     rows.append(data)
+            except FileNotFoundError:
+                continue
             except Exception as e:
                 unreadable.append(p.stem)
                 _log_unreadable(p, e)
@@ -437,9 +439,10 @@ def _thinking_inlet(messages, ctx):
 # ------------------------------------------------------------------ #
 
 _ROLE_WORD_INSTRUCTION = (
-    "Speak only in the first person, as \"I\". Never refer to yourself in the "
-    "third person using a role word such as \"the model\" or \"the assistant\", "
-    "and never use an incorrect pronoun for yourself."
+    "Answer every question fully and directly. Style note: when you mention "
+    "yourself, say \"I\" or \"me\" rather than a third person role word such as "
+    "\"the model\" or \"the assistant\", and never use an incorrect pronoun for "
+    "yourself."
 )
 
 

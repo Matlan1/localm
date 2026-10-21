@@ -236,6 +236,7 @@ export const I18N_EN = {
   "chat.usage.mtpPaused.title": "Multi-Token Prediction was measured slower than generating one token at a time on this model, so it was paused for {steps} steps of this reply",
   "chat.usage.mtpOff": "MTP off",
   "chat.usage.mtpOff.image": "Multi-Token Prediction does not run on a turn with an image",
+  "chat.usage.mtpOff.audio": "Multi-Token Prediction does not run on a turn with audio",
   "chat.usage.mtpStopped": "MTP stopped",
   "chat.usage.mtpUnavailable": "MTP unavailable",
   "chat.usage.mtpReason": "Multi-Token Prediction: {reason}",
@@ -442,7 +443,7 @@ export const I18N_EN = {
   "coder.controls.modalTitle": "Session controls - {label}",
   "coder.controls.busyError": "Cannot switch model while coder session is busy.",
   "coder.controls.modelHint":
-    "Repoint this session at a different model in place. Conversation history and agent state are untouched.",
+    "Repoint this session at a different model in place. Conversation history and agent state are untouched. A local model replaces the active engine for chat, other coder sessions and MCP too.",
   "coder.controls.modelLabel": "Model",
   "coder.controls.modelSwitchFailed": "Could not switch model: ",
   "coder.controls.modelSwitched": "Model switched to {model}",

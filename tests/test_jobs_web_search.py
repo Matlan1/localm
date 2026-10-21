@@ -530,3 +530,26 @@ def test_a_model_chosen_search_query_is_not_trusted_framing(monkeypatch):
     for a, b in sorted(spans, reverse=True):
         trusted = trusted[:a] + trusted[b:]
     assert "DAN" not in trusted, "the query is sitting in the trusted region"
+
+
+class TestThinkingBlocks:
+    """The scheduled-job parser reads a reply the way the GUI chat does."""
+
+    CALL = '<tool_call>{"name": "web_search", "args": {"query": "q"}}</tool_call>'
+
+    def test_a_call_after_a_closed_think_block_runs(self):
+        assert webtool.parse_web_call("<think>plan</think>" + self.CALL)["name"] == "web_search"
+
+    def test_a_call_only_inside_a_closed_think_block_does_not_run(self):
+        assert webtool.parse_web_call("<think>" + self.CALL + "</think>") is None
+
+    def test_a_call_inside_a_think_block_that_never_closes_does_not_run(self):
+        assert webtool.parse_web_call("<think>let me try " + self.CALL) is None
+
+    def test_a_call_before_an_unclosed_think_block_still_runs(self):
+        assert webtool.parse_web_call(self.CALL + "<think>and then") is not None
+
+
+    def test_a_closed_think_block_after_an_unclosed_reasoning_opener_is_left_alone(self):
+        text = "<r>stray <think>plan</think>" + self.CALL
+        assert webtool.parse_web_call(text) is not None

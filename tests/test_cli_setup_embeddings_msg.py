@@ -212,3 +212,118 @@ class TestSetupEmbeddingsUnreadableMemoryNamespace:
             f"treated as nothing to embed: {result.output!r}")
         assert "so recall is semantic for those too" not in low, (
             "must never claim success while a namespace went unread")
+
+
+# --------------------------------------------------------------------------- #
+#  A reranker is refused as the embedding model before anything is persisted, #
+#  and a lexical-only collection still gets the re-embed hint on a switch.    #
+# --------------------------------------------------------------------------- #
+
+def _reranker_gguf(path):
+    import struct
+
+    def kv(key, vtype, value):
+        k = key.encode()
+        out = struct.pack("<Q", len(k)) + k + struct.pack("<I", vtype)
+        if vtype == 8:
+            v = value.encode()
+            return out + struct.pack("<Q", len(v)) + v
+        return out + struct.pack("<I", value)
+
+    kvs = [("general.architecture", 8, "bert"), ("bert.pooling_type", 4, 4)]
+    body = b"".join(kv(*x) for x in kvs)
+    path.write_bytes(b"GGUF" + struct.pack("<IQQ", 3, 0, len(kvs)) + body)
+    return path
+
+
+class TestSetupEmbeddingsRefusesAReranker:
+    @staticmethod
+    def _no_install(monkeypatch):
+        def boom(*a, **k):
+            raise AssertionError("must refuse before resolving or downloading anything")
+        monkeypatch.setattr("localm.inference.embedder.resolve_embedding_model_path", boom)
+
+    def test_a_registered_reranker_is_refused_and_not_persisted(
+            self, cli_runner, monkeypatch, tmp_path):
+        from localm.cli.maintenance import setup_embeddings
+        from localm.config import load_config
+        from localm.model_manager import update_registry
+        self._no_install(monkeypatch)
+        rr = _reranker_gguf(tmp_path / "rr.gguf")
+        update_registry(lambda reg: reg.__setitem__("my-rr", {
+            "path": str(rr), "source": "local", "model_type": "embedding",
+            "reranker": True}))
+        before = load_config().get("embedding_model")
+
+        result = cli_runner.invoke(setup_embeddings, ["--model", "my-rr", "--yes"])
+
+        assert result.exit_code == 1, result.output
+        assert "reranker" in result.output.lower()
+        assert "Embedding model ready" not in result.output
+        assert load_config().get("embedding_model") == before
+
+    def test_a_reranker_gguf_path_is_refused_and_not_persisted(
+            self, cli_runner, monkeypatch, tmp_path):
+        from localm.cli.maintenance import setup_embeddings
+        from localm.config import load_config
+        self._no_install(monkeypatch)
+        rr = _reranker_gguf(tmp_path / "rr.gguf")
+        before = load_config().get("embedding_model")
+
+        result = cli_runner.invoke(setup_embeddings, ["--model", str(rr), "--yes"])
+
+        assert result.exit_code == 1, result.output
+        assert "reranker" in result.output.lower()
+        assert load_config().get("embedding_model") == before
+
+
+class TestSwitchHintsForLexicalOnlyCollections:
+    def test_a_switch_with_only_lexical_collections_still_says_to_reembed(
+            self, cli_runner, monkeypatch, tmp_path):
+        from localm.cli.maintenance import setup_embeddings
+        from localm.rag.store import Collection, rag_dir
+        _stub_install(monkeypatch, tmp_path)
+        c = Collection("docs", base=rag_dir()).create()
+        c._chunks = [{"source": "doc0.txt", "pos": 0, "text": "alpha"}]
+        c._save()
+
+        result = cli_runner.invoke(setup_embeddings, ["--model", "other-model", "--yes"])
+
+        assert result.exit_code == 0, result.output
+        assert "rag reembed" in " ".join(result.output.lower().split())
+
+    def test_a_switch_with_no_collections_says_nothing_about_reembedding(
+            self, cli_runner, monkeypatch, tmp_path):
+        from localm.cli.maintenance import setup_embeddings
+        _stub_install(monkeypatch, tmp_path)
+
+        result = cli_runner.invoke(setup_embeddings, ["--model", "other-model", "--yes"])
+
+        assert result.exit_code == 0, result.output
+        assert "rag reembed" not in " ".join(result.output.lower().split())
+
+
+class TestMixedProvenanceIsSaidSo:
+    def test_a_mixed_collection_is_flagged_in_the_report_and_the_note(self, cli_runner):
+        from localm.rag import collection_provenance_note, collection_provenance_report
+        from localm.rag.store import Collection, rag_dir
+        c = Collection("docs", base=rag_dir()).create()
+        c._chunks = [{"source": "doc0.txt", "pos": 0, "text": "alpha"}]
+        c._vectors = [[0.1] * 8]
+        c._meta["embedding_model"] = "model-A"
+        c._meta["embedding_model_mixed"] = True
+        c._save()
+        plain = Collection("plain", base=rag_dir()).create()
+        plain._chunks = [{"source": "doc0.txt", "pos": 0, "text": "alpha"}]
+        plain._vectors = [[0.1] * 8]
+        plain._meta["embedding_model"] = "model-B"
+        plain._save()
+
+        report = collection_provenance_report(candidate_model="model-A")
+        by_name = {r["name"]: r for r in report}
+
+        assert by_name["docs"]["built_with"] == "model-A" and by_name["docs"]["mixed"] is True
+        assert "mixed" not in by_name["plain"]
+        assert "more than one embedding model" in collection_provenance_note("model-A", report)
+        assert "more than one embedding model" not in collection_provenance_note(
+            "model-A", [by_name["plain"]])

@@ -505,11 +505,11 @@ class _EventRelay:
     frames to *on_preview*. ``flush`` shows any held warning lines and must be
     called when the job ends."""
 
-    def __init__(self, say, on_preview=None):
+    def __init__(self, say, on_preview=None, cancel_check=None):
         self._say = say
         self._on_preview = on_preview
         self._phase = None
-        self._warnings = RecoveredWarnings(say)
+        self._warnings = RecoveredWarnings(say, cancel_check)
 
     def flush(self) -> None:
         self._warnings.flush()
@@ -541,8 +541,8 @@ class _EventRelay:
         self._phase = phase
 
 
-def _event_relay(say, on_preview=None) -> _EventRelay:
-    return _EventRelay(say, on_preview)
+def _event_relay(say, on_preview=None, cancel_check=None) -> _EventRelay:
+    return _EventRelay(say, on_preview, cancel_check)
 
 
 def _batch_path(out_path: Path, index: int) -> Path:
@@ -737,7 +737,7 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
         say("Freeing VRAM: unloading the chat model...")
         if _localm_unload(self_url, instance_token) is None:
             say("Could not unload the chat model - the image model may run low on VRAM.")
-    relay = _event_relay(say, on_preview)
+    relay = _event_relay(say, on_preview, cancel_check)
     runner = shared.runner
     hires_path = None
     if hires and hires.get("upscaler") == sampling.HIRES_MODEL_UPSCALER:
@@ -977,7 +977,7 @@ def _upscale(s, source, upscaler, out_path, extra_meta, write_sidecar, cancel_ch
         pixels = _load_pixels(source)
     except (OSError, ValueError) as e:
         return False, f"The image could not be read: {e}"
-    relay = _event_relay(say)
+    relay = _event_relay(say, cancel_check=cancel_check)
     runner = shared.runner
     started = time.monotonic()
     with shared.held(say, cancel_check, on_queue_state) as acquired:

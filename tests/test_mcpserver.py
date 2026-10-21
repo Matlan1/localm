@@ -902,7 +902,7 @@ class TestStdioLoop:
                         "params": {}}),
             json.dumps({"jsonrpc": "2.0",
                         "method": "notifications/initialized"}),
-            "this is not json",   # must be skipped, not crash
+            "this is not json",   # answered with a parse error, not a crash
             json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
                         "params": {"name": "chat",
                                    "arguments": {"prompt": "hello"}}}),
@@ -912,10 +912,11 @@ class TestStdioLoop:
         server.run_stdio(stdin=stdin, stdout=stdout)
 
         responses = [json.loads(l) for l in stdout.getvalue().splitlines()]
-        assert len(responses) == 2          # init + call; notification silent
+        assert len(responses) == 3          # init + parse error + call; notification silent
         assert responses[0]["id"] == 1
-        assert responses[1]["id"] == 2
-        assert responses[1]["result"]["content"][0]["text"] == "reply-from-stub-model"
+        assert responses[1]["id"] is None and responses[1]["error"]["code"] == -32700
+        assert responses[2]["id"] == 2
+        assert responses[2]["result"]["content"][0]["text"] == "reply-from-stub-model"
 
     def test_stdout_is_pure_jsonrpc(self):
         """Every stdout line must parse as JSON - no log contamination."""
@@ -1080,6 +1081,33 @@ class TestStdioRobustness:
         responses = [json.loads(l) for l in stdout.getvalue().splitlines()]
         assert len(responses) == 4
         assert all(r["error"]["code"] == -32600 for r in responses)
+
+    @pytest.mark.parametrize("line", [
+        pytest.param("{not json", id="malformed"),
+        pytest.param("9" * 4301, id="integer_past_the_conversion_limit"),
+        pytest.param('{"jsonrpc": "2.0", "id": ' + "9" * 4301 + ', "method": "ping"}',
+                     id="id_past_the_conversion_limit"),
+        pytest.param("[" * 10000, id="array_nested_10000_deep"),
+        pytest.param('{"a":' * 10000, id="object_nested_10000_deep")])
+    def test_an_unparseable_line_gets_a_parse_error_reply_and_the_server_keeps_serving(self, line):
+        server, _ = _server()
+        stdout = io.StringIO()
+        ping = json.dumps({"jsonrpc": "2.0", "id": 5, "method": "ping"})
+        server.run_stdio(stdin=io.StringIO(line + "\n" + ping + "\n"), stdout=stdout)
+        replies = [json.loads(l) for l in stdout.getvalue().splitlines()]
+        assert replies[0] == {"jsonrpc": "2.0", "id": None,
+                              "error": {"code": -32700,
+                                        "message": "Parse error: the line is not valid JSON"}}
+        assert replies[1] == {"jsonrpc": "2.0", "id": 5, "result": {}}
+        assert len(replies) == 2
+
+    def test_a_4300_digit_id_is_still_answered(self):
+        server, _ = _server()
+        stdout = io.StringIO()
+        big = int("9" * 4300)
+        server.run_stdio(stdin=io.StringIO(
+            '{"jsonrpc": "2.0", "id": ' + "9" * 4300 + ', "method": "ping"}\n'), stdout=stdout)
+        assert json.loads(stdout.getvalue()) == {"jsonrpc": "2.0", "id": big, "result": {}}
 
     def test_handle_rejects_non_dict_directly(self):
         server, _ = _server()

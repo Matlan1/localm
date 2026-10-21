@@ -28,7 +28,8 @@ from typing import TYPE_CHECKING, Callable, Iterator, Optional, Sequence
 
 from localm.console import console
 
-from .base import (AdapterLoadError, BaseBackend, ModelLoadCancelled, PerThread,
+from .base import (AdapterLoadError, BaseBackend, ModelFileDamagedError,
+                   ModelLoadCancelled, PerThread,
                    PretokenizerUnsafeInputError, PretokenizerUnusableModelError,
                    UnsupportedModelRoleError)
 from .llamacpp._runner import RunnerBusy
@@ -71,6 +72,25 @@ _CONTEXT_FAILED_MSG = "Failed to create llama context"
 # llama.cpp's own error when a GGUF names an architecture the runtime has no
 # model class for.
 _UNKNOWN_ARCH_RE = re.compile(r"unknown model architecture: '([^'\r\n]{1,64})'")
+
+
+# llama.cpp's own reasons for refusing to read a GGUF file: the gguf reader's
+# "gguf_init_from_*" lines and the loader's corrupt/incomplete-file lines.
+_DAMAGED_FILE_RE = re.compile(
+    r"(gguf_init_from_\w+: [^\r\n]{1,300}"
+    r"|[^\r\n]{0,200}(?:model is corrupted|corrupted or incomplete|"
+    r"data is not within the file bounds)[^\r\n]{0,100})")
+
+
+def _damaged_file_reason(exc: BaseException) -> Optional[str]:
+    """The native reader's one-line reason when *exc*'s text shows llama.cpp
+    refused to read the model file because its contents are malformed or
+    incomplete, else None. A tensor type this runtime does not know ("invalid
+    ggml type") is a file newer than the runtime, not a damaged one."""
+    match = _DAMAGED_FILE_RE.search(str(exc))
+    if match is None or "ggml type" in match.group(1):
+        return None
+    return match.group(1).strip()
 
 
 def _load_failure_message(exc: BaseException, hint: str = "") -> str:
@@ -568,6 +588,12 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         role_refusal = gguf_chat_refusal(gguf_architecture(Path(self.model_path)))
         if role_refusal is not None:
             raise UnsupportedModelRoleError(role_refusal)
+        from localm.model_manager import gguf_is_mmproj
+        if gguf_is_mmproj(Path(self.model_path)):
+            raise UnsupportedModelRoleError(
+                f"{Path(self.model_path).name} is a vision projector (mmproj), "
+                f"not a model, so localm cannot chat with it. Load the model it "
+                f"belongs to; the projector is attached with --mmproj.")
         from localm.model_manager import gguf_adapter_chat_refusal
         adapter_refusal = gguf_adapter_chat_refusal(Path(self.model_path))
         if adapter_refusal is not None:
@@ -606,6 +632,12 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             # Propagate as-is, bypassing the load-failure handling below.
             raise
         except Exception as exc:
+            damaged = _damaged_file_reason(exc)
+            if damaged is not None:
+                raise ModelFileDamagedError(
+                    f"{Path(self.model_path).name} is damaged or not a valid "
+                    f"model file: llama.cpp could not read it ({damaged}). "
+                    f"Download it again, or use a different file.") from exc
             vram_hint = self._load_failure_vram_hint()
             split_note = getattr(self, "_split_fit_note", "")
             if split_note:
@@ -990,6 +1022,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # None).
         n_cpu_moe = self._load_n_cpu_moe()
         self.moe_cpu_layers = 0
+        self.moe_ram_read_bytes = None
         if n_cpu_moe > 0:
             # Why the override did not apply, rendered here in the parent from the
             # metadata the child returned. The child must never console.print.
@@ -1018,6 +1051,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                         "requested)[/dim]")
                 per_token = self._moe_ram_bytes_per_token(n_cpu_moe)
                 if per_token > 0:
+                    self.moe_ram_read_bytes = per_token
                     gb = per_token / 1e9
                     console.print(
                         f"[dim]  moe speed: each generated token reads about "
@@ -1172,6 +1206,13 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             return False
         is_alive = getattr(self._runner, "is_alive", None)
         return True if is_alive is None else bool(is_alive())
+
+    @property
+    def streams_waiting(self) -> int:
+        """Generations queued behind one already running on the worker; 0 when
+        the model is unloaded or runs several requests at once."""
+        runner = self._runner
+        return runner.streams_waiting if runner is not None else 0
 
     @property
     def is_diffusion(self) -> bool:
@@ -1456,16 +1497,18 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                 stop_on_request=self.is_diffusion,
                 on_logprobs=on_logprobs,
                 **kwargs)
-        except RuntimeError:
+        except RuntimeError as failure:
             # The isolated worker crashed or stalled and the model is gone. Drop it
             # so the next request triggers a clean reload.
             self.last_finish_reason = "error"
             from localm.debuglog import logger as _dbg
             # Class-neutral: this except catches every RuntimeError the runner
             # raises - a native fault, an uncaught Python exception in the worker, a
-            # generation stall, and an unload racing the stream. exception() carries
-            # the real message and traceback.
-            _dbg.exception("worker failure during generation - dropping model instance")
+            # generation stall, and an unload racing the stream. The console line is
+            # one line; the traceback goes to the debug log only.
+            _dbg.error("worker failure during generation - dropping model instance: %s",
+                       (str(failure).splitlines() or [""])[0])
+            _dbg.debug("worker failure traceback", exc_info=True)
             if self._runner is runner:
                 try:
                     self.unload()

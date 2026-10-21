@@ -118,6 +118,7 @@ the inline path still ends it: the stream thread exits the process with code 1.
 
 from __future__ import annotations
 
+import contextlib
 import itertools
 import multiprocessing as mp
 import os
@@ -135,6 +136,7 @@ from localm.inference.backends.base import (
     PretokenizerUnsafeInputError, PretokenizerUnusableModelError,
     UnsupportedInputError, UnsupportedModelRoleError, VisionInputError,
     stream_stop_requested)
+from ._abi import AbiMismatch
 
 # UnsupportedInputError subclasses carried across the worker boundary by name,
 # so the parent re-raises the same type. Any other subclass travels as
@@ -385,14 +387,26 @@ class UnexpectedLoadError(RuntimeError):
     runtime). The message names the exception type."""
 
 
+_LONG_DIGITS_RE = re.compile(r"\d{40,}")
+
+
+def _digits_summary(match: re.Match[str]) -> str:
+    """A run of 40 or more digits as its first 12 digits and its length."""
+    run = match.group()
+    return f"{run[:12]}...({len(run)} digits)"
+
+
 def load_error_text(e: BaseException) -> str:
     """The text a worker sends for a failed load: ``str(e)`` for a
-    ``RuntimeError``/``OSError`` with a message, otherwise prefixed with the
-    exception type, and the bare type name when the message is empty."""
-    msg = str(e).strip()
+    ``RuntimeError``/``OSError``/``AbiMismatch`` (a runtime failure) with a
+    message, otherwise prefixed with the exception type, and the bare type name
+    when the message is empty. A run of 40 or more digits in the message (a
+    model config holding a huge number) is shortened to its first 12 digits and
+    its length."""
+    msg = _LONG_DIGITS_RE.sub(_digits_summary, str(e).strip())
     if not msg:
         return type(e).__name__
-    if isinstance(e, (RuntimeError, OSError)):
+    if isinstance(e, (RuntimeError, OSError, AbiMismatch)):
         return msg
     return f"{type(e).__name__}: {msg}"
 
@@ -501,10 +515,12 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
                 resp_q.put(("error", str(e), "UnsupportedModelRoleError"))
             except Exception as e:
                 from localm.debuglog import logger as _dbg
-                _dbg.error("gguf worker: model load failed", exc_info=True)
-                if isinstance(e, (RuntimeError, OSError)):
+                if isinstance(e, (RuntimeError, OSError, AbiMismatch)):
+                    _dbg.error("gguf worker: model load failed: %s", load_error_text(e))
+                    _dbg.debug("gguf worker: model load failure trace", exc_info=True)
                     resp_q.put(("error", load_error_text(e)))
                 else:
+                    _dbg.error("gguf worker: model load failed", exc_info=True)
                     resp_q.put(("error", load_error_text(e), "UnexpectedLoadError"))
             # A hard native abort during worker.load() is NOT caught here -
             # the process dies, and the parent detects that via is_alive().
@@ -801,9 +817,35 @@ class ModelRunner:
         self._mux = False
         self._streams: dict = {}
         self._streams_lock = threading.Lock()
+        # Inline-protocol streams blocked on _q_lock, guarded by _streams_lock.
+        self._waiting_streams = 0
         self._simple_q: Optional[_queue.Queue] = None
         self._simple_lock = threading.Lock()
         self._sids = itertools.count(1)
+
+    @property
+    def streams_waiting(self) -> int:
+        """Streams queued behind a generation already running on the inline
+        protocol. Always 0 on a multiplexed runner, whose streams do not queue
+        on ``_q_lock``."""
+        with self._streams_lock:
+            return self._waiting_streams
+
+    @contextlib.contextmanager
+    def _stream_turn(self):
+        """Hold ``_q_lock`` for one stream, counting this caller in
+        :attr:`streams_waiting` while it waits for the lock."""
+        with self._streams_lock:
+            self._waiting_streams += 1
+        try:
+            self._q_lock.acquire()
+        finally:
+            with self._streams_lock:
+                self._waiting_streams -= 1
+        try:
+            yield
+        finally:
+            self._q_lock.release()
 
     @property
     def multiplexed(self) -> bool:
@@ -1145,7 +1187,7 @@ class ModelRunner:
         awaiting_first = True
         chunks_received = 0
         _stream_t0 = time.monotonic()
-        with self._q_lock:
+        with self._stream_turn():
             self._req_q.put(("chat_stream", kwargs))
             try:
                 while True:

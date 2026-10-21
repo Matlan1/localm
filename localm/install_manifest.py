@@ -147,7 +147,7 @@ def journal_path(root) -> Path:
     return Path(root) / JOURNAL_NAME
 
 
-_JOURNAL_EVENTS = ("begin", "done", "intend", "complete", "resume")
+_JOURNAL_EVENTS = ("begin", "done", "abandon", "intend", "complete", "resume")
 _INTENT_KINDS = ("shortcut", "command")
 # Steps that can touch the user's profile: an unfinished one is reported.
 _PROFILE_STEPS = {
@@ -158,15 +158,17 @@ _PROFILE_STEPS = {
 
 
 def journal_event(root, event: str, name: str = "", path: str = "") -> Path:
-    """Append one event to the setup journal under *root*. ``begin`` and ``done``
-    take a step *name*; ``intend`` takes a *name* of ``shortcut`` or ``command`` and
+    """Append one event to the setup journal under *root*. ``begin``, ``done`` and
+    ``abandon`` take a step *name* (``abandon`` closes a begun step that was
+    refused before it changed anything, without recording it as finished);
+    ``intend`` takes a *name* of ``shortcut`` or ``command`` and
     the *path* of the artifact setup is about to create. The line is written with a
     single append and flushed to disk, so a kill leaves either the whole line or
     none of it. Raises ValueError for a malformed event."""
     if event not in _JOURNAL_EVENTS:
         raise ValueError(f"unknown journal event {event!r}")
     fields = [event]
-    if event in ("begin", "done"):
+    if event in ("begin", "done", "abandon"):
         fields.append(name)
     elif event == "intend":
         if name not in _INTENT_KINDS:
@@ -214,6 +216,9 @@ def journal_state(root) -> dict:
             if parts[1] not in state["done"]:
                 state["done"].append(parts[1])
             state["last_done"] = parts[1]
+        elif ev == "abandon" and len(parts) == 2:
+            if parts[1] in open_steps:
+                open_steps.remove(parts[1])
         elif ev == "intend" and len(parts) == 3 and parts[1] in _INTENT_KINDS:
             state["intents"].append((parts[1], parts[2]))
         elif ev == "complete":

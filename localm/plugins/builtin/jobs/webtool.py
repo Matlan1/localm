@@ -122,7 +122,7 @@ _FENCE_OPEN_RE = re.compile(r"```[ \t]*(?:[A-Za-z_]\w*[ \t]*)?\r?\n")
 _FENCE_CLOSE_RE = re.compile(r"\r?\n[ \t]*```")
 
 
-def _strip_think(text: str) -> str:
+def _strip_think(text: str, drop_unclosed: bool = False) -> str:
     """Remove ``<think>`` / ``<reasoning>`` / ``<r>`` blocks from a model reply.
 
     The closing tag is located with ``str.find``, not a lazy ``.*?``. ``find`` is
@@ -132,6 +132,11 @@ def _strip_think(text: str) -> str:
 
     Once a closer is missing there cannot be one for any LATER opener either, so
     the loop stops instead of re-walking the tail once per opener.
+
+    With *drop_unclosed*, a ``<think>`` opener that has no closer discards the
+    rest of the text, as the GUI's stripThink does: a reply cut off inside its
+    thoughts has no call in it. An unclosed ``<reasoning>`` or ``<r>`` opener
+    is left alone either way.
     """
     if not text:
         return text
@@ -145,6 +150,9 @@ def _strip_think(text: str) -> str:
         close = f"</{m.group(1)}>".lower()
         end = lowered.find(close, m.end())
         if end < 0:
+            if drop_unclosed and m.group(1).lower() == "think":
+                out.append(text[pos:m.start()])
+                pos = len(text)
             break
         out.append(text[pos:m.start()])
         pos = end + len(close)
@@ -287,7 +295,7 @@ def parse_web_calls(text: str, limit: int | None = None) -> list:
     carrying one real call followed by a pile of junk fences would parse every one
     of them to answer a question the caller had already settled.
     """
-    clean = _strip_think(text or "")
+    clean = _strip_think(text or "", drop_unclosed=True)
     candidates = []
     candidates.extend(_iter_wrapped_bodies(clean))
     candidates.extend((None, body) for body in _iter_fenced_bodies(clean))

@@ -301,6 +301,9 @@ def describe_gpu_placement(placement: dict) -> str:
     moe = placement.get("moe_cpu_layers")
     if isinstance(moe, int) and moe > 0:
         text += f", routed experts of {moe} layers in system RAM"
+        read = placement.get("moe_ram_read_bytes")
+        if isinstance(read, int) and read > 0:
+            text += f" (about {read / 1024 ** 3:.2f} GB read from RAM per token)"
     return text
 
 
@@ -491,6 +494,9 @@ class Engine:
         }
         if moe:
             placement["moe_cpu_layers"] = moe
+            read = getattr(self._backend, "moe_ram_read_bytes", None)
+            if isinstance(read, int) and read > 0:
+                placement["moe_ram_read_bytes"] = read
         return placement
 
     def full_offload_vram_bytes(self) -> Optional[int]:
@@ -565,6 +571,13 @@ class Engine:
         report "stop". A GGUF backend answers for the generation that last ran
         on the calling thread."""
         return getattr(self._backend, "last_finish_reason", "stop")
+
+    @property
+    def streams_waiting(self) -> int:
+        """Generations queued behind one already running on the model; 0 for a
+        backend that does not queue."""
+        waiting = getattr(self._backend, "streams_waiting", 0)
+        return waiting if isinstance(waiting, int) and not isinstance(waiting, bool) else 0
 
     @property
     def parallel_slots(self) -> int:

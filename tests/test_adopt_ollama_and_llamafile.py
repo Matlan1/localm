@@ -51,6 +51,11 @@ def _gguf(arch: str = "llama", tag: str = "") -> bytes:
     return body + b"\0" * (_MIN_BYTES - len(body))
 
 
+def _v1(data: bytes) -> bytes:
+    """*data*, a GGUF, with its header rewritten to the retired version 1."""
+    return data[:4] + struct.pack("<I", 1) + data[8:]
+
+
 # ----------------------------------------------------------------- Ollama
 
 _MODEL = "application/vnd.ollama.image.model"
@@ -253,6 +258,17 @@ class TestOllamaProblems:
         assert set(load_registry()) == {"good-latest"}
         assert "st-latest: the model is not a GGUF file" in capsys.readouterr().out
 
+    def test_a_version_1_model_layer_is_reported_by_its_version_not_as_not_a_gguf(
+            self, tmp_path, isolated_home, capsys):
+        root = _store(tmp_path,
+                      ("registry.ollama.ai/library/good/latest", _gguf(tag="good")),
+                      ("registry.ollama.ai/library/old/latest", _v1(_gguf(tag="old"))))
+        assert add_local(str(root)) is True
+        assert set(load_registry()) == {"good-latest"}
+        out = " ".join(capsys.readouterr().out.split())
+        assert "old-latest: This is a GGUF version 1 file" in out
+        assert "not a GGUF file" not in out
+
     def test_a_missing_blob_is_reported_and_skipped(self, tmp_path, isolated_home, capsys):
         root = _store(tmp_path, ("registry.ollama.ai/library/good/latest", _gguf(tag="good")))
         _manifest(root, "registry.ollama.ai/library/gone/latest", [_layer(_MODEL, "f" * 64)])
@@ -380,6 +396,14 @@ class TestLlamafile:
         assert load_registry() == {}
         assert list((isolated_home / "models").iterdir()) == []
 
+    def test_a_version_1_member_is_refused_by_its_version_and_leaves_nothing(
+            self, tmp_path, isolated_home, capsys):
+        lf = _llamafile(tmp_path / "t.llamafile", {"t.gguf": _v1(_gguf(tag="old"))})
+        assert add_local(str(lf)) is False
+        assert "GGUF version 1 file" in " ".join(capsys.readouterr().out.split())
+        assert load_registry() == {}
+        assert list((isolated_home / "models").iterdir()) == []
+
     def test_corrupt_member_is_refused_and_leaves_nothing(self, tmp_path, isolated_home):
         data = _gguf(tag="c")
         lf = _llamafile(tmp_path / "t.llamafile", {"t.gguf": data})
@@ -417,6 +441,27 @@ class TestNotALlamafile:
         exe.write_bytes(b"MZ" + b"\0" * 4096)
         assert add_local(str(exe)) is False
         assert load_registry() == {}
+
+    @pytest.mark.parametrize("name,head", [
+        ("t.llamafile", b"MZ"),
+        ("t", b"MZqFpD='\n"),
+    ])
+    def test_a_truncated_llamafile_is_named_as_one(
+            self, tmp_path, isolated_home, capsys, name, head):
+        lf = tmp_path / name
+        lf.write_bytes(head + b"\x90" * 4096)
+        assert add_local(str(lf)) is False
+        out = " ".join(capsys.readouterr().out.split())
+        assert "not downloaded completely" in out
+        assert "Expected a .gguf file" not in out
+        assert load_registry() == {}
+
+    def test_a_plain_executable_is_not_called_a_truncated_llamafile(
+            self, tmp_path, isolated_home, capsys):
+        exe = tmp_path / "tool.exe"
+        exe.write_bytes(b"MZ" + b"\0" * 4096)
+        assert add_local(str(exe)) is False
+        assert "not downloaded completely" not in capsys.readouterr().out
 
     def test_zip_without_a_gguf_member_is_not_a_llamafile(self, tmp_path, isolated_home):
         lf = _llamafile(tmp_path / "t.llamafile", {"readme.txt": b"hello"})

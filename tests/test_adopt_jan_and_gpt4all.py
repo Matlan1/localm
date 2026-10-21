@@ -184,6 +184,16 @@ class TestJanStore:
         assert add_local(str(data)) is True
         assert "qwen-Q4: its download has not finished" in " ".join(capsys.readouterr().out.split())
 
+    def test_a_version_1_model_is_reported_by_its_version_not_as_incomplete(
+            self, tmp_path, isolated_home, capsys):
+        data = self._store(tmp_path)
+        old = _gguf(tag="old")
+        _jan_unit(data, "org/old", weights=old[:4] + struct.pack("<I", 1) + old[8:])
+        assert add_local(str(data)) is True
+        out = " ".join(capsys.readouterr().out.split())
+        assert "org-old" in out and "GGUF version 1 file" in out
+        assert "not a complete GGUF file" not in out
+
     @pytest.mark.parametrize("answer", ["copy", "move"])
     def test_a_duplicate_is_never_copied_or_moved_out_of_the_store(
             self, tmp_path, isolated_home, answer, capsys):

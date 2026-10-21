@@ -446,7 +446,7 @@ def test_agent_job_result_for_preserves_the_real_ok_field(ok_flag):
     job = AgentJob(child, "task", label="kid")
     st = _wait_for_terminal(job)
 
-    assert st["state"] == "done", st
+    assert st["state"] == ("done" if ok_flag else "failed"), st
     assert st["result"] is not None
     assert st["result"]["ok"] is ok_flag, (
         f"_result_for() lost the child's real last_run_ok={ok_flag}: {st['result']}")
@@ -876,3 +876,17 @@ def test_a_destructive_tool_still_runs_when_its_peers_finished(tmp_path,
 
     assert "dispatch_parallel" in executed, (
         "the new gate blocks a destructive tool even with no live peer")
+
+
+def test_a_child_that_did_not_complete_is_listed_as_failed_not_done():
+    """The jobs listing reads job state; a child that hit max_turns or tripped
+    a breaker did not finish its task, so the job is not "done"."""
+    from localm.plugins.coder.background import AgentJob
+
+    child = _RealAgentJobChild(ok=False, summary="[max_turns=2 reached]")
+    job = AgentJob(child, "task", label="looper")
+    st = _wait_for_terminal(job)
+
+    assert st["state"] == "failed", st
+    assert st["error"] is None, st
+    assert st["result"]["ok"] is False and "max_turns" in st["result"]["summary"]
