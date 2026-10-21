@@ -18,6 +18,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   slightly slower decoding. The automatic context ceiling and the VRAM estimate account for it. It
   applies at the next model load; a model that cannot use flash attention refuses to load under
   `q8_0` and the error names the setting.
+- **Inpaint, outpaint, edit with reference images, ControlNet and embeddings with the built-in
+  image backend.** The Images page has a mask editor for the input image (brush, eraser, invert,
+  and extend the canvas to outpaint), reference images for edit models such as FLUX.1 Kontext,
+  Qwen-Image-Edit and FLUX.2, a ControlNet picker with a control image (optionally turned into
+  an edge map) for Stable Diffusion 1.x, 2.x and SDXL models, and textual-inversion embeddings
+  listed with their trigger words. ControlNets and embeddings are new model types, picked up from
+  ComfyUI and StabilityMatrix folders and CivitAI downloads.
 - **Workflows for the built-in image, video and music generators.** The Images, Video and Music
   pages have a Workflow card for the native backend: a workflow saves the models (with LoRAs and
   their strengths) and the generation settings, and Apply puts them back. Starter workflows come
@@ -192,6 +199,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **A failed load no longer blames low VRAM when the planned load fit,** and the advice names a
   GPU layer count that fits instead of a fixed `-g 24`. A worker crash in privacy mode says that
   privacy mode kept no crash trace and how to keep one.
+- **A textual-inversion embedding downloaded from CivitAI now registers as an image embedding**,
+  not as a text embedding model, so it no longer appears as an embedding model in the model list
+  Ollama clients see. One downloaded earlier is still offered on the Images page; `localm
+  set-type <name> textual-inversion` also takes it out of that list.
 - **A coder shell command that starts with a quoted program path now runs on Windows.** A command such as `"D:\tools dir\tool.exe" --flag "a b"` used to fail with "is not recognized as an internal or external command", because `cmd` dropped the first and last quote.
 - **A shell command's timeout or cancel in `localm coder` is no longer held up by a stray
   background process.** A command that left a detached process holding its output open used to

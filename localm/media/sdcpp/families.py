@@ -8,9 +8,11 @@ companion files a diffusion model needs.
 * ``kind``: ``checkpoint`` (a full model with its own text encoder and VAE),
   ``diffusion`` (a UNet/DiT alone), ``clip_l``, ``clip_g``, ``clip_h``
   (OpenCLIP-H, the SD 2.x text encoder), ``t5xxl``,
-  ``umt5``, ``llm``, ``vae``, ``clip_vision``, ``lora``, ``music`` (a
-  component of an ACE-Step music model, never an image or video file) or
-  ``unknown``.
+  ``umt5``, ``llm``, ``llm_vision`` (the vision tower of an LLM text encoder,
+  a llama.cpp mmproj file), ``vae``, ``clip_vision``, ``lora``, ``controlnet``,
+  ``textual_inversion`` (an embedding a prompt names by its trigger word),
+  ``music`` (a component of an ACE-Step music model, never an image or video
+  file) or ``unknown``.
 * ``family``: the model family a diffusion model, checkpoint, VAE or LoRA
   belongs to (``flux``, ``chroma``, ``sd3``, ``sd1``, ``sd2``, ``sdxl``,
   ``wan2.1``, ``wan2.2``, ``qwen-image``, ``z-image``, ``flux2``, ...), or
@@ -21,8 +23,11 @@ stable-diffusion.cpp, applied to names normalised to its
 ``model.diffusion_model.`` prefix.
 
 ``requirements(info)`` lists the component slots a diffusion model needs
-(``clip_l``, ``clip_g``, ``t5xxl``, ``llm``, ``vae``, ``clip_vision``) and
+(``clip_l``, ``clip_g``, ``t5xxl``, ``llm``, ``vae``, ``clip_vision``, and the
+optional ``llm_vision``) and
 ``accepts(slot, family, candidate)`` says whether a classified file fits one.
+``capabilities(info)`` says which extra inputs (reference images, a
+ControlNet, embeddings) a model takes in stable-diffusion.cpp.
 """
 
 from __future__ import annotations
@@ -41,7 +46,7 @@ _GGUF_MAX_DIMS = 8
 
 DIFFUSION_PREFIX = "model.diffusion_model."
 
-SLOTS = ("clip_l", "clip_g", "t5xxl", "llm", "vae", "clip_vision")
+SLOTS = ("clip_l", "clip_g", "t5xxl", "llm", "vae", "clip_vision", "llm_vision")
 
 
 @dataclass(frozen=True)
@@ -101,6 +106,10 @@ _FAMILY_SLOTS: dict[str, tuple[str, ...]] = {
     "hunyuan-video": ("llm", "t5xxl", "vae"),
 }
 
+# Optional companion slots: filled when a fitting file is registered, never
+# reported missing.
+_FAMILY_OPTIONAL_SLOTS: dict[str, tuple[str, ...]] = {"qwen-image": ("llm_vision",)}
+
 # The VAE latent layout each family decodes: ("2d", channels) or ("3d", z_dim).
 _FAMILY_VAE = {
     "sd1": ("2d", 4), "sd2": ("2d", 4), "sdxl": ("2d", 4),
@@ -128,6 +137,14 @@ _FAMILY_LLM_ARCH = {
 # Hidden sizes of the LLM text encoders a family's models were trained with
 # (Qwen2.5-VL-7B: 3584, Qwen3-4B: 2560).
 _FAMILY_LLM_HIDDEN = {"qwen-image": (3584,), "z-image": (2560,), "hunyuan-video": (3584,)}
+
+# UNet families stable-diffusion.cpp runs a ControlNet and textual-inversion
+# embeddings with.
+UNET_FAMILIES = frozenset({"sd1", "sd2", "sdxl"})
+
+# Families stable-diffusion.cpp passes reference images to (FLUX.1 Kontext,
+# FLUX.2, Qwen-Image-Edit, Z-Image Omni, Anima edit LoRAs).
+REFERENCE_FAMILIES = frozenset({"flux", "flux2", "qwen-image", "z-image", "anima"})
 
 _GGUF_DIFFUSION_ARCH = {"flux": "flux", "sd3": "sd3", "wan": None, "lumina2": "z-image",
                         "sdxl": "sdxl", "sd1": "sd1", "hyvid": "hunyuan-video"}
@@ -169,14 +186,16 @@ def defaults_for(info: FileInfo) -> Optional[Defaults]:
 
 
 def requirements(info: FileInfo) -> list[Requirement]:
-    """The companion slots the diffusion model *info* needs. A full checkpoint
-    and a family localm does not know need none it can name."""
+    """The companion slots the diffusion model *info* needs, then the optional
+    ones (``required`` False). A full checkpoint and a family localm does not
+    know need none it can name."""
     if info.kind != "diffusion" or info.family is None:
         return []
     slots = list(_FAMILY_SLOTS.get(info.family, ()))
     if info.family == "wan2.1" and info.detail.get("i2v"):
         slots.append("clip_vision")
-    return [Requirement(s) for s in slots]
+    return ([Requirement(s) for s in slots]
+            + [Requirement(s, required=False) for s in _FAMILY_OPTIONAL_SLOTS.get(info.family, ())])
 
 
 def known_family(family: Optional[str]) -> bool:
@@ -193,6 +212,12 @@ def accepts(slot: str, family: Optional[str], cand: FileInfo,
         return cand.kind == "clip_g"
     if slot == "clip_vision":
         return cand.kind == "clip_vision"
+    if slot == "llm_vision":
+        if cand.kind != "llm_vision":
+            return False
+        hidden = _FAMILY_LLM_HIDDEN.get(family or "")
+        got = cand.detail.get("hidden")
+        return hidden is None or got is None or got in hidden
     if slot == "t5xxl":
         if family == "hunyuan-video":
             return cand.kind in ("t5xxl", "byt5")
@@ -221,6 +246,37 @@ def accepts(slot: str, family: Optional[str], cand: FileInfo,
             return True
         return (cand.detail.get("vae_dims"), cand.detail.get("latent")) == want
     return False
+
+
+def capabilities(info: FileInfo) -> dict:
+    """The extra inputs the diffusion model or checkpoint *info* takes:
+    ``{"references", "controlnet", "embeddings", "inpaint", "edit"}``, each a
+    bool. ``references``: reference images (an edit family that is not a
+    dedicated inpainting model, or an instruct pix2pix UNet); ``controlnet``
+    and ``embeddings``: a UNet family;
+    ``inpaint``: a dedicated inpainting model (a mask works with every model);
+    ``edit``: the header marks an edit model (pix2pix, Qwen-Image-Edit 2511)."""
+    family = info.family if info.kind in ("diffusion", "checkpoint") else None
+    detail = info.detail or {}
+    pix2pix = bool(detail.get("pix2pix"))
+    return {
+        "references": (family in REFERENCE_FAMILIES and not detail.get("inpaint")) or pix2pix,
+        "controlnet": family in UNET_FAMILIES,
+        "embeddings": family in UNET_FAMILIES,
+        "inpaint": bool(detail.get("inpaint")),
+        "edit": pix2pix or bool(detail.get("edit")),
+    }
+
+
+def fits_unet_addon(addon: FileInfo, family: Optional[str]) -> bool:
+    """Whether the ControlNet or textual-inversion file *addon* works with a
+    *family* model: the same UNet family, and for a ControlNet in the
+    diffusers layout, SDXL (the runtime converts that layout for SDXL only)."""
+    if family not in UNET_FAMILIES or addon.family != family:
+        return False
+    if addon.kind == "controlnet" and addon.detail.get("layout") == "diffusers":
+        return family == "sdxl"
+    return addon.kind in ("controlnet", "textual_inversion")
 
 
 # ---------------------------------------------------------------- headers --
@@ -349,9 +405,13 @@ def _diffusion_family(t: dict) -> Optional[tuple[str, dict]]:
     if _has(names, p + "double_blocks.", p + "single_transformer_blocks."):
         if _has(names, p + "distilled_guidance_layer."):
             return "chroma", {}
-        return "flux", {"guidance": _has(names, p + "guidance_in.")}
+        img_in = t.get(p + "img_in.weight") or ()
+        detail = {"guidance": _has(names, p + "guidance_in.")}
+        if len(img_in) == 2 and img_in[1] == 384:
+            detail["inpaint"] = True
+        return "flux", detail
     if _has(names, p + "transformer_blocks.0.img_mod.1.weight"):
-        return "qwen-image", {}
+        return "qwen-image", {"edit": True} if _has(names, "__index_timestep_zero__") else {}
     if _has(names, p + "cap_embedder.0.weight"):
         return "z-image", {}
     if _has(names, "llm_adapter.blocks.0.cross_attn.q_proj.weight"):
@@ -370,18 +430,30 @@ def _diffusion_family(t: dict) -> Optional[tuple[str, dict]]:
             return "wan2.2", {"variant": "i2v-a14b"}
         return "wan2.1", {"i2v": i2v}
     if _has(names, p + "down_blocks.") and _has(names, p + "add_embedding."):
-        return "sdxl", {}
+        return "sdxl", _unet_input_detail(t.get(p + "conv_in.weight"))
     if _has(names, p + "down_blocks."):
         ctx = _diffusers_cross_attention_dim(t, p)
         if ctx in (768, 1024):
-            return ("sd2" if ctx == 1024 else "sd1"), {}
+            return ("sd2" if ctx == 1024 else "sd1"), _unet_input_detail(t.get(p + "conv_in.weight"))
     if _has(names, p + "input_blocks."):
+        detail = _unet_input_detail(t.get(p + "input_blocks.0.0.weight"))
         if _has(names, p + "label_emb."):
-            return "sdxl", {}
+            return "sdxl", detail
         k = t.get(p + "input_blocks.1.1.transformer_blocks.0.attn2.to_k.weight") or ()
         ctx = k[1] if len(k) >= 2 else None
-        return ("sd2" if ctx == 1024 else "sd1"), {}
+        return ("sd2" if ctx == 1024 else "sd1"), detail
     return None
+
+
+def _unet_input_detail(conv_in: Optional[tuple]) -> dict:
+    """``{"inpaint": True}`` for a UNet whose first convolution reads 9
+    channels, ``{"pix2pix": True}`` for 8, else ``{}``."""
+    channels = conv_in[1] if conv_in and len(conv_in) == 4 else None
+    if channels == 9:
+        return {"inpaint": True}
+    if channels == 8:
+        return {"pix2pix": True}
+    return {}
 
 
 _DIFFUSERS_CROSS_ATTN_K = re.compile(
@@ -491,6 +563,9 @@ def _text_encoder_info(t: dict, arch: Optional[str]) -> Optional[FileInfo]:
     if arch in _LLM_GGUF_ARCHS:
         tok = _shape(t, "token_embd.weight") or ()
         return FileInfo("llm", detail={"arch": arch, "hidden": tok[1] if len(tok) > 1 else None})
+    if arch == "clip" and _has(names, "v.blk."):
+        proj = _shape(t, "mm.2.weight") or ()
+        return FileInfo("llm_vision", detail={"hidden": proj[0] if proj else None})
     for pre in ("", "text_encoders.t5xxl.transformer.", "t5xxl.transformer."):
         shared = _shape(t, pre + "shared.weight", pre + "encoder.embed_tokens.weight")
         if shared and _has(names, pre + "encoder.block."):
@@ -517,8 +592,66 @@ def _text_encoder_info(t: dict, arch: Optional[str]) -> Optional[FileInfo]:
         emb = _shape(t, "model.embed_tokens.weight", "embed_tokens.weight",
                      "model.language_model.embed_tokens.weight") or ()
         return FileInfo("llm", detail={"arch": None,
-                                       "hidden": emb[1] if len(emb) > 1 else None})
+                                       "hidden": emb[1] if len(emb) > 1 else None,
+                                       "vision": _has(names, "visual.")})
     return None
+
+
+def _controlnet_info(t: dict) -> Optional[FileInfo]:
+    """A ControlNet in the original layout (``input_hint_block`` and
+    ``zero_convs``, optionally under ``control_model.``) or the diffusers
+    layout (``controlnet_cond_embedding`` and ``controlnet_down_blocks``), with
+    its UNet family, or None."""
+    names = t.keys()
+    for pre in ("control_model.", ""):
+        if (any(n.startswith(pre + "input_hint_block.") for n in names)
+                and any(n.startswith(pre + "zero_convs.") for n in names)):
+            if any(n.startswith(pre + "label_emb.") for n in names):
+                family = "sdxl"
+            else:
+                k = t.get(pre + "input_blocks.1.1.transformer_blocks.0.attn2.to_k.weight") or ()
+                family = _CROSS_ATTN_FAMILIES.get(k[1] if len(k) >= 2 else None)
+            return FileInfo("controlnet", family, {"layout": "original"})
+    if (any(n.startswith("controlnet_cond_embedding.") for n in names)
+            and any(n.startswith("controlnet_down_blocks.") for n in names)):
+        if any(n.startswith("add_embedding.") for n in names):
+            family = "sdxl"
+        else:
+            family = _CROSS_ATTN_FAMILIES.get(_diffusers_cross_attention_dim(t, ""))
+        return FileInfo("controlnet", family, {"layout": "diffusers"})
+    return None
+
+
+_TI_MAX_TENSORS = 4
+_TI_MAX_ROWS = 512
+_TI_WIDTHS = {768: "sd1", 1024: "sd2", 1280: "sdxl"}
+_CROSS_ATTN_FAMILIES: dict = {768: "sd1", 1024: "sd2"}
+
+
+def _textual_inversion_info(t: dict) -> Optional[FileInfo]:
+    """A textual-inversion embedding: at most ``_TI_MAX_TENSORS`` vectors or
+    small matrices, each named without a module path (no ``.``, as
+    ``emb_params`` or ``clip_l``), whose width is a CLIP text encoder's (768
+    SD 1.x, 1024 SD 2.x, 768 and 1280 together SDXL), with its family, or
+    None."""
+    if not t or len(t) > _TI_MAX_TENSORS or any("." in name for name in t):
+        return None
+    widths = set()
+    for shape in t.values():
+        if len(shape) not in (1, 2) or (len(shape) == 2 and shape[0] > _TI_MAX_ROWS):
+            return None
+        if shape[-1] not in _TI_WIDTHS:
+            return None
+        widths.add(shape[-1])
+    if 1280 in widths:
+        family = "sdxl" if widths == {768, 1280} else None
+    elif widths == {768}:
+        family = "sd1"
+    elif widths == {1024}:
+        family = "sd2"
+    else:
+        family = None
+    return FileInfo("textual_inversion", family)
 
 
 def classify_tensors(tensors: dict, arch: Optional[str] = None) -> FileInfo:
@@ -535,10 +668,17 @@ def classify_tensors(tensors: dict, arch: Optional[str] = None) -> FileInfo:
         fam = _checkpoint_family(tensors)
         dv = {k: v for k, v in tensors.items() if k.startswith(DIFFUSION_PREFIX)}
         found = _diffusion_family(dv)
-        return FileInfo("checkpoint", fam or (found[0] if found else None))
+        return FileInfo("checkpoint", fam or (found[0] if found else None),
+                        found[1] if found else {})
+    control = _controlnet_info(tensors)
+    if control is not None:
+        return control
     lora = _lora_info(tensors)
     if lora is not None:
         return lora
+    embedding = _textual_inversion_info(tensors)
+    if embedding is not None:
+        return embedding
     te = _text_encoder_info(tensors, arch)
     if te is not None:
         return te

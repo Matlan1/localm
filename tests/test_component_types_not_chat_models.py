@@ -16,7 +16,8 @@ from localm.plugins.gui.web import attach_gui
 from tests.conftest import probe_double
 from tests.test_projector_not_a_model import FakeEngine
 
-COMPONENT_TYPES = ["diffusion-unet", "lora", "text-encoder", "tts", "upscaler", "vae"]
+COMPONENT_TYPES = ["diffusion-unet", "lora", "text-encoder", "tts", "upscaler", "vae",
+                   "controlnet", "textual-inversion"]
 WORDS = {
     "diffusion-unet": "an image or video checkpoint",
     "text-encoder": "a text encoder",
@@ -24,6 +25,8 @@ WORDS = {
     "lora": "a LoRA adapter",
     "upscaler": "an upscaler",
     "tts": "a text-to-speech model",
+    "controlnet": "a ControlNet",
+    "textual-inversion": "a textual-inversion embedding",
 }
 
 

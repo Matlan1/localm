@@ -58,7 +58,7 @@ from .gguf import hub_snapshot_repo_id
 from .gguf import logical_model_path
 from .gguf import scan_hub_cache
 
-MODEL_TYPES = frozenset({'llm', 'mmproj', 'diffusion-unet', 'text-encoder', 'vae', 'lora', 'embedding', 'tts', 'upscaler', 'unknown'})
+MODEL_TYPES = frozenset({'llm', 'mmproj', 'diffusion-unet', 'text-encoder', 'vae', 'lora', 'embedding', 'tts', 'upscaler', 'controlnet', 'textual-inversion', 'unknown'})
 
 # HuggingFace architecture class-name suffixes that deterministically mark a text
 # generation (chat) model: LlamaForCausalLM, T5ForConditionalGeneration,
@@ -172,12 +172,12 @@ def projector_refusal(name: str, registry: dict) -> Optional[str]:
 # Registry types the chat Engine can never load: a request naming one is refused
 # before any model is evicted.
 NON_CHAT_TYPES = frozenset({"mmproj", "diffusion-unet", "text-encoder", "vae", "lora",
-                            "upscaler", "tts"})
+                            "upscaler", "controlnet", "textual-inversion", "tts"})
 
 # Registry types GET /v1/models leaves out: nothing under /v1 accepts one by name.
 # A 'tts' model stays listed because POST /v1/audio/speech takes it as ``model``.
 UNLISTED_TYPES = frozenset({"mmproj", "diffusion-unet", "text-encoder", "vae", "lora",
-                            "upscaler"})
+                            "upscaler", "controlnet", "textual-inversion"})
 
 
 def is_unlisted_entry(entry) -> bool:
@@ -364,12 +364,14 @@ def _is_sentence_transformers_folder(path: Path) -> bool:
 
 
 _MEDIA_KIND_TYPES = MEDIA_KIND_TYPES
-_MEDIA_COMPONENT_TYPES = frozenset({"diffusion-unet", "text-encoder", "vae", "lora"})
+_MEDIA_COMPONENT_TYPES = frozenset({"diffusion-unet", "text-encoder", "vae", "lora",
+                                    "controlnet", "textual-inversion"})
 
 
 def _media_component_type(path: Path, model_type: Optional[str]) -> Optional[str]:
     """The registry type a single ``.safetensors`` file registers as when it is
-    an image/video model file (a diffusion model, text encoder, VAE or LoRA),
+    an image/video model file (a diffusion model, text encoder, VAE, LoRA,
+    ControlNet or textual-inversion embedding),
     or None when it is not one. An explicit media *model_type* is taken as
     given; otherwise the file's tensor layout decides
     (``localm.media.sdcpp.families``). A file inside a HuggingFace model or

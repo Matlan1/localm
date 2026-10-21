@@ -67,7 +67,8 @@ NEGATIVE_AT_CFG_1 = ("The negative prompt has no effect at CFG 1. Raise CFG (for
                      "to 3) to apply it; generation then takes about twice as long per step.")
 
 _COMPONENT_FIELDS = (("clip_l", "clip_l_path"), ("clip_g", "clip_g_path"),
-                     ("t5xxl", "t5xxl_path"), ("llm", "llm_path"), ("vae", "vae_path"))
+                     ("t5xxl", "t5xxl_path"), ("llm", "llm_path"), ("vae", "vae_path"),
+                     ("llm_vision", "llm_vision_path"))
 
 def _native_block(s: dict) -> dict:
     blk = s.get("native")
@@ -115,11 +116,17 @@ def missing_model_message() -> str:
 def resolve_models(s: dict) -> dict:
     """The model files the native backend would load for settings *s*:
     ``{"key", "ctx", "label", "recommended", "family", "components",
-    "notes", "defaults"}`` (see ``pairing.build_context``; ``defaults`` is the
-    family's ``families.Defaults`` or None). A diffusion model's missing text
-    encoders and VAE are picked from the registry. Raises ``_ModelError``
-    (``pairing.MissingComponents`` when a companion file is missing) with a
-    user-facing reason when they cannot be resolved."""
+    "notes", "defaults", "capabilities", "control_net", "embeddings"}`` (see
+    ``pairing.build_context``; ``defaults`` is the family's
+    ``families.Defaults`` or None; ``capabilities`` is
+    ``families.capabilities``). A diffusion model's missing text encoders and
+    VAE are picked from the registry. The ``native`` block's ``control_net``
+    (a registered ControlNet name) and ``embeddings`` (registered
+    textual-inversion names) are loaded with the model
+    (``pairing.resolve_addon``); ``control_net`` and ``embeddings`` in the
+    result are ``{"name", "path", ...}`` / a list of them, or None / ``[]``.
+    Raises ``_ModelError`` (``pairing.MissingComponents`` when a companion file
+    is missing) with a user-facing reason when they cannot be resolved."""
     blk = _native_block(s)
     model = (blk.get("model") or "").strip()
     rec = None
@@ -140,11 +147,21 @@ def resolve_models(s: dict) -> dict:
     built = pairing.build_context(main, label, explicit, where="Settings > Images",
                                   media="image")
     ctx = built["ctx"]
-    key = tuple(sorted(ctx.items()))
     info = built["info"]
+    control = None
+    if (blk.get("control_net") or "").strip():
+        control = pairing.resolve_addon(blk["control_net"].strip(), "controlnet", info.family)
+        ctx["control_net_path"] = control["path"]
+    embeddings = pairing.resolve_embeddings(
+        [str(n) for n in (blk.get("embeddings") or []) if str(n).strip()], info.family)
+    if embeddings:
+        ctx["embeddings"] = tuple((e["trigger"], e["path"]) for e in embeddings)
+    key = tuple(sorted(ctx.items()))
     return {"key": key, "ctx": ctx, "label": label, "recommended": rec,
             "family": info.family, "components": built["components"],
-            "notes": built["notes"], "defaults": families.defaults_for(info)}
+            "notes": built["notes"], "defaults": families.defaults_for(info),
+            "capabilities": families.capabilities(info), "control_net": control,
+            "embeddings": embeddings}
 
 
 FLASH_ATTENTION_BACKENDS = ("rocm",)
@@ -283,15 +300,145 @@ def fit_size(width: int, height: int) -> tuple[int, int]:
     return max(MIN_SIDE, width // 8 * 8), max(MIN_SIDE, height // 8 * 8)
 
 
-def _load_init_image(path: Path, width: Optional[int], height: Optional[int]) -> dict:
+def _open_image(src):
+    """A PIL image of *src*: a path, or encoded image bytes."""
+    import io
+
     from PIL import Image
-    with Image.open(path) as im:
-        im = im.convert("RGB")
+    return Image.open(io.BytesIO(src) if isinstance(src, (bytes, bytearray)) else src)
+
+
+def _upright(im):
+    """*im* turned the way its EXIF orientation says it is shown."""
+    from PIL import ImageOps
+    return ImageOps.exif_transpose(im)
+
+
+def _load_init_image(src, width: Optional[int], height: Optional[int]) -> dict:
+    """The base image *src* (a path or encoded bytes) as RGB pixels at
+    *width* x *height*, or at its own size fitted by ``fit_size`` when either
+    is None."""
+    from PIL import Image
+    with _open_image(src) as im:
+        im = _upright(im).convert("RGB")
         if width is None or height is None:
             width, height = fit_size(im.width, im.height)
         if (im.width, im.height) != (width, height):
             im = im.resize((width, height), Image.Resampling.LANCZOS)
         return {"width": width, "height": height, "channel": 3, "data": im.tobytes()}
+
+
+EMPTY_MASK = ("The mask is empty (all black), so nothing would change. Paint the area to "
+              "repaint in white.")
+
+
+def _load_mask(data: bytes, width: int, height: int) -> dict:
+    """The mask image *data* as 8-bit gray pixels at *width* x *height*
+    (white repaints, black keeps). Raises ``ValueError`` (``EMPTY_MASK``) when
+    no pixel is lighter than black."""
+    from PIL import Image
+    with _open_image(data) as im:
+        im = _upright(im).convert("L")
+        if (im.width, im.height) != (width, height):
+            im = im.resize((width, height), Image.Resampling.NEAREST)
+        if im.getextrema()[1] == 0:
+            raise ValueError(EMPTY_MASK)
+        return {"width": width, "height": height, "channel": 1, "data": im.tobytes()}
+
+
+def _load_rgb(data: bytes, size: Optional[tuple] = None) -> dict:
+    """The image *data* as RGB pixels, resized to *size* (width, height), or
+    fitted by ``fit_size`` when *size* is None."""
+    from PIL import Image
+    with _open_image(data) as im:
+        im = _upright(im).convert("RGB")
+        width, height = size if size is not None else fit_size(im.width, im.height)
+        if (im.width, im.height) != (width, height):
+            im = im.resize((width, height), Image.Resampling.LANCZOS)
+        return {"width": width, "height": height, "channel": 3, "data": im.tobytes()}
+
+
+def image_data_refusal(*, init_image_data=None, mask_image=None, ref_images=None,
+                       control_image=None) -> Optional[str]:
+    """Why the encoded images of a request cannot be used (one does not decode
+    in full, or the mask is all black: ``EMPTY_MASK``), or None. Decodes every
+    pixel; nothing is loaded onto the GPU."""
+    items = [("base image", init_image_data), ("mask", mask_image),
+             ("control image", control_image)]
+    items += [(f"reference image {i + 1}", r) for i, r in enumerate(ref_images or [])]
+    for what, data in items:
+        if data is None:
+            continue
+        try:
+            with _open_image(data) as im:
+                im.load()
+                if what == "mask" and im.convert("L").getextrema()[1] == 0:
+                    return EMPTY_MASK
+        except (OSError, ValueError, SyntaxError) as e:
+            return f"The {what} could not be read: {e}"
+    return None
+
+
+NO_REFERENCES = ("{model} ({family}) does not take reference images. They work with edit "
+                 "models: FLUX.1 Kontext, FLUX.2, Qwen-Image-Edit, and other Qwen-Image, "
+                 "Z-Image and Anima models, or an instruct-pix2pix model.")
+
+
+CONTROL_STRENGTH = 0.9
+
+NO_LLM_VISION = ("The Qwen text encoder has no vision encoder, so the reference images reach the "
+                 "image model only and the edit follows them less closely. Register the "
+                 "matching Qwen2.5-VL mmproj file (type mmproj) and pick it as the LLM vision "
+                 "encoder.")
+
+
+def _lacks_llm_vision(models: dict) -> bool:
+    """Whether the Qwen-Image model set *models* has no vision encoder for its
+    LLM text encoder: no ``llm_vision`` file and an LLM file without vision
+    weights."""
+    ctx = models.get("ctx") or {}
+    if models.get("family") != "qwen-image" or ctx.get("llm_vision_path"):
+        return False
+    llm = ctx.get("llm_path")
+    return bool(llm) and not families.inspect_file(llm).detail.get("vision")
+
+
+def input_refusal(s: dict, *, input_image=None, ref_images=None, control_image=None,
+                  mask_image=None, init_image_data=None, **_ignored) -> Optional[str]:
+    """Why the native backend cannot run the image inputs of a request with
+    settings *s* (a model that does not take reference images, a ControlNet
+    without a control image or for another family, a mask without a base
+    image, an image that does not decode or an empty mask:
+    ``image_data_refusal``), or None. A model set that does not resolve is left
+    to ``ensure_available``, which reports it. Checked before any VRAM
+    handover."""
+    if mask_image is not None and init_image_data is None and input_image is None:
+        return "A mask needs a base image: set the input image first."
+    bad = image_data_refusal(init_image_data=init_image_data, mask_image=mask_image,
+                             ref_images=ref_images, control_image=control_image)
+    if bad:
+        return bad
+    if not (ref_images or control_image is not None or _native_block(s).get("control_net")):
+        return None
+    try:
+        models = resolve_models(s)
+    except _ModelError as e:
+        return str(e)
+    return _input_refusal(models, ref_images=ref_images, control_image=control_image)
+
+
+def _input_refusal(models: dict, *, ref_images, control_image) -> Optional[str]:
+    """Why the resolved model set *models* cannot take these inputs, or None."""
+    caps = models.get("capabilities") or {}
+    family = families.FAMILY_LABELS.get(models.get("family") or "", models.get("family")
+                                        or "unknown family")
+    if ref_images and not caps.get("references"):
+        return NO_REFERENCES.format(model=models["label"], family=family)
+    if control_image is not None and not models.get("control_net"):
+        return "A control image needs a ControlNet: pick one."
+    if models.get("control_net") and control_image is None:
+        return "A ControlNet needs a control image."
+    return None
 
 
 BLANK_IMAGE = ("The model returned a pure white image: its numbers overflowed, usually because "
@@ -491,7 +638,13 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
              steps: Optional[int] = None,
              clip_skip: Optional[int] = None,
              on_preview=None,
-             on_queue_state: Optional[Callable[[str], None]] = None) -> tuple[bool, str]:
+             on_queue_state: Optional[Callable[[str], None]] = None,
+             init_image_data: Optional[bytes] = None,
+             mask_image: Optional[bytes] = None,
+             ref_images: Optional[list] = None,
+             control_image: Optional[bytes] = None,
+             control_strength: Optional[float] = None,
+             control_preprocess: Optional[str] = None) -> tuple[bool, str]:
     """Generate *batch* images of *prompt* (each a PNG without embedded metadata
     unless the ``embed_params`` setting is on and the session is not in privacy
     mode). Returns ``(ok, message)``. Image ``i`` (from 0) is made with seed
@@ -515,7 +668,17 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
     settings and the family default for this image. *on_preview*, when given,
     receives ``{"step", "steps", "width", "height", "png"}`` for each
     in-progress frame the worker makes. *on_queue_state* is called while the
-    job waits for another image or video job (``shared.held``)."""
+    job waits for another image or video job (``shared.held``).
+
+    *init_image_data* (encoded image bytes) is the base image instead of the
+    file *input_image*. *mask_image* (encoded bytes) repaints its white area
+    of the base image and keeps the black (inpainting; an outpaint is a base
+    image extended with white mask over the new area). *ref_images* (encoded
+    bytes each) are reference images for an edit model. *control_image*
+    (encoded bytes) drives the ControlNet named in the settings' ``native``
+    block at *control_strength*; *control_preprocess* ``canny`` turns it into
+    an edge map first. These are refused with a reason for a model that cannot
+    take them (``_input_refusal``)."""
     say = _say(on_progress)
     refused = refusal(model_overrides=model_overrides, lora_name=lora_name,
                       width=width, height=height, sample_method=sample_method,
@@ -532,6 +695,13 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
     blk = _native_block(s)
     rec = models["recommended"]
     defaults = models.get("defaults")
+    if mask_image is not None and init_image_data is None and input_image is None:
+        return False, "A mask needs a base image: set the input image first."
+    refused = (image_data_refusal(init_image_data=init_image_data, mask_image=mask_image,
+                                  ref_images=ref_images, control_image=control_image)
+               or _input_refusal(models, ref_images=ref_images, control_image=control_image))
+    if refused:
+        return False, refused
     wanted = list(loras or [])
     if lora_name:
         wanted.append({"name": lora_name, "strength": lora_strength_model})
@@ -543,6 +713,23 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
         say(note)
     if lora_files:
         say("LoRA: " + ", ".join(f"{x['name']} ({x['multiplier']:g})" for x in lora_files) + ".")
+    control = models.get("control_net")
+    embeddings = models.get("embeddings") or []
+    if control:
+        strength = CONTROL_STRENGTH if control_strength is None else control_strength
+        say(f"ControlNet: {control['name']} ({strength:g}"
+            + (", canny" if control_preprocess == "canny" else "") + ").")
+    if embeddings:
+        say("Embeddings: " + ", ".join(e["trigger"] for e in embeddings) + ".")
+        text = f"{prompt} {negative_prompt or ''}".lower()
+        unused = [e["trigger"] for e in embeddings if e["trigger"].lower() not in text]
+        if unused:
+            say("Not in the prompt or negative prompt, so they have no effect: "
+                + ", ".join(unused) + ".")
+    if ref_images and _lacks_llm_vision(models):
+        say(NO_LLM_VISION)
+    if mask_image is not None and (models.get("capabilities") or {}).get("inpaint"):
+        say("Inpainting with a dedicated inpainting model.")
     if any(c.get("auto") for c in (models.get("components") or {}).values()):
         say("Using " + pairing.describe_components(models["components"]) + ".")
     if swap and self_url:
@@ -584,12 +771,21 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
                 runner.shutdown()
                 return False, (f"{models['label']} ({info.get('version') or 'unknown'}) is not "
                                "an image generation model.")
+            if ref_images and info.get("ref_images") is False:
+                return False, NO_REFERENCES.format(model=models["label"],
+                                                   family=info.get("version") or "unknown")
             init = None
-            if input_image is not None:
-                init = _load_init_image(Path(input_image), width, height)
+            source = init_image_data if init_image_data is not None else (
+                Path(input_image) if input_image is not None else None)
+            if source is not None:
+                init = _load_init_image(source, width, height)
                 width, height = init["width"], init["height"]
             if width is None or height is None:
                 width, height = _default_size(info.get("version", ""), rec, blk, defaults)
+            mask = _load_mask(mask_image, int(width), int(height)) if mask_image else None
+            refs = [_load_rgb(r) for r in (ref_images or [])]
+            control_px = (_load_rgb(control_image, (int(width), int(height)))
+                          if control_image is not None else None)
             if hires:
                 reason = sampling.check_hires_target(int(width), int(height),
                                                      float(hires["scale"]))
@@ -631,6 +827,13 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
                     "loras": [{"path": x["path"], "multiplier": x["multiplier"]}
                               for x in lora_files],
                     "hires": hires_payload,
+                    "mask_image": mask,
+                    "ref_images": refs,
+                    "control_image": control_px,
+                    "control_strength": (None if control_px is None else
+                                         (CONTROL_STRENGTH if control_strength is None
+                                          else float(control_strength))),
+                    "control_canny": control_preprocess == "canny",
                 }
                 label = f"image {index + 1}/{batch}, " if batch > 1 else ""
                 say(f"Generating {label}{width}x{height}"
@@ -650,6 +853,14 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
                     "width": result["width"], "height": result["height"],
                     "size": f"{int(width)}x{int(height)}",
                     "input_image": str(input_image) if input_image else None,
+                    "input_image_data": True if init_image_data is not None else None,
+                    "mask": True if mask is not None else None,
+                    "reference_images": len(refs) or None,
+                    "control": ({"model": control["name"],
+                                 "strength": params["control_strength"],
+                                 "preprocess": control_preprocess or "none"}
+                                if control else None),
+                    "embeddings": [e["name"] for e in embeddings] or None,
                     "denoise": params["strength"], "hires": hires,
                     "batch": {"index": index + 1, "count": batch} if batch > 1 else None,
                     "backend": "native", "model": models["label"],

@@ -502,6 +502,8 @@ def model_type_for_node(class_type: str) -> str:
         return "vae"
     if "lora" in name:
         return "lora"
+    if "controlnet" in name:
+        return "controlnet"
     if "checkpoint" in name or "ckpt" in name:
         return "diffusion-unet"
     return "unknown"
