@@ -2332,20 +2332,21 @@
       }
     },
     "localm/config.py": {
-      "score_floor": 94.94,
+      "score_floor": 94.97,
       "function_hashes": {
         "x__absolute_folder": "5302283cc7e3",
         "x__atomic_write_json": "bb2c0f778029",
         "x__cross_lock_backoff": "73461abd4f78",
         "x__default_hf_token_path": "df660b366830",
         "x__detect_home": "e3a9907b76da",
+        "x__drop_stray_credentials": "d5c8f35add5d",
         "x__gpu_pin_marker": "57939fc5cdd8",
         "x__holds_unparseable_json": "2ccb0ef5b427",
         "x__is_portable_home": "4453dbed6611",
         "x__is_transient_permission_error": "b54673995ad0",
         "x__loadable_lib_names": "2156acb54386",
         "x__lock_is_held_by_us": "2647e70ca9c0",
-        "x__merge_stored_config": "ca8e1bb18442",
+        "x__merge_stored_config": "68d8b17ff7b1",
         "x__mkdir_or_explain": "d85916e36eb1",
         "x__normalize_remote_image_mode": "690e46a92eae",
         "x__read_json": "d7044ed5950c",
@@ -2495,6 +2496,9 @@
         "localm.config.x__detect_home__mutmut_7": "killed",
         "localm.config.x__detect_home__mutmut_8": "killed",
         "localm.config.x__detect_home__mutmut_9": "killed",
+        "localm.config.x__drop_stray_credentials__mutmut_1": "killed",
+        "localm.config.x__drop_stray_credentials__mutmut_2": "killed",
+        "localm.config.x__drop_stray_credentials__mutmut_3": "killed",
         "localm.config.x__gpu_pin_marker__mutmut_1": "killed",
         "localm.config.x__gpu_pin_marker__mutmut_2": "killed",
         "localm.config.x__gpu_pin_marker__mutmut_3": "killed",
@@ -2549,6 +2553,7 @@
         "localm.config.x__merge_stored_config__mutmut_10": "killed",
         "localm.config.x__merge_stored_config__mutmut_11": "killed",
         "localm.config.x__merge_stored_config__mutmut_12": "killed",
+        "localm.config.x__merge_stored_config__mutmut_13": "killed",
         "localm.config.x__merge_stored_config__mutmut_2": "killed",
         "localm.config.x__merge_stored_config__mutmut_3": "killed",
         "localm.config.x__merge_stored_config__mutmut_4": "killed",
@@ -3073,10 +3078,10 @@
         "localm.config.x_user_command_env__mutmut_9": "killed"
       },
       "mutant_hashes": {
-        "localm.config.x__stored_temp_location__mutmut_9": "fabb7db7f214",
-        "localm.config.x_contain_hf_cache__mutmut_13": "cd333ef4a808",
-        "localm.config.x_gpu_cache_dirs__mutmut_1": "18288e16c73f",
-        "localm.config.x_gpu_cache_dirs__mutmut_2": "e9cc7888a0e1"
+        "localm.config.x__stored_temp_location__mutmut_9": "71231a95879c",
+        "localm.config.x_contain_hf_cache__mutmut_13": "afb34c7b9fe3",
+        "localm.config.x_gpu_cache_dirs__mutmut_1": "62748ee62fac",
+        "localm.config.x_gpu_cache_dirs__mutmut_2": "c9ace4b7d150"
       }
     },
     "localm/tls.py": {
