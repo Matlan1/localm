@@ -503,7 +503,8 @@ def _vae_info(t: dict) -> Optional[FileInfo]:
 
 
 _LORA_MARKERS = (".lora_down.", ".lora_up.", ".lora_A.", ".lora_B.", "lora_unet_",
-                 "lora_te", ".hada_w1", ".lokr_w1", ".oft_blocks", ".diff_b")
+                 "lora_te", ".hada_w1", ".lokr_w1", ".oft_blocks", ".diff_b",
+                 "_lora1.down.", "_lora1.up.", "_lora2.down.", "_lora2.up.")
 
 
 def _lora_info(t: dict) -> Optional[FileInfo]:

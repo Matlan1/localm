@@ -279,6 +279,30 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **"continue" carries on with the previous reply.** "continue", "weiter", "continúa" and the same
   word in other languages continue the last reply instead of searching the selected Knowledge
   collection for the word.
+- **The same speech seed gives the same audio.** `localm speak --seed N` and the `seed` field of
+  `/v1/audio/speech` gave a different recording on every run on a GPU. A request with a seed now
+  runs the speech model's projector on the CPU and puts it back on the GPU afterwards, so the
+  audio is identical from run to run; such a request takes longer. Requests without a seed are
+  unchanged.
+- **A FLUX LoRA from XLabs is a LoRA.** It is no longer offered as a FLUX model in the Images
+  model picker; it is listed with the other LoRAs.
+- **A plugin install that is interrupted can be repeated.** A `localm plugin install` that dies
+  mid-copy no longer leaves a half-copied plugin folder that the next install answers with
+  "already installed"; the copy is built next to the plugin folder and moved into place once it
+  is complete, and a folder without a manifest left by an older interrupted install is replaced.
+- **`localm pull` no longer replaces a model you registered in place.** A pull whose name is
+  already registered to a file kept outside the models folder (`localm add` without copying)
+  stops and says so instead of replacing the registration; pick another name with `--name`.
+- **Importing an A1111 image fills Clip skip and says what it left out.** The Images page's
+  Import parameters takes the Clip skip value from a Stable Diffusion WebUI image and reports
+  Hires fix settings as not applied instead of dropping them silently.
+- **Cancelling an image or video job no longer prints the engine's raw failure lines.** The
+  "sampling failed" lines the stable-diffusion.cpp engine logs while it stops are kept in the
+  debug log. A second out-of-memory retry while decoding says "Still not enough VRAM" instead of
+  repeating the first message.
+- **`localm image`, `video` and `music` no longer ask "Open it now?" when input is `NUL`.** On
+  Windows the null device passed for a terminal.
+- **The message for a refused ComfyUI address no longer ends with an internal tag.**
 
 ### Changed
 

@@ -285,6 +285,42 @@ def test_retry_on_cpu_reopens_once_and_refuses_to_loop():
     assert c.retry_on_cpu() is False
 
 
+def test_switch_device_moves_between_cpu_and_gpu_and_is_a_no_op_on_the_same_device():
+    rec = _ParamsRecorder()
+    c = _bare_ctx(rec)
+    c.on_gpu = True
+    c._ctx = 0x7000
+    assert c.switch_device(gpu=True) is True and rec.seen == []
+    assert c.switch_device(gpu=False) is True
+    assert c.on_gpu is False and rec.seen[-1]["use_gpu"] == 0
+    assert c.switch_device(gpu=True) is True
+    assert c.on_gpu is True and rec.seen[-1]["use_gpu"] == 1
+
+
+def test_switch_device_to_a_gpu_that_will_not_open_falls_back_to_the_cpu():
+    class _GpuRefused(_ParamsRecorder):
+        def mtmd_init_from_file(self, path, model, params):
+            super().mtmd_init_from_file(path, model, params)
+            return 0 if self.seen[-1]["use_gpu"] else 0x7001
+
+    rec = _GpuRefused()
+    c = _bare_ctx(rec)
+    c.on_gpu = False
+    c._ctx = 0x7000
+    assert c.switch_device(gpu=True) is False
+    assert c.on_gpu is False and c._ctx == 0x7001
+    assert [s["use_gpu"] for s in rec.seen] == [1, 0]
+
+
+def test_switch_device_that_cannot_open_at_all_leaves_no_context():
+    rec = _ParamsRecorder(init_returns=0)
+    c = _bare_ctx(rec)
+    c.on_gpu = True
+    c._ctx = 0x7000
+    assert c.switch_device(gpu=False) is False
+    assert not c._ctx
+
+
 def test_a_gpu_encode_failure_is_retryable_but_a_cpu_one_is_not():
     """The type carries the retry decision, so the caller (which owns the KV the
     failed evaluation dirtied) can reset and try once on the CPU."""
