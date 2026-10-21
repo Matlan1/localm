@@ -624,6 +624,12 @@ class TestServeAndSurfaces:
         assert "Starting with no model loaded." in r.flat
         assert "Missing argument" not in r.flat
 
+    def test_serve_registers_the_console_close_cleanup(self, gui):
+        from localm.plugins.gui.cli import _console_close_cleanup
+        r = gui.invoke("serve", "--no-model", command=localm.cli.main)
+        assert r.exit_code == 0, r.output
+        assert gui.console_handlers == [_console_close_cleanup]
+
     def test_no_browser_opens_no_surface_and_records_none(self, gui):
         gui.native = True
         r = gui.invoke("--no-model", "--no-browser")
