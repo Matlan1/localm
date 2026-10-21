@@ -236,6 +236,15 @@ monitor = [
 # extra also pulls triton-windows (upstream Triton ships no Windows wheels),
 # which the native FP8 path imports; grammar masking does not use it.
 # Install with:  pip install "localm[gpu,grammar]"
+# ExLlama runtimes for the exllama plugin (EXL2 and EXL3 models), Linux only.
+# They run on an NVIDIA GPU with CUDA and compile their extension on first
+# import, which needs the CUDA toolkit and a C++ compiler. The plugin also needs
+# the [hf] extra for the tokenizer and chat template.
+# Install with:  localm plugin install-deps exllama
+exllama = [
+    "exllamav3>=1.6.4; sys_platform == 'linux'",
+    "exllamav2==0.3.2; sys_platform == 'linux'",
+]
 grammar = [
     "xgrammar>=0.2.2",
     # xgrammar 0.2.6+ cannot load its native bindings with apache-tvm-ffi older

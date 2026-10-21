@@ -769,7 +769,7 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
             budget = heal_budget
         else:
             budget = await loop.run_in_executor(None, _switch_load_budget, name)
-            if budget is not None and budget.check_split_fit:
+            if budget is not None and (budget.check_split_fit or budget.plugin_backend):
                 sized = _engines.get(name)
                 if sized is None:
                     built = sized = await loop.run_in_executor(None, _engine_factory, name)
@@ -869,6 +869,7 @@ def _switch_load_budget(name: str) -> switch_admission.LoadBudget | None:
     if not registry:
         return None
 
+    from localm.inference import backend_registry
     from localm.inference.engine import _is_gguf
     vram_required = residency.required_vram_bytes(file_size)
     cfg = load_config()
@@ -879,6 +880,7 @@ def _switch_load_budget(name: str) -> switch_admission.LoadBudget | None:
         resident_cap=residency.resident_cap(cfg),
         pinned=residency.pinned_model_names(cfg),
         check_split_fit=_is_gguf(m_path),
+        plugin_backend=backend_registry.backend_for(str(m_path)) is not None,
     )
 
 

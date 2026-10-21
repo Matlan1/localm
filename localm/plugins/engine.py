@@ -26,8 +26,9 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from localm.plugins.contract import (API_VERSION, KNOWN_PLUGIN_KEYS,
-                                     KNOWN_SURFACE_KEYS, PluginSettingField,
-                                     PluginSpec, Surface)
+                                     KNOWN_SURFACE_KEYS,
+                                     InferenceBackendDescriptor,
+                                     PluginSettingField, PluginSpec, Surface)
 from localm.plugins.ids import _check_plugin_name, _is_valid_plugin_name
 
 # Logger for the sequential plugin load, one line per plugin.
@@ -304,6 +305,7 @@ class PluginHost:
         self._spec = spec
         self._routes: list = []
         self._chat_phases: list = []        # chat-pipeline phases this plugin hooked
+        self._backends: list = []           # inference backends this plugin registered
         self._static_prefixes: set = set()  # URL prefixes this plugin already serves
         self.settings: list = []
         self.surface: Optional[Surface] = spec.surface or None
@@ -439,6 +441,12 @@ class PluginHost:
                 pass
         self._routes = []
         self._static_prefixes = set()
+        if self._backends:
+            from localm.inference import backend_registry
+            backend_registry.unregister_plugin(self._spec.name)
+            self._backends = []
+        if self._app is None:
+            return
         self._app.openapi_schema = None
         # Drop any chat-pipeline hooks this plugin registered.
         if self._chat_phases:
@@ -480,6 +488,23 @@ class PluginHost:
             raise ValueError(f"Invalid model_type {descriptor.model_type!r}; must be one of {MODEL_TYPES}")
         descriptor.plugin_name = self._spec.name
         self.model_roles.append(descriptor)
+
+    def register_inference_backend(self, descriptor) -> None:
+        """Register *descriptor* (a ``contract.InferenceBackendDescriptor``) in
+        the process-wide backend registry, stamped with this plugin's name.
+        Removed again by :meth:`unmount`."""
+        import dataclasses
+
+        from localm.inference import backend_registry
+        if not isinstance(descriptor, InferenceBackendDescriptor):
+            raise TypeError(
+                f"plugin {self._spec.name!r}: register_inference_backend() takes an "
+                f"InferenceBackendDescriptor (see localm.plugins.contract), got "
+                f"{type(descriptor).__name__}")
+        stamped = dataclasses.replace(descriptor, plugin_name=self._spec.name)
+        backend_registry.register(stamped)
+        self._backends.append(stamped)
+        self.audit("inference_backend_registered", {"backend": stamped.name})
 
 
     def _own_config_key(self, name: Optional[str]) -> str:
@@ -911,6 +936,27 @@ class PluginManager:
                     _emit(name, "loaded", None)
                 else:
                     _emit(name, "failed", self._errors.get(name))
+
+    def load_backend_plugins(self) -> list:
+        """Load every installed, enabled plugin whose manifest declares the
+        ``inference-backend`` capability and is not loaded yet, for a process
+        with no server app (an in-process ``localm run``). Returns the names
+        loaded. Never raises: a failing plugin is recorded in errors and logged
+        at WARNING. A plugin that mounts routes or hooks fails to load here."""
+        self.discover()
+        enabled = self._enabled_set()
+        loaded = []
+        for name in sorted(self._specs):
+            spec = self._specs[name]
+            if (name not in enabled or name in self._loaded
+                    or "inference-backend" not in (spec.capabilities or [])):
+                continue
+            self._safe_load(spec)
+            if name in self._loaded:
+                loaded.append(name)
+            else:
+                _log.warning("plugin %s failed to load: %s", name, self._errors.get(name))
+        return loaded
 
     def load_enabled_pending(self) -> list:
         """Load every installed, enabled plugin that is not loaded yet and has no
@@ -1846,7 +1892,7 @@ class PluginManager:
             plugins.append(_entry(spec, name, available=False))
         seen = set(self._specs)
         for name in sorted(set(store) | set(_cat.names())):  # available, not installed
-            if name in seen:
+            if name in seen or not _cat.offered(name):
                 continue
             plugins.append(_entry(store.get(name), name, available=True))
         from localm.config import load_config
@@ -1862,6 +1908,22 @@ class PluginManager:
 # --------------------------------------------------------------------------- #
 #  Wire the engine + its management API onto a FastAPI app                    #
 # --------------------------------------------------------------------------- #
+
+_backend_manager: Optional[PluginManager] = None
+_backend_manager_lock = threading.Lock()
+
+
+def load_inference_backend_plugins() -> list:
+    """For a process without a server app: load the installed, enabled plugins
+    that register an inference backend (``PluginManager.load_backend_plugins``),
+    once per process. Returns the names loaded by this call; [] on later calls."""
+    global _backend_manager
+    with _backend_manager_lock:
+        if _backend_manager is not None:
+            return []
+        _backend_manager = PluginManager(app=None)
+        return _backend_manager.load_backend_plugins()
+
 
 def attach_engine(app, inference_engine=None) -> PluginManager:
     """Instantiate a PluginManager bound to *app*, load enabled plugins, and add

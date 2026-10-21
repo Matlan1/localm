@@ -83,7 +83,9 @@ dispatch thread is blocked on ``req_q.get()`` or forwarding chunks):
                                   "InvalidGrammarError",
                                   "ContextCapacityExceededError",
                                   "ChatTemplateMissingError",
-                                  "RerankInputError". "WorkerFault"
+                                  "RerankInputError", and
+                                  "ModelRefusedError" on a failed "load".
+                                  "WorkerFault"
                                   carries the text of an exception the child
                                   is dying on. An UNTAGGED error becomes
                                   a RuntimeError, which callers read as "the
@@ -237,7 +239,7 @@ def _arm_native_crash_trace(path) -> None:
             type(e).__name__, e)
 
 
-def _runner_entry(req_q, resp_q, ctrl_q, crash_trace_path=None) -> None:
+def _runner_entry(req_q, resp_q, ctrl_q, crash_trace_path=None, worker_target=None) -> None:
     """Process target. Wraps ``_runner_main`` so any exception escaping it is
     logged via the ``logging`` module before the process dies, not left to
     multiprocessing's own ``traceback.print_exc()`` alone - mirrors
@@ -255,7 +257,7 @@ def _runner_entry(req_q, resp_q, ctrl_q, crash_trace_path=None) -> None:
     the one mechanism that CAN say where such a fault happened."""
     _arm_native_crash_trace(crash_trace_path)
     try:
-        _runner_main(req_q, resp_q, ctrl_q)
+        _runner_main(req_q, resp_q, ctrl_q, worker_target)
     except BaseException:
         from localm.debuglog import attach_child_logging, logger
         attach_child_logging()
@@ -304,7 +306,28 @@ def prepare_worker_process() -> None:
     close_hub_gate()
 
 
-def _runner_main(req_q, resp_q, ctrl_q) -> None:
+def _load_worker_class(worker_target):
+    """The worker class the child instantiates: ``HFWorker`` for None, else the
+    class named by *worker_target*, a ``(module file path, class name)`` pair.
+    The module is imported from its file under a private name, so it must not
+    use relative imports."""
+    if worker_target is None:
+        from localm.inference.backends._hf_worker import HFWorker
+        return HFWorker
+    import importlib.util
+    import sys
+    module_file, class_name = worker_target
+    name = f"_localm_runner_worker_{os.getpid()}"
+    spec = importlib.util.spec_from_file_location(name, module_file)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot import a worker module from {module_file}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return getattr(module, class_name)
+
+
+def _runner_main(req_q, resp_q, ctrl_q, worker_target=None) -> None:
     """Long-lived child: owns one HFWorker (one loaded model) for its whole
     process lifetime, dispatching one request at a time on ``req_q``/
     ``resp_q``. A dedicated control-thread drains ``ctrl_q`` for a
@@ -316,7 +339,6 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
     ``cancel_event``)."""
     prepare_worker_process()
 
-    from localm.inference.backends._hf_worker import HFWorker
     from localm.inference.backends.base import (
         AudioInputError,
         ChatTemplateMissingError,
@@ -347,7 +369,7 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
 
     threading.Thread(target=_control_loop, daemon=True, name="localm-hf-ctrl").start()
 
-    worker: Optional[HFWorker] = None
+    worker = None
 
     while True:
         cmd = req_q.get()
@@ -376,7 +398,7 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
             # calls self._spawn() immediately before sending "load", so
             # `worker` is always still None here.
             try:
-                worker = HFWorker(**payload)
+                worker = _load_worker_class(worker_target)(**payload)
                 worker.load()
                 # Computed ONCE here, right after load, and cached on the
                 # parent proxy: the model lives in the child, so the parent
@@ -400,7 +422,11 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
                     _dbg.debug("hf worker: model load failure trace", exc_info=True)
                 else:
                     _dbg.error("hf worker: model load failed", exc_info=True)
-                resp_q.put(("error", load_error_text(e)))
+                from localm.inference.backends.base import ModelRefusedError
+                if isinstance(e, ModelRefusedError):
+                    resp_q.put(("error", load_error_text(e), "ModelRefusedError"))
+                else:
+                    resp_q.put(("error", load_error_text(e)))
             # A hard native abort during worker.load() is NOT caught here -
             # the process dies, and the parent detects that via is_alive().
             continue
@@ -579,9 +605,22 @@ EMBED_MAX_CHARS_DEFAULT = 200_000
 
 
 class HFRunner:
-    """Parent-side handle to one isolated HF worker process."""
+    """Parent-side handle to one isolated HF worker process.
 
-    def __init__(self) -> None:
+    *worker_target*, a ``(module file path, class name)`` pair, makes the child
+    host that class instead of ``HFWorker``. It must offer the same interface
+    the dispatch loop uses (constructor taking the load params, ``load``,
+    ``unload``, ``chat_stream(cancel_event=, on_status=, **params)``,
+    ``last_finish_reason``, ``count_tokens``, ``count_messages_tokens``,
+    ``embed``, and the ``supports_images``, ``processor_error``, ``can_embed``
+    and ``resolved_device`` attributes the load reply reads). *process_name*
+    names the child process and its native-fault trace file."""
+
+    def __init__(self, worker_target: Optional[tuple] = None,
+                 process_name: str = "hf-worker") -> None:
+        self._worker_target = (None if worker_target is None
+                               else (str(worker_target[0]), str(worker_target[1])))
+        self._process_name = process_name
         self._proc = None
         self._req_q = None
         self._resp_q = None
@@ -745,7 +784,7 @@ class HFRunner:
         if not self._trace_skipped_for_privacy:
             from localm.debuglog import child_crash_trace_path, logger
             try:
-                self._crash_trace_path = child_crash_trace_path("hf-worker")
+                self._crash_trace_path = child_crash_trace_path(self._process_name)
             except OSError as e:
                 # An unwritable logs dir costs the trace, not the worker.
                 logger.warning("could not allocate a native-fault trace file (%s); "
@@ -756,8 +795,8 @@ class HFRunner:
         self._proc = ctx.Process(
             target=_runner_entry,
             args=(self._req_q, self._resp_q, self._ctrl_q,
-                  self._crash_trace_path),
-            name="localm-hf-worker", daemon=True)
+                  self._crash_trace_path, self._worker_target),
+            name=f"localm-{self._process_name}", daemon=True)
         self._proc.start()
 
     def spawn_and_load(self, params: dict, timeout: float = LOAD_TIMEOUT_DEFAULT) -> dict:
@@ -801,6 +840,9 @@ class HFRunner:
         # next load attempt to pile another one alongside it.
         self.shutdown(grace=0)
         if kind == "error":
+            if len(result) > 2 and result[2] == "ModelRefusedError":
+                from .base import ModelRefusedError
+                raise ModelRefusedError(result[1])
             raise RuntimeError(result[1])
         raise RuntimeError(f"Unexpected response from the HF model-loading process: {result!r}")
 

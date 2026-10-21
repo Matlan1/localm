@@ -5149,6 +5149,10 @@ def add_local(
     if registered and is_hf:
         cannot_load = hf_folder_refusal(p)
         if cannot_load is not None:
+            from localm.inference import backend_registry
+            if backend_registry.backend_for(str(p)) is not None:
+                cannot_load = None
+        if cannot_load is not None:
             console.print("[yellow]Registered, but localm cannot load it:[/yellow] "
                           f"{escape(cannot_load)}")
     return registered

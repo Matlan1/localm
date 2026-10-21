@@ -255,6 +255,9 @@ def create_backend(
 
     model_path:   HF model directory  →  HFBackend
                   *.gguf file         →  GgufBackend
+                  a path both refuse  →  the first plugin-registered backend
+                                         that claims it (backend_registry),
+                                         built with ``device`` and ``n_ctx``
 
     mtp_enabled:  None reads the ``mtp_enabled`` config key; True or False
                   overrides it for this backend only, leaving the stored
@@ -270,6 +273,11 @@ def create_backend(
                   or path overrides it the same way.
     """
     cfg = load_config()
+
+    from localm.inference import backend_registry
+    plugin_backend = backend_registry.backend_for(model_path)
+    if plugin_backend is not None:
+        return plugin_backend.create(model_path, device=device, n_ctx=n_ctx)
 
     if _is_hf_dir(model_path):
         from localm.inference.backends.hf import HFBackend

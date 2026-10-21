@@ -57,6 +57,9 @@ class LoadBudget:
     top of it, ``resident_cap`` the ``max_resident_models`` setting (None for
     no cap), ``pinned`` the ``pinned_models`` names and ``check_split_fit``
     whether the configured split's per-device shares are checked (a GGUF load).
+    ``plugin_backend`` is True for a model a plugin-registered backend runs;
+    such a load, like a GGUF one, is sized by its backend before the first
+    eviction pass.
     ``backend_need`` is the free VRAM the backend's own sizing needs to put
     every layer on the GPU (``Engine.full_offload_vram_bytes``), or None when
     it is not known.
@@ -69,6 +72,7 @@ class LoadBudget:
     pinned: frozenset
     check_split_fit: bool
     backend_need: Optional[int] = None
+    plugin_backend: bool = False
 
     @property
     def needed_bytes(self) -> int:
