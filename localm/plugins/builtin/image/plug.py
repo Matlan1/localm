@@ -51,8 +51,9 @@ from localm.inference.http_server import (
 from localm.media import gallery
 from localm.media import paths as media_paths
 from localm.media.native_models import (
-    MAX_BATCH, MAX_LORAS, HiresChoice, LoraChoice, apply_choice, check_generation_extras,
-    check_request, validate_upscaler,
+    MAX_BATCH, MAX_EMBEDDINGS, MAX_LORAS, MAX_REF_IMAGES, ControlChoice, HiresChoice, LoraChoice,
+    apply_choice, check_generation_extras, check_image_inputs, check_request, validate_addons,
+    validate_upscaler,
 )
 from localm.pathsafe import confined_file, confined_name
 from localm.pathscrub import map_strings
@@ -91,6 +92,16 @@ class ImagineRequest(BaseModel):
     sample_method: str | None = None
     scheduler: str | None = None
     hires: HiresChoice | None = None
+    # Native backend only. Images are data URLs (PNG, JPEG or WebP):
+    # input_image_data replaces input_image (the mask editor's base image),
+    # mask repaints its white area, ref_images feed edit models; control names a
+    # registered ControlNet with its control image; embeddings name registered
+    # textual-inversion embeddings.
+    input_image_data: str | None = None
+    mask: str | None = None
+    ref_images: list[str] | None = Field(default=None, max_length=MAX_REF_IMAGES)
+    control: ControlChoice | None = None
+    embeddings: list[str] | None = Field(default=None, max_length=MAX_EMBEDDINGS)
 
 
 class MoveFileRequest(BaseModel):
@@ -139,6 +150,9 @@ def _validate_lora_name(raw: str) -> str:
     return name
 
 
+_IMAGE_INPUT_KEYS = ("init_image_data", "mask_image", "ref_images", "control_image")
+
+
 def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
                    instance_token, width=None, height=None, in_gallery=True,
                    native_choice=None, native_loras=None, native_extras=None):
@@ -172,10 +186,20 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
                 job.push({"type": "line", "outcome": True, "text": refused})
                 return False
             s = apply_choice(s, native_choice or {})
+            refused = native.input_refusal(s, input_image=input_image, **extras)
+            if refused:
+                job.push({"type": "line", "outcome": True, "text": refused})
+                return False
         elif native_loras:
             job.push({"type": "line", "text":
                       "Several LoRAs per job apply to the native backend; with ComfyUI "
                       "use the LoRA picker."})
+            return False
+        elif any(extras.get(k) for k in _IMAGE_INPUT_KEYS) or (native_choice or {}).get(
+                "control_net") or (native_choice or {}).get("embeddings"):
+            job.push({"type": "line", "outcome": True, "text":
+                      "Masks, reference images, ControlNet and embeddings apply to the "
+                      "native backend; with ComfyUI use a workflow that has them."})
             return False
         elif (extras.get("sample_method") or extras.get("scheduler") or extras.get("hires")
               or extras.get("batch", 1) > 1):
@@ -300,6 +324,40 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
     return media_handover_job(_generate)
 
 
+async def _check_native_inputs(req: ImagineRequest, choice: dict, extras: dict):
+    """*choice* and *extras* with the request's images (decoded in a worker
+    thread, ``check_image_inputs``) and its ControlNet and embeddings
+    (``validate_addons``) added. A bad one is a 400."""
+    from localm.inference._threadpool_timeout import (
+        ThreadCallTimeout, run_in_threadpool_bounded,
+    )
+    if not (req.input_image_data or req.mask or req.ref_images or req.control
+            or req.embeddings):
+        return choice, extras
+    try:
+        addons = validate_addons(req.control, req.embeddings)
+        images = await run_in_threadpool_bounded(
+            lambda: check_image_inputs(input_image=req.input_image,
+                                       input_image_data=req.input_image_data, mask=req.mask,
+                                       ref_images=req.ref_images, control=req.control),
+            timeout=30.0)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    except ThreadCallTimeout as e:
+        raise HTTPException(504, f"Reading the images timed out: {e}") from e
+    choice = dict(choice or {})
+    if addons["control_net"]:
+        choice["control_net"] = addons["control_net"]
+    if addons["embeddings"]:
+        choice["embeddings"] = addons["embeddings"]
+    extras = dict(extras, init_image_data=images["init_image"], mask_image=images["mask"],
+                  ref_images=images["ref_images"] or None,
+                  control_image=images["control_image"],
+                  control_strength=addons["control_strength"],
+                  control_preprocess=addons["control_preprocess"])
+    return choice, extras
+
+
 @_router.post("/api/imagine")
 async def imagine(req: ImagineRequest, request: Request):
     if not req.prompt.strip():
@@ -315,6 +373,7 @@ async def imagine(req: ImagineRequest, request: Request):
     native_choice, native_loras = check_request(req.native_models, req.loras, "image")
     native_extras = check_generation_extras(req.sample_method, req.scheduler, req.hires,
                                             req.batch)
+    native_choice, native_extras = await _check_native_inputs(req, native_choice, native_extras)
 
     # Any app built through attach_engine has a background-job registry, so
     # reaching this branch means the router was mounted on an app that never ran
@@ -489,33 +548,42 @@ async def _await_job(job, request: Request) -> tuple[str, str]:
 
     When the client goes away while it runs, cancels the job, waits up to
     ``CANCEL_SETTLE_SECONDS`` for it to finish writing and stop, then raises
-    ``asyncio.CancelledError``."""
+    ``asyncio.CancelledError``.
+
+    The disconnect poll runs every ``JOB_POLL_SECONDS`` whether the job is
+    silent or streaming line events."""
     queue = job.subscribe()
     poll = _resolve_disconnect_poll(request)
     last_line = ""
     outcome = ""
     deadline = None
+    next_poll = time.monotonic() + JOB_POLL_SECONDS
     try:
         while True:
+            event = None
             try:
                 event = await asyncio.wait_for(queue.get(), timeout=JOB_POLL_SECONDS)
             except TimeoutError:
-                if deadline is None:
+                pass
+            if event is not None:
+                kind = event.get("type")
+                if kind == "line":
+                    last_line = str(event.get("text", ""))
+                    if event.get("outcome"):
+                        outcome = last_line
+                elif kind == "end":
+                    if deadline is not None:
+                        raise asyncio.CancelledError()
+                    return str(event.get("status", "failed")), outcome or last_line
+            now = time.monotonic()
+            if deadline is None:
+                if now >= next_poll:
+                    next_poll = now + JOB_POLL_SECONDS
                     if poll is not None and await poll():
                         job.cancel()
                         deadline = time.monotonic() + CANCEL_SETTLE_SECONDS
-                elif time.monotonic() >= deadline:
-                    raise asyncio.CancelledError() from None
-                continue
-            kind = event.get("type")
-            if kind == "line":
-                last_line = str(event.get("text", ""))
-                if event.get("outcome"):
-                    outcome = last_line
-            elif kind == "end":
-                if deadline is not None:
-                    raise asyncio.CancelledError()
-                return str(event.get("status", "failed")), outcome or last_line
+            elif now >= deadline:
+                raise asyncio.CancelledError()
     finally:
         job.unsubscribe(queue)
 
@@ -942,6 +1010,8 @@ def register(host) -> None:
     host.mount_router(make_workflow_router("image"))
     from localm.media.native_models import make_router as make_native_models_router
     host.mount_router(make_native_models_router("image", "imagine", _backend))
+    from localm.media.native_workflows import make_router as make_native_workflow_router
+    host.mount_router(make_native_workflow_router("image"))
     # One-time: rescue any legacy personal override left INSIDE the package
     # (localm/image_gen/flux_workflow.json) into home/workflows, which survives a
     # self-update (the localm/ dir is whole-tree-replaced). No-op when absent.

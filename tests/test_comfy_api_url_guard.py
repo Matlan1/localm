@@ -191,3 +191,27 @@ def test_sanitize_runs_the_shape_check_before_classifying():
 def test_host_is_link_local_helper_is_gone():
     """The second, weaker classifier must not quietly come back."""
     assert not hasattr(c, "_host_is_link_local")
+
+
+@pytest.mark.parametrize("url", ["http://169.254.169.254:8188", "http://[::1"])
+def test_the_guard_log_line_carries_no_internal_tag(url):
+    import logging
+    seen = []
+
+    class _Grab(logging.Handler):
+        def emit(self, record):
+            seen.append(record.getMessage())
+
+    log = logging.getLogger("localm")
+    handler = _Grab(level=logging.DEBUG)
+    old = log.level
+    log.addHandler(handler)
+    log.setLevel(logging.DEBUG)
+    try:
+        resolved, warning = c.sanitize_comfy_url_checked(url)
+    finally:
+        log.removeHandler(handler)
+        log.setLevel(old)
+    assert resolved == _LOOPBACK and warning
+    assert any("ignoring it" in m for m in seen)
+    assert not any("CHK-" in m for m in seen)

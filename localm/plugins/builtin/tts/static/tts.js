@@ -10,11 +10,12 @@
  * The model (~86 MB) is fetched from Hugging Face on first use and cached by the
  * browser, so synthesis is fully local thereafter. No text ever leaves the
  * machine and nothing is written to the server, so privacy mode stays intact.
- * The fetch itself is gated on the resolved net_mode (net_mode=off refuses it;
- * net_mode=ask requires a one-time confirmation) before it is ever made.
+ * The fetch itself is gated on the resolved net_mode (net_mode=off refuses it
+ * unless model downloads are allowed while off; net_mode=ask requires a
+ * one-time confirmation) before it is ever made.
  */
 
-import { NetGateError, classifyLoadError, isSafariBelow26, loadToast, runtimePaths, planModelFetch, pickDevice, pickDtype, pinnedRemotePathTemplate, rekeyCachedModel, KOKORO_PINNED_REVISION, repairAudioTransient, shouldAbortForCorruption, shouldWarmPassively } from "./tts-util.js";
+import { NetGateError, classifyLoadError, isSafariBelow26, loadToast, runtimePaths, planModelFetch, planVoiceFetch, pickDevice, pickDtype, pinnedRemotePathTemplate, rekeyCachedModel, KOKORO_PINNED_REVISION, repairAudioTransient, shouldAbortForCorruption, shouldWarmPassively } from "./tts-util.js";
 import { isNonEnglishVoice, streamNonEnglish } from "./g2p.js";
 
 const VENDOR_VOICES = new URL("vendor/voices.json", import.meta.url);
@@ -26,14 +27,11 @@ const VENDOR_VOICES = new URL("vendor/voices.json", import.meta.url);
 // own isolated unit test). No closure dependency on register()'s cfg/ctx, so
 // it is a plain module-level export rather than nested like the rest of this
 // file's helpers.
-export function requestDownloadConsent(opts = {}) {
-  const mode = (opts && opts.mode) || "ask";
+export function requestDownloadConsent() {
   if (typeof window === "undefined" || typeof window.openModal !== "function" ||
       typeof window.$ !== "function" || typeof window.el !== "function") {
-    const msg = mode === "off"
-      ? "Network access is set to off. Download the Kokoro voice model (~86 MB) once anyway?"
-      : "Download the Kokoro voice model (~86 MB) from huggingface.co now?";
-    return Promise.resolve(typeof confirm === "function" && confirm(msg));
+    return Promise.resolve(typeof confirm === "function" && confirm(
+      "Download the Kokoro voice model (~86 MB) from huggingface.co now?"));
   }
   return new Promise((resolve) => {
     let settled = false;
@@ -45,13 +43,9 @@ export function requestDownloadConsent(opts = {}) {
       resolve(v);
     };
     window.openModal("Download voice model?", (body) => {
-      const pText = mode === "off"
-        ? "Kokoro (~86 MB) will be downloaded from huggingface.co once, then " +
-          "cached in the browser. Network access is currently turned off (net_mode=off). " +
-          "Download once anyway?"
-        : "Kokoro (~86 MB) will be downloaded from huggingface.co once, then " +
-          "cached in the browser. Network access is set to \"ask first\".";
-      body.appendChild(window.el("p", "", pText));
+      body.appendChild(window.el("p", "",
+        "Kokoro (~86 MB) will be downloaded from huggingface.co once, then " +
+        "cached in the browser. Network access is set to \"ask first\"."));
       const row = window.el("div", "actions");
       const skip = window.el("button", "btn-secondary", "Not now");
       skip.onclick = () => finish(false);
@@ -163,16 +157,44 @@ export async function register(ctx) {
     return { mode: cfg.net_mode, allowDownloadsWhenOff: !!cfg.net_allow_model_downloads };
   }
 
+  // Is this voice's file in the cache the vendored bundle keeps for voices?
+  async function voiceCached(voice) {
+    if (typeof caches === "undefined") return false;
+    try {
+      const c = await caches.open("kokoro-voices");
+      const keys = await c.keys();
+      return keys.some((req) => req.url && req.url.includes("/voices/" + voice + ".bin"));
+    } catch {
+      return false;
+    }
+  }
+
+  // The bundle fetches a voice file from huggingface.co the first time that
+  // voice is used, separately from the model: refuse that fetch under
+  // net_mode=off, as load() refuses the model.
+  async function gateVoiceFetch(voice) {
+    const cached = await voiceCached(voice);
+    const policy = await currentNetPolicy();
+    if (planVoiceFetch(policy.mode, cached, policy.allowDownloadsWhenOff) !== "refuse") return;
+    const message = "Voice download is blocked (net_mode=off). Turn network access on, " +
+      "or allow model downloads while network access is off, in Settings -> Network";
+    ctx.toast(message + "; using the browser voice", true);
+    throw new NetGateError(message);
+  }
+
   async function load() {
     const cached = await modelCached();
     const policy = await currentNetPolicy();
     const decision = planModelFetch(policy.mode, cached, policy.allowDownloadsWhenOff);
-    if (decision === "confirm" && !(await requestDownloadConsent({ mode: policy.mode }))) {
+    if (decision === "refuse") {
       throw new NetGateError(
-        policy.mode === "off"
-          ? "Voice model download was not granted (net_mode=off)."
-          : "Voice model download needs a one-time confirmation (net_mode=ask) and was not granted."
-      );
+        "Voice model download is blocked (net_mode=off). Turn network access on, " +
+        "or allow model downloads while network access is off, in Settings -> Network.");
+    }
+    if (decision === "confirm" && !(await requestDownloadConsent())) {
+      throw new NetGateError(
+        "Voice model download needs a one-time confirmation (net_mode=ask) " +
+        "and was not granted.");
     }
 
     const mod = await import(libraryURL);
@@ -382,6 +404,7 @@ export async function register(ctx) {
     let k;
     try {
       k = await ensureLoaded();
+      await gateVoiceFetch(currentVoice);
     } catch {
       if (myToken !== token) return;                // superseded while loading
       if (typeof window !== "undefined" && window.speechSynthesis) {

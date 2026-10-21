@@ -3179,6 +3179,24 @@ div:has(> .data-table) { overflow-x: auto; }
 .native-lora-row { display: grid; grid-template-columns: 1fr 90px auto; gap: 8px; margin-bottom: 6px; }
 .enhance-row { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 10px; }
 .native-models-unsupported > div + div { margin-top: 2px; }
+
+/* Native image extras (app/image-inputs.js). */
+.iin { display: grid; gap: 8px; margin: 8px 0 10px; }
+.iin-section > label { display: block; margin-bottom: 4px; }
+.iin-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.iin-row select { max-width: 320px; }
+.iin-row input[type="number"] { width: 90px; }
+.iin-thumb { display: inline-flex; flex-direction: column; align-items: center; gap: 4px; }
+.iin-thumb img { max-width: 96px; max-height: 96px; border-radius: 6px; border: 1px solid var(--border); }
+.iin-chip { display: inline-flex; align-items: center; gap: 6px; padding: 2px 6px;
+  border: 1px solid var(--border); border-radius: 8px; }
+.iin-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 6px 0; }
+.iin-tools .active { outline: 2px solid var(--accent); }
+.iin-pad { width: 70px; }
+.iin-size { font-size: 12px; }
+.iin-canvas-wrap { max-height: 58vh; overflow: auto; text-align: center; }
+.iin-canvas { max-width: 100%; max-height: 56vh; touch-action: none; cursor: crosshair;
+  border-radius: 6px; }
 @media (max-width: 640px) {
   .native-models { grid-template-columns: 1fr; }
 }

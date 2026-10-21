@@ -86,6 +86,16 @@ CI_WAIT_TIMEOUT_SECONDS = 75 * 60
 CI_POLL_INTERVAL_SECONDS = 20
 
 REQUIRE_BACKENDS = ("cpu", "vulkan")
+ALSO_MEASURE_BACKENDS = ("cuda", "sycl", "hip", "metal")
+
+
+def llama_confirm_args() -> list[str]:
+    """confirm_llama_runtime.py's backend arguments for this machine: every
+    REQUIRE_BACKENDS entry must PASS on a GPU device where it is a GPU backend, and
+    every ALSO_MEASURE_BACKENDS entry is measured as far as this machine can."""
+    args = [a for b in REQUIRE_BACKENDS for a in ("--backend", b)]
+    args.append("--require-gpu")
+    return args + [a for b in ALSO_MEASURE_BACKENDS for a in ("--also-measure", b)]
 
 # Upper bounds for every external command, so a hung confirm, git or gh call cannot hold
 # the GPU lease and the pipeline lock until the scheduled task's own limit.
@@ -146,9 +156,11 @@ def _load_module(path: Path, name: str):
 
 
 def newest_candidate(repo: Path = REPO) -> tuple[str, str] | None:
-    """(pinned tag, newest upstream tag) when upstream has something newer
-    than the pin, else None (already current or upstream unreadable - both
-    read the same here: nothing eligible to test this run)."""
+    """(pinned tag, candidate) where the candidate is the newest upstream tag
+    newer than the pin that the Linux CUDA build repo has also released, else
+    None (already current, upstream or the Linux CUDA repo unreadable, or no
+    newer tag built there yet - all read the same here: nothing eligible to
+    test this run)."""
     check_llama_pin = _load_module(repo / "scripts" / "check_llama_pin.py", "check_llama_pin")
     pin = check_llama_pin.pinned_tag()
     releases, err = check_llama_pin.upstream_releases()
@@ -161,8 +173,23 @@ def newest_candidate(repo: Path = REPO) -> tuple[str, str] | None:
     if pin_n is None or newest_n is None or newest_n <= pin_n:
         print(f"currency: {pin} is already current (upstream newest: {newest})")
         return None
-    print(f"currency: {pin} -> candidate {newest}")
-    return pin, newest
+    built, err = check_llama_pin.cuda_linux_tags()
+    if err:
+        print(f"currency: could not read the Linux CUDA builds ({err}); nothing to do")
+        return None
+    for rel in releases:
+        n = check_llama_pin._build_number(rel["tag"])
+        if n is None or n <= pin_n:
+            break
+        if rel["tag"] in built:
+            if rel["tag"] != newest:
+                print(f"currency: upstream newest is {newest}; {rel['tag']} is the newest "
+                      "the Linux CUDA build repo has released")
+            print(f"currency: {pin} -> candidate {rel['tag']}")
+            return pin, rel["tag"]
+    print(f"currency: {pin} -> {newest} upstream, but the Linux CUDA build repo has "
+          "released no newer tag yet; nothing to do")
+    return None
 
 
 def newest_comfyui_candidate(repo: Path = REPO) -> tuple[str, str, str] | None:
@@ -274,8 +301,8 @@ def run_under_gpu_lease(cmd: list[str], *, purpose: str, cwd: Path,
 
 
 def run_confirm(candidate: str, receipt_path: Path) -> int:
-    """scripts/confirm_llama_runtime.py --tag candidate --backend cpu --backend
-    vulkan --receipt receipt_path, from the MAIN checkout (read-only: it
+    """scripts/confirm_llama_runtime.py --tag candidate, the llama_confirm_args()
+    backends and --receipt receipt_path, from the MAIN checkout (read-only: it
     downloads to a throwaway dir and never edits a tracked file), held under
     the GPU lease for the whole invocation - cpu does not need the GPU, but
     running it outside the lease buys nothing, and holding one lease for the
@@ -284,8 +311,7 @@ def run_confirm(candidate: str, receipt_path: Path) -> int:
     confirm_llama_runtime's own exit code (0/1/2), or LEASE_BUSY_EXIT if the
     lease could not be acquired at all."""
     cmd = [sys.executable, str(REPO / "scripts" / "confirm_llama_runtime.py"),
-           "--tag", candidate, "--backend", "cpu", "--backend", "vulkan",
-           "--receipt", str(receipt_path)]
+           "--tag", candidate, *llama_confirm_args(), "--receipt", str(receipt_path)]
     return run_under_gpu_lease(cmd, purpose=f"pin_pipeline llama confirm {candidate}", cwd=REPO)
 
 
@@ -515,6 +541,14 @@ def insert_changelog_bullet(text: str, bullet: str) -> str:
 # string constant here - this file is tracked and public, and the prose
 # itself names a gitignored path (see test_no_gitignored_path_leak.py).
 _ISSUES_INTRO_RE = re.compile(r"an entry lives\nin exactly one\..*?\n\n", re.S)
+
+
+def ci_red_summary(title: str, candidate: str, pr_number, receipt_path: Path | None) -> str:
+    """The issue-backlog description for a candidate that passed its runtime confirm
+    but whose bump PR went red in CI."""
+    receipt_note = f" (receipt: {receipt_path})" if receipt_path else ""
+    return (f"{title} {candidate} passed its runtime confirm on this hardware{receipt_note},\n"
+            f"    but CI went red on the bump PR #{pr_number}; read the failing checks there.")
 
 
 def append_fail_issue(candidate: str, reason: str, receipt_path: Path | None,
@@ -1148,7 +1182,8 @@ def run_llama_pipeline(*, dry_run: bool) -> int:
         reason = f"CI red on PR #{pr_number}; left open, not merged"
         save_state({"last_tag_tried": candidate, "verdict": "FAIL", "timestamp": now_iso,
                    "receipt_path": str(receipt_path), "reason": reason, "open_pr": pr_number})
-        append_fail_issue(candidate, reason, receipt_path)
+        append_fail_issue(candidate, reason, receipt_path, kind="CI-RED",
+                          summary=ci_red_summary("llama.cpp", candidate, pr_number, receipt_path))
         print(reason)
         return 1
     except PipelineError as e:
@@ -1295,7 +1330,8 @@ def run_comfyui_pipeline(*, dry_run: bool) -> int:
         save_state({"last_tag_tried": candidate, "verdict": "FAIL", "timestamp": now_iso,
                    "receipt_path": str(receipt_path), "reason": reason, "open_pr": pr_number},
                   pin="comfyui")
-        append_fail_issue(candidate, reason, receipt_path, pin="comfyui")
+        append_fail_issue(candidate, reason, receipt_path, pin="comfyui", kind="CI-RED",
+                          summary=ci_red_summary("ComfyUI", candidate, pr_number, receipt_path))
         print(reason)
         return 1
     except PipelineError as e:

@@ -283,7 +283,7 @@ def test_run_job_reports_an_unreachable_folder_instead_of_deleting(home, docs):
 
     assert result["status"] == "ok", result.get("error")
     assert "skipped folder" in result["output"]
-    assert "nothing under it was indexed, flagged, or removed" in result["output"]
+    assert "nothing under it was indexed or flagged" in result["output"]
     assert Collection("kb").stats()["n_missing"] == 0
 
 

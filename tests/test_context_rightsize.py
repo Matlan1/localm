@@ -339,6 +339,70 @@ class TestStepReserve:
         assert llm._step_reserve(4460, 876) == 876
 
 
+class TestStepReserveOsBudget:
+    """_step_reserve also reserves one step when the whole budget would keep the
+    KV cache in VRAM but past the OS video memory budget (``_budget_check``)."""
+
+    PROMPT = list(range(1, 301))
+
+    def _llm(self, budget_limit, calls, capacity=4096):
+        llm = _llm(capacity, vram_check=_vram_upto(65536, []), cached=[])
+
+        def budget(target, current):
+            calls.append((target, current))
+            return None if budget_limit is None else target <= budget_limit
+        llm._budget_check = budget
+        return llm
+
+    def test_a_budget_past_the_os_budget_reserves_one_step(self):
+        calls = []
+        assert self._llm(4096, calls)._step_reserve(4460, 876) == 876
+        assert calls == [(8192, 4096), (4096, 4096)]
+
+    def test_a_budget_within_the_os_budget_is_reserved_whole(self):
+        calls = []
+        assert self._llm(8192, calls)._step_reserve(4460, 876) == 4460
+        assert calls == [(8192, 4096)]
+
+    def test_a_step_past_the_os_budget_reserves_the_whole_budget(self):
+        calls = []
+        assert self._llm(0, calls, capacity=0)._step_reserve(4460, 876) == 4460
+        assert calls == [(8192, 0), (4096, 0)]
+
+    def test_a_ram_placement_reserves_one_step_even_past_the_os_budget(self):
+        calls = []
+        llm = _llm(4096, vram_check=_vram_upto(4096, []), cached=[])
+        llm._budget_check = lambda target, current: calls.append((target, current)) or False
+        assert llm._step_reserve(4460, 876) == 876
+        assert calls == []
+
+    def test_an_unknown_budget_reserves_the_whole_budget(self):
+        calls = []
+        assert self._llm(None, calls)._step_reserve(4460, 876) == 4460
+
+    def test_a_raising_budget_check_reserves_the_whole_budget(self):
+        llm = self._llm(4096, [])
+
+        def boom(target, current):
+            raise RuntimeError("dxgi failed")
+        llm._budget_check = boom
+        assert llm._step_reserve(4460, 876) == 4460
+
+    def test_a_ram_placement_reserves_one_step_without_a_budget_check(self):
+        llm = _llm(4096, vram_check=_vram_upto(4096, []), cached=[])
+        assert llm._step_reserve(4460, 876) == 876
+
+    def test_the_reply_runs_in_the_live_context_until_it_fills(self):
+        calls = []
+        llm = self._llm(4096, calls)
+        api, _cp, created = _capacity_api(llm)
+        out = _generate(llm, api, prompt=self.PROMPT, max_new_tokens=4096)
+        assert len(out) == 4096
+        assert calls[:2] == [(8192, 4096), (4096, 4096)]
+        assert created == [(8192, True)]
+        assert llm._ctx_capacity == 8192 and llm._offload_kqv is True
+
+
 class TestPromoteToASmallerContext:
     def test_a_refused_same_size_promotion_moves_to_vram_at_the_needed_size(self):
         calls = []

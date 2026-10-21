@@ -39,7 +39,8 @@ This module:
 from __future__ import annotations
 
 import re
-from typing import TypedDict
+from datetime import datetime
+from typing import Optional, TypedDict
 
 
 class LogRecord(TypedDict):
@@ -192,6 +193,23 @@ def _record_timestamp(rec: LogRecord) -> str:
     return rec["lines"][0][:19]   # "YYYY-MM-DD HH:MM:SS" prefix, or "" if absent
 
 
+# Seconds a record's header timestamp may lie before the content record's and
+# still count as in order.
+_TIMESTAMP_SKEW_S = 1.0
+
+
+def _record_epoch(rec: LogRecord) -> Optional[float]:
+    """Seconds since the epoch (naive local time, as logged) of *rec*'s header
+    timestamp, or None when its first line carries no parseable one."""
+    if not rec["level"]:
+        return None
+    try:
+        return datetime.strptime(rec["lines"][0][:23],
+                                 "%Y-%m-%d %H:%M:%S,%f").timestamp()
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
 def _collapse_line_runs(lines: list[str]) -> list[str]:
     """The line-level twin of collapse_records' record-level collapsing,
     applied WITHIN a single (already-grouped) benign record's own lines: a run
@@ -281,11 +299,14 @@ def _drop_content_records(
     So once a content marker fires, every record after it is ALSO dropped -
     regardless of its own claimed level, which is as forgeable as any other
     line - until a run of _MIN_RUN_TO_COLLAPSE (3) CONSECUTIVE, mutually
-    near-duplicate (matching record_template()) records appears. Content
-    producing 3 back-to-back near-duplicates immediately after the marker,
-    with nothing else in between, is the residual, accepted risk; the fix for
-    a narrower window is widening _CONTENT_MARKER_RES or the resync run
-    length.
+    near-duplicate (matching record_template()) records appears, each stamped
+    no earlier than the latest content record's own timestamp minus
+    _TIMESTAMP_SKEW_S. A log pasted into the content was written before the
+    content record, so its lines can never start a resync. Content that
+    forges 3 back-to-back near-duplicate header lines stamped at or after the
+    marker, with nothing else in between, is the residual, accepted risk; a
+    tainted start (*start_tainted*) has no content timestamp and resyncs on the
+    run alone.
 
     *start_tainted* applies the SAME distrust to the very first record, for
     text that may itself start mid-way through a content write with no header
@@ -295,19 +316,34 @@ def _drop_content_records(
     kept: list[LogRecord] = []
     dropped = 0
     tainted = start_tainted
+    floor: Optional[float] = None
     i, n = 0, len(records)
+
+    def _stamped_after_floor(r: LogRecord) -> bool:
+        if floor is None:
+            return True
+        ts = _record_epoch(r)
+        return ts is not None and ts >= floor
+
     while i < n:
         rec = records[i]
         if is_content_record(rec):
             tainted = True
+            ts = _record_epoch(rec)
+            floor = None if ts is None else ts - _TIMESTAMP_SKEW_S
             dropped += 1
             i += 1
             continue
         if tainted:
+            if not _stamped_after_floor(rec):
+                dropped += 1
+                i += 1
+                continue
             tmpl = record_template(rec)
             j = i + 1
             while (j < n and not is_content_record(records[j])
-                   and record_template(records[j]) == tmpl):
+                   and record_template(records[j]) == tmpl
+                   and _stamped_after_floor(records[j])):
                 j += 1
             run_len = j - i
             if run_len >= _MIN_RUN_TO_COLLAPSE:

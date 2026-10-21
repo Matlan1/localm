@@ -258,6 +258,9 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                     row_out["applied_adapters"] = applied
             models.append(row_out)
         out = {"models": models, "active": current}
+        loading = _hs._switch_loading
+        if loading:
+            out["loading"] = loading
         # Models this instance answers through a peer instance on the same
         # machine, keyed by name (see localm.peer_routing).
         from localm import peer_routing
@@ -379,7 +382,10 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
 
     @app.post("/api/models/load", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def gui_load_model(req: LoadModelRequest):
-        _require_registered(req.model)
+        from localm.model_manager.registry import chat_load_refusal
+        refusal = chat_load_refusal(req.model, _require_registered(req.model))
+        if refusal is not None:
+            raise HTTPException(422, refusal)
         # Route every switch through the coordinator so a new selection preempts an
         # in-flight load instead of queuing behind it. The coordinator returns the
         # authoritative status: loaded, already_active, superseded (a newer

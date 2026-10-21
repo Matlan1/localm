@@ -478,7 +478,7 @@ def _handle_command(raw: str, agent: Agent) -> bool:
             label = f' "{title}"' if title else ""
             print_success(f"Resumed session{label} ({turns} turns, interrupted {ts}).")
             try:
-                agent.chat("Continue from where we left off.")
+                agent.chat("Continue from where we left off.", record_request=False)
             except KeyboardInterrupt:
                 pass
             except Exception as e:

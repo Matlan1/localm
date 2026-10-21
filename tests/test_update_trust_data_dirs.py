@@ -182,7 +182,7 @@ def test_cli_update_reports_a_non_utf8_trust_file(broken_trust, cli_runner, monk
     monkeypatch.setattr(updater, "check", lambda **_: _check_reply(trust, data))
     monkeypatch.setenv("LOCALM_HOME", str(f.parents[1]))
     r = cli_runner.invoke(update_cmd, ["--yes"])
-    assert r.exit_code == 0, r.output
+    assert r.exit_code == 1, r.output
     assert "Update failed" in r.output and "corrupt" in r.output, r.output
     assert "unexpected error" not in r.output, r.output
     assert _installed_version(inst) == "0.1.0"

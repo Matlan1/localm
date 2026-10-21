@@ -600,6 +600,24 @@ def bench_spec(model, source, draft_model, gen_tokens, rounds, ctx, gpu_layers,
         rounds, kinds=_SPEC_PROBE_KINDS)
 
 
+def _gguf_cut_short(path) -> bool:
+    """True when *path* declares tensors and is shorter than where its last
+    tensor's data begins. False for a file that declares none, and when the
+    header cannot be parsed (no signal)."""
+    import struct
+
+    from ..model_manager.gguf import _gguf_declared_min_size, gguf_file_bytes
+    try:
+        with open(path, "rb") as f:
+            head = f.read(16)
+        if len(head) < 16 or struct.unpack("<Q", head[8:16])[0] == 0:
+            return False
+    except OSError:
+        return False
+    declared_min = _gguf_declared_min_size(path)
+    return declared_min is not None and (gguf_file_bytes(path) or 0) < declared_min
+
+
 @main.command("spec-drafts")
 @click.argument("model", shell_complete=_complete_model_name)
 def spec_drafts(model):
@@ -636,6 +654,8 @@ def spec_drafts(model):
         if (path is None or path.suffix.lower() != ".gguf" or not path.is_file()
                 or path.resolve() == target_path.resolve()
                 or entry.get("model_type", "llm") != "llm"):
+            continue
+        if _gguf_cut_short(path):
             continue
         sig = gguf_vocab_signature(path)
         if sig is None or draft_vocab_mismatch(target, gguf_vocab_view(sig)) is not None:

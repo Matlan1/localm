@@ -48,6 +48,17 @@ def _restore_durable_notes(raw) -> list[str]:
     return notes[-_MAX_DURABLE_NOTES:]
 
 
+def _restore_pinned_requests(raw) -> list[str]:
+    """The pinned user requests from a checkpoint's ``pinned_requests`` value:
+    non-empty string entries, each cut to the request length cap, the newest
+    ``_MAX_PINNED_REQUESTS`` kept. Anything else restores as ``[]``."""
+    from .context import _MAX_PINNED_REQUEST_CHARS, _MAX_PINNED_REQUESTS
+    if not isinstance(raw, list):
+        return []
+    items = [r.strip()[:_MAX_PINNED_REQUEST_CHARS] for r in raw if isinstance(r, str)]
+    return [r for r in items if r][-_MAX_PINNED_REQUESTS:]
+
+
 class _PersistenceMixin:
     if TYPE_CHECKING:
         # Set by Agent (core.py), which this class is mixed into.
@@ -309,7 +320,9 @@ class _PersistenceMixin:
                 child_ok = result.get("ok")
                 if child_ok is None:
                     child_ok = getattr(child, "last_run_ok", True) if child else True
-                if state != "done":
+                if state == "failed" and not st.get("error"):
+                    status = "error"
+                elif state != "done":
                     status = state
                 else:
                     status = "ok" if child_ok else "error"
@@ -576,6 +589,8 @@ class _PersistenceMixin:
                 for key, entry in self._changed_files.items()
             },
             "durable_notes": list(getattr(self, "_durable_notes", [])),
+            "pinned_requests": list(getattr(self, "_pinned_requests", [])),
+            "pinned_requests_dropped": int(getattr(self, "_pinned_requests_dropped", 0) or 0),
         }
         p = self._checkpoint_path
         try:
@@ -677,6 +692,15 @@ class _PersistenceMixin:
         self._restore_delegated(data.get("delegated"))
         self._restore_changed_files(data.get("changed_files"))
         self._durable_notes = _restore_durable_notes(data.get("durable_notes"))
+        self._pinned_requests = _restore_pinned_requests(data.get("pinned_requests"))
+        dropped = data.get("pinned_requests_dropped")
+        self._pinned_requests_dropped = (dropped if isinstance(dropped, int)
+                                         and not isinstance(dropped, bool) and dropped > 0
+                                         else 0)
+        self._pinned_requests_dropped = min(10**6, self._pinned_requests_dropped)
+        self._compact_futile = False
+        self._server_compacted = False
+        self._usage_base = None
 
     def _restore_activated_tools(self, raw) -> None:
         """Restore the search_tools activations from a checkpoint: only string

@@ -64,7 +64,8 @@ def active_plugins(cfg: dict) -> set:
     installed = set()
     try:
         for child in Path(plugins_dir()).glob("*"):
-            if child.is_dir() and (child / "plugin.toml").is_file():
+            if (not child.name.startswith(".") and child.is_dir()
+                    and (child / "plugin.toml").is_file()):
                 installed.add(child.name)
     except OSError as exc:
         # Surface a real disk or permission fault on the plugins-dir scan: an

@@ -21,6 +21,7 @@ see ``_free_total_vram_bytes``.
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import NamedTuple, Optional
@@ -1342,30 +1343,10 @@ class VramSizingMixin:
                       else self.n_gpu_layers)
         if gpu_layers == 0:
             return  # CPU-only run, VRAM is irrelevant
-        # Budget against the COMBINED capacity of an applied multi-GPU split:
-        # weights and per-layer KV both spread across the split devices.
-        free, total, split_devices = self._split_free_total_bytes()
-        if free is None:
-            free = self._free_vram_bytes()
-            if free is None:
-                return  # can't measure (no torch / no GPU) - nothing useful to say
-            total = self._total_vram_bytes()
-            split_devices = 1   # single-device reading - the flat overhead
-        # An n_cpu_moe load pins its routed-expert weights to system RAM, where
-        # they never draw on this budget at all.
-        model_bytes = self._effective_model_bytes_for_vram()
-        kv_cache = self.n_ctx * self._kv_bytes_per_token()
-        # Charge only the offloaded fraction of the weights; a full or "all"
-        # load (>= 99) charges the entire weight.
-        if gpu_layers >= self._DEFAULT_GPU_LAYERS:
-            weights = model_bytes
-        else:
-            layers = self._cached_layer_count() or self._ASSUMED_LAYERS
-            weights = int(model_bytes * min(1.0, gpu_layers / layers))
-        overhead = (self._split_overhead_bytes(split_devices)
-                    + self._spec_extra_vram_bytes()
-                    + self._recurrent_state_vram_bytes())
-        need = weights + kv_cache + overhead
+        planned = self._planned_vram(gpu_layers)
+        if planned is None:
+            return  # can't measure (no torch / no GPU) - nothing useful to say
+        need, free, total, split_devices, kv_cache, overhead = planned
         ctx_hint = f"weights + a {self.n_ctx:,}-token KV cache + buffers"
         if total is not None and need > total:
             # On a split box the ceiling exceeded is the split's combined one.
@@ -1416,6 +1397,40 @@ class VramSizingMixin:
             f"  Continuing anyway - load may be slow or fail."
         )
 
+    def _planned_vram(self, gpu_layers: int) -> Optional[tuple]:
+        """``(need, free, total, split_devices, kv_cache, overhead)`` for a load
+        that puts *gpu_layers* layers on the GPU, or None when free VRAM cannot
+        be read.
+
+        ``free``/``total`` are the COMBINED figures of an applied multi-GPU
+        split (``_split_free_total_bytes``, ``split_devices`` its device
+        count), else the single-device readings (``split_devices`` 1).
+        ``need`` is the VRAM-resident weights (``_effective_model_bytes_for_vram``,
+        so without the input-layer tensors and the routed experts this load's
+        n_cpu_moe pins; only the offloaded fraction of them below 99 layers),
+        plus the KV cache for ``self.n_ctx`` tokens, plus ``overhead`` (the
+        per-device compute overhead, the draft source and the recurrent
+        state)."""
+        free, total, split_devices = self._split_free_total_bytes()
+        if free is None:
+            free = self._free_vram_bytes()
+            if free is None:
+                return None
+            total = self._total_vram_bytes()
+            split_devices = 1   # single-device reading - the flat overhead
+        model_bytes = self._effective_model_bytes_for_vram()
+        kv_cache = self.n_ctx * self._kv_bytes_per_token()
+        if gpu_layers >= self._DEFAULT_GPU_LAYERS:
+            weights = model_bytes
+        else:
+            layers = self._cached_layer_count() or self._ASSUMED_LAYERS
+            weights = int(model_bytes * min(1.0, gpu_layers / layers))
+        overhead = (self._split_overhead_bytes(split_devices)
+                    + self._spec_extra_vram_bytes()
+                    + self._recurrent_state_vram_bytes())
+        return (weights + kv_cache + overhead, free, total, split_devices,
+                kv_cache, overhead)
+
     # Smallest context a "lower the context" suggestion names.
     _FIT_HINT_MIN_CTX = 1024
 
@@ -1430,7 +1445,8 @@ class VramSizingMixin:
         - for a Mixture-of-Experts model loaded with every layer on the GPU,
           the smallest n_cpu_moe that fits *budget*, when one does and it is
           above this load's;
-        - fewer GPU layers."""
+        - the most GPU layers that fit *budget* (``_gpu_layers_fitting``) when
+          that is fewer than *gpu_layers* and at least one, else the CPU."""
         options = []
         per_token = self._kv_bytes_per_token() + self._spec_kv_per_token()
         fixed = need - kv_cache - self.n_ctx * self._spec_kv_per_token()
@@ -1444,8 +1460,24 @@ class VramSizingMixin:
             if n is not None and n > self._load_n_cpu_moe():
                 options.append(("Keep MoE experts in system RAM",
                                 f"localm config n_cpu_moe {n}"))
-        options.append(("Offload fewer layers", "-g 24  (or -g 0 for CPU-only)"))
+        layers = self._gpu_layers_fitting(budget, kv_cache, overhead)
+        if 0 < layers < gpu_layers:
+            options.append(("Offload fewer layers", f"-g {layers}  (or -g 0 for CPU-only)"))
+        else:
+            options.append(("Run on the CPU", "-g 0"))
         return options
+
+    def _gpu_layers_fitting(self, budget: int, kv_cache: int, overhead: int) -> int:
+        """The most layers whose share of the VRAM-resident weights
+        (``_effective_model_bytes_for_vram``) fits *budget* beside *kv_cache*
+        and *overhead*, over the layer count ``_cached_layer_count`` reads (or
+        ``_ASSUMED_LAYERS``). 0 when not even one layer fits."""
+        weights = self._effective_model_bytes_for_vram()
+        room = budget - kv_cache - overhead
+        if room <= 0 or weights <= 0:
+            return 0
+        layer_count = self._cached_layer_count() or self._ASSUMED_LAYERS
+        return max(0, min(layer_count, int(room / weights * layer_count)))
 
     def _smallest_fitting_n_cpu_moe(self, budget: int, kv: int,
                                     overhead: int) -> Optional[int]:
@@ -1504,35 +1536,22 @@ class VramSizingMixin:
             free = self._free_vram_bytes()
         if free is None:
             return None  # can't measure (no torch / no GPU) - keep the default (VRAM)
-        # KV bytes per token on the GPU: only the offloaded layers keep their KV
-        # in VRAM (offload_kqv); CPU layers' KV lives in system RAM, so a partial
-        # load is charged only its GPU share.
-        per_token = self._kv_bytes_per_token()
-        if gpu_layers < self._DEFAULT_GPU_LAYERS:
-            layers = self._cached_layer_count() or self._ASSUMED_LAYERS
-            per_token = int(per_token * min(1.0, gpu_layers / layers))
-        per_token += self._spec_kv_per_token()
-        if per_token <= 0:
+        parts = self._ctx_grow_charge(n_ctx, current_ctx, gpu_layers)
+        if parts is None:
             return None
-        # How much NEW KV must land in VRAM to grow to n_ctx depends on WHERE the
-        # currently-resident KV lives (the recreate frees it first):
-        #  - current KV in VRAM: freeing it returns that KV to the VRAM pool and
-        #    `free` was measured with it still resident, so the NET growth is
-        #    the charge (delta <= free  <=>  full target <= budget).
-        #  - current KV already in SYSTEM RAM (offload_kqv=False): the GPU holds
-        #    NO KV, `free` already reads the whole KV budget, and the FULL
-        #    target is charged.
-        # current_ctx==0 means "not told" (a direct or test call), so the base
-        # n_ctx stands in.
-        kv_in_ram = getattr(self._llm, "_offload_kqv", True) is False
-        current = max(int(current_ctx), self.n_ctx)
-        charge = (n_ctx * per_token if kv_in_ram
-                  else (n_ctx - current) * per_token)   # NET when the old VRAM KV is reclaimed
-        # State the decision - nothing else in the worker surfaces it.
+        charge, per_token, kv_in_ram = parts
+        # State the decision - nothing else in the worker surfaces it. The
+        # placement is decided on free VRAM alone; the Windows budget is only
+        # reported here. See test_budget_overrun_keeps_the_kv_cache_in_vram.
         from localm.debuglog import logger as _dbg
-        _dbg.debug("ctx-grow fit: target=%d free=%d per_token=%d charge=%d "
-                   "kv_in_ram=%s -> KV in %s", n_ctx, free, per_token, charge,
-                   kv_in_ram, "VRAM" if charge <= free else "system RAM")
+        if _dbg.isEnabledFor(logging.DEBUG):
+            from localm.gpu_usage import process_vram_budget
+            budget = process_vram_budget()
+            _dbg.debug("ctx-grow fit: target=%d free=%d budget=%s usage=%s per_token=%d "
+                       "charge=%d kv_in_ram=%s -> KV in %s", n_ctx, free,
+                       budget[0] if budget else None, budget[1] if budget else None,
+                       per_token, charge, kv_in_ram,
+                       "VRAM" if charge <= free else "system RAM")
         if charge <= free:
             return True                                # KV cache fits VRAM - keep it there
         # Does not fit VRAM: keep the FULL window and put the KV cache in system
@@ -1551,6 +1570,68 @@ class VramSizingMixin:
                 "full-speed GPU KV cache.",
                 f"{n_ctx:,}", charge / 1024**3, free / 1024**3, blind_note)
         return False
+
+    def _ctx_grow_charge(self, n_ctx: int, current_ctx: int,
+                         gpu_layers: int) -> Optional[tuple[int, int, bool]]:
+        """``(charge, per_token, kv_in_ram)`` for growing the live context to
+        *n_ctx* tokens with *gpu_layers* layers on the GPU: the bytes of KV
+        cache that must newly land in VRAM, the KV bytes per token charged, and
+        whether the live KV cache is in system RAM. None when the model keeps
+        no per-token KV on the GPU.
+
+        The charge depends on WHERE the live KV lives (the recreate frees it
+        first): in VRAM, only the NET growth over *current_ctx* is charged; in
+        system RAM, the FULL target is. *current_ctx* 0 means not told, and the
+        base n_ctx stands in."""
+        # Only the offloaded layers keep their KV in VRAM, so a partial load is
+        # charged only its GPU share.
+        per_token = self._kv_bytes_per_token()
+        if gpu_layers < self._DEFAULT_GPU_LAYERS:
+            layers = self._cached_layer_count() or self._ASSUMED_LAYERS
+            per_token = int(per_token * min(1.0, gpu_layers / layers))
+        per_token += self._spec_kv_per_token()
+        if per_token <= 0:
+            return None
+        kv_in_ram = getattr(self._llm, "_offload_kqv", True) is False
+        current = max(int(current_ctx), self.n_ctx)
+        charge = n_ctx * per_token if kv_in_ram else (n_ctx - current) * per_token
+        return charge, per_token, kv_in_ram
+
+    def _context_fits_budget(self, n_ctx: int, current_ctx: int = 0) -> Optional[bool]:
+        """Whether growing the live context to *n_ctx* tokens with the KV cache
+        in VRAM stays within this process's Windows video memory budget
+        (``gpu_usage.process_vram_budget``) - wired as LlamaCpp's
+        ``budget_check``.
+
+        True when the growth (charged as in ``_check_context_fit``) fits
+        budget - usage; False when it does not, so Windows would move part of
+        this process's video memory to shared system memory; None off Windows,
+        when the budget cannot be read, for a CPU-only run, or when the model
+        keeps no per-token KV on the GPU. Never raises."""
+        gpu_layers = getattr(self, "effective_gpu_layers", None)
+        if gpu_layers is None:
+            gpu_layers = self.n_gpu_layers
+        if gpu_layers == 0:
+            return None
+        from localm.gpu_usage import process_vram_budget
+        budget = process_vram_budget()
+        if budget is None:
+            return None
+        try:
+            parts = self._ctx_grow_charge(n_ctx, current_ctx, gpu_layers)
+        except Exception as e:
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("ctx-grow budget: charge unavailable (%s)", type(e).__name__)
+            return None
+        if parts is None:
+            return None
+        charge = parts[0]
+        room = budget[0] - budget[1]
+        from localm.debuglog import logger as _dbg
+        _dbg.debug("ctx-grow budget: target=%d charge=%d budget=%d usage=%d -> %s",
+                   n_ctx, charge, budget[0], budget[1],
+                   "fits" if charge <= room else "would be paged to shared memory")
+        return charge <= room
 
     # Bounds for VRAM-derived context ceilings
     _AUTO_CTX_MIN = 4096
@@ -1651,10 +1732,23 @@ class VramSizingMixin:
     _ASSUMED_LAYERS = 32
 
     def _cached_layer_count(self) -> Optional[int]:
-        """The model's true transformer layer count if a prior load cached it,
-        else None (never loaded yet - the caller falls back to _ASSUMED_LAYERS)."""
+        """The model's transformer layer count: the count a prior load cached,
+        else the ``block_count`` of its GGUF header (memoised per instance), else
+        None (the caller falls back to _ASSUMED_LAYERS)."""
         from localm.model_meta import cached_n_layers
-        return cached_n_layers(self.model_path)
+        cached = cached_n_layers(self.model_path)
+        if cached:
+            return cached
+        if not hasattr(self, "_header_layer_count"):
+            from localm.model_manager.gguf import _gguf_split_layout_meta
+            try:
+                meta = _gguf_split_layout_meta(Path(self.model_path))
+            except Exception as exc:  # contracted not to raise - surface if it does
+                from localm.debuglog import logger as _dbg
+                _dbg.debug("gguf block_count probe failed (%s)", type(exc).__name__)
+                meta = None
+            self._header_layer_count = int(meta[0]) if meta and meta[0] > 0 else None
+        return self._header_layer_count
 
     def _full_offload_parts(self, split_devices: int) -> tuple[int, int, int]:
         """``(model, kv, overhead)`` bytes a full GPU offload of this load

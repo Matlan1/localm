@@ -69,9 +69,9 @@ class TestBatchApply:
         r = tool_edit_files(project, [
             {"path": "a.py", "old": "value = 1", "new": "def broken("},
         ])
-        assert r.ok is True                     # the write happened
-        assert "syntax check" in r.output       # and the breakage is reported
-        assert "syntax error" in r.summary
+        assert r.ok is False                    # nothing is written
+        assert "syntax error" in r.output       # and the breakage is reported
+        assert "value = 1" in (project / "a.py").read_text()
 
 
 class TestAllOrNothing:

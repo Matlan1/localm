@@ -102,6 +102,15 @@ def _quiet_stderr(to_log: bool = True):
             os.close(saved_fd)
 
 
+def _grammar_parse_stderr():
+    """Context manager around a native grammar parse: the parser's stderr (its
+    error and the whole grammar source) goes to /dev/null, and to the debug
+    log only when ``debug_content_enabled()`` allows chat content there. Takes
+    ``_stderr_lock`` for the block."""
+    from localm.debuglog import debug_content_enabled
+    return _quiet_stderr(to_log=debug_content_enabled())
+
+
 def _stderr_ctx_for_generate(verbose: bool):
     """Return the context manager used to wrap generation stderr:
     nullcontext when verbose is True, otherwise dedup_native_stderr with
@@ -358,12 +367,21 @@ def _make_chunk_id() -> str:
 class _Tokenizer:
     """Thin wrapper for the vocab / tokenisation layer."""
 
+    # The texts check() cuts input at; empty until a load reads them.
+    _separators: tuple = ()
+    _separators_untrusted: tuple = ()
+
     def __init__(self, model_ptr: int, ctx_ptr: int) -> None:
         self._vocab = api.llama_model_get_vocab(model_ptr)
         self._ctx   = ctx_ptr
         # Read once per load, not per encode: the value cannot change while the
         # model is loaded, and encode() runs on every request.
         self._pre_type = pretokenizer_guard.read_pre_type(model_ptr, api)
+        # Texts llama.cpp cuts the input at before the pre-tokenizer runs, read
+        # only for a pre-tokenizer the guard bounds.
+        if pretokenizer_guard.policy_for(self._pre_type) is not None:
+            self._separators, self._separators_untrusted = (
+                pretokenizer_guard.read_separators(self._vocab, api))
         hazard = pretokenizer_guard.hazard_note(self._pre_type)
         if hazard is not None:
             from localm.debuglog import logger
@@ -387,7 +405,7 @@ class _Tokenizer:
 
         With no ranges this issues the single call it always did.
         """
-        pretokenizer_guard.check_text(self._pre_type, text)
+        self.check(text, untrusted_ranges)
         if not untrusted_ranges:
             return self._encode_segment(text, add_bos, True)
 
@@ -401,6 +419,22 @@ class _Tokenizer:
         if want_bos and add_bos:
             return self._encode_segment(text, add_bos, True)
         return tokens
+
+    def check(self, text: str, untrusted_ranges=()) -> None:
+        """Raise ``PretokenizerUnsafeInputError`` when a piece of *text* that
+        :meth:`encode` would hand the pre-tokenizer is one it must not see.
+        Each trust segment is tokenized on its own, and is cut at the special
+        tokens its ``parse_special`` setting lets llama.cpp recognise."""
+        if pretokenizer_guard.policy_for(self._pre_type) is None:
+            return
+        if not untrusted_ranges:
+            pretokenizer_guard.check_parts(self._pre_type, text, self._separators)
+            return
+        for segment, is_untrusted in split_by_trust(text, untrusted_ranges):
+            if segment:
+                pretokenizer_guard.check_parts(
+                    self._pre_type, segment,
+                    self._separators_untrusted if is_untrusted else self._separators)
 
     def _encode_segment(self, text: str, add_special: bool, parse_special: bool) -> list[int]:
         raw = text.encode("utf-8", errors="replace")
@@ -1117,10 +1151,11 @@ def _build_sampler(
     # letting a malformed grammar reach the crash-and-latch path.
     if grammar and grammar_lazy:
         if grammar_triggers and api.has_lazy_grammar():
-            gsampler = api.llama_sampler_init_grammar_lazy_patterns(
-                vocab, grammar.encode(), b"root",
-                [t.encode() for t in grammar_triggers],
-            )
+            with _grammar_parse_stderr():
+                gsampler = api.llama_sampler_init_grammar_lazy_patterns(
+                    vocab, grammar.encode(), b"root",
+                    [t.encode() for t in grammar_triggers],
+                )
             if gsampler is None:
                 api.llama_sampler_free(chain)
                 raise InvalidGrammarError(_INVALID_GRAMMAR_MSG)
@@ -1156,7 +1191,8 @@ def _build_sampler(
                 GRAMMAR_LAZY_NO_TRIGGERS_MESSAGE if not grammar_triggers
                 else GRAMMAR_LAZY_RUNTIME_OLD_MESSAGE)
     elif grammar:
-        gsampler = api.llama_sampler_init_grammar(vocab, grammar.encode(), b"root")
+        with _grammar_parse_stderr():
+            gsampler = api.llama_sampler_init_grammar(vocab, grammar.encode(), b"root")
         if gsampler is None:
             api.llama_sampler_free(chain)
             raise InvalidGrammarError(_INVALID_GRAMMAR_MSG)
@@ -1387,6 +1423,7 @@ class LlamaCpp:
         mmproj_path: Optional[str] = None,
         cancel_event: Optional[threading.Event] = None,
         vram_check: Optional[Callable[[int, int], Optional[bool]]] = None,
+        budget_check: Optional[Callable[[int, int], Optional[bool]]] = None,
         gpu_split_ratios: Optional[list] = None,
         n_cpu_moe: int = 0,
         mtp_enabled: bool = False,
@@ -1433,6 +1470,12 @@ class LlamaCpp:
         # abort), or None when VRAM is unmeasurable (keep the default). None (the
         # attribute) = no check (only a NULL-pointer check on the result after).
         self._vram_check  = vram_check
+        # Optional check consulted by _step_reserve, called with
+        # (target_n_ctx, current_ctx_capacity): True when a context of that size
+        # with the KV cache in VRAM stays within the video memory the OS lets
+        # this process keep resident, False when the OS would page part of it
+        # out, None when unknown.
+        self._budget_check = budget_check
         # Dynamic context window: starts at n_ctx, grows in n_ctx_grow steps
         # up to n_ctx_max when a conversation outgrows it. None/0 = unlimited
         # (the pre-dynamic behaviour: grow exactly as far as needed).
@@ -1728,6 +1771,9 @@ class LlamaCpp:
             and (not self.weight_placement
                  or any(not b.get("is_ram") for b in self.weight_placement)))
 
+        self._residency_watch = True
+        self._prime_residency_counters()
+
         self.n_parallel, self.parallel_note = self._resolve_parallel(n_parallel, n_ctx)
 
         # --- create context ---
@@ -1765,6 +1811,7 @@ class LlamaCpp:
         if not self._ctx_ptr:
             self._free_adapters()
             api.llama_free_model(self._model_ptr)
+            self._model_ptr = None
             note = context_refused_note(self._kv_cache_type)
             if note:
                 raise RuntimeError("Failed to create llama context." + note)
@@ -2215,8 +2262,10 @@ class LlamaCpp:
 
     # Tokenisation (public helpers used by tests / introspection)
 
-    def tokenize(self, text: str, add_bos: bool = True) -> list[int]:
-        return self._tokenizer.encode(text, add_bos=add_bos)
+    def tokenize(self, text: str, add_bos: bool = True,
+                 untrusted_ranges=()) -> list[int]:
+        return self._tokenizer.encode(text, add_bos=add_bos,
+                                      untrusted_ranges=untrusted_ranges)
 
     def detokenize(self, tokens: Iterable[int]) -> str:
         # Join the raw token bytes first, then decode once, so a multibyte
@@ -2240,8 +2289,7 @@ class LlamaCpp:
         # The native parser prints its error and the whole grammar source to
         # stderr on rejection. It is kept off the terminal, and reaches the debug
         # log only when debug_content_enabled() allows chat content there.
-        from localm.debuglog import debug_content_enabled
-        with _quiet_stderr(to_log=debug_content_enabled()):
+        with _grammar_parse_stderr():
             sampler = api.llama_sampler_init_grammar(
                 self._tokenizer._vocab, grammar.encode(), b"root")
         if sampler is None:
@@ -3308,7 +3356,7 @@ class LlamaCpp:
                 # mtmd_tokenize runs the same pre-tokenizer over the text parts
                 # of this prompt, so the vision path needs the same check the
                 # text path gets in _Tokenizer.encode.
-                pretokenizer_guard.check_text(self._tokenizer._pre_type, prompt)
+                self._loaded_tokenizer().check(prompt)
 
                 # Stays on _quiet_stderr rather than _generate()'s
                 # dedup_native_stderr: below, _ctx() is entered once for the mtmd
@@ -3623,6 +3671,81 @@ class LlamaCpp:
     _decode_refresh_at: Optional[float] = None  # time.monotonic() of the last refresh
     _decode_refresh_backoff = 60.0
 
+    # Shared system memory a process fully on a GPU may hold before
+    # _note_residency reports it: at least _RESIDENCY_SHARED_MIN bytes and at
+    # least _RESIDENCY_SHARED_RATIO of the process's dedicated VRAM.
+    _RESIDENCY_SHARED_MIN = 1536 * 1024 ** 2
+    _RESIDENCY_SHARED_RATIO = 0.15
+    # Seconds between two residency checks while no context is recreated.
+    _RESIDENCY_RECHECK_S = 60.0
+    _residency_watch = False           # set by __init__; read by _note_residency
+    _residency_check_after = 0.0       # time.monotonic(); due at the next request
+    _residency_reported = False        # the current over-threshold spell was logged
+    _residency_unavailable_said = False
+
+    def _prime_residency_counters(self) -> Optional[threading.Thread]:
+        """On Windows, for a load ``_note_residency`` checks, open this
+        process's ``GPU Process Memory`` query on a daemon thread so the
+        first check does not pay the one-time PDH setup. Returns the started
+        thread, or None when nothing is checked. Never raises."""
+        import sys
+        if sys.platform != "win32" or not self._decode_judged:
+            return None
+        from localm import gpu_usage
+        try:
+            t = threading.Thread(target=gpu_usage.process_gpu_memory,
+                                 name="localm-residency-prime", daemon=True)
+            t.start()
+        except RuntimeError:
+            return None   # the first check opens the query instead. See test_a_failed_prime_still_checks
+        return t
+
+    def _note_residency(self) -> None:
+        """On Windows, log at INFO when the WDDM counters show this process
+        holding at least ``_RESIDENCY_SHARED_MIN`` bytes and
+        ``_RESIDENCY_SHARED_RATIO`` of its dedicated VRAM in shared system
+        memory, once per spell: the next line follows only after a reading
+        under that threshold, which is logged at INFO too.
+
+        Reads at most once per ``_RESIDENCY_RECHECK_S`` seconds, and at the
+        first call after a load or a context recreate. Does nothing on other
+        platforms, for an instance ``__init__`` did not build, while
+        ``_decode_judged`` is False, or while the KV cache is in system RAM.
+        The first unavailable reading is logged here at DEBUG
+        (``gpu_usage.process_gpu_memory`` logs each failed query itself).
+        Never raises. Caller holds ``_gen_lock``."""
+        import sys
+        if (sys.platform != "win32" or not self._residency_watch or not self._decode_judged
+                or not self._ctx_ptr or self._offload_kqv is False):
+            return
+        now = time.monotonic()
+        if now < self._residency_check_after:
+            return
+        self._residency_check_after = now + self._RESIDENCY_RECHECK_S
+        from localm import gpu_usage
+        from localm.debuglog import logger
+        reading = gpu_usage.process_gpu_memory()
+        if reading is None:
+            if not self._residency_unavailable_said:
+                self._residency_unavailable_said = True
+                logger.debug("gguf context: the GPU Process Memory counters are "
+                             "unavailable, residency is not checked")
+            return
+        dedicated, shared = reading
+        over = (shared >= self._RESIDENCY_SHARED_MIN
+                and shared >= self._RESIDENCY_SHARED_RATIO * dedicated)
+        if over and not self._residency_reported:
+            self._residency_reported = True
+            logger.info("gguf model: Windows holds %.2f GB of this model's GPU memory in "
+                        "shared system memory (%.2f GB in VRAM), so replies run slower "
+                        "until other programs release VRAM and Windows moves it back",
+                        shared / 1024 ** 3, dedicated / 1024 ** 3)
+        elif not over and self._residency_reported:
+            self._residency_reported = False
+            logger.info("gguf model: Windows moved this model's GPU memory back to VRAM "
+                        "(%.2f GB in VRAM, %.2f GB in shared system memory)",
+                        dedicated / 1024 ** 3, shared / 1024 ** 3)
+
     def _note_decode_rate(self, steps: int, seconds: float, depth: float) -> None:
         """Record a finished reply that ran *steps* main decode steps in
         *seconds* of native time at a mean KV depth of *depth* cells, with the
@@ -3661,11 +3784,14 @@ class LlamaCpp:
             samples[key] = (rate, depth)
 
     def _consume_decode_refresh(self) -> None:
-        """Clear a pending refresh because the context is being recreated, and
-        start the backoff before the next one: ``_DECODE_REFRESH_BACKOFF_S``
-        when the last refresh was longer than ``_DECODE_REFRESH_BACKOFF_MAX_S``
-        ago (or there was none), else double the last backoff, at most
-        ``_DECODE_REFRESH_BACKOFF_MAX_S``. Caller holds ``_gen_lock``."""
+        """Make the residency check due at the next ``_note_residency`` because
+        the context is being recreated. When a decode-rate refresh is pending,
+        clear it and start the backoff before the next one:
+        ``_DECODE_REFRESH_BACKOFF_S`` when the last refresh was longer than
+        ``_DECODE_REFRESH_BACKOFF_MAX_S`` ago (or there was none), else double
+        the last backoff, at most ``_DECODE_REFRESH_BACKOFF_MAX_S``. Caller
+        holds ``_gen_lock``."""
+        self._residency_check_after = 0.0
         if self._decode_refresh is None:
             return
         self._decode_refresh = None
@@ -3693,10 +3819,12 @@ class LlamaCpp:
         ``_vram_check`` answers True for it; the check is not asked again for
         ``_KV_PROMOTE_RETRY_S`` seconds after it is asked. Otherwise, when
         ``_note_decode_rate`` marked the context for a refresh, recreates it at
-        the same size and KV placement.
+        the same size and KV placement. Runs ``_note_residency`` first whenever
+        the live context holds *needed*.
         Caller holds ``_gen_lock``. ``_vram_check`` may raise."""
         if not self._ctx_ptr or needed > self._ctx_capacity:
             return None
+        self._note_residency()
         capacity = self._ctx_capacity
         target = self._target_ctx(needed + max(0, others))
         shrink = target <= capacity // 2
@@ -3723,22 +3851,27 @@ class LlamaCpp:
         return target, decision is not False
 
     # Cells a budgeted reply reserves at first when its whole budget would put
-    # the KV cache in system RAM (``_step_reserve``), grown as the reply runs.
+    # the KV cache in system RAM or past the OS video memory budget
+    # (``_step_reserve``), grown as the reply runs.
     RESERVE_STEP = 512
     RESERVE_PAD = 64
 
     def _step_reserve(self, needed: int, step: int, others: int = 0) -> int:
         """The cells to reserve now for a reply that needs at most *needed*:
         *step* when a context sized for *needed* would keep its KV cache in
-        system RAM while one sized for *step* keeps it in VRAM, else *needed*.
+        system RAM, or would not fit the OS video memory budget
+        (``_budget_check`` answers False), while one sized for *step* keeps it in
+        VRAM within that budget; else *needed*.
 
         When the live context holds *needed*, *others* counts the cells other
         sequences' caches hold (as in ``_rightsize_plan``), the answer is
         *needed* without asking ``_vram_check`` while its KV cache is in VRAM
         or while the promotion check is held off (``_kv_promote_after``).
         Asks ``_vram_check`` with ``hint=False``, at most twice, *step* first;
-        never asks when the two sizes round to the same context. Never raises:
-        a raising check answers *needed*, logged at INFO. Caller holds
+        when it keeps both sizes in VRAM, asks ``_budget_check`` (when set) for
+        *needed*, then for *step*. Never asks when the two sizes round to the
+        same context. Never
+        raises: a raising check answers *needed*, logged at INFO. Caller holds
         ``_gen_lock``."""
         check = getattr(self, "_vram_check", None)
         if step >= needed or check is None:
@@ -3754,11 +3887,15 @@ class LlamaCpp:
         full = self._target_ctx(needed + extra)
         if small >= full:
             return needed
+        budget = getattr(self, "_budget_check", None)
         try:
             if check(small, capacity, hint=False) is not True:
                 return needed
             if check(full, capacity, hint=False) is not False:
-                return needed
+                if budget is None or budget(full, capacity) is not False:
+                    return needed
+                if budget(small, capacity) is False:
+                    return needed
         except Exception as exc:
             from localm.debuglog import logger
             logger.info("gguf context: reserving the whole reply, the VRAM check raised %s",
@@ -3766,7 +3903,7 @@ class LlamaCpp:
             return needed
         from localm.debuglog import logger
         logger.info("gguf context: reserving %d of %d cells, a %d-token context keeps the "
-                    "KV cache in VRAM where a %d-token one would not", step, needed,
+                    "KV cache resident in VRAM where a %d-token one would not", step, needed,
                     small, full)
         return step
 

@@ -326,10 +326,14 @@ def test_rewrite_leaves_everything_outside_the_rocm_regions_byte_identical(cand)
 
 def test_rewriting_to_the_pinned_values_changes_nothing():
     view = REAL_VIEW
+    info = re.search(r"# tag b\d+ ROCm assets \(llama\.cpp ([0-9a-f]{12})(?:, ROCm ([^)]+))?\)",
+                     REAL_PINS)
+    assert info, "the ROCm asset block's comment no longer names the llama.cpp commit"
+    commit, rocm_version = info.group(1), info.group(2) or ""
     cand = bump.Candidate(
-        tag=view.tag, lemonade_commit="71ad0", rocm_version="10.2.0a20261008",
+        tag=view.tag, lemonade_commit=commit[:5], rocm_version=rocm_version,
         published_at=bump.parse_date("2026-10-08T20:46:47Z"), rocm_assets=dict(view.rocm_table),
-        cpu_tag=view.cpu_tag, cpu_commit="71ad0590f4808b6202f9213d166913858c73b1bc",
+        cpu_tag=view.cpu_tag, cpu_commit=commit,
         cpu_asset=f"llama-{view.cpu_tag}-bin-win-cpu-x64.zip",
         cpu_sha256=next(iter(view.cpu_table.values())))
     assert bump.pins_problems(view, cand) == []

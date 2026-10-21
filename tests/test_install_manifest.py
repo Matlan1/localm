@@ -587,6 +587,33 @@ def test_contained_runtime_removed_in_process_and_shared_kept(tmp_path):
     assert any("shared runtime kept" in why for _, why in rep["skipped"])
 
 
+def test_a_shared_uv_folder_is_kept(tmp_path):
+    shared = tmp_path / "elsewhere" / "uv"
+    shared.mkdir(parents=True)
+    (shared / "f").write_text("x", encoding="utf-8")
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    im.record(clone, runtime_contained=False, uv_dir=str(shared))
+    rep = im.uninstall(clone, force=True)
+    assert (shared / "f").exists()
+    assert any("shared runtime kept" in why for _, why in rep["skipped"])
+    assert str(shared) not in " ".join(str(x) for x in rep["removed"])
+
+
+@pytest.mark.parametrize("key", ["python_dir", "cache_dir", "uv_dir"])
+def test_a_contained_runtime_recorded_outside_the_clone_is_refused(tmp_path, key):
+    outside = tmp_path / "elsewhere" / "victim"
+    outside.mkdir(parents=True)
+    (outside / "f").write_text("x", encoding="utf-8")
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    im.record(clone, runtime_contained=True, **{key: str(outside)})
+    rep = im.uninstall(clone, force=True)
+    assert (outside / "f").exists()
+    assert any(str(outside) in str(p) and "recorded outside this folder" in why
+               for p, why in rep["refused"])
+
+
 def test_a_failure_keeps_the_record_and_the_runtime(tmp_path):
     _runtime_layout(tmp_path)
     lib = tmp_path / "runtime" / "localm_llama_runtime" / "lib"

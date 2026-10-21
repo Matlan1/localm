@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from localm.pathsafe import confined_model_file
+
 DEFAULT_MAX_SEQ_LENGTH = 512
 
 _LEGACY_POOLING_FLAGS = (
@@ -95,6 +97,18 @@ def _activation(config: dict, stage: str) -> str:
     return _ACTIVATIONS[short]
 
 
+def _stage_file(folder: Path, sub: str, name: str, stage: str) -> Path:
+    """The file *name* of the stage folder *sub* (the folder itself when empty),
+    confined under *folder* before any filesystem call. Raises
+    :class:`StUnsupportedError` when it is not inside *folder*."""
+    try:
+        return confined_model_file(folder, f"{sub}/{name}" if sub else name)
+    except ValueError as exc:
+        raise StUnsupportedError(
+            f"the {stage} stage of this sentence-transformers folder names the path "
+            f"{sub!r}, which is not inside the folder; refusing to load it") from exc
+
+
 def load_plan(model_path: str) -> Optional[StPlan]:
     """The stages of the sentence-transformers folder *model_path*, or None when it
     has no ``modules.json``. Raises :class:`StUnsupportedError` for a module or
@@ -117,14 +131,14 @@ def load_plan(model_path: str) -> Optional[StPlan]:
                     f"subfolder {sub!r}; localm loads one at the top of the folder")
             continue
         if kind == "Pooling":
-            config = _read_json(folder / sub / "config.json")
+            config = _read_json(_stage_file(folder, sub, "config.json", "Pooling"))
             if not isinstance(config, dict):
                 raise StUnsupportedError(f"{sub}/config.json of the Pooling stage is missing")
             stages.append(Stage("pooling", pooling_modes=_pooling_modes(config)))
         elif kind == "Normalize":
             stages.append(Stage("normalize"))
         elif kind == "Dense":
-            config = _read_json(folder / sub / "config.json")
+            config = _read_json(_stage_file(folder, sub, "config.json", "Dense"))
             if not isinstance(config, dict):
                 raise StUnsupportedError(f"{sub}/config.json of the Dense stage is missing")
             if config.get("use_residual"):
@@ -135,7 +149,7 @@ def load_plan(model_path: str) -> Optional[StPlan]:
                 raise StUnsupportedError(
                     f"the Dense stage {sub!r} of this sentence-transformers folder reads "
                     f"{config.get('module_input_name')!r}, not the sentence embedding")
-            weights = folder / sub / "model.safetensors"
+            weights = _stage_file(folder, sub, "model.safetensors", "Dense")
             if not weights.is_file():
                 raise StUnsupportedError(
                     f"the Dense stage {sub!r} of this sentence-transformers folder keeps its "

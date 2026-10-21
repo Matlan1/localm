@@ -589,6 +589,8 @@ test("while a web call is in flight, sending, /web and edit/revert are refused; 
     return jsonResp({});
   };
   const { window } = loadApp({ fetchImpl: impl });
+  await new Promise((r) => setTimeout(r, 300));          // let the boot model refresh settle
+  runScript(window, "modelCache.active = 'm';");
   window.maybeCompactConversation = async () => {};
   window.readSSE = async (_r, onData) => {
     onData(JSON.stringify({ choices: [{ delta: { content: "answer" } }] }));

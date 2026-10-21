@@ -175,9 +175,13 @@ def plan_split(devices: Sequence[dict], *, layer_bytes: Sequence[int],
     non-zero share cannot hold its charge, the one with the least free memory
     among them gets a zero share and the rest are re-weighted by free memory.
     When one device remains, the plan is that device alone (``tensor_split``
-    ``{index: 1.0}``) if it holds the whole charge. When no plan fits,
-    ``tensor_split`` is ``None`` and only ``default`` reports the shortfall.
-    *spread_bytes* is charged as in :func:`charge_devices`."""
+    ``{index: 1.0}``) if it holds the whole charge. When that leaves no plan
+    that fits, the layers are packed in order onto the devices in order
+    (:func:`_packed_shares`), which fits layers of unequal size (the blocks
+    whose routed experts stay in system RAM beside those whose experts do not).
+    When no plan fits, ``tensor_split`` is ``None`` and only ``default``
+    reports the shortfall. *spread_bytes* is charged as in
+    :func:`charge_devices`."""
     kw: dict[str, Any] = dict(layer_bytes=layer_bytes, output_bytes=output_bytes,
                               n_gpu_layers=n_gpu_layers, layer_kv_bytes=layer_kv_bytes,
                               logits_bytes=logits_bytes, reserve_bytes=reserve_bytes,
@@ -186,6 +190,84 @@ def plan_split(devices: Sequence[dict], *, layer_bytes: Sequence[int],
     default = charge_devices(devices, frees, **kw)
     if all(c.fits for c in default):
         return SplitFitPlan(tensor_split=None, excluded=[], default=default)
+    dropped = _drop_devices_plan(devices, frees, default, kw)
+    if dropped is not None:
+        return dropped
+    packed = _packed_shares(devices, frees, kw)
+    if packed is None:
+        return SplitFitPlan(tensor_split=None, excluded=[], default=default)
+    return _plan_from_shares(devices, packed, default, kw)
+
+
+def _plan_from_shares(devices: Sequence[dict], shares: Sequence[float],
+                      default: list[DeviceCharge], kw: dict) -> SplitFitPlan:
+    """The :class:`SplitFitPlan` keeping the devices of *shares* above 0."""
+    kept = {int(d["index"]): s for d, s in zip(devices, shares, strict=True) if s > 0}
+    excluded = [int(d["index"]) for d, s in zip(devices, shares, strict=True) if s <= 0]
+    return SplitFitPlan(tensor_split=kept, excluded=excluded, default=default,
+                        chosen=charge_devices(devices, shares, **kw))
+
+
+def _packed_shares(devices: Sequence[dict], frees: Sequence[int],
+                   kw: dict) -> Optional[list[float]]:
+    """Shares that give each device, in order, a contiguous run of the
+    offloaded layers: every device takes as many of the next layers (and the
+    output layer, last) as fit its free memory less the per-device reserve.
+    The shares place exactly those runs under :func:`layer_devices`. None when
+    the layers do not all fit, or when the placement the shares produce
+    (charged by :func:`charge_devices`, *spread_bytes* included) leaves a
+    device over its free memory."""
+    layer_bytes = kw["layer_bytes"]
+    layer_kv = kw["layer_kv_bytes"]
+    n_layer_all = len(layer_bytes)
+    n_gpu_layers = kw["n_gpu_layers"]
+    if n_gpu_layers < 0:
+        n_gpu_layers = n_layer_all + 1
+    i_gpu_start = max(n_layer_all + 1 - n_gpu_layers, 0)
+    act = min(n_gpu_layers, n_layer_all + 1)
+    units = []
+    for j in range(act):
+        il = i_gpu_start + j
+        if il < n_layer_all:
+            units.append(int(layer_bytes[il]) + int(layer_kv[il]))
+        else:
+            units.append(int(kw["output_bytes"]) + int(kw["logits_bytes"]))
+    if not units:
+        return None
+    bounds = []
+    j = 0
+    for free in frees:
+        room = free - int(kw["reserve_bytes"])
+        start = j
+        used = 0
+        while j < len(units) and used + units[j] <= room:
+            used += units[j]
+            j += 1
+        bounds.append((start, j))
+    if j < len(units):
+        return None
+    cum = [(end - 0.5) / act if end > start else None for start, end in bounds]
+    last = max(pos for pos, (start, end) in enumerate(bounds) if end > start)
+    shares = []
+    prev = 0.0
+    for pos, c in enumerate(cum):
+        if c is None or pos > last:
+            shares.append(0.0)
+            continue
+        c = 1.0 if pos == last else c
+        shares.append(c - prev)
+        prev = c
+    charges = charge_devices(devices, shares, **kw)
+    if not all(ch.fits for ch in charges):
+        return None
+    return shares
+
+
+def _drop_devices_plan(devices: Sequence[dict], frees: Sequence[int],
+                       default: list[DeviceCharge], kw: dict) -> Optional[SplitFitPlan]:
+    """The plan that zeroes the share of the device with the least free memory
+    among those over their charge, re-weighting the rest by free memory, until
+    every device fits; None when no device set fits."""
     shares: list[float] = [float(f) for f in frees]
     charges = default
     while True:
@@ -196,13 +278,10 @@ def plan_split(devices: Sequence[dict], *, layer_bytes: Sequence[int],
         shares[victim] = 0.0
         remaining = sum(1 for s in shares if s > 0)
         if remaining == 0:
-            return SplitFitPlan(tensor_split=None, excluded=[], default=default)
+            return None
         total = sum(shares)
         shares = [s / total for s in shares]
         charges = charge_devices(devices, shares, **kw)
         if remaining == 1 and not all(c.fits for c in charges):
-            return SplitFitPlan(tensor_split=None, excluded=[], default=default)
-    kept = {int(d["index"]): s for d, s in zip(devices, shares, strict=True) if s > 0}
-    excluded = [int(d["index"]) for d, s in zip(devices, shares, strict=True) if s <= 0]
-    return SplitFitPlan(tensor_split=kept, excluded=excluded, default=default,
-                        chosen=charges)
+            return None
+    return _plan_from_shares(devices, shares, default, kw)

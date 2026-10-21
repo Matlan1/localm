@@ -52,6 +52,133 @@ class HiresChoice(BaseModel):
                            allow_inf_nan=False)
 
 
+MAX_REF_IMAGES = 4
+MAX_EMBEDDINGS = 16
+MAX_IMAGE_DATA_CHARS = 48 * 1024 * 1024
+MAX_INPUT_SIDE = 4096
+MIN_INPUT_SIDE = 8
+CONTROL_PREPROCESS = ("none", "canny")
+_DATA_URL_PREFIXES = ("data:image/png;base64,", "data:image/jpeg;base64,",
+                      "data:image/webp;base64,")
+_IMAGE_FORMATS = frozenset({"PNG", "JPEG", "MPO", "WEBP"})
+
+
+class ControlChoice(BaseModel):
+    """A ControlNet pass of a native image job: the registered ControlNet
+    *model*, the control *image* (a data URL), its *strength*, and
+    *preprocess* (``none`` uses the image as given, ``canny`` turns it into an
+    edge map first)."""
+    model: str
+    image: str
+    strength: float = Field(default=0.9, ge=0.0, le=2.0, allow_inf_nan=False)
+    preprocess: str = "none"
+
+
+def decode_image_data(raw: Optional[str], what: str) -> bytes:
+    """The encoded image in the data URL *raw* (PNG, JPEG or WebP, each side
+    ``MIN_INPUT_SIDE`` to ``MAX_INPUT_SIDE`` pixels). Only the header is
+    decoded to check it. Raises ``ValueError`` naming *what* when *raw* is not
+    such an image."""
+    import base64
+    import binascii
+    import io
+
+    from PIL import Image, UnidentifiedImageError
+    text = (raw or "").strip()
+    prefix = next((p for p in _DATA_URL_PREFIXES if text[:len(p)].lower() == p), None)
+    if prefix is None:
+        raise ValueError(f"The {what} must be a PNG, JPEG or WebP image sent as a data URL.")
+    if len(text) > MAX_IMAGE_DATA_CHARS:
+        raise ValueError(f"The {what} is larger than {MAX_IMAGE_DATA_CHARS // (1024 * 1024)} MB.")
+    try:
+        data = base64.b64decode(text[len(prefix):], validate=True)
+    except (binascii.Error, ValueError) as e:
+        raise ValueError(f"The {what} is not valid base64 data.") from e
+    try:
+        with Image.open(io.BytesIO(data)) as im:
+            fmt, (w, h) = im.format, im.size
+    except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as e:
+        raise ValueError(f"The {what} could not be read as an image.") from e
+    if fmt not in _IMAGE_FORMATS:
+        raise ValueError(f"The {what} must be a PNG, JPEG or WebP image.")
+    if not (MIN_INPUT_SIDE <= w <= MAX_INPUT_SIDE and MIN_INPUT_SIDE <= h <= MAX_INPUT_SIDE):
+        raise ValueError(f"The {what} is {w}x{h}; each side must be {MIN_INPUT_SIDE} to "
+                         f"{MAX_INPUT_SIDE} pixels.")
+    return data
+
+
+def check_image_inputs(*, input_image: Optional[str], input_image_data: Optional[str],
+                       mask: Optional[str], ref_images: Optional[list],
+                       control: Optional[ControlChoice]) -> dict:
+    """A request's images decoded and checked (``decode_image_data``):
+    ``{"init_image", "mask", "ref_images", "control_image"}`` with the encoded
+    bytes, None or ``[]`` for an unset one. Raises ``ValueError`` when an
+    image is bad, *input_image* (a path) and *input_image_data* are both set, a
+    mask has no base image, there are more than ``MAX_REF_IMAGES`` references,
+    or the control preprocess is unknown."""
+    if input_image and input_image_data:
+        raise ValueError("Send the base image as a path or as image data, not both.")
+    if mask and not (input_image or input_image_data):
+        raise ValueError("A mask needs a base image: set the input image first.")
+    refs = list(ref_images or [])
+    if len(refs) > MAX_REF_IMAGES:
+        raise ValueError(f"At most {MAX_REF_IMAGES} reference images per job.")
+    if control is not None and control.preprocess not in CONTROL_PREPROCESS:
+        raise ValueError(f"Unknown control preprocess '{control.preprocess}'. Allowed: "
+                         + ", ".join(CONTROL_PREPROCESS) + ".")
+    return {
+        "init_image": decode_image_data(input_image_data, "base image")
+        if input_image_data else None,
+        "mask": decode_image_data(mask, "mask") if mask else None,
+        "ref_images": [decode_image_data(r, f"reference image {i + 1}")
+                       for i, r in enumerate(refs)],
+        "control_image": decode_image_data(control.image, "control image")
+        if control is not None else None,
+    }
+
+
+def _check_typed_name(name: str, model_types: tuple, label: str, reg: dict) -> str:
+    name = (name or "").strip()
+    entry = reg.get(name) if name else None
+    if not isinstance(entry, dict) or entry.get("model_type") not in model_types:
+        raise ValueError(f"'{name}' is not a registered {label}." if name
+                         else f"Pick a {label}.")
+    return name
+
+
+def validate_addons(control: Optional[ControlChoice], embeddings: Optional[list],
+                    reg: Optional[dict] = None) -> dict:
+    """A request's ControlNet and embeddings by registered name:
+    ``{"control_net", "control_strength", "control_preprocess", "embeddings"}``
+    (None / ``[]`` when unset). A name must be a registry entry of type
+    ``controlnet`` / ``textual-inversion``, or ``unknown`` (and ``embedding``
+    for an embedding); the backend checks the file is one. Raises ``ValueError`` with a user-facing reason."""
+    names = [str(n) for n in (embeddings or [])]
+    if len(names) > MAX_EMBEDDINGS:
+        raise ValueError(f"At most {MAX_EMBEDDINGS} embeddings per job.")
+    if control is None and not names:
+        return {"control_net": None, "control_strength": None, "control_preprocess": None,
+                "embeddings": []}
+    if reg is None:
+        from localm.config import load_registry
+        reg = load_registry()
+    out = {"control_net": None, "control_strength": None, "control_preprocess": None,
+           "embeddings": []}
+    if control is not None:
+        out["control_net"] = _check_typed_name(control.model, ("controlnet", "unknown"),
+                                               "ControlNet", reg)
+        out["control_strength"] = float(control.strength)
+        out["control_preprocess"] = control.preprocess
+    seen = []
+    for n in names:
+        n = _check_typed_name(n, ("textual-inversion", "unknown", "embedding"), "embedding",
+                              reg)
+        if n not in seen:
+            seen.append(n)
+    out["embeddings"] = seen
+    return out
+
+
 def upscaler_options(reg: Optional[dict] = None) -> list:
     """``[{"name", "file"}]``: the registered upscaler models whose file exists."""
     from localm.model_manager.registry import _entry_path

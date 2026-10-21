@@ -185,7 +185,7 @@ class TestUpdateCheckMarkupEscaping:
         monkeypatch.setattr(updater, "check", _raise)
 
         r = cli_runner.invoke(update_cmd, ["--check"])
-        assert r.exit_code == 0, r.output
+        assert r.exit_code == 1, r.output
         assert BRACKET_DROP in r.output, r.output
         assert BRACKET_STYLE in r.output, r.output
 
@@ -242,7 +242,7 @@ class TestUpdateRollbackMarkupEscaping:
         monkeypatch.setattr(updater, "rollback_last", _raise)
 
         r = cli_runner.invoke(update_cmd, ["--rollback"])
-        assert r.exit_code == 0, r.output
+        assert r.exit_code == 1, r.output
         assert BRACKET_STYLE in r.output, r.output
         assert BRACKET_DROP in r.output, r.output
 

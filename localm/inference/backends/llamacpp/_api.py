@@ -425,6 +425,17 @@ def llama_vocab_get_text(vocab: ctypes.c_void_p, token: int) -> bytes:
     return out or b""
 
 
+def has_vocab_attr_api() -> bool:
+    """True when this llama.dll exports ``llama_vocab_get_attr``."""
+    return hasattr(load_lib(), "llama_vocab_get_attr")
+
+
+def llama_vocab_get_attr(vocab: ctypes.c_void_p, token: int) -> int:
+    """The ``enum llama_token_attr`` bit set of *token*. Only call after
+    has_vocab_attr_api()."""
+    return _bind("llama_vocab_get_attr", ctypes.c_int32, LlamaVocab, llama_token)(vocab, token)
+
+
 def llama_vocab_bos(vocab: ctypes.c_void_p) -> int:
     return _bind("llama_vocab_bos", llama_token, LlamaVocab)(vocab)
 
@@ -1130,7 +1141,7 @@ def llama_kv_cache_seq_rm(
 # Derived mechanically from upstream at MTP_ARCH_SOURCE_TAG, which must track
 # localm.setup_llama._PINNED_TAG. scripts/check_mtp_arch_allowlist.py is the gate
 # that fails when the two drift apart, and can re-derive this set from upstream.
-MTP_ARCH_SOURCE_TAG = "b11756"
+MTP_ARCH_SOURCE_TAG = "b11757"
 
 MTP_GRAPH_ARCHITECTURES = frozenset({
     "bailingmoe3",

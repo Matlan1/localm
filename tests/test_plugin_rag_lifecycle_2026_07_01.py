@@ -139,6 +139,9 @@ def test_rag_add_embed_flag_passes_embed_fn(env, monkeypatch):
         def __init__(self, name):
             pass
 
+        def exists(self):
+            return True
+
         def create(self):
             pass
 

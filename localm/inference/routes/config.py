@@ -273,7 +273,7 @@ def register(app: FastAPI, ctx) -> None:
             raise HTTPException(409, str(e)) from e
         if cred_updates:
             try:
-                set_credentials(cred_updates)
+                await run_in_threadpool(set_credentials, cred_updates)
             except ConfigUnreadable as e:
                 raise HTTPException(409, _credentials_not_saved(str(e), bool(validated))) from e
             except OSError as e:
@@ -574,7 +574,9 @@ def register(app: FastAPI, ctx) -> None:
         comfy_client's module docstring on the readiness cache)."""
         # default_api_url is the current base-URL helper.
         from localm.image_gen.comfy import _comfy_alive, default_api_url
-        from localm.media.comfy_client import mark_comfy_alive, mark_comfy_dead, spawned_pid
+        from localm.media.comfy_client import (
+            comfy_port_held_message, comfy_port_holder, mark_comfy_alive, mark_comfy_dead,
+            spawned_pid)
 
         # Off the event loop: _comfy_alive is a blocking urlopen with a 1.0s
         # timeout, hit on the GUI's own poll timer, so inline it would hold the
@@ -583,7 +585,14 @@ def register(app: FastAPI, ctx) -> None:
             url = default_api_url()
             alive = _comfy_alive(url, timeout=1.0)
             (mark_comfy_alive if alive else mark_comfy_dead)(url)
-            return {"alive": alive, "launched_by_localm": spawned_pid(url) is not None}
+            status: dict = {"alive": alive,
+                            "launched_by_localm": spawned_pid(url) is not None}
+            if not alive and not status["launched_by_localm"]:
+                holder = comfy_port_holder(url, timeout=1.0)
+                if holder is not None:
+                    status["port_held"] = {"pid": holder["pid"], "name": holder["name"],
+                                           "message": comfy_port_held_message(url, holder)}
+            return status
 
         try:
             return await run_in_threadpool_bounded(_check, timeout=_COMFY_STATUS_TIMEOUT_S)

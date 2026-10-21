@@ -522,9 +522,10 @@ def decode_self_test(timeout: float = 60.0) -> tuple[str, str]:
     process so a native fault cannot take the caller down.
 
     Returns ``(state, detail)``: ``("absent", ...)`` when the voice extra is not
-    installed, ``("ok", "PyAV x, faster-whisper y")`` when decoding works, or
-    ``("fail", reason)`` naming the exception, a timeout, or the child's exit
-    code."""
+    installed, ``("ok", "PyAV x, faster-whisper y")`` when decoding works,
+    ``("timeout", reason)`` when the child did not finish in ``timeout`` seconds
+    (decoding was not proven broken, only not proven to work), or
+    ``("fail", reason)`` naming the exception or the child's exit code."""
     import importlib.metadata as md
     import subprocess
 
@@ -537,7 +538,7 @@ def decode_self_test(timeout: float = 60.0) -> tuple[str, str]:
         proc = subprocess.run([interpreter_for_localm_children(), "-c", code],
                               capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
-        return "fail", f"decoding a short recording did not finish within {timeout:g}s"
+        return "timeout", f"decoding a short recording did not finish within {timeout:g}s"
     except OSError as e:
         return "fail", f"could not start the decoder check: {e}"
     out = (proc.stdout or "").strip().splitlines()

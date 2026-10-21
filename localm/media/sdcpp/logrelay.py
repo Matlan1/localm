@@ -14,7 +14,7 @@ debug log whether or not it is collapsed.
 from __future__ import annotations
 
 import re
-from typing import Callable
+from typing import Callable, Optional
 
 _PRECURSORS = tuple(re.compile(p, re.IGNORECASE) for p in (
     r"model manager memory on ",
@@ -51,13 +51,29 @@ def vae_retry_message(mode: str, smaller: bool) -> str:
     return f"Not enough VRAM to decode in one piece; decoding in {words}."
 
 
-class RecoveredWarnings:
-    """Relays worker log lines to *say*, collapsing recovered sequences."""
+def vae_escalation_message(mode: str) -> str:
+    """The job-log line for a second decode retry that changes *mode*."""
+    return f"Still not enough VRAM; decoding in {_RETRY_WORDS.get(mode.lower(), 'tiles')}."
 
-    def __init__(self, say: Callable[[str], None]) -> None:
+
+class RecoveredWarnings:
+    """Relays worker log lines to *say*, collapsing recovered sequences. Once
+    *cancelled* returns True the worker's failure lines are the cancel itself:
+    they go to the debug log only."""
+
+    def __init__(self, say: Callable[[str], None],
+                 cancelled: Optional[Callable[[], bool]] = None) -> None:
         self._say = say
+        self._cancelled = cancelled
         self._pending: list[str] = []
         self._no_preview_said = False
+        self._retry_mode: Optional[str] = None
+
+    def _is_cancelled(self) -> bool:
+        try:
+            return bool(self._cancelled is not None and self._cancelled())
+        except Exception:
+            return False
 
     def _raw(self, text: str) -> None:
         self._say(f"stable-diffusion.cpp: {text}")
@@ -66,11 +82,19 @@ class RecoveredWarnings:
         """Handle one WARN/ERROR line from the worker."""
         from localm.debuglog import logger
         logger.debug("sd.cpp: %s", text)
+        if self._is_cancelled():
+            self._pending.clear()
+            return
         retry = _VAE_RETRY.search(text)
         if retry:
             smaller = any(_TILE_FAILED.search(p) for p in self._pending)
             self._pending.clear()
-            self._say(vae_retry_message(retry.group(1), smaller))
+            mode = retry.group(1).lower()
+            if self._retry_mode is not None and mode != self._retry_mode and not smaller:
+                self._say(vae_escalation_message(mode))
+            else:
+                self._say(vae_retry_message(mode, smaller))
+            self._retry_mode = mode
             return
         if _NO_PROJECTION.search(text):
             if not self._no_preview_said:
@@ -87,10 +111,13 @@ class RecoveredWarnings:
     def sampling(self) -> None:
         """Sampling is running again: held lines were not part of a decode
         retry, so show them."""
+        self._retry_mode = None
         self.flush()
 
     def flush(self) -> None:
         """Show every held line unchanged. Call when the job ends."""
         pending, self._pending = self._pending, []
+        if self._is_cancelled():
+            return
         for text in pending:
             self._raw(text)

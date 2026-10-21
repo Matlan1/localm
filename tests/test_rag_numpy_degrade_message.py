@@ -162,3 +162,27 @@ def test_the_notice_does_not_keep_the_callers_frames_alive(monkeypatch, caplog, 
     assert ref() is None, "the logged notice keeps the caller's frame alive"
     assert caplog.records, "the notice was not logged at all"
     assert "numpy is not installed" in " ".join(_messages(caplog))
+
+
+@pytest.mark.skipif(store._numpy is None, reason="needs numpy")
+def test_a_failing_matrix_build_is_announced_and_the_query_still_answers(
+        monkeypatch, caplog, tmp_path):
+    """The matrix path used to swallow any exception with no trace."""
+    coll = store.Collection("docs", base=tmp_path).create()
+    coll._chunks = [{"source": "a.txt", "pos": 0, "text": "alpha turbines"},
+                    {"source": "b.txt", "pos": 0, "text": "beta bearings"}]
+    coll._vectors = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
+    coll._norm_matrix = None
+
+    def boom(*args, **kwargs):
+        raise MemoryError("cannot allocate the matrix")
+
+    monkeypatch.setattr(store._numpy, "zeros", boom)
+
+    with caplog.at_level(logging.DEBUG, logger="localm"):
+        hits = coll.query("alpha", embed_fn=lambda texts: [[1.0, 0.0, 0.0]])
+
+    assert hits and hits[0]["text"] == "alpha turbines"
+    joined = " ".join(_messages(caplog))
+    assert "MemoryError" in joined and "matrix scoring" in joined
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING]

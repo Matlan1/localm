@@ -570,6 +570,20 @@ _BUSY_VICTIM_IDLE_WAIT_S = 30.0
 _VICTIM_RELEASE_EXTRA_WAIT_S = 25.0
 
 
+def _refuse_non_chat_model(name: str, registry: dict | None = None) -> None:
+    """Raise HTTPException 422 when *name* is a registered entry the chat engine
+    can never load (a vision projector, an image or video component, a
+    text-to-speech model). Runs before any eviction or cancellation, so the
+    resident model stays loaded. *registry* defaults to the current registry."""
+    from localm.model_manager.registry import chat_load_refusal
+    if registry is None:
+        from localm.config import load_registry
+        registry = load_registry()
+    msg = chat_load_refusal(name, registry)
+    if msg is not None:
+        raise HTTPException(422, msg)
+
+
 async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool = True,
                         force: bool = False, activate: bool = True,
                         skip_if_latched: bool = False,
@@ -622,6 +636,8 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
     the ``_switch_*`` helpers below perform the effects.
     """
     global _engine_factory, _switch_desired
+
+    _refuse_non_chat_model(name)
 
     if preempt:
         _switch_desired = name
@@ -1786,6 +1802,8 @@ async def get_engine(model_name: str | None, *, load: bool = True,
         raise HTTPException(503, "No model is loaded and none was specified. "
                             "Load a model first or name one explicitly.")
 
+    _refuse_non_chat_model(name, registry)
+
     # `not unloading`: never hand back (and let the caller pin) an engine that an
     # eviction/unload path is mid-freeing - that is the pin-arrives-during-the-
     # unload-await race. An engine flagged unloading falls through to switch_engine
@@ -1961,7 +1979,7 @@ def _coder_sessions_using(name: str) -> list[str]:
     if mgr is None:
         return []
     try:
-        infos = mgr.list(is_owner=True)
+        infos = mgr.list(is_owner=True, reap=False)
     except Exception:
         return []
     return [f"a coder session in {info.get('cwd') or info.get('id')}"
@@ -4818,7 +4836,7 @@ def _make_lifespan():
                     "scheme": getattr(app.state, "instance_scheme", None) or "http",
                 }
                 from localm import gpu_registry
-                gpu_registry.set_local_status_provider(_gpu_status)
+                gpu_registry.set_local_status_provider(_gpu_status, identity=_gpu_coord)
             except Exception as e:
                 from localm.debuglog import logger as _dbg
                 _dbg.debug("gpu coordination startup failed (continuing without "

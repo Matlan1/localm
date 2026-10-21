@@ -241,6 +241,32 @@ def effective_mode(surface: str, cwd=None) -> SessionMode:
     return SessionMode.PRIVACY
 
 
+_MODE_PERSISTENCE = {SessionMode.PRIVACY: 0, SessionMode.LOG: 1,
+                     SessionMode.FULL: 2}
+
+
+def effective_unattended_mode(surface: str, cwd=None) -> SessionMode:
+    """
+    Resolve the session mode for an unattended run of *surface* in *cwd*.
+
+    Like :func:`effective_mode`, except a project-local ``.localcoder/config.toml``
+    ``mode`` can only reduce what the run persists: when the project's mode would
+    persist more than the mode resolved without the project file, the
+    project-less mode applies and a WARNING says the project's mode was ignored.
+    """
+    resolved = effective_mode(surface, cwd=cwd)
+    if cwd is None:
+        return resolved
+    baseline = effective_mode(surface)
+    if _MODE_PERSISTENCE[resolved] > _MODE_PERSISTENCE[baseline]:
+        logger.warning(
+            "the project config under %s sets mode %r for an unattended %s run, "
+            "which would persist more than the configured mode %r; using %r",
+            cwd, resolved.value, surface, baseline.value, baseline.value)
+        return baseline
+    return resolved
+
+
 def diagnostics_allowed() -> bool:
     """Whether localm may write an AUTOMATIC diagnostic trace right now.
 

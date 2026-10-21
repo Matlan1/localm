@@ -111,6 +111,21 @@ test("a load with MoE experts in system RAM warns with the expert count, not a l
   assert.ok(toastEl.className.includes("error"));
 });
 
+test("a MoE load names how much of the experts each token reads from system RAM", async () => {
+  const { window } = loadApp();
+  stubLoad(window, {
+    status: "loaded", model: "moe-model",
+    gpu_layers_offloaded: 48, gpu_layers_total: 48, moe_cpu_layers: 18, degraded: true,
+    moe_ram_read_bytes: 1610612736,
+  });
+
+  await selectAndLoad(window, "moe-model");
+
+  const toastEl = window.document.getElementById("toast");
+  assert.match(toastEl.textContent,
+    /experts of 18 layers in system RAM, about 1\.50 GB read from RAM per token - slower/);
+});
+
 test("a model running from disk-backed memory warns even when every layer is on the GPU", async () => {
   const { window } = loadApp();
   stubLoad(window, {

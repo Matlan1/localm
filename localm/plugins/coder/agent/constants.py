@@ -293,10 +293,16 @@ _BROWSER_TOOLS: frozenset[str] = frozenset({
     "browser_close",
 })
 
-# Fraction of estimated context window at which compaction is triggered
-_COMPACT_WARN_RATIO  = 0.70   # warn user in interactive mode
+# Fraction of the context window over which the expected prompt makes the
+# agent compact (also bounded by the server's reply reserve, see
+# _ContextMixin._compaction_bounds), and the fraction compaction aims for.
+_COMPACT_AUTO_RATIO  = 0.85
 
-_COMPACT_AUTO_RATIO  = 0.90   # silently compact in non-interactive mode
+_COMPACT_TARGET_RATIO = 0.50
+
+# Share of the context window the newest tool output may keep when older tool
+# output is dropped from the context.
+_COMPACT_KEEP_OUTPUT_RATIO = 0.25
 
 _DEFAULT_CTX_TOKENS  = 4096   # fallback when n_ctx is unknown
 

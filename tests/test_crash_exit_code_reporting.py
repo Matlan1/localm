@@ -183,3 +183,106 @@ def test_a_clean_stop_leaves_no_exit_record(tmp_path):
            poll_interval=0.02, grace_s=0.1, request_timeout=0.2, log_path=None)
     proc.wait(timeout=5)
     assert not (tmp_path / "server-crash-exit.clean.json").exists()
+
+
+def _write_privacy_marker(run_dir, instance_id, pid, suffix="marker"):
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / f"server-crash.{instance_id}.{suffix}").write_text(
+        json.dumps({"pid": pid, "context": {}, "diagnostics": False}),
+        encoding="utf-8")
+
+
+class TestPrivacyModeLeavesNoExitRecord:
+    def test_a_privacy_marker_start_deletes_the_exit_record(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("LOCALM_MODE", "privacy")
+        monkeypatch.delenv("LOCALM_KEEP_DIAGNOSTICS", raising=False)
+        monkeypatch.setattr(instances, "pid_alive", lambda pid: False)
+        run = tmp_path / "run"
+        _write_privacy_marker(run, "inst-priv", 4242)
+        exit_file = run / "server-crash-exit.inst-priv.json"
+        exit_file.write_text(json.dumps({"pid": 4242, "exit_code": _ACCESS_VIOLATION,
+                                         "watched_for_s": 3.0}), encoding="utf-8")
+        filed = []
+        monkeypatch.setattr(bugreport, "report_failure",
+                            lambda **k: filed.append(k))
+        bugreport.check_and_report_prior_crash(home=str(tmp_path))
+        assert not exit_file.exists()
+        assert not (run / "server-crash.inst-priv.marker").exists()
+        assert filed == []
+
+    def test_a_stopping_record_start_deletes_the_exit_record(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("LOCALM_MODE", "log")
+        monkeypatch.setattr(instances, "pid_alive", lambda pid: False)
+        run = tmp_path / "run"
+        _write_privacy_marker(run, "inst-stop", 4242, suffix="stopping")
+        exit_file = run / "server-crash-exit.inst-stop.json"
+        exit_file.write_text(json.dumps({"pid": 4242, "exit_code": 1,
+                                         "watched_for_s": 3.0}), encoding="utf-8")
+        bugreport.check_and_report_prior_crash(home=str(tmp_path))
+        assert not exit_file.exists()
+        assert not (run / "server-crash.inst-stop.stopping").exists()
+
+    def test_the_exit_path_derives_from_a_stopping_record_name(self, tmp_path):
+        record = tmp_path / "server-crash.abc.stopping"
+        assert (bugreport._exit_path_for_marker(tmp_path, record)
+                == tmp_path / "server-crash-exit.abc.json")
+
+
+class TestWatchdogHonoursThePrivacyMarker:
+    @pytest.mark.parametrize("body, expected", [
+        ({"pid": 1, "diagnostics": False}, False),
+        ({"pid": 1, "diagnostics": True}, True),
+        ({"pid": 1}, True),
+        ("not json", True),
+        (None, True),
+    ])
+    def test_marker_allows_exit_record(self, tmp_path, body, expected):
+        marker = tmp_path / "server-crash.x.marker"
+        if isinstance(body, dict):
+            marker.write_text(json.dumps(body), encoding="utf-8")
+        elif body is not None:
+            marker.write_text(body, encoding="utf-8")
+        assert _load_wd().marker_allows_exit_record(marker) is expected
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="reads a Windows exit code")
+    @pytest.mark.parametrize("diagnostics, written", [(False, False), (True, True)])
+    def test_the_exit_record_follows_the_marker_diagnostics_flag(
+            self, tmp_path, diagnostics, written):
+        wd = _load_wd()
+        wd._MIN_UPTIME_TO_RELAUNCH_S = 0.0
+        proc = subprocess.Popen([
+            sys.executable, "-c",
+            "import ctypes, time; time.sleep(0.3); "
+            f"ctypes.windll.kernel32.ExitProcess({_ACCESS_VIOLATION})"])
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "server-crash.flag.marker").write_text(
+            json.dumps({"pid": proc.pid, "context": {}, "diagnostics": diagnostics}),
+            encoding="utf-8")
+        wd.run(pid=proc.pid, host="127.0.0.1", port=9, scheme="http",
+               instance_id="flag", crash_dir=tmp_path,
+               relaunch_argv=[sys.executable, "-c", "pass"],
+               restart_history=[], poll_interval=0.02, grace_s=0.1,
+               request_timeout=0.2, log_path=None)
+        proc.wait(timeout=5)
+        assert (tmp_path / "server-crash-exit.flag.json").exists() is written
+
+    def test_a_marker_gone_during_the_grace_wait_removes_the_exit_record(
+            self, tmp_path, monkeypatch):
+        wd = _load_wd()
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(0.2)"])
+        _write_marker(tmp_path, "gone", proc.pid)
+        exit_file = tmp_path / "server-crash-exit.gone.json"
+        exit_file.write_text(json.dumps({"pid": proc.pid, "exit_code": 1,
+                                         "watched_for_s": 1.0}), encoding="utf-8")
+
+        def _marker_vanishes(*_a, **_k):
+            (tmp_path / "server-crash.gone.marker").unlink()
+            return None
+
+        monkeypatch.setattr(wd, "poll_for_new_instance", _marker_vanishes)
+        wd.run(pid=proc.pid, host="127.0.0.1", port=9, scheme="http",
+               instance_id="gone", crash_dir=tmp_path,
+               relaunch_argv=[sys.executable, "-c", "pass"], restart_history=[],
+               poll_interval=0.02, grace_s=0.1, request_timeout=0.2, log_path=None)
+        proc.wait(timeout=5)
+        assert not exit_file.exists()

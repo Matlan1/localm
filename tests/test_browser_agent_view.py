@@ -81,7 +81,7 @@ class _FakeManager:
     def __init__(self, sessions):
         self._s = {s.id: s for s in sessions}
 
-    def list(self, *, principal=None, is_owner=True):
+    def list(self, *, principal=None, is_owner=True, reap=True):
         vals = list(self._s.values())
         if not is_owner:
             vals = [s for s in vals if s.principal == principal]
