@@ -219,7 +219,8 @@ def mutated_source_hashes(mutants_dir: Path, module: str) -> dict[str, str]:
     or position, so it changes only when the mutation itself does. An empty dict
     when the file is missing or does not parse."""
     try:
-        tree = ast.parse((mutants_dir / module).read_text(encoding="utf-8"))
+        source = (mutants_dir / module).read_text(encoding="utf-8")
+        tree = ast.parse(source)
     except (OSError, UnicodeDecodeError, SyntaxError, ValueError):
         return {}
     dotted = module.removesuffix(".py").replace("/", ".")
@@ -227,13 +228,20 @@ def mutated_source_hashes(mutants_dir: Path, module: str) -> dict[str, str]:
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
                 and _MUTANT_FUNCTION.match(node.name):
-            shape = ast.dump(ast.Module(
-                body=[ast.FunctionDef(
-                    name="_", args=node.args, body=node.body, decorator_list=[],
-                    returns=node.returns, type_comment=None)],
-                type_ignores=[]))
-            hashes[f"{dotted}.{node.name}"] = hashlib.sha256(shape.encode("utf-8")).hexdigest()[:12]
+            segment = ast.get_source_segment(source, node)
+            if segment is None:
+                return {}
+            hashes[f"{dotted}.{node.name}"] = _segment_hash(segment, node.name)
     return hashes
+
+
+def _segment_hash(segment: str, name: str) -> str:
+    """Short sha256 of a mutant function's source text with its name replaced
+    by ``_``. The text is the same on every Python version, unlike an ``ast.dump``
+    of it, which differs between interpreters (3.13 omits empty lists)."""
+    text = "\n".join(line.rstrip() for line in segment.splitlines())
+    text = re.sub(rf"^((?:async\s+)?def\s+){re.escape(name)}\b", r"\1_", text, count=1)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
 
 
 def _disposition(value) -> tuple[str, str | None]:
