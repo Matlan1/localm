@@ -70,6 +70,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `.localcoder/config.toml` to be asked every time.
 
 ### Changed
+- **localm's managed ComfyUI now installs v0.42.1, up from v0.39.0.** An existing install picks it up with `localm comfy update --reinstall-requirements` (this release's Python requirements changed).
 - **The bundled llama.cpp runtime moved from b11541 to b11757.** An existing install picks it up with `localm setup-llama --force`.
 - **The bundled AMD (ROCm) llama.cpp runtime moved from build b1342 to b1349** (upstream llama.cpp b11719). An existing install picks it up with `localm setup-llama --force`.
 - **The bundled stable-diffusion.cpp runtime moved from master-964-1d0a58a to master-982-0518b34.** An existing install picks it up the next time image generation starts.
