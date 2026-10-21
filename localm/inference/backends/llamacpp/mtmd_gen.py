@@ -100,9 +100,10 @@ _PROJECTOR_TOP_P_CAP = 1.0 - 2.0 ** -24
 
 def projector_top_p(top_p: float) -> float:
     """The top_p handed to the projector's code sampler for a model whose
-    top_p is *top_p*: *top_p* itself when it is strictly between 0 and 1, else
-    the largest float32 below 1.0, which keeps practically every candidate."""
-    if 0.0 < top_p < _PROJECTOR_TOP_P_CAP:
+    top_p is *top_p*: *top_p* itself when, as a float32, it is above 0 and
+    below the largest float32 below 1.0, else that largest float32, which
+    keeps practically every candidate."""
+    if 0.0 < ctypes.c_float(top_p).value < _PROJECTOR_TOP_P_CAP:
         return float(top_p)
     return _PROJECTOR_TOP_P_CAP
 

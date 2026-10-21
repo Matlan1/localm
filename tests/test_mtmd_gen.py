@@ -275,7 +275,8 @@ class TestProjectorTopP:
         assert sent == 1.0 - 2.0 ** -24
         assert ctypes.c_float(sent + 2.0 ** -25).value == 1.0
 
-    @pytest.mark.parametrize("value", [1.0, 0.0, -0.5, 2.0, float("inf"), float("nan")])
+    @pytest.mark.parametrize("value", [1.0, 0.0, -0.5, 2.0, float("inf"), float("nan"),
+                                       1e-50, 1.0 - 1e-12])
     def test_a_value_outside_zero_and_one_is_capped(self, value):
         assert g.projector_top_p(value) == 1.0 - 2.0 ** -24
 
