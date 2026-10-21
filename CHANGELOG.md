@@ -156,6 +156,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   until the server stopped. The server no longer shares the terminal's streams.
 - **`setup.bat` works from a folder whose name contains `&`.** The setup and uninstall banners
   split the command at the `&` and printed an error; the folder is now shown in quotes.
+- **`setup.bat` works from a folder whose name contains `'` or `^`.** A `'` in the folder name
+  broke the desktop shortcut and the checks for a OneDrive folder and for programs still running
+  from the environment, and a `^` next to a `!` was dropped from the folders setup used for
+  Python and its cache. Setup now passes the folder to PowerShell without quoting it and keeps
+  the name exactly.
 - **`localm info` names the temp folder that is in use.** After `LOCALM_TMPDIR` pointed at a
   folder that could not be created, it still listed that folder instead of the system temp
   folder. An unreadable `localm-home.cfg` is now reported once, not once per setting read.

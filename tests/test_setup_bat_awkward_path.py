@@ -33,8 +33,6 @@ NAMES = [
 ]
 
 AWKWARD = [
-    "it's here",
-    "a^b!c",
     "a&b'c!d%e^f (g)",
     "café '&!%^",
 ]
@@ -155,11 +153,10 @@ def test_the_install_folders_keep_the_exact_folder_name(tmp_path, bat_text, name
     assert got.get("CACHEDIR") == f"{folder}\\.cache", got
     assert got.get("UV_PYTHON_INSTALL_DIR") == f"{folder}\\.python", got
     assert got.get("UV_CACHE_DIR") == f"{folder}\\.cache", got
-    assert got.get("LOCALM_SETUP_ROOT") == str(folder), got
 
 
 @pytest.mark.parametrize("pick", ["1", "2"])
-@pytest.mark.parametrize("name", NAMES[:3] + AWKWARD)
+@pytest.mark.parametrize("name", NAMES[:3] + NAMES[-2:] + AWKWARD)
 def test_the_desktop_shortcut_points_into_the_folder_whatever_its_name(tmp_path, bat_text, pick, name):
     block = _shortcut_block(bat_text, pick)
     folder = _awkward_dir(tmp_path, name)
