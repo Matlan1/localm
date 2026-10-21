@@ -9,7 +9,7 @@ prompt, output, status, and timing).
 Results are EXPLICIT user data, like generated images: they are saved in every
 privacy mode (the user asked for this job to run and keep its output). What a
 job RUN writes as a session trace (audit JSONL, transcripts) still honours
-``effective_mode`` - that is the runner's concern, not the store's.
+``effective_unattended_mode`` - that is the runner's concern, not the store's.
 
 Every path the store touches is resolved and confined under the jobs dir, so a
 crafted job id (``../../etc``) can never escape it.

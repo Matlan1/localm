@@ -18,6 +18,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   slightly slower decoding. The automatic context ceiling and the VRAM estimate account for it. It
   applies at the next model load; a model that cannot use flash attention refuses to load under
   `q8_0` and the error names the setting.
+- **Workflows for the built-in image, video and music generators.** The Images, Video and Music
+  pages have a Workflow card for the native backend: a workflow saves the models (with LoRAs and
+  their strengths) and the generation settings, and Apply puts them back. Starter workflows come
+  built in (SD-Turbo, FLUX.1 schnell and dev, Wan 2.1 text to video 1.3B, the ACE-Step 1.5 set).
+  Applying one offers the download of every model you do not have yet, checked against its sha256
+  when the workflow gives one (the built-in ones always do). Workflows can be renamed, deleted,
+  exported and imported, and a ComfyUI workflow (API or regular format) imports as one: its
+  loaders, sampler settings, size, prompts, guidance and shift are carried over, and every node
+  with no native equivalent is listed. The Video page gains a Flow shift setting and the Music
+  page a Shift setting for the native backend.
 - **`localm coder` shows what it is doing.** A live spinner runs while the model thinks, while
   it writes a file (with the file name and line count) and while a tool runs. `set_todos` shows
   the task list. Type `@path` or `@path:10-40` to attach a file to your message, and a
@@ -119,6 +129,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   SharedWorker, used to connect directly without passing the network policy. The
   browser now resolves no host on its own, so these fail without connecting anywhere; every
   other request is still decided by the policy as before.
+- **Text-to-speech no longer downloads its voice model or voice files when network access is off.**
+  With network access set to off, the browser voice (Kokoro) now refuses to fetch the model, or a
+  voice it has not used before, instead of offering a one-click download, unless "Allow model
+  downloads while network access is off" is on. A model and voices already downloaded still work.
+- **Scheduled coder jobs and MCP coder runs no longer let a project's `.localcoder/config.toml`
+  write more than your settings allow.** A project mode of `log` or `full` is ignored (with a
+  warning) when your configured mode persists less, so a cloned repository cannot turn privacy
+  mode into session logs for an unattended run. A project can still pin a run to a stricter mode.
+- **Knowledge re-sync now removes documents indexed from a credential folder in every case.**
+  Previously a document was kept when the indexed folder itself was a credential folder such as
+  `.ssh`, when the file had been deleted, or when its folder was unavailable, and search kept
+  returning its text. They are now removed on the next re-sync.
 - **`localm coder` no longer compacts after every turn.** With a model that leaves little room for context, the coder used to be summarised again on nearly every request, and reading a codebase file by file triggered a summary per file. It now compacts only when a request would take most of the context window, brings the session down to about half of it, and first drops the output of older tool calls (the model reads a file again when it needs it) before summarising anything. Everything you typed is kept word for word across compactions, and summaries list facts instead of prose. A model server that reports no context window, such as an online API, is no longer compacted at 4096 tokens.
 - **A vision projector is no longer offered as a model.** A pulled vision model registers its
   projector (`...-mmproj`) as a separate entry, and `GET /v1/models` listed it as a chat model.
@@ -154,6 +176,22 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **A coder task no longer ends on "let me run the tests".** A reply whose last line announces a
   step it did not take is sent back once; a run that still stops there, or answers with nothing,
   is reported as not finished.
+- **A model whose context does not fit no longer crashes the loading process.** When llama.cpp
+  could not create the context (for example when a GPU ran out of memory for it), the model was
+  freed twice, which on Linux killed the loading process with a segmentation fault ("exit code
+  -11") instead of reporting "Failed to create llama context" with advice.
+- **Large split models plan their GPU placement correctly.** A split GGUF whose first part holds
+  only metadata, the layout big models such as Qwen3.8-Flash-Next ship in, was sized as if every
+  byte went to the GPU: the embedding tables that stay in system RAM were counted as VRAM, the
+  Mixture-of-Experts experts could not be kept in RAM, the multi-GPU split was not planned and the
+  KV cache was over-estimated, so only a few layers were offloaded across every GPU. Such models
+  are now placed with every layer on the GPUs and the experts that do not fit kept in system RAM.
+- **Multi-GPU loads use all the cards for a Mixture-of-Experts model.** When the experts of some
+  layers stay in system RAM, the remaining layers are packed onto the GPUs by size instead of by
+  free memory alone, so a small last card no longer forces most experts off the GPUs.
+- **A failed load no longer blames low VRAM when the planned load fit,** and the advice names a
+  GPU layer count that fits instead of a fixed `-g 24`. A worker crash in privacy mode says that
+  privacy mode kept no crash trace and how to keep one.
 - **A coder shell command that starts with a quoted program path now runs on Windows.** A command such as `"D:\tools dir\tool.exe" --flag "a b"` used to fail with "is not recognized as an internal or external command", because `cmd` dropped the first and last quote.
 - **A shell command's timeout or cancel in `localm coder` is no longer held up by a stray
   background process.** A command that left a detached process holding its output open used to

@@ -574,6 +574,15 @@
           ComfyUI: Save -> API format) and select it, or keep the built-in default.</div>
           <div id="img-workflows" data-media="image"></div>
         </div>
+        <div class="card" id="img-native-workflow-card" hidden>
+          <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="sliders"></span>
+            <div class="card-head-text"><h3 data-i18n="mediaGallery.workflowHeading">Workflow</h3></div></div>
+          <div class="sub" data-i18n="nativeWorkflows.intro">Saved model and settings presets for the native backend.
+          Apply one to fill the model picker and the settings above; models that are not downloaded yet
+          are offered for download. Import takes a workflow exported here or a ComfyUI workflow (API or
+          regular format).</div>
+          <div id="img-native-workflows" class="native-workflows-mount"></div>
+        </div>
       </div>
     </section>
 
@@ -604,6 +613,7 @@
               <div><label data-i18n="chat.seed">Seed</label><input type="number" id="music-seed" placeholder="random" data-i18n-placeholder="mediaGallery.randomPlaceholder"></div>
               <div><label data-i18n="mediaGallery.stepsLabel">Steps</label><input type="number" id="music-steps" placeholder="default (50)" data-i18n-placeholder="music.stepsPlaceholder"></div>
               <div><label data-i18n="mediaGallery.cfgLabel">CFG</label><input type="number" id="music-cfg" step="0.5" placeholder="default (5.0)" data-i18n-placeholder="music.cfgPlaceholder"></div>
+              <div class="music-native-only" hidden><label data-i18n="nativeWorkflows.shift">Shift</label><input type="number" id="music-shift" step="0.5" min="0" max="100" placeholder="model default" data-i18n-placeholder="nativeWorkflows.modelDefault"></div>
             </div>
           </details>
           <div class="actions">
@@ -630,6 +640,15 @@
           <div class="sub" data-i18n="workflow.intro">The ComfyUI workflow this page uses. Upload one (in
           ComfyUI: Save -> API format) and select it, or keep the built-in default.</div>
           <div id="music-workflows" data-media="music"></div>
+        </div>
+        <div class="card" id="music-native-workflow-card" hidden>
+          <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="sliders"></span>
+            <div class="card-head-text"><h3 data-i18n="mediaGallery.workflowHeading">Workflow</h3></div></div>
+          <div class="sub" data-i18n="nativeWorkflows.intro">Saved model and settings presets for the native backend.
+          Apply one to fill the model picker and the settings above; models that are not downloaded yet
+          are offered for download. Import takes a workflow exported here or a ComfyUI workflow (API or
+          regular format).</div>
+          <div id="music-native-workflows" class="native-workflows-mount"></div>
         </div>
       </div>
     </section>
@@ -669,6 +688,7 @@
               <div><label data-i18n="mediaGallery.cfgLabel">CFG</label><input type="number" id="video-cfg" step="0.5" placeholder="default (5.0)" data-i18n-placeholder="video.cfgPlaceholder"></div>
               <div class="video-native-only" hidden><label data-i18n="nativeModels.sampler">Sampler</label><select id="video-sampler"><option value="" data-i18n="nativeModels.samplerDefault">Model default</option></select></div>
               <div class="video-native-only" hidden><label data-i18n="nativeModels.scheduler">Scheduler</label><select id="video-scheduler"><option value="" data-i18n="nativeModels.schedulerDefault">Model default</option></select></div>
+              <div class="video-native-only" hidden><label data-i18n="nativeWorkflows.flowShift">Flow shift</label><input type="number" id="video-flow-shift" step="0.5" min="0" max="100" placeholder="model default" data-i18n-placeholder="nativeWorkflows.modelDefault"></div>
             </div>
           </details>
           <div class="actions">
@@ -690,12 +710,21 @@
           <div id="video-bulk" class="media-bulk" style="display:none"></div>
           <div id="video-history" class="media-grid"></div>
         </div>
-        <div class="card">
+        <div class="card" id="video-workflow-card">
           <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="sliders"></span>
             <div class="card-head-text"><h3 data-i18n="mediaGallery.workflowHeading">Workflow</h3></div></div>
           <div class="sub" data-i18n="workflow.intro">The ComfyUI workflow this page uses. Upload one (in
           ComfyUI: Save -> API format) and select it, or keep the built-in default.</div>
           <div id="video-workflows" data-media="video"></div>
+        </div>
+        <div class="card" id="video-native-workflow-card" hidden>
+          <div class="card-head"><span class="ic cat-ic cat-violet" data-icon="sliders"></span>
+            <div class="card-head-text"><h3 data-i18n="mediaGallery.workflowHeading">Workflow</h3></div></div>
+          <div class="sub" data-i18n="nativeWorkflows.intro">Saved model and settings presets for the native backend.
+          Apply one to fill the model picker and the settings above; models that are not downloaded yet
+          are offered for download. Import takes a workflow exported here or a ComfyUI workflow (API or
+          regular format).</div>
+          <div id="video-native-workflows" class="native-workflows-mount"></div>
         </div>
       </div>
     </section>

@@ -2229,6 +2229,29 @@ class TestRunCoderTaskInProcess:
         assert resp["result"]["isError"] is False, resp
         assert factory.loads[len(loads_before):] == ["cfg-model"]
 
+    def test_a_project_mode_cannot_raise_what_an_mcp_run_persists(
+            self, coder_env, tmp_path, monkeypatch):
+        from localm.audit import SessionMode
+        from localm.plugins.coder import runner as coder_runner
+        modes = []
+        real = coder_runner.resolve_task_config
+
+        def _spy(*a, **kw):
+            cfg = real(*a, **kw)
+            modes.append(cfg.session_mode)
+            return cfg
+
+        monkeypatch.setattr(coder_runner, "resolve_task_config", _spy)
+        monkeypatch.delenv("LOCALM_MODE", raising=False)
+        server, _ = _coder_server(_scripted_engine_factory(["done"]))
+        project = _project(tmp_path)
+        (project / ".localcoder").mkdir()
+        (project / ".localcoder" / "config.toml").write_text(
+            'mode = "full"\n', encoding="utf-8")
+        resp = _run_task(server, project)
+        assert resp["result"]["isError"] is False, resp
+        assert modes == [SessionMode.PRIVACY]
+
     @pytest.mark.parametrize("bad", ["soon", [5], -5, True])
     def test_bad_timeout_is_refused_before_anything_is_pinned(
             self, coder_env, tmp_path, bad):

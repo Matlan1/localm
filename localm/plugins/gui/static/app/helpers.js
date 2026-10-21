@@ -1449,6 +1449,9 @@ function _offerModelDownload(missingModel, log, plugin) {
         t("common.modelDownload.source", { repo: source.repo, file: source.file })));
       if (source.origin === "huggingface") {
         body.appendChild(el("p", "sub", t("common.modelDownload.foundOnHf")));
+      } else if (source.origin === "workflow") {
+        body.appendChild(el("p", "sub", t(source.sha256
+          ? "common.modelDownload.fromWorkflow" : "common.modelDownload.fromWorkflowNoSha")));
       }
       const row = el("div", "actions");
       const skip = el("button", "btn-secondary", t("common.modelDownload.notNow"));
@@ -1583,8 +1586,12 @@ function _offerModelSearch(missingModel, log, plugin) {
         if (data.status === "found" && data.source) {
           settled = true;
           close();
+          const source = missingModel.native
+            ? { ...data.source, spec: `${data.source.repo}:${data.source.file}`,
+              name: missingModel.source_name || null, sha256: data.source.sha256 || null }
+            : data.source;
           resolve(await _offerModelDownload(
-            { ...missingModel, source: data.source, dest_dir: data.dest_dir }, log, plugin));
+            { ...missingModel, source, dest_dir: data.dest_dir }, log, plugin));
           return;
         }
         _reportUncuratedMiss({ ...missingModel, reason: data.reason }, log, data.status);

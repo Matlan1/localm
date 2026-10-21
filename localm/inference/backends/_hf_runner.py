@@ -604,6 +604,8 @@ class HFRunner:
         # parent (see debuglog.child_crash_trace_path for why it is not
         # recomputed child-side) and set in _spawn(); None before the first spawn.
         self._crash_trace_path = None
+        # True when privacy mode kept the last spawn's trace from being armed.
+        self._trace_skipped_for_privacy = False
         self._shutdown_requested = False
 
     def is_alive(self) -> bool:
@@ -682,7 +684,8 @@ class HFRunner:
         trace = self._native_crash_trace()
         native = self._exit_was_native_fault(trace_captured=bool(trace))
         if not trace:
-            return native, " No native fault trace was captured for this exit."
+            from localm.debuglog import no_native_trace_detail
+            return native, no_native_trace_detail(self._trace_skipped_for_privacy)
         from localm.debuglog import logger, native_fault_hint
         # Logged as well as returned: the trace is multi-line and belongs in the
         # debug log the message points at, not inlined into an HTTP error body.
@@ -709,7 +712,8 @@ class HFRunner:
         # so a stale trace can never be reported against the new process.
         self._discard_native_crash_trace()
         from localm.audit import diagnostics_allowed
-        if diagnostics_allowed():
+        self._trace_skipped_for_privacy = not diagnostics_allowed()
+        if not self._trace_skipped_for_privacy:
             from localm.debuglog import child_crash_trace_path, logger
             try:
                 self._crash_trace_path = child_crash_trace_path("hf-worker")

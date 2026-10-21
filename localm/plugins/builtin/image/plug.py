@@ -942,6 +942,8 @@ def register(host) -> None:
     host.mount_router(make_workflow_router("image"))
     from localm.media.native_models import make_router as make_native_models_router
     host.mount_router(make_native_models_router("image", "imagine", _backend))
+    from localm.media.native_workflows import make_router as make_native_workflow_router
+    host.mount_router(make_native_workflow_router("image"))
     # One-time: rescue any legacy personal override left INSIDE the package
     # (localm/image_gen/flux_workflow.json) into home/workflows, which survives a
     # self-update (the localm/ dir is whole-tree-replaced). No-op when absent.

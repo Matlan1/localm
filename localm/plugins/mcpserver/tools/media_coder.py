@@ -323,7 +323,7 @@ def build(engines: EngineCache) -> dict[str, dict]:
         try:
             cfg = coder_runner.resolve_task_config(
                 work_dir, model=args.get("model") or None, max_turns=max_turns,
-                yes=bool(args.get("yes")))
+                yes=bool(args.get("yes")), unattended=True)
         except ProjectConfigUnreadable as e:
             return _text_result(f"Project config could not be read: {e}", is_error=True)
         except coder_runner.InvalidSessionMode as e:

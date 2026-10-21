@@ -839,3 +839,41 @@ def test_the_worker_records_the_wan_model_it_loaded(child_state):
 def _no_live_vram_budget(monkeypatch):
     from localm.media.sdcpp import budget as sd_budget
     monkeypatch.setattr(sd_budget, "vram_budget", lambda backend, **kw: None)
+
+
+def test_a_per_job_flow_shift_reaches_the_native_job(video_app):
+    from fastapi.testclient import TestClient
+    app, runner = video_app
+    with TestClient(app) as c:
+        r = c.post("/api/video", json={"prompt": "p", "seconds": 1, "fps": 8, "width": 96,
+                                       "height": 64, "flow_shift": 7.5})
+        assert r.status_code == 200, r.text
+        job = _wait_job(app, r.json()["job_id"])
+    assert job.status == "done", _lines(job)
+    assert runner.generates[0]["flow_shift"] == 7.5
+
+
+@pytest.mark.parametrize("value", [-1, 101, "x"])
+def test_an_out_of_range_flow_shift_is_a_422(video_app, value):
+    from fastapi.testclient import TestClient
+    app, runner = video_app
+    with TestClient(app) as c:
+        r = c.post("/api/video", json={"prompt": "p", "flow_shift": value})
+    assert r.status_code == 422 and runner.generates == []
+
+
+def test_a_flow_shift_is_refused_for_comfyui(video_app, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from localm.config import update_config
+    app, runner = video_app
+    update_config(lambda cfg: cfg["plugins"]["video"].update({"backend": "comfy"}))
+    mod = sys.modules["_localm_plugin_video.backend"]
+    monkeypatch.setattr(mod._COMFY_REF, "ensure_available",
+                        lambda s, on_progress=None: (True, "ready"))
+    with TestClient(app) as c:
+        r = c.post("/api/video", json={"prompt": "p", "flow_shift": 3})
+        job = _wait_job(app, r.json()["job_id"])
+    assert job.status == "failed"
+    assert any("Flow shift applies to the native backend" in ln for ln in _lines(job))
+    assert runner.generates == []

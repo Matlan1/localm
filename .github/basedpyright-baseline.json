@@ -4006,14 +4006,6 @@
                     "endColumn": 47,
                     "lineCount": 1
                 }
-            },
-            {
-                "code": "reportIndexIssue",
-                "range": {
-                    "startColumn": 58,
-                    "endColumn": 64,
-                    "lineCount": 1
-                }
             }
         ],
         "./localm/model_manager/pull.py": [
