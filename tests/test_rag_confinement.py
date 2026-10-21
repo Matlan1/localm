@@ -1233,6 +1233,72 @@ class TestCliCredentialFloor:
         assert [d["path"] for d in fresh.docs()] == [str(good.resolve())]
         assert all(ch.get("source") != new_key for ch in fresh._chunks)
 
+    @staticmethod
+    def _collection_rooted_in_credential_folder(home, name):
+        """A collection whose persisted root and one indexed document both lie
+        under a credential folder (as one built before the floor existed)."""
+        good = home / "docs" / "good.txt"
+        good.write_text("ordinary document about turbines", encoding="utf-8")
+        stray = home / "docs" / "stray.txt"
+        stray.write_text("stray document about bearings", encoding="utf-8")
+        ssh = home / ".ssh"
+        ssh.mkdir()
+        bad = ssh / "config"
+        bad.write_text("Host secret-host", encoding="utf-8")
+        c = Collection(name).create()
+        c.add_paths([good, stray])
+        old_key, new_key = str(stray.resolve()), str(bad.resolve())
+        c._meta["docs"][new_key] = c._meta["docs"].pop(old_key)
+        for ch in c._chunks:
+            if ch.get("source") == old_key:
+                ch["source"] = new_key
+        c._meta["roots"][str(ssh.resolve())] = {"added": 0}
+        c._save()
+        return good, bad, new_key
+
+    def test_resync_prunes_documents_when_the_root_is_a_credential_folder(
+            self, home_env):
+        home, _ = home_env
+        good, bad, key = self._collection_rooted_in_credential_folder(
+            home, "cred9")
+        res = Collection("cred9").resync(policy=None)
+        assert key in res["pruned"]
+        assert [b["root"] for b in res["blocked_roots"]] == [
+            str(bad.parent.resolve())]
+        fresh = Collection("cred9")
+        assert all(d["path"] != key for d in fresh.docs())
+        assert all(ch.get("source") != key for ch in fresh._chunks)
+        assert all("secret-host" not in ch.get("text", "")
+                   for ch in fresh._chunks)
+
+    def test_resync_prunes_a_deleted_credential_document_without_prune_flag(
+            self, home_env):
+        home, _ = home_env
+        good, bad, key = self._collection_rooted_in_credential_folder(
+            home, "cred10")
+        c = Collection("cred10")
+        c._meta["roots"].pop(str(bad.parent.resolve()))
+        c._save()
+        bad.unlink()
+        res = Collection("cred10").resync(policy=None, prune_missing=False)
+        assert res["pruned"] == [key]
+        assert res["missing"] == []
+        fresh = Collection("cred10")
+        assert all(d["path"] != key for d in fresh.docs())
+        assert all(ch.get("source") != key for ch in fresh._chunks)
+
+    def test_resync_prunes_a_credential_document_under_an_unavailable_root(
+            self, home_env):
+        import shutil
+        home, _ = home_env
+        good, bad, key = self._collection_rooted_in_credential_folder(
+            home, "cred11")
+        shutil.rmtree(bad.parent)
+        res = Collection("cred11").resync(policy=None)
+        assert [u["root"] for u in res["unavailable_roots"]]
+        assert key in res["pruned"]
+        assert all(d["path"] != key for d in Collection("cred11").docs())
+
 
 class TestRagAddRouteSecretFile:
     def test_owner_explicit_secret_file_hard_blocked(self, rag_route_app):

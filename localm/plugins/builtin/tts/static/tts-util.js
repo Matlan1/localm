@@ -150,12 +150,23 @@ export async function rekeyCachedModel(cache, model, revision) {
   return moved;
 }
 
-// Resolves whether to allow the model fetch immediately or prompt the user.
+// Resolves whether the model fetch proceeds at once ("allow"), needs a one-time
+// user confirmation ("confirm"), or is refused outright ("refuse": net_mode=off
+// without the allow-downloads-when-off override).
 export function planModelFetch(mode, cached, allowDownloadsWhenOff) {
   if (cached) return "allow";
-  if (mode === "off" && allowDownloadsWhenOff) return "allow";
+  if (mode === "off") return allowDownloadsWhenOff ? "allow" : "refuse";
   if (mode === "allow") return "allow";
   return "confirm";
+}
+
+// Resolves whether a voice file that is not in the browser cache may be fetched:
+// "refuse" under net_mode=off without the allow-downloads-when-off override,
+// otherwise "allow" (net_mode=ask was already answered when the model loaded).
+export function planVoiceFetch(mode, cached, allowDownloadsWhenOff) {
+  if (cached) return "allow";
+  if (mode === "off" && !allowDownloadsWhenOff) return "refuse";
+  return "allow";
 }
 
 // Thrown by tts.js's load() when planModelFetch returns "refuse" or the user
