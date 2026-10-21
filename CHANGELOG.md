@@ -118,17 +118,23 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **"Delete saved data" also removes the coder's hook and MCP trust records** (`coder-hook-trust.json` in the data folder).
 - **A short request no longer throws away a running conversation's cached prompt.** A summary, title or other small request sent to the same model between two turns used to take over the conversation's cache, so its next turn processed the whole prompt again. It now uses another slot, and the conversation continues from its cache.
 - **A long conversation is no longer summarised again on every message.** When a chat client sends its whole history each turn and the server has to compact it to fit the context window, the server now reuses the summary it already wrote while the conversation still fits, and later only summarises the newly older messages. Each compaction also brings the conversation down to about half the window, so the next one is many turns away instead of one.
-- **The coder writes code to files instead of printing it.** When a reply shows code for the
-  project but nothing was written, the agent is asked to write it with `write_file` or
-  `edit_file`; if it still does not, the run ends as not finished instead of "Task finished". A
-  reply of only `[no tool needed]` no longer leaves you with an empty answer.
+- **Long conversations on Mistral-family (tekken) models no longer fail with "Send less text
+  per request".** The pre-tokenizer length limit now applies to each message, the way llama.cpp
+  tokenizes a conversation, instead of to the whole conversation. When one message the coder built
+  (tool output, file contents) is still too long, the coder shortens it and retries; only text you
+  typed is reported back to you, with what to do about it.
+- **The coder makes the change instead of printing it.** When you ask for a change and the coder
+  writes nothing (it puts the code in its reply, says the change is already there, or only runs
+  the tests), it is told once that nothing was written; a run that still ends with nothing
+  written is reported as not finished instead of "Task finished". A reply of only
+  `[no tool needed]` no longer leaves you with an empty answer.
 - **Coder edit tools are harder to get wrong.** `edit_file`, `edit_files` and `patch_file` no
   longer apply an edit that would break a Python or TOML file that was valid (the file stays
   unchanged and the agent sees the region its edit would have produced), and a replacement written
   without the indentation of the line it lands on is re-indented when that keeps the file valid.
   Argument names other coding tools use (`old_str`, `new_str`, `file_path`) are accepted, as are
-  arguments written next to `args` when the tool takes them; a call with missing arguments gets a reply naming them with an
-  example, a missed `old` text says how to add new text, and identical calls in one reply run once.
+  arguments written next to `args` when the tool takes them; a call with missing arguments gets a
+  reply naming them with an example, a missed `old` text says how to add new text, and identical calls in one reply run once.
 - **A coder task no longer ends on "let me run the tests".** A reply whose last line announces a
   step it did not take is sent back once; a run that still stops there, or answers with nothing,
   is reported as not finished.

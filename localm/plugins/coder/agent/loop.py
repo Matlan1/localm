@@ -390,6 +390,8 @@ class _LoopMixin:
 
         def _emit(self, event_type: str, **data) -> None: ...
 
+        def _record_typed_request(self, text: str) -> None: ...
+
     def run_task(self, task: str, attachments: str = "", *,
                  record_request: bool = True) -> str:
         """
@@ -411,6 +413,7 @@ class _LoopMixin:
         self._last_user_request = task
         if record_request and getattr(self, "parent", None) is None:
             self._note_typed_request(task)
+            self._record_typed_request(task)
         message = self._with_episodes(task)
         self._add_user_with_plan_note(compose(message, attachments) if attachments else message)
         return self._loop(interactive=False)
@@ -449,6 +452,7 @@ class _LoopMixin:
         self._last_user_request = user_input   # raw, see run_task
         if record_request:
             self._note_typed_request(user_input)
+            self._record_typed_request(user_input)
         if self._episodic and not self._episode_task:
             self._episode_task = user_input
             user_input = self._with_episodes(user_input)
@@ -569,6 +573,7 @@ class _LoopMixin:
                 # next LLM call so the agent reads them this turn.
                 for queued in self._drain_queued():
                     self._note_typed_request(queued)
+                    self._record_typed_request(queued)
                     self._add_user(
                         "[user steering note - read this before continuing, it "
                         f"overrides earlier instructions where they conflict]\n{queued}"

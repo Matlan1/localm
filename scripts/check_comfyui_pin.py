@@ -73,7 +73,7 @@ _PER_PAGE = 100
 
 # How many days upstream's latest release may postdate the pinned one before
 # --gate exits 1. Matches scripts/check_llama_pin.py's DEFAULT_MAX_AGE_DAYS.
-DEFAULT_MAX_AGE_DAYS = 21
+DEFAULT_MAX_AGE_DAYS = 7
 
 # --gate exit codes.
 EXIT_CURRENT, EXIT_STALE, EXIT_UNKNOWN = 0, 1, 2
