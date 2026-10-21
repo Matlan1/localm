@@ -173,8 +173,7 @@ def test_settings_write_blocked_by_another_process_answers_busy_not_500(
 
     from localm.inference.http_server import create_app
 
-    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
-    monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+    monkeypatch.setenv("LOCALM_API_KEY", "owner-key-for-the-busy-settings-test")
     monkeypatch.setattr(cfg, "_CROSS_LOCK_STALE_AGE", 3600.0)
     monkeypatch.setattr(cfg, "_CROSS_LOCK_TIMEOUT", 0.3)
     cfg.save_config({"temperature": 0.7})
@@ -183,7 +182,9 @@ def test_settings_write_blocked_by_another_process_answers_busy_not_500(
     with TestClient(create_app(None), raise_server_exceptions=False) as client:
         lockpath.write_text("12345", encoding="utf-8")
         try:
-            response = client.patch("/v1/config", json={"temperature": 0.2})
+            response = client.patch(
+                "/v1/config", json={"temperature": 0.2},
+                headers={"Authorization": "Bearer owner-key-for-the-busy-settings-test"})
         finally:
             lockpath.unlink()
     assert response.status_code == 503
