@@ -223,6 +223,7 @@ class SlotScheduler:
     ``n_batch()``, ``decode(entries)``, ``sample(sampler, row)``,
     ``is_eog(tok)``, ``seq_rm(seq, p0, p1)``, ``clear_memory()``,
     ``checkpoints_wanted()``, ``state_get(seq)``, ``state_set(seq, data)``,
+    ``state_copy_limit()``, ``state_get_all(seq, limit)``, ``state_set_all(seq, data)``,
     ``free_sampler(sampler)``, ``stderr_scope()``, and, for a reply submitted
     with a scorer, ``score(scorer, row, tok)``.
 
@@ -679,8 +680,9 @@ class SlotScheduler:
         """Recreate the context per ``ops.rightsize`` before *slot* takes a
         request of *need* cells for *prompt*, while no reply is active. The
         other slots' caches, which the plan counts, and the part of *slot*'s
-        cache that *prompt* shares are decoded into the new context again; a
-        cache whose decode fails is dropped. A context that cannot be created
+        cache that *prompt* shares are put into the new context again (see
+        ``_copy_caches`` and ``_restore_caches``); a cache that cannot be put
+        back is dropped. A context that cannot be created
         with the KV cache in VRAM is created with it in system RAM; when that
         fails too the model has no context and ``_fit`` grows a new one."""
         from localm.debuglog import logger
@@ -697,6 +699,7 @@ class SlotScheduler:
         shared = min(_common_prefix_len(slot.kv, prompt), len(prompt) - 1)
         kept = [(s, list(s.kv) if s is not slot else list(s.kv[:max(0, shared)]))
                 for s in self._slots]
+        copies = self._copy_caches(kept)
         for other in self._slots:
             other.kv = []
         self._touched = True
@@ -713,16 +716,56 @@ class SlotScheduler:
                 logger.info("gguf slots: a %d-token context with the KV cache in system "
                             "RAM could not be created either: %s", target, exc)
                 return
-        self._restore_caches(kept)
+        self._restore_caches(kept, copies)
 
-    def _restore_caches(self, kept: list[tuple[_Slot, list[int]]]) -> None:
-        """Decode each ``(slot, tokens)`` of *kept* into its sequence of a
-        freshly created context, in batches of ``ops.n_batch()``; a slot whose
-        decode fails keeps an empty cache."""
+    def _copy_caches(self, kept: list[tuple[_Slot, list[int]]]) -> dict[int, Any]:
+        """Host copies of the sequence states of the ``(slot, tokens)`` of
+        *kept* whose tokens are the slot's whole cache, keyed by sequence, while
+        their total stays within ``ops.state_copy_limit()``; empty when that
+        limit is None. A sequence whose state cannot be read is left out."""
+        copies: dict[int, Any] = {}
+        limit = self._ops.state_copy_limit()
+        if limit is None:
+            return copies
+        for slot, tokens in kept:
+            if not tokens or tokens != slot.kv:
+                continue
+            data = self._ops.state_get_all(slot.seq, limit)
+            if data is None:
+                continue
+            limit -= len(data)
+            copies[slot.seq] = data
+        return copies
+
+    def _load_copy(self, slot: _Slot, tokens: list[int], copies: dict[int, Any]) -> bool:
+        """Put *slot*'s copy from ``_copy_caches`` into its sequence of the new
+        context and record *tokens* as its cache. False, with the sequence
+        emptied, when there is no copy or it does not load."""
+        data = copies.get(slot.seq)
+        if data is None:
+            return False
+        if self._ops.state_set_all(slot.seq, data):
+            slot.kv = list(tokens)
+            return True
+        from localm.debuglog import logger
+        logger.info("gguf slots: the cache of slot %d did not load into the new context; "
+                    "decoding it again", slot.seq)
+        self._ops.seq_rm(slot.seq, 0, -1)
+        return False
+
+    def _restore_caches(self, kept: list[tuple[_Slot, list[int]]],
+                        copies: Optional[dict[int, Any]] = None) -> None:
+        """Put each ``(slot, tokens)`` of *kept* into its sequence of a freshly
+        created context: from its copy in *copies* (``_copy_caches``) when it
+        loads, else decoded in batches of ``ops.n_batch()``; a slot whose decode
+        fails keeps an empty cache."""
         from localm.debuglog import logger
         step = max(1, self._ops.n_batch())
         restored = 0
         for slot, tokens in kept:
+            if self._load_copy(slot, tokens, copies or {}):
+                restored += len(slot.kv)
+                continue
             for i in range(0, len(tokens), step):
                 chunk = tokens[i:i + step]
                 entries = [(tok, i + j, slot.seq, j == len(chunk) - 1)
@@ -741,8 +784,9 @@ class SlotScheduler:
 
     def _grow(self, target: int, offload_kqv: bool,
               ram_target: Optional[int] = None) -> None:
-        """Recreate the context with *target* cells and re-decode the cached
-        tokens of every active reply into it. Idle caches are dropped. When
+        """Recreate the context with *target* cells and put the cache of every
+        active reply into it: from a host copy (``_copy_caches``) when it loads,
+        else decoded again. Idle caches are dropped. When
         *ram_target* is given and the context cannot be created with the KV
         cache in VRAM, one of *ram_target* cells is created with it in system
         RAM instead. A failed recreate ends every active reply with its
@@ -753,6 +797,7 @@ class SlotScheduler:
             slot.rate_ok = False
         logger.info("gguf slots: growing the context to %d tokens (%d active)",
                     target, len(active))
+        copies = self._copy_caches([(slot, list(slot.kv)) for slot in active])
         try:
             try:
                 self._ops.recreate(target, offload_kqv)
@@ -775,6 +820,8 @@ class SlotScheduler:
                 slot.kv = []
         for slot in active:
             tokens, slot.kv = slot.kv, []
+            if self._load_copy(slot, tokens, copies):
+                continue
             step = max(1, self._ops.n_batch())
             for i in range(0, len(tokens), step):
                 chunk = tokens[i:i + step]
@@ -1269,6 +1316,26 @@ class LlamaSlotOps:
         if not self._llm._ctx_ptr:
             return False
         return self._llm._write_seq_state(seq, data, api.LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY)
+
+    def state_copy_limit(self) -> Optional[int]:
+        from . import _api as api
+        llm = self._llm
+        try:
+            if not (llm._memory_api_available() and api.has_state_seq_ext_api() is True):
+                return None
+        except Exception:
+            return None
+        return llm._state_copy_limit()
+
+    def state_get_all(self, seq: int, limit: int) -> Any:
+        if not self._llm._ctx_ptr:
+            return None
+        return self._llm._read_seq_state(seq, 0, limit)
+
+    def state_set_all(self, seq: int, data: Any) -> bool:
+        if not self._llm._ctx_ptr:
+            return False
+        return self._llm._write_seq_state(seq, data, 0)
 
     def clear_memory(self) -> None:
         from . import _api as api

@@ -208,6 +208,28 @@ class _SimContext:
         self.rec[seq] = len(data)
         return True
 
+    # Whole-sequence copies across a context recreate: None turns them off.
+    copy_limit = None
+    copy_fail = False
+
+    def state_copy_limit(self):
+        return self.copy_limit
+
+    def state_get_all(self, seq, limit):
+        cells = tuple(self.cells.get(seq, []))
+        return cells if 0 < len(cells) <= limit else None
+
+    def state_set_all(self, seq, data):
+        if self.copy_fail:
+            self.cells[seq] = list(data[:1])
+            return False
+        if sum(len(v) for s, v in self.cells.items() if s != seq) + len(data) > self.cap:
+            return False
+        self.cells[seq] = list(data)
+        if self.recurrent:
+            self.rec[seq] = len(data)
+        return True
+
     def free_sampler(self, sampler):
         self.freed.append(sampler)
 
@@ -441,6 +463,56 @@ def test_growing_the_context_replays_the_running_replies(made):
     assert got + rest == _reference(PROMPTS[0], 150)[0]
     assert rec["out"] == _reference(PROMPTS[1], 150)[0]
     assert ctx.recreated and ctx.recreated[0][0] >= 2 * (150 + RESERVE_PAD)
+
+
+def test_a_grown_context_takes_the_running_caches_without_decoding_them_again(made):
+    ctx = _SimContext(capacity=256, n_ctx_max=4096, grow=256)
+    ctx.copy_limit = 1 << 20
+    ctx.step_delay = 0.005
+    sched = made(ctx, 2)
+    first = sched.submit(PROMPTS[0], 150, _Sampler())
+    got = [next(first) for _ in range(5)]
+    rec = _collect(sched, PROMPTS[1], 150)
+    rest, _reason = _drain(first)
+    assert got + rest == _reference(PROMPTS[0], 150)[0]
+    assert rec["out"] == _reference(PROMPTS[1], 150)[0]
+    assert ctx.recreated
+    positions = {}
+    for call in ctx.calls:
+        for _tok, pos, seq, _want in call:
+            positions.setdefault(seq, []).append(pos)
+    for seq, seen in positions.items():
+        assert len(seen) == len(set(seen)), f"sequence {seq} decoded a position twice"
+
+
+def test_a_copy_that_does_not_load_is_decoded_again(made):
+    ctx = _SimContext(capacity=256, n_ctx_max=4096, grow=256)
+    ctx.copy_limit = 1 << 20
+    ctx.copy_fail = True
+    ctx.step_delay = 0.005
+    sched = made(ctx, 2)
+    first = sched.submit(PROMPTS[0], 150, _Sampler())
+    got = [next(first) for _ in range(5)]
+    rec = _collect(sched, PROMPTS[1], 150)
+    rest, _reason = _drain(first)
+    assert got + rest == _reference(PROMPTS[0], 150)[0]
+    assert rec["out"] == _reference(PROMPTS[1], 150)[0]
+
+
+def test_rightsizing_takes_the_idle_caches_without_decoding_them_again(made):
+    ctx = _SimContext()
+    ctx.copy_limit = 1 << 20
+    sched = made(ctx, 2)
+    _collect(sched, PROMPTS[0], 3)
+    _collect(sched, PROMPTS[1], 3)
+    ctx.rightsize_plan = (2048, True)
+    before = len(ctx.calls)
+    third = PROMPTS[0] + _reference(PROMPTS[0], 3)[0][:2] + [70, 71]
+    rec = _collect(sched, third, 3)
+    assert rec["out"] == _reference(third, 3)[0]
+    assert ctx.recreated
+    seq1 = [e for call in ctx.calls[before:] for e in call if e[2] == 1]
+    assert seq1 == []
 
 
 def test_no_growth_beside_running_replies_when_vram_says_it_does_not_fit(made):
