@@ -93,6 +93,17 @@ class TestVramPreflight:
             b._check_vram()
         assert capsys.readouterr().out == ""
 
+    @pytest.mark.parametrize("model", ["x[/dim] y", "qwen[v2]", "[bold red]m"])
+    def test_a_peer_model_name_is_printed_as_text(self, tmp_path, capsys, monkeypatch, model):
+        monkeypatch.setattr("localm.gpu_registry.list_gpu_peers",
+                            lambda **k: [{"port": 8650, "model": model, "gpu_index": 0}])
+        monkeypatch.setattr("localm.config.load_config", lambda: {})
+        b = _backend(tmp_path, size_bytes=80_000_000)
+        with patch.object(GgufBackend, "_free_vram_bytes", return_value=40_000_000),              patch.object(GgufBackend, "_total_vram_bytes", return_value=16_000_000_000):
+            b._check_vram()
+        out = " ".join(capsys.readouterr().out.split())
+        assert f"is running '{model}'" in out
+
     def test_low_vram_warning_notes_a_possibly_blind_reading(self, tmp_path, capsys):
         """The warning fires only when even a possibly over-stated free already
         reads as insufficient, but the quoted GB figure itself can be the raw,

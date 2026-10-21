@@ -1088,7 +1088,8 @@ def list_machine_peers(home: Path, *, timeout: float = 0.7) -> list[dict]:
 
     ``mode`` and ``version`` come from the instance's own ``/whoami`` answer;
     ``root_dir`` from its full status, read only by a verified sibling of the
-    same OS user (None otherwise). ``started`` is None: a live probe has no
+    same OS user (None otherwise). A peer listening on a non-loopback
+    interface only is not found. ``started`` is None: a live probe has no
     start time.
 
     Returns no credential. ``snapshot`` is deliberately NOT widened to cover

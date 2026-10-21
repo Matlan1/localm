@@ -1411,11 +1411,12 @@ class VramSizingMixin:
             f"    • {label}:  [bold]{command}[/bold]\n"
             for label, command in self._vram_fit_options(
                 free, need, kv_cache, overhead, gpu_layers))
+        from rich.markup import escape
         console.print(
             f"[yellow]⚠ Low VRAM:[/yellow] this model needs roughly "
             f"[bold]{need / 1024**3:.1f} GB[/bold] ({ctx_hint}) but only "
             f"[bold]{free / 1024**3:.1f} GB[/bold] is free{where}.{blind_note}\n"
-            f"  [dim]Likely cause: {self._vram_holder_hint()}[/dim]\n"
+            f"  [dim]Likely cause: {escape(self._vram_holder_hint())}[/dim]\n"
             f"  Options:\n"
             f"    • Free VRAM first (close the other app, or POST "
             f"/v1/models/unload on its server)\n"
@@ -2203,8 +2204,9 @@ class VramSizingMixin:
             what = (f"offloading {auto}/{of} layers to the GPU, the rest on CPU "
                     f"(slower)")
             override = "Set n_gpu_layers to override"
+        from rich.markup import escape
         console.print(
-            f"[yellow]  gpu layers auto:[/yellow] {what} - {cause}.{blind_note} "
+            f"[yellow]  gpu layers auto:[/yellow] {what} - {escape(cause)}.{blind_note} "
             f"{override}, or n_gpu_layers_auto false."
         )
         from localm.debuglog import logger as _dbg
