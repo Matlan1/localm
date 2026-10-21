@@ -501,6 +501,30 @@ class TestAwaitJob:
         asyncio.run(run())
         assert events == [True]
 
+    def test_disconnect_cancels_a_job_that_keeps_streaming_lines(self, plug):
+        import asyncio
+        job = _FakeJob([])
+
+        async def run():
+            task = asyncio.ensure_future(plug._await_job(job, _FakeRequest(True)))
+            await asyncio.sleep(0)
+            for n in range(150):
+                if job.cancelled:
+                    break
+                job._queue.put_nowait({"type": "line", "text": f"step {n}"})
+                await asyncio.sleep(0.005)
+            cancelled = job.cancelled
+            job._queue.put_nowait({"type": "end", "status": "cancelled"})
+            try:
+                await asyncio.wait_for(task, timeout=3)
+            except asyncio.CancelledError:
+                return cancelled, "cancelled"
+            except TimeoutError:
+                return cancelled, "timeout"
+            return cancelled, "returned"
+
+        assert asyncio.run(run()) == (True, "cancelled")
+
     def test_a_job_that_never_stops_is_given_up_on_after_the_settle_time(self, plug):
         import asyncio
         import time
