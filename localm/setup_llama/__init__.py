@@ -87,7 +87,7 @@ import click  # noqa: F401
 from localm import config  # noqa: F401
 from localm.http_ssl import verified_urlopen as _verified_urlopen
 from localm.setup_llama._common import (
-    console, _flush_stdin, _net_allowed, _require_network_allowed,
+    console, _flush_stdin, _require_network_allowed,
 )
 from localm.setup_llama.pins import (
     DEFAULT_URL, DEFAULT_URL_SHA256, _ROCM_TAG, _ROCM_BUILD, _ROCM_CPU_ASSET, _ROCM_CPU_TAG,
