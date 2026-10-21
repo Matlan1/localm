@@ -1383,24 +1383,37 @@ def _mmproj_reuse_confirmed(dest: Path, repo_id: str, candidate: str,
     return None
 
 
-def _mmproj_recorded_only_from(dest: Path, repo_id: str) -> bool:
-    """True when at least one registry entry records *dest* (as its file or its
-    projector) and every such entry was pulled from ``hf:<repo_id>``: the file is
-    that repo's own, so a digest that differs from the repo's published one means
-    it is damaged or outdated, not another repo's projector of the same name."""
-    sources = []
-    for info in _mm.load_registry().values():
-        for field in ("path", "mmproj"):
-            recorded = _mm._entry_path(info, field) if isinstance(info, dict) else None
-            if recorded is None:
-                continue
-            try:
-                same = Path(recorded).resolve() == dest.resolve()
-            except OSError:
-                continue
-            if same:
-                sources.append(str(info.get("source") or ""))
-    return bool(sources) and all(s == f"hf:{repo_id}" for s in sources)
+def _mmproj_origin_path(dest: Path) -> Path:
+    """The file beside the projector *dest* that records where it was
+    downloaded from."""
+    return dest.with_name(dest.name + ".origin.json")
+
+
+def _record_mmproj_origin(dest: Path, repo_id: str, remote_name: str,
+                          sha256: Optional[str]) -> None:
+    """Record that *dest* was downloaded from ``hf:<repo_id>`` as *remote_name*.
+    A failed write is logged and leaves *dest* without a recorded origin, which
+    only means a differing copy is never replaced automatically. See
+    test_a_projector_without_a_recorded_origin_is_never_replaced."""
+    from ..storekit import atomic_write
+    try:
+        atomic_write(_mmproj_origin_path(dest), json.dumps(
+            {"source": f"hf:{repo_id}", "file": remote_name, "sha256": sha256}))
+    except OSError as e:
+        logger.warning("could not record where %s came from: %s", dest, e)
+
+
+def _mmproj_origin_is(dest: Path, repo_id: str, remote_name: str) -> bool:
+    """True when the origin recorded beside *dest* says it was downloaded from
+    ``hf:<repo_id>`` as *remote_name*: the file is that repo's own, so a digest
+    that differs from the repo's published one means it is damaged or outdated,
+    not another repo's projector of the same name."""
+    try:
+        recorded = json.loads(_mmproj_origin_path(dest).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return (isinstance(recorded, dict) and recorded.get("source") == f"hf:{repo_id}"
+            and recorded.get("file") == remote_name)
 
 
 def _mmproj_download_dest(base_dir: Path, candidate: str, repo_id: str,
@@ -1415,8 +1428,8 @@ def _mmproj_download_dest(base_dir: Path, candidate: str, repo_id: str,
     returned instead, and the occupied file is never read from beyond that
     one comparison or written to; it may be another entry's own correctly
     recorded projector. When the occupied file differs from the digest the repo
-    publishes and the registry records it only from *repo_id* itself, it is that
-    repo's own damaged or outdated copy: it is deleted and the plain name is
+    publishes and the origin recorded beside it says it came from *repo_id* as
+    *candidate*, it is that repo's own damaged or outdated copy: it is deleted and the plain name is
     returned for a fresh download. Returns ``(None, False)`` when every
     numbered name up to ``_MAX_MMPROJ_COLLISION_SUFFIX`` is also taken."""
     dest = base_dir / candidate
@@ -1425,7 +1438,7 @@ def _mmproj_download_dest(base_dir: Path, candidate: str, repo_id: str,
     confirmed = _mmproj_reuse_confirmed(dest, repo_id, candidate, model_path)
     if confirmed is not False:
         return dest, True
-    if _mm._hf_file_sha256(repo_id, candidate) and _mmproj_recorded_only_from(dest, repo_id):
+    if _mm._hf_file_sha256(repo_id, candidate) and _mmproj_origin_is(dest, repo_id, candidate):
         from rich.markup import escape
         try:
             dest.unlink(missing_ok=True)
@@ -1476,6 +1489,7 @@ def _download_mmproj_file(repo_id: str, remote_name: str, dest: Path, base_dir: 
             shutil.move(local, dest)
     if expected is None:
         _note_unverified(repo_id, [remote_name])
+        _record_mmproj_origin(dest, repo_id, remote_name, None)
         return
     actual = _verify_digest(dest, purpose="to check the vision projector").lower()
     if actual != expected:
@@ -1483,6 +1497,7 @@ def _download_mmproj_file(repo_id: str, remote_name: str, dest: Path, base_dir: 
         raise RuntimeError(
             f"sha256 mismatch for {remote_name}: expected {expected[:16]}..., "
             f"got {actual[:16]}... - the file was deleted")
+    _record_mmproj_origin(dest, repo_id, remote_name, actual)
 
 
 def _maybe_fetch_repo_mmproj(repo_id: str, filename: str, base_dir: Path, *,

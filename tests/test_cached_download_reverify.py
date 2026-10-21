@@ -19,7 +19,6 @@ from localm import voice
 from localm.inference import embedder
 from tests._net_config import set_config
 from tests.test_mmproj_discovery import _real_mmproj_gguf, _real_text_model_gguf
-from tests.test_pull_mmproj_autofetch import _wire_download, _wire_repo_listing
 
 
 @pytest.fixture()
@@ -223,40 +222,101 @@ class TestSnapshotRepull:
 # MOD-02: a vision projector
 # --------------------------------------------------------------------------- #
 
+def _wire_hub_by_repo(monkeypatch, files: dict):
+    """A hub where *files* maps (repo, filename) to bytes: published digests,
+    the repo listing and the downloads all come from it."""
+    downloaded: list = []
+
+    monkeypatch.setattr(mm, "_hf_file_sha256", lambda repo, fn: (
+        _sha(files[(repo, fn)]) if (repo, fn) in files and "mmproj" in fn else None))
+
+    class _Api:
+        def __init__(self, *a, **kw):
+            pass
+
+        def list_repo_files(self, repo_id):
+            return [fn for (r, fn) in files if r == repo_id]
+
+    def _download(repo_id, filename, local_dir, **kw):
+        downloaded.append((repo_id, filename))
+        out = Path(local_dir) / filename
+        out.write_bytes(files[(repo_id, filename)])
+        return str(out)
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", _Api)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", _download)
+    return downloaded
+
+
 class TestProjectorRepull:
-    def _setup(self, fake_registry, monkeypatch, tmp_path, source: str):
-        store, models_dir = fake_registry
+    @pytest.fixture()
+    def blobs(self, tmp_path):
+        model = _real_text_model_gguf(tmp_path / "_model.gguf", "qwen2", 3584).read_bytes()
         right = _real_mmproj_gguf(tmp_path / "_right.gguf", 3584).read_bytes()
-        damaged = right + b"damaged"
-        model_bytes = _real_text_model_gguf(tmp_path / "_model.gguf", "qwen2", 3584).read_bytes()
-        (models_dir / "main.gguf").write_bytes(model_bytes)
-        (models_dir / "mmproj-main-f16.gguf").write_bytes(damaged)
-        store["main"] = {"path": str((models_dir / "main.gguf").resolve()), "source": source,
-                         "model_type": "llm",
-                         "mmproj": str((models_dir / "mmproj-main-f16.gguf").resolve())}
-        digest = _sha(right)
-        monkeypatch.setattr(mm, "_hf_file_sha256",
-                            lambda repo, fn: digest if fn == "mmproj-main-f16.gguf" else None)
-        _wire_repo_listing(monkeypatch, ["main.gguf", "mmproj-main-f16.gguf"])
-        downloaded = _wire_download(monkeypatch, {"mmproj-main-f16.gguf": right})
-        return store, models_dir, right, damaged, downloaded
+        return model, right
 
     def test_the_repos_own_damaged_projector_is_replaced_in_place(
-            self, fake_registry, monkeypatch, tmp_path):
-        store, models_dir, right, _, downloaded = self._setup(
-            fake_registry, monkeypatch, tmp_path, "hf:o/r")
+            self, fake_registry, monkeypatch, blobs):
+        store, models_dir = fake_registry
+        model, right = blobs
+        downloaded = _wire_hub_by_repo(monkeypatch, {
+            ("o/r", "main.gguf"): model, ("o/r", "mmproj-main-f16.gguf"): right})
+        assert mm._pull_gguf_file("o/r:main.gguf", None) is True
+        projector = models_dir / "mmproj-main-f16.gguf"
+        projector.write_bytes(right + b"damaged")
+        downloaded.clear()
 
         assert mm._pull_gguf_file("o/r:main.gguf", None) is True
 
-        assert (models_dir / "mmproj-main-f16.gguf").read_bytes() == right
+        assert projector.read_bytes() == right
         assert not (models_dir / "mmproj-main-f16-2.gguf").exists()
-        assert downloaded == ["mmproj-main-f16.gguf"]
-        assert store["main"]["mmproj"] == str((models_dir / "mmproj-main-f16.gguf").resolve())
+        assert downloaded == [("o/r", "mmproj-main-f16.gguf")]
+        assert store["main"]["mmproj"] == str(projector.resolve())
+
+    def test_a_projector_without_a_recorded_origin_is_never_replaced(
+            self, fake_registry, monkeypatch, blobs):
+        store, models_dir = fake_registry
+        model, right = blobs
+        _wire_hub_by_repo(monkeypatch, {
+            ("o/r", "main.gguf"): model, ("o/r", "mmproj-main-f16.gguf"): right})
+        assert mm._pull_gguf_file("o/r:main.gguf", None) is True
+        projector = models_dir / "mmproj-main-f16.gguf"
+        projector.write_bytes(right + b"damaged")
+        (models_dir / "mmproj-main-f16.gguf.origin.json").unlink()
+
+        assert mm._pull_gguf_file("o/r:main.gguf", None) is True
+
+        assert projector.read_bytes() == right + b"damaged"
+        assert (models_dir / "mmproj-main-f16-2.gguf").read_bytes() == right
+
+    def test_a_projector_chosen_from_another_repo_is_not_replaced_by_the_model_repos(
+            self, fake_registry, monkeypatch, blobs):
+        store, models_dir = fake_registry
+        model, theirs = blobs
+        ours = theirs + b"-from-the-model-repo"
+        downloaded = _wire_hub_by_repo(monkeypatch, {
+            ("b/r", "main.gguf"): model, ("b/r", "other.gguf"): model,
+            ("b/r", "mmproj-model-f16.gguf"): ours,
+            ("c/r", "mmproj-model-f16.gguf"): theirs})
+        assert mm.pull_model("b/r:main.gguf", mmproj_spec="c/r:mmproj-model-f16.gguf") is True
+        assert (models_dir / "mmproj-model-f16.gguf").read_bytes() == theirs
+        downloaded.clear()
+
+        assert mm._pull_gguf_file("b/r:other.gguf", None) is True
+
+        assert (models_dir / "mmproj-model-f16.gguf").read_bytes() == theirs
+        assert (models_dir / "mmproj-model-f16-2.gguf").read_bytes() == ours
+        assert store["main"]["mmproj"] == str((models_dir / "mmproj-model-f16.gguf").resolve())
 
     def test_a_projector_that_is_in_use_is_left_and_the_pull_still_succeeds(
-            self, fake_registry, monkeypatch, tmp_path):
-        store, models_dir, right, damaged, _ = self._setup(
-            fake_registry, monkeypatch, tmp_path, "hf:o/r")
+            self, fake_registry, monkeypatch, blobs):
+        store, models_dir = fake_registry
+        model, right = blobs
+        _wire_hub_by_repo(monkeypatch, {
+            ("o/r", "main.gguf"): model, ("o/r", "mmproj-main-f16.gguf"): right})
+        assert mm._pull_gguf_file("o/r:main.gguf", None) is True
+        projector = models_dir / "mmproj-main-f16.gguf"
+        projector.write_bytes(right + b"damaged")
         real_unlink = Path.unlink
 
         def _locked(self, missing_ok=False):
@@ -268,17 +328,7 @@ class TestProjectorRepull:
 
         assert mm._pull_gguf_file("o/r:main.gguf", None) is True
 
-        assert (models_dir / "mmproj-main-f16.gguf").read_bytes() == damaged
-        assert (models_dir / "mmproj-main-f16-2.gguf").read_bytes() == right
-
-    def test_another_repos_projector_of_the_same_name_is_still_left_alone(
-            self, fake_registry, monkeypatch, tmp_path):
-        store, models_dir, right, damaged, downloaded = self._setup(
-            fake_registry, monkeypatch, tmp_path, "hf:someone/else")
-
-        assert mm._pull_gguf_file("o/r:main.gguf", None) is True
-
-        assert (models_dir / "mmproj-main-f16.gguf").read_bytes() == damaged
+        assert projector.read_bytes() == right + b"damaged"
         assert (models_dir / "mmproj-main-f16-2.gguf").read_bytes() == right
 
 
@@ -325,6 +375,54 @@ class TestCachedWhisper:
         assert _Model.instances == []
         assert not repo_dir.exists()
         assert voice.stt_model_cached() == (False, "base")
+
+    def test_an_intact_older_snapshot_survives_a_bad_pinned_one_and_stays_loadable(self):
+        commit = voice._STT_PINS[WHISPER_REPO][0]
+        repo_dir = self._lay(b"a changed byte" + WHISPER_BODY)
+        old = repo_dir / "snapshots" / ("1" * 40)
+        old.mkdir()
+        (old / "model.bin").write_bytes(b"an older but intact model")
+        (repo_dir / "refs").mkdir()
+        (repo_dir / "refs" / "main").write_text(commit, encoding="utf-8")
+
+        with pytest.raises(RuntimeError, match="integrity check"):
+            voice._load_whisper(_Model, "base", voice.stt_cache_dir(), True)
+
+        assert not (repo_dir / "snapshots" / commit).exists()
+        assert (old / "model.bin").read_bytes() == b"an older but intact model"
+        assert (repo_dir / "refs" / "main").read_text(encoding="utf-8") == "1" * 40
+        assert voice.stt_model_cached() == (True, "base")
+
+    def test_the_file_the_bad_snapshot_points_at_is_deleted_too(self):
+        commit = voice._STT_PINS[WHISPER_REPO][0]
+        repo_dir = voice.stt_cache_dir() / "models--Systran--faster-whisper-base"
+        (repo_dir / "blobs").mkdir(parents=True)
+        blob = repo_dir / "blobs" / "etag"
+        blob.write_bytes(b"a changed byte" + WHISPER_BODY)
+        snap = repo_dir / "snapshots" / commit
+        snap.mkdir(parents=True)
+        try:
+            (snap / "model.bin").symlink_to(blob)
+        except OSError:
+            pytest.skip("symlinks are not available here")
+        old = repo_dir / "snapshots" / ("1" * 40)
+        old.mkdir()
+        (old / "model.bin").write_bytes(b"an older but intact model")
+
+        with pytest.raises(RuntimeError, match="integrity check"):
+            voice._load_whisper(_Model, "base", voice.stt_cache_dir(), True)
+
+        assert not blob.exists() and not snap.exists()
+
+    def test_the_error_does_not_claim_a_deletion_that_did_not_happen(self, monkeypatch):
+        self._lay(b"a changed byte" + WHISPER_BODY)
+        monkeypatch.setattr(voice.shutil, "rmtree", lambda *a, **k: None)
+
+        with pytest.raises(RuntimeError) as raised:
+            voice._load_whisper(_Model, "base", voice.stt_cache_dir(), True)
+
+        assert "could not all be deleted" in str(raised.value)
+        assert "files were deleted" not in str(raised.value)
 
     def test_an_intact_cached_model_bin_loads(self):
         self._lay(WHISPER_BODY)

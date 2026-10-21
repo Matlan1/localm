@@ -236,9 +236,41 @@ def _verify_pinned_model(name: str, cache_root) -> Optional[str]:
     actual = _sha256_of(model_bin)
     if actual == pin[1]:
         return None
-    shutil.rmtree(repo_dir, ignore_errors=True)
+    leftover = _discard_snapshot(repo_dir, pin[0])
+    outcome = ("the downloaded files were deleted." if not leftover else
+               "they could not all be deleted (in use?): " + ", ".join(leftover))
     return (f"Whisper model '{name}' failed its integrity check (sha256 {actual[:16]}..., "
-            f"expected {pin[1][:16]}...); the downloaded files were deleted.")
+            f"expected {pin[1][:16]}...); {outcome}")
+
+
+def _discard_snapshot(repo_dir: Path, commit: str) -> list[str]:
+    """Delete the snapshot *commit* of the hub cache folder *repo_dir*, and the
+    file it holds model.bin in. The whole folder goes when no other snapshot is
+    in it; otherwise the other snapshots stay and the folder's default reference
+    is pointed at the newest of them when it named *commit*. Returns what could
+    not be deleted."""
+    snapshots = repo_dir / "snapshots"
+    others = sorted((d for d in snapshots.iterdir() if d.is_dir() and d.name != commit),
+                    key=lambda d: d.stat().st_mtime) if snapshots.is_dir() else []
+    if not others:
+        shutil.rmtree(repo_dir, ignore_errors=True)
+        return [str(repo_dir)] if repo_dir.exists() else []
+    target = snapshots / commit
+    blob = (target / "model.bin").resolve()
+    shutil.rmtree(target, ignore_errors=True)
+    leftover = [str(target)] if target.exists() else []
+    if blob.is_file() and repo_dir.resolve() in blob.parents:
+        try:
+            blob.unlink()
+        except OSError:
+            leftover.append(str(blob))
+    ref = repo_dir / "refs" / "main"
+    try:
+        if ref.is_file() and ref.read_text(encoding="utf-8").strip() == commit:
+            ref.write_text(others[-1].name, encoding="utf-8")
+    except OSError:
+        leftover.append(str(ref))
+    return leftover
 
 
 def stt_model_cached() -> tuple[bool, str]:
