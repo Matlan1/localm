@@ -1412,6 +1412,7 @@ class LlamaCpp:
         mmproj_path: Optional[str] = None,
         cancel_event: Optional[threading.Event] = None,
         vram_check: Optional[Callable[[int, int], Optional[bool]]] = None,
+        budget_check: Optional[Callable[[int, int], Optional[bool]]] = None,
         gpu_split_ratios: Optional[list] = None,
         n_cpu_moe: int = 0,
         mtp_enabled: bool = False,
@@ -1458,6 +1459,12 @@ class LlamaCpp:
         # abort), or None when VRAM is unmeasurable (keep the default). None (the
         # attribute) = no check (only a NULL-pointer check on the result after).
         self._vram_check  = vram_check
+        # Optional check consulted by _step_reserve, called with
+        # (target_n_ctx, current_ctx_capacity): True when a context of that size
+        # with the KV cache in VRAM stays within the video memory the OS lets
+        # this process keep resident, False when the OS would page part of it
+        # out, None when unknown.
+        self._budget_check = budget_check
         # Dynamic context window: starts at n_ctx, grows in n_ctx_grow steps
         # up to n_ctx_max when a conversation outgrows it. None/0 = unlimited
         # (the pre-dynamic behaviour: grow exactly as far as needed).
@@ -3831,22 +3838,26 @@ class LlamaCpp:
         return target, decision is not False
 
     # Cells a budgeted reply reserves at first when its whole budget would put
-    # the KV cache in system RAM (``_step_reserve``), grown as the reply runs.
+    # the KV cache in system RAM or past the OS video memory budget
+    # (``_step_reserve``), grown as the reply runs.
     RESERVE_STEP = 512
     RESERVE_PAD = 64
 
     def _step_reserve(self, needed: int, step: int, others: int = 0) -> int:
         """The cells to reserve now for a reply that needs at most *needed*:
         *step* when a context sized for *needed* would keep its KV cache in
-        system RAM while one sized for *step* keeps it in VRAM, else *needed*.
+        system RAM, or would not fit the OS video memory budget
+        (``_budget_check`` answers False), while one sized for *step* keeps it in
+        VRAM within that budget; else *needed*.
 
         When the live context holds *needed*, *others* counts the cells other
         sequences' caches hold (as in ``_rightsize_plan``), the answer is
         *needed* without asking ``_vram_check`` while its KV cache is in VRAM
         or while the promotion check is held off (``_kv_promote_after``).
-        Asks ``_vram_check`` with ``hint=False``, at most twice, *step* first;
-        never asks when the two sizes round to the same context. Never raises:
-        a raising check answers *needed*, logged at INFO. Caller holds
+        Asks ``_vram_check`` with ``hint=False``, at most twice, *step* first,
+        and ``_budget_check`` (when set) for each size ``_vram_check`` keeps in
+        VRAM; never asks when the two sizes round to the same context. Never
+        raises: a raising check answers *needed*, logged at INFO. Caller holds
         ``_gen_lock``."""
         check = getattr(self, "_vram_check", None)
         if step >= needed or check is None:
@@ -3862,10 +3873,14 @@ class LlamaCpp:
         full = self._target_ctx(needed + extra)
         if small >= full:
             return needed
+        budget = getattr(self, "_budget_check", None)
         try:
             if check(small, capacity, hint=False) is not True:
                 return needed
-            if check(full, capacity, hint=False) is not False:
+            if budget is not None and budget(small, capacity) is False:
+                return needed
+            if (check(full, capacity, hint=False) is not False
+                    and (budget is None or budget(full, capacity) is not False)):
                 return needed
         except Exception as exc:
             from localm.debuglog import logger
@@ -3874,7 +3889,7 @@ class LlamaCpp:
             return needed
         from localm.debuglog import logger
         logger.info("gguf context: reserving %d of %d cells, a %d-token context keeps the "
-                    "KV cache in VRAM where a %d-token one would not", step, needed,
+                    "KV cache resident in VRAM where a %d-token one would not", step, needed,
                     small, full)
         return step
 

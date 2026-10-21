@@ -196,6 +196,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   context before the next request, which restores the speed without reloading the model. This
   applies to models loaded fully on the GPU, never while other replies are running, and at most
   once a minute.
+- **On Windows, a reply beside another program's VRAM use keeps the model in VRAM.** When other
+  programs use VRAM, Windows lets each program keep only part of what is free and moves the rest
+  of its memory to system memory, where replies decode about half as fast. When the whole reply
+  budget (`max_tokens`) would go past what Windows lets the model keep but the prompt plus the
+  first 512 tokens of the reply fits, the reply now starts in the context the model already has,
+  so a short reply keeps full GPU speed.
 - **The Live tuning VRAM estimate counts the running model's own memory.** The VRAM the running
   model holds was counted as used, so settings that fit read "may not fit"; it is now shown
   beside the free VRAM and counted as available. Apply now reloads the running model with the

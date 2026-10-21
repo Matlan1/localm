@@ -996,7 +996,10 @@ class _DxgiQueryVideoMemoryInfo(ctypes.Structure):
 
 def _com_method(obj, slot: int, *argtypes):
     """Vtable entry *slot* of COM object *obj* as a callable taking *obj* first
-    and returning an HRESULT (or a ULONG for Release)."""
+    and returning an HRESULT (or a ULONG for Release). Windows only: raises
+    OSError elsewhere."""
+    if sys.platform != "win32":
+        raise OSError("COM is Windows-only")
     vtbl = ctypes.cast(obj, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
     return ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, *argtypes)(vtbl[slot])
 
@@ -1006,7 +1009,9 @@ def _dxgi_local_memory() -> list[tuple[int, int]]:
     group for THIS process, one entry per hardware DXGI adapter, from
     ``IDXGIAdapter3::QueryVideoMemoryInfo``. Software adapters and adapters
     without IDXGIAdapter3 are skipped. Raises OSError when DXGI cannot be
-    opened."""
+    opened, and on every platform other than Windows."""
+    if sys.platform != "win32":
+        raise OSError("DXGI is Windows-only")
     iid_factory1 = _guid(0x770AAE78, 0xF26F, 0x4DBA,
                          b"\xa8\x29\x25\x3c\x83\xd1\xb3\x87")
     iid_adapter3 = _guid(0x645967A4, 0x1392, 0x4310,

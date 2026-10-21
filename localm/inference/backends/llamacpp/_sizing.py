@@ -21,6 +21,7 @@ see ``_free_total_vram_bytes``.
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import NamedTuple, Optional
@@ -1504,45 +1505,22 @@ class VramSizingMixin:
             free = self._free_vram_bytes()
         if free is None:
             return None  # can't measure (no torch / no GPU) - keep the default (VRAM)
-        # KV bytes per token on the GPU: only the offloaded layers keep their KV
-        # in VRAM (offload_kqv); CPU layers' KV lives in system RAM, so a partial
-        # load is charged only its GPU share.
-        per_token = self._kv_bytes_per_token()
-        if gpu_layers < self._DEFAULT_GPU_LAYERS:
-            layers = self._cached_layer_count() or self._ASSUMED_LAYERS
-            per_token = int(per_token * min(1.0, gpu_layers / layers))
-        per_token += self._spec_kv_per_token()
-        if per_token <= 0:
+        parts = self._ctx_grow_charge(n_ctx, current_ctx, gpu_layers)
+        if parts is None:
             return None
-        # How much NEW KV must land in VRAM to grow to n_ctx depends on WHERE the
-        # currently-resident KV lives (the recreate frees it first):
-        #  - current KV in VRAM: freeing it returns that KV to the VRAM pool and
-        #    `free` was measured with it still resident, so the NET growth is
-        #    the charge (delta <= free  <=>  full target <= budget).
-        #  - current KV already in SYSTEM RAM (offload_kqv=False): the GPU holds
-        #    NO KV, `free` already reads the whole KV budget, and the FULL
-        #    target is charged.
-        # current_ctx==0 means "not told" (a direct or test call), so the base
-        # n_ctx stands in.
-        kv_in_ram = getattr(self._llm, "_offload_kqv", True) is False
-        current = max(int(current_ctx), self.n_ctx)
-        charge = (n_ctx * per_token if kv_in_ram
-                  else (n_ctx - current) * per_token)   # NET when the old VRAM KV is reclaimed
-        # On Windows the growth must also fit what is left of this process's
-        # video memory budget, else Windows moves allocations to shared memory.
-        from localm.gpu_usage import process_vram_budget
-        budget = process_vram_budget()
-        room = budget[0] - budget[1] if budget is not None else None
-        device_free = free
-        if room is not None:
-            free = min(free, room)
-        # State the decision - nothing else in the worker surfaces it.
+        charge, per_token, kv_in_ram = parts
+        # State the decision - nothing else in the worker surfaces it. The
+        # placement is decided on free VRAM alone; the Windows budget is only
+        # reported here. See test_budget_overrun_keeps_the_kv_cache_in_vram.
         from localm.debuglog import logger as _dbg
-        _dbg.debug("ctx-grow fit: target=%d free=%d device_free=%d budget=%s usage=%s "
-                   "per_token=%d charge=%d kv_in_ram=%s -> KV in %s", n_ctx, free,
-                   device_free, budget[0] if budget else None,
-                   budget[1] if budget else None, per_token, charge, kv_in_ram,
-                   "VRAM" if charge <= free else "system RAM")
+        if _dbg.isEnabledFor(logging.DEBUG):
+            from localm.gpu_usage import process_vram_budget
+            budget = process_vram_budget()
+            _dbg.debug("ctx-grow fit: target=%d free=%d budget=%s usage=%s per_token=%d "
+                       "charge=%d kv_in_ram=%s -> KV in %s", n_ctx, free,
+                       budget[0] if budget else None, budget[1] if budget else None,
+                       per_token, charge, kv_in_ram,
+                       "VRAM" if charge <= free else "system RAM")
         if charge <= free:
             return True                                # KV cache fits VRAM - keep it there
         # Does not fit VRAM: keep the FULL window and put the KV cache in system
@@ -1552,13 +1530,8 @@ class VramSizingMixin:
             from localm.debuglog import logger as _dbg
             # The quoted GB figure can still be the raw, cross-process-blind
             # reading when the device-global correction declined.
-            if room is not None and room < device_free:
-                blind_note = (" (Windows lets this process use only that much of the "
-                              f"{device_free / 1024**3:.2f} GB free)")
-            elif self._free_reading_may_be_blind():
-                blind_note = " (this reading may not see other processes' VRAM use)"
-            else:
-                blind_note = ""
+            blind_note = (" (this reading may not see other processes' VRAM use)"
+                          if self._free_reading_may_be_blind() else "")
             _dbg.warning(
                 "large context (%s tokens): the KV cache does not fit free VRAM "
                 "(need %.2f GB > %.2f GB free)%s, so it is kept in system RAM and "
@@ -1566,6 +1539,68 @@ class VramSizingMixin:
                 "full-speed GPU KV cache.",
                 f"{n_ctx:,}", charge / 1024**3, free / 1024**3, blind_note)
         return False
+
+    def _ctx_grow_charge(self, n_ctx: int, current_ctx: int,
+                         gpu_layers: int) -> Optional[tuple[int, int, bool]]:
+        """``(charge, per_token, kv_in_ram)`` for growing the live context to
+        *n_ctx* tokens with *gpu_layers* layers on the GPU: the bytes of KV
+        cache that must newly land in VRAM, the KV bytes per token charged, and
+        whether the live KV cache is in system RAM. None when the model keeps
+        no per-token KV on the GPU.
+
+        The charge depends on WHERE the live KV lives (the recreate frees it
+        first): in VRAM, only the NET growth over *current_ctx* is charged; in
+        system RAM, the FULL target is. *current_ctx* 0 means not told, and the
+        base n_ctx stands in."""
+        # Only the offloaded layers keep their KV in VRAM, so a partial load is
+        # charged only its GPU share.
+        per_token = self._kv_bytes_per_token()
+        if gpu_layers < self._DEFAULT_GPU_LAYERS:
+            layers = self._cached_layer_count() or self._ASSUMED_LAYERS
+            per_token = int(per_token * min(1.0, gpu_layers / layers))
+        per_token += self._spec_kv_per_token()
+        if per_token <= 0:
+            return None
+        kv_in_ram = getattr(self._llm, "_offload_kqv", True) is False
+        current = max(int(current_ctx), self.n_ctx)
+        charge = n_ctx * per_token if kv_in_ram else (n_ctx - current) * per_token
+        return charge, per_token, kv_in_ram
+
+    def _context_fits_budget(self, n_ctx: int, current_ctx: int = 0) -> Optional[bool]:
+        """Whether growing the live context to *n_ctx* tokens with the KV cache
+        in VRAM stays within this process's Windows video memory budget
+        (``gpu_usage.process_vram_budget``) - wired as LlamaCpp's
+        ``budget_check``.
+
+        True when the growth (charged as in ``_check_context_fit``) fits
+        budget - usage; False when it does not, so Windows would move part of
+        this process's video memory to shared system memory; None off Windows,
+        when the budget cannot be read, for a CPU-only run, or when the model
+        keeps no per-token KV on the GPU. Never raises."""
+        gpu_layers = getattr(self, "effective_gpu_layers", None)
+        if gpu_layers is None:
+            gpu_layers = self.n_gpu_layers
+        if gpu_layers == 0:
+            return None
+        from localm.gpu_usage import process_vram_budget
+        budget = process_vram_budget()
+        if budget is None:
+            return None
+        try:
+            parts = self._ctx_grow_charge(n_ctx, current_ctx, gpu_layers)
+        except Exception as e:
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("ctx-grow budget: charge unavailable (%s)", type(e).__name__)
+            return None
+        if parts is None:
+            return None
+        charge = parts[0]
+        room = budget[0] - budget[1]
+        from localm.debuglog import logger as _dbg
+        _dbg.debug("ctx-grow budget: target=%d charge=%d budget=%d usage=%d -> %s",
+                   n_ctx, charge, budget[0], budget[1],
+                   "fits" if charge <= room else "would be paged to shared memory")
+        return charge <= room
 
     # Bounds for VRAM-derived context ceilings
     _AUTO_CTX_MIN = 4096

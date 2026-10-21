@@ -310,6 +310,7 @@ class GgufWorker(VramSizingMixin):
             mmproj_path=self.mmproj_path,        # C1: in-process vision via mtmd
             cancel_event=self.cancel_event,       # abort mid-load if superseded
             vram_check=self._check_context_fit,   # guard context GROWTH too
+            budget_check=self._context_fits_budget,
             gpu_split_ratios=self.gpu_split_ratios,
             main_gpu=self.main_gpu,
             n_cpu_moe=self.n_cpu_moe,
