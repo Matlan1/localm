@@ -245,6 +245,110 @@ def unfounded_code(text: str, cwd) -> list[tuple[str, list[str]]]:
     return list(found.items())
 
 
+# A fenced block's language tag and body.
+_RE_FENCE_WITH_LANG = re.compile(r"```[ \t]*([\w+.-]*)[^\n`]*\n(.*?)```", re.DOTALL)
+_SHELL_FENCE_LANGS = frozenset({
+    "sh", "bash", "zsh", "shell", "console", "terminal", "powershell", "ps1",
+    "pwsh", "cmd", "bat", "batch", "text", "txt", "plaintext", "output", "log",
+})
+_FILE_CODE_MIN_LINES = 4
+# Verbs of a step a tool would carry out.
+_STEP_VERBS = (
+    "run|rerun|re-run|execute|test|check|verify|create|write|rewrite|add|update|"
+    "modify|edit|change|fix|implement|read|open|inspect|search|grep|install|apply|"
+    "build|refactor|remove|delete|rename|move|commit|launch|compile|configure|"
+    "generate|replace|patch|insert|call")
+# A last line that announces a step instead of reporting one.
+_RE_ANNOUNCED_STEP = re.compile(
+    r"^(?:(?:now|next|then|ok|okay|great|alright|first|finally)[,.!]?\s+)*"
+    r"(?:let\s+me|let'?s|let\s+us|i'?ll|i\s+will|i'?m\s+going\s+to"
+    r"|i\s+am\s+going\s+to|we'?ll|we\s+will)\s+"
+    r"(?:(?:now|also|quickly|just|first|then|go\s+ahead\s+and)\s+)*"
+    r"(?:" + _STEP_VERBS + r")\b",
+    re.IGNORECASE)
+# Words of a request that asks for the project to change.
+_RE_CHANGE_REQUEST = re.compile(
+    r"\b(?:implement|write|create|add|build|make|fix|change|update|modify|edit|"
+    r"refactor|rewrite|generate|code|develop|extend|replace|insert|apply|port|"
+    r"convert|finish|complete)(?:s|es|ed|d|ing)?\b",
+    re.IGNORECASE)
+
+
+# A shell command that runs a project's tests.
+_RE_TEST_COMMAND = re.compile(
+    r"^\s*(?:(?:python[\d.]*|py)\s+-m\s+)?(?:pytest|unittest|tox|nox|jest|vitest|mocha)\b"
+    r"|^\s*(?:npm|pnpm|yarn)\s+(?:run\s+)?test\b"
+    r"|^\s*(?:cargo|go|dotnet|mvn|gradle)\s+test\b"
+    r"|^\s*make\s+(?:test|check)\b",
+    re.IGNORECASE)
+
+
+def _may_write_files(call, cwd) -> bool:
+    """True for a call that can change files without the write tracker seeing
+    it: search_replace, an MCP or plugin tool, or a shell command that is
+    neither read-only nor a test run."""
+    name = call.name
+    if name == "search_replace" or name.startswith(("mcp_", "plugin_")):
+        return True
+    if name not in ("run_shell", "run_shell_background"):
+        return False
+    command = call.args.get("command") if isinstance(call.args, dict) else None
+    if not isinstance(command, str):
+        return True
+    if _RE_TEST_COMMAND.match(command):
+        return False
+    from ..shell_guard import is_read_only
+    try:
+        return not is_read_only(command, cwd)
+    except Exception:
+        return True
+
+
+def _has_file_code_block(text: str) -> bool:
+    """True when *text* holds a fenced block of at least four non-blank lines
+    whose language is not a shell, console or plain-text one."""
+    for m in _RE_FENCE_WITH_LANG.finditer(text or ""):
+        if m.group(1).lower() in _SHELL_FENCE_LANGS:
+            continue
+        if sum(1 for ln in m.group(2).splitlines() if ln.strip()) >= _FILE_CODE_MIN_LINES:
+            return True
+    return False
+
+
+def _announced_step(text: str) -> str:
+    """The last non-blank line of *text* when it announces a next step ("Let me
+    run the tests.", "Now I'll update main.py:") rather than asking a question;
+    ``""`` otherwise. Text inside a code block is not considered."""
+    prose = _RE_FENCE_WITH_LANG.sub("", text or "")
+    lines = [ln.strip().strip("*_>#- ").strip() for ln in prose.splitlines()]
+    lines = [ln for ln in lines if ln]
+    if not lines:
+        return ""
+    last = lines[-1]
+    if last.endswith("?") or len(last) > 200:
+        return ""
+    return last if _RE_ANNOUNCED_STEP.match(last) else ""
+
+
+def _dedupe_calls(calls: list) -> tuple[list, int]:
+    """``(calls, dropped)``: *calls* with every call whose name and arguments
+    equal an earlier call's removed, in order, and how many were removed."""
+    import json
+    seen: set = set()
+    kept = []
+    for call in calls:
+        try:
+            key = (call.name, json.dumps(call.args, sort_keys=True, default=str))
+        except (TypeError, ValueError):
+            kept.append(call)
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(call)
+    return kept, len(calls) - len(kept)
+
+
 def response_similarity(a: str, b: str) -> float:
     """difflib ratio of two responses, whitespace-normalised. 1.0 is identical."""
     import difflib
@@ -266,9 +370,30 @@ class _LoopMixin:
 
         def start_deferred_mcp(self) -> list: ...
 
+        # Set by Agent (core.py) through _ContextMixin.
+        def _note_typed_request(self, text) -> None: ...
+
         def report_deferred_mcp(self, interactive: bool) -> None: ...
 
-    def run_task(self, task: str, attachments: str = "") -> str:
+        @property
+        def disabled_tools(self) -> frozenset: ...
+
+        max_turns: int
+        patch_mode: bool
+        cwd: Path
+        _unverified_writes: set
+        _audit: Any
+
+        def _add_user(self, content) -> None: ...
+
+        def _add_assistant(self, content) -> None: ...
+
+        def _emit(self, event_type: str, **data) -> None: ...
+
+        def _record_typed_request(self, text: str) -> None: ...
+
+    def run_task(self, task: str, attachments: str = "", *,
+                 record_request: bool = True) -> str:
         """
         Run a single task to completion (non-interactive).
 
@@ -286,6 +411,9 @@ class _LoopMixin:
             self._session_title = task   # resume-listing display title
         # The raw request, before _with_episodes can prepend a lessons preamble.
         self._last_user_request = task
+        if record_request and getattr(self, "parent", None) is None:
+            self._note_typed_request(task)
+            self._record_typed_request(task)
         message = self._with_episodes(task)
         self._add_user_with_plan_note(compose(message, attachments) if attachments else message)
         return self._loop(interactive=False)
@@ -303,7 +431,8 @@ class _LoopMixin:
         self._add_user_with_plan_note(message)
         return self._loop(interactive=False)
 
-    def chat(self, user_input: str, attachments: str = "") -> str:
+    def chat(self, user_input: str, attachments: str = "", *,
+             record_request: bool = True) -> str:
         """
         Send one user message in an ongoing interactive session.
 
@@ -321,6 +450,9 @@ class _LoopMixin:
         # Recall relevant past lessons on the first turn of a session (the turn
         # that sets the session's task); later turns keep the same context.
         self._last_user_request = user_input   # raw, see run_task
+        if record_request:
+            self._note_typed_request(user_input)
+            self._record_typed_request(user_input)
         if self._episodic and not self._episode_task:
             self._episode_task = user_input
             user_input = self._with_episodes(user_input)
@@ -420,6 +552,8 @@ class _LoopMixin:
                              verify_checked_at=self._write_total(),
                              partial_notice_count=0, partial_notice_cap_announced=False,
                              nocall_escalation=0, nocall_declined=False, tool_calls_made=0,
+                             nocall_response="", code_nudged=False, announce_nudged=False,
+                             possible_write=False, announced_step="",
                              writes_at_start=self._write_total(),
                              files_at_start={f["path"]: f["writes"]
                                              for f in self.changed_files()},
@@ -438,6 +572,8 @@ class _LoopMixin:
                 # Mid-task steering: deliver queued user messages before the
                 # next LLM call so the agent reads them this turn.
                 for queued in self._drain_queued():
+                    self._note_typed_request(queued)
+                    self._record_typed_request(queued)
                     self._add_user(
                         "[user steering note - read this before continuing, it "
                         f"overrides earlier instructions where they conflict]\n{queued}"
@@ -527,7 +663,8 @@ class _LoopMixin:
                 # Pass the known tool names so the name-gated formats (bare JSON
                 # and json / bare fences) are recognised.
                 tool_names = set(TOOL_REGISTRY) - self.disabled_tools
-                calls = parse_tool_calls(response, tool_names=tool_names)
+                parsed_calls = parse_tool_calls(response, tool_names=tool_names)
+                calls, duplicate_calls = _dedupe_calls(parsed_calls)
 
                 # ---- repeated-scaffold breaker ---------------------------
                 # Counts a turn whose response is SIMILAR (not identical) to any
@@ -577,9 +714,11 @@ class _LoopMixin:
                 # Recorded before execution: the escalation ladder asks whether
                 # the model can produce a CALL at all, not whether it succeeded.
                 st.tool_calls_made += len(calls)
+                st.possible_write = st.possible_write or any(
+                    _may_write_files(c, self.cwd) for c in calls)
 
                 # Show the non-tool-call text parts when not already streamed
-                segments = split_response(response, calls)
+                segments = split_response(response, parsed_calls)
                 if interactive and not getattr(self, "_streamed_to_terminal", False):
                     for seg in segments:
                         if isinstance(seg, str) and seg.strip():
@@ -654,6 +793,12 @@ class _LoopMixin:
                             "text still looks like an attempt); notice cap "
                             "already reached, not reported to the model "
                             "this turn")
+
+                if duplicate_calls:
+                    result_blocks.append(
+                        f"[duplicate calls] {duplicate_calls} call(s) in this "
+                        "response repeated an earlier call in it with the same "
+                        "arguments; each distinct call was run once.")
 
                 # Feed all results back as a user message, compressing large
                 # outputs when the context is filling up
@@ -824,15 +969,39 @@ class _LoopMixin:
         # Zero-attempt escalation: the model produced nothing tool-shaped on a
         # request that needs a tool. Every branch above is reached only via
         # looks_like_tool_attempt().
-        declined = (_RE_NO_TOOL_NEEDED.match(response)
-                    if st.nocall_escalation >= 1 else None)
-        if declined is not None:
+        request = getattr(self, "_last_user_request", "") or ""
+        offered = st.nocall_escalation >= 1 or st.code_nudged
+        marker = _RE_NO_TOOL_NEEDED.match(response)
+        if marker is not None and self._change_still_owed(request, st):
+            # The escape does not answer a request to change the project while
+            # nothing was written: the marker is dropped and the reply is judged
+            # as written. See test_the_escape_does_not_answer_a_change_request.
+            response = response[marker.end():] or st.nocall_response
+            marker = None
+        declined = marker if offered else None
+        if declined is not None and not response[declined.end():].strip():
+            # The marker with no answer after it: an imperative request keeps
+            # climbing the ladder, anything else is answered by the reply the
+            # nudge was sent for.
+            if demands_action(request) and not st.code_nudged:
+                declined = None
+            else:
+                st.nocall_declined = True
+                response = st.nocall_response
+        elif declined is not None:
             st.nocall_declined = True
             response = response[declined.end():]
-        else:
+        if declined is None:
             escalated = self._escalate_no_tool_attempt(response, interactive, st)
             if escalated is not None:
                 return escalated
+
+        unfinished = ""
+        if not st.nocall_declined:
+            gated = self._unfinished_work_gate(response, request, interactive, st)
+            if isinstance(gated, tuple):
+                return gated
+            unfinished = gated or ""
 
         # Code shown for a workspace file that defines names the file does not
         # contain is invented file content, whatever the reply says it read.
@@ -918,11 +1087,16 @@ class _LoopMixin:
                 "the content of the file it names"))
         footer = self._grounding_footer()
         sensitive = self._sensitive_changes_notice()
-        final_text = response + enforcement + unverified + (footer or "") + sensitive
+        if unfinished:
+            self._last_run_ok = False
+        final_text = (response + enforcement + unfinished + unverified
+                      + (footer or "") + sensitive)
         if interactive and self.on_event is None:
             print_warning = _agent.print_warning
             if enforcement.strip():
                 print_warning(enforcement.strip())
+            if unfinished.strip():
+                print_warning(unfinished.strip())
             if unverified.strip():
                 print_warning(unverified.strip())
             task_files = self._files_changed_this_task(st)
@@ -940,6 +1114,100 @@ class _LoopMixin:
             print_assistant_response(final_text, name=self.name)
         self._add_assistant(response)
         return (True, final_text)
+
+    def _unfinished_work_gate(self, response, request, interactive, st):
+        """Hold back a final answer that leaves the requested work undone.
+
+        Two cases:
+
+        * a change the request asked for is still owed (see
+          :meth:`_change_still_owed`) and the reply is not a short clarifying
+          question: the agent is told so once (worded for a
+          reply that shows code when it does), unless the no-tool-call ladder
+          already ran this task; a final answer with the change still owed after
+          that ends the run as not finished;
+        * the reply's last line announces a next step ("Let me run the tests.")
+          after tools were used this task: nudged once, and ending on an
+          announcement again ends the run as not finished.
+
+        Returns ``(False, "")`` after a nudge (the loop continues), a note for
+        the final answer when the run ends with the case still open (it is then
+        reported as not finished), or ``""``."""
+        turns_left = self._turns < self.max_turns and not self.plan_mode
+        if self._change_still_owed(request, st) and not _asks_a_question(response):
+            if st.code_nudged or st.nocall_escalation or not turns_left:
+                return ("\n\n[not finished: nothing was written to any file in this "
+                        "task, so the change the request asked for was not made]")
+            st.code_nudged = True
+            st.nocall_response = response
+            if _has_file_code_block(response):
+                self._audit.notice("code_not_written",
+                                   "reply carried code but nothing was written")
+                prompt = ("[code not written] Your reply contains code, but no file "
+                          "was written or edited in this task, so nothing on disk "
+                          "changed. If the code belongs in the project, write it now "
+                          "with a tool call: write_file for a new file or a complete "
+                          "rewrite, edit_file to change part of a file.")
+                info = "the reply showed code but wrote no file - asking the agent to write it"
+            else:
+                self._audit.notice("change_not_made",
+                                   "change request answered with nothing written")
+                prompt = ("[nothing written] This request asks for a change to the "
+                          "project, but nothing has been written in this task, so "
+                          "nothing on disk changed. Make the change now with a tool "
+                          "call: write_file for a new file or a complete rewrite, "
+                          "edit_file to change part of a file.")
+                info = "the request asked for a change and nothing was written - asking the agent to make it"
+            self._add_assistant(response)
+            self._add_user(prompt)
+            if interactive:
+                print_info("(nothing written: asking the agent to make the change)")
+            self._emit("info", text=info)
+            return (False, "")
+        announced = _announced_step(response)
+        if st.announce_nudged and not announced and (
+                not response.strip() or _RE_NO_TOOL_NEEDED.fullmatch(response.strip())):
+            # A reply with nothing in it after the nudge leaves the announced
+            # step untaken.
+            announced = st.announced_step
+        if announced and self._used_tools_this_task(st):
+            if not st.announce_nudged and turns_left:
+                st.announce_nudged = True
+                st.announced_step = announced
+                st.nocall_response = response
+                why = (f'Your reply ends with "{announced}", but it made no tool '
+                       "call, so that step did not happen.")
+                self._audit.notice("announced_step_not_taken", why)
+                self._add_assistant(response)
+                self._add_user(
+                    f"[unfinished] {why} Do it now with a tool call. If the task "
+                    "is already complete, give your final summary without "
+                    "announcing further steps.")
+                if interactive:
+                    print_info("(unfinished: asking the agent to take the step it announced)")
+                self._emit("info", text=(
+                    "the reply announced a next step without taking it - asking "
+                    "the agent to take it"))
+                return (False, "")
+            if st.announce_nudged:
+                return (f'\n\n[not finished: the run ended on "{announced}" and '
+                        "that step was never taken]")
+        return ""
+
+    def _change_still_owed(self, request: str, st) -> bool:
+        """True when *request* tells the agent to change the project (an
+        imperative with a change verb), the session can write files and is not
+        in plan mode, and nothing that can write has run this task: no write
+        the tracker saw, no unverified changed file, no patch-mode capture, and
+        no call :func:`_may_write_files` counts as a possible write."""
+        if self.plan_mode:
+            return False
+        if not {"write_file", "edit_file", "patch_file"} - self.disabled_tools:
+            return False
+        if not (demands_action(request) and _RE_CHANGE_REQUEST.search(request)):
+            return False
+        return not (self._write_total() > st.writes_at_start or self.patch_mode
+                    or st.possible_write or bool(self._unverified_writes))
 
     def _used_tools_this_task(self, st) -> bool:
         """Has the model demonstrated, THIS TASK, that it can drive a tool?
@@ -1022,6 +1290,7 @@ class _LoopMixin:
                 "no_tool_call",
                 "model produced no tool call and no attempt on an action request "
                 "- re-prompting with the tool-call format")
+            st.nocall_response = response
             self._add_assistant(response)
             self._add_user(
                 "[no tool call] That request needs you to USE a tool - I run the "
@@ -1034,9 +1303,11 @@ class _LoopMixin:
                 "</tool_call>\n"
                 "Use one of the available tools by its exact name, with valid "
                 "JSON args. Emit one call now and I will run it and give you the "
-                "result. If this genuinely needs no tool at all, begin your reply "
-                'with "[no tool needed]" and answer in plain text, and I will '
-                "accept that as your answer."
+                "result."
+                + ("" if self._change_still_owed(request, st) else
+                   ' If this genuinely needs no tool at all, begin your reply '
+                   'with "[no tool needed]" and answer in plain text, and I will '
+                   "accept that as your answer.")
             )
             if interactive:
                 print_info("(no tool call: re-prompting with the tool-call format)")

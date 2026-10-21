@@ -14,14 +14,14 @@ from __future__ import annotations
 # no separate HIP SDK. See rocm-canary-forge/windows-native for the provenance.
 DEFAULT_URL = (
     "https://github.com/lemonade-sdk/llamacpp-rocm/releases/download/"
-    "b1342/llama-b1342-windows-rocm-gfx103X-x64.zip"
+    "b1349/llama-b1349-windows-rocm-gfx103X-x64.zip"
 )
 
 
 # sha256 of the DEFAULT_URL asset, used when the release lookup is unavailable.
 # Named rather than repeated inline so the URL and its pin cannot drift apart.
 DEFAULT_URL_SHA256 = (
-    "2236d8d3074e570e871dfbf03b77f031c18df6a96ce078cba7b1ae37047006d5"
+    "7e5ccf0561b5be9ad8d93fda64125b61926448a6f8042c826988afadad1048c3"
 )
 
 
@@ -30,7 +30,7 @@ DEFAULT_URL_SHA256 = (
 # which bind every layout from lemonade b1288 on, so an already-provisioned
 # runtime keeps working. (b1xxx here are lemonade-sdk tags, NOT ggml-org ones -
 # the two schemes collide; see inference/backends/llamacpp/_structs.py.)
-_ROCM_TAG = "b1342"
+_ROCM_TAG = "b1349"
 
 
 # The upstream llama.cpp release built from the SAME commit as _ROCM_TAG. Its
@@ -39,7 +39,7 @@ _ROCM_TAG = "b1342"
 # instruction-set option off. The variant binds to that build's ggml-base, so
 # this must name the upstream release of _ROCM_TAG's commit. See
 # localm/setup_llama/rocm_cpu.py.
-_ROCM_CPU_TAG = "b11513"
+_ROCM_CPU_TAG = "b11719"
 _ROCM_CPU_ASSET = f"llama-{_ROCM_CPU_TAG}-bin-win-cpu-x64.zip"
 
 # The amd-rocm build identity recorded in the runtime marker once the SIMD CPU
@@ -210,24 +210,24 @@ _PINNED_FALLBACK_SHA256 = {
     "llama-b11757-bin-win-vulkan-x64.zip": "5561afe6522d9b9f3cd29c4712e56f9e262716abfb17f7e11c3a832d134c4467",
     "llama-b11757-ui.tar.gz": "d87bef7fe5771feee04ebb051dd7206dacb410fe2ab64e42c4f103343c4ac5ce",
     "llama-b11757-xcframework.zip": "a6ab02056b7a83b5794fb6d0a6c70eca5cda05fe3465da00f0deeace4888d812",
-    # tag b1342 ROCm assets (llama.cpp 71ad0590f480, ROCm 10.2.0a20261008)
-    "llama-b1342-windows-rocm-gfx103X-x64.zip": "2236d8d3074e570e871dfbf03b77f031c18df6a96ce078cba7b1ae37047006d5",
-    "llama-b1342-windows-rocm-gfx110X-x64.zip": "2fa2904d323fa785c19bda1844dc366db126339b7f775666b7fdcf6de1a9cbe8",
-    "llama-b1342-windows-rocm-gfx1150-x64.zip": "890ba3afe24337a069d59e927d9e5d1904170dee74e4c9150c19cdd106640448",
-    "llama-b1342-windows-rocm-gfx1151-x64.zip": "553a722e20bdd126224ad1c66ef023f9f0508d0d9121978719fac10c3af0acbc",
-    "llama-b1342-windows-rocm-gfx120X-x64.zip": "fab097799c01f5b1dfaa04d562d9ececd1a7655329624d6a3afaf88d6cd6935c",
-    "llama-b1342-windows-rocm-gfx908-x64.zip": "bfb125f6f13bc9aa6a507107465529a3e64fb539638002cfad0eeee516efffbd",
-    "llama-b1342-windows-rocm-gfx90a-x64.zip": "b90fb996ac54c837616f7668083185575a01531a009332425a252c15549dbf0b",
-    "llama-b1342-ubuntu-rocm-gfx103X-x64.zip": "8bf462b1a328b4d203bc4d76b90109dca57e21b32ce9dc4bfcce361671a9ca2d",
-    "llama-b1342-ubuntu-rocm-gfx110X-x64.zip": "e7111fbde1c9a39f0a67dc37be11f3f809da835769312cd1d9d4e65ea122719e",
-    "llama-b1342-ubuntu-rocm-gfx1150-x64.zip": "616eca00da9a8f0d42d3cb654dadedbccf148ae9bf993a06732c03b3d76a9f7c",
-    "llama-b1342-ubuntu-rocm-gfx1151-x64.zip": "726250806fb8ee008c1e054c7ce17f2c0004771461af67f2c1783d3f43c46b59",
-    "llama-b1342-ubuntu-rocm-gfx120X-x64.zip": "4910ccea06736eaedf900581caeeef3c997c8f5e1770b67cd4f8176b6bd5511b",
-    "llama-b1342-ubuntu-rocm-gfx908-x64.zip": "f5527fc010420927349aa2aae538a43647e3499dc6097bc6aca383de6daca1d1",
-    "llama-b1342-ubuntu-rocm-gfx90a-x64.zip": "454809a6ec52cc96d4bdc4b64db86a73a3baf4fd5964ac061dad223e803d987d",
-    # tag b11513 upstream Windows CPU archive (_ROCM_CPU_ASSET), the amd-rocm
+    # tag b1349 ROCm assets (llama.cpp 5aeac37a35b4, ROCm 10.2.0a20261018)
+    "llama-b1349-windows-rocm-gfx103X-x64.zip": "7e5ccf0561b5be9ad8d93fda64125b61926448a6f8042c826988afadad1048c3",
+    "llama-b1349-windows-rocm-gfx110X-x64.zip": "bae8f9f562c27b09525c8d2ba7a82be910cf3e3463b42f9afa0bef5d8eb37af1",
+    "llama-b1349-windows-rocm-gfx1150-x64.zip": "98f8c80b80a358618d3661c31d9289d7d8d71d88bed42660e81d3344de256553",
+    "llama-b1349-windows-rocm-gfx1151-x64.zip": "5261de463afb39429b857475d896e4f68075d789d613c521b726eff27f55c376",
+    "llama-b1349-windows-rocm-gfx120X-x64.zip": "7c4c673cbb1c2f408a39daf58234a5e6be07a7d7d781ed74fe0042d0b5f507a9",
+    "llama-b1349-windows-rocm-gfx908-x64.zip": "973ba2ed1d7277df137dfd89162676b3dca6e793633881946e293af5c28c2185",
+    "llama-b1349-windows-rocm-gfx90a-x64.zip": "1363df2eb64c1645bd9a0a2d94d9b67257878e635ec2ef08d00523b9b235395f",
+    "llama-b1349-ubuntu-rocm-gfx103X-x64.zip": "a295522ae9a3967a2e7e2341b7cab9fc9128e39f8d5796d55e554f2591b83dba",
+    "llama-b1349-ubuntu-rocm-gfx110X-x64.zip": "aceaf9a316d789d204626ace4eeb074250393de13b8191bec46dc37620802c2f",
+    "llama-b1349-ubuntu-rocm-gfx1150-x64.zip": "c1620c46af55e89e46e0db5d4c4012c3cb934fb545bd1e446d9e1758ef4d2b40",
+    "llama-b1349-ubuntu-rocm-gfx1151-x64.zip": "7bfd1246df4a46f17399d71be6505580f241488da23352daa35c4ff36307d83c",
+    "llama-b1349-ubuntu-rocm-gfx120X-x64.zip": "3cb11a50f66c0bd4fe44633f5a838c24ba7cc361c30b3c8dbc8cf098b6c15882",
+    "llama-b1349-ubuntu-rocm-gfx908-x64.zip": "1611ca170626a4d0206ae638683694ddbcefabcb7fb36bd4a2887abd2aa2dd1c",
+    "llama-b1349-ubuntu-rocm-gfx90a-x64.zip": "b9d103af5732d697e9e211601b8e138c250103d48730e3486b25b85f04eef4c7",
+    # tag b11719 upstream Windows CPU archive (_ROCM_CPU_ASSET), the amd-rocm
     # build's SIMD CPU backend
-    "llama-b11513-bin-win-cpu-x64.zip": "34166ebb2593b31b7f644a6e3fddaade42716fb4a12bb5bc3a6650ddc5ae1e39",
+    "llama-b11719-bin-win-cpu-x64.zip": "1b1234d208a8b851cc27cd3d96b850d1547a4e5cfc5cd75f0a9fdd1d4c5bea20",
 }
 
 

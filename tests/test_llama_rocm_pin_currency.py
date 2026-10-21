@@ -243,7 +243,7 @@ def test_gate_default_max_age_matches_llama_pins_own_default(currency):
     spec = importlib.util.spec_from_file_location("check_llama_pin_ref", llama_path)
     llama = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(llama)
-    assert currency.DEFAULT_MAX_AGE_DAYS == llama.DEFAULT_MAX_AGE_DAYS == 21
+    assert currency.DEFAULT_MAX_AGE_DAYS == llama.DEFAULT_MAX_AGE_DAYS == 7
 
 
 def test_gate_current_exits_zero_and_never_prints_behind(currency, monkeypatch, capsys):

@@ -288,7 +288,8 @@ def _load_fp8_kernel(model_path: str, plan):
             model_path, f"the finegrained-fp8 kernel could not be loaded ({error})")
     if not plan.offline:
         try:
-            _hf_hub_gate.record_kernel_version_ref(FP8_KERNEL_REPO, FP8_KERNEL_VERSION)
+            _hf_hub_gate.record_kernel_version_ref(FP8_KERNEL_REPO, FP8_KERNEL_VERSION,
+                                                   FP8_KERNEL_REVISION)
         except Exception as e:
             logger.debug("hf load: could not record the finegrained-fp8 kernel "
                          "version for offline use: %s", e)
@@ -1194,7 +1195,8 @@ class _VisionFeatureCache:
         self._features: OrderedDict[str, object] = OrderedDict()
         self._armed: Optional[tuple] = None
         self.last_encoded = 0
-        inner.get_image_features = self._get_image_features
+        self._installed = self._installed_method()
+        inner.get_image_features = self._installed
 
     def __len__(self) -> int:
         return len(self._features)
@@ -1240,8 +1242,18 @@ class _VisionFeatureCache:
         """Empty the cache and restore the inner model's own
         ``get_image_features``."""
         self.clear()
-        if vars(self._inner).get("get_image_features") == self._get_image_features:
+        if vars(self._inner).get("get_image_features") is self._installed:
             del self._inner.get_image_features
+
+    def _installed_method(self):
+        """The callable installed over ``get_image_features``: forwards to
+        :meth:`_get_image_features` and reports the original method's
+        signature, which transformers' ``generate`` reads to choose the
+        arguments it passes and then removes from the model call."""
+        def get_image_features(*args, **kwargs):
+            return self._get_image_features(*args, **kwargs)
+        get_image_features.__signature__ = self._signature
+        return get_image_features
 
     def _call_kwargs(self, args, kwargs) -> dict:
         bound = self._signature.bind(*args, **kwargs)
