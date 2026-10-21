@@ -1612,9 +1612,9 @@ def backfill_mmproj_for_entry(entry: dict, path: Path) -> Optional[Path]:
     if not repo_id:
         return None
     from localm.model_manager.gguf import gguf_architecture, gguf_is_tts_architecture
-    speech = (entry.get("model_type") == "tts"
-              or gguf_is_tts_architecture(gguf_architecture(path)))
-    return _maybe_fetch_repo_mmproj(repo_id, path.name, path.parent, speech=speech)
+    return _maybe_fetch_repo_mmproj(
+        repo_id, path.name, path.parent,
+        speech=gguf_is_tts_architecture(gguf_architecture(path)))
 
 
 def _fetch_explicit_mmproj(mmproj_spec: str, base_dir: Path,

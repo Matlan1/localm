@@ -1624,7 +1624,6 @@ class TestListGpusAmdSingleAdapterFallback:
 
     @pytest.mark.parametrize("sycl_resident", [False, True])
     def test_the_sycl_skip_answers_what_an_xpu_torch_would(self, monkeypatch, sycl_resident):
-        monkeypatch.setattr(discover, "_torch_doomed_reason", None, raising=False)
         monkeypatch.delitem(sys.modules, "torch", raising=False)
         monkeypatch.setattr(discover, "native_hip_runtime_resident", lambda: False)
         monkeypatch.setattr(discover, "native_sycl_runtime_resident", lambda: sycl_resident)

@@ -1042,7 +1042,8 @@ def _list_gpus_with_status(deadline: float, wait_for_inflight: bool = False) -> 
             conclusive = not (not value and (_isolated_torch_unavailable
                                              or _isolated_torch_unanswered
                                              or (_torch_gpu_probe_known_doomed()
-                                                 and _torch_doomed_reason != "sycl")))
+                                                 and _torch_gpu_probe_doomed_reason()
+                                                 != "sycl")))
             if _gpu_probe_epoch != my_epoch:
                 # A reset retired this probe while it ran: its reading describes a
                 # state the owner has explicitly dropped, and the in-flight slot is
@@ -1128,15 +1129,12 @@ def _list_gpus_with_status(deadline: float, wait_for_inflight: bool = False) -> 
 # above, for native_sycl_runtime_resident() / _intel_sycl_rt_installed().
 # _torch_doomed_announced: the last _torch_gpu_probe_known_doomed() answer written
 # to the log, or None before anything has been.
-# _torch_doomed_reason: which combination the last _torch_gpu_probe_known_doomed()
-# call found ("hip" or "sycl"), or None when it answered False.
 _source_selection_lock = threading.Lock()
 _native_hip_resident: bool | None = None
 _rocm_sdk_present: bool | None = None
 _native_sycl_resident: bool | None = None
 _intel_sycl_rt_present: bool | None = None
 _torch_doomed_announced: bool | None = None
-_torch_doomed_reason: str | None = None
 
 
 def native_hip_runtime_resident() -> bool:
@@ -1300,7 +1298,12 @@ def _announce_torch_doomed(doomed: bool) -> bool:
 
 
 def _torch_gpu_probe_known_doomed() -> bool:
-    """True when :func:`_list_gpus_probe`'s ``import torch`` attempt below is
+    """True when :func:`_torch_gpu_probe_doomed_reason` names a combination."""
+    return _torch_gpu_probe_doomed_reason() is not None
+
+
+def _torch_gpu_probe_doomed_reason() -> str | None:
+    """``"hip"`` or ``"sycl"`` when :func:`_list_gpus_probe`'s ``import torch`` attempt below is
     KNOWN, ahead of time, to fail in this exact process state - so the probe
     skips it at the root instead of triggering the failure and catching the
     aftermath.
@@ -1401,13 +1404,8 @@ def _torch_gpu_probe_known_doomed() -> bool:
     distribution lookup - is resolved once per process, so a caller polling
     this on every GPU probe re-runs none of them. Only the ``sys.modules``
     membership test is re-evaluated, which is what lets the answer still
-    flip when torch becomes resident.
-
-    Records which combination fired in ``_torch_doomed_reason`` ("hip",
-    "sycl", or None when this answers False)."""
-    global _torch_doomed_reason
+    flip when torch becomes resident. None when neither combination applies."""
     import sys
-    _torch_doomed_reason = None
     if "torch" in sys.modules:
         # A resident torch (imported for real before the runtime loaded, or a
         # test's injected stand-in) makes `import torch` a plain cache hit: no
@@ -1416,7 +1414,7 @@ def _torch_gpu_probe_known_doomed() -> bool:
         # resident - the faulted module is evicted on every attempt - so this
         # never defuses the real guard.
         _announce_torch_doomed(False)
-        return False
+        return None
     doomed_reason: str | None = None
     try:
         if native_hip_runtime_resident() and _rocm_sdk_installed():
@@ -1427,13 +1425,12 @@ def _torch_gpu_probe_known_doomed() -> bool:
         logger.debug("list_gpus: torch-conflict detector failed (%s); "
                      "proceeding with the normal torch attempt", type(e).__name__)
         _announce_torch_doomed(False)
-        return False
+        return None
     if doomed_reason is None:
         _announce_torch_doomed(False)
-        return False
-    _torch_doomed_reason = doomed_reason
+        return None
     if not _announce_torch_doomed(True):
-        return True
+        return doomed_reason
     if doomed_reason == "hip":
         logger.debug(
             "list_gpus: skipping the torch GPU probe: the bundled HIP llama.cpp "
@@ -1450,7 +1447,7 @@ def _torch_gpu_probe_known_doomed() -> bool:
             "DLL-identity conflict as the proven HIP case - unconfirmed on real "
             "Intel hardware; see _torch_gpu_probe_known_doomed's docstring); using "
             "the non-torch sources")
-    return True
+    return doomed_reason
 
 
 # How long the out-of-process torch enumeration may take before it is abandoned
@@ -1944,7 +1941,7 @@ def _list_gpus_probe() -> list:
     with _gpu_probe_lock:
         _isolated_torch_unanswered = False
     torch_asked = not _torch_gpu_probe_known_doomed()
-    skipped_for_sycl = not torch_asked and _torch_doomed_reason == "sycl"
+    skipped_for_sycl = not torch_asked and _torch_gpu_probe_doomed_reason() == "sycl"
     if torch_asked:
         try:
             out = _torch_gpus_resident_bounded() if _torch_is_resident() \
