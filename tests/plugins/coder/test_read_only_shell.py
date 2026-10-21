@@ -166,6 +166,8 @@ def test_dotdot_after_a_link_back_into_the_project_that_climbs_out_is_not_read_o
     assert is_read_only("cat x/y/j/../../../z.txt", proj) is False
 
 
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="POSIX realpath resolves each link before its .., so the two readings agree")
 def test_a_gitdir_whose_dotdot_climbs_out_through_a_link_is_not_read_only(tmp_path):
     proj = tmp_path / "proj"
     (proj / "x" / "y").mkdir(parents=True)
