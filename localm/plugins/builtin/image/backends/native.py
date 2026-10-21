@@ -26,7 +26,7 @@ from localm.media.image_params import png_text_entries
 from localm.media.sdcpp import budget as sd_budget
 from localm.media.sdcpp import families, pairing, sampling
 from localm.media.sdcpp import runtime as sd_runtime
-from localm.media.sdcpp import shared
+from localm.media.sdcpp import shared, vaetile
 from localm.media.sdcpp.logrelay import RecoveredWarnings
 from localm.media.sdcpp.files import ModelFileError as _ModelError
 from localm.media.sdcpp.files import display_name, registered_file, resolve_model_file
@@ -505,7 +505,9 @@ class _EventRelay:
     """The worker-event handler for one job: status lines to *say*, preview
     frames to *on_preview*. ``flush`` shows any held warning lines and must be
     called when the job ends. Weight loads reported after sampling has started
-    (weights streamed in per step) are not shown."""
+    (weights streamed in per step) are not shown. The decoding phase says
+    ``Decoding...`` once when it starts and nothing when a progress count in it
+    completes (those counts are the decoder's weight loads, not the decode)."""
 
     def __init__(self, say, on_preview=None, cancel_check=None):
         self._say = say
@@ -549,17 +551,37 @@ class _EventRelay:
             self._say(f"Step {step}/{steps}{rate}")
         elif phase == "upscaling":
             self._say(f"Upscaling {step}/{steps}")
+        elif phase == "decoding":
+            if phase != self._phase:
+                self._say("Decoding...")
         elif phase != self._phase or (steps and step == steps):
-            label = "Decoding" if phase == "decoding" else "Loading weights"
             if steps and step == steps:
-                self._say(f"{label}: done")
+                self._say("Loading weights: done")
             elif phase != self._phase:
-                self._say(f"{label}...")
+                self._say("Loading weights...")
         self._phase = phase
 
 
 def _event_relay(say, on_preview=None, cancel_check=None) -> _EventRelay:
     return _EventRelay(say, on_preview, cancel_check)
+
+
+def _decode_tile(info: dict, width: int, height: int, hires: Optional[dict],
+                 say: Callable[[str], None]) -> Optional[int]:
+    """The VAE decode tile size (``vaetile.decode_tile_size``) for a job whose
+    largest decode is *width* x *height*, or its hires target, from the load
+    *info*'s ``max_tensor_bytes`` and ``vae_decoder_ch``; says the tiling
+    through *say* when there is one. None decodes in one piece."""
+    if hires:
+        width = sampling.hires_side(width, float(hires["scale"]))
+        height = sampling.hires_side(height, float(hires["scale"]))
+    limit = info.get("max_tensor_bytes")
+    tile = vaetile.decode_tile_size(width, height, limit, info.get("vae_decoder_ch"))
+    if tile and limit:
+        say(f"Decoding in {tile} px tiles: this GPU runtime takes buffers of up to "
+            f"{limit / 1024 ** 3:.1f} GB, too small to decode {width}x{height} in one piece "
+            "on the GPU.")
+    return tile
 
 
 def _batch_path(out_path: Path, index: int) -> Path:
@@ -828,6 +850,7 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
             components = {k: v["name"] for k, v in (models.get("components") or {}).items()} or None
             if negative_prompt and cfg_scale is not None and abs(float(cfg_scale) - 1.0) < 1e-5:
                 say(NEGATIVE_AT_CFG_1)
+            tile = _decode_tile(info, int(width), int(height), hires, say)
 
             def reload_model(load: dict) -> None:
                 runner.ensure_loaded(key, rt.path, load, extra_dirs=rt.extra_dirs,
@@ -856,6 +879,7 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
                                          (CONTROL_STRENGTH if control_strength is None
                                           else float(control_strength))),
                     "control_canny": control_preprocess == "canny",
+                    "vae_tile_size": tile,
                 }
                 label = f"image {index + 1}/{batch}, " if batch > 1 else ""
                 say(f"Generating {label}{width}x{height}"

@@ -666,3 +666,83 @@ def list_devices(lib) -> list[tuple[str, str]]:
         name, _, desc = line.partition("\t")
         out.append((name.strip(), desc.strip()))
     return out
+
+
+class _GgmlInitParams(Structure):
+    _fields_ = [("mem_size", c_size_t), ("mem_buffer", c_void_p), ("no_alloc", c_bool)]
+
+
+_GGML_TYPE_F32 = 0
+_TENSOR_PROBE_STEP = 64 * 1024 ** 2
+TENSOR_PROBE_CEILING = 1024 ** 4
+
+
+def _ggml_handles(lib, runtime_dir: Path) -> list:
+    """The loaded libraries that may export the ggml C API for *lib*: on Windows
+    ``ggml-base.dll`` and ``ggml.dll`` beside it (when present), elsewhere *lib*
+    itself (its handle also searches the libraries it links)."""
+    if sys.platform != "win32":
+        return [lib]
+    out = []
+    for name in ("ggml-base.dll", "ggml.dll"):
+        path = Path(runtime_dir) / name
+        if path.exists():
+            out.append(ctypes.CDLL(str(path), mode=0))
+    return out
+
+
+def _ggml_fn(handles, name, restype, *argtypes):
+    for h in handles:
+        f = getattr(h, name, None)
+        if f is not None:
+            f.restype = restype
+            f.argtypes = list(argtypes)
+            return f
+    return None
+
+
+def max_tensor_bytes(lib, runtime_dir: Path, device_name: str) -> Optional[int]:
+    """The largest F32 tensor, in bytes, the ggml device *device_name* accepts
+    as an op's input and output, rounded down to ``_TENSOR_PROBE_STEP``.
+    ``TENSOR_PROBE_CEILING`` when it accepts one that large. None when the
+    runtime does not export the ggml functions the probe needs, the device is
+    not registered, or it refuses even ``_TENSOR_PROBE_STEP``. Asks
+    ``ggml_backend_dev_supports_op`` about a scale of a 1-D tensor; allocates
+    no device memory. Call after :func:`load_library`."""
+    handles = _ggml_handles(lib, runtime_dir)
+    init = _ggml_fn(handles, "ggml_init", c_void_p, _GgmlInitParams)
+    free = _ggml_fn(handles, "ggml_free", None, c_void_p)
+    new_1d = _ggml_fn(handles, "ggml_new_tensor_1d", c_void_p, c_void_p, _enum, c_int64)
+    scale = _ggml_fn(handles, "ggml_scale", c_void_p, c_void_p, c_void_p, c_float)
+    by_name = _ggml_fn(handles, "ggml_backend_dev_by_name", c_void_p, c_char_p)
+    supports = _ggml_fn(handles, "ggml_backend_dev_supports_op", c_bool, c_void_p, c_void_p)
+    if (init is None or free is None or new_1d is None or scale is None or by_name is None
+            or supports is None):
+        return None
+    dev = by_name(device_name.encode("utf-8"))
+    if not dev:
+        return None
+
+    def accepts(nbytes: int) -> bool:
+        ctx = init(_GgmlInitParams(64 * 1024, None, True))
+        if not ctx:
+            raise RuntimeError("ggml_init failed")
+        try:
+            t = new_1d(ctx, _GGML_TYPE_F32, nbytes // 4)
+            op = scale(ctx, t, 1.0)
+            return bool(supports(dev, op))
+        finally:
+            free(ctx)
+
+    if not accepts(_TENSOR_PROBE_STEP):
+        return None
+    if accepts(TENSOR_PROBE_CEILING):
+        return TENSOR_PROBE_CEILING
+    lo, hi = 1, TENSOR_PROBE_CEILING // _TENSOR_PROBE_STEP
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if accepts(mid * _TENSOR_PROBE_STEP):
+            lo = mid
+        else:
+            hi = mid
+    return lo * _TENSOR_PROBE_STEP
