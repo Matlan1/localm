@@ -65,6 +65,7 @@ class TestLoad:
             meta = w.load()
         _, kwargs = fake_llamacpp_module.LlamaCpp.call_args
         assert kwargs.get("vram_check") == w._check_context_fit
+        assert kwargs.get("budget_check") == w._context_fits_budget
         assert kwargs.get("cancel_event") is None
         assert kwargs.get("n_gpu_layers") == 99
         assert meta == {"n_layers": 42, "kv_bytes_per_token": 12_345,

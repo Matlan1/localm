@@ -947,3 +947,147 @@ def _torch_pci_bus(index) -> Optional[int]:
     except Exception as e:
         logger.debug("gpu_usage: no pci_bus_id for device %s: %s", index, e)
         return None
+
+
+# Adapters on which this process holds less local video memory than this are
+# not candidates for process_vram_budget.
+_BUDGET_ADAPTER_MIN_USAGE = 256 * 1024 ** 2
+_DXGI_ADAPTER_FLAG_SOFTWARE = 2
+_DXGI_MEMORY_SEGMENT_GROUP_LOCAL = 0
+# Vtable slots: IUnknown::QueryInterface, IUnknown::Release,
+# IDXGIFactory1::EnumAdapters1, IDXGIAdapter1::GetDesc1,
+# IDXGIAdapter3::QueryVideoMemoryInfo.
+_VT_QUERY_INTERFACE = 0
+_VT_RELEASE = 2
+_VT_ENUM_ADAPTERS1 = 12
+_VT_GET_DESC1 = 10
+_VT_QUERY_VIDEO_MEMORY_INFO = 14
+
+
+class _Guid(ctypes.Structure):
+    _fields_ = [("Data1", ctypes.c_uint32), ("Data2", ctypes.c_uint16),
+                ("Data3", ctypes.c_uint16), ("Data4", ctypes.c_ubyte * 8)]
+
+
+def _guid(d1: int, d2: int, d3: int, d4: bytes) -> _Guid:
+    g = _Guid(d1, d2, d3)
+    g.Data4[:] = list(d4)
+    return g
+
+
+class _Luid(ctypes.Structure):
+    _fields_ = [("LowPart", ctypes.c_uint32), ("HighPart", ctypes.c_int32)]
+
+
+class _DxgiAdapterDesc1(ctypes.Structure):
+    _fields_ = [("Description", ctypes.c_wchar * 128), ("VendorId", ctypes.c_uint),
+                ("DeviceId", ctypes.c_uint), ("SubSysId", ctypes.c_uint),
+                ("Revision", ctypes.c_uint), ("DedicatedVideoMemory", ctypes.c_size_t),
+                ("DedicatedSystemMemory", ctypes.c_size_t),
+                ("SharedSystemMemory", ctypes.c_size_t), ("AdapterLuid", _Luid),
+                ("Flags", ctypes.c_uint)]
+
+
+class _DxgiQueryVideoMemoryInfo(ctypes.Structure):
+    _fields_ = [("Budget", ctypes.c_uint64), ("CurrentUsage", ctypes.c_uint64),
+                ("AvailableForReservation", ctypes.c_uint64),
+                ("CurrentReservation", ctypes.c_uint64)]
+
+
+def _com_method(obj, slot: int, *argtypes):
+    """Vtable entry *slot* of COM object *obj* as a callable taking *obj* first
+    and returning an HRESULT (or a ULONG for Release). Windows only: raises
+    OSError elsewhere."""
+    if sys.platform != "win32":
+        raise OSError("COM is Windows-only")
+    vtbl = ctypes.cast(obj, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+    return ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, *argtypes)(vtbl[slot])
+
+
+def _dxgi_local_memory() -> list[tuple[int, int]]:
+    """``(budget, current_usage)`` bytes of the LOCAL (dedicated VRAM) segment
+    group for THIS process, one entry per hardware DXGI adapter, from
+    ``IDXGIAdapter3::QueryVideoMemoryInfo``. Software adapters are skipped.
+    Raises OSError when DXGI cannot be opened, when a call on an adapter
+    fails, and on every platform other than Windows."""
+    if sys.platform != "win32":
+        raise OSError("DXGI is Windows-only")
+    iid_factory1 = _guid(0x770AAE78, 0xF26F, 0x4DBA,
+                         b"\xa8\x29\x25\x3c\x83\xd1\xb3\x87")
+    iid_adapter3 = _guid(0x645967A4, 0x1392, 0x4310,
+                         b"\xa7\x98\x80\x53\xce\x3e\x93\xfd")
+    dxgi = ctypes.WinDLL("dxgi")
+    factory = ctypes.c_void_p()
+    hr = dxgi.CreateDXGIFactory1(ctypes.byref(iid_factory1), ctypes.byref(factory))
+    if hr != 0 or not factory:
+        raise OSError(f"CreateDXGIFactory1 failed (0x{hr & 0xFFFFFFFF:08x})")
+    out: list[tuple[int, int]] = []
+    try:
+        enum = _com_method(factory, _VT_ENUM_ADAPTERS1, ctypes.c_uint,
+                           ctypes.POINTER(ctypes.c_void_p))
+        index = 0
+        while True:
+            adapter = ctypes.c_void_p()
+            if enum(factory, index, ctypes.byref(adapter)) != 0 or not adapter:
+                break
+            index += 1
+            try:
+                desc = _DxgiAdapterDesc1()
+                hr = _com_method(adapter, _VT_GET_DESC1, ctypes.POINTER(_DxgiAdapterDesc1))(
+                    adapter, ctypes.byref(desc))
+                if hr != 0:
+                    raise OSError(f"IDXGIAdapter1::GetDesc1 failed (0x{hr & 0xFFFFFFFF:08x})")
+                if desc.Flags & _DXGI_ADAPTER_FLAG_SOFTWARE:
+                    continue
+                adapter3 = ctypes.c_void_p()
+                hr = _com_method(adapter, _VT_QUERY_INTERFACE, ctypes.POINTER(_Guid),
+                                 ctypes.POINTER(ctypes.c_void_p))(
+                    adapter, ctypes.byref(iid_adapter3), ctypes.byref(adapter3))
+                if hr != 0 or not adapter3:
+                    raise OSError(f"IDXGIAdapter3 unavailable (0x{hr & 0xFFFFFFFF:08x})")
+                try:
+                    info = _DxgiQueryVideoMemoryInfo()
+                    hr = _com_method(adapter3, _VT_QUERY_VIDEO_MEMORY_INFO, ctypes.c_uint,
+                                     ctypes.c_int,
+                                     ctypes.POINTER(_DxgiQueryVideoMemoryInfo))(
+                        adapter3, 0, _DXGI_MEMORY_SEGMENT_GROUP_LOCAL, ctypes.byref(info))
+                    if hr != 0:
+                        raise OSError("IDXGIAdapter3::QueryVideoMemoryInfo failed "
+                                      f"(0x{hr & 0xFFFFFFFF:08x})")
+                    out.append((int(info.Budget), int(info.CurrentUsage)))
+                finally:
+                    _com_method(adapter3, _VT_RELEASE)(adapter3)
+            finally:
+                _com_method(adapter, _VT_RELEASE)(adapter)
+    finally:
+        _com_method(factory, _VT_RELEASE)(factory)
+    return out
+
+
+def process_vram_budget() -> Optional[tuple[int, int]]:
+    """``(budget, usage)`` bytes of dedicated video memory for THIS process on
+    the one adapter where it holds at least ``_BUDGET_ADAPTER_MIN_USAGE``, or
+    None when unavailable.
+
+    *budget* is how much dedicated VRAM Windows currently lets this process
+    keep resident; allocations past it are moved to shared system memory.
+    *usage* is how much the process currently holds there. Both come from
+    ``IDXGIAdapter3::QueryVideoMemoryInfo`` (LOCAL segment group) and change
+    as other processes take or release VRAM.
+
+    Windows only: None on every other platform, when DXGI cannot be queried,
+    and when no adapter or more than one adapter qualifies (logged at DEBUG).
+    Never raises."""
+    if sys.platform != "win32":
+        return None
+    try:
+        readings = _dxgi_local_memory()
+    except Exception as e:
+        logger.debug("gpu_usage: DXGI video memory budget unavailable: %s", e)
+        return None
+    held = [r for r in readings if r[1] >= _BUDGET_ADAPTER_MIN_USAGE]
+    if len(held) != 1:
+        logger.debug("gpu_usage: no DXGI video memory budget: this process holds "
+                     "VRAM on %d adapters", len(held))
+        return None
+    return held[0]

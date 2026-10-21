@@ -935,15 +935,26 @@ class Launcher(tk.Tk):
 
     _status_full = ""
 
+    def _diagnostics_allowed(self) -> bool:
+        """Whether the launcher may write an automatic log line: the global
+        privacy mode is not "privacy", or "Keep diagnostics" is ticked. False
+        when either setting cannot be read."""
+        try:
+            mode = self.privacy_global.get() or "privacy"
+            return mode != "privacy" or bool(self.keep_diagnostics.get())
+        except (AttributeError, tk.TclError):
+            return False
+
     def status_msg(self, text: str, error: bool = False) -> None:
         """Show *text* on the status line, ellipsized so a long line cannot
         widen the window. A clipped line is clickable and shows the full text;
-        an error is also appended to logs/launcher.log."""
+        an error is also appended to logs/launcher.log when
+        ``_diagnostics_allowed()``."""
         self._status_full = text
         shown = _ellipsize(text)
         self.status.configure(text=shown, fg="#e25d5d" if error else GREEN,
                               cursor="hand2" if shown != text else "")
-        if error:
+        if error and self._diagnostics_allowed():
             _log_launcher_error(text)
 
     def _show_full_status(self) -> None:

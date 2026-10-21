@@ -102,6 +102,15 @@ def _quiet_stderr(to_log: bool = True):
             os.close(saved_fd)
 
 
+def _grammar_parse_stderr():
+    """Context manager around a native grammar parse: the parser's stderr (its
+    error and the whole grammar source) goes to /dev/null, and to the debug
+    log only when ``debug_content_enabled()`` allows chat content there. Takes
+    ``_stderr_lock`` for the block."""
+    from localm.debuglog import debug_content_enabled
+    return _quiet_stderr(to_log=debug_content_enabled())
+
+
 def _stderr_ctx_for_generate(verbose: bool):
     """Return the context manager used to wrap generation stderr:
     nullcontext when verbose is True, otherwise dedup_native_stderr with
@@ -1142,10 +1151,11 @@ def _build_sampler(
     # letting a malformed grammar reach the crash-and-latch path.
     if grammar and grammar_lazy:
         if grammar_triggers and api.has_lazy_grammar():
-            gsampler = api.llama_sampler_init_grammar_lazy_patterns(
-                vocab, grammar.encode(), b"root",
-                [t.encode() for t in grammar_triggers],
-            )
+            with _grammar_parse_stderr():
+                gsampler = api.llama_sampler_init_grammar_lazy_patterns(
+                    vocab, grammar.encode(), b"root",
+                    [t.encode() for t in grammar_triggers],
+                )
             if gsampler is None:
                 api.llama_sampler_free(chain)
                 raise InvalidGrammarError(_INVALID_GRAMMAR_MSG)
@@ -1181,7 +1191,8 @@ def _build_sampler(
                 GRAMMAR_LAZY_NO_TRIGGERS_MESSAGE if not grammar_triggers
                 else GRAMMAR_LAZY_RUNTIME_OLD_MESSAGE)
     elif grammar:
-        gsampler = api.llama_sampler_init_grammar(vocab, grammar.encode(), b"root")
+        with _grammar_parse_stderr():
+            gsampler = api.llama_sampler_init_grammar(vocab, grammar.encode(), b"root")
         if gsampler is None:
             api.llama_sampler_free(chain)
             raise InvalidGrammarError(_INVALID_GRAMMAR_MSG)
@@ -1412,6 +1423,7 @@ class LlamaCpp:
         mmproj_path: Optional[str] = None,
         cancel_event: Optional[threading.Event] = None,
         vram_check: Optional[Callable[[int, int], Optional[bool]]] = None,
+        budget_check: Optional[Callable[[int, int], Optional[bool]]] = None,
         gpu_split_ratios: Optional[list] = None,
         n_cpu_moe: int = 0,
         mtp_enabled: bool = False,
@@ -1458,6 +1470,12 @@ class LlamaCpp:
         # abort), or None when VRAM is unmeasurable (keep the default). None (the
         # attribute) = no check (only a NULL-pointer check on the result after).
         self._vram_check  = vram_check
+        # Optional check consulted by _step_reserve, called with
+        # (target_n_ctx, current_ctx_capacity): True when a context of that size
+        # with the KV cache in VRAM stays within the video memory the OS lets
+        # this process keep resident, False when the OS would page part of it
+        # out, None when unknown.
+        self._budget_check = budget_check
         # Dynamic context window: starts at n_ctx, grows in n_ctx_grow steps
         # up to n_ctx_max when a conversation outgrows it. None/0 = unlimited
         # (the pre-dynamic behaviour: grow exactly as far as needed).
@@ -2268,8 +2286,7 @@ class LlamaCpp:
         # The native parser prints its error and the whole grammar source to
         # stderr on rejection. It is kept off the terminal, and reaches the debug
         # log only when debug_content_enabled() allows chat content there.
-        from localm.debuglog import debug_content_enabled
-        with _quiet_stderr(to_log=debug_content_enabled()):
+        with _grammar_parse_stderr():
             sampler = api.llama_sampler_init_grammar(
                 self._tokenizer._vocab, grammar.encode(), b"root")
         if sampler is None:
@@ -3831,22 +3848,27 @@ class LlamaCpp:
         return target, decision is not False
 
     # Cells a budgeted reply reserves at first when its whole budget would put
-    # the KV cache in system RAM (``_step_reserve``), grown as the reply runs.
+    # the KV cache in system RAM or past the OS video memory budget
+    # (``_step_reserve``), grown as the reply runs.
     RESERVE_STEP = 512
     RESERVE_PAD = 64
 
     def _step_reserve(self, needed: int, step: int, others: int = 0) -> int:
         """The cells to reserve now for a reply that needs at most *needed*:
         *step* when a context sized for *needed* would keep its KV cache in
-        system RAM while one sized for *step* keeps it in VRAM, else *needed*.
+        system RAM, or would not fit the OS video memory budget
+        (``_budget_check`` answers False), while one sized for *step* keeps it in
+        VRAM within that budget; else *needed*.
 
         When the live context holds *needed*, *others* counts the cells other
         sequences' caches hold (as in ``_rightsize_plan``), the answer is
         *needed* without asking ``_vram_check`` while its KV cache is in VRAM
         or while the promotion check is held off (``_kv_promote_after``).
         Asks ``_vram_check`` with ``hint=False``, at most twice, *step* first;
-        never asks when the two sizes round to the same context. Never raises:
-        a raising check answers *needed*, logged at INFO. Caller holds
+        when it keeps both sizes in VRAM, asks ``_budget_check`` (when set) for
+        *needed*, then for *step*. Never asks when the two sizes round to the
+        same context. Never
+        raises: a raising check answers *needed*, logged at INFO. Caller holds
         ``_gen_lock``."""
         check = getattr(self, "_vram_check", None)
         if step >= needed or check is None:
@@ -3862,11 +3884,15 @@ class LlamaCpp:
         full = self._target_ctx(needed + extra)
         if small >= full:
             return needed
+        budget = getattr(self, "_budget_check", None)
         try:
             if check(small, capacity, hint=False) is not True:
                 return needed
             if check(full, capacity, hint=False) is not False:
-                return needed
+                if budget is None or budget(full, capacity) is not False:
+                    return needed
+                if budget(small, capacity) is False:
+                    return needed
         except Exception as exc:
             from localm.debuglog import logger
             logger.info("gguf context: reserving the whole reply, the VRAM check raised %s",
@@ -3874,7 +3900,7 @@ class LlamaCpp:
             return needed
         from localm.debuglog import logger
         logger.info("gguf context: reserving %d of %d cells, a %d-token context keeps the "
-                    "KV cache in VRAM where a %d-token one would not", step, needed,
+                    "KV cache resident in VRAM where a %d-token one would not", step, needed,
                     small, full)
         return step
 

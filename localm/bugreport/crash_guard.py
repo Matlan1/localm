@@ -80,11 +80,14 @@ def _crash_trace_path(d, instance_id: Optional[str]):
 def _exit_path_for_marker(d, marker):
     """The exit record the crash-recovery watchdog wrote for *marker*'s
     instance (``server-crash-exit.<instance_id>.json``: the dead process's pid
-    and exit code), derived from the marker's own filename."""
+    and exit code), derived from the marker's own filename. *marker* may also
+    be the instance's stopping record (``server-crash.<id>.stopping``)."""
     name = marker.name
-    prefix, suffix = "server-crash.", ".marker"
-    if name.startswith(prefix) and name.endswith(suffix) and name != "server-crash.marker":
-        return d / f"server-crash-exit.{name[len(prefix):-len(suffix)]}.json"
+    prefix = "server-crash."
+    for suffix in (".marker", ".stopping"):
+        if (name.startswith(prefix) and name.endswith(suffix)
+                and name != f"server-crash{suffix}"):
+            return d / f"server-crash-exit.{name[len(prefix):-len(suffix)]}.json"
     return d / "server-crash-exit.json"
 
 

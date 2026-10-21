@@ -96,7 +96,8 @@ def test_own_host_name_inside_a_dotted_or_path_name_is_kept(scrub, monkeypatch):
 
 
 @pytest.mark.parametrize("scrub", _SCRUBBERS)
-@pytest.mark.parametrize("name", ["ubuntu", "Fedora", "localm", "host", "redacted", "user"])
+@pytest.mark.parametrize("name", ["ubuntu", "Fedora", "localm", "host", "redacted", "user",
+                                  "server", "Desktop", "workstation", "gpu", "main", "build"])
 def test_default_and_placeholder_host_names_are_not_used(scrub, monkeypatch, name):
     monkeypatch.setattr(socket, "gethostname", lambda: name)
     monkeypatch.delenv("COMPUTERNAME", raising=False)
@@ -106,6 +107,24 @@ def test_default_and_placeholder_host_names_are_not_used(scrub, monkeypatch, nam
 
 def test_python_reporters_skip_the_same_names():
     assert ri._OWN_NAME_SKIP == br_scrub._OWN_NAME_SKIP
+
+
+def test_every_reporter_skips_the_same_names():
+    import re
+    sh = re.search(r"%skip = map \{ \$_ => 1 \} qw\(([^)]*)\)",
+                   _SH_PATH.read_text(encoding="utf-8")).group(1).split()
+    ps = re.search(r"@\(('[a-z]+'(?:, '[a-z]+')+)\) -notcontains",
+                   _PS1_PATH.read_text(encoding="utf-8")).group(1)
+    ps_names = re.findall(r"'([^']+)'", ps)
+    assert set(sh) == br_scrub._OWN_NAME_SKIP
+    assert set(ps_names) == br_scrub._OWN_NAME_SKIP
+
+
+def test_a_report_title_keeps_a_common_word_host_name(monkeypatch):
+    monkeypatch.setattr(socket, "gethostname", lambda: "server")
+    monkeypatch.setenv("COMPUTERNAME", "SERVER")
+    title = "localm server crashed while stopping - native fault captured"
+    assert br_scrub._scrub_secrets(title) == title
 
 
 def test_python_reporters_share_the_local_network_scanner():
