@@ -233,7 +233,8 @@ export async function refreshImageBackend() {
   for (const node of document.querySelectorAll("#view-images .img-comfy-only")) {
     node.hidden = native;
   }
-  for (const node of document.querySelectorAll("#view-images .img-native-only, #view-images .img-native-gen")) {
+  for (const node of document.querySelectorAll(
+    "#view-images .img-native-only, #view-images .img-native-gen, #view-images .img-native-extra")) {
     node.hidden = !native;
   }
 }
