@@ -71,6 +71,23 @@ _OUTPUT_CAP = 1_000_000
 _ENTRY_KEYS = frozenset({"matcher", "command", "timeout"})
 
 
+def display_safe(text: str) -> str:
+    """*text* for display at a trust or run decision: printable ASCII kept,
+    every other character (controls, bidi and zero-width marks, any non-ASCII)
+    shown as a ``\\uXXXX`` or ``\\UXXXXXXXX`` escape, as
+    :meth:`ToolHooks.describe_mcp` shows MCP servers."""
+    out = []
+    for ch in text:
+        code = ord(ch)
+        if 0x20 <= code < 0x7F:
+            out.append(ch)
+        elif code <= 0xFFFF:
+            out.append(f"\\u{code:04x}")
+        else:
+            out.append(f"\\U{code:08x}")
+    return "".join(out)
+
+
 @dataclass(frozen=True)
 class HookSpec:
     """One declared hook. *error* is set when the entry is invalid; an invalid
@@ -503,13 +520,15 @@ class ToolHooks:
         return lines
 
     def describe(self) -> list[str]:
-        """One line per hook, for display to the user."""
+        """One line per hook, for display to the user, through
+        :func:`display_safe`."""
         lines = []
         for spec in (*self.pre, *self.post):
             if spec.error is not None:
-                lines.append(f"{spec.label}: INVALID ({spec.error})")
+                lines.append(f"{spec.label}: INVALID ({display_safe(spec.error)})")
             else:
-                lines.append(f"{spec.label}: [{spec.matcher}] {spec.command_text(None)} "
+                lines.append(f"{spec.label}: [{display_safe(spec.matcher)}] "
+                             f"{display_safe(spec.command_text(None))} "
                              f"(timeout {spec.timeout:g}s)")
         return lines
 

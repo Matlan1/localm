@@ -907,28 +907,55 @@ class _ExecutionMixin:
             self._audit.notice("tool_hooks_untrusted", msg)
         return hooks
 
+    def _session_allowed_tools(self) -> set[str]:
+        """Names of the tools allowed without asking for the rest of the
+        session, by this agent or an agent above it: "a" at a terminal prompt
+        (``_session_allowed``) or "always allow" in the GUI (the
+        ``allowed_tools`` of the object whose method is the confirm handler).
+        A shell tool allowed for one exact command is not included."""
+        names: set[str] = set()
+        agent = self
+        while agent is not None:
+            for key in getattr(agent, "_session_allowed", None) or ():
+                if isinstance(key, str):
+                    names.add(key)
+                elif key and key[0] not in _SHELL_GUARDED_TOOLS:
+                    names.add(str(key[0]))
+            owner = getattr(getattr(agent, "confirm_handler", None), "__self__", None)
+            names.update(str(n) for n in (getattr(owner, "allowed_tools", None) or ()))
+            agent = getattr(agent, "parent", None)
+        return names
+
     def _hook_run_gate(self) -> Optional[str]:
         """Whether a hook run needs more than trust in this session.
 
         When some enabled destructive tool other than the shell tools runs
-        without confirmation but run_shell does not, a hook run gets
-        run_shell's gate: "confirm" when run_shell needs confirmation, "refuse"
-        when it is disabled. None when trust is enough."""
-        if not self.auto_approve:
-            return None
+        without confirmation (under auto_approve, or allowed for the session
+        with "a" or GUI "always allow") but run_shell does not, a hook run gets
+        run_shell's gate: "refuse" when run_shell is disabled, else "confirm"
+        unless run_shell runs without confirmation too. None when trust is
+        enough."""
         disabled = self.disabled_tools
         confirmed = set(self.always_confirm)
+        allowed = self._session_allowed_tools()
+
+        def unconfirmed(name: str) -> bool:
+            if name in disabled:
+                return False
+            if name in allowed:
+                return True
+            return self.auto_approve and name not in confirmed
+
         writes_unconfirmed = any(
-            td.destructive and name not in _SHELL_EXEC_TOOLS
-            and name not in disabled and name not in confirmed
+            td.destructive and name not in _SHELL_EXEC_TOOLS and unconfirmed(name)
             for name, td in _agent.TOOL_REGISTRY.items())
         if not writes_unconfirmed:
             return None
         if "run_shell" in disabled:
             return "refuse"
-        if "run_shell" in confirmed:
-            return "confirm"
-        return None
+        if "run_shell" in allowed or (self.auto_approve and "run_shell" not in confirmed):
+            return None
+        return "confirm"
 
     def _hook_permit(self, interactive: bool):
         """A callback deciding, per hook run, whether it may run: None to run
@@ -937,18 +964,22 @@ class _ExecutionMixin:
         if gate is None:
             return None
 
+        from ..hooks import display_safe
+
         def _permit(spec) -> Optional[str]:
             if gate == "refuse":
                 return "run_shell is disabled for this session and file writes run unconfirmed"
             if self.confirm_handler is not None:
                 approved = invoke_confirm(
                     self.confirm_handler,
-                    ToolCall(name="run_shell", args={"command": spec.command_text(400)},
+                    ToolCall(name="run_shell",
+                             args={"command": display_safe(spec.command_text(400))},
                              raw="", start=0, end=0),
                     agent=self._confirm_agent_label())
             elif interactive:
                 approved = _agent.confirm(
-                    f"  Run the project's {spec.label} ({spec.command_text(80)})?")
+                    f"  Run the project's {spec.label} "
+                    f"({display_safe(spec.command_text(80))})?")
             else:
                 return ("it needs the confirmation run_shell needs in this session, "
                         "and none can be asked for here (a non-interactive run, or "

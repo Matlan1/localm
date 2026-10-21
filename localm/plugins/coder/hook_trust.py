@@ -34,6 +34,11 @@ _FILENAME = "coder-hook-trust.json"
 # of the store. LOCK ORDER: _LOCK (outer) -> the store's .lock file.
 _LOCK = threading.Lock()
 
+# Unreadable-store messages already logged at WARNING since the store was last
+# read successfully.
+_WARNED: set[str] = set()
+_WARNED_LOCK = threading.Lock()
+
 
 def _store() -> Path:
     from localm.config import home_dir
@@ -97,14 +102,22 @@ def _load_strict() -> dict:
 def is_trusted(config_path: Path, digest: str) -> bool:
     """Whether the hooks with *digest* in *config_path* were trusted.
 
-    An unreadable store trusts nothing: the failure is logged at WARNING and
-    False is returned. Never raises."""
+    An unreadable store trusts nothing and False is returned. The failure is
+    logged at WARNING the first time it is seen, and at DEBUG while it
+    repeats, until the store is read successfully again. Never raises."""
     try:
         entries = _load_strict()
     except TrustStoreUnreadable as e:
-        logger.warning("coder hook trust: %s; no project hooks are trusted until "
-                       "it is fixed or removed", e)
+        msg = str(e)
+        with _WARNED_LOCK:
+            first = msg not in _WARNED
+            _WARNED.add(msg)
+        log = logger.warning if first else logger.debug
+        log("coder hook trust: %s; no project hooks are trusted until it is "
+            "fixed or removed", msg)
         return False
+    with _WARNED_LOCK:
+        _WARNED.clear()
     entry = entries.get(config_key(config_path))
     return isinstance(entry, dict) and entry.get("sha256") == digest
 
