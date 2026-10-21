@@ -762,16 +762,6 @@ def _semver_major(tag: str) -> int | None:
     return key[0] if key else None
 
 
-def _no_major_boundary(old: str, new: str) -> bool:
-    """True unless the move from *old* to *new* crosses a MAJOR boundary (a 0.x minor counts)."""
-    a, b = cp._semver_key(old), cp._semver_key(new)
-    if a is None or b is None:
-        return False
-    if a[0] == 0 or b[0] == 0:
-        return a[:2] == b[:2]
-    return a[0] == b[0]
-
-
 def _llama_candidate() -> tuple[str, str] | None:
     """(pinned, newest) for llama.cpp; raises FetchError when upstream cannot be read, so an
     outage is never reported as "nothing newer"."""
@@ -878,7 +868,7 @@ def _review_only_advancers() -> list[Advancer]:
     vendored = [
         Advancer(f"vendored-{name.lower().replace('.', '')}", f"vendored {name}", None,
                  "scripts/bump_vendored_js.py", candidate=_vendored_candidate(name),
-                 bump_args=("--lib", name), gpu=False, auto_merge=_no_major_boundary,
+                 bump_args=("--lib", name), gpu=False, auto_merge=lambda old, new: False,
                  post_bump_cmds=(("npm", "ci"), ("npm", "test")))
         for name in ("marked", "DOMPurify", "highlight.js", "KaTeX")
     ]

@@ -50,6 +50,7 @@ jobs:
     env:
       TAG: ${{ inputs.tag || github.event.release.tag_name }}
       EVENT: ${{ github.event_name }}
+      DRY_RUN: ${{ inputs.dry_run }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
@@ -147,7 +148,9 @@ jobs:
           python - <<'PY'
           import hashlib, json, os, pathlib, time, urllib.error, urllib.request
           version = os.environ["VERSION"]
-          gate = os.environ["EVENT"] == "release"
+          event = os.environ["EVENT"]
+          gate = event == "release" or (
+              event == "workflow_dispatch" and os.environ.get("DRY_RUN") == "false")
           names = (f"localm-{version}.tar.gz", f"localm-{version}-py3-none-any.whl")
           url = f"https://pypi.org/pypi/localm/{version}/json"
           attempts = 10 if gate else 1

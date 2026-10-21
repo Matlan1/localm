@@ -215,17 +215,29 @@ def test_docker_base_current_when_the_tag_still_points_at_the_pinned_digest(monk
 
 
 @pytest.mark.parametrize("pushed_days_ago,status", [(30, cp.BEHIND), (31, cp.STALE)])
-def test_docker_base_digest_mismatch_ages_from_the_last_republish(monkeypatch, pushed_days_ago, status):
+def test_docker_base_digest_mismatch_ages_from_the_last_push_of_the_pinned_tag(
+        monkeypatch, pushed_days_ago, status):
     monkeypatch.setattr(cp, "_registry_digest", lambda repo, tag: "sha256:" + "0" * 64)
-    _router(monkeypatch, {"official-images/commits": [
-        {"commit": {"committer": {"date": _d(pushed_days_ago)}}}]})
+    seen = _router(monkeypatch, {"hub.docker.com/v2/repositories/library/ubuntu/tags/": {
+        "tag_last_pushed": _d(pushed_days_ago), "last_updated": _d(1)}})
     row = _docker_spec().check(NOW)
     assert row.status == status and row.days == pushed_days_ago
+    tag = cp._read_const("docker/Dockerfile", r"^ARG UBUNTU_IMAGE=ubuntu:([\d.]+)@").strip()
+    assert seen == [f"https://hub.docker.com/v2/repositories/library/ubuntu/tags/{tag}"]
+
+
+def test_docker_base_age_does_not_reset_when_another_ubuntu_tag_is_republished(monkeypatch):
+    monkeypatch.setattr(cp, "_registry_digest", lambda repo, tag: "sha256:" + "0" * 64)
+    _router(monkeypatch, {"hub.docker.com/v2/repositories/library/ubuntu/tags/": {
+        "tag_last_pushed": _d(90)},
+        "official-images": AssertionError("another tag's republish date was asked for")})
+    row = _docker_spec().check(NOW)
+    assert row.status == cp.STALE and row.days == 90
 
 
 def test_docker_base_mismatch_without_a_republish_date_is_unknown_not_current(monkeypatch):
     monkeypatch.setattr(cp, "_registry_digest", lambda repo, tag: "sha256:" + "0" * 64)
-    _router(monkeypatch, {"official-images/commits": []})
+    _router(monkeypatch, {"hub.docker.com/v2/repositories/library/ubuntu/tags/": {}})
     assert _docker_spec().check(NOW).status == cp.UNKNOWN
 
 
@@ -723,7 +735,7 @@ def _real_table():
     return dict(cp._ASSET_ENTRY_RE.findall(block))
 
 
-def _asset_router(monkeypatch, *, change=None, drop=None):
+def _asset_router(monkeypatch, *, change=None, drop=None, undigested=None):
     """A GitHub that publishes exactly the digests the repo pins (optionally one changed
     or one dropped)."""
     table = _real_table()
@@ -735,7 +747,9 @@ def _asset_router(monkeypatch, *, change=None, drop=None):
     digests = {**table, **cuda_table}
 
     def published(names):
-        return {"assets": [{"name": n, "digest": "sha256:" + ("0" * 64 if n == change else digests[n])}
+        return {"assets": [{"name": n,
+                            "digest": None if n == undigested
+                            else "sha256:" + ("0" * 64 if n == change else digests[n])}
                            for n in names if n != drop]}
     rocm_names = [n for n in table if n.startswith(f"llama-{rocm}-")]
     cpu_names = [n for n in table if n.startswith(f"llama-{cpu}-")]
@@ -795,6 +809,23 @@ def test_a_linux_cuda_asset_missing_from_its_release_is_inconsistent_in_the_chec
     _asset_router(monkeypatch, drop=victim)
     row = _checksum_row()
     assert row.status == cp.INCONSISTENT and victim in row.detail
+
+
+def test_an_asset_published_without_a_digest_is_unknown_not_a_checksum_mismatch(monkeypatch):
+    victim = next(n for n in _real_table() if n.endswith("-bin-win-vulkan-x64.zip"))
+    _asset_router(monkeypatch, undigested=victim)
+    row = _checksum_row()
+    assert row.status == cp.UNKNOWN
+    assert victim in row.detail and "no digest" in row.detail
+    assert "differ" not in row.detail
+
+
+def test_a_real_mismatch_still_wins_over_an_asset_without_a_digest(monkeypatch):
+    table = _real_table()
+    changed = next(n for n in table if n.endswith("-bin-win-vulkan-x64.zip"))
+    bare = next(n for n in table if n.endswith("-bin-win-cpu-x64.zip"))
+    _asset_router(monkeypatch, change=changed, undigested=bare)
+    assert _checksum_row().status == cp.STALE
 
 
 def test_an_unreadable_release_listing_is_unknown_for_the_checksums(monkeypatch):
