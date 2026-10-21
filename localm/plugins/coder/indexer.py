@@ -747,6 +747,8 @@ class ProjectMap:
              stat is treated as "moved" without re-reading the content first,
              since reading it IS the refresh. Always runs, regardless of
              files_capped: a tracked file's own stat is meaningful either way.
+          1b. Drop every ``unindexed_paths`` entry whose file is gone, so a
+             deleted file past the detail limit stops being counted.
           2. listdir() every directory that has at least one tracked file, for
              names not already tracked there (created) - exact, unlike a
              coarser dir-mtime heuristic. SKIPPED when files_capped is True:
@@ -760,7 +762,8 @@ class ProjectMap:
 
         Runs once per dirty period regardless of how many files actually
         changed: bounded by O(tracked files [+ tracked dirs, when pass 2
-        runs]), never O(whole tree).
+        runs] + unindexed paths), never O(whole tree). A file past the detail
+        limit that was renamed is dropped from the count and not re-added.
         """
         if not self.dirty:
             return
@@ -807,6 +810,10 @@ class ProjectMap:
 
         for abs_path in stale:
             self.refresh_file(abs_path)
+
+        self.unindexed_paths = {
+            rel for rel in self.unindexed_paths
+            if os.path.lexists(self.root / rel)}
 
     # ------------------------------------------------------------------
     #  Render

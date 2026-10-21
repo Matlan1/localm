@@ -139,6 +139,61 @@ def demands_action(text: str) -> bool:
     return False
 
 
+def _is_change_verb(word: str) -> bool:
+    return word in _CHANGE_VERBS
+
+
+def _is_inflected_change_verb(word: str) -> bool:
+    """True for an -ing, -ed or -ied form of a change verb."""
+    for suffix, repl in (("ing", ""), ("ing", "e"), ("ed", ""), ("ed", "e"),
+                         ("ied", "y")):
+        if word.endswith(suffix) and word[:-len(suffix)] + repl in _CHANGE_VERBS:
+            return True
+    return False
+
+
+def asks_for_change(text: str) -> bool:
+    """True when *text* tells the agent to change the project: a change verb
+    (``implement``, ``write``, ``add``, ``fix``, ...) that is not used as a noun
+    or in a description, or an -ing or -ed form of one after "start", "try",
+    "by" or an obligation ("needs", "should", "must").
+
+    A change word after a determiner, a possessive, an auxiliary or a question
+    word ("the code that loads the config", "where the file is created", "what
+    was added") asks to read, and so does a participle with none of those
+    leads. A change verb after any other word does not: "Open utils.py and in
+    the retry function add a backoff" asks for a change. A noun-like change
+    word ("code") counts only when it opens a clause.
+
+    Pure and module-level, so it can be tested directly on request strings."""
+    lowered = (text or "").lower()
+    if not lowered.strip():
+        return False
+    for m in _RE_POLITE_VERB.finditer(lowered):
+        word = m.group(1)
+        if _is_change_verb(word) or _is_inflected_change_verb(word):
+            return True
+    for clause in _RE_CLAUSE_SPLIT.split(lowered):
+        words = _RE_WORD.findall(clause)
+        first = next((k for k, w in enumerate(words) if w not in _IMPERATIVE_LEADS),
+                     len(words))
+        for k, word in enumerate(words):
+            prev = words[k - 1] if k else ""
+            if _is_change_verb(word):
+                if prev in _CHANGE_NOUN_CONTEXT:
+                    continue
+                if word == "code" and k != first:
+                    continue
+                if k == first and _is_statement_subject(words[k + 1:]):
+                    continue
+                return True
+            if _is_inflected_change_verb(word) and k > 0 and (
+                    prev in _CHANGE_FORM_LEADS
+                    or any(w in _CHANGE_OBLIGATIONS for w in words[max(0, k - 6):k])):
+                return True
+    return False
+
+
 def _asks_a_question(response: str) -> bool:
     """True when *response* is a short plain-text question: its last line ends
     with a question mark and it holds no code block."""
@@ -266,12 +321,29 @@ _RE_ANNOUNCED_STEP = re.compile(
     r"(?:(?:now|also|quickly|just|first|then|go\s+ahead\s+and)\s+)*"
     r"(?:" + _STEP_VERBS + r")\b",
     re.IGNORECASE)
-# Words of a request that asks for the project to change.
-_RE_CHANGE_REQUEST = re.compile(
-    r"\b(?:implement|write|create|add|build|make|fix|change|update|modify|edit|"
-    r"refactor|rewrite|generate|code|develop|extend|replace|insert|apply|port|"
-    r"convert|finish|complete)(?:s|es|ed|d|ing)?\b",
-    re.IGNORECASE)
+# Verbs that, used as an imperative, ask for the project to change.
+_CHANGE_VERBS = frozenset({
+    "implement", "write", "create", "add", "build", "make", "fix", "change",
+    "update", "modify", "edit", "refactor", "rewrite", "generate", "code",
+    "develop", "extend", "replace", "insert", "apply", "port", "convert",
+    "finish", "complete",
+})
+# Words right before a change word that make it a noun, a participle of a
+# description or part of a question ("the update", "was added", "where users
+# create").
+_CHANGE_NOUN_CONTEXT = frozenset({
+    "the", "a", "an", "this", "that", "these", "those", "my", "your", "its",
+    "their", "our", "his", "her", "of", "me", "us", "new", "existing", "some",
+    "any", "all", "each", "every", "source", "same", "whole", "full", "last",
+    "latest", "recent", "what", "which", "where", "when", "how", "whether",
+    "is", "are", "was", "were", "be", "been", "being", "has", "have", "had",
+    "no", "one", "another", "other", "will", "would", "can", "could", "may",
+    "might", "does", "do", "did", "doesn't", "don't",
+})
+# Words that make a following -ing or -ed form of a change verb a request.
+_CHANGE_FORM_LEADS = frozenset({
+    "start", "begin", "continue", "keep", "proceed", "try", "by"})
+_CHANGE_OBLIGATIONS = frozenset({"needs", "need", "should", "must"})
 
 
 # A shell command that runs a project's tests.
@@ -285,11 +357,13 @@ _RE_TEST_COMMAND = re.compile(
 
 def _may_write_files(call, cwd) -> bool:
     """True for a call that can change files without the write tracker seeing
-    it: search_replace, an MCP or plugin tool, or a shell command that is
-    neither read-only nor a test run."""
+    it: search_replace, generate_image, a sub-agent that can write, an MCP or
+    plugin tool, or a shell command that is neither read-only nor a test run."""
     name = call.name
-    if name == "search_replace" or name.startswith(("mcp_", "plugin_")):
+    if name in ("search_replace", "generate_image") or name.startswith(("mcp_", "plugin_")):
         return True
+    if name in ("spawn_agent", "spawn_agent_background", "dispatch_parallel"):
+        return _delegated_work_may_write(call)
     if name not in ("run_shell", "run_shell_background"):
         return False
     command = call.args.get("command") if isinstance(call.args, dict) else None
@@ -302,6 +376,21 @@ def _may_write_files(call, cwd) -> bool:
         return not is_read_only(command, cwd)
     except Exception:
         return True
+
+
+def _delegated_work_may_write(call) -> bool:
+    """True unless *call* hands work to a sub-agent whose named role has no
+    tool that writes a file."""
+    role = call.args.get("role") if isinstance(call.args, dict) else None
+    if call.name == "dispatch_parallel" or not role:
+        return True
+    from ..roles import resolve_role
+    try:
+        preset = resolve_role(role)
+    except ValueError:
+        return False
+    return preset is None or bool(
+        preset.allowed_tools & {"write_file", "edit_file", "patch_file", "search_replace"})
 
 
 def _has_file_code_block(text: str) -> bool:
@@ -1204,7 +1293,7 @@ class _LoopMixin:
             return False
         if not {"write_file", "edit_file", "patch_file"} - self.disabled_tools:
             return False
-        if not (demands_action(request) and _RE_CHANGE_REQUEST.search(request)):
+        if not (demands_action(request) and asks_for_change(request)):
             return False
         return not (self._write_total() > st.writes_at_start or self.patch_mode
                     or st.possible_write or bool(self._unverified_writes))

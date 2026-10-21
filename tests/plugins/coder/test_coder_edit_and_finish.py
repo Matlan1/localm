@@ -482,3 +482,76 @@ def test_an_empty_decline_on_an_imperative_request_keeps_climbing(tmp_path):
          patch("localm.plugins.coder.agent.parse_tool_calls", return_value=[]):
         agent.run_task("start implementing all the features")
     assert forced[:3] == [False, False, True]
+
+
+# --------------------------------------------------------------------------- #
+#  A request to read is not a request to change                                 #
+# --------------------------------------------------------------------------- #
+
+_READ_REQUESTS = (
+    "Show me the code that loads the config",
+    "Find where the session file is created",
+    "List the functions that were added in utils.py",
+    "Search for where users are updated",
+    "Check the changes made to config.py",
+    "Show me how the update works",
+    "Show me the build output",
+)
+
+_CHANGE_REQUESTS = (
+    "implement add and sub in calc.py",
+    "start implementing all the features",
+    "Find the bug and fix it",
+    "please add a flag to cli.py",
+    "Read config.py and add a flag",
+    "Can you update the README?",
+    "Write tests for utils.py",
+    "Refactor utils.py, then run the tests",
+    "Start by writing the tests for utils.py",
+    "Let's start by adding a --verbose flag to cli.py",
+    "Use the existing helper to add pagination to list.py",
+    "Try writing a script that prints hello",
+    "Open utils.py and in the retry function add a backoff",
+    "Open utils.py. For each function add a docstring",
+    "Run the tests and if they fail fix them",
+    "Review the code; the retry loop needs a timeout added",
+    "Read foo.py. It should be refactored to use asyncio.",
+    "Look at parser.py and the bug in it needs fixing",
+)
+
+
+def test_a_change_word_that_is_not_the_verb_does_not_make_a_request_a_change():
+    from localm.plugins.coder.agent.loop import asks_for_change
+    assert not [r for r in _READ_REQUESTS if asks_for_change(r)]
+    assert not [r for r in _CHANGE_REQUESTS if not asks_for_change(r)]
+
+
+def test_a_request_to_read_code_is_answered_without_a_write_nudge(tmp_path):
+    (tmp_path / "config.py").write_text("def load():\n    return 1\n", encoding="utf-8")
+    for request in _READ_REQUESTS:
+        agent = _make_agent(tmp_path, max_turns=6)
+        with _scripted(agent, [_call("read_file", {"path": "config.py"}), _CODE_REPLY]):
+            result = agent.run_task(request)
+        assert not any("[code not written]" in t or "[nothing written]" in t
+                       for t in _user_texts(agent)), request
+        assert "[not finished" not in result, request
+        assert agent.last_run_ok is True, request
+
+
+def test_generated_images_and_delegated_work_count_as_possible_writes(tmp_path):
+    from localm.plugins.coder.agent.loop import _may_write_files
+    from localm.plugins.coder.parser import ToolCall
+
+    def call(name, **args):
+        return ToolCall(name=name, args=args, raw="", start=0, end=0)
+
+    assert _may_write_files(call("generate_image", prompt="a logo",
+                                 output_path="logo.png"), tmp_path)
+    assert _may_write_files(call("spawn_agent", task="write it"), tmp_path)
+    assert _may_write_files(call("spawn_agent_background", task="write it",
+                                 role="test-writer"), tmp_path)
+    assert _may_write_files(call("dispatch_parallel", tasks=["a", "b"]), tmp_path)
+    assert not _may_write_files(call("spawn_agent", task="look", role="reviewer"),
+                                tmp_path)
+    assert not _may_write_files(call("spawn_agent", task="look", role="researcher"),
+                                tmp_path)

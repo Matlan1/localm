@@ -103,16 +103,17 @@ def decide_media_swap(settings: dict, *,
     ``swap_policy`` and ``vram_estimate_bytes`` (filled by the media backends).
     Pass *read_free* to inject the free-VRAM reading in tests.
 
-    The default reading uses ``discover.vram_capacity()`` (combined free
-    across a configured multi-GPU split, else the same single-GPU number
-    ``vram_info()`` reports) - the same "will it fit" ceiling
+    The default reading uses ``discover.vram_capacity_joined()`` (combined
+    free across a configured multi-GPU split, else the same single-GPU number
+    ``vram_info()`` reports, waiting for a probe already in flight) - the same
+    "will it fit" ceiling
     ``http_server.switch_engine``'s eviction gate uses, so a split-configured
     machine does not needlessly swap the chat model out when the combined
     capacity already covers the media job."""
     if read_free is None:
         def read_free() -> Optional[int]:
-            from localm.discover import vram_capacity
-            return vram_capacity().get("free")
+            from localm.discover import vram_capacity_joined
+            return vram_capacity_joined()[0].get("free")
     return should_swap_for_media(
         read_free(), settings.get("vram_estimate_bytes"),
         policy=settings.get("swap_policy", "auto"))
@@ -304,8 +305,8 @@ def decide_embedder_swap(embedder_estimate_bytes: Optional[int], *,
     auto/always/never semantics the image/music/video plugins already use."""
     if read_free is None:
         def read_free() -> Optional[int]:
-            from localm.discover import vram_capacity
-            return vram_capacity().get("free")
+            from localm.discover import vram_capacity_joined
+            return vram_capacity_joined()[0].get("free")
     return should_swap_for_media(read_free(), embedder_estimate_bytes, policy=policy)
 
 
@@ -533,9 +534,11 @@ def _live_free_vram_bytes():
 
     NOT every free-VRAM caller uses this. Ones weighing CAPACITY rather than
     reporting a completed action (the fit badges, the swap gates, the eviction
-    ceiling) still call vram_capacity() directly: a stale ceiling costs an over-
-    or under-swap, while refusing to decide at all would break a working box
-    every time the probe merely ran slow.
+    ceiling) still decide on a reading that is not fresh: the fit badges call
+    vram_capacity() directly, the swap gates discover.vram_capacity_joined()
+    (which waits for a probe already in flight, then takes whatever it got). A
+    stale ceiling costs an over- or under-swap, while refusing to decide at all
+    would break a working box every time the probe merely ran slow.
 
     ``sysstats.vram_capacity()`` behind GET /api/stats and
     ``gui/routes/models/inventory.py``'s /api/vram-estimate gate on

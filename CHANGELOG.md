@@ -143,6 +143,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **`localm info` names the temp folder that is in use.** After `LOCALM_TMPDIR` pointed at a
   folder that could not be created, it still listed that folder instead of the system temp
   folder. An unreadable `localm-home.cfg` is now reported once, not once per setting read.
+- **An embedding or speech model is placed by a current VRAM reading.** When another GPU reading
+  was running (the GUI refreshing its stats, or just after a chat model loaded), the embedding and
+  speech models skipped their fit check and went onto the GPU even with too little VRAM free, and
+  the decision to unload the chat model for them or for an image, video or music job used an
+  older figure. They now wait for that reading.
 - **Pulling a ControlNet or a textual-inversion embedding no longer fails after the download.** `localm pull` (and the Models page's Add a model, with no type chosen) crashed once the file was on disk, so nothing was registered and a second pull crashed the same way. The file is now typed from its tensors and registered as a ControlNet or an embedding.
 - **Cancelling a download on the Models page says what was actually deleted.** The status line used to claim the partial download was deleted every time, including for CivitAI files and whole-repo downloads whose files stay on disk, and when the delete request failed. It now reports the case.
 - **Restarting a ComfyUI that localm launched waits for the old one to release its port.** The restart used to be refused with "localm did not start it" while the process that had just been stopped still held the port.
@@ -427,10 +432,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   word (Qwen3-ASR) is picked only when no other model is eligible.
 - **The usage line explains why MTP is off on a turn with audio.** It used to show the raw reason
   word.
-- **A GGUF model loads several seconds faster.** Sizing a load (GPU layers, the VRAM check, the
-  GPU placement and the context ceiling) now reads the GPUs once instead of once per step; on
-  Windows each reading starts a separate process. A small model's first reply after loading
-  arrives in about 11 seconds instead of about 19 on an RX 6900 XT.
+- **A GGUF model loads several seconds faster.** Checking that a model fits and sizing its load
+  (GPU layers, the VRAM check, the GPU placement and the context ceiling) now read the GPUs once
+  instead of once per step, unless a model has to be unloaded first or another load runs in
+  between; on Windows each reading starts a separate process. The VRAM usage line in the server
+  log no longer holds up the load: it is printed just after "Model loaded". A small model's
+  first reply after loading arrives in about 5.5 seconds instead of about 19 on an RX 6900 XT.
 - **Loads that spread over two or more GPUs are no longer sized against one of them when torch
   is loaded in the server.** A model that fits across the GPUs is no longer refused as too large
   for "this GPU" when the combined reading is not available.
@@ -446,6 +453,28 @@ permanent public record of what shipped and are never rewritten; the in-progress
   counts the weights kept in system memory correctly.**
 - **`/v1/embeddings` checks whether a model is a folder off the server's event loop,** and an
   embedding model entry with no path is no longer read as the current folder.
+- **`localm coder --url` to a server that reports no context window compacts again.** Ollama,
+  LM Studio and similar servers got no compaction at all, so a long session grew until the server
+  truncated the prompt. The agent now budgets against the `n_ctx` of your localm config, a
+  llama-server reports its real window, and llama-server's "exceeds the available context size"
+  refusal is recognised so the request is compacted and sent again.
+- **A background sub-agent no longer skews the main agent's compaction.** Both read the token
+  count of "the last request" from one shared connection, so one could record the other's.
+- **A request to show or find code is no longer reported "not finished".** "Show me the code that
+  loads the config" or "Find where the file is created" made the agent write a file nobody asked
+  for, or ended the run as failed. Images generated with `generate_image` and work handed to
+  sub-agents now count as work done.
+- **`localm coder doctor` no longer calls a working API key rejected.** A key that cannot list
+  models (HTTP 403 from the model list) is a warning that says only the list was tested.
+- **Reviewer, researcher and test-writer sub-agents can read back the cut part of a long output**
+  they were told to read back.
+- **Deleted files past the project map's detail limit stop being counted** in the directory counts
+  and the "not indexed in detail" line without waiting for `/reindex`.
+- **`localm coder --output-format json` run from a terminal on Linux or macOS no longer mixes the
+  auto-started server's output into stdout,** and the pipe it writes to is no longer held open by
+  the server after the run ends.
+- **Idle coder sessions and their agent browsers are closed after 24 hours again** when only the
+  Browser tab is in use.
 
 ### Changed
 

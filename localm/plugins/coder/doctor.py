@@ -68,9 +68,14 @@ def check_model(backend) -> Check:
         return Check("model", FAIL,
                      f"{model}: server not reachable at {res.get('url')} "
                      f"({str(res.get('error'))[:_ERROR_CHARS]})")
-    if status in (401, 403):
+    if status == 401:
         return Check("model", FAIL,
                      f"{model}: server rejected the API key (HTTP {status})")
+    if status == 403:
+        return Check("model", WARN,
+                     f"{model}: the server refused to list its models for this "
+                     "key (HTTP 403), which does not mean chat requests are "
+                     "refused; only the model list was tested")
     if status >= 500:
         return Check("model", FAIL, f"{model}: server error (HTTP {status})")
     if not 200 <= status < 300:

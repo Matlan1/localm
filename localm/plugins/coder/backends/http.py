@@ -13,8 +13,9 @@ Covers:
 from __future__ import annotations
 
 import os
+import threading
 import time
-from typing import Callable, Iterator, Optional
+from typing import TYPE_CHECKING, Any, Callable, Iterator, Optional
 
 import requests
 
@@ -173,6 +174,34 @@ def _post_with_retry(url: str, *, headers: dict, json_body: dict,
     return last  # unreachable, keeps type checkers happy
 
 
+class _PerThread:
+    """An attribute whose value is kept per thread: a thread that never set it
+    reads *default* (a fresh copy when it is a dict), whatever other threads
+    set. Holds the state of the request a thread made last, so agents that
+    share one backend on different threads never read each other's."""
+
+    def __init__(self, default: Any) -> None:
+        self._default = default
+
+    def __set_name__(self, owner, name):
+        self._slot = name
+
+    def __get__(self, obj: Any, owner: Any = None) -> Any:
+        if obj is None:
+            return self
+        local = obj.__dict__.get("_per_thread")
+        if local is None or not hasattr(local, self._slot):
+            default: Any = self._default
+            return dict(default) if isinstance(default, dict) else default
+        return getattr(local, self._slot)
+
+    def __set__(self, obj: Any, value: Any) -> None:
+        local = obj.__dict__.get("_per_thread")
+        if local is None:
+            local = obj.__dict__.setdefault("_per_thread", threading.local())
+        setattr(local, self._slot, value)
+
+
 class HTTPBackend(BaseLLMBackend):
     """
     OpenAI /v1/chat/completions compatible backend.
@@ -208,6 +237,20 @@ class HTTPBackend(BaseLLMBackend):
     # X-Localm-Session-Mode, and the server records them no less privately.
     session_mode: Optional[str] = None
     _ANTHROPIC_VERSION = "2023-06-01"
+
+    assume_ctx_window = False
+    """True for a backend reached by an explicit ``--url``: when its server
+    reports no context window, the agent budgets against the configured
+    ``n_ctx`` instead of not compacting ahead of the server's refusal."""
+
+    if TYPE_CHECKING:
+        _last_usage: dict
+        last_reply_compacted: bool
+        _last_reasoning: str
+    else:
+        _last_usage = _PerThread({})
+        last_reply_compacted = _PerThread(False)
+        _last_reasoning = _PerThread("")
 
     def __init__(
         self,
@@ -248,7 +291,7 @@ class HTTPBackend(BaseLLMBackend):
             from localm import tls
             verify = tls.requests_verify(base_url)
         self._verify = verify
-        self._last_usage: dict = {}
+        self._last_usage = {}
         # True when the server compacted the conversation of the last request
         # to fit its context window (so last_usage counts the compacted prompt).
         self.last_reply_compacted = False
@@ -256,7 +299,7 @@ class HTTPBackend(BaseLLMBackend):
         # non-streaming counterpart of chat_stream's on_reasoning callback - see
         # last_reasoning. Never mixed into chat()/chat_stream()'s returned or
         # yielded text.
-        self._last_reasoning: str = ""
+        self._last_reasoning = ""
         self.native_tools  = native_tools
         # Anthropic speaks the Messages API (/v1/messages, x-api-key,
         # anthropic-version, content-block responses) - NOT the OpenAI
@@ -313,8 +356,9 @@ class HTTPBackend(BaseLLMBackend):
         /v1/config (VRAM-derived under ctx_auto), cached after the first
         successful fetch. Lets the coder budget its history against the real
         window instead of a static 4096 default. Best-effort: None on any error
-        (the caller falls back to its default), and only a localm server exposes
-        it, so non-localm backends stay None.
+        (the caller falls back to its default). A localm server exposes it at
+        /v1/config; a llama-server at ``/props`` (see ``_llama_server_ctx``);
+        any other server stays None.
 
         A localm server also reports which model that ceiling belongs to
         (``effective_ctx_model``). When it names a model other than this
@@ -330,15 +374,7 @@ class HTTPBackend(BaseLLMBackend):
         latch = True
         try:
             url = f"{self._base_url}/config"
-            if self._pinned:
-                from localm import netpolicy
-                resp = netpolicy.pinned_request(
-                    "GET", url, headers=self._headers(), timeout=15,
-                    verify=self._verify, allow_redirects=False)
-            else:
-                resp = requests.get(url, headers=self._headers(), timeout=15,
-                                    verify=self._verify, allow_redirects=False)
-            _raise_on_redirect(resp, url)
+            resp = self._get(url)
             if resp.ok:
                 body = resp.json()
                 v = body.get("effective_ctx_max")
@@ -350,10 +386,42 @@ class HTTPBackend(BaseLLMBackend):
                     latch = False
                 elif isinstance(v, int) and v > 0:
                     self._ctx_capacity = v
+            if latch and self._ctx_capacity is None and not self._is_local_server:
+                self._ctx_capacity = self._llama_server_ctx()
         except Exception:
             self._ctx_capacity = None
         self._ctx_capacity_cached = latch
         return self._ctx_capacity
+
+    def _get(self, url: str):
+        """One GET of *url* with this backend's headers, TLS setting and
+        address pinning; redirects are refused."""
+        if self._pinned:
+            from localm import netpolicy
+            resp = netpolicy.pinned_request(
+                "GET", url, headers=self._headers(), timeout=15,
+                verify=self._verify, allow_redirects=False)
+        else:
+            resp = requests.get(url, headers=self._headers(), timeout=15,
+                                verify=self._verify, allow_redirects=False)
+        _raise_on_redirect(resp, url)
+        return resp
+
+    def _llama_server_ctx(self) -> Optional[int]:
+        """The per-slot context size llama-server reports at ``/props``
+        (``default_generation_settings.n_ctx``), read from the server root
+        above this backend's ``/v1`` base URL; None for any server that does not
+        answer it that way."""
+        base = self._base_url
+        root = base[:-3] if base.endswith("/v1") else base
+        try:
+            resp = self._get(f"{root}/props")
+            if not resp.ok:
+                return None
+            n = resp.json()["default_generation_settings"]["n_ctx"]
+        except Exception:
+            return None
+        return n if isinstance(n, int) and not isinstance(n, bool) and n > 0 else None
 
     def probe(self, timeout: float = 10.0) -> dict:
         """One read-only GET of ``<base_url>/models``, reporting whether the
