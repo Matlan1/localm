@@ -152,7 +152,9 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
     async def model_pull_discard(req: PullDiscardRequest, request: Request):
         """Delete the partially downloaded data of a pull that was stopped.
         409 while a pull of the same spec is still running. Returns
-        {"removed_bytes": n}."""
+        {"removed_bytes": n, "kept": "civitai" | "repo" | null}: "kept" names
+        a download shape whose finished or in-progress files the discard leaves
+        on disk."""
         spec = req.spec.strip()
         if not spec or set(spec) <= {"-"} or _spec_names_a_host_path(spec):
             raise HTTPException(400, "Enter a remote model spec.")
@@ -162,7 +164,9 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             raise HTTPException(
                 409, f"{spec} is still downloading - stop it before deleting "
                      "its partial data.")
-        from localm.model_manager.pull import PullInFlight, discard_partial_download
+        from localm.model_manager.pull import (
+            PullInFlight, discard_partial_download, partial_download_kept,
+        )
 
         def _discard() -> int:
             return discard_partial_download(spec, req.name)
@@ -173,7 +177,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             raise HTTPException(409, str(e)) from e
         except ThreadCallTimeout as e:
             raise HTTPException(504, f"Deleting the partial download timed out: {e}") from e
-        return {"removed_bytes": removed}
+        return {"removed_bytes": removed, "kept": partial_download_kept(spec)}
 
     # --------------- ComfyUI missing-model pre-check + curated pull -------- #
     # Read-only pre-check the frontend calls before submitting a generate job: does
