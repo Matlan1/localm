@@ -14,8 +14,15 @@ A peer asks another instance to release its VRAM with
 names the requester (its instance id, port and scheme) and carries a random
 request id the requester remembers for :data:`REQUEST_TTL_S` seconds. The
 receiving instance calls the requester back on ``POST /v1/instances/vouch`` with
-that id and acts only if the requester confirms it really sent it. A caller that
-never received the id cannot get a confirmation.
+that id and acts only if the listener on the named port belongs to the OS user
+running the receiver and confirms it really sent it. A caller that never
+received the id cannot get a confirmation, and another user's listener is never
+asked.
+
+``GET /v1/instances/status`` without a credential answers a redacted status (no
+pid, no model file identity). A reader gets the full status with ``POST
+/v1/instances/status``, which is verified the same way as an unload request, or,
+for an instance of its own install, with that instance's attach token.
 
 Everything here is advisory and best-effort: every public function returns a safe
 default rather than raising, failures are logged at debug, and nothing is
@@ -35,6 +42,9 @@ from localm.debuglog import logger
 from localm.instances import fetch_any_whoami, fetch_whoami
 
 REQUEST_TTL_S = 30.0
+#: Floor on the wait for a verified status answer, which includes the peer
+#: calling this instance back before it answers.
+VERIFIED_STATUS_TIMEOUT_S = 3.0
 DETECTION_ENV = "LOCALM_PEER_DETECTION"
 STATUS_PATH = "/v1/instances/status"
 UNLOAD_PATH = "/v1/instances/cooperate-unload"
@@ -57,15 +67,36 @@ EXTRA_PEER_PORTS = (11434,)
 # ------------------------------------------------------------------ #
 
 _status_provider: Optional[Callable[[], Optional[dict]]] = None
+_own_identity: Optional[dict] = None
 
 
-def set_local_status_provider(provider: Optional[Callable[[], Optional[dict]]]) -> None:
+def set_local_status_provider(provider: Optional[Callable[[], Optional[dict]]],
+                              identity: Optional[dict] = None) -> None:
     """Register (or with None, clear) the callable that reports THIS instance's
     live coordination status: ``{instance_id, pid, port, host, scheme, model,
     models, vram_estimate_bytes, gpu_index}``, or None when this instance does not
-    coordinate (a plain test app or an ``--isolated`` run)."""
-    global _status_provider
+    coordinate (a plain test app or an ``--isolated`` run).
+
+    *identity* is THIS instance's ``{instance_id, port, scheme}``, read without
+    calling *provider*: it names this instance when it asks a peer for its full
+    status (:func:`fetch_status`). Cleared with the provider."""
+    global _status_provider, _own_identity
     _status_provider = provider
+    _own_identity = (dict(identity) if provider is not None and isinstance(identity, dict)
+                     else None)
+
+
+def own_identity() -> Optional[dict]:
+    """THIS instance's ``{instance_id, port, scheme}`` as registered with
+    :func:`set_local_status_provider`, or None when none is registered or it
+    lacks an instance id or an int port."""
+    ident = _own_identity
+    if not ident or not isinstance(ident.get("instance_id"), str) or not ident["instance_id"]:
+        return None
+    port = ident.get("port")
+    if isinstance(port, bool) or not isinstance(port, int):
+        return None
+    return ident
 
 
 def own_status() -> Optional[dict]:
@@ -141,11 +172,21 @@ def candidate_endpoints() -> list:
     return [(dial, port) for port, dial in sorted(chosen.items())]
 
 
-def fetch_status(scheme: str, port: int, timeout: float,
-                 dial: str = _LOOPBACK) -> Optional[dict]:
-    """``GET /v1/instances/status`` on *dial*:*port*: the peer's live coordination
-    status, or None when it is unreachable, refuses, or answers something that is
-    not a status object."""
+def _status_object(r) -> Optional[dict]:
+    """The JSON object of a 200 response *r*, or None."""
+    if r is None or r.status_code != 200:
+        return None
+    try:
+        data = r.json()
+    except (ValueError, RecursionError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _get_status(scheme: str, port: int, timeout: float, dial: str,
+                token: Optional[str] = None) -> Optional[dict]:
+    """``GET /v1/instances/status`` on *dial*:*port*, presenting *token* as a
+    bearer credential when given."""
     import requests
     from localm.bindhost import url_host
     url = f"{scheme}://{url_host(dial)}:{int(port)}{STATUS_PATH}"
@@ -158,17 +199,84 @@ def fetch_status(scheme: str, port: int, timeout: float,
         logger.debug("gpu_registry: could not determine TLS verification for %s: %s",
                      url, e)
         return None
+    headers = {"Authorization": f"Bearer {token}"} if token else None
     try:
-        r = requests.get(url, timeout=timeout, verify=verify, allow_redirects=False)
+        r = requests.get(url, timeout=timeout, verify=verify, allow_redirects=False,
+                         headers=headers)
     except requests.RequestException:
         return None
-    if r.status_code != 200:
+    return _status_object(r)
+
+
+def _post_verified_status(scheme: str, port: int, timeout: float, dial: str,
+                          instance_id: str) -> Optional[dict]:
+    """``POST /v1/instances/status`` naming this instance (:func:`own_identity`)
+    and a fresh request id it confirms when the peer calls back, as
+    :func:`request_cooperative_unload` does; waits at least
+    :data:`VERIFIED_STATUS_TIMEOUT_S`. None when this instance has no identity,
+    *instance_id* is this instance, or the peer does not answer a status
+    object. The caller must not be this instance's event loop thread, which has
+    to answer the callback."""
+    me = own_identity()
+    if me is None or me["instance_id"] == instance_id:
         return None
+    url = _loopback_url(scheme, dial, port, STATUS_PATH)
+    if url is None:
+        return None
+    request_id = secrets.token_urlsafe(24)
+    _remember_request(request_id, instance_id)
     try:
-        data = r.json()
-    except (ValueError, RecursionError):
+        r = _post_json(url, {
+            "requester": {"instance_id": me["instance_id"], "port": me["port"],
+                          "scheme": me.get("scheme") or "http"},
+            "request_id": request_id}, max(timeout, VERIFIED_STATUS_TIMEOUT_S))
+    finally:
+        _forget_request(request_id)
+    return _status_object(r)
+
+
+def _same_install_token(instance_id: str, port: int, dial: str) -> Optional[str]:
+    """The attach token this install's instance registry records for
+    *instance_id* at *port*, or None. None also when the listener on *port* is
+    not this OS user's, so the token is never sent to another user's socket."""
+    try:
+        from localm.config import home_dir
+        from localm.instances import list_entries
+        entry = next((e for e in list_entries(home_dir())
+                      if e.get("instance_id") == instance_id
+                      and str(e.get("port")) == str(port)), None)
+    except Exception as e:
+        logger.debug("gpu_registry: could not read this install's instances: %s", e)
         return None
-    return data if isinstance(data, dict) else None
+    token = entry.get("token") if entry else None
+    if not isinstance(token, str) or not token:
+        return None
+    from localm.listeners import port_owned_by_current_user
+    return token if port_owned_by_current_user(int(port), dial) else None
+
+
+def fetch_status(scheme: str, port: int, timeout: float,
+                 dial: str = _LOOPBACK, *,
+                 instance_id: Optional[str] = None) -> Optional[dict]:
+    """The live coordination status of the peer on *dial*:*port*, or None when it
+    is unreachable, refuses, or answers something that is not a status object.
+
+    With *instance_id* (the peer's, from its ``/whoami``) the full status is asked
+    for first: by a verified ``POST`` when this instance coordinates
+    (:func:`own_identity`), else with the attach token this install records for
+    that instance at that port. Otherwise, or when the peer does not answer that,
+    the plain ``GET`` answers, which a current peer redacts (no pid, no model file
+    identity)."""
+    if instance_id:
+        full = _post_verified_status(scheme, port, timeout, dial, instance_id)
+        if full is not None:
+            return full
+        token = _same_install_token(instance_id, port, dial)
+        if token:
+            full = _get_status(scheme, port, timeout, dial, token)
+            if full is not None:
+                return full
+    return _get_status(scheme, port, timeout, dial)
 
 
 def _probe_peer(endpoint: tuple, exclude_self_id: Optional[str],
@@ -181,9 +289,10 @@ def _probe_peer(endpoint: tuple, exclude_self_id: Optional[str],
     else:
         return None
     iid = ident.get("instance_id")
-    if not iid or iid == exclude_self_id:
+    me = own_identity()
+    if not iid or iid == exclude_self_id or (me is not None and iid == me["instance_id"]):
         return None
-    status = fetch_status(scheme, port, timeout, dial)
+    status = fetch_status(scheme, port, timeout, dial, instance_id=iid)
     if status is None or status.get("instance_id") != iid:
         return None
     try:
@@ -301,12 +410,32 @@ def _loopback_url(scheme: str, host: object, port: int, path: str) -> Optional[s
     return f"{scheme}://{url_host(self_connect_host(host))}:{int(port)}{path}"
 
 
+_REQUESTER_DIALS = (_LOOPBACK, "::1")
+
+
+def _requester_dial(scheme: str, port: int, instance_id: str,
+                    timeout: float) -> Optional[str]:
+    """The loopback address (127.0.0.1, then ::1) on which *port* is listening
+    as this OS user and answers ``/whoami`` as *instance_id*, or None."""
+    from localm.listeners import port_owned_by_current_user
+    for dial in _REQUESTER_DIALS:
+        if (port_owned_by_current_user(port, dial)
+                and fetch_whoami(scheme, port, instance_id, timeout, dial) is not None):
+            return dial
+    return None
+
+
 def verify_requester(requester: object, request_id: object, self_instance_id: str,
                      *, timeout: float = 2.0) -> bool:
     """Whether *requester* (``{instance_id, port, scheme}``, from a received unload
-    request) is a live localm instance that confirms it sent *request_id* to this
-    instance. Dials loopback only, and sends nothing unless *requester* is
-    well-formed."""
+    or status request) is a live localm instance, listening on loopback as the OS
+    user running this process, that confirms it sent *request_id* to this
+    instance. The socket's owner is read again after the confirmation, so a port
+    that changes hands during the exchange is refused.
+
+    Dials loopback only (127.0.0.1, or ::1 for a requester bound there), sends
+    nothing unless *requester* is well-formed, and never dials a listener that
+    belongs to another OS user."""
     if not isinstance(requester, dict) or not isinstance(request_id, str) or not request_id:
         return False
     iid, port, scheme = (requester.get("instance_id"), requester.get("port"),
@@ -315,9 +444,12 @@ def verify_requester(requester: object, request_id: object, self_instance_id: st
             or isinstance(port, bool) or not isinstance(port, int)
             or not 0 < port < 65536 or scheme not in _SCHEMES):
         return False
-    if fetch_whoami(scheme, port, iid, timeout) is None:
+    dial = _requester_dial(scheme, port, iid, timeout)
+    if dial is None:
+        logger.debug("gpu_registry: requester %r on port %d is not a localm "
+                     "instance of this OS user; not asking it to confirm", iid, port)
         return False
-    url = _loopback_url(scheme, _LOOPBACK, port, VOUCH_PATH)
+    url = _loopback_url(scheme, dial, port, VOUCH_PATH)
     if url is None:
         return False
     r = _post_json(url, {"request_id": request_id,
@@ -328,7 +460,10 @@ def verify_requester(requester: object, request_id: object, self_instance_id: st
         data = r.json()
     except (ValueError, RecursionError):
         return False
-    return isinstance(data, dict) and data.get("vouched") is True
+    if not (isinstance(data, dict) and data.get("vouched") is True):
+        return False
+    from localm.listeners import port_owned_by_current_user
+    return port_owned_by_current_user(port, dial, fresh=True)
 
 
 def request_cooperative_unload(peer: dict, *, timeout: float = 5.0) -> bool:

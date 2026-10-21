@@ -95,7 +95,7 @@ class TestListMachinePeersProbesConcurrently:
         monkeypatch.setattr(gpu_registry, "fetch_any_whoami", whoami)
         monkeypatch.setattr(
             gpu_registry, "fetch_status",
-            lambda scheme, port, timeout, dial="127.0.0.1": {
+            lambda scheme, port, timeout, dial="127.0.0.1", **kw: {
                 "instance_id": f"peer{port:013d}", "pid": 1, "model": None})
 
     def test_wall_clock_is_far_below_sequential(self, tmp_path, monkeypatch):

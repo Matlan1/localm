@@ -16,9 +16,10 @@ from localm import scopes
 from localm.inference._threadpool_timeout import ThreadCallTimeout, run_in_threadpool_bounded
 
 # Budget for run_in_threadpool_bounded() below. A peer lookup reads the
-# listening ports in localm's range and then runs a /whoami and a status
-# probe per candidate at gpu_registry.list_gpu_peers' own 0.7s timeout, so this
-# sits well above the worst case for a realistic number of local instances.
+# listening ports in localm's range and then runs a /whoami probe per
+# candidate at gpu_registry.list_gpu_peers' own 0.7s timeout, and a status
+# probe that waits up to gpu_registry.VERIFIED_STATUS_TIMEOUT_S, so this sits
+# well above the worst case for a realistic number of local instances.
 _PEER_LOOKUP_TIMEOUT_S = 20.0
 
 

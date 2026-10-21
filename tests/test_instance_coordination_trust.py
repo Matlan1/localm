@@ -32,8 +32,8 @@ from fastapi.testclient import TestClient
 from localm import gpu_registry, listeners
 from localm.inference import http_server as hs
 from localm.inference.http_server import create_app
-from tests._peer_servers import (_Handler, default_status, enable_detection,
-                                 localm_whoami, peer_server)
+from tests._peer_servers import (FOREIGN_PID, _Handler, default_status,
+                                 enable_detection, localm_whoami, peer_server)
 
 _PRIVATE_PATH = os.path.join(os.sep, "home", "alice-s1", "models", "secret-model.gguf")
 _DIGEST = "ab" * 32
@@ -49,6 +49,7 @@ def _clean_coordination_state():
     listeners._owned_cache.clear()
     yield
     hs._gpu_coord = None
+    hs._active_model_name = None
     gpu_registry.set_local_status_provider(None)
     gpu_registry._pending.clear()
     listeners._owned_cache.clear()
@@ -64,9 +65,11 @@ def _deferring_vouch(body):
     return (200, {"vouched": True}) if ok else (403, {"detail": "no"})
 
 
-def _coordinating_app(bind_host="127.0.0.1", port=8700):
+def _coordinating_app(bind_host="127.0.0.1", port=8700, model=None):
     app = create_app(None)
     app.state.bind_host = bind_host
+    app.state.instance_id = "self-1"
+    hs._active_model_name = model
     hs._gpu_coord = {"instance_id": "self-1", "port": port, "host": bind_host,
                      "scheme": "http"}
     return app
@@ -201,7 +204,7 @@ class TestCooperateUnloadEndToEnd:
     def test_a_self_vouching_listener_of_another_user_cannot_unload(self, monkeypatch):
         calls = self._spy_unload(monkeypatch)
         _as_another_os_user(monkeypatch)
-        with _served(_coordinating_app()) as port, \
+        with _served(_coordinating_app(model="secret-model")) as port, \
                 peer_server(localm_whoami("attacker"),
                             post={"/v1/instances/vouch":
                                   lambda b: (200, {"vouched": True})}) as fake:
@@ -215,7 +218,7 @@ class TestCooperateUnloadEndToEnd:
 
     def test_a_sibling_of_this_user_still_gets_the_unload(self, monkeypatch):
         calls = self._spy_unload(monkeypatch)
-        with _served(_coordinating_app()) as port, \
+        with _served(_coordinating_app(model="secret-model")) as port, \
                 peer_server(localm_whoami("requester-1"),
                             post={"/v1/instances/vouch": _deferring_vouch}) as req:
             gpu_registry.set_local_status_provider(
@@ -235,10 +238,9 @@ class TestStatusWithoutACredential:
     @pytest.fixture(autouse=True)
     def _loaded(self, monkeypatch):
         monkeypatch.setattr(hs, "_loaded_model_identities", lambda: list(_IDENTITIES))
-        monkeypatch.setattr(hs, "_active_model_name", "secret-model")
 
     def test_open_mode_names_the_models_but_no_file_identity_or_pid(self):
-        r = TestClient(_coordinating_app()).get("/v1/instances/status")
+        r = TestClient(_coordinating_app(model="secret-model")).get("/v1/instances/status")
         assert r.status_code == 200
         body = r.json()
         assert "alice-s1" not in r.text and _DIGEST not in r.text
@@ -250,7 +252,7 @@ class TestStatusWithoutACredential:
 
     def test_a_key_protected_instance_names_no_models_at_all(self, monkeypatch):
         monkeypatch.setenv("LOCALM_API_KEY", "k" * 40)
-        r = TestClient(_coordinating_app()).get("/v1/instances/status")
+        r = TestClient(_coordinating_app(model="secret-model")).get("/v1/instances/status")
         assert r.status_code == 200
         body = r.json()
         assert "secret-model" not in r.text and "alice-s1" not in r.text
@@ -259,7 +261,7 @@ class TestStatusWithoutACredential:
 
     def test_a_wrong_key_is_no_credential(self, monkeypatch):
         monkeypatch.setenv("LOCALM_API_KEY", "k" * 40)
-        r = TestClient(_coordinating_app()).get(
+        r = TestClient(_coordinating_app(model="secret-model")).get(
             "/v1/instances/status", headers={"Authorization": "Bearer " + "x" * 40})
         assert r.status_code == 200
         assert "secret-model" not in r.text and "pid" not in r.json()
@@ -269,14 +271,13 @@ class TestFullStatus:
     @pytest.fixture(autouse=True)
     def _loaded(self, monkeypatch):
         monkeypatch.setattr(hs, "_loaded_model_identities", lambda: list(_IDENTITIES))
-        monkeypatch.setattr(hs, "_active_model_name", "secret-model")
 
     def _assert_full(self, body):
         assert body["pid"] == os.getpid()
         assert body["models"] == _IDENTITIES
 
     def test_this_instances_attach_token_reads_it(self):
-        app = _coordinating_app()
+        app = _coordinating_app(model="secret-model")
         app.state.instance_token = "attach-" + "t" * 30
         client = TestClient(app)
         r = client.get("/v1/instances/status",
@@ -290,13 +291,13 @@ class TestFullStatus:
     def test_an_api_key_with_models_read_reads_it(self, monkeypatch):
         key = "k" * 40
         monkeypatch.setenv("LOCALM_API_KEY", key)
-        r = TestClient(_coordinating_app()).get(
+        r = TestClient(_coordinating_app(model="secret-model")).get(
             "/v1/instances/status", headers={"Authorization": "Bearer " + key})
         assert r.status_code == 200
         self._assert_full(r.json())
 
     def test_a_browser_page_cannot_read_it_even_with_the_attach_token(self):
-        app = _coordinating_app()
+        app = _coordinating_app(model="secret-model")
         app.state.instance_token = "attach-" + "t" * 30
         r = TestClient(app).get(
             "/v1/instances/status",
@@ -313,7 +314,7 @@ class TestFullStatus:
             return True
 
         monkeypatch.setattr(gpu_registry, "verify_requester", fake_verify)
-        r = TestClient(_coordinating_app()).post(
+        r = TestClient(_coordinating_app(model="secret-model")).post(
             "/v1/instances/status",
             json={"requester": {"instance_id": "req", "port": 1}, "request_id": "rid"})
         assert r.status_code == 200
@@ -323,7 +324,7 @@ class TestFullStatus:
 
     def test_an_unverified_post_is_refused(self, monkeypatch):
         monkeypatch.setattr(gpu_registry, "verify_requester", lambda *a, **k: False)
-        r = TestClient(_coordinating_app()).post(
+        r = TestClient(_coordinating_app(model="secret-model")).post(
             "/v1/instances/status",
             json={"requester": {"instance_id": "req", "port": 1}, "request_id": "rid"})
         assert r.status_code == 403
@@ -336,9 +337,9 @@ class TestFullStatus:
         if app_kind == "plain":
             app = create_app(None)
         elif app_kind == "network":
-            app = _coordinating_app(bind_host="0.0.0.0")
+            app = _coordinating_app(bind_host="0.0.0.0", model="secret-model")
         else:
-            app = _coordinating_app()
+            app = _coordinating_app(model="secret-model")
             headers = {"Origin": "http://localhost:3000"}
         r = TestClient(app).post(
             "/v1/instances/status", headers=headers,
@@ -352,14 +353,23 @@ class TestFullStatus:
 # ------------------------------------------------------------------ #
 
 class TestPeerDiscoveryReadsTheFullStatus:
+    """The served app runs in this process, so its status names another pid;
+    discovery always leaves out a status naming this process."""
+
     @pytest.fixture(autouse=True)
     def _loaded(self, monkeypatch):
         monkeypatch.setattr(hs, "_loaded_model_identities", lambda: list(_IDENTITIES))
-        monkeypatch.setattr(hs, "_active_model_name", "secret-model")
+        real = hs._gpu_status
+
+        def as_another_process():
+            status = real()
+            return None if status is None else {**status, "pid": FOREIGN_PID}
+
+        monkeypatch.setattr(hs, "_gpu_status", as_another_process)
 
     def test_a_coordinating_reader_gets_the_file_identity_over_real_sockets(
             self, monkeypatch):
-        with _served(_coordinating_app()) as port, \
+        with _served(_coordinating_app(model="secret-model")) as port, \
                 peer_server(localm_whoami("reader-1"),
                             post={"/v1/instances/vouch": _deferring_vouch}) as me:
             enable_detection(monkeypatch, port)
@@ -371,11 +381,11 @@ class TestPeerDiscoveryReadsTheFullStatus:
                                  timeout=10)
         assert [p["instance_id"] for p in peers] == ["self-1"]
         assert peers[0]["models"] == _IDENTITIES
-        assert peers[0]["pid"] == os.getpid()
+        assert peers[0]["pid"] == FOREIGN_PID
         assert "alice-s1" not in plain.text and "pid" not in plain.json()
 
     def test_a_reader_without_coordination_gets_the_redacted_status(self, monkeypatch):
-        with _served(_coordinating_app()) as port:
+        with _served(_coordinating_app(model="secret-model")) as port:
             enable_detection(monkeypatch, port)
             peers = gpu_registry.list_gpu_peers(timeout=5)
         assert [p["instance_id"] for p in peers] == ["self-1"]
@@ -385,7 +395,7 @@ class TestPeerDiscoveryReadsTheFullStatus:
     def test_a_same_install_reader_presents_the_attach_token(self, monkeypatch):
         from localm import instances
         from localm.config import home_dir
-        app = _coordinating_app()
+        app = _coordinating_app(model="secret-model")
         app.state.instance_token = "attach-" + "s" * 30
         with _served(app) as port:
             path = instances.register_instance(
@@ -422,7 +432,7 @@ class TestPeerDiscoveryReadsTheFullStatus:
         assert seen and all("attach-secret-zz" not in str(h) for h in seen)
 
     def test_the_reader_excludes_itself_by_instance_id_without_a_pid(self, monkeypatch):
-        with _served(_coordinating_app()) as port:
+        with _served(_coordinating_app(model="secret-model")) as port:
             enable_detection(monkeypatch, port)
             gpu_registry.set_local_status_provider(
                 lambda: None,

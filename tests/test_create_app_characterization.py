@@ -187,6 +187,7 @@ _KERNEL_ROUTES = {
     ("api", "POST", "/v1/instances/cooperate-unload"): (),
     ("api", "POST", "/v1/instances/vouch"): (),
     ("api", "GET", "/v1/instances/status"): (),
+    ("api", "POST", "/v1/instances/status"): (),
     # routes/peer_routing.py
     ("api", "GET", "/v1/models/{model_id}/peer-offer"): ("scope:models:read",),
     ("api", "POST", "/v1/models/{model_id}/peer-route"): ("scope:models:write",),
@@ -314,6 +315,7 @@ _HIDDEN_FROM_SCHEMA = {
     ("POST", "/v1/instances/cooperate-unload"),
     ("POST", "/v1/instances/vouch"),
     ("GET", "/v1/instances/status"),
+    ("POST", "/v1/instances/status"),
     ("POST", "/v1/surfaces/gui"),
     ("POST", "/api/pull"),
     ("POST", "/api/push"),

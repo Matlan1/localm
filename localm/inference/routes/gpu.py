@@ -1,26 +1,33 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Multi-instance GPU/VRAM coordination routes (see ``localm.gpu_registry``).
 
-Three endpoints a sibling localm instance on this machine uses to talk to this one:
+The endpoints a sibling localm instance on this machine uses to talk to this one:
 
-- ``GET /v1/instances/status``: this instance's live model / VRAM status.
+- ``GET /v1/instances/status``: this instance's live model / VRAM status. Without
+  a credential it is redacted: no ``pid``, each loaded model by name only, and on
+  a key-protected instance no model names at all. This instance's attach token,
+  or an API key granting ``models:read``, reads the full status.
+- ``POST /v1/instances/status``: the full status for a sibling that names itself
+  as the requester, verified exactly like an unload request below.
 - ``POST /v1/instances/cooperate-unload``: a sibling, itself out of local eviction
   candidates, asks THIS instance to release its own VRAM. A SEPARATE auth code path
   from ``require_scope``/``MODELS_WRITE``: the request is honoured only after the
-  requester confirms, by calling this instance back on ``/v1/instances/vouch``,
-  that it really sent it. An API key alone does not grant it.
+  requester's port is found listening as the OS user running this instance and
+  the requester confirms, called back on ``/v1/instances/vouch``, that it really
+  sent it (``gpu_registry.verify_requester``). An API key alone does not grant it.
 - ``POST /v1/instances/vouch``: confirms (once) that THIS instance sent a given
-  unload request to the asking instance.
+  unload or status request to the asking instance.
 
-All three exist only on an instance that coordinates (not ``--isolated``, not a bare
-test app). Status and unload also require a loopback bind; vouch does not, because it
-confirms only a request id this instance generated and sent. All three refuse any
-request that carries an ``Origin`` header: a sibling instance is not a browser, so a
-browser page cannot read the status or trigger the others."""
+All of them exist only on an instance that coordinates (not ``--isolated``, not a
+bare test app). Status and unload also require a loopback bind; vouch does not,
+because it confirms only a request id this instance generated and sent. All refuse
+any request that carries an ``Origin`` header: a sibling instance is not a browser,
+so a browser page cannot read the status or trigger the others."""
 
 from __future__ import annotations
 
 import asyncio
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request
 
@@ -51,16 +58,76 @@ async def _json_body(request: Request) -> dict:
     return body if isinstance(body, dict) else {}
 
 
+def _holds_full_status_credential(request: Request) -> bool:
+    """Whether *request* presents this instance's attach token, or an API key
+    granting ``models:read``. Blocking (a key check can take the keystore
+    lock)."""
+    from localm import scopes
+    from localm.auth import ct_equal
+    presented = _hs._bearer_token(request)
+    if not presented:
+        return False
+    inst_token = getattr(request.app.state, "instance_token", None)
+    if inst_token and ct_equal(presented, inst_token):
+        return True
+    held = _hs.caller_scopes(request)
+    return held is not None and scopes.grants(held, scopes.MODELS_READ)
+
+
+def _redacted(status: dict) -> dict:
+    """*status* without ``pid`` and with each loaded model reduced to its name;
+    on a key-protected instance, without model names either."""
+    from localm.auth import any_key_configured, require_auth_enabled
+    out = {k: v for k, v in status.items() if k != "pid"}
+    if any_key_configured() or require_auth_enabled():
+        out["model"] = None
+        out["models"] = []
+    else:
+        out["models"] = [{"name": m.get("name")} for m in status.get("models") or []
+                         if isinstance(m, dict)]
+    return out
+
+
+def _status_for(request: Request) -> Optional[dict]:
+    """``_hs._gpu_status``, redacted unless *request* holds a full-status
+    credential. Blocking."""
+    status = _hs._gpu_status()
+    if status is None or _holds_full_status_credential(request):
+        return status
+    return _redacted(status)
+
+
 def register(app: FastAPI, ctx) -> None:
     @app.get("/v1/instances/status", include_in_schema=False)
     async def instance_status(request: Request):
-        """This instance's live coordination status (see ``_hs._gpu_status``)."""
+        """This instance's live coordination status (see ``_hs._gpu_status``),
+        redacted for a caller without a credential (see the module docstring)."""
         if not _coordinating(request):
             raise HTTPException(404, "Not Found")
         loop = asyncio.get_running_loop()
-        status = await loop.run_in_executor(None, _hs._gpu_status)
+        status = await loop.run_in_executor(None, _status_for, request)
         if status is None:
             raise HTTPException(404, "Not Found")
+        return status
+
+    @app.post("/v1/instances/status", include_in_schema=False)
+    async def instance_status_for_sibling(request: Request):
+        """This instance's full coordination status for a sibling that names
+        itself in ``requester`` and confirms ``request_id`` when called back
+        (``gpu_registry.verify_requester``). 403 otherwise, the same answer as
+        a refused unload request."""
+        from localm import gpu_registry
+        body = await _json_body(request)
+        coord = getattr(_hs, "_gpu_coord", None)
+        loop = asyncio.get_running_loop()
+        verified = False
+        if coord and _coordinating(request):
+            verified = await loop.run_in_executor(
+                None, gpu_registry.verify_requester, body.get("requester"),
+                body.get("request_id"), coord["instance_id"])
+        status = await loop.run_in_executor(None, _hs._gpu_status) if verified else None
+        if status is None:
+            raise HTTPException(403, _REFUSED)
         return status
 
     @app.post("/v1/instances/vouch", include_in_schema=False)
