@@ -141,6 +141,129 @@ def test_a_directory_symlink_leaving_the_project_is_not_read_only(tmp_path):
     assert is_read_only("ls out", proj) is False
 
 
+def test_dotdot_after_a_directory_link_that_climbs_out_is_not_read_only(tmp_path):
+    proj = tmp_path / "proj"
+    (proj / "src").mkdir(parents=True)
+    (proj / "a.txt").write_text("a", encoding="utf-8")
+    sibling = tmp_path / "sibling"
+    (sibling / ".git").mkdir(parents=True)
+    (tmp_path / "secret.txt").write_text("s", encoding="utf-8")
+    assert is_read_only("cat src/../a.txt", proj) is True
+    _symlink(proj / "jup", sibling, directory=True)
+    assert is_read_only("cat jup/.git/../../secret.txt", proj) is False
+    assert is_read_only("grep s jup/.git/../../secret.txt", proj) is False
+    assert is_read_only("cd jup/.git/../.. && cat secret.txt", proj) is False
+    assert is_read_only("cat src/../a.txt", proj) is True
+
+
+def test_dotdot_after_a_link_back_into_the_project_that_climbs_out_is_not_read_only(tmp_path):
+    proj = tmp_path / "proj"
+    (proj / "x" / "y").mkdir(parents=True)
+    (proj / "z.txt").write_text("z", encoding="utf-8")
+    (tmp_path / "z.txt").write_text("outside", encoding="utf-8")
+    _symlink(proj / "x" / "y" / "j", proj, directory=True)
+    assert is_read_only("cat x/y/j/z.txt", proj) is True
+    assert is_read_only("cat x/y/j/../../../z.txt", proj) is False
+
+
+def test_a_glob_after_a_link_and_dotdot_is_not_read_only_even_with_no_match_inside(tmp_path):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    sibling = tmp_path / "sibling"
+    (sibling / ".git").mkdir(parents=True)
+    (tmp_path / "secret.txt").write_text("s", encoding="utf-8")
+    _symlink(proj / "jup", sibling, directory=True)
+    assert is_read_only("cat jup/.git/../../secre*", proj) is False
+    assert is_read_only("cat j*/../../secret.txt", proj) is False
+
+
+def test_a_long_path_is_checked_without_resolving_every_prefix(tmp_path, monkeypatch):
+    import localm.plugins.coder.shell_guard as sg
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    calls = []
+    real = os.path.realpath
+
+    def counting(path, *a, **k):
+        calls.append(path)
+        return real(path, *a, **k)
+
+    monkeypatch.setattr(sg.os.path, "realpath", counting)
+    assert is_read_only("cat " + "x/" * 1500 + "a.txt", proj) is True
+    assert len(calls) < 20, len(calls)
+
+
+def test_git_after_cd_through_a_link_checks_the_repository_git_uses(tmp_path):
+    proj = tmp_path / "proj"
+    (proj / "vendor" / "repo2" / "sub").mkdir(parents=True)
+    (proj / "vendor" / "repo2" / ".git").mkdir()
+    (proj / "vendor" / "repo2" / ".git" / "config").write_text(
+        "[core]\n\tpager = ./p.sh\n", encoding="utf-8")
+    (proj / "x").mkdir()
+    assert is_read_only("cd vendor/repo2/sub && git log", proj) is False
+    _symlink(proj / "x" / "j", proj / "vendor" / "repo2" / "sub", directory=True)
+    assert is_read_only("cd x && ls", proj) is True
+    assert is_read_only("cd x/j && git log", proj) is False
+
+
+def _bare_repo(path: Path, config: str) -> None:
+    (path / "objects").mkdir(parents=True)
+    (path / "refs").mkdir()
+    (path / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (path / "config").write_text(config, encoding="utf-8")
+
+
+def test_git_in_a_bare_repository_inside_the_project_checks_its_config(tmp_path):
+    proj = tmp_path / "proj"
+    _bare_repo(proj / "vendor" / "safe.git", "[core]\n\trepositoryformatversion = 0\n")
+    _bare_repo(proj / "vendor" / "lib.git", "[core]\n\tpager = ./p.sh\n")
+    assert is_read_only("cd vendor/safe.git && git log", proj) is True
+    assert is_read_only("cd vendor/lib.git && git log", proj) is False
+    assert is_read_only("cd vendor/lib.git/objects && git log", proj) is False
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="file attributes are a Windows feature")
+def test_a_file_with_the_system_attribute_is_not_read_only(tmp_path):
+    import ctypes
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "a.txt").write_text("a", encoding="utf-8")
+    cyg = proj / "cyg"
+    cyg.write_bytes(b"!<symlink>\xff\xfe" + "../secret".encode("utf-16-le") + b"\x00\x00")
+    assert is_read_only("cat cyg", proj) is True
+    assert ctypes.windll.kernel32.SetFileAttributesW(str(cyg), 0x4)
+    assert is_read_only("cat cyg", proj) is False
+    assert is_read_only("cat cyg/inner/f.txt", proj) is False
+    assert is_read_only("cat a.txt", proj) is True
+
+
+def test_a_file_used_as_a_folder_in_a_path_is_not_read_only(tmp_path):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "a.txt").write_text("a", encoding="utf-8")
+    assert is_read_only("cat a.txt", proj) is True
+    assert is_read_only("cat a.txt/x", proj) is False
+
+
+def test_a_glob_too_deep_to_expand_is_refused_without_raising(tmp_path):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    assert is_read_only("cat " + "*/" * 1000 + "a", proj) is False
+
+
+def test_a_gitdir_whose_dotdot_climbs_out_through_a_link_is_not_read_only(tmp_path):
+    proj = tmp_path / "proj"
+    (proj / "x" / "y").mkdir(parents=True)
+    (proj / "store").mkdir()
+    (proj / "store" / "config").write_text("[core]\n\trepositoryformatversion = 0\n",
+                                           encoding="utf-8")
+    _symlink(proj / "x" / "y" / "j", proj, directory=True)
+    (proj / ".git").write_text("gitdir: store\n", encoding="utf-8")
+    assert is_read_only("git status", proj) is True
+    (proj / ".git").write_text("gitdir: x/y/j/../../../store\n", encoding="utf-8")
+    assert is_read_only("git status", proj) is False
+
+
 def test_a_project_file_that_a_command_name_finds_is_not_read_only(tmp_path, monkeypatch):
     proj = tmp_path / "proj"
     (proj / "bin").mkdir(parents=True)

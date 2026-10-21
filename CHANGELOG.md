@@ -598,7 +598,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
   project file can stand in for, with no option that runs a program, writes a file, reads a file
   the option names or follows links (`git grep -O`, `rg --hostname-bin`, `sort -o`, `tree -R`,
   `--files0-from`, `grep -f`, also attached, clustered or shortened), with every path in it inside
-  the project once links are followed, and, for git, with no repository setting or hook script
+  the project once links are followed (a `..` after a link or Windows junction included, so a
+  path that climbs out through one asks first), and, for git, with no repository setting or hook script
   that runs a program (an fsmonitor hook, a filter, a diff driver, a pager, a git hook). Anything
   else asks as before.
 - **The coder's shell safety check reads a command the way both shells do.** A backslash at the
