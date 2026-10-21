@@ -243,3 +243,17 @@ class TestToolChangesEndToEnd:
             assert agent.compact() is True
         assert "brand_new" in agent._system_prompt
         assert "made_by_write" in agent._system_prompt
+
+    def test_an_automatic_compaction_refreshes_the_map_in_the_prompt(self, tmp_path):
+        (tmp_path / "a.py").write_text("def existing():\n    pass\n", encoding="utf-8")
+        agent = self._make_real_agent(tmp_path)
+        (tmp_path / "b.py").write_text("def brand_new():\n    pass\n", encoding="utf-8")
+        agent._project_map.mark_dirty()
+        agent._build_messages()
+        assert "brand_new" not in agent._system_prompt
+
+        with patch.object(agent, "_compact_history", return_value=True), \
+             patch.object(agent, "_drop_old_tool_output", return_value=0), \
+             patch.object(agent, "_prompt_tokens_estimate", return_value=10_000):
+            assert agent._compact_to(100, 1000) is True
+        assert "brand_new" in agent._system_prompt
