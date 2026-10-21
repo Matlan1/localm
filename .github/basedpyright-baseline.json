@@ -232,8 +232,8 @@
             {
                 "code": "reportOptionalMemberAccess",
                 "range": {
-                    "startColumn": 41,
-                    "endColumn": 49,
+                    "startColumn": 37,
+                    "endColumn": 45,
                     "lineCount": 1
                 }
             },
