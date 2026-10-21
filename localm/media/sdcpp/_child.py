@@ -13,7 +13,7 @@ command at a time:
                         "hires": {"upscaler", "model_path", "scale", "steps",
                                   "denoising_strength", "tile_size"},
                         "mask_image", "ref_images": [image, ...], "control_image",
-                        "control_strength", "control_canny"})
+                        "control_strength", "control_canny", "vae_tile_size"})
     (an image is {"width", "height", "channel", "data"}; a mask has 1 channel)
     ("generate_video", {"prompt", "negative_prompt", "width", "height", "video_frames",
                         "fps", "steps", "cfg_scale", "flow_shift", "seed",
@@ -77,6 +77,7 @@ class _State:
     last_progress = 0.0
     capacity_short = False
     budget_refused = False
+    vae_decoder_ch: Optional[int] = None
 
 
 class _BudgetRefused(RuntimeError):
@@ -146,6 +147,7 @@ def _set_rocblas_tensile(extra_dirs) -> None:
 _MODEL_DESC_RE = re.compile(r"\AWan\d\.[\dx]-[A-Za-z0-9.]+-[A-Za-z0-9.]+\Z")
 
 _CAPACITY_SHORT_TEXT = "cannot make enough memory available"
+_KL_DECODER_CH_RE = re.compile(r"\bvae decoder: ch = (\d+)")
 _SEGMENT_REFUSED_RE = re.compile(r"\bsegment \d+/\d+ \([^)]*\) failed during weight preparation")
 
 
@@ -195,6 +197,9 @@ def _make_callbacks(resp_q):
         low = msg.lower()
         if "decoding" in low and "latent" in low:
             _State.decoding = True
+        ch = _KL_DECODER_CH_RE.search(msg)
+        if ch:
+            _State.vae_decoder_ch = int(ch.group(1))
         head = msg.split(" --- ", 1)[0].strip()
         if not _State.model_desc and _MODEL_DESC_RE.match(head):
             _State.model_desc = head
@@ -368,6 +373,7 @@ def _do_load(payload):
     embeddings = _set_embeddings(b, params, ctx_fields.get("embeddings"))
     _State.last_errors = []
     _State.model_desc = ""
+    _State.vae_decoder_ch = None
     _State.paths = tuple(str(v) for k, v in ctx_fields.items()
                          if k.endswith("_path") and isinstance(v, str) and v) + tuple(
         str(path) for _name, path in (ctx_fields.get("embeddings") or ()))
@@ -388,7 +394,29 @@ def _do_load(payload):
         "default_sample_method": (lib.sd_sample_method_name(method) or b"").decode(),
         "default_scheduler": (lib.sd_scheduler_name(scheduler) or b"").decode(),
         "devices": b.list_devices(lib),
+        "vae_decoder_ch": _State.vae_decoder_ch,
+        "max_tensor_bytes": _max_tensor_bytes(lib, payload.get("runtime_dir")),
     }
+
+
+def _max_tensor_bytes(lib, runtime_dir) -> Optional[int]:
+    """The smallest ``_binding.max_tensor_bytes`` over the runtime's non-CPU
+    devices, or None when there is none or a device cannot be probed. A probe
+    error is logged and gives None."""
+    from . import _binding as b
+    if runtime_dir is None:
+        return None
+    try:
+        limits = [b.max_tensor_bytes(lib, Path(runtime_dir), name)
+                  for name, _desc in b.list_devices(lib) if name.upper() != "CPU"]
+    except Exception as e:  # noqa: BLE001
+        from localm.debuglog import logger
+        logger.warning("sd.cpp worker: the device tensor-size probe failed (%s: %s)",
+                       type(e).__name__, e)
+        return None
+    if not limits or None in limits:
+        return None
+    return min(limits)
 
 
 def _set_embeddings(b, params, embeddings):
@@ -505,6 +533,17 @@ def _set_hires(lib, b, p, payload):
     return keep
 
 
+def _set_vae_tiling(p, payload) -> None:
+    """Decode image params *p* in square tiles of ``payload["vae_tile_size"]``
+    image pixels when it is set; leave the library's default otherwise."""
+    tile = payload.get("vae_tile_size")
+    if not tile:
+        return
+    p.vae_tiling_params.enabled = True
+    p.vae_tiling_params.tile_size_w = int(tile)
+    p.vae_tiling_params.tile_size_h = int(tile)
+
+
 def _set_loras(b, p, payload):
     """Fill *p*'s ``loras``/``lora_count`` from ``payload["loras"]`` (each
     ``{"path", "multiplier", "is_high_noise"}``). Returns the ctypes objects
@@ -559,6 +598,7 @@ def _do_generate_image(payload, cancel_event):
     if sched is not None:
         p.sample_params.scheduler = sched
     hires_refs = _set_hires(lib, b, p, payload)
+    _set_vae_tiling(p, payload)
     input_refs = _set_image_inputs(b, p, payload)
     keep = None
     init = payload.get("init_image")
