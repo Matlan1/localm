@@ -108,6 +108,9 @@ def test_a_bare_sd1_controlnet_is_not_read_as_an_sd1_unet(tmp_path):
     {"emb_params": (8, 777)},
     {"emb_params": (4096, 768)},
     {"emb_params": (2, 8, 768)},
+    {"lora_unet_down_blocks_2_attentions_0_transformer_blocks_2_attn1_to_k.lora_down.weight":
+         (64, 1280)},
+    {"text_model.final_layer_norm.weight": (768,)},
 ])
 def test_other_small_files_are_not_embeddings(tmp_path, shapes):
     assert _info(tmp_path, shapes).kind != "textual_inversion"

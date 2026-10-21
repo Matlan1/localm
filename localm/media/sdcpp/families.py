@@ -629,9 +629,11 @@ _TI_WIDTHS = {768: "sd1", 1024: "sd2", 1280: "sdxl"}
 
 def _textual_inversion_info(t: dict) -> Optional[FileInfo]:
     """A textual-inversion embedding: at most ``_TI_MAX_TENSORS`` vectors or
-    small matrices whose width is a CLIP text encoder's (768 SD 1.x, 1024
-    SD 2.x, 768 and 1280 together SDXL), with its family, or None."""
-    if not t or len(t) > _TI_MAX_TENSORS:
+    small matrices, each named without a module path (no ``.``, as
+    ``emb_params`` or ``clip_l``), whose width is a CLIP text encoder's (768
+    SD 1.x, 1024 SD 2.x, 768 and 1280 together SDXL), with its family, or
+    None."""
+    if not t or len(t) > _TI_MAX_TENSORS or any("." in name for name in t):
         return None
     widths = set()
     for shape in t.values():
@@ -667,12 +669,15 @@ def classify_tensors(tensors: dict, arch: Optional[str] = None) -> FileInfo:
         found = _diffusion_family(dv)
         return FileInfo("checkpoint", fam or (found[0] if found else None),
                         found[1] if found else {})
-    addon = _controlnet_info(tensors) or _textual_inversion_info(tensors)
-    if addon is not None:
-        return addon
+    control = _controlnet_info(tensors)
+    if control is not None:
+        return control
     lora = _lora_info(tensors)
     if lora is not None:
         return lora
+    embedding = _textual_inversion_info(tensors)
+    if embedding is not None:
+        return embedding
     te = _text_encoder_info(tensors, arch)
     if te is not None:
         return te

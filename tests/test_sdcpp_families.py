@@ -220,7 +220,7 @@ def test_a_rewritten_file_is_classified_again(tmp_path):
 ])
 def test_each_family_needs_its_companions(tmp_path, shapes, slots):
     info = families.inspect_file(write_safetensors(tmp_path / "m.safetensors", shapes))
-    assert [r.slot for r in families.requirements(info)] == slots
+    assert [r.slot for r in families.requirements(info) if r.required] == slots
 
 
 def test_flux_schnell_defaults_to_four_steps_and_dev_to_more(tmp_path):
