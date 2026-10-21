@@ -14,6 +14,8 @@ from typing import Callable, Optional
 
 
 _warned_unconfigured_home = False
+_warned_unreadable_home_cfg: set = set()
+_unusable_temp_dirs: set = set()
 
 # config files already warned about (present but not a JSON object), so a
 # non-dict config.json is surfaced once per process, not on every load_config
@@ -172,8 +174,11 @@ def _detect_home() -> Path:
                 # rather than the logger - this runs at import time, before
                 # logging is wired, and importing debuglog here would be
                 # circular.
-                print(f"[localm] WARNING: cannot read {cfg_marker} ({e}); "
-                      "falling back to the default data dir.", file=sys.stderr)
+                warning = (f"[localm] WARNING: cannot read {cfg_marker} ({e}); "
+                           "falling back to the default data dir.")
+                if warning not in _warned_unreadable_home_cfg:
+                    _warned_unreadable_home_cfg.add(warning)
+                    print(warning, file=sys.stderr)
         portable = repo_root / "home"
         if portable.is_dir():
             return portable
@@ -500,6 +505,7 @@ def contain_temp_dir() -> None:
     try:
         os.makedirs(path, exist_ok=True)
     except OSError as e:
+        _unusable_temp_dirs.add(path)
         print(f"[localm] WARNING: cannot create the temp folder {path} ({e}); "
               "temporary files will go to the system temp folder instead.",
               file=sys.stderr)
@@ -507,6 +513,15 @@ def contain_temp_dir() -> None:
     for var in ("TMP", "TEMP", "TMPDIR"):
         os.environ[var] = path
     tempfile.tempdir = path
+
+
+def temp_dir_in_use(home: Optional[Path] = None) -> Optional[Path]:
+    """:func:`temp_dir`, or None when that folder could not be created at start-up
+    (:func:`contain_temp_dir` then left the system temp folder in use)."""
+    target = temp_dir(home)
+    if target is not None and os.path.abspath(str(target)) in _unusable_temp_dirs:
+        return None
+    return target
 
 
 HOME_DIR = _detect_home()
