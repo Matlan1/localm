@@ -1427,11 +1427,15 @@ def _mmproj_download_dest(base_dir: Path, candidate: str, repo_id: str,
         return dest, True
     if _mm._hf_file_sha256(repo_id, candidate) and _mmproj_recorded_only_from(dest, repo_id):
         from rich.markup import escape
-        console.print(
-            f"[yellow]{escape(dest.name)} does not match the digest {escape(repo_id)} "
-            "publishes - deleted, fetching it again.[/yellow]")
-        dest.unlink(missing_ok=True)
-        return dest, False
+        try:
+            dest.unlink(missing_ok=True)
+        except OSError as e:
+            logger.warning("could not delete the damaged %s: %s", dest, e)
+        else:
+            console.print(
+                f"[yellow]{escape(dest.name)} does not match the digest {escape(repo_id)} "
+                "publishes - deleted, fetching it again.[/yellow]")
+            return dest, False
     stem, suffix = Path(candidate).stem, Path(candidate).suffix
     for n in range(2, _MAX_MMPROJ_COLLISION_SUFFIX + 1):
         free = base_dir / f"{stem}-{n}{suffix}"
@@ -2171,7 +2175,8 @@ def _snapshot_files_failing_digest(dest: Path, repo_siblings, repo_id: str) -> l
     """Names of the files of the snapshot at *dest* that do not hash to the LFS
     sha256 *repo_siblings* (a ``model_info(files_metadata=True)`` listing) gives
     them. A listed file with a digest that is absent from disk counts as failing.
-    Each failing file is deleted, so a second pull fetches it again."""
+    Each failing file is deleted, so a second pull fetches it again; one that
+    cannot be deleted is logged and still counts as failing."""
     from localm import pathsafe
     failing = []
     for sib in repo_siblings:
@@ -2192,9 +2197,51 @@ def _snapshot_files_failing_digest(dest: Path, repo_siblings, repo_id: str) -> l
             continue
         actual = _verify_digest(fp, purpose=f"to check {name}").lower()
         if actual != str(published).lower():
-            fp.unlink(missing_ok=True)
+            try:
+                fp.unlink(missing_ok=True)
+            except OSError as e:
+                logger.warning("could not delete the damaged %s: %s", fp, e)
             failing.append(name)
     return failing
+
+
+def _snapshot_files_damaged(dest: Path, repo_siblings, repo_id: str) -> list[str]:
+    """Names of the files of the snapshot at *dest* that are present but do not
+    have the size, or the LFS sha256, *repo_siblings* gives them. A file that is
+    absent is not listed (a download fetches it). Deletes nothing."""
+    from localm import pathsafe
+    damaged = []
+    for sib in repo_siblings:
+        name = str(sib.rfilename)
+        try:
+            fp = pathsafe.confined_under(dest, name)
+        except ValueError:
+            continue
+        if not fp.is_file():
+            continue
+        size = getattr(sib, "size", None)
+        if size is not None and fp.stat().st_size != size:
+            damaged.append(name)
+            continue
+        lfs = getattr(sib, "lfs", None)
+        published = (lfs.get("sha256") if isinstance(lfs, dict) else getattr(lfs, "sha256", None)) if lfs else None
+        if published and _verify_digest(fp, purpose=f"to check {name}").lower() != str(published).lower():
+            damaged.append(name)
+    return damaged
+
+
+def _delete_snapshot_files(dest: Path, names: list[str]) -> list[str]:
+    """Delete the files *names* of the snapshot at *dest*; the names of those
+    that could not be deleted (in use, no permission) are returned."""
+    from localm import pathsafe
+    stuck = []
+    for name in names:
+        try:
+            pathsafe.confined_under(dest, name).unlink(missing_ok=True)
+        except (OSError, ValueError) as e:
+            logger.warning("could not delete the damaged %s: %s", name, e)
+            stuck.append(name)
+    return stuck
 
 
 def _snapshot_bytes_on_disk(dest: Path) -> int:
@@ -2500,21 +2547,18 @@ def _pull_hf_snapshot(
         logger.debug("could not fetch file listing for %s (%s); falling back "
                      "to a config.json-only completeness check", repo_id, e)
 
-    repairing = False
-    if dest.exists() and _snapshot_is_complete(dest, repo_siblings, repo_id):
-        damaged = (_snapshot_files_failing_digest(dest, repo_siblings, repo_id)
-                   if repo_siblings is not None else [])
-        if not damaged:
-            console.print(f"[yellow]Already downloaded:[/yellow] {escape(model_name)}")
-            _mm._register_with_dedup(model_name, dest, f"hf:{repo_id}",
-                                     model_type=_resolve_snapshot_type(dest, model_type))
-            return True
-        repairing = True
-        shown = ", ".join(escape(n) for n in damaged[:3]) + (" ..." if len(damaged) > 3 else "")
-        console.print(
-            f"[yellow]{len(damaged)} file(s) of {escape(model_name)} do not match the "
-            f"digests Hugging Face publishes ({shown}) - deleted, fetching them again."
-            "[/yellow]")
+    damaged: list[str] = []
+    if dest.exists() and repo_siblings is not None:
+        damaged = _snapshot_files_damaged(dest, repo_siblings, repo_id)
+    if dest.exists() and not damaged and _snapshot_is_complete(dest, repo_siblings, repo_id):
+        console.print(f"[yellow]Already downloaded:[/yellow] {escape(model_name)}")
+        _mm._register_with_dedup(model_name, dest, f"hf:{repo_id}",
+                                 model_type=_resolve_snapshot_type(dest, model_type))
+        return True
+    repairing = bool(damaged) or (
+        dest.exists() and any(
+            _mm.load_registry()[n].get("source") == f"hf:{repo_id}"
+            for n in find_aliases_by_path(dest, _mm.load_registry())))
 
     # Same repo already pulled under a different name?
     if not redownload and not repairing:
@@ -2588,6 +2632,20 @@ def _pull_hf_snapshot(
             )
             return False
 
+    if damaged:
+        shown = ", ".join(escape(n) for n in damaged[:3]) + (" ..." if len(damaged) > 3 else "")
+        stuck = _delete_snapshot_files(dest, damaged)
+        if stuck:
+            console.print(
+                f"[red]Could not delete {len(stuck)} damaged file(s) of {escape(model_name)}"
+                f"[/red] ({escape(', '.join(stuck[:3]))}): a running model or another program "
+                "may be using them. Unload the model and pull again.")
+            return False
+        console.print(
+            f"[yellow]{len(damaged)} file(s) of {escape(model_name)} do not match the size or "
+            f"digest Hugging Face publishes ({shown}) - deleted, fetching them again."
+            "[/yellow]")
+
     def _disk_bytes() -> int:
         return _snapshot_bytes_on_disk(dest)
 
@@ -2622,6 +2680,8 @@ def _pull_hf_snapshot(
             _prog.ok()
     except Exception as e:
         console.print(f"[red]Download failed:[/red] {escape(str(e))}")
+        if damaged:
+            console.print("The damaged files were deleted; pull again to fetch them.")
         return False
 
     if repo_siblings is None:
