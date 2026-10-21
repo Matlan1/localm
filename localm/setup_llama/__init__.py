@@ -176,7 +176,7 @@ def _require_network_allowed() -> None:
 
 def verified_urlopen(req, *, timeout=None, handlers=()):
     """``localm.http_ssl.verified_urlopen`` behind the ``net_mode`` check: every
-    network access of this package goes through it."""
+    urllib request this package makes goes through it."""
     _require_network_allowed()
     return _verified_urlopen(req, timeout=timeout, handlers=handlers)
 
