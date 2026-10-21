@@ -317,3 +317,195 @@ def test_a_runtime_without_a_limit_is_not_tiled(monkeypatch, tmp_path):
                               width=64, height=64, hires={"upscaler": "lanczos", "scale": 16.0,
                                                           "steps": 1, "denoise": 0.5})
     assert params[0]["vae_tile_size"] is None
+
+
+def test_a_wan_vae_image_model_is_tiled_by_the_wan_decoder(monkeypatch, tmp_path):
+    params, said = _generate(monkeypatch, tmp_path,
+                             {"version": "Qwen Image", "wan_vae_conv": "3D",
+                              "max_tensor_bytes": 2 * GIB, "vae_decoder_ch": None},
+                             width=1024, height=1024)
+    assert params[0]["vae_tile_size"] == 640
+    assert any(line.startswith("Decoding in 640 px tiles") for line in said)
+
+
+def test_an_image_no_tile_fits_fails_naming_the_limit(monkeypatch, tmp_path):
+    runner = _Runner({"version": "Qwen Image", "image": True, "wan_vae_conv": "3D",
+                      "max_tensor_bytes": 1024 ** 2})
+    monkeypatch.setattr(shared, "runner", runner)
+    monkeypatch.setattr(shared, "arm_idle_timer", lambda seconds=None: None)
+    monkeypatch.setattr(sd_runtime, "resolve", lambda choice="auto": sd_runtime.Runtime(
+        backend="vulkan", path=tmp_path / "rt"))
+    monkeypatch.setattr(sd_budget, "_platform", lambda: "linux")
+    monkeypatch.setattr(discover, "list_gpus", lambda **k: ([], discover.GPU_PROBE_OK))
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"weights")
+    ok, msg = image_native.generate({"backend": "native", "native": {"model": str(model)}},
+                                    "p", tmp_path / "a.png", write_sidecar=False,
+                                    width=1024, height=1024)
+    assert not ok and "1 MB" in msg and "64 px tiles" in msg
+    assert runner.params == []
+
+
+# --------------------------------------------------------------------------- #
+#  Wan VAE (video, Qwen-Image)                                                #
+# --------------------------------------------------------------------------- #
+
+MIB = 1024 ** 2
+WAN21 = vaetile.wan_vae("Wan 2.x", "3D")
+
+
+def test_wan_decode_peak_bytes_at_the_default_video_size():
+    # Recorded (Wan2.1-T2V-1.3B, 832x480x17, Vulkan, GGML_SCHED_DEBUG=2): the
+    # untiled decode graph's first CPU node is the 3x3 im2col of the second
+    # upsample stage, 384 channels at 416x240 over 4 frames, 2632 MiB in F16.
+    assert vaetile._conv_bytes(384, 416, 240, 4, False) // MIB == 2632
+    assert vaetile.wan_decode_peak_bytes(WAN21, 832, 480, 17) >= 384 * 9 * 2 * 416 * 240 * 4
+    # The 320 px tile it picks decoded with no CPU split (recorded, same run).
+    assert vaetile.wan_decode_peak_bytes(WAN21, 320, 320, 17) <= 2 * GIB
+
+
+def test_the_default_video_is_tiled_under_a_2_gib_limit():
+    assert vaetile.wan_decode_tile_size(832, 480, 81, 2 * GIB, WAN21) == 320
+    for side in (320, 384):
+        fits = vaetile.wan_decode_peak_bytes(WAN21, side, min(side, 480), 81) <= 2 * GIB
+        assert fits == (side == 320)
+
+
+@pytest.mark.parametrize("version,w,h,frames,tile", [
+    ("Wan 2.2 TI2V", 1280, 704, 121, 256),
+    ("Qwen Image", 1024, 1024, 1, 640),
+    ("Qwen Image 2.1", 1024, 1024, 1, 320),
+    ("Wan 2.x", 1920, 1088, 241, 320),
+])
+def test_every_wan_vae_shape_keeps_its_tile_under_the_limit(version, w, h, frames, tile):
+    vae = vaetile.wan_vae(version, "3D")
+    assert vaetile.wan_decode_tile_size(w, h, frames, 2 * GIB, vae) == tile
+    assert vaetile.wan_decode_peak_bytes(vae, min(tile, w), min(tile, h), frames) <= 2 * GIB
+    bigger = tile + vaetile.TILE_STEP
+    assert vaetile.wan_decode_peak_bytes(vae, min(bigger, w), min(bigger, h), frames) > 2 * GIB
+
+
+def test_one_latent_frame_is_decoded_at_a_time():
+    assert (vaetile.wan_decode_peak_bytes(WAN21, 320, 320, 17)
+            == vaetile.wan_decode_peak_bytes(WAN21, 320, 320, 81))
+    assert (vaetile.wan_decode_peak_bytes(WAN21, 320, 320, 1)
+            < vaetile.wan_decode_peak_bytes(WAN21, 320, 320, 17))
+
+
+@pytest.mark.parametrize("w,h,limit,vae", [
+    (256, 256, 2 * GIB, WAN21),
+    (832, 480, None, WAN21),
+    (832, 480, 2 * GIB, None),
+])
+def test_no_wan_tiling_when_the_clip_fits_or_a_value_is_unknown(w, h, limit, vae):
+    assert vaetile.wan_decode_tile_size(w, h, 81, limit, vae) is None
+
+
+def test_no_wan_tile_fits_a_tiny_limit():
+    with pytest.raises(vaetile.DecodeTooLarge, match=r"64 px tiles .* up to 1 MB"):
+        vaetile.wan_decode_tile_size(832, 480, 81, MIB, WAN21)
+
+
+def test_a_model_without_a_wan_vae_has_no_wan_shape():
+    assert vaetile.wan_vae("Wan 2.x", None) is None
+    assert vaetile.wan_vae("Wan 2.2 TI2V", "3D").scale == 16
+    assert vaetile.wan_vae("Qwen Image 2.1", "3D").scale == 16
+    assert WAN21.scale == 8
+
+
+def test_a_2d_wan_export_never_doubles_frames():
+    vae = vaetile.wan_vae("Wan 2.x", "2D")
+    assert vae.conv2d and not any(vae.temporal_up)
+    assert (vaetile.wan_decode_peak_bytes(vae, 320, 320, 81)
+            < vaetile.wan_decode_peak_bytes(WAN21, 320, 320, 81))
+
+
+def test_the_worker_reads_the_wan_vae_from_the_load_log(monkeypatch):
+    monkeypatch.setattr(_child._State, "wan_vae_conv", None)
+    log_cb, _progress, _preview = _child._make_callbacks(queue.Queue())
+    log_cb(b.SD_LOG_VERBOSE, b"Wan VAE convolution type: 3D --- wan_vae.hpp:1338", None)
+    assert _child._State.wan_vae_conv == "3D"
+
+
+class _VideoLib:
+    """Captures the video params the worker hands the library."""
+
+    def __init__(self):
+        self.tiling = None
+
+    def __getattr__(self, name):
+        def call(*args):
+            if name == "generate_video":
+                p = args[1]._obj
+                t = p.vae_tiling_params
+                self.tiling = (t.enabled, t.tile_size_w, t.tile_size_h)
+                return False
+        return call
+
+
+def test_the_worker_passes_the_tile_size_to_the_video_library(monkeypatch):
+    import threading
+    lib = _VideoLib()
+    monkeypatch.setattr(_child._State, "lib", lib)
+    monkeypatch.setattr(_child._State, "ctx", 1)
+    with pytest.raises(RuntimeError):
+        _child._do_generate_video({"prompt": "p", "width": 832, "height": 480,
+                                   "video_frames": 17, "vae_tile_size": 320}, threading.Event())
+    assert lib.tiling == (True, 320, 320)
+
+
+class _VideoRunner(_Runner):
+    def generate_video(self, params, *, on_event=None, cancel_check=None, timeout=None):
+        self.params.append(params)
+        w, h = params["width"], params["height"]
+        return {"width": w, "height": h, "channel": 3, "fps": 16, "audio": None,
+                "seed": params["seed"], "frames": [b"\0" * (w * h * 3)] * params["video_frames"]}
+
+
+def _generate_video(monkeypatch, tmp_path, info, **kw):
+    from localm.plugins.builtin.video.backends import native as video_native
+    runner = _VideoRunner({"version": "Wan 2.x", "video": True, "wan_vae_conv": "3D", **info})
+    monkeypatch.setattr(shared, "runner", runner)
+    monkeypatch.setattr(shared, "arm_idle_timer", lambda seconds=None: None)
+    monkeypatch.setattr(sd_runtime, "resolve", lambda choice="auto": sd_runtime.Runtime(
+        backend="vulkan", path=tmp_path / "rt"))
+    monkeypatch.setattr(sd_budget, "_platform", lambda: "linux")
+    monkeypatch.setattr(discover, "list_gpus", lambda **k: ([], discover.GPU_PROBE_OK))
+    monkeypatch.setattr(video_native, "_write_mp4", lambda out, result, fps: None)
+    files = {}
+    for k in ("dit", "t5", "vae"):
+        files[k] = tmp_path / f"{k}.gguf"
+        files[k].write_bytes(b"w")
+    s = {"backend": "native", "native": {"model": str(files["dit"]), "t5xxl": str(files["t5"]),
+                                         "vae": str(files["vae"])}}
+    said = []
+    ok, msg = video_native.generate(s, "p", tmp_path / "a.mp4", write_sidecar=False,
+                                    on_progress=said.append, **kw)
+    return ok, msg, runner.params, said
+
+
+def test_a_default_size_video_over_the_limit_is_decoded_in_tiles(monkeypatch, tmp_path):
+    ok, msg, params, said = _generate_video(monkeypatch, tmp_path, {"max_tensor_bytes": 2 * GIB},
+                                            seconds=5, fps=16)
+    assert ok, msg
+    assert (params[0]["width"], params[0]["height"], params[0]["video_frames"]) == (832, 480, 81)
+    assert params[0]["vae_tile_size"] == 320
+    assert any(line.startswith("Decoding in 320 px tiles") and "832x480" in line
+               for line in said)
+
+
+@pytest.mark.parametrize("info", [{"max_tensor_bytes": None},
+                                  {"max_tensor_bytes": 2 * GIB, "wan_vae_conv": None}])
+def test_a_video_is_not_tiled_without_a_limit_or_a_wan_vae(monkeypatch, tmp_path, info):
+    ok, msg, params, said = _generate_video(monkeypatch, tmp_path, info, seconds=5, fps=16)
+    assert ok, msg
+    assert params[0]["vae_tile_size"] is None
+    assert not [line for line in said if "tiles" in line]
+
+
+def test_a_video_no_tile_fits_is_refused_before_generating(monkeypatch, tmp_path):
+    ok, msg, params, _said = _generate_video(monkeypatch, tmp_path, {"max_tensor_bytes": MIB},
+                                             seconds=5, fps=16)
+    assert not ok
+    assert msg.startswith("This video cannot be decoded on the GPU") and "up to 1 MB" in msg
+    assert params == []

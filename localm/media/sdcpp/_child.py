@@ -78,6 +78,7 @@ class _State:
     capacity_short = False
     budget_refused = False
     vae_decoder_ch: Optional[int] = None
+    wan_vae_conv: Optional[str] = None
 
 
 class _BudgetRefused(RuntimeError):
@@ -148,6 +149,7 @@ _MODEL_DESC_RE = re.compile(r"\AWan\d\.[\dx]-[A-Za-z0-9.]+-[A-Za-z0-9.]+\Z")
 
 _CAPACITY_SHORT_TEXT = "cannot make enough memory available"
 _KL_DECODER_CH_RE = re.compile(r"\bvae decoder: ch = (\d+)")
+_WAN_VAE_CONV_RE = re.compile(r"\bWan VAE convolution type: (2D|3D)\b")
 _SEGMENT_REFUSED_RE = re.compile(r"\bsegment \d+/\d+ \([^)]*\) failed during weight preparation")
 
 
@@ -200,6 +202,9 @@ def _make_callbacks(resp_q):
         ch = _KL_DECODER_CH_RE.search(msg)
         if ch:
             _State.vae_decoder_ch = int(ch.group(1))
+        wan = _WAN_VAE_CONV_RE.search(msg)
+        if wan:
+            _State.wan_vae_conv = wan.group(1)
         head = msg.split(" --- ", 1)[0].strip()
         if not _State.model_desc and _MODEL_DESC_RE.match(head):
             _State.model_desc = head
@@ -374,6 +379,7 @@ def _do_load(payload):
     _State.last_errors = []
     _State.model_desc = ""
     _State.vae_decoder_ch = None
+    _State.wan_vae_conv = None
     _State.paths = tuple(str(v) for k, v in ctx_fields.items()
                          if k.endswith("_path") and isinstance(v, str) and v) + tuple(
         str(path) for _name, path in (ctx_fields.get("embeddings") or ()))
@@ -395,6 +401,7 @@ def _do_load(payload):
         "default_scheduler": (lib.sd_scheduler_name(scheduler) or b"").decode(),
         "devices": b.list_devices(lib),
         "vae_decoder_ch": _State.vae_decoder_ch,
+        "wan_vae_conv": _State.wan_vae_conv,
         "max_tensor_bytes": _max_tensor_bytes(lib, payload.get("runtime_dir")),
     }
 
@@ -535,8 +542,9 @@ def _set_hires(lib, b, p, payload):
 
 
 def _set_vae_tiling(p, payload) -> None:
-    """Decode image params *p* in square tiles of ``payload["vae_tile_size"]``
-    image pixels when it is set; leave the library's default otherwise."""
+    """Decode image or video params *p* in square tiles of
+    ``payload["vae_tile_size"]`` image pixels when it is set; leave the
+    library's default otherwise."""
     tile = payload.get("vae_tile_size")
     if not tile:
         return
@@ -736,6 +744,7 @@ def _do_generate_video(payload, cancel_event):
     sched = _enum_from_name(lib, "scheduler", payload.get("scheduler"))
     if sched is not None:
         p.sample_params.scheduler = sched
+    _set_vae_tiling(p, payload)
     keep = None
     init = payload.get("init_image")
     if init:
@@ -744,7 +753,7 @@ def _do_generate_video(payload, cancel_event):
             raise ValueError("init image buffer does not match its size")
         keep = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
         p.init_image = b.sd_image_t(w, h, c, ctypes.cast(keep, ctypes.POINTER(ctypes.c_uint8)))
-    frames = ctypes.POINTER(b.sd_image_t)()
+    frames =ctypes.POINTER(b.sd_image_t)()
     count = ctypes.c_int(0)
     audio = ctypes.POINTER(b.sd_audio_t)()
     fps_out = ctypes.c_int(0)
