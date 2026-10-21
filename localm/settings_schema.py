@@ -229,6 +229,13 @@ CORE_FIELDS: list = [
                  "VRAM. 0 is automatic: with auto-sized GPU layers, only as many as "
                  "needed, before a whole layer moves to the CPU.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=0, max=999),
+    SettingField("moe_cache_mib", Widget.NUMBER, "MoE expert GPU cache (MB)",
+                 "MoE models only. VRAM that keeps the most used experts of the layers whose "
+                 "experts stay in system RAM, so they are not copied to the GPU again. Used "
+                 "only when those experts are read into memory (not memory-mapped); the VRAM "
+                 "is set aside whenever the model has experts. 0 turns it off. Experimental "
+                 "in llama.cpp.",
+                 group="Engine", applies=Applies.NEXT_LOAD, min=0, max=262144),
     SettingField("use_mmap", Widget.SELECT, "Memory-map model files",
                  "auto runs from disk-backed memory when the model may not fit in "
                  "available RAM. on forces it; off reads the whole model into memory first.",

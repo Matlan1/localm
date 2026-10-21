@@ -1378,6 +1378,7 @@ class LlamaCpp:
     _mtp_backend_chain = None    # sampler chain attached to the draft context, or None
     mtp_drafted = 0              # draft tokens THIS generation sent to verification
     prompt_reused = 0            # prompt tokens the last single-sequence prefill kept in the KV cache
+    moe_cache_bytes = 0          # VRAM every context gives the MoE expert cache, 0 when off
     _checkpoints_wanted: Optional[bool] = None   # lazy, see _state_checkpoints_wanted
     _checkpoints: Sequence[_StateCheckpoint] = ()   # state checkpoints of sequence 0, newest last
     mtp_accepted = 0             # how many of those the target model accepted
@@ -1466,6 +1467,7 @@ class LlamaCpp:
         diffusion_max_tokens: Optional[int] = None,
         n_parallel: int = 1,
         kv_cache_type: Optional[str] = None,
+        moe_cache_size: int = 0,
         **_ignored,
     ) -> None:
         self._n_ctx       = n_ctx
@@ -1716,6 +1718,8 @@ class LlamaCpp:
                     self.mmap_mapped = captured.mapped()
                 else:
                     _load_failure_detail = captured.tail()
+        if self._model_ptr:
+            self.moe_cache_bytes = self._resolve_moe_cache(moe_cache_size, n_cpu_moe)
         if not self._model_ptr:
             # A NULL return when we asked to cancel is an ABORT, not a failure:
             # the load was superseded by a newer model selection. Report it as
@@ -1823,6 +1827,7 @@ class LlamaCpp:
         self._apply_initial_spec_params(cp, spec_draft_tokens)
         cp.flash_attn_type   = -1  # keep default (unspecified)
         apply_kv_cache_type(cp, self._kv_cache_type)
+        self._apply_moe_cache(cp)
         if n_threads is not None:
             cp.n_threads       = n_threads
             cp.n_threads_batch = n_threads
@@ -4032,6 +4037,7 @@ class LlamaCpp:
         cp.offload_kqv = offload_kqv
         self._apply_parallel_params(cp)
         apply_kv_cache_type(cp, self._kv_cache_type)
+        self._apply_moe_cache(cp)
         if self._n_threads is not None:
             cp.n_threads = self._n_threads
             cp.n_threads_batch = self._n_threads
@@ -5068,6 +5074,40 @@ class LlamaCpp:
     CHECKPOINT_TAIL = CHECKPOINT_TAIL
     CHECKPOINTS_MAX = CHECKPOINTS_MAX
 
+    def _resolve_moe_cache(self, requested: int, n_cpu_moe: int) -> int:
+        """The bytes of MoE expert cache this model's contexts get: *requested*
+        when the routed experts of *n_cpu_moe* layers were placed in system RAM
+        and the load did not memory-map them, else 0 (logged at INFO with the
+        reason)."""
+        requested = max(0, int(requested or 0))
+        if requested == 0:
+            return 0
+        from localm.debuglog import logger
+        if n_cpu_moe <= 0 or self.moe_skip_reason is not None:
+            logger.info("moe cache: off, no expert weights are kept in system RAM")
+            return 0
+        if self.mmap_mapped is not False:
+            logger.info("moe cache: off, the expert weights in system RAM are %s",
+                        "memory-mapped" if self.mmap_mapped else "possibly memory-mapped")
+            return 0
+        logger.info("moe cache: %d MiB of VRAM for the experts kept in system RAM",
+                    requested >> 20)
+        return requested
+
+    def _apply_moe_cache(self, cp) -> None:
+        """Give context params *cp* the MoE expert cache (``moe_cache_bytes``).
+        A runtime whose context params have no ``moe_cache_size`` field gets
+        none, logged at WARNING once, and the cache stays off."""
+        if self.moe_cache_bytes <= 0:
+            return
+        if not hasattr(cp, "moe_cache_size"):
+            from localm.debuglog import logger
+            logger.warning("moe_cache_mib is set but this llama.cpp runtime has no MoE "
+                           "expert cache; it stays off")
+            self.moe_cache_bytes = 0
+            return
+        cp.moe_cache_size = self.moe_cache_bytes
+
     def _state_checkpoints_wanted(self) -> bool:
         """Whether prefill takes state checkpoints: the model has recurrent
         layers (whose cache cannot drop a range of positions) and the runtime
@@ -5255,6 +5295,7 @@ class LlamaCpp:
         cp.n_ubatch    = cp.n_batch   # micro-batch must match so prefill fits in one call
         cp.offload_kqv = offload_kqv  # False -> KV cache in system RAM (VRAM was tight)
         apply_kv_cache_type(cp, self._kv_cache_type)
+        self._apply_moe_cache(cp)
         if self._n_threads is not None:
             cp.n_threads = self._n_threads
             cp.n_threads_batch = self._n_threads

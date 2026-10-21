@@ -551,6 +551,7 @@ DEFAULT_CONFIG: dict = {
     # layer moves to the CPU. Only affects Mixture-of-Experts models; a dense
     # model has no expert tensors to move, so any value is a no-op there.
     "n_cpu_moe": 0,
+    "moe_cache_mib": 0,    # MB of VRAM caching MoE experts kept in system RAM; 0 = off
     # Memory-map the model file: "auto" (the loader decides), "on" (only the
     # pages a run touches are resident, so a model that may not fit in
     # available RAM can run from disk-backed memory, first tokens slower) or
