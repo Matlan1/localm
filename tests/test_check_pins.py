@@ -841,7 +841,6 @@ _NOT_A_VERSION_PIN = {
     "localm/plugins/builtin/voice/audio_model.py": "a tag of a chat format",
     "localm/updater.py": "the built-in update signing key set",
     "localm/plugins/coder/agent/context.py": "a cap on the changed files a compaction block lists",
-    "localm/media/native_workflows.py": "a pattern that checks a sha256 digest's shape",
 }
 
 
