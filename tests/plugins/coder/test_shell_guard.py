@@ -262,6 +262,32 @@ def test_a_newline_separates_commands(command, rule):
     assert refusal.rule == rule
 
 
+_BS = chr(92)
+
+
+@pytest.mark.parametrize("command,rule", [
+    ("git reset " + _BS + "\n  --hard origin/main", "git-hard-reset"),
+    ("git reset " + _BS + "\r\n  --hard", "git-hard-reset"),
+    ("git push --force " + _BS + "\n origin main", "git-force-push"),
+    ('git reset "--ha' + _BS + '\nrd"', "git-hard-reset"),
+])
+def test_a_backslash_line_continuation_is_one_command(command, rule):
+    refusal = shell_guard.classify(command, _CWD)
+    assert refusal is not None and refusal.rule == rule, command
+
+
+@pytest.mark.parametrize("command,rule", [
+    ("echo 'x & rd /s /q C:" + _BS + "Windows & '", "fs-root-wipe"),
+    ('echo "a' + _BS + '" & rd /s /q C:' + _BS + 'Windows"', "fs-root-wipe"),
+    ('echo ^" & rd /s /q C:' + _BS + 'Windows ^"', "fs-root-wipe"),
+    ("ls " + _BS + '" ; rm -rf / ; echo ' + _BS + '"', "fs-root-wipe"),
+    ("echo " + _BS + "' ; git reset --hard ; echo " + _BS + "'", "git-hard-reset"),
+])
+def test_quoting_read_differently_by_cmd_and_sh_is_checked_both_ways(command, rule):
+    refusal = shell_guard.classify(command, _CWD)
+    assert refusal is not None and refusal.rule == rule, command
+
+
 def test_a_newline_inside_quotes_is_not_a_separator():
     segs = shell_guard._lex("git commit -m 'line one\nrm -rf /'")
     assert len(segs) == 1

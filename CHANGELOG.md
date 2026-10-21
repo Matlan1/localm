@@ -583,6 +583,24 @@ permanent public record of what shipped and are never rewritten; the in-progress
   download, names `net_mode`, and still installs a runtime from a local build (`--from`) or keeps
   the one already installed. `net_allow_model_downloads` lifts the refusal as it does for model
   downloads.
+- **The coder's read-only shell shortcut no longer runs project programs or writes files without
+  asking.** A command skips the prompt only when it is a bare `grep`, `cat`, `ls` and so on that no
+  project file can stand in for, with no option that runs a program, writes a file, reads a file
+  the option names or follows links (`git grep -O`, `rg --hostname-bin`, `sort -o`, `tree -R`,
+  `--files0-from`, `grep -f`, also attached, clustered or shortened), with every path in it inside
+  the project once links are followed, and, for git, with no repository setting that runs a
+  program (an fsmonitor hook, a filter, a diff driver, a pager). Anything else asks as before.
+- **The coder's shell safety check reads a command the way both shells do.** A backslash at the
+  end of a line joins it to the next, so `git reset \` followed by `--hard` on the next line is
+  refused, and quoting that `cmd.exe` and `sh` read differently (single quotes, `\"`, `^"`) can no
+  longer hide a second command from the check or from the protection of localm's own files.
+- **Trusted project hooks ask before running once file writes are allowed for the session.**
+  Answering "a" to a file write in the terminal, or "always allow" in the GUI, now gives every hook
+  run the confirmation `run_shell` needs, as auto-approve already did, so a hook cannot run a
+  script the model has just rewritten without asking. The trust prompt (terminal and GUI) shows
+  invisible and direction-changing characters in hook commands as `\uXXXX` escapes, the coder asks
+  before touching the hook and MCP trust store, and an "a" answer applies only to the prompt it
+  was given at.
 
 ## [0.3.0] - 2026-10-14
 

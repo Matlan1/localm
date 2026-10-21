@@ -12,6 +12,11 @@ answer. It reads no environment variables, touches no filesystem, and starts no
 process. Relative paths are resolved against ``cwd`` LEXICALLY
 (``posixpath.normpath``), never with ``Path.resolve()``, which does I/O.
 
+A command line is parsed in three quoting dialects (:data:`_DIALECTS`): the
+POSIX ``sh`` rules, the ``cmd.exe`` rules, and a mixed form of the two. A
+command is refused when any parse matches a rule. :func:`is_read_only` is the
+exception to purity: it reads the filesystem (see its docstring).
+
 WHAT IT BLOCKS (rule ids are stable and are named in the refusal message):
 
 ``fs-root-wipe``      recursive delete whose target is a filesystem root, a
@@ -38,6 +43,8 @@ a rule in this module.
 
 from __future__ import annotations
 
+import glob
+import os
 import posixpath
 from dataclasses import dataclass
 from pathlib import Path
@@ -51,6 +58,15 @@ _DQ_ESCAPABLE = '"\\$`'
 
 # How deep command substitution is followed before it is left alone.
 _MAX_SUB_DEPTH = 3
+
+# Quoting dialects a command line is parsed in:
+#   "mixed": ' and " quote, \ escapes inside "...", an unquoted \ is literal.
+#   "sh":    POSIX sh: an unquoted \ escapes the next character, and \ before a
+#            line break joins the two lines into one command.
+#   "cmd":   cmd.exe: only " quotes, \ is always literal (so \" ends a quoted
+#            span), ^ escapes the next character outside quotes, and there is
+#            no command substitution.
+_DIALECTS = ("mixed", "sh", "cmd")
 
 _POSIX_SYSTEM_DIRS = frozenset({
     "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib32", "/lib64",
@@ -227,15 +243,18 @@ def _read_backtick(text: str, start: int) -> tuple[str, int]:
     return text[start:], n
 
 
-def _lex(text: str) -> list[_Segment]:
+def _lex(text: str, dialect: str = "mixed") -> list[_Segment]:
     """Split *text* into simple commands, quote-aware, without evaluating it.
 
     Segments joined by ``|`` share a ``group``; every other separator
     (``;``, ``&&``, ``||``, ``&``, newline) starts a new one. ``>`` and ``>>``
     targets are recorded as redirects instead of ordinary tokens. Command and
     process substitutions are kept verbatim inside their token AND collected in
-    ``subs`` for the caller to parse separately.
+    ``subs`` for the caller to parse separately. *dialect* is one of
+    :data:`_DIALECTS`.
     """
+    sh = dialect == "sh"
+    cmd = dialect == "cmd"
     segments: list[_Segment] = []
     tokens: list[str] = []
     redirects: list[tuple[str, str]] = []
@@ -285,7 +304,10 @@ def _lex(text: str) -> list[_Segment]:
             continue
 
         if in_double:
-            if ch == "\\" and i + 1 < n and text[i + 1] in _DQ_ESCAPABLE:
+            if sh and ch == "\\" and text[i + 1:i + 2] == "\n":
+                i += 2
+                continue
+            if not cmd and ch == "\\" and i + 1 < n and text[i + 1] in _DQ_ESCAPABLE:
                 cur.append(text[i + 1])
                 i += 2
                 continue
@@ -293,12 +315,12 @@ def _lex(text: str) -> list[_Segment]:
                 in_double = False
                 i += 1
                 continue
-            if ch == "$" and i + 1 < n and text[i + 1] == "(":
+            if not cmd and ch == "$" and i + 1 < n and text[i + 1] == "(":
                 body, i = _read_balanced(text, i + 2, "(", ")")
                 subs.append(body)
                 cur.append("$(" + body + ")")
                 continue
-            if ch == "`":
+            if not cmd and ch == "`":
                 body, i = _read_backtick(text, i + 1)
                 subs.append(body)
                 cur.append("`" + body + "`")
@@ -307,7 +329,24 @@ def _lex(text: str) -> list[_Segment]:
             i += 1
             continue
 
-        if ch == "'":
+        if sh and ch == "\\":
+            if text[i + 1:i + 2] == "\n":
+                i += 2
+            elif text[i + 1:i + 3] == "\r\n":
+                i += 3
+            elif i + 1 < n:
+                cur.append(text[i + 1])
+                i += 2
+            else:
+                cur.append(ch)
+                i += 1
+            continue
+        if cmd and ch == "^":
+            if i + 1 < n:
+                cur.append(text[i + 1])
+            i += 2
+            continue
+        if ch == "'" and not cmd:
             in_single = True
             i += 1
             continue
@@ -315,17 +354,17 @@ def _lex(text: str) -> list[_Segment]:
             in_double = True
             i += 1
             continue
-        if ch == "$" and i + 1 < n and text[i + 1] == "(":
+        if not cmd and ch == "$" and i + 1 < n and text[i + 1] == "(":
             body, i = _read_balanced(text, i + 2, "(", ")")
             subs.append(body)
             cur.append("$(" + body + ")")
             continue
-        if ch == "`":
+        if not cmd and ch == "`":
             body, i = _read_backtick(text, i + 1)
             subs.append(body)
             cur.append("`" + body + "`")
             continue
-        if ch in "<>" and i + 1 < n and text[i + 1] == "(":
+        if not cmd and ch in "<>" and i + 1 < n and text[i + 1] == "(":
             body, i = _read_balanced(text, i + 2, "(", ")")
             subs.append(body)
             cur.append(ch + "(" + body + ")")
@@ -915,13 +954,15 @@ def _rule_remote_exec(segments: Sequence[_Segment]) -> Optional[ShellRefusal]:
 #  Entry point                                                                 #
 # --------------------------------------------------------------------------- #
 
-def _collect(text: str, depth: int, base: int) -> tuple[list[_Segment], int]:
-    """Segments of *text* and of any substitution inside it, with unique groups.
+def _collect(text: str, depth: int, base: int,
+             dialect: str = "mixed") -> tuple[list[_Segment], int]:
+    """Segments of *text* and of any substitution inside it, with unique groups,
+    parsed in *dialect*.
 
     Each nested parse is given a group range disjoint from every other, so two
     unrelated commands can never be read as one pipeline.
     """
-    segments = _lex(text)
+    segments = _lex(text, dialect)
     out: list[_Segment] = []
     highest = base
     for seg in segments:
@@ -932,9 +973,15 @@ def _collect(text: str, depth: int, base: int) -> tuple[list[_Segment], int]:
     if depth < _MAX_SUB_DEPTH:
         for seg in segments:
             for sub in seg.subs:
-                nested, nxt = _collect(sub, depth + 1, nxt)
+                nested, nxt = _collect(sub, depth + 1, nxt, dialect)
                 out.extend(nested)
     return out, nxt
+
+
+def _parses(text: str) -> list[list[_Segment]]:
+    """The segments of *text* (substitutions included) in each of
+    :data:`_DIALECTS`, in that order."""
+    return [_collect(text, 0, 0, d)[0] for d in _DIALECTS]
 
 
 def classify_git_push(remote: str, branch: str) -> Optional[ShellRefusal]:
@@ -969,7 +1016,8 @@ def classify(command: str, cwd: Optional[Path | str] = None) -> Optional[ShellRe
     Returns
     -------
     ShellRefusal | None
-        The first matching rule, or None when nothing matched.
+        The first matching rule in any of :data:`_DIALECTS`, or None when
+        nothing matched in any of them.
 
     Notes
     -----
@@ -980,8 +1028,16 @@ def classify(command: str, cwd: Optional[Path | str] = None) -> Optional[ShellRe
     if not command or not command.strip():
         return None
     cwd_s = _canon(str(cwd)) if cwd is not None else None
-    segments, _ = _collect(command, 0, 0)
+    for segments in _parses(command):
+        refusal = _classify_segments(segments, cwd_s)
+        if refusal is not None:
+            return refusal
+    return None
 
+
+def _classify_segments(segments: Sequence[_Segment],
+                       cwd_s: Optional[str]) -> Optional[ShellRefusal]:
+    """The first rule *segments* (one parse of a command) match, or None."""
     pipe_refusal = _rule_remote_exec(segments)
     if pipe_refusal is not None:
         return pipe_refusal
@@ -1010,12 +1066,13 @@ def classify(command: str, cwd: Optional[Path | str] = None) -> Optional[ShellRe
 #
 # The opposite question to classify(): not "is this catastrophic" but "is this
 # provably read-only and confined to the project", so the confirmation prompt
-# can be skipped. It is an ALLOWLIST over the same lexical parse: anything it
-# cannot prove (a wrapper, a substitution, a variable, a redirect into a file,
-# an operand outside the project, an unknown command or subcommand) answers
-# False and the command goes to the normal prompt.
+# can be skipped. It is an ALLOWLIST: anything it cannot prove (a wrapper, a
+# substitution, a variable, a redirect into a file, an operand outside the
+# project, an unknown command, subcommand or option) answers False and the
+# command goes to the normal prompt.
 
-# Commands that only read, when every operand stays inside the project.
+# Commands that only read, when every operand stays inside the project. The
+# command must be written as one of these bare names.
 _READ_ONLY_COMMANDS = frozenset({
     "ls", "dir", "pwd", "cat", "head", "tail", "wc", "grep", "egrep", "fgrep",
     "rg", "tree", "file", "stat", "du", "diff", "cmp", "basename", "dirname",
@@ -1024,29 +1081,64 @@ _READ_ONLY_COMMANDS = frozenset({
     "get-location", "test-path", "find", "sort", "uniq",
 })
 
-# Read-only git subcommands, and the flags that make one write anyway.
+# Read-only git subcommands.
 _READ_ONLY_GIT = frozenset({
     "status", "diff", "log", "show", "rev-parse", "ls-files", "blame",
     "describe", "shortlog", "branch", "tag", "remote", "grep",
 })
-_GIT_WRITING_FLAGS = ("--output", "-o", "--ext-diff", "-d", "-D", "-m", "-M",
-                      "-c", "-C", "--delete", "--move", "--copy", "--set-upstream-to",
-                      "-u", "--unset-upstream", "--edit-description", "-f", "--force",
-                      "add", "rm", "rename", "set-url", "prune", "update", "set-head",
-                      "--track", "--no-track", "--create-reflog",
-                      "-O", "--open-files-in-pager")
 
-# Flags (as prefixes, so an attached value matches too) that make an otherwise
-# read-only command run a program or write a file.
-_EXEC_OR_WRITE_FLAGS: dict[str, tuple[str, ...]] = {
-    "rg": ("--pre",),
-    "sort": ("-o", "--output", "--compress-program"),
-    "tree": ("-o", "--output"),
+# Options that make an otherwise read-only command write a file, run a
+# program, read a file the option names, or follow symlinks while recursing:
+# (short option letters, matched anywhere in a cluster such as -ro; long
+# options, matched as written or abbreviated, with or without a value).
+_RISKY_OPTIONS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "git": ("odDmMcCufO", (
+        "--output", "--ext-diff", "--textconv", "--show-signature", "--delete",
+        "--move", "--copy", "--set-upstream-to", "--unset-upstream",
+        "--edit-description", "--force", "--track", "--no-track",
+        "--create-reflog", "--open-files-in-pager")),
+    "rg": ("Lfz", ("--pre", "--hostname-bin", "--follow", "--search-zip",
+                   "--file", "--ignore-file")),
+    "grep": ("fR", ("--file", "--dereference-recursive", "--exclude-from")),
+    "egrep": ("fR", ("--file", "--dereference-recursive", "--exclude-from")),
+    "fgrep": ("fR", ("--file", "--dereference-recursive", "--exclude-from")),
+    "sort": ("oT", ("--output", "--compress-program", "--files0-from",
+                    "--temporary-directory", "--random-source")),
+    "tree": ("oRl", ("--output", "--fromfile")),
+    "du": ("LX", ("--dereference", "--files0-from", "--exclude-from")),
+    "wc": ("", ("--files0-from",)),
+    "diff": ("rX", ("--recursive", "--exclude-from", "--from-file", "--to-file")),
+    "file": ("fmC", ("--files-from", "--magic-file", "--compile")),
+    "ls": ("L", ("--dereference",)),
 }
+
+# git remote subcommand words that write.
+_GIT_WRITING_WORDS = frozenset({"add", "rm", "rename", "set-url", "prune",
+                                "update", "set-head"})
+
+# cmd.exe commands, whose short /x switches are options rather than paths, and
+# the switches that recurse (through junctions too).
+_DOS_COMMANDS = frozenset({"dir", "findstr", "where", "type", "cd"})
+_DOS_RECURSE = frozenset({"/s"})
 
 _FIND_ACTIONS = frozenset({"-exec", "-execdir", "-ok", "-okdir", "-delete",
                            "-fprint", "-fprint0", "-fprintf", "-fls"})
+_FIND_RISKY = frozenset({"-L", "-H", "-follow", "-files0-from"})
 _UNSAFE_CHARS = ("$", "`", "<", ">", "%")
+
+# git configuration that makes a read command run a program, or pulls in
+# another file: whole sections, and keys within a section. core.fsmonitor
+# names a program unless it is a boolean (true selects git's built-in
+# monitor); log.showSignature runs the signature program when true.
+_GIT_RISKY_SECTIONS = frozenset({"include", "includeif", "filter", "pager"})
+_GIT_RISKY_KEYS = {
+    "core": frozenset({"fsmonitor", "pager"}),
+    "diff": frozenset({"external", "textconv", "command"}),
+    "log": frozenset({"showsignature"}),
+    "gpg": frozenset({"program"}),
+}
+_GIT_FALSE = frozenset({"false", "no", "off", "0"})
+_GIT_BOOL = _GIT_FALSE | {"true", "yes", "on", "1", ""}
 
 
 def _plain_operand(tok: str) -> bool:
@@ -1074,41 +1166,192 @@ def _inside(norm: Optional[str], root: str) -> bool:
     return norm is not None and (norm == root or norm.startswith(root.rstrip("/") + "/"))
 
 
-def _git_read_only(args: Sequence[str]) -> bool:
-    # A global option before the subcommand (-C dir, -c key=val, --git-dir,
-    # --exec-path ...) can redirect or reconfigure git: not proven safe.
-    if not args or args[0].startswith("-"):
-        return False
-    sub, rest = args[0].lower(), args[1:]
-    if sub not in _READ_ONLY_GIT:
-        return False
-    for tok in rest:
-        low = tok.lower()
-        if any(low == f or low.startswith(f + "=") for f in _GIT_WRITING_FLAGS):
-            return False
-    if sub in ("branch", "tag", "remote"):
-        # Listing only: any operand would create, rename or configure.
-        return all(t.startswith("-") for t in rest)
-    return True
+def _real(path: str) -> str:
+    """*path* with every symlink and junction resolved, case-normalised."""
+    return os.path.normcase(os.path.realpath(path))
 
 
-def is_read_only(command: str, cwd: Optional[Path | str]) -> bool:
-    """True when *command* provably only reads, and only inside *cwd*.
+def _real_within(real: str, root_real: str) -> bool:
+    return real == root_real or real.startswith(root_real.rstrip(os.sep) + os.sep)
 
-    Pure and lexical, like :func:`classify`. A False answer is not a verdict
-    that the command is unsafe, only that it could not be proven safe, so the
-    caller asks the user as before. See test_read_only_shell_commands.
-    """
-    if not command or not command.strip() or cwd is None:
+
+def _risky_option(tok: str, short: str, long: Sequence[str]) -> bool:
+    """True when option *tok* is, or contains, one of the *short* letters or
+    *long* options (GNU getopt and git accept any unambiguous abbreviation of
+    a long option, so a prefix of one counts)."""
+    if tok.startswith("--"):
+        stem = tok.split("=", 1)[0]
+        return len(stem) > 2 and any(opt.startswith(stem) for opt in long)
+    return tok.startswith("-") and any(ch in short for ch in tok[1:])
+
+
+def _split_args(name: str, args: Sequence[str]) -> tuple[list[str], list[str]]:
+    """(options, operands) of *args*. Everything after ``--`` is an operand,
+    and a short /x switch is an option only for a cmd.exe command."""
+    options: list[str] = []
+    operands: list[str] = []
+    ended = False
+    for tok in args:
+        if ended:
+            operands.append(tok)
+        elif tok == "--":
+            ended = True
+        elif tok.startswith("-") or (name in _DOS_COMMANDS and _is_flag(tok)):
+            options.append(tok)
+        else:
+            operands.append(tok)
+    return options, operands
+
+
+def _operand_ok(tok: str, current: str, root: str, root_real: str) -> bool:
+    """Whether path operand *tok*, relative to *current*, stays inside the
+    project, lexically and with symlinks resolved (every match of a glob)."""
+    if not _plain_operand(tok):
         return False
-    if "\n" in command or "\r" in command:
+    norm = _norm_target(tok, current)
+    if norm is None or not _inside(norm, root) or _secret_kind(norm):
         return False
-    root = _canon(str(cwd))
-    if root is None:
+    path = tok if _canon(tok) is not None else os.path.join(current, tok)
+    try:
+        hits = glob.glob(path) if any(ch in tok for ch in "*?") else [path]
+        return all(_real_within(_real(p), root_real) for p in hits)
+    except (OSError, ValueError):
         return False
-    segments = _lex(command)
-    if not segments:
-        return False
+
+
+def _search_path(root: str, root_real: str) -> tuple[list[str], list[str]]:
+    """The PATH entries that matter to :func:`_program_shadowed`: the absolute
+    ones whose path, as written, lies in the project (*root* or its resolved
+    form *root_real*), and the relative or empty ones. Nothing outside the
+    project is touched."""
+    inside: list[str] = []
+    relative: list[str] = []
+    roots = {os.path.normcase(os.path.abspath(root)), root_real}
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if not entry or not os.path.isabs(entry):
+            relative.append(entry)
+            continue
+        lexical = os.path.normcase(os.path.abspath(entry))
+        if any(_real_within(lexical, r) for r in roots):
+            inside.append(entry)
+    return inside, relative
+
+
+def _program_shadowed(name: str, current: str, root: str, root_real: str,
+                      search: tuple[list[str], list[str]]) -> bool:
+    """True when a file inside the project could be what command *name* runs.
+
+    Looks for a file (not a folder) named *name* (on Windows also *name* plus
+    each PATHEXT extension) in every directory the lookup may search that lies
+    in the project (*root* or *root_real*, compared as written): on Windows the
+    directory the command runs in and the process directory first, then each
+    PATH entry (*search*, from :func:`_search_path`), a relative or empty
+    entry taken relative to *current*. Returns True when a candidate cannot
+    be checked."""
+    inside, relative = search
+    dirs = list(inside)
+    exts = [""]
+    if os.name == "nt":
+        dirs += [current, os.getcwd()]
+        exts += [e for e in os.environ.get(
+            "PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";") if e]
+    dirs += [os.path.join(current, entry) for entry in relative]
+    roots = {os.path.normcase(os.path.abspath(root)), root_real}
+    try:
+        for d in dirs:
+            lexical = os.path.normcase(os.path.abspath(d))
+            if not any(_real_within(lexical, r) for r in roots):
+                continue
+            if any(os.path.isfile(os.path.join(d, name + ext)) for ext in exts):
+                return True
+    except (OSError, ValueError):
+        return True
+    return False
+
+
+def _git_config_risky(text: str) -> bool:
+    """True when git config *text* sets something that makes a read command
+    run a program (a filter, a diff driver or external diff, a pager, an
+    fsmonitor hook, signature checking) or includes another file."""
+    section = ""
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("["):
+            end = line.find("]")
+            if end == -1:
+                return True
+            header = line[1:end].strip().lower()
+            section = header.replace('"', " ").replace(".", " ").split(" ", 1)[0]
+            if section in _GIT_RISKY_SECTIONS:
+                return True
+            line = line[end + 1:].strip()
+        if not line or line[0] in "#;":
+            continue
+        key, eq, value = line.partition("=")
+        key = key.strip().lower()
+        if key not in _GIT_RISKY_KEYS.get(section, ()):
+            continue
+        value = value.strip().strip('"').strip().lower() if eq else "true"
+        if (section, key) == ("core", "fsmonitor") and value in _GIT_BOOL:
+            continue
+        if (section, key) == ("log", "showsignature") and value in _GIT_FALSE:
+            continue
+        return True
+    return False
+
+
+def _read_text(path: str) -> str:
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        return fh.read()
+
+
+def _repo_config_risky(dotgit: str, base: str) -> bool:
+    """:func:`_git_config_risky` over every local config file of the repository
+    whose ``.git`` entry is *dotgit* in directory *base* (a ``gitdir:`` file
+    and a ``commondir`` are followed). True when one cannot be read."""
+    gitdir = dotgit
+    if os.path.isfile(dotgit):
+        first = _read_text(dotgit).strip()
+        if not first.lower().startswith("gitdir:"):
+            return True
+        target = first[len("gitdir:"):].strip()
+        gitdir = target if os.path.isabs(target) else os.path.join(base, target)
+    gitdirs = [gitdir]
+    common = os.path.join(gitdir, "commondir")
+    if os.path.isfile(common):
+        target = _read_text(common).strip()
+        gitdirs.append(target if os.path.isabs(target) else os.path.join(gitdir, target))
+    for g in gitdirs:
+        for name in ("config", "config.worktree"):
+            path = os.path.join(g, name)
+            if os.path.lexists(path) and _git_config_risky(_read_text(path)):
+                return True
+    return False
+
+
+def _git_runs_programs(start: str, root: str) -> bool:
+    """True when the repository git uses for a command run in *start* is
+    inside the project and its local configuration makes a read command run a
+    program, or cannot be read. A repository above the project is not looked
+    at."""
+    d = start
+    while _inside(d, root):
+        dotgit = os.path.join(d, ".git")
+        try:
+            if os.path.lexists(dotgit):
+                return _repo_config_risky(dotgit, d)
+        except (OSError, ValueError):
+            return True
+        parent = _canon(posixpath.dirname(d))
+        if parent is None or parent == d:
+            break
+        d = parent
+    return False
+
+
+def _read_only_segments(segments: Sequence[_Segment], root: str, root_real: str,
+                        search: tuple[list[str], list[str]]) -> bool:
+    """Whether every segment of one parse provably only reads inside *root*."""
     current = root
     for seg in segments:
         if seg.subs:
@@ -1120,31 +1363,79 @@ def is_read_only(command: str, cwd: Optional[Path | str]) -> bool:
             return False
         if any(ch in tok for tok in seg.tokens for ch in _UNSAFE_CHARS):
             return False
-        name = _base(seg.tokens[0])
+        prog = seg.tokens[0]
+        name = prog.lower() if os.name == "nt" else prog
+        if name != "git" and name not in _READ_ONLY_COMMANDS:
+            return False
+        if _program_shadowed(name, current, root, root_real, search):
+            return False
         args = seg.tokens[1:]
         if name == "git":
-            if not _git_read_only(args):
+            if not args or args[0].startswith("-") or args[0].lower() not in _READ_ONLY_GIT:
                 return False
-            operands = [a for a in args[1:] if not a.startswith("-")]
-        elif name in _READ_ONLY_COMMANDS:
-            if name == "find" and any(a.lower() in _FIND_ACTIONS for a in args):
+            sub = args[0].lower()
+            options, operands = _split_args(name, args[1:])
+            if sub in ("branch", "tag", "remote") and operands:
                 return False
-            risky = _EXEC_OR_WRITE_FLAGS.get(name, ())
-            if any(a.startswith(f) for a in args for f in risky):
+            if any(op.lower() in _GIT_WRITING_WORDS for op in operands):
                 return False
-            if name == "uniq" and len([a for a in args if not a.startswith("-")]) > 1:
+            if _git_runs_programs(current, root):
                 return False
-            operands = [a for a in args if not _is_flag(a)]
         else:
-            return False
-        for tok in operands:
-            if not _plain_operand(tok):
+            if name == "find" and any(a.lower() in _FIND_ACTIONS or a in _FIND_RISKY
+                                      for a in args):
                 return False
-            norm = _norm_target(tok, current)
-            if norm is None or not _inside(norm, root) or _secret_kind(norm):
+            options, operands = _split_args(name, args)
+            if name in ("dir", "findstr") and any(
+                    o.lower() in _DOS_RECURSE for o in options):
+                return False
+            if name == "uniq" and len(operands) > 1:
+                return False
+        short, long = _RISKY_OPTIONS.get(name, ("", ()))
+        if any(_risky_option(o, short, long) for o in options):
+            return False
+        values = [o.split("=", 1)[1] for o in options
+                  if o.startswith("--") and "=" in o]
+        for tok in operands + values:
+            if not _operand_ok(tok, current, root, root_real):
                 return False
         if name == "cd":
             current = _cd_destination(args, current)
             if current is None or not _inside(current, root):
                 return False
+            try:
+                if not _real_within(_real(current), root_real):
+                    return False
+            except (OSError, ValueError):
+                return False
+    return True
+
+
+def is_read_only(command: str, cwd: Optional[Path | str]) -> bool:
+    """True when *command* provably only reads, and only inside *cwd*.
+
+    The command must be read-only in every one of :data:`_DIALECTS`. Unlike
+    :func:`classify` it reads the filesystem: operands are resolved with
+    symlinks followed, a project file that a command name could run (a PATH
+    entry inside the project, or on Windows the working directory) makes it
+    False, and a git command is False when the project's git configuration
+    can run a program. A False answer is not a verdict that the command is
+    unsafe, only that it could not be proven safe, so the caller asks the
+    user as before. See test_read_only_shell_commands.
+    """
+    if not command or not command.strip() or cwd is None:
+        return False
+    if "\n" in command or "\r" in command:
+        return False
+    root = _canon(str(cwd))
+    if root is None:
+        return False
+    try:
+        root_real = _real(root)
+        search = _search_path(root, root_real)
+    except (OSError, ValueError):
+        return False
+    for segments in _parses(command):
+        if not segments or not _read_only_segments(segments, root, root_real, search):
+            return False
     return True

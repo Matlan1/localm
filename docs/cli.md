@@ -1124,7 +1124,8 @@ and remembering it (`a`, `--trust-hooks` or `/hooks trust`) starts them in the n
 
 Trust covers the hook commands, not the scripts they run, and the agent can edit those
 scripts. So when file writes run without confirmation but `run_shell` does not (a one-shot
-`localm coder "TASK"` without `--yes`, or `run_shell` in `always_confirm`), every hook run
+`localm coder "TASK"` without `--yes`, `run_shell` in `always_confirm`, or a file write
+allowed for the session with `a` at a prompt or "always allow" in the GUI), every hook run
 needs the same confirmation `run_shell` would, and a run that cannot ask refuses it; if
 `run_shell` is disabled in such a session, its hooks do not run at all. When several read-only calls
 run at once, their hooks count toward that batch's two-minute limit. Sub-agents run under

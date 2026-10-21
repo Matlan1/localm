@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -56,6 +58,145 @@ def test_no_project_means_nothing_is_read_only():
     assert is_read_only("ls", None) is False
 
 
+_BS = chr(92)
+
+
+@pytest.mark.parametrize("command", [
+    # The program must be the bare allowlisted name.
+    "./tools/grep TODO src", "tools/cat a.txt", "tools" + _BS + "cat.bat a.txt",
+    "grep.exe x", "/usr/bin/cat a.txt",
+    # Options that run a program, write a file, read a named file or follow
+    # symlinks, attached, clustered or abbreviated.
+    "git grep -O./x.sh foo", "git grep -nO./x.sh foo", "git grep --open=vim foo",
+    "git diff --out=x.patch", "git log --show-signature", "git show --textconv HEAD",
+    "rg --hostname-bin=./x.sh foo", "rg --pre=./x.sh foo", "rg -z foo", "rg -L foo",
+    "rg --follow foo", "rg -fpatterns.txt foo", "sort -ro a.txt a.txt",
+    "sort --out=x a.txt", "sort --files0-from=l.txt", "sort -T tmp a.txt",
+    "wc --files0-from=l.txt", "du --files0-from=l.txt", "du -L src",
+    "grep -fFILE x", "grep -rf FILE x", "grep --exclude-from=../x y", "grep -R x src",
+    "tree -R -H x", "tree -l src", "find -L src", "find src -follow",
+    "diff -r a b", "diff --from-file=../x a", "file -C -m x", "ls -LR src",
+    "findstr /s x a.txt", "dir /s",
+    # Operands that only look like options or switches.
+    "cat -- -/../../etc/passwd", "cat /ab",
+    # An option value naming a path outside the project.
+    "grep --exclude-from=/etc/passwd x src",
+    # Quoting cmd.exe and sh read differently.
+    "type 'x & rd /s /q build & '", 'type "a' + _BS + '" & rd /s /q build"',
+    'type ^" & rd /s /q build ^"', "ls " + _BS + '" ; rm x ; echo ' + _BS + '"',
+    "echo " + _BS + "' ; rm x ; echo " + _BS + "'",
+])
+def test_options_programs_and_quoting_that_escape_the_check(command):
+    assert is_read_only(command, PROJECT) is False, command
+
+
+@pytest.mark.parametrize("command", [
+    "grep TODO src", 'grep "^def" src', "grep -rn 'TODO' src", "git diff -U3",
+    "rg -n parse src", "grep --color=never TODO src", "sort -k2 data.txt",
+    "type src" + _BS + "app.py",
+])
+def test_ordinary_read_only_forms_still_skip_the_prompt(command):
+    assert is_read_only(command, PROJECT) is True, command
+
+
+def _symlink(link: Path, target: Path, directory: bool = False) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=directory)
+    except (OSError, NotImplementedError):
+        if directory and sys.platform == "win32":
+            import _winapi
+            _winapi.CreateJunction(str(target), str(link))
+            return
+        pytest.skip("symlinks are not available to this account")
+
+
+def test_a_symlink_leaving_the_project_is_not_read_only(tmp_path):
+    proj = tmp_path / "proj"
+    (proj / "src").mkdir(parents=True)
+    (proj / "src" / "a.txt").write_text("a", encoding="utf-8")
+    secret = tmp_path / "secret.txt"
+    secret.write_text("s", encoding="utf-8")
+    assert is_read_only("cat src/a.txt", proj) is True
+    assert is_read_only("cat src/*", proj) is True
+    _symlink(proj / "src" / "link.txt", secret)
+    assert is_read_only("cat src/link.txt", proj) is False
+    assert is_read_only("cat src/*", proj) is False
+    assert is_read_only("wc -l src/*.txt", proj) is False
+
+
+def test_a_directory_symlink_leaving_the_project_is_not_read_only(tmp_path):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "x.txt").write_text("x", encoding="utf-8")
+    _symlink(proj / "out", outside, directory=True)
+    assert is_read_only("cat out/x.txt", proj) is False
+    assert is_read_only("cd out && cat x.txt", proj) is False
+    assert is_read_only("ls out", proj) is False
+
+
+def test_a_project_file_that_a_command_name_finds_is_not_read_only(tmp_path, monkeypatch):
+    proj = tmp_path / "proj"
+    (proj / "bin").mkdir(parents=True)
+    monkeypatch.setenv("PATH", "bin" + os.pathsep + str(proj / "abs"))
+    assert is_read_only("grep x a.txt", proj) is True
+    (proj / "bin" / "grep").mkdir()
+    assert is_read_only("grep x a.txt", proj) is True
+    (proj / "bin" / "grep").rmdir()
+    (proj / "bin" / "grep").write_text("#!/bin/sh\n", encoding="utf-8")
+    assert is_read_only("grep x a.txt", proj) is False
+    assert is_read_only("cat a.txt", proj) is True
+    (proj / "abs").mkdir()
+    (proj / "abs" / "cat").write_text("#!/bin/sh\n", encoding="utf-8")
+    assert is_read_only("cat a.txt", proj) is False
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows searches the current folder")
+def test_a_batch_file_in_the_folder_shadows_the_command_on_windows(tmp_path):
+    proj = tmp_path / "proj"
+    (proj / "src").mkdir(parents=True)
+    assert is_read_only("cd src && type a.txt", proj) is True
+    (proj / "src" / "type.bat").write_text("@echo off\n", encoding="utf-8")
+    assert is_read_only("cd src && type a.txt", proj) is False
+    (proj / "grep.cmd").write_text("@echo off\n", encoding="utf-8")
+    assert is_read_only("grep x a.txt", proj) is False
+
+
+@pytest.mark.parametrize("config, read_only", [
+    ("[core]\n\trepositoryformatversion = 0\n\tfsmonitor = true\n", True),
+    ("[core]\n\tfsmonitor = ./hook.sh\n", False),
+    ("[core]\n\tpager = ./p.sh\n", False),
+    ('[filter "lfs"]\n\tclean = git-lfs clean -- %f\n', False),
+    ('[diff "x"]\n\ttextconv = ./t.sh\n', False),
+    ("[diff]\n\texternal = ./d.sh\n", False),
+    ("[include]\n\tpath = other.cfg\n", False),
+    ("[log]\n\tshowSignature = false\n", True),
+    ("[log]\n\tshowSignature\n", False),
+    ("[gpg]\n\tprogram = ./g.sh\n", False),
+    ("[core] fsmonitor = ./hook.sh\n", False),
+])
+def test_git_config_that_runs_programs_is_not_read_only(tmp_path, config, read_only):
+    proj = tmp_path / "proj"
+    (proj / ".git").mkdir(parents=True)
+    (proj / ".git" / "config").write_text(config, encoding="utf-8")
+    assert is_read_only("git status", proj) is read_only
+    assert is_read_only("ls", proj) is True
+
+
+def test_git_config_is_found_through_a_gitdir_file_and_a_nested_repo(tmp_path):
+    proj = tmp_path / "proj"
+    (proj / "sub").mkdir(parents=True)
+    store = proj / "store"
+    store.mkdir()
+    (store / "config").write_text("[core]\n\tfsmonitor = ./hook.sh\n", encoding="utf-8")
+    (proj / "sub" / ".git").write_text("gitdir: ../store\n", encoding="utf-8")
+    assert is_read_only("git status", proj) is True
+    assert is_read_only("cd sub && git status", proj) is False
+    (proj / ".git").write_text("gitdir: store\n", encoding="utf-8")
+    assert is_read_only("git status", proj) is False
+
+
 def _make_agent(tmp_path, **kw):
     from localm.plugins.coder.agent import Agent
     backend = MagicMock()
@@ -97,6 +238,21 @@ def test_plan_mode_still_refuses_a_read_only_command(tmp_path, monkeypatch):
     res = agent._execute_tool(_shell("cat a.txt"), interactive=True)
     assert not res.ok and "hello" not in res.output
     assert prompts == []
+
+
+@pytest.mark.parametrize("command", [
+    "sort -ro a.txt a.txt", "./tools/grep TODO .", "git grep -O./x.sh foo",
+])
+def test_an_executing_or_writing_form_of_an_allowed_command_asks(tmp_path, monkeypatch,
+                                                                command):
+    (tmp_path / "a.txt").write_text("b\na\n", encoding="utf-8")
+    agent = _make_agent(tmp_path)
+    prompts = []
+    monkeypatch.setattr(display.console, "input",
+                        lambda prompt="": prompts.append(prompt) or "n")
+    res = agent._execute_tool(_shell(command), interactive=True)
+    assert len(prompts) == 1 and not res.ok
+    assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "b\na\n"
 
 
 def test_writing_command_still_asks(tmp_path, monkeypatch):
