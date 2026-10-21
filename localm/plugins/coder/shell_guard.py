@@ -46,6 +46,7 @@ from __future__ import annotations
 import glob
 import os
 import posixpath
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence
@@ -1173,27 +1174,48 @@ def _real(path: str) -> str:
     return os.path.normcase(os.path.realpath(path))
 
 
+_REPARSE_POINT = 0x400
+_SYSTEM_FILE = 0x4
+
+
 def _dotdot_after_link(path: str) -> bool:
-    """True when a ``..`` in absolute *path* comes after a component that is a
-    symlink or junction, or after a wildcard component that could match one: a
-    POSIX-style tool applies that ``..`` to the link's target, while
-    :func:`_real` collapses it first on Windows. One ``lstat`` per component.
-    Raises OSError or ValueError when a component cannot be examined."""
+    """True when absolute *path* cannot be judged by resolving it: a ``..``
+    comes after a component that is a symlink or junction, or after a wildcard
+    component that could match one (a POSIX-style tool applies that ``..`` to
+    the link's target, while :func:`_real` collapses it first on Windows); or a
+    component is a link Python does not resolve but an MSYS or Cygwin tool
+    follows (a reparse point that is neither a symlink nor a junction, such as
+    a WSL symlink; a file with the system attribute, such as a Cygwin symlink
+    file); or a component before the last exists and is not a directory. One
+    ``lstat`` per component. Raises OSError or ValueError when a component
+    cannot be examined."""
     drive, rest = os.path.splitdrive(path)
     current = drive + (os.sep if rest[:1] in ("/", "\\") else "")
+    parts = [p for p in rest.replace("\\", "/").split("/") if p not in ("", ".")]
     linked = False
-    for part in rest.replace("\\", "/").split("/"):
-        if part in ("", "."):
-            continue
+    for i, part in enumerate(parts):
         if part == "..":
             if linked:
                 return True
             current = os.path.dirname(current)
             continue
         current = os.path.join(current, part)
-        if (any(ch in part for ch in "*?[") or os.path.islink(current)
-                or os.path.isjunction(current)):
+        if any(ch in part for ch in "*?["):
             linked = True
+            continue
+        try:
+            st = os.lstat(current)
+        except FileNotFoundError:
+            continue
+        attrs = getattr(st, "st_file_attributes", 0)
+        if stat.S_ISLNK(st.st_mode) or os.path.isjunction(current):
+            linked = True
+            continue
+        opaque_link = bool(attrs & _REPARSE_POINT) or (
+            stat.S_ISREG(st.st_mode) and bool(attrs & _SYSTEM_FILE))
+        file_in_the_middle = i < len(parts) - 1 and not stat.S_ISDIR(st.st_mode)
+        if opaque_link or file_in_the_middle:
+            return True
     return False
 
 
@@ -1250,7 +1272,7 @@ def _operand_ok(tok: str, current: str, root: str, root_real: str) -> bool:
             return False
         hits = glob.glob(path) if any(ch in tok for ch in "*?") else [path]
         return all(_real_inside(p, root_real) for p in hits)
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return False
 
 
@@ -1410,18 +1432,33 @@ def _repo_config_risky(dotgit: str, base: str, root: str) -> bool:
     return False
 
 
+def _repo_at(d: str) -> Optional[str]:
+    """The git directory git would use at folder *d* itself: its ``.git``
+    entry, else *d* when *d* is a git directory (``HEAD`` file plus ``objects``
+    and ``refs`` folders), else None. Raises OSError."""
+    dotgit = os.path.join(d, ".git")
+    if os.path.lexists(dotgit):
+        return dotgit
+    if (os.path.isfile(os.path.join(d, "HEAD")) and os.path.isdir(os.path.join(d, "objects"))
+            and os.path.isdir(os.path.join(d, "refs"))):
+        return d
+    return None
+
+
 def _git_runs_programs(start: str, root: str) -> bool:
     """True when the repository git uses for a command run in *start* is
     inside the project and its local configuration or hook scripts can make a
     read command run a program, or cannot be read. The repository is looked up
     from *start* as written and from *start* with its links resolved (git uses
-    the resolved one); either being risky makes the answer True. A repository
-    above the project is not looked at."""
+    the resolved one); either being risky makes the answer True. At each folder
+    a ``.git`` entry is used first, then the folder itself when it is a git
+    directory (a bare repository). A repository above the project is not looked
+    at."""
     d = start
     while _inside(d, root):
-        dotgit = os.path.join(d, ".git")
         try:
-            if os.path.lexists(dotgit):
+            dotgit = _repo_at(d)
+            if dotgit is not None:
                 if _repo_config_risky(dotgit, d, root):
                     return True
                 break
@@ -1437,9 +1474,9 @@ def _git_runs_programs(start: str, root: str) -> bool:
     except (OSError, ValueError):
         return True
     while _real_within(os.path.normcase(d), root_real):
-        dotgit = os.path.join(d, ".git")
         try:
-            if os.path.lexists(dotgit):
+            dotgit = _repo_at(d)
+            if dotgit is not None:
                 return _repo_config_risky(dotgit, d, root)
         except (OSError, ValueError):
             return True

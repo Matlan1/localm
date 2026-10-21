@@ -206,6 +206,51 @@ def test_git_after_cd_through_a_link_checks_the_repository_git_uses(tmp_path):
     assert is_read_only("cd x/j && git log", proj) is False
 
 
+def _bare_repo(path: Path, config: str) -> None:
+    (path / "objects").mkdir(parents=True)
+    (path / "refs").mkdir()
+    (path / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (path / "config").write_text(config, encoding="utf-8")
+
+
+def test_git_in_a_bare_repository_inside_the_project_checks_its_config(tmp_path):
+    proj = tmp_path / "proj"
+    _bare_repo(proj / "vendor" / "safe.git", "[core]\n\trepositoryformatversion = 0\n")
+    _bare_repo(proj / "vendor" / "lib.git", "[core]\n\tpager = ./p.sh\n")
+    assert is_read_only("cd vendor/safe.git && git log", proj) is True
+    assert is_read_only("cd vendor/lib.git && git log", proj) is False
+    assert is_read_only("cd vendor/lib.git/objects && git log", proj) is False
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="file attributes are a Windows feature")
+def test_a_file_with_the_system_attribute_is_not_read_only(tmp_path):
+    import ctypes
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "a.txt").write_text("a", encoding="utf-8")
+    cyg = proj / "cyg"
+    cyg.write_bytes(b"!<symlink>\xff\xfe" + "../secret".encode("utf-16-le") + b"\x00\x00")
+    assert is_read_only("cat cyg", proj) is True
+    assert ctypes.windll.kernel32.SetFileAttributesW(str(cyg), 0x4)
+    assert is_read_only("cat cyg", proj) is False
+    assert is_read_only("cat cyg/inner/f.txt", proj) is False
+    assert is_read_only("cat a.txt", proj) is True
+
+
+def test_a_file_used_as_a_folder_in_a_path_is_not_read_only(tmp_path):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "a.txt").write_text("a", encoding="utf-8")
+    assert is_read_only("cat a.txt", proj) is True
+    assert is_read_only("cat a.txt/x", proj) is False
+
+
+def test_a_glob_too_deep_to_expand_is_refused_without_raising(tmp_path):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    assert is_read_only("cat " + "*/" * 1000 + "a", proj) is False
+
+
 def test_a_gitdir_whose_dotdot_climbs_out_through_a_link_is_not_read_only(tmp_path):
     proj = tmp_path / "proj"
     (proj / "x" / "y").mkdir(parents=True)
