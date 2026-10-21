@@ -610,14 +610,14 @@ def _controlnet_info(t: dict) -> Optional[FileInfo]:
                 family = "sdxl"
             else:
                 k = t.get(pre + "input_blocks.1.1.transformer_blocks.0.attn2.to_k.weight") or ()
-                family = {768: "sd1", 1024: "sd2"}.get(k[1] if len(k) >= 2 else None)
+                family = _CROSS_ATTN_FAMILIES.get(k[1] if len(k) >= 2 else None)
             return FileInfo("controlnet", family, {"layout": "original"})
     if (any(n.startswith("controlnet_cond_embedding.") for n in names)
             and any(n.startswith("controlnet_down_blocks.") for n in names)):
         if any(n.startswith("add_embedding.") for n in names):
             family = "sdxl"
         else:
-            family = {768: "sd1", 1024: "sd2"}.get(_diffusers_cross_attention_dim(t, ""))
+            family = _CROSS_ATTN_FAMILIES.get(_diffusers_cross_attention_dim(t, ""))
         return FileInfo("controlnet", family, {"layout": "diffusers"})
     return None
 
@@ -625,6 +625,7 @@ def _controlnet_info(t: dict) -> Optional[FileInfo]:
 _TI_MAX_TENSORS = 4
 _TI_MAX_ROWS = 512
 _TI_WIDTHS = {768: "sd1", 1024: "sd2", 1280: "sdxl"}
+_CROSS_ATTN_FAMILIES: dict = {768: "sd1", 1024: "sd2"}
 
 
 def _textual_inversion_info(t: dict) -> Optional[FileInfo]:

@@ -775,9 +775,10 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
                 return False, NO_REFERENCES.format(model=models["label"],
                                                    family=info.get("version") or "unknown")
             init = None
-            if init_image_data is not None or input_image is not None:
-                init = _load_init_image(init_image_data if init_image_data is not None
-                                        else Path(input_image), width, height)
+            source = init_image_data if init_image_data is not None else (
+                Path(input_image) if input_image is not None else None)
+            if source is not None:
+                init = _load_init_image(source, width, height)
                 width, height = init["width"], init["height"]
             if width is None or height is None:
                 width, height = _default_size(info.get("version", ""), rec, blk, defaults)

@@ -370,8 +370,9 @@ def _set_embeddings(b, params, embeddings):
     if not pairs:
         return None
     arr = (b.sd_embedding_t * len(pairs))()
-    keep = []
-    for i, (name, path) in enumerate(pairs):
+    keep: list = []
+    for i, pair in enumerate(pairs):
+        name, path = pair[0], pair[1]
         enc_name, enc_path = str(name).encode("utf-8"), str(path).encode("utf-8")
         keep += [enc_name, enc_path]
         arr[i].name = enc_name
