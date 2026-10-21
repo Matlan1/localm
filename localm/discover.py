@@ -897,9 +897,43 @@ def list_gpus(*, deadline: float = _GPU_PROBE_DEADLINE, return_status: bool = Fa
     Does NOT fall back to the Windows display-adapter registry: that tier (see
     vram_info()) can only report one aggregate "largest adapter" number with no
     per-device identity, so it cannot support GPU *selection* - only
-    vram_info()'s single-number "total VRAM for fit badges" use case."""
+    vram_info()'s single-number "total VRAM for fit badges" use case.
+
+    Between :func:`start_shared_gpu_reading` and :func:`end_shared_gpu_reading`
+    on the calling thread, a call after one that completed with
+    :data:`GPU_PROBE_OK` answers with a copy of that reading and status OK
+    without probing."""
+    shared = getattr(_shared_reading, "state", None)
+    if shared is not None and shared["gpus"] is not None:
+        gpus = [dict(g) for g in shared["gpus"]]
+        return (gpus, GPU_PROBE_OK) if return_status else gpus
     gpus, status = _list_gpus_with_status(deadline, wait_for_inflight)
+    if shared is not None and status == GPU_PROBE_OK:
+        shared["gpus"] = [dict(g) for g in gpus]
     return (gpus, status) if return_status else gpus
+
+
+# The calling thread's shared list_gpus reading: {"gpus": list | None} between
+# start_shared_gpu_reading() and end_shared_gpu_reading(), else absent or None.
+_shared_reading = threading.local()
+
+
+def start_shared_gpu_reading() -> None:
+    """Make :func:`list_gpus` on THIS thread probe at most once until
+    :func:`end_shared_gpu_reading`: the first call that completes with
+    :data:`GPU_PROBE_OK` stores its reading and later calls answer with a copy
+    of it. A call that completes with any other status stores nothing, so the
+    next call probes again. Other threads are not affected. For one model
+    load's sizing, which reads the same devices several times in a row.
+    Calling it while a shared reading is already open keeps that reading."""
+    if getattr(_shared_reading, "state", None) is None:
+        _shared_reading.state = {"gpus": None}
+
+
+def end_shared_gpu_reading() -> None:
+    """End THIS thread's shared reading (see :func:`start_shared_gpu_reading`);
+    later :func:`list_gpus` calls probe again. A no-op when none is open."""
+    _shared_reading.state = None
 
 
 def _list_gpus_with_status(deadline: float, wait_for_inflight: bool = False) -> tuple:
