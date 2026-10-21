@@ -61,7 +61,8 @@ def _as_another_os_user(monkeypatch):
 
 
 def _deferring_vouch(body):
-    ok = gpu_registry.vouch_for(body.get("request_id"), body.get("asker_instance_id"))
+    ok = gpu_registry.vouch_for(body.get("request_id"), body.get("asker_instance_id"),
+                                body.get("asker_port"), body.get("purpose"))
     return (200, {"vouched": True}) if ok else (403, {"detail": "no"})
 
 
@@ -83,6 +84,8 @@ def _served(app):
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]
     sock.close()
+    app.state.instance_port = port
+    app.state.instance_scheme = "http"
     if hs._gpu_coord is not None:
         hs._gpu_coord["port"] = port
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port,
@@ -94,6 +97,7 @@ def _served(app):
         while not server.started and time.time() < deadline:
             time.sleep(0.05)
         assert server.started
+        gpu_registry.set_local_status_provider(None)
         yield port
     finally:
         server.should_exit = True
@@ -245,7 +249,8 @@ class TestStatusWithoutACredential:
         body = r.json()
         assert "alice-s1" not in r.text and _DIGEST not in r.text
         assert "pid" not in body
-        assert body["models"] == [{"name": "secret-model"}]
+        assert body["models"] == [{"name": "secret-model", "file": "secret-model.gguf",
+                                   "size": 1234}]
         assert body["model"] == "secret-model"
         assert body["instance_id"] == "self-1"
         assert {"vram_estimate_bytes", "gpu_index", "port", "scheme"} <= set(body)
@@ -258,6 +263,19 @@ class TestStatusWithoutACredential:
         assert "secret-model" not in r.text and "alice-s1" not in r.text
         assert "pid" not in body
         assert body["models"] == [] and body["model"] is None
+
+    def test_require_auth_without_a_key_names_no_models(self, monkeypatch):
+        monkeypatch.setenv("LOCALM_REQUIRE_AUTH", "1")
+        r = TestClient(_coordinating_app(model="secret-model")).get("/v1/instances/status")
+        assert "secret-model" not in r.text and "pid" not in r.json()
+
+    def test_a_session_cookie_is_no_credential(self, monkeypatch):
+        key = "k" * 40
+        monkeypatch.setenv("LOCALM_API_KEY", key)
+        client = TestClient(_coordinating_app(model="secret-model"))
+        client.cookies.set(hs.SESSION_COOKIE, key)
+        r = client.get("/v1/instances/status")
+        assert "secret-model" not in r.text and "pid" not in r.json()
 
     def test_a_wrong_key_is_no_credential(self, monkeypatch):
         monkeypatch.setenv("LOCALM_API_KEY", "k" * 40)
@@ -294,6 +312,13 @@ class TestFullStatus:
         r = TestClient(_coordinating_app(model="secret-model")).get(
             "/v1/instances/status", headers={"Authorization": "Bearer " + key})
         assert r.status_code == 200
+        self._assert_full(r.json())
+
+    def test_an_api_key_in_x_api_key_reads_it(self, monkeypatch):
+        key = "k" * 40
+        monkeypatch.setenv("LOCALM_API_KEY", key)
+        r = TestClient(_coordinating_app(model="secret-model")).get(
+            "/v1/instances/status", headers={"x-api-key": key})
         self._assert_full(r.json())
 
     def test_a_browser_page_cannot_read_it_even_with_the_attach_token(self):
@@ -389,7 +414,8 @@ class TestPeerDiscoveryReadsTheFullStatus:
             enable_detection(monkeypatch, port)
             peers = gpu_registry.list_gpu_peers(timeout=5)
         assert [p["instance_id"] for p in peers] == ["self-1"]
-        assert peers[0]["models"] == [{"name": "secret-model"}]
+        assert peers[0]["models"] == [{"name": "secret-model", "file": "secret-model.gguf",
+                                       "size": 1234}]
         assert "pid" not in peers[0]
 
     def test_a_same_install_reader_presents_the_attach_token(self, monkeypatch):
@@ -438,3 +464,118 @@ class TestPeerDiscoveryReadsTheFullStatus:
                 lambda: None,
                 identity={"instance_id": "self-1", "port": port, "scheme": "http"})
             assert gpu_registry.list_gpu_peers(timeout=5) == []
+
+
+# ------------------------------------------------------------------ #
+#  A request id cannot be relayed                                    #
+# ------------------------------------------------------------------ #
+
+class TestARequestIdCannotBeRelayed:
+    """Another user's listener claiming a sibling's instance id must not receive
+    a request id it could forward to that sibling, and an id confirms only the
+    purpose and the port it was sent for."""
+
+    def _owned_except(self, monkeypatch, *foreign_ports):
+        monkeypatch.setattr(listeners, "_port_owned_by_current_user",
+                            lambda port, dial: port not in foreign_ports)
+
+    def test_an_impostor_claiming_a_siblings_id_gets_no_request_id(self, monkeypatch):
+        with peer_server(localm_whoami("self-1")) as impostor:
+            self._owned_except(monkeypatch, impostor.port)
+            enable_detection(monkeypatch, impostor.port)
+            gpu_registry.set_local_status_provider(
+                lambda: None,
+                identity={"instance_id": "reader-1", "port": 18642, "scheme": "http"})
+            gpu_registry.list_gpu_peers(timeout=5)
+            posts = [r for r in impostor.requests if r[0] == "POST"]
+        assert posts == []
+        assert gpu_registry._pending == {}
+
+    def test_no_unload_request_is_sent_to_another_users_listener(self, monkeypatch):
+        gpu_registry.set_local_status_provider(
+            lambda: {"instance_id": "me-1", "port": 18642, "scheme": "http"})
+        with peer_server(localm_whoami("peer-1"),
+                         post={"/v1/instances/cooperate-unload":
+                               lambda b: (200, {"status": "unloaded"})}) as srv:
+            self._owned_except(monkeypatch, srv.port)
+            peer = {"instance_id": "peer-1", "port": srv.port, "host": "127.0.0.1",
+                    "scheme": "http"}
+            assert gpu_registry.request_cooperative_unload(peer) is False
+            assert srv.requests == []
+
+    def test_a_status_request_id_does_not_confirm_an_unload(self):
+        gpu_registry._remember_request("rid-s", "peer-1", 8700, gpu_registry.PURPOSE_STATUS)
+        assert gpu_registry.vouch_for("rid-s", "peer-1", 8700,
+                                      gpu_registry.PURPOSE_UNLOAD) is False
+        assert gpu_registry.vouch_for("rid-s", "peer-1", 8700,
+                                      gpu_registry.PURPOSE_STATUS) is True
+
+    def test_a_request_id_confirms_only_for_the_port_it_was_sent_to(self):
+        gpu_registry._remember_request("rid-p", "peer-1", 8700, gpu_registry.PURPOSE_UNLOAD)
+        assert gpu_registry.vouch_for("rid-p", "peer-1", 8701,
+                                      gpu_registry.PURPOSE_UNLOAD) is False
+        assert gpu_registry.vouch_for("rid-p", "peer-1", 8700,
+                                      gpu_registry.PURPOSE_UNLOAD) is True
+
+    @pytest.mark.parametrize("port, purpose", [(True, None), ("8700", None),
+                                               (None, 5), (None, ["unload"])])
+    def test_a_malformed_port_or_purpose_is_refused(self, port, purpose):
+        gpu_registry._remember_request("rid-m", "peer-1", 8700, gpu_registry.PURPOSE_UNLOAD)
+        assert gpu_registry.vouch_for("rid-m", "peer-1", port, purpose) is False
+
+    def test_an_asker_naming_neither_is_matched_on_the_id(self):
+        gpu_registry._remember_request("rid-o", "peer-1", 8700, gpu_registry.PURPOSE_UNLOAD)
+        assert gpu_registry.vouch_for("rid-o", "peer-1") is True
+
+    def test_a_relayed_status_id_cannot_unload_a_real_sibling(self, monkeypatch):
+        calls = []
+
+        async def unload_all_models():
+            calls.append(1)
+            return {"status": "unloaded"}
+
+        monkeypatch.setattr(hs, "unload_all_models", unload_all_models)
+        with _served(_coordinating_app()) as port, \
+                peer_server(localm_whoami("reader-1"),
+                            post={"/v1/instances/vouch": _deferring_vouch}) as reader:
+            gpu_registry._remember_request("leaked", "self-1", port,
+                                           gpu_registry.PURPOSE_STATUS)
+            r = requests.post(
+                f"http://127.0.0.1:{port}/v1/instances/cooperate-unload",
+                json={"requester": {"instance_id": "reader-1", "port": reader.port,
+                                    "scheme": "http"},
+                      "request_id": "leaked"}, timeout=10)
+            vouch_bodies = [b for m, p, b in reader.requests if p == "/v1/instances/vouch"]
+        assert r.status_code == 403
+        assert calls == []
+        assert vouch_bodies == [{"request_id": "leaked", "asker_instance_id": "self-1",
+                                 "asker_port": port,
+                                 "purpose": gpu_registry.PURPOSE_UNLOAD}]
+
+
+# ------------------------------------------------------------------ #
+#  A redacted identity still tells files apart                       #
+# ------------------------------------------------------------------ #
+
+class TestRedactedIdentityStillMatchesByFile:
+    def _local(self):
+        return {"path": _PRIVATE_PATH, "size": 1234, "sha256": None}
+
+    def test_the_same_file_name_and_size_is_the_same_file(self):
+        from localm.peer_routing import _same_file
+        assert _same_file(self._local(), {"name": "m", "file": "secret-model.gguf",
+                                          "size": 1234}) is True
+
+    def test_a_different_size_is_a_different_file(self):
+        from localm.peer_routing import _same_file
+        assert _same_file(self._local(), {"name": "m", "file": "secret-model.gguf",
+                                          "size": 99}) is False
+
+    def test_a_different_file_name_is_a_different_file(self):
+        from localm.peer_routing import _same_file
+        assert _same_file(self._local(), {"name": "m", "file": "other.gguf",
+                                          "size": 1234}) is False
+
+    def test_a_name_alone_cannot_be_compared(self):
+        from localm.peer_routing import _same_file
+        assert _same_file(self._local(), {"name": "m"}) is None

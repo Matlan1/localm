@@ -4,8 +4,9 @@
 The endpoints a sibling localm instance on this machine uses to talk to this one:
 
 - ``GET /v1/instances/status``: this instance's live model / VRAM status. Without
-  a credential it is redacted: no ``pid``, each loaded model by name only, and on
-  a key-protected instance no model names at all. This instance's attach token,
+  a credential it is redacted: no ``pid``, each loaded model by name, file name
+  and size only (no path, no sha256), and on a key-protected instance no model
+  at all. This instance's attach token,
   or an API key granting ``models:read``, reads the full status.
 - ``POST /v1/instances/status``: the full status for a sibling that names itself
   as the requester, verified exactly like an unload request below.
@@ -59,13 +60,14 @@ async def _json_body(request: Request) -> dict:
 
 
 def _holds_full_status_credential(request: Request) -> bool:
-    """Whether *request* presents this instance's attach token, or an API key
+    """Whether *request* presents, in its ``Authorization`` or ``x-api-key``
+    header (never a session cookie), this instance's attach token or an API key
     granting ``models:read``. Blocking (a key check can take the keystore
     lock)."""
     from localm import scopes
     from localm.auth import ct_equal
-    presented = _hs._bearer_token(request)
-    if not presented:
+    presented, source = _hs._request_token(request)
+    if source != "header" or not presented:
         return False
     inst_token = getattr(request.app.state, "instance_token", None)
     if inst_token and ct_equal(presented, inst_token):
@@ -74,16 +76,37 @@ def _holds_full_status_credential(request: Request) -> bool:
     return held is not None and scopes.grants(held, scopes.MODELS_READ)
 
 
+def _own_port(coord: dict) -> Optional[int]:
+    """The port this instance serves on, from its coordination record, or None."""
+    port = coord.get("port")
+    return port if isinstance(port, int) and not isinstance(port, bool) else None
+
+
+def _redacted_model(m: dict) -> dict:
+    """A loaded model's identity without its path or sha256: ``name``, plus
+    ``file`` (the file or folder name alone) and ``size`` when known."""
+    import os
+    out = {"name": m.get("name")}
+    path = m.get("path")
+    if isinstance(path, str) and path:
+        out["file"] = os.path.basename(os.path.normpath(path))
+    size = m.get("size")
+    if isinstance(size, int) and not isinstance(size, bool):
+        out["size"] = size
+    return out
+
+
 def _redacted(status: dict) -> dict:
-    """*status* without ``pid`` and with each loaded model reduced to its name;
-    on a key-protected instance, without model names either."""
+    """*status* without ``pid`` and with each loaded model reduced to its name,
+    file name and size (:func:`_redacted_model`); on a key-protected instance,
+    without any model at all."""
     from localm.auth import any_key_configured, require_auth_enabled
     out = {k: v for k, v in status.items() if k != "pid"}
     if any_key_configured() or require_auth_enabled():
         out["model"] = None
         out["models"] = []
     else:
-        out["models"] = [{"name": m.get("name")} for m in status.get("models") or []
+        out["models"] = [_redacted_model(m) for m in status.get("models") or []
                          if isinstance(m, dict)]
     return out
 
@@ -123,8 +146,10 @@ def register(app: FastAPI, ctx) -> None:
         verified = False
         if coord and _coordinating(request):
             verified = await loop.run_in_executor(
-                None, gpu_registry.verify_requester, body.get("requester"),
-                body.get("request_id"), coord["instance_id"])
+                None, lambda: gpu_registry.verify_requester(
+                    body.get("requester"), body.get("request_id"),
+                    coord["instance_id"], purpose=gpu_registry.PURPOSE_STATUS,
+                    self_port=_own_port(coord)))
         status = await loop.run_in_executor(None, _hs._gpu_status) if verified else None
         if status is None:
             raise HTTPException(403, _REFUSED)
@@ -132,13 +157,15 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/v1/instances/vouch", include_in_schema=False)
     async def vouch(request: Request):
-        """Confirm that THIS instance sent unload request ``request_id`` to
-        instance ``asker_instance_id``. One confirmation per request."""
+        """Confirm that THIS instance sent request ``request_id`` to instance
+        ``asker_instance_id`` (on ``asker_port``, for ``purpose``, when named).
+        One confirmation per request."""
         from localm import gpu_registry
         body = await _json_body(request)
         if (not getattr(_hs, "_gpu_coord", None) or not _from_a_sibling(request)
                 or not gpu_registry.vouch_for(
-                    body.get("request_id"), body.get("asker_instance_id"))):
+                    body.get("request_id"), body.get("asker_instance_id"),
+                    body.get("asker_port"), body.get("purpose"))):
             raise HTTPException(403, _REFUSED)
         return {"vouched": True}
 
@@ -156,8 +183,10 @@ def register(app: FastAPI, ctx) -> None:
         if coord and _coordinating(request):
             loop = asyncio.get_running_loop()
             verified = await loop.run_in_executor(
-                None, gpu_registry.verify_requester, body.get("requester"),
-                body.get("request_id"), coord["instance_id"])
+                None, lambda: gpu_registry.verify_requester(
+                    body.get("requester"), body.get("request_id"),
+                    coord["instance_id"], purpose=gpu_registry.PURPOSE_UNLOAD,
+                    self_port=_own_port(coord)))
         if not verified:
             # An identical 403 whether coordination is not enabled on this
             # instance or the requester did not confirm, so the two cases are

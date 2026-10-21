@@ -214,8 +214,10 @@ def _same_file(a: dict, b: dict) -> Optional[bool]:
     None when either carries nothing to compare.
 
     Equal paths, or equal sha256 digests, are the same file. Two files with
-    the same base name and the same byte size are treated as the same file.
-    Anything else that can be compared is a different file."""
+    the same base name and the same byte size are treated as the same file;
+    the base name is ``file`` when an identity carries no ``path`` (a peer's
+    redacted status). Anything else that can be compared is a different
+    file."""
     pa, pb = a.get("path"), b.get("path")
     if pa and pb and os.path.normcase(pa) == os.path.normcase(pb):
         return True
@@ -223,11 +225,21 @@ def _same_file(a: dict, b: dict) -> Optional[bool]:
     if ha and hb:
         return ha.lower() == hb.lower()
     sa, sb = a.get("size"), b.get("size")
-    if pa and pb and isinstance(sa, int) and isinstance(sb, int):
-        return (os.path.basename(os.path.normcase(pa))
-                == os.path.basename(os.path.normcase(pb)) and sa == sb)
+    fa, fb = _file_name(a), _file_name(b)
+    if fa and fb and isinstance(sa, int) and isinstance(sb, int):
+        return fa == fb and sa == sb
     if pa and pb:
         return False
+    return None
+
+
+def _file_name(ident: dict) -> Optional[str]:
+    """The case-normalised base name of *ident*'s ``path``, else of its
+    ``file``, or None."""
+    for key in ("path", "file"):
+        value = ident.get(key)
+        if isinstance(value, str) and value:
+            return os.path.basename(os.path.normcase(os.path.normpath(value)))
     return None
 
 

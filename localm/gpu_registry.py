@@ -215,16 +215,20 @@ def _post_verified_status(scheme: str, port: int, timeout: float, dial: str,
     :func:`request_cooperative_unload` does; waits at least
     :data:`VERIFIED_STATUS_TIMEOUT_S`. None when this instance has no identity,
     *instance_id* is this instance, or the peer does not answer a status
-    object. The caller must not be this instance's event loop thread, which has
-    to answer the callback."""
+    object, and without sending anything when the listener on *port* is not
+    this OS user's. The caller must not be this instance's event loop thread,
+    which has to answer the callback."""
     me = own_identity()
     if me is None or me["instance_id"] == instance_id:
         return None
     url = _loopback_url(scheme, dial, port, STATUS_PATH)
     if url is None:
         return None
+    from localm.listeners import port_owned_by_current_user
+    if not port_owned_by_current_user(int(port), dial, fresh=True):
+        return None
     request_id = secrets.token_urlsafe(24)
-    _remember_request(request_id, instance_id)
+    _remember_request(request_id, instance_id, int(port), PURPOSE_STATUS)
     try:
         r = _post_json(url, {
             "requester": {"instance_id": me["instance_id"], "port": me["port"],
@@ -344,17 +348,24 @@ def list_gpu_peers(*, exclude_self_id: Optional[str] = None,
 #  Asking a peer to release its VRAM, and vouching for the ask        #
 # ------------------------------------------------------------------ #
 
-# request id -> (peer instance id, monotonic expiry). Guarded by _pending_lock.
+PURPOSE_UNLOAD = "unload"
+PURPOSE_STATUS = "status"
+
+# request id -> (peer instance id, peer port, purpose, monotonic expiry). Guarded
+# by _pending_lock.
 _pending: dict = {}
 _pending_lock = threading.Lock()
 
 
-def _remember_request(request_id: str, peer_instance_id: str) -> None:
+def _remember_request(request_id: str, peer_instance_id: str,
+                      peer_port: Optional[int] = None,
+                      purpose: Optional[str] = None) -> None:
     now = time.monotonic()
     with _pending_lock:
-        for rid in [r for r, (_p, exp) in _pending.items() if exp <= now]:
+        for rid in [r for r, entry in _pending.items() if entry[-1] <= now]:
             _pending.pop(rid, None)
-        _pending[request_id] = (peer_instance_id, now + REQUEST_TTL_S)
+        _pending[request_id] = (peer_instance_id, peer_port, purpose,
+                                now + REQUEST_TTL_S)
 
 
 def _forget_request(request_id: str) -> None:
@@ -362,18 +373,34 @@ def _forget_request(request_id: str) -> None:
         _pending.pop(request_id, None)
 
 
-def vouch_for(request_id: object, asker_instance_id: object) -> bool:
-    """Whether THIS instance really sent the unload request *request_id* to the
-    instance *asker_instance_id*, and it is still within :data:`REQUEST_TTL_S`.
-    Confirms at most once: the id is consumed."""
+def vouch_for(request_id: object, asker_instance_id: object,
+              asker_port: object = None, purpose: object = None) -> bool:
+    """Whether THIS instance really sent request *request_id* to the instance
+    *asker_instance_id*, and it is still within :data:`REQUEST_TTL_S`.
+
+    *asker_port* (the port the asker serves on) and *purpose*
+    (:data:`PURPOSE_UNLOAD` or :data:`PURPOSE_STATUS`), when given, must match
+    the port the request was sent to and what it asked for, wherever those were
+    recorded; an asker that names neither is matched on the id alone. A
+    malformed *asker_port* or *purpose* is refused. Confirms at most once: the id
+    is consumed."""
     if not isinstance(request_id, str) or not isinstance(asker_instance_id, str):
+        return False
+    if asker_port is not None and (isinstance(asker_port, bool)
+                                   or not isinstance(asker_port, int)):
+        return False
+    if purpose is not None and not isinstance(purpose, str):
         return False
     with _pending_lock:
         entry = _pending.get(request_id)
         if entry is None:
             return False
-        peer_id, expiry = entry
+        peer_id, peer_port, sent_purpose, expiry = entry
         if peer_id != asker_instance_id or expiry <= time.monotonic():
+            return False
+        if asker_port is not None and peer_port is not None and asker_port != peer_port:
+            return False
+        if purpose is not None and sent_purpose is not None and purpose != sent_purpose:
             return False
         _pending.pop(request_id, None)
         return True
@@ -419,14 +446,15 @@ def _requester_dial(scheme: str, port: int, instance_id: str,
     as this OS user and answers ``/whoami`` as *instance_id*, or None."""
     from localm.listeners import port_owned_by_current_user
     for dial in _REQUESTER_DIALS:
-        if (port_owned_by_current_user(port, dial)
+        if (port_owned_by_current_user(port, dial, fresh=True)
                 and fetch_whoami(scheme, port, instance_id, timeout, dial) is not None):
             return dial
     return None
 
 
 def verify_requester(requester: object, request_id: object, self_instance_id: str,
-                     *, timeout: float = 2.0) -> bool:
+                     *, timeout: float = 2.0, purpose: Optional[str] = None,
+                     self_port: Optional[int] = None) -> bool:
     """Whether *requester* (``{instance_id, port, scheme}``, from a received unload
     or status request) is a live localm instance, listening on loopback as the OS
     user running this process, that confirms it sent *request_id* to this
@@ -435,7 +463,9 @@ def verify_requester(requester: object, request_id: object, self_instance_id: st
 
     Dials loopback only (127.0.0.1, or ::1 for a requester bound there), sends
     nothing unless *requester* is well-formed, and never dials a listener that
-    belongs to another OS user."""
+    belongs to another OS user. *purpose* and *self_port* (the port this instance
+    serves on) are sent with the confirmation request, so the requester confirms
+    only a request of that purpose that it sent to that port (:func:`vouch_for`)."""
     if not isinstance(requester, dict) or not isinstance(request_id, str) or not request_id:
         return False
     iid, port, scheme = (requester.get("instance_id"), requester.get("port"),
@@ -452,8 +482,12 @@ def verify_requester(requester: object, request_id: object, self_instance_id: st
     url = _loopback_url(scheme, dial, port, VOUCH_PATH)
     if url is None:
         return False
-    r = _post_json(url, {"request_id": request_id,
-                         "asker_instance_id": self_instance_id}, timeout)
+    body: dict = {"request_id": request_id, "asker_instance_id": self_instance_id}
+    if self_port is not None:
+        body["asker_port"] = self_port
+    if purpose is not None:
+        body["purpose"] = purpose
+    r = _post_json(url, body, timeout)
     if r is None or r.status_code != 200:
         return False
     try:
@@ -473,8 +507,8 @@ def request_cooperative_unload(peer: dict, *, timeout: float = 5.0) -> bool:
     peer calls back (see the module docstring).
 
     Refuses before sending anything unless the peer's ``host``/``scheme`` are
-    loopback over http or https, and unless this instance itself coordinates
-    (:func:`own_status`).
+    loopback over http or https, the listener on its port is this OS user's,
+    and this instance itself coordinates (:func:`own_status`).
 
     Advisory and best-effort: any failure (no own status, no port, network error,
     timeout, non-200, malformed body) returns False. A caller must treat False
@@ -495,8 +529,16 @@ def request_cooperative_unload(peer: dict, *, timeout: float = 5.0) -> bool:
             "https has had its occupant identity-verified",
             peer_id, scheme, peer.get("host"))
         return False
+    from localm.bindhost import self_connect_host
+    from localm.listeners import port_owned_by_current_user
+    if not port_owned_by_current_user(int(port), self_connect_host(peer.get("host")),
+                                      fresh=True):
+        logger.warning(
+            "gpu_registry: refusing cooperative-unload to peer %r on port %s: the "
+            "listener there does not belong to this OS user", peer_id, port)
+        return False
     request_id = secrets.token_urlsafe(24)
-    _remember_request(request_id, peer_id)
+    _remember_request(request_id, peer_id, int(port), PURPOSE_UNLOAD)
     try:
         r = _post_json(url, {
             "requester": {"instance_id": me["instance_id"], "port": int(me["port"]),
