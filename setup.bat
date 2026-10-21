@@ -15,6 +15,7 @@ rem  peak performance on NVIDIA/AMD/Intel respectively; CPU for machines
 rem  with no GPU.
 rem ===========================================================================
 cd /d "%~dp0"
+set "LOCALM_SETUP_ROOT=%CD%"
 setlocal EnableDelayedExpansion
 set LOCALM_SETUP=1
 title LocaLM setup
@@ -131,8 +132,8 @@ set "PYPREF="
 set "UVDIR="
 if "%STOREPICK%"=="1" (
     set "CONTAINED=1"
-    set "UV_PYTHON_INSTALL_DIR=%CD:!=^!%\.python"
-    set "UV_CACHE_DIR=%CD:!=^!%\.cache"
+    set "UV_PYTHON_INSTALL_DIR=!CD!\.python"
+    set "UV_CACHE_DIR=!CD!\.cache"
     set "PYPREF=--python-preference only-managed"
     echo  Portable: uv, Python, and downloads all under this folder
 ) else (
@@ -145,8 +146,8 @@ set "PYDIR="
 set "CACHEDIR="
 if "%CONTAINED%"=="1" (
     set "RCFLAG=--runtime-contained"
-    set "PYDIR=%CD:!=^!%\.python"
-    set "CACHEDIR=%CD:!=^!%\.cache"
+    set "PYDIR=!CD!\.python"
+    set "CACHEDIR=!CD!\.cache"
 )
 call :step_done portable-choice || exit /b 99
 
@@ -173,8 +174,8 @@ goto uv_missing
 :uv_check_portable
 if "%RESUMING%"=="1" if not "!OPENSET:;uv-portable;=!"=="!OPENSET!" if exist ".uv" call :redo_uv
 if exist ".uv\uv.exe" (
-    set "PATH=%CD:!=^!%\.uv;%PATH%"
-    set "UVDIR=%CD:!=^!%\.uv"
+    set "PATH=!CD!\.uv;%PATH%"
+    set "UVDIR=!CD!\.uv"
     goto uv_ready
 )
 
@@ -197,9 +198,9 @@ if "%CONTAINED%"=="1" (
     rem  override for the installer's target dir. UV_UNMANAGED_INSTALL also
     rem  stops it adding .\.uv to the user PATH and writing an install receipt
     rem  under %LOCALAPPDATA%\uv.
-    set "UV_INSTALL_DIR=%CD:!=^!%\.uv"
-    set "UV_UNMANAGED_INSTALL=%CD:!=^!%\.uv"
-    set "UVDIR=%CD:!=^!%\.uv"
+    set "UV_INSTALL_DIR=!CD!\.uv"
+    set "UV_UNMANAGED_INSTALL=!CD!\.uv"
+    set "UVDIR=!CD!\.uv"
     echo  Portable: installing uv itself under .\.uv
 )
 set "UV_INSTALLER_VERSION=0.13.4"
@@ -227,9 +228,9 @@ rem  literally named with `!` in the inherited PATH is exotic, and a bulletproof
 rem  preserving assignment needs fragile batch not worth it here.
 set "UVDIRS=%USERPROFILE%\.local\bin;%USERPROFILE%\.cargo\bin;%HOMEDRIVE%%HOMEPATH%\.local\bin"
 set "PATH=%UVDIRS%;%PATH%"
-rem  UV_INSTALL_DIR itself is prepended fresh from %CD:!=^!% here rather than
+rem  UV_INSTALL_DIR itself is prepended fresh from !CD! here rather than
 rem  read back - see test_uv_install_dir_is_actually_findable_on_path_after_a_bang_install.
-if defined UV_INSTALL_DIR set "PATH=%CD:!=^!%\.uv;%PATH%"
+if defined UV_INSTALL_DIR set "PATH=!CD!\.uv;%PATH%"
 where uv >nul 2>nul
 if not errorlevel 1 goto uv_ready
 
@@ -775,9 +776,9 @@ if "%SCPICK%"=="1" (
         "$ErrorActionPreference = 'Stop';" ^
         "$p = [Environment]::GetFolderPath('Desktop') + '\LocaLM.lnk';" ^
         "$s = (New-Object -ComObject WScript.Shell).CreateShortcut($p);" ^
-        "$s.TargetPath = '%CD%\localm-launcher.bat';" ^
-        "$s.WorkingDirectory = '%CD%';" ^
-        "$s.IconLocation = '%CD%\assets\localm.ico';" ^
+        "$s.TargetPath = $env:LOCALM_SETUP_ROOT + '\localm-launcher.bat';" ^
+        "$s.WorkingDirectory = $env:LOCALM_SETUP_ROOT;" ^
+        "$s.IconLocation = $env:LOCALM_SETUP_ROOT + '\assets\localm.ico';" ^
         "$s.Description = 'LocaLM - open the launcher';" ^
         "$s.Save();Write-Output $p"`) do (
         endlocal & set "SCPATH=%%p"
@@ -793,9 +794,9 @@ if "%SCPICK%"=="2" (
         "$ErrorActionPreference = 'Stop';" ^
         "$p = [Environment]::GetFolderPath('Desktop') + '\LocaLM.lnk';" ^
         "$s = (New-Object -ComObject WScript.Shell).CreateShortcut($p);" ^
-        "$exe = '%CD%\.venv\localm-app\LocaLM.exe'; if (Test-Path $exe) { $s.TargetPath = $exe; $s.Arguments = '-m localm gui' } else { $s.TargetPath = '%CD%\.venv\Scripts\localm.exe'; $s.Arguments = 'gui' };" ^
-        "$s.WorkingDirectory = '%CD%';" ^
-        "$s.IconLocation = '%CD%\assets\localm.ico';" ^
+        "$exe = $env:LOCALM_SETUP_ROOT + '\.venv\localm-app\LocaLM.exe'; if (Test-Path -LiteralPath $exe) { $s.TargetPath = $exe; $s.Arguments = '-m localm gui' } else { $s.TargetPath = $env:LOCALM_SETUP_ROOT + '\.venv\Scripts\localm.exe'; $s.Arguments = 'gui' };" ^
+        "$s.WorkingDirectory = $env:LOCALM_SETUP_ROOT;" ^
+        "$s.IconLocation = $env:LOCALM_SETUP_ROOT + '\assets\localm.ico';" ^
         "$s.Description = 'LocaLM - open the web GUI';" ^
         "$s.Save();Write-Output $p"`) do (
         endlocal & set "SCPATH=%%p"
@@ -839,10 +840,10 @@ rem  already set (record the command but NOT --path-modified, so the manifest ne
 rem  claims a change it did not make); anything else = failed (record nothing). Flat
 rem  single-line ifs, not a paren block, to dodge cmd.exe's nested-paren parser.
 if "!GCRC!"=="0" set "PATHMOD=--path-modified"
-if "!GCRC!"=="0" set "PATHDIR=%CD:!=^!%\bin"
-if "!GCRC!"=="0" set "CMDSHIM=%CD:!=^!%\bin\localm.cmd"
-if "!GCRC!"=="20" set "PATHDIR=%CD:!=^!%\bin"
-if "!GCRC!"=="20" set "CMDSHIM=%CD:!=^!%\bin\localm.cmd"
+if "!GCRC!"=="0" set "PATHDIR=!CD!\bin"
+if "!GCRC!"=="0" set "CMDSHIM=!CD!\bin\localm.cmd"
+if "!GCRC!"=="20" set "PATHDIR=!CD!\bin"
+if "!GCRC!"=="20" set "CMDSHIM=!CD!\bin\localm.cmd"
 if not defined CMDSHIM goto globalcmd_recorded
 setlocal DisableDelayedExpansion
 .venv\Scripts\python -m localm.install_manifest record --root . --path-dir "%PATHDIR%" --command-shim "%CMDSHIM%" %PATHMOD% >nul 2>nul
@@ -1332,7 +1333,7 @@ rem ===========================================================================
 set "LOCKERS="
 if exist "%STMP%\localm_lockers.txt" del "%STMP%\localm_lockers.txt"
 powershell -NoProfile -Command ^
-    "$root = ('%CD%\.venv\').ToLowerInvariant();" ^
+    "$root = ($env:LOCALM_SETUP_ROOT + '\.venv\').ToLowerInvariant();" ^
     "Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.ToLowerInvariant().StartsWith($root) } | ForEach-Object { '{0}|{1}' -f $_.ProcessId, $_.Name }" ^
     >"%STMP%\localm_lockers.txt" 2>nul
 for %%s in ("%STMP%\localm_lockers.txt") do if %%~zs GTR 0 set "LOCKERS=1"
@@ -1350,7 +1351,7 @@ rem ===========================================================================
 :onedrive_root
 set "ONEDRIVE_ROOT="
 for /f "usebackq delims=" %%r in (`powershell -NoProfile -Command ^
-    "$cwd = ('%CD%\').ToLowerInvariant();" ^
+    "$cwd = ($env:LOCALM_SETUP_ROOT + '\').ToLowerInvariant();" ^
     "foreach ($n in 'OneDrive','OneDriveConsumer','OneDriveCommercial') { $v = [Environment]::GetEnvironmentVariable($n); if ($v) { $p = ($v.TrimEnd('\') + '\').ToLowerInvariant(); if ($cwd.StartsWith($p)) { Write-Output $v; break } } }"`) do (
     set "ONEDRIVE_ROOT=%%r"
 )

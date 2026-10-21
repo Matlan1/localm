@@ -335,8 +335,9 @@ class TestShortcutSurvivesBangInInstallPath:
         # Each fragment embedding %CD% must survive as its OWN intact,
         # separately-quoted argument with the `!` preserved - not merged
         # into a neighbour by a corrupted delayed-expansion scan.
-        assert f"\"$s.WorkingDirectory = '{bang}';\"" in argv, argv
-        assert f"\"$s.IconLocation = '{bang}\\assets\\localm.ico';\"" in argv, argv
+        assert '"$s.WorkingDirectory = $env:LOCALM_SETUP_ROOT;"' in argv, argv
+        assert "\"$s.IconLocation = $env:LOCALM_SETUP_ROOT + '\\assets\\localm.ico';\"" in argv, argv
+        assert bang not in argv, argv
         scpath, scmade = self._result(out.stdout)
         assert scmade == "1", (out.stdout, out.stderr)
 
@@ -356,8 +357,9 @@ class TestShortcutSurvivesBangInInstallPath:
         self._run(probe, stub_dir, cwd=bangdir)
         argv = argv_file.read_text(encoding="utf-8")
         bang = str(bangdir)
-        assert f"$exe = '{bang}\\.venv\\localm-app\\LocaLM.exe'" in argv, argv
-        assert f"$s.TargetPath = '{bang}\\.venv\\Scripts\\localm.exe'" in argv, argv
+        assert "$exe = $env:LOCALM_SETUP_ROOT + '\\.venv\\localm-app\\LocaLM.exe'" in argv, argv
+        assert "$s.TargetPath = $env:LOCALM_SETUP_ROOT + '\\.venv\\Scripts\\localm.exe'" in argv, argv
+        assert bang not in argv, argv
 
     @pytest.mark.parametrize("scpick,block_index", [("1", 0), ("2", 1)])
     def test_a_failed_write_in_a_bang_path_leaves_delayed_expansion_enabled(
@@ -495,8 +497,8 @@ class TestManifestRecordSurvivesBangInInstallPath:
         bangdir = tmp_path / "bang!dir"
         bangdir.mkdir()
         extra_setup = (
-            'set "RCFLAG=--runtime-contained"\r\nset "PYDIR=%CD:!=^!%\\.python"\r\n'
-            'set "CACHEDIR=%CD:!=^!%\\.cache"\r\nset "UVDIR=%CD:!=^!%\\.uv"\r\n'
+            'set "RCFLAG=--runtime-contained"\r\nset "PYDIR=!CD!\\.python"\r\n'
+            'set "CACHEDIR=!CD!\\.cache"\r\nset "UVDIR=!CD!\\.uv"\r\n'
             'set "UVSHARED="\r\n')
         out = self._run(bangdir, echoed, extra_setup)
         expected = (
@@ -644,12 +646,9 @@ def test_cd_derived_set_statements_escape_the_bang_before_delayed_expansion_scan
     substitutes in - corrupting the variable at the point it is set, before
     anything downstream (including the install manifest) ever reads it.
 
-    `%CD:!=^!%` replaces a literal `!` with the caret-escaped form as PART of
-    the same %-expansion pass that inserts %CD%'s value, so the delayed-
-    expansion scan that runs immediately after sees an escaped `^!`, not a
-    bare `!`, and resolves it back to a literal `!` in the value actually
-    stored - regardless of whether delayed expansion is enabled at that
-    line. No setlocal/endlocal is needed for these sites (unlike the
+    `!CD!` is expanded by the delayed-expansion pass itself, so the value is
+    stored exactly as it is, whatever `!`, `^`, `&` or `'` it holds (a
+    %-substitution hands those to the parser). No setlocal/endlocal is needed for these sites (unlike the
     PowerShell shortcut blocks, nothing here needs to survive an `endlocal`
     - see TestCdDerivedVarsSurviveBangInInstallPath for why that specific
     transport does NOT preserve a bang, and the module docstring's note on
@@ -672,7 +671,7 @@ def test_cd_derived_set_statements_escape_the_bang_before_delayed_expansion_scan
             _pydir_cachedir_block,
     ):
         block = extractor(bat)
-        assert "%CD:!=^!%" in block, extractor.__name__
+        assert "!CD!" in block, extractor.__name__
         assert "%CD%" not in block, extractor.__name__
 
 
@@ -783,7 +782,7 @@ class TestCdDerivedVarsSurviveBangInInstallPath:
         same way a bare %CD% would - confirmed directly: the first draft of
         this fix read `%UV_INSTALL_DIR%` at that point and `where uv` failed
         to find a real, just-created uv.exe at the correct (bang-preserving)
-        location. The PATH entry is prepended fresh from %CD:!=^!% instead.
+        location. The PATH entry is prepended fresh from !CD! instead.
         A minimal PATH (just enough to resolve `where`/`powershell`) rules
         out a real, pre-existing system `uv` masking the check."""
         block = _uv_missing_full_sequence(bat)
@@ -890,7 +889,7 @@ class TestCdDerivedVarsSurviveBangInInstallPath:
             'set "CONTAINED=1"\r\nset "PYDIR="\r\nset "CACHEDIR="\r\n'
             + _pydir_cachedir_block(bat) + "\r\n"
             'set "SCPATH=C:\\FakeDesktop\\LocaLM.lnk"\r\n'
-            'set "UVDIR=%CD:!=^!%\\.uv"\r\nset "PATHMOD=--path-modified"\r\n'
+            'set "UVDIR=!CD!\\.uv"\r\nset "PATHMOD=--path-modified"\r\n'
             + echoed + "\r\n"
             "exit /b 0\r\n" + _JOURNAL_LABELS)
         probe = bangdir / "probe.bat"
