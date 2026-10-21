@@ -462,15 +462,16 @@ def _registry_digest(repo: str, tag: str) -> str:
     return digest
 
 
-def _docker_library_updated(repo: str) -> _dt.datetime | None:
-    """When docker-library/official-images last changed library/<repo>, i.e. when
-    its tags were last republished."""
-    data = _get_json("https://api.github.com/repos/docker-library/official-images/commits"
-                     f"?path=library/{repo}&per_page=1")
+def _docker_tag_pushed(repo: str, tag: str) -> _dt.datetime | None:
+    """When Docker Hub last pushed library/<repo>:<tag>, i.e. when the digest the tag
+    serves now replaced the one before it. Only this tag counts: a republish of another
+    tag of the same repository does not move it. A tag pushed more than once since the pin
+    was taken still dates from its newest push. None when the date cannot be parsed."""
+    data = _get_json(f"https://hub.docker.com/v2/repositories/library/{repo}/tags/{tag}")
     try:
-        return _parse_date(data[0]["commit"]["committer"]["date"])
-    except (KeyError, IndexError, TypeError) as e:
-        raise FetchError("unexpected official-images commits response shape") from e
+        return _parse_date(data.get("tag_last_pushed") or data["last_updated"])
+    except (KeyError, AttributeError, TypeError) as e:
+        raise FetchError("unexpected Docker Hub tag response shape") from e
 
 
 def _check_docker_base(now):
@@ -482,7 +483,7 @@ def _check_docker_base(now):
         image, _, pinned = ref.partition("@")
         repo, _, tag = image.partition(":")
         current = _registry_digest(repo, tag)
-        updated = _docker_library_updated(repo) if current != pinned else None
+        updated = _docker_tag_pushed(repo, tag) if current != pinned else None
     except FetchError as e:
         return _unknown(name, group, advancer, e, pinned[:19])
     row = Row(name=name, status=CURRENT, pinned=pinned[:19], latest=current[:19], days=0,
@@ -547,7 +548,7 @@ def _check_llama_asset_checksums(now):
                 sources[(upstream, cpu_tag)][asset] = sha
             else:
                 sources[(upstream, tag)][asset] = sha
-        wrong, missing, checked = [], [], 0
+        wrong, missing, undigested, checked = [], [], [], 0
         for (repo, release_tag), pinned in sources.items():
             if not pinned:
                 continue
@@ -556,12 +557,20 @@ def _check_llama_asset_checksums(now):
                 if asset not in published:
                     missing.append(asset)
                     continue
+                if not published[asset]:
+                    undigested.append(asset)
+                    continue
                 checked += 1
                 if published[asset] != sha:
                     wrong.append(asset)
     except FetchError as e:
         return _unknown(name, group, advancer, e)
     pinned_label = f"{tag}, {cpu_tag}, {rocm_tag}"
+    if undigested and not (wrong or missing):
+        return _unknown(name, group, advancer,
+                        FetchError(f"GitHub publishes no digest for {len(undigested)} pinned "
+                                   f"asset(s), so their checksums cannot be compared: "
+                                   f"{', '.join(undigested[:3])}"), pinned_label)
     if wrong or missing:
         return Row(name=name, status=STALE if wrong else INCONSISTENT, pinned=pinned_label,
                    advancer=advancer, group=group,

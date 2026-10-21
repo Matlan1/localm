@@ -413,22 +413,14 @@ def test_review_only_bump_opens_a_pr_without_a_receipt_and_never_merges(env, mon
     assert pp.load_state(pin="fake")["verdict"] == "REVIEW"
 
 
-@pytest.mark.parametrize("old,new,expected", [
-    ("3.4.13", "3.4.16", True), ("12.0.2", "12.1.0", True), ("12.0.2", "13.0.0", False),
-    ("0.18.4", "0.18.5", True), ("0.18.4", "0.19.0", False), ("0.18.4", "1.0.0", False),
-    ("11.12.0", "11.13.0", True), ("bad", "1.0.0", False)])
-def test_a_bump_that_stays_inside_one_major_line_may_auto_merge(old, new, expected):
-    assert pw._no_major_boundary(old, new) is expected
-
-
-def test_tested_review_pins_merge_on_green_ci_when_no_major_boundary_is_crossed(env):
+def test_a_tested_review_pin_that_allows_auto_merge_merges_on_green_ci(env):
     out = pw.advance(_review_adv(post_bump_cmds=((sys.executable, "-c", "print('suite ok')"),),
                                  auto_merge=lambda o, n: True), dry_run=False)
     assert out.verdict == pw.MERGED
     assert [c[0] for c in env.calls] == ["supersede", "branch", "push", "pr", "ci", "merge"]
 
 
-def test_a_tested_pin_that_crosses_a_major_boundary_still_waits_for_review(env):
+def test_a_tested_pin_that_refuses_auto_merge_waits_for_review(env):
     out = pw.advance(_review_adv(post_bump_cmds=((sys.executable, "-c", "print('suite ok')"),),
                                  auto_merge=lambda o, n: False), dry_run=False)
     assert out.verdict == pw.REVIEW and "merge" not in [c[0] for c in env.calls]
@@ -441,12 +433,17 @@ def test_a_failing_post_bump_command_stops_before_any_push(env):
     assert "push" not in [c[0] for c in env.calls]
 
 
-def test_shipped_vendored_advancers_run_the_gui_suite_and_gate_the_merge_on_the_boundary():
+def test_shipped_vendored_advancers_run_the_gui_suite_and_are_never_auto_merged():
+    seen = []
     for adv in pw.build_advancers():
         if adv.key.startswith("vendored-") and adv.bump_script == "scripts/bump_vendored_js.py":
+            seen.append(adv.key)
             assert adv.post_bump_cmds == (("npm", "ci"), ("npm", "test"))
-            assert adv.auto_merge("1.2.3", "1.2.4") is True
-            assert adv.auto_merge("1.2.3", "2.0.0") is False
+            for old, new in (("1.2.3", "1.2.4"), ("1.2.3", "1.3.0"), ("1.2.3", "2.0.0"),
+                             ("0.18.4", "0.18.5")):
+                assert adv.auto_merge(old, new) is False
+    assert sorted(seen) == ["vendored-dompurify", "vendored-highlightjs", "vendored-katex",
+                            "vendored-marked"]
 
 
 def test_review_only_dry_run_changes_nothing(env):

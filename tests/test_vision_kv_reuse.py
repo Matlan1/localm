@@ -330,6 +330,50 @@ class TestGenerateImageAcrossTurns:
         assert rig.kv.cells == _fresh_cells(TURN2, [IMG_A])
 
 
+class TestGenerateImageFreesThePrompt:
+    """_generate_image owns the MtmdPrompt it tokenizes and frees it on every path."""
+
+    _turn = TestGenerateImageAcrossTurns._turn
+
+    def test_a_finished_reply_frees_the_prompt_once(self):
+        rig = _Rig()
+        rig.api.llama_sampler_free = lambda s: None
+        self._turn(rig, TURN1, [IMG_A], [word_token("a"), -1])
+        assert rig.lib.chunk_lists_freed == 1
+        assert rig.lib.bitmaps_freed == 1
+
+    def test_a_failed_prefill_frees_the_prompt(self):
+        rig = _Rig()
+        rig.llm._mtmd.on_gpu = False
+        rig.lib.fail_decode = True
+        with pytest.raises(VisionInputError):
+            self._turn(rig, TURN1, [IMG_A], [-1])
+        assert rig.lib.chunk_lists_freed == 1
+        assert rig.lib.bitmaps_freed == 1
+
+    def test_a_gpu_encode_failure_frees_the_first_prompt_before_the_cpu_retry(self):
+        rig = _Rig()
+        rig.api.llama_sampler_free = lambda s: None
+
+        def _reopen_on_cpu(use_gpu):
+            rig.lib.fail_decode = False
+            return 0x78
+
+        rig.llm._mtmd._open = _reopen_on_cpu
+        rig.lib.fail_decode = True
+        reply = [word_token("a")]
+        assert self._turn(rig, TURN1, [IMG_A], reply + [-1]) == reply
+        assert rig.llm._mtmd.on_gpu is False
+        assert rig.lib.chunk_lists_freed == 2
+        assert rig.lib.bitmaps_freed == 2
+
+    def test_a_prompt_that_ends_at_position_zero_is_refused(self):
+        rig = _Rig()
+        with pytest.raises(VisionInputError, match="implausible position"):
+            rig.prefill("", [])
+        assert rig.llm._vision_kv is None
+
+
 class TestEmbeddingCache:
     def _chunk(self, ctx, image):
         prompt = ctx.tokenize(f"look {MARKER} here", [image], add_special=True)

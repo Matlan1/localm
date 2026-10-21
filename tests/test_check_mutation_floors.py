@@ -38,21 +38,36 @@ M3 = "localm.scopes.x_normalize__mutmut_1"
 HASHES = {"x_grants": "aaaaaaaaaaaa", "x_normalize": "bbbbbbbbbbbb"}
 
 
+def _mutant_hash(mutant: str) -> str:
+    return "mh:" + mutant
+
+
 def _results(mutants: dict[str, str], hashes: dict[str, str] | None = None,
-             module: str = MOD) -> dict:
-    return {module: {"mutants": dict(mutants), "function_hashes": dict(HASHES if hashes is None else hashes)}}
+             module: str = MOD, mutant_hashes: dict[str, str] | None = None) -> dict:
+    return {module: {
+        "mutants": dict(mutants),
+        "function_hashes": dict(HASHES if hashes is None else hashes),
+        "mutant_hashes": ({m: _mutant_hash(m) for m in mutants}
+                          if mutant_hashes is None else dict(mutant_hashes)),
+    }}
 
 
 def _baseline(mutants: dict, floor: float = 100.0, hashes: dict | None = None,
-              controls: dict | None = None, module: str = MOD) -> dict:
+              controls: dict | None = None, module: str = MOD,
+              mutant_hashes: dict[str, str] | None = None) -> dict:
+    if mutant_hashes is None:
+        mutant_hashes = {m: _mutant_hash(m) for m, v in mutants.items() if isinstance(v, dict)}
+    entry = {
+        "score_floor": floor,
+        "function_hashes": dict(hashes or HASHES),
+        "mutants": dict(mutants),
+    }
+    if mutant_hashes:
+        entry["mutant_hashes"] = dict(mutant_hashes)
     return {
         "schema": 1,
         "mutmut": "3.7.0",
-        "modules": {module: {
-            "score_floor": floor,
-            "function_hashes": dict(hashes or HASHES),
-            "mutants": dict(mutants),
-        }},
+        "modules": {module: entry},
         "controls": dict(controls or {}),
     }
 
@@ -478,6 +493,141 @@ class TestUnstable:
         assert prop["modules"][MOD]["mutants"][M2] == "killed"
 
 
+class TestRenumberedExcludedMutants:
+    """A coverage change can move which mutation an id names while the function's
+    source and its mutant count stay the same; an equivalent or unstable
+    exclusion written for the old mutation must not follow the id."""
+
+    REASON = "message text only"
+
+    def _shifted(self):
+        res = _results({M1: "killed", M2: "survived"},
+                       mutant_hashes={M1: _mutant_hash(M1), M2: "mh:another-mutation"})
+        base = _baseline({M1: "killed", M2: {"equivalent": self.REASON}}, floor=0.0)
+        return res, base
+
+    def test_an_equivalent_mutant_whose_mutated_code_changed_loses_its_exclusion(self):
+        res, base = self._shifted()
+        problems, _, rows = cmf.check(res, base, [MOD])
+        assert len(problems) == 1, problems
+        assert "1 mutant(s) have no disposition" in problems[0] and M2 in problems[0]
+        assert "no longer the one" in problems[0]
+        assert rows[0]["equivalent"] == 0 and rows[0]["scored"] == 2
+
+    def test_an_unstable_mutant_whose_mutated_code_changed_loses_its_exclusion(self):
+        res = _results({M1: "killed", M2: "survived"},
+                       mutant_hashes={M1: _mutant_hash(M1), M2: "mh:another-mutation"})
+        base = _baseline({M1: "killed", M2: {"unstable": "hash seed"}}, floor=0.0)
+        problems, _, _ = cmf.check(res, base, [MOD])
+        assert len(problems) == 1 and M2 in problems[0] and "no longer the one" in problems[0]
+
+    def test_a_missing_mutated_module_fails_closed_for_an_excluded_mutant(self):
+        res = _results({M1: "killed", M2: "survived"}, mutant_hashes={})
+        base = _baseline({M1: "killed", M2: {"equivalent": self.REASON}}, floor=0.0)
+        problems, _, _ = cmf.check(res, base, [MOD])
+        assert len(problems) == 1 and "could not be read" in problems[0]
+
+    def test_the_same_mutated_code_keeps_its_exclusion(self):
+        res = _results({M1: "killed", M2: "survived"})
+        base = _baseline({M1: "killed", M2: {"equivalent": self.REASON}})
+        problems, warnings, rows = cmf.check(res, base, [MOD])
+        assert problems == [] and warnings == []
+        assert rows[0]["equivalent"] == 1
+
+    def test_an_exclusion_with_no_recorded_hash_is_a_warning_until_update_records_it(self):
+        res = _results({M1: "killed", M2: "survived"})
+        base = _baseline({M1: "killed", M2: {"equivalent": self.REASON}}, mutant_hashes={})
+        problems, warnings, _ = cmf.check(res, base, [MOD])
+        assert problems == []
+        assert len(warnings) == 1 and "no recorded mutated-code hash" in warnings[0]
+        assert M2 in warnings[0]
+
+    def test_update_drops_an_exclusion_whose_mutated_code_changed(self):
+        res, base = self._shifted()
+        prop = cmf.propose_baseline(res, base, [MOD])
+        entry = prop["modules"][MOD]
+        assert entry["mutants"][M2] == "survived"
+        assert M2 not in entry.get("mutant_hashes", {})
+        assert cmf.check(res, prop, [MOD])[0] == []
+
+    def test_update_records_the_hash_of_a_kept_exclusion_that_had_none(self):
+        res = _results({M1: "killed", M2: "survived"})
+        base = _baseline({M1: "killed", M2: {"equivalent": self.REASON}}, mutant_hashes={})
+        entry = cmf.propose_baseline(res, base, [MOD])["modules"][MOD]
+        assert entry["mutants"][M2] == {"equivalent": self.REASON}
+        assert entry["mutant_hashes"] == {M2: _mutant_hash(M2)}
+
+    def test_update_keeps_the_pinned_hash_of_an_unchanged_exclusion(self):
+        res = _results({M1: "killed", M2: "survived"})
+        base = _baseline({M1: "killed", M2: {"equivalent": self.REASON}},
+                         mutant_hashes={M2: _mutant_hash(M2)})
+        entry = cmf.propose_baseline(res, base, [MOD])["modules"][MOD]
+        assert entry["mutant_hashes"] == {M2: _mutant_hash(M2)}
+
+
+MUTATED_SOURCE = """
+from mutmut.mutation.trampoline import wrap_in_trampoline as _mutmut_mutated, MutantDict
+mutants_x_grants__mutmut: MutantDict = {}
+@_mutmut_mutated(mutants_x_grants__mutmut)
+def grants(a, b):
+    return a + b
+def x_grants__mutmut_orig(a, b):
+    return a + b
+def x_grants__mutmut_1(a, b):
+    return a - b
+def x_grants__mutmut_2(a, b):
+    return a + b + 1
+
+class Foo:
+    @_mutmut_mutated(mutants_x\u01c1Foo\u01c1bar__mutmut)
+    def bar(self, x):
+        return x and not x
+    def x\u01c1Foo\u01c1bar__mutmut_orig(self, x):
+        return x and not x
+    def x\u01c1Foo\u01c1bar__mutmut_1(self, x):
+        return x or not x
+"""
+
+
+class TestMutatedSourceHashes:
+    def _write(self, root: Path, text: str = MUTATED_SOURCE) -> None:
+        path = root / MOD
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    def test_every_mutant_function_gets_a_hash_keyed_like_the_meta_file(self, tmp_path):
+        self._write(tmp_path)
+        hashes = cmf.mutated_source_hashes(tmp_path, MOD)
+        assert sorted(hashes) == [
+            "localm.scopes.x_grants__mutmut_1", "localm.scopes.x_grants__mutmut_2",
+            "localm.scopes.x\u01c1Foo\u01c1bar__mutmut_1"]
+        assert len(set(hashes.values())) == 3
+
+    def test_the_hash_follows_the_mutation_not_the_name_or_the_position(self, tmp_path):
+        self._write(tmp_path)
+        before = cmf.mutated_source_hashes(tmp_path, MOD)
+        renumbered = MUTATED_SOURCE.replace("x_grants__mutmut_1", "x_grants__mutmut_9") \
+            .replace("x_grants__mutmut_2", "x_grants__mutmut_1") \
+            .replace("x_grants__mutmut_9", "x_grants__mutmut_2")
+        self._write(tmp_path, "\n\n\n" + renumbered)
+        after = cmf.mutated_source_hashes(tmp_path, MOD)
+        assert after["localm.scopes.x_grants__mutmut_1"] == before["localm.scopes.x_grants__mutmut_2"]
+        assert after["localm.scopes.x_grants__mutmut_2"] == before["localm.scopes.x_grants__mutmut_1"]
+
+    def test_a_missing_or_unparsable_mutated_module_gives_no_hashes(self, tmp_path):
+        assert cmf.mutated_source_hashes(tmp_path, MOD) == {}
+        self._write(tmp_path, "def broken(:\n")
+        assert cmf.mutated_source_hashes(tmp_path, MOD) == {}
+
+    def test_load_results_carries_the_hashes_of_the_mutated_module(self, tmp_path):
+        _write_meta(tmp_path, MOD, {M1: 1, M2: 0})
+        self._write(tmp_path)
+        results, problems = cmf.load_results(tmp_path, [MOD])
+        assert problems == []
+        assert results[MOD]["mutant_hashes"] == cmf.mutated_source_hashes(tmp_path, MOD)
+        assert M1 in results[MOD]["mutant_hashes"]
+
+
 # --------------------------------------------------------------------------- #
 #  propose_baseline(): --update                                               #
 # --------------------------------------------------------------------------- #
@@ -612,7 +762,8 @@ class TestMain:
         assert "FAILED" in err and M1 in err and "BELOW its floor" in err
 
     def test_surviving_unstable_mutant_exits_zero_and_is_counted_in_the_table(self, tmp_path, capsys):
-        base = _baseline({M1: "killed", M2: {"unstable": TestUnstable.REASON}}, floor=100.0)
+        base = _baseline({M1: "killed", M2: {"unstable": TestUnstable.REASON}}, floor=100.0,
+                         mutant_hashes={})
         argv = self._setup(tmp_path, {M1: 1, M2: 0}, base)
         assert cmf.main(argv) == 0
         out = capsys.readouterr().out

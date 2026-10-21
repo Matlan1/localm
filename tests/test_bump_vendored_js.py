@@ -63,16 +63,22 @@ def _patch_up(version: str) -> str:
     return f"{major}.{minor}.{patch + 1}"
 
 
-def _patch_down(version: str) -> str:
+def _older(version: str) -> str:
+    """A release below *version*, whatever its patch or minor is."""
     major, minor, patch = _parts(version)
-    assert patch > 0, "this helper needs a vendored version with a non-zero patch"
-    return f"{major}.{minor}.{patch - 1}"
+    if patch > 0:
+        return f"{major}.{minor}.{patch - 1}"
+    if minor > 0:
+        return f"{major}.{minor - 1}.9"
+    assert major > 0, "there is no release below 0.0.0"
+    return f"{major - 1}.9.9"
 
 
 _REAL = _real_versions()
 MARKED, DOMPURIFY, HLJS, KATEX = (_REAL["marked"], _REAL["DOMPurify"], _REAL["highlight.js"],
                                   _REAL["KaTeX"])
 NEW_MARKED, NEW_HLJS, NEW_KATEX = _boundary_up(MARKED), _boundary_up(HLJS), _boundary_up(KATEX)
+NEW_DOMPURIFY = _patch_up(DOMPURIFY)
 
 
 # --------------------------------------------------------------------------- #
@@ -241,8 +247,8 @@ def test_the_dompurify_guard_has_no_version_pin_to_edit(bump):
 
 def test_dry_run_changes_nothing_and_shows_the_plan(bump, tree, capsys):
     before = snapshot(tree)
-    reg = registry_for(bump, tree, "DOMPurify", "3.4.99")
-    assert run(bump, ["--lib", "DOMPurify", "--tag", "3.4.99"], reg) == 0
+    reg = registry_for(bump, tree, "DOMPurify", NEW_DOMPURIFY)
+    assert run(bump, ["--lib", "DOMPurify", "--tag", NEW_DOMPURIFY], reg) == 0
     out = capsys.readouterr().out
     assert "replace localm/plugins/gui/static/vendor/purify.min.js" in out
     assert "dry run: nothing written" in out
@@ -252,19 +258,19 @@ def test_dry_run_changes_nothing_and_shows_the_plan(bump, tree, capsys):
 
 def test_write_replaces_the_library_byte_for_byte_and_nothing_else(bump, tree, capsys):
     before = snapshot(tree)
-    reg = registry_for(bump, tree, "DOMPurify", "3.4.99")
-    assert run(bump, ["--lib", "DOMPurify", "--tag", "3.4.99", "--write"], reg) == 0
+    reg = registry_for(bump, tree, "DOMPurify", NEW_DOMPURIFY)
+    assert run(bump, ["--lib", "DOMPurify", "--tag", NEW_DOMPURIFY, "--write"], reg) == 0
     after = snapshot(tree)
     changed = {k for k in after if before.get(k) != after[k]}
     assert changed == {f"{bump.VENDOR_REL}/purify.min.js"}
     new_file = after[f"{bump.VENDOR_REL}/purify.min.js"]
     assert new_file == reg_files(reg)["package/dist/purify.min.js"]
     assert b"\r" not in new_file
-    assert b"@license DOMPurify 3.4.99" in new_file
+    assert f"@license DOMPurify {NEW_DOMPURIFY}".encode() in new_file
 
     capsys.readouterr()
-    assert run(bump, ["--lib", "DOMPurify", "--tag", "3.4.99", "--write"], reg) == 1
-    assert "not newer than the vendored 3.4.99" in capsys.readouterr().out
+    assert run(bump, ["--lib", "DOMPurify", "--tag", NEW_DOMPURIFY, "--write"], reg) == 1
+    assert f"not newer than the vendored {NEW_DOMPURIFY}" in capsys.readouterr().out
 
 
 def reg_files(reg) -> dict:
@@ -416,7 +422,7 @@ def test_a_katex_patch_release_is_not_a_major_boundary(bump, tree, capsys):
 
 @pytest.mark.parametrize("tag, fragment", [
     (DOMPURIFY, f"not newer than the vendored {DOMPURIFY}"),
-    (_patch_down(DOMPURIFY), f"not newer than the vendored {DOMPURIFY}"),
+    (_older(DOMPURIFY), f"not newer than the vendored {DOMPURIFY}"),
     ("2.9.9", f"not newer than the vendored {DOMPURIFY}"),
     (f"{DOMPURIFY}-rc.1", "not a plain MAJOR.MINOR.PATCH"),
     (f"v{_patch_up(DOMPURIFY)}", "not a plain MAJOR.MINOR.PATCH"),
@@ -433,8 +439,8 @@ def test_a_same_older_or_malformed_version_is_refused_before_any_request(
 
 
 @pytest.mark.parametrize("name, mutate, fragment", [
-    ("another package", lambda b: b.update(name="dompurify-evil"), "not dompurify@3.4.99"),
-    ("another version", lambda b: b.update(version="3.4.98"), "not dompurify@3.4.99"),
+    ("another package", lambda b: b.update(name="dompurify-evil"), f"not dompurify@{NEW_DOMPURIFY}"),
+    ("another version", lambda b: b.update(version=_patch_up(NEW_DOMPURIFY)), f"not dompurify@{NEW_DOMPURIFY}"),
     ("deprecated", lambda b: b.update(deprecated="use something else"), "is deprecated"),
     ("no dist", lambda b: b.pop("dist"), "no dist block"),
     ("no integrity", lambda b: b["dist"].pop("integrity"), "no sha512 dist.integrity"),
@@ -444,47 +450,47 @@ def test_a_same_older_or_malformed_version_is_refused_before_any_request(
     ("tarball elsewhere", lambda b: b["dist"].update(tarball="https://evil.example/x.tgz"),
      "is not on https://registry.npmjs.org"),
     ("tarball over http", lambda b: b["dist"].update(
-        tarball="http://registry.npmjs.org/dompurify/-/dompurify-3.4.99.tgz"),
+        tarball=f"http://registry.npmjs.org/dompurify/-/dompurify-{NEW_DOMPURIFY}.tgz"),
      "is not on https://registry.npmjs.org"),
 ])
 def test_a_registry_answer_that_does_not_check_out_is_refused(
         bump, tree, capsys, name, mutate, fragment):
     before = snapshot(tree)
-    reg = registry_for(bump, tree, "DOMPurify", "3.4.99")
+    reg = registry_for(bump, tree, "DOMPurify", NEW_DOMPURIFY)
     mutate(reg.body)
-    assert run(bump, ["--lib", "DOMPurify", "--tag", "3.4.99", "--write"], reg) == 1
+    assert run(bump, ["--lib", "DOMPurify", "--tag", NEW_DOMPURIFY, "--write"], reg) == 1
     assert fragment in capsys.readouterr().out
     assert snapshot(tree) == before
 
 
 def test_a_registry_answer_that_is_not_an_object_is_refused(bump, tree, capsys):
-    reg = registry_for(bump, tree, "DOMPurify", "3.4.99")
+    reg = registry_for(bump, tree, "DOMPurify", NEW_DOMPURIFY)
     reg.body = ["not", "an", "object"]
-    assert run(bump, ["--lib", "DOMPurify", "--tag", "3.4.99", "--write"], reg) == 1
+    assert run(bump, ["--lib", "DOMPurify", "--tag", NEW_DOMPURIFY, "--write"], reg) == 1
     assert "is not an object" in capsys.readouterr().out
 
 
 def test_a_tampered_tarball_is_refused_and_nothing_is_edited(bump, tree, capsys):
     before = snapshot(tree)
-    reg = registry_for(bump, tree, "DOMPurify", "3.4.99")
+    reg = registry_for(bump, tree, "DOMPurify", NEW_DOMPURIFY)
     good = reg.tarball
     reg.tarball = make_tarball({"package/dist/purify.min.js": b"alert(1)"})
     assert reg.tarball != good
-    assert run(bump, ["--lib", "DOMPurify", "--tag", "3.4.99", "--write"], reg) == 1
+    assert run(bump, ["--lib", "DOMPurify", "--tag", NEW_DOMPURIFY, "--write"], reg) == 1
     assert "does not match its registry integrity" in capsys.readouterr().out
     assert snapshot(tree) == before
 
 
 def test_a_tarball_whose_shasum_differs_is_refused(bump, tree, capsys):
-    reg = registry_for(bump, tree, "DOMPurify", "3.4.99")
+    reg = registry_for(bump, tree, "DOMPurify", NEW_DOMPURIFY)
     reg.body["dist"]["shasum"] = "0" * 40
-    assert run(bump, ["--lib", "DOMPurify", "--tag", "3.4.99", "--write"], reg) == 1
+    assert run(bump, ["--lib", "DOMPurify", "--tag", NEW_DOMPURIFY, "--write"], reg) == 1
     assert "does not match its registry shasum" in capsys.readouterr().out
 
 
 def test_a_tarball_that_is_not_a_tarball_is_refused(bump, tree, capsys):
-    reg = Registry(bump, "dompurify", "3.4.99", b"this is not gzip")
-    assert run(bump, ["--lib", "DOMPurify", "--tag", "3.4.99", "--write"], reg) == 1
+    reg = Registry(bump, "dompurify", NEW_DOMPURIFY, b"this is not gzip")
+    assert run(bump, ["--lib", "DOMPurify", "--tag", NEW_DOMPURIFY, "--write"], reg) == 1
     assert "cannot be opened" in capsys.readouterr().out
 
 
@@ -500,8 +506,8 @@ def test_a_duplicated_member_is_refused(bump, tree, capsys):
     info = tarfile.TarInfo("package/dist/purify.min.js")
     info.size = 3
     files = {"package/dist/purify.min.js": b"one"}
-    reg = Registry(bump, "dompurify", "3.4.99", make_tarball(files, extra=[(info, b"two")]))
-    assert run(bump, ["--lib", "DOMPurify", "--tag", "3.4.99", "--write"], reg) == 1
+    reg = Registry(bump, "dompurify", NEW_DOMPURIFY, make_tarball(files, extra=[(info, b"two")]))
+    assert run(bump, ["--lib", "DOMPurify", "--tag", NEW_DOMPURIFY, "--write"], reg) == 1
     assert "appears more than once" in capsys.readouterr().out
 
 
@@ -509,8 +515,8 @@ def test_a_link_in_place_of_a_file_is_refused(bump, tree, capsys):
     info = tarfile.TarInfo("package/dist/purify.min.js")
     info.type = tarfile.SYMTYPE
     info.linkname = "../../../../etc/passwd"
-    reg = Registry(bump, "dompurify", "3.4.99", make_tarball({}, extra=[(info, None)]))
-    assert run(bump, ["--lib", "DOMPurify", "--tag", "3.4.99", "--write"], reg) == 1
+    reg = Registry(bump, "dompurify", NEW_DOMPURIFY, make_tarball({}, extra=[(info, None)]))
+    assert run(bump, ["--lib", "DOMPurify", "--tag", NEW_DOMPURIFY, "--write"], reg) == 1
     assert "is not a regular file" in capsys.readouterr().out
 
 
@@ -524,8 +530,8 @@ def test_a_font_name_with_a_path_in_it_is_refused(bump, tree, capsys):
 
 def test_an_oversized_member_is_refused(bump, tree, capsys, monkeypatch):
     monkeypatch.setattr(bump, "MAX_MEMBER_BYTES", 10)
-    reg = registry_for(bump, tree, "DOMPurify", "3.4.99")
-    assert run(bump, ["--lib", "DOMPurify", "--tag", "3.4.99", "--write"], reg) == 1
+    reg = registry_for(bump, tree, "DOMPurify", NEW_DOMPURIFY)
+    assert run(bump, ["--lib", "DOMPurify", "--tag", NEW_DOMPURIFY, "--write"], reg) == 1
     assert "is larger than 10 bytes" in capsys.readouterr().out
 
 
@@ -537,7 +543,7 @@ def test_a_pin_that_disagrees_with_the_banner_is_refused(bump, tree, capsys):
     reg = registry_for(bump, tree, "marked", NEW_MARKED)
     path = tree / bump.TESTS_REL / "vendor-marked.test.mjs"
     path.write_bytes(path.read_bytes().replace(f'VENDORED_VERSION = "{MARKED}"'.encode(),
-                                               f'VENDORED_VERSION = "{_patch_down(MARKED)}"'.encode()))
+                                               f'VENDORED_VERSION = "{_older(MARKED)}"'.encode()))
     assert run(bump, ["--lib", "marked", "--tag", NEW_MARKED, "--write"], reg) == 1
     assert "the tree is inconsistent" in capsys.readouterr().out
 
