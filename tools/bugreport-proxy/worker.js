@@ -122,13 +122,11 @@ async function fileReport(request, env) {
 
 // Prepended to the body of every issue this proxy files.
 const REPORTER_NOTE =
-  "> Filed through the localm bug reporter on behalf of a user. " +
-  "This text was not written by the repository owner.\n\n";
+  "> Submitted by a localm user through the built-in bug reporter.\n\n";
 
 // Prepended instead of REPORTER_NOTE when the body lacks the REPORT_SECTIONS headings.
 const REPORTER_NOTE_UNSHAPED =
-  "> Filed through the localm bug reporter on behalf of a user. " +
-  "This text was not written by the repository owner.\n" +
+  "> Submitted by a localm user through the built-in bug reporter.\n" +
   "> It does not have the sections a report built by localm contains.\n\n";
 
 // Section headings every report built by localm's reporter contains.
