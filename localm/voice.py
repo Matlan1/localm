@@ -400,7 +400,9 @@ def _load_whisper(model_cls: Callable[..., Any], name: str, download_root, local
     WhisperModel). A pinned model that has to be downloaded is fetched at its
     pinned commit and its model.bin is checked before it is loaded; a failed
     check raises. A cached model loads offline, from the pinned snapshot when it
-    is there and from the cache's default snapshot otherwise."""
+    is there (its model.bin is checked first and a failed check raises) and from
+    the cache's default snapshot otherwise (not checked: no digest is known for
+    it)."""
     revision = _stt_revision(name, download_root, local_files_only)
     if revision is not None and not local_files_only:
         path = fetch(name, download_root, revision)
@@ -408,6 +410,10 @@ def _load_whisper(model_cls: Callable[..., Any], name: str, download_root, local
         if integrity is not None:
             raise RuntimeError(integrity)
         return model_cls(path, device="cpu", compute_type="int8")
+    if revision is not None:
+        integrity = _verify_pinned_model(name, download_root)
+        if integrity is not None:
+            raise RuntimeError(integrity)
     extra = {"revision": revision} if revision else {}
     return model_cls(name, device="cpu", compute_type="int8",
                      download_root=download_root, local_files_only=local_files_only, **extra)
