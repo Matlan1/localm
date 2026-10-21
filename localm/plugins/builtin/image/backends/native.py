@@ -504,12 +504,14 @@ def _write_sidecar(out_path: Path, record: dict) -> str:
 class _EventRelay:
     """The worker-event handler for one job: status lines to *say*, preview
     frames to *on_preview*. ``flush`` shows any held warning lines and must be
-    called when the job ends."""
+    called when the job ends. Weight loads reported after sampling has started
+    (weights streamed in per step) are not shown."""
 
     def __init__(self, say, on_preview=None, cancel_check=None):
         self._say = say
         self._on_preview = on_preview
         self._phase = None
+        self._sampled = False
         self._warnings = RecoveredWarnings(say, cancel_check)
 
     def flush(self) -> None:
@@ -529,7 +531,11 @@ class _EventRelay:
             return
         info = event[1]
         phase, step, steps = info.get("phase"), info.get("step", 0), info.get("steps", 0)
+        if phase == "loading" and self._sampled:
+            self._phase = phase
+            return
         if phase == "sampling":
+            self._sampled = True
             self._warnings.sampling()
             secs = info.get("secs") or 0.0
             rate = f" ({secs:.2f} s/step)" if secs else ""

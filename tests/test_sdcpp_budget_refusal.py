@@ -310,3 +310,27 @@ def test_a_failed_batched_pass_is_still_shown():
     said = _relayed([(b.SD_LOG_ERROR, "batched diffusion model compute failed "
                                       "--- diffusion_engine.cpp:2805")], retry=False)
     assert said == ["stable-diffusion.cpp: batched diffusion model compute failed"]
+
+
+def _progress(phase, step, steps, secs=0.0):
+    return ("progress", {"phase": phase, "step": step, "steps": steps, "secs": secs})
+
+
+STREAMED_JOB = ([_progress("loading", 0, 3), _progress("loading", 3, 3)]
+                + [e for n in (1, 2) for e in (_progress("sampling", n, 2, 5.0),
+                                              _progress("loading", 0, 4),
+                                              _progress("loading", 4, 4))]
+                + [_progress("decoding", 0, 1), _progress("decoding", 1, 1)])
+
+
+@pytest.mark.parametrize("module", [image_native, video_native], ids=["image", "video"])
+def test_weights_streamed_in_per_step_add_no_load_lines(module):
+    said = []
+    relay = module._event_relay(said.append)
+    for event in STREAMED_JOB:
+        relay(event)
+    loads = [i for i, line in enumerate(said) if line.startswith("Loading weights")]
+    steps = [i for i, line in enumerate(said) if line.startswith("Step ")]
+    assert len(steps) == 2
+    assert loads and all(i < steps[0] for i in loads)
+    assert any(line.startswith("Decoding") for line in said[steps[-1]:])
