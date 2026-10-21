@@ -1005,7 +1005,8 @@ def _list_gpus_with_status(deadline: float, wait_for_inflight: bool = False) -> 
             # mutates, and this probe thread is the only writer while it runs.
             conclusive = not (not value and (_isolated_torch_unavailable
                                              or _isolated_torch_unanswered
-                                             or _torch_gpu_probe_known_doomed()))
+                                             or (_torch_gpu_probe_known_doomed()
+                                                 and _torch_doomed_reason != "sycl")))
             if _gpu_probe_epoch != my_epoch:
                 # A reset retired this probe while it ran: its reading describes a
                 # state the owner has explicitly dropped, and the in-flight slot is
@@ -1091,12 +1092,15 @@ def _list_gpus_with_status(deadline: float, wait_for_inflight: bool = False) -> 
 # above, for native_sycl_runtime_resident() / _intel_sycl_rt_installed().
 # _torch_doomed_announced: the last _torch_gpu_probe_known_doomed() answer written
 # to the log, or None before anything has been.
+# _torch_doomed_reason: which combination the last _torch_gpu_probe_known_doomed()
+# call found ("hip" or "sycl"), or None when it answered False.
 _source_selection_lock = threading.Lock()
 _native_hip_resident: bool | None = None
 _rocm_sdk_present: bool | None = None
 _native_sycl_resident: bool | None = None
 _intel_sycl_rt_present: bool | None = None
 _torch_doomed_announced: bool | None = None
+_torch_doomed_reason: str | None = None
 
 
 def native_hip_runtime_resident() -> bool:
@@ -1342,10 +1346,12 @@ def _torch_gpu_probe_known_doomed() -> bool:
     the collision itself is not. It is still wired in because the cost of
     being wrong is asymmetric and small: this probe enumerates only
     torch.cuda devices (the HF backend separately enumerates torch.xpu, in
-    ``backends/_hf_worker.py``), so skipping the torch.cuda attempt here
-    changes nothing this probe currently returns, while catching it if the
-    collision is real avoids the HIP case's exact symptoms (a crash-prone
-    import, a repeating stderr trace).
+    ``backends/_hf_worker.py``), and :func:`_list_gpus_probe` treats this
+    skip as torch answering no CUDA device (no AMD single-adapter fallback,
+    a conclusive empty answer), so skipping the torch.cuda attempt here
+    changes nothing this probe returns, while catching it if the collision
+    is real avoids the HIP case's exact symptoms (a crash-prone import, a
+    repeating stderr trace).
 
     Fails OPEN: if either detector pair errors, the probe proceeds with its
     normal torch attempt (which catches its own failures) - detection must
@@ -1359,8 +1365,13 @@ def _torch_gpu_probe_known_doomed() -> bool:
     distribution lookup - is resolved once per process, so a caller polling
     this on every GPU probe re-runs none of them. Only the ``sys.modules``
     membership test is re-evaluated, which is what lets the answer still
-    flip when torch becomes resident."""
+    flip when torch becomes resident.
+
+    Records which combination fired in ``_torch_doomed_reason`` ("hip",
+    "sycl", or None when this answers False)."""
+    global _torch_doomed_reason
     import sys
+    _torch_doomed_reason = None
     if "torch" in sys.modules:
         # A resident torch (imported for real before the runtime loaded, or a
         # test's injected stand-in) makes `import torch` a plain cache hit: no
@@ -1384,6 +1395,7 @@ def _torch_gpu_probe_known_doomed() -> bool:
     if doomed_reason is None:
         _announce_torch_doomed(False)
         return False
+    _torch_doomed_reason = doomed_reason
     if not _announce_torch_doomed(True):
         return True
     if doomed_reason == "hip":
@@ -1896,6 +1908,7 @@ def _list_gpus_probe() -> list:
     with _gpu_probe_lock:
         _isolated_torch_unanswered = False
     torch_asked = not _torch_gpu_probe_known_doomed()
+    skipped_for_sycl = not torch_asked and _torch_doomed_reason == "sycl"
     if torch_asked:
         try:
             out = _torch_gpus_resident_bounded() if _torch_is_resident() \
@@ -1954,11 +1967,13 @@ def _list_gpus_probe() -> list:
     # AMD/Windows single-adapter fallback: pair the one registry-reported
     # adapter via ADL/PDH, same source and rule as vram_info()'s registry
     # tier. Runs ONLY when torch itself could not be trusted this round
-    # (never asked, or the isolated-torch latch is engaged) - never when
-    # torch was asked and answered honestly empty. See
+    # (skipped for the HIP conflict, or the isolated-torch latch is engaged)
+    # - never when torch was asked and answered honestly empty, or skipped
+    # for the SYCL conflict, where it would answer no CUDA device. See
     # test_amd_single_adapter_fallback_is_conclusive and
     # test_fires_control_genuine_no_gpu_box_stays_ok.
-    if not torch_asked or _isolated_torch_unavailable or _isolated_torch_unanswered:
+    if ((not torch_asked and not skipped_for_sycl)
+            or _isolated_torch_unavailable or _isolated_torch_unanswered):
         entry = _windows_largest_adapter_registry_entry()
         if entry is not None:
             _apply_device_global_free([entry])
