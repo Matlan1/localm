@@ -540,7 +540,10 @@ def _pin_mismatch(path: Path, pin: Optional[tuple]) -> Optional[str]:
     names, or None when it is that file or *pin* is None."""
     if pin is None:
         return None
-    actual = file_sha256(path)
+    try:
+        actual = file_sha256(path)
+    except OSError as e:
+        return f"the embedding model file {path.name} could not be read ({e})"
     if actual == pin[1].lower():
         return None
     return (f"the embedding model file {path.name} has sha256 {actual}, not the "

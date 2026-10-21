@@ -126,6 +126,75 @@ class TestSnapshotRepull:
         assert (dest / "model.safetensors").read_bytes() == GOOD_WEIGHTS
         assert "already downloaded" in " ".join(capsys.readouterr().out.lower().split())
 
+    def test_a_truncated_weight_file_of_a_registered_model_is_fetched_again(
+            self, fake_registry, monkeypatch, capsys):
+        store, models_dir = fake_registry
+        dest = self._lay(models_dir, GOOD_WEIGHTS[:400])
+        store["snap"] = {"path": str(dest), "source": "hf:o/r", "model_type": "llm"}
+        downloaded: list = []
+        _snapshot_hub(monkeypatch, downloaded)
+
+        ok = mm._pull_hf_snapshot("o/r", "snap")
+
+        assert (dest / "model.safetensors").read_bytes() == GOOD_WEIGHTS
+        assert downloaded == ["o/r"]
+        assert ok is True
+        assert "skipping" not in capsys.readouterr().out.lower()
+
+    def test_a_damaged_file_that_is_in_use_is_reported_and_nothing_is_fetched(
+            self, fake_registry, monkeypatch, capsys):
+        store, models_dir = fake_registry
+        dest = self._lay(models_dir, DAMAGED_WEIGHTS)
+        store["snap"] = {"path": str(dest), "source": "hf:o/r", "model_type": "llm"}
+        downloaded: list = []
+        _snapshot_hub(monkeypatch, downloaded)
+        real_unlink = Path.unlink
+
+        def _locked(self, missing_ok=False):
+            if self.name == "model.safetensors":
+                raise PermissionError(32, "in use")
+            return real_unlink(self, missing_ok=missing_ok)
+
+        monkeypatch.setattr(Path, "unlink", _locked)
+
+        ok = mm._pull_hf_snapshot("o/r", "snap")
+
+        assert ok is False
+        assert downloaded == []
+        assert (dest / "model.safetensors").read_bytes() == DAMAGED_WEIGHTS
+        assert "could not delete" in " ".join(capsys.readouterr().out.lower().split())
+
+    def test_nothing_is_deleted_when_the_folder_belongs_to_another_model(
+            self, fake_registry, monkeypatch):
+        store, models_dir = fake_registry
+        dest = self._lay(models_dir, DAMAGED_WEIGHTS)
+        store["other"] = {"path": str(dest), "source": "hf:someone/else", "model_type": "llm"}
+        downloaded: list = []
+        _snapshot_hub(monkeypatch, downloaded)
+
+        assert mm._pull_hf_snapshot("o/r", "snap") is False
+
+        assert (dest / "model.safetensors").read_bytes() == DAMAGED_WEIGHTS
+        assert downloaded == []
+
+    def test_a_failed_refetch_says_the_damaged_files_are_gone(
+            self, fake_registry, monkeypatch, capsys):
+        store, models_dir = fake_registry
+        dest = self._lay(models_dir, DAMAGED_WEIGHTS)
+        store["snap"] = {"path": str(dest), "source": "hf:o/r", "model_type": "llm"}
+        _snapshot_hub(monkeypatch, [])
+
+        def _offline(**kw):
+            raise OSError("offline")
+
+        monkeypatch.setattr(huggingface_hub, "snapshot_download", _offline)
+
+        assert mm._pull_hf_snapshot("o/r", "snap") is False
+
+        out = " ".join(capsys.readouterr().out.lower().split())
+        assert "damaged files were deleted" in out
+        assert not (dest / "model.safetensors").exists()
+
     def test_a_listing_without_digests_keeps_the_size_only_check(
             self, fake_registry, monkeypatch):
         store, models_dir = fake_registry
@@ -183,6 +252,24 @@ class TestProjectorRepull:
         assert not (models_dir / "mmproj-main-f16-2.gguf").exists()
         assert downloaded == ["mmproj-main-f16.gguf"]
         assert store["main"]["mmproj"] == str((models_dir / "mmproj-main-f16.gguf").resolve())
+
+    def test_a_projector_that_is_in_use_is_left_and_the_pull_still_succeeds(
+            self, fake_registry, monkeypatch, tmp_path):
+        store, models_dir, right, damaged, _ = self._setup(
+            fake_registry, monkeypatch, tmp_path, "hf:o/r")
+        real_unlink = Path.unlink
+
+        def _locked(self, missing_ok=False):
+            if self.name == "mmproj-main-f16.gguf":
+                raise PermissionError(32, "in use")
+            return real_unlink(self, missing_ok=missing_ok)
+
+        monkeypatch.setattr(Path, "unlink", _locked)
+
+        assert mm._pull_gguf_file("o/r:main.gguf", None) is True
+
+        assert (models_dir / "mmproj-main-f16.gguf").read_bytes() == damaged
+        assert (models_dir / "mmproj-main-f16-2.gguf").read_bytes() == right
 
     def test_another_repos_projector_of_the_same_name_is_still_left_alone(
             self, fake_registry, monkeypatch, tmp_path):
@@ -293,6 +380,18 @@ class TestExistingEmbeddingFile:
         assert embedder.resolve_embedding_model_path(allow_download=True) is None
 
         assert "pinned" in (embedder.last_error() or "")
+
+    def test_an_unreadable_file_is_fetched_again_not_raised(self, known, monkeypatch):
+        known.write_bytes(b"whatever")
+        seen = self._hub(monkeypatch, EMBED_GOOD)
+
+        def _unreadable(path):
+            raise PermissionError(13, "denied")
+
+        monkeypatch.setattr(embedder, "file_sha256", _unreadable)
+        embedder.resolve_embedding_model_path(allow_download=True)
+
+        assert seen == ["a" * 40]
 
     def test_an_intact_file_is_not_fetched_again(self, known, monkeypatch):
         known.write_bytes(EMBED_GOOD)
