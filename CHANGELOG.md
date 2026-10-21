@@ -406,6 +406,25 @@ permanent public record of what shipped and are never rewritten; the in-progress
   word (Qwen3-ASR) is picked only when no other model is eligible.
 - **The usage line explains why MTP is off on a turn with audio.** It used to show the raw reason
   word.
+- **A GGUF model loads several seconds faster.** Sizing a load (GPU layers, the VRAM check, the
+  GPU placement and the context ceiling) now reads the GPUs once instead of once per step; on
+  Windows each reading starts a separate process. A small model's first reply after loading
+  arrives in about 11 seconds instead of about 19 on an RX 6900 XT.
+- **Loads that spread over two or more GPUs are no longer sized against one of them when torch
+  is loaded in the server.** A model that fits across the GPUs is no longer refused as too large
+  for "this GPU" when the combined reading is not available.
+- **On an Intel GPU with the SYCL runtime and an XPU build of torch, the GPU list no longer
+  shows a made-up adapter** once the runtime is loaded.
+- **The automatic context ceiling counts the MTP draft context's attention scores per token.**
+  A large automatic context on a model with an MTP draft no longer leaves that memory out.
+- **A text-to-speech GGUF registered as a chat model by an older version gets the Q8_0 speech
+  projector** when the model folder is synced, not the f16 one the CPU backend cannot run.
+- **A low-VRAM warning that names another localm instance's model prints the name as text.** A
+  name with square brackets no longer loses them or stops the warning with an error.
+- **With a LoRA adapter attached and part of the model on the CPU, the memory-map decision
+  counts the weights kept in system memory correctly.**
+- **`/v1/embeddings` checks whether a model is a folder off the server's event loop,** and an
+  embedding model entry with no path is no longer read as the current folder.
 
 ### Changed
 
