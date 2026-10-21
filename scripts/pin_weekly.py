@@ -194,11 +194,13 @@ def _resolve_exe(cmd: list[str]) -> list[str]:
 
 
 def _kill_tree(pid: int) -> None:
+    """Kill *pid* and its descendants. On POSIX *pid* must lead its own process
+    group (run_cmd starts it with start_new_session)."""
     if os.name == "nt":
         subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
     else:
         with contextlib.suppress(OSError):
-            os.kill(pid, 9)
+            os.killpg(pid, 9)
 
 
 def run_cmd(cmd: list[str], *, cwd: Path, timeout: float, env: dict | None = None) -> tuple[int, str]:
@@ -206,7 +208,7 @@ def run_cmd(cmd: list[str], *, cwd: Path, timeout: float, env: dict | None = Non
     process tree is killed and the exit code is 2 (INCONCLUSIVE)."""
     proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True, encoding="utf-8",
-                            errors="replace")
+                            errors="replace", start_new_session=(os.name != "nt"))
     try:
         out, _ = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:

@@ -528,8 +528,11 @@ def test_run_cmd_times_out_kills_the_tree_and_reports_inconclusive(tmp_path):
         f"open({str(pidfile)!r}, 'w').write(str(p.pid))",
         "time.sleep(60)",
     ])
+    started = time.monotonic()
     rc, out = pw.run_cmd([sys.executable, "-c", code], cwd=tmp_path, timeout=3)
+    elapsed = time.monotonic() - started
     assert rc == 2 and "timed out" in out
+    assert elapsed < 30, f"run_cmd held {elapsed:.0f}s: the grandchild outlived the kill and kept the pipe open"
     grandchild = int(pidfile.read_text(encoding="utf-8"))
     from localm.instances import pid_alive
     deadline = time.monotonic() + 10
