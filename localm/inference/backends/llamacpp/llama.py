@@ -3854,9 +3854,10 @@ class LlamaCpp:
         sequences' caches hold (as in ``_rightsize_plan``), the answer is
         *needed* without asking ``_vram_check`` while its KV cache is in VRAM
         or while the promotion check is held off (``_kv_promote_after``).
-        Asks ``_vram_check`` with ``hint=False``, at most twice, *step* first,
-        and ``_budget_check`` (when set) for each size ``_vram_check`` keeps in
-        VRAM; never asks when the two sizes round to the same context. Never
+        Asks ``_vram_check`` with ``hint=False``, at most twice, *step* first;
+        when it keeps both sizes in VRAM, asks ``_budget_check`` (when set) for
+        *needed*, then for *step*. Never asks when the two sizes round to the
+        same context. Never
         raises: a raising check answers *needed*, logged at INFO. Caller holds
         ``_gen_lock``."""
         check = getattr(self, "_vram_check", None)
@@ -3877,11 +3878,11 @@ class LlamaCpp:
         try:
             if check(small, capacity, hint=False) is not True:
                 return needed
-            if budget is not None and budget(small, capacity) is False:
-                return needed
-            if (check(full, capacity, hint=False) is not False
-                    and (budget is None or budget(full, capacity) is not False)):
-                return needed
+            if check(full, capacity, hint=False) is not False:
+                if budget is None or budget(full, capacity) is not False:
+                    return needed
+                if budget(small, capacity) is False:
+                    return needed
         except Exception as exc:
             from localm.debuglog import logger
             logger.info("gguf context: reserving the whole reply, the VRAM check raised %s",

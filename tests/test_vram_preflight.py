@@ -399,7 +399,10 @@ class TestProcessVramBudget:
     @pytest.mark.skipif(sys.platform != "win32", reason="DXGI is Windows-only")
     def test_real_dxgi_query(self):
         from localm import gpu_usage
-        for budget, usage in gpu_usage._dxgi_local_memory():
+        readings = gpu_usage._dxgi_local_memory()
+        if not readings:
+            pytest.skip("no hardware DXGI adapter")
+        for budget, usage in readings:
             assert budget > 0
             assert usage >= 0
 

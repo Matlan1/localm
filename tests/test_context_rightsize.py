@@ -357,17 +357,24 @@ class TestStepReserveOsBudget:
     def test_a_budget_past_the_os_budget_reserves_one_step(self):
         calls = []
         assert self._llm(4096, calls)._step_reserve(4460, 876) == 876
-        assert calls == [(4096, 4096), (8192, 4096)]
+        assert calls == [(8192, 4096), (4096, 4096)]
 
     def test_a_budget_within_the_os_budget_is_reserved_whole(self):
         calls = []
         assert self._llm(8192, calls)._step_reserve(4460, 876) == 4460
-        assert calls == [(4096, 4096), (8192, 4096)]
+        assert calls == [(8192, 4096)]
 
     def test_a_step_past_the_os_budget_reserves_the_whole_budget(self):
         calls = []
         assert self._llm(0, calls, capacity=0)._step_reserve(4460, 876) == 4460
-        assert calls == [(4096, 0)]
+        assert calls == [(8192, 0), (4096, 0)]
+
+    def test_a_ram_placement_reserves_one_step_even_past_the_os_budget(self):
+        calls = []
+        llm = _llm(4096, vram_check=_vram_upto(4096, []), cached=[])
+        llm._budget_check = lambda target, current: calls.append((target, current)) or False
+        assert llm._step_reserve(4460, 876) == 876
+        assert calls == []
 
     def test_an_unknown_budget_reserves_the_whole_budget(self):
         calls = []
@@ -391,7 +398,7 @@ class TestStepReserveOsBudget:
         api, _cp, created = _capacity_api(llm)
         out = _generate(llm, api, prompt=self.PROMPT, max_new_tokens=4096)
         assert len(out) == 4096
-        assert calls[:2] == [(4096, 4096), (8192, 4096)]
+        assert calls[:2] == [(8192, 4096), (4096, 4096)]
         assert created == [(8192, True)]
         assert llm._ctx_capacity == 8192 and llm._offload_kqv is True
 

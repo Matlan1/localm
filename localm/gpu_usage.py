@@ -1007,9 +1007,9 @@ def _com_method(obj, slot: int, *argtypes):
 def _dxgi_local_memory() -> list[tuple[int, int]]:
     """``(budget, current_usage)`` bytes of the LOCAL (dedicated VRAM) segment
     group for THIS process, one entry per hardware DXGI adapter, from
-    ``IDXGIAdapter3::QueryVideoMemoryInfo``. Software adapters and adapters
-    without IDXGIAdapter3 are skipped. Raises OSError when DXGI cannot be
-    opened, and on every platform other than Windows."""
+    ``IDXGIAdapter3::QueryVideoMemoryInfo``. Software adapters are skipped.
+    Raises OSError when DXGI cannot be opened, when a call on an adapter
+    fails, and on every platform other than Windows."""
     if sys.platform != "win32":
         raise OSError("DXGI is Windows-only")
     iid_factory1 = _guid(0x770AAE78, 0xF26F, 0x4DBA,
@@ -1033,24 +1033,28 @@ def _dxgi_local_memory() -> list[tuple[int, int]]:
             index += 1
             try:
                 desc = _DxgiAdapterDesc1()
-                if _com_method(adapter, _VT_GET_DESC1, ctypes.POINTER(_DxgiAdapterDesc1))(
-                        adapter, ctypes.byref(desc)) != 0:
-                    continue
+                hr = _com_method(adapter, _VT_GET_DESC1, ctypes.POINTER(_DxgiAdapterDesc1))(
+                    adapter, ctypes.byref(desc))
+                if hr != 0:
+                    raise OSError(f"IDXGIAdapter1::GetDesc1 failed (0x{hr & 0xFFFFFFFF:08x})")
                 if desc.Flags & _DXGI_ADAPTER_FLAG_SOFTWARE:
                     continue
                 adapter3 = ctypes.c_void_p()
-                if _com_method(adapter, _VT_QUERY_INTERFACE, ctypes.POINTER(_Guid),
-                               ctypes.POINTER(ctypes.c_void_p))(
-                        adapter, ctypes.byref(iid_adapter3), ctypes.byref(adapter3)) != 0:
-                    continue
+                hr = _com_method(adapter, _VT_QUERY_INTERFACE, ctypes.POINTER(_Guid),
+                                 ctypes.POINTER(ctypes.c_void_p))(
+                    adapter, ctypes.byref(iid_adapter3), ctypes.byref(adapter3))
+                if hr != 0 or not adapter3:
+                    raise OSError(f"IDXGIAdapter3 unavailable (0x{hr & 0xFFFFFFFF:08x})")
                 try:
                     info = _DxgiQueryVideoMemoryInfo()
-                    if _com_method(adapter3, _VT_QUERY_VIDEO_MEMORY_INFO, ctypes.c_uint,
-                                   ctypes.c_int,
-                                   ctypes.POINTER(_DxgiQueryVideoMemoryInfo))(
-                            adapter3, 0, _DXGI_MEMORY_SEGMENT_GROUP_LOCAL,
-                            ctypes.byref(info)) == 0:
-                        out.append((int(info.Budget), int(info.CurrentUsage)))
+                    hr = _com_method(adapter3, _VT_QUERY_VIDEO_MEMORY_INFO, ctypes.c_uint,
+                                     ctypes.c_int,
+                                     ctypes.POINTER(_DxgiQueryVideoMemoryInfo))(
+                        adapter3, 0, _DXGI_MEMORY_SEGMENT_GROUP_LOCAL, ctypes.byref(info))
+                    if hr != 0:
+                        raise OSError("IDXGIAdapter3::QueryVideoMemoryInfo failed "
+                                      f"(0x{hr & 0xFFFFFFFF:08x})")
+                    out.append((int(info.Budget), int(info.CurrentUsage)))
                 finally:
                     _com_method(adapter3, _VT_RELEASE)(adapter3)
             finally:
