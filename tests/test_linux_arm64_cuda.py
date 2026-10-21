@@ -69,7 +69,7 @@ def test_the_pinned_release_publishes_the_arm64_cuda_assets_the_resolver_names()
 @pytest.mark.parametrize("caps,arch,expected", [
     ([(8, 7)], "arm64", "vulkan"),
     ([(9, 0)], "arm64", "vulkan"),
-    ([], "arm64", "vulkan"),
+    ([], "arm64", "cuda"),
     ([(12, 0)], "arm64", "cuda"),
     ([(8, 6), (10, 0)], "arm64", "cuda"),
     ([(8, 6)], "x64", "cuda"),

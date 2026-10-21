@@ -280,5 +280,6 @@ def test_recommended_install_backend_only_picks_a_backend_with_a_build(
     monkeypatch.setattr(hwdetect.sys, "platform", plat)
     monkeypatch.setattr(hwdetect, "machine_arch", lambda: arch)
     monkeypatch.setattr(hwdetect, "_rocm_toolkit_present", lambda: False)
+    monkeypatch.setattr(hwdetect, "_cuda_compute_capabilities", lambda: [])
     got = hwdetect.recommended_install_backend(hwdetect.Detection(vendors=vendors))
     assert got == expected
