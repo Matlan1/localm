@@ -650,3 +650,66 @@ def test_an_explicit_backend_that_does_not_start_is_not_swapped(two_backends, fa
     starts = [e for e in _events(fake_kcpp) if e["event"] == "start"]
     assert len(starts) == 1 and "--usevulkan" in starts[0]["argv"]
     assert runtime.backend_failed("vulkan") is None
+
+
+# --------------------------------------------------------------------------- #
+#  Model paths with non-ASCII characters on Windows                            #
+# --------------------------------------------------------------------------- #
+
+UMLAUT_MODELS = server.ModelSet(text_encoder="D:/Jürgen/te.gguf", dit="D:/Jürgen/dit.gguf",
+                                vae="D:/ascii/vae.gguf", lm="D:/Öl ß/lm.gguf")
+SHORT = {"D:/Jürgen/te.gguf": "D:/JRGEN~1/te.gguf", "D:/Jürgen/dit.gguf": "D:/JRGEN~1/dit.gguf",
+         "D:/Öl ß/lm.gguf": "D:/LSS~1/lm.gguf"}
+
+
+def test_a_non_ascii_music_model_path_is_given_to_the_runtime_in_short_form(
+        two_backends, fake_kcpp, monkeypatch):
+    monkeypatch.setattr(music.sys, "platform", "win32")
+    monkeypatch.setattr(music, "_short_path", lambda p: SHORT.get(p, p))
+    monkeypatch.setattr(music, "resolve_models", lambda *a, **k: UMLAUT_MODELS)
+    server.stop()
+    _data, used = music.generate_wav({}, "vulkan", REQUEST, plan=False)
+    assert used == "vulkan"
+    argv = [e for e in _events(fake_kcpp) if e["event"] == "start"][-1]["argv"]
+    for flag, value in (("--musicembeddings", "D:/JRGEN~1/te.gguf"),
+                        ("--musicdiffusion", "D:/JRGEN~1/dit.gguf"),
+                        ("--musicvae", "D:/ascii/vae.gguf"), ("--musicllm", "D:/LSS~1/lm.gguf")):
+        assert argv[argv.index(flag) + 1] == value
+
+
+def test_a_non_ascii_music_model_path_without_a_short_form_is_refused_before_starting(
+        two_backends, fake_kcpp, monkeypatch):
+    monkeypatch.setattr(music.sys, "platform", "win32")
+    monkeypatch.setattr(music, "_short_path", lambda p: p)
+    monkeypatch.setattr(music, "resolve_models", lambda *a, **k: UMLAUT_MODELS)
+    server.stop()
+    before = len([e for e in _events(fake_kcpp) if e["event"] == "start"])
+    with pytest.raises(music.ModelError) as exc:
+        music.generate_wav({}, "auto", REQUEST, plan=False)
+    assert "D:/Jürgen/te.gguf" in str(exc.value) and "short (8.3) name" in str(exc.value)
+    after = len([e for e in _events(fake_kcpp) if e["event"] == "start"])
+    assert after == before
+    assert runtime.backend_failed("cuda") is None and runtime.backend_failed("vulkan") is None
+
+
+def test_music_model_paths_are_unchanged_off_windows(monkeypatch):
+    monkeypatch.setattr(music.sys, "platform", "linux")
+    monkeypatch.setattr(music, "_short_path", lambda p: pytest.fail("no short path off Windows"))
+    assert music.runtime_paths(UMLAUT_MODELS) is UMLAUT_MODELS
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="short (8.3) names are Windows-only")
+def test_a_real_non_ascii_music_model_path_maps_to_an_ascii_name_of_the_same_file(tmp_path):
+    d = tmp_path / "Jürgen Öl ß"
+    d.mkdir()
+    f = d / "lm.gguf"
+    f.write_bytes(b"GGUF")
+    models = server.ModelSet(text_encoder=str(f), dit=str(f), vae=str(f))
+    try:
+        mapped = music.runtime_paths(models)
+    except music.ModelError as e:
+        assert str(f) in str(e) and "short (8.3) name" in str(e)
+        assert not music._short_path(str(f)).isascii()
+        return
+    assert mapped.text_encoder.isascii() and os.path.samefile(mapped.text_encoder, f)
+    assert mapped.lm is None
