@@ -54,7 +54,7 @@ def _gpu_refusal(fmt: str) -> Optional[str]:
     found = detect()
     if "nvidia" in found.vendors or found.gpu_state == "unknown":
         return None
-    names = [_VENDOR_NAMES.get(v, v) for v in found.vendors]
+    names = [str(_VENDOR_NAMES.get(v, v)) for v in found.vendors]
     if not names:
         have = "no GPU"
     elif len(names) == 1:

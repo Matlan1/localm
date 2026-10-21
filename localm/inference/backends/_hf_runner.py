@@ -128,7 +128,7 @@ import os
 import queue as _queue
 import threading
 import time
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 
 class RunnerBusy(Exception):
@@ -306,7 +306,7 @@ def prepare_worker_process() -> None:
     close_hub_gate()
 
 
-def _load_worker_class(worker_target):
+def _load_worker_class(worker_target) -> Any:
     """The worker class the child instantiates: ``HFWorker`` for None, else the
     class named by *worker_target*, a ``(module file path, class name)`` pair.
     The module is imported from its file under a private name, so it must not
@@ -398,7 +398,7 @@ def _runner_main(req_q, resp_q, ctrl_q, worker_target=None) -> None:
             # calls self._spawn() immediately before sending "load", so
             # `worker` is always still None here.
             try:
-                worker = _load_worker_class(worker_target)(**payload)
+                worker = _load_worker_class(worker_target)(**dict(payload or {}))
                 worker.load()
                 # Computed ONCE here, right after load, and cached on the
                 # parent proxy: the model lives in the child, so the parent

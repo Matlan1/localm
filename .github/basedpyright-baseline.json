@@ -1240,30 +1240,6 @@
         ],
         "./localm/inference/backends/_hf_runner.py": [
             {
-                "code": "reportCallIssue",
-                "range": {
-                    "startColumn": 25,
-                    "endColumn": 44,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportCallIssue",
-                "range": {
-                    "startColumn": 36,
-                    "endColumn": 43,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportCallIssue",
-                "range": {
-                    "startColumn": 22,
-                    "endColumn": 78,
-                    "lineCount": 2
-                }
-            },
-            {
                 "code": "reportOptionalMemberAccess",
                 "range": {
                     "startColumn": 29,
@@ -1296,14 +1272,6 @@
                 }
             },
             {
-                "code": "reportArgumentType",
-                "range": {
-                    "startColumn": 54,
-                    "endColumn": 61,
-                    "lineCount": 1
-                }
-            },
-            {
                 "code": "reportOptionalMemberAccess",
                 "range": {
                     "startColumn": 41,
@@ -1312,26 +1280,10 @@
                 }
             },
             {
-                "code": "reportArgumentType",
-                "range": {
-                    "startColumn": 63,
-                    "endColumn": 70,
-                    "lineCount": 1
-                }
-            },
-            {
                 "code": "reportOptionalMemberAccess",
                 "range": {
                     "startColumn": 41,
                     "endColumn": 46,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportArgumentType",
-                "range": {
-                    "startColumn": 47,
-                    "endColumn": 54,
                     "lineCount": 1
                 }
             },

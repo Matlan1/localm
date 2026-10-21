@@ -202,24 +202,31 @@ class ExllamaWorker:
     def loaded(self) -> bool:
         return self._runtime is not None
 
+    def _loaded_tokenizer(self):
+        """The loaded tokenizer. Raises RuntimeError before :meth:`load`."""
+        if self._tokenizer is None:
+            raise RuntimeError("Model not loaded - call load() first")
+        return self._tokenizer
+
     def _render(self, template_messages: list[dict], thinking: Optional[bool]):
         """``(text, prompt, template_kwargs)`` for *template_messages*: the
         template's rendering and the prompt to tokenise."""
         from localm.inference.backends._hf_worker import _require_chat_template
-        _require_chat_template(self._tokenizer)
+        tokenizer = self._loaded_tokenizer()
+        _require_chat_template(tokenizer)
         template_kwargs = {"enable_thinking": False} if thinking is False else {}
-        text = self._tokenizer.apply_chat_template(
+        text = tokenizer.apply_chat_template(
             template_messages, tokenize=False, add_generation_prompt=True, **template_kwargs)
         prompt = text
         if thinking is False:
             from localm.inference.backends.base import no_think_prompt
-            tmpl = getattr(self._tokenizer, "chat_template", None)
+            tmpl = getattr(tokenizer, "chat_template", None)
             prompt = no_think_prompt(text, tmpl if isinstance(tmpl, str) else None)
         return text, prompt, template_kwargs
 
     def count_tokens(self, text: str) -> int:
         """Token count of *text* with the model's tokenizer."""
-        return max(1, len(self._tokenizer.encode(text, add_special_tokens=False)))
+        return max(1, len(self._loaded_tokenizer().encode(text, add_special_tokens=False)))
 
     def count_messages_tokens(self, messages: list[dict]) -> int:
         """Token count of *messages* rendered with the chat template."""

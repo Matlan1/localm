@@ -880,7 +880,8 @@ def _switch_load_budget(name: str) -> switch_admission.LoadBudget | None:
         resident_cap=residency.resident_cap(cfg),
         pinned=residency.pinned_model_names(cfg),
         check_split_fit=_is_gguf(m_path),
-        plugin_backend=backend_registry.backend_for(str(m_path)) is not None,
+        plugin_backend=(info is not None
+                        and backend_registry.backend_for(str(info[0])) is not None),
     )
 
 
