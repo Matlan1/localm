@@ -69,6 +69,7 @@ nav:
   - Media generation:
       - Native image generation: native-image.md
       - Native music generation: native-music.md
+      - Native workflows: native-workflows.md
       - FLUX image generation: flux-setup.md
       - Video generation: video.md
       - Managed ComfyUI: managed-comfyui.md

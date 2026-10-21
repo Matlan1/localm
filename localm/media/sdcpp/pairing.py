@@ -175,6 +175,11 @@ def suggested_download(slot: str, family: Optional[str]) -> Optional[Download]:
     return _DOWNLOADS.get((slot, family or ""))
 
 
+def all_downloads() -> list[Download]:
+    """Every distinct public component download, in table order."""
+    return list(dict.fromkeys(_DOWNLOADS.values()))
+
+
 def registry_candidates(reg: Optional[dict] = None) -> list[Candidate]:
     """Every registered single-file model of a type a native slot can use,
     classified from its header. Entries whose file is missing, unreadable, a

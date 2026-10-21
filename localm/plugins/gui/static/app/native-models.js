@@ -431,7 +431,14 @@ export function createMusicModelPicker({ mountId }) {
     return Object.keys(models).length ? { native_models: models } : {};
   }
 
-  return { refresh, choice };
+  function setModels(models) {
+    state = {};
+    for (const [k, v] of Object.entries(models || {})) if (v && NM_MUSIC_KEYS[k]) state[k] = String(v);
+    nmSave(storeKey, state);
+    return refresh();
+  }
+
+  return { refresh, choice, setModels, get state() { return state; } };
 }
 
 /* ================================================================ */

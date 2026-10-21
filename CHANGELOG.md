@@ -18,6 +18,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
   slightly slower decoding. The automatic context ceiling and the VRAM estimate account for it. It
   applies at the next model load; a model that cannot use flash attention refuses to load under
   `q8_0` and the error names the setting.
+- **Workflows for the built-in image, video and music generators.** The Images, Video and Music
+  pages have a Workflow card for the native backend: a workflow saves the models (with LoRAs and
+  their strengths) and the generation settings, and Apply puts them back. Starter workflows come
+  built in (SD-Turbo, FLUX.1 schnell and dev, Wan 2.1 text to video 1.3B, the ACE-Step 1.5 set).
+  Applying one offers the download of every model you do not have yet, checked against its sha256
+  when the workflow gives one (the built-in ones always do). Workflows can be renamed, deleted,
+  exported and imported, and a ComfyUI workflow (API or regular format) imports as one: its
+  loaders, sampler settings, size, prompts, guidance and shift are carried over, and every node
+  with no native equivalent is listed. The Video page gains a Flow shift setting and the Music
+  page a Shift setting for the native backend.
 - **`localm coder` shows what it is doing.** A live spinner runs while the model thinks, while
   it writes a file (with the file name and line count) and while a tool runs. `set_todos` shows
   the task list. Type `@path` or `@path:10-40` to attach a file to your message, and a
