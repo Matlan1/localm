@@ -1052,12 +1052,10 @@ CORE_FIELDS: list = [
     SettingField("comfy_output_dir", Widget.FOLDER, "ComfyUI output folder",
                  "ComfyUI's own output folder. Only needed with 'Remove ComfyUI's "
                  "copy after generating' on; blank derives it.",
-                 # NOT admin_only, though it names a folder this process DELETES
-                 # from when comfy_delete_outputs is on (comfy_client.py, the
-                 # unlink() calls under _comfy_output_root). That delete-escape is
-                 # held by path confinement at the unlink site, not by an owner
-                 # flag here.
-                 group="Media", owner="image"),
+                 # admin_only: names a host folder this process deletes from when
+                 # comfy_delete_outputs is on, and a scoped key never receives a
+                 # host path.
+                 group="Media", owner="image", admin_only=True),
     SettingField("comfy_delete_outputs", Widget.TOGGLE,
                  "Remove ComfyUI's copy after generating",
                  "Delete ComfyUI's own copy and history entry once localm has "
@@ -2017,7 +2015,8 @@ MEDIA_PLUGIN_FIELDS: list = [
                admin_only=True),
     MediaField("output_dir", ("comfy", "output_dir"), "comfy_output_dir", Widget.FOLDER,
                "ComfyUI output folder",
-               "Only needed if 'Remove ComfyUI's copy' is on; blank derives it."),
+               "Only needed if 'Remove ComfyUI's copy' is on; blank derives it.",
+               admin_only=True),
     # The swap_policy SELECT sits ahead of the toggle fields so all dropdowns
     # render before all checkboxes in each subsection.
     MediaField("swap_policy", ("model_swap_policy",), "model_swap_policy",
