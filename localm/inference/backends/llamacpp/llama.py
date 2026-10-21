@@ -1811,6 +1811,7 @@ class LlamaCpp:
         if not self._ctx_ptr:
             self._free_adapters()
             api.llama_free_model(self._model_ptr)
+            self._model_ptr = None
             note = context_refused_note(self._kv_cache_type)
             if note:
                 raise RuntimeError("Failed to create llama context." + note)
