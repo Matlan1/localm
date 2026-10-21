@@ -16,7 +16,7 @@ abort only ever kills this process, never the server."""
 from __future__ import annotations
 
 import threading
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, cast
 
 from localm.inference.backends.base import PerThread
 
@@ -393,15 +393,17 @@ class GgufWorker(VramSizingMixin):
         # Fallback status not propagated from here - this is a token-count-only
         # call, not a generation request; the real chat_stream() call below
         # will report the same model's fallback if a generation is ever made.
-        prompt, fallback_reason = _apply_model_template(self._llm._model_ptr, text_messages)
+        prompt, _fallback_reason = _apply_model_template(self._llm._model_ptr, text_messages)
         bos_markers = ("<bos>", "<s>", "﻿")
         add_bos = not any(prompt.startswith(m) for m in bos_markers)
+        if llm is None:
+            raise RuntimeError("no model is loaded")
         untrusted_ranges = _untrusted_prompt_ranges(
-            self._llm._model_ptr, text_messages, prompt, fallback_reason)
+            cast(int, llm._model_ptr), text_messages, prompt, _fallback_reason)
         if untrusted_ranges:
-            return len(self._llm.tokenize(
+            return len(llm.tokenize(
                 prompt, add_bos=add_bos, untrusted_ranges=untrusted_ranges))
-        return len(self._llm.tokenize(prompt, add_bos=add_bos))
+        return len(llm.tokenize(prompt, add_bos=add_bos))
 
     def check_grammar(self, grammar: str) -> None:
         """Raises InvalidGrammarError for a malformed GBNF string - see
