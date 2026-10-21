@@ -585,7 +585,8 @@ def register(app: FastAPI, ctx) -> None:
             url = default_api_url()
             alive = _comfy_alive(url, timeout=1.0)
             (mark_comfy_alive if alive else mark_comfy_dead)(url)
-            status = {"alive": alive, "launched_by_localm": spawned_pid(url) is not None}
+            status: dict = {"alive": alive,
+                            "launched_by_localm": spawned_pid(url) is not None}
             if not alive and not status["launched_by_localm"]:
                 holder = comfy_port_holder(url, timeout=1.0)
                 if holder is not None:
