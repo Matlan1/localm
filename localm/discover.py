@@ -904,12 +904,14 @@ def list_gpus(*, deadline: float = _GPU_PROBE_DEADLINE, return_status: bool = Fa
     :data:`GPU_PROBE_OK` answers with a copy of that reading and status OK
     without probing."""
     shared = getattr(_shared_reading, "state", None)
+    result: tuple
     if shared is not None and shared["gpus"] is not None:
-        gpus = [dict(g) for g in shared["gpus"]]
-        return (gpus, GPU_PROBE_OK) if return_status else gpus
-    gpus, status = _list_gpus_with_status(deadline, wait_for_inflight)
-    if shared is not None and status == GPU_PROBE_OK:
-        shared["gpus"] = [dict(g) for g in gpus]
+        result = ([dict(g) for g in shared["gpus"]], GPU_PROBE_OK)
+    else:
+        result = _list_gpus_with_status(deadline, wait_for_inflight)
+        if shared is not None and result[1] == GPU_PROBE_OK:
+            shared["gpus"] = [dict(g) for g in result[0]]
+    gpus, status = result
     return (gpus, status) if return_status else gpus
 
 
