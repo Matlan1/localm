@@ -189,8 +189,6 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **A failed load no longer blames low VRAM when the planned load fit,** and the advice names a
   GPU layer count that fits instead of a fixed `-g 24`. A worker crash in privacy mode says that
   privacy mode kept no crash trace and how to keep one.
-- **A textual-inversion embedding downloaded from CivitAI no longer registers as a text embedding
-  model**, so it no longer appears as an embedding model in the model list Ollama clients see.
 - **A textual-inversion embedding downloaded from CivitAI now registers as an image embedding**,
   not as a text embedding model, so it no longer appears as an embedding model in the model list
   Ollama clients see. One downloaded earlier is still offered on the Images page; `localm
