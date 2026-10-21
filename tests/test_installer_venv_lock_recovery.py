@@ -85,6 +85,7 @@ class TestFindVenvLockers:
             f'set "STMP={tmp_path}\\.localm-setup-tmp"\r\n'
             'mkdir "%STMP%" 2>nul\r\n'
             f'cd /d "{tmp_path}"\r\n'
+            'set "LOCALM_SETUP_ROOT=%CD%"\r\n'
             "call :find_venv_lockers\r\n"
             "echo LOCKERS=[!LOCKERS!]\r\n"
             "echo ---file---\r\n"
@@ -145,6 +146,7 @@ class TestOnedriveRoot:
         probe.write_text(
             "@echo off\r\nsetlocal EnableDelayedExpansion\r\n"
             f'cd /d "{tmp_path}"\r\n'
+            'set "LOCALM_SETUP_ROOT=%CD%"\r\n'
             + "\r\n".join(env_lines) + "\r\n"
             "call :onedrive_root\r\n"
             "echo ONEDRIVE_ROOT=[!ONEDRIVE_ROOT!]\r\n"
