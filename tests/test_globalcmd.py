@@ -200,3 +200,42 @@ def test_install_cli_surfaces_path_edit_failure(monkeypatch, capsys):
     assert rc == 20
     assert "already on PATH" not in out          # the falsehood must be gone
     assert "add it manually" in out
+
+
+def test_locations_are_absolute_for_a_relative_root(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    for fn in (gc.bin_dir, gc.shim_path, gc._venv_localm):
+        assert fn(".").is_absolute()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows registry PATH entry")
+def test_install_with_a_relative_root_writes_an_absolute_path_entry(
+        fake_path, tmp_path, monkeypatch):
+    monkeypatch.setattr(gc.shutil, "which", lambda name: None)
+    monkeypatch.chdir(tmp_path)
+    res = gc.install(".")
+    entries = [e for e in fake_path.value.split(os.pathsep) if e]
+    assert entries == [str(tmp_path / "bin")]
+    assert Path(res["shim"]).is_absolute()
+
+
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="POSIX symlink usually needs privilege on Windows")
+def test_install_with_a_relative_root_writes_a_working_symlink(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(gc, "_posix_ensure_on_path",
+                        lambda d, prepend=False: (False, None))
+    monkeypatch.setattr(gc.shutil, "which", lambda name: None)
+    clone = tmp_path / "clone"
+    target = clone / ".venv" / "bin" / "localm"
+    target.parent.mkdir(parents=True)
+    target.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.chdir(clone)
+    res = gc.install(".")
+    link = Path(res["shim"])
+    assert os.path.isabs(os.readlink(link))
+    assert link.exists()
+    assert link.resolve() == target.resolve()
+

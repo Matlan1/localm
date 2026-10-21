@@ -1631,7 +1631,7 @@ def test_offline_resolution_reads_the_pinned_asset_table(world, plat, backend, l
 
 @pytest.mark.parametrize("plat, backend, message", [
     ("win32", "metal", "backend 'metal' is not available on this platform (win32). Available: "
-                       "cpu, cuda, hip, sycl, vulkan."),
+                       "amd-rocm, cpu, cuda, hip, sycl, vulkan."),
     ("linux", "metal", "backend 'metal' is not available on this platform (linux). Available: "
                        "cpu, cuda, hip, sycl, vulkan."),
     ("darwin", "vulkan", "backend 'vulkan' is not available on this platform (darwin). "
@@ -1645,6 +1645,38 @@ def test_unresolvable_backends_are_refused_with_a_reason(world, plat, backend, m
     with pytest.raises(click.ClickException) as ei:
         sl._resolve_backend_asset(backend)
     assert ei.value.message == message
+
+
+@pytest.mark.parametrize("plat, backend", [
+    ("win32", "metal"), ("linux", "metal"), ("darwin", "vulkan"), ("linux", "amd-rocm"),
+])
+def test_an_unavailable_backend_is_refused_before_anything_changes(world, plat, backend):
+    world.platform(plat)
+    world.arch = "arm64" if plat == "darwin" else "x64"
+    world.seed_target("llama.dll", "ggml.dll", marker="vulkan")
+    before = world.files()
+    r = world.invoke("--backend", backend, "--yes")
+    assert r.exit_code != 0
+    assert "Replacing" not in r.output
+    assert "Heads up" not in r.output
+    assert world.files() == before and world.marker() == "vulkan\n"
+    assert world.requests == [] and world.probe_calls == 0
+    assert world.pin() is None and world.history() == []
+
+
+def test_the_refusal_of_an_unavailable_backend_lists_amd_rocm_on_windows(world):
+    world.seed_target("llama.dll", marker="vulkan")
+    r = world.invoke("--backend", "metal", "--yes")
+    assert ("backend 'metal' is not available on this platform (win32). Available: "
+            "amd-rocm, cpu, cuda, hip, sycl, vulkan.") in r.text
+
+
+def test_an_unavailable_backend_is_still_accepted_with_a_local_build(world, tmp_path):
+    src = tmp_path / "build"
+    src.mkdir()
+    (src / "llama.dll").write_bytes(b"x")
+    r = world.invoke("--backend", "metal", "--from", str(src), "--yes")
+    assert "is not available on this platform" not in r.output
 
 
 def test_an_unpinned_linux_cuda_tag_with_no_listing_is_refused_with_a_reason(world):

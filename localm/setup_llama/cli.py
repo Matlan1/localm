@@ -12,7 +12,7 @@ import click
 
 from localm.debuglog import logger
 from localm.setup_llama._common import console
-from localm.setup_llama.assets import _require_prebuilt
+from localm.setup_llama.assets import _require_backend_here, _require_prebuilt
 from localm.setup_llama.pins import _ROCM_BUILD, _ROCM_TAG
 from localm.setup_llama.download import ArtifactError
 from localm.setup_llama.runtime_dir import (_exit_provisioning_busy, _exit_runtime_in_use,
@@ -124,6 +124,8 @@ def main(from_dir: Optional[str], backend: str, url: Optional[str],
     if cuda_line:
         cuda_line = cuda_line.lower()
         _require_staging_context(backend, cuda_line, from_dir, url, rollback)
+    if not (from_dir or url):
+        _require_backend_here(backend.lower())
     _apply_version_request(tag, rollback, backend, from_dir, url)
     # A version request is inherently a re-provision: the guard below compares
     # BACKENDS, and the whole point here is to change the BUILD while the
