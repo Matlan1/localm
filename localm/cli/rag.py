@@ -283,7 +283,8 @@ def rag_resync(collection, embed, url, prune_missing):
     searchable and the flag clears by itself if the file comes back, so a moved
     file or an unplugged drive is never silently forgotten. Pass --prune-missing
     to actually delete those entries. A folder that is not currently reachable is
-    reported and skipped WHOLE - nothing under it is touched.
+    reported and skipped WHOLE - nothing under it is indexed or flagged. A
+    document under a credential folder (.ssh, .aws, ...) is always removed.
 
     Schedule this instead of running it by hand:
     `localm job add sync-docs --rag --collection COLLECTION --cron "0 3 * * *"`.
@@ -344,7 +345,7 @@ def rag_resync(collection, embed, url, prune_missing):
                       f"or under a credential folder).[/yellow]")
     for r in result["unavailable_roots"] + result["blocked_roots"]:
         console.print(f"[yellow]skipped folder {escape(r['root'])}: {escape(r['reason'])} - "
-                      f"nothing under it was indexed, flagged, or removed."
+                      f"nothing under it was indexed or flagged."
                       f"[/yellow]")
     if result.get("vector_degrade_reason"):
         # Also logged by the store.

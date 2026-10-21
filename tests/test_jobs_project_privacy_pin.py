@@ -169,6 +169,50 @@ def test_a_project_pin_that_would_loosen_a_job_is_logged(
                for r in caplog.records)
 
 
+def test_resolve_task_config_unattended_ignores_a_loosening_project_mode(
+        home, tmp_path):
+    from localm.plugins.coder.runner import resolve_task_config
+    proj = _project(tmp_path, 'mode = "full"\n')
+
+    assert resolve_task_config(proj).session_mode == SessionMode.FULL
+    assert resolve_task_config(
+        proj, unattended=True).session_mode == SessionMode.PRIVACY
+
+
+def test_resolve_task_config_unattended_keeps_a_tightening_project_mode(
+        home, tmp_path):
+    from localm.plugins.coder.runner import resolve_task_config
+    _write_config(home, coder_mode="full")
+    proj = _project(tmp_path, 'mode = "log"\n')
+
+    assert resolve_task_config(
+        proj, unattended=True).session_mode == SessionMode.LOG
+
+
+def test_resolve_task_config_unattended_still_rejects_an_invalid_project_mode(
+        home, tmp_path):
+    from localm.plugins.coder.runner import InvalidSessionMode, resolve_task_config
+    proj = _project(tmp_path, 'mode = "loud"\n')
+
+    with pytest.raises(InvalidSessionMode):
+        resolve_task_config(proj, unattended=True)
+
+
+def test_rag_job_output_reports_documents_removed_from_the_index():
+    from localm.plugins.builtin.jobs.runner import _format_rag_result
+    result = {"added": 0, "updated": 0, "skipped": 1, "chunks": 3,
+              "roots": ["/r"], "missing": [], "restored": [],
+              "pruned": ["/home/u/.ssh/config"], "unavailable_roots": [],
+              "blocked_roots": [{"root": "/home/u/.ssh", "reason": "refused"}],
+              "failed": []}
+
+    text = _format_rag_result("kb", result, [], embedded=False, had_vectors=False)
+
+    assert "pruned: /home/u/.ssh/config" in text
+    assert "removed from the index" in text
+    assert "nothing under it was indexed or flagged" in text
+
+
 def test_a_confined_job_uses_the_pin_of_the_directory_it_runs_in(
         home, tmp_path, monkeypatch):
     from localm import auth

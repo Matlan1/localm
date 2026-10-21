@@ -25,8 +25,8 @@ class _CollectionResync:
         """The resync body. MUST run under _collection_lock after _load()."""
         say = on_progress or (lambda _t: None)
         available, unavailable, blocked = self._partition_roots(policy, say)
-        # Roots we could not judge: nothing under them is indexed, flagged, or
-        # pruned this run.
+        # Roots we could not judge: nothing under them is indexed or flagged
+        # this run, and only credential-folder documents are pruned.
         skipped_roots = [Path(r["root"]) for r in (unavailable + blocked)]
 
         targets: list = list(available)

@@ -160,6 +160,15 @@ export function planModelFetch(mode, cached, allowDownloadsWhenOff) {
   return "confirm";
 }
 
+// Resolves whether a voice file that is not in the browser cache may be fetched:
+// "refuse" under net_mode=off without the allow-downloads-when-off override,
+// otherwise "allow" (net_mode=ask was already answered when the model loaded).
+export function planVoiceFetch(mode, cached, allowDownloadsWhenOff) {
+  if (cached) return "allow";
+  if (mode === "off" && !allowDownloadsWhenOff) return "refuse";
+  return "allow";
+}
+
 // Thrown by tts.js's load() when planModelFetch returns "refuse" or the user
 // declines a "confirm" prompt. A distinct class so the catch handler in
 // ensureLoaded() can show this message as-is instead of running it through

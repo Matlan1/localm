@@ -571,7 +571,7 @@ def _format_rag_result(name: str, result: dict, lines: list, *,
     """Render a re-sync result as the job's output.
 
     Every degrade is stated, not implied: a skipped root, a flagged-missing
-    document, a per-file failure, a vectors.json the store found corrupt or stale,
+    document, a document removed from the index, a per-file failure, a vectors.json the store found corrupt or stale,
     and new documents indexed WITHOUT embeddings into a collection that had
     semantic search, which pushes vector coverage down and can drop the whole
     collection to BM25."""
@@ -587,9 +587,13 @@ def _format_rag_result(name: str, result: dict, lines: list, *,
     if result["restored"]:
         out.append(f"{len(result['restored'])} previously missing document(s) "
                    f"are back.")
+    if result["pruned"]:
+        out.append(f"{len(result['pruned'])} document(s) removed from the index "
+                   f"(file gone, or under a credential folder):")
+        out.extend(f"  pruned: {p}" for p in result["pruned"][:10])
     for r in result["unavailable_roots"] + result["blocked_roots"]:
         out.append(f"skipped folder {r['root']}: {r['reason']} "
-                   f"(nothing under it was indexed, flagged, or removed)")
+                   f"(nothing under it was indexed or flagged)")
     if result["failed"]:
         out.append(f"{len(result['failed'])} file(s) failed:")
         out.extend(f"  {f['path']}: {f['error']}" for f in result["failed"][:10])

@@ -119,14 +119,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   SharedWorker, used to connect directly without passing the network policy. The
   browser now resolves no host on its own, so these fail without connecting anywhere; every
   other request is still decided by the policy as before.
-- **Text-to-speech no longer downloads its voice model when network access is off.** With
-  network access set to off, the browser voice (Kokoro) now refuses to fetch the model instead of
-  offering a one-click download, unless "Allow model downloads while network access is off" is
-  on. An already downloaded model still works.
-- **Scheduled coder jobs no longer let a project's `.localcoder/config.toml` write more than your
-  settings allow.** A project mode of `log` or `full` is ignored (with a warning) when your
-  configured mode persists less, so a cloned repository cannot turn privacy mode into session logs for
-  a scheduled run. A project can still pin a run to a stricter mode.
+- **Text-to-speech no longer downloads its voice model or voice files when network access is off.**
+  With network access set to off, the browser voice (Kokoro) now refuses to fetch the model, or a
+  voice it has not used before, instead of offering a one-click download, unless "Allow model
+  downloads while network access is off" is on. A model and voices already downloaded still work.
+- **Scheduled coder jobs and MCP coder runs no longer let a project's `.localcoder/config.toml`
+  write more than your settings allow.** A project mode of `log` or `full` is ignored (with a
+  warning) when your configured mode persists less, so a cloned repository cannot turn privacy
+  mode into session logs for an unattended run. A project can still pin a run to a stricter mode.
 - **Knowledge re-sync now removes documents indexed from a credential folder in every case.**
   Previously a document was kept when the indexed folder itself was a credential folder such as
   `.ssh`, when the file had been deleted, or when its folder was unavailable, and search kept

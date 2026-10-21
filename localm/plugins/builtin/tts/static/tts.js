@@ -15,7 +15,7 @@
  * one-time confirmation) before it is ever made.
  */
 
-import { NetGateError, classifyLoadError, isSafariBelow26, loadToast, runtimePaths, planModelFetch, pickDevice, pickDtype, pinnedRemotePathTemplate, rekeyCachedModel, KOKORO_PINNED_REVISION, repairAudioTransient, shouldAbortForCorruption, shouldWarmPassively } from "./tts-util.js";
+import { NetGateError, classifyLoadError, isSafariBelow26, loadToast, runtimePaths, planModelFetch, planVoiceFetch, pickDevice, pickDtype, pinnedRemotePathTemplate, rekeyCachedModel, KOKORO_PINNED_REVISION, repairAudioTransient, shouldAbortForCorruption, shouldWarmPassively } from "./tts-util.js";
 import { isNonEnglishVoice, streamNonEnglish } from "./g2p.js";
 
 const VENDOR_VOICES = new URL("vendor/voices.json", import.meta.url);
@@ -155,6 +155,31 @@ export async function register(ctx) {
       }
     } catch { /* fall through to the page-load value */ }
     return { mode: cfg.net_mode, allowDownloadsWhenOff: !!cfg.net_allow_model_downloads };
+  }
+
+  // Is this voice's file in the cache the vendored bundle keeps for voices?
+  async function voiceCached(voice) {
+    if (typeof caches === "undefined") return false;
+    try {
+      const c = await caches.open("kokoro-voices");
+      const keys = await c.keys();
+      return keys.some((req) => req.url && req.url.includes("/voices/" + voice + ".bin"));
+    } catch {
+      return false;
+    }
+  }
+
+  // The bundle fetches a voice file from huggingface.co the first time that
+  // voice is used, separately from the model: refuse that fetch under
+  // net_mode=off, as load() refuses the model.
+  async function gateVoiceFetch(voice) {
+    const cached = await voiceCached(voice);
+    const policy = await currentNetPolicy();
+    if (planVoiceFetch(policy.mode, cached, policy.allowDownloadsWhenOff) !== "refuse") return;
+    const message = "Voice download is blocked (net_mode=off). Turn network access on, " +
+      "or allow model downloads while network access is off, in Settings -> Network";
+    ctx.toast(message + "; using the browser voice", true);
+    throw new NetGateError(message);
   }
 
   async function load() {
@@ -379,6 +404,7 @@ export async function register(ctx) {
     let k;
     try {
       k = await ensureLoaded();
+      await gateVoiceFetch(currentVoice);
     } catch {
       if (myToken !== token) return;                // superseded while loading
       if (typeof window !== "undefined" && window.speechSynthesis) {

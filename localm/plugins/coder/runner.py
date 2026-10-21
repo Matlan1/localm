@@ -114,9 +114,14 @@ def resolve_task_config(work_dir: Path, *, model: Optional[str] = None,
                         temperature: Optional[float] = None,
                         seed: Optional[int] = None, yes: bool = False,
                         interactive_confirm: bool = False,
-                        mode: Optional[str] = None) -> TaskConfig:
+                        mode: Optional[str] = None,
+                        unattended: bool = False) -> TaskConfig:
     """Resolve a run's settings: explicit arguments win, then the project's
     ``.localcoder/config.toml``, then the defaults.
+
+    With *unattended*, a project ``mode`` that would persist more than the mode
+    configured without the project file is ignored (see
+    ``localm.audit.effective_unattended_mode``).
 
     Raises ``ProjectConfigUnreadable`` when the project config exists but
     cannot be read, and ``InvalidSessionMode`` for an unknown mode."""
@@ -146,6 +151,15 @@ def resolve_task_config(work_dir: Path, *, model: Optional[str] = None,
     cfg_confirm = proj_cfg.get("always_confirm", [])
     if isinstance(cfg_confirm, list):
         always_confirm.update(cfg_confirm)
+    if mode is None and unattended:
+        project_mode = proj_cfg.get("mode")
+        if project_mode is not None:
+            try:
+                parse_mode(project_mode)
+            except ValueError as exc:
+                raise InvalidSessionMode(str(exc)) from exc
+        from localm.audit import effective_unattended_mode
+        mode = effective_unattended_mode("coder", cwd=work_dir).value
     if mode is None:
         mode = proj_cfg.get("mode")
     if mode is None:
