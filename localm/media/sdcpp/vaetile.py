@@ -1,11 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""VAE decode tiling for a GPU runtime that refuses tensors above a size.
-
-A ggml backend that refuses an op (``ggml_backend_dev_supports_op``) hands it to
-the CPU, so a full-frame decode whose largest tensor is over the device's limit
-runs those ops on the CPU. ``decode_tile_size`` picks a tile small enough for the
-decode to stay on the GPU.
-"""
+"""VAE decode tile size for a GPU device that refuses ops on tensors above a size
+(``_binding.max_tensor_bytes``): ``decode_tile_size`` picks a tile whose largest
+decode tensor fits under the limit."""
 
 from __future__ import annotations
 

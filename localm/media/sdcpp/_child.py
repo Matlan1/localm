@@ -218,7 +218,7 @@ def _make_callbacks(resp_q):
 
     def _progress(step, steps, secs, _data):
         now = time.monotonic()
-        if step not in (1, steps) and now - _State.last_progress < _PROGRESS_MIN_INTERVAL:
+        if step not in (0, 1, steps) and now - _State.last_progress < _PROGRESS_MIN_INTERVAL:
             return
         _State.last_progress = now
         if _State.upscaling:

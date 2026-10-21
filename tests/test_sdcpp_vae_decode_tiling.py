@@ -54,6 +54,35 @@ def test_the_job_log_says_decoding_until_the_decode_ends(events):
     assert not [line for line in said if "Decoding: done" in line]
 
 
+def test_the_first_sampling_event_is_never_rate_limited(monkeypatch):
+    monkeypatch.setattr(_child._State, "upscaling", False)
+    monkeypatch.setattr(_child._State, "decoding", False)
+    monkeypatch.setattr(_child._State, "sample_steps", 2)
+    monkeypatch.setattr(_child._State, "hires_steps", 0)
+    q = queue.Queue()
+    _log, progress_cb, _preview = _child._make_callbacks(q)
+    progress_cb(219, 219, 0.04, None)
+    progress_cb(0, 2, 0.0, None)
+    events = [q.get_nowait() for _ in range(q.qsize())]
+    assert events[-1] == _p("sampling", 0, 2)
+
+
+# Recorded (FLUX.1-dev Q8, Vulkan): the first denoiser step streams the DiT's
+# weights in blocks, after the step-0 sampling event.
+RECORDED_FIRST_STEP = ([_p("loading", 219, 219), _p("sampling", 0, 2)]
+                       + [e for _ in range(20) for e in (_p("loading", 16, 24),
+                                                         _p("loading", 24, 24))]
+                       + [_p("sampling", 1, 2, 46.35)])
+
+
+def test_weights_streamed_during_the_first_step_add_no_lines():
+    said = []
+    relay = image_native._event_relay(said.append)
+    for event in RECORDED_FIRST_STEP:
+        relay(event)
+    assert said == ["Loading weights: done", "Step 0/2", "Step 1/2 (46.35 s/step)"]
+
+
 def test_weight_loads_before_sampling_still_say_done():
     said = []
     relay = image_native._event_relay(said.append)

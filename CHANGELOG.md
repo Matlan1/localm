@@ -142,6 +142,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
   next request fits in it.
 
 ### Fixed
+- **The built-in image backend decodes on the GPU with the Vulkan runtime.** On a GPU whose Vulkan
+  driver limits a single buffer (2 GB on an AMD Radeon RX 6900 XT, for example), the final image decode of a larger
+  image (FLUX at 1024x1024, for example) ran on the CPU and took about three minutes. localm now
+  reads the GPU's limit and decodes in tiles that fit it, which takes a few seconds; the job log
+  says when it tiles. The log also no longer prints "Decoding: done" as the decode starts, and no
+  longer repeats "Loading weights: done" for every block of weights streamed in during the first
+  step.
 - **The global `localm` command works from a Shared install and uninstalls cleanly.** On Linux and
   macOS setup made `~/.local/bin/localm` a symlink with a relative target that pointed nowhere,
   and uninstall left it behind; on Windows it added the relative entry `bin` to your user PATH.
