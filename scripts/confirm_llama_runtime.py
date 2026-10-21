@@ -87,8 +87,7 @@ _ALL_BACKENDS = ("cpu", "vulkan", "cuda", "sycl", "hip", "metal")
 _GPU_BACKENDS = frozenset({"vulkan", "cuda", "sycl", "hip", "metal"})
 _CUDA_LINES = ("cuda-12", "cuda-13")
 
-# Each question, and the word its answer must contain. Every one is answered
-# correctly by the model above under greedy sampling on cpu, vulkan and hip.
+# Each question, and the word its answer must contain.
 KNOWN_ANSWERS = (
     ("What is the capital of France? Answer with one word.", "paris"),
     ("Which planet do we live on? Answer with one word.", "earth"),
