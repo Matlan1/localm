@@ -232,3 +232,28 @@ def test_the_load_lock_generation_is_even_exactly_when_it_is_free():
     assert lock.acquire(blocking=False)
     lock.release()
     assert engine_mod.load_lock_mark() == start + 4
+
+
+def test_the_load_lock_knows_its_owner_and_refuses_a_foreign_release():
+    lock = engine_mod._LoadLock()
+    assert not lock._is_owned()
+    with pytest.raises(RuntimeError):
+        lock.release()
+    assert lock.generation == 0
+    lock.acquire()
+    seen = {}
+
+    def _other():
+        seen["owned"] = lock._is_owned()
+        try:
+            lock.release()
+        except RuntimeError:
+            seen["refused"] = True
+
+    t = threading.Thread(target=_other)
+    t.start()
+    t.join(10)
+    assert lock._is_owned() and seen == {"owned": False, "refused": True}
+    assert lock.generation == 1
+    lock.release()
+    assert not lock._is_owned() and lock.generation == 2

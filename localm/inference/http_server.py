@@ -598,7 +598,7 @@ class _FirstPassReading:
         self.mark = mark
 
     @classmethod
-    def open(cls) -> "_FirstPassReading":
+    def open(cls) -> _FirstPassReading:
         """A new, empty reading marked with the load lock's current mark."""
         from localm import discover
         from localm.inference.engine import load_lock_mark
@@ -609,7 +609,7 @@ class _FirstPassReading:
         self.state = None
 
     @staticmethod
-    async def run(loop, reading: Optional["_FirstPassReading"], fn):
+    async def run(loop, reading: Optional[_FirstPassReading], fn):
         """``fn()`` in an executor, under *reading*'s shared GPU reading when
         *reading* is given and open (``discover.using_shared_gpu_reading``)."""
         from localm import discover

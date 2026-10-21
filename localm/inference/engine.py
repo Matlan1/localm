@@ -41,6 +41,7 @@ class _LoadLock:
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
+        self._owner: Optional[int] = None
         self._depth = 0
         self.generation = 0
 
@@ -49,18 +50,24 @@ class _LoadLock:
         if got:
             self._depth += 1
             if self._depth == 1:
+                self._owner = threading.get_ident()
                 self.generation += 1
         return got
 
     def release(self) -> None:
+        """Release one level. Raises RuntimeError when the calling thread does
+        not hold the lock."""
+        if not self._is_owned():
+            raise RuntimeError("cannot release un-acquired lock")
         self._depth -= 1
         if self._depth == 0:
+            self._owner = None
             self.generation += 1
         self._lock.release()
 
     def _is_owned(self) -> bool:
         """Whether the calling thread holds the lock."""
-        return self._lock._is_owned()
+        return self._owner == threading.get_ident()
 
     def __enter__(self) -> bool:
         return self.acquire()
