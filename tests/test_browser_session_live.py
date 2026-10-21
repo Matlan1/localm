@@ -473,6 +473,93 @@ def test_a_routed_request_still_loads_under_the_resolver_rule(browser, origin):
     assert any(u.endswith("/routed-fetch") for u in b.allowed_requests())
 
 
+class _DatagramCounter:
+    """A UDP socket on 127.0.0.1 that counts every datagram it receives."""
+
+    def __init__(self):
+        import socket
+        self.received = 0
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._sock.bind(("127.0.0.1", 0))
+        self._sock.settimeout(0.2)
+        self.port = self._sock.getsockname()[1]
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        while not self._stop.is_set():
+            try:
+                self._sock.recvfrom(4096)
+            except OSError:
+                continue
+            self.received += 1
+
+    def close(self):
+        self._stop.set()
+        self._thread.join(timeout=2)
+        self._sock.close()
+
+
+@pytest.fixture
+def datagrams():
+    d = _DatagramCounter()
+    try:
+        yield d
+    finally:
+        d.close()
+
+
+def _rtc_page(udp_port: int, tcp_port: int) -> None:
+    """Serve /rtc-page: a peer connection with a STUN server, a TURN server over
+    TCP and one over UDP, all given as IP literals, that then starts ICE checks
+    toward a remote candidate on *udp_port*; it reports how far it got with
+    /ran?step=N (4 = every call returned)."""
+    script = (
+        "var step = 0;"
+        "setTimeout(() => fetch('/ran?step=' + step), 5000);"
+        "(async () => {"
+        " const NL = String.fromCharCode(13, 10);"
+        " const cand = 'candidate:1 1 udp 2122260223 127.0.0.1 %(u)d typ host';"
+        " const pc = new RTCPeerConnection({iceServers: ["
+        "  {urls: 'stun:127.0.0.1:%(u)d'},"
+        "  {urls: 'turn:127.0.0.1:%(t)d?transport=tcp', username: 'u', credential: 'p'},"
+        "  {urls: 'turn:127.0.0.1:%(u)d?transport=udp', username: 'u', credential: 'p'}]});"
+        " step = 1; pc.createDataChannel('x');"
+        " await pc.setLocalDescription(await pc.createOffer()); step = 2;"
+        " const remote = new RTCPeerConnection();"
+        " await remote.setRemoteDescription(pc.localDescription);"
+        " const ans = await remote.createAnswer();"
+        " const sdp = ans.sdp.split(NL).filter(l => !l.startsWith('a=candidate'))"
+        "  .join(NL).trim() + NL + 'a=' + cand + NL;"
+        " await pc.setRemoteDescription({type: 'answer', sdp}); step = 3;"
+        " await pc.addIceCandidate({candidate: cand, sdpMid: '0', sdpMLineIndex: 0});"
+        " step = 4;"
+        "})();") % {"u": udp_port, "t": tcp_port}
+    _WORKER_FILES.clear()
+    _WORKER_FILES["/rtc-page"] = (
+        "text/html", "<html><body>rtc<script>" + script + "</script></body></html>")
+
+
+def test_webrtc_sends_nothing_to_an_ip_literal(browser, origin, counter, datagrams):
+    """A page's RTCPeerConnection sends no UDP datagram (STUN, TURN over UDP,
+    ICE connectivity checks) and opens no TCP connection (TURN over TCP) to a
+    host given as an IP literal, which the resolver rule does not cover."""
+    port = origin.server_address[1]
+    _set(net_mode="allow", net_allow_private=True)
+    _rtc_page(datagrams.port, counter.port)
+    b = browser()
+    assert b.navigate("http://localhost:%d/rtc-page" % port)["ok"] is True
+    assert _wait_for("/ran?step=4"), (
+        "the peer connection calls did not all return, so nothing was "
+        "measured: %r" % (_Recorder.seen,))
+    time.sleep(1.5)
+    assert datagrams.received == 0, (
+        "WebRTC sent %d UDP datagram(s) to an IP literal" % datagrams.received)
+    assert counter.accepted == 0, (
+        "WebRTC opened %d TCP connection(s) to an IP literal" % counter.accepted)
+
+
 # --------------------------------------------------------------------------- #
 #  Redirects. A browser follows these itself, and a followed redirect is not
 #  routed, so its target would never be decided. Every hop is gated instead.

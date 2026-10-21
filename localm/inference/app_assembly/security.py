@@ -120,10 +120,9 @@ def add_origin_guard(app: FastAPI, cors_cfg: Any) -> None:
     # detail and, unlike the /api,/v1 metadata reads below, have NO route-level
     # auth to fall back on. The default CORS policy hands an ACAO to any
     # http(s)://localhost:PORT origin, so without an explicit refusal a drive-by
-    # local page could read them cross-origin: /whoami leaks root_dir (an absolute
-    # path -> the OS username) on a loopback bind, and /debug/stacks leaks thread
-    # stacks. They sit OUTSIDE the /api,/v1 metadata-GET gate, so they are refused
-    # here instead - cross-origin, in EVERY mode (they are unauthenticated in
+    # local page could read them cross-origin: /whoami discloses this instance's
+    # id, version and mode, and /debug/stacks leaks thread stacks. They sit
+    # OUTSIDE the /api,/v1 metadata-GET gate, so they are refused here instead - cross-origin, in EVERY mode (they are unauthenticated in
     # protected mode too, so an open-mode-only refusal would miss them).
     _CROSS_ORIGIN_GET_REFUSED = ("/whoami", "/debug/stacks", "/metrics")
 

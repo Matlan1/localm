@@ -9,7 +9,7 @@ import re
 import sys
 from pathlib import Path
 
-from localm.bugreport.scrub import _scrub_secrets
+from localm.bugreport.scrub import _scrub_emails, _scrub_secrets
 
 from .base import ToolResult, _confine
 
@@ -86,16 +86,18 @@ def _redact_env_value(name: str, value: str,
     format. Otherwise the value is passed through ``_scrub_secrets``, which
     replaces URL ``user:pass@`` credentials, credential-named query
     parameters, bearer tokens, ``sk-`` API keys, email addresses and the home
-    directory / account name in paths, then each of *accounts* is replaced by
-    ``<user>`` where it is a whole path segment. *redacted* is True when the
-    shown value differs from the original."""
+    directory / account name in paths, then every email address left is
+    replaced, the maintainer's included, then each of
+    *accounts* is replaced by ``<user>`` where it is a whole path segment.
+    *redacted* is True when the shown value differs from the original."""
     lowered = name.lower()
     if (any(marker in lowered for marker in _SECRET_MARKERS)
             or _SECRET_NAME_SEGMENTS.intersection(re.split(r"[^a-z0-9]+", lowered))
             or lowered in _IDENTITY_NAMES
             or _TOKEN_VALUE_RE.search(value)):
         return _redacted(value), True
-    shown = _strip_account(_scrub_secrets(value), accounts)
+    shown = _strip_account(
+        _scrub_emails(_scrub_secrets(value), keep_maintainer=False), accounts)
     return shown, shown != value
 
 

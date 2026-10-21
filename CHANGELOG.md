@@ -423,6 +423,25 @@ permanent public record of what shipped and are never rewritten; the in-progress
   link leading out of the folder makes the load fail. A sharded model added in place from the
   Hugging Face cache is no longer refused as pointing outside its folder.
 - **Another user on the machine can no longer make your localm instance unload its models.** A running instance asked to release its VRAM for a sibling now acts only when the sibling listens under your own OS account, and a request it confirms cannot be reused for anything else. A sibling listening only on `::1` can now ask too. The instance status a sibling reads no longer gives model file paths, digests or the process id to a caller without credentials, and on a key-protected instance it no longer names the loaded models either.
+- **A key that is not the owner's no longer sees your project folders.** The instance list
+  (Settings, Instances) shows each instance's project folder only to the owner; any other key
+  sees the instances without it. The identity check any local program can make (`/whoami`) no
+  longer names the project folder at all; another instance of yours still shows it. A
+  non-owner key allowed to read model details gets the instance status without the project
+  folder and with model file paths shortened like everywhere else.
+- **A token typed into config.json by hand is no longer handed out.** localm never reads
+  `hf_token` or `civitai_api_key` from config.json (they live in their own store), but a copy
+  written there by hand was returned by the settings API and kept on every save. It is now left
+  out of every settings response, removed from config.json on the next save, and a warning names
+  the key. Set it with `localm config hf_token <value>` or in Settings.
+- **Folder and file settings refuse network shares and device paths.** The llama.cpp binary
+  folder, the ComfyUI folder and output folder (also per media plugin) and the TLS certificate and
+  key paths no longer accept a `\\server\share`, `\\?\` or `\??\` path, which could send your
+  Windows sign-in hash to that server; the save fails with a message naming the setting.
+- **The coder's `read_env` hides every email address.** One address could be shown as it was.
+- **The automated browser's pages can no longer reach the network over WebRTC.** A page's peer
+  connection (STUN, TURN over UDP, connectivity checks to an address the page names) could send
+  UDP packets past the network gate; the browser now sends none.
 
 ## [0.3.0] - 2026-10-14
 

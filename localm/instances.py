@@ -124,15 +124,14 @@ def resolve_root_dir(start: Optional[str] = None, override: Optional[str] = None
 #  Identity payload                                                   #
 # ------------------------------------------------------------------ #
 
-def whoami_payload(instance_id: Optional[str], root_dir: Optional[str],
-                   mode: Optional[str]) -> dict:
+def whoami_payload(instance_id: Optional[str], mode: Optional[str]) -> dict:
     """The public identity a discovering client reads to confirm this really is a
-    localm instance (and which one). Omits the token and the pid."""
+    localm instance (and which one). Omits the token, the pid and the project
+    directory."""
     return {
         "app": APP_NAME,
         "version": _version(),
         "instance_id": instance_id,
-        "root_dir": root_dir,
         "mode": mode,
     }
 
@@ -888,8 +887,7 @@ def fetch_whoami(scheme: str, port: int, instance_id: Optional[str],
     single hop: a redirect answer is not followed and, not being a 200, reads
     as not verified. See test_a_redirect_from_a_local_listener_is_not_followed.
 
-    The payload carries ``version``, ``root_dir`` and ``mode``; a network-bound
-    instance omits ``root_dir``."""
+    The payload carries ``version`` and ``mode``."""
     data = fetch_any_whoami(scheme, port, timeout, bind_host)
     if data is None or data.get("instance_id") != instance_id:
         return None
@@ -1088,9 +1086,10 @@ def list_machine_peers(home: Path, *, timeout: float = 0.7) -> list[dict]:
     that answer ``GET /whoami`` as localm and ``GET /v1/instances/status`` as the
     same instance) and returns the ones that are NOT in *home*'s own registry.
 
-    ``root_dir``, ``mode`` and ``version`` come from the instance's own
-    ``/whoami`` answer; a network-bound peer omits ``root_dir``. ``started`` is
-    None: a live probe has no start time.
+    ``mode`` and ``version`` come from the instance's own ``/whoami`` answer;
+    ``root_dir`` from its full status, read only by a verified sibling of the
+    same OS user (None otherwise). ``started`` is None: a live probe has no
+    start time.
 
     Returns no credential. ``snapshot`` is deliberately NOT widened to cover
     these: callers that decide whether a model file is held elsewhere

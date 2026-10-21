@@ -350,8 +350,8 @@ def _loaded_model_identities() -> list:
 def _gpu_status() -> Optional[dict]:
     """This instance's live coordination status, served to sibling instances on
     ``GET /v1/instances/status`` and read by the in-process VRAM-holder hint:
-    ``{instance_id, pid, port, host, scheme, model, models,
-    vram_estimate_bytes, gpu_index}``. None when this instance does not
+    ``{instance_id, pid, port, host, scheme, root_dir, model, models,
+    vram_estimate_bytes, gpu_index, media}``. None when this instance does not
     coordinate (``_gpu_coord`` unset: a plain test app or an ``--isolated`` run).
 
     Blocking: sizes the loaded model files and may probe the GPU driver for the
@@ -377,6 +377,7 @@ def _gpu_status() -> Optional[dict]:
             "port": coord.get("port"),
             "host": coord.get("host") or "127.0.0.1",
             "scheme": coord.get("scheme") or "http",
+            "root_dir": coord.get("root_dir"),
             "model": model,
             "models": _loaded_model_identities(),
             "vram_estimate_bytes": vram_bytes,
@@ -4834,6 +4835,7 @@ def _make_lifespan():
                     "port": getattr(app.state, "instance_port", None),
                     "host": getattr(app.state, "bind_host", None) or "127.0.0.1",
                     "scheme": getattr(app.state, "instance_scheme", None) or "http",
+                    "root_dir": getattr(app.state, "root_dir", None),
                 }
                 from localm import gpu_registry
                 gpu_registry.set_local_status_provider(_gpu_status, identity=_gpu_coord)
