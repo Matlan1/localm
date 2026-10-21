@@ -100,6 +100,11 @@ _NTSTATUS_CRASH_NAMES = {
 }
 
 
+# The exit status Process.terminate() and Task Manager's End Task give a
+# Windows process: TerminateProcess(handle, -1), reported unsigned.
+_WINDOWS_TERMINATED = 0xFFFFFFFF
+
+
 # Crash-relevant POSIX signal numbers, resolved without the host's signal enum:
 # a code from a POSIX child must be decoded with POSIX numbering, and the Windows
 # enum numbers SIGABRT differently and lacks several entries. Only signals whose
@@ -172,6 +177,8 @@ def describe_exit_code(code, *, posix: Optional[bool] = None) -> str:
     # Windows: a negative code is not a signal. Process.terminate() calls
     # TerminateProcess(handle, -1), so -1 must not decode as a signal name.
     unsigned = code & 0xFFFFFFFF
+    if unsigned == _WINDOWS_TERMINATED:
+        return "-1 (the process was terminated)"
     name = _NTSTATUS_CRASH_NAMES.get(unsigned)
     if name:
         return f"{code} (0x{unsigned:08X}, {name})"

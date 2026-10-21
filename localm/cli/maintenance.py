@@ -398,7 +398,7 @@ def update_cmd(check_only: bool, yes: bool, do_rollback: bool) -> None:
             updater.rollback_last()
         except LocalmError as e:
             console.print(f"[yellow]{escape(e.summary)}[/yellow] ({escape(e.reason)}).")
-            return
+            sys.exit(1)
         console.print("[green]Rolled back.[/green] Restart localm to load the previous build.")
         return
 
@@ -412,7 +412,7 @@ def update_cmd(check_only: bool, yes: bool, do_rollback: bool) -> None:
         console.print(
             f"[yellow]Could not check for updates:[/yellow] {escape(e.summary)} "
             f"({escape(e.reason)}).")
-        return
+        sys.exit(1)
 
     cur, latest = info["current"], info["latest"]
     if not latest:
@@ -452,7 +452,7 @@ def update_cmd(check_only: bool, yes: bool, do_rollback: bool) -> None:
     except LocalmError as e:
         # apply() has already rolled back by this point.
         console.print(f"[red]Update failed:[/red] {escape(e.summary)} ({escape(e.reason)}).")
-        return
+        sys.exit(1)
     console.print(f"[green]Updated to {escape(res['version'])}[/green] "
                   f"({updater.class_summary(res['klass'])}).")
     if res["klass"] == "setup":

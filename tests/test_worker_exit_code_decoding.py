@@ -96,6 +96,12 @@ class TestWindowsNtstatusDecoding:
         assert "SIGHUP" not in out
         assert "signal" not in out.lower()
 
+    @pytest.mark.parametrize("code", [-1, 4294967295])
+    def test_a_terminated_process_is_reported_signed_and_as_terminated(self, code):
+        out = describe_exit_code(code, posix=False)
+        assert out == "-1 (the process was terminated)"
+        assert "4294967295" not in out
+
     def test_the_measured_native_abort_code_is_named(self):
         """3221226505 == 0xC0000409, the exit code a native os.abort()
         produces on Windows."""
