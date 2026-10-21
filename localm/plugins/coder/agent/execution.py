@@ -103,6 +103,7 @@ class _ExecutionMixin:
         _audit: AuditLogT
         always_confirm: set
         confirm_handler: Any
+        _project_map: Any
 
         @property
         def auto_approve(self) -> bool: ...

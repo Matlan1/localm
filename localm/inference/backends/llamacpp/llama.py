@@ -5168,15 +5168,19 @@ class LlamaCpp:
         larger than *limit* bytes, or cannot be read (logged at INFO). Never
         raises."""
         from localm.debuglog import logger
+        ctx = self._ctx_ptr
+        if ctx is None:
+            return None
         try:
-            size = api.llama_state_seq_get_size_ext(self._ctx_ptr, seq, flags)
-            if size <= 0 or (limit is not None and size > limit):
-                if size > 0:
-                    logger.info("gguf state: sequence %d state of %d MiB is over the "
-                                "%d MiB available for a copy", seq, size >> 20, limit >> 20)
+            size = api.llama_state_seq_get_size_ext(ctx, seq, flags)
+            if size <= 0:
+                return None
+            if limit is not None and size > limit:
+                logger.info("gguf state: sequence %d state of %d MiB is over the "
+                            "%d MiB available for a copy", seq, size >> 20, limit >> 20)
                 return None
             buf = (ctypes.c_uint8 * size)()
-            got = api.llama_state_seq_get_data_ext(self._ctx_ptr, buf, size, seq, flags)
+            got = api.llama_state_seq_get_data_ext(ctx, buf, size, seq, flags)
         except Exception as exc:
             logger.info("gguf state: reading sequence %d raised %s", seq, type(exc).__name__)
             return None
@@ -5190,9 +5194,11 @@ class LlamaCpp:
         """Load *data* from ``_read_seq_state`` into sequence *seq*. False when
         the runtime refuses it (logged at INFO). Never raises."""
         from localm.debuglog import logger
+        ctx = self._ctx_ptr
+        if ctx is None:
+            return False
         try:
-            ok = api.llama_state_seq_set_data_ext(
-                self._ctx_ptr, data, len(data), seq, flags) == len(data)
+            ok = api.llama_state_seq_set_data_ext(ctx, data, len(data), seq, flags) == len(data)
         except Exception as exc:
             logger.info("gguf state: loading sequence %d raised %s", seq, type(exc).__name__)
             return False
@@ -5423,8 +5429,10 @@ class LlamaCpp:
         if not self._write_seq_state(0, buf, 0):
             logger.info("gguf context: the carried %d-token cache could not be loaded; "
                         "prefilling the whole prompt", len(tokens))
+            ctx = self._ctx_ptr
             try:
-                api.llama_memory_clear(api.llama_get_memory(self._ctx_ptr), True)
+                if ctx is not None:
+                    api.llama_memory_clear(api.llama_get_memory(ctx), True)
             except Exception as exc:
                 logger.info("gguf context: clearing the cache raised %s", type(exc).__name__)
             return False
