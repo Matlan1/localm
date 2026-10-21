@@ -351,6 +351,7 @@ _GPU_CACHE_PINS = (
     ("MIOPEN_CUSTOM_CACHE_DIR", "miopen/cache"),
     ("MESA_SHADER_CACHE_DIR", "mesa"),
     ("__GL_SHADER_DISK_CACHE_PATH", "glcache"),
+    ("CUDA_CACHE_PATH", "cuda"),
 )
 
 
@@ -365,7 +366,9 @@ def gpu_cache_dirs() -> dict:
     ``%LOCALAPPDATA%\\comgr`` and MIOpen (torch convolutions) keeps its kernel cache and
     tuning database under ``~/.miopen`` when these variables are unset. Mesa
     (``MESA_SHADER_CACHE_DIR``) and the NVIDIA Linux driver
-    (``__GL_SHADER_DISK_CACHE_PATH``) keep compiled OpenGL shaders under ``~/.cache``.
+    (``__GL_SHADER_DISK_CACHE_PATH``) keep compiled OpenGL shaders under ``~/.cache``,
+    and the NVIDIA CUDA driver (``CUDA_CACHE_PATH``) keeps JIT-compiled kernels under
+    ``~/.nv/ComputeCache`` (``%APPDATA%\\NVIDIA\\ComputeCache`` on Windows).
     Those are per-user locations OUTSIDE the data dir that "delete saved data" never
     reaches. Siblings of the pip / uv / whisper / Hugging Face caches under
     ``cache_dir()``."""
