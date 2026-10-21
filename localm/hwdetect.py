@@ -371,6 +371,8 @@ def recommended_install_backend(det: Detection | None = None) -> str:
     setup-llama then refuses, naming ``--from``."""
     d = det or detect()
     choice = _hardware_install_backend(d)
+    if choice == "cuda" and machine_arch() == "arm64" and _arm64_cuda_build_excluded():
+        choice = "vulkan"
     if has_prebuilt(choice):
         return choice
     return "vulkan" if has_prebuilt("vulkan") else "cpu"
@@ -494,6 +496,14 @@ def _cuda_compute_capabilities() -> list:
         except ValueError:
             continue
     return caps
+
+
+def _arm64_cuda_build_excluded() -> bool:
+    """Whether the newest NVIDIA GPU is read as older than Blackwell, which the
+    ARM64 CUDA build does not serve (setup-llama picks the build line from the
+    newest card). False when no compute capability can be read."""
+    caps = _cuda_compute_capabilities()
+    return bool(caps) and max(caps) < _CUDA_BLACKWELL_MIN_CAP
 
 
 def _cuda_is_blackwell() -> bool:

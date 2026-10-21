@@ -281,7 +281,8 @@ class _GracefulGroup(click.Group):
     with a summary/reason; it does no reporting itself.
 
     User errors (ClickException / bad usage), Ctrl+C, and clean exits pass
-    through untouched."""
+    through untouched. A model load refusal (ModelRefusedError) is printed as a
+    refusal and exits 1, with no bug report."""
 
     def invoke(self, ctx):
         try:
@@ -312,7 +313,10 @@ class _GracefulGroup(click.Group):
                 raise SystemExit(0) from e
             self._report_failure(ctx, e)
             raise SystemExit(1) from e
-        except Exception as e:  # an actual, unexpected failure
+        except Exception as e:
+            from localm.inference.backends.base import ModelRefusedError
+            if isinstance(e, ModelRefusedError):
+                raise click.ClickException(str(e)) from e
             self._report_failure(ctx, e)
             raise SystemExit(1) from e
 

@@ -365,6 +365,28 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **`localm image`, `video` and `music` no longer ask "Open it now?" when input is `NUL`.** On
   Windows the null device passed for a terminal.
 - **The message for a refused ComfyUI address no longer ends with an internal tag.**
+- **A model localm will not load is reported as a refusal, with the real reason.** An
+  unsupported format, a model that is not a chat model (an ACE-Step component, a vision
+  projector), a draft head or a damaged file now print the reason and exit 1 instead of "Sorry -
+  localm hit an unexpected error". A GGUF that llama.cpp cannot read (for example one with an
+  invalid alignment) is named as a damaged file instead of blaming the runtime, and a runtime
+  ABI mismatch is reported as a runtime problem with `localm setup-llama --force`. A GGUF in an
+  Ollama store, a llamafile or a Jan folder that is refused for its version says so instead of
+  "not a GGUF file", a truncated llamafile is named as one, and `localm list` shows a lone
+  `.safetensors` file as `safetensors`. A huge number in a model's config is shortened in the
+  load error, and a model that fails to load prints one error line on the console instead of a
+  Python traceback (the trace goes to the debug log).
+- **Setup recommends the right backend on Linux ARM64 with an older NVIDIA GPU.** Only
+  Blackwell-class GPUs have an ARM64 CUDA build, so a Jetson Orin or GH200 is now recommended
+  Vulkan instead of CUDA that then installs Vulkan anyway. A refused uv download no longer
+  leaves an uninstall note that setup stopped while creating uv.
+- **`localm key list` on an unreadable `auth.json` says so.** It no longer prints "No named
+  keys" for a keystore it could not read, and exits non-zero.
+- **A settings save that cannot get the lock answers "busy".** When another localm process holds
+  the settings file, the save returns 503 with a short message and nothing is saved, instead of a
+  500 and a traceback in the console.
+- **`localm doctor` tells a broken torch from a missing one.** A torch that is installed but
+  raises on import is reported as such, and the Hugging Face worker check still runs.
 - **`/web` with no model loaded says so before it searches.** It used to run the search and then
   show a raw "Model parameter is required" error; it now gives the same "No model loaded" answer
   as a plain send, and a send made while a model is still loading says which model is loading.

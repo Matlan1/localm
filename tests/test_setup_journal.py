@@ -95,6 +95,19 @@ class TestJournalState:
         im.journal_event(tmp_path, "begin", "venv")
         assert im.journal_state(tmp_path)["complete"] is False
 
+    def test_an_abandoned_step_is_neither_open_nor_finished(self, tmp_path):
+        for ev, name in (("begin", "venv"), ("done", "venv"),
+                         ("begin", "uv-bootstrap"), ("abandon", "uv-bootstrap")):
+            im.journal_event(tmp_path, ev, name)
+        st = im.journal_state(tmp_path)
+        assert st["started"] == [] and st["done"] == ["venv"]
+        assert st["last_done"] == "venv" and st["complete"] is False
+
+    def test_an_abandon_event_needs_a_step_name(self, tmp_path):
+        with pytest.raises(ValueError):
+            im.journal_event(tmp_path, "abandon", "")
+        assert not im.journal_path(tmp_path).exists()
+
     def test_complete_closes_any_step_left_open(self, tmp_path):
         im.journal_event(tmp_path, "begin", "x")
         im.journal_event(tmp_path, "complete")
@@ -222,6 +235,22 @@ class TestUninstallUsesTheJournal:
         im.journal_event(clone, "begin", "global-command")
         rep = im.uninstall(clone, force=True)
         assert any(step == "global-command" and "stopped" in why
+                   for step, why in rep["notes"])
+
+    def test_an_abandoned_profile_step_is_not_reported(self, tmp_path):
+        clone = tmp_path / "LocaLM"
+        clone.mkdir()
+        im.journal_event(clone, "begin", "uv-bootstrap")
+        im.journal_event(clone, "abandon", "uv-bootstrap")
+        rep = im.uninstall(clone, force=True)
+        assert not any(step == "uv-bootstrap" for step, _w in rep["notes"])
+
+    def test_an_unfinished_uv_step_is_reported(self, tmp_path):
+        clone = tmp_path / "LocaLM"
+        clone.mkdir()
+        im.journal_event(clone, "begin", "uv-bootstrap")
+        rep = im.uninstall(clone, force=True)
+        assert any(step == "uv-bootstrap" and "stopped" in why
                    for step, why in rep["notes"])
 
     def test_a_finished_profile_step_is_not_reported(self, tmp_path):

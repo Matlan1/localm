@@ -136,6 +136,7 @@ from localm.inference.backends.base import (
     PretokenizerUnsafeInputError, PretokenizerUnusableModelError,
     UnsupportedInputError, UnsupportedModelRoleError, VisionInputError,
     stream_stop_requested)
+from ._abi import AbiMismatch
 
 # UnsupportedInputError subclasses carried across the worker boundary by name,
 # so the parent re-raises the same type. Any other subclass travels as
@@ -386,14 +387,26 @@ class UnexpectedLoadError(RuntimeError):
     runtime). The message names the exception type."""
 
 
+_LONG_DIGITS_RE = re.compile(r"\d{40,}")
+
+
+def _digits_summary(match: re.Match[str]) -> str:
+    """A run of 40 or more digits as its first 12 digits and its length."""
+    run = match.group()
+    return f"{run[:12]}...({len(run)} digits)"
+
+
 def load_error_text(e: BaseException) -> str:
     """The text a worker sends for a failed load: ``str(e)`` for a
-    ``RuntimeError``/``OSError`` with a message, otherwise prefixed with the
-    exception type, and the bare type name when the message is empty."""
-    msg = str(e).strip()
+    ``RuntimeError``/``OSError``/``AbiMismatch`` (a runtime failure) with a
+    message, otherwise prefixed with the exception type, and the bare type name
+    when the message is empty. A run of 40 or more digits in the message (a
+    model config holding a huge number) is shortened to its first 12 digits and
+    its length."""
+    msg = _LONG_DIGITS_RE.sub(_digits_summary, str(e).strip())
     if not msg:
         return type(e).__name__
-    if isinstance(e, (RuntimeError, OSError)):
+    if isinstance(e, (RuntimeError, OSError, AbiMismatch)):
         return msg
     return f"{type(e).__name__}: {msg}"
 
@@ -502,10 +515,12 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
                 resp_q.put(("error", str(e), "UnsupportedModelRoleError"))
             except Exception as e:
                 from localm.debuglog import logger as _dbg
-                _dbg.error("gguf worker: model load failed", exc_info=True)
-                if isinstance(e, (RuntimeError, OSError)):
+                if isinstance(e, (RuntimeError, OSError, AbiMismatch)):
+                    _dbg.error("gguf worker: model load failed: %s", load_error_text(e))
+                    _dbg.debug("gguf worker: model load failure trace", exc_info=True)
                     resp_q.put(("error", load_error_text(e)))
                 else:
+                    _dbg.error("gguf worker: model load failed", exc_info=True)
                     resp_q.put(("error", load_error_text(e), "UnexpectedLoadError"))
             # A hard native abort during worker.load() is NOT caught here -
             # the process dies, and the parent detects that via is_alive().

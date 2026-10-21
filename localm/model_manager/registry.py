@@ -1674,7 +1674,7 @@ def list_models(type_filter: Optional[str] = None) -> None:
             size = "[dim]dir[/dim]"
             name_cell = escape(name)
         elif path.exists():
-            kind = "gguf"
+            kind = "safetensors" if path.suffix.lower() in (".safetensors", ".sft") else "gguf"
             b = path.stat().st_size
             size = f"{b/1024**3:.2f} GB" if b >= 1024**3 else f"{b/1024**2:.0f} MB"
             name_cell = escape(name)
@@ -4388,6 +4388,9 @@ def _extract_gguf_member(archive: zipfile.ZipFile, info: zipfile.ZipInfo,
         if written != info.file_size:
             raise RuntimeError(f"{filename} came out {written} bytes, expected "
                                f"{info.file_size}")
+        unusable = gguf_unusable_reason(part)
+        if unusable is not None:
+            raise RuntimeError(f"{filename} in {source_name} cannot be used: {unusable}")
         if not _has_gguf_magic(part):
             raise RuntimeError(f"{filename} in {source_name} is not a GGUF file")
         sha = digest.hexdigest()
@@ -4616,6 +4619,10 @@ def _scan_ollama_root(root: Path):
         if blob is None:
             if problem:
                 problems.append(f"{label}: {problem}")
+            continue
+        blob_unusable = gguf_unusable_reason(blob)
+        if blob_unusable is not None:
+            problems.append(f"{label}: {blob_unusable}")
             continue
         if not _has_gguf_magic(blob):
             problems.append(f"{label}: the model is not a GGUF file")

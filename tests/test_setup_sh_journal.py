@@ -78,6 +78,14 @@ class TestPickingItUp:
         rc, out = _setup(folder)
         assert "stopped after 'portable-choice', while running 'venv'" in out
 
+    def test_an_abandoned_step_is_not_reported_as_left_open(self, folder):
+        (folder / ".localm-setup-journal").write_text(
+            "begin\tportable-choice\ndone\tportable-choice\n"
+            "begin\tuv-bootstrap\nabandon\tuv-bootstrap\n", encoding="utf-8")
+        rc, out = _setup(folder)
+        assert "stopped after 'portable-choice'" in out
+        assert "while running" not in out
+
     def test_a_run_that_never_finished_a_step_says_so(self, folder):
         (folder / ".localm-setup-journal").write_text("begin\tuv-portable\n", encoding="utf-8")
         rc, out = _setup(folder)

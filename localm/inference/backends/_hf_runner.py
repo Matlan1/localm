@@ -395,7 +395,11 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
             except Exception as e:
                 from localm.debuglog import logger as _dbg
                 from localm.inference.backends.llamacpp._runner import load_error_text
-                _dbg.error("hf worker: model load failed", exc_info=True)
+                if isinstance(e, (RuntimeError, OSError)):
+                    _dbg.error("hf worker: model load failed: %s", load_error_text(e))
+                    _dbg.debug("hf worker: model load failure trace", exc_info=True)
+                else:
+                    _dbg.error("hf worker: model load failed", exc_info=True)
                 resp_q.put(("error", load_error_text(e)))
             # A hard native abort during worker.load() is NOT caught here -
             # the process dies, and the parent detects that via is_alive().

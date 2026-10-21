@@ -169,6 +169,25 @@ class TestNamedKeys:
         assert r.exit_code == 0
         assert "no named keys" in r.output.lower()
 
+    @pytest.mark.parametrize("content", ['{"oops": 1}', "not json at all", '"text"'])
+    def test_list_of_an_unreadable_keystore_is_not_reported_as_empty(self, runner, content):
+        auth.keystore_file().parent.mkdir(parents=True, exist_ok=True)
+        auth.keystore_file().write_text(content, encoding="utf-8")
+        r = runner.invoke(main, ["key", "list"])
+        assert r.exit_code != 0
+        assert "no named keys" not in r.output.lower()
+        assert "could not be read" in " ".join(r.output.split())
+        assert auth.keystore_file().read_text(encoding="utf-8") == content
+
+    def test_a_valid_backup_does_not_hide_an_unreadable_keystore(self, runner):
+        auth.keystore_file().parent.mkdir(parents=True, exist_ok=True)
+        auth.keystore_file().write_text("not json at all", encoding="utf-8")
+        auth.keystore_file().with_name(auth.keystore_file().name + ".bak").write_text(
+            "[]", encoding="utf-8")
+        r = runner.invoke(main, ["key", "list"])
+        assert r.exit_code != 0
+        assert "no named keys" not in r.output.lower()
+
     def test_create_scoped_key_shown_once(self, runner):
         r = runner.invoke(main, ["key", "create", "dashboard",
                                  "--scope", "models:read"])

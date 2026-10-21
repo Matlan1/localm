@@ -244,6 +244,7 @@ pause
 exit /b 1
 
 :uv_refused
+call :jr abandon %UVSTEP%
 echo.
 echo  uv was not installed. Install it yourself, then re-run setup.bat:
 call :uv_manual_hint
@@ -1199,6 +1200,10 @@ for /f "usebackq tokens=1,* delims=%TAB%" %%A in (".localm-setup-journal") do (
     )
     if /i "%%A"=="done" (
         set "LASTDONE=%%B"
+        set "OPENSET=!OPENSET:;%%B;=;!"
+        if /i "%%B"=="!OPENSTEP!" set "OPENSTEP="
+    )
+    if /i "%%A"=="abandon" (
         set "OPENSET=!OPENSET:;%%B;=;!"
         if /i "%%B"=="!OPENSTEP!" set "OPENSTEP="
     )
