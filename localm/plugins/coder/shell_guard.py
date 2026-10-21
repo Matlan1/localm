@@ -1092,7 +1092,7 @@ _READ_ONLY_GIT = frozenset({
 # (short option letters, matched anywhere in a cluster such as -ro; long
 # options, matched as written or abbreviated, with or without a value).
 _RISKY_OPTIONS: dict[str, tuple[str, tuple[str, ...]]] = {
-    "git": ("odDmMcCufO", (
+    "git": ("odDmMcCufOS", (
         "--output", "--ext-diff", "--textconv", "--show-signature", "--delete",
         "--move", "--copy", "--set-upstream-to", "--unset-upstream",
         "--edit-description", "--force", "--track", "--no-track",
@@ -1104,11 +1104,12 @@ _RISKY_OPTIONS: dict[str, tuple[str, tuple[str, ...]]] = {
     "fgrep": ("fR", ("--file", "--dereference-recursive", "--exclude-from")),
     "sort": ("oT", ("--output", "--compress-program", "--files0-from",
                     "--temporary-directory", "--random-source")),
-    "tree": ("oRl", ("--output", "--fromfile")),
+    "tree": ("oRl", ("--output", "--fromfile", "--infofile")),
     "du": ("LX", ("--dereference", "--files0-from", "--exclude-from")),
     "wc": ("", ("--files0-from",)),
     "diff": ("rX", ("--recursive", "--exclude-from", "--from-file", "--to-file")),
-    "file": ("fmC", ("--files-from", "--magic-file", "--compile")),
+    "file": ("fmCzZ", ("--files-from", "--magic-file", "--compile",
+                        "--uncompress", "--uncompress-noreport")),
     "ls": ("L", ("--dereference",)),
 }
 
@@ -1124,7 +1125,7 @@ _DOS_RECURSE = frozenset({"/s"})
 _FIND_ACTIONS = frozenset({"-exec", "-execdir", "-ok", "-okdir", "-delete",
                            "-fprint", "-fprint0", "-fprintf", "-fls"})
 _FIND_RISKY = frozenset({"-L", "-H", "-follow", "-files0-from"})
-_UNSAFE_CHARS = ("$", "`", "<", ">", "%")
+_UNSAFE_CHARS = ("$", "`", "<", ">", "%", "!")
 
 # git configuration that makes a read command run a program, or pulls in
 # another file: whole sections, and keys within a section. core.fsmonitor
@@ -1307,8 +1308,9 @@ def _read_text(path: str) -> str:
 
 def _repo_config_risky(dotgit: str, base: str) -> bool:
     """:func:`_git_config_risky` over every local config file of the repository
-    whose ``.git`` entry is *dotgit* in directory *base* (a ``gitdir:`` file
-    and a ``commondir`` are followed). True when one cannot be read."""
+    whose ``.git`` entry is *dotgit* in directory *base*, its submodules'
+    (under ``modules/``) included; a ``gitdir:`` file and a ``commondir`` are
+    followed. True when one cannot be read."""
     gitdir = dotgit
     if os.path.isfile(dotgit):
         first = _read_text(dotgit).strip()
@@ -1321,12 +1323,14 @@ def _repo_config_risky(dotgit: str, base: str) -> bool:
     if os.path.isfile(common):
         target = _read_text(common).strip()
         gitdirs.append(target if os.path.isabs(target) else os.path.join(gitdir, target))
+    configs = []
     for g in gitdirs:
-        for name in ("config", "config.worktree"):
-            path = os.path.join(g, name)
-            if os.path.lexists(path) and _git_config_risky(_read_text(path)):
-                return True
-    return False
+        configs += [os.path.join(g, "config"), os.path.join(g, "config.worktree")]
+        for top, _dirs, files in os.walk(os.path.join(g, "modules")):
+            configs += [os.path.join(top, f) for f in files
+                        if f in ("config", "config.worktree")]
+    return any(os.path.lexists(path) and _git_config_risky(_read_text(path))
+               for path in configs)
 
 
 def _git_runs_programs(start: str, root: str) -> bool:
@@ -1393,6 +1397,8 @@ def _read_only_segments(segments: Sequence[_Segment], root: str, root_real: str,
                 return False
         short, long = _RISKY_OPTIONS.get(name, ("", ()))
         if any(_risky_option(o, short, long) for o in options):
+            return False
+        if any(ch in o.split("=", 1)[0] for o in options for ch in "/\\"):
             return False
         values = [o.split("=", 1)[1] for o in options
                   if o.startswith("--") and "=" in o]

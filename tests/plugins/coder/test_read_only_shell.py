@@ -77,8 +77,12 @@ _BS = chr(92)
     "tree -R -H x", "tree -l src", "find -L src", "find src -follow",
     "diff -r a b", "diff --from-file=../x a", "file -C -m x", "ls -LR src",
     "findstr /s x a.txt", "dir /s",
+    "git blame -Srevs.txt a.txt", "tree --infofile=x src", "file -z a.gz",
     # Operands that only look like options or switches.
-    "cat -- -/../../etc/passwd", "cat /ab",
+    "cat -- -/../../etc/passwd", "cat /ab", "cat a.txt -/../../etc/passwd",
+    "cat a.txt -" + _BS + ".." + _BS + "secret",
+    # cmd.exe delayed expansion.
+    "type !USERPROFILE!" + _BS + ".ssh" + _BS + "id_rsa",
     # An option value naming a path outside the project.
     "grep --exclude-from=/etc/passwd x src",
     # Quoting cmd.exe and sh read differently.
@@ -194,6 +198,17 @@ def test_git_config_is_found_through_a_gitdir_file_and_a_nested_repo(tmp_path):
     assert is_read_only("git status", proj) is True
     assert is_read_only("cd sub && git status", proj) is False
     (proj / ".git").write_text("gitdir: store\n", encoding="utf-8")
+    assert is_read_only("git status", proj) is False
+
+
+def test_a_submodule_config_that_runs_programs_is_not_read_only(tmp_path):
+    proj = tmp_path / "proj"
+    sub = proj / ".git" / "modules" / "lib"
+    sub.mkdir(parents=True)
+    (proj / ".git" / "config").write_text("[core]\n\tbare = false\n", encoding="utf-8")
+    (sub / "config").write_text("[core]\n\tbare = false\n", encoding="utf-8")
+    assert is_read_only("git status", proj) is True
+    (sub / "config").write_text("[core]\n\tfsmonitor = ../../../hook.sh\n", encoding="utf-8")
     assert is_read_only("git status", proj) is False
 
 
