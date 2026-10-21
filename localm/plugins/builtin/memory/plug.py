@@ -609,8 +609,8 @@ async def memory_consolidate(request: Request = None):
             from localm.debuglog import debug_content_enabled, logger
             if debug_content_enabled():
                 logger.debug("memory consolidate prompt:\n%s", prompt)
-            out = strip_think("".join(eng.chat_stream(
-                [{"role": "user", "content": prompt}]))).strip()
+            from localm.inference.background_generation import background_complete
+            out = strip_think(background_complete(eng, prompt)).strip()
             if debug_content_enabled():
                 logger.debug("memory consolidate response:\n%s", out)
             return out
@@ -1127,6 +1127,7 @@ def _store_episodes(store, complete, embed_fn=_UNSET, now=None, errors=None,
 # durable facts into the store. Writes stay gated, so nothing runs in privacy mode.
 
 MEMORY_AUTO_MIN_INTERVAL = 900.0     # >= 15 min between auto-consolidation runs
+MEMORY_AUTO_RETRY_AFTER = 60.0       # a pass that yielded to a chat request may run again after this
 _auto_lock = _threading.Lock()       # guards the marker read + in-progress flag
 _auto_running = False                 # True while a background pass is in flight
 
@@ -1161,6 +1162,7 @@ def _auto_consolidate_bg(principal: str | None = None) -> None:
     stamps the marker when done."""
     global _auto_running
     from localm.debuglog import logger, debug_content_enabled
+    deferred = False
     try:
         # Resolved once here, at thread start, and reused for the whole pass, so the
         # engine cannot swap out from under consolidation while it is mid-run.
@@ -1168,13 +1170,15 @@ def _auto_consolidate_bg(principal: str | None = None) -> None:
         if eng is None or not getattr(eng, "loaded", False):
             return
         logger.info("memory auto-consolidate: starting background memory synthesis pass")
+        from localm.inference.background_generation import (
+            BackgroundYield, background_complete)
         from localm.textnorm import strip_think
 
         def complete(prompt: str) -> str:
             if debug_content_enabled():
                 logger.debug("memory auto-consolidate prompt:\n%s", prompt)
-            out = strip_think("".join(
-                eng.chat_stream([{"role": "user", "content": prompt}]))).strip()
+            out = strip_think(background_complete(
+                eng, prompt, yield_to_foreground=True)).strip()
             if debug_content_enabled():
                 logger.debug("memory auto-consolidate response:\n%s", out)
             return out
@@ -1182,8 +1186,14 @@ def _auto_consolidate_bg(principal: str | None = None) -> None:
         # Pin for the whole pass, not per-completion, so a gap between candidates
         # cannot be evicted into.
         from localm.inference.http_server import driving_engine
-        with driving_engine(eng):
-            res = synthesize_memory(complete, principal=principal)
+        try:
+            with driving_engine(eng):
+                res = synthesize_memory(complete, principal=principal)
+        except BackgroundYield:
+            deferred = True
+            logger.info("memory auto-consolidate: a chat request is waiting for the "
+                        "model, so this pass stopped and will run again shortly")
+            return
         added = res.get("added", 0)
         updated = res.get("updated", 0)
         deleted = res.get("deleted", 0)
@@ -1200,7 +1210,9 @@ def _auto_consolidate_bg(principal: str | None = None) -> None:
         logger.warning("memory auto-consolidate failed: %s", e)
     finally:
         import time as _time
-        _auto_stamp(_time.time())
+        now = _time.time()
+        _auto_stamp(now - (MEMORY_AUTO_MIN_INTERVAL - MEMORY_AUTO_RETRY_AFTER)
+                    if deferred else now)
         with _auto_lock:
             _auto_running = False
 

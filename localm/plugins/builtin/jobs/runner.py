@@ -437,6 +437,8 @@ def _run_memory(job: Job, *, engine=None) -> str:
         raise RuntimeError(
             "no inference engine available (pass one, or register a model)")
 
+    from localm.inference.background_generation import (
+        BackgroundYield, background_complete)
     from localm.textnorm import strip_think
 
     # Track when a reply was ALL reasoning (empty after the strip), so the no-facts
@@ -444,8 +446,7 @@ def _run_memory(job: Job, *, engine=None) -> str:
     state = {"empty_replies": 0}
 
     def complete(prompt: str) -> str:
-        raw = "".join(
-            eng.chat_stream([{"role": "user", "content": prompt}])).strip()
+        raw = background_complete(eng, prompt, yield_to_foreground=True).strip()
         # strip_think: memory must never ingest the reasoning channel.
         text = strip_think(raw).strip()
         if raw and not text:
@@ -456,8 +457,12 @@ def _run_memory(job: Job, *, engine=None) -> str:
     # (synthesize_memory can call complete() several times), so idle-unload cannot
     # unload it mid-run.
     from localm.inference.http_server import driving_engine
-    with driving_engine(eng):
-        result = synthesize_memory(complete)
+    try:
+        with driving_engine(eng):
+            result = synthesize_memory(complete)
+    except BackgroundYield:
+        return ("memory synthesis stopped: a chat request was waiting for the model. "
+                "It will run again at the next scheduled time.")
     if result.get("status") == "skipped":
         return f"memory synthesis skipped ({result.get('reason')})"
     if result.get("status") == "error":

@@ -1176,6 +1176,13 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         return True if is_alive is None else bool(is_alive())
 
     @property
+    def streams_waiting(self) -> int:
+        """Generations queued behind one already running on the worker; 0 when
+        the model is unloaded or runs several requests at once."""
+        runner = self._runner
+        return runner.streams_waiting if runner is not None else 0
+
+    @property
     def is_diffusion(self) -> bool:
         """True when the model is a diffusion language model: read from the
         file's own GGUF header, or reported by the worker that loaded it."""

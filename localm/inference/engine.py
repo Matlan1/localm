@@ -573,6 +573,13 @@ class Engine:
         return getattr(self._backend, "last_finish_reason", "stop")
 
     @property
+    def streams_waiting(self) -> int:
+        """Generations queued behind one already running on the model; 0 for a
+        backend that does not queue."""
+        waiting = getattr(self._backend, "streams_waiting", 0)
+        return waiting if isinstance(waiting, int) and not isinstance(waiting, bool) else 0
+
+    @property
     def parallel_slots(self) -> int:
         """How many requests the loaded model answers at the same time (the
         last load's figure while unloaded); 1 for a backend without slots."""

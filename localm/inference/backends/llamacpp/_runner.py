@@ -118,6 +118,7 @@ the inline path still ends it: the stream thread exits the process with code 1.
 
 from __future__ import annotations
 
+import contextlib
 import itertools
 import multiprocessing as mp
 import os
@@ -801,9 +802,35 @@ class ModelRunner:
         self._mux = False
         self._streams: dict = {}
         self._streams_lock = threading.Lock()
+        # Inline-protocol streams blocked on _q_lock, guarded by _streams_lock.
+        self._waiting_streams = 0
         self._simple_q: Optional[_queue.Queue] = None
         self._simple_lock = threading.Lock()
         self._sids = itertools.count(1)
+
+    @property
+    def streams_waiting(self) -> int:
+        """Streams queued behind a generation already running on the inline
+        protocol. Always 0 on a multiplexed runner, whose streams do not queue
+        on ``_q_lock``."""
+        with self._streams_lock:
+            return self._waiting_streams
+
+    @contextlib.contextmanager
+    def _stream_turn(self):
+        """Hold ``_q_lock`` for one stream, counting this caller in
+        :attr:`streams_waiting` while it waits for the lock."""
+        with self._streams_lock:
+            self._waiting_streams += 1
+        try:
+            self._q_lock.acquire()
+        finally:
+            with self._streams_lock:
+                self._waiting_streams -= 1
+        try:
+            yield
+        finally:
+            self._q_lock.release()
 
     @property
     def multiplexed(self) -> bool:
@@ -1145,7 +1172,7 @@ class ModelRunner:
         awaiting_first = True
         chunks_received = 0
         _stream_t0 = time.monotonic()
-        with self._q_lock:
+        with self._stream_turn():
             self._req_q.put(("chat_stream", kwargs))
             try:
                 while True:
