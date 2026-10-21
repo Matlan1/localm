@@ -149,6 +149,19 @@ class _Spec:
         self.packages = packages
 
 
+def test_bare_torch_probe_allows_a_cold_gpu_torch_import(confirm, monkeypatch, tmp_path):
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen.update(kw)
+        from types import SimpleNamespace
+        return SimpleNamespace(stdout='{"version": "2.9.1+rocm7.13.0"}\n')
+    monkeypatch.setattr(confirm.subprocess, "run", fake_run)
+    out = confirm._bare_torch_probe(tmp_path / "python.exe")
+    assert out == {"version": "2.9.1+rocm7.13.0"}
+    assert seen["timeout"] == confirm.TORCH_PROBE_TIMEOUT_S >= 300
+
+
 def test_torch_variant_ok_matches_by_suffix(confirm):
     assert confirm._torch_variant_ok("2.9.1+cu124", _Spec("cuda")) is True
     assert confirm._torch_variant_ok("2.9.1+cpu", _Spec("cuda")) is False, (
