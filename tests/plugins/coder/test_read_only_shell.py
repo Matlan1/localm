@@ -141,6 +141,44 @@ def test_a_directory_symlink_leaving_the_project_is_not_read_only(tmp_path):
     assert is_read_only("ls out", proj) is False
 
 
+def test_dotdot_after_a_directory_link_that_climbs_out_is_not_read_only(tmp_path):
+    proj = tmp_path / "proj"
+    (proj / "src").mkdir(parents=True)
+    (proj / "a.txt").write_text("a", encoding="utf-8")
+    sibling = tmp_path / "sibling"
+    (sibling / ".git").mkdir(parents=True)
+    (tmp_path / "secret.txt").write_text("s", encoding="utf-8")
+    assert is_read_only("cat src/../a.txt", proj) is True
+    _symlink(proj / "jup", sibling, directory=True)
+    assert is_read_only("cat jup/.git/../../secret.txt", proj) is False
+    assert is_read_only("grep s jup/.git/../../secret.txt", proj) is False
+    assert is_read_only("cd jup/.git/../.. && cat secret.txt", proj) is False
+    assert is_read_only("cat src/../a.txt", proj) is True
+
+
+def test_dotdot_after_a_link_back_into_the_project_that_climbs_out_is_not_read_only(tmp_path):
+    proj = tmp_path / "proj"
+    (proj / "x" / "y").mkdir(parents=True)
+    (proj / "z.txt").write_text("z", encoding="utf-8")
+    (tmp_path / "z.txt").write_text("outside", encoding="utf-8")
+    _symlink(proj / "x" / "y" / "j", proj, directory=True)
+    assert is_read_only("cat x/y/j/z.txt", proj) is True
+    assert is_read_only("cat x/y/j/../../../z.txt", proj) is False
+
+
+def test_a_gitdir_whose_dotdot_climbs_out_through_a_link_is_not_read_only(tmp_path):
+    proj = tmp_path / "proj"
+    (proj / "x" / "y").mkdir(parents=True)
+    (proj / "store").mkdir()
+    (proj / "store" / "config").write_text("[core]\n\trepositoryformatversion = 0\n",
+                                           encoding="utf-8")
+    _symlink(proj / "x" / "y" / "j", proj, directory=True)
+    (proj / ".git").write_text("gitdir: store\n", encoding="utf-8")
+    assert is_read_only("git status", proj) is True
+    (proj / ".git").write_text("gitdir: x/y/j/../../../store\n", encoding="utf-8")
+    assert is_read_only("git status", proj) is False
+
+
 def test_a_project_file_that_a_command_name_finds_is_not_read_only(tmp_path, monkeypatch):
     proj = tmp_path / "proj"
     (proj / "bin").mkdir(parents=True)

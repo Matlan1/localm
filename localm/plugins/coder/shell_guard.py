@@ -1173,6 +1173,34 @@ def _real(path: str) -> str:
     return os.path.normcase(os.path.realpath(path))
 
 
+def _real_stepwise(path: str) -> str:
+    """*path* resolved one component at a time, each ``..`` applied to the
+    already resolved prefix (how a POSIX-style tool walks it through a symlink or
+    junction; :func:`_real` collapses ``..`` before resolving on Windows),
+    case-normalised. A relative *path* is taken from the current directory."""
+    drive, rest = os.path.splitdrive(path)
+    if drive or rest[:1] in ("/", "\\"):
+        current = drive + os.sep
+    else:
+        current = os.getcwd()
+    for part in rest.replace("\\", "/").split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            current = os.path.dirname(current.rstrip(os.sep)) or current
+        else:
+            current = os.path.realpath(os.path.join(current, part))
+    return os.path.normcase(current)
+
+
+def _real_inside(path: str, root_real: str) -> bool:
+    """Whether *path* stays in *root_real* both when ``..`` is collapsed before
+    links are resolved and when it is applied after each link. Raises OSError
+    or ValueError when the path cannot be resolved."""
+    return (_real_within(_real(path), root_real)
+            and _real_within(_real_stepwise(path), root_real))
+
+
 def _real_within(real: str, root_real: str) -> bool:
     return real == root_real or real.startswith(root_real.rstrip(os.sep) + os.sep)
 
@@ -1216,7 +1244,7 @@ def _operand_ok(tok: str, current: str, root: str, root_real: str) -> bool:
     path = tok if _canon(tok) is not None else os.path.join(current, tok)
     try:
         hits = glob.glob(path) if any(ch in tok for ch in "*?") else [path]
-        return all(_real_within(_real(p), root_real) for p in hits)
+        return all(_real_inside(p, root_real) for p in hits)
     except (OSError, ValueError):
         return False
 
@@ -1325,8 +1353,10 @@ def _repo_config_risky(dotgit: str, base: str, root: str) -> bool:
     submodules' (under ``modules/``) included; a ``gitdir:`` file and a ``commondir`` are
     followed. Only files whose resolved path lies in the project *root* are
     read: a target outside it is not looked at, and a network or device
-    target makes the answer True without being touched. True when a file
-    cannot be read."""
+    target makes the answer True without being touched. A gitdir or commondir
+    whose ``..`` lands elsewhere when applied after its links than when
+    collapsed first also makes the answer True. True when a file cannot be
+    read."""
     prefix = os.path.realpath(root).rstrip(os.sep) + os.sep
     real = os.path.realpath(dotgit)
     if not real.startswith(prefix):
@@ -1344,7 +1374,10 @@ def _repo_config_risky(dotgit: str, base: str, root: str) -> bool:
     configs = []
     seen: set[str] = set()
     while gitdirs:
-        real = os.path.realpath(gitdirs.pop())
+        nxt = gitdirs.pop()
+        if _real(nxt) != _real_stepwise(nxt):
+            return True
+        real = os.path.realpath(nxt)
         if not real.startswith(prefix) or real in seen:
             continue
         seen.add(real)
@@ -1451,7 +1484,7 @@ def _read_only_segments(segments: Sequence[_Segment], root: str, root_real: str,
             if current is None or not _inside(current, root):
                 return False
             try:
-                if not _real_within(_real(current), root_real):
+                if not _real_inside(current, root_real):
                     return False
             except (OSError, ValueError):
                 return False
