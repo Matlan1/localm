@@ -1906,7 +1906,9 @@ def gguf_recurrent_state_bytes(path: Path, *, _parsed: object = _UNSET) -> int:
     if split_gguf_parts(Path(path).name):
         parts = _gguf_all_parts_entries(path)
     else:
-        parsed = _gguf_tensor_offset_entries(path) if _parsed is _UNSET else _parsed
+        parsed = cast(
+            "Optional[tuple[list[tuple[str, int]], int, int]]",
+            _gguf_tensor_offset_entries(path) if _parsed is _UNSET else _parsed)
         parts = None if parsed is None else [parsed]
     if parts is None:
         return 0
