@@ -154,6 +154,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **A coder task no longer ends on "let me run the tests".** A reply whose last line announces a
   step it did not take is sent back once; a run that still stops there, or answers with nothing,
   is reported as not finished.
+- **A model whose context does not fit no longer crashes the loading process.** When llama.cpp
+  could not create the context (for example when a GPU ran out of memory for it), the model was
+  freed twice, which on Linux killed the loading process with a segmentation fault ("exit code
+  -11") instead of reporting "Failed to create llama context" with advice.
 - **Large split models plan their GPU placement correctly.** A split GGUF whose first part holds
   only metadata, the layout big models such as Qwen3.8-Flash-Next ship in, was sized as if every
   byte went to the GPU: the embedding tables that stay in system RAM were counted as VRAM, the
