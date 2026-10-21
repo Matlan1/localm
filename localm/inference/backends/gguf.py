@@ -1456,16 +1456,18 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                 stop_on_request=self.is_diffusion,
                 on_logprobs=on_logprobs,
                 **kwargs)
-        except RuntimeError:
+        except RuntimeError as failure:
             # The isolated worker crashed or stalled and the model is gone. Drop it
             # so the next request triggers a clean reload.
             self.last_finish_reason = "error"
             from localm.debuglog import logger as _dbg
             # Class-neutral: this except catches every RuntimeError the runner
             # raises - a native fault, an uncaught Python exception in the worker, a
-            # generation stall, and an unload racing the stream. exception() carries
-            # the real message and traceback.
-            _dbg.exception("worker failure during generation - dropping model instance")
+            # generation stall, and an unload racing the stream. The console line is
+            # one line; the traceback goes to the debug log only.
+            _dbg.error("worker failure during generation - dropping model instance: %s",
+                       (str(failure).splitlines() or [""])[0])
+            _dbg.debug("worker failure traceback", exc_info=True)
             if self._runner is runner:
                 try:
                     self.unload()

@@ -437,9 +437,10 @@ def _thinking_inlet(messages, ctx):
 # ------------------------------------------------------------------ #
 
 _ROLE_WORD_INSTRUCTION = (
-    "Speak only in the first person, as \"I\". Never refer to yourself in the "
-    "third person using a role word such as \"the model\" or \"the assistant\", "
-    "and never use an incorrect pronoun for yourself."
+    "Answer every question fully and directly. Style note: when you mention "
+    "yourself, say \"I\" or \"me\" rather than a third person role word such as "
+    "\"the model\" or \"the assistant\", and never use an incorrect pronoun for "
+    "yourself."
 )
 
 
