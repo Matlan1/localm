@@ -42,7 +42,15 @@ def currency():
     spec = importlib.util.spec_from_file_location("check_llama_pin", _SCRIPT)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
+    mod.real_adoptable_releases = mod.adoptable_releases
     return mod
+
+
+@pytest.fixture(autouse=True)
+def _every_release_adoptable(currency, monkeypatch):
+    """Tests that are not about adoptability see every release as adoptable, so
+    none of them reaches the Linux CUDA build lookup."""
+    monkeypatch.setattr(currency, "adoptable_releases", lambda releases, pin_n: (releases, ""))
 
 
 @pytest.fixture(autouse=True)
@@ -553,3 +561,50 @@ class _FakeHTTP:
 
     def __exit__(self, *a):
         return False
+
+
+# --------------------------------------------------------------------------- #
+#  The gate judges against the newest ADOPTABLE release                         #
+# --------------------------------------------------------------------------- #
+
+def test_gate_is_not_red_when_the_linux_cuda_repo_built_nothing_newer(
+        currency, monkeypatch, capsys):
+    pin = currency.pinned_tag()
+    n = currency._build_number(pin)
+    releases = _releases((f"b{n + 2}", 60), (f"b{n + 1}", 40), (pin, 0))
+    monkeypatch.setattr(currency, "upstream_releases", lambda: (releases, ""))
+    monkeypatch.setattr(currency, "adoptable_releases", currency.real_adoptable_releases)
+    monkeypatch.setattr(currency, "cuda_linux_tags", lambda: ({pin}, ""))
+    rc = currency.main(["--gate", "--max-age-days", "7"])
+    out = capsys.readouterr().out
+    assert rc == currency.EXIT_CURRENT
+    assert "OK: the pin is current" in out and "STALE" not in out
+
+
+def test_gate_goes_stale_against_the_newest_tag_the_cuda_repo_built(
+        currency, monkeypatch, capsys):
+    pin = currency.pinned_tag()
+    n = currency._build_number(pin)
+    releases = _releases((f"b{n + 3}", 90), (f"b{n + 2}", 30), (f"b{n + 1}", 20), (pin, 0))
+    monkeypatch.setattr(currency, "upstream_releases", lambda: (releases, ""))
+    monkeypatch.setattr(currency, "adoptable_releases", currency.real_adoptable_releases)
+    monkeypatch.setattr(currency, "cuda_linux_tags", lambda: ({f"b{n + 2}", f"b{n + 1}"}, ""))
+    rc = currency.main(["--gate", "--max-age-days", "7"])
+    out = capsys.readouterr().out
+    assert rc == currency.EXIT_STALE
+    assert f"newest adoptable release: b{n + 2}" in out
+    assert "age: 30 day(s)" in out
+
+
+def test_gate_reports_unknown_when_the_cuda_builds_cannot_be_read(
+        currency, monkeypatch, capsys):
+    pin = currency.pinned_tag()
+    n = currency._build_number(pin)
+    releases = _releases((f"b{n + 1}", 40), (pin, 0))
+    monkeypatch.setattr(currency, "upstream_releases", lambda: (releases, ""))
+    monkeypatch.setattr(currency, "adoptable_releases", currency.real_adoptable_releases)
+    monkeypatch.setattr(currency, "cuda_linux_tags", lambda: (set(), "simulated: rate limited"))
+    rc = currency.main(["--gate"])
+    out = capsys.readouterr().out
+    assert rc == currency.EXIT_UNKNOWN
+    assert "COULD NOT CHECK" in out and "STALE" not in out

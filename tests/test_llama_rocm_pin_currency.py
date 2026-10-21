@@ -35,7 +35,15 @@ def currency():
     spec = importlib.util.spec_from_file_location("check_llama_rocm_pin", _SCRIPT)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
+    mod.real_adoptable_releases = mod.adoptable_releases
     return mod
+
+
+@pytest.fixture(autouse=True)
+def _every_release_adoptable(currency, monkeypatch):
+    """Tests that are not about adoptability see every release as adoptable, so
+    none of them reaches the pairing lookups."""
+    monkeypatch.setattr(currency, "adoptable_releases", lambda releases, pin_n: (releases, ""))
 
 
 @pytest.fixture(autouse=True)
@@ -415,3 +423,69 @@ def test_every_api_call_sends_github_token_when_set(currency, monkeypatch):
     assert currency.release_date("b1") == _day(0)
     assert len(captured) == 2
     assert [r.get_header("Authorization") for r in captured] == ["Bearer tok-123"] * 2
+
+
+# --------------------------------------------------------------------------- #
+#  The gate judges against the newest ADOPTABLE release                         #
+# --------------------------------------------------------------------------- #
+
+def test_gate_is_not_red_when_every_newer_build_is_unpairable(currency, monkeypatch, capsys):
+    pin = currency.pinned_tag()
+    n = currency._build_number(pin)
+    releases = _releases((f"b{n + 2}", 60), (f"b{n + 1}", 40), (pin, 0))
+    monkeypatch.setattr(currency, "upstream_releases", lambda: (releases, ""))
+    monkeypatch.setattr(currency, "adoptable_releases", currency.real_adoptable_releases)
+    probed = []
+    monkeypatch.setattr(currency, "_pairs_with_upstream",
+                        lambda tag: probed.append(tag) or False)
+    rc = currency.main(["--gate", "--max-age-days", "7"])
+    out = capsys.readouterr().out
+    assert rc == currency.EXIT_CURRENT
+    assert probed == [f"b{n + 2}", f"b{n + 1}"]
+    assert "OK: the pin is current" in out and "STALE" not in out
+
+
+def test_gate_still_goes_stale_against_a_newer_adoptable_build(currency, monkeypatch, capsys):
+    pin = currency.pinned_tag()
+    n = currency._build_number(pin)
+    releases = _releases((f"b{n + 3}", 90), (f"b{n + 2}", 30), (f"b{n + 1}", 20), (pin, 0))
+    monkeypatch.setattr(currency, "upstream_releases", lambda: (releases, ""))
+    monkeypatch.setattr(currency, "adoptable_releases", currency.real_adoptable_releases)
+    monkeypatch.setattr(currency, "_pairs_with_upstream", lambda tag: tag == f"b{n + 2}")
+    rc = currency.main(["--gate", "--max-age-days", "7"])
+    out = capsys.readouterr().out
+    assert rc == currency.EXIT_STALE
+    assert f"newest adoptable release: b{n + 2}" in out
+    assert "age: 30 day(s)" in out
+
+
+def test_gate_reports_unknown_when_pairing_cannot_be_read(currency, monkeypatch, capsys):
+    pin = currency.pinned_tag()
+    n = currency._build_number(pin)
+    releases = _releases((f"b{n + 1}", 40), (pin, 0))
+    monkeypatch.setattr(currency, "upstream_releases", lambda: (releases, ""))
+    monkeypatch.setattr(currency, "adoptable_releases", currency.real_adoptable_releases)
+
+    def unreadable(tag):
+        raise RuntimeError("simulated: rate limited")
+    monkeypatch.setattr(currency, "_pairs_with_upstream", unreadable)
+    rc = currency.main(["--gate"])
+    out = capsys.readouterr().out
+    assert rc == currency.EXIT_UNKNOWN
+    assert "COULD NOT CHECK" in out and "STALE" not in out
+
+
+def test_pairs_with_upstream_follows_the_pin_pipelines_own_refusal(currency, monkeypatch):
+    import bump_rocm_pin
+
+    def fetch(tag):
+        if tag == "b1":
+            raise bump_rocm_pin.Refused("no upstream release at that commit")
+        if tag == "b2":
+            raise bump_rocm_pin.UpstreamUnreadable("rate limited")
+        return object()
+    monkeypatch.setattr(bump_rocm_pin, "fetch_candidate", fetch)
+    assert currency._pairs_with_upstream("b1") is False
+    assert currency._pairs_with_upstream("b3") is True
+    with pytest.raises(bump_rocm_pin.UpstreamUnreadable):
+        currency._pairs_with_upstream("b2")
