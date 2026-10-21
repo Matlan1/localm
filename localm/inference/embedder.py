@@ -1580,8 +1580,8 @@ def _choose_embedder_gpu_layers(path: str, cfg: dict, *,
         return 99, None
     if read_free is None:
         def read_free() -> Optional[int]:
-            from localm.discover import GPU_PROBE_OK, vram_capacity
-            info, status = vram_capacity(return_status=True)
+            from localm.discover import GPU_PROBE_OK, vram_capacity_joined
+            info, status = vram_capacity_joined()
             return info.get("free") if status == GPU_PROBE_OK else None
     try:
         free = read_free()

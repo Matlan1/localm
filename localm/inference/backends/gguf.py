@@ -1014,14 +1014,19 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # VRAM usage after load, skipped for a CPU-only load.
         self._vram_report_thread = None
         if gpu_layers != 0:
+            report = None
             if getattr(_vram_report_deferral, "on", False):
-                self._vram_report_thread = threading.Thread(
+                report = threading.Thread(
                     target=self._report_vram_after_load,
                     args=(vram_before, vram_before_status),
                     name="localm-vram-after-load", daemon=True)
-                self._vram_report_thread.start()
-            else:
+                try:
+                    report.start()
+                except RuntimeError:
+                    report = None
+            if report is None:
                 self._report_vram_after_load(vram_before, vram_before_status)
+            self._vram_report_thread = report
 
         # MoE expert placement (n_cpu_moe, configured or chosen by auto sizing):
         # llama.cpp's own load_tensors report of where each backend's share of

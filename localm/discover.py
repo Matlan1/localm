@@ -946,6 +946,11 @@ def new_shared_gpu_reading() -> dict:
     return {"gpus": None}
 
 
+def gpu_probe_in_flight() -> bool:
+    """Whether a :func:`list_gpus` probe is running now."""
+    return bool(_gpu_probe_inflight)
+
+
 def shared_gpu_reading_taken(state: Optional[dict]) -> bool:
     """Whether *state* (from :func:`new_shared_gpu_reading`) holds a reading."""
     return state is not None and state.get("gpus") is not None
@@ -4279,6 +4284,33 @@ def _list_gpus_reading(deadline: Optional[float] = None, *,
             kw["wait_for_inflight"] = True
         return list_gpus(**kw)
     return list_gpus(), GPU_PROBE_OK
+
+
+def vram_capacity_joined() -> tuple:
+    """``(info, status)`` from :func:`vram_capacity` for a caller deciding a
+    model's placement off the event loop. It joins a probe already in flight
+    (``wait_for_inflight``) instead of answering :data:`GPU_PROBE_BUSY` with
+    the last reading, so it can block up to :func:`list_gpus`' default
+    deadline: never call it on the event loop.
+
+    A test double patched in for ``vram_capacity`` whose signature does not
+    name ``return_status`` is called bare and its answer treated as
+    :data:`GPU_PROBE_OK`; ``wait_for_inflight`` is passed only to a callable
+    that accepts it."""
+    try:
+        params = inspect.signature(vram_capacity).parameters
+        accepts = "return_status" in params
+        accepts_wfi = ("wait_for_inflight" in params or any(
+            p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()))
+    except (TypeError, ValueError):
+        accepts = False
+        accepts_wfi = False
+    if not accepts:
+        return vram_capacity(), GPU_PROBE_OK
+    kw = {"return_status": True}
+    if accepts_wfi:
+        kw["wait_for_inflight"] = True
+    return vram_capacity(**kw)
 
 
 def gpu_split_shortfall(vram_required: int, config: Optional[dict] = None,

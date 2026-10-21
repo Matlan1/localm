@@ -11,8 +11,10 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from fastapi import HTTPException
 
 from localm import discover
 from localm.inference import engine as engine_mod
@@ -121,14 +123,81 @@ def _join_vram_report(engine):
         assert not thread.is_alive()
 
 
+def _switch_on_one_thread(box):
+    """switch_engine for "m" with every executor hop on one worker thread.
+    Returns (result or raised exception, that thread's shared reading after)."""
+    async def _go():
+        loop = asyncio.get_running_loop()
+        pool = ThreadPoolExecutor(max_workers=1)
+        loop.set_default_executor(pool)
+        try:
+            res = await hs.switch_engine("m", _factory(box), preempt=False)
+        except Exception as exc:  # noqa: BLE001 - returned to the test
+            res = exc
+        left = await loop.run_in_executor(
+            None, lambda: getattr(discover._shared_reading, "state", None))
+        return res, left
+    return asyncio.run(_go())
+
+
 def test_a_cold_load_reads_the_gpus_once_before_the_spawn(box):
-    res = asyncio.run(hs.switch_engine("m", _factory(box), preempt=False))
+    res, left = _switch_on_one_thread(box)
     assert res["status"] == "loaded"
     assert box.spawns == 1
     assert len(box.before_spawn()) == 1, box.probes
     _join_vram_report(hs._engines["m"])
     assert len(box.probes) == 2
-    assert getattr(discover._shared_reading, "state", None) is None
+    assert left is None
+
+
+def test_a_failed_load_leaves_no_shared_reading_on_the_worker_thread(box, monkeypatch):
+    def _spawn(self, params, **kw):
+        box.spawns += 1
+        raise RuntimeError("llama.cpp could not load it")
+
+    monkeypatch.setattr("localm.inference.backends.llamacpp._runner.ModelRunner.spawn_and_load",
+                        _spawn)
+    res, left = _switch_on_one_thread(box)
+    assert isinstance(res, HTTPException) and res.status_code == 503
+    assert len(box.before_spawn()) == 1, box.probes
+    assert left is None
+
+
+def test_a_reading_opened_while_a_probe_runs_is_not_handed_to_the_load(box, monkeypatch):
+    monkeypatch.setattr(discover, "_gpu_probe_inflight", True)
+    reading = hs._FirstPassReading.open()
+    assert reading.mark is None and reading.state is not None
+    monkeypatch.setattr(discover, "_gpu_probe_inflight", False)
+    assert hs._FirstPassReading.open().mark == engine_mod.load_lock_mark()
+
+
+def test_a_placement_check_after_a_switch_waits_for_the_after_load_reading(box):
+    """Right after switch_engine returns, the embedder's placement check sees
+    the reading taken after the load, not the admission's."""
+    box.hold_after_load = True
+    box.free = lambda: 1024 if box.spawns else 12 * GIB
+    res = asyncio.run(hs.switch_engine("m", _factory(box), preempt=False))
+    assert res["status"] == "loaded"
+    assert box.after_load_started.wait(20)
+    threading.Timer(0.3, box.release_after_load.set).start()
+    from localm.inference import embedder
+    ngl, reason = embedder._choose_embedder_gpu_layers(str(box.path), {})
+    assert ngl == 0 and "insufficient free VRAM" in reason
+    _join_vram_report(hs._engines["m"])
+
+
+def test_vram_capacity_joined_joins_and_tolerates_a_bare_double(monkeypatch):
+    seen = {}
+
+    def _real(config=None, *, return_status=False, wait_for_inflight=False, **kw):
+        seen.update(return_status=return_status, wait_for_inflight=wait_for_inflight)
+        return {"free": 5}, discover.GPU_PROBE_OK
+
+    monkeypatch.setattr(discover, "vram_capacity", _real)
+    assert discover.vram_capacity_joined() == ({"free": 5}, discover.GPU_PROBE_OK)
+    assert seen == {"return_status": True, "wait_for_inflight": True}
+    monkeypatch.setattr(discover, "vram_capacity", lambda: {"free": 7})
+    assert discover.vram_capacity_joined() == ({"free": 7}, discover.GPU_PROBE_OK)
 
 
 def test_switch_engine_returns_before_the_after_load_reading_lands(box, capsys):
@@ -159,8 +228,8 @@ def test_after_an_eviction_admission_and_load_read_the_gpus_again(box):
     before = box.before_spawn()
     assert before[0][2] == 16 * GIB // 100
     after_eviction = [p for p in before if p[2] == 12 * GIB]
-    # The re-admission pass (vram_capacity, implicit_split_free) and the
-    # load's sizing each read the GPUs.
+    # The release wait, the re-admission pass and the load's sizing each read
+    # the GPUs.
     assert len(after_eviction) >= 3, box.probes
     _join_vram_report(hs._engines["m"])
 

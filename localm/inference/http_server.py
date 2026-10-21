@@ -591,7 +591,9 @@ class _FirstPassReading:
     the GGUF load that pass admits.
 
     ``state`` is a ``discover.new_shared_gpu_reading()`` (None once closed);
-    ``mark`` is ``engine.load_lock_mark()`` when it was opened."""
+    ``mark`` is ``engine.load_lock_mark()`` when it was opened, or None when a
+    GPU probe was already running then (a reading joined from it can predate
+    the mark)."""
 
     def __init__(self, state: Optional[dict], mark: Optional[int]) -> None:
         self.state = state
@@ -599,10 +601,14 @@ class _FirstPassReading:
 
     @classmethod
     def open(cls) -> _FirstPassReading:
-        """A new, empty reading marked with the load lock's current mark."""
+        """A new, empty reading marked with the load lock's current mark. The
+        mark is read before the in-flight check."""
         from localm import discover
         from localm.inference.engine import load_lock_mark
-        return cls(discover.new_shared_gpu_reading(), load_lock_mark())
+        mark = load_lock_mark()
+        if discover.gpu_probe_in_flight():
+            mark = None
+        return cls(discover.new_shared_gpu_reading(), mark)
 
     def close(self) -> None:
         """Stop sharing: later calls under it read the GPUs again."""
