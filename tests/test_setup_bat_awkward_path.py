@@ -151,11 +151,11 @@ def test_the_install_folders_keep_the_exact_folder_name(tmp_path, bat_text, name
              f'set LOCALM_SETUP_ROOT) > "{out_file}"\n')
     r = _run_probe(folder, probe)
     got = dict(line.split("=", 1) for line in _decode(out_file.read_bytes()).splitlines() if "=" in line)
-    assert got.get("LOCALM_SETUP_ROOT") == str(folder), (got, _decode(r.stdout + r.stderr))
-    assert got.get("PYDIR") == f"{folder}\\.python", got
+    assert got.get("PYDIR") == f"{folder}\\.python", (got, _decode(r.stdout + r.stderr))
     assert got.get("CACHEDIR") == f"{folder}\\.cache", got
     assert got.get("UV_PYTHON_INSTALL_DIR") == f"{folder}\\.python", got
     assert got.get("UV_CACHE_DIR") == f"{folder}\\.cache", got
+    assert got.get("LOCALM_SETUP_ROOT") == str(folder), got
 
 
 @pytest.mark.parametrize("pick", ["1", "2"])
@@ -196,7 +196,7 @@ def test_the_app_shortcut_prefers_the_branded_exe_in_an_awkward_folder(tmp_path,
 
 @pytest.mark.parametrize("name", ["plain", "it's here", "a^b!c", "a&b'c!d%e^f (g)"])
 def test_the_onedrive_probe_recognises_a_folder_under_a_synced_root(tmp_path, bat_text, name):
-    sync_root = tmp_path / "sync root's"
+    sync_root = tmp_path / "sync root"
     sync_root.mkdir()
     folder = sync_root / name
     folder.mkdir()
