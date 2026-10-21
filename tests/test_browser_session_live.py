@@ -436,6 +436,67 @@ def test_the_system_engine_carries_the_resolver_rule(browser, origin, counter,
         % counter.accepted)
 
 
+@pytest.fixture(params=["Google Chrome", "Microsoft Edge"])
+def branded(request, monkeypatch):
+    """Only the installed browser named by the parameter is offered to the
+    system engine."""
+    from localm.browser import discovery
+    found = [b for b in discovery.find_system_browsers() if b.name == request.param]
+    if not found:
+        pytest.skip("%s is not installed" % request.param)
+    monkeypatch.setattr(discovery, "find_system_browsers", lambda **kw: found)
+    return request.param
+
+
+@pytest.mark.parametrize("kind", ["worker", "shared", "sw"])
+def test_a_branded_browser_keeps_a_worker_websocket_from_connecting(
+        browser, origin, counter, branded, kind):
+    port = origin.server_address[1]
+    _set(net_mode="allow", net_allow_private=True)
+    _worker_page(kind, "ws://127.0.0.1:%d/ws" % counter.port)
+    b = browser(engine="system")
+    assert b.browser_name == branded
+    assert b.navigate("http://localhost:%d/wk-page" % port)["ok"] is True
+    assert _wait_for("/ran?src=" + kind), _Recorder.seen
+    time.sleep(1.5)
+    assert counter.accepted == 0, (
+        "a %s WebSocket from %s connected %d time(s)"
+        % (kind, branded, counter.accepted))
+
+
+def test_a_branded_browser_leaves_no_profile_folder_after_stop(
+        browser, origin, branded):
+    import glob
+    import os
+    import tempfile
+    pattern = os.path.join(tempfile.gettempdir(), "localm-browser-*")
+    before = set(glob.glob(pattern))
+    _set(net_mode="allow", net_allow_private=True)
+    b = browser(engine="system")
+    assert b.navigate("http://localhost:%d/index.html" % origin.server_address[1])["ok"]
+    during = set(glob.glob(pattern)) - before
+    assert len(during) == 1, during
+    b.stop()
+    assert not (set(glob.glob(pattern)) - before)
+
+
+def test_a_branded_browser_connects_without_the_resolver_rule(
+        browser, origin, counter, branded, monkeypatch):
+    """The control for the test above: the same page, with the launch switches
+    dropped, does reach the listener, so a zero there is a measurement."""
+    port = origin.server_address[1]
+    _set(net_mode="allow", net_allow_private=True)
+    monkeypatch.setattr(bsession, "_LAUNCH_ARGS", ())
+    _worker_page("worker", "ws://127.0.0.1:%d/ws" % counter.port)
+    b = browser(engine="system")
+    assert b.navigate("http://localhost:%d/wk-page" % port)["ok"] is True
+    assert _wait_for("/ran?src=worker"), _Recorder.seen
+    deadline = time.monotonic() + 5
+    while counter.accepted == 0 and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert counter.accepted > 0, "%s never connected without the rule" % branded
+
+
 def test_a_shared_worker_request_never_reaches_its_host(browser, origin):
     """A SharedWorker's fetch is not routed, so it must not leave the browser."""
     port = origin.server_address[1]
@@ -471,6 +532,108 @@ def test_a_routed_request_still_loads_under_the_resolver_rule(browser, origin):
     assert b.navigate("http://localhost:%d/wk-page" % port)["ok"] is True
     assert _wait_for("/routed-fetch"), _Recorder.seen
     assert any(u.endswith("/routed-fetch") for u in b.allowed_requests())
+
+
+class _DatagramCounter:
+    """A UDP socket on 127.0.0.1 that counts every datagram it receives."""
+
+    def __init__(self):
+        import socket
+        self.received = 0
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._sock.bind(("127.0.0.1", 0))
+        self._sock.settimeout(0.2)
+        self.port = self._sock.getsockname()[1]
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        while not self._stop.is_set():
+            try:
+                self._sock.recvfrom(4096)
+            except OSError:
+                continue
+            self.received += 1
+
+    def close(self):
+        self._stop.set()
+        self._thread.join(timeout=2)
+        self._sock.close()
+
+
+@pytest.fixture
+def datagrams():
+    d = _DatagramCounter()
+    try:
+        yield d
+    finally:
+        d.close()
+
+
+def _rtc_page(udp_port: int, tcp_port: int) -> None:
+    """Serve /rtc-page: a peer connection with a STUN server, a TURN server over
+    TCP and one over UDP, all given as IP literals, that then starts ICE checks
+    toward a remote candidate on *udp_port*; it reports how far it got with
+    /ran?step=N (4 = every call returned)."""
+    script = (
+        "var step = 0;"
+        "setTimeout(() => fetch('/ran?step=' + step), 5000);"
+        "(async () => {"
+        " const NL = String.fromCharCode(13, 10);"
+        " const cand = 'candidate:1 1 udp 2122260223 127.0.0.1 %(u)d typ host';"
+        " const pc = new RTCPeerConnection({iceServers: ["
+        "  {urls: 'stun:127.0.0.1:%(u)d'},"
+        "  {urls: 'turn:127.0.0.1:%(t)d?transport=tcp', username: 'u', credential: 'p'},"
+        "  {urls: 'turn:127.0.0.1:%(u)d?transport=udp', username: 'u', credential: 'p'}]});"
+        " step = 1; pc.createDataChannel('x');"
+        " await pc.setLocalDescription(await pc.createOffer()); step = 2;"
+        " const remote = new RTCPeerConnection();"
+        " await remote.setRemoteDescription(pc.localDescription);"
+        " const ans = await remote.createAnswer();"
+        " const sdp = ans.sdp.split(NL).filter(l => !l.startsWith('a=candidate'))"
+        "  .join(NL).trim() + NL + 'a=' + cand + NL;"
+        " await pc.setRemoteDescription({type: 'answer', sdp}); step = 3;"
+        " await pc.addIceCandidate({candidate: cand, sdpMid: '0', sdpMLineIndex: 0});"
+        " step = 4;"
+        "})();") % {"u": udp_port, "t": tcp_port}
+    _WORKER_FILES.clear()
+    _WORKER_FILES["/rtc-page"] = (
+        "text/html", "<html><body>rtc<script>" + script + "</script></body></html>")
+
+
+def test_webrtc_sends_nothing_to_an_ip_literal(browser, origin, counter, datagrams):
+    """A page's RTCPeerConnection sends no UDP datagram (STUN, TURN over UDP,
+    ICE connectivity checks) and opens no TCP connection (TURN over TCP) to a
+    host given as an IP literal, which the resolver rule does not cover."""
+    port = origin.server_address[1]
+    _set(net_mode="allow", net_allow_private=True)
+    _rtc_page(datagrams.port, counter.port)
+    b = browser()
+    assert b.navigate("http://localhost:%d/rtc-page" % port)["ok"] is True
+    assert _wait_for("/ran?step=4"), (
+        "the peer connection calls did not all return, so nothing was "
+        "measured: %r" % (_Recorder.seen,))
+    time.sleep(1.5)
+    assert datagrams.received == 0, (
+        "WebRTC sent %d UDP datagram(s) to an IP literal" % datagrams.received)
+    assert counter.accepted == 0, (
+        "WebRTC opened %d TCP connection(s) to an IP literal" % counter.accepted)
+
+
+def test_a_branded_browser_sends_no_webrtc_traffic_to_an_ip_literal(
+        browser, origin, counter, datagrams, branded):
+    port = origin.server_address[1]
+    _set(net_mode="allow", net_allow_private=True)
+    _rtc_page(datagrams.port, counter.port)
+    b = browser(engine="system")
+    assert b.navigate("http://localhost:%d/rtc-page" % port)["ok"] is True
+    assert _wait_for("/ran?step=4"), _Recorder.seen
+    time.sleep(1.5)
+    assert datagrams.received == 0, (
+        "%s sent %d UDP datagram(s) to an IP literal" % (branded, datagrams.received))
+    assert counter.accepted == 0, (
+        "%s opened %d TCP connection(s) to an IP literal" % (branded, counter.accepted))
 
 
 # --------------------------------------------------------------------------- #

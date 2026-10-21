@@ -307,6 +307,58 @@ def test_owner_can_set_credential_and_it_never_reaches_config_json(app_env, key,
     assert key not in got.json()
 
 
+_STRAY = {"hf_token": "hf_STRAYinCONFIGjson0001", "civitai_api_key": "civ_STRAY_in_config_0001"}
+
+
+def _write_stray(home):
+    (home / "config.json").write_text(
+        json.dumps({**_STRAY, "max_tokens": 777}), encoding="utf-8")
+
+
+@pytest.mark.parametrize("who", ["owner", "scoped"])
+def test_a_token_hand_written_into_config_json_is_never_served(app_env, who):
+    """A credential copy written into config.json by hand is not returned by
+    GET /v1/config or echoed by a PATCH, to the owner or a scoped key, and an
+    unrelated save removes it from the file while keeping the other setting."""
+    c, scoped, home = app_env
+    _write_stray(home)
+    headers = _owner() if who == "owner" else _scoped(scoped)
+
+    got = c.get("/v1/config", headers=headers)
+    assert got.status_code == 200, got.text
+    assert got.json()["max_tokens"] == 777
+    for key, value in _STRAY.items():
+        assert value not in got.text and key not in got.json()
+
+    saved = c.patch("/v1/config", headers=headers, json={"temperature": 0.5})
+    assert saved.status_code == 200, saved.text
+    for key, value in _STRAY.items():
+        assert value not in saved.text and key not in saved.json()
+
+    on_disk = (home / "config.json").read_text(encoding="utf-8")
+    for key, value in _STRAY.items():
+        assert value not in on_disk and key not in json.loads(on_disk)
+    assert json.loads(on_disk)["max_tokens"] == 777
+    assert json.loads(on_disk)["temperature"] == 0.5
+
+    from localm.model_source_credentials import get_credential
+    assert get_credential("hf_token") is None
+    assert get_credential("civitai_api_key") is None
+
+
+def test_a_hand_written_token_is_reported_by_name_not_value(isolated_home, capsys,
+                                                           monkeypatch):
+    import localm.config as cfg
+    monkeypatch.setattr(cfg, "_warned_stray_credentials", set())
+    _write_stray(isolated_home)
+    loaded = cfg.load_config()
+    assert "hf_token" not in loaded and "civitai_api_key" not in loaded
+    err = capsys.readouterr().err
+    assert "hf_token" in err and "civitai_api_key" in err
+    for value in _STRAY.values():
+        assert value not in err
+
+
 @pytest.mark.parametrize("key", ["hf_token", "civitai_api_key"])
 def test_scoped_key_cannot_set_credential(app_env, key):
     """Mirrors test_config_admin_gating.py's admin_only pattern: 403 for the

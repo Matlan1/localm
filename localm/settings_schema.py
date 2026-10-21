@@ -1052,12 +1052,10 @@ CORE_FIELDS: list = [
     SettingField("comfy_output_dir", Widget.FOLDER, "ComfyUI output folder",
                  "ComfyUI's own output folder. Only needed with 'Remove ComfyUI's "
                  "copy after generating' on; blank derives it.",
-                 # NOT admin_only, though it names a folder this process DELETES
-                 # from when comfy_delete_outputs is on (comfy_client.py, the
-                 # unlink() calls under _comfy_output_root). That delete-escape is
-                 # held by path confinement at the unlink site, not by an owner
-                 # flag here.
-                 group="Media", owner="image"),
+                 # admin_only: names a host folder this process deletes from when
+                 # comfy_delete_outputs is on, and a scoped key never receives a
+                 # host path.
+                 group="Media", owner="image", admin_only=True),
     SettingField("comfy_delete_outputs", Widget.TOGGLE,
                  "Remove ComfyUI's copy after generating",
                  "Delete ComfyUI's own copy and history entry once localm has "
@@ -1673,6 +1671,7 @@ def _validate_one(key: str, val, field: SettingField, default):
         s = "" if val is None else str(val).strip()
         if not s:
             return ""
+        _refuse_unsafe_path(key, s)
         try:
             is_file = Path(s).is_file()
         except OSError:
@@ -1720,8 +1719,21 @@ def _validate_one(key: str, val, field: SettingField, default):
         return _to_str_list(key, s)
     if isinstance(val, str):
         s = val.strip()
+        if s and widget in (Widget.FOLDER, Widget.PATH):
+            _refuse_unsafe_path(key, s)
         return s or (None if nullable else "")
     raise ValueError(f"{key}: expected a string, got {val!r}")
+
+
+def _refuse_unsafe_path(key: str, path: str) -> None:
+    """Raise ValueError naming *key* when *path* is a UNC or device path, by the
+    same rule the job folder and model relocate apply
+    (``pathsafe.reject_unsafe_path_string``)."""
+    from localm.pathsafe import reject_unsafe_path_string
+    try:
+        reject_unsafe_path_string(path)
+    except ValueError as e:
+        raise ValueError(f"{key}: {e}: {path!r}") from e
 
 
 def validate_update(updates: dict) -> dict:
@@ -2003,7 +2015,8 @@ MEDIA_PLUGIN_FIELDS: list = [
                admin_only=True),
     MediaField("output_dir", ("comfy", "output_dir"), "comfy_output_dir", Widget.FOLDER,
                "ComfyUI output folder",
-               "Only needed if 'Remove ComfyUI's copy' is on; blank derives it."),
+               "Only needed if 'Remove ComfyUI's copy' is on; blank derives it.",
+               admin_only=True),
     # The swap_policy SELECT sits ahead of the toggle fields so all dropdowns
     # render before all checkboxes in each subsection.
     MediaField("swap_policy", ("model_swap_policy",), "model_swap_policy",
@@ -2118,6 +2131,8 @@ def _coerce_media_value(f: MediaField, val):
     if val is None:
         return None
     s = str(val).strip()
+    if s and f.widget in (Widget.FOLDER, Widget.PATH):
+        _refuse_unsafe_path(f.key, s)
     return s or None
 
 
@@ -2555,8 +2570,11 @@ def _coerce_plugin_field_value(f, val):
     # save_plugin_config with the RESOLVED value, or the plugin author reads
     # this block back through plugin_config() and validates there - this
     # generic layer only guarantees the value round-trips as the widget's
-    # basic type, the same floor tts/media give TEXT/FOLDER fields.
+    # basic type, the same floor tts/media give TEXT/FOLDER fields. A PATH or
+    # FOLDER value is also refused when it is a UNC or device path.
     s = str(val).strip()
+    if s and f.widget in (Widget.FOLDER, Widget.PATH):
+        _refuse_unsafe_path(f.key, s)
     return s or None
 
 

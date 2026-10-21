@@ -231,6 +231,24 @@ class TestReadEnvRedaction:
         assert home not in r.output
         assert f"ZZ_WORKDIR=~{os.sep}proj" in r.output
 
+    def test_every_email_address_is_redacted(self, tmp_path, monkeypatch):
+        """No address survives, the one the bug-report scrubber keeps
+        (MAINTAINER_EMAIL) included, in a .env file and in the process
+        environment alike."""
+        from localm.bugreport._common import MAINTAINER_EMAIL
+        (tmp_path / ".env").write_text(
+            f"COMMIT_EMAIL={MAINTAINER_EMAIL}\nCONTACT=someone@example.org\n",
+            encoding="utf-8")
+        monkeypatch.setenv("ZZ_USER_EMAIL", MAINTAINER_EMAIL.upper())
+        monkeypatch.setenv("ZZ_NOTIFY_TO", "Ops <" + MAINTAINER_EMAIL + ">")
+        r = tool_read_env(tmp_path)
+        assert r.ok
+        assert MAINTAINER_EMAIL.split("@")[0].lower() not in r.output.lower()
+        assert "someone@example.org" not in r.output
+        assert "COMMIT_EMAIL=<redacted-email>" in r.output
+        assert "ZZ_USER_EMAIL=<redacted-email>" in r.output
+        assert "CONTACT=<redacted-email>" in r.output
+
     def test_summary_reports_zero_when_nothing_was_redacted(self, tmp_path):
         (tmp_path / "plain.env").write_text("PORT=8080\nMODE=dev\n", encoding="utf-8")
         r = tool_read_env(tmp_path, path="plain.env")

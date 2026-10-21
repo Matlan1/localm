@@ -415,6 +415,22 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ### Security
 
+- **Removing the last API key no longer opens a network-bound server.** A server reachable
+  from the network (`-H 0.0.0.0` or a LAN address) whose key is cleared or revoked while it runs
+  now refuses every request until a key is set again, instead of serving chat and model reads to
+  anyone on the network. `/health` and `/whoami` still answer, a server started with `--insecure`
+  keeps running open, and on such a server the GUI's Clear key and the revoke of the last device
+  key are refused with a note to set a new key instead.
+- **`localm key clear`, and `localm key rm` of the last key, need you at a terminal.** They always
+  ask for confirmation, `--yes` included, and refuse piped input, so a script or another program
+  cannot switch the server to open mode.
+- **The coder asks before it touches localm's own keys and settings.** With auto-approve on, or in
+  an unattended `localm coder` task, a shell command or file tool that reads, writes or deletes
+  localm's key files, TLS private keys, session store, `config.json` or instance registry (or
+  the data folder as a whole), or that runs `localm key` or `localm config <key> <value>`, now
+  needs your approval of that exact call; an "always allow" in the GUI does not cover it, and an
+  unattended run refuses it. A project-wide grep or search and replace skips those files and says
+  so. Shell commands the coder runs no longer read from its terminal.
 - **A Hugging Face model can no longer make localm read files outside its folder.** The `path`
   of each stage in a sentence-transformers model's `modules.json`, and each shard file a model's
   `model.safetensors.index.json` names (read when sizing the model and when loading it as a
@@ -423,6 +439,32 @@ permanent public record of what shipped and are never rewritten; the in-progress
   link leading out of the folder makes the load fail. A sharded model added in place from the
   Hugging Face cache is no longer refused as pointing outside its folder.
 - **Another user on the machine can no longer make your localm instance unload its models.** A running instance asked to release its VRAM for a sibling now acts only when the sibling listens under your own OS account, and a request it confirms cannot be reused for anything else. A sibling listening only on `::1` can now ask too. The instance status a sibling reads no longer gives model file paths, digests or the process id to a caller without credentials, and on a key-protected instance it no longer names the loaded models either.
+- **A key that is not the owner's no longer sees your project folders.** The instance list
+  (Settings, Instances) shows each instance's project folder only to the owner; any other key
+  sees the instances without it. The identity check any local program can make (`/whoami`) no
+  longer names the project folder at all; another instance of yours still shows it. A
+  non-owner key allowed to read model details gets the instance status without the project
+  folder and with model file paths shortened like everywhere else.
+- **A token typed into config.json by hand is no longer handed out.** localm never reads
+  `hf_token` or `civitai_api_key` from config.json (they live in their own store), but a copy
+  written there by hand was returned by the settings API and kept on every save. It is now left
+  out of every settings response, removed from config.json on the next save, and a warning names
+  the key. Set it with `localm config hf_token <value>` or in Settings.
+- **Folder and file settings refuse network shares and device paths.** The llama.cpp binary
+  folder, the ComfyUI folder and output folder (also per media plugin) and the TLS certificate and
+  key paths no longer accept a `\\server\share`, `\\?\` or `\??\` path, which could send your
+  Windows sign-in hash to that server; the save fails with a message naming the setting.
+- **The coder's `read_env` hides every email address.** One address could be shown as it was.
+- **The automated browser's pages can no longer reach the network over WebRTC.** A page's peer
+  connection (STUN, TURN over UDP, connectivity checks to an address the page names) could send
+  UDP packets past the network gate; the browser now sends none.
+- **The automated browser stays off the network in an installed Google Chrome or Microsoft Edge
+  too.** With the System engine, Chrome and Edge ignored the WebRTC setting and a page's peer
+  connection could still send UDP packets past the network gate; localm now applies the setting
+  through the throwaway profile it launches them in, which is deleted when the session stops.
+- **A key limited to reading or writing settings can no longer see or change the ComfyUI output
+  folder.** `comfy_output_dir`, and the same folder set per media plugin, is now owner-only like
+  the other host paths: it is left out of what such a key reads, and saving it needs the owner key.
 
 ## [0.3.0] - 2026-10-14
 

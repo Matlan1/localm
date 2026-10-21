@@ -1181,6 +1181,29 @@ def revoke_key(key_id: str) -> bool:
     return True
 
 
+def removal_leaves_no_key(*, clear_all: bool = False,
+                          revoke_id: Optional[str] = None) -> bool:
+    """True when the removal would leave no API key configured, returning the
+    server to open mode: ``clear_all`` is ``clear_api_key()``, ``revoke_id`` is
+    ``revoke_key(revoke_id)``. False while a non-empty LOCALM_API_KEY env var is
+    set (it survives both). For a revoke, False while an owner key exists,
+    another keystore record remains, *revoke_id* names no record, or the
+    keystore is unreadable, which
+    ``revoke_key`` refuses (ConfigUnreadable) without removing anything."""
+    env = os.environ.get(ENV_VAR)
+    if env and env.strip():
+        return False
+    if clear_all:
+        return True
+    if revoke_id is None or _owner_key_present():
+        return False
+    records, read_ok = _load_keystore_checked()
+    if not read_ok:
+        return False
+    ids = [r.get("id") for r in records]
+    return revoke_id in ids and all(i == revoke_id for i in ids)
+
+
 def key_hash_live(key_hash: Optional[str]) -> bool:
     """True when a keystore key with this sha256 *key_hash* still exists AND has not
     expired. Used to tie a scoped-key browser session to its key's lifecycle: the

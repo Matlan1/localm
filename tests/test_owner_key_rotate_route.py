@@ -36,6 +36,7 @@ def _client(bind_host="127.0.0.1"):
     from localm.inference.http_server import create_app
     app = create_app(None)
     app.state.bind_host = bind_host
+    app.state.insecure_bind = True
     c = TestClient(app)
     # The per-process shell token the server injects into the browser-served SPA.
     # In OPEN mode _origin_guard demands it (or the instance token) for any unsafe

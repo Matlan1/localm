@@ -388,7 +388,7 @@ def test_gui_always_allow_is_never_kept_for_a_plan_approval():
     from localm.plugins.coder.sessions import CoderSession
 
     def fake(tool):
-        pending = SimpleNamespace(tool=tool, approved=None,
+        pending = SimpleNamespace(tool=tool, approved=None, exact=False,
                                   answered=threading.Event())
         return SimpleNamespace(_lock=threading.Lock(), _pending={"c": pending},
                                allowed_tools=set())

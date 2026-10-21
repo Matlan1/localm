@@ -132,11 +132,47 @@ class TestInstancesList:
             assert len(rows) == 1
             row = rows[0]
             assert row["instance_id"] == "cafef00d01234567"
-            assert row["root_dir"] == "/proj/a"
             assert row["mode"] == "full"
             assert row["port"] == 59991
             assert row["alive"] is False   # nothing is actually listening
             assert row["self"] is False
+
+    def test_a_scoped_key_never_receives_a_host_path(self, instances_app, monkeypatch):
+        """A config:read key that is not the owner gets every row, own install
+        and other installs alike, with root_dir None and the path nowhere in
+        the body."""
+        app, home = instances_app
+        app.state.instance_id = "cafef00d01234567"
+        _write_entry(home, instance_id="cafef00d01234567", root_dir="/proj/own-secret")
+        monkeypatch.setattr(instances, "list_machine_peers", lambda h, **kw: [{
+            "instance_id": "eeee000000000005", "pid": 4242, "port": 59994,
+            "host": "127.0.0.1", "scheme": "http", "root_dir": "/proj/peer-secret",
+            "mode": "full", "version": "9.9.9", "started": None, "alive": True,
+            "same_install": False}])
+        with TestClient(app) as c:
+            r = c.get("/api/instances", headers=_hdr(_config_read_key()))
+        assert r.status_code == 200, r.text
+        rows = r.json()["instances"]
+        assert {row["instance_id"] for row in rows} == {
+            "cafef00d01234567", "eeee000000000005"}
+        assert [row["root_dir"] for row in rows] == [None, None]
+        assert "own-secret" not in r.text and "peer-secret" not in r.text
+
+    def test_the_owner_sees_the_host_path(self, instances_app):
+        app, home = instances_app
+        _write_entry(home, instance_id="cafef00d01234567", root_dir="/proj/a")
+        with TestClient(app) as c:
+            r = c.get("/api/instances", headers=_hdr(_admin_key()))
+        assert r.status_code == 200, r.text
+        assert r.json()["instances"][0]["root_dir"] == "/proj/a"
+
+    def test_open_mode_sees_the_host_path(self, instances_app):
+        app, home = instances_app
+        _write_entry(home, instance_id="cafef00d01234567", root_dir="/proj/a")
+        with TestClient(app) as c:
+            r = c.get("/api/instances")
+        assert r.status_code == 200, r.text
+        assert r.json()["instances"][0]["root_dir"] == "/proj/a"
 
     def test_never_leaks_the_attach_token_or_the_registry_file_path(self, instances_app):
         app, home = instances_app

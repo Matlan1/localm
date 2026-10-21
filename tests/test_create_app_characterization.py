@@ -431,6 +431,7 @@ _MIDDLEWARE_STACK = (
     ("_BodyStreamCapMiddleware", None),
     ("BaseHTTPMiddleware", "_docs_loopback_only"),
     ("BaseHTTPMiddleware", "_security_headers"),
+    ("BaseHTTPMiddleware", "_keyless_network_gate"),
     ("BaseHTTPMiddleware", "_origin_guard"),
     ("CORSMiddleware", None),
 )
@@ -677,6 +678,7 @@ def test_docs_and_debug_stacks_follow_app_state_bind_host(bind_host, served):
     app = create_app(None)
     if bind_host is not None:
         app.state.bind_host = bind_host
+        app.state.insecure_bind = True
     client = TestClient(app)
     for path in ("/openapi.json", "/docs", "/redoc", "/docs/oauth2-redirect"):
         response = client.get(path)

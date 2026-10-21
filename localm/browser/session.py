@@ -13,7 +13,8 @@ proceed, and a refusal is recorded so a caller can be told which destination was
 blocked and why. The browser is launched with a host-resolver rule that makes
 its own network stack resolve no host, IP literals included, so a WebSocket
 opened from a worker and a SharedWorker's requests, which the routes never see,
-fail without connecting anywhere. Routed requests are fetched by the playwright
+fail without connecting anywhere, and with a WebRTC policy that sends no UDP
+from a page's peer connections. Routed requests are fetched by the playwright
 driver, not by the browser, so they are unaffected.
 
 A session keeps exactly one page open. A new window that a click opened becomes
@@ -25,10 +26,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
+import shutil
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Optional
 from urllib.parse import urljoin
 
@@ -72,9 +77,36 @@ _PAGE_SETUP_MS = 10000
 _BLANK_WINDOW_WAIT_MS = 5000
 
 #: Chromium switches every launch carries. The rule resolves every host,
-#: including IP literals and localhost, to not-found inside the browser.
-#: See test_a_worker_websocket_never_connects.
-_LAUNCH_ARGS = ("--host-resolver-rules=MAP * ~NOTFOUND",)
+#: including IP literals and localhost, to not-found inside the browser. The
+#: WebRTC policy stops a page's peer connections from sending UDP (STUN, TURN
+#: over UDP, connectivity checks).
+#: See test_a_worker_websocket_never_connects and
+#: test_webrtc_sends_nothing_to_an_ip_literal.
+_LAUNCH_ARGS = ("--host-resolver-rules=MAP * ~NOTFOUND",
+                "--force-webrtc-ip-handling-policy=disable_non_proxied_udp")
+
+
+#: The profile preference that applies the same WebRTC policy in an installed
+#: Chrome or Edge, which ignores the launch switch above. See
+#: test_a_branded_browser_sends_no_webrtc_traffic_to_an_ip_literal.
+_PROFILE_PREFERENCES = {"webrtc": {"ip_handling_policy": "disable_non_proxied_udp"}}
+
+#: Attempts, 0.2 s apart, to remove a closed browser's profile folder.
+_PROFILE_REMOVE_TRIES = 25
+
+
+def _new_profile_dir() -> str:
+    """A fresh profile folder holding the WebRTC preference."""
+    folder = tempfile.mkdtemp(prefix="localm-browser-")
+    try:
+        default = Path(folder) / "Default"
+        default.mkdir()
+        (default / "Preferences").write_text(
+            json.dumps(_PROFILE_PREFERENCES), encoding="utf-8")
+    except BaseException:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise
+    return folder
 
 
 class BrowserUnavailableError(RuntimeError):
@@ -158,6 +190,7 @@ class BrowserSession:
         self._pw = None
         self._browser = None
         self._ctx = None
+        self._profile_dir: Optional[str] = None
         self._page = None
         self._closed = False
         self._tearing_down = False
@@ -250,10 +283,10 @@ class BrowserSession:
         async_playwright = _require_playwright()
         self._pw = await async_playwright().start()
         if self.engine == "system":
-            self._browser = await self._launch_system()
+            self._ctx = await self._launch_system()
         else:
             self._browser = await self._launch_bundled()
-        self._ctx = await self._browser.new_context()
+            self._ctx = await self._browser.new_context()
         # Routed on the CONTEXT rather than the page, so a popup or a second
         # page the site opens is gated too.
         await self._ctx.route("**/*", self._on_route)
@@ -261,7 +294,11 @@ class BrowserSession:
         # a routed WebSocket does not reach the server unless connect_to_server()
         # is called, so an unhandled one fails closed.
         await self._ctx.route_web_socket("**/*", self._on_ws_route)
+        initial = list(self._ctx.pages)
         page = await self._ctx.new_page()
+        for old in initial:
+            with contextlib.suppress(Exception):
+                await old.close()
         async with self._page_lock:
             await self._drive(page)
         self._ctx.on("page", self._on_new_page)
@@ -283,8 +320,9 @@ class BrowserSession:
 
     async def _launch_system(self):
         """Launch the first browser already installed on this machine that
-        starts, in a fresh profile: none of the user's own profile data is
-        used."""
+        starts, in a fresh profile folder that holds the WebRTC preference and
+        is removed when the session stops: none of the user's own profile data
+        is used. Returns its browser context."""
         candidates = discovery.find_system_browsers()
         if not candidates:
             raise BrowserUnavailableError(
@@ -292,17 +330,20 @@ class BrowserSession:
                 launch_errors.SYSTEM_MISSING)
         attempts = []
         for candidate in candidates:
+            profile = _new_profile_dir()
             try:
-                browser = await self._pw.chromium.launch(
-                    headless=self.headless, args=list(_LAUNCH_ARGS),
+                ctx = await self._pw.chromium.launch_persistent_context(
+                    profile, headless=self.headless, args=list(_LAUNCH_ARGS),
                     **candidate.launch_options())
             except Exception as exc:
                 logger.debug("system browser %s launch failed: %s",
                              candidate.name, exc)
                 attempts.append((candidate.name, exc))
+                await self._remove_profile(profile)
                 continue
+            self._profile_dir = profile
             self.browser_name = candidate.name
-            return browser
+            return ctx
         kind, message = launch_errors.system_launch_failure(attempts)
         raise BrowserUnavailableError(message, kind) from attempts[-1][1]
 
@@ -595,6 +636,20 @@ class BrowserSession:
                 await self._pw.stop()
         except Exception:
             pass
+        if self._profile_dir is not None:
+            await self._remove_profile(self._profile_dir)
+            self._profile_dir = None
+
+    @staticmethod
+    async def _remove_profile(folder: str) -> None:
+        """Delete a browser profile folder, retrying while the closing browser
+        still holds files in it; a folder that survives is logged."""
+        for _ in range(_PROFILE_REMOVE_TRIES):
+            shutil.rmtree(folder, ignore_errors=True)
+            if not Path(folder).exists():
+                return
+            await asyncio.sleep(0.2)
+        logger.warning("could not remove the browser profile folder %s", folder)
 
     # -- marshalling -------------------------------------------------------- #
 

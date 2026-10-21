@@ -17,12 +17,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
+import shutil
 import subprocess
 import sys
 import threading
 import time
 import types
+from pathlib import Path
 
 import pytest
 
@@ -443,6 +446,8 @@ class _FakeChromium:
     def __init__(self, *outcomes):
         self.outcomes = list(outcomes)
         self.calls = []
+        self.profiles = []
+        self.profile_preferences = []
 
     async def launch(self, **kw):
         self.calls.append(kw)
@@ -450,6 +455,12 @@ class _FakeChromium:
         if isinstance(outcome, BaseException):
             raise outcome
         return outcome
+
+    async def launch_persistent_context(self, user_data_dir, **kw):
+        self.profiles.append(user_data_dir)
+        self.profile_preferences.append(
+            (Path(user_data_dir) / "Default" / "Preferences").read_text("utf-8"))
+        return await self.launch(**kw)
 
 
 class _FakePlaywright:
@@ -464,6 +475,15 @@ def _session(engine, *outcomes, **kw):
     sess = bsession.BrowserSession("t-" + engine, engine=engine, **kw)
     sess._pw = _FakePlaywright(*outcomes)
     return sess
+
+
+def _launch_system(sess):
+    """Run the system launch and remove the profile folder it kept."""
+    try:
+        return asyncio.run(sess._launch_system())
+    finally:
+        if sess._profile_dir is not None:
+            shutil.rmtree(sess._profile_dir, ignore_errors=True)
 
 
 def _browsers(monkeypatch, *found):
@@ -579,8 +599,9 @@ def test_the_real_missing_headless_shell_marks_a_half_installed_build(
 
 
 #: The switches a launch must carry so the browser's own network stack resolves
-#: no host.
-_NO_OWN_NETWORK = ["--host-resolver-rules=MAP * ~NOTFOUND"]
+#: no host and a page's WebRTC sends no UDP.
+_NO_OWN_NETWORK = ["--host-resolver-rules=MAP * ~NOTFOUND",
+                   "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"]
 
 
 def test_a_bundled_launch_passes_the_headless_setting_and_no_channel():
@@ -598,18 +619,39 @@ def test_the_system_engine_launches_chrome_by_its_channel(monkeypatch):
     sentinel = object()
     sess = _session("system", sentinel)
 
-    assert asyncio.run(sess._launch_system()) is sentinel
+    assert _launch_system(sess) is sentinel
 
     assert sess._pw.chromium.calls == [
         {"headless": True, "args": _NO_OWN_NETWORK, "channel": "chrome"}]
     assert sess.browser_name == "Google Chrome"
 
 
+def test_the_system_engine_profile_holds_the_webrtc_preference(monkeypatch):
+    _browsers(monkeypatch, CHROME)
+    sess = _session("system", object())
+
+    _launch_system(sess)
+
+    assert [json.loads(p) for p in sess._pw.chromium.profile_preferences] == [
+        {"webrtc": {"ip_handling_policy": "disable_non_proxied_udp"}}]
+
+
+def test_a_system_browser_that_will_not_start_leaves_no_profile_folder(monkeypatch):
+    _browsers(monkeypatch, CHROMIUM, BRAVE)
+    sess = _session("system", RuntimeError(MISSING_LIBRARY_LINUX), object())
+
+    _launch_system(sess)
+
+    first, kept = sess._pw.chromium.profiles
+    assert not Path(first).exists()
+    assert sess._profile_dir == kept
+
+
 def test_the_system_engine_launches_a_browser_with_no_channel_by_its_path(monkeypatch):
     _browsers(monkeypatch, BRAVE)
     sess = _session("system", object())
 
-    asyncio.run(sess._launch_system())
+    _launch_system(sess)
 
     assert sess._pw.chromium.calls == [
         {"headless": True, "args": _NO_OWN_NETWORK,
@@ -622,7 +664,7 @@ def test_the_system_engine_moves_on_when_the_first_browser_will_not_start(monkey
     sentinel = object()
     sess = _session("system", RuntimeError(MISSING_LIBRARY_LINUX), sentinel)
 
-    assert asyncio.run(sess._launch_system()) is sentinel
+    assert _launch_system(sess) is sentinel
 
     assert [c.get("executable_path") for c in sess._pw.chromium.calls] == [
         "/usr/bin/chromium", "/usr/bin/brave-browser"]
@@ -633,7 +675,7 @@ def test_every_system_browser_tried_carries_the_resolver_rule(monkeypatch):
     _browsers(monkeypatch, CHROMIUM, BRAVE)
     sess = _session("system", RuntimeError(MISSING_LIBRARY_LINUX), object())
 
-    asyncio.run(sess._launch_system())
+    _launch_system(sess)
 
     assert [c.get("args") for c in sess._pw.chromium.calls] == [
         _NO_OWN_NETWORK, _NO_OWN_NETWORK]

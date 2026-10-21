@@ -12,6 +12,7 @@ import re
 import subprocess
 import sys
 import time
+import uuid
 
 import pytest
 
@@ -36,10 +37,14 @@ def test_resolve_root_dir_localcoder_marker(tmp_path):
     assert instances.resolve_root_dir(start=str(proj)) == str(proj.resolve())
 
 
-def test_resolve_root_dir_falls_back_to_start(tmp_path):
+def test_resolve_root_dir_falls_back_to_start(tmp_path, monkeypatch):
+    marker = f".no-such-marker-{uuid.uuid4().hex}"
+    monkeypatch.setattr(instances, "_ROOT_MARKERS", (marker,))
     plain = tmp_path / "no-marker"
     plain.mkdir()
     assert instances.resolve_root_dir(start=str(plain)) == str(plain.resolve())
+    (tmp_path / marker).mkdir()
+    assert instances.resolve_root_dir(start=str(plain)) == str(tmp_path.resolve())
 
 
 def test_resolve_root_dir_override_wins(tmp_path):
@@ -529,13 +534,12 @@ def test_kill_pid_terminates_a_real_live_process():
 # ------------------------------------------------------------------ #
 
 def test_whoami_payload_has_identity_no_secrets():
-    p = instances.whoami_payload("abc123", "/home/x/proj", "full")
+    p = instances.whoami_payload("abc123", "full")
     assert p["app"] == "localm"
     assert p["instance_id"] == "abc123"
-    assert p["root_dir"] == "/home/x/proj"
     assert p["mode"] == "full"
     assert "version" in p
-    assert "token" not in p and "pid" not in p
+    assert "token" not in p and "pid" not in p and "root_dir" not in p
 
 
 class _FakeApp:
@@ -629,7 +633,6 @@ def test_whoami_endpoint_reports_state_unauthenticated(tmp_path):
         "app": "localm",
         "version": body["version"],
         "instance_id": "iid-xyz",
-        "root_dir": str(tmp_path),
         "mode": "full",
     }
     assert "token" not in body and "pid" not in body
@@ -647,9 +650,8 @@ def test_whoami_endpoint_before_wiring_returns_nulls():
 
 def test_whoami_omits_root_dir_on_a_network_bind(tmp_path):
     """root_dir is an absolute host path (it can carry the OS username); it must
-    not leak to LAN clients. It is disclosed only on a loopback bind - discovery
-    matches root_dir from the registry file, not /whoami, so identity still
-    works."""
+    not leak to LAN clients. Discovery matches root_dir from the registry file,
+    not /whoami, so identity still works."""
     from fastapi.testclient import TestClient
     from localm.inference.http_server import create_app
 
@@ -658,21 +660,28 @@ def test_whoami_omits_root_dir_on_a_network_bind(tmp_path):
     app.state.root_dir = str(tmp_path)
     app.state.instance_mode = "api"
     app.state.bind_host = "0.0.0.0"          # network bind
-    body = TestClient(app).get("/whoami").json()
-    assert body["root_dir"] is None           # omitted over the network
-    assert body["instance_id"] == "iid-net"   # identity handshake still works
-    assert body["mode"] == "api"
+    r = TestClient(app).get("/whoami")
+    assert "root_dir" not in r.json()
+    assert tmp_path.name not in r.text
+    assert r.json()["instance_id"] == "iid-net"   # identity handshake still works
+    assert r.json()["mode"] == "api"
 
 
-def test_whoami_keeps_root_dir_on_a_loopback_bind(tmp_path):
+def test_whoami_omits_root_dir_on_a_loopback_bind(tmp_path):
+    """/whoami answers any local process with no credential, so the project
+    directory is not in it on a loopback bind either."""
     from fastapi.testclient import TestClient
     from localm.inference.http_server import create_app
 
     app = create_app(_mock_engine())
+    app.state.instance_id = "iid-lo"
     app.state.root_dir = str(tmp_path)
     app.state.bind_host = "127.0.0.1"
-    body = TestClient(app).get("/whoami").json()
-    assert body["root_dir"] == str(tmp_path)
+    r = TestClient(app).get("/whoami")
+    assert r.status_code == 200
+    assert "root_dir" not in r.json()
+    assert tmp_path.name not in r.text
+    assert r.json()["instance_id"] == "iid-lo"
 
 
 # ------------------------------------------------------------------ #

@@ -89,6 +89,7 @@ class _PendingConfirm:
     tool: str
     args: dict
     diff: Optional[str]
+    exact: bool = False
     answered: threading.Event = field(default_factory=threading.Event)
     approved: bool = False
 
@@ -374,8 +375,11 @@ class CoderSession:
         tool_call events are NOT forwarded here (children do not inherit
         on_event), so the card is the only place that attribution appears.
         """
-        # Tools granted "always allow" earlier in the session skip the flow
-        if call.name in self.allowed_tools:
+        from .display import exact_approval_required
+        exact = exact_approval_required()
+        # Tools granted "always allow" earlier in the session skip the flow,
+        # except for a call that needs an approval of its own.
+        if call.name in self.allowed_tools and not exact:
             who = f"sub-agent '{agent}': " if agent else ""
             self._push({"type": "info",
                         "text": f"{who}{call.name} auto-approved "
@@ -386,6 +390,7 @@ class CoderSession:
             tool=call.name,
             args=dict(call.args),
             diff=self._diff_preview(call),
+            exact=exact,
         )
         with self._lock:
             self._pending[pending.id] = pending
@@ -966,13 +971,16 @@ class CoderSession:
         """Resolve a pending confirmation. False if id doesn't match.
 
         ``always_allow`` (only honoured on approval) whitelists the tool for
-        the rest of the session - later calls skip the confirmation flow."""
+        the rest of the session - later calls skip the confirmation flow. It
+        is ignored for a confirmation asked under
+        ``display.requiring_exact_approval``."""
         with self._lock:
             pending = self._pending.get(confirm_id)
         if pending is None:
             return False
         # A plan approval (exit_plan_mode) is never made automatic.
-        if approved and always_allow and pending.tool != "exit_plan_mode":
+        if (approved and always_allow and not pending.exact
+                and pending.tool != "exit_plan_mode"):
             self.allowed_tools.add(pending.tool)
         pending.approved = approved
         pending.answered.set()

@@ -142,6 +142,7 @@ class TestDebugStacksGate:
         app = create_app(_engine())
         with TestClient(app) as c:
             app.state.bind_host = "0.0.0.0"
+            app.state.insecure_bind = True
             r = c.get("/debug/stacks", headers=_shell(app))
             assert r.status_code == 404, r.text
 
@@ -158,6 +159,7 @@ class TestDebugStacksGate:
         app = create_app(_engine())
         with TestClient(app) as c:
             app.state.bind_host = host
+            app.state.insecure_bind = True
             assert c.get("/debug/stacks").status_code == 404
             # A path that does not exist.
             assert c.get("/debug/no-such-endpoint").status_code == 404

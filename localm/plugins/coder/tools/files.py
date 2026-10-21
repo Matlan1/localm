@@ -23,6 +23,7 @@ from .base import (
 )
 # The indexer's skip and file-type tables, shared so grep and the project map
 # classify files the same way.
+from .. import data_guard as _data_guard
 from ..indexer import _SKIP_DIRS, _SYMBOL_LANGS, _TEXT_EXTS
 from .diagnostics import run_diagnostics
 
@@ -1231,7 +1232,8 @@ def tool_grep(cwd: Path, pattern: str, path: str = ".", glob: str = "",
     prune_dirs = _SKIP_DIRS - requested
     files: list[Path] = []
     skipped_noise: set = set()
-    skipped_binary = skipped_large = 0
+    skipped_binary = skipped_large = skipped_localm = 0
+    guard_targets = _data_guard.protected_targets()
     for fp in candidates:
         # Noise directories are pruned by name and only below the search root, so
         # pointing path= at one still searches it.
@@ -1253,6 +1255,9 @@ def tool_grep(cwd: Path, pattern: str, path: str = ".", glob: str = "",
             continue
         real = _os_path.normcase(_os_path.realpath(fp))
         if real != cwd_prefix and not real.startswith(cwd_prefix_sep):
+            continue
+        if _data_guard.protected_file(fp, targets=guard_targets):
+            skipped_localm += 1
             continue
         if _is_probably_binary(fp):
             skipped_binary += 1
@@ -1325,6 +1330,9 @@ def tool_grep(cwd: Path, pattern: str, path: str = ".", glob: str = "",
                        "in path= or glob=)")
     if skipped_binary:
         reasons.append(f"{skipped_binary} binary file(s)")
+    if skipped_localm:
+        reasons.append(f"{skipped_localm} file(s) holding localm's own keys or "
+                       "settings")
     if skipped_large:
         reasons.append(f"{skipped_large} file(s) over the "
                        f"{size_cap / (1024 * 1024):.1f} MB size cap "
@@ -1414,7 +1422,15 @@ def tool_search_replace(
                 f".localcoder or .git links ({e}).")
 
     oversized: list[str] = []   # skipped by the size cap, reported not silenced
+    guarded: list[str] = []     # localm's own keys or settings, never read or written
+    guard_targets = _data_guard.protected_targets()
     for fp in candidates:
+        if _data_guard.protected_file(fp, targets=guard_targets):
+            try:
+                guarded.append(str(fp.relative_to(cwd)))
+            except ValueError:
+                guarded.append(str(fp))
+            continue
         try:
             if size_cap > 0 and fp.stat().st_size > size_cap:
                 try:
@@ -1469,6 +1485,13 @@ def tool_search_replace(
             f"\n[WARNING: {len(unreadable)} file(s) could not be read and were "
             f"skipped; any matches there were NOT replaced: {shown}]"
         )
+
+    if guarded:
+        shown = ", ".join(guarded[:20])
+        if len(guarded) > 20:
+            shown += f", ... (+{len(guarded) - 20} more)"
+        unreadable_note += (
+            f"\n[not searched, localm's own keys or settings: {shown}]")
 
     locked_note = ""
     if locked:

@@ -266,6 +266,9 @@ EXEC_OWNER_KEYS = {
 # The privacy contract: whether localm writes the user's content to disk at all.
 PRIVACY_OWNER_KEYS = {"mode", "chat_mode", "coder_mode", "keep_diagnostics"}
 
+# A host folder the server deletes from; a scoped key neither reads nor sets it.
+HOST_PATH_OWNER_KEYS = {"comfy_output_dir"}
+
 # Selects a file the server OPENS and parses, with no path confinement:
 # embedder.py accepts any caller-chosen path and hands it to llama.cpp's native
 # GGUF parser (a UNC path on Windows also makes the probe an outbound SMB/NTLM
@@ -309,6 +312,7 @@ def test_admin_only_keys_lists_the_owner_only_settings():
     assert ss.admin_only_keys() == (
         RAG_OWNER_KEYS | OUTBOUND_OWNER_KEYS | EXEC_OWNER_KEYS
         | PRIVACY_OWNER_KEYS | GUARD_OWNER_KEYS | LOAD_PATH_OWNER_KEYS
+        | HOST_PATH_OWNER_KEYS
         | {"hf_trust_remote_code"}
         | {"net_allow_private", "cors_origins"}
         # update_allow_prerelease decides which builds the updater suggests

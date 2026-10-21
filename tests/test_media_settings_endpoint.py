@@ -42,12 +42,13 @@ def test_media_schema_admin_only_fields_hidden_for_non_owner():
     owner_fields = {f["key"] for f in ss.media_schema_json("image", {}, cfg)}
     scoped_fields = {f["key"] for f in
                      ss.media_schema_json("image", {}, cfg, is_owner=False)}
-    assert {"launch_cmd", "api_url", "workdir"} <= owner_fields, "owner sees everything"
-    assert not ({"launch_cmd", "api_url", "workdir"} & scoped_fields), \
-        "a non-owner must not see launch_cmd/api_url/workdir"
+    assert {"launch_cmd", "api_url", "workdir", "output_dir"} <= owner_fields, \
+        "owner sees everything"
+    assert not ({"launch_cmd", "api_url", "workdir", "output_dir"} & scoped_fields), \
+        "a non-owner must not see launch_cmd/api_url/workdir/output_dir"
     # An ordinary media field stays visible to a non-owner, so the filter is
     # SELECTIVE rather than hiding the whole block.
-    assert "output_dir" in scoped_fields, "an ordinary field stays visible"
+    assert "delete_outputs" in scoped_fields, "an ordinary field stays visible"
 
 
 def test_media_admin_only_fields_is_the_single_source_of_truth():
@@ -56,7 +57,7 @@ def test_media_admin_only_fields_is_the_single_source_of_truth():
     # inside that folder and run via Popen, so it reaches execution the same way
     # launch_cmd does.
     assert ss.media_admin_only_fields() == {
-        "launch_cmd", "api_url", "workdir", "native_model", "native_vae",
+        "launch_cmd", "api_url", "workdir", "output_dir", "native_model", "native_vae",
         "native_clip_l", "native_clip_g", "native_t5xxl", "native_llm",
         "native_clip_vision", "native_dit", "native_text_encoder", "native_lm"}
 
@@ -289,11 +290,11 @@ def test_get_hides_launch_cmd_and_api_url_from_a_config_read_only_key(env):
 
     for plugin in reader_resp.json()["plugins"]:
         reader_keys = {f["key"] for f in plugin["fields"]}
-        assert not ({"launch_cmd", "api_url", "workdir"} & reader_keys), \
-            f"{plugin['plugin']}: launch_cmd/api_url/workdir must be hidden " \
-            "from a scoped key"
-        # The over-gating control: an ordinary field (output_dir) stays visible.
-        assert "output_dir" in reader_keys, "an ordinary field stays visible"
+        assert not ({"launch_cmd", "api_url", "workdir", "output_dir"} & reader_keys), \
+            f"{plugin['plugin']}: launch_cmd/api_url/workdir/output_dir must be " \
+            "hidden from a scoped key"
+        # The over-gating control: an ordinary field stays visible.
+        assert "delete_outputs" in reader_keys, "an ordinary field stays visible"
 
 
 def test_post_response_hides_launch_cmd_and_api_url_from_a_scoped_writer(env):
@@ -311,12 +312,12 @@ def test_post_response_hides_launch_cmd_and_api_url_from_a_scoped_writer(env):
 
     # The saved field must be one this key may actually SET: workdir sits on the
     # owner gate, so posting it here would 403.
-    r = client.post("/v1/media/config/image", json={"output_dir": "/x"},
+    r = client.post("/v1/media/config/image", json={"delete_outputs": True},
                     headers=writer_hdr)
     assert r.status_code == 200, r.text
     fields = {f["key"] for f in r.json()["fields"]}
-    assert not ({"launch_cmd", "api_url", "workdir"} & fields)
-    assert "output_dir" in fields
+    assert not ({"launch_cmd", "api_url", "workdir", "output_dir"} & fields)
+    assert "delete_outputs" in fields
 
 
 def test_generic_config_get_does_not_leak_per_plugin_media_secrets(env):
@@ -339,7 +340,8 @@ def test_generic_config_get_does_not_leak_per_plugin_media_secrets(env):
         "image": {"comfy": {"launch_cmd": "attacker.bat",
                             "api_url": "http://attacker.invalid",
                             "workdir": "/attacker/dir",
-                            "output_dir": "/ordinary/dir"}}}))
+                            "output_dir": "/attacker/out",
+                            "delete_outputs": True}}}))
     client = TestClient(create_app(None))
 
     owner = client.get("/v1/config",
@@ -355,10 +357,11 @@ def test_generic_config_get_does_not_leak_per_plugin_media_secrets(env):
     # per-plugin field stays readable.
     assert owner_comfy.get("launch_cmd") == "attacker.bat", \
         "precondition: the owner must still see the value being hidden"
-    assert scoped_comfy.get("output_dir") == "/ordinary/dir", \
+    assert owner_comfy.get("output_dir") == "/attacker/out"
+    assert scoped_comfy.get("delete_outputs") is True, \
         "the scrub must be TARGETED - an ordinary per-plugin field stays readable"
 
-    leaked = {"launch_cmd", "api_url", "workdir"} & set(scoped_comfy)
+    leaked = {"launch_cmd", "api_url", "workdir", "output_dir"} & set(scoped_comfy)
     assert not leaked, f"non-owner read the owner-only media values: {sorted(leaked)}"
 
 
@@ -395,3 +398,43 @@ def test_an_out_of_range_number_is_a_400_not_a_server_error(client, body):
                     headers={"Content-Type": "application/json"})
     assert r.status_code == 400, r.text
     assert "native_steps" in r.text
+
+
+def test_comfy_output_dir_is_owner_only_on_the_generic_config_route(env, tmp_path):
+    from localm import auth, scopes
+    from localm.config import load_config
+
+    auth.set_api_key("owner-secret-output-dir")
+    reader = auth.create_key("reader", [scopes.CONFIG_READ])["key"]
+    writer = auth.create_key("writer", [scopes.CONFIG_READ, scopes.CONFIG_WRITE],
+                             allow_privileged=True)["key"]
+    client = TestClient(create_app(None))
+    owner_hdr = {"Authorization": "Bearer owner-secret-output-dir"}
+    folder = str(tmp_path / "comfy-out")
+
+    r = client.patch("/v1/config", json={"comfy_output_dir": folder, "max_tokens": 321},
+                     headers=owner_hdr)
+    assert r.status_code == 200, r.text
+    assert r.json()["comfy_output_dir"] == folder
+    assert client.get("/v1/config", headers=owner_hdr).json()["comfy_output_dir"] == folder
+
+    scoped = client.get("/v1/config", headers={"Authorization": f"Bearer {reader}"})
+    assert scoped.status_code == 200, scoped.text
+    assert "comfy_output_dir" not in scoped.json()
+    assert scoped.json()["max_tokens"] == 321
+
+    other = str(tmp_path / "elsewhere")
+    denied = client.patch("/v1/config", json={"comfy_output_dir": other},
+                          headers={"Authorization": f"Bearer {writer}"})
+    assert denied.status_code == 403, denied.text
+    assert load_config()["comfy_output_dir"] == folder
+
+    echo = client.patch("/v1/config", json={"max_tokens": 654},
+                        headers={"Authorization": f"Bearer {writer}"})
+    assert echo.status_code == 200, echo.text
+    assert "comfy_output_dir" not in echo.json()
+    assert load_config()["comfy_output_dir"] == folder
+
+    media = client.post("/v1/media/config/image", json={"output_dir": other},
+                        headers={"Authorization": f"Bearer {writer}"})
+    assert media.status_code == 403, media.text

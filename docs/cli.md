@@ -561,7 +561,7 @@ localm config autoprune_missing_models true
 localm config language de                        # interface language: en (default) or de
 ```
 
-`localm config KEY VALUE` always sets a value; `localm info` prints the current ones. Config lives at `<data dir>/config.json` and only known keys are settable (both the CLI and the GUI validate against the schema). Only the settings you actually changed are stored in the file. Set `require_auth true` (or `LOCALM_REQUIRE_AUTH=1`) to fail closed and refuse requests until a key exists; `localm gui` and `localm serve` refuse to bind past loopback unless an API key of at least 8 characters is set (exit 2; `--insecure` overrides it, and a bind address set in Settings falls back to loopback with a warning instead); `cors_origins` widens CORS (locked to localhost by default). See the [API keys](#api-keys) section and [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md) for the auth and scope model, and [docs/tls.md](tls.md) for LAN serving.
+`localm config KEY VALUE` always sets a value; `localm info` prints the current ones. Config lives at `<data dir>/config.json` and only known keys are settable (both the CLI and the GUI validate against the schema). Only the settings you actually changed are stored in the file. Set `require_auth true` (or `LOCALM_REQUIRE_AUTH=1`) to fail closed and refuse requests until a key exists; `localm gui` and `localm serve` refuse to bind past loopback unless an API key of at least 8 characters is set (exit 2; `--insecure` overrides it, and a bind address set in Settings falls back to loopback with a warning instead), and a running one whose last key is removed refuses requests until a key is set; `cors_origins` widens CORS (locked to localhost by default). See the [API keys](#api-keys) section and [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md) for the auth and scope model, and [docs/tls.md](tls.md) for LAN serving.
 
 ### Dynamic context window
 
@@ -728,15 +728,17 @@ localm's HTTP surface is protected by a bearer key. Manage the owner key and min
 localm key show [--reveal]      # show the active owner key (masked, or full with --reveal) or "open mode"
 localm key generate             # generate a random owner key, persist it, print it once
 localm key set KEY              # persist a specific owner key you provide (8+ characters: letters, digits, - and _)
-localm key clear [-y]           # remove the owner key, return to open mode (-y skips the confirmation)
+localm key clear [-y]           # remove every key, return to open mode (-y skips the confirmation, except for the last key, which needs a terminal and always asks)
 localm key create NAME --scope chat --scope rag   # mint a named key limited to those scopes (--scope/-s is required)
 localm key create NAME -s rag --fs-access host --rag-root D:\docs --expires-in 86400
 localm key list                 # list named keys (metadata only, never the secret)
-localm key rm KEY_ID [-y]       # revoke a named key by ID (-y skips the confirmation)
+localm key rm KEY_ID [-y]       # revoke a named key by ID (-y skips the confirmation; the last key needs a terminal and always asks)
 localm key recover              # recover owner access after a lockout (run locally on the server machine): mints a new owner key, signs out browser sessions, leaves named keys working
 ```
 
 The owner key can also be set outside these commands: the `LOCALM_API_KEY` env var, or a `<data dir>/auth.key` file.
+
+Removing the last key (`key clear`, or `key rm` of the only key with no owner key set) returns the server to open mode, so it is refused unless it runs at an interactive terminal: piped input exits 1 and changes nothing, and the confirmation is asked even with `-y`. A server bound past loopback without `--insecure` refuses every request except `/health` and `/whoami` while it has no key, until a key is set again.
 
 `key create` takes three optional confinements beyond `--scope`/`-s`, each narrowing what the key can do below what the owner can:
 

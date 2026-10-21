@@ -43,6 +43,7 @@ _EFFECTIVE_CHAIN = (
     ("_BodyStreamCapMiddleware", None),
     ("BaseHTTPMiddleware", "_docs_loopback_only"),
     ("BaseHTTPMiddleware", "_security_headers"),
+    ("BaseHTTPMiddleware", "_keyless_network_gate"),
     ("BaseHTTPMiddleware", "_origin_guard"),
     ("CORSMiddleware", None),
 )
@@ -249,6 +250,7 @@ def test_loopback_decisions_read_is_loopback_host_from_http_server(monkeypatch):
     """Patched after assembly: the docs guard and /debug/stacks look the
     classifier up per request, through http_server."""
     app = create_app(None)
+    app.state.insecure_bind = True
     client = TestClient(app)
     auth = {"Authorization": f"Bearer {app.state.shell_token}"}
     assert client.get("/docs").status_code == 200

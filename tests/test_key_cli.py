@@ -21,6 +21,7 @@ def runner(cli_runner, monkeypatch):
     # about the throwaway home, not the developer's environment.
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+    monkeypatch.setattr("localm.cli.keys._stdin_is_interactive", lambda: True)
     return cli_runner
 
 
@@ -96,13 +97,13 @@ class TestOwnerKey:
     def test_clear_returns_to_open_mode(self, runner):
         runner.invoke(main, ["key", "generate"])
         assert auth.get_api_key() is not None
-        r = runner.invoke(main, ["key", "clear", "--yes"])
+        r = runner.invoke(main, ["key", "clear", "--yes"], input="y\n")
         assert r.exit_code == 0
         assert auth.get_api_key() is None           # NEGATIVE: clear truly clears
         assert "open mode" in runner.invoke(main, ["key", "show"]).output.lower()
 
     def test_clear_open_mode_is_noop(self, runner):
-        r = runner.invoke(main, ["key", "clear", "--yes"])
+        r = runner.invoke(main, ["key", "clear", "--yes"], input="y\n")
         assert r.exit_code == 0
         assert "already open mode" in r.output.lower()
 
@@ -153,7 +154,7 @@ class TestOwnerSessionRevocation:
         monkeypatch.setattr(sessions, "_CACHE", {"mtime": None, "records": None})
         sid = self._mint_owner_session()
         assert sessions.lookup(sid) is not None
-        r = runner.invoke(main, ["key", "clear", "--yes"])
+        r = runner.invoke(main, ["key", "clear", "--yes"], input="y\n")
         assert r.exit_code == 0, r.output
         assert auth.get_api_key() is None                  # clear truly clears
         assert sessions.lookup(sid) is None                # NEGATIVE: owner cookie dead
@@ -321,12 +322,12 @@ class TestNamedKeys:
     def test_rm_revokes_named_key(self, runner):
         runner.invoke(main, ["key", "create", "dash", "--scope", "models:read"])
         key_id = auth.list_keys()[0]["id"]
-        r = runner.invoke(main, ["key", "rm", key_id, "--yes"])
+        r = runner.invoke(main, ["key", "rm", key_id, "--yes"], input="y\n")
         assert r.exit_code == 0
         assert auth.list_keys() == []
 
     def test_rm_unknown_id_errors(self, runner):
-        r = runner.invoke(main, ["key", "rm", "deadbeef", "--yes"])
+        r = runner.invoke(main, ["key", "rm", "deadbeef", "--yes"], input="y\n")
         assert r.exit_code == 1
 
 

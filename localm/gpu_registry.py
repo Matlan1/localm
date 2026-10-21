@@ -20,7 +20,7 @@ received the id cannot get a confirmation, and another user's listener is never
 asked.
 
 ``GET /v1/instances/status`` without a credential answers a redacted status (no
-pid, no model file identity). A reader gets the full status with ``POST
+pid, no project directory, no model file identity). A reader gets the full status with ``POST
 /v1/instances/status``, which is verified the same way as an unload request, or,
 for an instance of its own install, with that instance's attach token.
 
@@ -73,11 +73,11 @@ _own_identity: Optional[dict] = None
 def set_local_status_provider(provider: Optional[Callable[[], Optional[dict]]],
                               identity: Optional[dict] = None) -> None:
     """Register (or with None, clear) the callable that reports THIS instance's
-    live coordination status: ``{instance_id, pid, port, host, scheme, model,
-    models, vram_estimate_bytes, gpu_index}``, or None when this instance does not
+    live coordination status: ``{instance_id, pid, port, host, scheme, root_dir,
+    model, models, vram_estimate_bytes, gpu_index}``, or None when this instance does not
     coordinate (a plain test app or an ``--isolated`` run).
 
-    *identity* is THIS instance's ``{instance_id, port, scheme}``, read without
+    *identity* is THIS instance's ``{instance_id, port, scheme, root_dir}``, read without
     calling *provider*: it names this instance when it asks a peer for its full
     status (:func:`fetch_status`). Cleared with the provider."""
     global _status_provider, _own_identity
@@ -305,8 +305,8 @@ def _probe_peer(endpoint: tuple, exclude_self_id: Optional[str],
     except (TypeError, ValueError):
         return None
     return {**status, "host": dial, "scheme": scheme, "port": port,
-            "root_dir": ident.get("root_dir"), "mode": ident.get("mode"),
-            "version": ident.get("version")}
+            "root_dir": status.get("root_dir") or ident.get("root_dir"),
+            "mode": ident.get("mode"), "version": ident.get("version")}
 
 
 def list_gpu_peers(*, exclude_self_id: Optional[str] = None,
@@ -319,7 +319,9 @@ def list_gpu_peers(*, exclude_self_id: Optional[str] = None,
 
     Each peer is the status object (``instance_id``, ``pid``, ``model``,
     ``models``, ``vram_estimate_bytes``, ``gpu_index``) plus ``host`` (the loopback
-    address dialled), ``scheme``, ``port`` and the ``root_dir`` / ``mode`` /
+    address dialled), ``scheme``, ``port``, ``root_dir`` (from the full status,
+    which only a verified sibling or a credential reads, else from an older
+    peer's ``/whoami``; None when neither carries it) and the ``mode`` /
     ``version`` from its ``/whoami`` answer. Sorted by instance id.
 
     Best-effort and advisory: any failure yields the peers found so far."""
