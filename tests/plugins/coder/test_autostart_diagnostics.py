@@ -152,3 +152,51 @@ class TestAutoStartedServerRunsInTheProjectDirectory:
             "the server was spawned with no working directory, so it registers "
             "against the caller's directory and the attach can never match")
         assert str(seen["cwd"]) == str(project), seen["cwd"]
+
+
+class TestWhereAnAutoStartedServersOutputGoes:
+    """The detached server must never share the stdout of a run whose stdout
+    carries a result document or event lines, or a pipe someone else reads."""
+
+    def test_the_table(self):
+        from localm.plugins.coder.cli._main import _captures_child_output as cap
+        assert cap(False, True, "linux", False)
+        assert cap(False, True, "win32", False)
+        assert cap(True, True, "linux", True)
+        assert cap(True, False, "linux", False)
+        assert cap(True, False, "darwin", False)
+        assert not cap(True, True, "linux", False)
+        assert not cap(True, True, "win32", False)
+        assert not cap(True, False, "win32", False)
+        assert not cap(True, True, "win32", True)
+
+    def test_a_json_run_passes_machine_output_to_the_backend_builder(self, monkeypatch):
+        _bypass_plugin_gate(monkeypatch)
+        seen = {}
+
+        def fake_build(*a, **kw):
+            seen.update(kw)
+            raise SystemExit(0)
+
+        monkeypatch.setattr("localm.plugins.coder.cli._main._build_backend", fake_build)
+        CliRunner().invoke(ccli.main, ["--model", "m", "--output-format", "json", "hi"])
+        assert seen.get("machine_output") is True
+        seen.clear()
+        CliRunner().invoke(ccli.main, ["--model", "m", "hi"])
+        assert seen.get("machine_output") is False
+
+
+def test_a_backend_built_from_url_assumes_a_window_and_a_preset_does_not():
+    import click
+
+    from localm.plugins.coder.backends.http import make_openai_backend
+    from localm.plugins.coder.cli._main import _build_backend
+
+    with click.Context(ccli.main):
+        by_url = _build_backend(None, "http://127.0.0.1:1/v1", "m", "k", False, None,
+                                False, False, ".", False)
+        preset = _build_backend("openai", None, "gpt-4o", "k", False, None,
+                                False, False, ".", False)
+    assert by_url.assume_ctx_window is True
+    assert preset.assume_ctx_window is False
+    assert make_openai_backend().assume_ctx_window is False

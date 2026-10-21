@@ -425,6 +425,28 @@ permanent public record of what shipped and are never rewritten; the in-progress
   counts the weights kept in system memory correctly.**
 - **`/v1/embeddings` checks whether a model is a folder off the server's event loop,** and an
   embedding model entry with no path is no longer read as the current folder.
+- **`localm coder --url` to a server that reports no context window compacts again.** Ollama,
+  LM Studio and similar servers got no compaction at all, so a long session grew until the server
+  truncated the prompt. The agent now budgets against the `n_ctx` of your localm config, a
+  llama-server reports its real window, and llama-server's "exceeds the available context size"
+  refusal is recognised so the request is compacted and sent again.
+- **A background sub-agent no longer skews the main agent's compaction.** Both read the token
+  count of "the last request" from one shared connection, so one could record the other's.
+- **A request to show or find code is no longer reported "not finished".** "Show me the code that
+  loads the config" or "Find where the file is created" made the agent write a file nobody asked
+  for, or ended the run as failed. Images generated with `generate_image` and work handed to
+  sub-agents now count as work done.
+- **`localm coder doctor` no longer calls a working API key rejected.** A key that cannot list
+  models (HTTP 403 from the model list) is a warning that says only the list was tested.
+- **Reviewer, researcher and test-writer sub-agents can read back the cut part of a long output**
+  they were told to read back.
+- **Deleted files past the project map's detail limit stop being counted** in the directory counts
+  and the "not indexed in detail" line without waiting for `/reindex`.
+- **`localm coder --output-format json` run from a terminal on Linux or macOS no longer mixes the
+  auto-started server's output into stdout,** and the pipe it writes to is no longer held open by
+  the server after the run ends.
+- **Idle coder sessions and their agent browsers are closed after 24 hours again** when only the
+  Browser tab is in use.
 
 ### Changed
 

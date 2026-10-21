@@ -1981,6 +1981,7 @@ def _coder_sessions_using(name: str) -> list[str]:
     if mgr is None:
         return []
     try:
+        mgr.reap_idle_in_background()
         infos = mgr.list(is_owner=True, reap=False)
     except Exception:
         return []

@@ -263,6 +263,32 @@ def test_deleting_an_unindexed_file_drops_it_from_the_count(tmp_path):
     assert len(pm.unindexed_paths) == 5 and "9 files in" in _text(pm)
 
 
+def test_files_deleted_by_a_shell_command_leave_the_unindexed_count(tmp_path):
+    for i in range(10):
+        (tmp_path / f"f{i}.py").write_text("x = 1\n", encoding="utf-8")
+    pm = ProjectMap.build(tmp_path, max_files=4)
+    gone = sorted(pm.unindexed_paths)[:3]
+    for rel in gone:
+        (tmp_path / rel).unlink()
+    pm.mark_dirty()
+    text = _text(pm)
+    assert len(pm.unindexed_paths) == 3 and not set(gone) & pm.unindexed_paths
+    assert "7 files in" in text and "3 file(s) not indexed in detail" in text
+
+
+def test_a_cached_capped_map_drops_unindexed_files_deleted_since(tmp_path):
+    for i in range(10):
+        (tmp_path / f"f{i}.py").write_text("x = 1\n", encoding="utf-8")
+    cache = tmp_path.parent / (tmp_path.name + "-cache.json")
+    first = ProjectMap.build(tmp_path, max_files=4)
+    first.save_cache(cache)
+    victim = sorted(first.unindexed_paths)[0]
+    (tmp_path / victim).unlink()
+    loaded = ProjectMap.load_cached_and_reconcile(tmp_path, cache)
+    assert loaded is not None and victim not in loaded.unindexed_paths
+    assert len(loaded.unindexed_paths) == 5
+
+
 def _symlink_or_skip(link: Path, target: Path) -> None:
     try:
         os.symlink(target, link)

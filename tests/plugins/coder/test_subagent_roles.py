@@ -113,6 +113,15 @@ class TestRoleNarrowsTheChild:
         assert not _dispatch(child, "run_shell", command="echo x").ok
         assert not _dispatch(child, "git_push").ok
 
+    @pytest.mark.parametrize("role", sorted(ROLE_PRESETS))
+    def test_every_role_can_read_back_output_it_was_told_to_read_back(
+            self, tmp_path, role):
+        _, child = _spawn_child(tmp_path, role=role)
+        sid = child._spill_store.add("alpha\nbeta\ngamma\n", "git_diff", False)
+        result = _dispatch(child, "read_output", id=sid, pattern="beta")
+        assert result.ok, result.output
+        assert "beta" in result.output
+
     def test_every_role_forbids_recursive_spawning(self, tmp_path):
         """A child that can spawn its own children escapes the narrowing."""
         for role in ROLE_PRESETS:

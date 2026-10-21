@@ -115,3 +115,40 @@ def test_a_reaper_thread_that_cannot_start_does_not_wedge_later_reaps(
     while mgr.get(s.id) is not None and __import__("time").monotonic() < deadline:
         __import__("time").sleep(0.02)
     assert mgr.get(s.id) is None
+
+
+def _wait_until_gone(mgr, session_id):
+    import time
+    deadline = time.monotonic() + 10
+    while mgr.get(session_id) is not None and time.monotonic() < deadline:
+        time.sleep(0.02)
+    return mgr.get(session_id) is None
+
+
+def test_the_browser_tab_listing_reaps_an_abandoned_session(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from localm.plugins.builtin.browser.plug import _viewable_agent_browsers
+
+    mgr = SessionManager()
+    s = mgr.create(_session(tmp_path))
+    s.last_activity_at -= (_IDLE_REAP_SECONDS + 1)
+    monkeypatch.setattr(
+        "localm.plugins.builtin.coder.plug._principal_from_request",
+        lambda request: (True, "owner"))
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(coder_sessions=mgr)))
+    assert _viewable_agent_browsers(request) == []
+    assert _wait_until_gone(mgr, s.id)
+    assert s.closed is True
+
+
+def test_the_unload_attribution_probe_reaps_an_abandoned_session(tmp_path, monkeypatch):
+    from localm.inference import http_server as hs
+
+    mgr = SessionManager()
+    s = mgr.create(_session(tmp_path))
+    s.last_activity_at -= (_IDLE_REAP_SECONDS + 1)
+    monkeypatch.setattr(hs, "_coder_session_manager", mgr)
+    assert hs._coder_sessions_using("m") == []
+    assert _wait_until_gone(mgr, s.id)
+    assert s.closed is True

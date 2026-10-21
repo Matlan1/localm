@@ -74,10 +74,16 @@ def test_model_placeholder_name_is_not_flagged(serve):
     assert doctor.check_model(HTTPBackend(url, "localm")).status == OK
 
 
-@pytest.mark.parametrize("code", [401, 403])
-def test_model_auth_rejection_fails(serve, code):
-    c = doctor.check_model(HTTPBackend(serve(code), "m1"))
-    assert c.status == FAIL and "API key" in c.detail and str(code) in c.detail
+def test_model_unauthorized_fails(serve):
+    c = doctor.check_model(HTTPBackend(serve(401), "m1"))
+    assert c.status == FAIL and "API key" in c.detail and "401" in c.detail
+
+
+def test_model_listing_forbidden_warns_and_says_only_the_list_was_tested(serve):
+    c = doctor.check_model(HTTPBackend(serve(403), "m1"))
+    assert c.status == WARN
+    assert "rejected the API key" not in c.detail
+    assert "403" in c.detail and "only the model list was tested" in c.detail
 
 
 def test_model_server_error_fails(serve):
