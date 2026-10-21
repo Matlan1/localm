@@ -2633,9 +2633,23 @@ async function discardPartialPull(payload) {
       const data = await r.json().catch(() => ({}));
       throw new Error(data.detail || r.statusText);
     }
+    const data = await r.json().catch(() => ({}));
+    return { ok: true, removed: Number(data.removed_bytes) || 0, kept: data.kept || null };
   } catch (e) {
     toast(t("models.pull.discardFailed", { message: e.message }), true);
+    return { ok: false, removed: 0, kept: null };
   }
+}
+
+// The status line after a cancel, from what the discard actually removed.
+function cancelledStatusText(discard) {
+  if (!discard.ok) return t("models.pull.cancelledNotDeletedStatus");
+  if (discard.kept) {
+    return t(discard.removed > 0 ? "models.pull.cancelledKeptTempStatus"
+                                 : "models.pull.cancelledKeptStatus");
+  }
+  return t(discard.removed > 0 ? "models.pull.cancelledStatus"
+                               : "models.pull.cancelledNothingStatus");
 }
 
 async function runPull(payload) {
@@ -2743,10 +2757,10 @@ async function runPull(payload) {
       pausedPull = payload;
       setPullButtons("paused");
     } else if (end.status === "cancelled") {
-      await discardPartialPull(payload);
+      const discard = await discardPartialPull(payload);
       bar.classList.remove("indeterminate");
       bar.style.width = "0%";
-      pct.textContent = t("models.pull.cancelledStatus");
+      pct.textContent = cancelledStatusText(discard);
       toast(t("models.pull.cancelledToast"));
       setPullButtons("idle");
     } else if (end.status === "disconnected") {
@@ -2837,8 +2851,8 @@ $("pull-cancel").onclick = async () => {
   } else if (pausedPull) {
     const payload = pausedPull;
     pausedPull = null;
-    await discardPartialPull(payload);
-    $("pull-pct").textContent = t("models.pull.cancelledStatus");
+    const discard = await discardPartialPull(payload);
+    $("pull-pct").textContent = cancelledStatusText(discard);
     $("pull-bar").style.width = "0%";
     setPullButtons("idle");
   }

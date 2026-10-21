@@ -351,8 +351,22 @@ class TestPullDiscard:
         with TestClient(harness.app) as c:
             r = c.post("/api/models/pull/discard",
                        json={"spec": " owner/repo:m.gguf ", "name": "mine"})
-        assert r.status_code == 200 and r.json() == {"removed_bytes": 1234}
+        assert r.status_code == 200 and r.json() == {"removed_bytes": 1234, "kept": None}
         assert seen["args"] == ("owner/repo:m.gguf", "mine")
+
+    @pytest.mark.parametrize("spec,kept", [
+        ("civitai:123:m.safetensors", "civitai"),
+        ("owner/repo", "repo"),
+        ("owner/repo:m.gguf", None),
+        ("https://example.com/m.gguf", None),
+    ])
+    def test_it_reports_which_shapes_leave_downloaded_data_behind(
+            self, harness, monkeypatch, spec, kept):
+        monkeypatch.setattr("localm.model_manager.pull.discard_partial_download",
+                            lambda *a, **k: 0)
+        with TestClient(harness.app) as c:
+            r = c.post("/api/models/pull/discard", json={"spec": spec})
+        assert r.status_code == 200 and r.json() == {"removed_bytes": 0, "kept": kept}
 
     def test_it_refuses_while_a_pull_of_the_same_spec_runs(self, harness, monkeypatch):
         harness.jobs.running = [{"kind": "pull", "status": "running",

@@ -143,13 +143,27 @@ class TestTerminalBar:
         assert "250.0 KB/s" in text
         assert "ETA 2s" in text
 
-    def test_a_pipe_shows_nothing(self, monkeypatch, capsys):
+    def test_a_pipe_gets_plain_lines_on_stderr_and_nothing_on_stdout(
+            self, monkeypatch, capsys):
         monkeypatch.delenv("LOCALM_PROGRESS_JSON", raising=False)
-        run = pull_mod._ProgressRun(lambda: 0, 1000)
-        assert not run.active
+        monkeypatch.setattr(pull_mod, "METER", FakeMeter(transferred=250, rate=25.0))
+        run = pull_mod._ProgressRun(lambda: 0, 1000, label="m.gguf")
+        assert run.active
         run.start()
+        run._tick()
         run.finish(succeeded=True)
-        assert capsys.readouterr().out == ""
+        out, err = capsys.readouterr()
+        assert out == ""
+        assert err == "m.gguf: 25% (250 B / 1.0 KB) at 25 B/s, 30s left\n"
+
+    def test_a_listener_replaces_the_plain_lines(self, monkeypatch, capsys):
+        monkeypatch.delenv("LOCALM_PROGRESS_JSON", raising=False)
+        monkeypatch.setattr(pull_mod, "METER", FakeMeter(transferred=250, rate=25.0))
+        with pull_mod.progress_listener(lambda s: None):
+            run = pull_mod._ProgressRun(lambda: 0, 1000, label="m.gguf")
+            run.start()
+            run.finish(succeeded=True)
+        assert capsys.readouterr().err == ""
 
 
 class TestListener:

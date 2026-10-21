@@ -126,6 +126,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   next request fits in it.
 
 ### Fixed
+- **Pulling a ControlNet or a textual-inversion embedding no longer fails after the download.** `localm pull` (and the Models page's Add a model, with no type chosen) crashed once the file was on disk, so nothing was registered and a second pull crashed the same way. The file is now typed from its tensors and registered as a ControlNet or an embedding.
+- **Cancelling a download on the Models page says what was actually deleted.** The status line used to claim the partial download was deleted every time, including for CivitAI files and whole-repo downloads whose files stay on disk, and when the delete request failed. It now reports the case.
+- **Restarting a ComfyUI that localm launched waits for the old one to release its port.** The restart used to be refused with "localm did not start it" while the process that had just been stopped still held the port.
+- **`localm pull` prints progress when its output is piped or redirected.** With stdout not a terminal it showed nothing for the whole transfer; it now writes a plain progress line to stderr every few seconds.
 - **A scheduled job with no model set no longer picks a speech-to-text model.** The job took the first registered chat model by name, so a Qwen3-ASR or Whisper model could answer a job that named no model; those models now come last, behind every other chat model.
 - **`localm config pinned_models '["a"]'` pins `a`.** A JSON list typed on the command line was
   stored as one model name with the brackets and quotes in it, so nothing was pinned. A list
@@ -433,6 +437,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
   saves there, without the browser's download prompt. Other devices still download the file.
 
 ### Security
+
+- **A model folder's hub-cache link is refused when its `blobs` folder is itself a link out of the repo.** A sentence-transformers or Hugging Face snapshot whose `blobs` folder pointed elsewhere let a file link inside the snapshot reach files outside the model folder.
 
 - **Removing the last API key no longer opens a network-bound server.** A server reachable
   from the network (`-H 0.0.0.0` or a LAN address) whose key is cleared or revoked while it runs
