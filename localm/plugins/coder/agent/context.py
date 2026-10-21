@@ -640,7 +640,14 @@ class _ContextMixin:
         ``_COMPACT_KEEP_OUTPUT_RATIO`` of the window, then only the newest
         one), and summarise older turns (``_compact_history``) only when that
         is not enough and *summarise* is True. Returns True when the history
-        changed."""
+        changed. When it changed, the system prompt is rebuilt with the
+        current project map."""
+        changed = self._compact_to_inner(target_tokens, window, summarise=summarise)
+        if changed:
+            self._rebuild_system_prompt()
+        return changed
+
+    def _compact_to_inner(self, target_tokens: int, window: int, *, summarise: bool) -> bool:
         dropped = self._drop_old_tool_output(int(window * _COMPACT_KEEP_OUTPUT_RATIO))
         if self._prompt_tokens_estimate() > target_tokens:
             dropped += self._drop_old_tool_output(0)
@@ -664,8 +671,12 @@ class _ContextMixin:
         a summary produced by a direct backend call (no tools, no loop).
 
         Returns True if compaction happened, False if there was nothing to compact.
+        After a compaction the system prompt is rebuilt with the current project map.
         """
-        return self._compact_history()
+        changed = self._compact_history()
+        if changed:
+            self._rebuild_system_prompt()
+        return changed
 
     # GBNF grammar for structured compaction output.
     # Produces: {"summary":"...","changed_files":["..."],"open_tasks":["..."]}
@@ -1930,15 +1941,10 @@ ws     ::= [ \t\n\r]*
         """Build the full message list with system prompt prepended.
 
         Called once per turn, right before the LLM call. The system prompt is
-        rebuilt only when the project map is dirty (see ProjectMap.mark_dirty /
-        execution._refresh_map_for_tool), so a clean turn pays neither
-        _rebuild_system_prompt's cost nor the map's stat-diff rescan.
-
-        The check is `is True`, not plain truthiness, so a MagicMock standing in
-        for ProjectMap does not read as dirty.
+        used as it is: file changes the tools made reach it at the next
+        compaction (see ``_compact_to``), so every turn of a session shares the
+        same prompt prefix.
         """
-        if self._project_map.dirty is True:
-            self._rebuild_system_prompt()
         return [
             {"role": "system", "content": self._system_prompt},
             *self._messages,

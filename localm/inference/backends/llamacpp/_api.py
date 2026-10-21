@@ -1108,6 +1108,47 @@ def llama_memory_seq_rm(
     return bool(fn(mem, seq_id, p0, p1))
 
 
+# llama_state_seq_flags: only the parts of a sequence's state that cannot be
+# partially removed (a recurrent state, an SWA cache).
+LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY = 1
+
+
+def has_state_seq_ext_api() -> bool:
+    """True when this llama.cpp build exports the llama_state_seq_*_ext
+    family, which saves and restores one sequence's state with flags."""
+    lib = load_lib()
+    return all(
+        hasattr(lib, fn)
+        for fn in ("llama_state_seq_get_size_ext", "llama_state_seq_get_data_ext",
+                   "llama_state_seq_set_data_ext")
+    )
+
+
+def llama_state_seq_get_size_ext(ctx: ctypes.c_void_p, seq_id: int, flags: int) -> int:
+    """Bytes ``llama_state_seq_get_data_ext`` needs for *seq_id* with *flags*."""
+    fn = _bind("llama_state_seq_get_size_ext", ctypes.c_size_t,
+               LlamaContext, ctypes.c_int32, ctypes.c_uint32)
+    return int(fn(ctx, seq_id, flags))
+
+
+def llama_state_seq_get_data_ext(ctx: ctypes.c_void_p, dst, size: int,
+                                 seq_id: int, flags: int) -> int:
+    """Copy the state of *seq_id* with *flags* into *dst* (*size* bytes).
+    Returns the bytes written, 0 on failure."""
+    fn = _bind("llama_state_seq_get_data_ext", ctypes.c_size_t, LlamaContext,
+               ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int32, ctypes.c_uint32)
+    return int(fn(ctx, dst, size, seq_id, flags))
+
+
+def llama_state_seq_set_data_ext(ctx: ctypes.c_void_p, src, size: int,
+                                 seq_id: int, flags: int) -> int:
+    """Load a state saved by ``llama_state_seq_get_data_ext`` into *seq_id*.
+    Returns the bytes read, 0 on failure."""
+    fn = _bind("llama_state_seq_set_data_ext", ctypes.c_size_t, LlamaContext,
+               ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int32, ctypes.c_uint32)
+    return int(fn(ctx, src, size, seq_id, flags))
+
+
 def llama_kv_cache_seq_rm(
     ctx: ctypes.c_void_p, seq_id: int, p0: int, p1: int
 ) -> bool:

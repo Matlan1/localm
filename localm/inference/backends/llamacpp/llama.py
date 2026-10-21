@@ -45,6 +45,7 @@ from ._drafting import (
     SPEC_DRAFT, SPEC_MTP, SPEC_NGRAM, SPEC_OFF, DraftSource, MtpSource, counted_source,
     resolve_spec_source)
 from ._ngram import NgramSource, ngram_draft_cap, ngram_rs_seq
+from ._slots import CHECKPOINT_TAIL, CHECKPOINTS_MAX
 from ._structs import (
     llama_token, LlamaChatMessage, LlamaBatch, LlamaModelTensorBuftOverride,
     set_use_mmap)
@@ -1078,6 +1079,29 @@ def _common_prefix_len(a: list[int], b: list[int]) -> int:
     return n
 
 
+class _StateCheckpoint:
+    """The recurrent part of one sequence's state after decoding ``tokens``."""
+
+    __slots__ = ("tokens", "data")
+
+    def __init__(self, tokens: list[int], data) -> None:
+        self.tokens = tokens
+        self.data = data
+
+
+def newest_checkpoint(checkpoints: Iterable[_StateCheckpoint], prompt: list[int],
+                      prefix: int) -> Optional[_StateCheckpoint]:
+    """The checkpoint holding the most tokens, at most *prefix*, that are the
+    start of *prompt*; None when there is none."""
+    best = None
+    for ck in checkpoints:
+        n = len(ck.tokens)
+        if 0 < n <= prefix and ck.tokens == prompt[:n] and (
+                best is None or n > len(best.tokens)):
+            best = ck
+    return best
+
+
 _PENALTIES_UNSUPPORTED_MSG = (
     "presence_penalty and frequency_penalty cannot be applied: this llama runtime "
     "has no penalties sampler")
@@ -1353,6 +1377,9 @@ class LlamaCpp:
     _mtp_drafting = False        # THIS generation is still proposing drafts
     _mtp_backend_chain = None    # sampler chain attached to the draft context, or None
     mtp_drafted = 0              # draft tokens THIS generation sent to verification
+    prompt_reused = 0            # prompt tokens the last single-sequence prefill kept in the KV cache
+    _checkpoints_wanted: Optional[bool] = None   # lazy, see _state_checkpoints_wanted
+    _checkpoints: Sequence[_StateCheckpoint] = ()   # state checkpoints of sequence 0, newest last
     mtp_accepted = 0             # how many of those the target model accepted
     mtp_steps = 0                # verification batches THIS generation decoded
     mtp_paused_steps = 0         # steps THIS generation ran plain because drafting was slower
@@ -1525,6 +1552,8 @@ class LlamaCpp:
         # under-charged and wrongly flipped back to VRAM, overflowing and aborting.
         self._offload_kqv   = True
         self._kv_supported: Optional[bool] = None   # lazy llama_memory_* probe
+        self._checkpoints_wanted = None
+        self._checkpoints = []
         # Non-None once _apply_model_template has had to substitute a generic
         # ChatML prompt because this model's own embedded template could not
         # be used (RAG-VISION-1). Sticky for the life of this instance - the
@@ -2456,8 +2485,10 @@ class LlamaCpp:
                                 prompt_tokens, needed,
                                 ram_fallback=full_needed is not None and needed < full_needed)
 
-                logger.info("gguf generate: prefill complete in %.2fs (kv_reuse=%s)",
-                            time.monotonic() - _t0, reuse and cache_prompt)
+                logger.info("gguf generate: prefill complete in %.2fs (kv_reuse=%s, "
+                            "%d of %d prompt token(s) reused)",
+                            time.monotonic() - _t0, reuse and cache_prompt,
+                            self.prompt_reused if reuse else 0, n_prompt)
 
                 # Build sampler
                 sampler = _build_sampler(
@@ -5006,46 +5037,164 @@ class LlamaCpp:
             api.llama_memory_clear(mem, True)
         elif prefix < len(self._cached_tokens) or not self._cached_tokens:
             if not api.llama_memory_seq_rm(mem, 0, prefix, -1):
-                # Partial removal unsupported (e.g. SWA cache / recurrent state) - start over
-                api.llama_memory_clear(mem, True)
-                prefix = 0
+                # Partial removal unsupported (recurrent state): resume from the
+                # newest state checkpoint inside the shared prefix, else start over.
+                prefix = self._restore_checkpoint(mem, prompt_tokens, prefix)
+                if prefix == 0:
+                    api.llama_memory_clear(mem, True)
+        self._drop_checkpoints_after(prefix)
+        self.prompt_reused = prefix
         # The suffix below is mirrored into the draft cache at prefix + i, so the
         # draft cache has to end at prefix too.
         self._sync_draft_cache(prefix, prompt_tokens)
 
-        suffix = prompt_tokens[prefix:]
-        for i in range(0, len(suffix), _PREFILL_CHUNK):
+        ret = self._decode_prompt(prompt_tokens, prefix, _PREFILL_CHUNK)
+        if ret != 0:
+            # If partial reuse failed (e.g. a recurrent state conflict),
+            # perform a full clean prefill from position 0
+            self._cached_tokens = []
+            self._checkpoints = []
+            self.prompt_reused = 0
+            api.llama_memory_clear(mem, True)
+            self._sync_draft_cache(0, prompt_tokens)
+            if prefix == 0:
+                raise RuntimeError(f"llama_decode failed during prefill (code {ret})")
+            full_ret = self._decode_prompt(prompt_tokens, 0, _PREFILL_CHUNK)
+            if full_ret != 0:
+                raise RuntimeError(f"llama_decode failed during prefill (code {full_ret})")
+
+        self._cached_tokens = list(prompt_tokens)
+
+    CHECKPOINT_TAIL = CHECKPOINT_TAIL
+    CHECKPOINTS_MAX = CHECKPOINTS_MAX
+
+    def _state_checkpoints_wanted(self) -> bool:
+        """Whether prefill takes state checkpoints: the model has recurrent
+        layers (whose cache cannot drop a range of positions) and the runtime
+        exports the llama_state_seq_*_ext functions. Probed once; False when
+        either cannot be told."""
+        if self._checkpoints_wanted is None:
+            try:
+                self._checkpoints_wanted = bool(
+                    self._memory_api_available() and api.has_state_seq_ext_api() is True
+                    and self._model_has_recurrent_layers() is True)
+            except Exception:
+                self._checkpoints_wanted = False
+        return self._checkpoints_wanted
+
+    def _decode_prompt(self, prompt_tokens: list[int], start: int, step: int) -> int:
+        """Decode ``prompt_tokens[start:]`` at positions start.. in chunks of
+        at most *step* tokens. When state checkpoints are wanted, a chunk
+        boundary is placed ``CHECKPOINT_TAIL`` tokens before the end and a
+        checkpoint is taken there. Returns 0, or the first failing
+        ``llama_decode`` code (the KV cache then holds a partial prompt).
+        Raises RuntimeError when the model is unloaded partway."""
+        n = len(prompt_tokens)
+        cut = n - self.CHECKPOINT_TAIL
+        if not (start < cut and self._state_checkpoints_wanted()):
+            cut = -1
+        i = start
+        while i < n:
             if self._ctx_ptr is None:
                 self._cached_tokens = []
                 raise RuntimeError(
                     "Model was unloaded during prefill - request aborted."
                 )
-            chunk = suffix[i:i + _PREFILL_CHUNK]
-            batch = self._create_batch(chunk, prefix + i, logits_at_last_only=True)
+            end = min(i + step, n)
+            if i < cut < end:
+                end = cut
+            chunk = prompt_tokens[i:end]
+            batch = self._create_batch(chunk, i, logits_at_last_only=True)
             ret = api.llama_decode(self._ctx_ptr, batch)
             api.llama_batch_free(batch)
-            if ret == 0:
-                self._after_prefill_chunk(chunk, prefix + i)
-                continue
-            # If partial reuse failed (e.g. a recurrent state conflict),
-            # perform a full clean prefill from position 0
-            self._cached_tokens = []
-            api.llama_memory_clear(mem, True)
-            self._sync_draft_cache(0, prompt_tokens)
-            if prefix > 0:
-                for j in range(0, len(prompt_tokens), _PREFILL_CHUNK):
-                    full_chunk = prompt_tokens[j:j + _PREFILL_CHUNK]
-                    full_batch = self._create_batch(full_chunk, j, logits_at_last_only=True)
-                    full_ret = api.llama_decode(self._ctx_ptr, full_batch)
-                    api.llama_batch_free(full_batch)
-                    if full_ret != 0:
-                        raise RuntimeError(f"llama_decode failed during prefill (code {full_ret})")
-                    self._after_prefill_chunk(full_chunk, j)
-                break
-            else:
-                raise RuntimeError(f"llama_decode failed during prefill (code {ret})")
+            if ret != 0:
+                return ret
+            self._after_prefill_chunk(chunk, i)
+            if end == cut:
+                self._save_checkpoint(prompt_tokens[:cut])
+            i = end
+        return 0
 
-        self._cached_tokens = list(prompt_tokens)
+    def _read_seq_state(self, seq: int, flags: int, limit: Optional[int] = None):
+        """Copy sequence *seq*'s state with *flags* (``llama_state_seq_flags``)
+        into a new ctypes byte array and return it; None when it is empty,
+        larger than *limit* bytes, or cannot be read (logged at INFO). Never
+        raises."""
+        from localm.debuglog import logger
+        try:
+            size = api.llama_state_seq_get_size_ext(self._ctx_ptr, seq, flags)
+            if size <= 0 or (limit is not None and size > limit):
+                if size > 0:
+                    logger.info("gguf state: sequence %d state of %d MiB is over the "
+                                "%d MiB available for a copy", seq, size >> 20, limit >> 20)
+                return None
+            buf = (ctypes.c_uint8 * size)()
+            got = api.llama_state_seq_get_data_ext(self._ctx_ptr, buf, size, seq, flags)
+        except Exception as exc:
+            logger.info("gguf state: reading sequence %d raised %s", seq, type(exc).__name__)
+            return None
+        if got != size:
+            logger.info("gguf state: reading sequence %d returned %d of %d bytes",
+                        seq, got, size)
+            return None
+        return buf
+
+    def _write_seq_state(self, seq: int, data, flags: int) -> bool:
+        """Load *data* from ``_read_seq_state`` into sequence *seq*. False when
+        the runtime refuses it (logged at INFO). Never raises."""
+        from localm.debuglog import logger
+        try:
+            ok = api.llama_state_seq_set_data_ext(
+                self._ctx_ptr, data, len(data), seq, flags) == len(data)
+        except Exception as exc:
+            logger.info("gguf state: loading sequence %d raised %s", seq, type(exc).__name__)
+            return False
+        if not ok:
+            logger.info("gguf state: sequence %d did not take a %d-byte state", seq, len(data))
+        return ok
+
+    def _save_checkpoint(self, tokens: list[int]) -> None:
+        """Keep the recurrent part of sequence 0's state, which holds exactly
+        *tokens*, as the newest checkpoint; the oldest is dropped past
+        ``CHECKPOINTS_MAX``. A state that cannot be read is not kept. Never
+        raises."""
+        buf = self._read_seq_state(0, api.LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY)
+        if buf is None:
+            return
+        self._checkpoints = [c for c in self._checkpoints if len(c.tokens) != len(tokens)]
+        self._checkpoints.append(_StateCheckpoint(list(tokens), buf))
+        del self._checkpoints[:-self.CHECKPOINTS_MAX]
+
+    def _restore_checkpoint(self, mem, prompt_tokens: list[int], prefix: int) -> int:
+        """Put sequence 0 back to the newest checkpoint whose tokens are a
+        prefix of ``prompt_tokens[:prefix]``: restore its recurrent state and
+        drop every cached position from its end on. Returns the number of
+        tokens the cache then holds, or 0 when no checkpoint applies or the
+        restore fails (the caller clears the cache). Never raises."""
+        from localm.debuglog import logger
+        best = newest_checkpoint(self._checkpoints, prompt_tokens, prefix)
+        if best is None:
+            return 0
+        n = len(best.tokens)
+        ok = self._write_seq_state(0, best.data, api.LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY)
+        if ok:
+            try:
+                ok = bool(api.llama_memory_seq_rm(mem, 0, n, -1))
+            except Exception as exc:
+                logger.info("gguf prefill: trimming to the state checkpoint at %d tokens "
+                            "raised %s", n, type(exc).__name__)
+                ok = False
+        if not ok:
+            logger.info("gguf prefill: the state checkpoint at %d tokens could not be "
+                        "restored; prefilling the whole prompt", n)
+            self._checkpoints = []
+            return 0
+        return n
+
+    def _drop_checkpoints_after(self, prefix: int) -> None:
+        """Forget the checkpoints holding more than *prefix* tokens: the cache
+        no longer holds their tokens past *prefix*."""
+        self._checkpoints = [c for c in self._checkpoints if len(c.tokens) <= prefix]
 
     def _prefill_fresh_context(self, prompt_tokens: list[int], needed: int,
                                plan: Optional[tuple[int, bool]] = None,
@@ -5084,11 +5233,14 @@ class LlamaCpp:
             if decision is False:
                 offload_kqv = False
 
+        carried = self._snapshot_cache(prompt_tokens, target) if self._ctx_ptr else None
         self._consume_decode_refresh()
         if self._ctx_ptr:
             api.llama_free(self._ctx_ptr)
             self._ctx_ptr = None
         self._cached_tokens = []
+        self._checkpoints = []
+        self.prompt_reused = 0
         self._pending_h_pos = -1
         had_draft_context = self._mtp_ctx_ptr is not None
         if had_draft_context:
@@ -5156,18 +5308,72 @@ class LlamaCpp:
         # more tokens than n_batch does not return an error - it aborts the
         # whole process inside the native library. Long chat histories
         # (prompt > 2048 tokens) land here whenever the context is recreated.
-        n_batch = cp.n_batch
-        for i in range(0, len(prompt_tokens), n_batch):
-            chunk = prompt_tokens[i:i + n_batch]
-            batch = self._create_batch(chunk, i, logits_at_last_only=True)
-            ret = api.llama_decode(self._ctx_ptr, batch)
-            api.llama_batch_free(batch)
-            if ret != 0:
-                self._cached_tokens = []
-                raise RuntimeError(f"llama_decode failed during prefill (code {ret})")
-            self._after_prefill_chunk(chunk, i)
+        if carried is not None and self._restore_cache(carried):
+            self._prefill_with_reuse(prompt_tokens)
+            return
+
+        ret = self._decode_prompt(prompt_tokens, 0, cp.n_batch)
+        if ret != 0:
+            self._cached_tokens = []
+            self._checkpoints = []
+            raise RuntimeError(f"llama_decode failed during prefill (code {ret})")
 
         self._cached_tokens = list(prompt_tokens)
+
+    def _snapshot_cache(self, prompt_tokens: list[int], target: int):
+        """Copy sequence 0's whole state (KV cache and recurrent state) to host
+        memory before the live context is replaced by one of *target* cells,
+        when the cache shares a prefix with *prompt_tokens*, fits *target*, and
+        the copy takes at most half the available system RAM. Returns
+        ``(tokens, data, checkpoints)`` or None. Never raises; a skip for RAM
+        or a failed read is logged at INFO."""
+        from localm.debuglog import logger
+        tokens = list(self._cached_tokens)
+        if (not tokens or len(tokens) > target or not prompt_tokens
+                or tokens[0] != prompt_tokens[0] or self._vision_kv is not None):
+            return None
+        try:
+            if not (self._memory_api_available() and api.has_state_seq_ext_api() is True):
+                return None
+        except Exception as exc:
+            logger.info("gguf context: probing the state API raised %s", type(exc).__name__)
+            return None
+        limit = self._state_copy_limit()
+        if limit is None:
+            logger.info("gguf context: not carrying the %d-token cache into the new "
+                        "context, the available system RAM is unknown", len(tokens))
+            return None
+        buf = self._read_seq_state(0, 0, limit)
+        if buf is None:
+            return None
+        return tokens, buf, list(self._checkpoints)
+
+    @staticmethod
+    def _state_copy_limit() -> Optional[int]:
+        """Bytes a host copy of KV state may take: half the available system
+        RAM, or None when that cannot be read."""
+        from localm.sysstats import system_ram
+        _total, available = system_ram()
+        return None if available is None else available // 2
+
+    def _restore_cache(self, carried) -> bool:
+        """Load a ``_snapshot_cache`` copy into the new live context's
+        sequence 0 and take back its tokens and state checkpoints. False, with
+        the cache emptied, when the load fails (logged at INFO). Never
+        raises."""
+        from localm.debuglog import logger
+        tokens, buf, checkpoints = carried
+        if not self._write_seq_state(0, buf, 0):
+            logger.info("gguf context: the carried %d-token cache could not be loaded; "
+                        "prefilling the whole prompt", len(tokens))
+            try:
+                api.llama_memory_clear(api.llama_get_memory(self._ctx_ptr), True)
+            except Exception as exc:
+                logger.info("gguf context: clearing the cache raised %s", type(exc).__name__)
+            return False
+        self._cached_tokens = tokens
+        self._checkpoints = checkpoints
+        return True
 
     def _reset_kv_for_image(self) -> None:
         """Empty the KV cache (and the MTP draft cache) so an image prefill can

@@ -199,9 +199,17 @@ class _Slot:
         self.rate_steps = 0               # decode steps it ran alone
         self.rate_s = 0.0                 # their native seconds
         self.rate_depth = 0               # the sum of the cache's cells at them
+        self.checkpoints: list[Any] = []  # state checkpoints of this sequence, newest last
+        self.ck_at = -1                   # cache length at which to take the next one, -1 for none
 
 
 _WAIT = object()
+
+# Tokens before the end of a prompt where a state checkpoint is taken, so a
+# next prompt that re-renders the end of this one still finds it.
+CHECKPOINT_TAIL = 4
+# State checkpoints kept per sequence, newest last.
+CHECKPOINTS_MAX = 3
 
 
 class SlotScheduler:
@@ -214,6 +222,7 @@ class SlotScheduler:
     ``note_decode(steps, seconds, depth)``,
     ``n_batch()``, ``decode(entries)``, ``sample(sampler, row)``,
     ``is_eog(tok)``, ``seq_rm(seq, p0, p1)``, ``clear_memory()``,
+    ``checkpoints_wanted()``, ``state_get(seq)``, ``state_set(seq, data)``,
     ``free_sampler(sampler)``, ``stderr_scope()``, and, for a reply submitted
     with a scorer, ``score(scorer, row, tok)``.
 
@@ -793,9 +802,13 @@ class SlotScheduler:
                 self._drop_cache(slot)
         elif keep < len(slot.kv):
             if not self._ops.seq_rm(slot.seq, keep, -1):
-                self._drop_cache(slot)
-                keep = 0
+                keep = self._restore_checkpoint(slot, stream.prompt, keep)
+                if keep == 0:
+                    self._drop_cache(slot)
         slot.kv = slot.kv[:keep]
+        slot.checkpoints = [c for c in slot.checkpoints if len(c.tokens) <= keep]
+        cut = len(stream.prompt) - CHECKPOINT_TAIL
+        slot.ck_at = cut if keep < cut and self._ops.checkpoints_wanted() else -1
         slot.todo = list(stream.prompt[keep:])
         slot.pending = None
         slot.generated = 0
@@ -814,7 +827,38 @@ class SlotScheduler:
         logger.info("gguf slots: slot %d prefill starting, %d prompt token(s), %d reused",
                     slot.seq, len(stream.prompt), keep)
 
+    def _restore_checkpoint(self, slot: _Slot, prompt: list[int], keep: int) -> int:
+        """Put *slot*'s sequence back to its newest checkpoint inside the first
+        *keep* tokens of *prompt* and drop its cache past that. Returns the
+        tokens the cache then holds, 0 when no checkpoint applies or the
+        restore fails."""
+        from .llama import newest_checkpoint
+        best = newest_checkpoint(slot.checkpoints, prompt, keep)
+        if best is None:
+            return 0
+        n = len(best.tokens)
+        if self._ops.state_set(slot.seq, best.data) and self._ops.seq_rm(slot.seq, n, -1):
+            return n
+        from localm.debuglog import logger
+        logger.info("gguf slots: slot %d state checkpoint at %d tokens could not be "
+                    "restored", slot.seq, n)
+        slot.checkpoints = []
+        return 0
+
+    def _save_checkpoint(self, slot: _Slot) -> None:
+        """Keep *slot*'s state, which holds exactly ``slot.kv``, as its newest
+        checkpoint, at most ``CHECKPOINTS_MAX``."""
+        from .llama import _StateCheckpoint
+        slot.ck_at = -1
+        data = self._ops.state_get(slot.seq)
+        if data is None:
+            return
+        slot.checkpoints = [c for c in slot.checkpoints if len(c.tokens) != len(slot.kv)]
+        slot.checkpoints.append(_StateCheckpoint(list(slot.kv), data))
+        del slot.checkpoints[:-CHECKPOINTS_MAX]
+
     def _drop_cache(self, slot: _Slot) -> None:
+        slot.checkpoints = []
         if slot.kv and not self._ops.seq_rm(slot.seq, 0, -1):
             from localm.debuglog import logger
             logger.warning("gguf slots: sequence %d could not be removed from the "
@@ -845,9 +889,11 @@ class SlotScheduler:
         for slot in active:
             if slot.pending is not None or not slot.todo or room <= 0:
                 continue
-            n = min(room, len(slot.todo))
-            done = n == len(slot.todo)
             base = len(slot.kv)
+            n = min(room, len(slot.todo))
+            if slot.ck_at > base:
+                n = min(n, slot.ck_at - base)
+            done = n == len(slot.todo)
             part = [(tok, base + i, slot.seq, done and i == n - 1)
                     for i, tok in enumerate(slot.todo[:n])]
             plan[slot.seq] = (part, n - 1 if done else None)
@@ -863,6 +909,8 @@ class SlotScheduler:
             else:
                 slot.kv.extend(slot.todo[:len(part)])
                 slot.todo = slot.todo[len(part):]
+                if slot.ck_at == len(slot.kv):
+                    self._save_checkpoint(slot)
 
     def _sample(self, rows: dict[int, int]) -> None:
         for seq, row in rows.items():
@@ -1206,6 +1254,21 @@ class LlamaSlotOps:
         if not llm._ctx_ptr:
             return True
         return bool(api.llama_memory_seq_rm(api.llama_get_memory(llm._ctx_ptr), seq, p0, p1))
+
+    def checkpoints_wanted(self) -> bool:
+        return self._llm._state_checkpoints_wanted()
+
+    def state_get(self, seq: int) -> Any:
+        from . import _api as api
+        if not self._llm._ctx_ptr:
+            return None
+        return self._llm._read_seq_state(seq, api.LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY)
+
+    def state_set(self, seq: int, data: Any) -> bool:
+        from . import _api as api
+        if not self._llm._ctx_ptr:
+            return False
+        return self._llm._write_seq_state(seq, data, api.LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY)
 
     def clear_memory(self) -> None:
         from . import _api as api

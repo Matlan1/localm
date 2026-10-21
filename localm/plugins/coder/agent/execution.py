@@ -2,7 +2,7 @@
 """Single tool-call execution: the security-critical dispatch path (disabled-tool
 gate, scope check, dry-run, network policy, fail-closed confirmation, snapshot,
 hidden-arg injection, the failure breaker), plus patch-mode capture, the
-confirm prompt, scope resolution, and the per-write map refresh. Mixed into Agent."""
+confirm prompt, scope resolution, and the per-write project map update. Mixed into Agent."""
 
 from __future__ import annotations
 
@@ -1330,20 +1330,17 @@ class _ExecutionMixin:
                               result: ToolResult | None = None) -> None:
         """Update the project map for files touched by a write/edit tool call.
 
-        *result* is optional (existing callers - and the test that drives
-        this directly - omit it) and consulted only for a tool whose targets
-        are not knowable from the call args alone: search_replace's paths
-        come from its own glob+regex sweep, reported post-call via
-        ToolResult.changes, not from a `path`-shaped arg _call_target_paths()
-        could resolve ahead of time.
+        Updates the map only; the system prompt keeps the map it was built
+        with until the next compaction (see ``_ContextMixin._compact_to``), so
+        the prompt prefix the model's KV cache holds stays valid.
 
-        run_shell is a step further: it has no `path`-shaped arg AT ALL (only
-        a free-form `command` string), so there is no path to resolve even
-        post-call. It marks the whole map dirty and returns, without calling
-        _rebuild_system_prompt() as every other branch below does. That rebuild
-        is what reconciles the map (see ProjectMap._rescan_if_dirty via
-        context._build_messages, called once per turn), so it runs once before
-        the map is next read rather than once per run_shell call.
+        *result* is optional and consulted only for a tool whose targets are
+        not knowable from the call args alone: search_replace's paths come from
+        its own glob+regex sweep, reported post-call via ToolResult.changes.
+
+        run_shell has no `path`-shaped arg at all (only a free-form `command`
+        string): it marks the whole map dirty, reconciled by the map's next
+        read (ProjectMap._rescan_if_dirty).
         """
         if call.name == "run_shell":
             self._project_map.mark_dirty()
@@ -1352,11 +1349,6 @@ class _ExecutionMixin:
         if result is not None and result.changes:
             for rel, _old, _new in result.changes:
                 paths.setdefault(rel, None)
-        if paths:
-            for path_arg in paths:
-                abs_path = (self.cwd / path_arg).resolve()
-                self._project_map.refresh_file(abs_path)
-            # Regenerate the system prompt with the updated map (combined mcp+
-            # plugin+skill tool docs preserved - see _rebuild_system_prompt).
-            # Once, after ALL the call's files, not once per file.
-            self._rebuild_system_prompt()
+        for path_arg in paths:
+            abs_path = (self.cwd / path_arg).resolve()
+            self._project_map.refresh_file(abs_path)

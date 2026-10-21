@@ -91,7 +91,7 @@ class _SessionMixin:
         drift - notably the COMBINED external tool docs (mcp + plugin + skill)
         and the provenance flag. Rebuilding with only ``_mcp_docs`` would drop
         plugin tools and agent skills from the prompt after a reindex, memory
-        reload or per-write map refresh.
+        reload or compaction.
         """
         self._system_prompt = build_system_prompt(
             self.cwd,

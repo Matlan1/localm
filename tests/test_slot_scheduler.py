@@ -64,7 +64,7 @@ class _Sampler:
 
 class _SimContext:
     def __init__(self, capacity=4096, n_ctx_max=None, base=None, grow=256,
-                 vram_fits=None, partial_rm=True):
+                 vram_fits=None, partial_rm=True, recurrent=False):
         self._lock = threading.RLock()
         self.cap = capacity
         self.base = base if base is not None else capacity
@@ -72,6 +72,12 @@ class _SimContext:
         self.grow = grow
         self.vram_fits = vram_fits
         self.partial_rm = partial_rm
+        # A recurrent sequence's state has consumed its first rec[seq] cells and
+        # cannot drop a range inside them; state_get/state_set copy it.
+        self.recurrent = recurrent
+        self.rec = {}
+        self.state_fail = False
+        self.state_sets = []
         self.cells = {}
         self.rows = {}
         self.calls = []
@@ -155,7 +161,11 @@ class _SimContext:
             cur = staged.setdefault(seq, [])
             if pos != len(cur):
                 return -1
+            if self.recurrent and self.rec.get(seq, 0) != pos:
+                return -2
             cur.append(tok)
+            if self.recurrent:
+                self.rec[seq] = len(cur)
             if want:
                 rows[i] = _next_token(cur)
         self.cells = staged
@@ -172,13 +182,31 @@ class _SimContext:
         self.seq_rms.append((seq, p0, p1))
         if p0 > 0 and not self.partial_rm:
             return False
+        if self.recurrent and 0 < p0 < self.rec.get(seq, 0):
+            return False
         cur = self.cells.get(seq, [])
         self.cells[seq] = cur[:p0] if p0 > 0 else []
+        if self.recurrent:
+            self.rec[seq] = min(self.rec.get(seq, 0), len(self.cells[seq]))
         return True
 
     def clear_memory(self):
         self.cleared += 1
         self.cells = {}
+        self.rec = {}
+
+    def checkpoints_wanted(self):
+        return self.recurrent
+
+    def state_get(self, seq):
+        return tuple(self.cells.get(seq, [])[:self.rec.get(seq, 0)])
+
+    def state_set(self, seq, data):
+        self.state_sets.append((seq, len(data)))
+        if self.state_fail or tuple(self.cells.get(seq, [])[:len(data)]) != data:
+            return False
+        self.rec[seq] = len(data)
+        return True
 
     def free_sampler(self, sampler):
         self.freed.append(sampler)
@@ -342,6 +370,64 @@ def test_a_cache_that_cannot_be_truncated_is_rebuilt_from_scratch(made):
     _collect(sched, PROMPTS[1], 3)
     rec = _collect(sched, PROMPTS[1] + [40, 41], 3)
     assert rec["out"] == _reference(PROMPTS[1] + [40, 41], 3)[0]
+
+
+def _prefill_of(ctx, start, seq):
+    return [e for call in ctx.calls[start:] for e in call if e[2] == seq and not e[3]]
+
+
+def test_a_recurrent_follow_up_resumes_from_the_checkpoint_before_the_prompt_end(made):
+    ctx = _SimContext(recurrent=True)
+    sched = made(ctx, 2)
+    first = list(range(10, 50))
+    _collect(sched, first, 3)
+    assert [len(c) for c in ctx.calls[:2]] == [len(first) - 4, 4]
+    second = first[:-1] + [90, 91, 92, 93, 94, 95]
+    before = len(ctx.calls)
+    rec = _collect(sched, second, 3)
+    assert rec["out"] == _reference(second, 3)[0]
+    assert ctx.state_sets == [(0, len(first) - 4)]
+    positions = [e[1] for call in ctx.calls[before:] for e in call if e[2] == 0]
+    assert positions[0] == len(first) - 4
+
+
+def test_a_recurrent_cache_without_checkpoints_is_prefilled_whole(made):
+    ctx = _SimContext(recurrent=True)
+    ctx.checkpoints_wanted = lambda: False
+    sched = made(ctx, 1)
+    first = list(range(10, 50))
+    _collect(sched, first, 3)
+    second = first[:-1] + [90, 91]
+    before = len(ctx.calls)
+    rec = _collect(sched, second, 3)
+    assert rec["out"] == _reference(second, 3)[0]
+    positions = [e[1] for call in ctx.calls[before:] for e in call]
+    assert positions[0] == 0
+    assert ctx.state_sets == []
+
+
+def test_a_checkpoint_that_does_not_restore_falls_back_to_a_whole_prefill(made):
+    ctx = _SimContext(recurrent=True)
+    sched = made(ctx, 1)
+    first = list(range(10, 50))
+    _collect(sched, first, 3)
+    ctx.state_fail = True
+    second = first[:-1] + [90, 91]
+    before = len(ctx.calls)
+    rec = _collect(sched, second, 3)
+    assert rec["out"] == _reference(second, 3)[0]
+    assert [e[1] for call in ctx.calls[before:] for e in call][0] == 0
+
+
+def test_a_prompt_diverging_before_the_checkpoint_does_not_restore_it(made):
+    ctx = _SimContext(recurrent=True)
+    sched = made(ctx, 1)
+    first = list(range(10, 50))
+    _collect(sched, first, 3)
+    second = first[:20] + [90, 91]
+    rec = _collect(sched, second, 3)
+    assert rec["out"] == _reference(second, 3)[0]
+    assert ctx.state_sets == []
 
 
 def test_growing_the_context_replays_the_running_replies(made):
