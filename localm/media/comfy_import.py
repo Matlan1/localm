@@ -186,7 +186,8 @@ def _ui_nodes(data: dict, notes: list) -> dict:
         elif isinstance(values, list):
             for name, value in zip(_widget_names(node["type"], values), values, strict=False):
                 inputs[name] = value
-        node_inputs = node.get("inputs") if isinstance(node.get("inputs"), list) else []
+        raw_inputs = node.get("inputs")
+        node_inputs = raw_inputs if isinstance(raw_inputs, list) else []
         for inp in node_inputs:
             if (isinstance(inp, dict) and _key(inp.get("link")) is not None
                     and isinstance(inp.get("name"), str)):
@@ -236,8 +237,8 @@ class _Graph:
             return None
         return v
 
-    def label(self, nid: str) -> str:
-        n = self.nodes.get(nid)
+    def label(self, nid: Optional[str]) -> str:
+        n = self.nodes.get(nid) if nid is not None else None
         return f"{n['class_type']} #{nid}" if n else f"#{nid}"
 
     def upstream(self, nid: str, names: tuple, stop: tuple) -> Optional[str]:
@@ -301,7 +302,7 @@ def _model_ref(value, class_type: str, input_name: str, *, lora: bool,
     except ValueError as e:
         notes.append(str(e))
         return None
-    ref = {"name": name, "file": filename}
+    ref: dict = {"name": name, "file": filename}
     source = known.get(filename)
     if source is None:
         dl = curated_comfy_download(value) or cached_comfy_download(value, class_type,
@@ -615,8 +616,9 @@ def convert(data, media: str, reg: Optional[dict] = None) -> tuple[dict, dict]:
         raise ValueError("No node of this ComfyUI workflow maps to a native setting.")
     title = None
     if isinstance(data, dict):
-        extra = data.get("extra") if isinstance(data.get("extra"), dict) else {}
-        title = extra.get("title") if isinstance(extra.get("title"), str) else None
+        extra = data.get("extra")
+        raw_title = extra.get("title") if isinstance(extra, dict) else None
+        title = raw_title if isinstance(raw_title, str) else None
     name = "".join(ch for ch in (title or "") if ord(ch) >= 32).strip()[:nw.MAX_NAME]
     name = name or "Imported ComfyUI workflow"
     desc = f"Imported from a ComfyUI workflow ({len(g.nodes)} nodes)."

@@ -153,7 +153,8 @@ async def video(req: VideoRequest, request: Request):
                 return False
             s = apply_choice(s, native_choice)
             if req.flow_shift is not None:
-                s = dict(s, native=dict(s.get("native") or {}, flow_shift=req.flow_shift))
+                s = dict(s)
+                s["native"] = dict(s.get("native") or {}, flow_shift=req.flow_shift)
         elif native_loras:
             job.push({"type": "line", "text":
                       "LoRAs chosen this way apply to the native backend only."})

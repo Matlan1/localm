@@ -196,7 +196,7 @@ def _model_ref(value, what: str, *, lora: bool = False) -> dict:
     unknown = set(value) - allowed
     if unknown:
         raise ValueError(f"{what}: unknown field '{sorted(unknown)[0]}'.")
-    out = {"name": check_model_name(value.get("name"), what)}
+    out: dict = {"name": check_model_name(value.get("name"), what)}
     source = check_source(value.get("source"), what)
     file = value.get("file")
     if file is not None:
@@ -210,7 +210,7 @@ def _model_ref(value, what: str, *, lora: bool = False) -> dict:
         out["comfy"] = comfy
     if lora:
         strength = value.get("strength", 1.0)
-        if not is_number(strength) or not -4.0 <= strength <= 4.0:
+        if not is_number(strength) or not -4.0 <= float(strength) <= 4.0:
             raise ValueError(f"{what}: strength must be a number from -4 to 4.")
         out["strength"] = float(strength)
     return out
@@ -339,6 +339,8 @@ def _flux_models(main: dict) -> dict:
     out = {"model": _ref(main)}
     for slot in ("clip_l", "t5xxl", "vae"):
         d = pairing.suggested_download(slot, "flux")
+        if d is None:
+            raise LookupError(f"No FLUX {slot} download is pinned.")
         out[slot] = _ref(_download_source(d), d.name)
     return out
 
@@ -556,7 +558,7 @@ def save_workflow(media: str, data, *, wid: Optional[str] = None,
     return wid
 
 
-def rename_workflow(media: str, wid: str, name: str) -> None:
+def rename_workflow(media: str, wid: str, name: Optional[str]) -> None:
     """Set the name of user workflow *wid* (its id stays). Caller must hold
     ``lock_for(media)``. Raises ``ValueError`` or ``WorkflowNotFound``."""
     if isinstance(wid, str) and wid.startswith(BUILTIN_PREFIX):
@@ -710,7 +712,7 @@ def resolve(wf: dict, media: str, reg: Optional[dict] = None) -> dict:
     def _one(slot: str, ref: dict, want_lora: bool) -> Optional[str]:
         entry = reg.get(ref["name"])
         path = _entry_file(entry) if isinstance(entry, dict) else None
-        if path is not None:
+        if isinstance(entry, dict) and path is not None:
             if want_lora and entry.get("model_type") != "lora":
                 notes.append(f"'{ref['name']}' is registered, but not as a LoRA.")
             elif ref.get("file") and path.name != ref["file"]:

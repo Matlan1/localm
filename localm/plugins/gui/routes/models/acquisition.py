@@ -348,15 +348,15 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                            "model_type": m["model_type"], "origin": "curated"},
             } for m in st["missing"]]}
 
-        def _workflow_check():
-            """The models of native workflow ``req.native_workflow`` that are not
-            registered, with their downloads (``native_workflows.resolve``)."""
+        def _workflow_check(wid: str):
+            """The models of native workflow *wid* that are not registered,
+            with their downloads (``native_workflows.resolve``)."""
             from localm.media import native_workflows
             try:
-                wf = native_workflows.get_workflow(kind, req.native_workflow)
+                wf = native_workflows.get_workflow(kind, wid)
             except native_workflows.WorkflowNotFound:
                 return {"status": "unavailable", "missing": [],
-                        "warning": f"No such {kind} workflow: {req.native_workflow}."}
+                        "warning": f"No such {kind} workflow: {wid}."}
             res = native_workflows.resolve(wf, kind)
             return {"status": "verified", "missing": res["missing"],
                     "warning": " ".join(res["notes"]) or None}
@@ -364,7 +364,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         def _check():
             if req.native_workflow:
                 try:
-                    return _workflow_check()
+                    return _workflow_check(req.native_workflow)
                 except Exception as e:
                     logger.warning("%s workflow preflight failed: %s", kind, e)
                     return {"status": "unavailable", "missing": [],

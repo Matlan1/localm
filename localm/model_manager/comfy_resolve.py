@@ -197,7 +197,7 @@ def _safe_repo_path(path: str) -> bool:
             and _is_name_part(name))
 
 
-def is_safe_hf_file(repo: str, path: str) -> bool:
+def is_safe_hf_file(repo: object, path: object) -> bool:
     """True when *repo* is an ``owner/name`` HuggingFace repository id and
     *path* a file in it (``_safe_repo_path``, no backslash) with one of
     ``SAFE_EXTENSIONS``."""
