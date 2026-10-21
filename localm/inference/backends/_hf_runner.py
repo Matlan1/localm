@@ -120,6 +120,7 @@ produces NO envelope - the parent detects the dead/stuck child via
 
 from __future__ import annotations
 
+import contextlib
 import multiprocessing as mp
 import os
 import queue as _queue
@@ -590,6 +591,8 @@ class HFRunner:
         # command that drives the queue holds this for its whole
         # request/response cycle. Mirrors ModelRunner._q_lock exactly.
         self._q_lock = threading.Lock()
+        self._waiting_lock = threading.Lock()
+        self._waiting_streams = 0
         self.last_done: dict = {}
         # Monotonically increasing per-stream id, sent with every
         # "chat_stream" command and echoed back on the matching
@@ -610,6 +613,28 @@ class HFRunner:
 
     def is_alive(self) -> bool:
         return self._proc is not None and self._proc.is_alive()
+
+    @property
+    def streams_waiting(self) -> int:
+        """Streams blocked on ``_q_lock`` behind a generation already running."""
+        with self._waiting_lock:
+            return self._waiting_streams
+
+    @contextlib.contextmanager
+    def _stream_turn(self):
+        """Hold ``_q_lock`` for one stream, counting this caller in
+        :attr:`streams_waiting` while it waits for the lock."""
+        with self._waiting_lock:
+            self._waiting_streams += 1
+        try:
+            self._q_lock.acquire()
+        finally:
+            with self._waiting_lock:
+                self._waiting_streams -= 1
+        try:
+            yield
+        finally:
+            self._q_lock.release()
 
     def _exit_reason(self) -> str:
         """The child's exit code DECODED - "-4 (killed by signal SIGILL)" rather
@@ -797,7 +822,7 @@ class HFRunner:
         from localm.debuglog import logger
         first_budget = first_chunk_timeout or FIRST_TOKEN_TIMEOUT_DEFAULT
         awaiting_first = True
-        with self._q_lock:
+        with self._stream_turn():
             # Incremented under _q_lock, not before it: two Python-level
             # callers racing chat_stream() before either acquires the lock
             # could otherwise interleave the += 1 (a read then a write, not

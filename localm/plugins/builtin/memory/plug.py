@@ -609,8 +609,8 @@ async def memory_consolidate(request: Request = None):
             from localm.debuglog import debug_content_enabled, logger
             if debug_content_enabled():
                 logger.debug("memory consolidate prompt:\n%s", prompt)
-            out = strip_think("".join(eng.chat_stream(
-                [{"role": "user", "content": prompt}]))).strip()
+            from localm.inference.background_generation import background_complete
+            out = strip_think(background_complete(eng, prompt)).strip()
             if debug_content_enabled():
                 logger.debug("memory consolidate response:\n%s", out)
             return out
@@ -981,6 +981,7 @@ def _store_episodes(store, complete, embed_fn=_UNSET, now=None, errors=None,
         import time as _time
         from difflib import SequenceMatcher
 
+        from localm.inference.background_generation import BackgroundYield
         from localm.memory import ConsolidationModelError, MemoryRecord, summarize_session
         sdir = _home() / "sessions"
         if not sdir.is_dir():
@@ -1048,6 +1049,9 @@ def _store_episodes(store, complete, embed_fn=_UNSET, now=None, errors=None,
             logger.info("memory consolidation: summarizing session %s (%d chars)...", f.stem, len(text))
             try:
                 summ = summarize_session(complete, text)
+            except BackgroundYield:
+                _write_episodic_watermark(store, newest, newest_stems, failures)
+                raise
             except ConsolidationModelError as e:
                 if errors is not None:
                     errors.append(str(e))
@@ -1127,6 +1131,17 @@ def _store_episodes(store, complete, embed_fn=_UNSET, now=None, errors=None,
 # durable facts into the store. Writes stay gated, so nothing runs in privacy mode.
 
 MEMORY_AUTO_MIN_INTERVAL = 900.0     # >= 15 min between auto-consolidation runs
+MEMORY_AUTO_RETRY_AFTER = 60.0       # a pass that yielded to a chat request may run again after this
+
+
+def _auto_interval() -> float:
+    """Seconds between auto-consolidation runs: LOCALM_MEMORY_AUTO_INTERVAL when it
+    parses as a number, else MEMORY_AUTO_MIN_INTERVAL."""
+    import os
+    try:
+        return float(os.environ.get("LOCALM_MEMORY_AUTO_INTERVAL", MEMORY_AUTO_MIN_INTERVAL))
+    except (TypeError, ValueError):
+        return MEMORY_AUTO_MIN_INTERVAL
 _auto_lock = _threading.Lock()       # guards the marker read + in-progress flag
 _auto_running = False                 # True while a background pass is in flight
 
@@ -1161,6 +1176,7 @@ def _auto_consolidate_bg(principal: str | None = None) -> None:
     stamps the marker when done."""
     global _auto_running
     from localm.debuglog import logger, debug_content_enabled
+    deferred = False
     try:
         # Resolved once here, at thread start, and reused for the whole pass, so the
         # engine cannot swap out from under consolidation while it is mid-run.
@@ -1168,13 +1184,15 @@ def _auto_consolidate_bg(principal: str | None = None) -> None:
         if eng is None or not getattr(eng, "loaded", False):
             return
         logger.info("memory auto-consolidate: starting background memory synthesis pass")
+        from localm.inference.background_generation import (
+            BackgroundYield, background_complete)
         from localm.textnorm import strip_think
 
         def complete(prompt: str) -> str:
             if debug_content_enabled():
                 logger.debug("memory auto-consolidate prompt:\n%s", prompt)
-            out = strip_think("".join(
-                eng.chat_stream([{"role": "user", "content": prompt}]))).strip()
+            out = strip_think(background_complete(
+                eng, prompt, yield_to_foreground=True)).strip()
             if debug_content_enabled():
                 logger.debug("memory auto-consolidate response:\n%s", out)
             return out
@@ -1182,8 +1200,14 @@ def _auto_consolidate_bg(principal: str | None = None) -> None:
         # Pin for the whole pass, not per-completion, so a gap between candidates
         # cannot be evicted into.
         from localm.inference.http_server import driving_engine
-        with driving_engine(eng):
-            res = synthesize_memory(complete, principal=principal)
+        try:
+            with driving_engine(eng):
+                res = synthesize_memory(complete, principal=principal)
+        except BackgroundYield:
+            deferred = True
+            logger.info("memory auto-consolidate: a chat request is waiting for the "
+                        "model, so this pass stopped and will run again shortly")
+            return
         added = res.get("added", 0)
         updated = res.get("updated", 0)
         deleted = res.get("deleted", 0)
@@ -1200,7 +1224,9 @@ def _auto_consolidate_bg(principal: str | None = None) -> None:
         logger.warning("memory auto-consolidate failed: %s", e)
     finally:
         import time as _time
-        _auto_stamp(_time.time())
+        now = _time.time()
+        _auto_stamp(now - (_auto_interval() - MEMORY_AUTO_RETRY_AFTER)
+                    if deferred else now)
         with _auto_lock:
             _auto_running = False
 
@@ -1235,15 +1261,8 @@ def _maybe_auto_consolidate(principal: str | None = None) -> None:
         logger.debug("memory auto-consolidate: no engine currently loaded, "
                      "skipping this turn")
         return                                # no model to distil with
-    import os
     import time as _time
-    # The debounce interval is overridable via env; malformed values fall back to the
-    # default.
-    try:
-        interval = float(os.environ.get(
-            "LOCALM_MEMORY_AUTO_INTERVAL", MEMORY_AUTO_MIN_INTERVAL))
-    except (TypeError, ValueError):
-        interval = MEMORY_AUTO_MIN_INTERVAL
+    interval = _auto_interval()
     now = _time.time()
     with _auto_lock:
         if _auto_running:
