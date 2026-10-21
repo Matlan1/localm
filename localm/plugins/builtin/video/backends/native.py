@@ -425,6 +425,9 @@ class _EventRelay:
     def flush(self) -> None:
         self._warnings.flush()
 
+    def budget_retry(self) -> None:
+        self._warnings.budget_retry()
+
     def __call__(self, event) -> None:
         kind = event[0]
         if kind == "log":
@@ -590,7 +593,15 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
                 say("The negative prompt has no effect at CFG 1. Raise CFG to apply it.")
             say(f"Generating {frames} frames at {width}x{height}"
                 + (f", {steps} steps" if steps else "") + f", seed {seed}...")
-            result = runner.generate_video(params, on_event=relay, cancel_check=cancel_check)
+
+            def reload_model(load: dict) -> None:
+                runner.ensure_loaded(key, rt.path, load, extra_dirs=rt.extra_dirs,
+                                     on_event=relay, cancel_check=cancel_check)
+
+            result = sd_budget.call_within_budget(
+                runner, lambda: runner.generate_video(params, on_event=relay,
+                                                      cancel_check=cancel_check),
+                reload_model, say, on_retry=relay.budget_retry)
         except SdCancelled:
             return False, "Cancelled."
         except SdWorkerError as e:

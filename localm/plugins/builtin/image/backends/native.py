@@ -13,6 +13,7 @@ idle period, or when the server exits.
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import secrets
@@ -514,6 +515,9 @@ class _EventRelay:
     def flush(self) -> None:
         self._warnings.flush()
 
+    def budget_retry(self) -> None:
+        self._warnings.budget_retry()
+
     def __call__(self, event) -> None:
         kind = event[0]
         if kind == "log":
@@ -811,6 +815,11 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
             components = {k: v["name"] for k, v in (models.get("components") or {}).items()} or None
             if negative_prompt and cfg_scale is not None and abs(float(cfg_scale) - 1.0) < 1e-5:
                 say(NEGATIVE_AT_CFG_1)
+
+            def reload_model(load: dict) -> None:
+                runner.ensure_loaded(key, rt.path, load, extra_dirs=rt.extra_dirs,
+                                     on_event=relay, cancel_check=cancel_check)
+
             batch_started = time.monotonic()
             for index in range(batch):
                 if cancel_check is not None and cancel_check():
@@ -841,7 +850,10 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
                     + (f", hires x{hires['scale']:g}" if hires else "")
                     + f", seed {image_seed}...")
                 image_started = time.monotonic()
-                result = runner.generate_image(params, on_event=relay, cancel_check=cancel_check)
+                result = sd_budget.call_within_budget(
+                    runner, functools.partial(runner.generate_image, params, on_event=relay,
+                                              cancel_check=cancel_check),
+                    reload_model, say, on_retry=relay.budget_retry)
                 if _is_blank_white(result):
                     raise SdWorkerError(BLANK_IMAGE)
                 path = _batch_path(Path(out_path), index)

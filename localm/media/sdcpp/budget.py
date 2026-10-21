@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, Optional, TypeVar
+
+T = TypeVar("T")
 
 PROCESS_SCOPED_BACKENDS = ("rocm", "vulkan")
 
@@ -24,6 +26,10 @@ MIN_BUDGET_BYTES = 256 * 1024 ** 2
 RELEASE_TIMEOUT_S = 5.0
 
 _GIB = 1024 ** 3
+
+UNBUDGETED_RETRY = ("The free VRAM is too little for this model to run within it. Loading it "
+                    "again without that limit; Windows may move part of it to system "
+                    "memory, which is slower.")
 
 
 @dataclass(frozen=True)
@@ -213,3 +219,31 @@ def reload_ctx(runner, ctx: dict, backend: str, say: Callable[[str], None],
         logger.warning("native media VRAM budget: free VRAM did not rise within %.0f s "
                        "of stopping the previous model", RELEASE_TIMEOUT_S)
     return with_budget(ctx, backend, say, good[0] or last[0], devices=devices)
+
+
+def call_within_budget(runner, call: Callable[[], T], reload: Callable[[dict], object],
+                       say: Callable[[str], None], *,
+                       on_retry: Optional[Callable[[], None]] = None) -> T:
+    """``call()``, the generation on *runner*'s loaded model. When it raises
+    ``SdBudgetRefused`` and the model was loaded with a ``max_vram`` budget,
+    calls *on_retry*, says ``UNBUDGETED_RETRY``, stops the worker, passes the
+    loaded context without ``max_vram`` to *reload* (which loads it) and
+    returns ``call()`` once more. Any other failure, and a refusal of a load
+    without a budget, propagates."""
+    from .runner import SdBudgetRefused
+    try:
+        return call()
+    except SdBudgetRefused as e:
+        loaded = dict(runner.loaded_ctx or {})
+        if not loaded.get("max_vram"):
+            raise
+        from localm.debuglog import logger
+        logger.info("native media VRAM budget: the runtime refused to run within "
+                    "max_vram=%s (%s); reloading without a budget", loaded["max_vram"], e)
+    if on_retry is not None:
+        on_retry()
+    say(UNBUDGETED_RETRY)
+    loaded.pop("max_vram", None)
+    runner.shutdown()
+    reload(loaded)
+    return call()

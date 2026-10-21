@@ -6,9 +6,11 @@ before it recovers: a VAE decode that does not fit in VRAM logs a memory
 shortfall, a failed segment and a failed compute, then logs that it retries
 with tiling, and the image is saved. ``RecoveredWarnings`` holds such a
 sequence back and, when the retry line arrives, replaces it with one plain
-line. Lines that are not followed by a recovery are shown unchanged by
-``flush``, so a real failure is never hidden. Every raw line goes to the
-debug log whether or not it is collapsed.
+line. A generation refused for its VRAM budget logs a memory shortfall, a
+failed segment and the failed sampling; ``budget_retry`` drops that sequence
+when the backend retries without the budget. Lines that are not followed by a
+recovery are shown unchanged by ``flush``, so a real failure is never hidden.
+Every raw line goes to the debug log whether or not it is collapsed.
 """
 
 from __future__ import annotations
@@ -22,6 +24,11 @@ _PRECURSORS = tuple(re.compile(p, re.IGNORECASE) for p in (
     r"vae segment \d+/\d+ \([^)]*\) failed during",
     r"\bvae decode compute failed",
     r"\breducing vae decode tiles from",
+    r"\bsegment \d+/\d+ \([^)]*\) failed during weight preparation",
+    r"\Adiffusion model compute failed\b",
+    r"\Adiffusion model sampling failed\b",
+    r"\A(?:hires )?sampling for image \d+/\d+ failed after\b",
+    r"\Asampling(?:\([^)]*\))? failed after\b",
 ))
 
 _TILE_FAILED = re.compile(r"vae decode compute failed while processing a tile", re.IGNORECASE)
@@ -113,6 +120,12 @@ class RecoveredWarnings:
         retry, so show them."""
         self._retry_mode = None
         self.flush()
+
+    def budget_retry(self) -> None:
+        """The generation is retried without its VRAM budget: drop the held
+        lines of the refused attempt."""
+        self._pending.clear()
+        self._retry_mode = None
 
     def flush(self) -> None:
         """Show every held line unchanged. Call when the job ends."""

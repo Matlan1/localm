@@ -130,6 +130,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Cancelling a download on the Models page says what was actually deleted.** The status line used to claim the partial download was deleted every time, including for CivitAI files and whole-repo downloads whose files stay on disk, and when the delete request failed. It now reports the case.
 - **Restarting a ComfyUI that localm launched waits for the old one to release its port.** The restart used to be refused with "localm did not start it" while the process that had just been stopped still held the port.
 - **`localm pull` prints progress when its output is piped or redirected.** With stdout not a terminal it showed nothing for the whole transfer; it now writes a plain progress line to stderr every few seconds.
+- **Native image and video generation works when other programs hold most of the VRAM.** On
+  Windows with the Vulkan or ROCm runtime, a model loaded with little free VRAM was given a VRAM
+  limit too small for any part of it, and every generation failed at once with "diffusion model
+  compute failed". When the runtime refuses to run within that limit, localm now says so, loads
+  the model again without the limit, and generates.
 - **A scheduled job with no model set no longer picks a speech-to-text model.** The job took the first registered chat model by name, so a Qwen3-ASR or Whisper model could answer a job that named no model; those models now come last, behind every other chat model.
 - **`localm config pinned_models '["a"]'` pins `a`.** A JSON list typed on the command line was
   stored as one model name with the brackets and quotes in it, so nothing was pinned. A list
