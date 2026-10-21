@@ -140,6 +140,8 @@ def test_switch_engine_returns_before_the_after_load_reading_lands(box, capsys):
 
     res = asyncio.run(_go())
     assert res["status"] == "loaded"
+    thread = getattr(hs._engines["m"]._backend, "_vram_report_thread", None)
+    assert thread is not None and thread.is_alive()
     assert box.after_load_started.wait(20)
     assert "GB in use" not in capsys.readouterr().out
     box.release_after_load.set()
