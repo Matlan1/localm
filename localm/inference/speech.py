@@ -243,9 +243,9 @@ def _choose_gpu_layers(model: SpeechModel, n_ctx: int) -> tuple[int, Optional[st
     if isinstance(raw, int) and not isinstance(raw, bool) and raw != 99:
         return int(raw), None
     estimate = _estimate_bytes(model, n_ctx)
-    from localm.discover import GPU_PROBE_OK, vram_capacity
+    from localm.discover import GPU_PROBE_OK, vram_capacity_joined
     try:
-        info, status = vram_capacity(return_status=True)
+        info, status = vram_capacity_joined()
         free = info.get("free") if status == GPU_PROBE_OK else None
     except Exception as e:   # noqa: BLE001 - unmeasurable VRAM keeps the full offload
         logger.debug("speech: free VRAM unreadable (%s)", e)
@@ -256,7 +256,7 @@ def _choose_gpu_layers(model: SpeechModel, n_ctx: int) -> tuple[int, Optional[st
     if decide_embedder_swap(estimate, policy=resolve_swap_policy({}, cfg)):
         evict_chat_for_embedder()
         try:
-            info, status = vram_capacity(return_status=True)
+            info, status = vram_capacity_joined()
             free = info.get("free") if status == GPU_PROBE_OK else None
         except Exception:   # noqa: BLE001 - see above
             free = None

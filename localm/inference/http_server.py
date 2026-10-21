@@ -586,6 +586,73 @@ def _refuse_non_chat_model(name: str, registry: dict | None = None) -> None:
         raise HTTPException(422, msg)
 
 
+class _FirstPassReading:
+    """The GPU reading switch_engine's first admission pass takes, shared with
+    the GGUF load that pass admits.
+
+    ``state`` is a ``discover.new_shared_gpu_reading()`` (None once closed);
+    ``mark`` is ``engine.load_lock_mark()`` when it was opened, or None when a
+    GPU probe was already running then (a reading joined from it can predate
+    the mark)."""
+
+    def __init__(self, state: Optional[dict], mark: Optional[int]) -> None:
+        self.state = state
+        self.mark = mark
+
+    @classmethod
+    def open(cls) -> _FirstPassReading:
+        """A new, empty reading marked with the load lock's current mark. The
+        mark is read before the in-flight check."""
+        from localm import discover
+        from localm.inference.engine import load_lock_mark
+        mark = load_lock_mark()
+        if discover.gpu_probe_in_flight():
+            mark = None
+        return cls(discover.new_shared_gpu_reading(), mark)
+
+    def close(self) -> None:
+        """Stop sharing: later calls under it read the GPUs again."""
+        self.state = None
+
+    @staticmethod
+    async def run(loop, reading: Optional[_FirstPassReading], fn):
+        """``fn()`` in an executor, under *reading*'s shared GPU reading when
+        *reading* is given and open (``discover.using_shared_gpu_reading``)."""
+        from localm import discover
+        state = reading.state if reading is not None else None
+        if state is None:
+            return await loop.run_in_executor(None, fn)
+        return await loop.run_in_executor(
+            None, discover.using_shared_gpu_reading, state, fn)
+
+
+def _load_for_switch(engine, reading: Optional[_FirstPassReading]) -> None:
+    """``engine.load()`` for switch_engine, on an executor thread. A GGUF
+    load's after-load VRAM line is printed after it returns
+    (``gguf.vram_report_after_return``).
+
+    When *reading* holds a reading and no thread has taken the engine's
+    ``_LOAD_LOCK`` since *reading* was opened, the load runs under that
+    reading, so its sizing reads the GPUs no further. The check and the load
+    hold ``_LOAD_LOCK`` (re-entered by ``Engine.load``), so no other load can
+    start between them. See
+    test_a_load_that_waited_for_another_load_reads_the_gpus_again."""
+    from localm import discover
+    from localm.inference import engine as engine_mod
+    from localm.inference.backends.gguf import vram_report_after_return
+
+    with vram_report_after_return():
+        if (reading is None or reading.mark is None
+                or not discover.shared_gpu_reading_taken(reading.state)):
+            engine.load()
+            return
+        lock = engine_mod._LOAD_LOCK
+        with lock:
+            fresh = getattr(lock, "generation", None) == reading.mark + 1
+            discover.using_shared_gpu_reading(
+                reading.state if fresh else None, engine.load)
+
+
 async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool = True,
                         force: bool = False, activate: bool = True,
                         skip_if_latched: bool = False,
@@ -697,6 +764,7 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                 raise LoadSkipped(latched[name])
 
         built = None
+        reading = None
         if healing is not None:
             budget = heal_budget
         else:
@@ -705,7 +773,9 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                 sized = _engines.get(name)
                 if sized is None:
                     built = sized = await loop.run_in_executor(None, _engine_factory, name)
-                budget = await _switch_with_backend_need(loop, budget, sized)
+                reading = _FirstPassReading.open()
+                budget = await _switch_with_backend_need(loop, budget, sized,
+                                                         reading=reading)
         attempt = switch_admission.EvictionAttempt(started=time.monotonic())
         evictions: list[VictimRelease] = []
         if healing is not None:
@@ -717,7 +787,7 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
             early = await _switch_make_room(loop, budget, preempt=preempt,
                                             force=force, activate=activate,
                                             attempt=attempt, evictions=evictions,
-                                            on_status=on_status)
+                                            on_status=on_status, reading=reading)
             if early is not None:
                 return early
 
@@ -734,7 +804,8 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
         else:
             new_engine = built if built is not None else await loop.run_in_executor(
                 None, _engine_factory, name)
-        interrupted = await _switch_load(loop, name, new_engine, preempt=preempt)
+        interrupted = await _switch_load(loop, name, new_engine, preempt=preempt,
+                                         reading=reading)
         if interrupted is not None:
             return interrupted
 
@@ -812,18 +883,19 @@ def _switch_load_budget(name: str) -> switch_admission.LoadBudget | None:
 
 
 async def _switch_with_backend_need(loop, budget: switch_admission.LoadBudget,
-                                    engine) -> switch_admission.LoadBudget:
+                                    engine, *, reading: Optional[_FirstPassReading] = None
+                                    ) -> switch_admission.LoadBudget:
     """*budget* with ``backend_need`` set to *engine*'s
-    ``full_offload_vram_bytes()``, read off the event loop. *budget* is
-    returned unchanged when *engine* has no such method or it answers None.
-    An exception from it is logged at WARNING and *budget* is returned
-    unchanged."""
+    ``full_offload_vram_bytes()``, read off the event loop under *reading*
+    when given. *budget* is returned unchanged when *engine* has no such
+    method or it answers None. An exception from it is logged at WARNING and
+    *budget* is returned unchanged."""
     size = getattr(engine, "full_offload_vram_bytes", None)
     if not callable(size):
         return budget
     from localm.debuglog import logger as _dbg
     try:
-        need = await loop.run_in_executor(None, size)
+        need = await _FirstPassReading.run(loop, reading, size)
     except Exception as exc:
         _dbg.warning("switch_engine: could not size a full GPU offload of '%s' "
                      "(%s: %s); admitting it on the whole-model estimate",
@@ -843,7 +915,8 @@ async def _switch_make_room(loop, budget: switch_admission.LoadBudget, *,
                             preempt: bool, force: bool, activate: bool,
                             attempt: Optional[switch_admission.EvictionAttempt] = None,
                             evictions: Optional[list] = None,
-                            on_status: Optional[Callable[[str], None]] = None
+                            on_status: Optional[Callable[[str], None]] = None,
+                            reading: Optional[_FirstPassReading] = None
                             ) -> Optional[dict]:
     """Run the eviction loop until ``budget.name`` may load.
 
@@ -856,7 +929,9 @@ async def _switch_make_room(loop, budget: switch_admission.LoadBudget, *,
     skipped and the loop re-probes. The ``VictimRelease`` of each eviction is
     appended to *evictions* when given. *attempt* is the load attempt's
     ``EvictionAttempt`` (a fresh one when None). *on_status* is passed to
-    ``_switch_exhaustion_ladder``.
+    ``_switch_exhaustion_ladder``. The first iteration's VRAM reading is taken
+    under *reading* when given; *reading* is closed when that iteration does
+    not admit the load, so every later iteration reads the GPUs again.
 
     Returns None when the load may proceed, or a ``confirm_required`` result
     for switch_engine to return. Raises HTTPException 503 when a static split
@@ -870,11 +945,14 @@ async def _switch_make_room(loop, budget: switch_admission.LoadBudget, *,
     if attempt is None:
         attempt = switch_admission.EvictionAttempt(started=time.monotonic())
     while True:
-        probe = await _switch_probe_vram(loop, budget)
+        probe = await _switch_probe_vram(loop, budget, reading=reading)
         decision = switch_admission.decide_admission(
             probe, budget, _engines_lru, _engines)
         if decision.action == switch_admission.ADMIT:
             return None
+        if reading is not None and decision.action != switch_admission.ADMIT_OVER_CAP:
+            reading.close()
+            reading = None
         if decision.action == switch_admission.ADMIT_OVER_CAP:
             from localm.debuglog import logger as _dbg
             _dbg.warning(
@@ -917,11 +995,13 @@ async def _switch_make_room(loop, budget: switch_admission.LoadBudget, *,
             evictions.append(release)
 
 
-async def _switch_probe_vram(loop, budget: switch_admission.LoadBudget
+async def _switch_probe_vram(loop, budget: switch_admission.LoadBudget, *,
+                             reading: Optional[_FirstPassReading] = None
                              ) -> switch_admission.VramProbe:
     """Take one VRAM reading off the event loop: ``vram_capacity()`` and, when
     ``budget.check_split_fit``, the configured split's
-    ``gpu_split_shortfall()`` for ``budget.split_share_bytes``.
+    ``gpu_split_shortfall()`` for ``budget.split_share_bytes``. With *reading*,
+    each step runs under it (``_FirstPassReading.run``).
 
     ``vram_capacity`` is given the full CLI deadline on this first call and
     joins a probe already in flight (``wait_for_inflight``); joining is only
@@ -935,24 +1015,23 @@ async def _switch_probe_vram(loop, budget: switch_admission.LoadBudget
     from localm import discover
     from localm.discover import gpu_split_shortfall, implicit_split_free, vram_capacity
 
-    v_info, probe_status = await loop.run_in_executor(
-        None, functools.partial(
-            vram_capacity, return_status=True,
-            deadline=discover._GPU_PROBE_CLI_DEADLINE,
-            wait_for_inflight=True))
+    run = _FirstPassReading.run
+    v_info, probe_status = await run(loop, reading, functools.partial(
+        vram_capacity, return_status=True,
+        deadline=discover._GPU_PROBE_CLI_DEADLINE,
+        wait_for_inflight=True))
     free = v_info.get("free")
     process_scoped = v_info.get("free_scope") == discover.FREE_SCOPE_PROCESS
     implicit = None
     if budget.check_split_fit and probe_status == discover.GPU_PROBE_OK:
-        implicit = await loop.run_in_executor(None, implicit_split_free)
+        implicit = await run(loop, reading, implicit_split_free)
     if implicit is not None:
         free = implicit["free"]
         process_scoped = implicit.get("free_scope") == discover.FREE_SCOPE_PROCESS
     shortfall, shares_adaptive = (
-        await loop.run_in_executor(
-            None, functools.partial(
-                gpu_split_shortfall, budget.split_share_bytes,
-                return_shares_adaptive=True))
+        await run(loop, reading, functools.partial(
+            gpu_split_shortfall, budget.split_share_bytes,
+            return_shares_adaptive=True))
         if budget.check_split_fit else ([], False))
     return switch_admission.VramProbe(
         free=free, probe_ok=probe_status == discover.GPU_PROBE_OK,
@@ -1363,8 +1442,10 @@ async def _switch_free_victim(loop, victim: str, engine,
     return result
 
 
-async def _switch_load(loop, name: str, engine, *, preempt: bool) -> Optional[dict]:
-    """Run ``engine.load()`` off the event loop with a fresh cancel event.
+async def _switch_load(loop, name: str, engine, *, preempt: bool,
+                       reading: Optional[_FirstPassReading] = None) -> Optional[dict]:
+    """Run ``engine.load()`` off the event loop with a fresh cancel event,
+    through ``_load_for_switch`` with *reading*.
 
     Returns None when the load succeeded, a ``superseded`` result when a newer
     explicit switch cancelled it or was selected before the load began, or a
@@ -1395,7 +1476,7 @@ async def _switch_load(loop, name: str, engine, *, preempt: bool) -> Optional[di
             return {"status": "superseded", "model": name, "by": _switch_desired}
         fingerprint = await loop.run_in_executor(
             None, _routing_latch.fingerprint, name)
-        await loop.run_in_executor(None, engine.load)
+        await loop.run_in_executor(None, _load_for_switch, engine, reading)
     except ModelLoadCancelled as e:
         if preempt and _switch_desired != name:
             return {"status": "superseded", "model": name, "by": _switch_desired}

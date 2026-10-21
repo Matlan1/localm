@@ -938,6 +938,38 @@ def end_shared_gpu_reading() -> None:
     _shared_reading.state = None
 
 
+def new_shared_gpu_reading() -> dict:
+    """A shared reading that no thread uses yet, for several threads to use
+    one after another through :func:`using_shared_gpu_reading`. It holds no
+    reading until a :func:`list_gpus` call made under it completes with
+    :data:`GPU_PROBE_OK`. Not safe for two threads to use at the same time."""
+    return {"gpus": None}
+
+
+def gpu_probe_in_flight() -> bool:
+    """Whether a :func:`list_gpus` probe is running now."""
+    return bool(_gpu_probe_inflight)
+
+
+def shared_gpu_reading_taken(state: Optional[dict]) -> bool:
+    """Whether *state* (from :func:`new_shared_gpu_reading`) holds a reading."""
+    return state is not None and state.get("gpus") is not None
+
+
+def using_shared_gpu_reading(state: Optional[dict], fn, *args, **kwargs):
+    """Call ``fn(*args, **kwargs)`` with *state* (from
+    :func:`new_shared_gpu_reading`) as this thread's shared reading (see
+    :func:`start_shared_gpu_reading`) and return its result; the thread's
+    previous shared reading is restored afterwards. With *state* None, *fn*
+    runs under no shared reading."""
+    previous = getattr(_shared_reading, "state", None)
+    _shared_reading.state = state
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        _shared_reading.state = previous
+
+
 def _list_gpus_with_status(deadline: float, wait_for_inflight: bool = False) -> tuple:
     """The real probe driver behind :func:`list_gpus`, returning ``(gpus, status)``
     where status is one of :data:`GPU_PROBE_OK` / :data:`GPU_PROBE_TIMEOUT` /
@@ -4252,6 +4284,40 @@ def _list_gpus_reading(deadline: Optional[float] = None, *,
             kw["wait_for_inflight"] = True
         return list_gpus(**kw)
     return list_gpus(), GPU_PROBE_OK
+
+
+def vram_capacity_joined() -> tuple:
+    """``(info, status)`` from :func:`vram_capacity` for a caller deciding a
+    model's placement off the event loop. It joins a probe already in flight
+    (``wait_for_inflight``) instead of answering :data:`GPU_PROBE_BUSY` with
+    the last reading, so it can block up to :func:`list_gpus`' default
+    deadline: never call it on the event loop.
+
+    Tolerant of test doubles patched in for ``vram_capacity``, ``vram_info``
+    or ``list_gpus``: ``return_status`` and ``wait_for_inflight`` are passed
+    only when all three accept them, and an answer that is not an
+    ``(info, status)`` pair is read as ``info`` with :data:`GPU_PROBE_OK`."""
+    chain = (vram_capacity, vram_info, list_gpus)
+    kw = {}
+    if all(_takes_kwarg(f, "return_status") for f in chain):
+        kw["return_status"] = True
+        if all(_takes_kwarg(f, "wait_for_inflight") for f in chain):
+            kw["wait_for_inflight"] = True
+    result = vram_capacity(**kw)
+    if isinstance(result, tuple) and len(result) == 2:
+        return result
+    return result, GPU_PROBE_OK
+
+
+def _takes_kwarg(fn, name: str) -> bool:
+    """Whether callable *fn* accepts keyword argument *name* (by name or
+    through ``**kwargs``); False when its signature cannot be read."""
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return name in params or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 
 def gpu_split_shortfall(vram_required: int, config: Optional[dict] = None,

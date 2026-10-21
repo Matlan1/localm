@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import os
 import re
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Iterator, Optional, Sequence
 
@@ -133,6 +135,24 @@ def _load_failure_message(exc: BaseException, hint: str = "") -> str:
     return (f"Native llama runtime failed to load: {reason}{hint}\n"
             f"Provision or repair it with  localm setup-llama  "
             f"(or set LLAMA_CPP_LIB to a working {lib_filename()}).")
+
+
+# Whether a load on this thread prints its after-load VRAM line from a thread
+# of its own (see vram_report_after_return).
+_vram_report_deferral = threading.local()
+
+
+@contextmanager
+def vram_report_after_return():
+    """Within it, a GgufBackend load on this thread prints its after-load VRAM
+    line from a daemon thread of its own (kept as ``_vram_report_thread`` on
+    the backend) and returns without waiting for that reading."""
+    previous = getattr(_vram_report_deferral, "on", False)
+    _vram_report_deferral.on = True
+    try:
+        yield
+    finally:
+        _vram_report_deferral.on = previous
 
 
 class GgufBackend(VramSizingMixin, BaseBackend):
@@ -991,37 +1011,22 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         else:
             self.gpu_layers_offloaded = None   # "everything" sentinel, true count unknown
 
-        # VRAM usage after load - device-level driver numbers, corrected for
-        # cross-process blindness via discover.list_gpus. used/free are shown only
-        # when sysstats._vram_reading_trusted says the reading is both fresh and
-        # device-global; an untrusted reading shows total-only.
-        #
-        # Skipped for a CPU-only load: nothing was placed on the GPU.
+        # VRAM usage after load, skipped for a CPU-only load.
+        self._vram_report_thread = None
         if gpu_layers != 0:
-            from localm.sysstats import _vram_reading_trusted
-            try:
-                vram_after, vram_after_status = list_gpus(
-                    return_status=True, wait_for_inflight=True)
-            except Exception:
-                vram_after, vram_after_status = [], None
-            for i, gpu in enumerate(vram_after):
-                total = gpu.get("total")
-                if not total:
-                    continue
-                if _vram_reading_trusted(gpu, vram_after_status):
-                    free = gpu["free"]
-                    used = (total - free) / 1024**3
-                    line = (f"  vram     : {used:.2f} GB in use / "
-                            f"{total / 1024**3:.2f} GB total (device {i}")
-                    before = vram_before[i] if i < len(vram_before) else None
-                    if before is not None and _vram_reading_trusted(before, vram_before_status):
-                        delta = (before["free"] - free) / 1024**3
-                        line += f", {delta:+.2f} GB this load"
-                    line += ")"
-                else:
-                    line = (f"  vram     : {total / 1024**3:.2f} GB total (device {i}"
-                            f", used/free reading not trusted on this platform)")
-                console.print(f"[dim]{line}[/dim]")
+            report = None
+            if getattr(_vram_report_deferral, "on", False):
+                report = threading.Thread(
+                    target=self._report_vram_after_load,
+                    args=(vram_before, vram_before_status),
+                    name="localm-vram-after-load", daemon=True)
+                try:
+                    report.start()
+                except RuntimeError:
+                    report = None
+            if report is None:
+                self._report_vram_after_load(vram_before, vram_before_status)
+            self._vram_report_thread = report
 
         # MoE expert placement (n_cpu_moe, configured or chosen by auto sizing):
         # llama.cpp's own load_tensors report of where each backend's share of
@@ -1076,6 +1081,41 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                 f"[dim]  encoder-decoder model: each request reads its messages "
                 f"as plain text, up to {self.effective_ctx_max} tokens[/dim]")
         console.print("[green]✓[/green] Model loaded")
+
+    def _report_vram_after_load(self, vram_before, vram_before_status) -> None:
+        """Print the VRAM usage after a load: device-level driver numbers,
+        corrected for cross-process blindness via discover.list_gpus. used/free
+        are shown only when sysstats._vram_reading_trusted says the reading is
+        both fresh and device-global, with the change since *vram_before*
+        (a list_gpus reading taken before the load, with its status
+        *vram_before_status*) when that one is trusted too; an untrusted reading
+        shows total-only. Takes a fresh list_gpus reading, joining one in
+        flight, so it must run off the event loop."""
+        from localm.discover import list_gpus
+        from localm.sysstats import _vram_reading_trusted
+        try:
+            vram_after, vram_after_status = list_gpus(
+                return_status=True, wait_for_inflight=True)
+        except Exception:
+            vram_after, vram_after_status = [], None
+        for i, gpu in enumerate(vram_after):
+            total = gpu.get("total")
+            if not total:
+                continue
+            if _vram_reading_trusted(gpu, vram_after_status):
+                free = gpu["free"]
+                used = (total - free) / 1024**3
+                line = (f"  vram     : {used:.2f} GB in use / "
+                        f"{total / 1024**3:.2f} GB total (device {i}")
+                before = vram_before[i] if i < len(vram_before) else None
+                if before is not None and _vram_reading_trusted(before, vram_before_status):
+                    delta = (before["free"] - free) / 1024**3
+                    line += f", {delta:+.2f} GB this load"
+                line += ")"
+            else:
+                line = (f"  vram     : {total / 1024**3:.2f} GB total (device {i}"
+                        f", used/free reading not trusted on this platform)")
+            console.print(f"[dim]{line}[/dim]")
 
     def _apply_speculation_report(self, report) -> None:
         """Record the loaded model's draft-model status from the worker's
