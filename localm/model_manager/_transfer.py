@@ -184,7 +184,13 @@ class MeterBar:
     def set_description(self, *args, **kwargs) -> None:
         return None
 
+    def set_description_str(self, *args, **kwargs) -> None:
+        return None
+
     def refresh(self, *args, **kwargs) -> None:
+        return None
+
+    def clear(self, *args, **kwargs) -> None:
         return None
 
     def close(self) -> None:
