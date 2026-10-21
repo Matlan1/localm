@@ -716,7 +716,8 @@ def max_tensor_bytes(lib, runtime_dir: Path, device_name: str) -> Optional[int]:
     scale = _ggml_fn(handles, "ggml_scale", c_void_p, c_void_p, c_void_p, c_float)
     by_name = _ggml_fn(handles, "ggml_backend_dev_by_name", c_void_p, c_char_p)
     supports = _ggml_fn(handles, "ggml_backend_dev_supports_op", c_bool, c_void_p, c_void_p)
-    if None in (init, free, new_1d, scale, by_name, supports):
+    if (init is None or free is None or new_1d is None or scale is None or by_name is None
+            or supports is None):
         return None
     dev = by_name(device_name.encode("utf-8"))
     if not dev:

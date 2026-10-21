@@ -577,7 +577,7 @@ def _decode_tile(info: dict, width: int, height: int, hires: Optional[dict],
         height = sampling.hires_side(height, float(hires["scale"]))
     limit = info.get("max_tensor_bytes")
     tile = vaetile.decode_tile_size(width, height, limit, info.get("vae_decoder_ch"))
-    if tile:
+    if tile and limit:
         say(f"Decoding in {tile} px tiles: this GPU runtime takes buffers of up to "
             f"{limit / 1024 ** 3:.1f} GB, too small to decode {width}x{height} in one piece "
             "on the GPU.")

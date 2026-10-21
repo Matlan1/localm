@@ -414,9 +414,10 @@ def _max_tensor_bytes(lib, runtime_dir) -> Optional[int]:
         logger.warning("sd.cpp worker: the device tensor-size probe failed (%s: %s)",
                        type(e).__name__, e)
         return None
-    if not limits or None in limits:
+    known = [n for n in limits if n is not None]
+    if not limits or len(known) != len(limits):
         return None
-    return min(limits)
+    return min(known)
 
 
 def _set_embeddings(b, params, embeddings):
