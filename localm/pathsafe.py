@@ -218,7 +218,8 @@ def _hub_blob_link(base: Path, parts: list[str]) -> Path | None:
     """``base/parts`` with its folders resolved when *base* is a hub-cache snapshot
     folder, those folders are confined under it, and the last component is a
     symlink whose one-hop target is a name in the same repo's ``blobs`` folder
-    that is not itself a symlink; else None."""
+    that is not itself a symlink, the ``blobs`` folder itself resolving to
+    ``repo/blobs`` (not a link out of the repo); else None."""
     try:
         base_resolved = base.resolve()
         repo = base_resolved.parent.parent
@@ -230,7 +231,8 @@ def _hub_blob_link(base: Path, parts: list[str]) -> Path | None:
         if not link.is_symlink():
             return None
         target = Path(os.path.normpath(parent / os.readlink(link)))
-        if target.parent != repo / "blobs" or target.is_symlink():
+        blobs = repo / "blobs"
+        if blobs.resolve() != blobs or target.parent != blobs or target.is_symlink():
             return None
     except (OSError, ValueError):
         return None

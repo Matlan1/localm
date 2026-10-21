@@ -1803,6 +1803,23 @@ def stop_comfy(api_url: Optional[str] = None) -> tuple[bool, str]:
     return True, "Stopped the ComfyUI that localm launched."
 
 
+_PORT_RELEASE_WAIT_S = 10.0
+_PORT_RELEASE_POLL_S = 0.25
+
+
+def _wait_for_port_release(api_url: str, seconds: float = _PORT_RELEASE_WAIT_S) -> bool:
+    """Wait up to *seconds* for nothing to accept connections on the loopback
+    port of *api_url*. True once the port is free (or *api_url* is not a
+    loopback address), False when something still holds it after the wait."""
+    deadline = time.monotonic() + seconds
+    while True:
+        if comfy_port_holder(api_url, timeout=0.5) is None:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(_PORT_RELEASE_POLL_S)
+
+
 def restart_comfy(api_url: Optional[str] = None, on_progress=None,
                   wait_seconds: Optional[int] = None,
                   launch_cmd: Optional[str] = None,
@@ -1819,6 +1836,8 @@ def restart_comfy(api_url: Optional[str] = None, on_progress=None,
     with _launch_lock_for(url):
         launched_by_us = spawned_pid(url) is not None
         stop_comfy(url)
+        if launched_by_us:
+            _wait_for_port_release(url)
         not_ours_and_still_alive = not launched_by_us and is_comfy_confirmed(url)
     if not_ours_and_still_alive:
         return True, (

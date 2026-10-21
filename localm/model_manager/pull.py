@@ -598,6 +598,10 @@ _PROGRESS_POLL_S = 0.7
 # Seconds between the progress lines handed to a progress listener.
 _LISTENER_EVERY_S = 2.0
 
+# Seconds between the plain progress lines written to stderr when stdout is not
+# a terminal.
+_PLAIN_EVERY_S = 5.0
+
 _PROGRESS_LISTENER: "Optional[Callable[[str], None]]" = None
 
 
@@ -617,10 +621,11 @@ def progress_listener(callback: "Callable[[str], None]"):
 
 def _progress_wanted() -> bool:
     """True when something shows download progress: the GUI job runner, a
-    terminal, or a progress listener."""
+    terminal, a progress listener, or stderr (plain progress lines)."""
     return (os.environ.get("LOCALM_PROGRESS_JSON") == "1"
             or _PROGRESS_LISTENER is not None
-            or console.is_terminal)
+            or console.is_terminal
+            or sys.stderr is not None)
 
 
 class _TerminalBar:
@@ -690,8 +695,9 @@ class _ByteTracker:
 
 class _ProgressRun:
     """Reports one download's progress while it runs: frames for the GUI job
-    runner (LOCALM_PROGRESS_JSON=1), a bar on a terminal, and lines for a
-    progress listener. Does nothing when none of them is wanted."""
+    runner (LOCALM_PROGRESS_JSON=1), a bar on a terminal, lines for a progress
+    listener, and otherwise (stdout not a terminal) a plain line on stderr every
+    few seconds. Does nothing when none of them is wanted."""
 
     def __init__(self, measure, total: int, *, parts: "list[Path] | None" = None,
                  label: str = "") -> None:
@@ -703,12 +709,16 @@ class _ProgressRun:
         self._listener = _PROGRESS_LISTENER
         self._bar = (_TerminalBar(label)
                      if not self._gui and console.is_terminal else None)
-        self.active = self._gui or self._listener is not None or self._bar is not None
+        self._plain = (not self._gui and self._listener is None and self._bar is None
+                       and sys.stderr is not None)
+        self.active = (self._gui or self._listener is not None or self._bar is not None
+                       or self._plain)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._tracker: _ByteTracker | None = None
         self._last_key: tuple | None = None
         self._last_listener_at = 0.0
+        self._last_plain_at = 0.0
         self._failed = False
 
     def start(self) -> None:
@@ -757,6 +767,12 @@ class _ProgressRun:
                 self._last_listener_at = now
                 self._listener(_describe_progress(downloaded, self._total, rate,
                                                   self._label))
+        if self._plain:
+            now = time.monotonic()
+            if now - self._last_plain_at >= _PLAIN_EVERY_S:
+                self._last_plain_at = now
+                print(_describe_progress(downloaded, self._total, rate, self._label),
+                      file=sys.stderr, flush=True)
 
     def finish(self, succeeded: bool) -> None:
         if not self.active:
@@ -1704,7 +1720,14 @@ def _non_chat_detection_note(architecture) -> str:
 
 
 _MEDIA_TYPE_WORDS = {"lora": "a LoRA", "diffusion-unet": "an image or video diffusion model",
-                     "vae": "a VAE", "text-encoder": "a text encoder"}
+                     "vae": "a VAE", "text-encoder": "a text encoder",
+                     "controlnet": "a ControlNet", "textual-inversion": "a textual-inversion embedding"}
+
+
+def _media_type_phrase(media_type: str) -> str:
+    """The console wording for registry media type *media_type*; a type with no
+    entry in ``_MEDIA_TYPE_WORDS`` is named by its own string."""
+    return _MEDIA_TYPE_WORDS.get(media_type) or f"a {media_type} model"
 
 
 def _content_media_type(path: Path, reg_type: Optional[str]) -> Optional[str]:
@@ -1715,7 +1738,7 @@ def _content_media_type(path: Path, reg_type: Optional[str]) -> Optional[str]:
     media_type = _media_component_type(path, None)
     if media_type is None or media_type == reg_type:
         return reg_type
-    console.print(f"[dim]Detected as {_MEDIA_TYPE_WORDS[media_type]} (tensor names in "
+    console.print(f"[dim]Detected as {_media_type_phrase(media_type)} (tensor names in "
                   "the file).[/dim]")
     return media_type
 
@@ -1958,7 +1981,7 @@ def _pull_gguf_file(
                     reg_type = _mm.gguf_non_chat_model_type(gguf_meta.get("architecture"))
                 elif (media_type := _mm.gguf_media_component_type(dest)) is not None:
                     reg_type = media_type
-                    console.print(f"[dim]Detected as {_MEDIA_TYPE_WORDS[reg_type]} (tensor names "
+                    console.print(f"[dim]Detected as {_media_type_phrase(reg_type)} (tensor names "
                                   "in the GGUF).[/dim]")
             if type_is_auto and not filename.lower().endswith(".gguf"):
                 reg_type = _content_media_type(dest, reg_type)
@@ -2163,7 +2186,7 @@ def _pull_gguf_file(
                 reg_type = _mm.gguf_non_chat_model_type(gguf_meta.get("architecture"))
             elif (media_type := _mm.gguf_media_component_type(base_dir / filename)) is not None:
                 reg_type = media_type
-                console.print(f"[dim]Detected as {_MEDIA_TYPE_WORDS[reg_type]} (tensor names "
+                console.print(f"[dim]Detected as {_media_type_phrase(reg_type)} (tensor names "
                               "in the GGUF).[/dim]")
         if type_is_auto and not filename.lower().endswith(".gguf"):
             reg_type = _content_media_type(base_dir / filename, reg_type)
@@ -2350,6 +2373,21 @@ def _unlink_temp_files(files: "list[Path]") -> int:
         _unlink_quiet(_partial_owner_path(f))
         freed += max(0, size)
     return freed
+
+
+def partial_download_kept(spec: str) -> Optional[str]:
+    """What :func:`discard_partial_download` leaves on disk for *spec*, by the
+    spec's shape: ``"civitai"`` (a ``civitai:`` spec is never discarded),
+    ``"repo"`` (a full-repo download keeps every file that finished), else
+    None. Does no filesystem or network access."""
+    spec = _mm.resolve_spec(spec.strip())
+    if spec.startswith("civitai:"):
+        return "civitai"
+    if spec.startswith(("http://", "https://")) or "/" not in spec:
+        return None
+    if ":" in spec or spec.rsplit("/", 1)[-1].endswith(".gguf"):
+        return None
+    return "repo"
 
 
 def discard_partial_download(spec: str, name: Optional[str] = None) -> int:
