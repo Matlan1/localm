@@ -1974,7 +1974,8 @@ class HFWorker:
                         f"the query is {len(query)} characters, far beyond this model's "
                         f"{window}-token window; shorten the query")
                 if self._qwen3_rerank:
-                    results.append(self._score_qwen3_pair(query, document, window, reach))
+                    results.append(self._score_qwen3_pair(
+                        tokenizer, model, query, document, window, reach))
                     continue
                 clipped = document[:reach]
                 full = tokenizer(query, clipped, truncation=False)["input_ids"]
@@ -1994,14 +1995,14 @@ class HFWorker:
                                 "truncated": bool(truncated)})
         return results
 
-    def _score_qwen3_pair(self, query: str, document: str, window: int, reach: int) -> dict:
+    def _score_qwen3_pair(self, tokenizer, model, query: str, document: str,
+                          window: int, reach: int) -> dict:
         """Score one pair with a Qwen3 sequence-classification reranker, which was
         trained on the templated prompt of :func:`qwen3_rerank_head`. A pair past
         *window* tokens is cut in the document; a query that leaves no room for
         one raises ``RerankInputError``."""
         import torch
         from .base import RerankInputError
-        tokenizer, model = self._tokenizer, self._model
         head = qwen3_rerank_head(query)
         clipped = document[:reach]
         truncated = len(clipped) < len(document)
