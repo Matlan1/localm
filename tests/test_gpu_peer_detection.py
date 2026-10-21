@@ -325,10 +325,10 @@ class TestListGpuPeers:
             enable_detection(monkeypatch, good.port, bad.port)
             real = gpu_registry.fetch_status
 
-            def flaky(scheme, port, timeout, dial="127.0.0.1"):
+            def flaky(scheme, port, timeout, dial="127.0.0.1", **kw):
                 if port == bad.port:
                     raise RuntimeError("probe exploded")
-                return real(scheme, port, timeout, dial)
+                return real(scheme, port, timeout, dial, **kw)
 
             monkeypatch.setattr(gpu_registry, "fetch_status", flaky)
             ids = [p["instance_id"]
@@ -550,8 +550,12 @@ def _coordinating_app(bind_host="127.0.0.1"):
 
 class TestStatusRoute:
     def test_reports_this_instances_live_status(self):
-        client = TestClient(_coordinating_app())
-        r = client.get("/v1/instances/status")
+        app = _coordinating_app()
+        app.state.instance_token = "attach-token-for-status"
+        client = TestClient(app)
+        assert "pid" not in client.get("/v1/instances/status").json()
+        r = client.get("/v1/instances/status",
+                       headers={"Authorization": "Bearer attach-token-for-status"})
         assert r.status_code == 200
         body = r.json()
         assert body["instance_id"] == "self-1"

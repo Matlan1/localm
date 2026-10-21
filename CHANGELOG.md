@@ -288,6 +288,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   path, a Windows network share (which could send your Windows sign-in hash to that server) or a
   link leading out of the folder makes the load fail. A sharded model added in place from the
   Hugging Face cache is no longer refused as pointing outside its folder.
+- **Another user on the machine can no longer make your localm instance unload its models.** A running instance asked to release its VRAM for a sibling now acts only when the sibling listens under your own OS account, and a request it confirms cannot be reused for anything else. A sibling listening only on `::1` can now ask too. The instance status a sibling reads no longer gives model file paths, digests or the process id to a caller without credentials, and on a key-protected instance it no longer names the loaded models either.
 
 ## [0.3.0] - 2026-10-14
 

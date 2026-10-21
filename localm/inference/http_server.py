@@ -4836,7 +4836,7 @@ def _make_lifespan():
                     "scheme": getattr(app.state, "instance_scheme", None) or "http",
                 }
                 from localm import gpu_registry
-                gpu_registry.set_local_status_provider(_gpu_status)
+                gpu_registry.set_local_status_provider(_gpu_status, identity=_gpu_coord)
             except Exception as e:
                 from localm.debuglog import logger as _dbg
                 _dbg.debug("gpu coordination startup failed (continuing without "

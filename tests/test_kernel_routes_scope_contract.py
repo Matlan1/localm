@@ -58,6 +58,8 @@ _BESPOKE_GATED_ROUTES = {
     ("POST", "/v1/instances/vouch"),
     # coordinating-and-loopback-only status read; localm/inference/routes/gpu.py
     ("GET", "/v1/instances/status"),
+    # requester-vouch check for the full status; localm/inference/routes/gpu.py
+    ("POST", "/v1/instances/status"),
 }
 
 

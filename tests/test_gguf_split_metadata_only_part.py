@@ -457,3 +457,16 @@ class TestSplitNoticeWhenNoDeviceIsLeftOut:
         assert "sharing the layers out by size over devices 0, 1" in out
         assert "leaving device  out" not in out
         assert "device 1 would hold about" in out
+
+
+class TestASingleFileWithoutTensorsIsNoAnswer:
+    """Outside a split set, a GGUF that lists no tensors cannot be judged by
+    its tensor list: the probes that report a confirmed absence say "could not
+    tell" instead."""
+
+    def test_classifier_head_and_media_type_are_unknown(self, tmp_path):
+        from localm.model_manager.gguf import (gguf_classifier_head_tensors,
+                                               gguf_media_component_type)
+        path = _write_part(tmp_path / "odd.gguf", [], [])
+        assert gguf_classifier_head_tensors(path) is None
+        assert gguf_media_component_type(path, meta={"architecture": None, "x": 1}) is None
