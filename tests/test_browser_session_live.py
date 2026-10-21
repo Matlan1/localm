@@ -321,13 +321,18 @@ def test_an_allowed_websocket_is_refused_for_the_stated_reason(browser, origin):
 # --------------------------------------------------------------------------- #
 
 class _ConnectCounter:
-    """A raw TCP listener on loopback that counts every connection accepted."""
+    """A raw TCP listener on loopback (IPv4 by default, ::1 when *ipv6*) that
+    counts every connection accepted."""
 
-    def __init__(self):
+    def __init__(self, ipv6: bool = False):
         import socket
         self.accepted = 0
-        self._sock = socket.socket()
-        self._sock.bind(("127.0.0.1", 0))
+        if ipv6:
+            self._sock = socket.socket(socket.AF_INET6)
+            self._sock.bind(("::1", 0))
+        else:
+            self._sock = socket.socket()
+            self._sock.bind(("127.0.0.1", 0))
         self._sock.listen(16)
         self._sock.settimeout(0.2)
         self.port = self._sock.getsockname()[1]
@@ -351,8 +356,8 @@ class _ConnectCounter:
 
 
 @pytest.fixture
-def counter():
-    c = _ConnectCounter()
+def counter(request):
+    c = _ConnectCounter(ipv6=getattr(request, "param", None) == "[::1]")
     try:
         yield c
     finally:
@@ -390,7 +395,9 @@ def _wait_for(path_prefix: str, timeout: float = 15.0) -> bool:
 
 
 @pytest.mark.parametrize("kind", ["worker", "shared", "sw"])
-@pytest.mark.parametrize("host", ["127.0.0.1", "localhost"])
+@pytest.mark.parametrize("counter, host", [
+    ("127.0.0.1", "127.0.0.1"), ("127.0.0.1", "localhost"), ("[::1]", "[::1]"),
+], indirect=["counter"])
 def test_a_worker_websocket_never_connects(browser, origin, counter, kind, host):
     """A WebSocket opened from a dedicated worker, a SharedWorker or a service
     worker never makes a TCP connection, even to a host the policy allows."""
