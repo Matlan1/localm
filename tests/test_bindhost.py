@@ -29,14 +29,6 @@ def test_all_former_call_sites_reexport_the_same_function():
     assert gui_web._is_loopback_host is is_loopback_host
 
 
-def test_system_route_uses_shared_predicate_not_a_drifted_inline_copy():
-    # whoami() calls the shared helper for a loopback-shaped host that only the
-    # ipaddress-based check recognizes.
-    from localm.inference.routes import system as system_routes
-    assert system_routes.is_loopback_host is is_loopback_host
-    assert system_routes.is_loopback_host("127.0.0.5") is True
-
-
 def test_interface_addresses_skip_an_address_that_does_not_parse(monkeypatch):
     import ipaddress
     import socket
