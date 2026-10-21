@@ -87,6 +87,54 @@ def test_gguf_load_error_envelope_keeps_the_type(monkeypatch, exc, envelope):
         t.join(timeout=5)
 
 
+@pytest.mark.parametrize("runner,worker_attr,worker_name,hf", [
+    ("llamacpp._runner", "_worker", "GgufWorker", False),
+    ("_hf_runner", "_hf_worker", "HFWorker", True),
+])
+def test_a_load_refusal_logs_one_error_line_and_keeps_the_trace_at_debug(
+        monkeypatch, caplog, runner, worker_attr, worker_name, hf):
+    import importlib
+    import logging
+    main_mod = importlib.import_module(f"localm.inference.backends.{runner}")
+    worker_mod = importlib.import_module(f"localm.inference.backends.llamacpp.{worker_attr}"
+                                         if not hf else
+                                         f"localm.inference.backends.{worker_attr}")
+    caplog.set_level(logging.DEBUG, logger="localm")
+    req_q, resp_q, t = _drive(main_mod._runner_main, worker_mod, worker_name,
+                              _failing_worker(RuntimeError("Failed to load model: x.gguf")),
+                              monkeypatch, hf=hf)
+    try:
+        req_q.put(("load", {}))
+        assert resp_q.get(timeout=5)[0] == "error"
+    finally:
+        req_q.put(None)
+        t.join(timeout=5)
+    failed = [r for r in caplog.records if "model load fail" in r.getMessage()]
+    errors = [r for r in failed if r.levelno == logging.ERROR]
+    traces = [r for r in failed if r.levelno == logging.DEBUG]
+    assert len(errors) == 1 and errors[0].exc_info is None
+    assert "Failed to load model: x.gguf" in errors[0].getMessage()
+    assert len(traces) == 1 and traces[0].exc_info is not None
+
+
+def test_a_defect_in_the_load_keeps_its_trace_at_error(monkeypatch, caplog):
+    import logging
+
+    from localm.inference.backends.llamacpp import _runner, _worker
+    caplog.set_level(logging.DEBUG, logger="localm")
+    req_q, resp_q, t = _drive(_runner._runner_main, _worker, "GgufWorker",
+                              _failing_worker(TypeError("bad arg")), monkeypatch)
+    try:
+        req_q.put(("load", {}))
+        assert resp_q.get(timeout=5)[2] == "UnexpectedLoadError"
+    finally:
+        req_q.put(None)
+        t.join(timeout=5)
+    errors = [r for r in caplog.records
+              if r.levelno == logging.ERROR and "model load failed" in r.getMessage()]
+    assert len(errors) == 1 and errors[0].exc_info is not None
+
+
 def test_hf_load_error_envelope_keeps_the_type(monkeypatch):
     from localm.inference.backends import _hf_runner, _hf_worker
     req_q, resp_q, t = _drive(_hf_runner._runner_main, _hf_worker, "HFWorker",

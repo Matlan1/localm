@@ -514,10 +514,12 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
                 resp_q.put(("error", str(e), "UnsupportedModelRoleError"))
             except Exception as e:
                 from localm.debuglog import logger as _dbg
-                _dbg.error("gguf worker: model load failed", exc_info=True)
                 if isinstance(e, (RuntimeError, OSError, AbiMismatch)):
+                    _dbg.error("gguf worker: model load failed: %s", load_error_text(e))
+                    _dbg.debug("gguf worker: model load failure trace", exc_info=True)
                     resp_q.put(("error", load_error_text(e)))
                 else:
+                    _dbg.error("gguf worker: model load failed", exc_info=True)
                     resp_q.put(("error", load_error_text(e), "UnexpectedLoadError"))
             # A hard native abort during worker.load() is NOT caught here -
             # the process dies, and the parent detects that via is_alive().

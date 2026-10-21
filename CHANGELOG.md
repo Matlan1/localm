@@ -366,7 +366,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
   Ollama store, a llamafile or a Jan folder that is refused for its version says so instead of
   "not a GGUF file", a truncated llamafile is named as one, and `localm list` shows a lone
   `.safetensors` file as `safetensors`. A huge number in a model's config is shortened in the
-  load error.
+  load error, and a model that fails to load prints one error line on the console instead of a
+  Python traceback (the trace goes to the debug log).
 - **Setup recommends the right backend on Linux ARM64 with an older NVIDIA GPU.** Only
   Blackwell-class GPUs have an ARM64 CUDA build, so a Jetson Orin or GH200 is now recommended
   Vulkan instead of CUDA that then installs Vulkan anyway. A refused uv download no longer
