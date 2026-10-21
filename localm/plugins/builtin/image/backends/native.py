@@ -568,27 +568,26 @@ def _event_relay(say, on_preview=None, cancel_check=None) -> _EventRelay:
 
 
 def _decode_tile(info: dict, width: int, height: int, hires: Optional[dict],
-                 say: Callable[[str], None]) -> Optional[int]:
+                 say: Callable[[str], None], backend: Optional[str] = None) -> Optional[int]:
     """The VAE decode tile size for a job whose largest decode is *width* x
     *height*, or its hires target, from the load *info*'s ``max_tensor_bytes``
-    and its VAE: ``vaetile.wan_decode_tile_size`` for a Wan VAE (``version``
-    and ``wan_vae_conv``), else ``vaetile.decode_tile_size`` for a 2D
+    (``vaetile.device_limit`` on runtime *backend*) and its VAE:
+    ``vaetile.wan_decode_tile_size`` for a Wan VAE (``version`` and
+    ``wan_vae_conv``), else ``vaetile.decode_tile_size`` for a 2D
     AutoencoderKL (``vae_decoder_ch``). Says the tiling through *say* when
     there is one. None decodes in one piece. Raises ``vaetile.DecodeTooLarge``
     when no tile fits the device."""
     if hires:
         width = sampling.hires_side(width, float(hires["scale"]))
         height = sampling.hires_side(height, float(hires["scale"]))
-    limit = info.get("max_tensor_bytes")
+    limit, assumed = vaetile.device_limit(backend, info.get("max_tensor_bytes"))
     wan = vaetile.wan_vae(info.get("version") or "", info.get("wan_vae_conv"))
     if wan is not None:
         tile = vaetile.wan_decode_tile_size(width, height, 1, limit, wan)
     else:
         tile = vaetile.decode_tile_size(width, height, limit, info.get("vae_decoder_ch"))
     if tile and limit:
-        say(f"Decoding in {tile} px tiles: this GPU runtime takes buffers of up to "
-            f"{limit / 1024 ** 3:.1f} GB, too small to decode {width}x{height} in one piece "
-            "on the GPU.")
+        say(vaetile.tiling_note(tile, width, height, limit, assumed))
     return tile
 
 
@@ -858,7 +857,7 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
             components = {k: v["name"] for k, v in (models.get("components") or {}).items()} or None
             if negative_prompt and cfg_scale is not None and abs(float(cfg_scale) - 1.0) < 1e-5:
                 say(NEGATIVE_AT_CFG_1)
-            tile = _decode_tile(info, int(width), int(height), hires, say)
+            tile = _decode_tile(info, int(width), int(height), hires, say, rt.backend)
 
             def reload_model(load: dict) -> None:
                 runner.ensure_loaded(key, rt.path, load, extra_dirs=rt.extra_dirs,

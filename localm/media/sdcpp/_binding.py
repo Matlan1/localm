@@ -746,3 +746,101 @@ def max_tensor_bytes(lib, runtime_dir: Path, device_name: str) -> Optional[int]:
         else:
             hi = mid
     return lo * _TENSOR_PROBE_STEP
+
+
+_GGML_TYPE_F16 = 1
+_GGML_PREC_F32 = 10
+_ATTENTION_PROBE_HEADS = 12
+_ATTENTION_PROBE_HEAD_DIM = 128
+_ATTENTION_PROBE_FIRST_TOKENS = 512
+_ATTENTION_PROBE_MAX_TOKENS = 8192
+_ATTENTION_PROBE_MIN_SECONDS = 0.1
+
+
+def attention_flops(tokens: int, dim: int) -> int:
+    """Floating point operations of one unmasked self-attention over *tokens*
+    tokens of hidden size *dim* (heads times head size): ``4 * tokens**2 *
+    dim``, the count ggml-vulkan gives a FLASH_ATTN_EXT node."""
+    return 4 * int(tokens) * int(tokens) * int(dim)
+
+
+def attention_rate(lib, runtime_dir: Path, device_name: str) -> Optional[float]:
+    """Flash attention throughput of ggml device *device_name*, in floating
+    point operations per second: the fastest of two timed runs of one
+    FLASH_ATTN_EXT op (F32 queries, F16 keys and values, F32 accumulation, head
+    size 128, the attention the diffusion models run). The token count starts
+    at ``_ATTENTION_PROBE_FIRST_TOKENS`` and doubles until one op takes
+    ``_ATTENTION_PROBE_MIN_SECONDS`` or the count reaches
+    ``_ATTENTION_PROBE_MAX_TOKENS``, so no single op runs much past a few
+    tenths of a second. None when the runtime does not export the ggml
+    functions the probe needs, the device is not registered, or it does not
+    support the op. Raises RuntimeError when the device cannot run it. Call
+    after :func:`load_library`."""
+    import time
+    handles = _ggml_handles(lib, runtime_dir)
+    fn = {name: _ggml_fn(handles, name, restype, *argtypes) for name, restype, argtypes in (
+        ("ggml_init", c_void_p, (_GgmlInitParams,)),
+        ("ggml_free", None, (c_void_p,)),
+        ("ggml_new_tensor_3d", c_void_p, (c_void_p, _enum, c_int64, c_int64, c_int64)),
+        ("ggml_flash_attn_ext", c_void_p,
+         (c_void_p, c_void_p, c_void_p, c_void_p, c_void_p, c_float, c_float, c_float)),
+        ("ggml_prec_set_acc", c_bool, (c_void_p, _enum)),
+        ("ggml_new_graph", c_void_p, (c_void_p,)),
+        ("ggml_build_forward_expand", None, (c_void_p, c_void_p)),
+        ("ggml_backend_dev_by_name", c_void_p, (c_char_p,)),
+        ("ggml_backend_dev_supports_op", c_bool, (c_void_p, c_void_p)),
+        ("ggml_backend_dev_init", c_void_p, (c_void_p, c_char_p)),
+        ("ggml_backend_free", None, (c_void_p,)),
+        ("ggml_backend_alloc_ctx_tensors", c_void_p, (c_void_p, c_void_p)),
+        ("ggml_backend_buffer_clear", None, (c_void_p, c_uint8)),
+        ("ggml_backend_buffer_free", None, (c_void_p,)),
+        ("ggml_backend_graph_compute", _enum, (c_void_p, c_void_p)),
+    )}
+    if any(f is None for f in fn.values()):
+        return None
+    dev = fn["ggml_backend_dev_by_name"](device_name.encode("utf-8"))
+    if not dev:
+        return None
+    backend = fn["ggml_backend_dev_init"](dev, None)
+    if not backend:
+        raise RuntimeError(f"ggml could not start device {device_name}")
+    heads, head_dim = _ATTENTION_PROBE_HEADS, _ATTENTION_PROBE_HEAD_DIM
+    try:
+        tokens = _ATTENTION_PROBE_FIRST_TOKENS
+        while True:
+            ctx = fn["ggml_init"](_GgmlInitParams(1024 * 1024, None, True))
+            if not ctx:
+                raise RuntimeError("ggml_init failed")
+            buf = None
+            try:
+                q = fn["ggml_new_tensor_3d"](ctx, _GGML_TYPE_F32, head_dim, tokens, heads)
+                k = fn["ggml_new_tensor_3d"](ctx, _GGML_TYPE_F16, head_dim, tokens, heads)
+                v = fn["ggml_new_tensor_3d"](ctx, _GGML_TYPE_F16, head_dim, tokens, heads)
+                op = fn["ggml_flash_attn_ext"](ctx, q, k, v, None, head_dim ** -0.5, 0.0, 0.0)
+                fn["ggml_prec_set_acc"](op, _GGML_PREC_F32)
+                if not fn["ggml_backend_dev_supports_op"](dev, op):
+                    return None
+                graph = fn["ggml_new_graph"](ctx)
+                fn["ggml_build_forward_expand"](graph, op)
+                buf = fn["ggml_backend_alloc_ctx_tensors"](ctx, backend)
+                if not buf:
+                    raise RuntimeError(f"could not allocate the attention probe on {device_name}")
+                fn["ggml_backend_buffer_clear"](buf, 0)
+                times = []
+                for _ in range(3):
+                    t0 = time.perf_counter()
+                    status = fn["ggml_backend_graph_compute"](backend, graph)
+                    times.append(time.perf_counter() - t0)
+                    if status != 0:
+                        raise RuntimeError(
+                            f"the attention probe failed on {device_name} (ggml status {status})")
+            finally:
+                if buf:
+                    fn["ggml_backend_buffer_free"](buf)
+                fn["ggml_free"](ctx)
+            best = max(min(times[1:]), 1e-9)
+            if best >= _ATTENTION_PROBE_MIN_SECONDS or tokens * 2 > _ATTENTION_PROBE_MAX_TOKENS:
+                return attention_flops(tokens, heads * head_dim) / best
+            tokens *= 2
+    finally:
+        fn["ggml_backend_free"](backend)
