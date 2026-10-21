@@ -217,6 +217,7 @@ def test_a_parents_identical_call_does_not_clear_a_sub_agents_denial(tmp_path):
         [_xml_call("spawn_agent", task="write NOTE.txt", name="helper"),
          _headed_call("write_file", path="NOTE.txt", content="hello\n"),
          "child: could not write.",
+         "child: still could not write.",
          _xml_call("write_file", path="NOTE.txt", content="hello\n"),
          "parent: wrote it myself."])
     assert (project / "NOTE.txt").read_text(encoding="utf-8") == "hello\n"
