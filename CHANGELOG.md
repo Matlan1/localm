@@ -406,10 +406,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   word (Qwen3-ASR) is picked only when no other model is eligible.
 - **The usage line explains why MTP is off on a turn with audio.** It used to show the raw reason
   word.
-- **A GGUF model loads several seconds faster.** Sizing a load (GPU layers, the VRAM check, the
-  GPU placement and the context ceiling) now reads the GPUs once instead of once per step; on
-  Windows each reading starts a separate process. A small model's first reply after loading
-  arrives in about 11 seconds instead of about 19 on an RX 6900 XT.
+- **A GGUF model loads several seconds faster.** Checking that a model fits and sizing its load
+  (GPU layers, the VRAM check, the GPU placement and the context ceiling) now read the GPUs once
+  instead of once per step, unless a model has to be unloaded first or another load runs in
+  between; on Windows each reading starts a separate process. The VRAM usage line in the server
+  log no longer holds up the load: it is printed just after "Model loaded". A small model's
+  first reply after loading arrives in about 5.5 seconds instead of about 19 on an RX 6900 XT.
 - **Loads that spread over two or more GPUs are no longer sized against one of them when torch
   is loaded in the server.** A model that fits across the GPUs is no longer refused as too large
   for "this GPU" when the combined reading is not available.
