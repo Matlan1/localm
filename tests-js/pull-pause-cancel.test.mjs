@@ -6,8 +6,13 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadAppWithPages, runScript } from "./harness.mjs";
 
-function makeFetch(calls) {
+function makeFetch(calls, discard = null) {
   return async (url, opts = {}) => {
+    if (discard && url === "/api/models/pull/discard") {
+      calls.push({ url, body: opts.body ? JSON.parse(opts.body) : null });
+      return { ok: discard.ok, status: discard.ok ? 200 : 409, statusText: "Conflict",
+               json: async () => discard.body, text: async () => "" };
+    }
     if (url === "/api/models/pull" || url === "/api/models/pull/discard"
         || String(url).endsWith("/cancel")) {
       calls.push({ url, body: opts.body ? JSON.parse(opts.body) : null });
@@ -147,4 +152,48 @@ test("pull panel: a download stopped from the Activity list keeps its partial da
   assert.ok(!calls.some((c) => c.url === "/api/models/pull/discard"),
     "a stop that did not come from Cancel must not delete the partial data");
   assert.equal($("pull-resume").hidden, false, "Resume shows after an outside stop");
+});
+
+// What the status line says after Cancel, per what the server's discard reported.
+async function cancelWith(discard, spec = "owner/repo:m.gguf") {
+  const calls = [];
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch(calls, discard) });
+  runScript(win, WAITING_STREAM);
+  const $ = (id) => win.document.getElementById(id);
+  $("pull-spec").value = spec;
+  $("pull-start").click();
+  await settle();
+  $("pull-cancel").click();
+  await settle();
+  win.__finishJob("cancelled");
+  await settle();
+  return $("pull-pct").textContent;
+}
+
+test("pull panel: Cancel says the partial download was deleted only when bytes were removed", async () => {
+  const text = await cancelWith({ ok: true, body: { removed_bytes: 5000, kept: null } });
+  assert.match(text, /partial download deleted/);
+});
+
+test("pull panel: Cancel says nothing was deleted when the discard removed no bytes", async () => {
+  const text = await cancelWith({ ok: true, body: { removed_bytes: 0, kept: null } });
+  assert.doesNotMatch(text, /partial download deleted/);
+  assert.match(text, /no partial data was deleted/);
+});
+
+test("pull panel: Cancel of a civitai or full-repo download says the downloaded data stays", async () => {
+  const none = await cancelWith({ ok: true, body: { removed_bytes: 0, kept: "civitai" } },
+    "civitai:123:m.safetensors");
+  assert.doesNotMatch(none, /partial download deleted/);
+  assert.match(none, /nothing was deleted.*stays on disk/);
+  const some = await cancelWith({ ok: true, body: { removed_bytes: 4096, kept: "repo" } },
+    "owner/repo");
+  assert.doesNotMatch(some, /partial download deleted/);
+  assert.match(some, /finished files stay on disk/);
+});
+
+test("pull panel: Cancel does not claim a deletion when the discard request failed", async () => {
+  const text = await cancelWith({ ok: false, body: { detail: "still downloading" } });
+  assert.doesNotMatch(text, /partial download deleted/);
+  assert.match(text, /could not be deleted/);
 });
