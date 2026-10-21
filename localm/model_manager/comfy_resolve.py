@@ -87,6 +87,8 @@ _FOLDER_MODEL_TYPES = {
     "vae": "vae",
     "loras": "lora",
     "upscale_models": "upscaler",
+    "controlnet": "controlnet",
+    "embeddings": "textual-inversion",
 }
 
 _FOUND_TTL = 1800.0
@@ -195,6 +197,15 @@ def _safe_repo_path(path: str) -> bool:
     *folders, name = path.split("/")
     return (all(p not in (".", "..") and _PATH_PART_RE.match(p) for p in folders)
             and _is_name_part(name))
+
+
+def is_safe_hf_file(repo: object, path: object) -> bool:
+    """True when *repo* is an ``owner/name`` HuggingFace repository id and
+    *path* a file in it (``_safe_repo_path``, no backslash) with one of
+    ``SAFE_EXTENSIONS``."""
+    return (isinstance(repo, str) and isinstance(path, str)
+            and bool(_REPO_ID_RE.match(repo)) and "\\" not in path and _safe_repo_path(path)
+            and path.lower().endswith(SAFE_EXTENSIONS))
 
 
 def _is_name_part(part: str) -> bool:

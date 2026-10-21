@@ -323,7 +323,8 @@ _owned_cache: dict = {}
 _owned_cache_lock = threading.Lock()
 
 
-def port_owned_by_current_user(port: int, dial: str = "127.0.0.1") -> bool:
+def port_owned_by_current_user(port: int, dial: str = "127.0.0.1", *,
+                               fresh: bool = False) -> bool:
     """True only when at least one socket is listening on *port* where a
     connection to *dial* can reach it, and every such socket belongs to the OS
     user running this process (Windows: the owning process's account; Linux
@@ -331,12 +332,13 @@ def port_owned_by_current_user(port: int, dial: str = "127.0.0.1") -> bool:
     those owners, cannot be read.
 
     A True answer is reused for :data:`OWNED_CACHE_TTL_S` seconds for the same
-    (port, dial); a False answer is recomputed on every call."""
+    (port, dial); a False answer is recomputed on every call. *fresh* reads the
+    socket table now, ignoring a reused answer (and refreshes it)."""
     key = (int(port), dial)
     now = time.monotonic()
     with _owned_cache_lock:
         expiry = _owned_cache.get(key)
-        if expiry is not None and expiry > now:
+        if not fresh and expiry is not None and expiry > now:
             return True
         _owned_cache.pop(key, None)
     owned = _port_owned_by_current_user(port, dial)

@@ -31,7 +31,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # The first version not yet verified against the pinned ROCm torch. Raise only
 # after a cold-install re-verify.
-_TRANSFORMERS_BREAKS_AT = "5.16"
+_TRANSFORMERS_BREAKS_AT = "5.21"
 
 
 def _extra_requirements(extra: str) -> list[str]:

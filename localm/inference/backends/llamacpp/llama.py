@@ -29,6 +29,10 @@ from typing import (Any, Callable, Generator, Iterable, Iterator, Optional,
 
 from localm.inference import pretokenizer_guard
 from localm.inference.backends.base import PerThread
+from localm.kv_cache import (
+    apply_kv_cache_type, context_refused_note, ggml_type_id, kv_bytes_for_type,
+    refusal_status,
+)
 from localm.textguard import (
     content_spans_via_sentinels, map_untrusted_ranges, split_by_trust,
     untrusted_spans_of,
@@ -96,6 +100,15 @@ def _quiet_stderr(to_log: bool = True):
         finally:
             os.dup2(saved_fd, 2)
             os.close(saved_fd)
+
+
+def _grammar_parse_stderr():
+    """Context manager around a native grammar parse: the parser's stderr (its
+    error and the whole grammar source) goes to /dev/null, and to the debug
+    log only when ``debug_content_enabled()`` allows chat content there. Takes
+    ``_stderr_lock`` for the block."""
+    from localm.debuglog import debug_content_enabled
+    return _quiet_stderr(to_log=debug_content_enabled())
 
 
 def _stderr_ctx_for_generate(verbose: bool):
@@ -354,12 +367,21 @@ def _make_chunk_id() -> str:
 class _Tokenizer:
     """Thin wrapper for the vocab / tokenisation layer."""
 
+    # The texts check() cuts input at; empty until a load reads them.
+    _separators: tuple = ()
+    _separators_untrusted: tuple = ()
+
     def __init__(self, model_ptr: int, ctx_ptr: int) -> None:
         self._vocab = api.llama_model_get_vocab(model_ptr)
         self._ctx   = ctx_ptr
         # Read once per load, not per encode: the value cannot change while the
         # model is loaded, and encode() runs on every request.
         self._pre_type = pretokenizer_guard.read_pre_type(model_ptr, api)
+        # Texts llama.cpp cuts the input at before the pre-tokenizer runs, read
+        # only for a pre-tokenizer the guard bounds.
+        if pretokenizer_guard.policy_for(self._pre_type) is not None:
+            self._separators, self._separators_untrusted = (
+                pretokenizer_guard.read_separators(self._vocab, api))
         hazard = pretokenizer_guard.hazard_note(self._pre_type)
         if hazard is not None:
             from localm.debuglog import logger
@@ -383,7 +405,7 @@ class _Tokenizer:
 
         With no ranges this issues the single call it always did.
         """
-        pretokenizer_guard.check_text(self._pre_type, text)
+        self.check(text, untrusted_ranges)
         if not untrusted_ranges:
             return self._encode_segment(text, add_bos, True)
 
@@ -397,6 +419,22 @@ class _Tokenizer:
         if want_bos and add_bos:
             return self._encode_segment(text, add_bos, True)
         return tokens
+
+    def check(self, text: str, untrusted_ranges=()) -> None:
+        """Raise ``PretokenizerUnsafeInputError`` when a piece of *text* that
+        :meth:`encode` would hand the pre-tokenizer is one it must not see.
+        Each trust segment is tokenized on its own, and is cut at the special
+        tokens its ``parse_special`` setting lets llama.cpp recognise."""
+        if pretokenizer_guard.policy_for(self._pre_type) is None:
+            return
+        if not untrusted_ranges:
+            pretokenizer_guard.check_parts(self._pre_type, text, self._separators)
+            return
+        for segment, is_untrusted in split_by_trust(text, untrusted_ranges):
+            if segment:
+                pretokenizer_guard.check_parts(
+                    self._pre_type, segment,
+                    self._separators_untrusted if is_untrusted else self._separators)
 
     def _encode_segment(self, text: str, add_special: bool, parse_special: bool) -> list[int]:
         raw = text.encode("utf-8", errors="replace")
@@ -1113,10 +1151,11 @@ def _build_sampler(
     # letting a malformed grammar reach the crash-and-latch path.
     if grammar and grammar_lazy:
         if grammar_triggers and api.has_lazy_grammar():
-            gsampler = api.llama_sampler_init_grammar_lazy_patterns(
-                vocab, grammar.encode(), b"root",
-                [t.encode() for t in grammar_triggers],
-            )
+            with _grammar_parse_stderr():
+                gsampler = api.llama_sampler_init_grammar_lazy_patterns(
+                    vocab, grammar.encode(), b"root",
+                    [t.encode() for t in grammar_triggers],
+                )
             if gsampler is None:
                 api.llama_sampler_free(chain)
                 raise InvalidGrammarError(_INVALID_GRAMMAR_MSG)
@@ -1152,7 +1191,8 @@ def _build_sampler(
                 GRAMMAR_LAZY_NO_TRIGGERS_MESSAGE if not grammar_triggers
                 else GRAMMAR_LAZY_RUNTIME_OLD_MESSAGE)
     elif grammar:
-        gsampler = api.llama_sampler_init_grammar(vocab, grammar.encode(), b"root")
+        with _grammar_parse_stderr():
+            gsampler = api.llama_sampler_init_grammar(vocab, grammar.encode(), b"root")
         if gsampler is None:
             api.llama_sampler_free(chain)
             raise InvalidGrammarError(_INVALID_GRAMMAR_MSG)
@@ -1303,6 +1343,7 @@ class LlamaCpp:
     # stays off for the rest of the model's life.
     _mtp_usable = True
     _mtp_ctx_ptr = None          # the MTP draft context, None until created
+    _kv_cache_type: Optional[str] = None   # KV cache element type, None = f16
     _mtp_ctx_capacity = 0        # the draft context's own n_ctx, 0 until created
     _mtp_wants_h = False         # True once both contexts expose the next-n state
     mtp_active_this_call = False # whether THIS generation actually speculated
@@ -1382,6 +1423,7 @@ class LlamaCpp:
         mmproj_path: Optional[str] = None,
         cancel_event: Optional[threading.Event] = None,
         vram_check: Optional[Callable[[int, int], Optional[bool]]] = None,
+        budget_check: Optional[Callable[[int, int], Optional[bool]]] = None,
         gpu_split_ratios: Optional[list] = None,
         n_cpu_moe: int = 0,
         mtp_enabled: bool = False,
@@ -1396,9 +1438,15 @@ class LlamaCpp:
         diffusion_steps: Optional[int] = None,
         diffusion_max_tokens: Optional[int] = None,
         n_parallel: int = 1,
+        kv_cache_type: Optional[str] = None,
         **_ignored,
     ) -> None:
         self._n_ctx       = n_ctx
+        # Element type of every KV cache this model's contexts hold: a
+        # localm.kv_cache.KV_CACHE_TYPES value, None for llama.cpp's default (f16).
+        if kv_cache_type is not None:
+            ggml_type_id(kv_cache_type)
+        self._kv_cache_type = kv_cache_type
         self._diffusion_steps = diffusion_steps
         self._diffusion_max_tokens = diffusion_max_tokens
         # spec_source names the draft source (off, mtp, ngram, draft); None
@@ -1422,6 +1470,12 @@ class LlamaCpp:
         # abort), or None when VRAM is unmeasurable (keep the default). None (the
         # attribute) = no check (only a NULL-pointer check on the result after).
         self._vram_check  = vram_check
+        # Optional check consulted by _step_reserve, called with
+        # (target_n_ctx, current_ctx_capacity): True when a context of that size
+        # with the KV cache in VRAM stays within the video memory the OS lets
+        # this process keep resident, False when the OS would page part of it
+        # out, None when unknown.
+        self._budget_check = budget_check
         # Dynamic context window: starts at n_ctx, grows in n_ctx_grow steps
         # up to n_ctx_max when a conversation outgrows it. None/0 = unlimited
         # (the pre-dynamic behaviour: grow exactly as far as needed).
@@ -1695,7 +1749,8 @@ class LlamaCpp:
         # it instead of a file-size heuristic that under-counted wide-KV models by
         # ~2.6x.
         self.kv_bytes_per_token: int = (
-            0 if self.is_diffusion else self._read_kv_bytes_per_token())
+            0 if self.is_diffusion
+            else kv_bytes_for_type(self._read_kv_bytes_per_token(), self._kv_cache_type))
 
         # llama.cpp already offloads min(n_gpu_layers, actual), so an over-large
         # value is harmless - but silently clamping a SPECIFIC number is
@@ -1706,6 +1761,18 @@ class LlamaCpp:
                 "n_gpu_layers=%d exceeds the model's %d layers; "
                 "offloading all %d (the extra has no effect)",
                 n_gpu_layers, self.n_layers, self.n_layers)
+
+        # Decode rates are judged only when every layer and the output layer are
+        # on a GPU, no expert tensors were kept on the CPU, and the load placed
+        # weights in VRAM (or did not report where it placed them).
+        self._decode_judged = (
+            (n_gpu_layers < 0 or (self.n_layers is not None and n_gpu_layers > self.n_layers))
+            and self._moe_override_keepalive is None
+            and (not self.weight_placement
+                 or any(not b.get("is_ram") for b in self.weight_placement)))
+
+        self._residency_watch = True
+        self._prime_residency_counters()
 
         self.n_parallel, self.parallel_note = self._resolve_parallel(n_parallel, n_ctx)
 
@@ -1726,6 +1793,7 @@ class LlamaCpp:
         # See test_recurrent_rollback_is_requested_when_mtp_is_enabled.
         self._apply_initial_spec_params(cp, spec_draft_tokens)
         cp.flash_attn_type   = -1  # keep default (unspecified)
+        apply_kv_cache_type(cp, self._kv_cache_type)
         if n_threads is not None:
             cp.n_threads       = n_threads
             cp.n_threads_batch = n_threads
@@ -1743,6 +1811,10 @@ class LlamaCpp:
         if not self._ctx_ptr:
             self._free_adapters()
             api.llama_free_model(self._model_ptr)
+            self._model_ptr = None
+            note = context_refused_note(self._kv_cache_type)
+            if note:
+                raise RuntimeError("Failed to create llama context." + note)
             raise RuntimeError("Failed to create llama context")
         if self._adapter_handles:
             try:
@@ -2190,8 +2262,10 @@ class LlamaCpp:
 
     # Tokenisation (public helpers used by tests / introspection)
 
-    def tokenize(self, text: str, add_bos: bool = True) -> list[int]:
-        return self._tokenizer.encode(text, add_bos=add_bos)
+    def tokenize(self, text: str, add_bos: bool = True,
+                 untrusted_ranges=()) -> list[int]:
+        return self._tokenizer.encode(text, add_bos=add_bos,
+                                      untrusted_ranges=untrusted_ranges)
 
     def detokenize(self, tokens: Iterable[int]) -> str:
         # Join the raw token bytes first, then decode once, so a multibyte
@@ -2215,8 +2289,7 @@ class LlamaCpp:
         # The native parser prints its error and the whole grammar source to
         # stderr on rejection. It is kept off the terminal, and reaches the debug
         # log only when debug_content_enabled() allows chat content there.
-        from localm.debuglog import debug_content_enabled
-        with _quiet_stderr(to_log=debug_content_enabled()):
+        with _grammar_parse_stderr():
             sampler = api.llama_sampler_init_grammar(
                 self._tokenizer._vocab, grammar.encode(), b"root")
         if sampler is None:
@@ -2324,6 +2397,8 @@ class LlamaCpp:
             # If unlimited (<= 0), allocate a modest chunk up front and grow later
             initial_budget = max_new_tokens if max_new_tokens > 0 else 512
             needed = n_prompt + initial_budget + 64
+            # Cells the whole reply needs, for a reply with a budget.
+            full_needed = needed if max_new_tokens > 0 else None
 
             # BOUNDARY LOGGING: between "model loaded" and either a token or a
             # corpse, this worker would otherwise emit nothing at any level, so a
@@ -2350,6 +2425,13 @@ class LlamaCpp:
             # loop iteration; set only by the reject branch below.
             pending_token = None
             pending_emit = None
+            # Native seconds and count of the main decode steps, and the sum of
+            # their positions, for _note_decode_rate.
+            rate_steps = 0
+            rate_s = 0.0
+            rate_depth = 0
+            rate_ok = grammar is None and logprobs is None
+            failed = False
             try:
                 # One contiguous suppression scope covering context work and
                 # prefill. The ROCm lazy-buffer verification messages fire
@@ -2360,6 +2442,9 @@ class LlamaCpp:
                 with self._gen_lock:
                     if self._stop.is_set():
                         return
+                    if full_needed is not None:
+                        needed = self._step_reserve(
+                            full_needed, n_prompt + self.RESERVE_STEP + self.RESERVE_PAD)
                     reuse = self._can_reuse_kv(needed)
                     with _ctx():
                         if reuse and self._rightsize_context(prompt_tokens, needed):
@@ -2367,7 +2452,9 @@ class LlamaCpp:
                         elif reuse:
                             self._prefill_with_reuse(prompt_tokens, keep_prefix=cache_prompt)
                         else:
-                            self._prefill_fresh_context(prompt_tokens, needed)
+                            self._prefill_fresh_context(
+                                prompt_tokens, needed,
+                                ram_fallback=full_needed is not None and needed < full_needed)
 
                 logger.info("gguf generate: prefill complete in %.2fs (kv_reuse=%s)",
                             time.monotonic() - _t0, reuse and cache_prompt)
@@ -2441,6 +2528,7 @@ class LlamaCpp:
                                 # into the native library, which crashes the driver.
                                 self.last_finish_reason = "error"
                                 break
+                            sample_t0 = clock()
                             # llama_sampler_sample() already ACCEPTS the sampled token
                             # into every stateful sampler in the chain (documented
                             # upstream as "sample and accept"). A second explicit
@@ -2465,6 +2553,8 @@ class LlamaCpp:
                             if emit is None:
                                 emit = (token if scorer is None or eog
                                         else scorer.score(self._ctx_ptr, -1, token))
+                            if rate_steps:
+                                rate_s += clock() - sample_t0
 
                         if step is not None:
                             step_s = clock() - step[0] - consumer_s
@@ -2562,6 +2652,7 @@ class LlamaCpp:
                                 if self._stop.is_set() or self._ctx_ptr is None:
                                     self.last_finish_reason = "error"
                                     break
+                                verify_t0 = clock()
                                 batch = self._create_batch([token] + drafts, pos, logits_at_last_only=False)
                                 try:
                                     ret = api.llama_decode(self._ctx_ptr, batch)
@@ -2572,8 +2663,11 @@ class LlamaCpp:
                                         # emitted: the matching drafts below, the
                                         # first mismatching token as pending_token.
                                         replacement = None
+                                        verify_s = 0.0
                                         for i, draft in enumerate(drafts):
                                             verified = api.llama_sampler_sample(sampler, self._ctx_ptr, i)
+                                            if i == 0:
+                                                verify_s = clock() - verify_t0
                                             emits.append(
                                                 verified if scorer is None
                                                 else scorer.score(self._ctx_ptr, i, verified))
@@ -2591,8 +2685,12 @@ class LlamaCpp:
                                                 self._ctx_ptr, 0, pos + n_acc + 1, -1)
                                         source.after_verify(accepted, pos)
                                         self._cached_tokens.extend([token] + accepted)
+                                        rate_steps += 1
+                                        rate_s += verify_s
+                                        rate_depth += pos
                                         pos += n_acc + 1
                                         if not removed:
+                                            rate_ok = False
                                             # The rejected cells are still in the
                                             # cache and llama.cpp refuses every later
                                             # batch as having inconsistent sequence
@@ -2612,6 +2710,7 @@ class LlamaCpp:
                                             pending_emit = emits[-1]
                                     else:
                                         # Decode failed, fall back to single token
+                                        rate_ok = False
                                         api.llama_batch_free(batch)
                                         batch = self._create_batch([token], pos, logits_at_last_only=True)
                                         ret = api.llama_decode(self._ctx_ptr, batch)
@@ -2641,6 +2740,7 @@ class LlamaCpp:
                                 if self._stop.is_set() or self._ctx_ptr is None:
                                     self.last_finish_reason = "error"
                                     break
+                                decode_t0 = clock()
                                 batch = self._create_batch([token], pos, logits_at_last_only=True)
                                 try:
                                     ret = api.llama_decode(self._ctx_ptr, batch)
@@ -2648,6 +2748,12 @@ class LlamaCpp:
                                         # KV cache full or error.
                                         # Attempt mid-generation context growth if there is headroom.
                                         current_needed = pos + 512
+                                        stepped = (full_needed is not None
+                                                   and self._target_ctx(full_needed)
+                                                   > self._ctx_capacity)
+                                        if stepped and full_needed is not None:
+                                            current_needed = self._step_reserve(
+                                                full_needed, current_needed)
                                         target = self._target_ctx(current_needed)
                                         if target > self._ctx_capacity:
                                             grew = True
@@ -2662,7 +2768,9 @@ class LlamaCpp:
                                             api.llama_batch_free(batch)
                                             batch = None
                                             prompt_and_gen = self._cached_tokens.copy()
-                                            self._prefill_fresh_context(prompt_and_gen, current_needed)
+                                            self._prefill_fresh_context(
+                                                prompt_and_gen, current_needed,
+                                                ram_fallback=stepped)
                                             # Retry decode on the newly grown context.
                                             batch = self._create_batch([token], pos, logits_at_last_only=True)
                                             ret = api.llama_decode(self._ctx_ptr, batch)
@@ -2676,6 +2784,12 @@ class LlamaCpp:
                                             break
                                     source.after_single_token(token, pos)
                                     self._cached_tokens.append(token)
+                                    if grew:
+                                        rate_ok = False
+                                    else:
+                                        rate_steps += 1
+                                        rate_s += clock() - decode_t0
+                                        rate_depth += pos
                                     pos += 1
                                     if timed or observed:
                                         step = (step_t0, speculate and not source.free_miss, 1,
@@ -2701,11 +2815,18 @@ class LlamaCpp:
                     "decode" if in_decode else "prefill", tokens_generated)
                 raise
             except Exception:
+                failed = True
                 logger.info(
                     "gguf generate: aborted (exception) during %s, %d token(s) generated",
                     "decode" if in_decode else "prefill", tokens_generated)
                 raise
             finally:
+                if (rate_ok and rate_steps and not failed
+                        and self.last_finish_reason != "error"):
+                    with self._gen_lock:
+                        if not self._stop.is_set():
+                            self._note_decode_rate(rate_steps, rate_s,
+                                                   rate_depth / rate_steps)
                 if sampler is not None:
                     api.llama_sampler_free(sampler)
                 if scorer is not None:
@@ -3235,7 +3356,7 @@ class LlamaCpp:
                 # mtmd_tokenize runs the same pre-tokenizer over the text parts
                 # of this prompt, so the vision path needs the same check the
                 # text path gets in _Tokenizer.encode.
-                pretokenizer_guard.check_text(self._tokenizer._pre_type, prompt)
+                self._loaded_tokenizer().check(prompt)
 
                 # Stays on _quiet_stderr rather than _generate()'s
                 # dedup_native_stderr: below, _ctx() is entered once for the mtmd
@@ -3532,6 +3653,158 @@ class LlamaCpp:
     _KV_PROMOTE_RETRY_S = 20.0
     _kv_promote_after = 0.0
 
+    # A reply is judged slow when its main decode steps per second fall under
+    # this share of the rate expected at its KV depth and placement.
+    _DECODE_SLOW_RATIO = 0.4
+    # Fewest main decode steps a reply needs before its rate is judged.
+    _DECODE_MIN_STEPS = 32
+    # Depth offset of the expected-rate bound in _note_decode_rate.
+    _DECODE_DEPTH_SLACK = 2048
+    # Seconds after a refresh before the next one, doubling per refresh up to
+    # the maximum, back to the base after a reply at the expected rate.
+    _DECODE_REFRESH_BACKOFF_S = 60.0
+    _DECODE_REFRESH_BACKOFF_MAX_S = 960.0
+    _decode_judged = True                    # set at load, see __init__
+    _decode_samples: Optional[dict] = None   # (kv in vram, depth bucket) -> (rate, depth)
+    _decode_refresh: Optional[tuple[float, float]] = None  # (rate, expected) of the slow reply
+    _decode_refresh_after = 0.0              # no refresh is marked before this time.monotonic()
+    _decode_refresh_at: Optional[float] = None  # time.monotonic() of the last refresh
+    _decode_refresh_backoff = 60.0
+
+    # Shared system memory a process fully on a GPU may hold before
+    # _note_residency reports it: at least _RESIDENCY_SHARED_MIN bytes and at
+    # least _RESIDENCY_SHARED_RATIO of the process's dedicated VRAM.
+    _RESIDENCY_SHARED_MIN = 1536 * 1024 ** 2
+    _RESIDENCY_SHARED_RATIO = 0.15
+    # Seconds between two residency checks while no context is recreated.
+    _RESIDENCY_RECHECK_S = 60.0
+    _residency_watch = False           # set by __init__; read by _note_residency
+    _residency_check_after = 0.0       # time.monotonic(); due at the next request
+    _residency_reported = False        # the current over-threshold spell was logged
+    _residency_unavailable_said = False
+
+    def _prime_residency_counters(self) -> Optional[threading.Thread]:
+        """On Windows, for a load ``_note_residency`` checks, open this
+        process's ``GPU Process Memory`` query on a daemon thread so the
+        first check does not pay the one-time PDH setup. Returns the started
+        thread, or None when nothing is checked. Never raises."""
+        import sys
+        if sys.platform != "win32" or not self._decode_judged:
+            return None
+        from localm import gpu_usage
+        try:
+            t = threading.Thread(target=gpu_usage.process_gpu_memory,
+                                 name="localm-residency-prime", daemon=True)
+            t.start()
+        except RuntimeError:
+            return None   # the first check opens the query instead. See test_a_failed_prime_still_checks
+        return t
+
+    def _note_residency(self) -> None:
+        """On Windows, log at INFO when the WDDM counters show this process
+        holding at least ``_RESIDENCY_SHARED_MIN`` bytes and
+        ``_RESIDENCY_SHARED_RATIO`` of its dedicated VRAM in shared system
+        memory, once per spell: the next line follows only after a reading
+        under that threshold, which is logged at INFO too.
+
+        Reads at most once per ``_RESIDENCY_RECHECK_S`` seconds, and at the
+        first call after a load or a context recreate. Does nothing on other
+        platforms, for an instance ``__init__`` did not build, while
+        ``_decode_judged`` is False, or while the KV cache is in system RAM.
+        The first unavailable reading is logged here at DEBUG
+        (``gpu_usage.process_gpu_memory`` logs each failed query itself).
+        Never raises. Caller holds ``_gen_lock``."""
+        import sys
+        if (sys.platform != "win32" or not self._residency_watch or not self._decode_judged
+                or not self._ctx_ptr or self._offload_kqv is False):
+            return
+        now = time.monotonic()
+        if now < self._residency_check_after:
+            return
+        self._residency_check_after = now + self._RESIDENCY_RECHECK_S
+        from localm import gpu_usage
+        from localm.debuglog import logger
+        reading = gpu_usage.process_gpu_memory()
+        if reading is None:
+            if not self._residency_unavailable_said:
+                self._residency_unavailable_said = True
+                logger.debug("gguf context: the GPU Process Memory counters are "
+                             "unavailable, residency is not checked")
+            return
+        dedicated, shared = reading
+        over = (shared >= self._RESIDENCY_SHARED_MIN
+                and shared >= self._RESIDENCY_SHARED_RATIO * dedicated)
+        if over and not self._residency_reported:
+            self._residency_reported = True
+            logger.info("gguf model: Windows holds %.2f GB of this model's GPU memory in "
+                        "shared system memory (%.2f GB in VRAM), so replies run slower "
+                        "until other programs release VRAM and Windows moves it back",
+                        shared / 1024 ** 3, dedicated / 1024 ** 3)
+        elif not over and self._residency_reported:
+            self._residency_reported = False
+            logger.info("gguf model: Windows moved this model's GPU memory back to VRAM "
+                        "(%.2f GB in VRAM, %.2f GB in shared system memory)",
+                        dedicated / 1024 ** 3, shared / 1024 ** 3)
+
+    def _note_decode_rate(self, steps: int, seconds: float, depth: float) -> None:
+        """Record a finished reply that ran *steps* main decode steps in
+        *seconds* of native time at a mean KV depth of *depth* cells, with the
+        live context's KV placement.
+
+        The expected rate at *depth* is the largest
+        ``rate * min(1, (d + _DECODE_DEPTH_SLACK) / (depth + _DECODE_DEPTH_SLACK))``
+        over the replies recorded at this placement (one per power-of-two depth
+        bucket, the fastest), a lower bound on a healthy rate while a step costs
+        ``a + b * depth`` with ``a >= _DECODE_DEPTH_SLACK * b``. A reply under
+        ``_DECODE_SLOW_RATIO`` of it marks the context for a refresh at the next
+        ``_rightsize_plan`` unless a refresh ran less than the backoff ago.
+        Replies with fewer than ``_DECODE_MIN_STEPS`` steps are ignored, and
+        every reply is ignored when ``_decode_judged`` is False (a load not
+        fully on a GPU). Caller holds ``_gen_lock``."""
+        if (not self._decode_judged or steps < self._DECODE_MIN_STEPS
+                or seconds <= 0 or not self._ctx_ptr):
+            return
+        rate = steps / seconds
+        depth = max(0.0, float(depth))
+        placement = self._offload_kqv is not False
+        samples = self._decode_samples
+        if samples is None:
+            samples = self._decode_samples = {}
+        slack = self._DECODE_DEPTH_SLACK
+        expected = max((r * min(1.0, (d + slack) / (depth + slack))
+                        for (p, _b), (r, d) in samples.items() if p == placement),
+                       default=0.0)
+        if (expected and rate < self._DECODE_SLOW_RATIO * expected
+                and self._decode_refresh is None
+                and time.monotonic() >= self._decode_refresh_after):
+            self._decode_refresh = (rate, expected)
+        key = (placement, int(depth).bit_length())
+        best = samples.get(key)
+        if best is None or rate > best[0]:
+            samples[key] = (rate, depth)
+
+    def _consume_decode_refresh(self) -> None:
+        """Make the residency check due at the next ``_note_residency`` because
+        the context is being recreated. When a decode-rate refresh is pending,
+        clear it and start the backoff before the next one:
+        ``_DECODE_REFRESH_BACKOFF_S`` when the last refresh was longer than
+        ``_DECODE_REFRESH_BACKOFF_MAX_S`` ago (or there was none), else double
+        the last backoff, at most ``_DECODE_REFRESH_BACKOFF_MAX_S``. Caller
+        holds ``_gen_lock``."""
+        self._residency_check_after = 0.0
+        if self._decode_refresh is None:
+            return
+        self._decode_refresh = None
+        now = time.monotonic()
+        last = self._decode_refresh_at
+        if last is None or now - last > self._DECODE_REFRESH_BACKOFF_MAX_S:
+            backoff = self._DECODE_REFRESH_BACKOFF_S
+        else:
+            backoff = min(self._decode_refresh_backoff * 2, self._DECODE_REFRESH_BACKOFF_MAX_S)
+        self._decode_refresh_backoff = backoff
+        self._decode_refresh_at = now
+        self._decode_refresh_after = now + backoff
+
     def _rightsize_plan(self, needed: int, others: int = 0) -> Optional[tuple[int, bool]]:
         """``(n_ctx, offload_kqv)`` for a context to recreate before a request
         of *needed* cells that the live context can already hold, or None to
@@ -3541,34 +3814,111 @@ class LlamaCpp:
         Shrinks to ``_target_ctx(needed + others)`` when that is at most half
         the live capacity, with the KV cache in VRAM unless ``_vram_check``
         answers False. Otherwise, when the live KV cache is in system RAM,
-        moves it to VRAM at the same size once ``_vram_check`` answers True;
-        the check is not asked again for ``_KV_PROMOTE_RETRY_S`` seconds after
-        it is asked.
+        moves it to VRAM at the same size once ``_vram_check`` answers True,
+        or else at ``_target_ctx(needed + others)`` when that is smaller and
+        ``_vram_check`` answers True for it; the check is not asked again for
+        ``_KV_PROMOTE_RETRY_S`` seconds after it is asked. Otherwise, when
+        ``_note_decode_rate`` marked the context for a refresh, recreates it at
+        the same size and KV placement. Runs ``_note_residency`` first whenever
+        the live context holds *needed*.
         Caller holds ``_gen_lock``. ``_vram_check`` may raise."""
         if not self._ctx_ptr or needed > self._ctx_capacity:
             return None
+        self._note_residency()
         capacity = self._ctx_capacity
         target = self._target_ctx(needed + max(0, others))
         shrink = target <= capacity // 2
         promote = self._offload_kqv is False
-        if not (shrink or promote):
+        refresh = self._decode_refresh is not None
+        if not (shrink or promote or refresh):
             return None
         check = getattr(self, "_vram_check", None)
         if not shrink:
             now = time.monotonic()
-            if check is None or now < self._kv_promote_after:
-                return None
-            self._kv_promote_after = now + self._KV_PROMOTE_RETRY_S
-            if check(capacity, capacity) is True:
-                return capacity, True
+            if promote and check is not None and now >= self._kv_promote_after:
+                self._kv_promote_after = now + self._KV_PROMOTE_RETRY_S
+                if target >= capacity:
+                    if check(capacity, capacity) is True:
+                        return capacity, True
+                elif check(capacity, capacity, hint=False) is True:
+                    return capacity, True
+                elif check(target, capacity, hint=False) is True:
+                    return target, True
+            if refresh:
+                return capacity, self._offload_kqv is not False
             return None
         decision = check(target, capacity) if check is not None else None
         return target, decision is not False
 
+    # Cells a budgeted reply reserves at first when its whole budget would put
+    # the KV cache in system RAM or past the OS video memory budget
+    # (``_step_reserve``), grown as the reply runs.
+    RESERVE_STEP = 512
+    RESERVE_PAD = 64
+
+    def _step_reserve(self, needed: int, step: int, others: int = 0) -> int:
+        """The cells to reserve now for a reply that needs at most *needed*:
+        *step* when a context sized for *needed* would keep its KV cache in
+        system RAM, or would not fit the OS video memory budget
+        (``_budget_check`` answers False), while one sized for *step* keeps it in
+        VRAM within that budget; else *needed*.
+
+        When the live context holds *needed*, *others* counts the cells other
+        sequences' caches hold (as in ``_rightsize_plan``), the answer is
+        *needed* without asking ``_vram_check`` while its KV cache is in VRAM
+        or while the promotion check is held off (``_kv_promote_after``).
+        Asks ``_vram_check`` with ``hint=False``, at most twice, *step* first;
+        when it keeps both sizes in VRAM, asks ``_budget_check`` (when set) for
+        *needed*, then for *step*. Never asks when the two sizes round to the
+        same context. Never
+        raises: a raising check answers *needed*, logged at INFO. Caller holds
+        ``_gen_lock``."""
+        check = getattr(self, "_vram_check", None)
+        if step >= needed or check is None:
+            return needed
+        capacity = self._ctx_capacity if self._ctx_ptr else 0
+        if self._ctx_ptr and needed <= capacity:
+            if self._offload_kqv is not False or time.monotonic() < self._kv_promote_after:
+                return needed
+            extra = max(0, others)
+        else:
+            extra = 0
+        small = self._target_ctx(step + extra)
+        full = self._target_ctx(needed + extra)
+        if small >= full:
+            return needed
+        budget = getattr(self, "_budget_check", None)
+        try:
+            if check(small, capacity, hint=False) is not True:
+                return needed
+            if check(full, capacity, hint=False) is not False:
+                if budget is None or budget(full, capacity) is not False:
+                    return needed
+                if budget(small, capacity) is False:
+                    return needed
+        except Exception as exc:
+            from localm.debuglog import logger
+            logger.info("gguf context: reserving the whole reply, the VRAM check raised %s",
+                        type(exc).__name__)
+            return needed
+        from localm.debuglog import logger
+        logger.info("gguf context: reserving %d of %d cells, a %d-token context keeps the "
+                    "KV cache resident in VRAM where a %d-token one would not", step, needed,
+                    small, full)
+        return step
+
     def _log_rightsize(self, n_ctx: int, offload_kqv: bool) -> None:
         """Log at INFO that the live context is replaced by one of *n_ctx*
-        cells with its KV cache in VRAM (*offload_kqv*) or system RAM."""
+        cells with its KV cache in VRAM (*offload_kqv*) or system RAM; for a
+        refresh at the same size and placement, with the slow reply's rate."""
         from localm.debuglog import logger
+        slow = self._decode_refresh
+        if (slow is not None and n_ctx == self._ctx_capacity
+                and offload_kqv == (self._offload_kqv is not False)):
+            logger.info("gguf context: recreating the %d-token context (KV cache in %s): "
+                        "the last reply decoded at %.1f steps/s where %.1f was expected",
+                        n_ctx, "VRAM" if offload_kqv else "system RAM", slow[0], slow[1])
+            return
         logger.info("gguf context: replacing the %d-token context (KV cache in %s) "
                     "with a %d-token one (KV cache in %s)", self._ctx_capacity,
                     "VRAM" if self._offload_kqv else "system RAM", n_ctx,
@@ -3639,6 +3989,7 @@ class LlamaCpp:
         model = self._model_ptr
         if not model:
             raise RuntimeError("Model not loaded")
+        self._consume_decode_refresh()
         if self._ctx_ptr:
             api.llama_free(self._ctx_ptr)
             self._ctx_ptr = None
@@ -3649,6 +4000,7 @@ class LlamaCpp:
         cp.n_ubatch = cp.n_batch
         cp.offload_kqv = offload_kqv
         self._apply_parallel_params(cp)
+        apply_kv_cache_type(cp, self._kv_cache_type)
         if self._n_threads is not None:
             cp.n_threads = self._n_threads
             cp.n_threads_batch = self._n_threads
@@ -3667,7 +4019,8 @@ class LlamaCpp:
                      else "even with the KV cache in system RAM")
             raise RuntimeError(
                 f"Not enough memory to create a {target:,}-token context, {where}. "
-                f"Start a new chat, lower n_ctx_max, or free some memory.")
+                f"Start a new chat, lower n_ctx_max, or free some memory."
+                + context_refused_note(self._kv_cache_type))
         self._ctx_capacity = target
         self._offload_kqv = offload_kqv
 
@@ -3725,7 +4078,8 @@ class LlamaCpp:
             stream = slots.submit(prompt_tokens, max_new_tokens, sampler,
                                         on_status=on_status,
                                         stop_requested=stream_stop_requested,
-                                        scorer=scorer)
+                                        scorer=scorer,
+                                        timed=grammar is None and logprobs is None)
         except BaseException:
             api.llama_sampler_free(sampler)
             if scorer is not None:
@@ -4381,7 +4735,8 @@ class LlamaCpp:
         context can hold is one the draft context can hold. Returns "" on
         success, otherwise the status naming why no draft context exists:
         "no-mtp-graph", "no-ctx-type-field", "context-refused" or
-        "hidden-state-refused".
+        "hidden-state-refused". "context-refused" carries a
+        ``:kv_cache_type=<type>`` suffix when the KV cache type is quantised.
         """
         if not api.llama_model_mtp_support(self._model_ptr)[0]:
             return "no-mtp-graph"
@@ -4397,6 +4752,7 @@ class LlamaCpp:
         cp_mtp.n_batch = min(n_ctx, _MTP_DRAFT_BATCH)
         cp_mtp.n_ubatch = cp_mtp.n_batch
         cp_mtp.offload_kqv = offload_kqv
+        apply_kv_cache_type(cp_mtp, self._kv_cache_type)
         if n_threads is not None:
             cp_mtp.n_threads = n_threads
             cp_mtp.n_threads_batch = n_threads
@@ -4407,7 +4763,7 @@ class LlamaCpp:
         if not self._mtp_ctx_ptr:
             self._mtp_ctx_ptr = None
             self._mtp_ctx_capacity = 0
-            return "context-refused"
+            return refusal_status("context-refused", self._kv_cache_type)
         self._mtp_ctx_capacity = cp_mtp.n_ctx
         self._n_embd = api.llama_model_n_embd(self._model_ptr)
         # The target exposes its hidden state; the draft consumes it masked. Both
@@ -4728,6 +5084,7 @@ class LlamaCpp:
             if decision is False:
                 offload_kqv = False
 
+        self._consume_decode_refresh()
         if self._ctx_ptr:
             api.llama_free(self._ctx_ptr)
             self._ctx_ptr = None
@@ -4745,6 +5102,7 @@ class LlamaCpp:
         cp.n_batch     = min(cp.n_ctx, 2048)
         cp.n_ubatch    = cp.n_batch   # micro-batch must match so prefill fits in one call
         cp.offload_kqv = offload_kqv  # False -> KV cache in system RAM (VRAM was tight)
+        apply_kv_cache_type(cp, self._kv_cache_type)
         if self._n_threads is not None:
             cp.n_threads = self._n_threads
             cp.n_threads_batch = self._n_threads
@@ -4785,6 +5143,7 @@ class LlamaCpp:
             raise RuntimeError(
                 f"Not enough memory to create a {target:,}-token context, {where}. "
                 f"Start a new chat, lower n_ctx_max, or free some memory."
+                + context_refused_note(self._kv_cache_type)
             )
         self._ctx_capacity = cp.n_ctx
         self._offload_kqv = offload_kqv   # record the new context's KV placement

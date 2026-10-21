@@ -765,6 +765,8 @@ class PluginManager:
             except OSError:
                 children = []
             for child in children:
+                if child.name.startswith("."):
+                    continue
                 if not child.is_dir() or not (child / "plugin.toml").is_file():
                     continue
                 try:
@@ -850,6 +852,8 @@ class PluginManager:
         if root:
             try:
                 for child in Path(root).glob("*"):
+                    if child.name.startswith("."):
+                        continue
                     if child.is_dir() and (child / "plugin.toml").is_file():
                         out.add(child.name)
             except OSError:
@@ -907,6 +911,25 @@ class PluginManager:
                     _emit(name, "loaded", None)
                 else:
                     _emit(name, "failed", self._errors.get(name))
+
+    def load_enabled_pending(self) -> list:
+        """Load every installed, enabled plugin that is not loaded yet and has no
+        recorded load error, mounting its routes on the live app. Covers a plugin
+        installed or enabled by another process (``localm plugin install``) while
+        this server runs. Returns the names loaded. Never raises: a failing plugin
+        is recorded in errors, as at startup. Runs on the event loop thread, like
+        enable(). Returns [] without loading when the manager has no app."""
+        if self.app is None:
+            return []
+        self.discover()
+        enabled = self._enabled_set()
+        loaded = []
+        for name in sorted(self._specs):
+            if name in enabled and name not in self._loaded and name not in self._errors:
+                self._safe_load(self._specs[name])
+                if name in self._loaded:
+                    loaded.append(name)
+        return loaded
 
     def _ensure_preinstalled(self) -> None:
         """First-run provisioning for preinstalled plugins (chat is plugin #0).
@@ -1359,16 +1382,30 @@ class PluginManager:
         # _installed_dir re-checks it. This feeds _remove_installed_dir ->
         # shutil.rmtree just below, and copytree after.
         dest = self._installed_dir(name)
-        if dest.exists():
-            if not force:
-                raise ValueError(f"plugin {name!r} is already installed")
-            self._remove_installed_dir(name)
+        if dest.exists() and (dest / "plugin.toml").is_file() and not force:
+            raise ValueError(f"plugin {name!r} is already installed")
         dest.parent.mkdir(parents=True, exist_ok=True)
-        # symlinks=True keeps a link that appeared after _reject_source_links
-        # walked the tree from being DEREFERENCED. It does not cover a Windows
-        # junction, which copytree demotes and recurses into.
-        shutil.copytree(src, dest, symlinks=True)
-        _write_marker(dest, "external", _dir_content_hash(src))
+        # The copy is built beside dest and renamed into place, so an install
+        # that dies mid-copy leaves a hidden staging folder, never a
+        # half-filled plugin folder, and a failed forced reinstall leaves the
+        # existing plugin in place.
+        tmp = dest.parent / f".{name}.install.tmp"
+        if tmp.exists():
+            shutil.rmtree(tmp, ignore_errors=True)
+        try:
+            # symlinks=True keeps a link that appeared after _reject_source_links
+            # walked the tree from being DEREFERENCED. It does not cover a Windows
+            # junction, which copytree demotes and recurses into.
+            shutil.copytree(src, tmp, symlinks=True)
+            _write_marker(tmp, "external", _dir_content_hash(src))
+            if dest.exists() and not self._remove_installed_dir(name):
+                raise ValueError(
+                    f"plugin {name!r}: the existing installed directory could not "
+                    f"be removed; see the log")
+            tmp.rename(dest)
+        except BaseException:
+            shutil.rmtree(tmp, ignore_errors=True)
+            raise
         return spec0, dest
 
     def _provision_and_verify(self, name: str, *, rollback_on_fail: bool = True,
@@ -1849,6 +1886,7 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
 
     @app.get("/api/plugins", dependencies=[Depends(require_scope(scopes.PLUGINS_READ))])
     async def list_plugins_engine():
+        manager.load_enabled_pending()
         return manager.api_state()
 
     @app.post("/api/plugins/{name}/install",
@@ -1868,8 +1906,8 @@ def attach_engine(app, inference_engine=None) -> PluginManager:
     async def install_external_plugin_engine(body: dict):
         """Install a THIRD-PARTY plugin from a local directory (the GUI's
         External plugins card). The HTTP sibling of `localm plugin install
-        <dir>`, using the same manager call. Copy + verify only, no live mount:
-        the plugin loads on the next server start."""
+        <dir>`, using the same manager call. Copy + verify only: the plugin is
+        mounted the next time the plugin list is read."""
         from pathlib import Path as _P
         source = (body or {}).get("source", "")
         if not source:

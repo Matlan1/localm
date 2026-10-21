@@ -8,9 +8,13 @@ route handler or an agent tool happens to be on; each marshals its work onto tha
 loop with ``run_coroutine_threadsafe`` and waits for it. Never touch ``_page``,
 ``_browser`` or ``_ctx`` from outside that loop.
 
-Every request the browser makes is put through ``netgate`` before it may
+Every request the context routes see is put through ``netgate`` before it may
 proceed, and a refusal is recorded so a caller can be told which destination was
-blocked and why.
+blocked and why. The browser is launched with a host-resolver rule that makes
+its own network stack resolve no host, IP literals included, so a WebSocket
+opened from a worker and a SharedWorker's requests, which the routes never see,
+fail without connecting anywhere. Routed requests are fetched by the playwright
+driver, not by the browser, so they are unaffected.
 
 A session keeps exactly one page open. A new window that a click opened becomes
 the page every call drives and the live view shows, and the page before it is
@@ -55,6 +59,10 @@ _CLICKED_WINDOW_TTL = 30.0
 #: Windows opened by a click that are remembered while they load.
 _CLICKED_WINDOW_CAP = 32
 
+#: Seconds the address of any window a page opened is remembered, to name a
+#: window that is only reported once its load has failed.
+_OPENED_WINDOW_TTL = 120.0
+
 #: Milliseconds allowed for attaching a DevTools session to a page, for the
 #: window watch and for the screencast.
 _PAGE_SETUP_MS = 10000
@@ -62,6 +70,11 @@ _PAGE_SETUP_MS = 10000
 #: Milliseconds a blank window a click opened is given to start loading a URL
 #: before it is shown as it is.
 _BLANK_WINDOW_WAIT_MS = 5000
+
+#: Chromium switches every launch carries. The rule resolves every host,
+#: including IP literals and localhost, to not-found inside the browser.
+#: See test_a_worker_websocket_never_connects.
+_LAUNCH_ARGS = ("--host-resolver-rules=MAP * ~NOTFOUND",)
 
 
 class BrowserUnavailableError(RuntimeError):
@@ -153,6 +166,7 @@ class BrowserSession:
         self._page_lock = asyncio.Lock()
         #: (url, expiry) for each window a click opened that has not yet loaded.
         self._clicked_windows: list = []
+        self._opened_windows: list = []
         #: time.monotonic() of the last click or key press sent to the page.
         self._last_input = float("-inf")
         #: Clicks and key presses currently being sent to the page.
@@ -257,7 +271,8 @@ class BrowserSession:
     async def _launch_bundled(self):
         """Launch the Chromium build localm downloads, in a fresh profile."""
         try:
-            browser = await self._pw.chromium.launch(headless=self.headless)
+            browser = await self._pw.chromium.launch(
+                headless=self.headless, args=list(_LAUNCH_ARGS))
         except Exception as exc:
             logger.debug("bundled browser launch failed: %s", exc)
             provision.note_missing_executable(exc)
@@ -279,7 +294,8 @@ class BrowserSession:
         for candidate in candidates:
             try:
                 browser = await self._pw.chromium.launch(
-                    headless=self.headless, **candidate.launch_options())
+                    headless=self.headless, args=list(_LAUNCH_ARGS),
+                    **candidate.launch_options())
             except Exception as exc:
                 logger.debug("system browser %s launch failed: %s",
                              candidate.name, exc)
@@ -299,10 +315,13 @@ class BrowserSession:
         ``_cdp`` is set only once the screencast has started; an attach that
         fails or is cancelled detaches its DevTools session and leaves ``_cdp``
         None."""
+        page = self._page
+        if page is None:
+            return
         attached = []
 
         async def attach():
-            cdp = await self._ctx.new_cdp_session(self._page)
+            cdp = await self._ctx.new_cdp_session(page)
             attached.append(cdp)
             await cdp.send("Page.enable")
             cdp.on("Page.screencastFrame",
@@ -414,6 +433,9 @@ class BrowserSession:
         one within _INPUT_ACTIVATION seconds. See
         test_a_gesture_flag_without_recent_input_is_not_a_click."""
         now = time.monotonic()
+        opened = [(u, t) for (u, t) in self._opened_windows if t > now]
+        opened.append((str(params.get("url") or ""), now + _OPENED_WINDOW_TTL))
+        self._opened_windows = opened[-_CLICKED_WINDOW_CAP:]
         if not params.get("userGesture"):
             return
         if not self._inputs_in_flight and now - self._last_input > _INPUT_ACTIVATION:
@@ -432,6 +454,23 @@ class BrowserSession:
                 return True
         return False
 
+    def _window_name(self, shown: str) -> str:
+        """The address to record for a window the browser reports as *shown*.
+
+        A window whose load failed is reported as a chrome-error page, and one
+        still blank has no address yet; both are named by the oldest remembered
+        window address the page asked for. Any other URL is its own name."""
+        now = time.monotonic()
+        live = [(u, t) for (u, t) in self._opened_windows if t > now]
+        self._opened_windows = live
+        for i, (opened, _expiry) in enumerate(live):
+            if opened == shown:
+                del live[i]
+                return shown
+        if (shown.startswith("chrome-error:") or shown == "about:blank") and live:
+            return live.pop(0)[0] or shown
+        return shown
+
     async def _on_new_page(self, page) -> None:
         """Show a loaded window that a click opened, in place of the page before
         it. Close any other new window and record it as refused.
@@ -446,10 +485,12 @@ class BrowserSession:
                     return
                 url = page.url
                 if url.startswith("chrome-error:"):
-                    self._refuse(url, "a new window the page opened did not "
-                                      "load, so it was closed", kind="window")
+                    self._refuse(self._window_name(url),
+                                 "a new window the page opened did not "
+                                 "load, so it was closed", kind="window")
                     await self._close_quietly(page)
                 elif self._take_clicked_window(url):
+                    self._window_name(url)
                     if url == "about:blank":
                         await self._await_navigation(page)
                         if page.is_closed():
@@ -462,8 +503,9 @@ class BrowserSession:
                     self._note("showing the new window %s in place of %s, "
                                "which was closed" % (page.url, previous_url))
                 else:
-                    self._refuse(url, "the page opened a new window without a "
-                                      "click, so it was closed", kind="window")
+                    self._refuse(self._window_name(url),
+                                 "the page opened a new window without a "
+                                 "click, so it was closed", kind="window")
                     await self._close_quietly(page)
         except Exception as exc:                     # noqa: BLE001
             logger.warning("browser %s could not handle a new window: %s",

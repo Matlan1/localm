@@ -656,6 +656,13 @@ def _check_voice_decode() -> None:
     if state == "ok":
         console.print(f"  {_OK_SYM}  voice: recordings decode ({escape(detail)})")
         return
+    if state == "timeout":
+        console.print(f"  {_WARN_SYM}  voice: could not tell whether recordings decode: "
+                      f"{escape(detail)}")
+        console.print("       [dim]The first run after an install can be slow. Run "
+                      "[bold]localm doctor[/bold] again; reinstall the voice extra only "
+                      "if it reports a failure.[/dim]")
+        return
     console.print(f"  {_WARN_SYM}  voice: decoding a recording fails: {escape(detail)}")
     fix = escape('pip install --upgrade --force-reinstall "localm[voice]"')
     console.print("       [dim]Speech-to-text will not work until this is fixed. "

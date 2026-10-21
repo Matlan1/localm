@@ -281,11 +281,13 @@ async def create_transcription(request: Request):
     audio_name = await loop.run_in_executor(
         get_plugin_executor(), resolve_engine, params.model)
     if audio_name is not None and params.response_format not in audio_model.SUPPORTED_FORMATS:
+        way_out = ("send model 'whisper-1'" if _whisper_installed()
+                   else "install faster-whisper (pip install \"localm[voice]\") "
+                        "and send model 'whisper-1'")
         raise _bad_request(
             f"response_format '{params.response_format}' needs timestamps, which "
             f"the audio model '{audio_name}' does not produce. Use 'json' or "
-            "'text', or install faster-whisper (pip install \"localm[voice]\") "
-            "and send model 'whisper-1'.")
+            f"'text', or {way_out}.")
 
     uploads = form.files.get("file") or []
     if not uploads:

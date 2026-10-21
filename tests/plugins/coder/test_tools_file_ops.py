@@ -32,8 +32,8 @@ class TestReadFile:
         f.write_text("x = 1\ny = 2\n", encoding="utf-8")
         r = tool_read_file(tmp_path, "code.py")
         assert r.ok
-        # "x = 1\ny = 2\n" → count("\n")+1 = 3 (trailing newline counts)
-        assert "<lines>3</lines>" in r.output
+        # "x = 1\ny = 2\n" is two lines: the final newline ends the second
+        assert "<lines>2</lines>" in r.output
         assert "code.py" in r.output
 
     def test_file_not_found_returns_error(self, tmp_path):
@@ -213,8 +213,9 @@ class TestEditFile:
         f = tmp_path / "code.py"
         f.write_text("def foo(): pass\n")
         r = tool_edit_file(tmp_path, "code.py", old="def foo(): pass", new="def foo(")
-        assert r.ok  # write still succeeds
+        assert not r.ok
         assert "syntax" in r.output.lower()
+        assert f.read_text() == "def foo(): pass\n"
 
 
 class TestEditFileWhitespaceTolerant:

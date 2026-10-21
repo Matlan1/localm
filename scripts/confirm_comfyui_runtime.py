@@ -221,6 +221,30 @@ def _requirements_changed(root: Path, old_commit: str, new_commit: str) -> bool 
     return r.returncode == 1
 
 
+# Substrings of pip, uv, urllib3 and git output that mean a download or connection
+# failed, not that the candidate is bad.
+_NETWORK_FAILURE_MARKERS = (
+    "ReadTimeoutError", "ConnectTimeoutError", "Read timed out", "timed out",
+    "NewConnectionError", "Max retries exceeded", "ConnectionResetError",
+    "Connection reset", "RemoteDisconnected", "IncompleteRead", "ProtocolError",
+    "getaddrinfo failed", "Temporary failure in name resolution", "Name or service not known",
+    "Could not resolve host", "error sending request", "Failed to fetch",
+    "Failed to download", "dns error", "Network is unreachable",
+)
+
+
+def _provision_failure_verdict(status: str, message: str) -> str:
+    """The verdict for a failed ``provision_fresh``: INCONCLUSIVE when the install
+    location already existed or *message* shows a network failure (see
+    ``_NETWORK_FAILURE_MARKERS``), else FAIL."""
+    if status == "exists":
+        return INCONCLUSIVE
+    text = message or ""
+    if any(marker in text for marker in _NETWORK_FAILURE_MARKERS):
+        return INCONCLUSIVE
+    return FAIL
+
+
 def run_provision_phase(tag: str, commit: str, workdir: Path, receipt_path: Path,
                         *, require_gpu: bool) -> int:
     _prepare_scratch_env(workdir)
@@ -257,7 +281,7 @@ def run_provision_phase(tag: str, commit: str, workdir: Path, receipt_path: Path
     print(f"provisioning ComfyUI {tag} ({commit[:12]}) into {workdir} ...", flush=True)
     result = provision_fresh(comfyui_commit=commit, torch_spec=spec, on_progress=_log)
     if not result.ok:
-        verdict = INCONCLUSIVE if result.status == "exists" else FAIL
+        verdict = _provision_failure_verdict(result.status, result.message)
         _set_check(receipt, "provision", verdict, result.message)
         _save_receipt(receipt_path, receipt)
         print(f"{verdict}: {result.message}")
@@ -359,6 +383,10 @@ def _port_answers(port: int) -> bool:
         return False
 
 
+# Seconds the scratch venv's torch probe (a first import of its torch) may run.
+TORCH_PROBE_TIMEOUT_S = 300
+
+
 def _bare_torch_probe(venv_python: Path) -> dict:
     """Ask the SCRATCH VENV's own interpreter (never this process's) what
     torch it has and what device it sees - independent of whatever ComfyUI
@@ -381,7 +409,7 @@ def _bare_torch_probe(venv_python: Path) -> dict:
     )
     try:
         r = subprocess.run([str(venv_python), "-c", code],
-                           capture_output=True, text=True, timeout=60)
+                           capture_output=True, text=True, timeout=TORCH_PROBE_TIMEOUT_S)
         return json.loads(r.stdout.strip().splitlines()[-1])
     except Exception as e:
         return {"error": str(e)}

@@ -33,8 +33,12 @@ class _FakeAgent:
     def __init__(self):
         self.run_task_calls: list = []
         self.continue_calls: list = []
+        self.typed: list = []
 
-    def run_task(self, task):
+    def _note_typed_request(self, text):
+        self.typed.append(text)
+
+    def run_task(self, task, record_request=True):
         self.run_task_calls.append(task)
         return "did the task"
 

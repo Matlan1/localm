@@ -750,3 +750,69 @@ def test_a_reexport_module_counts_as_importing_what_its_package_imports(
         "imports localm.rag.store (1 hop(s) from a change)"]
     assert "tests/test_store_caller.py" not in at_one
     assert "tests/test_none.py" not in at_one
+
+
+# --------------------------------------------------------------------------- #
+#  Tests that read a whole source tree                                        #
+# --------------------------------------------------------------------------- #
+
+_SCANNER_BODY = "def test_it():\n    assert True\n"
+_SCANNER_FILES = {
+    "tests/test_check_pins.py": _SCANNER_BODY,
+    "tests/test_native_fault_debug_log_hint.py": _SCANNER_BODY,
+    "tests/test_debug_scrub.py": _SCANNER_BODY,
+    "tests/test_ci_runner_files.py": _SCANNER_BODY,
+}
+
+
+@pytest.fixture
+def scanner_repo(repo):
+    mod, root = repo
+    for rel, src in _SCANNER_FILES.items():
+        (root / rel).write_text(src, encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "scanners")
+    return mod, root
+
+
+def test_a_new_localm_module_selects_the_tests_that_read_every_localm_file(scanner_repo):
+    mod, root = scanner_repo
+    (root / "localm" / "x").mkdir()
+    (root / "localm" / "x" / "y.py").write_text("PIN = 1\n", encoding="utf-8")
+    selected = _select(mod, ["localm/x/y.py"])
+    assert selected["tests/test_check_pins.py"] == [
+        "greps every tracked localm/*.py for pin-shaped constants under localm/: "
+        "localm/x/y.py changed"]
+    assert "tests/test_native_fault_debug_log_hint.py" not in selected
+    assert "tests/test_debug_scrub.py" not in selected
+    assert "tests/test_ci_runner_files.py" not in selected
+
+
+def test_a_scanner_is_selected_by_the_folder_it_reads_and_by_nothing_else(scanner_repo):
+    mod, _ = scanner_repo
+    inference = _select(mod, ["localm/inference/z.py"])
+    assert "tests/test_native_fault_debug_log_hint.py" in inference
+    assert "tests/test_check_pins.py" in inference
+    assert "tests/test_native_fault_debug_log_hint.py" not in _select(mod, ["localm/b.py"])
+    assert "tests/test_debug_scrub.py" in _select(mod, ["tests/test_new_one.py"])
+    assert "tests/test_ci_runner_files.py" in _select(mod, ["scripts/tool.py"])
+    assert "tests/test_check_pins.py" not in _select(mod, ["localm/static/index.html"])
+
+
+def test_a_scanner_missing_from_the_checkout_is_not_invented(repo):
+    mod, _ = repo
+    assert set(_select(mod, ["localm/x/y.py"])).isdisjoint(mod._TREE_SCANNERS)
+
+
+def test_real_tree_a_new_localm_module_selects_the_pin_scan_and_stays_targeted():
+    mod = _load()
+    graph = mod.Graph()
+    selected = mod.select(["localm/media/native_workflows.py", "localm/media/comfy_import.py"], graph)
+    assert "tests/test_check_pins.py" in selected
+    assert len(selected) <= 0.25 * len(graph.test_files)
+
+
+def test_real_tree_every_declared_scanner_is_a_test_file():
+    mod = _load()
+    graph = mod.Graph()
+    assert sorted(set(mod._TREE_SCANNERS) - set(graph.test_files)) == []

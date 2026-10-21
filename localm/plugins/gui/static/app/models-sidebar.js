@@ -16,11 +16,18 @@ export const sidebarUnloadBtn = $("sidebar-unload-btn");
 // this so it does not clobber one.
 let _statusBusy = false;
 
+// True while the busy state on the pill was written by refreshModels() itself
+// (the server reported a load in flight that this page did not start).
+let _statusFromPoll = false;
+let _loadingPollTimer = null;
+const LOADING_POLL_MS = 2000;
+
 // State renders as a .job-state pill; busy maps to st-running.
 const STATUS_STATE_CLASS = { ok: "st-ok", busy: "st-running", err: "st-error" };
 
 export function setStatus(state, text) {
   _statusBusy = state === "busy";
+  _statusFromPoll = false;
   $("status-text").className = "job-state " + (STATUS_STATE_CLASS[state] || "");
   $("status-text").textContent = text;
   // The pill is hidden for "ok" alone: the dropdown above already renders the
@@ -888,6 +895,20 @@ export async function refreshModels() {
     // "no model" only when nothing will serve the next message either - a
     // resumable model reloads on it, so reporting "no model" would contradict
     // both the dropdown above and what the server actually does.
+    const polledLoading = !peerRoute && typeof data.loading === "string" ? data.loading : "";
+    if (polledLoading && !_statusBusy) {
+      setStatus("busy", t("sidebar.status.loading", { model: polledLoading }));
+      _statusFromPoll = true;
+    } else if (!polledLoading && _statusFromPoll) {
+      _statusFromPoll = false;
+      _statusBusy = false;
+    }
+    if (polledLoading && _loadingPollTimer === null) {
+      _loadingPollTimer = setTimeout(() => {
+        _loadingPollTimer = null;
+        refreshModels();
+      }, LOADING_POLL_MS);
+    }
     if (!_statusBusy) {
       if (peerRoute) {
         setStatus("ok", t("sidebar.peerRoute.routedStatus", {
@@ -1177,6 +1198,9 @@ export function toastLoadResult(res, model) {
     }
     if (res.moe_cpu_layers > 0) {
       parts.push(`experts of ${res.moe_cpu_layers} layers in system RAM`);
+      if (res.moe_ram_read_bytes > 0) {
+        parts.push(`about ${(res.moe_ram_read_bytes / 1024 ** 3).toFixed(2)} GB read from RAM per token`);
+      }
     }
     const slow = `${parts.join(", ") || "partly on CPU"} - slower`;
     const extra = fromDisk ? `; ${diskNote}` : (res.mmap_ram_short && res.mmap_note ? `; ${res.mmap_note}` : "");

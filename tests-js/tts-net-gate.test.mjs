@@ -17,7 +17,7 @@ import { dirname, join } from "node:path";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const UTIL = join(HERE, "..", "localm", "plugins", "builtin", "tts", "static", "tts-util.js");
 const TTS_JS = join(HERE, "..", "localm", "plugins", "builtin", "tts", "static", "tts.js");
-const { planModelFetch, NetGateError, shouldWarmPassively } = await import(pathToFileURL(UTIL).href);
+const { planModelFetch, planVoiceFetch, NetGateError, shouldWarmPassively } = await import(pathToFileURL(UTIL).href);
 
 // ---- planModelFetch: pure decision ------------------------------------- //
 
@@ -32,9 +32,9 @@ test("planModelFetch: net_mode=allow proceeds uncached with no prompt", () => {
   assert.equal(planModelFetch("allow", false), "allow");
 });
 
-test("planModelFetch: net_mode=off confirms by default so user is asked", () => {
-  assert.equal(planModelFetch("off", false), "confirm");
-  assert.equal(planModelFetch("off", false, false), "confirm");
+test("planModelFetch: net_mode=off refuses an uncached model by default", () => {
+  assert.equal(planModelFetch("off", false), "refuse");
+  assert.equal(planModelFetch("off", false, false), "refuse");
 });
 
 test("planModelFetch: net_mode=off proceeds when allowDownloadsWhenOff is set", () => {
@@ -60,6 +60,15 @@ test("NetGateError is a real Error subclass carrying its own name", () => {
   assert.ok(e instanceof Error);
   assert.equal(e.name, "NetGateError");
   assert.equal(e.message, "refused");
+});
+
+test("planVoiceFetch: net_mode=off refuses an uncached voice file unless downloads are allowed while off", () => {
+  assert.equal(planVoiceFetch("off", false), "refuse");
+  assert.equal(planVoiceFetch("off", false, false), "refuse");
+  assert.equal(planVoiceFetch("off", false, true), "allow");
+  assert.equal(planVoiceFetch("off", true), "allow");
+  assert.equal(planVoiceFetch("ask", false), "allow");
+  assert.equal(planVoiceFetch("allow", false), "allow");
 });
 
 // ---- shouldWarmPassively: pure decision --------------------------------- //
@@ -214,22 +223,24 @@ function installFetchEnv(win, { netMode, allowDownloadsWhenOff = false }) {
   global.fetch = win.fetch;
 }
 
-test("load(): net_mode=off offers the dialog; declining leaves provider registered", async () => {
+test("load(): net_mode=off refuses without a dialog or any model fetch; provider stays registered", async () => {
   const win = installModalShell();
   installFetchEnv(win, { netMode: "off" });
+  const fetched = [];
+  const baseFetch = win.fetch;
+  win.fetch = async (url) => { fetched.push(String(url)); return baseFetch(url); };
+  global.fetch = win.fetch;
   const { ctx, calls } = makeCtx();
   const { register } = await importFresh(TTS_JS);
   await register(ctx);
 
   const provider = calls.registerTTS[0];
   assert.ok(provider, "register() must call ctx.registerTTS with a provider");
-  const readyPromise = provider.ready();
-  await new Promise((r) => setTimeout(r, 0));
-  assert.equal(win.$("modal-title").textContent, "Download voice model?",
-    "net_mode=off must offer the one-time confirmation before fetching");
-
-  clickButtonNamed(win, "Not now");
-  await assert.rejects(readyPromise);
+  await assert.rejects(provider.ready());
+  assert.equal(win.$("modal").style.display, "none",
+    "net_mode=off must not offer a download confirmation");
+  assert.deepEqual(fetched.filter((u) => /huggingface\.co/.test(u)), [],
+    "net_mode=off must never request the model from huggingface.co");
 
   const errToast = calls.toasts.find((t) => t.isError);
   assert.ok(errToast, "a toast must explain the refusal");
@@ -415,4 +426,75 @@ test("speak(): a NON-superseded failed load does reach the speechSynthesis fallb
 
   assert.equal(synthCalls.length, 1,
     "an utterance that was never superseded must still get the browser-voice fallback");
+});
+
+// ---- speak(): the per-voice file fetch is gated too --------------------- //
+
+const MODEL_ID = "onnx-community/Kokoro-82M-v1.0-ONNX";
+const FAKE_LIBRARY = "data:text/javascript," + encodeURIComponent(
+  "export const KokoroTTS = { from_pretrained: async () => ({" +
+  " stream: (source, opts) => { (globalThis.__voiceStreams ||= []).push(opts.voice);" +
+  " return (async function* () {})(); } }) };");
+
+function installCaches(stores) {
+  global.caches = {
+    open: async (name) => ({
+      keys: async () => (stores[name] || []).map((url) => ({ url })),
+    }),
+  };
+}
+
+async function speakWithCachedModel({ netMode, allowDownloadsWhenOff = false, voiceFiles = [] }) {
+  const win = installModalShell();
+  const synthCalls = installSpeechSynthesis(win);
+  globalThis.__voiceStreams = [];
+  installCaches({
+    "transformers-cache": [`https://huggingface.co/${MODEL_ID}/resolve/main/onnx/model.onnx`],
+    "kokoro-voices": voiceFiles,
+  });
+  const hfRequests = [];
+  win.fetch = async (url) => {
+    const u = String(url);
+    if (u.includes("/api/tts/config")) {
+      return { ok: true, status: 200, json: async () => ({
+        net_mode: netMode, net_allow_model_downloads: allowDownloadsWhenOff,
+        library: FAKE_LIBRARY, voice: "af_heart" }) };
+    }
+    if (/huggingface\.co/.test(u)) hfRequests.push(u);
+    return { ok: false, status: 404, json: async () => ({}) };
+  };
+  global.fetch = win.fetch;
+  const { ctx, calls } = makeCtx();
+  const { register } = await importFresh(TTS_JS);
+  await register(ctx);
+  await calls.registerTTS[0].speak("hello there");
+  const streams = globalThis.__voiceStreams.slice();
+  delete global.caches;
+  delete globalThis.__voiceStreams;
+  return { calls, synthCalls, streams, hfRequests };
+}
+
+test("speak(): net_mode=off with the model cached refuses a voice file that is not cached", async () => {
+  const r = await speakWithCachedModel({ netMode: "off" });
+  assert.deepEqual(r.streams, [], "the voice must not be synthesised (that is what fetches its file)");
+  assert.deepEqual(r.hfRequests, []);
+  const errToast = r.calls.toasts.find((t) => t.isError && /net_mode=off/.test(t.msg));
+  assert.ok(errToast, "a toast must explain the refusal");
+  assert.equal(r.synthCalls.length, 1, "the browser voice speaks instead");
+});
+
+test("speak(): net_mode=off synthesises a voice whose file is already cached", async () => {
+  const r = await speakWithCachedModel({ netMode: "off", voiceFiles: [
+    "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/voices/af_heart.bin"] });
+  assert.deepEqual(r.streams, ["af_heart"]);
+});
+
+test("speak(): net_mode=off with downloads allowed while off synthesises an uncached voice", async () => {
+  const r = await speakWithCachedModel({ netMode: "off", allowDownloadsWhenOff: true });
+  assert.deepEqual(r.streams, ["af_heart"]);
+});
+
+test("speak(): net_mode=ask with the model cached synthesises without a second prompt", async () => {
+  const r = await speakWithCachedModel({ netMode: "ask" });
+  assert.deepEqual(r.streams, ["af_heart"]);
 });

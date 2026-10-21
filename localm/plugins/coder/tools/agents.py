@@ -648,4 +648,4 @@ def tool_check_agent_job(cwd: Path, job_id: str) -> ToolResult:
         compose("sub-agent '", untrusted_span(st["label"]),
                 f"' ({job_id}) {verdict} {result.get('turns', 0)} turn(s):\n\n",
                 body, warn),
-        summary=f"{job_id}: {state}" if child_ok else f"{job_id}: {state} (failed)")
+        summary=f"{job_id}: {state}")

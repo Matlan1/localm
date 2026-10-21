@@ -101,6 +101,7 @@ class TestMeterBar:
             bar.set_postfix_str("1 MB/s", refresh=False)
             bar.set_transfer_postfix_str("1 MB/s", refresh=False)
             bar.set_description("done")
+            bar.set_description_str("Download complete")
             bar.refresh()
         bar.close()
 
@@ -120,6 +121,22 @@ class _Blob(BaseHTTPRequestHandler):
 
 class TestAgainstTheRealHubClient:
     """The contract with the installed huggingface_hub, not a stand-in for it."""
+
+    def test_the_bar_has_every_tqdm_method_the_hub_client_calls(self):
+        import pathlib
+        import re
+
+        import huggingface_hub
+        from tqdm import tqdm
+        root = pathlib.Path(huggingface_hub.__file__).parent
+        source = "\n".join(p.read_text(encoding="utf-8", errors="replace") for p in root.rglob("*.py"))
+        tqdm_methods = {name for name, value in vars(tqdm).items()
+                        if callable(value) and not name.startswith("_")}
+        called = {name for name in tqdm_methods
+                  if re.search(rf"\w*(?:bar|progress)\.{name}\(", source)}
+        assert "set_description_str" in called and "update" in called
+        missing = sorted(name for name in called if not callable(getattr(tr.MeterBar, name, None)))
+        assert missing == []
 
     def test_http_get_feeds_the_meter_through_the_bar(self, tmp_path):
         from huggingface_hub.file_download import http_get

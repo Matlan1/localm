@@ -796,6 +796,7 @@ def half_installed(monkeypatch, tmp_path):
     shell = tmp_path / "shell" / "chrome-headless-shell"
     monkeypatch.setattr(plug, "_playwright_installed", lambda: True)
     monkeypatch.setattr(provision, "chromium_executable_path", lambda: full)
+    monkeypatch.setattr(provision, "launch_build_locations", lambda: None)
     monkeypatch.setattr(discovery, "find_system_browsers", lambda: [])
     monkeypatch.setenv("LOCALM_NET_MODE", "ask")
     with provision._missing_lock:

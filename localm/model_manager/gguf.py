@@ -23,6 +23,7 @@ from rich.progress import Progress
 from rich.progress import TextColumn
 from rich.progress import TimeRemainingColumn
 from ..debuglog import logger
+from ..kv_cache import kv_bytes_for_type
 from ._shared import console
 from .unsupported import GGUF_IMATRIX_REFUSAL, gguf_file_refusal, gguf_header_refusal, gguf_version_supported
 
@@ -962,7 +963,16 @@ def _gguf_attending_layer_count(path: Path, n_layers: int) -> int:
 
     Keyed on attn_k/attn_v SPECIFICALLY, never on a bare "attn": a hybrid
     carries blk.<i>.attn_norm.weight on every layer whether it attends or not,
-    so matching the norm tensor would count the whole stack."""
+    so matching the norm tensor would count the whole stack.
+
+    For a split GGUF the tensor names of every part are read; 0 when a part is
+    missing or does not parse."""
+    if split_gguf_parts(Path(path).name):
+        parts = _gguf_all_parts_entries(path)
+        if parts is None:
+            return 0
+        names = [name for entries, _size, _start in parts for name, _off in entries]
+        return _attending_layers_in(names, n_layers)
     try:
         with open(path, "rb") as f:
             buf = f.read(_GGUF_TENSOR_PROBE_BYTES)
@@ -979,7 +989,7 @@ def _gguf_attending_layer_count(path: Path, n_layers: int) -> int:
             _key, off = _gguf_read_string(buf, off)
             (vtype,) = struct.unpack_from("<I", buf, off)
             off = _gguf_skip_value(buf, off + 4, vtype)
-        attending = set()
+        names = []
         for _ in range(tensor_count):
             name, off = _gguf_read_string(buf, off)
             (n_dims,) = struct.unpack_from("<I", buf, off)
@@ -987,26 +997,45 @@ def _gguf_attending_layer_count(path: Path, n_layers: int) -> int:
                 return 0
             # n_dims (u32) + dims (u64 each) + ggml type (u32) + offset (u64)
             off += 4 + 8 * n_dims + 4 + 8
-            if not name.startswith("blk."):
-                continue
-            if ".attn_k." not in name and ".attn_v." not in name:
-                continue
-            try:
-                attending.add(int(name.split(".")[1]))
-            except ValueError:
-                return 0        # an unexpected layout - refuse rather than guess
+            names.append(name)
     except (struct.error, IndexError, UnicodeDecodeError):
         # Ran past the bounded read, or a malformed layout. Unlike the metadata
         # walk this CANNOT answer from a partial result: a truncated tensor list
         # under-counts attending layers, which would UNDER-charge the KV cache
         # and let it overflow VRAM. Refusing is the only safe partial answer.
         return 0
+    return _attending_layers_in(names, n_layers)
+
+
+def _attending_layers_in(names, n_layers: int) -> int:
+    """How many distinct blocks among the tensor *names* carry
+    ``blk.<i>.attn_k`` or ``blk.<i>.attn_v``; 0 when a block index does not
+    parse, when none does, or when there are more than *n_layers*."""
+    attending = set()
+    for name in names:
+        if not name.startswith("blk."):
+            continue
+        if ".attn_k." not in name and ".attn_v." not in name:
+            continue
+        try:
+            attending.add(int(name.split(".")[1]))
+        except ValueError:
+            return 0        # an unexpected layout - refuse rather than guess
     # More attending layers than the stack has means the two disagree about what
     # they describe, so neither can be trusted.
     return len(attending) if 0 < len(attending) <= n_layers else 0
 
 
-def gguf_kv_bytes_per_token(path: Path) -> int:
+def gguf_kv_bytes_per_token(path: Path, kv_cache_type: Optional[str] = None) -> int:
+    """KV-cache bytes per token for *path* with the cache stored as
+    *kv_cache_type* (``localm.kv_cache.KV_CACHE_TYPES``; None means f16), read
+    from the file's GGUF header. 0 under the same conditions as
+    :func:`_gguf_f16_kv_bytes_per_token`. Raises ValueError for a
+    *kv_cache_type* that is not a known type."""
+    return kv_bytes_for_type(_gguf_f16_kv_bytes_per_token(path), kv_cache_type)
+
+
+def _gguf_f16_kv_bytes_per_token(path: Path) -> int:
     """f16 KV-cache bytes per token, computed from *path*'s own GGUF header.
 
     Same formula as ``LlamaCpp._read_kv_bytes_per_token``, but read from the
@@ -1229,7 +1258,17 @@ def gguf_nextn_predict_layers(path: Path) -> "tuple[str, int]":
     return architecture, 0
 
 
-def gguf_mtp_draft_kv_bytes_per_token(path: Path, nextn_layers: int) -> int:
+def gguf_mtp_draft_kv_bytes_per_token(path: Path, nextn_layers: int,
+                                      kv_cache_type: Optional[str] = None) -> int:
+    """MTP draft-context KV bytes per token for *nextn_layers* layers of *path*,
+    with the cache stored as *kv_cache_type* (None means f16). 0 under the same
+    conditions as :func:`_gguf_f16_mtp_draft_kv_bytes_per_token`. Raises
+    ValueError for a *kv_cache_type* that is not a known type."""
+    return kv_bytes_for_type(
+        _gguf_f16_mtp_draft_kv_bytes_per_token(path, nextn_layers), kv_cache_type)
+
+
+def _gguf_f16_mtp_draft_kv_bytes_per_token(path: Path, nextn_layers: int) -> int:
     """f16 KV-cache bytes per token for *nextn_layers* MTP/draft layers only -
     the rate llama.py's separate, smaller MTP draft context (its own KV cache,
     not the main model's) actually pays per token - read from *path*'s own
@@ -1476,6 +1515,10 @@ def _gguf_tensor_offset_entries(
     scheme, with no per-type block-size table, as long as tensors are laid
     out contiguously in offset order, which every llama.cpp-produced GGUF is.
 
+    A file that declares no tensors (the metadata-only first part of a split
+    GGUF written with ``--no-tensor-first-split``) parses to an empty
+    *entries* list.
+
     Returns ``None`` - never raises - on any parse failure: not a GGUF, GGUF
     v1, a truncated/malformed KV or tensor-info section, an implausible
     dims/string length, or a hostile KV array whose declared element count
@@ -1512,8 +1555,6 @@ def _gguf_tensor_offset_entries(
                      path.name, type(exc).__name__)
         return None
 
-    if not entries:
-        return None
     remainder = data_start % _GGUF_DEFAULT_ALIGNMENT
     if remainder:
         # Only the LAST tensor's size below depends on this: every other
@@ -1524,6 +1565,25 @@ def _gguf_tensor_offset_entries(
         data_start += _GGUF_DEFAULT_ALIGNMENT - remainder
     entries.sort(key=lambda e: e[1])
     return entries, file_size, data_start
+
+
+def _gguf_all_parts_entries(
+        path: Path) -> "Optional[list[tuple[list[tuple[str, int]], int, int]]]":
+    """``_gguf_tensor_offset_entries`` of every part of the model at *path*: one
+    item for a single-file GGUF, one per part, in part order, for a split GGUF
+    (any part's path may be given). ``None`` - never raises - when a part is
+    missing or does not parse."""
+    parts = split_gguf_parts(Path(path).name)
+    paths = [Path(path).parent / p for p in parts] if parts else [Path(path)]
+    out = []
+    for part in paths:
+        if not part.is_file():
+            return None
+        parsed = _gguf_tensor_offset_entries(part)
+        if parsed is None:
+            return None
+        out.append(parsed)
+    return out
 
 
 def _gguf_read_string_stream(f) -> str:
@@ -1611,16 +1671,24 @@ def gguf_moe_pinned_expert_bytes(
     *_parsed*, if given, is used instead of reading *path* again - an
     already-computed ``_gguf_tensor_offset_entries(path)`` result, or its
     ``None`` failure. Left unset (the default), *path* is parsed here exactly
-    as before.
+    as before. For a split GGUF every part is read (``gguf_block_bytes``) and
+    *_parsed* is not used.
 
     Returns ``None`` - never raises - when the file cannot be parsed as a
-    GGUF, or *n_pinned_layers* is <= 0; the caller then falls back to charging
+    GGUF, a part of a split GGUF is missing or does not parse, or
+    *n_pinned_layers* is <= 0; the caller then falls back to charging
     the whole file. Returns ``0`` (a real answer, not a failure) when parsing
     succeeds but nothing in the pinned layer range matches - e.g. a dense
     model, where ``_apply_cpu_moe`` already treats ``n_cpu_moe`` as a no-op via
     its own ``gguf_expert_count() == 0`` guard."""
     if n_pinned_layers <= 0:
         return None
+    if split_gguf_parts(Path(path).name):
+        blocks = gguf_block_bytes(Path(path))
+        if blocks is None:
+            return None
+        return sum(experts for layer, (_total, experts) in blocks.items()
+                   if layer < n_pinned_layers)
     parsed = _gguf_tensor_offset_entries(path) if _parsed is _UNSET else _parsed
     if parsed is None:
         return None
@@ -1783,7 +1851,9 @@ def gguf_recurrent_state_bytes(path: Path, *, _parsed: object = _UNSET) -> int:
     means 'no signal' and the caller charges nothing for it.
 
     *_parsed*, if given, is a precomputed ``_gguf_tensor_offset_entries(path)``
-    result (or its ``None`` failure), used instead of parsing *path* again."""
+    result (or its ``None`` failure), used instead of parsing *path* again for
+    a single-file GGUF. A split GGUF reads the tensor names of every part, and
+    answers 0 when a part is missing or does not parse."""
     try:
         with open(path, "rb") as f:
             buf = f.read(_GGUF_META_PROBE_BYTES)
@@ -1833,10 +1903,17 @@ def gguf_recurrent_state_bytes(path: Path, *, _parsed: object = _UNSET) -> int:
     if not (conv_kernel and state_size and inner_size):
         return 0
 
-    parsed = _gguf_tensor_offset_entries(path) if _parsed is _UNSET else _parsed
-    if parsed is None:
+    if split_gguf_parts(Path(path).name):
+        parts = _gguf_all_parts_entries(path)
+    else:
+        parsed = cast(
+            "Optional[tuple[list[tuple[str, int]], int, int]]",
+            _gguf_tensor_offset_entries(path) if _parsed is _UNSET else _parsed)
+        parts = None if parsed is None else [parsed]
+    if parts is None:
         return 0
-    recurrent_layers = {int(m.group(1)) for name, _off in parsed[0]
+    recurrent_layers = {int(m.group(1)) for entries, _size, _start in parts
+                        for name, _off in entries
                         if (m := _RECURRENT_LAYER_TENSOR_RE.match(name))}
     if not recurrent_layers:
         return 0
@@ -2259,13 +2336,13 @@ def gguf_classifier_head_tensors(path: Path) -> Optional[frozenset]:
     present in the GGUF at *path*, as a possibly empty frozenset.
 
     None - "could not tell" - when the tensor list cannot be read in full: an
-    unreadable or malformed header, or one part of a split GGUF (the head may sit
-    in another part). An empty frozenset is a confirmed answer: the complete
+    unreadable or malformed header, a header that lists no tensors, or one part
+    of a split GGUF (the head may sit in another part). An empty frozenset is a confirmed answer: the complete
     tensor list was read and holds no head."""
     if _SPLIT_GGUF_RE.match(Path(path).name):
         return None
     parsed = _gguf_tensor_offset_entries(Path(path))
-    if parsed is None:
+    if parsed is None or not parsed[0]:
         return None
     return frozenset(name for name, _offset in parsed[0]
                      if name in _GGUF_CLASSIFIER_HEAD_TENSORS)
@@ -2281,6 +2358,7 @@ MEDIA_KIND_TYPES = {
     "lora": "lora", "clip_l": "text-encoder", "clip_g": "text-encoder",
     "clip_h": "text-encoder", "t5xxl": "text-encoder", "umt5": "text-encoder",
     "byt5": "text-encoder", "clip_vision": "text-encoder",
+    "controlnet": "controlnet", "textual_inversion": "textual-inversion",
 }
 
 
@@ -2293,8 +2371,8 @@ def gguf_media_component_type(path: Path, meta: Optional[dict] = None) -> Option
     bare tensor names, such as a FLUX.1 transformer's ``double_blocks.``),
     ``text-encoder`` for a CLIP/T5 text encoder, ``vae`` for a VAE and ``lora``
     for an image-model LoRA. None when it declares an architecture, is one
-    part of a split GGUF, its tensors cannot be read, or they are none of
-    these (an LLM's tensors included).
+    part of a split GGUF, its tensors cannot be read or it lists none, or they
+    are none of these (an LLM's tensors included).
 
     *meta* is an already-computed ``_gguf_metadata_probe(path)`` result."""
     if meta is None:
@@ -2304,7 +2382,7 @@ def gguf_media_component_type(path: Path, meta: Optional[dict] = None) -> Option
     if _SPLIT_GGUF_RE.match(Path(path).name):
         return None
     parsed = _gguf_tensor_offset_entries(Path(path))
-    if parsed is None:
+    if parsed is None or not parsed[0]:
         return None
     if any(name.startswith(_GGUF_SD_TENSOR_PREFIXES) for name, _offset in parsed[0]):
         return "diffusion-unet"

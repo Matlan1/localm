@@ -134,6 +134,7 @@ def register(app: FastAPI, ctx) -> None:
         mgr = getattr(app.state, "plugin_manager", None)
         plugins, suggest = [], True
         if mgr is not None:
+            mgr.load_enabled_pending()
             state = mgr.api_state()
             suggest = bool(state.get("suggest_plugins", True))
             # Only surface plugins this key's scopes grant; renderNav still filters

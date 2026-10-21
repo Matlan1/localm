@@ -65,3 +65,57 @@ def test_quiet_stderr_restores_fd_2(capfd, debug_log):
     os.write(2, b"visible\n")
     err = capfd.readouterr().err
     assert "visible" in err and "hidden" not in err
+
+
+def _stub_sampler_chain(monkeypatch):
+    def _lazy_rejects(vocab, grammar_bytes, root, triggers):
+        return _native_rejects(vocab, grammar_bytes, root)
+
+    monkeypatch.setattr(llama_mod.api, "llama_sampler_chain_default_params",
+                        lambda: SimpleNamespace(no_perf=False), raising=False)
+    monkeypatch.setattr(llama_mod.api, "llama_sampler_chain_init",
+                        lambda params: object(), raising=False)
+    monkeypatch.setattr(llama_mod.api, "llama_sampler_free",
+                        lambda ptr: None, raising=False)
+    monkeypatch.setattr(llama_mod.api, "has_lazy_grammar", lambda: True,
+                        raising=False)
+    monkeypatch.setattr(llama_mod.api, "llama_sampler_init_grammar_lazy_patterns",
+                        _lazy_rejects, raising=False)
+
+
+def _build_inside_generation_scope(**kwargs):
+    ctx = llama_mod._stderr_ctx_for_generate(False)
+    with ctx():
+        with pytest.raises(InvalidGrammarError):
+            llama_mod._build_sampler(
+                vocab=None, grammar=f'root ::= "{_CANARY}" broken', **kwargs)
+
+
+def _persisted_text(debug_log) -> str:
+    return debug_log.read_text(errors="replace") if debug_log.exists() else ""
+
+
+_SAMPLER_KWARGS = pytest.mark.parametrize("kwargs", [
+    {},
+    {"grammar_lazy": True, "grammar_triggers": ["<tool>"]},
+], ids=["strict", "lazy"])
+
+
+@_SAMPLER_KWARGS
+def test_generation_time_grammar_parse_keeps_the_source_out_of_the_debug_log_and_ring(
+        debug_log, monkeypatch, capfd, kwargs):
+    monkeypatch.setattr(debuglog, "debug_content_enabled", lambda: False)
+    _stub_sampler_chain(monkeypatch)
+    _build_inside_generation_scope(**kwargs)
+    assert _CANARY not in _persisted_text(debug_log)
+    assert _CANARY not in "\n".join(debuglog.recent_activity())
+    assert _CANARY not in capfd.readouterr().err
+
+
+@_SAMPLER_KWARGS
+def test_generation_time_grammar_parse_reaches_the_debug_log_when_content_is_allowed(
+        debug_log, monkeypatch, kwargs):
+    monkeypatch.setattr(debuglog, "debug_content_enabled", lambda: True)
+    _stub_sampler_chain(monkeypatch)
+    _build_inside_generation_scope(**kwargs)
+    assert _CANARY in _persisted_text(debug_log)

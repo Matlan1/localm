@@ -260,13 +260,13 @@ def _report_one_crash_marker(d, marker, home, interactive: bool):
             tp.unlink(missing_ok=True)
         except Exception:
             pass
+        exit_record = _read_exit_record(d, marker)
         if not report:
             logger.info(
                 "bugreport: prior hard crash detected (%s); not reported: "
                 "privacy mode", marker.name)
             return None
         ctx = {"prior_run": info}
-        exit_record = _read_exit_record(d, marker)
         if exit_record:
             ctx["prior_exit"] = exit_record
         if trace:
@@ -342,6 +342,7 @@ def _report_one_stopping_record(d, record, home, interactive: bool):
             trace.unlink(missing_ok=True)
         except Exception:
             pass
+        _read_exit_record(d, record)
         fatal_fault = _fatal_fault_line(text)
         if not fatal_fault:
             return None

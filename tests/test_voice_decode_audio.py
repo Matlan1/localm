@@ -208,3 +208,37 @@ def test_the_self_test_is_absent_without_the_voice_extra(monkeypatch):
                         else real_find_spec(name, *a, **k))
     state, _detail = voice.decode_self_test()
     assert state == "absent"
+
+
+def test_a_slow_self_test_is_a_timeout_not_a_failure(monkeypatch):
+    import subprocess
+
+    def slow(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="x", timeout=60)
+
+    monkeypatch.setattr(subprocess, "run", slow)
+    state, detail = voice.decode_self_test(timeout=60)
+    assert state == "timeout"
+    assert "60s" in detail
+
+
+def test_doctor_does_not_tell_the_user_to_reinstall_after_a_slow_self_test(monkeypatch):
+    doctor = importlib.import_module("localm.cli.doctor")
+
+    monkeypatch.setattr(voice, "decode_self_test",
+                        lambda *a, **k: ("timeout", "decoding did not finish within 60s"))
+    with doctor.console.capture() as cap:
+        doctor._check_voice_decode()
+    out = cap.get()
+    assert "could not tell" in out
+    assert "force-reinstall" not in out
+
+
+def test_doctor_still_tells_the_user_to_reinstall_after_a_real_decode_failure(monkeypatch):
+    doctor = importlib.import_module("localm.cli.doctor")
+
+    monkeypatch.setattr(voice, "decode_self_test",
+                        lambda *a, **k: ("fail", "TypeError: removed"))
+    with doctor.console.capture() as cap:
+        doctor._check_voice_decode()
+    assert "force-reinstall" in cap.get()

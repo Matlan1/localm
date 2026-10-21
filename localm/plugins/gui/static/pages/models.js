@@ -46,7 +46,8 @@ export const GROUP_BY_TYPE_KEY = "localm.modelsGroupByType";
 // (keep in sync). Powers the per-row one-click set-type control, and gives the
 // group-by-type headings a stable order for a type the tab strip does not name.
 const MODEL_TYPE_OPTIONS =
-  ["llm", "embedding", "mmproj", "tts", "diffusion-unet", "text-encoder", "vae", "lora", "upscaler", "unknown"];
+  ["llm", "embedding", "mmproj", "tts", "diffusion-unet", "text-encoder", "vae", "lora", "upscaler",
+   "controlnet", "textual-inversion", "unknown"];
 
 // The type reported for a registry entry with no recorded model_type. The route
 // still sends `model_type: "llm"` for such an entry, plus
@@ -3028,6 +3029,8 @@ export const IMPORT_TYPE_LABELS = {
   vae: "models.importComfy.type.vae",
   lora: "models.importComfy.type.lora",
   upscaler: "models.importComfy.type.upscaler",
+  controlnet: "models.importComfy.type.controlnet",
+  "textual-inversion": "models.importComfy.type.textualInversion",
   unknown: "models.importComfy.type.unknown",
 };
 

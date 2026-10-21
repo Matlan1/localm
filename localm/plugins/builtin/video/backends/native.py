@@ -416,11 +416,11 @@ class _EventRelay:
     frames to *on_preview*. ``flush`` shows any held warning lines and must be
     called when the job ends."""
 
-    def __init__(self, say, on_preview=None):
+    def __init__(self, say, on_preview=None, cancel_check=None):
         self._say = say
         self._on_preview = on_preview
         self._phase = None
-        self._warnings = RecoveredWarnings(say)
+        self._warnings = RecoveredWarnings(say, cancel_check)
 
     def flush(self) -> None:
         self._warnings.flush()
@@ -446,8 +446,8 @@ class _EventRelay:
         self._phase = phase
 
 
-def _event_relay(say, on_preview=None) -> _EventRelay:
-    return _EventRelay(say, on_preview)
+def _event_relay(say, on_preview=None, cancel_check=None) -> _EventRelay:
+    return _EventRelay(say, on_preview, cancel_check)
 
 
 def generate(s: dict, prompt: str, out_path: Path, **kwargs) -> tuple[bool, str]:
@@ -541,7 +541,7 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
         say("Freeing VRAM: unloading the chat model...")
         if _localm_unload(self_url, instance_token) is None:
             say("Could not unload the chat model - the video model may run low on VRAM.")
-    relay = _event_relay(say, on_preview)
+    relay = _event_relay(say, on_preview, cancel_check)
     runner = shared.runner
     if seed is None or seed < 0:
         seed = secrets.randbelow(2 ** 31)

@@ -548,6 +548,11 @@ class SpeechSynthesizer:
         *should_stop* is polled between frames and raises
         :class:`SpeechCancelled` once it returns True.
 
+        A request with an explicit *seed* runs with the projector on the CPU
+        and puts it back on the GPU afterwards: the projector's GPU stages are
+        not bit-reproducible, so the same seed would otherwise give different
+        audio from run to run.
+
         Raises :class:`SpeechInputError`, ``PretokenizerUnsafeInputError``,
         :class:`SpeechCancelled`, :class:`SpeechBudgetExceeded` or
         :class:`SpeechStageFailed`. A projector GPU failure is retried once on
@@ -567,26 +572,56 @@ class SpeechSynthesizer:
             if len(reference) < 4 or len(reference) % 4:
                 raise SpeechInputError("The reference voice recording is empty.")
         budget = frame_budget(self.n_ctx, n_tokens, has_reference=reference is not None)
+        reproducible = seed is not None and self._mtmd.on_gpu
         if seed is None:
             seed = secrets.randbelow(_UINT32_MAX)
         seed = int(seed) & _UINT32_MAX
         if seed == _UINT32_MAX:
             seed = 0
         from .llama import _stderr_ctx_for_generate
+        if reproducible:
+            self._move_projector(gpu=False)
+        try:
+            with _stderr_ctx_for_generate(False)():
+                try:
+                    return self._run(text, lang, reference, seed, budget, on_progress,
+                                     should_stop)
+                except SpeechStageFailed:
+                    if not self._mtmd.on_gpu:
+                        raise
+                    if not self._retry_projector_on_cpu():
+                        raise SpeechUnavailable(
+                            "The speech model's projector failed on the GPU and could not "
+                            "be reopened on the CPU; the model is unloaded and loads again "
+                            "on the next request.") from None
+                    return self._run(text, lang, reference, seed, budget, on_progress,
+                                     should_stop)
+        finally:
+            if reproducible and self._helper is not None:
+                try:
+                    self._move_projector(gpu=True)
+                except SpeechUnavailable as e:
+                    logger.warning("speech: %s", e)
+
+    def _move_projector(self, *, gpu: bool) -> None:
+        """Rebuild the projector and the generation helper on the GPU or the
+        CPU. Raises :class:`SpeechUnavailable` (the synthesizer is then closed to
+        further requests) when the projector cannot be rebuilt at all. A GPU
+        rebuild that fails leaves the projector on the CPU."""
+        self._m.mtmd_helper_gen_audio_free(self._helper)
+        self._helper = None
+        self._last_gen_seed = None
+        from .llama import _stderr_ctx_for_generate
         with _stderr_ctx_for_generate(False)():
-            try:
-                return self._run(text, lang, reference, seed, budget, on_progress,
-                                 should_stop)
-            except SpeechStageFailed:
-                if not self._mtmd.on_gpu:
-                    raise
-                if not self._retry_projector_on_cpu():
-                    raise SpeechUnavailable(
-                        "The speech model's projector failed on the GPU and could not "
-                        "be reopened on the CPU; the model is unloaded and loads again "
-                        "on the next request.") from None
-                return self._run(text, lang, reference, seed, budget, on_progress,
-                                 should_stop)
+            moved = self._mtmd.switch_device(gpu=gpu)
+        if not self._mtmd._ctx:
+            raise SpeechUnavailable(
+                "The speech model's projector could not be reopened; the model is "
+                "unloaded and loads again on the next request.")
+        self._helper = self._new_helper()
+        if gpu and not moved:
+            logger.warning("speech: the projector could not return to the GPU; it stays "
+                           "on the CPU until the model is reloaded")
 
     def _reseed_generation_rng(self, seed: int) -> None:
         """Make the projector's generation RNG start from *seed* on the next

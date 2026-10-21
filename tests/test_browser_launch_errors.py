@@ -578,13 +578,18 @@ def test_the_real_missing_headless_shell_marks_a_half_installed_build(
     assert provision.is_chromium_installed() is False
 
 
+#: The switches a launch must carry so the browser's own network stack resolves
+#: no host.
+_NO_OWN_NETWORK = ["--host-resolver-rules=MAP * ~NOTFOUND"]
+
+
 def test_a_bundled_launch_passes_the_headless_setting_and_no_channel():
     sentinel = object()
     sess = _session("bundled", sentinel, headless=False)
 
     assert asyncio.run(sess._launch_bundled()) is sentinel
 
-    assert sess._pw.chromium.calls == [{"headless": False}]
+    assert sess._pw.chromium.calls == [{"headless": False, "args": _NO_OWN_NETWORK}]
     assert sess.browser_name == "Bundled Chromium"
 
 
@@ -595,7 +600,8 @@ def test_the_system_engine_launches_chrome_by_its_channel(monkeypatch):
 
     assert asyncio.run(sess._launch_system()) is sentinel
 
-    assert sess._pw.chromium.calls == [{"headless": True, "channel": "chrome"}]
+    assert sess._pw.chromium.calls == [
+        {"headless": True, "args": _NO_OWN_NETWORK, "channel": "chrome"}]
     assert sess.browser_name == "Google Chrome"
 
 
@@ -606,7 +612,8 @@ def test_the_system_engine_launches_a_browser_with_no_channel_by_its_path(monkey
     asyncio.run(sess._launch_system())
 
     assert sess._pw.chromium.calls == [
-        {"headless": True, "executable_path": "/usr/bin/brave-browser"}]
+        {"headless": True, "args": _NO_OWN_NETWORK,
+         "executable_path": "/usr/bin/brave-browser"}]
     assert sess.browser_name == "Brave"
 
 
@@ -620,6 +627,16 @@ def test_the_system_engine_moves_on_when_the_first_browser_will_not_start(monkey
     assert [c.get("executable_path") for c in sess._pw.chromium.calls] == [
         "/usr/bin/chromium", "/usr/bin/brave-browser"]
     assert sess.browser_name == "Brave"
+
+
+def test_every_system_browser_tried_carries_the_resolver_rule(monkeypatch):
+    _browsers(monkeypatch, CHROMIUM, BRAVE)
+    sess = _session("system", RuntimeError(MISSING_LIBRARY_LINUX), object())
+
+    asyncio.run(sess._launch_system())
+
+    assert [c.get("args") for c in sess._pw.chromium.calls] == [
+        _NO_OWN_NETWORK, _NO_OWN_NETWORK]
 
 
 def test_the_system_engine_with_no_browser_launches_nothing_and_says_what_it_sought(

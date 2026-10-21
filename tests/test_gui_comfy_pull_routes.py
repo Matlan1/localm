@@ -313,7 +313,8 @@ class TestSourceLookupRoute:
         assert body["status"] == "found"
         assert body["source"] == {
             "repo": "Comfy-Org/Wan_2.1_ComfyUI_repackaged", "file": WAN_PATH,
-            "size_bytes": None, "model_type": "diffusion-unet", "origin": "huggingface"}
+            "size_bytes": None, "model_type": "diffusion-unet", "sha256": None,
+            "origin": "huggingface"}
         assert body["dest_dir"] == str(workdir / "models" / "unet")
 
     def test_a_miss_is_not_found(self, scoped_app, no_hf):

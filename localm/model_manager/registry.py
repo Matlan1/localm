@@ -58,7 +58,7 @@ from .gguf import hub_snapshot_repo_id
 from .gguf import logical_model_path
 from .gguf import scan_hub_cache
 
-MODEL_TYPES = frozenset({'llm', 'mmproj', 'diffusion-unet', 'text-encoder', 'vae', 'lora', 'embedding', 'tts', 'upscaler', 'unknown'})
+MODEL_TYPES = frozenset({'llm', 'mmproj', 'diffusion-unet', 'text-encoder', 'vae', 'lora', 'embedding', 'tts', 'upscaler', 'controlnet', 'textual-inversion', 'unknown'})
 
 # HuggingFace architecture class-name suffixes that deterministically mark a text
 # generation (chat) model: LlamaForCausalLM, T5ForConditionalGeneration,
@@ -93,6 +93,27 @@ def is_auto_chat_eligible(entry: dict) -> bool:
             and not is_gguf_adapter_entry(entry))
 
 
+_TRANSCRIPTION_NAME_RE = re.compile(r"(?<![a-z0-9])(?:asr|whisper|stt)(?![a-z0-9])", re.IGNORECASE)
+
+
+def is_transcription_model(name: str, entry: dict) -> bool:
+    """True when the registered *name*, or the file name of *entry*'s path, has
+    a standalone ``asr``, ``whisper`` or ``stt`` word in it (``Qwen3-ASR-0.6B``,
+    ``whisper-small``): a speech-to-text model that is registered as an
+    ``llm`` because it loads through the chat path, not one to answer chat."""
+    path = entry.get("path") if isinstance(entry, dict) else None
+    stem = Path(path).stem if isinstance(path, str) and path else ""
+    return any(_TRANSCRIPTION_NAME_RE.search(s) for s in (str(name), stem))
+
+
+def auto_chat_candidates(registry: dict) -> list:
+    """Names of the registry entries that may be auto-selected as the default
+    chat model, in preference order: by name, with speech-to-text models
+    (:func:`is_transcription_model`) after every other candidate."""
+    names = [n for n in sorted(registry) if is_auto_chat_eligible(registry[n])]
+    return sorted(names, key=lambda n: is_transcription_model(n, registry[n]))
+
+
 def is_gguf_adapter_entry(entry) -> bool:
     """True when a registry *entry* is a GGUF LoRA adapter: type ``lora`` whose
     stored file is a ``.gguf``. ComfyUI LoRAs and HuggingFace adapter folders
@@ -116,6 +137,94 @@ def is_llm(entry: dict) -> bool:
     LoRA / VAE / other component model.
     """
     return isinstance(entry, dict) and entry.get("model_type", "llm") == "llm"
+
+
+def is_projector_entry(entry) -> bool:
+    """True when a registry *entry* records ``model_type`` 'mmproj': a vision
+    projector, which is loaded alongside a chat model and is never a model a
+    request can name."""
+    return isinstance(entry, dict) and entry.get("model_type") == "mmproj"
+
+
+def _same_file(a, b) -> bool:
+    return (isinstance(a, str) and isinstance(b, str) and bool(a) and bool(b)
+            and os.path.normcase(os.path.normpath(a)) == os.path.normcase(os.path.normpath(b)))
+
+
+def projector_owners(name: str, registry: dict) -> list[str]:
+    """Sorted names of the chat models in *registry* that use the projector
+    registered as *name*.
+
+    A model owns the projector when its recorded ``mmproj`` is the projector's
+    file; failing that, when it is a chat model whose file sits in the
+    projector's folder. Reads the registry only: no file is opened. Empty when
+    *name* is not a projector entry or nothing claims it."""
+    entry = registry.get(name)
+    if not is_projector_entry(entry):
+        return []
+    mmproj_path = _entry_path(entry)
+    if mmproj_path is None:
+        return []
+    chat = {n: e for n, e in registry.items()
+            if n != name and isinstance(e, dict) and e.get("model_type", "llm") == "llm"}
+    recorded = sorted(n for n, e in chat.items() if _same_file(e.get("mmproj"), mmproj_path))
+    if recorded:
+        return recorded
+    folder = os.path.dirname(os.path.normpath(mmproj_path))
+    return sorted(n for n, e in chat.items()
+                  if (p := _entry_path(e)) is not None
+                  and _same_file(os.path.dirname(os.path.normpath(p)), folder))
+
+
+def projector_refusal(name: str, registry: dict) -> Optional[str]:
+    """The message refusing a request that names *name* as a model to load, or
+    None when *name* is not a projector entry in *registry*. Names the chat
+    models that use the projector when the registry identifies any."""
+    if not is_projector_entry(registry.get(name)):
+        return None
+    owners = projector_owners(name, registry)
+    msg = f"'{name}' is a vision projector, not a model that can be loaded or chatted with."
+    if owners:
+        msg += (" It belongs to " + ", ".join(f"'{o}'" for o in owners)
+                + "; name that model instead and the projector is attached automatically.")
+    return msg
+
+
+# Registry types the chat Engine can never load: a request naming one is refused
+# before any model is evicted.
+NON_CHAT_TYPES = frozenset({"mmproj", "diffusion-unet", "text-encoder", "vae", "lora",
+                            "upscaler", "controlnet", "textual-inversion", "tts"})
+
+# Registry types GET /v1/models leaves out: nothing under /v1 accepts one by name.
+# A 'tts' model stays listed because POST /v1/audio/speech takes it as ``model``.
+UNLISTED_TYPES = frozenset({"mmproj", "diffusion-unet", "text-encoder", "vae", "lora",
+                            "upscaler", "controlnet", "textual-inversion"})
+
+
+def is_unlisted_entry(entry) -> bool:
+    """True when a registry *entry*'s ``model_type`` is one GET /v1/models omits
+    (see :data:`UNLISTED_TYPES`)."""
+    return (isinstance(entry, dict) and isinstance(entry.get("model_type"), str)
+            and entry["model_type"] in UNLISTED_TYPES)
+
+
+def chat_load_refusal(name: str, registry: dict) -> Optional[str]:
+    """The message refusing a request that names *name* as a model to load, or
+    None when *name* may be loaded. Refuses an entry whose ``model_type`` is in
+    :data:`NON_CHAT_TYPES`: a vision projector gets :func:`projector_refusal`'s
+    message naming its chat model, every other type a message saying what the
+    entry is (and, for 'tts', where it is used). Reads the registry only."""
+    entry = registry.get(name)
+    kind = entry.get("model_type") if isinstance(entry, dict) else None
+    if not isinstance(kind, str) or kind not in NON_CHAT_TYPES:
+        return None
+    if kind == "mmproj":
+        return projector_refusal(name, registry)
+    from localm.inference.reranker import _KIND_WORDS
+    msg = f"'{name}' is {_KIND_WORDS.get(kind, f'a {kind} model')}, not a model that can be loaded or chatted with."
+    if kind == "tts":
+        return msg + " Use it with 'localm speak' or POST /v1/audio/speech."
+    return msg + " It is a component of image, video or music generation."
 
 
 def models_of_type(model_type: str, registry: Optional[dict] = None) -> dict:
@@ -276,12 +385,14 @@ def _is_sentence_transformers_folder(path: Path) -> bool:
 
 
 _MEDIA_KIND_TYPES = MEDIA_KIND_TYPES
-_MEDIA_COMPONENT_TYPES = frozenset({"diffusion-unet", "text-encoder", "vae", "lora"})
+_MEDIA_COMPONENT_TYPES = frozenset({"diffusion-unet", "text-encoder", "vae", "lora",
+                                    "controlnet", "textual-inversion"})
 
 
 def _media_component_type(path: Path, model_type: Optional[str]) -> Optional[str]:
     """The registry type a single ``.safetensors`` file registers as when it is
-    an image/video model file (a diffusion model, text encoder, VAE or LoRA),
+    an image/video model file (a diffusion model, text encoder, VAE, LoRA,
+    ControlNet or textual-inversion embedding),
     or None when it is not one. An explicit media *model_type* is taken as
     given; otherwise the file's tensor layout decides
     (``localm.media.sdcpp.families``). A file inside a HuggingFace model or

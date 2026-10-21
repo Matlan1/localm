@@ -381,6 +381,18 @@ class Agent(
         # Notes the pre-compaction flush kept, oldest first; re-pinned into every
         # compaction summary verbatim (see context._compact_history).
         self._durable_notes: list[str] = []
+        # User requests carried verbatim into every compaction summary.
+        self._pinned_requests: list[str] = []
+        self._pinned_requests_dropped: int = 0
+        # Prompt token count of the last request and what it covered (see
+        # _ContextMixin._record_prompt_usage).
+        self._usage_base: Optional[tuple] = None
+        # Set when compacting left the history over the high bound; summarising
+        # is skipped until it is back under it.
+        self._compact_futile: bool = False
+        # Set when the server compacted the last request itself; the next turn
+        # compacts the agent's own history.
+        self._server_compacted: bool = False
         # Work done by ISOLATED children (their own git worktree), which is NOT
         # in _changed_files: it never touched this tree, and
         # merging its keys would fabricate diffs (keys are relative to the writing
@@ -655,7 +667,7 @@ class Agent(
                         self._audit.notice("mcp_untrusted", hooks.untrusted_message())
             self._mcp_tool_names = frozenset(mcp_names)
         except Exception as e:
-            _agent.print_warning(f"MCP setup failed: {e}")
+            _agent.print_warning(f"MCP setup failed: {e}", to_stderr=True)
 
     def _register_mcp_servers(self, hooks) -> list:
         """Start *hooks*' MCP servers, register their tools and set
@@ -665,7 +677,7 @@ class Agent(
         mcp_names, mcp_warnings = register_mcp_tools(
             hooks.project_dir, servers=hooks.mcp_servers)
         for w in mcp_warnings:
-            _agent.print_warning(w)
+            _agent.print_warning(w, to_stderr=True)
         if mcp_names:
             self._mcp_docs = _foreign_tool_docs(
                 "EXTERNAL MCP TOOLS (call exactly like built-in tools)\n",
@@ -685,7 +697,7 @@ class Agent(
         try:
             names = self._register_mcp_servers(hooks)
         except Exception as e:
-            _agent.print_warning(f"MCP setup failed: {e}")
+            _agent.print_warning(f"MCP setup failed: {e}", to_stderr=True)
             return []
         self._mcp_tool_names = frozenset(names)
         self._audit.notice("mcp_started", ", ".join(names) or "(no tools)")
@@ -776,13 +788,13 @@ class Agent(
             from ..plugin_tools import register_plugin_tools
             plugin_names, plugin_warnings = register_plugin_tools()
             for w in plugin_warnings:
-                print_warning(w)
+                print_warning(w, to_stderr=True)
             if plugin_names:
                 self._plugin_docs = _foreign_tool_docs(
                     "EXTERNAL PLUGIN TOOLS (call exactly like built-in tools)\n",
                     plugin_names, TOOL_REGISTRY)
         except Exception as e:
-            print_warning(f"Plugin tool setup failed: {e}")
+            print_warning(f"Plugin tool setup failed: {e}", to_stderr=True)
 
     def _init_skill_tools(self, cwd: Path) -> None:
         print_warning = _agent.print_warning
@@ -796,14 +808,14 @@ class Agent(
             from ..skills import register_skill_tools
             skill_names, skill_warnings = register_skill_tools(cwd)
             for w in skill_warnings:
-                print_warning(w)
+                print_warning(w, to_stderr=True)
             if skill_names:
                 self._skill_docs = (
                     "AGENT SKILLS: call list_skills to see available skills, then "
                     "use_skill(name) to load one's instructions and follow it."
                 )
         except Exception as e:
-            print_warning(f"Skill setup failed: {e}")
+            print_warning(f"Skill setup failed: {e}", to_stderr=True)
 
     def _notify_scope_does_not_confine_shell(self) -> None:
         """Once per session: say plainly that an active scope does not confine the
@@ -914,6 +926,14 @@ class Agent(
         with self._skill_lock:
             self._expire_active_skill_locked()
             return self._active_skill_tools
+
+    def _record_typed_request(self, text: str) -> None:
+        """Remember *text* as typed by the user (the input fit never cuts a
+        message that holds it). Keeps the last 64."""
+        if text:
+            typed = self.__dict__.setdefault("_typed_requests", [])
+            typed.append(text)
+            del typed[:-64]
 
     @property
     def _last_user_request(self) -> str:

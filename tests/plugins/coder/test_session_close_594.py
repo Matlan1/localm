@@ -428,3 +428,67 @@ def test_delete_session_route_offloads_a_real_git_detecting_close(tmp_path,
 
     assert seen.get("on_loop") is False, (
         "the git change-detection subprocess ran ON the event loop")
+
+
+# --------------------------------------------------------------------------- #
+#  Listing sessions reaps idle ones off the event loop                         #
+# --------------------------------------------------------------------------- #
+
+def test_list_sessions_route_reaps_idle_sessions_off_the_event_loop(tmp_path,
+                                                                    monkeypatch):
+    """GET /api/coder/sessions used to close an idle session inline (a
+    checkpoint write, git, and the session's browser teardown) on the loop
+    thread. The close must run in a worker, and the listing must not wait for it.
+    """
+    import threading
+    import time
+
+    from localm.plugins.coder.sessions import _IDLE_REAP_SECONDS, CoderSession
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    app = _coder_app(tmp_path, monkeypatch)
+    app.state.root_dir = str(proj)
+    owner = {"Authorization": "Bearer ownersecret"}
+
+    seen: dict = {}
+    release = threading.Event()
+    closed = threading.Event()
+    real_close = CoderSession.close
+
+    def _probing_close(self):
+        try:
+            asyncio.get_running_loop()
+            seen["on_loop"] = True
+        except RuntimeError:
+            seen["on_loop"] = False
+        release.wait(timeout=20)
+        real_close(self)
+        closed.set()
+
+    monkeypatch.setattr(CoderSession, "close", _probing_close)
+
+    with TestClient(app) as client:
+        r = client.post("/api/coder/sessions", headers=owner,
+                        json={"cwd": str(proj), "mode": "log"})
+        assert r.status_code == 200, r.text
+        sid = r.json()["id"]
+        app.state.coder_sessions.get(sid).last_activity_at -= _IDLE_REAP_SECONDS + 1
+
+        started = time.monotonic()
+        listed = client.get("/api/coder/sessions", headers=owner)
+        elapsed = time.monotonic() - started
+        assert listed.status_code == 200, listed.text
+        assert elapsed < 10, (
+            "the listing waited for the idle session's close(), which is still "
+            "blocked")
+        release.set()
+        assert closed.wait(timeout=20), "the idle session was never closed"
+        deadline = time.monotonic() + 10
+        while (app.state.coder_sessions.get(sid) is not None
+               and time.monotonic() < deadline):
+            time.sleep(0.02)
+        assert app.state.coder_sessions.get(sid) is None
+
+    assert seen.get("on_loop") is False, (
+        "an idle session was closed ON the event loop by the sessions listing")

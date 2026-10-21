@@ -42,6 +42,7 @@ _REVIEWED_WATCHED_ROUTES = {
     ("POST", "/v1/instances/cooperate-unload"),
     ("POST", "/v1/instances/vouch"),
     ("GET", "/v1/instances/status"),
+    ("POST", "/v1/instances/status"),
 }
 
 

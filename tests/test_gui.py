@@ -954,6 +954,31 @@ class TestVramEstimate:
         assert data["held"] == estimate_vram(22 * _GB, 8192, 16, n_layers=32)["needed"]
         assert data["held"] < estimate_vram(22 * _GB, 8192, 32, n_layers=32)["needed"]
 
+    def test_the_saved_kv_cache_type_sizes_the_estimate(
+            self, gui_app, tmp_path, monkeypatch):
+        from localm.config import DEFAULT_CONFIG
+        from localm.sysstats import estimate_vram
+        cfg = dict(DEFAULT_CONFIG, kv_cache_type="q8_0")
+        with patch("localm.config.load_config", return_value=cfg):
+            data = self._running_estimate(gui_app, tmp_path, monkeypatch, None,
+                                          {"n_ctx": 8192, "n_gpu_layers": 99})
+        f16 = estimate_vram(22 * _GB, 8192, 99, n_layers=32)
+        q8 = estimate_vram(22 * _GB, 8192, 99, n_layers=32, kv_cache_type="q8_0")
+        assert q8["kv_cache"] < f16["kv_cache"]
+        assert data["kv_cache"] == q8["kv_cache"]
+
+    def test_the_running_load_is_held_at_its_own_kv_cache_type(
+            self, gui_app, tmp_path, monkeypatch):
+        from localm.sysstats import estimate_vram
+        engine = self._engine()
+        engine.kv_cache_type = "q8_0"
+        data = self._running_estimate(gui_app, tmp_path, monkeypatch, engine,
+                                      {"n_ctx": 4096, "n_gpu_layers": 99})
+        assert data["held"] == estimate_vram(22 * _GB, 8192, 32, n_layers=32,
+                                             kv_cache_type="q8_0")["needed"]
+        assert data["kv_cache"] == estimate_vram(22 * _GB, 4096, 99,
+                                                 n_layers=32)["kv_cache"]
+
     def test_a_model_that_is_not_loaded_holds_nothing(
             self, gui_app, tmp_path, monkeypatch):
         data = self._running_estimate(gui_app, tmp_path, monkeypatch, None,
@@ -1915,6 +1940,21 @@ class TestModelEndpoints:
                 data = client.get("/api/models").json()
         assert data["active"] == ""
         assert "resumable" not in data
+
+    def test_models_reports_the_model_whose_load_is_in_flight(self):
+        """A page loaded mid-load reads `loading` to tell "still loading" from "no
+        model", and the key is absent when no load is running."""
+        from localm.inference import http_server as _hs
+        app = self._app_with_no_active_model()
+        with patch("localm.config.load_registry", return_value=_FAKE_REGISTRY),              patch.object(_hs, "_switch_loading", "model-a"):
+            with TestClient(app) as client:
+                loading = client.get("/api/models").json()
+        with patch("localm.config.load_registry", return_value=_FAKE_REGISTRY),              patch.object(_hs, "_switch_loading", None):
+            with TestClient(app) as client:
+                idle = client.get("/api/models").json()
+        assert loading["loading"] == "model-a"
+        assert loading["active"] == ""
+        assert "loading" not in idle
 
     def test_models_filter_by_type(self, gui_app):
         # The `type` query param must resolve its annotation and validate at
@@ -3325,6 +3365,40 @@ class TestConversationStore:
         assert len(msgs) == 2, f"one warning per unreadable file, once: {msgs}"
         assert any("broken" in m for m in msgs) and any("shape" in m for m in msgs)
         assert not any("secret title" in m for m in msgs)
+
+    @pytest.mark.parametrize("meta", [False, True])
+    def test_a_conversation_deleted_while_the_list_is_read_is_not_reported_unreadable(
+            self, persist_app, monkeypatch, caplog, meta):
+        import logging
+        from pathlib import Path
+        monkeypatch.setenv("LOCALM_MODE", "log")
+        app, chats = persist_app
+        chats.mkdir(parents=True)
+        (chats / "ghost.json").write_text("{}", encoding="utf-8")
+        real_read_text, real_stat = Path.read_text, Path.stat
+
+        def vanishing_read(self, *a, **k):
+            if self.stem == "ghost":
+                raise FileNotFoundError(self.name)
+            return real_read_text(self, *a, **k)
+
+        def vanishing_stat(self, *a, **k):
+            if self.stem == "ghost" and self.suffix == ".json":
+                raise FileNotFoundError(self.name)
+            return real_stat(self, *a, **k)
+
+        url = "/api/conversations?meta=true" if meta else "/api/conversations"
+        with TestClient(app) as client:
+            client.put("/api/conversations/ok",
+                       json={"title": "ok", "updated_at": 1, "messages": []})
+            monkeypatch.setattr(Path, "read_text", vanishing_read)
+            monkeypatch.setattr(Path, "stat", vanishing_stat)
+            with caplog.at_level(logging.WARNING, logger="localm"):
+                data = client.get(url).json()
+            monkeypatch.undo()
+        assert [c["id"] for c in data["conversations"]] == ["ok"]
+        assert data["unreadable"] == []
+        assert not [r for r in caplog.records if "ghost" in r.getMessage()]
 
     def test_list_with_nothing_unreadable_reports_an_empty_list(
             self, persist_app, monkeypatch):

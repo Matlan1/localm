@@ -413,22 +413,14 @@ def test_review_only_bump_opens_a_pr_without_a_receipt_and_never_merges(env, mon
     assert pp.load_state(pin="fake")["verdict"] == "REVIEW"
 
 
-@pytest.mark.parametrize("old,new,expected", [
-    ("3.4.13", "3.4.16", True), ("12.0.2", "12.1.0", True), ("12.0.2", "13.0.0", False),
-    ("0.18.4", "0.18.5", True), ("0.18.4", "0.19.0", False), ("0.18.4", "1.0.0", False),
-    ("11.12.0", "11.13.0", True), ("bad", "1.0.0", False)])
-def test_a_bump_that_stays_inside_one_major_line_may_auto_merge(old, new, expected):
-    assert pw._no_major_boundary(old, new) is expected
-
-
-def test_tested_review_pins_merge_on_green_ci_when_no_major_boundary_is_crossed(env):
+def test_a_tested_review_pin_that_allows_auto_merge_merges_on_green_ci(env):
     out = pw.advance(_review_adv(post_bump_cmds=((sys.executable, "-c", "print('suite ok')"),),
                                  auto_merge=lambda o, n: True), dry_run=False)
     assert out.verdict == pw.MERGED
     assert [c[0] for c in env.calls] == ["supersede", "branch", "push", "pr", "ci", "merge"]
 
 
-def test_a_tested_pin_that_crosses_a_major_boundary_still_waits_for_review(env):
+def test_a_tested_pin_that_refuses_auto_merge_waits_for_review(env):
     out = pw.advance(_review_adv(post_bump_cmds=((sys.executable, "-c", "print('suite ok')"),),
                                  auto_merge=lambda o, n: False), dry_run=False)
     assert out.verdict == pw.REVIEW and "merge" not in [c[0] for c in env.calls]
@@ -441,12 +433,17 @@ def test_a_failing_post_bump_command_stops_before_any_push(env):
     assert "push" not in [c[0] for c in env.calls]
 
 
-def test_shipped_vendored_advancers_run_the_gui_suite_and_gate_the_merge_on_the_boundary():
+def test_shipped_vendored_advancers_run_the_gui_suite_and_are_never_auto_merged():
+    seen = []
     for adv in pw.build_advancers():
         if adv.key.startswith("vendored-") and adv.bump_script == "scripts/bump_vendored_js.py":
+            seen.append(adv.key)
             assert adv.post_bump_cmds == (("npm", "ci"), ("npm", "test"))
-            assert adv.auto_merge("1.2.3", "1.2.4") is True
-            assert adv.auto_merge("1.2.3", "2.0.0") is False
+            for old, new in (("1.2.3", "1.2.4"), ("1.2.3", "1.3.0"), ("1.2.3", "2.0.0"),
+                             ("0.18.4", "0.18.5")):
+                assert adv.auto_merge(old, new) is False
+    assert sorted(seen) == ["vendored-dompurify", "vendored-highlightjs", "vendored-katex",
+                            "vendored-marked"]
 
 
 def test_review_only_dry_run_changes_nothing(env):
@@ -521,21 +518,35 @@ def test_an_unexpected_exception_after_a_pass_is_logged(env, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 def test_run_cmd_times_out_kills_the_tree_and_reports_inconclusive(tmp_path):
-    pidfile = tmp_path / "grandchild.pid"
-    code = "; ".join([
+    # The grandchild rewrites a heartbeat file every 0.1s until it is killed.
+    heartbeat = tmp_path / "grandchild.beat"
+    grandchild = tmp_path / "grandchild.py"
+    grandchild.write_text("\n".join([
+        "import sys, time",
+        "n = 0",
+        "end = time.monotonic() + 90",
+        "while time.monotonic() < end:",
+        "    n += 1",
+        "    with open(sys.argv[1], 'w') as fh:",
+        "        fh.write(str(n))",
+        "    time.sleep(0.1)",
+    ]), encoding="utf-8")
+    child = tmp_path / "child.py"
+    child.write_text("\n".join([
         "import subprocess, sys, time",
-        "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])",
-        f"open({str(pidfile)!r}, 'w').write(str(p.pid))",
-        "time.sleep(60)",
-    ])
-    rc, out = pw.run_cmd([sys.executable, "-c", code], cwd=tmp_path, timeout=3)
+        "subprocess.Popen([sys.executable, sys.argv[1], sys.argv[2]])",
+        "time.sleep(90)",
+    ]), encoding="utf-8")
+    started = time.monotonic()
+    rc, out = pw.run_cmd([sys.executable, str(child), str(grandchild), str(heartbeat)],
+                         cwd=tmp_path, timeout=8)
+    elapsed = time.monotonic() - started
     assert rc == 2 and "timed out" in out
-    grandchild = int(pidfile.read_text(encoding="utf-8"))
-    from localm.instances import pid_alive
-    deadline = time.monotonic() + 10
-    while pid_alive(grandchild) and time.monotonic() < deadline:
-        time.sleep(0.2)
-    assert not pid_alive(grandchild)
+    assert elapsed < 60, f"run_cmd held {elapsed:.0f}s: the grandchild outlived the kill and kept the pipe open"
+    assert heartbeat.exists(), "the grandchild never started, so the kill was not exercised"
+    first = heartbeat.read_text(encoding="utf-8")
+    time.sleep(1.5)
+    assert heartbeat.read_text(encoding="utf-8") == first, "the grandchild is still writing its heartbeat"
 
 
 def test_run_cmd_returns_the_real_exit_code_and_output(tmp_path):
@@ -1427,3 +1438,66 @@ def test_no_pin_script_or_test_names_a_gitignored_path_in_its_comments_and_docst
         for n, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
             hits += [f"{f.name}:{n}: {b}" for b in _BANNED_IN_TRACKED_TEXT if b in line]
     assert hits == []
+
+
+def _rocm_fakes(monkeypatch, tags, pairs, unreadable=()):
+    """Point pw._load at a lemonade listing of *tags* (pin b100) and a bump_rocm_pin whose
+    fetch_candidate pairs only the tags in *pairs*; tags in *unreadable* raise
+    UpstreamUnreadable. Returns the list of tags fetch_candidate was asked about."""
+    from types import SimpleNamespace
+
+    class Refused(Exception):
+        pass
+
+    class UpstreamUnreadable(Refused):
+        pass
+
+    asked = []
+
+    def fetch_candidate(tag):
+        asked.append(tag)
+        if tag in unreadable:
+            raise UpstreamUnreadable("the upstream release list is not a list")
+        if tag not in pairs:
+            raise Refused(f"no upstream release was built from the commit {tag} names")
+        return SimpleNamespace(tag=tag)
+
+    def number(tag):
+        return int(tag[1:]) if tag.startswith("b") and tag[1:].isdigit() else None
+
+    check = SimpleNamespace(pinned_tag=lambda: "b100", _build_number=number,
+                            upstream_releases=lambda: ([{"tag": t} for t in tags], ""))
+    bump = SimpleNamespace(fetch_candidate=fetch_candidate, Refused=Refused,
+                           UpstreamUnreadable=UpstreamUnreadable)
+    monkeypatch.setattr(pw, "_load", lambda name, path: {"check_llama_rocm_pin": check,
+                                                         "bump_rocm_pin": bump}[name])
+    return asked
+
+
+def test_rocm_candidate_is_the_newest_release_that_pairs(monkeypatch):
+    asked = _rocm_fakes(monkeypatch, ["b104", "b103", "b102", "b100", "b99"], pairs={"b102"})
+    assert pw._rocm_candidate() == ("b100", "b102")
+    assert asked == ["b104", "b103", "b102"]
+
+
+def test_rocm_candidate_none_when_no_newer_release_pairs(monkeypatch):
+    asked = _rocm_fakes(monkeypatch, ["b102", "b101", "b100"], pairs=set())
+    assert pw._rocm_candidate() is None
+    assert asked == ["b102", "b101"]
+
+
+def test_rocm_candidate_unreadable_upstream_is_a_fetch_error(monkeypatch):
+    _rocm_fakes(monkeypatch, ["b102", "b100"], pairs={"b102"}, unreadable={"b102"})
+    with pytest.raises(pw.cp.FetchError):
+        pw._rocm_candidate()
+
+
+def test_the_weekly_llama_proof_requires_gpu_use_and_measures_every_other_backend(tmp_path):
+    cmd = pw._llama_verify_cmd(tmp_path, tmp_path / "r.json")
+    assert cmd[1].endswith("confirm_llama_runtime.py") and "--require-gpu" in cmd
+    pairs = list(zip(cmd, cmd[1:], strict=False))
+    assert {v for f, v in pairs if f == "--backend"} == {"cpu", "vulkan"}
+    assert {v for f, v in pairs if f == "--also-measure"} == {"cuda", "sycl", "hip", "metal"}
+    confirm_src = (pw.SCRIPTS / "confirm_llama_runtime.py").read_text(encoding="utf-8")
+    for flag in ("--require-gpu", "--also-measure", "--backend", "--workdir", "--receipt", "--tag"):
+        assert f'"{flag}"' in confirm_src

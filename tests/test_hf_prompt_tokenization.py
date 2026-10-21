@@ -46,6 +46,9 @@ def test_chat_tokenization_suppresses_double_bos(monkeypatch):
         def __iter__(self):
             return iter(())   # yield nothing -> the generate thread is a no-op
 
+        def end(self):
+            pass
+
     monkeypatch.setattr(transformers, "TextIteratorStreamer", _FakeStreamer)
     monkeypatch.setattr(hfmod, "_grammar_processor", lambda *a, **k: None)
 

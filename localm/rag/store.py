@@ -61,7 +61,7 @@ from ._store.indexing import (  # noqa: F401
 from ._store.introspect import _CollectionIntrospection
 from ._store.provenance import (  # noqa: F401
     _provenance_excludable, collection_provenance_note,
-    collection_provenance_report)
+    collection_provenance_report, lexical_only_collection_names)
 from ._store.resync import _CollectionResync
 from ._store.search import (  # noqa: F401
     _CONVERSATION_REF_RE, LEXICAL_RELEVANCE_COVERAGE, RELEVANCE_FLOORS,
@@ -355,9 +355,10 @@ class Collection(_CollectionFiles, _CollectionSidecar, _CollectionIndexing,
 
         A root that is not currently an available directory (deleted, unmounted,
         unreadable, or replaced by a file) is REPORTED and skipped whole, and
-        every document underneath it is left completely untouched - not indexed,
-        not flagged, not pruned. The same holds for a root the current
-        ``policy`` refuses.
+        every document underneath it is left alone - not indexed, not flagged,
+        not pruned - except a document under a credential folder (``.ssh``,
+        ``.aws``, ...), which is always pruned. The same holds for a root the
+        current ``policy`` refuses.
 
         *policy* is applied exactly as in ``add_paths``, including to a root that
         was legal when it was added but is outside the owner's allowed folders

@@ -107,17 +107,14 @@ class HFSource:
 # see media/managed_comfy.py _MODEL_FOLDER_TYPES). A CivitAI type absent from
 # this table is excluded from search results and refused by resolve_download,
 # rather than mis-filed under a folder ComfyUI does not scan for that role.
-#
-# Controlnet has no registry.MODEL_TYPES value; it still routes to a real ComfyUI
-# subfolder under model_type="unknown" rather than being excluded outright.
 CIVITAI_TYPE_MAP: dict[str, tuple[str, str]] = {
     "Checkpoint": ("diffusion-unet", "checkpoints"),
     "LORA": ("lora", "loras"),
     "LoCon": ("lora", "loras"),
     "DoRA": ("lora", "loras"),
-    "TextualInversion": ("embedding", "embeddings"),
+    "TextualInversion": ("textual-inversion", "embeddings"),
     "VAE": ("vae", "vae"),
-    "Controlnet": ("unknown", "controlnet"),
+    "Controlnet": ("controlnet", "controlnet"),
     "Upscaler": ("upscaler", "upscale_models"),
 }
 

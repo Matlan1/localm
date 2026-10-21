@@ -149,6 +149,19 @@ class _Spec:
         self.packages = packages
 
 
+def test_bare_torch_probe_allows_a_cold_gpu_torch_import(confirm, monkeypatch, tmp_path):
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen.update(kw)
+        from types import SimpleNamespace
+        return SimpleNamespace(stdout='{"version": "2.9.1+rocm7.13.0"}\n')
+    monkeypatch.setattr(confirm.subprocess, "run", fake_run)
+    out = confirm._bare_torch_probe(tmp_path / "python.exe")
+    assert out == {"version": "2.9.1+rocm7.13.0"}
+    assert seen["timeout"] == confirm.TORCH_PROBE_TIMEOUT_S >= 300
+
+
 def test_torch_variant_ok_matches_by_suffix(confirm):
     assert confirm._torch_variant_ok("2.9.1+cu124", _Spec("cuda")) is True
     assert confirm._torch_variant_ok("2.9.1+cpu", _Spec("cuda")) is False, (
@@ -404,6 +417,63 @@ def test_smoke_phase_refuses_when_provision_checks_did_not_all_pass(confirm, tmp
     rc = confirm.run_smoke_phase("v0.32.0", "a" * 40, tmp_path / "wd", receipt_path)
     assert rc == 2
     assert "provision phase did not fully pass" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
+#  A failed provision: a network failure is INCONCLUSIVE, a bad candidate FAIL #
+# --------------------------------------------------------------------------- #
+
+# The end of a real provision failure message: pip timing out on PyPI.
+_PIP_READ_TIMEOUT = (
+    "Installing ComfyUI requirements failed: ...ckages\\pip\\_vendor\\urllib3\\response.py\", "
+    "line 443, in _error_catcher\n    raise ReadTimeoutError(self._pool, None, \"Read timed out.\")\n"
+    "pip._vendor.urllib3.exceptions.ReadTimeoutError: HTTPSConnectionPool("
+    "host='files.pythonhosted.org', port=443): Read timed out.")
+
+_PIP_NO_MATCHING_VERSION = (
+    "Installing ComfyUI requirements failed: ERROR: Could not find a version that satisfies "
+    "the requirement comfyui-frontend-package==9.9.9 (from versions: 1.0.0)\n"
+    "ERROR: No matching distribution found for comfyui-frontend-package==9.9.9")
+
+
+def test_a_network_failure_during_provision_is_inconclusive(confirm):
+    assert confirm._provision_failure_verdict("error", _PIP_READ_TIMEOUT) == confirm.INCONCLUSIVE
+
+
+def test_an_unresolvable_requirement_during_provision_is_a_fail(confirm):
+    assert confirm._provision_failure_verdict("error", _PIP_NO_MATCHING_VERSION) == confirm.FAIL
+    assert confirm._provision_failure_verdict("error", "") == confirm.FAIL
+
+
+def test_an_existing_install_location_is_inconclusive(confirm):
+    assert confirm._provision_failure_verdict("exists", "already there") == confirm.INCONCLUSIVE
+
+
+@pytest.mark.parametrize("message,verdict,rc", [
+    (_PIP_READ_TIMEOUT, "INCONCLUSIVE", 2),
+    (_PIP_NO_MATCHING_VERSION, "FAIL", 1),
+])
+def test_provision_phase_records_the_failure_verdict(confirm, tmp_path, monkeypatch, capsys,
+                                                     message, verdict, rc):
+    from types import SimpleNamespace
+
+    from localm import hwdetect
+    from localm.media import managed_comfy_fresh as fresh
+
+    monkeypatch.setattr(confirm, "_prepare_scratch_env", lambda wd: (wd, wd))
+    monkeypatch.setattr(confirm, "_verify_isolation", lambda wd: (True, "scoped"))
+    monkeypatch.setattr(hwdetect, "detect", lambda: None)
+    monkeypatch.setattr(fresh, "comfy_torch_spec",
+                        lambda det: SimpleNamespace(variant="rocm", note="", packages=("torch",)))
+    monkeypatch.setattr(fresh, "provision_fresh",
+                        lambda **kw: SimpleNamespace(ok=False, status="error", message=message))
+    receipt_path = tmp_path / "r.json"
+    got = confirm.run_provision_phase("v0.42.1", "a" * 40, tmp_path / "wd", receipt_path,
+                                      require_gpu=False)
+    assert got == rc
+    receipt = confirm._load_receipt(receipt_path, "v0.42.1", "a" * 40)
+    assert receipt["checks"]["provision"]["verdict"] == verdict
+    assert f"{verdict}: Installing ComfyUI requirements failed" in capsys.readouterr().out
 
 
 # --------------------------------------------------------------------------- #

@@ -171,6 +171,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         use_mmap: str = "auto",
         adapters: Optional[list] = None,
         parallel_slots: ParallelSetting = 1,
+        kv_cache_type: str = "f16",
     ) -> None:
         self.model_path = str(Path(model_path).resolve())
         self.mmproj_path = mmproj_path   # multimodal projection GGUF
@@ -194,6 +195,13 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         self.mmap_forced_by_ram = False
         self.mmap_cpu_from_disk = False
         self.mmap_ram_short_note = ""
+        # Element type of the KV cache (localm.kv_cache.KV_CACHE_TYPES).
+        from localm.kv_cache import KV_CACHE_TYPES, coerce_kv_cache_type
+        kv_type = coerce_kv_cache_type(kv_cache_type)
+        if kv_type is None:
+            raise ValueError("kv_cache_type must be one of %s, got %r"
+                             % (", ".join(KV_CACHE_TYPES), kv_cache_type))
+        self.kv_cache_type = kv_type
         # The draft source (off, mtp, ngram); None follows mtp_enabled. MTP is
         # enabled exactly when the source is mtp.
         from .llamacpp._drafting import SPEC_MTP, resolve_spec_source
@@ -275,8 +283,9 @@ class GgufBackend(VramSizingMixin, BaseBackend):
     def _report_split_fit(self, plan) -> None:
         """Tell the user what the implicit split's per-device fit decided:
         which devices were left out (and, for a single kept device, that the
-        load runs on it alone), or which device is short of memory when no
-        plan fits. Devices are named by their torch index
+        load runs on it alone), that the layers were shared out by size over
+        every device when none was left out, or which device is short of
+        memory when no plan fits. Devices are named by their torch index
         (``_fit_source_index``), the number ``localm gpus`` and the GUI show.
         Sets ``_split_fit_note`` for the unresolved case."""
         from localm.debuglog import logger as _dbg
@@ -313,6 +322,18 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             parts += [f"device {gpu(i)} would then be short of memory as well"
                       for i in plan.excluded if i not in short_ids]
             detail = "; ".join(parts)
+            if not plan.excluded:
+                short_detail = "; ".join(
+                    f"device {gpu(c.index)} would hold about {c.need / gb:.1f} GB "
+                    f"({_what(c)}) with {c.free / gb:.1f} GB free" for c in short)
+                _dbg.info("implicit GPU split fit: re-sharing the layers by size "
+                          "over device(s) %s", kept)
+                console.print(
+                    f"[yellow]  gpu split:[/yellow] sharing the layers out by size "
+                    f"over devices {kept} - with the default split by free memory "
+                    f"{short_detail}. Set gpu_split_indices to choose the devices "
+                    f"yourself.")
+                return
             if len(plan.tensor_split) == 1:
                 _dbg.info("implicit GPU split fit: leaving out device(s) %s, "
                           "loading on device %s only", left_out, kept)
@@ -585,21 +606,48 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             # Propagate as-is, bypassing the load-failure handling below.
             raise
         except Exception as exc:
-            vram_hint = ""
-            if self.effective_gpu_layers:   # 0 = CPU-only, no VRAM probe needed
-                # Combined-when-split free VRAM budget; the helper never raises.
-                free, _split_total, _split_devices = self._split_free_total_bytes()
-                if free is None:
-                    free = self._free_vram_bytes()
-                if free is not None and free < self._model_bytes() + self._VRAM_OVERHEAD_BYTES:
-                    vram_hint = (
-                        " The GPU is low on memory - free VRAM or retry with "
-                        "fewer GPU layers (-g 24, or -g 0 for CPU)."
-                    )
+            vram_hint = self._load_failure_vram_hint()
             split_note = getattr(self, "_split_fit_note", "")
             if split_note:
                 vram_hint += f" {split_note}"
             raise RuntimeError(_load_failure_message(exc, vram_hint)) from exc
+
+    def _load_failure_vram_hint(self) -> str:
+        """The sentence a failed load adds about VRAM, or "".
+
+        Non-empty only for a GPU load (``effective_gpu_layers`` above 0) whose
+        planned VRAM need (``_planned_vram``) exceeds the free VRAM: the lower
+        of a fresh reading and the reading auto-sizing planned from
+        (``last_gpu_sizing``), so memory another process took after planning
+        counts. It names both figures, where they were read
+        (the GPU, or the N GPUs of a split) and the options
+        ``_vram_fit_options`` gives for that free figure. Never raises."""
+        layers = self.effective_gpu_layers
+        if not layers:
+            return ""
+        try:
+            planned = self._planned_vram(layers)
+            if planned is None:
+                return ""
+            need, free, _total, devices, kv_cache, overhead = planned
+            sizing = getattr(self, "last_gpu_sizing", None) or {}
+            if isinstance(sizing.get("free_bytes"), int):
+                free = min(free, sizing["free_bytes"])
+            if free >= need:
+                return ""
+            where = f"the {devices} GPUs" if devices >= 2 else "the GPU"
+            options = "; ".join(
+                f"{label[:1].lower()}{label[1:]} ({command.split('  ')[0]})"
+                for label, command in self._vram_fit_options(
+                    free, need, kv_cache, overhead, layers))
+            return (f" This load needed about {need / 1024**3:.1f} GB of VRAM and "
+                    f"{where} had {free / 1024**3:.1f} GB free - free VRAM, or: "
+                    f"{options}.")
+        except Exception as exc:  # a hint must never replace the load error
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("load-failure VRAM hint unavailable (%s: %s)",
+                       type(exc).__name__, exc)
+            return ""
 
     def _set_parallel_copies(self, copies: int) -> None:
         """Ask the next load for *copies* slots; the recurrent-state VRAM charge
@@ -817,6 +865,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                     params[key] = value
         if self.parallel_copies > 1:
             params["n_parallel"] = self.parallel_copies
+        if self.kv_cache_type != "f16":
+            params["kv_cache_type"] = self.kv_cache_type
         timeout = self._load_timeout_seconds()
 
         cap_label = f"→{ctx_max}" if ctx_max else "→∞"
@@ -940,6 +990,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # None).
         n_cpu_moe = self._load_n_cpu_moe()
         self.moe_cpu_layers = 0
+        self.moe_ram_read_bytes = None
         if n_cpu_moe > 0:
             # Why the override did not apply, rendered here in the parent from the
             # metadata the child returned. The child must never console.print.
@@ -968,6 +1019,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                         "requested)[/dim]")
                 per_token = self._moe_ram_bytes_per_token(n_cpu_moe)
                 if per_token > 0:
+                    self.moe_ram_read_bytes = per_token
                     gb = per_token / 1e9
                     console.print(
                         f"[dim]  moe speed: each generated token reads about "
@@ -1406,16 +1458,18 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                 stop_on_request=self.is_diffusion,
                 on_logprobs=on_logprobs,
                 **kwargs)
-        except RuntimeError:
+        except RuntimeError as failure:
             # The isolated worker crashed or stalled and the model is gone. Drop it
             # so the next request triggers a clean reload.
             self.last_finish_reason = "error"
             from localm.debuglog import logger as _dbg
             # Class-neutral: this except catches every RuntimeError the runner
             # raises - a native fault, an uncaught Python exception in the worker, a
-            # generation stall, and an unload racing the stream. exception() carries
-            # the real message and traceback.
-            _dbg.exception("worker failure during generation - dropping model instance")
+            # generation stall, and an unload racing the stream. The console line is
+            # one line; the traceback goes to the debug log only.
+            _dbg.error("worker failure during generation - dropping model instance: %s",
+                       (str(failure).splitlines() or [""])[0])
+            _dbg.debug("worker failure traceback", exc_info=True)
             if self._runner is runner:
                 try:
                     self.unload()

@@ -40,7 +40,7 @@ function sseResponse(events) {
   };
 }
 
-function setup({ active = "native", jobEvents = [{ type: "end", status: "done", result: "a.png" }],
+function setup({ active = "native", importReply = null, jobEvents = [{ type: "end", status: "done", result: "a.png" }],
                  options = OPTIONS } = {}) {
   const calls = [];
   const fetchImpl = async (url, opts = {}) => {
@@ -51,6 +51,9 @@ function setup({ active = "native", jobEvents = [{ type: "end", status: "done", 
     }
     if (u.startsWith("/api/video/native-models")) {
       return { ok: true, status: 200, json: async () => ({ ...options, preview: null }) };
+    }
+    if (u === "/api/imagine/import-params") {
+      return { ok: true, status: 200, json: async () => importReply };
     }
     if (u === "/api/imagine/backend") {
       return { ok: true, status: 200, json: async () => ({
@@ -342,6 +345,18 @@ test("a failed or superseded options fetch leaves the filled dropdowns alone", a
   runScript(win, "try { imageGen.populate(null); globalThis.__err = ''; } catch (e) { globalThis.__err = String(e); }");
   assert.equal(win.__err, "", "populate(null) must not throw");
   assert.equal($("img-sampler").options.length, before);
+});
+
+test("importing an A1111 image fills clip skip and reports the settings it cannot carry over", async () => {
+  const importReply = { source: "a1111", params: { prompt: "q", clip_skip: 2 }, notes: [],
+                        unsupported: ["Hires fix"] };
+  const { win, $ } = setup({ importReply });
+  await settle(win, "await refreshImageBackend();");
+  await tick(); await tick();
+  runScript(win, `globalThis.__r = importParamsFromFile(new Blob(["x"]));`);
+  await win.__r;
+  assert.equal($("img-clip-skip").value, "2");
+  assert.match(win.document.getElementById("toast").textContent, /Not applied: Hires fix/);
 });
 
 test("importing a localm image restores sampler, scheduler and hires; a foreign sampler name is reported", async () => {

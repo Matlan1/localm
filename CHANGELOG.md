@@ -12,6 +12,29 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **More context fits in VRAM with a q8_0 KV cache.** The new `kv_cache_type` setting (Settings,
+  Model, Runtime & GPU, or `localm config kv_cache_type q8_0`) stores the KV cache in about half the memory of
+  the default `f16`, so roughly 1.9x the context fits before the window stops growing, with
+  slightly slower decoding. The automatic context ceiling and the VRAM estimate account for it. It
+  applies at the next model load; a model that cannot use flash attention refuses to load under
+  `q8_0` and the error names the setting.
+- **Inpaint, outpaint, edit with reference images, ControlNet and embeddings with the built-in
+  image backend.** The Images page has a mask editor for the input image (brush, eraser, invert,
+  and extend the canvas to outpaint), reference images for edit models such as FLUX.1 Kontext,
+  Qwen-Image-Edit and FLUX.2, a ControlNet picker with a control image (optionally turned into
+  an edge map) for Stable Diffusion 1.x, 2.x and SDXL models, and textual-inversion embeddings
+  listed with their trigger words. ControlNets and embeddings are new model types, picked up from
+  ComfyUI and StabilityMatrix folders and CivitAI downloads.
+- **Workflows for the built-in image, video and music generators.** The Images, Video and Music
+  pages have a Workflow card for the native backend: a workflow saves the models (with LoRAs and
+  their strengths) and the generation settings, and Apply puts them back. Starter workflows come
+  built in (SD-Turbo, FLUX.1 schnell and dev, Wan 2.1 text to video 1.3B, the ACE-Step 1.5 set).
+  Applying one offers the download of every model you do not have yet, checked against its sha256
+  when the workflow gives one (the built-in ones always do). Workflows can be renamed, deleted,
+  exported and imported, and a ComfyUI workflow (API or regular format) imports as one: its
+  loaders, sampler settings, size, prompts, guidance and shift are carried over, and every node
+  with no native equivalent is listed. The Video page gains a Flow shift setting and the Music
+  page a Shift setting for the native backend.
 - **`localm coder` shows what it is doing.** A live spinner runs while the model thinks, while
   it writes a file (with the file name and line count) and while a tool runs. `set_todos` shows
   the task list. Type `@path` or `@path:10-40` to attach a file to your message, and a
@@ -23,6 +46,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   and keeps what is saved, Resume continues from it) and Cancel (stops and deletes the partial
   download), the download line shows the steady speed and time left, and the Activity list has a
   Stop button for a running operation.
+- **The server log says when Windows keeps part of a model in system memory.** On Windows, when
+  another program holds VRAM, Windows can place part of a model loaded fully on the GPU in shared
+  system memory, and replies run slower until that program releases it. localm now reads the
+  model's share of shared memory and logs one line with the amounts when it is large, and
+  another when Windows moves it back.
 - **Ctrl-C in `localm pull` stops cleanly.** What has been downloaded is kept, and the message
   says to run the same command again to continue from there.
 - **`localm coder doctor` and `/doctor`.** One command checks that the model server answers and accepts the key, whether the session uses native tool calls or grammar-constrained ones, the context window against the size of the repo map, the git state, whether the verify command resolves, and that each configured MCP server starts. It exits 1 when a check fails and prints `--output-format json` or `jsonl` for scripts.
@@ -64,7 +92,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `.localcoder/config.toml` to be asked every time.
 
 ### Changed
-- **The bundled llama.cpp runtime moved from b11541 to b11756.** An existing install picks it up with `localm setup-llama --force`.
+- **localm's managed ComfyUI now installs v0.42.1, up from v0.39.0.** An existing install picks it up with `localm comfy update --reinstall-requirements` (this release's Python requirements changed).
+- **The bundled llama.cpp runtime moved from b11541 to b11757.** An existing install picks it up with `localm setup-llama --force`.
+- **The bundled AMD (ROCm) llama.cpp runtime moved from build b1342 to b1349** (upstream llama.cpp b11719). An existing install picks it up with `localm setup-llama --force`.
+- **The bundled stable-diffusion.cpp runtime moved from master-964-1d0a58a to master-982-0518b34.** An existing install picks it up the next time image generation starts.
+- **The bundled koboldcpp runtime (native music generation) moved from v1.123 to v1.123.1.** An existing install picks it up the next time music generation starts.
+- **Newer Python libraries.** The Hugging Face backend uses transformers 5.20 (from 5.15), the
+  browser tool uses Playwright 1.64, and the server, PDF, image and download libraries move to
+  their current releases. Running setup again picks them up.
 
 - **The coder starts a project's MCP servers only after you trust them.** A cloned repository
   can declare MCP servers in `.localcoder/config.toml`, so they now need the same trust as tool
@@ -82,8 +117,122 @@ permanent public record of what shipped and are never rewritten; the in-progress
   seconds and jumping; the same line appears in a terminal `localm pull`, in the GUI and as MCP
   `pull_model` progress. A full-repository download counts the files still downloading, not only
   the finished ones.
+- **A reply no longer moves the KV cache to system RAM before it needs the room.** When the
+  whole reply budget (`max_tokens`) would not fit in free VRAM but the prompt plus the first 512
+  tokens of the reply does, the context is sized for that much with the KV cache in VRAM and
+  grows as the reply gets longer, so a short reply on a card with little free VRAM decodes at GPU
+  speed. A reply that does grow that long moves to system RAM at that point and is never cut
+  short. A KV cache already in system RAM also moves back to VRAM at a smaller size when the
+  next request fits in it.
 
 ### Fixed
+- **A scheduled job with no model set no longer picks a speech-to-text model.** The job took the first registered chat model by name, so a Qwen3-ASR or Whisper model could answer a job that named no model; those models now come last, behind every other chat model.
+- **`localm config pinned_models '["a"]'` pins `a`.** A JSON list typed on the command line was
+  stored as one model name with the brackets and quotes in it, so nothing was pinned. A list
+  setting given as JSON text is now read as that list.
+- **`localm coder --output-format json` prints only the JSON on stdout.** A warning about an
+  unreadable skill, a plugin tool or an MCP server printed ahead of the document; startup
+  warnings go to stderr.
+- **The coder counts the lines of a file the way `wc -l` does.** A file of 1000 lines was
+  reported as 1001 in `read_file`'s header and cut-off notice, and in `write_file`'s "(N lines)".
+- **A background sub-agent that ran out of turns is listed as failed.** The session's job list
+  showed it as done while the report to the model said it did not complete.
+- **The prompt token count follows how fetched text is read.** A request that marks part of its
+  text as untrusted reported the count of a prompt in which that text's control tokens were
+  parsed, which is not how it is read.
+- **A scheduled job does not run a web search written inside a thought that never closes.** The
+  chat already ignored it; a reply cut off mid-thought no longer triggers a lookup.
+- **Listing the coder's sessions no longer stalls the server.** Closing a session that had been
+  idle for a day (its browser, its checkpoint) ran inside the request and froze every other
+  request until it finished.
+- **The browser names a blocked popup by its address.** A window a page opened to an address that
+  did not answer was listed as blocked under an internal error page's address instead of its own.
+- **Pulling a whole Hugging Face folder works again.** `localm pull <owner>/<repo>` for a full model folder failed when the download finished, with "'MeterBar' object has no attribute 'set_description_str'", under the huggingface-hub release localm now installs.
+- **A ComfyUI that hangs on its port is named at once.** After a GPU crash a ComfyUI that localm did not launch can keep its port and stop answering. `localm comfy restart` and any generation that needs ComfyUI now say right away which process holds the port (its pid and name) and that localm will not stop it, instead of relaunching into the held port and waiting five minutes; `localm comfy status` shows the same line.
+- **Closing the connection during image generation stops the job.** A client that went away from `/v1/images/generations` while the job was reporting progress did not cancel it, because the check only ran while the job was silent. The job is now cancelled within a second of the disconnect.
+- **Closing the connection during text-to-speech stops the job.** A client that went away while `/v1/audio/speech` was synthesising did not cancel the job, because the check only ran while the job was silent. The job is now cancelled within a second of the disconnect.
+- **`localm update` exits non-zero when it fails.** A refused update (bad signature, unreadable trust file, failed apply), a failed update check and a failed `--rollback` printed their message and exited 0, so a script could not tell the update had not happened.
+- **`localm doctor` no longer tells you to reinstall the voice extra after a slow first run.** When the recording-decode check does not finish in 60 seconds (common right after an install) doctor says it could not tell and to run it again; the reinstall advice stays for a real decode failure.
+- **A model worker that was killed is reported as terminated.** The Windows exit code -1 was printed unsigned as `worker exit 4294967295`; it now reads `-1 (the process was terminated)`.
+- **`localm run` no longer prints a traceback when the model process dies mid-reply, and records the failed turn.** The console gets one line (the traceback is in the debug log), and the session log and transcript keep the failed turn with its error and a `finish_reason` of `error`, as the server does.
+- **A tiny model no longer answers "I." to plain questions.** The chat plugin's reminder to say "I" instead of "the model" is reworded as a style note after an instruction to answer every question fully.
+- **Privacy mode leaves no crash exit file.** After a hard crash on Windows the crash watchdog wrote a `server-crash-exit` file in the data folder even in privacy mode, and nothing removed it. It is no longer written when the run started in privacy mode, and the next start deletes any left over.
+- **The launcher writes no error log in privacy mode.** `logs/launcher.log`, which holds error lines that can name your model paths, is now written only when the privacy mode is not `privacy` or "Keep diagnostics for bug reports" is ticked.
+- **A rejected grammar's text stays out of the debug log in privacy mode.** When a malformed grammar was only found while the reply was generated, the native parser's error and the grammar source reached the debug log and the recent-activity view of a bug report; both now stay clear of it unless chat content is allowed in the debug log.
+- **A pasted log no longer lets chat text into a bug report's log digest.** After a debug record that carries chat content, several pasted localm log lines could end the withholding early and let the chat text after them through. Only log lines stamped after that record end it now.
+- **Bug reports keep ordinary words that are also your computer's name.** A machine named `server`, `desktop`, `workstation`, `gpu`, `main` or `build` had every such word in the report, and in the issue title, replaced by `<host>`. Common generic names are left alone; other machine names are still redacted.
+- **The automated browser no longer lets a worker reach the network around its gate.** A
+  WebSocket opened from a Worker, SharedWorker or service worker, and a `fetch()` from a
+  SharedWorker, used to connect directly without passing the network policy. The
+  browser now resolves no host on its own, so these fail without connecting anywhere; every
+  other request is still decided by the policy as before.
+- **Text-to-speech no longer downloads its voice model or voice files when network access is off.**
+  With network access set to off, the browser voice (Kokoro) now refuses to fetch the model, or a
+  voice it has not used before, instead of offering a one-click download, unless "Allow model
+  downloads while network access is off" is on. A model and voices already downloaded still work.
+- **Scheduled coder jobs and MCP coder runs no longer let a project's `.localcoder/config.toml`
+  write more than your settings allow.** A project mode of `log` or `full` is ignored (with a
+  warning) when your configured mode persists less, so a cloned repository cannot turn privacy
+  mode into session logs for an unattended run. A project can still pin a run to a stricter mode.
+- **Knowledge re-sync now removes documents indexed from a credential folder in every case.**
+  Previously a document was kept when the indexed folder itself was a credential folder such as
+  `.ssh`, when the file had been deleted, or when its folder was unavailable, and search kept
+  returning its text. They are now removed on the next re-sync.
+- **`localm coder` no longer compacts after every turn.** With a model that leaves little room for context, the coder used to be summarised again on nearly every request, and reading a codebase file by file triggered a summary per file. It now compacts only when a request would take most of the context window, brings the session down to about half of it, and first drops the output of older tool calls (the model reads a file again when it needs it) before summarising anything. Everything you typed is kept word for word across compactions, and summaries list facts instead of prose. A model server that reports no context window, such as an online API, is no longer compacted at 4096 tokens.
+- **A vision projector is no longer offered as a model.** A pulled vision model registers its
+  projector (`...-mmproj`) as a separate entry, and `GET /v1/models` listed it as a chat model.
+  A request naming it unloaded the working model and then failed to load the projector. The
+  projector is now left out of `/v1/models`, and a chat, load or switch request that names it is
+  refused with a message naming the model it belongs to, before anything is unloaded.
+- **Image, video, music and speech components can no longer be loaded as a chat model.** A VAE,
+  text encoder, LoRA, upscaler, image or video checkpoint, or text-to-speech model could be named
+  in a chat, load or switch request, which unloaded the working model (or failed with an internal
+  server error) before the load failed. Such a request is now refused up front with a message
+  saying what the entry is. The image and video components are also left out of `GET /v1/models`;
+  text-to-speech models stay listed, since `/v1/audio/speech` takes them by name.
+- **"Delete saved data" also removes the coder's hook and MCP trust records** (`coder-hook-trust.json` in the data folder).
+- **A short request no longer throws away a running conversation's cached prompt.** A summary, title or other small request sent to the same model between two turns used to take over the conversation's cache, so its next turn processed the whole prompt again. It now uses another slot, and the conversation continues from its cache.
+- **A long conversation is no longer summarised again on every message.** When a chat client sends its whole history each turn and the server has to compact it to fit the context window, the server now reuses the summary it already wrote while the conversation still fits, and later only summarises the newly older messages. Each compaction also brings the conversation down to about half the window, so the next one is many turns away instead of one.
+- **Long conversations on Mistral-family (tekken) models no longer fail with "Send less text
+  per request".** The pre-tokenizer length limit now applies to each message, the way llama.cpp
+  tokenizes a conversation, instead of to the whole conversation. When one message the coder built
+  (tool output, file contents) is still too long, the coder shortens it and retries; only text you
+  typed is reported back to you, with what to do about it.
+- **The coder makes the change instead of printing it.** When you ask for a change and the coder
+  writes nothing (it puts the code in its reply, says the change is already there, or only runs
+  the tests), it is told once that nothing was written; a run that still ends with nothing
+  written is reported as not finished instead of "Task finished". A reply of only
+  `[no tool needed]` no longer leaves you with an empty answer.
+- **Coder edit tools are harder to get wrong.** `edit_file`, `edit_files` and `patch_file` no
+  longer apply an edit that would break a Python or TOML file that was valid (the file stays
+  unchanged and the agent sees the region its edit would have produced), and a replacement written
+  without the indentation of the line it lands on is re-indented when that keeps the file valid.
+  Argument names other coding tools use (`old_str`, `new_str`, `file_path`) are accepted, as are
+  arguments written next to `args` when the tool takes them; a call with missing arguments gets a
+  reply naming them with an example, a missed `old` text says how to add new text, and identical calls in one reply run once.
+- **A coder task no longer ends on "let me run the tests".** A reply whose last line announces a
+  step it did not take is sent back once; a run that still stops there, or answers with nothing,
+  is reported as not finished.
+- **A model whose context does not fit no longer crashes the loading process.** When llama.cpp
+  could not create the context (for example when a GPU ran out of memory for it), the model was
+  freed twice, which on Linux killed the loading process with a segmentation fault ("exit code
+  -11") instead of reporting "Failed to create llama context" with advice.
+- **Large split models plan their GPU placement correctly.** A split GGUF whose first part holds
+  only metadata, the layout big models such as Qwen3.8-Flash-Next ship in, was sized as if every
+  byte went to the GPU: the embedding tables that stay in system RAM were counted as VRAM, the
+  Mixture-of-Experts experts could not be kept in RAM, the multi-GPU split was not planned and the
+  KV cache was over-estimated, so only a few layers were offloaded across every GPU. Such models
+  are now placed with every layer on the GPUs and the experts that do not fit kept in system RAM.
+- **Multi-GPU loads use all the cards for a Mixture-of-Experts model.** When the experts of some
+  layers stay in system RAM, the remaining layers are packed onto the GPUs by size instead of by
+  free memory alone, so a small last card no longer forces most experts off the GPUs.
+- **A failed load no longer blames low VRAM when the planned load fit,** and the advice names a
+  GPU layer count that fits instead of a fixed `-g 24`. A worker crash in privacy mode says that
+  privacy mode kept no crash trace and how to keep one.
+- **A textual-inversion embedding downloaded from CivitAI now registers as an image embedding**,
+  not as a text embedding model, so it no longer appears as an embedding model in the model list
+  Ollama clients see. One downloaded earlier is still offered on the Images page; `localm
+  set-type <name> textual-inversion` also takes it out of that list.
 - **A coder shell command that starts with a quoted program path now runs on Windows.** A command such as `"D:\tools dir\tool.exe" --flag "a b"` used to fail with "is not recognized as an internal or external command", because `cmd` dropped the first and last quote.
 - **A shell command's timeout or cancel in `localm coder` is no longer held up by a stray
   background process.** A command that left a detached process holding its output open used to
@@ -129,6 +278,19 @@ permanent public record of what shipped and are never rewritten; the in-progress
   layers, a model that loaded partly on the CPU because another program held VRAM is reloaded
   on the GPU at a later request once enough VRAM is free. An explicit GPU layer count is never
   changed.
+- **Replies speed up again after Windows moved part of a model out of VRAM.** When another
+  program takes VRAM, Windows can move part of a loaded model to system memory, and replies
+  stayed several times slower even after that program closed. When a reply decodes far slower
+  than the model managed before at the same context length, localm now rebuilds the model's
+  context before the next request, which restores the speed without reloading the model. This
+  applies to models loaded fully on the GPU, never while other replies are running, and at most
+  once a minute.
+- **On Windows, a reply beside another program's VRAM use keeps the model in VRAM.** When other
+  programs use VRAM, Windows lets each program keep only part of what is free and moves the rest
+  of its memory to system memory, where replies decode about half as fast. When the whole reply
+  budget (`max_tokens`) would go past what Windows lets the model keep but the prompt plus the
+  first 512 tokens of the reply fits, the reply now starts in the context the model already has,
+  so a short reply keeps full GPU speed.
 - **The Live tuning VRAM estimate counts the running model's own memory.** The VRAM the running
   model holds was counted as used, so settings that fit read "may not fit"; it is now shown
   beside the free VRAM and counted as available. Apply now reloads the running model with the
@@ -140,12 +302,97 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **"continue" carries on with the previous reply.** "continue", "weiter", "continúa" and the same
   word in other languages continue the last reply instead of searching the selected Knowledge
   collection for the word.
+- **The MCP server answers a line it cannot parse.** Malformed JSON, a number or id with more than
+  4300 digits and JSON nested thousands deep used to get no reply, so a client waited forever. They
+  now get a JSON-RPC parse error (-32700) and the server keeps serving.
+- **`/v1/models` lists whether each model sees images or hears audio.** The list entries carry the
+  same `vision` and `audio_input` fields as `/v1/models/{id}`.
+- **The audio transcription error no longer tells you to install Whisper when it is installed.**
+  Asking an audio model for `srt`, `vtt` or `verbose_json` now says to send model `whisper-1` when
+  faster-whisper is present.
+- **`localm setup-embeddings --model` refuses a reranker.** A registered reranker or a reranker
+  GGUF path is rejected before anything is saved, and the re-embed reminder still appears when your
+  collections have no vectors yet. A collection holding vectors from more than one embedding model
+  is marked as mixed in the switch warning.
+- **Qwen3 sequence-classification rerankers score the prompt they were trained on.** A Hugging
+  Face Qwen3 reranker folder now gets the instruction, query and document template its model card
+  specifies instead of a plain sentence pair, which separates relevant from irrelevant passages
+  much more clearly.
+- **A refused `localm rag add` leaves no empty collection behind.** Pointing a new collection at a
+  credential folder or a UNC path removes the collection that the failed add had created.
+- **A model folder named like the built-in embedding model no longer replaces it.** `/v1/embeddings`
+  for `bge-small-en-v1.5` is answered by the pinned embedding model, and the log says when a
+  registered folder with that name is being passed over.
+- **Memory recall ignores a word that most facts contain.** A query such as "what database does
+  Project Atlas use" no longer brings back every fact that says "use" behind the one that matches.
+- **`localm spec-drafts` leaves out a model file cut short**, and the load response and the
+  model-switch toast for a model with experts in system RAM say how much of that RAM each
+  generated token reads.
+- **Saving a token in Settings and opening a Knowledge collection no longer stall the server.**
+  The credential write of a config save and the collection open of add, upload, re-embed, repair
+  and remove-document run off the event loop. A numpy failure while scoring a collection is now
+  logged instead of silently slowing every query.
+- **A conversation deleted while the list loads is no longer reported as unreadable.**
+- **The same speech seed gives the same audio.** `localm speak --seed N` and the `seed` field of
+  `/v1/audio/speech` gave a different recording on every run on a GPU. A request with a seed now
+  runs the speech model's projector on the CPU and puts it back on the GPU afterwards, so the
+  audio is identical from run to run; such a request takes longer. Requests without a seed are
+  unchanged.
+- **A FLUX LoRA from XLabs is a LoRA.** It is no longer offered as a FLUX model in the Images
+  model picker; it is listed with the other LoRAs.
+- **A plugin install that is interrupted can be repeated.** A `localm plugin install` that dies
+  mid-copy no longer leaves a half-copied plugin folder that the next install answers with
+  "already installed"; the copy is built next to the plugin folder and moved into place once it
+  is complete, and a folder without a manifest left by an older interrupted install is replaced.
+- **`localm pull` no longer replaces a model you registered in place.** A pull whose name is
+  already registered to a file kept outside the models folder (`localm add` without copying)
+  stops and says so instead of replacing the registration; pick another name with `--name`.
+- **Importing an A1111 image fills Clip skip and says what it left out.** The Images page's
+  Import parameters takes the Clip skip value from a Stable Diffusion WebUI image and reports
+  Hires fix settings as not applied instead of dropping them silently.
+- **Cancelling an image or video job no longer prints the engine's raw failure lines.** The
+  "sampling failed" lines the stable-diffusion.cpp engine logs while it stops are kept in the
+  debug log. A second out-of-memory retry while decoding says "Still not enough VRAM" instead of
+  repeating the first message.
+- **`localm image`, `video` and `music` no longer ask "Open it now?" when input is `NUL`.** On
+  Windows the null device passed for a terminal.
+- **The message for a refused ComfyUI address no longer ends with an internal tag.**
+- **`/web` with no model loaded says so before it searches.** It used to run the search and then
+  show a raw "Model parameter is required" error; it now gives the same "No model loaded" answer
+  as a plain send, and a send made while a model is still loading says which model is loading.
+- **A page reloaded while a model is loading follows the load.** The sidebar shows "loading
+  <model>" and checks again every 2 seconds, instead of showing "No model loaded" and refusing
+  sends for up to 30 seconds.
+- **A plugin installed with `localm plugin install` while the GUI is running works at once.**
+  Its routes are mounted the next time the page reads the plugin list, so `/web` no longer
+  answers "Method Not Allowed" until a restart.
+- **A plugin's tab opens right after you install it.** The tab entry used to appear before the
+  plugin's page was loaded, and clicking it showed Chat until a reload.
+- **`localm key create` warns when no owner key is set.** The new key turns authentication on, so
+  the GUI asks for a key and the scoped key is the only one that exists; the note says to run
+  `localm key generate` first.
+- **`localm serve` and `localm gui` no longer start with a speech-to-text model.** With no model
+  named, a registered model whose name or file name has a standalone `asr`, `whisper` or `stt`
+  word (Qwen3-ASR) is picked only when no other model is eligible.
+- **The usage line explains why MTP is off on a turn with audio.** It used to show the raw reason
+  word.
 
 ### Changed
 
 - **Export saves inside the app.** On the computer running localm, Export (the chat's, and the
   coder's session, result and patch exports) asks for a folder in the app's own file browser and
   saves there, without the browser's download prompt. Other devices still download the file.
+
+### Security
+
+- **A Hugging Face model can no longer make localm read files outside its folder.** The `path`
+  of each stage in a sentence-transformers model's `modules.json`, and each shard file a model's
+  `model.safetensors.index.json` names (read when sizing the model and when loading it as a
+  reranker), is now checked before anything is opened: a path with `..`, an absolute or drive
+  path, a Windows network share (which could send your Windows sign-in hash to that server) or a
+  link leading out of the folder makes the load fail. A sharded model added in place from the
+  Hugging Face cache is no longer refused as pointing outside its folder.
+- **Another user on the machine can no longer make your localm instance unload its models.** A running instance asked to release its VRAM for a sibling now acts only when the sibling listens under your own OS account, and a request it confirms cannot be reused for anything else. A sibling listening only on `::1` can now ask too. The instance status a sibling reads no longer gives model file paths, digests or the process id to a caller without credentials, and on a key-protected instance it no longer names the loaded models either.
 
 ## [0.3.0] - 2026-10-14
 

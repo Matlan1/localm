@@ -38,6 +38,20 @@ def _refuse_bad_path(console):
         sys.exit(1)
 
 
+def _discard_if_empty(console, name):
+    """Remove collection *name* when it holds no documents, after a refused
+    first add left it behind. Says so when it cannot."""
+    from rich.markup import escape
+
+    from ..rag import Collection, CollectionLockedError, delete_collection
+    try:
+        if not Collection(name).documents():
+            delete_collection(name)
+    except (ValueError, OSError, CollectionLockedError) as e:
+        console.print(f"[yellow]Could not remove the empty collection "
+                      f"'{escape(name)}': {escape(str(e))}[/yellow]")
+
+
 @main.group("rag")
 def rag_group():
     """Knowledge collections - chat with your documents (offline RAG).
@@ -118,11 +132,17 @@ def rag_add(collection, paths, force, embed, url):
         from localm.inference.embedder import DEFAULT_EMBEDDING_MODEL
         model_name = str(load_config().get("embedding_model")
                           or DEFAULT_EMBEDDING_MODEL).strip()
+    created_here = not coll.exists()
     with _refuse_if_locked(console), _refuse_bad_path(console):
         coll.create()             # a write too: takes the same lock
-        result = coll.add_paths(
-            list(paths), force=force, embed_fn=embed_fn, model_name=model_name,
-            on_progress=lambda t: console.print(f"  [dim]{escape(t)}[/dim]"))
+        try:
+            result = coll.add_paths(
+                list(paths), force=force, embed_fn=embed_fn, model_name=model_name,
+                on_progress=lambda t: console.print(f"  [dim]{escape(t)}[/dim]"))
+        except ValueError:
+            if created_here:
+                _discard_if_empty(console, collection)
+            raise
     console.print(f"[green]{result['added']} added, {result['updated']} updated, "
                   f"{result['skipped']} unchanged[/green] - "
                   f"{result['chunks']} chunks in '{escape(collection)}'")
@@ -283,7 +303,8 @@ def rag_resync(collection, embed, url, prune_missing):
     searchable and the flag clears by itself if the file comes back, so a moved
     file or an unplugged drive is never silently forgotten. Pass --prune-missing
     to actually delete those entries. A folder that is not currently reachable is
-    reported and skipped WHOLE - nothing under it is touched.
+    reported and skipped WHOLE - nothing under it is indexed or flagged. A
+    document under a credential folder (.ssh, .aws, ...) is always removed.
 
     Schedule this instead of running it by hand:
     `localm job add sync-docs --rag --collection COLLECTION --cron "0 3 * * *"`.
@@ -344,7 +365,7 @@ def rag_resync(collection, embed, url, prune_missing):
                       f"or under a credential folder).[/yellow]")
     for r in result["unavailable_roots"] + result["blocked_roots"]:
         console.print(f"[yellow]skipped folder {escape(r['root'])}: {escape(r['reason'])} - "
-                      f"nothing under it was indexed, flagged, or removed."
+                      f"nothing under it was indexed or flagged."
                       f"[/yellow]")
     if result.get("vector_degrade_reason"):
         # Also logged by the store.

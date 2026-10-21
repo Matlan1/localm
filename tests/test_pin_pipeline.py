@@ -117,7 +117,58 @@ def test_newest_candidate_returns_pair_when_upstream_is_ahead(monkeypatch):
     monkeypatch.setattr(check_llama_pin, "upstream_releases",
                         lambda: ([{"tag": newest, "published_at": None},
                                   {"tag": pin, "published_at": None}], ""))
+    monkeypatch.setattr(check_llama_pin, "cuda_linux_tags", lambda: ({newest, pin}, ""))
     assert pipeline.newest_candidate() == (pin, newest)
+
+
+def _llama_pin_module(monkeypatch, name, releases, built=None, built_err=""):
+    check_llama_pin = pipeline._load_module(
+        Path(pipeline.REPO) / "scripts" / "check_llama_pin.py", name)
+    monkeypatch.setattr(pipeline, "_load_module", lambda path, name: check_llama_pin)
+    monkeypatch.setattr(check_llama_pin, "upstream_releases", lambda: (releases, ""))
+    monkeypatch.setattr(check_llama_pin, "cuda_linux_tags",
+                        lambda: (set(built or ()), built_err))
+    return check_llama_pin
+
+
+def _pin_and_number():
+    check_llama_pin = pipeline._load_module(
+        Path(pipeline.REPO) / "scripts" / "check_llama_pin.py", "check_llama_pin_for_pin")
+    pin = check_llama_pin.pinned_tag()
+    return pin, check_llama_pin._build_number(pin)
+
+
+def test_newest_candidate_is_the_newest_tag_the_linux_cuda_repo_has_built(monkeypatch):
+    pin, n = _pin_and_number()
+    releases = [{"tag": f"b{n + k}", "published_at": None} for k in (3, 2, 1, 0)]
+    _llama_pin_module(monkeypatch, "check_llama_pin_lagging", releases,
+                      built={pin, f"b{n + 1}", f"b{n + 2}"})
+    assert pipeline.newest_candidate() == (pin, f"b{n + 2}")
+
+
+def test_newest_candidate_none_when_the_linux_cuda_repo_has_built_nothing_newer(monkeypatch):
+    pin, n = _pin_and_number()
+    releases = [{"tag": f"b{n + 1}", "published_at": None}, {"tag": pin, "published_at": None}]
+    _llama_pin_module(monkeypatch, "check_llama_pin_unbuilt", releases, built={pin})
+    assert pipeline.newest_candidate() is None
+
+
+def test_newest_candidate_none_when_the_linux_cuda_listing_is_unreadable(monkeypatch):
+    pin, n = _pin_and_number()
+    releases = [{"tag": f"b{n + 1}", "published_at": None}, {"tag": pin, "published_at": None}]
+    _llama_pin_module(monkeypatch, "check_llama_pin_cuda_err", releases,
+                      built_err="HTTP 503 from the GitHub releases API")
+    assert pipeline.newest_candidate() is None
+
+
+def test_cuda_linux_repo_reads_the_pins_file(tmp_path):
+    check_llama_pin = pipeline._load_module(
+        Path(pipeline.REPO) / "scripts" / "check_llama_pin.py", "check_llama_pin_repo")
+    assert check_llama_pin.cuda_linux_repo() == "hybridgroup/llama-cpp-builder"
+    bad = tmp_path / "pins.py"
+    bad.write_text("_PINNED_TAG = \"b1\"\n", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        check_llama_pin.cuda_linux_repo(bad)
 
 
 def test_newest_candidate_none_on_upstream_error(monkeypatch):
@@ -517,6 +568,9 @@ def test_run_confirm_requests_cpu_and_vulkan_and_the_given_receipt(monkeypatch, 
     assert "confirm_llama_runtime.py" in " ".join(cmd)
     assert cmd.count("--backend") == 2
     assert "cpu" in cmd and "vulkan" in cmd
+    assert "--require-gpu" in cmd
+    assert [cmd[i + 1] for i, a in enumerate(cmd) if a == "--also-measure"] == list(
+        pipeline.ALSO_MEASURE_BACKENDS)
     assert "--tag" in cmd and "b10999" in cmd
     assert str(receipt) in cmd
 
@@ -1568,6 +1622,10 @@ def test_run_llama_pipeline_red_ci_leaves_pr_open_never_merges(monkeypatch, tmp_
     assert rc == 1
     assert not merge_spy.calls, "must never merge on a red CI result"
     assert issue_spy.calls
+    (_, kwargs), = issue_spy.calls
+    assert kwargs["kind"] == "CI-RED"
+    assert "passed its runtime confirm" in kwargs["summary"]
+    assert "#55" in kwargs["summary"]
     state = json.loads((state_dir / "llama-state.json").read_text(encoding="utf-8"))
     assert state["verdict"] == "FAIL"
     assert state["open_pr"] == 55
@@ -2245,6 +2303,9 @@ def test_run_comfyui_pipeline_red_ci_leaves_pr_open_never_merges(monkeypatch, tm
     assert rc == 1
     assert not merge_spy.calls
     assert issue_spy.calls
+    (_, kwargs), = issue_spy.calls
+    assert kwargs["kind"] == "CI-RED"
+    assert "ComfyUI v0.32.0 passed its runtime confirm" in kwargs["summary"]
     state = json.loads((state_dir / "comfyui-state.json").read_text(encoding="utf-8"))
     assert state["verdict"] == "FAIL"
 

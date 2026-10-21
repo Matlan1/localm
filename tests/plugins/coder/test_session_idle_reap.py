@@ -75,3 +75,43 @@ def test_list_opportunistically_reaps_without_a_background_thread(tmp_path):
     s.last_activity_at -= (_IDLE_REAP_SECONDS + 1)   # force idle, no real wait
     assert mgr.list() == []
     assert mgr.get(s.id) is None
+
+
+def test_a_session_that_turns_busy_before_its_turn_to_be_reaped_is_kept(tmp_path):
+    """The idle ids are taken once; a session that was used again while an
+    earlier session's close() ran must not be closed under its user."""
+    mgr = SessionManager()
+    s = mgr.create(_session(tmp_path))
+    s.last_activity_at -= (_IDLE_REAP_SECONDS + 1)
+    real_ids = mgr._idle_ids
+
+    def _ids_then_busy(max_idle_s, now=None):
+        ids = real_ids(max_idle_s, now)
+        s.busy = True
+        return ids
+
+    mgr._idle_ids = _ids_then_busy
+    assert mgr.reap_idle() == []
+    assert mgr.get(s.id) is s
+    assert s.closed is False
+
+
+def test_a_reaper_thread_that_cannot_start_does_not_wedge_later_reaps(
+        tmp_path, monkeypatch):
+    import threading
+    mgr = SessionManager()
+    s = mgr.create(_session(tmp_path))
+    s.last_activity_at -= (_IDLE_REAP_SECONDS + 1)
+
+    def _no_thread(*a, **k):
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(threading, "Thread", _no_thread)
+    assert mgr.reap_idle_in_background() is False
+    monkeypatch.undo()
+    assert mgr._reaping is False
+    assert mgr.reap_idle_in_background() is True
+    deadline = __import__("time").monotonic() + 10
+    while mgr.get(s.id) is not None and __import__("time").monotonic() < deadline:
+        __import__("time").sleep(0.02)
+    assert mgr.get(s.id) is None

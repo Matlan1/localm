@@ -26,18 +26,31 @@ def register(app: FastAPI, ctx) -> None:
              dependencies=[Depends(require_scope(scopes.MODELS_READ))])
     async def list_models():
         from localm.config import load_registry
+        from localm.model_manager.registry import is_unlisted_entry
         registry = load_registry()
-        
+
         models = []
         now = int(time.time())
-        all_model_names = set(registry.keys())
+        all_model_names = {n for n, e in registry.items() if not is_unlisted_entry(e)}
         if _hs._default_model_name and _hs._default_model_name not in all_model_names:
             all_model_names.add(_hs._default_model_name)
             
-        for name in sorted(all_model_names):
+        names = sorted(all_model_names)
+
+        def _probe_capabilities() -> dict:
+            from localm.model_manager import capabilities as _caps
+            dir_cache: dict = {}
+            return {n: (_caps.model_capability(n, _caps.VISION, reg=registry, dir_cache=dir_cache),
+                        _caps.model_capability(n, _caps.AUDIO, reg=registry, dir_cache=dir_cache))
+                    for n in names if n in registry}
+
+        caps = await asyncio.get_running_loop().run_in_executor(
+            get_plugin_executor(), _probe_capabilities)
+
+        for name in names:
             engine = _hs._engines.get(name)
             loaded = engine.loaded if engine is not None else False
-            models.append({
+            row = {
                 "id":       name,
                 "object":   "model",
                 "created":  now,
@@ -45,8 +58,14 @@ def register(app: FastAPI, ctx) -> None:
                 "loaded":   loaded,
                 # True for the active model: the default routing target.
                 "active":   name == _hs._active_model_name,
-            })
-            
+            }
+            vision, audio = caps.get(name, (None, None))
+            if vision is not None:
+                row["vision"] = vision
+            if audio is not None:
+                row["audio_input"] = audio
+            models.append(row)
+
         return {
             "object": "list",
             "data": models,

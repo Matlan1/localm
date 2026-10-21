@@ -22,7 +22,7 @@ task_kind "rag":   the job's ``collection`` is re-synced against the folders it
 
 Results are explicit user data (the store saves them in every privacy mode), but
 any session TRACE a run would leave (audit JSONL, transcripts) still honours
-``effective_mode`` - the coder Agent is constructed with the resolved mode, and
+``effective_unattended_mode`` - the coder Agent is constructed with the resolved mode, and
 the chat path writes no trace of its own.
 """
 
@@ -310,9 +310,8 @@ def _default_chat_model() -> Optional[str]:
     name = cfg.get("default_model") or cfg.get("model")
     if name:
         return name
-    from localm.model_manager import is_auto_chat_eligible
-    reg = load_registry()
-    return next((n for n in sorted(reg) if is_auto_chat_eligible(reg[n])), None)
+    from localm.model_manager import auto_chat_candidates
+    return next(iter(auto_chat_candidates(load_registry())), None)
 
 
 def _headless_routed_model(job: Job) -> Optional[str]:
@@ -396,11 +395,10 @@ def _load_engine(model: Optional[str]) -> tuple[Optional[object], bool]:
         cfg = load_config()
         name = cfg.get("default_model") or cfg.get("model")
     if not name:
-        from localm.model_manager import is_auto_chat_eligible
-        reg = load_registry()
+        from localm.model_manager import auto_chat_candidates
         # Auto-pick the first chat-eligible model; skip a type='unknown' model. It
         # stays runnable when a job explicitly configures default_model/model above.
-        name = next((n for n in sorted(reg) if is_auto_chat_eligible(reg[n])), None)
+        name = next(iter(auto_chat_candidates(load_registry())), None)
     if not name:
         return None, False
     info = get_model_info(name)
@@ -571,7 +569,7 @@ def _format_rag_result(name: str, result: dict, lines: list, *,
     """Render a re-sync result as the job's output.
 
     Every degrade is stated, not implied: a skipped root, a flagged-missing
-    document, a per-file failure, a vectors.json the store found corrupt or stale,
+    document, a document removed from the index, a per-file failure, a vectors.json the store found corrupt or stale,
     and new documents indexed WITHOUT embeddings into a collection that had
     semantic search, which pushes vector coverage down and can drop the whole
     collection to BM25."""
@@ -587,9 +585,13 @@ def _format_rag_result(name: str, result: dict, lines: list, *,
     if result["restored"]:
         out.append(f"{len(result['restored'])} previously missing document(s) "
                    f"are back.")
+    if result["pruned"]:
+        out.append(f"{len(result['pruned'])} document(s) removed from the index "
+                   f"(file gone, or under a credential folder):")
+        out.extend(f"  pruned: {p}" for p in result["pruned"][:10])
     for r in result["unavailable_roots"] + result["blocked_roots"]:
         out.append(f"skipped folder {r['root']}: {r['reason']} "
-                   f"(nothing under it was indexed, flagged, or removed)")
+                   f"(nothing under it was indexed or flagged)")
     if result["failed"]:
         out.append(f"{len(result['failed'])} file(s) failed:")
         out.extend(f"  {f['path']}: {f['error']}" for f in result["failed"][:10])
@@ -723,7 +725,7 @@ def _run_coder(job: Job, *, engine=None) -> str:
     The agent always talks to an OpenAI-compatible HTTP endpoint, so a job run
     needs a localm server (``self_url``) reachable; without one this raises and
     the run is recorded as an error (never crashing the tick)."""
-    from localm.audit import effective_mode
+    from localm.audit import effective_unattended_mode
     from localm.plugins.builtin.jobs.store import cwd_unc_error
 
     # AUTHORITATIVE check, re-validated at RUN time and not only at the write: a row
@@ -762,8 +764,9 @@ def _run_coder(job: Job, *, engine=None) -> str:
             "directory.", job.name, job.id)
 
     backend = _coder_backend(job)
-    # Resolved with the job's project dir, where a .localcoder/config.toml mode applies.
-    mode = effective_mode("coder", cwd=cwd)
+    # Resolved with the job's project dir, where a .localcoder/config.toml mode can
+    # only reduce what the run persists.
+    mode = effective_unattended_mode("coder", cwd=cwd)
 
     # Safe-by-default: an unattended scheduled run has nobody to approve a destructive
     # tool, so it runs RESTRICTED (read plus confined edit, no run_shell, no network,

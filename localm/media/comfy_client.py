@@ -502,6 +502,8 @@ def model_type_for_node(class_type: str) -> str:
         return "vae"
     if "lora" in name:
         return "lora"
+    if "controlnet" in name:
+        return "controlnet"
     if "checkpoint" in name or "ckpt" in name:
         return "diffusion-unet"
     return "unknown"
@@ -825,7 +827,7 @@ def sanitize_comfy_url_checked(url: str) -> tuple:
             from localm.debuglog import logger
             logger.warning(
                 "comfy_api_url %r targets a link-local/metadata address; ignoring "
-                "it and using the loopback default (CHK-COMFY-APIURL)", url)
+                "it and using the loopback default", url)
             return _COMFY_LOOPBACK_DEFAULT, (
                 f"comfy_api_url {url!r} targets a link-local/metadata address; "
                 f"ignoring it and using the loopback default instead")
@@ -838,7 +840,7 @@ def sanitize_comfy_url_checked(url: str) -> tuple:
         from localm.debuglog import logger
         logger.warning(
             "comfy_api_url %r could not be validated (%s); ignoring it and "
-            "using the loopback default (CHK-COMFY-APIURL)", url, e)
+            "using the loopback default", url, e)
         return _COMFY_LOOPBACK_DEFAULT, (
             f"comfy_api_url {url!r} could not be validated ({e}); ignoring it "
             f"and using the loopback default instead")
@@ -1419,6 +1421,65 @@ def spawned_pid(api_url: Optional[str] = None) -> Optional[int]:
         return None
 
 
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "0.0.0.0"})
+
+
+def comfy_port_holder(api_url: str, timeout: float = 1.0) -> Optional[dict]:
+    """Who holds the TCP port of a local *api_url*, or ``None``.
+
+    ``None`` when *api_url* is not a loopback address, the port is free, or the
+    probe could not connect. Otherwise ``{"port": int, "pid": int | None,
+    "name": str | None}``: something accepts connections there, ``pid`` and
+    ``name`` identify the listener when the OS lets this account see them.
+    Never raises, never signals a process. Callers use it after the
+    ``/system_stats`` probe failed, so a holder means a process that accepts a
+    connection but does not answer ComfyUI's API."""
+    import socket
+    try:
+        parts = urllib.parse.urlsplit(api_url)
+        host = (parts.hostname or "").lower()
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+    except ValueError:
+        return None
+    if host not in _LOOPBACK_HOSTS:
+        return None
+    probe_host = "127.0.0.1" if host in ("localhost", "0.0.0.0") else host
+    try:
+        with socket.create_connection((probe_host, port), timeout=timeout):
+            pass
+    except OSError:
+        return None
+    holder: dict = {"port": port, "pid": None, "name": None}
+    try:
+        import psutil
+        for conn in psutil.net_connections(kind="tcp"):
+            if (conn.laddr and conn.laddr.port == port and not conn.raddr
+                    and conn.pid):
+                holder["pid"] = conn.pid
+                try:
+                    holder["name"] = psutil.Process(conn.pid).name()
+                except psutil.Error:
+                    pass
+                break
+    except Exception as e:
+        from localm.debuglog import logger
+        logger.debug("could not identify the listener on port %s: %s", port, e)
+    return holder
+
+
+def comfy_port_held_message(api_url: str, holder: dict) -> str:
+    """The user-facing sentence for a ``comfy_port_holder`` result."""
+    who = "another process"
+    if holder.get("pid"):
+        name = f" ({holder['name']})" if holder.get("name") else ""
+        who = f"process {holder['pid']}{name}"
+    return (f"Port {holder['port']} at {api_url} is held by {who}, which accepts "
+            "connections but does not answer as ComfyUI (a ComfyUI that hung after "
+            "a GPU crash looks like this). localm did not start it and will not stop "
+            "it: end that process yourself, or point localm at another port with "
+            "FLUX_API_URL.")
+
+
 # ---------------------------------------------------------------------------
 #  Serialize ensure_comfy()'s whole check-then-launch sequence per api_url.
 #
@@ -1930,6 +1991,11 @@ def _launch_and_wait(api_url: str, launch_cmd: Optional[str],
     if cfg.get("comfy_disable_auto_launch") and \
             "--disable-auto-launch" not in launch_cmd:
         launch_cmd = launch_cmd + " --disable-auto-launch"
+
+    if spawned_pid(api_url) is None:
+        holder = comfy_port_holder(api_url)
+        if holder is not None:
+            return False, comfy_port_held_message(api_url, holder)
 
     _say(f"ComfyUI not running - launching: {launch_cmd}")
     if discovered:

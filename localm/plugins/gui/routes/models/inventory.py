@@ -258,6 +258,9 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                     row_out["applied_adapters"] = applied
             models.append(row_out)
         out = {"models": models, "active": current}
+        loading = _hs._switch_loading
+        if loading:
+            out["loading"] = loading
         # Models this instance answers through a peer instance on the same
         # machine, keyed by name (see localm.peer_routing).
         from localm import peer_routing
@@ -379,7 +382,10 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
 
     @app.post("/api/models/load", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def gui_load_model(req: LoadModelRequest):
-        _require_registered(req.model)
+        from localm.model_manager.registry import chat_load_refusal
+        refusal = chat_load_refusal(req.model, _require_registered(req.model))
+        if refusal is not None:
+            raise HTTPException(422, refusal)
         # Route every switch through the coordinator so a new selection preempts an
         # in-flight load instead of queuing behind it. The coordinator returns the
         # authoritative status: loaded, already_active, superseded (a newer
@@ -485,10 +491,13 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         moe_pinned_bytes = 0
         input_layer_bytes = 0
         keeps_kv = True
-        # n_cpu_moe has no GUI slider of its own (unlike n_ctx / n_gpu_layers, which
-        # the caller sends as the sliders' live positions), so it is read from the
-        # saved config.
-        n_cpu_moe = int(load_config().get("n_cpu_moe") or 0)
+        # n_cpu_moe and kv_cache_type have no GUI slider of their own (unlike n_ctx /
+        # n_gpu_layers, which the caller sends as the sliders' live positions), so
+        # they are read from the saved config.
+        from localm.kv_cache import resolve_kv_cache_type
+        cfg = load_config()
+        n_cpu_moe = int(cfg.get("n_cpu_moe") or 0)
+        kv_cache_type = resolve_kv_cache_type(cfg)
         running = _hs._engines.get(name) if name else None
         if not (running is not None and getattr(running, "loaded", False)
                 and getattr(running, "unloading", False) is not True):
@@ -499,6 +508,10 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                         if running is not None else None)
         held_sizing = (getattr(running, "gpu_sizing", None)
                        if running is not None else None)
+        held_kv_type = (getattr(running, "kv_cache_type", None)
+                        if running is not None else None)
+        if not isinstance(held_kv_type, str):
+            held_kv_type = None
         held_cpu_moe = int((held_sizing or {}).get("n_cpu_moe") or 0)
         held_moe_pinned = 0
         # _entry_path returns None for a malformed entry (non-dict, or a null /
@@ -583,7 +596,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                             kv_bytes_per_token=kv_bytes_per_token,
                             moe_pinned_bytes=moe_pinned_bytes,
                             input_layer_bytes=input_layer_bytes,
-                            keeps_kv=keeps_kv)
+                            keeps_kv=keeps_kv, kv_cache_type=kv_cache_type)
         # vram_capacity() -> list_gpus() probes the GPU driver; keep it off the event
         # loop so a stats read never stalls the WebUI. return_status=True so a stale
         # (timed-out) or process-blind free reading is not weighed as current. When
@@ -607,7 +620,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                                      kv_bytes_per_token=kv_bytes_per_token,
                                      moe_pinned_bytes=held_moe_pinned,
                                      input_layer_bytes=input_layer_bytes,
-                                     keeps_kv=keeps_kv)["needed"]
+                                     keeps_kv=keeps_kv,
+                                     kv_cache_type=held_kv_type)["needed"]
         available = (free + held) if isinstance(free, int) and held is not None else None
         budget = available if available is not None else free
         fits = (est["needed"] <= budget) if isinstance(budget, int) else None

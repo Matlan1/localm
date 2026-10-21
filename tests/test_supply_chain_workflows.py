@@ -154,7 +154,8 @@ def _compare_script() -> str:
     return step["run"].split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
 
 
-def _run_compare(tmp_path, monkeypatch, capsys, *, event, pypi_hashes, built=b"built"):
+def _run_compare(tmp_path, monkeypatch, capsys, *, event, pypi_hashes, built=b"built",
+                 dry_run=""):
     """Execute the compare step's script against a stubbed PyPI listing."""
     import hashlib
     import io
@@ -172,6 +173,7 @@ def _run_compare(tmp_path, monkeypatch, capsys, *, event, pypi_hashes, built=b"b
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("VERSION", "9.9.9")
     monkeypatch.setenv("EVENT", event)
+    monkeypatch.setenv("DRY_RUN", dry_run)
     monkeypatch.setattr(time, "sleep", lambda _s: None)
 
     def fake_urlopen(url, timeout=0):
@@ -223,6 +225,24 @@ def test_release_attest_does_not_fail_a_dry_run_on_a_difference(tmp_path, monkey
                                         pypi_hashes={n: "0" * 64 for n in names})
     assert code == 0
     assert "::error::" not in out and "differs" in out
+
+
+def test_release_attest_fails_a_real_dispatch_whose_pypi_file_differs(tmp_path, monkeypatch, capsys):
+    names = ("localm-9.9.9.tar.gz", "localm-9.9.9-py3-none-any.whl")
+    code, out, _built, _ = _run_compare(tmp_path, monkeypatch, capsys, event="workflow_dispatch",
+                                        dry_run="false", pypi_hashes={n: "0" * 64 for n in names})
+    assert code == 1
+    assert "::error::" in out
+
+
+def test_release_attest_passes_a_real_dispatch_whose_pypi_files_match(tmp_path, monkeypatch, capsys):
+    import hashlib
+    good = hashlib.sha256(b"built").hexdigest()
+    names = ("localm-9.9.9.tar.gz", "localm-9.9.9-py3-none-any.whl")
+    code, out, _built, _ = _run_compare(tmp_path, monkeypatch, capsys, event="workflow_dispatch",
+                                        dry_run="false", pypi_hashes={n: good for n in names})
+    assert code == 0
+    assert out.count("byte-identical") == 2
 
 
 def test_release_attest_warns_rather_than_passing_when_pypi_cannot_be_read(tmp_path, monkeypatch, capsys):

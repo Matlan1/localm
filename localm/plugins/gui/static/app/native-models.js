@@ -18,6 +18,7 @@ const NM_SLOT_KEYS = {
   llm: "nativeModels.slot.llm",
   vae: "nativeModels.slot.vae",
   clip_vision: "nativeModels.slot.clipVision",
+  llm_vision: "nativeModels.slot.llmVision",
 };
 const NM_MUSIC_KEYS = {
   dit: "nativeModels.music.dit",
@@ -157,7 +158,7 @@ export function createNativeModelPicker({ media, prefix, mountId, onData }) {
     }
     if (note.textContent) box.appendChild(note);
 
-    const needs = new Set((prev && prev.needs) || []);
+    const needs = new Set([...((prev && prev.needs) || []), ...((prev && prev.optional) || [])]);
     const slots = data.slots || {};
     const unknown = prev && prev.kind === "unknown";
     const comps = (prev && prev.components) || {};
@@ -431,7 +432,14 @@ export function createMusicModelPicker({ mountId }) {
     return Object.keys(models).length ? { native_models: models } : {};
   }
 
-  return { refresh, choice };
+  function setModels(models) {
+    state = {};
+    for (const [k, v] of Object.entries(models || {})) if (v && NM_MUSIC_KEYS[k]) state[k] = String(v);
+    nmSave(storeKey, state);
+    return refresh();
+  }
+
+  return { refresh, choice, setModels, get state() { return state; } };
 }
 
 /* ================================================================ */

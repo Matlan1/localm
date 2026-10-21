@@ -7,6 +7,7 @@ or drive-qualified value replaces the directory outright.
 """
 
 import json
+import os
 from pathlib import Path
 from unittest import mock
 
@@ -184,3 +185,68 @@ def test_load_refuses_before_spawning_a_child(tmp_path):
     assert runner.call_count == 0, "a child was spawned for a hostile shard index"
     assert exc is not None, "HFBackend.load() did NOT refuse the hostile index"
     assert "outside the model directory" in str(exc)
+
+
+def _hub_sharded(tmp_path: Path, blobs_repo: str = "models--org--m") -> Path:
+    snap = tmp_path / "hub" / "models--org--m" / "snapshots" / "rev1"
+    snap.mkdir(parents=True)
+    blobs = tmp_path / "hub" / blobs_repo / "blobs"
+    blobs.mkdir(parents=True, exist_ok=True)
+    (blobs / "h1").write_text(json.dumps(
+        {"weight_map": {"a.weight": "model-00001-of-00001.safetensors"}}), encoding="utf-8")
+    (blobs / "h2").write_bytes(b"x")
+    try:
+        for name, blob in (("model.safetensors.index.json", "h1"),
+                           ("model-00001-of-00001.safetensors", "h2")):
+            (snap / name).symlink_to(os.path.relpath(blobs / blob, snap))
+    except (OSError, NotImplementedError) as e:
+        pytest.skip(f"symlink creation not permitted here: {e}")
+    return snap
+
+
+def test_hub_cache_snapshot_with_shards_linked_into_its_blobs_passes(tmp_path):
+    safety.validate_shard_index(str(_hub_sharded(tmp_path)))
+
+
+def test_hub_cache_shard_linked_into_another_repos_blobs_is_refused(tmp_path):
+    with pytest.raises(RuntimeError, match="outside the model directory"):
+        safety.validate_shard_index(str(_hub_sharded(tmp_path, "models--other--repo")))
+
+
+@pytest.mark.parametrize("shard", [
+    "\\\\attacker.invalid\\share\\x.safetensors", "//attacker.invalid/share/x.safetensors",
+    "\\\\?\\UNC\\attacker.invalid\\share\\x.safetensors",
+])
+def test_weight_files_refuses_a_network_shard_without_touching_it(tmp_path, monkeypatch, shard):
+    from localm.inference.backends import _hf_fp8
+    touched = []
+    for name in ("resolve", "is_file", "stat", "is_symlink"):
+        real = getattr(Path, name)
+
+        def spy(self, *a, _real=real, **k):
+            if "attacker.invalid" in str(self):
+                touched.append(str(self))
+                raise OSError("network path refused by the test")
+            return _real(self, *a, **k)
+        monkeypatch.setattr(Path, name, spy)
+    d = _model_dir(tmp_path, {"a.weight": shard})
+    assert _hf_fp8.weight_files(str(d)) == []
+    assert touched == []
+
+
+def test_weight_files_names_the_shards_of_a_hub_cache_snapshot(tmp_path):
+    from localm.inference.backends import _hf_fp8
+    snap = _hub_sharded(tmp_path)
+    files = _hf_fp8.weight_files(str(snap))
+    assert [f.name for f in files] == ["model-00001-of-00001.safetensors"]
+    assert files[0].read_bytes() == b"x"
+
+
+def test_hub_cache_shard_linked_outside_any_blobs_is_refused(tmp_path):
+    snap = _hub_sharded(tmp_path)
+    secret = _secret(tmp_path)
+    shard = snap / "model-00001-of-00001.safetensors"
+    shard.unlink()
+    shard.symlink_to(secret)
+    with pytest.raises(RuntimeError, match="outside the model directory"):
+        safety.validate_shard_index(str(snap))

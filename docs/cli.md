@@ -269,7 +269,8 @@ makes it `mmproj`, an embedding/pooling signal makes it `embedding`, otherwise i
 is an `llm`); a HuggingFace directory is read from its `config.json`
 architectures (or `adapter_config.json` for a `lora`). Anything without a hard
 signal is left as `unknown` rather than guessed. The types are `llm`, `mmproj`, `diffusion-unet`,
-`text-encoder`, `vae`, `lora`, `embedding`, `tts`, `upscaler`, and `unknown`.
+`text-encoder`, `vae`, `lora`, `embedding`, `tts`, `upscaler`, `controlnet`,
+`textual-inversion`, and `unknown`.
 
 An `unknown` model still runs when you name it explicitly (`localm run NAME`, or an
 API request naming it), but is never auto-picked as the default chat model, so a
@@ -277,7 +278,7 @@ diffusion checkpoint or text encoder cannot get loaded as if it were a chat mode
 Correct a misdetected or `unknown` type at any time:
 
 ```bash
-localm set-type MODEL llm        # types: llm mmproj diffusion-unet text-encoder vae lora embedding tts upscaler unknown
+localm set-type MODEL llm        # types: llm mmproj diffusion-unet text-encoder vae lora embedding tts upscaler controlnet textual-inversion unknown
 ```
 
 Registering a lone `.safetensors` file scans its parent directory: if that folder
@@ -619,6 +620,23 @@ a normal (dense) model. The Settings page has the same field ("MoE expert
 layers on CPU"). See
 [docs/gpu-setup.md](gpu-setup.md#mixture-of-experts-reducing-vram-footprint)
 for measured numbers.
+
+### KV cache type: more context in the same VRAM
+
+`kv_cache_type` sets the element type of the KV cache (the per-token memory the
+context window uses).
+
+```bash
+localm config kv_cache_type f16    # llama.cpp's default - the default
+localm config kv_cache_type q8_0   # about half the KV memory, about 1.9x the context
+```
+
+`q8_0` stores 34 bytes per 32 values instead of 64, so the automatic context
+ceiling (`ctx_auto`) and the VRAM estimate grow by about 1.9x for the same free
+VRAM; decoding is slightly slower. It needs flash attention, which
+llama.cpp turns on by itself; a model or runtime that cannot use it fails to
+load and the error names `kv_cache_type`. Applies at the next model load. The
+Settings page has the same field ("KV cache type").
 
 ### Memory-mapping: models larger than system RAM
 
@@ -989,8 +1007,20 @@ measured, a GGUF reply can also depend on the requests the model answered before
 (see the prompt cache note in [server-api.md](server-api.md#behaviour-notes)), and
 `--anthropic` ignores the flag because the Anthropic API has no seed parameter.
 
+**When the session compacts.** The agent compacts on its own, in the terminal as well
+as in unattended runs, when the next request would take more than 85% of the model's
+context window (or would leave less than the server's reply reserve free), and brings it
+down to about half the window. It counts from the prompt size the server reported for
+the last request. First it drops the output of older tool calls from the context (a file
+read, a command's output), keeping a short note of which tool ran on what; the model runs
+the tool again when it needs that output. Only when that is not enough does it summarise
+older turns. Every message you wrote yourself is kept word for word in the summary. With
+a server that reports no context window, the agent compacts only when the server refuses
+a request as too long, and then sends it again once. When even a compacted session does
+not fit, it says once that the window is too small.
+
 **Compaction keeps the working state.** When a long session is compacted (`/compact`,
-or automatically near the context limit), older turns become a prose summary, and the
+or automatically near the context limit), older turns become a summary of facts, and the
 summary message ends with a block the summariser never rewrites: the files this session
 changed with their added and removed line counts (new, deleted, or created then
 deleted), the verification command and its last result, the code files written since

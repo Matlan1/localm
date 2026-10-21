@@ -9,6 +9,7 @@ import { $, authHeaders, checkModelsBeforeGenerate, fetchImageURL, fmtBytes, job
 import { t } from "../app/i18n.js";
 import { bindReloadToggle, createGallery, musicPreview, playerDetail, reportMediaLoadFailure, refreshReloadToggle } from "../app/media-gallery.js";
 import { createMusicModelPicker, mountEnhanceButton } from "../app/native-models.js";
+import { createNativeWorkflowCard, nwfNumber, nwfSetField } from "../app/native-workflows.js";
 import { hideStop, showStop } from "./images.js";
 import { modelOverrides } from "./workflow.js";
 
@@ -63,6 +64,27 @@ export const musicBackend = { active: null, choice: null };
 
 export const musicModelPicker = createMusicModelPicker({ mountId: "music-native-models" });
 
+/* The native workflow card: presets of the ACE-Step parts and the settings below. */
+export const musicWorkflowCard = createNativeWorkflowCard({
+  media: "music", mountId: "music-native-workflows", picker: musicModelPicker, logId: "music-log",
+  fields: {
+    read: () => ({
+      duration_seconds: nwfNumber("music-duration"), steps: nwfNumber("music-steps"),
+      cfg: nwfNumber("music-cfg"), shift: nwfNumber("music-shift"),
+    }),
+    apply: (p) => {
+      if (p.tags) nwfSetField("music-tags", p.tags);
+      if (p.lyrics !== undefined) nwfSetField("music-lyrics", p.lyrics);
+      if (p.duration_seconds !== undefined) nwfSetField("music-duration", p.duration_seconds);
+      for (const [key, id] of [["steps", "music-steps"], ["cfg", "music-cfg"],
+                               ["shift", "music-shift"]]) {
+        nwfSetField(id, p[key]);
+      }
+      revealFilledAdvanced($("view-music"));
+    },
+  },
+});
+
 mountEnhanceButton({ media: "music", fieldId: "music-tags" });
 
 export async function refreshMusicBackend() {
@@ -102,6 +124,14 @@ export async function refreshMusicBackend() {
   }
   const card = $("music-workflow-card");
   if (card) card.hidden = native;
+  const workflows = $("music-native-workflow-card");
+  if (workflows) {
+    workflows.hidden = !native;
+    if (native) musicWorkflowCard.refresh();
+  }
+  for (const node of document.querySelectorAll("#view-music .music-native-only")) {
+    node.hidden = !native;
+  }
   const picker = $("music-native-models");
   if (picker) {
     picker.hidden = !native;
@@ -138,8 +168,18 @@ $("music-generate").onclick = async () => {
   if (!native && modelOverrides.music && Object.keys(modelOverrides.music).length) {
     body.model_overrides = modelOverrides.music;
   }
+  if (native && musicWorkflowCard.pending) {
+    $("music-generate").disabled = true;
+    let ready;
+    try { ready = await musicWorkflowCard.prepare(); } finally { $("music-generate").disabled = false; }
+    if (!ready) return;
+  }
   const nativeChoice = native ? musicModelPicker.choice() : {};
   Object.assign(body, nativeChoice);
+  if (native) {
+    const shift = nwfNumber("music-shift");
+    if (shift !== null) body.shift = shift;
+  }
 
   $("music-generate").disabled = true;
   const log = $("music-log");

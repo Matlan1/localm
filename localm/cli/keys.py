@@ -417,6 +417,11 @@ def key_create(name, scopes, fs_access, rag_roots, expires_in, allow_privileged)
     console.print(f"  [bold]{escape(rec['key'])}[/bold]")
     console.print(f"[dim]id {escape(rec['id'])}; revoke with: "
                   f"localm key rm {escape(rec['id'])}[/dim]")
+    if not auth.get_api_key():
+        console.print("[yellow]Note:[/yellow] no owner key is set, and this key turns "
+                      "authentication on: the web GUI and the API now ask for a key, "
+                      "and this scoped key is the only one that exists. Set an owner "
+                      "key first to keep full access:  [bold]localm key generate[/bold]")
     # Catch at grant: if this key unlocks a plugin the host cannot serve yet
     # (not installed, or missing its pip extras), say so right here.
     try:

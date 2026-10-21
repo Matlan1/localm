@@ -67,7 +67,7 @@ scrub() {
     { my $h = eval { hostname() }; push @hn, $h if defined $h; }
     push @hn, $ENV{COMPUTERNAME} if defined $ENV{COMPUTERNAME};
     my %names;
-    my %skip = map { $_ => 1 } qw(archlinux debian fedora host kali localhost localm raspberrypi redacted ubuntu user);
+    my %skip = map { $_ => 1 } qw(admin archlinux build builder client cloud computer container debian default desktop dev devbox docker fedora gpu home host kali laptop linux localhost localm macbook machine main node notebook office prod production raspberrypi redacted root runner server staging system test ubuntu user windows work worker workstation);
     for my $n (@hn) {
       $n =~ s/^\s+|\s+\z//g;
       $n =~ s/\.+\z//;

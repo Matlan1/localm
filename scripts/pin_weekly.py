@@ -194,11 +194,13 @@ def _resolve_exe(cmd: list[str]) -> list[str]:
 
 
 def _kill_tree(pid: int) -> None:
+    """Kill *pid* and its descendants. On POSIX *pid* must lead its own process
+    group (run_cmd starts it with start_new_session)."""
     if os.name == "nt":
         subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
     else:
         with contextlib.suppress(OSError):
-            os.kill(pid, 9)
+            os.killpg(pid, 9)
 
 
 def run_cmd(cmd: list[str], *, cwd: Path, timeout: float, env: dict | None = None) -> tuple[int, str]:
@@ -206,7 +208,7 @@ def run_cmd(cmd: list[str], *, cwd: Path, timeout: float, env: dict | None = Non
     process tree is killed and the exit code is 2 (INCONCLUSIVE)."""
     proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True, encoding="utf-8",
-                            errors="replace")
+                            errors="replace", start_new_session=(os.name != "nt"))
     try:
         out, _ = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -727,32 +729,37 @@ def _amd_wheels_candidate(mod=None) -> tuple[str, str] | None:
 
 
 def _rocm_candidate() -> tuple[str, str] | None:
+    """(pinned, candidate) for the lemonade ROCm build, where the candidate is the newest
+    release newer than the pin whose llama.cpp commit an upstream release was built from
+    (so its SIMD CPU archive can be paired); None when no newer release pairs. Raises
+    FetchError when the lemonade or upstream release data cannot be read."""
     mod = _load("check_llama_rocm_pin", SCRIPTS / "check_llama_rocm_pin.py")
+    bump = _load("bump_rocm_pin", SCRIPTS / "bump_rocm_pin.py")
     pin = mod.pinned_tag()
     releases, err = mod.upstream_releases()
     if err or not releases:
         raise cp.FetchError(f"lemonade releases unreadable: {err or 'empty'}")
     pin_n = mod._build_number(pin)
-    best = max(releases, key=lambda r: mod._build_number(r["tag"]) or -1)
-    best_n = mod._build_number(best["tag"])
-    if pin_n is None or best_n is None or best_n <= pin_n:
+    if pin_n is None:
         return None
-    return pin, best["tag"]
+    newer = sorted((r["tag"] for r in releases
+                    if (mod._build_number(r["tag"]) or -1) > pin_n),
+                   key=mod._build_number, reverse=True)
+    for tag in newer:
+        try:
+            bump.fetch_candidate(tag)
+        except bump.UpstreamUnreadable as e:
+            raise cp.FetchError(f"cannot pair lemonade {tag}: {e}") from e
+        except bump.Refused as e:
+            print(f"currency: lemonade {tag} skipped: {e}")
+            continue
+        return pin, tag
+    return None
 
 
 def _semver_major(tag: str) -> int | None:
     key = cp._semver_key(tag)
     return key[0] if key else None
-
-
-def _no_major_boundary(old: str, new: str) -> bool:
-    """True unless the move from *old* to *new* crosses a MAJOR boundary (a 0.x minor counts)."""
-    a, b = cp._semver_key(old), cp._semver_key(new)
-    if a is None or b is None:
-        return False
-    if a[0] == 0 or b[0] == 0:
-        return a[:2] == b[:2]
-    return a[0] == b[0]
 
 
 def _llama_candidate() -> tuple[str, str] | None:
@@ -798,8 +805,7 @@ def _comfyui_delegate(dry_run: bool) -> int:
 def _llama_verify_cmd(work: Path, receipt: Path) -> list[str]:
     pinned = _load("check_llama_pin", SCRIPTS / "check_llama_pin.py").pinned_tag()
     return [sys.executable, str(SCRIPTS / "confirm_llama_runtime.py"), "--tag", pinned,
-            "--backend", "cpu", "--backend", "vulkan", "--workdir", str(work),
-            "--receipt", str(receipt)]
+            *pp.llama_confirm_args(), "--workdir", str(work), "--receipt", str(receipt)]
 
 
 def _comfyui_verify_cmd(work: Path, receipt: Path) -> list[str]:
@@ -862,7 +868,7 @@ def _review_only_advancers() -> list[Advancer]:
     vendored = [
         Advancer(f"vendored-{name.lower().replace('.', '')}", f"vendored {name}", None,
                  "scripts/bump_vendored_js.py", candidate=_vendored_candidate(name),
-                 bump_args=("--lib", name), gpu=False, auto_merge=_no_major_boundary,
+                 bump_args=("--lib", name), gpu=False, auto_merge=lambda old, new: False,
                  post_bump_cmds=(("npm", "ci"), ("npm", "test")))
         for name in ("marked", "DOMPurify", "highlight.js", "KaTeX")
     ]
@@ -892,8 +898,19 @@ def _review_only_advancers() -> list[Advancer]:
 # --------------------------------------------------------------------------- #
 
 NOT_MEASURED_BY_DESIGN = (
-    ("llama.cpp CUDA, HIP, SYCL, Metal, OpenVINO and Android builds",
-     "no such hardware here; they share one llama library with the measured cpu and vulkan builds"),
+    ("llama.cpp CUDA (both lines) and SYCL generation",
+     "no NVIDIA or Intel GPU here: their archives are fetched and digest-checked, their llama and ggml "
+     "core libraries are hashed against the cpu build's and loaded through the ABI gate, and the "
+     "imports their GPU plugin cannot find are named; tokens on that hardware are not measured"),
+    ("llama.cpp HIP generation on a GPU",
+     "measured only when the HIP build registers a GPU device here and llama.cpp places the weights "
+     "on it; otherwise reported with the reason, beside the same archive, core-library and ABI checks"),
+    ("llama.cpp Metal build",
+     "macOS only: the archive is fetched and digest-checked and its llama library is located, but it "
+     "cannot be loaded or run on Windows"),
+    ("llama.cpp OpenVINO, Android, Linux, Windows ARM64 and macOS x64 builds, the xcframework and the "
+     "web UI archive",
+     "never fetched or run here; only their pinned digests are checked against the release"),
     ("koboldcpp CUDA and Metal builds, Linux and macOS archives", "installed and run on this platform only"),
     ("stable-diffusion.cpp CUDA and Metal builds, Linux and macOS archives", "installed and run on this platform only"),
     ("AMD ROCm builds for gfx110X, gfx120X and other families", "only this machine's gfx103X family can be run"),

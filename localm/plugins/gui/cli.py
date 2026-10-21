@@ -660,12 +660,12 @@ def _select_startup_model(console, model, *, no_model: bool, pull_spec,
 
     --no-model: model "" and model_less True. No MODEL argument and an empty
     registry: model unchanged and model_less True. No MODEL argument otherwise:
-    the first registered name (sorted) that get_model_info resolves and
-    is_auto_chat_eligible accepts, or None with model_less True when none does.
+    the first of auto_chat_candidates (by name, speech-to-text models last) that
+    get_model_info resolves, or None with model_less True when none does.
     A MODEL argument is returned unchanged with model_less False. Each
     model-less outcome prints its console hint."""
     from localm.config import load_registry
-    from localm.model_manager import get_model_info, is_auto_chat_eligible
+    from localm.model_manager import auto_chat_candidates, get_model_info
     registry = load_registry()
     model_less = False
     if no_model:
@@ -677,8 +677,7 @@ def _select_startup_model(console, model, *, no_model: bool, pull_spec,
             model_less = True
             console.print(_empty_registry_hint(api_mode, pull_spec))
         else:
-            model = next((n for n in sorted(registry)
-                          if get_model_info(n) and is_auto_chat_eligible(registry[n])), None)
+            model = next((n for n in auto_chat_candidates(registry) if get_model_info(n)), None)
             if model is None:
                 model_less = True
                 console.print(_no_loadable_model_hint(api_mode))

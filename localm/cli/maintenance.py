@@ -106,6 +106,31 @@ from ..media.koboldcpp.cli import main as _setup_music_main  # noqa: E402
 main.add_command(_setup_music_main, name="setup-music")
 
 
+def _reranker_as_embedding_model(spec: str) -> str:
+    """Why *spec* (a registered model name or a local GGUF path) names a
+    reranker and so cannot be the embedding model; an empty string when it does
+    not, or when that cannot be told without loading it."""
+    from pathlib import Path
+
+    from localm.config import load_registry
+    from ..inference.embedder import _nonlocal_spec_reason
+    from ..model_manager.registry import entry_is_reranker, gguf_reranker_state
+
+    entry = load_registry().get(spec)
+    if isinstance(entry, dict) and entry_is_reranker(spec, entry):
+        return (f"'{spec}' is a reranker: it scores query and document pairs "
+                "(localm rerank), it does not produce embeddings. Choose an "
+                "embedding model.")
+    if _nonlocal_spec_reason(spec):
+        return ""
+    path = Path(spec).expanduser()
+    if path.is_file() and gguf_reranker_state(path) is True:
+        return (f"'{path.name}' is a reranker GGUF: it scores query and document "
+                "pairs (localm rerank), it does not produce embeddings. Choose an "
+                "embedding model.")
+    return ""
+
+
 @main.command("setup-embeddings")
 @click.option("--model", "model", default=None,
               help="Embedding model to install (a known key, a registered model "
@@ -137,12 +162,17 @@ def setup_embeddings(model, yes=False):
     # TestSetupEmbeddingsPreSwitchConfirm.test_switch_to_model_matching_existing_collection_skips_reembed_note.
     reembed_hint = True
     if model:
+        reranker_why = _reranker_as_embedding_model(model)
+        if reranker_why:
+            console.print(f"[red]Not switching the embedding model:[/red] {escape(reranker_why)}")
+            sys.exit(1)
         current = str(load_config().get("embedding_model") or "")
         if model != current:
             # The third writer of embedding_model, alongside the RAG picker
             # (POST /api/rag/embedding) and PATCH /v1/config. Like those two, it
             # warns what the switch is about to invalidate BEFORE it happens.
-            from ..rag import collection_provenance_note, collection_provenance_report
+            from ..rag import (collection_provenance_note, collection_provenance_report,
+                               lexical_only_collection_names)
             affected = collection_provenance_report(candidate_model=model)
             if affected:
                 console.print(
@@ -150,6 +180,8 @@ def setup_embeddings(model, yes=False):
                 for c in affected:
                     built = (f" (built with {escape(c['built_with'])})"
                              if c.get("built_with") else "")
+                    if c.get("mixed"):
+                        built += " (mixed: vectors from more than one model)"
                     chunks = f" - {c['n_chunks']} chunks" if c.get("n_chunks") is not None else ""
                     console.print(f"  - {escape(c['name'])}{built}{chunks}")
                 if not yes:
@@ -168,7 +200,7 @@ def setup_embeddings(model, yes=False):
                     if not proceed:
                         raise click.Abort()
             else:
-                reembed_hint = False
+                reembed_hint = bool(lexical_only_collection_names())
         update_config(lambda c: c.update({"embedding_model": model}))
     name = str(load_config().get("embedding_model") or DEFAULT_EMBEDDING_MODEL)
     console.print(f"Installing embedding model: [bold cyan]{escape(name)}[/bold cyan]")
@@ -398,7 +430,7 @@ def update_cmd(check_only: bool, yes: bool, do_rollback: bool) -> None:
             updater.rollback_last()
         except LocalmError as e:
             console.print(f"[yellow]{escape(e.summary)}[/yellow] ({escape(e.reason)}).")
-            return
+            sys.exit(1)
         console.print("[green]Rolled back.[/green] Restart localm to load the previous build.")
         return
 
@@ -412,7 +444,7 @@ def update_cmd(check_only: bool, yes: bool, do_rollback: bool) -> None:
         console.print(
             f"[yellow]Could not check for updates:[/yellow] {escape(e.summary)} "
             f"({escape(e.reason)}).")
-        return
+        sys.exit(1)
 
     cur, latest = info["current"], info["latest"]
     if not latest:
@@ -452,7 +484,7 @@ def update_cmd(check_only: bool, yes: bool, do_rollback: bool) -> None:
     except LocalmError as e:
         # apply() has already rolled back by this point.
         console.print(f"[red]Update failed:[/red] {escape(e.summary)} ({escape(e.reason)}).")
-        return
+        sys.exit(1)
     console.print(f"[green]Updated to {escape(res['version'])}[/green] "
                   f"({updater.class_summary(res['klass'])}).")
     if res["klass"] == "setup":

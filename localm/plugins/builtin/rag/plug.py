@@ -305,6 +305,13 @@ def _get_collection(name: str):
     return coll
 
 
+async def _get_collection_off_loop(name: str):
+    """``_get_collection`` on the plugin pool: on a snapshot-cache miss it parses
+    chunks.jsonl and vectors.json, which must not run on the event loop."""
+    return await asyncio.get_running_loop().run_in_executor(
+        get_plugin_executor(), _get_collection, name)
+
+
 _CONFINED_DETAIL = ("This key's RAG access is confined to specific folders, "
                     "and this collection includes documents from outside them.")
 
@@ -676,7 +683,7 @@ async def rag_delete(name: str, request: Request):
 @_router.post("/api/rag/collections/{name}/add")
 async def rag_add(name: str, req: RagAddRequest, request: Request):
     from localm.rag import CollectionLockedError
-    coll = _get_collection(name)
+    coll = await _get_collection_off_loop(name)
     paths = [Path(p).expanduser() for p in req.paths if p.strip()]
     if not paths:
         raise HTTPException(400, "No paths given")
@@ -794,7 +801,7 @@ async def rag_upload(name: str, req: RagUploadRequest, request: Request):
     decoding, so no oversized payload is ever materialized in memory; a zip bomb is
     caught during extraction."""
     from localm.rag import CollectionLockedError
-    coll = _get_collection(name)
+    coll = await _get_collection_off_loop(name)
     if not req.files:
         raise HTTPException(400, "No files given")
     if len(req.files) > 50:
@@ -954,7 +961,7 @@ async def rag_reembed(name: str, request: Request):
     A background job like add/upload: re-embedding a large collection is minutes of
     model work, so it streams progress rather than blocking the request.
     """
-    coll = _get_collection(name)
+    coll = await _get_collection_off_loop(name)
     _require_rag_confinement(name, request)
     jobs = _require_jobs(request)
     self_embed, _, _ = _self_services(request)
@@ -1020,7 +1027,7 @@ async def rag_repair(name: str, req: RagRepairRequest, request: Request):
     what it can rebuild and the job log names how many upload-only documents were
     left untouched.
     """
-    coll = _get_collection(name)
+    coll = await _get_collection_off_loop(name)
     _require_rag_confinement(name, request)
     docs = coll.documents()
     if not docs:
@@ -1432,7 +1439,7 @@ async def rag_embedding_set(req: EmbeddingModelRequest, request: Request):
 
 @_router.post("/api/rag/collections/{name}/remove-doc")
 async def rag_remove_doc(name: str, req: RagRemoveDocRequest, request: Request):
-    coll = _get_collection(name)
+    coll = await _get_collection_off_loop(name)
     _require_rag_confinement(name, request)
     if not await _write_off_loop(lambda: coll.remove_doc(req.path)):
         raise HTTPException(404, f"Not in this collection: {req.path}")

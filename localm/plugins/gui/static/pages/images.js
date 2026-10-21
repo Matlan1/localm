@@ -9,8 +9,10 @@
 import { chat, renderAttachChips } from "../app/chat.js";
 import { $, authHeaders, cancelJob, checkModelsBeforeGenerate, createJobPreview, el, fetchImageURL, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
 import { t } from "../app/i18n.js";
+import { createImageInputs } from "../app/image-inputs.js";
 import { bindReloadToggle, createGallery, imagePreview, refreshReloadToggle } from "../app/media-gallery.js";
 import { createNativeGenControls, createNativeModelPicker, mountEnhanceButton } from "../app/native-models.js";
+import { createNativeWorkflowCard, nwfNumber, nwfSetField, nwfSetSelect } from "../app/native-workflows.js";
 import { showView } from "../app/tabs.js";
 import { modelOverrides } from "./workflow.js";
 
@@ -122,6 +124,7 @@ function reuseImageSettings(item) {
     imageModelPicker.setModels({ model: m.model, ...(m.components || {}) });
     imageModelPicker.setLoras(m.loras || []);
     imageGen.set(m);
+    imageInputs.setControl(m);
   }
   // Most of those ids live behind this page's Advanced fold; open it when
   // they are filled.
@@ -150,13 +153,47 @@ function showImageStepDefault(data) {
     : t("images.stepsPlaceholder");
 }
 
+/* Mask, reference images, ControlNet and embeddings (native backend only). */
+export const imageInputs = createImageInputs({
+  mountId: "img-native-inputs", promptId: "img-prompt", negativeId: "img-negative",
+  inputId: "img-input", denoiseId: "img-denoise" });
+
 export const imageModelPicker = createNativeModelPicker(
   { media: "image", prefix: "imagine", mountId: "img-native-models",
-    onData: showImageStepDefault });
+    onData: (data) => { showImageStepDefault(data); imageInputs.refresh(data); } });
 
 const imageLivePreview = createJobPreview("img-preview");
 
 const imageGen = createNativeGenControls({ prefix: "img" });
+
+/* The native workflow card: presets of models and the settings below. */
+export const imageWorkflowCard = createNativeWorkflowCard({
+  media: "image", mountId: "img-native-workflows", picker: imageModelPicker, logId: "img-log",
+  fields: {
+    read: () => {
+      const size = /^(\d+)\s*x\s*(\d+)$/i.exec($("img-size").value.trim());
+      return {
+        negative_prompt: $("img-negative").value.trim() || null,
+        steps: nwfNumber("img-steps"), cfg: nwfNumber("img-cfg"),
+        guidance: nwfNumber("img-guidance"), clip_skip: nwfNumber("img-clip-skip"),
+        width: size ? Number(size[1]) : null, height: size ? Number(size[2]) : null,
+        sample_method: $("img-sampler")?.value || null, scheduler: $("img-scheduler")?.value || null,
+      };
+    },
+    apply: (p) => {
+      if (p.prompt) nwfSetField("img-prompt", p.prompt);
+      if (p.negative_prompt !== undefined) nwfSetField("img-negative", p.negative_prompt);
+      for (const [key, id] of [["steps", "img-steps"], ["cfg", "img-cfg"],
+                               ["guidance", "img-guidance"], ["clip_skip", "img-clip-skip"]]) {
+        nwfSetField(id, p[key]);
+      }
+      nwfSetField("img-size", p.width && p.height ? `${p.width}x${p.height}` : "");
+      nwfSetSelect($("img-sampler"), p.sample_method || "");
+      nwfSetSelect($("img-scheduler"), p.scheduler || "");
+      revealFilledAdvanced($("view-images"));
+    },
+  },
+});
 
 /* The detail-view "Upscale" control: a registered upscaler model and a button
    that starts the upscale job (a new gallery image). */
@@ -218,6 +255,11 @@ export async function refreshImageBackend() {
     const node = $(id);
     if (node) node.hidden = native;
   }
+  const workflows = $("img-native-workflow-card");
+  if (workflows) {
+    workflows.hidden = !native;
+    if (native) imageWorkflowCard.refresh();
+  }
   const picker = $("img-native-models");
   if (picker) {
     picker.hidden = !native;
@@ -226,7 +268,8 @@ export async function refreshImageBackend() {
   for (const node of document.querySelectorAll("#view-images .img-comfy-only")) {
     node.hidden = native;
   }
-  for (const node of document.querySelectorAll("#view-images .img-native-only, #view-images .img-native-gen")) {
+  for (const node of document.querySelectorAll(
+    "#view-images .img-native-only, #view-images .img-native-gen, #view-images .img-native-extra")) {
     node.hidden = !native;
   }
 }
@@ -357,12 +400,20 @@ $("img-generate").onclick = async () => {
   if (!native && modelOverrides.image && Object.keys(modelOverrides.image).length) {
     body.model_overrides = modelOverrides.image;
   }
+  if (native && imageWorkflowCard.pending) {
+    $("img-generate").disabled = true;
+    let ready;
+    try { ready = await imageWorkflowCard.prepare(); } finally { $("img-generate").disabled = false; }
+    if (!ready) return;
+  }
   const nativeChoice = native ? imageModelPicker.choice() : {};
   Object.assign(body, nativeChoice);
   if (native) {
+    const problem = imageInputs.problem();
+    if (problem) { toast(problem, true); return; }
     body.steps = num("img-steps");
     body.clip_skip = num("img-clip-skip");
-    Object.assign(body, imageGen.body());
+    Object.assign(body, imageGen.body(), imageInputs.body());
   }
   $("img-generate").disabled = true;
   imageLivePreview.clear();
@@ -424,6 +475,9 @@ export async function applyImportedParams(result) {
   put("img-size", p.width && p.height ? `${p.width}x${p.height}` : null);
   if (!own && (p.prompt === undefined || p.prompt === null)) skipped.push("prompt");
   if (p.steps !== undefined && p.steps !== null && !put("img-steps", p.steps)) skipped.push("steps");
+  if (!own && p.clip_skip !== undefined && p.clip_skip !== null && !put("img-clip-skip", p.clip_skip)) {
+    skipped.push("clip skip");
+  }
   if (own) {
     imageGen.set(p);
   } else {
@@ -470,7 +524,7 @@ export async function importParamsFromFile(file) {
   let data = null;
   try { data = await r.json(); } catch { /* reported below by status */ }
   if (!r.ok) throw new Error((data && data.detail) || r.statusText);
-  const skipped = await applyImportedParams(data);
+  const skipped = [...(await applyImportedParams(data)), ...(data.unsupported || [])];
   const source = IMPORT_SOURCES.has(data.source) ? t(`images.import.source.${data.source}`) : data.source;
   toast(skipped.length
     ? t("images.import.doneSkipped", { source, items: skipped.join(", ") })

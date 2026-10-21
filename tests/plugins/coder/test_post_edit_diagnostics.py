@@ -339,7 +339,7 @@ class TestOtherWriteTools:
     def test_edit_file_syntax_error_is_left_to_the_syntax_check(self, tmp_path, spawns):
         (tmp_path / "m.py").write_text("x = 1\n", encoding="utf-8")
         r = tool_edit_file(tmp_path, "m.py", "x = 1", "def f(:", _restricted=False)
-        assert "[syntax check]" in r.output and "[ruff" not in r.output
+        assert "syntax error" in r.output and "[ruff" not in r.output
         assert spawns == []
 
     def test_patch_file(self, tmp_path, spawns):
@@ -353,7 +353,7 @@ class TestOtherWriteTools:
         (tmp_path / "m.py").write_text("x = 1\n", encoding="utf-8")
         diff = "--- a/m.py\n+++ b/m.py\n@@ -1 +1,2 @@\n+def f(:\n x = 1\n"
         r = tool_patch_file(tmp_path, "m.py", diff, _restricted=False)
-        assert "[syntax check]" in r.output and "[ruff" not in r.output
+        assert "syntax error" in r.output and "[ruff" not in r.output
         assert spawns == []
 
     def test_edit_files_runs_one_process_for_the_batch(self, tmp_path, spawns):
@@ -370,9 +370,9 @@ class TestOtherWriteTools:
 
     def test_edit_files_skips_a_file_with_a_syntax_error(self, tmp_path, spawns):
         (tmp_path / "ok.py").write_text("x = 1\n", encoding="utf-8")
-        (tmp_path / "bad.py").write_text("x = 1\n", encoding="utf-8")
+        (tmp_path / "bad.py").write_text("def g(:\nx = 1\n", encoding="utf-8")
         edits = [{"path": "ok.py", "old": "x = 1", "new": "import os\nx = 1"},
-                 {"path": "bad.py", "old": "x = 1", "new": "def f(:"}]
+                 {"path": "bad.py", "old": "x = 1", "new": "x = 2"}]
         r = tool_edit_files(tmp_path, edits, _restricted=False)
         assert "[syntax check]" in r.output
         assert "ok.py:1:" in r.output.split("[ruff", 1)[1]

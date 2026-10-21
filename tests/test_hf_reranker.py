@@ -543,3 +543,98 @@ def test_a_backend_not_built_for_reranking_refuses():
     from localm.inference.backends.hf import HFBackend
     with pytest.raises(RuntimeError, match="not loaded for reranking"):
         HFBackend("nowhere").rerank([("q", "d")])
+
+
+_QWEN3_CARD_PREFIX = (
+    "<|im_start|>system\nJudge whether the Document meets the requirements based on the "
+    'Query and the Instruct provided. Note that the answer can only be "yes" or "no".'
+    "<|im_end|>\n<|im_start|>user\n")
+_QWEN3_CARD_SUFFIX = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+
+
+def _qwen3_card_text(query, document):
+    return (f"{_QWEN3_CARD_PREFIX}<Instruct>: Given a web search query, retrieve relevant "
+            f"passages that answer the query\n<Query>: {query}\n<Document>: {document}"
+            f"{_QWEN3_CARD_SUFFIX}")
+
+
+def _build_qwen3_seq_cls(folder):
+    """A tiny random Qwen3ForSequenceClassification with a byte-level tokenizer that
+    knows the chat markers as single tokens."""
+    import torch
+    from tokenizers import Tokenizer, decoders, models, pre_tokenizers
+    from transformers import PreTrainedTokenizerFast, Qwen3Config, Qwen3ForSequenceClassification
+
+    torch.manual_seed(0)
+    alphabet = pre_tokenizers.ByteLevel.alphabet()
+    vocab = {ch: i for i, ch in enumerate(sorted(alphabet))}
+    tok = Tokenizer(models.BPE(vocab, [], unk_token=None))
+    tok.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+    tok.decoder = decoders.ByteLevel()
+    specials = ["<|im_start|>", "<|im_end|>", "<|endoftext|>"]
+    tok.add_special_tokens(specials)
+    fast = PreTrainedTokenizerFast(
+        tokenizer_object=tok, pad_token="<|endoftext|>", model_max_length=1024)
+    cfg = Qwen3Config(
+        vocab_size=len(vocab) + len(specials), hidden_size=32, intermediate_size=64,
+        num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=2, head_dim=8,
+        max_position_embeddings=1024, num_labels=1,
+        pad_token_id=fast.pad_token_id)
+    Qwen3ForSequenceClassification(cfg).save_pretrained(folder)
+    fast.save_pretrained(folder)
+
+
+def _qwen3_reference(folder, query, document):
+    import torch
+    from transformers import AutoModelForSequenceClassification, AutoTokenizer
+    tok = AutoTokenizer.from_pretrained(folder)
+    model = AutoModelForSequenceClassification.from_pretrained(folder).eval()
+    ids = tok(_qwen3_card_text(query, document), add_special_tokens=False,
+              return_tensors="pt")
+    with torch.no_grad():
+        return model(**ids).logits[0].tolist(), tok
+
+
+@pytest.fixture(scope="module")
+def qwen3_reranker(tmp_path_factory):
+    folder = tmp_path_factory.mktemp("rr") / "qwen3"
+    _build_qwen3_seq_cls(folder)
+    return folder
+
+
+@needs_stack
+class TestQwen3SequenceClassificationPrompt:
+    def test_the_pair_is_scored_as_the_instruct_prompt_the_model_was_trained_on(
+            self, qwen3_reranker):
+        query, document = "what is a cat", "a cat is a small pet animal"
+        outcome = reranker.rerank(str(qwen3_reranker), query, [document])
+        want, tok = _qwen3_reference(qwen3_reranker, query, document)
+        assert outcome.scored[0]["scores"] == pytest.approx(want, abs=1e-5)
+        assert outcome.scored[0]["tokens"] == len(
+            tok(_qwen3_card_text(query, document), add_special_tokens=False)["input_ids"])
+        assert outcome.scored[0]["truncated"] is False
+
+    def test_that_score_differs_from_a_plain_sentence_pair_encoding(self, qwen3_reranker):
+        import torch
+        from transformers import AutoModelForSequenceClassification, AutoTokenizer
+        query, document = "what is a cat", "a cat is a small pet animal"
+        tok = AutoTokenizer.from_pretrained(qwen3_reranker)
+        model = AutoModelForSequenceClassification.from_pretrained(qwen3_reranker).eval()
+        with torch.no_grad():
+            plain = model(**tok(query, document, return_tensors="pt")).logits[0].tolist()
+        got = reranker.rerank(str(qwen3_reranker), query, [document]).scored[0]["scores"]
+        assert got != pytest.approx(plain, abs=1e-4)
+
+    def test_a_long_document_is_cut_inside_the_window_and_flagged(self, qwen3_reranker):
+        long = " ".join(f"word{i}" for i in range(1, 600))
+        outcome = reranker.rerank(str(qwen3_reranker), "what is a cat", [long, "a cat"])
+        assert outcome.scored[0]["truncated"] is True
+        assert outcome.scored[0]["tokens"] <= 1024
+        assert outcome.scored[1]["truncated"] is False
+
+    def test_a_query_that_fills_the_window_is_refused_and_the_worker_survives(
+            self, qwen3_reranker):
+        query = "x" * 1100
+        with pytest.raises(RerankInputError):
+            reranker.rerank(str(qwen3_reranker), query, ["a cat"])
+        assert len(reranker.rerank(str(qwen3_reranker), "cat", ["a cat"]).scored) == 1

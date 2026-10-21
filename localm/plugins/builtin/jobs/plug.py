@@ -15,7 +15,7 @@ re-sync, on an interval or 5-field cron schedule. The
 JobScheduler wakes periodically (~30s) and runs every enabled + due job via the
 runner, recording each result. Job RESULTS are explicit user data (saved in any
 privacy mode, like generated images); a coder/chat RUN's own session trace still
-honours ``effective_mode``.
+honours ``effective_unattended_mode``.
 
 The scheduler starts only when the plugin is loaded under a running event loop
 (a live server). Under a bare-FastAPI test harness or a headless import there is

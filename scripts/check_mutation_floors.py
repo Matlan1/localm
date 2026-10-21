@@ -21,6 +21,12 @@ source. This script compares those results against the committed baseline
   dispositions are stale), or its disposition is not one
   of ``killed`` / ``survived`` / ``{"equivalent": "<reason>"}`` /
   ``{"unstable": "<reason>"}``;
+* an ``equivalent`` or ``unstable`` mutant's mutated code differs from the
+  code its reason was written for: a coverage change can move which line a
+  mutant id names while the function's source and its mutant count stay the
+  same, so the baseline's ``mutant_hashes`` table pins the mutated function
+  body of every excluded mutant (read from the mutated module mutmut writes
+  next to each ``.meta`` file) and a changed one loses its exclusion;
 * a control mutant (the ``controls`` section: concrete mutants, at least one
   per security-decision class, that must stay killed) is missing, stale,
   recorded as unstable or not killed;
@@ -68,8 +74,11 @@ without it ever standing in for the file under review.
 from __future__ import annotations
 
 import argparse
+import ast
+import hashlib
 import json
 import math
+import re
 import sys
 from pathlib import Path
 
@@ -193,11 +202,38 @@ def load_results(mutants_dir: Path, modules: list[str]) -> tuple[dict, list[str]
             problems.append(
                 f"{module}: could not read {meta_path.name}: {type(e).__name__}: {e}")
             continue
-        results[module] = {"mutants": mutants, "function_hashes": dict(hashes)}
+        results[module] = {"mutants": mutants, "function_hashes": dict(hashes),
+                           "mutant_hashes": mutated_source_hashes(mutants_dir, module)}
     return results, problems
 
 
 EXCLUDED_KINDS = frozenset({"equivalent", "unstable"})
+
+_MUTANT_FUNCTION = re.compile(r"^x.*__mutmut_\d+$")
+
+
+def mutated_source_hashes(mutants_dir: Path, module: str) -> dict[str, str]:
+    """``{mutant id: short sha256}`` of the body of every mutant function in the
+    mutated module mutmut wrote for *module* (``mutants/<module>``, beside its
+    ``.meta``). The hash covers the function's signature and body, not its name
+    or position, so it changes only when the mutation itself does. An empty dict
+    when the file is missing or does not parse."""
+    try:
+        tree = ast.parse((mutants_dir / module).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, SyntaxError, ValueError):
+        return {}
+    dotted = module.removesuffix(".py").replace("/", ".")
+    hashes: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                and _MUTANT_FUNCTION.match(node.name):
+            shape = ast.dump(ast.Module(
+                body=[ast.FunctionDef(
+                    name="_", args=node.args, body=node.body, decorator_list=[],
+                    returns=node.returns, type_comment=None)],
+                type_ignores=[]))
+            hashes[f"{dotted}.{node.name}"] = hashlib.sha256(shape.encode("utf-8")).hexdigest()[:12]
+    return hashes
 
 
 def _disposition(value) -> tuple[str, str | None]:
@@ -306,6 +342,9 @@ def check(results: dict, baseline: dict, modules: list[str]) -> tuple[list[str],
         changed_functions = {
             fn for fn, h in hashes.items() if base_hashes.get(fn) != h}
         changed_functions |= grown_functions(statuses, base_mutants)
+        base_mutant_hashes = base.get("mutant_hashes") or {}
+        mutant_hashes = res.get("mutant_hashes") or {}
+        unpinned: list[str] = []
         equivalents: set[str] = set()
         unstables: set[str] = set()
         undispositioned: list[str] = []
@@ -323,6 +362,16 @@ def check(results: dict, baseline: dict, modules: list[str]) -> tuple[list[str],
             if kind == "invalid":
                 invalid.append(mutant)
                 continue
+            if kind in EXCLUDED_KINDS:
+                pinned = base_mutant_hashes.get(mutant)
+                if pinned is None:
+                    unpinned.append(mutant)
+                elif mutant_hashes.get(mutant) != pinned:
+                    undispositioned.append(
+                        f"{mutant} ({status}; its mutated code is no longer the one "
+                        f"the {kind} reason was written for, or the mutated module "
+                        "could not be read)")
+                    continue
             if kind == "unstable":
                 unstables.add(mutant)
                 continue
@@ -354,6 +403,12 @@ def check(results: dict, baseline: dict, modules: list[str]) -> tuple[list[str],
             warnings.append(
                 f"{module}: {len(vanished)} baseline mutant(s) belong to functions "
                 f"that changed or were removed (e.g. {vanished[0]}) - --update prunes them")
+        if unpinned:
+            warnings.append(
+                f"{module}: {len(unpinned)} equivalent or unstable mutant(s) have no "
+                f"recorded mutated-code hash (e.g. {unpinned[0]}), so a renumbering "
+                "that keeps the mutant count cannot be detected for them - --update "
+                "records the hashes")
         if promotable:
             warnings.append(
                 f"{module}: {len(promotable)} mutant(s) recorded as survived are "
@@ -475,12 +530,19 @@ def propose_baseline(results: dict, baseline: dict, modules: list[str]) -> dict:
         changed |= grown_functions(res["mutants"], old_mutants)
         mutants: dict = {}
         excluded: set[str] = set()
+        old_mutant_hashes = old.get("mutant_hashes") or {}
+        new_mutant_hashes: dict[str, str] = {}
         for mutant, status in sorted(res["mutants"].items()):
             old_value = old_mutants.get(mutant)
             kind, _ = _disposition(old_value) if old_value is not None else ("invalid", None)
-            if kind in EXCLUDED_KINDS and function_of(mutant) not in changed:
+            current_hash = (res.get("mutant_hashes") or {}).get(mutant)
+            pinned = old_mutant_hashes.get(mutant)
+            shifted = pinned is not None and current_hash != pinned
+            if kind in EXCLUDED_KINDS and function_of(mutant) not in changed and not shifted:
                 mutants[mutant] = old_value
                 excluded.add(mutant)
+                if pinned or current_hash:
+                    new_mutant_hashes[mutant] = pinned or current_hash
             elif status in KILLED_LIKE:
                 mutants[mutant] = "killed"
             elif status in INCOMPLETE:
@@ -491,6 +553,8 @@ def propose_baseline(results: dict, baseline: dict, modules: list[str]) -> dict:
             fn = function_of(mutant)
             if mutant not in res["mutants"] and fn not in changed                     and fn in res["function_hashes"]:
                 mutants[mutant] = old_value
+                if mutant in old_mutant_hashes:
+                    new_mutant_hashes[mutant] = old_mutant_hashes[mutant]
         score, _, _ = module_score(res["mutants"], excluded)
         old_floor = old.get("score_floor")
         floor = floor_two_decimals(score)
@@ -501,6 +565,8 @@ def propose_baseline(results: dict, baseline: dict, modules: list[str]) -> dict:
             "function_hashes": dict(sorted(res["function_hashes"].items())),
             "mutants": mutants,
         }
+        if new_mutant_hashes:
+            new_modules[module]["mutant_hashes"] = dict(sorted(new_mutant_hashes.items()))
     return {
         "schema": SCHEMA_VERSION,
         "mutmut": baseline.get("mutmut", ""),

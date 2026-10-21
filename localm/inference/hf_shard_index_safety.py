@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from localm.pathsafe import confined_under
+from localm.pathsafe import confined_model_file
 
 INDEX_GLOB = "*.index.json"
 
@@ -68,7 +68,7 @@ def validate_shard_index(model_path: str) -> None:
                     f"'{base.name}' ships {index_file.name} with a non-string "
                     f"shard filename for weight '{weight}'; refusing to load.")
             try:
-                confined_under(resolved_base, shard)
+                confined_model_file(resolved_base, shard)
             except ValueError as exc:
                 raise RuntimeError(
                     f"'{base.name}' ships {index_file.name} with a shard "

@@ -1721,3 +1721,105 @@ def test_unparsable_bundled_manifest_is_reported_once(env, caplog):
 
     assert "bundled manifest unreadable" in state["errors"].get("broken", "")
     assert len([r for r in caplog.records if "broken" in r.getMessage()]) == 1
+
+
+# ---------------------------------------------------------------------------
+#  A third-party install interrupted mid-copy leaves nothing a reinstall trips on.
+# ---------------------------------------------------------------------------
+
+def _third_party_manager(env):
+    from localm.plugins.engine import PluginManager
+    return PluginManager(None, store_root=env / "store", installed_root=env / "installed")
+
+
+def test_an_install_that_fails_mid_copy_leaves_no_plugin_folder_and_reinstall_works(env, monkeypatch):
+    import shutil
+    from pathlib import Path
+    src = _make_plugin(env / "src", "halfway", _ping("halfway"))
+    mgr = _third_party_manager(env)
+    real_copytree = shutil.copytree
+
+    def dying_copytree(s, d, **kw):
+        Path(d).mkdir(parents=True)
+        (Path(d) / "plug.py").write_text("partial", encoding="utf-8")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(shutil, "copytree", dying_copytree)
+    with pytest.raises(OSError, match="disk full"):
+        mgr.set_installed_from_dir(src)
+    monkeypatch.setattr(shutil, "copytree", real_copytree)
+
+    installed = env / "installed"
+    assert not (installed / "halfway").exists()
+    assert [p.name for p in installed.iterdir()] == []
+    mgr.set_installed_from_dir(src)
+    assert (installed / "halfway" / "plugin.toml").is_file()
+
+
+def test_a_folder_left_without_a_manifest_is_replaced_not_reported_as_installed(env):
+    src = _make_plugin(env / "src", "leftover", _ping("leftover"))
+    stale = env / "installed" / "leftover"
+    stale.mkdir(parents=True)
+    (stale / "plug.py").write_text("partial", encoding="utf-8")
+    mgr = _third_party_manager(env)
+    assert "leftover" not in mgr._installed_set()
+    mgr.set_installed_from_dir(src)
+    assert (stale / "plugin.toml").is_file()
+    assert (stale / "plug.py").read_text(encoding="utf-8") != "partial"
+
+
+def test_a_staging_folder_from_a_killed_install_is_neither_listed_nor_blocks_reinstall(env):
+    src = _make_plugin(env / "src", "killed", _ping("killed"))
+    staging = env / "installed" / ".killed.install.tmp"
+    staging.mkdir(parents=True)
+    (staging / "plugin.toml").write_text(
+        '[plugin]\nname = "killed"\nscope = "killed"\nregister = "plug"\n', encoding="utf-8")
+    mgr = _third_party_manager(env)
+    assert mgr._installed_set() == set()
+    assert "killed" not in mgr.discover()
+    mgr.set_installed_from_dir(src)
+    assert mgr._installed_set() == {"killed"}
+    assert not staging.exists()
+
+
+def test_a_staging_folder_is_not_scanned_as_a_plugin_by_the_other_scanners(env, monkeypatch):
+    from localm.plugins import loader, media_config
+    root = env / "installed"
+    staging = root / ".killed.install.tmp"
+    staging.mkdir(parents=True)
+    (staging / "plugin.toml").write_text(
+        '[plugin]\nname = "killed"\nscope = "killed"\nregister = "plug"\n', encoding="utf-8")
+    manifests, errors, _warns = loader._scan(root)
+    assert manifests == [] and errors == []
+    monkeypatch.setattr(loader, "plugins_dir", lambda: root)
+    assert media_config.active_plugins({"plugins_enabled": ["killed", ".killed.install.tmp"]}) == set()
+
+
+def test_a_forced_reinstall_whose_copy_fails_keeps_the_existing_plugin(env, monkeypatch):
+    import shutil
+    from pathlib import Path
+    src = _make_plugin(env / "src", "keeper", _ping("keeper"))
+    mgr = _third_party_manager(env)
+    mgr.set_installed_from_dir(src)
+    installed = env / "installed" / "keeper"
+    (installed / "plug.py").write_text("# the working copy", encoding="utf-8")
+
+    def dying_copytree(s, d, **kw):
+        Path(d).mkdir(parents=True)
+        raise OSError("disk full")
+
+    monkeypatch.setattr(shutil, "copytree", dying_copytree)
+    with pytest.raises(OSError, match="disk full"):
+        mgr.set_installed_from_dir(src, force=True)
+    assert (installed / "plugin.toml").is_file()
+    assert (installed / "plug.py").read_text(encoding="utf-8") == "# the working copy"
+    assert not (env / "installed" / ".keeper.install.tmp").exists()
+
+
+def test_a_complete_install_is_still_reported_as_installed(env):
+    src = _make_plugin(env / "src", "whole", _ping("whole"))
+    mgr = _third_party_manager(env)
+    mgr.set_installed_from_dir(src)
+    with pytest.raises(ValueError, match="already installed"):
+        mgr.set_installed_from_dir(src)
+    mgr.set_installed_from_dir(src, force=True)

@@ -194,6 +194,8 @@ def _scan(root: Optional[Path]) -> tuple[list[PluginManifest], list[str], list[s
     if not root.is_dir():
         return manifests, errors, warns
     for child in sorted(root.iterdir()):
+        if child.name.startswith("."):
+            continue
         if not child.is_dir() or not (child / "plugin.toml").is_file():
             continue
         if _is_engine_plugin(child):
