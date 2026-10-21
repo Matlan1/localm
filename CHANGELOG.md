@@ -119,6 +119,18 @@ permanent public record of what shipped and are never rewritten; the in-progress
   SharedWorker, used to connect directly without passing the network policy. The
   browser now resolves no host on its own, so these fail without connecting anywhere; every
   other request is still decided by the policy as before.
+- **Text-to-speech no longer downloads its voice model when network access is off.** With
+  network access set to off, the browser voice (Kokoro) now refuses to fetch the model instead of
+  offering a one-click download, unless "Allow model downloads while network access is off" is
+  on. An already downloaded model still works.
+- **Scheduled coder jobs no longer let a project's `.localcoder/config.toml` write more than your
+  settings allow.** A project mode of `log` or `full` is ignored (with a warning) when your
+  configured mode persists less, so a cloned repository cannot turn privacy mode into session logs for
+  a scheduled run. A project can still pin a run to a stricter mode.
+- **Knowledge re-sync now removes documents indexed from a credential folder in every case.**
+  Previously a document was kept when the indexed folder itself was a credential folder such as
+  `.ssh`, when the file had been deleted, or when its folder was unavailable, and search kept
+  returning its text. They are now removed on the next re-sync.
 - **`localm coder` no longer compacts after every turn.** With a model that leaves little room for context, the coder used to be summarised again on nearly every request, and reading a codebase file by file triggered a summary per file. It now compacts only when a request would take most of the context window, brings the session down to about half of it, and first drops the output of older tool calls (the model reads a file again when it needs it) before summarising anything. Everything you typed is kept word for word across compactions, and summaries list facts instead of prose. A model server that reports no context window, such as an online API, is no longer compacted at 4096 tokens.
 - **A vision projector is no longer offered as a model.** A pulled vision model registers its
   projector (`...-mmproj`) as a separate entry, and `GET /v1/models` listed it as a chat model.

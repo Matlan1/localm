@@ -32,9 +32,9 @@ test("planModelFetch: net_mode=allow proceeds uncached with no prompt", () => {
   assert.equal(planModelFetch("allow", false), "allow");
 });
 
-test("planModelFetch: net_mode=off confirms by default so user is asked", () => {
-  assert.equal(planModelFetch("off", false), "confirm");
-  assert.equal(planModelFetch("off", false, false), "confirm");
+test("planModelFetch: net_mode=off refuses an uncached model by default", () => {
+  assert.equal(planModelFetch("off", false), "refuse");
+  assert.equal(planModelFetch("off", false, false), "refuse");
 });
 
 test("planModelFetch: net_mode=off proceeds when allowDownloadsWhenOff is set", () => {
@@ -214,22 +214,24 @@ function installFetchEnv(win, { netMode, allowDownloadsWhenOff = false }) {
   global.fetch = win.fetch;
 }
 
-test("load(): net_mode=off offers the dialog; declining leaves provider registered", async () => {
+test("load(): net_mode=off refuses without a dialog or any model fetch; provider stays registered", async () => {
   const win = installModalShell();
   installFetchEnv(win, { netMode: "off" });
+  const fetched = [];
+  const baseFetch = win.fetch;
+  win.fetch = async (url) => { fetched.push(String(url)); return baseFetch(url); };
+  global.fetch = win.fetch;
   const { ctx, calls } = makeCtx();
   const { register } = await importFresh(TTS_JS);
   await register(ctx);
 
   const provider = calls.registerTTS[0];
   assert.ok(provider, "register() must call ctx.registerTTS with a provider");
-  const readyPromise = provider.ready();
-  await new Promise((r) => setTimeout(r, 0));
-  assert.equal(win.$("modal-title").textContent, "Download voice model?",
-    "net_mode=off must offer the one-time confirmation before fetching");
-
-  clickButtonNamed(win, "Not now");
-  await assert.rejects(readyPromise);
+  await assert.rejects(provider.ready());
+  assert.equal(win.$("modal").style.display, "none",
+    "net_mode=off must not offer a download confirmation");
+  assert.deepEqual(fetched.filter((u) => /huggingface\.co/.test(u)), [],
+    "net_mode=off must never request the model from huggingface.co");
 
   const errToast = calls.toasts.find((t) => t.isError);
   assert.ok(errToast, "a toast must explain the refusal");

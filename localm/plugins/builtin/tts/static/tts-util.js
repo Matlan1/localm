@@ -150,10 +150,12 @@ export async function rekeyCachedModel(cache, model, revision) {
   return moved;
 }
 
-// Resolves whether to allow the model fetch immediately or prompt the user.
+// Resolves whether the model fetch proceeds at once ("allow"), needs a one-time
+// user confirmation ("confirm"), or is refused outright ("refuse": net_mode=off
+// without the allow-downloads-when-off override).
 export function planModelFetch(mode, cached, allowDownloadsWhenOff) {
   if (cached) return "allow";
-  if (mode === "off" && allowDownloadsWhenOff) return "allow";
+  if (mode === "off") return allowDownloadsWhenOff ? "allow" : "refuse";
   if (mode === "allow") return "allow";
   return "confirm";
 }

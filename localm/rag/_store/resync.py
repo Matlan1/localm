@@ -187,7 +187,8 @@ class _CollectionResync:
                            prune_missing: bool, say: ProgressFn):
         """Flag documents whose file has vanished, clear the flag on ones that
         came back, and prune only when explicitly asked. A document whose source
-        lies under a credential folder is always pruned. Returns
+        lies under a credential folder is always pruned, whether or not the file
+        or its root still exists. Returns
         (newly_missing, restored, pruned) as lists of doc keys.
 
         *was_missing* is the flagged set as it stood BEFORE this run indexed
@@ -204,6 +205,9 @@ class _CollectionResync:
             if not isinstance(entry, dict) or str(key).startswith("upload:"):
                 continue
             p = Path(key)
+            if is_credential_path(p):
+                pruned.append(key)
+                continue
             if any(_path_within(p, r) for r in skipped_roots):
                 continue        # unreachable root: no verdict, no change
             try:
@@ -212,9 +216,6 @@ class _CollectionResync:
                 # Could not ask at all: treated as present, so an unanswerable
                 # question is never resolved in the destructive direction.
                 present = True
-            if present and is_credential_path(p):
-                pruned.append(key)
-                continue
             if present:
                 entry.pop("missing", None)
                 entry.pop("missing_since", None)

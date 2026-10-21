@@ -22,7 +22,7 @@ task_kind "rag":   the job's ``collection`` is re-synced against the folders it
 
 Results are explicit user data (the store saves them in every privacy mode), but
 any session TRACE a run would leave (audit JSONL, transcripts) still honours
-``effective_mode`` - the coder Agent is constructed with the resolved mode, and
+``effective_unattended_mode`` - the coder Agent is constructed with the resolved mode, and
 the chat path writes no trace of its own.
 """
 
@@ -723,7 +723,7 @@ def _run_coder(job: Job, *, engine=None) -> str:
     The agent always talks to an OpenAI-compatible HTTP endpoint, so a job run
     needs a localm server (``self_url``) reachable; without one this raises and
     the run is recorded as an error (never crashing the tick)."""
-    from localm.audit import effective_mode
+    from localm.audit import effective_unattended_mode
     from localm.plugins.builtin.jobs.store import cwd_unc_error
 
     # AUTHORITATIVE check, re-validated at RUN time and not only at the write: a row
@@ -762,8 +762,9 @@ def _run_coder(job: Job, *, engine=None) -> str:
             "directory.", job.name, job.id)
 
     backend = _coder_backend(job)
-    # Resolved with the job's project dir, where a .localcoder/config.toml mode applies.
-    mode = effective_mode("coder", cwd=cwd)
+    # Resolved with the job's project dir, where a .localcoder/config.toml mode can
+    # only reduce what the run persists.
+    mode = effective_unattended_mode("coder", cwd=cwd)
 
     # Safe-by-default: an unattended scheduled run has nobody to approve a destructive
     # tool, so it runs RESTRICTED (read plus confined edit, no run_shell, no network,

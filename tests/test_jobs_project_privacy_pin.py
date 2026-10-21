@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """A scheduled coder job resolves its session mode with the job's project
 directory, so a project's ``.localcoder/config.toml`` ``mode`` applies to the
-run exactly as it does to an interactive coder session there (precedence:
-LOCALM_MODE > project config > coder_mode > mode > privacy)."""
+run when it persists less than the configured mode (precedence: LOCALM_MODE >
+project config > coder_mode > mode > privacy); a project mode that would persist
+more is ignored."""
 
 from __future__ import annotations
 
@@ -132,6 +133,40 @@ def test_a_project_dir_that_cannot_be_searched_runs_the_job_in_privacy(
 
     assert captured["mode"] == SessionMode.PRIVACY
     assert any("privacy mode" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("global_cfg, pin, expected", [
+    ({}, "full", SessionMode.PRIVACY),
+    ({}, "log", SessionMode.PRIVACY),
+    ({"coder_mode": "log"}, "full", SessionMode.LOG),
+    ({"mode": "log"}, "full", SessionMode.LOG),
+    ({"coder_mode": "full"}, "log", SessionMode.LOG),
+    ({"coder_mode": "full"}, "privacy", SessionMode.PRIVACY),
+    ({"coder_mode": "log"}, "log", SessionMode.LOG),
+])
+def test_a_project_pin_can_only_tighten_a_scheduled_job(
+        home, tmp_path, monkeypatch, global_cfg, pin, expected):
+    _write_config(home, **global_cfg)
+    proj = _project(tmp_path, f'mode = "{pin}"\n')
+    runner, captured = _capture_agent(monkeypatch)
+
+    assert _run(runner, proj)["status"] == "ok"
+
+    assert captured["mode"] == expected
+
+
+def test_a_project_pin_that_would_loosen_a_job_is_logged(
+        home, tmp_path, monkeypatch, caplog):
+    _write_config(home, coder_mode="log")
+    proj = _project(tmp_path, 'mode = "full"\n')
+    runner, captured = _capture_agent(monkeypatch)
+
+    with caplog.at_level("WARNING"):
+        assert _run(runner, proj)["status"] == "ok"
+
+    assert captured["mode"] == SessionMode.LOG
+    assert any("project config" in r.getMessage() and "full" in r.getMessage()
+               for r in caplog.records)
 
 
 def test_a_confined_job_uses_the_pin_of_the_directory_it_runs_in(
