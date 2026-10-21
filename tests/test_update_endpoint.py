@@ -202,6 +202,7 @@ def test_update_apply_builds_watchdog_from_app_state(monkeypatch):
     _monkeypatch_apply_ok(monkeypatch)
     app = create_app(_engine())
     app.state.bind_host = "0.0.0.0"          # wildcard bind -> probed via loopback
+    app.state.insecure_bind = True
     app.state.instance_port = 9001
     app.state.instance_scheme = "http"
     data = _post(app, "/api/update/apply").json()
@@ -219,6 +220,7 @@ def test_update_apply_uses_concrete_bind_host_directly(monkeypatch):
     _monkeypatch_apply_ok(monkeypatch)
     app = create_app(_engine())
     app.state.bind_host = "192.168.1.5"      # a concrete, non-loopback bind
+    app.state.insecure_bind = True
     app.state.instance_port = 9002
     app.state.instance_scheme = "http"
     _post(app, "/api/update/apply")

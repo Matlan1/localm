@@ -26,6 +26,7 @@ KEY = "owner-key-for-revocation-honesty-abc"
 def runner(cli_runner, monkeypatch):
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+    monkeypatch.setattr("localm.cli.keys._stdin_is_interactive", lambda: True)
     # The store cache is process-wide; reset it so a prior test's cached view is
     # never read through this test's throwaway store.
     from localm import sessions

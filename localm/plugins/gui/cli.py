@@ -1336,6 +1336,7 @@ def main(model, host, port, ctx, gpu_layers, no_browser, no_model, pull_spec, de
     # Browser / window / tray.
     want_native = _start_launch_surface(open_url, plan, no_browser=no_browser)
     app.state.bind_host = plan.host
+    app.state.insecure_bind = bool(insecure)
     app.state.bind_fallback = plan.fallback
     from localm.inference import http_server as hs
     on_restart, on_stop = _tray_callbacks(app, hs)

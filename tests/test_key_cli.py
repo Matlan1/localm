@@ -21,6 +21,7 @@ def runner(cli_runner, monkeypatch):
     # about the throwaway home, not the developer's environment.
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+    monkeypatch.setattr("localm.cli.keys._stdin_is_interactive", lambda: True)
     return cli_runner
 
 

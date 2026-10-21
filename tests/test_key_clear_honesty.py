@@ -19,6 +19,7 @@ from localm.cli import main
 def runner(cli_runner, monkeypatch):
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+    monkeypatch.setattr("localm.cli.keys._stdin_is_interactive", lambda: True)
     return cli_runner
 
 

@@ -577,11 +577,12 @@ def _run_cancellable(argv, cwd: Path, *, timeout: float, env: Optional[dict],
     answers True, or at *timeout*, keeping the output captured so far.
 
     stdout and stderr are read by daemon threads, so the wait on the process
-    never depends on the pipes reaching EOF."""
+    never depends on the pipes reaching EOF. stdin is the null device: the
+    process never reads the coder's terminal."""
     try:
         proc = subprocess.Popen(
-            argv, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            env=env,
+            argv, cwd=str(cwd), stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
         )
     except FileNotFoundError as e:
         return SubprocessResult(ok=False, not_found=True, error=str(e))

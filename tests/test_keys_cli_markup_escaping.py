@@ -51,6 +51,7 @@ def _wide_console(monkeypatch):
 def runner(cli_runner, monkeypatch):
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+    monkeypatch.setattr("localm.cli.keys._stdin_is_interactive", lambda: True)
     return cli_runner
 
 
@@ -70,6 +71,7 @@ def bracketed_home_runner(tmp_path, monkeypatch):
     monkeypatch.setattr(cfg, "REGISTRY_FILE", home / "registry.json")
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
+    monkeypatch.setattr("localm.cli.keys._stdin_is_interactive", lambda: True)
     return CliRunner()
 
 

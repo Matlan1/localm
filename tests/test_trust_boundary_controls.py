@@ -185,6 +185,7 @@ class TestBindHostNotPeerDecidesLoopbackOnlySurfaces:
         the peer would serve these to the whole LAN."""
         with TestClient(app, client=self.LOOPBACK_PEER) as c:
             app.state.bind_host = "0.0.0.0"
+            app.state.insecure_bind = True
             token = app.state.shell_token
             assert c.get("/docs").status_code == 404
             assert c.get("/openapi.json").status_code == 404

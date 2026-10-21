@@ -69,6 +69,7 @@ def _deferring_vouch(body):
 def _coordinating_app(bind_host="127.0.0.1", port=8700, model=None):
     app = create_app(None)
     app.state.bind_host = bind_host
+    app.state.insecure_bind = True
     app.state.instance_id = "self-1"
     hs._active_model_name = model
     hs._gpu_coord = {"instance_id": "self-1", "port": port, "host": bind_host,

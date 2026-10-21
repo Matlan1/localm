@@ -1166,7 +1166,7 @@ Scope: `keys:admin`.
 |---|---|
 | `GET /v1/keys` | List every scoped key (metadata only, never the plaintext key). Returns `{"keys": [{"id", "name", "scopes", "created", "expires", "last_used", "fs_access", "rag_roots"}], "is_owner", "presets", "owner_key_warning"}`: whether the caller is the owner, the configured key presets, and `owner_key_warning`, a notice (or null) that the owner key file exists but holds no key, so the server runs keyless; it names the key file: the full path for the owner and open mode, a scrubbed one for a scoped key. |
 | `POST /v1/keys` | Mint a new scoped key. Body: `name`, `scopes` (list of scope strings), `fs_access` (`none` or `host`), `rag_roots` (list of folder paths to confine RAG indexing to; omit for the key's normal, unconfined RAG reach), and either `expires_in` (seconds from now) or `expires` (epoch seconds); returns `{"id", "name", "scopes", "expires", "fs_access", "rag_roots", "key"}` (plus `warnings` when a granted scope unlocks a plugin that is not installed or not ready), with the plaintext `key` exactly once. A `scopes` that is not a list, an `expires_in` or `expires` that is not a number, a `rag_roots` that is not a list, or a scope that is neither a shipped scope nor a plain plugin-name identifier is a 400. Only an owner/`admin` caller may grant a privileged scope (`admin`, `plugins:admin`, `keys:admin`, `config:write`, `coder:full`), `fs_access=host`, or a non-empty `rag_roots` list - each is host-filesystem reach in some form, and a non-owner request for any of them gets 403. Minting the very first key from an open-mode loopback GUI also seeds an owner key and hands that browser a session cookie, so the local user is never locked out. 409 when the key store file exists but cannot be read as a JSON list; nothing is written. |
-| `DELETE /v1/keys/{key_id}` | Revoke a key. Returns `{"status": "revoked", "id"}`; 404 if no such key exists, 409 when the key store file cannot be read as a JSON list. |
+| `DELETE /v1/keys/{key_id}` | Revoke a key. Returns `{"status": "revoked", "id"}`; 404 if no such key exists, 409 when the key store file cannot be read as a JSON list, and 409 on a server bound past loopback (without `--insecure`) when it is the last key. |
 
 `POST /api/auth/key/clear` (scope `config:write`; CSRF-protected for
 cookie-authenticated callers) deletes the server-side owner key and signs out
@@ -1180,7 +1180,13 @@ response is `{"cleared": false, "warnings": [...]}`, naming what survived: a
 credential the server could not remove (a virus scanner or search indexer
 holding the file open, for example), or `"browser sessions (some devices may
 still be signed in)"` when the session store could not be written. The labels
-are deliberately path-free.
+are deliberately path-free. On a server bound past loopback (without
+`--insecure`) it answers 409 and removes nothing when no key would remain;
+set a new key instead (`/api/auth/key/rotate`).
+
+A server bound past loopback (without `--insecure`) that has no key at all
+answers every request except `GET /health` and `GET /whoami` with 401 until a
+key is set; a request carrying this instance's attach token still passes.
 
 `POST /api/auth/key/rotate` (scope `admin` - not merely `config:write`, since
 setting a caller-chosen key is privilege-equivalent to minting yourself owner)

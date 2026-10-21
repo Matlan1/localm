@@ -3538,6 +3538,28 @@ def _csrf_ok(request) -> bool:
     return ct_equal(header, csrf_token_for(request, sid))
 
 
+def network_bind_needs_key(app) -> bool:
+    """True when *app* is bound past loopback (``app.state.bind_host``) and was
+    not started with ``--insecure`` (``app.state.insecure_bind``). Such a server
+    must hold an API key: with none configured it refuses requests
+    (``security.add_keyless_network_gate``) instead of running open. An unset
+    ``bind_host`` reads as loopback, an unset ``insecure_bind`` as False."""
+    st = app.state
+    host = getattr(st, "bind_host", "127.0.0.1")
+    return not _is_loopback_host(host) and not getattr(st, "insecure_bind", False)
+
+
+KEYLESS_NETWORK_DETAIL = (
+    "No API key is set and this server is reachable from the network, so it "
+    "refuses requests. On the server, set a key (localm key generate), or "
+    "restart it bound to 127.0.0.1.")
+
+LAST_KEY_NETWORK_DETAIL = (
+    "This is the last API key and the server is reachable from the network: "
+    "without a key it would refuse every request. Set a new key instead, or "
+    "restart the server bound to 127.0.0.1 first.")
+
+
 def _enforce_request(request: Request, scope: Optional[str]) -> None:
     """Shared auth core (request-aware). Open/dev mode when no key is configured
     anywhere (unless LOCALM_REQUIRE_AUTH forces fail-closed). Otherwise a valid
@@ -4947,6 +4969,7 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     diagnostics.add_debug_stacks(app)
     cors_cfg = security.add_cors(app)
     security.add_origin_guard(app, cors_cfg)
+    security.add_keyless_network_gate(app)
     security.add_security_headers(app)
     security.add_docs_loopback_gate(app)
     transport.add_transport_middleware(app)
