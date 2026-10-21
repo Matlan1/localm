@@ -12,6 +12,7 @@ import re
 import subprocess
 import sys
 import time
+import uuid
 
 import pytest
 
@@ -36,10 +37,14 @@ def test_resolve_root_dir_localcoder_marker(tmp_path):
     assert instances.resolve_root_dir(start=str(proj)) == str(proj.resolve())
 
 
-def test_resolve_root_dir_falls_back_to_start(tmp_path):
+def test_resolve_root_dir_falls_back_to_start(tmp_path, monkeypatch):
+    marker = f".no-such-marker-{uuid.uuid4().hex}"
+    monkeypatch.setattr(instances, "_ROOT_MARKERS", (marker,))
     plain = tmp_path / "no-marker"
     plain.mkdir()
     assert instances.resolve_root_dir(start=str(plain)) == str(plain.resolve())
+    (tmp_path / marker).mkdir()
+    assert instances.resolve_root_dir(start=str(plain)) == str(tmp_path.resolve())
 
 
 def test_resolve_root_dir_override_wins(tmp_path):

@@ -458,6 +458,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **The automated browser's pages can no longer reach the network over WebRTC.** A page's peer
   connection (STUN, TURN over UDP, connectivity checks to an address the page names) could send
   UDP packets past the network gate; the browser now sends none.
+- **The automated browser stays off the network in an installed Google Chrome or Microsoft Edge
+  too.** With the System engine, Chrome and Edge ignored the WebRTC setting and a page's peer
+  connection could still send UDP packets past the network gate; localm now applies the setting
+  through the throwaway profile it launches them in, which is deleted when the session stops.
+- **A key limited to reading or writing settings can no longer see or change the ComfyUI output
+  folder.** `comfy_output_dir`, and the same folder set per media plugin, is now owner-only like
+  the other host paths: it is left out of what such a key reads, and saving it needs the owner key.
 
 ## [0.3.0] - 2026-10-14
 
