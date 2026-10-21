@@ -126,6 +126,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   next request fits in it.
 
 ### Fixed
+- **Pulling a whole Hugging Face folder works again.** `localm pull <owner>/<repo>` for a full model folder failed when the download finished, with "'MeterBar' object has no attribute 'set_description_str'", under the huggingface-hub release localm now installs.
 - **A ComfyUI that hangs on its port is named at once.** After a GPU crash a ComfyUI that localm did not launch can keep its port and stop answering. `localm comfy restart` and any generation that needs ComfyUI now say right away which process holds the port (its pid and name) and that localm will not stop it, instead of relaunching into the held port and waiting five minutes; `localm comfy status` shows the same line.
 - **Closing the connection during text-to-speech stops the job.** A client that went away while `/v1/audio/speech` was synthesising did not cancel the job, because the check only ran while the job was silent. The job is now cancelled within a second of the disconnect.
 - **Privacy mode leaves no crash exit file.** After a hard crash on Windows the crash watchdog wrote a `server-crash-exit` file in the data folder even in privacy mode, and nothing removed it. It is no longer written when the run started in privacy mode, and the next start deletes any left over.
