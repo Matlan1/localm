@@ -87,6 +87,9 @@ class _FakeManager:
             vals = [s for s in vals if s.principal == principal]
         return [s.info() for s in vals]
 
+    def reap_idle_in_background(self):
+        return False
+
     def get(self, sid):
         return self._s.get(sid)
 

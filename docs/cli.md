@@ -1016,10 +1016,12 @@ down to about half the window. It counts from the prompt size the server reporte
 the last request. First it drops the output of older tool calls from the context (a file
 read, a command's output), keeping a short note of which tool ran on what; the model runs
 the tool again when it needs that output. Only when that is not enough does it summarise
-older turns. Every message you wrote yourself is kept word for word in the summary. With
-a server that reports no context window, the agent compacts only when the server refuses
-a request as too long, and then sends it again once. When even a compacted session does
-not fit, it says once that the window is too small.
+older turns. Every message you wrote yourself is kept word for word in the summary. A
+localm server reports its window; so does a llama-server. With any other server (Ollama,
+LM Studio) the agent assumes the `n_ctx` of your localm config (4096 by default), so set
+`n_ctx` to the window that server runs. Whatever the window, a request the server refuses
+as too long is compacted and sent again once. When even a compacted session does not
+fit, it says once that the window is too small.
 
 **Compaction keeps the working state.** When a long session is compacted (`/compact`,
 or automatically near the context limit), older turns become a summary of facts, and the

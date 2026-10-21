@@ -323,7 +323,8 @@ def main(
     # Build the LLM backend.
     backend = _build_backend(
         provider, url, model, api_key, native_tools, port, no_server,
-        force_new, work_dir, ci)
+        force_new, work_dir, ci,
+        machine_output=bool(task) and output_format in ("json", "jsonl"))
     # Every coder request needs structured tool calls. A localm server answers
     # one --model cannot serve with an installed model that can, unless pinned;
     # any other server ignores both.
@@ -769,15 +770,29 @@ def _warn_if_url_leaves_machine(session_mode, provider, url) -> None:
     warn_external_url(url, from_env=from_env)
 
 
+def _captures_child_output(stdin_tty: bool, stdout_tty: bool, platform: str,
+                           machine_output: bool) -> bool:
+    """True when an auto-started server's output must go to a log file rather
+    than this process's own stdout: the caller has no terminal on stdin, or (off
+    Windows, where the child otherwise inherits the stream) stdout is not a
+    terminal or carries machine-readable output."""
+    if not stdin_tty:
+        return True
+    return platform != "win32" and (machine_output or not stdout_tty)
+
+
 def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
-                   force_new, work_dir, ci, probe_only=False):
+                   force_new, work_dir, ci, probe_only=False, machine_output=False):
     """Build the LLM backend for the chosen provider / explicit URL / offline path.
     Returns backend. Split out of main; exits
     (2 under --ci, else 1) on a missing required option or a failed server start.
 
     ``probe_only`` attaches to a localm server already running for the project
     when there is one and otherwise points at the default (or ``port``) address
-    WITHOUT starting a server, so the caller can report whether it answers."""
+    WITHOUT starting a server, so the caller can report whether it answers.
+
+    ``machine_output`` is True for a ``--output-format json|jsonl`` run, whose
+    stdout carries only the result document or the event lines."""
     # Live-attribute access so a test patching cli.make_localm_backend is honoured.
     make_localm_backend = _cli.make_localm_backend
 
@@ -809,6 +824,7 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
             sys.exit(2 if ci else 1)
         backend = HTTPBackend(url.rstrip("/"), model, api_key=api_key,
                               native_tools=native_tools)
+        backend.assume_ctx_window = True
 
     else:
         # Offline path - localm backend
@@ -906,7 +922,9 @@ def _build_backend(provider, url, model, api_key, native_tools, port, no_server,
                 # would deadlock a long-lived server once the OS buffer fills with
                 # its normal request logging, a file cannot. The tail is read back
                 # on an early exit. A TTY run keeps the visible console window.
-                headless = not sys.stdin.isatty()
+                headless = _captures_child_output(
+                    sys.stdin.isatty(), sys.stdout.isatty(), sys.platform,
+                    machine_output)
                 child_log_path = None
                 child_log = None
                 if headless:

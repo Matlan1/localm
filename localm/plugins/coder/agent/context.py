@@ -1268,13 +1268,19 @@ ws     ::= [ \t\n\r]*
     def _maybe_compact(self, interactive: bool) -> None:
         """Compact when the expected prompt is over the high bound of the
         backend's reported window (see ``_compaction_bounds``), down to its low
-        bound (see ``_compact_to``). Does nothing when the backend reports no
-        window. When the history is still over the high bound afterwards,
-        warns once per session that the window is too small (on the console
-        in an interactive session, else as an ``info`` event)."""
+        bound (see ``_compact_to``). When the backend reports no window, the
+        window is the configured ``n_ctx`` (``_ctx_window_tokens``) and the
+        warning says it is assumed, for a backend with ``assume_ctx_window``;
+        any other backend is not compacted ahead of the server. When the history is still over the high
+        bound afterwards, warns once per session that the window is too small
+        (on the console in an interactive session, else as an ``info``
+        event)."""
         window = self._known_ctx_window()
+        assumed = window is None
         if window is None:
-            return
+            if getattr(self.backend, "assume_ctx_window", False) is not True:
+                return
+            window = self._ctx_window_tokens()
         high, low = self._compaction_bounds(window)
         if getattr(self, "_server_compacted", False):
             self._server_compacted = False
@@ -1288,10 +1294,17 @@ ws     ::= [ \t\n\r]*
         self._compact_futile = expected > high
         if expected > high and not getattr(self, "_compact_warned", False):
             self._compact_warned = True
-            text = (f"The model's context window ({window:,} tokens) is too small for "
-                    f"this session: after compacting, the next request still needs "
-                    f"about {expected:,} tokens. Free some VRAM or load a smaller "
-                    "model so the window can grow, or raise n_ctx_max.")
+            if assumed:
+                text = (f"This server does not report its context window, so the "
+                        f"agent assumes n_ctx = {window:,} tokens: after compacting, "
+                        f"the next request still needs about {expected:,} tokens. "
+                        "If the server runs a larger window, raise n_ctx in the "
+                        "localm config to match it.")
+            else:
+                text = (f"The model's context window ({window:,} tokens) is too small for "
+                        f"this session: after compacting, the next request still needs "
+                        f"about {expected:,} tokens. Free some VRAM or load a smaller "
+                        "model so the window can grow, or raise n_ctx_max.")
             if interactive and getattr(self, "on_event", None) is None:
                 _agent.print_warning(text)
             else:
@@ -1300,9 +1313,12 @@ ws     ::= [ \t\n\r]*
     def _is_context_overflow(self, error: Exception) -> bool:
         """True when *error* is a server's refusal of a prompt longer than the
         model's context window (localm's HTTP 413 text, or an OpenAI-style
-        context-length error)."""
+        context-length error, or a llama-server's HTTP 400
+        ``exceed_context_size_error``)."""
         text = str(error).lower()
         return ("exceeds the model's maximum context capacity" in text
+                or "exceeds the available context size" in text
+                or "exceed_context_size_error" in text
                 or "context_length_exceeded" in text
                 or "maximum context length" in text
                 or ("http 413" in text and "context" in text))

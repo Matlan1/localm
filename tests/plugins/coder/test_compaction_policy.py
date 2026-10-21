@@ -5,8 +5,8 @@ Driven through the real Agent with a scripted model: the agent compacts only
 past a high bound of the window the backend reports, aims well below it, drops
 old tool output before it summarises anything, keeps every request the user
 wrote verbatim across compactions, compacts and retries once when the server
-refuses a prompt as too long, and never compacts proactively against a window
-nobody reported.
+refuses a prompt as too long, and budgets against the configured n_ctx when no
+window is reported.
 """
 
 from __future__ import annotations
@@ -51,8 +51,9 @@ class _Backend:
     native_tools = False
     supports_grammar = False
 
-    def __init__(self, window=16384, summary="- SUMMARY-FACT"):
+    def __init__(self, window=16384, summary="- SUMMARY-FACT", assume=False):
         self.window = window
+        self.assume_ctx_window = assume
         self.summary = summary
         self.calls: list[str] = []
         self.last_usage: dict = {"total_tokens": 0}
@@ -167,14 +168,51 @@ def test_an_interactive_session_compacts_too(proj, home):
     assert compact_to.call_args[0] == (agent._compaction_bounds(16384)[1], 16384)
 
 
-def test_no_proactive_compaction_without_a_reported_window(proj, home):
+def test_a_backend_not_reached_by_url_that_reports_no_window_is_not_compacted(proj, home):
     agent = _agent(proj, _Backend(window=None))
     agent._messages = [{"role": "user", "content": "go"}]
     for i in range(40):
         _read_turn(agent, i)
-    with patch.object(type(agent), "_compact_to") as compact_to:
+    with patch("localm.config.load_config", return_value={"n_ctx": 4096}), \
+         patch.object(type(agent), "_compact_to") as compact_to:
         agent._maybe_compact(interactive=False)
     compact_to.assert_not_called()
+
+
+def test_a_backend_that_reports_no_window_is_budgeted_against_the_configured_n_ctx(
+        proj, home):
+    agent = _agent(proj, _Backend(window=None, assume=True))
+    agent._messages = [{"role": "user", "content": "go"}]
+    for i in range(40):
+        _read_turn(agent, i)
+    with patch("localm.config.load_config", return_value={"n_ctx": 16384}),          patch.object(type(agent), "_compact_to", return_value=True) as compact_to:
+        agent._maybe_compact(interactive=False)
+    compact_to.assert_called_once()
+    assert compact_to.call_args[0] == (agent._compaction_bounds(16384)[1], 16384)
+
+
+def test_an_unreported_window_that_is_large_enough_does_not_compact(proj, home):
+    agent = _agent(proj, _Backend(window=None, assume=True))
+    agent._messages = [{"role": "user", "content": "go"}]
+    for i in range(3):
+        _read_turn(agent, i)
+    with patch("localm.config.load_config", return_value={"n_ctx": 131072}),          patch.object(type(agent), "_compact_to") as compact_to:
+        agent._maybe_compact(interactive=False)
+    compact_to.assert_not_called()
+
+
+def test_an_assumed_window_that_is_too_small_says_it_is_assumed(proj, home):
+    agent = _agent(proj, _Backend(window=None, assume=True))
+    agent._system_prompt = "x" * 12000
+    agent._messages = [{"role": "user", "content": "go"}, {"role": "assistant", "content": "ok"},
+                       {"role": "user", "content": "more"}, {"role": "assistant", "content": "ok"},
+                       {"role": "user", "content": "again"}]
+    with patch("localm.config.load_config", return_value={"n_ctx": 4096}):
+        agent._maybe_compact(interactive=False)
+        agent._maybe_compact(interactive=False)
+    warnings = [t for t in _info(agent) if "does not report its context window" in t]
+    assert len(warnings) == 1
+    assert "n_ctx = 4,096" in warnings[0] and "raise n_ctx" in warnings[0]
 
 
 def test_below_the_high_bound_nothing_changes(proj, home):
@@ -405,6 +443,44 @@ def test_another_server_error_is_not_treated_as_an_overflow(proj, home):
     assert not agent._is_context_overflow(CoderServerError("HTTP 500 error: worker crashed"))
     assert agent._is_context_overflow(CoderServerError(
         "Error code: 400 - {'error': {'code': 'context_length_exceeded'}}"))
+
+
+def test_a_llama_server_context_refusal_is_an_overflow(proj, home):
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    from localm.plugins.coder.backends.http import CoderServerError, HTTPBackend
+
+    body = json.dumps({"error": {
+        "code": 400,
+        "message": "request (3031 tokens) exceeds the available context size "
+                   "(512 tokens), try increasing it",
+        "type": "exceed_context_size_error", "n_prompt_tokens": 3031, "n_ctx": 512,
+    }}).encode()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):                                    # noqa: N802
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        backend = HTTPBackend(f"http://127.0.0.1:{srv.server_address[1]}/v1", "m")
+        with pytest.raises(CoderServerError) as info:
+            backend.chat([{"role": "user", "content": "hi"}])
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    assert _agent(proj)._is_context_overflow(info.value)
 
 
 def test_harness_messages_and_untrusted_text_are_never_pinned(proj, home):
