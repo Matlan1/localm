@@ -1782,6 +1782,19 @@ def test_a_staging_folder_from_a_killed_install_is_neither_listed_nor_blocks_rei
     assert not staging.exists()
 
 
+def test_a_staging_folder_is_not_scanned_as_a_plugin_by_the_other_scanners(env, monkeypatch):
+    from localm.plugins import loader, media_config
+    root = env / "installed"
+    staging = root / ".killed.install.tmp"
+    staging.mkdir(parents=True)
+    (staging / "plugin.toml").write_text(
+        '[plugin]\nname = "killed"\nscope = "killed"\nregister = "plug"\n', encoding="utf-8")
+    manifests, errors, _warns = loader._scan(root)
+    assert manifests == [] and errors == []
+    monkeypatch.setattr(loader, "plugins_dir", lambda: root)
+    assert media_config.active_plugins({"plugins_enabled": ["killed", ".killed.install.tmp"]}) == set()
+
+
 def test_a_complete_install_is_still_reported_as_installed(env):
     src = _make_plugin(env / "src", "whole", _ping("whole"))
     mgr = _third_party_manager(env)

@@ -765,7 +765,9 @@ class PluginManager:
             except OSError:
                 children = []
             for child in children:
-                if child.name.startswith(".") or not child.is_dir()                         or not (child / "plugin.toml").is_file():
+                if child.name.startswith("."):
+                    continue
+                if not child.is_dir() or not (child / "plugin.toml").is_file():
                     continue
                 try:
                     warns: list = []
