@@ -1528,11 +1528,21 @@ class VramSizingMixin:
         current = max(int(current_ctx), self.n_ctx)
         charge = (n_ctx * per_token if kv_in_ram
                   else (n_ctx - current) * per_token)   # NET when the old VRAM KV is reclaimed
+        # On Windows the growth must also fit what is left of this process's
+        # video memory budget, else Windows moves allocations to shared memory.
+        from localm.gpu_usage import process_vram_budget
+        budget = process_vram_budget()
+        room = budget[0] - budget[1] if budget is not None else None
+        device_free = free
+        if room is not None:
+            free = min(free, room)
         # State the decision - nothing else in the worker surfaces it.
         from localm.debuglog import logger as _dbg
-        _dbg.debug("ctx-grow fit: target=%d free=%d per_token=%d charge=%d "
-                   "kv_in_ram=%s -> KV in %s", n_ctx, free, per_token, charge,
-                   kv_in_ram, "VRAM" if charge <= free else "system RAM")
+        _dbg.debug("ctx-grow fit: target=%d free=%d device_free=%d budget=%s usage=%s "
+                   "per_token=%d charge=%d kv_in_ram=%s -> KV in %s", n_ctx, free,
+                   device_free, budget[0] if budget else None,
+                   budget[1] if budget else None, per_token, charge, kv_in_ram,
+                   "VRAM" if charge <= free else "system RAM")
         if charge <= free:
             return True                                # KV cache fits VRAM - keep it there
         # Does not fit VRAM: keep the FULL window and put the KV cache in system
@@ -1542,8 +1552,13 @@ class VramSizingMixin:
             from localm.debuglog import logger as _dbg
             # The quoted GB figure can still be the raw, cross-process-blind
             # reading when the device-global correction declined.
-            blind_note = (" (this reading may not see other processes' VRAM use)"
-                          if self._free_reading_may_be_blind() else "")
+            if room is not None and room < device_free:
+                blind_note = (" (Windows lets this process use only that much of the "
+                              f"{device_free / 1024**3:.2f} GB free)")
+            elif self._free_reading_may_be_blind():
+                blind_note = " (this reading may not see other processes' VRAM use)"
+            else:
+                blind_note = ""
             _dbg.warning(
                 "large context (%s tokens): the KV cache does not fit free VRAM "
                 "(need %.2f GB > %.2f GB free)%s, so it is kept in system RAM and "
