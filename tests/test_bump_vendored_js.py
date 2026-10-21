@@ -74,6 +74,14 @@ def _older(version: str) -> str:
     return f"{major - 1}.9.9"
 
 
+@pytest.mark.parametrize("version, expected", [
+    ("3.4.17", "3.4.16"), ("3.5.0", "3.4.9"), ("4.0.0", "3.9.9"), ("0.19.0", "0.18.9"),
+])
+def test_older_gives_a_lower_release_even_for_a_zero_patch_or_minor(version, expected):
+    assert _older(version) == expected
+    assert _parts(_older(version)) < _parts(version)
+
+
 _REAL = _real_versions()
 MARKED, DOMPURIFY, HLJS, KATEX = (_REAL["marked"], _REAL["DOMPurify"], _REAL["highlight.js"],
                                   _REAL["KaTeX"])
