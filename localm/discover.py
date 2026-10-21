@@ -938,6 +938,33 @@ def end_shared_gpu_reading() -> None:
     _shared_reading.state = None
 
 
+def new_shared_gpu_reading() -> dict:
+    """A shared reading that no thread uses yet, for several threads to use
+    one after another through :func:`using_shared_gpu_reading`. It holds no
+    reading until a :func:`list_gpus` call made under it completes with
+    :data:`GPU_PROBE_OK`. Not safe for two threads to use at the same time."""
+    return {"gpus": None}
+
+
+def shared_gpu_reading_taken(state: Optional[dict]) -> bool:
+    """Whether *state* (from :func:`new_shared_gpu_reading`) holds a reading."""
+    return state is not None and state.get("gpus") is not None
+
+
+def using_shared_gpu_reading(state: Optional[dict], fn, *args, **kwargs):
+    """Call ``fn(*args, **kwargs)`` with *state* (from
+    :func:`new_shared_gpu_reading`) as this thread's shared reading (see
+    :func:`start_shared_gpu_reading`) and return its result; the thread's
+    previous shared reading is restored afterwards. With *state* None, *fn*
+    runs under no shared reading."""
+    previous = getattr(_shared_reading, "state", None)
+    _shared_reading.state = state
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        _shared_reading.state = previous
+
+
 def _list_gpus_with_status(deadline: float, wait_for_inflight: bool = False) -> tuple:
     """The real probe driver behind :func:`list_gpus`, returning ``(gpus, status)``
     where status is one of :data:`GPU_PROBE_OK` / :data:`GPU_PROBE_TIMEOUT` /
