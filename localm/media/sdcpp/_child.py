@@ -355,6 +355,7 @@ def _do_load(payload):
         "desc": _State.model_desc,
         "image": bool(lib.sd_ctx_supports_image_generation(ctx)),
         "video": bool(lib.sd_ctx_supports_video_generation(ctx)),
+        "ref_images": _supports_ref_images(lib, ctx),
         "default_sample_method": (lib.sd_sample_method_name(method) or b"").decode(),
         "default_scheduler": (lib.sd_scheduler_name(scheduler) or b"").decode(),
         "devices": b.list_devices(lib),
@@ -421,6 +422,13 @@ def _set_image_inputs(b, p, payload):
         if payload.get("control_canny"):
             p.image_preprocess.rules = _CANNY_RULE
     return keep
+
+
+def _supports_ref_images(lib, ctx) -> Optional[bool]:
+    """Whether the model loaded in *ctx* takes reference images, or None when
+    the library cannot say."""
+    fn = getattr(lib, "sd_ctx_supports_ref_image_conditioning", None)
+    return None if fn is None else bool(fn(ctx))
 
 
 def _enum_from_name(lib, kind: str, name):

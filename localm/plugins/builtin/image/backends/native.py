@@ -736,6 +736,9 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
                 runner.shutdown()
                 return False, (f"{models['label']} ({info.get('version') or 'unknown'}) is not "
                                "an image generation model.")
+            if ref_images and info.get("ref_images") is False:
+                return False, NO_REFERENCES.format(model=models["label"],
+                                                   family=info.get("version") or "unknown")
             init = None
             if init_image_data is not None or input_image is not None:
                 init = _load_init_image(init_image_data if init_image_data is not None

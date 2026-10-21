@@ -124,7 +124,7 @@ def test_other_small_files_are_not_embeddings(tmp_path, shapes):
                          "inpaint": False, "edit": True}),
     (SDXL_UNET, "st", {"references": False, "controlnet": True, "embeddings": True,
                        "inpaint": False, "edit": False}),
-    (FLUX_FILL, "st", {"references": True, "controlnet": False, "embeddings": False,
+    (FLUX_FILL, "st", {"references": False, "controlnet": False, "embeddings": False,
                        "inpaint": True, "edit": False}),
     (QWEN_IMAGE, "st", {"references": True, "controlnet": False, "embeddings": False,
                         "inpaint": False, "edit": False}),
@@ -453,6 +453,9 @@ class _FakeLib:
     def sd_ctx_supports_video_generation(self, ctx):
         return False
 
+    def sd_ctx_supports_ref_image_conditioning(self, ctx):
+        return True
+
     def sd_sample_method_name(self, v):
         return b"euler"
 
@@ -469,7 +472,7 @@ def test_the_worker_load_passes_the_controlnet_and_embeddings(monkeypatch):
         "model_path": "D:/m/sd15.safetensors", "control_net_path": "D:/m/cn.safetensors",
         "embeddings": (("EasyNegative", "D:/m/EasyNegative.safetensors"),
                        ("Other", "D:/m/o.safetensors"))}})
-    assert out["image"] is True
+    assert out["image"] is True and out["ref_images"] is True
     assert lib.seen == {"control_net_path": b"D:/m/cn.safetensors",
                         "model_path": b"D:/m/sd15.safetensors",
                         "embeddings": [(b"EasyNegative", b"D:/m/EasyNegative.safetensors"),
@@ -637,3 +640,56 @@ def test_qwen_reference_images_without_a_vision_encoder_say_so(qwen_set, runner,
     assert ok, msg
     assert image_native.NO_LLM_VISION not in lines
     assert runner.loads[-1]["llm_vision_path"].endswith("mm.gguf")
+
+
+def test_the_worker_load_reports_unknown_reference_support_on_an_older_library(monkeypatch):
+    from localm.media.sdcpp import _child
+
+    class _Old(_FakeLib):
+        pass
+    del _FakeLib.sd_ctx_supports_ref_image_conditioning
+    try:
+        lib = _Old()
+        monkeypatch.setattr(_child._State, "lib", lib)
+        monkeypatch.setattr(_child._State, "ctx", None)
+        out = _child._do_load({"runtime_dir": "x", "ctx": {"model_path": "D:/m/a.safetensors"}})
+        assert out["ref_images"] is None
+    finally:
+        _FakeLib.sd_ctx_supports_ref_image_conditioning = lambda self, ctx: True
+        monkeypatch.setattr(_child._State, "ctx", None)
+
+
+def test_binding_declares_the_reference_query_only_when_the_library_has_it():
+    from localm.media.sdcpp import _binding as b
+
+    class _Fn:
+        restype = argtypes = None
+
+    class _Lib:
+        def __init__(self, has_ref_query):
+            self.has = has_ref_query
+
+        def __getattr__(self, name):
+            if name == "sd_ctx_supports_ref_image_conditioning" and not self.has:
+                raise AttributeError(name)
+            fn = _Fn()
+            object.__setattr__(self, name, fn)
+            return fn
+    old, new = _Lib(False), _Lib(True)
+    b._declare(old)
+    b._declare(new)
+    assert "sd_ctx_supports_ref_image_conditioning" not in vars(old)
+    assert new.sd_ctx_supports_ref_image_conditioning.restype is b.c_bool
+
+
+def test_a_loaded_model_that_takes_no_reference_images_is_refused_after_the_load(
+        addon_set, runner, tmp_path, monkeypatch):  # noqa: F811
+    real = runner.ensure_loaded
+
+    def ensure_loaded(key, runtime_dir, ctx, **kw):
+        return dict(real(key, runtime_dir, ctx, **kw), ref_images=False, version="FLUX Fill")
+    monkeypatch.setattr(runner, "ensure_loaded", ensure_loaded)
+    ok, msg, _, _ = _gen(runner, tmp_path, {"model": "fluxunchained"}, width=64, height=64,
+                         ref_images=[_png()])
+    assert not ok and "does not take reference images" in msg and "FLUX Fill" in msg
+    assert runner.generates == []

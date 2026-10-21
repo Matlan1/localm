@@ -251,15 +251,16 @@ def accepts(slot: str, family: Optional[str], cand: FileInfo,
 def capabilities(info: FileInfo) -> dict:
     """The extra inputs the diffusion model or checkpoint *info* takes:
     ``{"references", "controlnet", "embeddings", "inpaint", "edit"}``, each a
-    bool. ``references``: reference images (an edit family, or an instruct
-    pix2pix UNet); ``controlnet`` and ``embeddings``: a UNet family;
+    bool. ``references``: reference images (an edit family that is not a
+    dedicated inpainting model, or an instruct pix2pix UNet); ``controlnet``
+    and ``embeddings``: a UNet family;
     ``inpaint``: a dedicated inpainting model (a mask works with every model);
     ``edit``: the header marks an edit model (pix2pix, Qwen-Image-Edit 2511)."""
     family = info.family if info.kind in ("diffusion", "checkpoint") else None
     detail = info.detail or {}
     pix2pix = bool(detail.get("pix2pix"))
     return {
-        "references": family in REFERENCE_FAMILIES or pix2pix,
+        "references": (family in REFERENCE_FAMILIES and not detail.get("inpaint")) or pix2pix,
         "controlnet": family in UNET_FAMILIES,
         "embeddings": family in UNET_FAMILIES,
         "inpaint": bool(detail.get("inpaint")),

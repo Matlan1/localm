@@ -354,7 +354,10 @@ def lib_filename() -> str:
 
 
 def _declare(lib: ctypes.CDLL) -> None:
-    """Set argtypes/restype for every function this module calls."""
+    """Set argtypes/restype for every function this module calls. A function
+    a library of another commit lacks is left undeclared only when it is
+    optional here (``sd_ctx_supports_ref_image_conditioning``), so
+    :func:`verify_abi` can still name the commit mismatch."""
     def fn(name, restype, *argtypes):
         f = getattr(lib, name)
         f.restype = restype
@@ -375,6 +378,8 @@ def _declare(lib: ctypes.CDLL) -> None:
     fn("sd_get_model_version_name", c_char_p, c_void_p)
     fn("sd_ctx_supports_image_generation", c_bool, c_void_p)
     fn("sd_ctx_supports_video_generation", c_bool, c_void_p)
+    if hasattr(lib, "sd_ctx_supports_ref_image_conditioning"):
+        fn("sd_ctx_supports_ref_image_conditioning", c_bool, c_void_p)
     fn("sd_get_default_sample_method", _enum, c_void_p)
     fn("sd_get_default_scheduler", _enum, c_void_p, _enum)
     fn("str_to_sample_method", _enum, c_char_p)

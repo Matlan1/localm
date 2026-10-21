@@ -172,12 +172,12 @@ def projector_refusal(name: str, registry: dict) -> Optional[str]:
 # Registry types the chat Engine can never load: a request naming one is refused
 # before any model is evicted.
 NON_CHAT_TYPES = frozenset({"mmproj", "diffusion-unet", "text-encoder", "vae", "lora",
-                            "upscaler", "tts"})
+                            "upscaler", "controlnet", "textual-inversion", "tts"})
 
 # Registry types GET /v1/models leaves out: nothing under /v1 accepts one by name.
 # A 'tts' model stays listed because POST /v1/audio/speech takes it as ``model``.
 UNLISTED_TYPES = frozenset({"mmproj", "diffusion-unet", "text-encoder", "vae", "lora",
-                            "upscaler"})
+                            "upscaler", "controlnet", "textual-inversion"})
 
 
 def is_unlisted_entry(entry) -> bool:
