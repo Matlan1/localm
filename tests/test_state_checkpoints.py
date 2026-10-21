@@ -25,10 +25,19 @@ _MEM = 333
 
 class FakeRecurrentNative:
     """Sequence 0 of a hybrid model: an attention cache holding positions
-    0..n_attn-1 and a recurrent state that has consumed positions 0..rec_pos."""
+    0..n_attn-1 and a recurrent state that has consumed positions 0..rec_pos.
 
-    def __init__(self, recurrent: bool = True) -> None:
+    With *rollback* > 0 the context keeps that many recurrent-state snapshots
+    (n_rs_seq): a removal of up to *rollback* trailing positions succeeds and
+    rewinds to a snapshot. Decodes write snapshots; a state loaded with
+    set_data has none, so a rewind right after it leaves a zeroed state, as
+    llama.cpp's recurrent memory does."""
+
+    def __init__(self, recurrent: bool = True, rollback: int = 0) -> None:
         self.recurrent = recurrent
+        self.rollback = rollback
+        self.snapshots = 0
+        self.zeroed = False
         self.n_attn = 0
         self.rec_pos = -1
         self.decoded: list[list[int]] = []
@@ -53,6 +62,8 @@ class FakeRecurrentNative:
         tokens, pos0 = batch
         assert pos0 == self.n_attn, f"decode at {pos0}, cache ends at {self.n_attn}"
         assert pos0 == self.rec_pos + 1, f"decode at {pos0}, state at {self.rec_pos}"
+        assert not self.zeroed, "decode on a recurrent state rewound to an empty snapshot"
+        self.snapshots = self.rollback
         self.decoded.append(list(tokens))
         self.n_attn += len(tokens)
         self.rec_pos = self.n_attn - 1
@@ -61,13 +72,20 @@ class FakeRecurrentNative:
     def clear(self) -> None:
         self.n_attn = 0
         self.rec_pos = -1
+        self.zeroed = False
 
     def seq_rm(self, mem, seq, p0, p1) -> bool:
         if p0 <= 0:
             self.clear()
             return True
         if self.recurrent and p0 <= self.rec_pos:
-            return False
+            back = self.rec_pos - p0 + 1
+            if not self.rollback or back > self.rollback:
+                return False
+            self.zeroed = self.zeroed or back > self.snapshots
+            self.n_attn = p0
+            self.rec_pos = p0 - 1
+            return True
         self.n_attn = min(self.n_attn, p0)
         self.rec_pos = min(self.rec_pos, self.n_attn - 1)
         return True
@@ -83,6 +101,7 @@ class FakeRecurrentNative:
     def set_data(self, ctx, buf, size, seq, flags) -> int:
         if self.fail_set:
             return 0
+        self.snapshots = 0
         raw = bytes(buf)[:size]
         if flags == LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY:
             (self.rec_pos,) = struct.unpack("<q", raw)
@@ -261,3 +280,72 @@ class TestGrowthCarriesTheCache:
         assert llm.prompt_reused == 0
         assert _prefilled(native) == len(second)
         assert native.n_attn == len(second)
+
+
+def _full_copies(api) -> int:
+    return sum(1 for c in api.llama_state_seq_get_data_ext.call_args_list if c.args[4] == 0)
+
+
+class TestGrowthWithRollbackSnapshots:
+    def test_a_reply_that_outgrows_its_context_never_rewinds_a_loaded_state(self):
+        native = FakeRecurrentNative(rollback=4)
+        llm = _llm(native)
+        api = native.api()
+        first = list(range(200))
+        with patch("localm.inference.backends.llamacpp.llama.api", api):
+            llm._prefill_with_reuse(first)
+            native.generate(llm, [500, 501])
+        native.decoded.clear()
+        api.llama_free.side_effect = lambda ctx: native.clear()
+        prompt_and_gen = list(llm._cached_tokens)
+        with patch("localm.sysstats.system_ram", return_value=(1 << 34, 1 << 33)), \
+             patch("localm.inference.backends.llamacpp.llama.api", api):
+            llm._prefill_fresh_context(prompt_and_gen, needed=len(prompt_and_gen) + 600)
+
+        assert not native.zeroed
+        assert llm.prompt_reused == 200 - LlamaCpp.CHECKPOINT_TAIL
+        assert _prefilled(native) == len(prompt_and_gen) - 196
+        assert native.n_attn == len(prompt_and_gen)
+
+
+class TestWhatIsCarried:
+    def _primed(self):
+        native = FakeRecurrentNative()
+        llm = _llm(native)
+        api = native.api()
+        with patch("localm.inference.backends.llamacpp.llama.api", api):
+            llm._prefill_with_reuse(list(range(200)))
+            native.generate(llm, [500])
+        native.decoded.clear()
+        api.llama_free.side_effect = lambda ctx: native.clear()
+        return native, llm, api
+
+    def test_a_request_that_keeps_no_prefix_gets_an_empty_context(self):
+        native, llm, api = self._primed()
+        second = list(range(199)) + [900]
+        with patch("localm.sysstats.system_ram", return_value=(1 << 34, 1 << 33)), \
+             patch("localm.inference.backends.llamacpp.llama.api", api):
+            llm._prefill_fresh_context(second, needed=900, keep_prefix=False)
+        assert _full_copies(api) == 0
+        assert llm.prompt_reused == 0
+        assert _prefilled(native) == len(second)
+
+    def test_rightsizing_passes_keep_prefix_through(self):
+        native, llm, api = self._primed()
+        second = list(range(199)) + [900]
+        llm._rightsize_plan = lambda needed, others=0: (1024, True)
+        llm._log_rightsize = lambda *a: None
+        with patch("localm.sysstats.system_ram", return_value=(1 << 34, 1 << 33)), \
+             patch("localm.inference.backends.llamacpp.llama.api", api):
+            assert llm._rightsize_context(second, 900, keep_prefix=False) is True
+        assert _full_copies(api) == 0
+        assert _prefilled(native) == len(second)
+
+    def test_a_cache_sharing_less_than_half_its_tokens_is_not_copied(self):
+        native, llm, api = self._primed()
+        second = list(range(80)) + list(range(900, 1000))
+        with patch("localm.sysstats.system_ram", return_value=(1 << 34, 1 << 33)), \
+             patch("localm.inference.backends.llamacpp.llama.api", api):
+            llm._prefill_fresh_context(second, needed=900)
+        assert _full_copies(api) == 0
+        assert _prefilled(native) == len(second)

@@ -2481,19 +2481,20 @@ class LlamaCpp:
                             full_needed, n_prompt + self.RESERVE_STEP + self.RESERVE_PAD)
                     reuse = self._can_reuse_kv(needed)
                     with _ctx():
-                        if reuse and self._rightsize_context(prompt_tokens, needed):
+                        if reuse and self._rightsize_context(prompt_tokens, needed,
+                                                             keep_prefix=cache_prompt):
                             reuse = False
                         elif reuse:
                             self._prefill_with_reuse(prompt_tokens, keep_prefix=cache_prompt)
                         else:
                             self._prefill_fresh_context(
                                 prompt_tokens, needed,
-                                ram_fallback=full_needed is not None and needed < full_needed)
+                                ram_fallback=full_needed is not None and needed < full_needed,
+                                keep_prefix=cache_prompt)
 
-                logger.info("gguf generate: prefill complete in %.2fs (kv_reuse=%s, "
-                            "%d of %d prompt token(s) reused)",
-                            time.monotonic() - _t0, reuse and cache_prompt,
-                            self.prompt_reused if reuse else 0, n_prompt)
+                logger.info("gguf generate: prefill complete in %.2fs (%d of %d prompt "
+                            "token(s) reused)", time.monotonic() - _t0,
+                            self.prompt_reused, n_prompt)
 
                 # Build sampler
                 sampler = _build_sampler(
@@ -3960,7 +3961,8 @@ class LlamaCpp:
                     "VRAM" if self._offload_kqv else "system RAM", n_ctx,
                     "VRAM" if offload_kqv else "system RAM")
 
-    def _rightsize_context(self, prompt_tokens: list[int], needed: int) -> bool:
+    def _rightsize_context(self, prompt_tokens: list[int], needed: int,
+                           keep_prefix: bool = True) -> bool:
         """Recreate the live context per ``_rightsize_plan(needed)`` and
         prefill *prompt_tokens* into it. True when the context was replaced,
         False when the live one is kept (no plan, or ``_vram_check`` raised,
@@ -3978,7 +3980,8 @@ class LlamaCpp:
         if plan is None:
             return False
         self._log_rightsize(*plan)
-        self._prefill_fresh_context(prompt_tokens, needed, plan, ram_fallback=True)
+        self._prefill_fresh_context(prompt_tokens, needed, plan, ram_fallback=True,
+                                    keep_prefix=keep_prefix)
         return True
 
     def _resolve_parallel(self, requested: int, n_ctx: int) -> tuple[int, str]:
@@ -5014,12 +5017,16 @@ class LlamaCpp:
             return False
         return True
 
-    def _prefill_with_reuse(self, prompt_tokens: list[int], keep_prefix: bool = True) -> None:
+    def _prefill_with_reuse(self, prompt_tokens: list[int], keep_prefix: bool = True,
+                            rewind: bool = True) -> None:
         """
         Prefill keeping the common prefix with the previous call in the KV
         cache: remove diverging cached tokens, decode only the new suffix.
         With *keep_prefix* False the cache is emptied and the whole prompt is
-        decoded from position 0.
+        decoded from position 0. With *rewind* False, cached positions are
+        never removed from inside the recurrent state (a state just loaded has
+        no rollback snapshots): the cache resumes from a state checkpoint or
+        starts over.
         """
         self._vision_kv = None
         mem = api.llama_get_memory(self._ctx_ptr)
@@ -5042,7 +5049,7 @@ class LlamaCpp:
         if prefix == 0:
             api.llama_memory_clear(mem, True)
         elif prefix < len(self._cached_tokens) or not self._cached_tokens:
-            if not api.llama_memory_seq_rm(mem, 0, prefix, -1):
+            if not (rewind and api.llama_memory_seq_rm(mem, 0, prefix, -1)):
                 # Partial removal unsupported (recurrent state): resume from the
                 # newest state checkpoint inside the shared prefix, else start over.
                 prefix = self._restore_checkpoint(mem, prompt_tokens, prefix)
@@ -5238,8 +5245,14 @@ class LlamaCpp:
 
     def _prefill_fresh_context(self, prompt_tokens: list[int], needed: int,
                                plan: Optional[tuple[int, bool]] = None,
-                               ram_fallback: bool = False) -> None:
-        """Recreate the context (empty KV cache) and prefill the full prompt.
+                               ram_fallback: bool = False,
+                               keep_prefix: bool = True) -> None:
+        """Recreate the context and prefill the prompt into it.
+
+        With *keep_prefix*, the live cache is first copied to host memory and
+        loaded into the new context when it shares at least half its tokens
+        with *prompt_tokens* (``_snapshot_cache``), and only the rest is
+        prefilled; otherwise the new context starts empty.
 
         *plan*, when given, is the ``(n_ctx, offload_kqv)`` to create, already
         decided by ``_rightsize_plan``; ``_vram_check`` is then not consulted.
@@ -5273,7 +5286,8 @@ class LlamaCpp:
             if decision is False:
                 offload_kqv = False
 
-        carried = self._snapshot_cache(prompt_tokens, target) if self._ctx_ptr else None
+        carried = (self._snapshot_cache(prompt_tokens, target)
+                   if self._ctx_ptr and keep_prefix else None)
         self._consume_decode_refresh()
         if self._ctx_ptr:
             api.llama_free(self._ctx_ptr)
@@ -5350,7 +5364,8 @@ class LlamaCpp:
         # whole process inside the native library. Long chat histories
         # (prompt > 2048 tokens) land here whenever the context is recreated.
         if carried is not None and self._restore_cache(carried):
-            self._prefill_with_reuse(prompt_tokens)
+            self._prefill_with_reuse(
+                prompt_tokens, rewind=self._model_has_recurrent_layers() is False)
             return
 
         ret = self._decode_prompt(prompt_tokens, 0, cp.n_batch)
@@ -5364,14 +5379,15 @@ class LlamaCpp:
     def _snapshot_cache(self, prompt_tokens: list[int], target: int):
         """Copy sequence 0's whole state (KV cache and recurrent state) to host
         memory before the live context is replaced by one of *target* cells,
-        when the cache shares a prefix with *prompt_tokens*, fits *target*, and
-        the copy takes at most half the available system RAM. Returns
+        when at least half the cached tokens are a prefix of *prompt_tokens*,
+        the cache fits *target*, and the copy takes at most half the available
+        system RAM. Returns
         ``(tokens, data, checkpoints)`` or None. Never raises; a skip for RAM
         or a failed read is logged at INFO."""
         from localm.debuglog import logger
         tokens = list(self._cached_tokens)
-        if (not tokens or len(tokens) > target or not prompt_tokens
-                or tokens[0] != prompt_tokens[0] or self._vision_kv is not None):
+        if (not tokens or len(tokens) > target or self._vision_kv is not None
+                or 2 * _common_prefix_len(tokens, prompt_tokens) < len(tokens)):
             return None
         try:
             if not (self._memory_api_available() and api.has_state_seq_ext_api() is True):
