@@ -556,6 +556,7 @@ pytest_add_cli_args_test_selection = [
     "tests/test_netpolicy_ssrf_phase3.py",
     "tests/test_netpolicy_fetch_contract.py",
     "tests/test_netpolicy_mutation_kills.py",
+    "tests/test_netpolicy_address_mutation_kills.py",
     "tests/test_auth.py",
     "tests/test_auth_kdf.py",
     "tests/test_auth_network_1_loopback_gate.py",
