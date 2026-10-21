@@ -311,13 +311,14 @@ class EngineCache:
         if name:
             return name
         from localm.config import load_registry
-        from localm.model_manager import is_auto_chat_eligible
+        from localm.model_manager import auto_chat_candidates
         reg = load_registry()
         if not reg:
             raise ValueError("No models registered. Run 'localm pull <name>' first.")
-        # Auto-pick the first chat-eligible model; a type='unknown' model is never
-        # auto-loaded (it stays usable when named explicitly via --model / a request).
-        name = next((n for n in sorted(reg) if is_auto_chat_eligible(reg[n])), None)
+        # Auto-pick the first chat-eligible model (speech-to-text models last); a
+        # type='unknown' model is never auto-loaded (it stays usable when named
+        # explicitly via --model / a request).
+        name = next(iter(auto_chat_candidates(reg)), None)
         if name is None:
             raise ValueError(
                 "No chat model registered (all registered models are type 'unknown'). "

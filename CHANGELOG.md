@@ -111,9 +111,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **The bundled AMD (ROCm) llama.cpp runtime moved from build b1342 to b1349** (upstream llama.cpp b11719). An existing install picks it up with `localm setup-llama --force`.
 - **The bundled stable-diffusion.cpp runtime moved from master-964-1d0a58a to master-982-0518b34.** An existing install picks it up the next time image generation starts.
 - **The bundled koboldcpp runtime (native music generation) moved from v1.123 to v1.123.1.** An existing install picks it up the next time music generation starts.
-- **Newer Python libraries.** The Hugging Face backend uses transformers 5.20 (from 5.15), the
-  browser tool uses Playwright 1.64, and the server, PDF, image and download libraries move to
-  their current releases. Running setup again picks them up.
+- **Newer Python libraries.** The Hugging Face backend now needs transformers 5.20 (from 5.15)
+  and tokenizers 0.23.3, which running setup again installs. The dependency lock now carries
+  Playwright 1.64 and newer server, PDF, image and download libraries; setup keeps a library you
+  already have when it still meets localm's minimum version, so an existing install keeps its
+  older versions of those until you upgrade them yourself.
 
 - **The coder starts a project's MCP servers only after you trust them.** A cloned repository
   can declare MCP servers in `.localcoder/config.toml`, so they now need the same trust as tool
@@ -166,6 +168,20 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Cancelling a download on the Models page says what was actually deleted.** The status line used to claim the partial download was deleted every time, including for CivitAI files and whole-repo downloads whose files stay on disk, and when the delete request failed. It now reports the case.
 - **Restarting a ComfyUI that localm launched waits for the old one to release its port.** The restart used to be refused with "localm did not start it" while the process that had just been stopped still held the port.
 - **`localm pull` prints progress when its output is piped or redirected.** With stdout not a terminal it showed nothing for the whole transfer; it now writes a plain progress line to stderr every few seconds.
+- **Export saves in the app only where it can.** A key with access to the computer's files but
+  without permission to change settings got a folder picker and then an error instead of a file,
+  and the owner on another device (a phone, a second PC) had the file written on the computer
+  running localm instead of downloaded. Export now opens the folder picker only for a key that
+  may save there and only in a browser on the computer running localm; everywhere else it
+  downloads the file.
+- **The MCP server no longer picks a speech-to-text model for a request that names no model.**
+  Without `--model` or a default model it took the first registered chat model by name, so a
+  Qwen3-ASR or Whisper model could answer; those models now come last.
+- **The pin-currency check no longer fails on builds localm cannot adopt.** The llama.cpp and
+  AMD (ROCm) runtime checks measured how far behind the pin is against the newest upstream
+  release even when localm's pin update skips it (a ROCm build with no matching upstream
+  release, a llama.cpp tag the Linux CUDA build repository has not released), so the check could
+  turn red with nothing to update to. They now measure against the newest build that can be adopted.
 - **A scheduled job with no model set no longer picks a speech-to-text model.** The job took the first registered chat model by name, so a Qwen3-ASR or Whisper model could answer a job that named no model; those models now come last, behind every other chat model.
 - **`localm config pinned_models '["a"]'` pins `a`.** A JSON list typed on the command line was
   stored as one model name with the brackets and quotes in it, so nothing was pinned. A list

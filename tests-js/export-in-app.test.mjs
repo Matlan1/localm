@@ -7,7 +7,8 @@ import assert from "node:assert/strict";
 
 import { loadAppWithPages, runScript } from "./harness.mjs";
 
-function setup({ fsAccess, picked = "D:/exports", saveStatus = 200, privacy = false }) {
+function setup({ fsAccess, fsSave = fsAccess === "host", networkBind = false, url,
+               picked = "D:/exports", saveStatus = 200, privacy = false }) {
   const posts = [];
   const fetchImpl = async (url, opts = {}) => {
     if (String(url) === "/api/fs/save-text") {
@@ -21,7 +22,7 @@ function setup({ fsAccess, picked = "D:/exports", saveStatus = 200, privacy = fa
     return { ok: true, status: 200, headers: { get: () => null },
              json: async () => ({}), text: async () => "" };
   };
-  const { window } = loadAppWithPages({ fetchImpl });
+  const { window } = loadAppWithPages({ fetchImpl, url });
   let downloads = 0;
   window.URL.createObjectURL = () => "blob:x";
   window.URL.revokeObjectURL = () => {};
@@ -34,6 +35,7 @@ function setup({ fsAccess, picked = "D:/exports", saveStatus = 200, privacy = fa
   const pickerCalls = [];
   window.pickPath = async (opts) => { pickerCalls.push(opts); return picked; };
   runScript(window, `caps.fsAccess = ${JSON.stringify(fsAccess)};
+    caps.fsSave = ${fsSave}; caps.networkBind = ${networkBind};
     chat.modeKnown = true; chat.privacy = ${privacy}; chat.serverPrivacy = ${privacy};`);
   const conv = { id: "c1", title: "Derived request", messages: [
     { role: "user", content: "how does it work", id: "m1" },
@@ -116,4 +118,34 @@ test("without host access, export falls back to the browser download", async () 
   assert.equal(s.downloads(), 1);
   assert.equal(s.pickerCalls.length, 0);
   assert.equal(s.posts.length, 0);
+});
+
+test("a host-fs key without config:write downloads instead of opening the picker", async () => {
+  const s = setup({ fsAccess: "host", fsSave: false });
+  await s.window.exportConversation();
+  assert.equal(s.downloads(), 1);
+  assert.equal(s.pickerCalls.length, 0);
+  assert.equal(s.posts.length, 0);
+});
+
+test("a device other than the server's computer downloads on a network bind", async () => {
+  const s = setup({ fsAccess: "host", networkBind: true, url: "http://192.168.1.20:8642/" });
+  await s.window.exportConversation();
+  assert.equal(s.downloads(), 1);
+  assert.equal(s.pickerCalls.length, 0);
+  assert.equal(s.posts.length, 0);
+});
+
+test("the server's own computer still saves in the app on a network bind", async () => {
+  const s = setup({ fsAccess: "host", networkBind: true, url: "http://localhost:8642/" });
+  await s.window.exportConversation();
+  assert.equal(s.downloads(), 0);
+  assert.equal(s.posts.length, 1);
+});
+
+test("browserIsOnServerHost accepts loopback names and rejects network ones", () => {
+  const s = setup({ fsAccess: "none" });
+  const f = s.window.browserIsOnServerHost;
+  for (const h of ["localhost", "127.0.0.1", "[::1]", "app.localhost"]) assert.equal(f(h), true, h);
+  for (const h of ["192.168.1.20", "pc.local", "example.com", "127.evil.com", ""]) assert.equal(f(h), false, h);
 });

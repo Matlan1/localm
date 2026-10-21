@@ -461,6 +461,20 @@ class TestEngineCache:
                    return_value={"zeta": {}, "alpha": {}}):
             assert cache.resolve_model(None) == "alpha"
 
+    def test_no_default_skips_a_speech_to_text_model(self):
+        reg = {"Qwen3-ASR-0.6B": {"model_type": "llm", "path": "asr/Qwen3-ASR-0.6B.gguf"},
+               "qwen2.5-7b-instruct": {"model_type": "llm", "path": "q/qwen2.5-7b-instruct.gguf"}}
+        assert sorted(reg)[0] == "Qwen3-ASR-0.6B"
+        cache = EngineCache(None, engine_factory=_stub_engine_factory)
+        with patch("localm.config.load_registry", return_value=reg):
+            assert cache.resolve_model(None) == "qwen2.5-7b-instruct"
+
+    def test_no_default_uses_a_speech_to_text_model_when_it_is_the_only_one(self):
+        reg = {"Qwen3-ASR-0.6B": {"model_type": "llm", "path": "asr/Qwen3-ASR-0.6B.gguf"}}
+        cache = EngineCache(None, engine_factory=_stub_engine_factory)
+        with patch("localm.config.load_registry", return_value=reg):
+            assert cache.resolve_model(None) == "Qwen3-ASR-0.6B"
+
     def test_empty_registry_raises_helpfully(self):
         cache = EngineCache(None, engine_factory=_stub_engine_factory)
         with patch("localm.config.load_registry", return_value={}):

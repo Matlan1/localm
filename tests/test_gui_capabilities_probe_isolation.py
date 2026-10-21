@@ -193,3 +193,37 @@ def test_a_broken_bugreport_probe_leaves_the_other_two_alone(
     assert body["bugreport_upload"] is False
     assert body["issues_available"] is True, body
     assert body["update_available"] is True, body
+
+
+def test_capabilities_offer_the_in_app_save_only_with_host_fs_and_config_write(
+        caps_app, monkeypatch):
+    """fs_save mirrors /api/fs/save-text, which needs host filesystem reach AND
+    config:write; fs_access alone (the folder picker's gate) is not enough."""
+    from fastapi.testclient import TestClient
+
+    import localm.plugins.gui.routes.system as system_routes
+    from localm import scopes
+
+    def fetch(fs_access, granted):
+        monkeypatch.setattr(system_routes, "effective_fs_access", lambda request: fs_access)
+        monkeypatch.setattr(system_routes, "caller_grants",
+                            lambda request, scope: scope in granted)
+        with TestClient(caps_app) as c:
+            return c.get("/api/capabilities").json()
+
+    body = fetch("host", {scopes.CONFIG_WRITE})
+    assert body["fs_access"] == "host" and body["fs_save"] is True
+    body = fetch("host", set())
+    assert body["fs_access"] == "host" and body["fs_save"] is False
+    body = fetch("shared", {scopes.CONFIG_WRITE})
+    assert body["fs_save"] is False
+
+
+def test_capabilities_report_whether_the_server_listens_past_loopback(caps_app):
+    from fastapi.testclient import TestClient
+
+    with TestClient(caps_app) as c:
+        caps_app.state.bind_host = "127.0.0.1"
+        assert c.get("/api/capabilities").json()["network_bind"] is False
+        caps_app.state.bind_host = "0.0.0.0"
+        assert c.get("/api/capabilities").json()["network_bind"] is True

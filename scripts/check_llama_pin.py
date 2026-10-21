@@ -207,6 +207,27 @@ def release_date(tag: str) -> _dt.datetime | None:
     return _parse_date(body.get("published_at"))
 
 
+def adoptable_releases(releases: list, pin_n: int, built=None) -> tuple[list, str]:
+    """(releases, error): *releases* (newest-first) cut down to what the pin
+    pipeline may move to. Releases not newer than build *pin_n* are kept; of the
+    newer ones only the newest whose tag is in *built* (default: the tags with
+    assets on the Linux CUDA build repo) is kept. error is non-empty when that
+    set could not be read."""
+    if built is None:
+        built, err = cuda_linux_tags()
+        if err:
+            return [], f"the Linux CUDA builds could not be read: {err}"
+    kept, chosen = [], False
+    for r in releases:
+        n = _build_number(r["tag"])
+        if n is None or n <= pin_n:
+            kept.append(r)
+        elif not chosen and r["tag"] in built:
+            kept.append(r)
+            chosen = True
+    return kept, ""
+
+
 def assess(pin: str, releases: list, pin_date, max_age_days: int) -> dict:
     """Pure comparison of *pin* against *releases* (newest-first, as returned by
     upstream_releases()).
@@ -314,10 +335,15 @@ def main(argv=None) -> int:
     pin_date = next((r["published_at"] for r in releases if r["tag"] == pin), None)
     if pin_date is None:
         pin_date = release_date(pin)
+    releases, err = adoptable_releases(releases, pin_n)
+    if err:
+        return _report_unknown(pin, err, args.gate)
+    if not releases:
+        releases = [{"tag": pin, "published_at": pin_date}]
     result = assess(pin, releases, pin_date, args.max_age_days)
     newest = result["newest"]
     print(f"  pinned release date: {_date_str(pin_date)}")
-    print(f"upstream newest with assets: {newest} "
+    print(f"newest adoptable release: {newest} "
           f"(released {_date_str(result['newest_date'])})")
 
     if result["status"] == CURRENT:

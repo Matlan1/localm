@@ -1755,7 +1755,7 @@ export const pluginCommands = { map: {}, suggest: true };
 // whether the GUI shows host-path config fields and the host file browser. The
 // server ALWAYS enforces - this only avoids rendering dead controls. Defaults to
 // "none" (safe) until the first capabilities load resolves it.
-export const caps = { fsAccess: "none" };
+export const caps = { fsAccess: "none", fsSave: false, networkBind: false };
 
 // Resolves once the FIRST /api/capabilities load has finished, whatever it found.
 // `caps` starts at the SAFE default, so a consumer that reads it before that load
@@ -1800,6 +1800,8 @@ export async function refreshPluginCommands() {
     pluginCommands.suggest = data.suggest_plugins !== false;
     pluginState = data.plugins || [];
     caps.fsAccess = data.fs_access || "none";
+    caps.fsSave = data.fs_save === true;
+    caps.networkBind = data.network_bind === true;
     // Server decides who is offered the artifact canvas; re-walk already
     // rendered blocks so a cold-load render picks the button up or loses it.
     setPreviewAllowed(data.preview !== false);
@@ -3634,12 +3636,22 @@ export function exportConversation() {
 /** localStorage key of the folder the last in-app save went to. */
 const EXPORT_DIR_KEY = "localm.exportDir";
 
-/** Saves *text* as the file *name*. A client with host filesystem access
- *  picks the folder in the app's own file picker (starting in the folder of
- *  the last save) and the server writes the file; cancelling the picker saves
- *  nothing. Any other client gets a browser download of type *mime*. */
+/** Whether this browser reaches the server through a loopback host name. */
+export function browserIsOnServerHost(hostname = window.location.hostname) {
+  const h = String(hostname || "").toLowerCase().replace(/^\[|\]$/g, "");
+  return h === "localhost" || h.endsWith(".localhost") || h === "::1" || /^127(\.\d{1,3}){3}$/.test(h);
+}
+
+/** Saves *text* as the file *name*. A client that may use the server's
+ *  save endpoint (host filesystem reach and config:write) and runs on the
+ *  server's own computer picks the folder in the app's own file picker
+ *  (starting in the folder of the last save) and the server writes the file;
+ *  cancelling the picker saves nothing. Any other client gets a browser
+ *  download of type *mime*. */
 export function saveTextFile(name, text, mime = "text/plain") {
-  if (caps.fsAccess === "host") return saveTextInApp(name, text);
+  if (caps.fsSave && (!caps.networkBind || browserIsOnServerHost())) {
+    return saveTextInApp(name, text);
+  }
   const blob = new Blob([text], { type: mime });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
