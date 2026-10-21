@@ -190,7 +190,10 @@ def test_auto_approved_shell_cannot_run_localm_key_clear(keyed):
 
 
 def test_auto_approved_read_does_not_return_the_key(keyed):
-    agent = Agent(_StubBackend(), cwd=keyed, auto_approve=True, always_confirm=set())
+    """The data folder inside the project (a portable home in a repo): file
+    tools reach it, so only the data guard stands in the way."""
+    project = home_dir().parent
+    agent = Agent(_StubBackend(), cwd=project, auto_approve=True, always_confirm=set())
     result = agent._execute_tool(
         _call("read_file", path=str(home_dir() / "auth.key")), interactive=False)
     assert not result.ok
@@ -200,7 +203,8 @@ def test_auto_approved_read_does_not_return_the_key(keyed):
 def test_auto_approved_write_cannot_change_the_settings(keyed):
     cfg = home_dir() / "config.json"
     cfg.write_text('{"require_auth": true}', encoding="utf-8")
-    agent = Agent(_StubBackend(), cwd=keyed, auto_approve=True, always_confirm=set())
+    project = home_dir().parent
+    agent = Agent(_StubBackend(), cwd=project, auto_approve=True, always_confirm=set())
     result = agent._execute_tool(
         _call("write_file", path=str(cfg), content='{"require_auth": false}'),
         interactive=False)
