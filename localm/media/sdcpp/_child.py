@@ -753,7 +753,7 @@ def _do_generate_video(payload, cancel_event):
             raise ValueError("init image buffer does not match its size")
         keep = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
         p.init_image = b.sd_image_t(w, h, c, ctypes.cast(keep, ctypes.POINTER(ctypes.c_uint8)))
-    frames =ctypes.POINTER(b.sd_image_t)()
+    frames = ctypes.POINTER(b.sd_image_t)()
     count = ctypes.c_int(0)
     audio = ctypes.POINTER(b.sd_audio_t)()
     fps_out = ctypes.c_int(0)

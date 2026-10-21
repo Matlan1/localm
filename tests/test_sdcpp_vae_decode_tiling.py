@@ -355,12 +355,10 @@ WAN21 = vaetile.wan_vae("Wan 2.x", "3D")
 
 
 def test_wan_decode_peak_bytes_at_the_default_video_size():
-    # Recorded (Wan2.1-T2V-1.3B, 832x480x17, Vulkan, GGML_SCHED_DEBUG=2): the
-    # untiled decode graph's first CPU node is the 3x3 im2col of the second
-    # upsample stage, 384 channels at 416x240 over 4 frames, 2632 MiB in F16.
+    # The second upsample stage's 3x3 im2col at 832x480: 384 channels at
+    # 416x240 over 4 frames, 2632 MiB in F16.
     assert vaetile._conv_bytes(384, 416, 240, 4, False) // MIB == 2632
     assert vaetile.wan_decode_peak_bytes(WAN21, 832, 480, 17) >= 384 * 9 * 2 * 416 * 240 * 4
-    # The 320 px tile it picks decoded with no CPU split (recorded, same run).
     assert vaetile.wan_decode_peak_bytes(WAN21, 320, 320, 17) <= 2 * GIB
 
 
