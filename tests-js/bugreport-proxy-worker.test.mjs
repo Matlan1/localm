@@ -4,6 +4,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { generateKeyPairSync, createVerify } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -167,4 +168,114 @@ test("a report built by localm is filed, prefixed with the reporter note", async
   assert.ok(filed.startsWith("> Submitted by a localm user through the built-in bug reporter."), filed.slice(0, 120));
   assert.ok(filed.endsWith(report), "the report follows the note unchanged");
   assert.doesNotMatch(filed, /does not have the sections/, "a real report is not flagged");
+});
+// --- GitHub App identity for the issue routes ---------------------------------
+
+
+const APP_KEYS = generateKeyPairSync("rsa", { modulusLength: 2048 });
+const PKCS1_PEM = APP_KEYS.privateKey.export({ type: "pkcs1", format: "pem" });
+const PKCS8_PEM = APP_KEYS.privateKey.export({ type: "pkcs8", format: "pem" });
+
+function appEnv(installationId, pem = PKCS1_PEM) {
+  return {
+    GITHUB_TOKEN: "owner-token", TARGET_REPO: "a/b",
+    GITHUB_APP_ID: "12345", GITHUB_APP_INSTALLATION_ID: String(installationId),
+    GITHUB_APP_PRIVATE_KEY: pem,
+  };
+}
+
+// Send *request* to the Worker with GitHub stubbed: the installation-token call
+// answers *tokenStatus*; every other call answers 201 with an issue. Returns the
+// response and every upstream request (url, method, Authorization header).
+async function callWithApp(worker, request, env, tokenStatus = 201) {
+  const realFetch = globalThis.fetch;
+  const realError = console.error;
+  const upstream = [];
+  globalThis.fetch = async (u, init = {}) => {
+    const auth = (init.headers && init.headers.Authorization) || "";
+    upstream.push({ url: String(u), method: init.method || "GET", auth });
+    if (String(u).includes("/access_tokens")) {
+      if (tokenStatus !== 201) return new Response("{}", { status: tokenStatus });
+      return new Response(JSON.stringify({ token: "app-installation-token",
+        expires_at: new Date(Date.now() + 3600000).toISOString() }), { status: 201 });
+    }
+    return new Response(JSON.stringify({ html_url: "https://github.com/a/b/issues/7", number: 7 }),
+      { status: 201, headers: { "Content-Type": "application/json" } });
+  };
+  console.error = () => {};
+  try {
+    const res = await worker.fetch(request, env);
+    return { res, upstream };
+  } finally {
+    globalThis.fetch = realFetch;
+    console.error = realError;
+  }
+}
+
+const reportRequest = () => new Request("https://proxy.example/", {
+  method: "POST", headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ title: "t", body: "b" }) });
+
+function jwtParts(header) {
+  const jwt = header.replace(/^Bearer /, "");
+  const [h, p, s] = jwt.split(".");
+  const dec = (x) => JSON.parse(Buffer.from(x, "base64url").toString("utf8"));
+  return { head: dec(h), body: dec(p), signed: `${h}.${p}`, sig: Buffer.from(s, "base64url") };
+}
+
+for (const [label, pem] of [["PKCS#1", PKCS1_PEM], ["PKCS#8", PKCS8_PEM]]) {
+  test(`with the GitHub App configured (${label} key), a report is filed with the app's token`, async () => {
+    const worker = await loadWorker();
+    const { res, upstream } = await callWithApp(worker, reportRequest(), appEnv(label === "PKCS#1" ? 101 : 102, pem));
+    assert.equal(res.status, 201);
+    assert.equal(upstream.length, 2);
+    const [tokenCall, issueCall] = upstream;
+    assert.equal(tokenCall.url, `https://api.github.com/app/installations/${label === "PKCS#1" ? 101 : 102}/access_tokens`);
+    assert.equal(tokenCall.method, "POST");
+    const jwt = jwtParts(tokenCall.auth);
+    assert.equal(jwt.head.alg, "RS256");
+    assert.equal(jwt.body.iss, "12345");
+    assert.ok(jwt.body.exp - jwt.body.iat <= 600, "GitHub accepts at most ten minutes");
+    const ok = createVerify("RSA-SHA256").update(jwt.signed).verify(APP_KEYS.publicKey, jwt.sig);
+    assert.ok(ok, "the JWT verifies against the app's public key");
+    assert.equal(issueCall.url, "https://api.github.com/repos/a/b/issues");
+    assert.equal(issueCall.auth, "Bearer app-installation-token");
+    assert.ok(!upstream.some((c) => c.auth.includes("owner-token")), "the owner token is never sent");
+  });
+}
+
+test("the installation token is reused for the next request", async () => {
+  const worker = await loadWorker();
+  const env = appEnv(103);
+  await callWithApp(worker, reportRequest(), env);
+  const { res, upstream } = await callWithApp(worker, new Request("https://proxy.example/issues"), env);
+  assert.equal(res.status, 200);
+  assert.deepEqual(upstream.map((c) => c.url.includes("/access_tokens")), [false]);
+  assert.equal(upstream[0].auth, "Bearer app-installation-token");
+});
+
+test("a failed app token request is an error, never a fall back to the owner token", async () => {
+  const worker = await loadWorker();
+  const { res, upstream } = await callWithApp(worker, reportRequest(), appEnv(104), 401);
+  assert.equal(res.status, 502);
+  assert.equal((await res.json()).error, "GitHub App token request failed");
+  assert.equal(upstream.length, 1, "no issue is filed");
+  assert.ok(!upstream.some((c) => c.auth.includes("owner-token")));
+});
+
+test("a partly configured app is refused before any GitHub call", async () => {
+  const worker = await loadWorker();
+  const env = appEnv(105);
+  delete env.GITHUB_APP_PRIVATE_KEY;
+  const { res, upstream } = await callWithApp(worker, reportRequest(), env);
+  assert.equal(res.status, 500);
+  assert.match((await res.json()).error, /set all of GITHUB_APP_ID/);
+  assert.equal(upstream.length, 0);
+});
+
+test("without the app secrets the owner token is used, as before", async () => {
+  const worker = await loadWorker();
+  const { res, upstream } = await callWithApp(worker, reportRequest(), { GITHUB_TOKEN: "owner-token", TARGET_REPO: "a/b" });
+  assert.equal(res.status, 201);
+  assert.deepEqual(upstream.map((c) => c.auth), ["Bearer owner-token"]);
 });

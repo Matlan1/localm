@@ -3,9 +3,9 @@
 // localm proxy - a tiny Cloudflare Worker giving 1-2 private-repo testers three
 // account-less surfaces, each backed by a SERVER-SIDE GitHub token:
 //
-//   POST /                       file a bug report      [GITHUB_TOKEN, Issues:write]
-//   GET  /issues                 list open/closed issues[GITHUB_TOKEN, Issues:read]
-//   GET  /issues?number=N        one issue's state      [GITHUB_TOKEN]
+//   POST /                       file a bug report      [GitHub App or GITHUB_TOKEN, Issues:write]
+//   GET  /issues                 list open/closed issues[GitHub App or GITHUB_TOKEN, Issues:read]
+//   GET  /issues?number=N        one issue's state      [GitHub App or GITHUB_TOKEN]
 //   GET  /update                 latest release meta    [UPDATE_GITHUB_TOKEN, Contents:read]
 //   GET  /update/download?id=N   stream a build asset   [UPDATE_GITHUB_TOKEN]
 //
@@ -74,6 +74,107 @@ function updateGateOrError(request, env) {
   return null;
 }
 
+// ------------------------ issue token ----------------------------------
+
+// The token the issue routes use. With GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID
+// and GITHUB_APP_PRIVATE_KEY all set, it is a GitHub App installation token, so
+// issues are filed as the app's bot account; a failed app token request is an
+// error, never a fall back to GITHUB_TOKEN. With none of them set, GITHUB_TOKEN
+// is used. Returns { token } or { error: Response }.
+async function issueToken(env) {
+  if (!env.TARGET_REPO) {
+    return { error: json({ error: "proxy misconfigured: set TARGET_REPO" }, 500) };
+  }
+  const app = [env.GITHUB_APP_ID, env.GITHUB_APP_INSTALLATION_ID, env.GITHUB_APP_PRIVATE_KEY];
+  const set = app.filter(Boolean).length;
+  if (set === 0) {
+    if (!env.GITHUB_TOKEN) {
+      return { error: json({ error: "proxy misconfigured: set GITHUB_TOKEN or the GitHub App secrets" }, 500) };
+    }
+    return { token: env.GITHUB_TOKEN };
+  }
+  if (set !== app.length) {
+    return { error: json({ error: "proxy misconfigured: set all of GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID and GITHUB_APP_PRIVATE_KEY" }, 500) };
+  }
+  try {
+    return { token: await appInstallationToken(env) };
+  } catch (e) {
+    console.error("github app token failed", (e && e.stack) || String(e));
+    return { error: json({ error: "GitHub App token request failed" }, 502) };
+  }
+}
+
+// Cached installation token: { key, token, expiresAt } (ms since epoch).
+let appTokenCache = null;
+
+// An installation token for the configured GitHub App, reused until five minutes
+// before it expires. Throws on any failure.
+async function appInstallationToken(env) {
+  const key = `${env.GITHUB_APP_ID}/${env.GITHUB_APP_INSTALLATION_ID}`;
+  const now = Date.now();
+  if (appTokenCache && appTokenCache.key === key && appTokenCache.expiresAt - 300000 > now) {
+    return appTokenCache.token;
+  }
+  const jwt = await appJwt(env.GITHUB_APP_ID, env.GITHUB_APP_PRIVATE_KEY, Math.floor(now / 1000));
+  const res = await fetch(
+    `https://api.github.com/app/installations/${encodeURIComponent(env.GITHUB_APP_INSTALLATION_ID)}/access_tokens`,
+    { method: "POST", headers: ghHeaders(jwt) });
+  if (!res.ok) throw new Error(`installation token request returned ${res.status}`);
+  const data = await res.json();
+  if (!data || typeof data.token !== "string" || !data.token) {
+    throw new Error("installation token response has no token");
+  }
+  const expiresAt = Date.parse(data.expires_at || "") || now + 3600000;
+  appTokenCache = { key, token: data.token, expiresAt };
+  return data.token;
+}
+
+// An RS256 JWT for GitHub App authentication: issued 60 s in the past (clock
+// skew), valid for nine minutes, issuer = app id. *pem* is the app's private key,
+// PKCS#1 ("BEGIN RSA PRIVATE KEY", as GitHub issues it) or PKCS#8.
+async function appJwt(appId, pem, nowSeconds) {
+  const enc = (obj) => base64url(new TextEncoder().encode(JSON.stringify(obj)));
+  const head = enc({ alg: "RS256", typ: "JWT" });
+  const body = enc({ iat: nowSeconds - 60, exp: nowSeconds + 540, iss: String(appId) });
+  const key = await crypto.subtle.importKey(
+    "pkcs8", pemToPkcs8(pem), { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["sign"]);
+  const sig = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, new TextEncoder().encode(`${head}.${body}`));
+  return `${head}.${body}.${base64url(new Uint8Array(sig))}`;
+}
+
+// DER bytes of a PKCS#8 private key from a PEM string; a PKCS#1 RSA key is wrapped
+// in the PKCS#8 PrivateKeyInfo structure. Throws on anything else.
+function pemToPkcs8(pem) {
+  const text = String(pem).replace(/\\n/g, "\n");
+  const m = text.match(/-----BEGIN (RSA )?PRIVATE KEY-----([\s\S]*?)-----END (RSA )?PRIVATE KEY-----/);
+  if (!m) throw new Error("GITHUB_APP_PRIVATE_KEY is not a PEM private key");
+  const der = Uint8Array.from(atob(m[2].replace(/\s+/g, "")), (c) => c.charCodeAt(0));
+  if (!m[1]) return der;
+  const rsaAlgorithm = [0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05, 0x00];
+  const inner = concatBytes([0x02, 0x01, 0x00], rsaAlgorithm, derHeader(0x04, der.length), der);
+  return concatBytes(derHeader(0x30, inner.length), inner);
+}
+
+function derHeader(tag, length) {
+  if (length < 0x80) return [tag, length];
+  const bytes = [];
+  for (let n = length; n > 0; n >>= 8) bytes.unshift(n & 0xff);
+  return [tag, 0x80 | bytes.length, ...bytes];
+}
+
+function concatBytes(...parts) {
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let at = 0;
+  for (const p of parts) { out.set(p, at); at += p.length; }
+  return out;
+}
+
+function base64url(bytes) {
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
 // --------------------------- bug report ---------------------------------
 
 async function fileReport(request, env) {
@@ -95,9 +196,8 @@ async function fileReport(request, env) {
       return resp;
     }
   }
-  if (!env.GITHUB_TOKEN || !env.TARGET_REPO) {
-    return json({ error: "proxy misconfigured: set GITHUB_TOKEN and TARGET_REPO" }, 500);
-  }
+  const auth = await issueToken(env);
+  if (auth.error) return auth.error;
   let payload;
   try { payload = await request.json(); } catch { return json({ error: "invalid JSON" }, 400); }
   const title = (String(payload.title || "").slice(0, 200).trim()) || "localm bug report";
@@ -109,7 +209,7 @@ async function fileReport(request, env) {
     const labels = env.ISSUE_LABELS.split(",").map((s) => s.trim()).filter(Boolean);
     if (labels.length) issue.labels = labels;
   }
-  const gh = await ghFetch(env.GITHUB_TOKEN, `/repos/${env.TARGET_REPO}/issues`, {
+  const gh = await ghFetch(auth.token, `/repos/${env.TARGET_REPO}/issues`, {
     method: "POST", body: JSON.stringify(issue),
   });
   if (!gh.ok) {
@@ -142,20 +242,19 @@ function looksLikeLocalmReport(text) {
 
 async function listIssues(request, env, url) {
   if (!secretOk(request, env)) return json({ error: "unauthorized" }, 401);
-  if (!env.GITHUB_TOKEN || !env.TARGET_REPO) {
-    return json({ error: "proxy misconfigured: set GITHUB_TOKEN and TARGET_REPO" }, 500);
-  }
+  const auth = await issueToken(env);
+  if (auth.error) return auth.error;
   const one = url.searchParams.get("number");
   if (one) {
     if (!/^\d+$/.test(one)) return json({ error: "bad issue number" }, 400);
-    const gh = await ghFetch(env.GITHUB_TOKEN, `/repos/${env.TARGET_REPO}/issues/${one}`);
+    const gh = await ghFetch(auth.token, `/repos/${env.TARGET_REPO}/issues/${one}`);
     if (!gh.ok) return json({ error: "issue lookup failed", status: gh.status }, 502);
     return json({ ok: true, issue: trimIssue(await gh.json()) });
   }
   const want = url.searchParams.get("state");
   const state = ["open", "closed", "all"].includes(want) ? want : "all";
   const per = Math.min(Math.max(parseInt(url.searchParams.get("per_page") || "30", 10) || 30, 1), 100);
-  const gh = await ghFetch(env.GITHUB_TOKEN,
+  const gh = await ghFetch(auth.token,
     `/repos/${env.TARGET_REPO}/issues?state=${state}&per_page=${per}&sort=updated`);
   if (!gh.ok) return json({ error: "issues list failed", status: gh.status }, 502);
   const arr = await gh.json();
