@@ -575,16 +575,16 @@ def test_a_camera_jpeg_with_several_frames_is_accepted():
 
 def test_exif_orientation_is_applied_to_input_images():
     from PIL import Image
-    im = Image.new("RGB", (40, 20), (200, 0, 0))
+    im = Image.new("RGB", (160, 80), (200, 0, 0))
     exif = im.getexif()
     exif[0x0112] = 6
     out = io.BytesIO()
     im.save(out, format="JPEG", exif=exif.tobytes())
     data = out.getvalue()
     got = image_native._load_rgb(data)
-    assert (got["width"], got["height"]) == (24, 40)
+    assert (got["width"], got["height"]) == (80, 160)
     init = image_native._load_init_image(data, None, None)
-    assert (init["width"], init["height"]) == (24, 40)
+    assert (init["width"], init["height"]) == (80, 160)
 
 
 def test_an_embedding_from_an_older_civitai_download_still_works(addon_set, runner,  # noqa: F811
