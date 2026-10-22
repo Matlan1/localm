@@ -525,52 +525,54 @@ class TestXetResume:
         assert captured["resume_size"] == 5
         assert dest.read_bytes() == b"HELLO WORLD"
 
-    def test_fresh_download_uses_xet_into_an_owned_temp(
+    def test_fresh_xet_file_downloads_over_http_into_an_owned_temp(
             self, cache, tmp_path, monkeypatch):
         inc_path = cache / "file.etag.incomplete"
         dest = tmp_path / "dest.gguf"
-        http_calls = []
-        monkeypatch.setattr("huggingface_hub.file_download.http_get",
-                            lambda *a, **kw: http_calls.append(1))
+        xet_calls = []
         monkeypatch.setattr("huggingface_hub.file_download._check_disk_space", lambda *a: None)
         monkeypatch.setattr("huggingface_hub.file_download.is_xet_available", lambda: True)
+        monkeypatch.setattr("huggingface_hub.file_download.xet_get",
+                            lambda **kw: xet_calls.append(kw))
         seen = {}
 
-        def fake_xet_get(*, incomplete_path, **kw):
-            seen["path"] = Path(incomplete_path)
-            seen["owner_present"] = _partial_owner_path(Path(incomplete_path)).exists()
-            Path(incomplete_path).write_bytes(b"XET-BYTES")
+        def fake_http_get(url, f, resume_size=0, **kw):
+            seen["path"] = Path(f.name)
+            seen["owner_present"] = _partial_owner_path(Path(f.name)).exists()
+            seen["resume_size"] = resume_size
+            f.write(b"HTTP-BYTES")
 
-        monkeypatch.setattr("huggingface_hub.file_download.xet_get", fake_xet_get)
+        monkeypatch.setattr("huggingface_hub.file_download.http_get", fake_http_get)
 
-        _call(inc_path, dest, expected_size=9, xet_file_data=object())
+        _call(inc_path, dest, expected_size=10, xet_file_data=object())
 
-        assert http_calls == []
+        assert xet_calls == []
+        assert seen["resume_size"] == 0
         assert seen["path"].name.startswith("file.etag.") and seen["path"] != inc_path
         assert seen["owner_present"]
-        assert dest.read_bytes() == b"XET-BYTES"
+        assert dest.read_bytes() == b"HTTP-BYTES"
         assert sorted(p.name for p in cache.iterdir()) == []
 
-
-    def test_a_xet_failure_before_the_temp_exists_leaves_no_owner_record(
+    def test_a_failed_fresh_transfer_keeps_its_partial_and_owner_record(
             self, cache, tmp_path, monkeypatch):
         inc_path = cache / "file.etag.incomplete"
         dest = tmp_path / "dest.gguf"
         monkeypatch.setattr("huggingface_hub.file_download._check_disk_space", lambda *a: None)
         monkeypatch.setattr("huggingface_hub.file_download.is_xet_available", lambda: True)
-        seen = {}
 
-        def failing_xet_get(*, incomplete_path, **kw):
-            seen["owner_present"] = _partial_owner_path(Path(incomplete_path)).exists()
-            raise ConnectionError("token refresh failed")
+        def failing_http_get(url, f, **kw):
+            f.write(b"PART")
+            raise ConnectionError("connection dropped")
 
-        monkeypatch.setattr("huggingface_hub.file_download.xet_get", failing_xet_get)
+        monkeypatch.setattr("huggingface_hub.file_download.http_get", failing_http_get)
 
         with pytest.raises(ConnectionError):
             _call(inc_path, dest, expected_size=9, xet_file_data=object())
 
-        assert seen["owner_present"], "the transfer started without an owner record"
-        assert sorted(p.name for p in cache.iterdir()) == []
+        partials = [p for p in cache.iterdir() if p.name.endswith(".incomplete")]
+        assert [p.read_bytes() for p in partials] == [b"PART"]
+        assert _partial_owner_path(partials[0]).exists()
+        assert not dest.exists()
 
 @pytest.fixture()
 def hf_env(tmp_path, monkeypatch):

@@ -716,3 +716,99 @@ class TestReclaimStaleLockAge:
             time=lambda: mtime + cfg._CROSS_LOCK_STALE_AGE + 0.001))
         assert cfg._reclaim_stale_lock(lockpath, token, mtime) is True
         assert not lockpath.exists()
+
+
+# --------------------------------------------------------------------------- #
+#  Retry policy of the lock-file read, judged as each platform would          #
+# --------------------------------------------------------------------------- #
+
+class _OsAs:
+    """``config.os`` as seen on another platform: ``name`` replaced, the rest
+    from the real module."""
+
+    def __init__(self, name, **overrides):
+        self.name = name
+        self.__dict__.update(overrides)
+
+    def __getattr__(self, attr):
+        return getattr(os, attr)
+
+
+def _denial(winerror=None):
+    e = PermissionError(13, "injected denial")
+    if winerror is not None:
+        e.winerror = winerror
+    return e
+
+
+def _no_sleep(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(cfg, "time", types.SimpleNamespace(
+        sleep=sleeps.append, time=time.time, monotonic=time.monotonic))
+    return sleeps
+
+
+_RELEASE_READ_WARNING = (
+    "could not read lock file %s on release (%s); leaving it in "
+    "place, so config/registry writes in every localm process "
+    "fail on it until it is %.0fs old and reclaimed")
+
+
+def test_lock_read_on_posix_gives_up_at_once_and_reports_it(tmp_path, monkeypatch, caplog):
+    lockpath = tmp_path / "config.json.lock"
+    lockpath.write_bytes(b"1:aa")
+    monkeypatch.setattr(cfg, "os", _OsAs("posix"))
+    sleeps = _no_sleep(monkeypatch)
+    calls = _fail_lock_read(monkeypatch, lockpath, _denial, None)
+    with caplog.at_level("WARNING", logger="localm"):
+        assert cfg._read_lock_for_release(lockpath) is None
+    assert calls["n"] == 1 and sleeps == []
+    [r] = [r for r in caplog.records if "lock file" in str(r.msg)]
+    assert r.msg == _RELEASE_READ_WARNING
+    assert r.args[0] == "config.json.lock"
+    assert isinstance(r.args[1], PermissionError)
+    assert r.args[2] == cfg._CROSS_LOCK_STALE_AGE
+
+
+def test_lock_read_on_windows_rides_out_a_sharing_violation(tmp_path, monkeypatch):
+    lockpath = tmp_path / "config.json.lock"
+    lockpath.write_bytes(b"1:aa")
+    monkeypatch.setattr(cfg, "os", _OsAs("nt"))
+    sleeps = _no_sleep(monkeypatch)
+    _fail_lock_read(monkeypatch, lockpath, lambda: _denial(32), cfg._REPLACE_RETRIES - 1)
+    assert cfg._read_lock_for_release(lockpath) == b"1:aa"
+    assert len(sleeps) == cfg._REPLACE_RETRIES - 1
+
+
+def test_lock_read_on_windows_stops_after_its_retry_budget(tmp_path, monkeypatch):
+    lockpath = tmp_path / "config.json.lock"
+    lockpath.write_bytes(b"1:aa")
+    monkeypatch.setattr(cfg, "os", _OsAs("nt"))
+    sleeps = _no_sleep(monkeypatch)
+    calls = _fail_lock_read(monkeypatch, lockpath, lambda: _denial(32), None)
+    assert cfg._read_lock_for_release(lockpath) is None
+    assert calls["n"] == cfg._REPLACE_RETRIES
+    assert len(sleeps) == cfg._REPLACE_RETRIES - 1
+
+
+def test_lock_read_on_windows_does_not_retry_a_stable_denial(tmp_path, monkeypatch):
+    lockpath = tmp_path / "config.json.lock"
+    lockpath.write_bytes(b"1:aa")
+    monkeypatch.setattr(cfg, "os", _OsAs("nt"))
+    sleeps = _no_sleep(monkeypatch)
+    calls = _fail_lock_read(monkeypatch, lockpath, lambda: _denial(1314), None)
+    assert cfg._read_lock_for_release(lockpath) is None
+    assert calls["n"] == 1 and sleeps == []
+
+
+def test_replace_on_windows_does_not_retry_a_stable_denial(tmp_path, monkeypatch):
+    calls = []
+
+    def replace(src, dst):
+        calls.append((src, dst))
+        raise _denial(1314)
+    monkeypatch.setattr(cfg, "os", _OsAs("nt", replace=replace))
+    sleeps = _no_sleep(monkeypatch)
+    with pytest.raises(PermissionError):
+        cfg._replace_atomic(tmp_path / "a", tmp_path / "b")
+    assert len(calls) == 1 and sleeps == []

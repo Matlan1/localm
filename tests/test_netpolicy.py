@@ -761,3 +761,70 @@ class TestWebSearch:
         ])
         assert "1. A" in out and "https://a/" in out and "sa" in out
         assert "2. B" in out
+
+
+# ------------------------------------------------------------------ #
+#  Messages and address lists of the pinned-resolution helpers        #
+# ------------------------------------------------------------------ #
+
+def _resolves_to(monkeypatch, *addresses):
+    monkeypatch.setattr(
+        "socket.getaddrinfo",
+        lambda host, port, *a, **k: [(2, 1, 6, "", (ip, 0)) for ip in addresses])
+
+
+def test_network_mode_config_failure_warning_text(monkeypatch, caplog):
+    err = OSError("config unreadable")
+
+    def boom():
+        raise err
+    monkeypatch.setattr("localm.config.load_config_checked", boom)
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        assert network_mode() == "off"
+    [r] = [r for r in caplog.records
+           if "could not load config" in str(r.msg).lower()]
+    assert r.msg == ("netpolicy: could not load config (%s); resolving "
+                     "net_mode to 'off' (fail-safe) so an unreadable config "
+                     "cannot silently re-enable network access")
+    assert r.args == (err,)
+
+
+def test_search_backend_check_skips_an_unparsable_address(monkeypatch):
+    from localm import netpolicy
+    _resolves_to(monkeypatch, "not-an-ip", "169.254.169.254")
+    with pytest.raises(NetworkPolicyError, match="cloud-metadata"):
+        netpolicy._check_search_backend_address("search.example")
+
+
+def test_pinned_resolution_skips_an_unparsable_address(monkeypatch):
+    from localm import netpolicy
+    _with_config(monkeypatch, {"net_mode": "allow"})
+    _resolves_to(monkeypatch, "not-an-ip", "93.184.216.34")
+    assert netpolicy._resolve_pinned_all("example.com") == ["93.184.216.34"]
+
+
+def test_pinned_resolution_of_a_private_literal_names_the_address(monkeypatch):
+    from localm import netpolicy
+    _with_config(monkeypatch, {"net_mode": "allow"})
+    with pytest.raises(NetworkPolicyError) as refused:
+        netpolicy._resolve_pinned_all("10.0.0.1")
+    assert str(refused.value) == (
+        "'10.0.0.1' resolves to the non-public address 10.0.0.1. Requests to "
+        "local/private networks are blocked (set net_allow_private true to "
+        "permit them).")
+
+
+def test_pinned_session_for_an_unresolvable_host_names_it(monkeypatch):
+    import socket as _socket
+
+    from localm import netpolicy
+    _with_config(monkeypatch, {"net_mode": "allow"})
+
+    def boom(host, port, *a, **k):
+        raise _socket.gaierror("no such host")
+    monkeypatch.setattr("socket.getaddrinfo", boom)
+    with pytest.raises(netpolicy.UnresolvableHost) as refused:
+        netpolicy._session_for("https://nowhere.example/")
+    assert str(refused.value) == (
+        "Could not resolve 'nowhere.example' to an address; refusing the "
+        "request rather than connecting through an unvalidated re-resolution.")
