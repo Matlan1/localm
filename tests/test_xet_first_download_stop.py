@@ -104,13 +104,16 @@ def _download(server, inc_path: Path, dest: Path, tqdm_class=None):
 @pytest.fixture()
 def xet_buffers_in_memory(monkeypatch):
     """hf_xet is available, and a Xet transfer holds what it received in memory
-    until the end: a stop leaves nothing in its file."""
+    until the end: the first one is stopped and leaves nothing in its file, a
+    later one writes the whole file."""
     calls = []
 
     def xet_get(*, incomplete_path, **kw):
         calls.append(incomplete_path)
-        Path(incomplete_path).write_bytes(b"")
-        raise KeyboardInterrupt
+        if len(calls) == 1:
+            Path(incomplete_path).write_bytes(b"")
+            raise KeyboardInterrupt
+        Path(incomplete_path).write_bytes(BODY)
 
     monkeypatch.setattr("huggingface_hub.file_download.is_xet_available", lambda: True)
     monkeypatch.setattr("huggingface_hub.file_download.xet_get", xet_get)
