@@ -16,6 +16,7 @@ import array
 import io
 import sys
 import wave
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -57,6 +58,49 @@ def backend_order(choice: str) -> list[str]:
     return usable or order
 
 
+def _short_path(path: str) -> str:
+    """The Windows short (8.3) form of the existing file *path*, or *path* when
+    the system returns none or this is not Windows."""
+    if sys.platform != "win32":
+        return path
+    import ctypes
+    from ctypes import wintypes
+    fn = ctypes.windll.kernel32.GetShortPathNameW
+    fn.argtypes = (wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD)
+    fn.restype = wintypes.DWORD
+    size = fn(path, None, 0)
+    if not size:
+        return path
+    buf = ctypes.create_unicode_buffer(size)
+    return buf.value if 0 < fn(path, buf, size) < size else path
+
+
+def runtime_paths(models: server.ModelSet) -> server.ModelSet:
+    """*models* with every path the music runtime can open on Windows: a path
+    with non-ASCII characters becomes its ASCII short (8.3) form, because
+    KoboldCpp's music loaders read a path in the ANSI code page. Raises
+    :class:`ModelError` naming the file when it has no ASCII short form (for
+    example on a drive that keeps no short names). Unchanged on other
+    platforms.
+    See test_a_non_ascii_music_model_path_is_given_to_the_runtime_in_short_form."""
+    if sys.platform != "win32":
+        return models
+    fields = {}
+    for name in ("text_encoder", "dit", "vae", "lm"):
+        path = getattr(models, name)
+        if not path or path.isascii():
+            continue
+        short = _short_path(path)
+        if not short.isascii():
+            raise ModelError(
+                f"the music runtime cannot open {path}: its path has characters outside "
+                "ASCII and Windows gives no ASCII short (8.3) name for it. Keep the music "
+                "model files in a folder whose path is ASCII only (set them in the Music "
+                "settings), or move the localm data folder to such a path.")
+        fields[name] = short
+    return replace(models, **fields) if fields else models
+
+
 def work_dir() -> Path:
     return runtime.runtimes_root() / "work"
 
@@ -71,8 +115,8 @@ def prepare(native_cfg: dict, choice: str, *, plan: bool = True,
     :class:`Cancelled`."""
     say = on_progress or (lambda _m: None)
     backend = backend_order(choice)[0]
-    models = resolve_models(native_cfg, use_lm=plan, pull_missing=False,
-                            on_progress=say, cancel_check=cancel_check)
+    models = runtime_paths(resolve_models(native_cfg, use_lm=plan, pull_missing=False,
+                                          on_progress=say, cancel_check=cancel_check))
     _ensure_runtime(backend, say, cancel_check)
     return backend, models
 
@@ -93,8 +137,8 @@ def generate_wav(native_cfg: dict, choice: str, request: dict, *, plan: bool = T
     """Generate one track. Returns (WAV bytes, backend that produced it)."""
     say = on_progress or (lambda _m: None)
     order = backend_order(choice)
-    models = resolve_models(native_cfg, use_lm=plan, pull_missing=False,
-                            on_progress=say, cancel_check=cancel_check)
+    models = runtime_paths(resolve_models(native_cfg, use_lm=plan, pull_missing=False,
+                                          on_progress=say, cancel_check=cancel_check))
     errors: list[str] = []
     auto = choice.strip().lower() == "auto"
     for i, backend in enumerate(order):

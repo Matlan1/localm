@@ -156,7 +156,8 @@ def resolve_models(s: dict) -> dict:
     embeddings = pairing.resolve_embeddings(
         [str(n) for n in (blk.get("embeddings") or []) if str(n).strip()], info.family)
     if embeddings:
-        ctx["embeddings"] = tuple((e["trigger"], e["path"]) for e in embeddings)
+        ctx["embeddings"] = tuple((families.clip_text(e["trigger"], info.family), e["path"])
+                                  for e in embeddings)
     key = tuple(sorted(ctx.items()))
     return {"key": key, "ctx": ctx, "label": label, "recommended": rec,
             "family": info.family, "components": built["components"],
@@ -869,7 +870,9 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
                     raise SdCancelled("Generation cancelled.")
                 image_seed = int(seed) + index
                 params = {
-                    "prompt": prompt, "negative_prompt": negative_prompt or "",
+                    "prompt": families.clip_text(prompt, models.get("family")),
+                    "negative_prompt": families.clip_text(negative_prompt or "",
+                                                          models.get("family")),
                     "width": int(width), "height": int(height), "seed": image_seed,
                     "steps": steps, "cfg_scale": cfg_scale, "guidance": guidance,
                     "clip_skip": clip_skip, "preview": on_preview is not None,

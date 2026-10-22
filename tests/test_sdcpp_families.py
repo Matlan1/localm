@@ -544,6 +544,18 @@ def test_an_explicit_media_type_registers_a_file_the_header_cannot_tell(tmp_path
     assert mm.load_registry()["odd"]["model_type"] == "vae"
 
 
+@pytest.mark.parametrize("model_type", ["upscaler", "controlnet", "textual-inversion", "lora"])
+def test_an_explicit_media_type_registers_a_lone_safetensors(tmp_path, model_type):
+    import localm.model_manager as mm
+    d = tmp_path / "Zusätze Öß"
+    d.mkdir()
+    f = d / "Hochskalierer-Ö.safetensors"
+    f.write_bytes(b"\0" * 32)
+    assert mm.add_local(str(f), no_hash=True, model_type=model_type) is True
+    entry = mm.load_registry()["Hochskalierer-Ö"]
+    assert entry["model_type"] == model_type and Path(entry["path"]) == f
+
+
 def test_an_unrecognised_lone_safetensors_is_still_refused(tmp_path):
     import localm.model_manager as mm
     f = write_safetensors(tmp_path / "w.safetensors",
@@ -1047,3 +1059,19 @@ def test_native_models_route_without_a_model_marks_nothing(media_app, flux_set):
 def _no_live_vram_budget(monkeypatch):
     from localm.media.sdcpp import budget as sd_budget
     monkeypatch.setattr(sd_budget, "vram_budget", lambda backend, **kw: None)
+
+
+@pytest.mark.parametrize("family", sorted(families.UNET_FAMILIES))
+def test_clip_text_matches_clip_lowercasing(family):
+    text = "Öl-Stil (ÄPFEL:1.2) BREAK Straße <lora:Ünder:1>"
+    out = families.clip_text(text, family)
+    assert out == "öl-Stil (äPFEL:1.2) BREAK Straße <lora:ünder:1>"
+    assert out.lower() == text.lower()
+    assert [c for c in out if c.isascii()] == [c for c in text if c.isascii()]
+    assert families.clip_text("İ", family) == "İ".lower()
+    assert families.clip_text("ΟΔΟΣ ΚΑΙ ΣΑ", family) == "οδος και σα"
+
+
+@pytest.mark.parametrize("family", ["flux", "sd3", "wan2.1", "qwen-image", None])
+def test_clip_text_leaves_case_sensitive_encoders_alone(family):
+    assert families.clip_text("Ein großer ÖLBAUM", family) == "Ein großer ÖLBAUM"

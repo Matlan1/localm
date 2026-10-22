@@ -248,6 +248,26 @@ def accepts(slot: str, family: Optional[str], cand: FileInfo,
     return False
 
 
+def clip_text(text: str, family: Optional[str]) -> str:
+    """*text* as a *family* model's text encoders should receive it: for a
+    family that encodes prompts with CLIP alone (``UNET_FAMILIES``), every
+    non-ASCII character lowercased, matching the CLIP tokenizers these models
+    were trained with; stable-diffusion.cpp lowercases ASCII itself. Other
+    families get *text* unchanged. See test_clip_text_matches_clip_lowercasing."""
+    if family not in UNET_FAMILIES or text.isascii():
+        return text
+    low = text.lower()
+    out = []
+    for i, c in enumerate(text):
+        if ord(c) < 128:
+            out.append(c)
+        elif c == "Σ":
+            out.append(low[len(text[:i].lower())])
+        else:
+            out.append(c.lower())
+    return "".join(out)
+
+
 def capabilities(info: FileInfo) -> dict:
     """The extra inputs the diffusion model or checkpoint *info* takes:
     ``{"references", "controlnet", "embeddings", "inpaint", "edit"}``, each a
