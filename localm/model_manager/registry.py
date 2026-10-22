@@ -195,10 +195,28 @@ def projector_refusal(name: str, registry: dict) -> Optional[str]:
 NON_CHAT_TYPES = frozenset({"mmproj", "diffusion-unet", "text-encoder", "vae", "lora",
                             "upscaler", "controlnet", "textual-inversion", "tts"})
 
-# Registry types GET /v1/models leaves out: nothing under /v1 accepts one by name.
-# A 'tts' model stays listed because POST /v1/audio/speech takes it as ``model``.
+# Registry types GET /v1/models leaves out: nothing under /v1 accepts one by name,
+# or (unknown) the type is not known to be a chat model. A 'tts' model stays
+# listed because POST /v1/audio/speech takes it as ``model``.
 UNLISTED_TYPES = frozenset({"mmproj", "diffusion-unet", "text-encoder", "vae", "lora",
-                            "upscaler", "controlnet", "textual-inversion"})
+                            "upscaler", "controlnet", "textual-inversion", "unknown"})
+
+
+def _no_backend_runs_file(path: str) -> bool:
+    """True when *path* is a file that no chat backend (built-in or plugin) loads."""
+    from localm.inference import backend_registry
+    return (os.path.isfile(path) and backend_registry.builtin_refuses(path)
+            and backend_registry.backend_for(path) is None)
+
+
+def _speech_route_available() -> bool:
+    """True when the tts plugin, which mounts POST /v1/audio/speech, is active."""
+    from localm.plugins.engine import PluginManager
+    try:
+        return PluginManager(None).is_active("tts")
+    except Exception as e:
+        logger.debug("could not tell whether the tts plugin is active: %s", e)
+        return False
 
 
 def is_unlisted_entry(entry) -> bool:
@@ -216,6 +234,12 @@ def chat_load_refusal(name: str, registry: dict) -> Optional[str]:
     entry is (and, for 'tts', where it is used). Reads the registry only."""
     entry = registry.get(name)
     kind = entry.get("model_type") if isinstance(entry, dict) else None
+    if kind == "unknown":
+        path = _entry_path(entry)
+        if path and _no_backend_runs_file(path):
+            return (f"'{name}' is a model of unknown type that no chat backend can load. "
+                    f"Set its type with 'localm set-type {name} <type>'.")
+        return None
     if not isinstance(kind, str) or kind not in NON_CHAT_TYPES:
         return None
     if kind == "mmproj":
@@ -223,7 +247,8 @@ def chat_load_refusal(name: str, registry: dict) -> Optional[str]:
     from localm.inference.reranker import _KIND_WORDS
     msg = f"'{name}' is {_KIND_WORDS.get(kind, f'a {kind} model')}, not a model that can be loaded or chatted with."
     if kind == "tts":
-        return msg + " Use it with 'localm speak' or POST /v1/audio/speech."
+        return msg + (" Use it with 'localm speak' or POST /v1/audio/speech."
+                      if _speech_route_available() else " Use it with 'localm speak'.")
     return msg + " It is a component of image, video or music generation."
 
 
@@ -2396,11 +2421,12 @@ class ModelSyncResult(NamedTuple):
     # from `backfilled` - see sync_models_dir's _MMPROJ_BACKFILL_CAP
     mmproj_backfilled: int = 0
     note: str = ""          # a warning to surface (e.g. autoprune guardrail tripped)
+    retyped: int = 0        # 'llm' entries whose GGUF is a text-to-speech model, now 'tts'
 
     @property
     def changed(self) -> bool:
         return bool(self.added or self.flagged or self.restored or self.pruned
-                    or self.backfilled or self.mmproj_backfilled)
+                    or self.backfilled or self.mmproj_backfilled or self.retyped)
 
 
 
@@ -2564,6 +2590,7 @@ def sync_models_dir(prune: Optional[bool] = None, *,
 
     flagged = restored = pruned = 0
     backfilled = 0
+    retyped = 0
     cap_backfilled = 0
     mmproj_backfilled = 0
     mmproj_attempts = 0    # network round-trips spent this call (cap input);
@@ -2596,7 +2623,7 @@ def sync_models_dir(prune: Optional[bool] = None, *,
     net_blocked_mmproj = []   # entry names skipped this call by net_mode=off
 
     def _reconcile(reg: dict) -> None:
-        nonlocal flagged, restored, pruned, note, backed_up, backfilled
+        nonlocal flagged, restored, pruned, note, backed_up, backfilled, retyped
         nonlocal mmproj_backfilled, mmproj_attempts, cap_backfilled
 
         # Managed models = those whose file lives under the models folder.
@@ -2643,6 +2670,12 @@ def sync_models_dir(prune: Optional[bool] = None, *,
                     if gmeta.get("expert_count") is not None:
                         entry["expert_count"] = gmeta["expert_count"]
                     backfilled += 1
+                # An 'llm' entry whose GGUF declares a text-to-speech
+                # architecture takes the type a fresh registration of it gets.
+                if (entry.get("model_type") == "llm" and path.suffix.lower() == ".gguf"
+                        and gguf_non_chat_model_type(entry.get("architecture")) == "tts"):
+                    entry["model_type"] = "tts"
+                    retyped += 1
                 # Routing-capability backfill (tool_use / context_length), on
                 # the same bounded, opportunistic, self-correcting shape. Its
                 # OWN counter and cap rather than sharing _BACKFILL_CAP: the two
@@ -2750,7 +2783,8 @@ def sync_models_dir(prune: Optional[bool] = None, *,
 
     return ModelSyncResult(
         added=added, flagged=flagged, restored=restored, pruned=pruned,
-        backfilled=backfilled, mmproj_backfilled=mmproj_backfilled, note=note
+        backfilled=backfilled, mmproj_backfilled=mmproj_backfilled, note=note,
+        retyped=retyped
     )
 
 

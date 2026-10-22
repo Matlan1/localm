@@ -47,8 +47,16 @@ def _registry():
 
 
 @pytest.fixture
-def served(monkeypatch):
+def unknown_file(tmp_path):
+    path = tmp_path / "RealESRGAN_x4plus.safetensors"
+    path.write_bytes(b"x" * 16)
+    return path
+
+
+@pytest.fixture
+def served(monkeypatch, unknown_file):
     reg = _registry()
+    reg["zz-unknown-file"] = {"path": str(unknown_file), "model_type": "unknown"}
     engines: dict[str, FakeEngine] = {}
 
     def factory(name):
@@ -149,17 +157,75 @@ def test_gui_load_route_refuses_a_component_with_422(monkeypatch, kind):
 def test_v1_models_lists_what_v1_accepts_by_name(served):
     client, _ = served
     ids = {m["id"] for m in client.get("/v1/models").json()["data"]}
-    assert ids == {"aaa-working", "emb", "unk", _name("tts")}
+    assert ids == {"aaa-working", "emb", _name("tts")}
 
 
 def test_the_refused_and_unlisted_type_sets():
     assert NON_CHAT_TYPES == {"mmproj", *COMPONENT_TYPES}
-    assert UNLISTED_TYPES == NON_CHAT_TYPES - {"tts"}
+    assert UNLISTED_TYPES == (NON_CHAT_TYPES - {"tts"}) | {"unknown"}
 
 
-def test_tts_message_points_at_the_speech_routes():
+def test_tts_message_points_at_the_speech_route_only_when_the_tts_plugin_is_active(monkeypatch):
+    monkeypatch.setattr("localm.model_manager.registry._speech_route_available", lambda: True)
     msg = chat_load_refusal(_name("tts"), _registry())
     assert "localm speak" in msg and "/v1/audio/speech" in msg
+    monkeypatch.setattr("localm.model_manager.registry._speech_route_available", lambda: False)
+    msg = chat_load_refusal(_name("tts"), _registry())
+    assert "localm speak" in msg and "/v1/audio/speech" not in msg
+
+
+def test_speech_route_availability_follows_the_installed_and_enabled_tts_plugin(
+        monkeypatch, tmp_path):
+    from localm.model_manager.registry import _speech_route_available
+    from localm.plugins import engine as plugin_engine
+    installed = tmp_path / "installed"
+    (installed / "tts").mkdir(parents=True)
+    (installed / "tts" / "plugin.toml").write_text("name = 'tts'\n", encoding="utf-8")
+    enabled: list = []
+    real_init = plugin_engine.PluginManager.__init__
+
+    def init(self, app, *a, **kw):
+        real_init(self, app, installed_root=installed)
+
+    monkeypatch.setattr(plugin_engine.PluginManager, "__init__", init)
+    monkeypatch.setattr(plugin_engine.PluginManager, "_enabled_set", lambda self: set(enabled))
+    assert _speech_route_available() is False
+    enabled.append("tts")
+    assert _speech_route_available() is True
+    (installed / "tts" / "plugin.toml").unlink()
+    assert _speech_route_available() is False
+
+
+def test_chat_naming_an_unknown_typed_file_no_backend_runs_is_a_clean_422(served, unknown_file):
+    client, engines = served
+    r = client.post("/v1/chat/completions", json={
+        "model": "zz-unknown-file", "stream": False,
+        "messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 422
+    detail = r.json()["detail"]
+    assert "unknown type" in detail and "localm set-type zz-unknown-file" in detail
+    assert "\n" not in detail
+    _assert_untouched(engines, "zz-unknown-file")
+
+
+def test_an_unknown_typed_entry_a_backend_can_run_is_not_refused(tmp_path):
+    folder = tmp_path / "snapshot"
+    folder.mkdir()
+    gguf = tmp_path / "odd.gguf"
+    gguf.write_bytes(b"x" * 16)
+    reg = {"snap": {"path": str(folder), "model_type": "unknown"},
+           "odd": {"path": str(gguf), "model_type": "unknown"}}
+    assert chat_load_refusal("snap", reg) is None
+    assert chat_load_refusal("odd", reg) is None
+
+
+def test_an_unknown_typed_file_is_refused_unless_a_plugin_backend_claims_it(
+        monkeypatch, unknown_file):
+    from localm.inference import backend_registry
+    reg = {"u": {"path": str(unknown_file), "model_type": "unknown"}}
+    assert "unknown type" in chat_load_refusal("u", reg)
+    monkeypatch.setattr(backend_registry, "backend_for", lambda path: object())
+    assert chat_load_refusal("u", reg) is None
 
 
 @pytest.mark.parametrize("name", ["aaa-working", "emb", "unk", "not-registered"])

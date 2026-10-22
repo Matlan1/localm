@@ -2359,6 +2359,7 @@ MEDIA_KIND_TYPES = {
     "clip_h": "text-encoder", "t5xxl": "text-encoder", "umt5": "text-encoder",
     "byt5": "text-encoder", "clip_vision": "text-encoder",
     "controlnet": "controlnet", "textual_inversion": "textual-inversion",
+    "upscaler": "upscaler",
 }
 
 

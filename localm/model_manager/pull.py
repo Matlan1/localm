@@ -594,6 +594,7 @@ def _download_lock_paths(base_dir: Path, rel_parts: list[str]) -> "dict[str, Pat
         return {}
 
 
+_SAVED_LAG_MIN = 16_000_000
 _PROGRESS_POLL_S = 0.7
 
 # Seconds between the progress lines handed to a progress listener.
@@ -648,7 +649,7 @@ class _TerminalBar:
         self._task = self._progress.add_task(self._label, total=None, detail="")
 
     def update(self, downloaded: int, total: int, rate: "float | None",
-               eta: "int | None") -> None:
+               eta: "int | None", saved: "int | None" = None) -> None:
         detail = format_size(downloaded)
         if total:
             detail += f" / {format_size(total)}"
@@ -656,6 +657,8 @@ class _TerminalBar:
             detail += f"  {format_rate(rate)}"
         if eta is not None:
             detail += f"  ETA {format_duration(eta)}"
+        if saved is not None:
+            detail += f"  {format_size(saved)} saved"
         task = self._task
         if task is None:
             return
@@ -675,18 +678,23 @@ class _ByteTracker:
     when the download started plus the bytes received since, so it keeps moving
     while a Xet download holds data back from the file. The rate is the network
     rate; a download that reports no network bytes gets the rate its disk size
-    grows at."""
+    grows at.
+
+    ``saved`` is the bytes on disk from the last sample when the figure is at
+    least ``_SAVED_LAG_MIN`` ahead of them, else None."""
 
     def __init__(self, total: int, base: int) -> None:
         self._total = total
         self._base = base
         self._disk_rate = RateWindow()
+        self.saved: "int | None" = None
 
     def sample(self, on_disk: int) -> "tuple[int, float | None, int | None]":
         self._base = min(self._base, on_disk)
         downloaded = max(on_disk, self._base + METER.transferred)
         if self._total:
             downloaded = min(downloaded, self._total)
+        self.saved = on_disk if downloaded - on_disk >= _SAVED_LAG_MIN else None
         rate = METER.rate()
         if rate is None:
             self._disk_rate.add(downloaded)
@@ -759,20 +767,22 @@ class _ProgressRun:
                 self._last_key = key
                 fn, fi, fc = _progress_file_info(self._parts)
                 _emit_progress(downloaded, self._total, name=fn, index=fi, count=fc,
-                               zero_is_unknown=True, rate=rate, eta=eta)
+                               zero_is_unknown=True, rate=rate, eta=eta,
+                               saved=tracker.saved)
         if self._bar is not None:
-            self._bar.update(downloaded, self._total, rate, eta)
+            self._bar.update(downloaded, self._total, rate, eta, tracker.saved)
         if self._listener is not None:
             now = time.monotonic()
             if now - self._last_listener_at >= _LISTENER_EVERY_S:
                 self._last_listener_at = now
                 self._listener(_describe_progress(downloaded, self._total, rate,
-                                                  self._label))
+                                                  self._label, tracker.saved))
         if self._plain:
             now = time.monotonic()
             if now - self._last_plain_at >= _PLAIN_EVERY_S:
                 self._last_plain_at = now
-                print(_describe_progress(downloaded, self._total, rate, self._label),
+                print(_describe_progress(downloaded, self._total, rate, self._label,
+                                         tracker.saved),
                       file=sys.stderr, flush=True)
 
     def finish(self, succeeded: bool) -> None:
@@ -1092,15 +1102,8 @@ def pull_model(
                 # A bare owner/repo pull is a full snapshot, and
                 # _pull_hf_snapshot takes a second, harder look at the
                 # config.json it downloads and announces the outcome itself.
-                # Every other spec in this branch registers the probe's answer
-                # as-is, so it is announced now.
-                if detected_type == "unknown" and ":" in spec:
-                    # An 'unknown' type is not auto-loaded for chat, but stays
-                    # runnable by name.
-                    console.print(
-                        "[yellow]Could not determine this model's type[/yellow] - "
-                        "registering it as 'unknown'. Run it by name, or set its type "
-                        "later: [bold]localm set-type <name> <type>[/bold]")
+                # A single-file spec is announced by _content_media_type once the
+                # file's own tensors have been read.
         else:
             detected_type = "llm"
     else:
@@ -1825,7 +1828,8 @@ def mmproj_backfill_candidate(entry: dict, path: Path) -> bool:
     """True when *entry* (a registry entry whose file is *path*) is a
     plausible target for the mmproj backfill: pulled from the default branch of
     an HF repo (a pull at a named revision is not backfilled from it), a plain
-    LLM registration, and not already carrying a recorded ``mmproj``.
+    LLM or text-to-speech registration, and not already carrying a recorded
+    ``mmproj``.
 
     Pure, with no I/O; the network decision lives in
     ``backfill_mmproj_for_entry`` below, so a caller can filter cheaply
@@ -1833,7 +1837,7 @@ def mmproj_backfill_candidate(entry: dict, path: Path) -> bool:
     source = str(entry.get("source", ""))
     if not source.startswith("hf:") or entry.get("revision"):
         return False
-    if entry.get("model_type") != "llm":
+    if entry.get("model_type") not in ("llm", "tts"):
         return False
     if entry.get("mmproj"):
         return False
@@ -1964,7 +1968,8 @@ def _non_chat_detection_note(architecture) -> str:
 
 _MEDIA_TYPE_WORDS = {"lora": "a LoRA", "diffusion-unet": "an image or video diffusion model",
                      "vae": "a VAE", "text-encoder": "a text encoder",
-                     "controlnet": "a ControlNet", "textual-inversion": "a textual-inversion embedding"}
+                     "controlnet": "a ControlNet", "textual-inversion": "a textual-inversion embedding",
+                     "upscaler": "an upscaler"}
 
 
 def _media_type_phrase(media_type: str) -> str:
@@ -1980,6 +1985,11 @@ def _content_media_type(path: Path, reg_type: Optional[str]) -> Optional[str]:
     file's layout changes the type."""
     media_type = _media_component_type(path, None)
     if media_type is None or media_type == reg_type:
+        if reg_type == "unknown":
+            console.print(
+                "[yellow]Could not determine this model's type[/yellow] - "
+                "registering it as 'unknown'. Run it by name, or set its type "
+                "later: [bold]localm set-type <name> <type>[/bold]")
         return reg_type
     console.print(f"[dim]Detected as {_media_type_phrase(media_type)} (tensor names in "
                   "the file).[/dim]")

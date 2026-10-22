@@ -2724,6 +2724,7 @@ async function runPull(payload) {
         if (bytesPerSec) extra += `  ·  ${fmtBytes(bytesPerSec)}/s`;
         else if (ev.rate === 0 && ev.downloaded > 0) extra += `  ·  ${t("models.pull.stalled")}`;
         if (etaSec != null) extra += `  ·  ETA ${fmtDuration(etaSec)}`;
+        if (ev.saved != null) extra += `  ·  ${t("models.pull.saved", { bytes: fmtBytes(ev.saved) })}`;
         pct.textContent =
           `${ev.pct.toFixed(0)}%  ·  ${fmtBytes(ev.downloaded)} / ${fmtBytes(ev.total)}${extra}`;
       } else {
