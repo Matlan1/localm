@@ -254,7 +254,9 @@ coding agent's shell access, so you can grant one without the other.
   HTTP redirect outright. Loopback and LAN are both normal, unchecked ComfyUI
   deployments.
 - **Embedding-model and Whisper downloads.** These respect `net_mode`
-  (including `off`) but fetch from a fixed, hardcoded repository named by
+  (including `off`). The embedding model that memory and Knowledge need is
+  fetched automatically on first use under `ask` and `allow`. Both fetch from a
+  fixed, hardcoded repository named by
   localm's own code rather than a caller-supplied URL, so they never call
   `check_url` and are not subject to the domain lists, the SSRF guard, or the
   DNS-rebinding pin - none of which a fixed destination needs.

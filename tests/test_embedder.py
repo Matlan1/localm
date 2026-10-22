@@ -196,7 +196,7 @@ def test_policy_declined_download_does_not_clobber_a_real_load_failure(monkeypat
     """While a load failure is latched for the CURRENTLY CONFIGURED spec, a
     policy decline for that same spec leaves last_error() alone, exactly as a
     bare resolve success does."""
-    _cfg(monkeypatch, embedding_model="bge-small-en-v1.5", net_mode="ask")
+    _cfg(monkeypatch, embedding_model="bge-small-en-v1.5", net_mode="off")
     monkeypatch.setattr(emb, "_LOAD_FAILED_SPEC", "bge-small-en-v1.5")
     monkeypatch.setattr(
         emb, "_LAST_ERROR",

@@ -611,9 +611,9 @@ class TestEmbeddingRoutes:
 
     def test_download_route_fetches_under_ask_persists_nothing(
             self, rag_client, monkeypatch):
-        """The whole point end to end: net_mode=ask blocks the lazy fetch, the
-        explicit route fetches anyway (config:write key), and NOTHING lands in
-        config - the file is byte-identical and net_mode is still ask."""
+        """End to end under net_mode=ask: the explicit route fetches the model
+        (config:write key), and NOTHING lands in config - the file is
+        byte-identical and net_mode is still ask."""
         from localm.inference.embedder import (
             DEFAULT_EMBEDDING_MODEL, KNOWN_EMBEDDING_MODELS, _embeddings_dir)
         _repo, filename = KNOWN_EMBEDDING_MODELS[DEFAULT_EMBEDDING_MODEL]
@@ -631,11 +631,6 @@ class TestEmbeddingRoutes:
         _pin_known_models_to_fake_bytes(monkeypatch)
         cfg_file = rag_client.home / "config.json"
         before = cfg_file.read_bytes()
-
-        # The lazy path really is blocked under ask:
-        from localm.inference.embedder import resolve_embedding_model_path
-        assert resolve_embedding_model_path() is None
-        assert fetched == []
 
         r = rag_client.c.post("/api/rag/embedding/download",
                               headers=_hdr(rag_client.rag_writer))
@@ -711,37 +706,59 @@ class TestEmbeddingRoutes:
         finally:
             emb.reset_embedder()
 
-    def test_ask_mode_message_distinct_from_off(self, tmp_path, monkeypatch):
-        """netpolicy.py's documented 'ask' contract: allowed, but surfaces
-        confirmation first - NOT the same refusal as net_mode=off. The lazy/
-        auto resolve path (allow_download=None, what get_embedder() and every
-        memory/RAG caller actually uses) must say the one-time download
-        action will work RIGHT NOW under ask, and must not collapse into
-        off's wording."""
+    def test_lazy_resolve_fetches_the_pinned_model_under_ask(self, tmp_path, monkeypatch):
+        """net_mode=ask (the default): the lazy resolve that memory and RAG use
+        downloads the missing known embedding model on first use."""
         monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
         monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
         import localm.config as _cfg
         monkeypatch.setattr(_cfg, "MODELS_DIR", tmp_path / "models")
         from localm.inference import embedder as emb
+        repo, filename = emb.KNOWN_EMBEDDING_MODELS[emb.DEFAULT_EMBEDDING_MODEL]
+        fetched = []
+
+        def _fake_hf_download(repo_id, fname, local_dir=None, **kw):
+            fetched.append((repo_id, fname))
+            target = Path(local_dir) / fname
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"GGUF")
+            return str(target)
+
+        monkeypatch.setattr(huggingface_hub, "hf_hub_download", _fake_hf_download)
+        _pin_known_models_to_fake_bytes(monkeypatch)
         try:
             set_config(monkeypatch, lambda: {"net_mode": "ask"})
             emb.reset_embedder()
-            assert emb.resolve_embedding_model_path() is None
-            ask_reason = emb.last_error()
-            assert ask_reason is not None and "net_mode=ask" in ask_reason
-            assert "right now" in ask_reason, \
-                "ask must say the one-time action works NOW, not just name the mode"
+            got = emb.resolve_embedding_model_path()
+            assert fetched == [(repo, filename)]
+            assert got is not None and Path(got).name == filename and Path(got).is_file()
+        finally:
+            emb.reset_embedder()
 
+    def test_off_refuses_and_a_probe_only_reports_not_present(self, tmp_path, monkeypatch):
+        """net_mode=off still refuses the lazy fetch with its own reason; a
+        filesystem-only probe (allow_download=False) under ask records only that
+        the model is not present yet and downloads nothing."""
+        monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
+        monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
+        import localm.config as _cfg
+        monkeypatch.setattr(_cfg, "MODELS_DIR", tmp_path / "models")
+        from localm.inference import embedder as emb
+        fetched = []
+        monkeypatch.setattr(huggingface_hub, "hf_hub_download",
+                            lambda *a, **k: fetched.append(a) or None)
+        try:
             set_config(monkeypatch, lambda: {"net_mode": "off"})
             emb.reset_embedder()
             assert emb.resolve_embedding_model_path() is None
             off_reason = emb.last_error()
             assert off_reason is not None and "net_mode=off" in off_reason
 
-            assert ask_reason != off_reason, \
-                "ask and off must not collapse into the identical refusal text"
-            assert "right now" not in off_reason, \
-                "off's own wording must stay untouched by the ask-mode split"
+            set_config(monkeypatch, lambda: {"net_mode": "ask"})
+            emb.reset_embedder()
+            assert emb.resolve_embedding_model_path(allow_download=False) is None
+            assert "not present yet" in (emb.last_error() or "")
+            assert fetched == []
         finally:
             emb.reset_embedder()
 
