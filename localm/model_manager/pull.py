@@ -3164,7 +3164,7 @@ def _pull_hf_snapshot_locked(
                 f"[yellow]This repo is already downloaded - registered as "
                 f"{names}[/yellow]"
             )
-            if not sys.stdin.isatty():
+            if not _mm.can_prompt():
                 console.print("[dim]Non-interactive session - skipping. "
                               "Use --redownload to force.[/dim]")
                 return True
@@ -4167,7 +4167,7 @@ def _pull_url_locked(
         console.print(
             f"[yellow]Downloaded file is byte-identical to {names}[/yellow]"
         )
-        if sys.stdin.isatty():
+        if _mm.can_prompt():
             import click
             choice = click.prompt(
                 f"  [a]lias as '{name}' and delete the duplicate file  "

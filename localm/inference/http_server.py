@@ -7407,6 +7407,7 @@ def run_advertised(app, host: str, port: int, *, mode: str,
     """
     from localm import instances, portmux
     from localm.config import home_dir
+    from localm.model_manager import prompts_disabled
     # Removed from os.environ before portmux.run_server, whose crash-recovery
     # watchdog inherits os.environ. See
     # test_run_advertised_removes_the_gui_mount_flag_before_serving.
@@ -7424,8 +7425,10 @@ def run_advertised(app, host: str, port: int, *, mode: str,
     # caught in portmux.run_server), kept responsive on Windows by portmux's
     # loop-wakeup.
 
-    with instances.advertise(app, home_dir(), host=host, port=port, mode=mode,
-                             scheme=scheme, project=project, isolated=isolated):
+    # A model added through this server never asks a question on its console.
+    with prompts_disabled(), instances.advertise(
+            app, home_dir(), host=host, port=port, mode=mode,
+            scheme=scheme, project=project, isolated=isolated):
         try:
             if remount_gui:
                 _remount_gui(app)

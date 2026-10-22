@@ -994,3 +994,29 @@ def test_pin_engine_unpins_when_inner_aclose_raises_a_plain_exception():
         assert engine.active_requests == 0
 
     asyncio.run(scenario())
+
+
+def test_run_advertised_serves_with_registration_questions_off(monkeypatch, tmp_path):
+    """A model added through a running server never waits on (or aborts at) the
+    server's console; questions come back once serving has ended."""
+    from unittest.mock import MagicMock
+
+    import localm.model_manager as mm
+    stdin = MagicMock()
+    stdin.isatty.return_value = True
+    monkeypatch.setattr("localm.model_manager.registry.sys.stdin", stdin)
+    monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
+    app = http_server.create_app(None)
+    app.state.bind_host = "127.0.0.1"
+    seen = {}
+
+    def _run_server(served_app, host, port, **kw):
+        seen["can_prompt_while_serving"] = mm.can_prompt()
+
+    monkeypatch.setattr("localm.portmux.run_server", _run_server)
+    monkeypatch.setattr(http_server, "_announce_stopping", lambda: None)
+    monkeypatch.setattr(http_server, "_shutdown_teardown", lambda **kw: None)
+    assert mm.can_prompt() is True
+    http_server.run_advertised(app, "127.0.0.1", 8642, mode="api")
+    assert seen["can_prompt_while_serving"] is False
+    assert mm.can_prompt() is True

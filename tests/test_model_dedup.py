@@ -684,3 +684,66 @@ class TestMalformedRegistryResilience:
             mm._register_with_dedup(bad_key, new, "local", on_duplicate="register")
         assert bad_key in store          # not crashed, not silently overwritten
         assert "good" in store
+
+
+# ---------------------------------------------------------------------------
+#  A server never asks: its console is not a person
+# ---------------------------------------------------------------------------
+
+class TestNoQuestionsWhileServing:
+    def _tty(self):
+        fake = patch("localm.model_manager.sys.stdin")
+        stdin = fake.start()
+        stdin.isatty.return_value = True
+        return fake
+
+    def test_a_terminal_session_is_still_asked(self, fake_registry, tmp_path):
+        store, _ = fake_registry
+        f = _file(tmp_path, "m.gguf")
+        mm.add_local(str(f), "first", on_duplicate="register")
+        asked = []
+        tty = self._tty()
+        try:
+            with patch("click.prompt", side_effect=lambda *a, **k: asked.append(a) or "s"):
+                mm.add_local(str(f), "second")
+        finally:
+            tty.stop()
+        assert len(asked) == 1
+
+    def test_a_duplicate_is_skipped_without_asking_inside_a_server(self, fake_registry, tmp_path):
+        store, _ = fake_registry
+        f = _file(tmp_path, "m.gguf")
+        mm.add_local(str(f), "first", on_duplicate="register")
+        asked = []
+        tty = self._tty()
+        try:
+            with patch("click.prompt", side_effect=lambda *a, **k: asked.append(a) or "a"), \
+                    mm.prompts_disabled():
+                assert mm.can_prompt() is False
+                mm.add_local(str(f), "second")
+            assert mm.can_prompt() is True
+        finally:
+            tty.stop()
+        assert asked == []
+        assert "second" not in store
+
+    def test_a_folder_with_one_duplicate_registers_the_others_inside_a_server(
+            self, fake_registry, tmp_path):
+        store, _ = fake_registry
+        folder = tmp_path / "incoming"
+        folder.mkdir()
+        dup = _file(folder, "already.gguf", b"same-bytes")
+        new = _file(folder, "fresh.gguf", b"other-bytes")
+        mm.add_local(str(dup), "first", on_duplicate="register")
+        asked = []
+        tty = self._tty()
+        try:
+            with patch("click.prompt", side_effect=lambda *a, **k: asked.append(a) or "a"), \
+                    mm.prompts_disabled():
+                ok = mm.add_local(str(folder))
+        finally:
+            tty.stop()
+        assert asked == []
+        assert ok
+        assert any(e["path"] == str(new.resolve()) for e in store.values())
+        assert [n for n, e in store.items() if e["path"] == str(dup.resolve())] == ["first"]

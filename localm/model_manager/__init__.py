@@ -81,6 +81,8 @@ from .unsupported import explain_unsupported_model, hf_folder_refusal
 from .registry import (
     _add_local_gguf_dir,
     _backup_registry,
+    can_prompt,
+    prompts_disabled,
     _entry_path,
     _hf_is_vision,
     _looks_like_vision_gguf_name,
@@ -211,6 +213,7 @@ __all__ = [
     "_register", "_sanitize_name", "_unique_registry_name", "ModelSyncResult",
     "_backup_registry", "sync_models_dir", "_register_with_dedup", "remove_model",
     "_add_local_gguf_dir", "add_local", "show_shortcuts", "_prompt_duplicate_action",
+    "can_prompt", "prompts_disabled",
     "_prompt_predownload_dup", "_resolve_ollama_manifest", "MODEL_TYPES",
     "_store_into_models_dir", "_store_loose_gguf_dir", "_store_with_projector",
     # pull
