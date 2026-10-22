@@ -493,22 +493,22 @@ def test_run_abi_input_gates_only_the_abi_check_job():
     assert _norm(ci["jobs"]["gui-tests"]["if"]) == full_ci_gated
     assert _norm(ci["jobs"]["test-shard"]["if"]) == full_ci_gated
     assert _norm(ci["jobs"]["test"]["if"]) == "!cancelled() && " + full_ci_gated
-    # The mutation shards run on dispatch, on the weekly cron only, or on the
-    # `mutation-test` label - never automatically on a pull request, which
-    # would wait about an hour on the auth shard; the mutation-test gate
-    # follows the shards whenever they ran. mutation-scope only notices.
-    assert _norm(ci["jobs"]["mutation-run"]["if"]) == _norm("""
+    # mutation-scope runs on a pull request, a dispatch and the weekly cron
+    # and picks the shards; mutation-run runs the shards it picked; the
+    # mutation-test gate follows the shards whenever they ran.
+    assert _norm(ci["jobs"]["mutation-scope"]["if"]) == _norm("""
+        github.event_name == 'pull_request' ||
         github.event_name == 'workflow_dispatch' ||
-        (github.event_name == 'schedule' &&
-         github.event.schedule == '37 6 * * 1') ||
-        (github.event_name == 'pull_request' &&
-         contains(github.event.pull_request.labels.*.name, 'mutation-test'))
+        (github.event_name == 'schedule' && github.event.schedule == '37 6 * * 1')
         """)
-    assert "needs" not in ci["jobs"]["mutation-run"]
-    assert "outputs" not in ci["jobs"]["mutation-scope"]
+    assert "run_abi" not in ci["jobs"]["mutation-scope"]["if"]
+    assert _norm(ci["jobs"]["mutation-run"]["if"]) == _norm(
+        "${{ needs.mutation-scope.result == 'success' && "
+        "needs.mutation-scope.outputs.modules != '[]' }}")
+    assert ci["jobs"]["mutation-run"]["needs"] == ["mutation-scope"]
     assert _norm(ci["jobs"]["mutation-test"]["if"]) == _norm(
         "${{ !cancelled() && needs.mutation-run.result != 'skipped' }}")
-    assert ci["jobs"]["mutation-test"]["needs"] == ["mutation-run"]
+    assert ci["jobs"]["mutation-test"]["needs"] == ["mutation-scope", "mutation-run"]
 
 
 def test_confirm_llama_runtime_install_steps_provide_psutil():

@@ -24,7 +24,7 @@ WEEKLY = "37 6 * * 1"
 NIGHTLY_JOBS = {"test-shard", "test", "gui-tests", "optional-stacks", "lint"}
 WEEKLY_JOBS = NIGHTLY_JOBS | {
     "abi-check", "comfyui-pin-check", "llama-rocm-pin-check",
-    "mutation-run", "mutation-test", "web-search-canary", "voice-stack",
+    "mutation-scope", "mutation-run", "mutation-test", "web-search-canary", "voice-stack",
 }
 
 _TOKEN = re.compile(

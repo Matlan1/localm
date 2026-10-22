@@ -42,6 +42,20 @@ _lock = threading.Lock()
 _executor: ThreadPoolExecutor | None = None
 
 
+def _forget_pool_in_child() -> None:
+    """In a child created by ``os.fork()``: drop the inherited pool and lock,
+    so the child's next ``get_plugin_executor()`` builds a pool with its own
+    worker threads. See test_a_forked_child_runs_plugin_work_on_its_own_pool.
+    """
+    global _executor, _lock
+    _executor = None
+    _lock = threading.Lock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_forget_pool_in_child)
+
+
 def pool_is_shut_down(executor: ThreadPoolExecutor | None) -> bool:
     """True when *executor* has been shut down and can no longer accept work.
 

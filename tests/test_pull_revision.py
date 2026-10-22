@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import hashlib
+import os
 
 import httpx
 import pytest
@@ -103,7 +104,8 @@ class _FakeApi:
                 revision if revision in self.state.repo_files else None)
         if sha is None:
             raise self.state.missing_error(revision)
-        files = [SimpleNamespace(rfilename=n, size=len(b), lfs=None, blob_id=None)
+        files = [SimpleNamespace(rfilename=n, size=len(b), lfs=None,
+                                 blob_id=hashlib.sha1(b"blob %d\0" % len(b) + b).hexdigest())
                  for n, b in self.state.repo_files.get(sha, {}).items()]
         return SimpleNamespace(sha=sha, siblings=files)
 
@@ -563,13 +565,144 @@ class TestAnUnfinishedRevisionIsNotMergedWithAnother(_InterruptedAfterTheFirstFi
         capsys.readouterr()
         assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is False
         out = " ".join(capsys.readouterr().out.split())
-        assert "unfinished download of an earlier localm" in out
+        assert "files localm cannot match to a repo or revision" in out
         assert hub.snapshots == [] and "q" not in mm.load_registry()
 
     def test_the_default_branch_still_resumes_an_earlier_localms_folder(self, hub):
         self._unfinished_without_a_marker(hub)
         assert mm.pull_model("o/r", name="q", model_type="llm") is True
         assert "q" in mm.load_registry()
+
+    def test_a_complete_copy_of_the_revision_without_a_marker_is_registered(self, hub, capsys):
+        folder = hub.models_dir / "q"
+        folder.mkdir()
+        for name, data in hub.repo_files[COMMIT].items():
+            (folder / name).write_bytes(data)
+        capsys.readouterr()
+        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is True
+        assert "Already downloaded" in capsys.readouterr().out
+        assert hub.snapshots == []
+        assert mm.load_registry()["q"]["revision"] == "4.0bpw"
+
+    def _copy(self, hub, files):
+        folder = hub.models_dir / "q"
+        for name, data in files.items():
+            (folder / name).parent.mkdir(parents=True, exist_ok=True)
+            (folder / name).write_bytes(data)
+
+    def test_a_copy_with_a_small_file_of_another_revision_is_refused(self, hub, capsys):
+        files = dict(hub.repo_files[COMMIT])
+        files["config.json"] = b"[]"
+        assert len(files["config.json"]) == len(hub.repo_files[COMMIT]["config.json"])
+        self._copy(hub, files)
+        capsys.readouterr()
+        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is False
+        assert "files localm cannot match" in " ".join(capsys.readouterr().out.split())
+        assert hub.snapshots == [] and "q" not in mm.load_registry()
+
+    def test_a_copy_with_a_file_the_revision_does_not_list_is_refused(self, hub, capsys):
+        self._copy(hub, dict(hub.repo_files[COMMIT], **{"chat_template.jinja": b"{{ x }}"}))
+        capsys.readouterr()
+        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is False
+        assert hub.snapshots == [] and "q" not in mm.load_registry()
+
+    def test_a_complete_copy_without_a_config_json_is_registered_without_a_download(
+            self, hub, capsys):
+        hub.repo_files[COMMIT] = {"unet/diffusion.safetensors": BODY, "model_index.json": b"{}"}
+        self._copy(hub, hub.repo_files[COMMIT])
+        meta = hub.models_dir / "q" / ".cache" / "huggingface" / "download"
+        meta.mkdir(parents=True)
+        (meta / "model_index.json.metadata").write_text("x", encoding="utf-8")
+        capsys.readouterr()
+        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is True
+        assert "Already downloaded" in capsys.readouterr().out
+        assert hub.snapshots == []
+        assert mm.load_registry()["q"]["revision"] == "4.0bpw"
+
+    def test_os_folder_files_and_a_git_folder_do_not_block_an_exact_copy(self, hub):
+        self._copy(hub, dict(hub.repo_files[COMMIT], **{
+            ".DS_Store": b"x", "Thumbs.db": b"x", "desktop.ini": b"x",
+            ".git/HEAD": b"ref: refs/heads/4.0bpw\n"}))
+        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is True
+        assert hub.snapshots == []
+
+    def test_an_lfs_file_without_a_published_digest_blocks_the_adoption(self, hub, capsys):
+        self._copy(hub, hub.repo_files[COMMIT])
+        real_info = _FakeApi.model_info
+
+        def info(api, repo, **kw):
+            got = real_info(api, repo, **kw)
+            for sib in got.siblings:
+                if sib.rfilename == "w.safetensors":
+                    sib.lfs = {"size": sib.size}
+            return got
+        _FakeApi.model_info = info
+        try:
+            capsys.readouterr()
+            assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is False
+        finally:
+            _FakeApi.model_info = real_info
+        assert "files localm cannot match" in " ".join(capsys.readouterr().out.split())
+
+    def test_a_subfolder_that_cannot_be_listed_blocks_the_adoption(self, hub, monkeypatch):
+        self._copy(hub, hub.repo_files[COMMIT])
+        (hub.models_dir / "q" / "locked").mkdir()
+        real_scandir = os.scandir
+
+        def scandir(path="."):
+            if os.path.basename(os.fspath(path)) == "locked":
+                raise PermissionError(13, "Access is denied", os.fspath(path))
+            return real_scandir(path)
+        monkeypatch.setattr(os, "scandir", scandir)
+        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is False
+
+    def test_a_symlinked_subfolder_blocks_the_adoption(self, hub, monkeypatch):
+        self._copy(hub, hub.repo_files[COMMIT])
+        sub = hub.models_dir / "q" / "linked"
+        sub.mkdir()
+        real_islink = os.path.islink
+        monkeypatch.setattr(os.path, "islink",
+                            lambda p: os.path.basename(os.fspath(p)) == "linked" or real_islink(p))
+        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is False
+
+    def test_an_adopted_folder_whose_name_is_taken_reports_the_failure(self, hub, capsys, tmp_path):
+        hub.repo_files[COMMIT] = {"unet/diffusion.safetensors": BODY, "model_index.json": b"{}"}
+        self._copy(hub, hub.repo_files[COMMIT])
+        other = tmp_path / "elsewhere"
+        other.mkdir()
+        (other / "config.json").write_text("{}", encoding="utf-8")
+        reg = mm.load_registry()
+        reg["q"] = {"path": str(other), "source": "local", "model_type": "llm"}
+        mm.save_registry(reg)
+        capsys.readouterr()
+        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is False
+        assert "could not be registered as 'q'" in " ".join(capsys.readouterr().out.split())
+        assert mm.load_registry()["q"]["path"] == str(other)
+
+    @pytest.mark.skipif(os.name != "nt", reason="directory junctions are a Windows feature")
+    def test_a_linked_subfolder_blocks_the_adoption(self, hub, tmp_path):
+        import subprocess
+        self._copy(hub, hub.repo_files[COMMIT])
+        target = tmp_path / "elsewhere"
+        target.mkdir()
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(hub.models_dir / "q" / "linked"),
+                        str(target)], check=True, capture_output=True)
+        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is False
+
+    def test_a_pull_that_cannot_write_its_marker_downloads_nothing(self, hub, capsys, monkeypatch):
+        import localm.storekit as storekit
+
+        def refuse(path, *a, **k):
+            if str(path).endswith(".localm-revision.json"):
+                raise PermissionError(13, "Permission denied")
+            return real(path, *a, **k)
+        real = storekit.atomic_write
+        monkeypatch.setattr(storekit, "atomic_write", refuse)
+        capsys.readouterr()
+        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is False
+        out = " ".join(capsys.readouterr().out.split())
+        assert "could not write .localm-revision.json" in out and "Permission denied" in out
+        assert hub.snapshots == []
 
     def test_an_empty_folder_without_a_marker_is_free_for_a_revision(self, hub):
         (hub.models_dir / "q" / ".cache").mkdir(parents=True)

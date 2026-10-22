@@ -594,6 +594,7 @@ def _download_lock_paths(base_dir: Path, rel_parts: list[str]) -> "dict[str, Pat
         return {}
 
 
+_SAVED_LAG_MIN = 16_000_000
 _PROGRESS_POLL_S = 0.7
 
 # Seconds between the progress lines handed to a progress listener.
@@ -648,7 +649,7 @@ class _TerminalBar:
         self._task = self._progress.add_task(self._label, total=None, detail="")
 
     def update(self, downloaded: int, total: int, rate: "float | None",
-               eta: "int | None") -> None:
+               eta: "int | None", saved: "int | None" = None) -> None:
         detail = format_size(downloaded)
         if total:
             detail += f" / {format_size(total)}"
@@ -656,6 +657,8 @@ class _TerminalBar:
             detail += f"  {format_rate(rate)}"
         if eta is not None:
             detail += f"  ETA {format_duration(eta)}"
+        if saved is not None:
+            detail += f"  {format_size(saved)} saved"
         task = self._task
         if task is None:
             return
@@ -675,18 +678,23 @@ class _ByteTracker:
     when the download started plus the bytes received since, so it keeps moving
     while a Xet download holds data back from the file. The rate is the network
     rate; a download that reports no network bytes gets the rate its disk size
-    grows at."""
+    grows at.
+
+    ``saved`` is the bytes on disk from the last sample when the figure is at
+    least ``_SAVED_LAG_MIN`` ahead of them, else None."""
 
     def __init__(self, total: int, base: int) -> None:
         self._total = total
         self._base = base
         self._disk_rate = RateWindow()
+        self.saved: int | None = None
 
     def sample(self, on_disk: int) -> "tuple[int, float | None, int | None]":
         self._base = min(self._base, on_disk)
         downloaded = max(on_disk, self._base + METER.transferred)
         if self._total:
             downloaded = min(downloaded, self._total)
+        self.saved = on_disk if downloaded - on_disk >= _SAVED_LAG_MIN else None
         rate = METER.rate()
         if rate is None:
             self._disk_rate.add(downloaded)
@@ -759,20 +767,22 @@ class _ProgressRun:
                 self._last_key = key
                 fn, fi, fc = _progress_file_info(self._parts)
                 _emit_progress(downloaded, self._total, name=fn, index=fi, count=fc,
-                               zero_is_unknown=True, rate=rate, eta=eta)
+                               zero_is_unknown=True, rate=rate, eta=eta,
+                               saved=tracker.saved)
         if self._bar is not None:
-            self._bar.update(downloaded, self._total, rate, eta)
+            self._bar.update(downloaded, self._total, rate, eta, tracker.saved)
         if self._listener is not None:
             now = time.monotonic()
             if now - self._last_listener_at >= _LISTENER_EVERY_S:
                 self._last_listener_at = now
                 self._listener(_describe_progress(downloaded, self._total, rate,
-                                                  self._label))
+                                                  self._label, tracker.saved))
         if self._plain:
             now = time.monotonic()
             if now - self._last_plain_at >= _PLAIN_EVERY_S:
                 self._last_plain_at = now
-                print(_describe_progress(downloaded, self._total, rate, self._label),
+                print(_describe_progress(downloaded, self._total, rate, self._label,
+                                         tracker.saved),
                       file=sys.stderr, flush=True)
 
     def finish(self, succeeded: bool) -> None:
@@ -1092,15 +1102,8 @@ def pull_model(
                 # A bare owner/repo pull is a full snapshot, and
                 # _pull_hf_snapshot takes a second, harder look at the
                 # config.json it downloads and announces the outcome itself.
-                # Every other spec in this branch registers the probe's answer
-                # as-is, so it is announced now.
-                if detected_type == "unknown" and ":" in spec:
-                    # An 'unknown' type is not auto-loaded for chat, but stays
-                    # runnable by name.
-                    console.print(
-                        "[yellow]Could not determine this model's type[/yellow] - "
-                        "registering it as 'unknown'. Run it by name, or set its type "
-                        "later: [bold]localm set-type <name> <type>[/bold]")
+                # A single-file spec is announced by _content_media_type once the
+                # file's own tensors have been read.
         else:
             detected_type = "llm"
     else:
@@ -1825,7 +1828,8 @@ def mmproj_backfill_candidate(entry: dict, path: Path) -> bool:
     """True when *entry* (a registry entry whose file is *path*) is a
     plausible target for the mmproj backfill: pulled from the default branch of
     an HF repo (a pull at a named revision is not backfilled from it), a plain
-    LLM registration, and not already carrying a recorded ``mmproj``.
+    LLM or text-to-speech registration, and not already carrying a recorded
+    ``mmproj``.
 
     Pure, with no I/O; the network decision lives in
     ``backfill_mmproj_for_entry`` below, so a caller can filter cheaply
@@ -1833,7 +1837,7 @@ def mmproj_backfill_candidate(entry: dict, path: Path) -> bool:
     source = str(entry.get("source", ""))
     if not source.startswith("hf:") or entry.get("revision"):
         return False
-    if entry.get("model_type") != "llm":
+    if entry.get("model_type") not in ("llm", "tts"):
         return False
     if entry.get("mmproj"):
         return False
@@ -1964,7 +1968,8 @@ def _non_chat_detection_note(architecture) -> str:
 
 _MEDIA_TYPE_WORDS = {"lora": "a LoRA", "diffusion-unet": "an image or video diffusion model",
                      "vae": "a VAE", "text-encoder": "a text encoder",
-                     "controlnet": "a ControlNet", "textual-inversion": "a textual-inversion embedding"}
+                     "controlnet": "a ControlNet", "textual-inversion": "a textual-inversion embedding",
+                     "upscaler": "an upscaler"}
 
 
 def _media_type_phrase(media_type: str) -> str:
@@ -1980,6 +1985,11 @@ def _content_media_type(path: Path, reg_type: Optional[str]) -> Optional[str]:
     file's layout changes the type."""
     media_type = _media_component_type(path, None)
     if media_type is None or media_type == reg_type:
+        if reg_type == "unknown":
+            console.print(
+                "[yellow]Could not determine this model's type[/yellow] - "
+                "registering it as 'unknown'. Run it by name, or set its type "
+                "later: [bold]localm set-type <name> <type>[/bold]")
         return reg_type
     console.print(f"[dim]Detected as {_media_type_phrase(media_type)} (tensor names in "
                   "the file).[/dim]")
@@ -2554,6 +2564,71 @@ def _snapshot_files_damaged(dest: Path, repo_siblings, repo_id: str) -> list[str
     return damaged
 
 
+def _git_blob_id(path: Path) -> str:
+    """The git object id (SHA-1 of ``blob <size>\\0`` plus the content) of the
+    file at *path*, the id a Hugging Face listing gives a file stored outside
+    LFS."""
+    digest = hashlib.sha1(b"blob %d\0" % path.stat().st_size)
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+_SNAPSHOT_SIDE_FILES = frozenset({".ds_store", "thumbs.db", "desktop.ini"})
+
+
+def _snapshot_matches_listing(dest: Path, repo_siblings) -> bool:
+    """True when *dest* holds exactly the files *repo_siblings* lists: each at
+    its stated size, an LFS file with a published sha256 (which
+    :func:`_snapshot_files_damaged` compares), every other file with the git
+    blob id the listing gives it, and no file the listing does not name outside
+    ``.cache``, a top-level ``.git``, the claim marker and the operating
+    system's folder files (:data:`_SNAPSHOT_SIDE_FILES`). False when a file
+    carries no digest to compare, a subfolder is a link, or any part of the
+    folder cannot be read. Reads every non-LFS file; deletes nothing."""
+    from localm import pathsafe
+    listed: set[str] = set()
+    try:
+        for sib in repo_siblings:
+            name = str(sib.rfilename)
+            fp = pathsafe.confined_under(dest, name)
+            if not fp.is_file():
+                return False
+            size = getattr(sib, "size", None)
+            if size is not None and fp.stat().st_size != size:
+                return False
+            lfs = getattr(sib, "lfs", None)
+            if lfs:
+                sha = lfs.get("sha256") if isinstance(lfs, dict) else getattr(lfs, "sha256", None)
+                if not sha:
+                    return False
+            else:
+                blob = getattr(sib, "blob_id", None)
+                if not blob or _git_blob_id(fp) != str(blob).lower():
+                    return False
+            listed.add(name.replace("\\", "/"))
+        def _unreadable(error: OSError) -> None:
+            raise error
+
+        for root, dirs, files in os.walk(dest, onerror=_unreadable):
+            rel_root = Path(root).relative_to(dest).as_posix()
+            if rel_root == ".":
+                dirs[:] = [d for d in dirs if d not in (".cache", ".git")]
+            for d in dirs:
+                sub = os.path.join(root, d)
+                if os.path.islink(sub) or os.path.isjunction(sub):
+                    return False
+            for f in files:
+                rel = f if rel_root == "." else f"{rel_root}/{f}"
+                if (rel != _SNAPSHOT_CLAIM and rel not in listed
+                        and f.lower() not in _SNAPSHOT_SIDE_FILES):
+                    return False
+    except (OSError, ValueError):
+        return False
+    return True
+
+
 def _delete_snapshot_files(dest: Path, names: list[str]) -> list[str]:
     """Delete the files *names* of the snapshot at *dest*; the names of those
     that could not be deleted (in use, no permission) are returned."""
@@ -2614,7 +2689,8 @@ def _delete_hf_temp_files(base_dir: Path, rels: "list[str] | None") -> int:
             paths = get_local_download_paths(Path(base_dir), rel)
             if not paths.lock_path.parent.is_dir():
                 continue
-            held.enter_context(_hold_download_lock(paths.lock_path))
+            held.enter_context(_hold_download_lock(
+                paths.lock_path, wait=_SNAPSHOT_LOCK_WAIT_SECONDS))
             targets.append((paths.metadata_path.parent,
                             _short_hash(paths.metadata_path.name) + "."))
         files = []
@@ -2967,29 +3043,39 @@ def _pull_hf_snapshot_locked(
     if dest.exists() and repo_siblings is not None:
         damaged = _snapshot_files_damaged(dest, repo_siblings, repo_id)
     claimed = _snapshot_claim_held_by_other(dest, repo_id, revision) if dest.exists() else None
+    adopted = (claimed == ("", None) and not damaged and repo_siblings is not None
+               and _snapshot_matches_listing(dest, repo_siblings))
+    if adopted:
+        claimed = None
     if claimed is not None:
         claim_repo, claim_revision = claimed
-        what = ("an earlier localm, whose revision it cannot tell" if not claim_repo
+        what = ("files localm cannot match to a repo or revision" if not claim_repo
                 else "another revision of it" if claim_repo.casefold() == repo_id.casefold()
                 else f"{escape(claim_repo)}"
                 + (f"@{escape(claim_revision)}" if claim_revision else ""))
         console.print(
             f"[red]Refusing to pull {escape(repo_id)}"
             + (f"@{escape(revision.ref)}" if revision else "")
-            + f" into {escape(str(dest))}:[/red] this folder holds an unfinished "
-            f"download of {what}. Pull with "
+            + f" into {escape(str(dest))}:[/red] this folder holds "
+            + ("" if not claim_repo else "an unfinished download of ")
+            + f"{what}. Pull with "
             "[bold]-n <a-different-name>[/bold], or delete the folder first.")
         return False
     if (dest.exists() and not damaged
             and not _holds_other_revision(dest, repo_id, revision)
-            and _snapshot_is_complete(dest, repo_siblings, repo_id)):
+            and (adopted or _snapshot_is_complete(dest, repo_siblings, repo_id))):
         console.print(f"[yellow]Already downloaded:[/yellow] {escape(model_name)}")
         registered = _mm._register_with_dedup(
             model_name, dest, f"hf:{repo_id}",
             model_type=_resolve_snapshot_type(dest, model_type),
             **_register_revision(revision))
-        if registered:
-            _clear_snapshot_claim(dest)
+        if not registered:
+            console.print(
+                f"[yellow]{escape(repo_id)} is in {escape(str(dest))}, but could not "
+                f"be registered as '{escape(model_name)}'[/yellow] (see message above). "
+                "Retry with a different -n name, or 'localm alias' it in.")
+            return False
+        _clear_snapshot_claim(dest)
         return True
     repairing = bool(damaged) or (
         dest.exists() and any(
@@ -3101,8 +3187,10 @@ def _pull_hf_snapshot_locked(
                      json.dumps({"repo": repo_id,
                                  "revision": revision.ref if revision else None}))
     except OSError as e:
-        logger.warning("could not mark %s as holding %s%s: %s", dest, repo_id,
-                       f"@{revision.ref}" if revision else "", e)
+        console.print(
+            f"[red]Could not start the download into {escape(str(dest))}:[/red] "
+            f"localm could not write {_SNAPSHOT_CLAIM} there ({escape(str(e))}).")
+        return False
     # TAG-INJECTION site: repo_id/dest sit directly inside OPEN
     # [bold cyan]/[bold] tags.
     console.print(

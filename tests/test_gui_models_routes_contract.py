@@ -399,6 +399,22 @@ class TestPullDiscard:
             r = c.post("/api/models/pull/discard", json={"spec": "owner/repo"})
         assert r.status_code == 500 and "could not take the download lock" in r.json()["detail"]
 
+    def test_a_lock_error_shows_scoped_callers_no_home_path(self, harness, monkeypatch):
+        from pathlib import Path
+
+        from localm.model_manager.pull import PullLockUnavailable
+        home = str(Path.home() / "secret-lock-dir")
+
+        def denied(spec, name=None):
+            raise PullLockUnavailable(f"could not take the download lock ({home}): denied")
+
+        monkeypatch.setattr("localm.model_manager.pull.discard_partial_download", denied)
+        monkeypatch.setattr("localm.plugins.gui.routes.models.acquisition.path_formatter",
+                            lambda request: (lambda value: str(value).replace(home, "<home>")))
+        with TestClient(harness.app) as c:
+            r = c.post("/api/models/pull/discard", json={"spec": "owner/repo"})
+        assert r.status_code == 500 and home not in r.json()["detail"]
+
     @pytest.mark.parametrize("spec", ["", "--", "Z:/models/x.gguf", "~user/x.gguf", "../x.gguf"])
     def test_it_takes_remote_specs_only(self, harness, monkeypatch, spec):
         monkeypatch.setattr("localm.model_manager.pull.discard_partial_download",

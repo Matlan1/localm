@@ -32,8 +32,8 @@ def fastapi_telemetry_off() -> dict:
 
 def add_request_logging(app: FastAPI) -> None:
     """In debug mode (decided once, here), log every request with its status,
-    timing and loop lag. Added before any other middleware, so it is the
-    innermost one."""
+    timing and loop lag. Added right after the client-left answer, so it is
+    the innermost BaseHTTPMiddleware handler."""
     # Debug mode: log every request with timing to the debug log file
     from localm.debuglog import debug_enabled, logger as _dbg
     if debug_enabled():

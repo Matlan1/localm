@@ -482,7 +482,8 @@ def _post(engine, payload):
 
 
 @pytest.mark.parametrize("stream", [False, True])
-def test_route_reasoning_only_summary_keeps_history_and_alternation(stream):
+def test_route_reasoning_only_summary_keeps_history_and_alternation(stream, monkeypatch):
+    monkeypatch.setattr(hs, "PREP_STATUS_GRACE_S", 30.0)
     engine = _engine(_THINK_ONLY)
     r = _post(engine, {"model": "test-model", "messages": _THREAD, "stream": stream})
     summariser = [c for c in engine.calls if c[1].get("thinking") is False]

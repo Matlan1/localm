@@ -891,6 +891,133 @@ def test_the_gui_embedding_warmup_route_is_not_exempted_by_the_embed_paths(app):
     assert "Cross-origin" in r.json()["detail"]
 
 
+# ------------------------------------------------------------------ curl -d bodies
+
+CURL_FORM = {"Content-Type": "application/x-www-form-urlencoded"}
+
+
+def _raw(client, path, data: bytes, headers=None, method="POST"):
+    return client.request(method, path, content=data, headers=headers or {})
+
+
+@pytest.mark.parametrize("content_type", [
+    "application/x-www-form-urlencoded", "text/plain", "application/octet-stream", None],
+    ids=["curl-d", "text-plain", "octet-stream", "no-type"])
+def test_a_json_body_under_any_content_type_is_read_as_json(client, content_type):
+    headers = {"Content-Type": content_type} if content_type else {}
+    data = json.dumps({**CHAT_BODY, "stream": False}).encode()
+    r = _raw(client, "/api/chat", data, headers)
+    assert r.status_code == 200, r.text
+    assert r.json()["message"]["content"] == "Hello world"
+
+
+def test_curl_d_reaches_generate_and_show(client, home):
+    _write_registry(home, {"alpha": {"path": str(home / "x.gguf")}})
+    gen = _raw(client, "/api/generate",
+               json.dumps({"model": MODEL, "prompt": "hi", "stream": False}).encode(), CURL_FORM)
+    assert gen.status_code == 200, gen.text
+    assert gen.json()["response"] == "Hello world"
+    show = _raw(client, "/api/show", b'{"model":"alpha"}', CURL_FORM)
+    assert show.status_code == 200, show.text
+    gone = _raw(client, "/api/show", b'{"model":"nope"}', CURL_FORM)
+    assert gone.status_code == 404 and "nope" in _error_of(gone)
+
+
+def test_curl_d_reaches_embed_and_copy(client, home, embedding_engine):
+    embed = _raw(client, "/api/embed",
+                 json.dumps({"model": MODEL, "input": ["a", "b"]}).encode(), CURL_FORM)
+    assert embed.status_code == 200, embed.text
+    assert len(embed.json()["embeddings"]) == 2
+    _write_registry(home, {"alpha": {"path": str(home / "x.gguf")}})
+    copy = _raw(client, "/api/copy", b'{"source":"alpha","destination":"beta"}', CURL_FORM)
+    assert copy.status_code == 200, copy.text
+
+
+@pytest.mark.parametrize("data", [b"model=test-model&prompt=hi", b"not json at all",
+                                  b'["a", "list"]', b"\x89PNG\r\n\x1a\n\x00\xff\xfe"],
+                         ids=["form-fields", "text", "json-array", "binary"])
+def test_a_body_that_is_not_a_json_object_is_still_a_400(client, data):
+    r = _raw(client, "/api/chat", data, CURL_FORM)
+    assert r.status_code == 400
+    assert _error_of(r) == "Input should be a valid dictionary or object to extract fields from"
+
+
+@pytest.mark.parametrize("origin", ["https://evil.example", "http://localhost:6666", "null"])
+def test_a_browser_page_cannot_send_json_as_a_simple_request(app, origin, engine):
+    data = json.dumps({**CHAT_BODY, "stream": False}).encode()
+    with TestClient(app) as c:
+        r = _raw(c, "/api/chat", data, {"Content-Type": "text/plain", "Origin": origin})
+    assert r.status_code == 400
+    assert _error_of(r) == "Input should be a valid dictionary or object to extract fields from"
+    assert engine.seen["calls"] == []
+
+
+def test_a_browser_page_sending_real_json_is_unchanged(app):
+    with TestClient(app) as c:
+        r = c.post("/api/chat", json={**CHAT_BODY, "stream": False}, headers=EVIL)
+    assert r.status_code == 200
+
+
+def _asgi(app, method, path, messages, headers):
+    """Drive *app* as raw ASGI; *messages* are returned by receive() in order,
+    then ``http.disconnect``. Returns ``(status, receive() call count)``."""
+    import asyncio
+    calls = {"n": 0}
+    sent = []
+    queue = list(messages)
+
+    async def receive():
+        calls["n"] += 1
+        return queue.pop(0) if queue else {"type": "http.disconnect"}
+
+    async def send(message):
+        sent.append(message)
+
+    scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.4"},
+             "http_version": "1.1", "method": method, "scheme": "http", "path": path,
+             "raw_path": path.encode(), "query_string": b"", "root_path": "",
+             "headers": [(b"host", b"127.0.0.1:8642"), *headers],
+             "client": ("127.0.0.1", 50124), "server": ("127.0.0.1", 8642)}
+
+    async def run():
+        try:
+            await app(scope, receive, send)
+        except Exception:
+            pass
+
+    asyncio.run(run())
+    starts = [m["status"] for m in sent if m["type"] == "http.response.start"]
+    return (starts[0] if starts else None), calls["n"]
+
+
+def test_a_curl_d_upload_the_client_abandons_is_a_400_not_a_logged_500(app, caplog):
+    import logging
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        status, _ = _asgi(app, "POST", "/api/chat",
+                          [{"type": "http.request", "body": b'{"model":', "more_body": True}],
+                          [(b"content-type", b"application/x-www-form-urlencoded"),
+                           (b"authorization", f"Bearer {app.state.shell_token}".encode())])
+    assert status == 400
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+def test_a_route_with_no_body_is_refused_without_reading_the_body(protected):
+    app, _ = protected
+    body = b'{"model":"x"}'
+    status, reads = _asgi(app, "POST", "/api/pull",
+                          [{"type": "http.request", "body": body, "more_body": False}],
+                          [(b"content-type", b"application/x-www-form-urlencoded"),
+                           (b"content-length", str(len(body)).encode())])
+    assert status == 401
+    assert reads == 0
+
+
+def test_the_v1_routes_keep_the_strict_content_type(client):
+    data = json.dumps({**CHAT_BODY, "stream": False}).encode()
+    r = _raw(client, "/v1/chat/completions", data, CURL_FORM)
+    assert r.status_code == 422
+
+
 # ------------------------------------------------------------------ X-Localm-* headers
 
 @pytest.fixture

@@ -44,6 +44,7 @@ from .gguf import _gguf_recently_written
 from .gguf import first_split_part
 from .gguf import split_gguf_parts
 from .gguf import gguf_non_chat_model_type
+from .gguf import speech_route_available as _speech_route_available
 from .gguf import MEDIA_KIND_TYPES, gguf_media_component_type
 from .gguf import gguf_embedding_signal
 from .gguf import gguf_reranker_state
@@ -195,10 +196,22 @@ def projector_refusal(name: str, registry: dict) -> Optional[str]:
 NON_CHAT_TYPES = frozenset({"mmproj", "diffusion-unet", "text-encoder", "vae", "lora",
                             "upscaler", "controlnet", "textual-inversion", "tts"})
 
-# Registry types GET /v1/models leaves out: nothing under /v1 accepts one by name.
-# A 'tts' model stays listed because POST /v1/audio/speech takes it as ``model``.
+# Registry types GET /v1/models leaves out: nothing under /v1 accepts one by name,
+# or (unknown) the type is not known to be a chat model. A 'tts' model stays
+# listed because POST /v1/audio/speech takes it as ``model``.
 UNLISTED_TYPES = frozenset({"mmproj", "diffusion-unet", "text-encoder", "vae", "lora",
-                            "upscaler", "controlnet", "textual-inversion"})
+                            "upscaler", "controlnet", "textual-inversion", "unknown"})
+
+
+def _no_backend_runs_file(path: str) -> bool:
+    """True when *path* is a file or folder that no chat backend (built-in or
+    plugin) loads, other than a Hugging Face folder, which the HF backend
+    explains itself."""
+    from localm.inference import backend_registry
+    from localm.inference.engine import _is_hf_dir
+    return (os.path.exists(path) and not _is_hf_dir(path)
+            and backend_registry.builtin_refuses(path)
+            and backend_registry.backend_for(path) is None)
 
 
 def is_unlisted_entry(entry) -> bool:
@@ -213,9 +226,17 @@ def chat_load_refusal(name: str, registry: dict) -> Optional[str]:
     None when *name* may be loaded. Refuses an entry whose ``model_type`` is in
     :data:`NON_CHAT_TYPES`: a vision projector gets :func:`projector_refusal`'s
     message naming its chat model, every other type a message saying what the
-    entry is (and, for 'tts', where it is used). Reads the registry only."""
+    entry is (and, for 'tts', where it is used). An 'unknown' entry is refused
+    when its file is one no backend runs; that check reads the file system and
+    the backend registry."""
     entry = registry.get(name)
     kind = entry.get("model_type") if isinstance(entry, dict) else None
+    if kind == "unknown":
+        path = _entry_path(entry)
+        if path and _no_backend_runs_file(path):
+            return (f"'{name}' is a model of unknown type that no chat backend can load. "
+                    f"Set its type with 'localm set-type {name} <type>'.")
+        return None
     if not isinstance(kind, str) or kind not in NON_CHAT_TYPES:
         return None
     if kind == "mmproj":
@@ -223,7 +244,8 @@ def chat_load_refusal(name: str, registry: dict) -> Optional[str]:
     from localm.inference.reranker import _KIND_WORDS
     msg = f"'{name}' is {_KIND_WORDS.get(kind, f'a {kind} model')}, not a model that can be loaded or chatted with."
     if kind == "tts":
-        return msg + " Use it with 'localm speak' or POST /v1/audio/speech."
+        return msg + (" Use it with 'localm speak' or POST /v1/audio/speech."
+                      if _speech_route_available() else " Use it with 'localm speak'.")
     return msg + " It is a component of image, video or music generation."
 
 
@@ -2396,11 +2418,12 @@ class ModelSyncResult(NamedTuple):
     # from `backfilled` - see sync_models_dir's _MMPROJ_BACKFILL_CAP
     mmproj_backfilled: int = 0
     note: str = ""          # a warning to surface (e.g. autoprune guardrail tripped)
+    retyped: int = 0        # 'llm' entries whose GGUF is a text-to-speech model, now 'tts'
 
     @property
     def changed(self) -> bool:
         return bool(self.added or self.flagged or self.restored or self.pruned
-                    or self.backfilled or self.mmproj_backfilled)
+                    or self.backfilled or self.mmproj_backfilled or self.retyped)
 
 
 
@@ -2564,6 +2587,7 @@ def sync_models_dir(prune: Optional[bool] = None, *,
 
     flagged = restored = pruned = 0
     backfilled = 0
+    retyped = 0
     cap_backfilled = 0
     mmproj_backfilled = 0
     mmproj_attempts = 0    # network round-trips spent this call (cap input);
@@ -2596,7 +2620,7 @@ def sync_models_dir(prune: Optional[bool] = None, *,
     net_blocked_mmproj = []   # entry names skipped this call by net_mode=off
 
     def _reconcile(reg: dict) -> None:
-        nonlocal flagged, restored, pruned, note, backed_up, backfilled
+        nonlocal flagged, restored, pruned, note, backed_up, backfilled, retyped
         nonlocal mmproj_backfilled, mmproj_attempts, cap_backfilled
 
         # Managed models = those whose file lives under the models folder.
@@ -2643,6 +2667,12 @@ def sync_models_dir(prune: Optional[bool] = None, *,
                     if gmeta.get("expert_count") is not None:
                         entry["expert_count"] = gmeta["expert_count"]
                     backfilled += 1
+                # An 'llm' entry whose GGUF declares a text-to-speech
+                # architecture takes the type a fresh registration of it gets.
+                if (entry.get("model_type") == "llm" and path.suffix.lower() == ".gguf"
+                        and gguf_non_chat_model_type(entry.get("architecture")) == "tts"):
+                    entry["model_type"] = "tts"
+                    retyped += 1
                 # Routing-capability backfill (tool_use / context_length), on
                 # the same bounded, opportunistic, self-correcting shape. Its
                 # OWN counter and cap rather than sharing _BACKFILL_CAP: the two
@@ -2750,7 +2780,8 @@ def sync_models_dir(prune: Optional[bool] = None, *,
 
     return ModelSyncResult(
         added=added, flagged=flagged, restored=restored, pruned=pruned,
-        backfilled=backfilled, mmproj_backfilled=mmproj_backfilled, note=note
+        backfilled=backfilled, mmproj_backfilled=mmproj_backfilled, note=note,
+        retyped=retyped
     )
 
 
@@ -3353,7 +3384,10 @@ def _register_with_dedup(
         # clobbered by a later call that could not itself determine them.
         need_arch_backfill = architecture is not None and "architecture" not in reg[model_name]
         need_expert_backfill = expert_count is not None and "expert_count" not in reg[model_name]
-        if need_sha_backfill or need_mmproj_backfill or need_arch_backfill or need_expert_backfill:
+        need_type_backfill = (reg[model_name].get("model_type") == "unknown"
+                              and model_type in MODEL_TYPES - {"llm", "unknown"})
+        if (need_sha_backfill or need_mmproj_backfill or need_arch_backfill
+                or need_expert_backfill or need_type_backfill):
             def _backfill(r: dict) -> None:      # atomic RMW
                 e = r.get(model_name)
                 if not isinstance(e, dict):
@@ -3366,7 +3400,12 @@ def _register_with_dedup(
                     e["architecture"] = architecture
                 if need_expert_backfill and "expert_count" not in e:
                     e["expert_count"] = expert_count
+                if need_type_backfill and e.get("model_type") == "unknown":
+                    e["model_type"] = model_type
             _mm.update_registry(_backfill)
+            if need_type_backfill:
+                console.print(f"[green]✓[/green] Typed [bold]{escape(model_name)}[/bold] "
+                              f"as {escape(model_type)}")
         others = [a for a in aliases if a != model_name]
         if others:
             console.print(f"[dim]Also registered as: "
@@ -3685,6 +3724,21 @@ def _pop_model_entry(reg: dict, name: str) -> None:
             entry.pop("scale", None)
 
 
+def _rmtree_writable(path: Path) -> None:
+    """``shutil.rmtree`` that also removes read-only files (a git checkout's
+    object files on Windows). Links inside are removed, never followed."""
+    def _retry(func, p, _exc):
+        try:
+            os.chmod(p, _stat.S_IWRITE | _stat.S_IREAD)
+        except OSError:
+            pass
+        func(p)
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=_retry)
+    else:  # pragma: no cover - older interpreters
+        shutil.rmtree(path, onerror=lambda f, p, e: _retry(f, p, e[1]))
+
+
 def remove_model(name: str) -> None:
     # escape(): reachable via `POST /api/models/remove`, which spawns
     # `localm rm <model> --yes` and re-pushes its stdout into the GUI
@@ -3748,8 +3802,7 @@ def remove_model(name: str) -> None:
     # already-resolved path.
     if target is not None and is_owned_model_path(target):
         if target.is_dir():
-            import shutil
-            shutil.rmtree(target)
+            _rmtree_writable(target)
             # target: the on-disk path, whose filename component can come from
             # a remote HF repo's own filenames (pull.py) - not a safe charset.
             console.print(f"[dim]Deleted {escape(str(target))}[/dim]")

@@ -772,6 +772,16 @@ def gguf_is_music_architecture(architecture: Optional[str]) -> bool:
     return isinstance(architecture, str) and architecture in _GGUF_MUSIC_ARCHITECTURES
 
 
+def speech_route_available() -> bool:
+    """True when the tts plugin, which mounts POST /v1/audio/speech, is active."""
+    from localm.plugins.engine import PluginManager
+    try:
+        return PluginManager(None).is_active("tts")
+    except Exception as e:
+        logger.debug("could not tell whether the tts plugin is active: %s", e)
+        return False
+
+
 def gguf_chat_refusal(architecture: Optional[str]) -> Optional[str]:
     """The reason a GGUF with this ``general.architecture`` cannot be chatted
     with, or None when it can (including an unknown or missing architecture,
@@ -780,8 +790,10 @@ def gguf_chat_refusal(architecture: Optional[str]) -> Optional[str]:
     if what is None:
         return None
     if architecture in GGUF_TTS_ARCHITECTURES:
+        use = ("'localm speak' or POST /v1/audio/speech" if speech_route_available()
+               else "'localm speak'")
         return (f"This model's architecture ('{architecture}') is {what}, not a "
-                "chat model: use it with 'localm speak' or POST /v1/audio/speech.")
+                f"chat model: use it with {use}.")
     return (f"This model's architecture ('{architecture}') is {what}, not a chat "
             "model, so localm cannot chat with it.")
 
@@ -2359,6 +2371,7 @@ MEDIA_KIND_TYPES = {
     "clip_h": "text-encoder", "t5xxl": "text-encoder", "umt5": "text-encoder",
     "byt5": "text-encoder", "clip_vision": "text-encoder",
     "controlnet": "controlnet", "textual_inversion": "textual-inversion",
+    "upscaler": "upscaler",
 }
 
 

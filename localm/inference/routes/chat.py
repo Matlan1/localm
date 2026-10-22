@@ -683,6 +683,7 @@ def register(app: FastAPI, ctx) -> None:
                 _is_folder_model = False
                 _is_configured_embedder = True
         if (_is_registered_embedder or _is_configured_embedder) and not _is_folder_model:
+            from localm.inference import reranker as _rr
             from localm.inference.embedder import embed_texts, last_error
             loop = asyncio.get_running_loop()
             texts_emb = [req.input] if isinstance(req.input, str) else req.input
@@ -692,12 +693,31 @@ def register(app: FastAPI, ctx) -> None:
                     400,
                     f"Unsupported encoding_format {req.encoding_format!r}: "
                     "expected 'float' or 'base64'.")
+            # A registered embedding GGUF other than the configured embedder is
+            # embedded with its own file; None means embed_texts serves it.
+            named_path = None
+            if not _is_configured_embedder and isinstance(_entry, dict):
+                _named = (resolved_model or "").strip()
+                _named_entry: dict = _entry
+                try:
+                    named_path = await loop.run_in_executor(
+                        None, lambda: _rr.named_embedding_path(_named, _named_entry))
+                except _rr.RerankerModelError as e:
+                    raise HTTPException(e.status, str(e)) from e
+
+            def _run_embed():
+                if named_path is None:
+                    return embed_texts(texts_emb)
+                return _rr.embed(named_path, texts_emb)
             # One default-pool worker at a time inside embed_texts; further
             # requests queue here on the loop, holding no worker.
             sem_emb = _hs._get_embedder_sem()
             try:
                 async with sem_emb:
-                    vecs_emb = await loop.run_in_executor(None, lambda: embed_texts(texts_emb))
+                    vecs_emb = await loop.run_in_executor(None, _run_embed)
+            except _rr.RerankerUnavailableError as e:
+                raise HTTPException(
+                    503, f"Embedding model {resolved_model!r} unavailable: {e}") from e
             except PretokenizerUnsafeInputError as e:
                 # A permanent property of this text against this model, not a
                 # transient worker condition, so 400 rather than the 503 below:

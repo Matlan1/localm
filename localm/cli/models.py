@@ -923,6 +923,8 @@ def list_cmd(type):
             bits.append(f"{result.restored} restored")
         if result.pruned:
             bits.append(f"{result.pruned} pruned")
+        if result.retyped:
+            bits.append(f"{result.retyped} retyped")
         console.print(f"[dim]Models folder synced: {', '.join(bits)}.[/dim]")
     if result.note:
         # note is built from registry model names plus fixed counts and

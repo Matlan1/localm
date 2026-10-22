@@ -1216,6 +1216,7 @@
   "models.pull.shortcutTitle": "Ausgewählte kleine Modelle, die auch bei ausgeschaltetem Netzwerkzugriff funktionieren - wählt eine bekannt funktionierende Quantisierung und füllt die Felder unten aus",
   "models.pull.specNoDash": "Eine Modellangabe darf nicht mit '-' beginnen. Verwenden Sie owner/repo, owner/repo:file.gguf oder eine https-URL.",
   "models.pull.specPlaceholder": "owner/repo:file.gguf  ·  https://…  ·  ein lokaler Ordner oder .gguf-Pfad",
+  "models.pull.saved": "{bytes} auf der Festplatte gespeichert",
   "models.pull.stalled": "keine Daten kommen an",
   "models.pull.starting": "startet…",
   "models.pull.store.copy": "In die Bibliothek kopieren",

@@ -518,6 +518,50 @@ class TestSyncModelsDirBackfillsExistingEntry:
         assert downloaded == [q8]
         assert store[name]["mmproj"] == str((models_dir / q8).resolve())
 
+    def test_a_speech_gguf_registered_as_llm_is_retyped_tts_by_the_sync(
+            self, fake_registry, monkeypatch):
+        store, models_dir = fake_registry
+        name = "Qwen3-TTS-12Hz-0.6B-Base.Q8_0"
+        (models_dir / f"{name}.gguf").write_bytes(_gguf_bytes("qwen3tts"))
+        store[name] = {"path": str((models_dir / f"{name}.gguf").resolve()),
+                       "source": "hf:o/r", "model_type": "llm"}
+        q8 = "Qwen3-TTS-12Hz-0.6B-Base.mmproj-Q8_0.gguf"
+        _wire_repo_listing(monkeypatch, [f"{name}.gguf", q8])
+        _wire_download(monkeypatch, {q8: _CLIP_BYTES})
+
+        result = mm.sync_models_dir()
+
+        assert store[name]["model_type"] == "tts"
+        assert store[name]["mmproj"] == str((models_dir / q8).resolve())
+        assert result.retyped == 1 and result.changed is True
+
+    def test_a_speech_gguf_with_a_projector_already_recorded_is_still_retyped(
+            self, fake_registry, monkeypatch):
+        store, models_dir = fake_registry
+        name = "speech.Q8_0"
+        (models_dir / f"{name}.gguf").write_bytes(_gguf_bytes("qwen3tts"))
+        store[name] = {"path": str((models_dir / f"{name}.gguf").resolve()),
+                       "source": "local", "model_type": "llm",
+                       "mmproj": str(models_dir / "p.gguf")}
+        _wire_repo_listing(monkeypatch, [])
+        _wire_download(monkeypatch, {})
+
+        mm.sync_models_dir()
+
+        assert store[name]["model_type"] == "tts"
+
+    def test_a_chat_gguf_keeps_its_type_through_the_sync(self, fake_registry, monkeypatch):
+        store, models_dir = fake_registry
+        TestSyncModelsDirBackfillsExistingEntry._preexisting_entry(
+            None, store, models_dir, source="local")
+        _wire_repo_listing(monkeypatch, [])
+        _wire_download(monkeypatch, {})
+
+        result = mm.sync_models_dir()
+
+        assert store["main"]["model_type"] == "llm"
+        assert result.retyped == 0
+
     def test_a_vision_gguf_registered_as_llm_still_backfills_f16(
             self, fake_registry, monkeypatch):
         store, models_dir = fake_registry

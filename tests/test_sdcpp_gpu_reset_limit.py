@@ -274,7 +274,9 @@ def test_an_out_of_tree_amdgpu_module_is_assumed_strict(param):
 
 
 @pytest.mark.parametrize("param,known", [("20000,30000", True), ("20000", False),
-                                         ("0,30000", False), ("20000,0", False)])
+                                         ("0,30000", False), ("20000,0", False),
+                                         ("20000,0x0", False), ("+0,30000", False),
+                                         (" 20000 , 30000 ", True)])
 def test_an_out_of_tree_amdgpu_is_known_only_when_both_queues_are_set(param, known):
     files = {gpureset._AMDGPU_TAINT: "O", gpureset._AMDGPU_PARAM: param}
     got = limit([ON_PCI], **linux("amdgpu", files, "6.8.0"))
