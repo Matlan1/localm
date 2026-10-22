@@ -12,8 +12,8 @@ HuggingFace on FIRST use into localm's OWN data dir (``stt_cache_dir()``), not
 the global HuggingFace cache in the user's home profile - that one download is
 the only network access; transcription itself is fully local and offline.
 
-That one download is gated by the network policy (netpolicy.network_mode), the
-same bypass-ask-respect-off rule the embedder's ``_download_known`` applies:
+That one download is gated by the network policy (netpolicy.network_mode) with
+a bypass-ask-respect-off rule:
 under ``net_mode=allow`` the first use fetches automatically; under ``ask`` the
 fetch needs an explicit one-time authorization (``prefetch_stt_model``); under
 ``off`` nothing fetches, unless ``net_allow_model_downloads`` exempts an
@@ -319,8 +319,8 @@ def prefetch_stt_model(allow_download: Optional[bool] = None) -> tuple[bool, str
     network policy. Returns ``(ok, reason)``: ok True when the model is present
     afterwards (already cached counts), reason says why when it is not.
 
-    The policy rule is the bypass-ask-respect-off one the embedder's
-    ``_download_known`` applies, with the same parameter shape:
+    The policy rule is bypass-ask-respect-off, with the same parameter shape as
+    the embedder's ``_download_known``:
 
     * ``allow_download=None`` follows net_mode - automatic fetch only under
       "allow";

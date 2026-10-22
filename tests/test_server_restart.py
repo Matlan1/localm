@@ -999,12 +999,8 @@ def test_pin_engine_unpins_when_inner_aclose_raises_a_plain_exception():
 def test_run_advertised_serves_with_registration_questions_off(monkeypatch, tmp_path):
     """A model added through a running server never waits on (or aborts at) the
     server's console; questions come back once serving has ended."""
-    from unittest.mock import MagicMock
-
     import localm.model_manager as mm
-    stdin = MagicMock()
-    stdin.isatty.return_value = True
-    monkeypatch.setattr("localm.model_manager.registry.sys.stdin", stdin)
+    monkeypatch.setattr("localm.bugreport._common.stdin_is_interactive", lambda: True)
     monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
     app = http_server.create_app(None)
     app.state.bind_host = "127.0.0.1"

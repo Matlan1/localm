@@ -1195,8 +1195,8 @@ async def rag_embedding_status(request: Request):
 @_router.post("/api/rag/embedding/download")
 async def rag_embedding_download(request: Request):
     """One-time download of the CURRENTLY CONFIGURED embedding model, for when
-    the network policy does not download it automatically (net_mode=ask blocks
-    the lazy fetch - see embedder._download_known).
+    the network policy does not download it automatically (net_mode=off; see
+    embedder._download_known).
 
     Writes NOTHING: unlike POST /api/rag/embedding this never touches the
     `embedding_model` config key (which is why config:write suffices here while
