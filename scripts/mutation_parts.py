@@ -32,7 +32,7 @@ import shutil
 import sys
 from pathlib import Path
 
-PARTS = {"auth": 3, "config": 3}
+PARTS = {"auth": 5, "config": 5}
 
 _ARTIFACT = re.compile(r"^mutation-meta-(?P<module>[A-Za-z0-9_]+)-(?P<part>\d+)$")
 

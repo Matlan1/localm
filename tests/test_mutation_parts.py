@@ -91,43 +91,49 @@ def _part(root: Path, module: str, part: int, codes: dict, hashes=None, stats=Tr
 A1, A2, A3 = (f"localm.auth.x_verify__mutmut_{i}" for i in (1, 5, 8))
 
 
+N = mp.PARTS["auth"]
+OWN = {1: {A1: 1}, 2: {A2: 0}, N: {A3: -24}}
+
+
 class TestMerge:
-    def _three(self, tmp_path):
+    def _all(self, tmp_path, skip=(), hashes_of=None):
+        """Every auth part: A1 in part 1, A2 in part 2, A3 in the last part."""
         parts = tmp_path / "parts"
-        _part(parts, "auth", 1, {A1: 1, A2: None, A3: None})
-        _part(parts, "auth", 2, {A1: None, A2: 0, A3: None})
-        _part(parts, "auth", 3, {A1: None, A2: None, A3: -24})
+        for k in range(1, N + 1):
+            if k in skip:
+                continue
+            codes = {m: None for m in (A1, A2, A3)}
+            codes.update(OWN.get(k, {}))
+            _part(parts, "auth", k, codes, hashes=(hashes_of or {}).get(k))
         return parts
 
     def test_merge_takes_each_exit_code_from_its_part(self, tmp_path):
         out = tmp_path / "localm"
-        assert mp.merge(self._three(tmp_path), out) == []
+        assert mp.merge(self._all(tmp_path), out) == []
         merged = json.loads((out / "auth.py.meta").read_text(encoding="utf-8"))
         assert merged["exit_code_by_key"] == {A1: 1, A2: 0, A3: -24}
         assert merged["durations_by_key"] == {A1: 1.0, A2: 1.0, A3: 1.0}
         assert (out / "auth.py").is_file()
-        assert sorted(p.name for p in out.glob("*.stats.json")) == [
-            "auth.1.stats.json", "auth.2.stats.json", "auth.3.stats.json"]
+        assert sorted(p.name for p in out.glob("*.stats.json")) == sorted(
+            f"auth.{k}.stats.json" for k in range(1, N + 1))
 
     def test_the_gate_reads_the_merged_result(self, tmp_path):
         out = tmp_path / "mutants" / "localm"
-        assert mp.merge(self._three(tmp_path), out) == []
+        assert mp.merge(self._all(tmp_path), out) == []
         results, problems = cmf.load_results(tmp_path / "mutants", ["localm/auth.py"])
         assert problems == []
         assert results["localm/auth.py"]["mutants"] == {A1: "killed", A2: "survived", A3: "timeout"}
 
     def test_a_missing_part_is_a_problem_and_leaves_its_mutants_unchecked(self, tmp_path):
         """NEGATIVE: a part that never uploaded must not read as complete."""
-        parts = tmp_path / "parts"
-        _part(parts, "auth", 1, {A1: 1, A2: None, A3: None})
-        _part(parts, "auth", 3, {A1: None, A2: None, A3: 1})
+        parts = self._all(tmp_path, skip=(2,))
         out = tmp_path / "mutants" / "localm"
-        assert mp.merge(parts, out) == [f"auth: part(s) 2 of {mp.PARTS['auth']} have no results"]
+        assert mp.merge(parts, out) == [f"auth: part(s) 2 of {N} have no results"]
         results, _ = cmf.load_results(tmp_path / "mutants", ["localm/auth.py"])
         assert results["localm/auth.py"]["mutants"][A2] == "not checked"
 
     def test_one_exit_code_in_two_parts_is_a_problem(self, tmp_path):
-        parts = self._three(tmp_path)
+        parts = self._all(tmp_path)
         meta = parts / "mutation-meta-auth-2" / "auth.py.meta"
         data = json.loads(meta.read_text(encoding="utf-8"))
         data["exit_code_by_key"][A1] = 0
@@ -136,14 +142,11 @@ class TestMerge:
         assert problems == [f"auth: {A1}: an exit code in part 1 and part 2"]
 
     def test_parts_disagreeing_on_a_function_hash_is_a_problem(self, tmp_path):
-        parts = tmp_path / "parts"
-        _part(parts, "auth", 1, {A1: 1})
-        _part(parts, "auth", 2, {A2: 0}, hashes={"x_verify": "bbbbbbbbbbbb"})
-        _part(parts, "auth", 3, {A3: 1})
+        parts = self._all(tmp_path, hashes_of={2: {"x_verify": "bbbbbbbbbbbb"}})
         assert "auth: x_verify: the parts disagree on the function hash" in mp.merge(parts, tmp_path / "o")
 
     def test_an_unreadable_part_is_a_problem(self, tmp_path):
-        parts = self._three(tmp_path)
+        parts = self._all(tmp_path)
         (parts / "mutation-meta-auth-2" / "auth.py.meta").write_text("{", encoding="utf-8")
         problems = mp.merge(parts, tmp_path / "o")
         assert len(problems) == 1 and problems[0].startswith("auth part 2: could not read auth.py.meta")
@@ -163,5 +166,5 @@ class TestMerge:
         _part(parts, "auth", 1, {A1: 1})
         assert mp.main(["merge", "--parts", str(parts), "--out", str(tmp_path / "o")]) == 1
         assert "have no results" in capsys.readouterr().err
-        assert mp.main(["merge", "--parts", str(self._three(tmp_path / "b")), "--out",
+        assert mp.main(["merge", "--parts", str(self._all(tmp_path / "b")), "--out",
                         str(tmp_path / "o2")]) == 0
