@@ -1471,7 +1471,7 @@ def _active_model_missing_mmproj(active_model_path: str) -> Optional[tuple]:
         return None
     source = str(entry.get("source", ""))
     if (entry.get("model_type") == "llm" and source.startswith("hf:")
-            and not entry.get("mmproj")):
+            and not entry.get("mmproj") and not entry.get("revision")):
         return names[0], source[len("hf:"):]
     return None
 
@@ -1667,6 +1667,8 @@ def list_models(type_filter: Optional[str] = None) -> None:
         # display time (only `localm set-type` validates model_type against
         # MODEL_TYPES) - a hand-edited registry can put anything in either.
         source = escape(str(info.get("source", "local")))
+        if info.get("revision"):
+            source += escape(f"@{info['revision']}")
         role = escape(str(info.get("model_type", "llm")))
 
         if path.is_dir():
@@ -2197,6 +2199,8 @@ def _register(
     expert_count: Optional[int] = None,
     tool_use: Optional[bool] = None,
     context_length: Optional[int] = None,
+    revision: Optional[str] = None,
+    commit: Optional[str] = None,
 ) -> None:
     """*mmproj*, when given, is a vision projector already verified and placed
     on disk (pull.py's job) and is recorded on the entry so get_model_mmproj
@@ -2213,6 +2217,10 @@ def _register(
     entirely) - collapsing the two would show a real MoE model as
     confirmed-dense the moment a caller defaults a missing field to 0.
 
+    *revision* / *commit* are the Hugging Face branch, tag or commit the model
+    was pulled at (``owner/repo@revision``) and the full commit that resolved
+    to; they are written only for a pull at a named revision.
+
     ``tool_use`` / ``context_length`` are the routing capabilities read from the
     same header (gguf_capability_metadata). Unlike the two above they are read
     HERE rather than passed in, so every registration path captures them without
@@ -2225,6 +2233,10 @@ def _register(
                              "model_type": model_type}
     if sha256:
         entry["sha256"] = sha256.lower()
+    if revision:
+        entry["revision"] = revision
+        if commit:
+            entry["commit"] = commit
     if mmproj:
         entry["mmproj"] = str(logical_model_path(Path(mmproj)))
     if architecture is not None:
@@ -3249,6 +3261,8 @@ def _register_with_dedup(
     expert_count: Optional[int] = None,
     attached_projector_only: bool = False,
     refresh: bool = False,
+    revision: Optional[str] = None,
+    commit: Optional[str] = None,
 ) -> bool:
     """
     Register a model, detecting duplicates first.
@@ -3278,6 +3292,9 @@ def _register_with_dedup(
     other key on the entry is kept. Without it that same-file case only
     backfills what is missing and never rewrites an entry's provenance.
 
+    *revision* / *commit* record the Hugging Face revision the file was pulled
+    at (see ``_register``); *refresh* rewrites them with the source.
+
     Returns True when *model_name* ends up correctly registered for *p*
     (freshly registered, aliased, deduped, or already correct) - False for
     every path where nothing was written: a real name/content conflict
@@ -3300,6 +3317,8 @@ def _register_with_dedup(
         entry = reg[model_name]
         need_refresh = refresh and (
             entry.get("source") != source
+            or (entry.get("revision") or None) != (revision or None)
+            or (entry.get("commit") or None) != (commit or None)
             or (entry.get("sha256") or None) != (digest.lower() if digest else None))
         if need_refresh:
             def _refresh(r: dict) -> None:       # atomic RMW
@@ -3307,6 +3326,11 @@ def _register_with_dedup(
                 if not isinstance(e, dict):
                     return
                 e["source"] = source
+                for key, value in (("revision", revision), ("commit", commit)):
+                    if value:
+                        e[key] = value
+                    else:
+                        e.pop(key, None)
                 if digest:
                     e["sha256"] = digest.lower()
                 else:
@@ -3404,6 +3428,10 @@ def _register_with_dedup(
             if action == "move":
                 dest_str = str(dest.resolve())
                 entry = {"path": dest_str, "source": source, "model_type": model_type}
+                if revision:
+                    entry["revision"] = revision
+                    if commit:
+                        entry["commit"] = commit
                 if digest:
                     entry["sha256"] = digest.lower()
                 if mmproj:
@@ -3437,7 +3465,8 @@ def _register_with_dedup(
         # action == "register" falls through unchanged
 
     _mm._register(model_name, p, source, sha256=digest, model_type=model_type,
-                  mmproj=mmproj, architecture=architecture, expert_count=expert_count)
+                  mmproj=mmproj, architecture=architecture, expert_count=expert_count,
+                  revision=revision, commit=commit)
     console.print(f"[green]✓[/green] Registered [bold]{escape(model_name)}[/bold]")
     return True
 
