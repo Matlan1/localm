@@ -1307,6 +1307,40 @@ def test_verify_accepts_a_key_until_its_expiry_has_passed(auth, monkeypatch):
     assert auth.verify(live["key"]) is None
 
 
+def test_an_unreadable_keystore_refuses_a_write_naming_the_file(auth):
+    import localm.config as cfg
+    path = auth.keystore_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{corrupt", encoding="utf-8")
+    with pytest.raises(cfg.ConfigUnreadable) as refused:
+        auth.create_key("a", ["chat"])
+    assert str(refused.value) == (
+        "auth.json exists but could not be read as a JSON list, so saving would "
+        "replace every key in it with just this change; refused. Fix or remove "
+        "auth.json (deleting it resets to no scoped keys).")
+
+
+def test_a_kdf_keystore_record_without_a_salt_uses_an_empty_salt(auth):
+    rec = {"alg": "scrypt", "n": 16, "r": 8, "p": 1, "dklen": 32}
+    assert auth._record_digest_for(rec, "k", lambda: "fast") == \
+        auth._scrypt_derive("k", b"", 16, 8, 1, 32)
+
+
+def test_removal_leaves_no_key_follows_env_owner_and_remaining_records(auth, monkeypatch):
+    assert auth.removal_leaves_no_key(revoke_id="ghost") is False
+    made = auth.create_key("only", ["chat"])
+    assert auth.removal_leaves_no_key(revoke_id=made["id"]) is True
+    other = auth.create_key("other", ["chat"])
+    assert auth.removal_leaves_no_key(revoke_id=made["id"]) is False
+    auth.revoke_key(other["id"])
+    assert auth.removal_leaves_no_key(clear_all=True) is True
+    auth.set_api_key("owner-key-123")
+    assert auth.removal_leaves_no_key(revoke_id=made["id"]) is False
+    auth.clear_api_key()
+    monkeypatch.setenv("LOCALM_API_KEY", "env-key-1234")
+    assert auth.removal_leaves_no_key(clear_all=True) is False
+
+
 def test_verify_stamps_the_alg_marker_only_on_a_legacy_record(auth, monkeypatch):
     monkeypatch.setattr(auth, "_last_used_writes", {})
     marks = []

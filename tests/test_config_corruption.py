@@ -408,7 +408,8 @@ def test_remote_image_mode_is_normalised_in_place(cfg_home, raw, want):
 
 @pytest.mark.parametrize("raw, want", [
     (1, "on"), (0, "off"), (2, None), (5, None), (1.0, None), (" ASK ", "ask"),
-    ("ON", "on"), ("sideways", None),
+    ("ON", "on"), ("sideways", None), ("1", "on"), ("TRUE", "on"), ("yes", "on"),
+    ("0", "off"), ("False", "off"), ("NO", "off"),
 ])
 def test_coerce_remote_image_mode(raw, want):
     assert cfg.coerce_remote_image_mode(raw) == want
@@ -433,6 +434,74 @@ def test_detect_home_treats_unset_and_blank_localm_home_alike(monkeypatch):
     blank = cfg._detect_home()
     monkeypatch.delenv("LOCALM_HOME")
     assert cfg._detect_home() == blank
+
+
+def _fake_install(tmp_path, monkeypatch):
+    root = tmp_path / "install"
+    (root / "localm").mkdir(parents=True)
+    (root / "pyproject.toml").write_text("", encoding="utf-8")
+    monkeypatch.setattr(cfg, "__file__", str(root / "localm" / "config.py"))
+    monkeypatch.delenv("LOCALM_HOME", raising=False)
+    monkeypatch.delenv("LOCALM_SETUP", raising=False)
+    monkeypatch.setattr(cfg, "_warned_unconfigured_home", False)
+    return root.resolve()
+
+
+def test_detect_home_reads_the_install_marker_file(tmp_path, monkeypatch):
+    root = _fake_install(tmp_path, monkeypatch)
+    target = tmp_path / "data"
+    (root / "localm-home.cfg").write_text(f"{target}\n", encoding="utf-8")
+    assert cfg._detect_home() == target
+
+
+def test_detect_home_ignores_an_empty_install_marker_file(tmp_path, monkeypatch):
+    root = _fake_install(tmp_path, monkeypatch)
+    (root / "localm-home.cfg").write_text("\n", encoding="utf-8")
+    assert cfg._detect_home() == root / "home"
+
+
+def test_detect_home_uses_a_portable_home_folder(tmp_path, monkeypatch, capsys):
+    root = _fake_install(tmp_path, monkeypatch)
+    (root / "home").mkdir()
+    assert cfg._detect_home() == root / "home"
+    assert capsys.readouterr().err == ""
+
+
+def test_detect_home_falls_back_to_a_contained_home_and_says_so(tmp_path, monkeypatch, capsys):
+    root = _fake_install(tmp_path, monkeypatch)
+    assert cfg._detect_home() == root / "home"
+    assert str(root / "home") in capsys.readouterr().err
+
+
+def test_unconfigured_home_warning_is_printed_once(tmp_path, monkeypatch, capsys):
+    _fake_install(tmp_path, monkeypatch)
+    cfg._warn_unconfigured_home(tmp_path / "h")
+    cfg._warn_unconfigured_home(tmp_path / "h")
+    out = capsys.readouterr()
+    assert out.err == (
+        "[localm] WARNING: no data directory is configured (no LOCALM_HOME, no "
+        "localm-home.cfg, no ./home). Setup may not have run, or the config was "
+        f"lost. Using a contained default inside this install: {tmp_path / 'h'}. "
+        "Run setup or set LOCALM_HOME to choose where data lives.\n")
+    assert out.out == ""
+
+
+def test_unconfigured_home_warning_is_silent_during_setup(tmp_path, monkeypatch, capsys):
+    _fake_install(tmp_path, monkeypatch)
+    monkeypatch.setenv("LOCALM_SETUP", "1")
+    cfg._warn_unconfigured_home(tmp_path / "h")
+    assert capsys.readouterr().err == ""
+
+
+def test_ensure_dirs_explains_a_file_data_dir_without_localm_home(tmp_path, monkeypatch):
+    import click
+    home_file = tmp_path / "home-file"
+    home_file.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(cfg, "HOME_DIR", home_file)
+    monkeypatch.delenv("LOCALM_HOME", raising=False)
+    with pytest.raises(click.ClickException) as err:
+        cfg.ensure_dirs()
+    assert err.value.message.startswith("localm's data path is a file")
 
 
 def test_ensure_dirs_names_localm_home_only_for_the_home_dir(tmp_path, monkeypatch):
