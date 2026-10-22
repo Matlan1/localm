@@ -1294,7 +1294,7 @@ def test_verify_refuses_absent_or_blank_tokens(auth):
     assert auth.verify("   ") is None
 
 
-def test_verify_rejects_a_key_at_or_after_its_expiry(auth, monkeypatch):
+def test_verify_accepts_a_key_until_its_expiry_has_passed(auth, monkeypatch):
     monkeypatch.setattr(auth, "_last_used_writes", {})
     clock = _TimeProxy(now=1_000_000.0)
     monkeypatch.setattr(auth, "time", clock)

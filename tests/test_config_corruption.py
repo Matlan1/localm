@@ -264,11 +264,7 @@ def test_atomic_write_private_creates_its_temp_file_owner_only(cfg_home, monkeyp
         seen.append(os.stat(path).st_mode & 0o777)
         return real(path, **kw)
     monkeypatch.setattr(cfg, "restrict_file_perms", spy)
-    old = os.umask(0)
-    try:
-        cfg.atomic_write_private(cfg_home / "secret.json", "x")
-    finally:
-        os.umask(old)
+    cfg.atomic_write_private(cfg_home / "secret.json", "x")
     assert seen[0] == 0o600
 
 

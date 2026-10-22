@@ -3083,7 +3083,7 @@
         "localm.config.x_find_binary_dir__mutmut_6": "survived",
         "localm.config.x_find_binary_dir__mutmut_7": "survived",
         "localm.config.x_gpu_cache_dirs__mutmut_1": {
-          "equivalent": "splitting the relative sub-path on no separator leaves one component that still contains the slashes, and Path.joinpath treats slashes as separators, so the resulting path is identical"
+          "equivalent": "split(None) splits on whitespace and no pinned sub-path contains any, so one component results, and Path.joinpath splits it on slashes, so the resulting path is identical"
         },
         "localm.config.x_gpu_cache_dirs__mutmut_2": {
           "equivalent": "a separator string that never occurs leaves the whole sub-path as one component, and Path.joinpath splits it on slashes again, so the resulting path is identical"
