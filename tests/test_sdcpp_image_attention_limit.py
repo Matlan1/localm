@@ -232,3 +232,11 @@ def test_other_runtimes_keep_their_image_attention(monkeypatch, tmp_path, backen
     ok, msg, runner, _said = _image(monkeypatch, tmp_path, 1536, backend=backend)
     assert ok, msg
     assert runner.asked == [] and len(runner.loads) == 1
+
+
+def test_the_rate_is_measured_at_the_models_head_size(monkeypatch, tmp_path):
+    ok, msg, runner, _said = _image(monkeypatch, tmp_path, 1536, family="sdxl", cfg=7.0,
+                                    rate=4e12)
+    assert ok, msg
+    assert runner.asked == [64]
+    assert runner.loads[-1][1]["flash_attn_mode"] == "diffusion=on"
