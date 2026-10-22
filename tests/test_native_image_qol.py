@@ -225,7 +225,7 @@ def test_a_latent_upscaler_without_a_denoise_gets_the_latent_denoise(qol, tmp_pa
     assert ok, msg
     sent = runner.generates[0]["hires"]
     assert sent["upscaler"] == "Latent (bicubic)"
-    assert sent["denoising_strength"] == sampling.SUGGESTED_LATENT_HIRES_DENOISE
+    assert sent["denoising_strength"] == 0.55
     hires = native_models.validate_hires(native_models.HiresChoice(upscaler="latent",
                                                                    denoise=0.8))
     native.generate(s, "p", tmp_path / "m.png", width=64, height=64, hires=hires)

@@ -145,8 +145,23 @@ scheduler also on the Video page); an empty field uses the model's own default.
   field `hires` takes `upscaler` (`latent`, `latent-nearest`, `latent-nearest-exact`,
   `latent-antialiased`, `latent-bicubic`, `latent-bicubic-antialiased`, `lanczos`,
   `nearest`, or `model` with `model` naming a registered upscaler), `scale` (1 to 4),
-  `steps` (0 keeps the job's steps) and `denoise` (0.05 to 1, default 0.7). Each side of
-  the final image is limited to 4096 pixels.
+  `steps` (0 keeps the job's steps) and `denoise` (0.05 to 1). Each side of the final
+  image is limited to 4096 pixels.
+
+  Every field you leave out takes the selected model's suggestion, which refines the
+  picture rather than painting a new one: the `lanczos` upscaler, scale 2 for a model
+  made for images up to 640 pixels (SD 1.x, SD-Turbo) and 1.5 for larger ones (SDXL,
+  FLUX and the other 1024-pixel families, and SD 2.x at 768), the job's steps, and
+  denoise 0.35. With a latent upscaler and no denoise given, the denoise is 0.55, since
+  a latent upscale needs more denoising to come out clean. A model localm cannot place
+  in a family gets `lanczos`, 2 and 0.35. A suggested scale is lowered when the result
+  would pass 4096 pixels; a scale you set is used as given. `"hires": {}` turns the pass
+  on with every suggested value. The sidecar records the values the job used.
+
+  On the Images page the suggestion is shown as the upscaler's first choice and as the
+  scale and denoise placeholders, and follows the model you pick. A value you type is
+  always sent as typed and never replaced when the model changes; **Use suggested
+  values** fills the fields with the current suggestion, replacing what is there.
 - **Upscale a gallery image** with a registered upscaler model: the detail view of an
   image has an Upscale action (`POST /api/imagine/file/{name}/upscale` with
   `{"upscaler": "<registered name>"}`), which saves a new gallery image at the model's
