@@ -88,7 +88,7 @@ def test_force_reinstalls(fake_release):
 
 
 @pytest.mark.parametrize("tamper,match", [
-    (lambda p: p.write_bytes(BODY[:-1] + b"X"), "pinned sha256"),
+    (lambda p: p.write_bytes(BODY[:-1] + bytes([BODY[-1] ^ 1])), "pinned sha256"),
     (lambda p: p.write_bytes(BODY + b"extra"), "expected"),
 ])
 def test_a_binary_that_does_not_verify_is_never_run(fake_release, tamper, match):
