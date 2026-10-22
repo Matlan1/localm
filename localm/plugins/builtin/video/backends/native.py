@@ -523,9 +523,10 @@ def _attention_refusal(runner, rt, info: dict, label: str, width: int, height: i
     att = attention.video_attention(info.get("version") or "", info.get("desc") or "",
                                     info.get("dit_hidden"), info.get("dit_patch"))
     secs = attention.dispatch_seconds(att, width, height, frames, rate)
-    logger.info("native video: Vulkan attention rate %.3g FLOP/s; one attention op of "
-                "%dx%dx%d takes about %.2f s; limit %s", rate, width, height, frames, secs,
-                limit.reason)
+    logger.info("native video: Vulkan attention rate %.3g FLOP/s on %s; one attention op of "
+                "%dx%dx%d takes about %.2f s; limit: %s", rate,
+                ", ".join(attention.compute_device_names(info)) or "the default device",
+                width, height, frames, secs, limit.reason)
     if secs <= limit.safe_seconds:
         return None
     most = attention.max_frames(att, width, height, rate, limit.safe_seconds)

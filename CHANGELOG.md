@@ -180,9 +180,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   sampling step of a video model runs its attention over the whole clip as one job on the GPU, and
   on a GPU whose Vulkan attention is slow (an AMD Radeon RX 6900 XT, for example) that job ran for
   several seconds at 49 or more frames of Wan 2.1 at 832x480, long enough for the driver to reset
-  the GPU and fail the job. localm now measures how fast the GPU runs attention, refuses a clip
-  whose attention job would run longer than a second before it starts, and names the most frames
-  that fit at that size and the ROCm or CUDA runtime as alternatives. HunyuanVideo now also decodes
+  the GPU and fail the job. localm now reads how long the system lets one GPU job run before it
+  resets the GPU (on Windows from whether it can pause the GPU in the middle of a job and the TDR
+  delay; on Linux from the GPU driver's job timeout), measures how fast the GPU that runs the model
+  computes attention, and refuses before it starts a clip whose attention job would run longer
+  than half that time. It names the most frames that fit at that size and the other GPU runtimes
+  this machine can use. A GPU that the system can pause in the middle of a job gets no such limit,
+  and where localm cannot read the limit it keeps a conservative one and says so in the job log.
+  HunyuanVideo now also decodes
   in tiles that fit the Vulkan buffer limit, and a Vulkan runtime that does not report its limit
   decodes in tiles under a conservative one and says so, instead of decoding part of the video or
   image on the CPU.
@@ -190,8 +195,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
   attention, the attention of a larger image (SD-Turbo at 1024x1024, FLUX above about 1024x1024,
   for example) needed a bigger buffer than the Vulkan driver allows and ran on the CPU. localm now
   reloads the model with flash attention on for such an image when the GPU runs it fast enough,
-  turns it off when it would make a single GPU job run too long, and otherwise refuses the image
-  with the largest size that fits and the ROCm or CUDA runtime as alternatives.
+  turns it off when it would make a single GPU job run longer than the system allows, and
+  otherwise refuses the image with the largest size that fits and the other GPU runtimes this
+  machine can use. A ControlNet gets the same flash attention setting as the model, and SD3 Medium
+  and SD3.5 Medium are sized by their own attention, so they are not reloaded at 1024x1024.
 - **The global `localm` command works from a Shared install and uninstalls cleanly.** On Linux and
   macOS setup made `~/.local/bin/localm` a symlink with a relative target that pointed nowhere,
   and uninstall left it behind; on Windows it added the relative entry `bin` to your user PATH.
