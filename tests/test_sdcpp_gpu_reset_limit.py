@@ -273,6 +273,16 @@ def test_an_out_of_tree_amdgpu_module_is_assumed_strict(param):
     assert "not built with the kernel" in got.reason
 
 
+@pytest.mark.parametrize("param,known", [("20000,30000", True), ("20000", False),
+                                         ("0,30000", False), ("20000,0", False)])
+def test_an_out_of_tree_amdgpu_is_known_only_when_both_queues_are_set(param, known):
+    files = {gpureset._AMDGPU_TAINT: "O", gpureset._AMDGPU_PARAM: param}
+    got = limit([ON_PCI], **linux("amdgpu", files, "6.8.0"))
+    assert got.known is known
+    if known:
+        assert got.seconds == 20 and "not built with the kernel" not in got.reason
+
+
 class _Unreadable(FakeHost):
     def __init__(self, unreadable, **kw):
         super().__init__(**kw)

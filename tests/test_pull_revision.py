@@ -553,6 +553,39 @@ class TestAnUnfinishedRevisionIsNotMergedWithAnother(_InterruptedAfterTheFirstFi
             assert mm.pull_model("o/r@2.0bpw", name="q", model_type="llm") is True
         assert ".localm-revision.json" in caplog.text
 
+    def _unfinished_without_a_marker(self, hub):
+        hub.repo_files["c" * 40] = {"README.md": b"readme", "main.bin": b"m"}
+        self.stop(hub, "o/r")
+        (hub.models_dir / "q" / ".localm-revision.json").unlink()
+
+    def test_a_revision_into_an_earlier_localms_unfinished_folder_is_refused(self, hub, capsys):
+        self._unfinished_without_a_marker(hub)
+        capsys.readouterr()
+        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is False
+        out = " ".join(capsys.readouterr().out.split())
+        assert "unfinished download of an earlier localm" in out
+        assert hub.snapshots == [] and "q" not in mm.load_registry()
+
+    def test_the_default_branch_still_resumes_an_earlier_localms_folder(self, hub):
+        self._unfinished_without_a_marker(hub)
+        assert mm.pull_model("o/r", name="q", model_type="llm") is True
+        assert "q" in mm.load_registry()
+
+    def test_an_empty_folder_without_a_marker_is_free_for_a_revision(self, hub):
+        (hub.models_dir / "q" / ".cache").mkdir(parents=True)
+        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is True
+
+    def test_the_same_revision_resumes_with_the_repo_in_another_letter_case(self, hub):
+        self.stop(hub, "o/r@4.0bpw")
+        assert mm.pull_model("O/R@4.0bpw", name="q", model_type="llm") is True
+
+    def test_another_revision_in_another_letter_case_is_still_refused(self, hub, capsys):
+        self.stop(hub, "o/r@4.0bpw")
+        capsys.readouterr()
+        assert mm.pull_model("O/R@2.0bpw", name="q", model_type="llm") is False
+        assert "unfinished download of another revision" in " ".join(
+            capsys.readouterr().out.split())
+
     def test_a_folder_that_was_deleted_is_free_for_another_revision(self, hub):
         import shutil
         self.stop(hub, "o/r@4.0bpw")
