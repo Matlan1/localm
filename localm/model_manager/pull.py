@@ -687,7 +687,7 @@ class _ByteTracker:
         self._total = total
         self._base = base
         self._disk_rate = RateWindow()
-        self.saved: "int | None" = None
+        self.saved: int | None = None
 
     def sample(self, on_disk: int) -> "tuple[int, float | None, int | None]":
         self._base = min(self._base, on_disk)
