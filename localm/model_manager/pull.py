@@ -2616,21 +2616,49 @@ def _delete_hf_temp_files(base_dir: Path, rels: "list[str] | None") -> int:
 
 
 @contextlib.contextmanager
-def _hold_download_lock(lock_path: Path):
+def _hold_download_lock(lock_path: Path, busy: str = (
+        "a download of this file is running; stop it before deleting "
+        "its partial data")):
     """Hold the file lock at *lock_path* for the block; raises
-    :class:`PullInFlight` when a download holds it."""
+    :class:`PullInFlight` with the text *busy* when a download holds it."""
     from filelock import FileLock, Timeout
     lock = FileLock(str(lock_path), timeout=0)
     try:
         lock.acquire(timeout=0)
     except Timeout as e:
-        raise PullInFlight(
-            "a download of this file is running; stop it before deleting "
-            "its partial data") from e
+        raise PullInFlight(busy) from e
     try:
         yield
     finally:
         lock.release()
+
+
+def _snapshot_lock_path(model_name: str) -> Path:
+    """The lock file serialising full-repo pulls into the models folder
+    *model_name*: beside the models dir, in ``locks/``, so deleting the folder
+    never touches it. The name is lower-cased because a case-insensitive
+    filesystem resolves two spellings of a folder to one."""
+    return _mm.MODELS_DIR.parent / "locks" / ("snapshot-" + model_name.lower() + ".lock")
+
+
+@contextlib.contextmanager
+def _snapshot_dest_lock(model_name: str):
+    """Hold the cross-process lock on the models folder *model_name* for the
+    block. The OS releases it when the holder exits, however it exits.
+
+    Raises :class:`PullInFlight` when a download into the folder holds it, or
+    when the lock cannot be taken at all."""
+    path = _snapshot_lock_path(model_name)
+    with contextlib.ExitStack() as held:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            held.enter_context(_hold_download_lock(path, busy=(
+                f"a download into the folder '{model_name}' is already "
+                "running.")))
+        except OSError as e:
+            raise PullInFlight(
+                f"could not take the download lock for '{model_name}': {e}") from e
+        yield
 
 
 def _unlink_temp_files(files: "list[Path]") -> int:
@@ -2706,9 +2734,10 @@ def discard_partial_download(spec: str, name: Optional[str] = None) -> int:
             return 0
         rels = [f"{remote_dir}/{p}" if remote_dir else p for p in parts]
         return _delete_hf_temp_files(base_dir, rels)
-    dest = _mm.MODELS_DIR / _sanitize_name(
+    model_name = _sanitize_name(
         name or spec.split("/")[-1] + (f"@{ref}" if ref else ""))
-    return _delete_hf_temp_files(dest, None)
+    with _snapshot_dest_lock(model_name):
+        return _delete_hf_temp_files(_mm.MODELS_DIR / model_name, None)
 
 
 def _warn_if_repo_ships_code(dest: Path, repo_id: str) -> None:
@@ -2870,6 +2899,30 @@ def _pull_hf_snapshot(
 
     default_name = repo_id.split("/")[-1] + (f"@{revision.ref}" if revision else "")
     model_name = _sanitize_name(name or default_name)
+
+    try:
+        with _snapshot_dest_lock(model_name):
+            return _pull_hf_snapshot_locked(
+                repo_id, model_name, redownload, model_type, revision,
+                snapshot_download)
+    except PullInFlight as e:
+        console.print(f"[red]Download already in progress:[/red] {escape(str(e))} "
+                      "Wait for it to finish, or pull with -n <a-different-name>.")
+        return False
+
+
+def _pull_hf_snapshot_locked(
+    repo_id: str,
+    model_name: str,
+    redownload: bool,
+    model_type: str,
+    revision: Optional[HfRevision],
+    snapshot_download,
+) -> bool:
+    """The body of :func:`_pull_hf_snapshot`, run while holding the lock on the
+    folder *model_name* (see :func:`_snapshot_dest_lock`); *snapshot_download*
+    is ``huggingface_hub.snapshot_download``."""
+    from rich.markup import escape
     dest = _mm.MODELS_DIR / model_name
 
     # Fetch the repo's file listing once, used both to verify an existing
