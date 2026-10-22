@@ -651,9 +651,14 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the option names or follows links (`git grep -O`, `rg --hostname-bin`, `sort -o`, `tree -R`,
   `--files0-from`, `grep -f`, also attached, clustered or shortened), with every path in it inside
   the project once links are followed (a `..` after a link or Windows junction included, so a
-  path that climbs out through one asks first), and, for git, with no repository setting or hook script
-  that runs a program (an fsmonitor hook, a filter, a diff driver, a pager, a git hook). Anything
-  else asks as before.
+  path that climbs out through one asks first), and, for git, with no repository setting or hook
+  that runs a program (an fsmonitor hook, a filter, a diff driver, a pager, a hook defined in the
+  git configuration, or a `post-index-change` hook, the one hook `git status` and `git diff` run,
+  also in a `core.hooksPath` folder or in a submodule's repository). Anything else asks as before.
+  Hooks those commands never run (git-lfs, pre-commit, husky, lefthook) no longer turn the shortcut
+  off, and it now also covers Windows paths written with backslashes (`type D:\app\README.md`),
+  real options that only start like a risky one (`grep --exclude=`, `git diff --text`) and git
+  options of other subcommands (`git status -uno`, `git log -S`, `git log -M`).
 - **The coder's shell safety check reads a command the way both shells do.** A backslash at the
   end of a line joins it to the next, so `git reset \` followed by `--hard` on the next line is
   refused, and quoting that `cmd.exe` and `sh` read differently (single quotes, `\"`, `^"`) can no
@@ -661,7 +666,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Trusted project hooks ask before running once file writes are allowed for the session.**
   Answering "a" to a file write in the terminal, or "always allow" in the GUI, now gives every hook
   run the confirmation `run_shell` needs, as auto-approve already did, so a hook cannot run a
-  script the model has just rewritten without asking. The trust prompt (terminal and GUI) shows
+  script the model has just rewritten without asking. That prompt (or GUI card, now named
+  `run_hook`) approves that one hook run only: it offers no "always allow", so it can no longer allow
+  `run_shell` for the session, and hooked tool calls in one reply ask in turn instead of being
+  refused. The trust prompt (terminal and GUI) shows
   invisible and direction-changing characters in hook commands as `\uXXXX` escapes, the coder asks
   before touching the hook and MCP trust store, and an "a" answer applies only to the prompt it
   was given at.

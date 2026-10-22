@@ -180,6 +180,10 @@ _CANCELLABLE_SUBPROCESS_TOOLS: frozenset[str] = frozenset(
 # delete with no flag present.
 _SHELL_GUARDED_TOOLS: frozenset[str] = _SHELL_EXEC_TOOLS | frozenset({"git_push"})
 
+# The name a project hook run is asked about under, and allowed for the session
+# by, on a confirmation prompt or card. It is not a tool the model can call.
+HOOK_RUN_TOOL = "run_hook"
+
 # The background job-control tools. Useless without a way to start a job, so they
 # follow the shell-exec family wherever it is disabled.
 _SHELL_JOB_TOOLS: frozenset[str] = frozenset({"check_shell_job", "kill_shell_job"})

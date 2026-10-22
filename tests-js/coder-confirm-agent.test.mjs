@@ -33,6 +33,17 @@ test("FIRES-CONTROL: the session's own prompt carries no attribution line", () =
   assert.equal(card.querySelector(".title .name").textContent, "run_shell");
 });
 
+test("an exact approval card offers no always-allow box, any other card does", () => {
+  const { window } = loadApp();
+  const s = session();
+  const exact = window.buildConfirmCard(
+    s, request({ tool: "run_hook", args: { hook: "pre_tool_use hook #1" }, exact: true }));
+  assert.equal(exact.querySelector(".always-allow"), null);
+  assert.equal(exact.querySelector(".title .name").textContent, "run_hook");
+  const plain = window.buildConfirmCard(s, request({ confirm_id: "c2" }));
+  assert.ok(plain.querySelector(".always-allow input[type=checkbox]"));
+});
+
 test("two children's cards are told apart by their labels", () => {
   const { window } = loadApp();
   const s = session();

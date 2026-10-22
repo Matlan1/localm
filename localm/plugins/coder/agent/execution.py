@@ -10,6 +10,7 @@ import json
 import os
 import re
 import shlex
+import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
@@ -43,9 +44,17 @@ from .constants import (
     _CANCELLABLE_SUBPROCESS_TOOLS,
     _SHELL_UNSCOPED_TOOLS,
     _TEST_COMMAND_MARKERS, _TODO_TOOLS, _UNDOABLE_TOOLS, _call_target_paths,
+    HOOK_RUN_TOOL,
 )
 from .planmode import INTERACTION_TOOLS, plan_mode_refusal
 from .scope import _scope_pattern
+
+# Held while an agent's _session_allowed set is changed or copied.
+_SESSION_ALLOWED_LOCK = threading.Lock()
+
+# Shown with each hook-run approval.
+_HOOK_RUN_NOTE = ("file writes run without confirmation in this session, so each "
+                  "hook run is asked about and an approval covers that run only")
 
 if TYPE_CHECKING:
     from localm.audit import AuditLogT
@@ -710,7 +719,8 @@ class _ExecutionMixin:
                     else:
                         approved = self._confirm_tool(call)
                 if consume_confirm_always() and approved and session_allowable:
-                    session_allowed.add(allow_key)
+                    with _SESSION_ALLOWED_LOCK:
+                        session_allowed.add(allow_key)
                     print_info("  " + self._session_allow_notice(call))
             else:
                 # Fail CLOSED: this tool requires confirmation and there is no way
@@ -912,17 +922,20 @@ class _ExecutionMixin:
         session, by this agent or an agent above it: "a" at a terminal prompt
         (``_session_allowed``) or "always allow" in the GUI (the
         ``allowed_tools`` of the object whose method is the confirm handler).
-        A shell tool allowed for one exact command is not included."""
+        A shell tool allowed for one exact command is not included. Safe to
+        call from any thread."""
         names: set[str] = set()
         agent = self
         while agent is not None:
-            for key in getattr(agent, "_session_allowed", None) or ():
+            with _SESSION_ALLOWED_LOCK:
+                keys = tuple(getattr(agent, "_session_allowed", None) or ())
+            for key in keys:
                 if isinstance(key, str):
                     names.add(key)
                 elif key and key[0] not in _SHELL_GUARDED_TOOLS:
                     names.add(str(key[0]))
             owner = getattr(getattr(agent, "confirm_handler", None), "__self__", None)
-            names.update(str(n) for n in (getattr(owner, "allowed_tools", None) or ()))
+            names.update(str(n) for n in tuple(getattr(owner, "allowed_tools", None) or ()))
             agent = getattr(agent, "parent", None)
         return names
 
@@ -931,10 +944,9 @@ class _ExecutionMixin:
 
         When some enabled destructive tool other than the shell tools runs
         without confirmation (under auto_approve, or allowed for the session
-        with "a" or GUI "always allow") but run_shell does not, a hook run gets
-        run_shell's gate: "refuse" when run_shell is disabled, else "confirm"
-        unless run_shell runs without confirmation too. None when trust is
-        enough."""
+        with "a" or GUI "always allow") but run_shell does not, a hook run is
+        gated: "refuse" when run_shell is disabled, else "confirm" unless
+        run_shell runs without confirmation too. None when trust is enough."""
         disabled = self.disabled_tools
         confirmed = set(self.always_confirm)
         allowed = self._session_allowed_tools()
@@ -957,33 +969,51 @@ class _ExecutionMixin:
             return None
         return "confirm"
 
+    def _hooks_may_ask(self, calls) -> bool:
+        """Whether running *calls* may ask the user before a project hook runs:
+        hooks trusted now (the trust store is re-read) apply to one of them and
+        :meth:`_hook_run_gate` answers "confirm"."""
+        from ..hooks import POST, PRE
+        hooks = getattr(self, "_tool_hooks", None)
+        if hooks is None or self.restricted or not hooks.refresh_trust():
+            return False
+        if not any(hooks.applies(event, call.name) for call in calls for event in (PRE, POST)):
+            return False
+        return self._hook_run_gate() == "confirm"
+
     def _hook_permit(self, interactive: bool):
         """A callback deciding, per hook run, whether it may run: None to run
-        it, else the reason it does not. None when no check is needed."""
-        gate = self._hook_run_gate()
-        if gate is None:
+        it, else the reason it does not. None when no check is needed. A gated
+        run is asked about as a :data:`HOOK_RUN_TOOL` call through the confirm
+        handler, else at the terminal when *interactive*, as an approval of that
+        one run: no answer allows a later run."""
+        if self._hook_run_gate() is None:
             return None
 
         from ..hooks import display_safe
 
         def _permit(spec) -> Optional[str]:
+            gate = self._hook_run_gate()
+            if gate is None:
+                return None
             if gate == "refuse":
                 return "run_shell is disabled for this session and file writes run unconfirmed"
-            if self.confirm_handler is not None:
-                approved = invoke_confirm(
-                    self.confirm_handler,
-                    ToolCall(name="run_shell",
-                             args={"command": display_safe(spec.command_text(400))},
-                             raw="", start=0, end=0),
-                    agent=self._confirm_agent_label())
-            elif interactive:
-                approved = _agent.confirm(
-                    f"  Run the project's {spec.label} "
-                    f"({display_safe(spec.command_text(80))})?")
-            else:
-                return ("it needs the confirmation run_shell needs in this session, "
-                        "and none can be asked for here (a non-interactive run, or "
-                        "several tool calls running at once)")
+            if self.confirm_handler is None and not interactive:
+                return ("file writes run unconfirmed in this session, so it needs a "
+                        "confirmation, and this run is non-interactive with no "
+                        "approval handler")
+            call = ToolCall(name=HOOK_RUN_TOOL,
+                            args={"hook": spec.label,
+                                  "command": display_safe(spec.command_text(400)),
+                                  "note": _HOOK_RUN_NOTE},
+                            raw="", start=0, end=0)
+            with offering_session_allow(False), requiring_exact_approval(True):
+                if self.confirm_handler is not None:
+                    approved = invoke_confirm(self.confirm_handler, call,
+                                              agent=self._confirm_agent_label())
+                else:
+                    approved = self._confirm_tool(call)
+            consume_confirm_always()
             return None if approved else "the user declined to run it"
         return _permit
 
@@ -1355,6 +1385,11 @@ class _ExecutionMixin:
             _con.print()
             _con.print(Syntax(patch, "diff", theme="monokai", line_numbers=False))
             return confirm_diff(path_arg or "file")
+
+        if call.name == HOOK_RUN_TOOL:
+            print_info(f"  ({call.args.get('note', _HOOK_RUN_NOTE)})")
+            return confirm(f"  Run the project's {call.args.get('hook', 'hook')} "
+                           f"({call.args.get('command', '')})?")
 
         return confirm(f"  Allow {call.name}?")
 

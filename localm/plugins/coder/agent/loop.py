@@ -459,6 +459,9 @@ class _LoopMixin:
 
         def start_deferred_mcp(self) -> list: ...
 
+        # Set by Agent (core.py) through _ExecutionMixin.
+        def _hooks_may_ask(self, calls) -> bool: ...
+
         # Set by Agent (core.py) through _ContextMixin.
         def _note_typed_request(self, text) -> None: ...
 
@@ -1694,7 +1697,9 @@ class _LoopMixin:
         Groups consecutive non-destructive calls and runs each group in parallel
         with a ``ThreadPoolExecutor``.  Destructive calls are always run alone,
         in order, to avoid unintended interactions (file corruption, overlapping
-        shell commands, etc.).
+        shell commands, etc.).  A group runs one call at a time, with
+        *interactive* passed on, when a project hook may ask before it runs for
+        one of its calls (``_hooks_may_ask``).
 
         The grouping strategy preserves the original ordering of destructive
         calls relative to non-destructive ones: given [read, read, write, read],
@@ -1762,7 +1767,7 @@ class _LoopMixin:
                 abandoned = self._await_abandoned_peers(abandoned)
                 self._abandoned_peers = abandoned
                 still_live = abandoned
-            if destructive or len(group) == 1:
+            if destructive or len(group) == 1 or self._hooks_may_ask(group):
                 # Serial execution
                 for call in group:
                     if still_live:

@@ -713,7 +713,8 @@ export function buildConfirmCard(s, ev) {
   no.onclick = () => answer(false);
   buttons.appendChild(yes);
   buttons.appendChild(no);
-  buttons.appendChild(allowLabel);
+  // No "always allow" box on an exact approval, which covers this call only.
+  if (!ev.exact) buttons.appendChild(allowLabel);
   inner.appendChild(buttons);
   card.appendChild(inner);
   s.confirmCards.set(ev.confirm_id, { card, title, tool: ev.tool });
