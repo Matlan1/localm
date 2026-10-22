@@ -41,7 +41,13 @@ TEST_MAP = {"tests/test_scopes.py": ["localm/scopes.py"],
             "tests/sub/test_deep.py": ["localm/auth.py"]}
 SOURCES = {"tests/test_scopes.py": "import localm.scopes\n",
            "tests/test_auth.py": "from tests._helper import thing\nPath('fixtures/keys')\n",
-           "tests/sub/test_deep.py": "x = 1\n"}
+           "tests/sub/test_deep.py": "x = 1\n",
+           "tests/conftest.py": "from tests._hooks import pytest_runtest_makereport  # noqa\n",
+           "tests/_hooks.py": "def pytest_runtest_makereport():\n    from tests import _deeper\n",
+           "tests/_deeper.py": "x = 1\n"}
+WORKFLOW = ("on: push\njobs:\n  lint:\n    runs-on: ubuntu-latest\n"
+            "  mutation-run:\n    runs-on: ubuntu-latest\n    timeout-minutes: 180\n"
+            "  docs:\n    runs-on: ubuntu-latest\n")
 PYPROJECT = ('[tool.mutmut]\nonly_mutate = ["localm/scopes.py", "localm/auth.py"]\n'
              'pytest_add_cli_args_test_selection = ["tests/test_scopes.py", '
              '"tests/test_auth.py", "tests/sub/test_deep.py"]\n')
@@ -119,6 +125,33 @@ class TestSelect:
         partial = {k: v for k, v in TEST_MAP.items() if k != "tests/test_auth.py"}
         picked, reasons = _select(["tests/_helper.py"], test_map=partial)
         assert picked == MODULES and "reaches tests/test_auth.py" in reasons[0]
+
+
+class TestEveryModuleTriggers:
+    def test_a_module_the_root_conftest_imports_selects_every_module(self):
+        picked, reasons = _select(["tests/_hooks.py"])
+        assert picked == MODULES and reasons == ["every module: tests/_hooks.py changed"]
+
+    def test_the_conftest_import_chain_is_followed(self):
+        """NEGATIVE: a helper the conftest reaches only through another helper
+        still runs on every test, so it is never 'no module'."""
+        assert ms.conftest_imports(lambda rel: SOURCES.get(rel, "")) == [
+            "tests/_deeper.py", "tests/_hooks.py", "tests/conftest.py"]
+        assert _select(["tests/_deeper.py"])[0] == MODULES
+
+    def test_a_workflow_change_selects_every_module_only_in_a_mutation_job(self):
+        rt = lambda rel: SOURCES.get(rel, "")  # noqa: E731
+        assert ms.select([ms.WORKFLOW], MODULES, SELECTION, TEST_MAP, False, rt, True)[0] == MODULES
+        assert ms.select([ms.WORKFLOW], MODULES, SELECTION, TEST_MAP, False, rt, False) == ([], [])
+
+    def test_mutation_jobs_text_is_only_the_mutation_jobs(self):
+        text = ms.mutation_jobs_text(WORKFLOW)
+        assert text == "  mutation-run:\n    runs-on: ubuntu-latest\n    timeout-minutes: 180"
+        assert ms.mutation_jobs_text(WORKFLOW.replace("docs:", "docs2:")) == text
+        assert ms.mutation_jobs_text(WORKFLOW.replace("180", "170")) != text
+
+    def test_the_mutmut_pin_is_a_gate_file(self):
+        assert ".github/requirements/mutmut.txt" in ms.GATE_FILES
 
 
 STATS = {"tests_by_mangled_function_name": {
@@ -212,6 +245,8 @@ def repo(tmp_path):
     for rel, text in SOURCES.items():
         (r / rel).write_text(text, encoding="utf-8")
     (r / ms.MAP_FILE).write_text(json.dumps({"schema": 1, "test_files": TEST_MAP}), encoding="utf-8")
+    (r / ".github" / "workflows").mkdir(parents=True)
+    (r / ms.WORKFLOW).write_text(WORKFLOW, encoding="utf-8")
     (r / "README.md").write_text("hi\n", encoding="utf-8")
     _git(r, "add", "-A")
     _git(r, "commit", "-q", "-m", "base")
@@ -265,6 +300,15 @@ class TestMain:
         assert ms.main(_run(repo)) == 0
         out = capsys.readouterr().out
         assert out.splitlines()[0] == 'modules=["scopes","auth"]' and "[tool.mutmut] changed" in out
+
+    def test_a_mutation_job_edit_selects_every_module_and_another_job_edit_nothing(self, repo, capsys):
+        _commit(repo, ms.WORKFLOW, WORKFLOW.replace("lint:", "lint2:"))
+        assert ms.main(_run(repo)) == 0
+        assert capsys.readouterr().out.splitlines()[0] == "modules=[]"
+        _commit(repo, ms.WORKFLOW, WORKFLOW.replace("lint:", "lint2:").replace("180", "170"))
+        assert ms.main(_run(repo)) == 0
+        out = capsys.readouterr().out
+        assert out.splitlines()[0] == 'modules=["scopes","auth"]' and "a mutation-* job" in out
 
     def test_all_true_selects_every_module_without_a_diff(self, repo, capsys):
         assert ms.main(["--base", "no-such-ref", "--repo", str(repo), "--all", "true"]) == 0

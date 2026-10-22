@@ -11,16 +11,19 @@ over all the parts. ``shards(stems)`` is the CI matrix: one
 ``{"module", "part", "pattern"}`` entry per job.
 
 Each part's ``mutants/localm/<module>.py.meta`` lists every mutant of the
-module, with an exit code only for its own. ``merge`` combines the parts of
-each module into one ``.meta`` (and copies the mutated module and the stats
-beside it): an exit code from exactly one part, the function hashes every
-part agrees on. Exits 1 when a mutant has an exit code in two parts, when the
-parts disagree on a function hash, or when a part is missing or unreadable.
+module, with an exit code only for its own. ``mark`` writes the part's marker,
+``<module>.part.json`` (``{"module", "part"}``), beside it. ``merge`` finds
+every marker in ``--parts`` and in each directory directly under it (a single
+downloaded artifact lands in ``--parts`` itself, several land one directory
+each) and combines the parts of each module into one ``.meta`` (and copies the
+mutated module and the stats beside it): an exit code from exactly one part,
+the function hashes every part agrees on. Exits 1 when no marker is found,
+when two markers name the same part, when a mutant has an exit code in two
+parts, when the parts disagree on a function hash, or when a part is missing
+or unreadable.
 
-Run:  python scripts/mutation_parts.py merge --parts DIR --out DIR
-
-DIR (``--parts``) holds one directory per downloaded artifact,
-``mutation-meta-<module>-<part>``.
+Run:  python scripts/mutation_parts.py mark --module M --part K --out DIR
+      python scripts/mutation_parts.py merge --parts DIR --out DIR
 """
 
 from __future__ import annotations
@@ -34,7 +37,7 @@ from pathlib import Path
 
 PARTS = {"auth": 5, "config": 5}
 
-_ARTIFACT = re.compile(r"^mutation-meta-(?P<module>[A-Za-z0-9_]+)-(?P<part>\d+)$")
+_MODULE = re.compile(r"^[A-Za-z0-9_]+$")
 
 
 def digit_groups(n: int) -> list[str]:
@@ -93,18 +96,48 @@ def merge_metas(metas: list[dict]) -> tuple[dict, list[str]]:
     return merged, problems
 
 
-def merge(parts_dir: Path, out_dir: Path) -> list[str]:
-    """Merge every ``mutation-meta-<module>-<part>`` directory under
-    *parts_dir* into ``<out_dir>/<module>.py.meta`` and copy the mutated
-    module and the stats files beside it. Returns the problems."""
+def mark(module: str, part: int, out_dir: Path) -> Path:
+    """Write the marker of *module*'s part *part* into *out_dir*."""
+    if not _MODULE.match(module) or not 1 <= part <= PARTS.get(module, 1):
+        raise ValueError(f"no part {part} of module {module!r}")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"{module}.part.json"
+    path.write_text(json.dumps({"module": module, "part": part}), encoding="utf-8")
+    return path
+
+
+def _markers(parts_dir: Path) -> tuple[dict[str, dict[int, Path]], list[str]]:
     by_module: dict[str, dict[int, Path]] = {}
     problems: list[str] = []
-    for d in sorted(p for p in parts_dir.iterdir() if p.is_dir()) if parts_dir.is_dir() else []:
-        m = _ARTIFACT.match(d.name)
-        if m:
-            by_module.setdefault(m["module"], {})[int(m["part"])] = d
+    if not parts_dir.is_dir():
+        return by_module, problems
+    dirs = [parts_dir, *sorted(p for p in parts_dir.iterdir() if p.is_dir())]
+    for d in dirs:
+        for marker in sorted(d.glob("*.part.json")):
+            try:
+                data = json.loads(marker.read_text(encoding="utf-8"))
+                module, part = data["module"], data["part"]
+                if not isinstance(module, str) or not _MODULE.match(module) \
+                        or not isinstance(part, int) or isinstance(part, bool):
+                    raise ValueError("module must be a name and part an integer")
+            except (OSError, ValueError, KeyError, TypeError) as e:
+                problems.append(f"{marker}: unreadable part marker: {e}")
+                continue
+            if part in by_module.get(module, {}):
+                problems.append(f"{module}: two results claim part {part} "
+                                f"({by_module[module][part]} and {d})")
+                continue
+            by_module.setdefault(module, {})[part] = d
+    return by_module, problems
+
+
+def merge(parts_dir: Path, out_dir: Path) -> list[str]:
+    """Merge every part found by its marker under *parts_dir* into
+    ``<out_dir>/<module>.py.meta`` and copy the mutated module and the stats
+    files beside it. Returns the problems."""
+    by_module, problems = _markers(parts_dir)
     if not by_module:
-        return [f"no mutation-meta-<module>-<part> directory under {parts_dir}"]
+        return problems + [f"no mutation part marker (<module>.part.json) under {parts_dir}"]
     out_dir.mkdir(parents=True, exist_ok=True)
     for module, parts in sorted(by_module.items()):
         n = PARTS.get(module, 1)
@@ -137,10 +170,21 @@ def merge(parts_dir: Path, out_dir: Path) -> list[str]:
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
+    mk = sub.add_parser("mark", help="write a part's marker beside its results")
+    mk.add_argument("--module", required=True)
+    mk.add_argument("--part", type=int, required=True)
+    mk.add_argument("--out", type=Path, required=True)
     mp = sub.add_parser("merge", help="merge the downloaded part artifacts")
     mp.add_argument("--parts", type=Path, required=True)
     mp.add_argument("--out", type=Path, required=True)
     args = ap.parse_args(argv)
+    if args.cmd == "mark":
+        try:
+            print(f"Wrote {mark(args.module, args.part, args.out)}")
+        except ValueError as e:
+            print(f"mutation parts: {e}", file=sys.stderr)
+            return 1
+        return 0
     problems = merge(args.parts, args.out)
     for p in problems:
         print(p, file=sys.stderr)

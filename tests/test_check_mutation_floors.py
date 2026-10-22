@@ -1030,9 +1030,15 @@ class TestCommittedBaseline:
                       if st.get("name", "").startswith("Upload this module"))
         paths = [p.strip() for p in upload["with"]["path"].splitlines() if p.strip()]
         assert sorted(paths) == [
+            "mutants/localm/${{ matrix.module }}.part.json",
             "mutants/localm/${{ matrix.module }}.py",
             "mutants/localm/${{ matrix.module }}.py.meta",
             "mutants/localm/${{ matrix.module }}.stats.json"]
+        mark = next(st for st in wf["jobs"]["mutation-run"]["steps"]
+                    if "mutation_parts.py mark" in (st.get("run") or ""))
+        assert mark["if"] == "always()"
+        assert '--module "$MUTATION_MODULE" --part "$MUTATION_PART" --out mutants/localm' in mark["run"]
+        assert mark["env"]["MUTATION_PART"] == "${{ matrix.part }}"
         assert upload["with"]["name"] == "mutation-meta-${{ matrix.module }}-${{ matrix.part }}"
         steps = wf["jobs"]["mutation-test"]["steps"]
         download = next(st for st in steps if st.get("name", "").startswith("Download every shard"))

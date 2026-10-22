@@ -10,7 +10,10 @@ only_mutate`` module. Otherwise the diff from the merge base with ``--base``
 
 * every module, when the change touches the mutation gate itself
   (GATE_FILES), the ``[tool.mutmut]`` table of pyproject.toml (compared
-  parsed, so an unrelated pyproject edit does not count) or tests/conftest.py;
+  parsed, so an unrelated pyproject edit does not count), the text of a
+  ``mutation-*`` job in .github/workflows/ci.yml, tests/conftest.py, or a
+  ``tests.*`` module tests/conftest.py imports (directly or through another
+  such module);
 * a module whose source changed;
 * the modules a changed test file of the mutmut test selection exercises,
   read from scripts/mutation_test_map.json; a selection file the map does not
@@ -76,10 +79,49 @@ GATE_FILES = (
     "scripts/write_mutation_summary.py",
     "scripts/mutation_scope.py",
     "scripts/mutation_parts.py",
+    ".github/requirements/mutmut.txt",
     MAP_FILE,
 )
 
 ROOT_CONFTEST = "tests/conftest.py"
+WORKFLOW = ".github/workflows/ci.yml"
+
+_JOB = re.compile(r"^  ([A-Za-z0-9_-]+):\s*$")
+_TESTS_IMPORT = re.compile(r"^\s*(?:from\s+tests\.([A-Za-z0-9_]+)\s+import|import\s+tests\.([A-Za-z0-9_]+)"
+                           r"|from\s+tests\s+import\s+([A-Za-z0-9_, ]+))", re.M)
+
+
+def mutation_jobs_text(workflow_text: str) -> str:
+    """The lines of every job under ``jobs:`` whose id starts with
+    ``mutation-``, from its id line up to the next job id."""
+    out, keep, in_jobs = [], False, False
+    for line in workflow_text.splitlines():
+        if line.startswith("jobs:"):
+            in_jobs = True
+            continue
+        if in_jobs and line and not line.startswith(" ") and not line.startswith("#"):
+            in_jobs, keep = False, False
+        m = _JOB.match(line) if in_jobs else None
+        if m:
+            keep = m.group(1).startswith("mutation-")
+        if keep:
+            out.append(line.rstrip())
+    return "\n".join(out)
+
+
+def conftest_imports(read_text) -> list[str]:
+    """tests/conftest.py and every ``tests/<name>.py`` it imports as
+    ``tests.<name>``, followed through the imported files."""
+    seen, todo = [], [ROOT_CONFTEST]
+    while todo:
+        rel = todo.pop()
+        if rel in seen:
+            continue
+        seen.append(rel)
+        for a, b, c in _TESTS_IMPORT.findall(read_text(rel)):
+            names = [a or b] if (a or b) else [n.strip() for n in c.split(",")]
+            todo += [f"tests/{n}.py" for n in names if n and f"tests/{n}.py" not in seen]
+    return sorted(seen)
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -176,9 +218,10 @@ def _mentions(text: str, key: str) -> bool:
 
 def select(changed: list[str], modules: list[str], selection: list[str],
            test_map: dict[str, list[str]], config_changed: bool,
-           read_text) -> tuple[list[str], list[str]]:
-    """``(module paths to run, reasons)``. *read_text* returns a selection
-    file's source at HEAD, for the support-file rule."""
+           read_text, workflow_changed: bool = False) -> tuple[list[str], list[str]]:
+    """``(module paths to run, reasons)``. *read_text* returns a repository
+    file's source at HEAD (``""`` when absent); *workflow_changed* says a
+    ``mutation-*`` job of the workflow changed."""
     modules = [_norm(m) for m in modules]
     norm = sorted({_norm(c) for c in changed})
     sel = [_norm(s) for s in selection]
@@ -186,8 +229,9 @@ def select(changed: list[str], modules: list[str], selection: list[str],
     reasons: list[str] = []
 
     every = [h for h in touched(norm, modules, config_changed) if h not in modules]
-    if ROOT_CONFTEST in norm:
-        every.append(ROOT_CONFTEST)
+    every += [h for h in conftest_imports(read_text) if h in norm]
+    if workflow_changed and WORKFLOW in norm:
+        every.append(f"{WORKFLOW} (a mutation-* job)")
     if every:
         return list(modules), [f"every module: {h} changed" for h in every]
 
@@ -331,8 +375,17 @@ def main(argv: list[str]) -> int:
             except (subprocess.CalledProcessError, OSError):
                 return ""
 
+        def read_at(ref: str, rel: str) -> str:
+            try:
+                return _git(args.repo, "show", f"{ref}:{rel}")
+            except (subprocess.CalledProcessError, OSError):
+                return ""
+
+        workflow_changed = (mutation_jobs_text(read_at(merge_base, WORKFLOW))
+                            != mutation_jobs_text(read_at("HEAD", WORKFLOW)))
         picked, reasons = select(changed, modules, selection, test_map,
-                                 section != mutmut_section(base_pyproject), read_text)
+                                 section != mutmut_section(base_pyproject), read_text,
+                                 workflow_changed)
 
     stems = [stem(m) for m in picked]
     line = "modules=" + json.dumps(stems, separators=(",", ":"))

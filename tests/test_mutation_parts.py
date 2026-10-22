@@ -75,9 +75,13 @@ class TestSplit:
 HASHES = {"x_verify": "aaaaaaaaaaaa"}
 
 
-def _part(root: Path, module: str, part: int, codes: dict, hashes=None, stats=True) -> Path:
-    d = root / f"mutation-meta-{module}-{part}"
-    d.mkdir(parents=True)
+def _part(root: Path, module: str, part: int, codes: dict, hashes=None, stats=True,
+          flat: bool = False) -> Path:
+    """One part's artifact as download-artifact lays it out: in its own
+    directory, or (*flat*, the single-artifact download) in *root* itself."""
+    d = root if flat else root / f"mutation-meta-{module}-{part}"
+    d.mkdir(parents=True, exist_ok=flat)
+    mp.mark(module, part, d)
     (d / f"{module}.py.meta").write_text(json.dumps({
         "exit_code_by_key": codes, "hash_by_function_name": dict(hashes or HASHES),
         "type_check_error_by_key": {}, "durations_by_key": {k: 1.0 for k, v in codes.items() if v is not None},
@@ -155,6 +159,46 @@ class TestMerge:
         (tmp_path / "parts").mkdir()
         assert mp.merge(tmp_path / "parts", tmp_path / "o")
         assert mp.merge(tmp_path / "nowhere", tmp_path / "o")
+
+    def test_a_single_artifact_downloaded_flat_merges(self, tmp_path):
+        """download-artifact puts a lone matching artifact straight into the
+        target directory, not into a directory named after it."""
+        parts = tmp_path / "parts"
+        _part(parts, "portmux", 1, {"localm.portmux.x_f__mutmut_1": 1}, hashes={"x_f": "d" * 12},
+              flat=True)
+        out = tmp_path / "mutants" / "localm"
+        assert mp.merge(parts, out) == []
+        results, problems = cmf.load_results(tmp_path / "mutants", ["localm/portmux.py"])
+        assert problems == [] and results["localm/portmux.py"]["mutants"] == {
+            "localm.portmux.x_f__mutmut_1": "killed"}
+
+    def test_a_directory_without_a_marker_is_not_a_part(self, tmp_path):
+        """NEGATIVE: results whose module and part nobody recorded are never merged."""
+        parts = tmp_path / "parts"
+        d = _part(parts, "scopes", 1, {"localm.scopes.x_grants__mutmut_1": 1}, hashes={"x_grants": "c" * 12})
+        (d / "scopes.part.json").unlink()
+        problems = mp.merge(parts, tmp_path / "o")
+        assert problems == [f"no mutation part marker (<module>.part.json) under {parts}"]
+
+    def test_two_results_claiming_one_part_is_a_problem(self, tmp_path):
+        parts = tmp_path / "parts"
+        _part(parts, "scopes", 1, {"localm.scopes.x_grants__mutmut_1": 1}, hashes={"x_grants": "c" * 12})
+        twin = parts / "copy"
+        twin.mkdir()
+        mp.mark("scopes", 1, twin)
+        assert any("two results claim part 1" in p for p in mp.merge(parts, tmp_path / "o"))
+
+    @pytest.mark.parametrize("module, part", [("auth", 0), ("auth", mp.PARTS["auth"] + 1),
+                                              ("scopes", 2), ("../x", 1)])
+    def test_mark_refuses_a_part_that_does_not_exist(self, tmp_path, module, part):
+        with pytest.raises(ValueError):
+            mp.mark(module, part, tmp_path)
+
+    def test_an_unreadable_marker_is_a_problem(self, tmp_path):
+        parts = tmp_path / "parts"
+        d = _part(parts, "scopes", 1, {"localm.scopes.x_grants__mutmut_1": 1}, hashes={"x_grants": "c" * 12})
+        (d / "scopes.part.json").write_text('{"module": "scopes"}', encoding="utf-8")
+        assert any("unreadable part marker" in p for p in mp.merge(parts, tmp_path / "o"))
 
     def test_an_unsplit_module_merges_from_its_one_part(self, tmp_path):
         parts = tmp_path / "parts"
