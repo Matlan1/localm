@@ -644,6 +644,18 @@ class TestAnUnfinishedRevisionIsNotMergedWithAnother(_InterruptedAfterTheFirstFi
             _FakeApi.model_info = real_info
         assert "files localm cannot match" in " ".join(capsys.readouterr().out.split())
 
+    def test_a_subfolder_that_cannot_be_listed_blocks_the_adoption(self, hub, monkeypatch):
+        self._copy(hub, hub.repo_files[COMMIT])
+        (hub.models_dir / "q" / "locked").mkdir()
+        real_scandir = os.scandir
+
+        def scandir(path="."):
+            if os.path.basename(os.fspath(path)) == "locked":
+                raise PermissionError(13, "Access is denied", os.fspath(path))
+            return real_scandir(path)
+        monkeypatch.setattr(os, "scandir", scandir)
+        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is False
+
     @pytest.mark.skipif(os.name != "nt", reason="directory junctions are a Windows feature")
     def test_a_linked_subfolder_blocks_the_adoption(self, hub, tmp_path):
         import subprocess
