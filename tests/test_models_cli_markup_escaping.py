@@ -380,3 +380,14 @@ class TestListCmdMarkupEscaping:
         assert res.exit_code == 0, res.output
         assert note in res.output, (
             f"sync_models_dir's note must survive verbatim: {res.output!r}")
+
+
+def test_list_names_a_sync_that_only_retyped_entries(cli_runner, monkeypatch):
+    import localm.cli.models as modelscli
+    from localm.model_manager.registry import ModelSyncResult
+    monkeypatch.setattr(modelscli, "sync_models_dir",
+                        lambda *a, **k: ModelSyncResult(retyped=2))
+    monkeypatch.setattr(modelscli, "list_models", lambda *a, **k: None)
+    res = CliRunner().invoke(main, ["list"])
+    assert res.exit_code == 0, res.output
+    assert "Models folder synced: 2 retyped." in res.output

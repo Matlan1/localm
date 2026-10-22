@@ -101,3 +101,29 @@ def test_pulling_a_file_with_no_known_layout_still_registers_unknown(isolated_ho
     assert _pull(monkeypatch, {"something.weight": (2, 2)},
                  "owner/repo:odd.safetensors") is True
     assert mm.load_registry()["odd.safetensors"]["model_type"] == "unknown"
+
+
+def test_pulling_again_retypes_an_entry_registered_unknown(isolated_home, monkeypatch, capsys):
+    spec = "owner/Real-ESRGAN_repackaged:RealESRGAN_x4plus.safetensors"
+    assert _pull(monkeypatch, {"something.weight": (2, 2)}, spec) is True
+    registry = mm.load_registry()
+    entry = registry["RealESRGAN_x4plus.safetensors"]
+    assert entry["model_type"] == "unknown"
+    _safetensors(Path(entry["path"]), RRDB)
+    capsys.readouterr()
+
+    assert mm.pull_model(spec) is True
+    assert mm.load_registry()["RealESRGAN_x4plus.safetensors"]["model_type"] == "upscaler"
+    assert "Typed RealESRGAN_x4plus.safetensors as upscaler" in capsys.readouterr().out
+
+
+def test_pulling_again_never_changes_a_type_that_is_already_set(isolated_home, monkeypatch):
+    spec = "owner/Real-ESRGAN_repackaged:RealESRGAN_x4plus.safetensors"
+    assert _pull(monkeypatch, RRDB, spec) is True
+
+    def set_vae(reg):
+        reg["RealESRGAN_x4plus.safetensors"]["model_type"] = "vae"
+
+    mm.update_registry(set_vae)
+    assert mm.pull_model(spec) is True
+    assert mm.load_registry()["RealESRGAN_x4plus.safetensors"]["model_type"] == "vae"

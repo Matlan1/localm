@@ -44,6 +44,7 @@ from .gguf import _gguf_recently_written
 from .gguf import first_split_part
 from .gguf import split_gguf_parts
 from .gguf import gguf_non_chat_model_type
+from .gguf import speech_route_available as _speech_route_available
 from .gguf import MEDIA_KIND_TYPES, gguf_media_component_type
 from .gguf import gguf_embedding_signal
 from .gguf import gguf_reranker_state
@@ -209,16 +210,6 @@ def _no_backend_runs_file(path: str) -> bool:
             and backend_registry.backend_for(path) is None)
 
 
-def _speech_route_available() -> bool:
-    """True when the tts plugin, which mounts POST /v1/audio/speech, is active."""
-    from localm.plugins.engine import PluginManager
-    try:
-        return PluginManager(None).is_active("tts")
-    except Exception as e:
-        logger.debug("could not tell whether the tts plugin is active: %s", e)
-        return False
-
-
 def is_unlisted_entry(entry) -> bool:
     """True when a registry *entry*'s ``model_type`` is one GET /v1/models omits
     (see :data:`UNLISTED_TYPES`)."""
@@ -231,7 +222,9 @@ def chat_load_refusal(name: str, registry: dict) -> Optional[str]:
     None when *name* may be loaded. Refuses an entry whose ``model_type`` is in
     :data:`NON_CHAT_TYPES`: a vision projector gets :func:`projector_refusal`'s
     message naming its chat model, every other type a message saying what the
-    entry is (and, for 'tts', where it is used). Reads the registry only."""
+    entry is (and, for 'tts', where it is used). An 'unknown' entry is refused
+    when its file is one no backend runs; that check reads the file system and
+    the backend registry."""
     entry = registry.get(name)
     kind = entry.get("model_type") if isinstance(entry, dict) else None
     if kind == "unknown":
@@ -3387,7 +3380,10 @@ def _register_with_dedup(
         # clobbered by a later call that could not itself determine them.
         need_arch_backfill = architecture is not None and "architecture" not in reg[model_name]
         need_expert_backfill = expert_count is not None and "expert_count" not in reg[model_name]
-        if need_sha_backfill or need_mmproj_backfill or need_arch_backfill or need_expert_backfill:
+        need_type_backfill = (reg[model_name].get("model_type") == "unknown"
+                              and model_type in MODEL_TYPES - {"llm", "unknown"})
+        if (need_sha_backfill or need_mmproj_backfill or need_arch_backfill
+                or need_expert_backfill or need_type_backfill):
             def _backfill(r: dict) -> None:      # atomic RMW
                 e = r.get(model_name)
                 if not isinstance(e, dict):
@@ -3400,7 +3396,12 @@ def _register_with_dedup(
                     e["architecture"] = architecture
                 if need_expert_backfill and "expert_count" not in e:
                     e["expert_count"] = expert_count
+                if need_type_backfill and e.get("model_type") == "unknown":
+                    e["model_type"] = model_type
             _mm.update_registry(_backfill)
+            if need_type_backfill:
+                console.print(f"[green]✓[/green] Typed [bold]{escape(model_name)}[/bold] "
+                              f"as {escape(model_type)}")
         others = [a for a in aliases if a != model_name]
         if others:
             console.print(f"[dim]Also registered as: "
