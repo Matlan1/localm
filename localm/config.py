@@ -927,8 +927,8 @@ DEFAULT_CONFIG: dict = {
     # memory): a small dedicated GGUF, loaded separately from the chat model.
     # Value = a known key (bge-small-en-v1.5, nomic-embed-text-v1.5), a registered
     # model name, or a GGUF path. A known model is fetched into
-    # <home>/models/embeddings on first use (auto only under net_mode=allow, else
-    # run 'localm setup-embeddings'). Until present, memory/RAG fall back to BM25.
+    # <home>/models/embeddings on first use (automatic under net_mode ask and allow;
+    # under off run 'localm setup-embeddings'). Until present, memory/RAG fall back to BM25.
     "embedding_model": "bge-small-en-v1.5",
     # GPU layers for the embedding model. None (default) = automatic placement:
     # full GPU offload when free VRAM demonstrably holds the model (file size

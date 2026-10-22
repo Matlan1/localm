@@ -18,8 +18,8 @@ Provisioning (``resolve_embedding_model_path``): the ``embedding_model`` config 
 is either a filesystem path, a registered model name, or a known key (default
 ``bge-small-en-v1.5``). A known model missing from ``<home>/models/embeddings/`` is
 downloaded on demand, gated by the network policy (never behind ``net_mode=off``
-unless ``net_allow_model_downloads`` exempts it; auto only under ``net_mode=allow``
-- otherwise the user runs ``localm setup-embeddings`` or the GUI's download action).
+unless ``net_allow_model_downloads`` exempts it; automatic under ``net_mode=ask`` and
+``allow``, otherwise the user runs ``localm setup-embeddings`` or the GUI's download action).
 When no embedding model can be resolved, callers degrade to lexical-only retrieval;
 the reason is recorded for ``last_error()`` (what the GUI's RAG-embedding status
 reads) on every resolve attempt, not only when a load is actually attempted. A
@@ -371,7 +371,7 @@ def resolve_embedding_model_path(*, allow_download: Optional[bool] = None,
     Order: an explicit filesystem path -> a registered model name -> a known key
     (downloaded into <home>/models/embeddings if missing and the net policy allows).
     ``allow_download`` overrides the policy (used by ``localm setup-embeddings`` to
-    force the fetch); default follows net_mode (auto only under 'allow').
+    force the fetch); default follows net_mode (automatic under 'ask' and 'allow').
     ``allow_download=True`` also re-hashes an already-present known model file
     against its pin and fetches it again when it differs; every other call
     trusts a present file without reading it.
@@ -617,22 +617,21 @@ def _download_known(name: str, repo: str, filename: str, dest: Path,
     skipped; only the download-failure branch warns, deduped the same way as
     ``resolve_embedding_model_path``'s own WARNING-worthy failures."""
     from localm.netpolicy import downloads_allowed_when_off, network_mode
+    mode = network_mode()
+    probe_only = allow_download is False
     if allow_download is None:
-        allow_download = network_mode() == "allow"
+        allow_download = mode in ("allow", "ask")
     if not allow_download:
-        mode = network_mode()
-        if mode == "ask":
-            reason = (
-                f"embedding model {name!r} not present; net_mode=ask does not "
-                "auto-fetch it, but the one-time download action will fetch it "
-                "right now - use it, or set net_mode=allow to auto-fetch on "
-                "future misses too (memory/RAG use lexical BM25 until then)")
-        else:
-            reason = (
-                f"embedding model {name!r} not present and not auto-downloading "
-                f"(net_mode={mode}); use the one-time download action, "
-                "or set net_mode=allow, to enable semantic search (memory/RAG use "
-                "lexical BM25 until then)")
+        if probe_only:
+            reason = f"embedding model {name!r} not present yet"
+            _set_resolve_outcome(name, reason)
+            logger.debug(reason)
+            return None
+        reason = (
+            f"embedding model {name!r} not present and not auto-downloading "
+            f"(net_mode={mode}); use the one-time download action, "
+            "or set net_mode=ask or allow, to enable semantic search (memory/RAG use "
+            "lexical BM25 until then)")
         _set_resolve_outcome(name, reason)
         logger.info(reason)
         return None
@@ -1553,7 +1552,7 @@ _EMBEDDER: Optional[IsolatedEmbedder] = None
 # from the same broken one: see get_embedder for how a changed spec clears the
 # stale latch, and _set_resolve_outcome for the matching resolve-side guard.
 _LOAD_FAILED_SPEC: Optional[str] = None
-_TRIED_DOWNLOAD = False          # one-time auto-download attempt (only net_mode=allow)
+_TRIED_DOWNLOAD = False          # one-time auto-download attempt (net_mode ask or allow)
 # Why the last LOAD or RESOLVE failed, for the GUI picker. See last_error() and
 # _record_resolve_failure/_record_resolve_success above.
 _LAST_ERROR: Optional[str] = None
@@ -1740,7 +1739,7 @@ def get_embedder(*, on_progress: Optional[Callable[[str], None]] = None
         path = resolve_embedding_model_path(allow_download=False)
         if not path and not _TRIED_DOWNLOAD:
             # First miss: one auto-download attempt, gated by net policy inside
-            # (it only fetches under net_mode=allow). Latched so a batch of embed
+            # (it fetches under net_mode ask and allow). Latched so a batch of embed
             # calls does not re-attempt the download on every chunk.
             _TRIED_DOWNLOAD = True
             _emit_stage(on_progress, "Not found locally - attempting a download...")
