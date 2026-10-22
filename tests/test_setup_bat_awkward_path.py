@@ -93,7 +93,9 @@ def _awkward_dir(tmp_path: Path, name: str) -> Path:
 
 
 def _run_probe(folder: Path, body: str, env_extra: dict[str, str] | None = None):
-    text = ("@echo off\n" + body).replace("\r\n", "\n").replace("\n", "\r\n")
+    # Pin the console code page to the OEM page the probe is written and decoded in.
+    text = (f"@echo off\nchcp {_oem_encoding()[2:]} >nul\n" + body).replace(
+        "\r\n", "\n").replace("\n", "\r\n")
     (folder / "probe.bat").write_bytes(text.encode(_oem_encoding(), "replace"))
     env = dict(os.environ)
     env.update(env_extra or {})
