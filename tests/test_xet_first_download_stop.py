@@ -206,10 +206,12 @@ def test_the_stop_record_measures_the_partial_left_by_the_stopped_download(
     assert kept >= STOP_AT
 
 
-def test_a_stop_outside_a_download_leaves_no_stop_record(monkeypatch):
+def test_a_stop_outside_a_download_does_not_report_an_earlier_stop(monkeypatch):
     from localm.cli import models as cli_models
-    with pull_mod._snapshot_progress(lambda: 5, 10):
-        pass
+    with pytest.raises(KeyboardInterrupt):
+        with pull_mod._snapshot_progress(lambda: 5, 10):
+            raise KeyboardInterrupt
+    assert pull_mod.stopped_download() == (5, 10)
 
     def fake_pull_model(*a, **kw):
         raise KeyboardInterrupt
@@ -218,5 +220,6 @@ def test_a_stop_outside_a_download_leaves_no_stop_record(monkeypatch):
     result = CliRunner().invoke(cli_models.pull, ["owner/repo:model.gguf"])
 
     assert result.exit_code == 130
-    assert "Download stopped. Run the same command again to continue." in result.output
+    assert "Download stopped; run the same command again to continue." in result.output
+    assert "saved" not in result.output
     assert pull_mod.stopped_download() is None

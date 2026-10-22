@@ -796,6 +796,12 @@ def stopped_download() -> "tuple[int, int] | None":
     return _STOPPED
 
 
+def forget_stopped_download() -> None:
+    """Clear the record :func:`stopped_download` returns."""
+    global _STOPPED
+    _STOPPED = None
+
+
 @contextlib.contextmanager
 def _record_stop(measure, total_size: int):
     """On a KeyboardInterrupt in the body, record ``(measure(), total_size)``

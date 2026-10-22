@@ -748,6 +748,8 @@ def pull(model_spec, name, sha256, redownload, mmproj, type, store,
 
     Models are stored in <data dir>/models/ and registered automatically.
     """
+    from ..model_manager.pull import forget_stopped_download
+    forget_stopped_download()
     try:
         ok = pull_model(model_spec, name, expected_sha256=sha256, redownload=redownload,
                         mmproj_spec=mmproj, model_type=type, store=store,
@@ -769,7 +771,7 @@ def _stopped_pull_message() -> str:
     from ..model_manager.pull import stopped_download
     stopped = stopped_download()
     if stopped is None:
-        return "Download stopped. Run the same command again to continue."
+        return "Download stopped; run the same command again to continue."
     saved, total = stopped
     if saved <= 0:
         return ("Download stopped before anything was saved to disk. Run the "
