@@ -1359,6 +1359,7 @@ export const I18N_EN = {
     "A model spec can't start with '-'. Use owner/repo, owner/repo:file.gguf, or an https URL.",
   "models.pull.specPlaceholder":
     "owner/repo:file.gguf  ·  https://…  ·  a local folder or .gguf path",
+  "models.pull.saved": "{bytes} saved to disk",
   "models.pull.stalled": "no data arriving",
   "models.pull.starting": "starting…",
   "models.pull.store.copy": "Copy into library",

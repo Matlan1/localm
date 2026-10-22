@@ -119,6 +119,27 @@ test("pull progress text includes the smoothed speed and ETA", async () => {
   assert.match(text, /ETA 1m 30s/, "shows the ETA");
 });
 
+test("pull progress names the bytes saved to disk only when the frame carries them", async () => {
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch() });
+  runScript(win, `
+    streamJob = async (jobId, onLine, onProgress) => {
+      const pct = document.getElementById("pull-pct");
+      onProgress({ pct: 48, total: 2500000000, downloaded: 1200000000, saved: 269000000 });
+      globalThis.__lagging = pct.textContent;
+      onProgress({ pct: 50, total: 1000000, downloaded: 500000 });
+      globalThis.__keeping = pct.textContent;
+      return { status: "done" };
+    };
+  `);
+  win.document.getElementById("pull-spec").value = "owner/repo:m.gguf";
+  win.document.getElementById("pull-start").click();
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+  assert.match(win.__lagging, /1\.12 GB \/ 2\.33 GB/);
+  assert.match(win.__lagging, /256\.5 MB saved to disk/);
+  assert.doesNotMatch(win.__keeping, /saved to disk/);
+});
+
 // --------------------------------------------------------------------------- //
 //  a multi-file (split GGUF) download shows "file N of M: <name>"               //
 // --------------------------------------------------------------------------- //

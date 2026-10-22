@@ -46,6 +46,22 @@ class TestByteTracker:
         assert rate == 50_000.0
         assert eta == 14
 
+    def test_the_bytes_on_disk_are_reported_apart_while_the_figure_runs_ahead(
+            self, monkeypatch):
+        monkeypatch.setattr(pull_mod, "METER", FakeMeter(transferred=1_200_000_000, rate=50e6))
+        tracker = pull_mod._ByteTracker(total=2_500_000_000, base=0)
+        downloaded, _, _ = tracker.sample(on_disk=269_000_000)
+        assert downloaded == 1_200_000_000
+        assert tracker.saved == 269_000_000
+
+    def test_no_saved_figure_while_the_file_keeps_up(self, monkeypatch):
+        monkeypatch.setattr(pull_mod, "METER", FakeMeter(transferred=500_000_000, rate=50e6))
+        tracker = pull_mod._ByteTracker(total=2_500_000_000, base=0)
+        tracker.sample(on_disk=495_000_000)
+        assert tracker.saved is None
+        tracker.sample(on_disk=500_000_000)
+        assert tracker.saved is None
+
     def test_a_resumed_download_counts_the_bytes_it_started_with(self, monkeypatch):
         monkeypatch.setattr(pull_mod, "METER", FakeMeter(transferred=100, rate=10.0))
         tracker = pull_mod._ByteTracker(total=1000, base=400)
@@ -95,6 +111,22 @@ class TestGuiFrames:
         assert first["downloaded"] == 400
         assert first["rate"] == 100
         assert first["eta"] == 6
+
+    def test_a_frame_carries_the_saved_bytes_only_while_they_lag(self, gui, capsys, monkeypatch):
+        monkeypatch.setattr(pull_mod, "METER",
+                            FakeMeter(transferred=1_200_000_000, rate=50e6))
+        run = pull_mod._ProgressRun(lambda: 269_000_000, 2_500_000_000)
+        run.start()
+        run.finish(succeeded=False)
+        first = _events(capsys)[0]
+        assert first["downloaded"] == 1_469_000_000
+        assert first["saved"] == 269_000_000
+
+        monkeypatch.setattr(pull_mod, "METER", FakeMeter(transferred=400, rate=100.0))
+        run = pull_mod._ProgressRun(lambda: 0, 1000)
+        run.start()
+        run.finish(succeeded=False)
+        assert "saved" not in _events(capsys)[0]
 
     def test_a_frame_without_a_measured_rate_omits_it(self, gui, capsys, monkeypatch):
         monkeypatch.setattr(pull_mod, "METER", FakeMeter(transferred=0, rate=None))
@@ -155,6 +187,27 @@ class TestTerminalBar:
         out, err = capsys.readouterr()
         assert out == ""
         assert err == "m.gguf: 25% (250 B / 1.0 KB) at 25 B/s, 30s left\n"
+
+    def test_a_pipe_line_and_the_bar_name_the_saved_bytes_when_they_lag(
+            self, monkeypatch, capsys):
+        from rich.console import Console
+        monkeypatch.delenv("LOCALM_PROGRESS_JSON", raising=False)
+        monkeypatch.setattr(pull_mod, "METER",
+                            FakeMeter(transferred=1_200_000_000, rate=50e6))
+        run = pull_mod._ProgressRun(lambda: 269_000_000, 2_500_000_000, label="m.gguf")
+        run.start()
+        run._tick()
+        run.finish(succeeded=False)
+        assert capsys.readouterr().err == (
+            "m.gguf: 59% (1.5 GB / 2.5 GB) at 50.0 MB/s, 21s left, 269.0 MB saved to disk\n")
+
+        buf = io.StringIO()
+        monkeypatch.setattr(pull_mod, "console",
+                            Console(file=buf, force_terminal=True, width=140))
+        run = pull_mod._ProgressRun(lambda: 269_000_000, 2_500_000_000, label="m.gguf")
+        run.start()
+        run.finish(succeeded=False)
+        assert "269.0 MB saved" in buf.getvalue()
 
     def test_a_listener_replaces_the_plain_lines(self, monkeypatch, capsys):
         monkeypatch.delenv("LOCALM_PROGRESS_JSON", raising=False)

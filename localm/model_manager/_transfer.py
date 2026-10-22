@@ -248,7 +248,7 @@ def eta_seconds(downloaded: int, total: int, rate: Optional[float]) -> Optional[
 
 
 def describe(downloaded: int, total: int, rate: Optional[float],
-             label: str = "") -> str:
+             label: str = "", saved: Optional[int] = None) -> str:
     """One line a person can read: ``'name: 34% (167.1 MB / 491.4 MB) at 22.0
     MB/s, 15s left'``."""
     head = f"{label}: " if label else ""
@@ -262,4 +262,6 @@ def describe(downloaded: int, total: int, rate: Optional[float],
         eta = eta_seconds(downloaded, total, rate)
         if eta is not None:
             text += f", {format_duration(eta)} left"
+    if saved is not None:
+        text += f", {format_size(saved)} saved to disk"
     return text
