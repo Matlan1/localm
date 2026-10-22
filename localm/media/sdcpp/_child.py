@@ -19,6 +19,7 @@ command at a time:
                         "fps", "steps", "cfg_scale", "flow_shift", "seed",
                         "sample_method", "scheduler", "init_image", "loras"})
     ("upscale_image", {"runtime_dir", "extra_dirs", "model_path", "image", "tile_size"})
+    ("attention_rate", {"runtime_dir", "head_dim"})
     ("shutdown", None)
 
 ``resp_q``: zero or more events, then exactly one final reply per command:
@@ -79,6 +80,10 @@ class _State:
     budget_refused = False
     vae_decoder_ch: Optional[int] = None
     wan_vae_conv: Optional[str] = None
+    dit_hidden: Optional[int] = None
+    dit_patch: Optional[int] = None
+    flash_auto: Optional[bool] = None
+    dit_heads: Optional[int] = None
 
 
 class _BudgetRefused(RuntimeError):
@@ -150,6 +155,11 @@ _MODEL_DESC_RE = re.compile(r"\AWan\d\.[\dx]-[A-Za-z0-9.]+-[A-Za-z0-9.]+\Z")
 _CAPACITY_SHORT_TEXT = "cannot make enough memory available"
 _KL_DECODER_CH_RE = re.compile(r"\bvae decoder: ch = (\d+)")
 _WAN_VAE_CONV_RE = re.compile(r"\bWan VAE convolution type: (2D|3D)\b")
+_FLASH_AUTO_RE = re.compile(r"\bflash attention auto: \S+ -> (on|off)\b")
+_FLUX_SHAPE_RE = re.compile(
+    r"\bflux: .*\bhidden_size = (\d+), num_heads = (\d+)")
+_HUNYUAN_SHAPE_RE = re.compile(
+    r"\bhunyuan video: .*\bhidden_size = (\d+),.*\bpatch_size = \d+x(\d+)x\d+")
 _SEGMENT_REFUSED_RE = re.compile(r"\bsegment \d+/\d+ \([^)]*\) failed during weight preparation")
 
 
@@ -205,6 +215,15 @@ def _make_callbacks(resp_q):
         wan = _WAN_VAE_CONV_RE.search(msg)
         if wan:
             _State.wan_vae_conv = wan.group(1)
+        flash = _FLASH_AUTO_RE.search(msg)
+        if flash:
+            _State.flash_auto = flash.group(1) == "on"
+        flux = _FLUX_SHAPE_RE.search(msg)
+        if flux:
+            _State.dit_hidden, _State.dit_heads = int(flux.group(1)), int(flux.group(2))
+        hunyuan = _HUNYUAN_SHAPE_RE.search(msg)
+        if hunyuan:
+            _State.dit_hidden, _State.dit_patch = int(hunyuan.group(1)), int(hunyuan.group(2))
         head = msg.split(" --- ", 1)[0].strip()
         if not _State.model_desc and _MODEL_DESC_RE.match(head):
             _State.model_desc = head
@@ -342,7 +361,8 @@ def _do_probe(payload):
 _CTX_STRING_FIELDS = ("model_path", "clip_l_path", "clip_g_path", "clip_vision_path",
                       "t5xxl_path", "llm_path", "llm_vision_path", "diffusion_model_path",
                       "high_noise_diffusion_model_path", "vae_path", "taesd_path",
-                      "control_net_path", "backend", "params_backend", "max_vram", "tokenizer")
+                      "control_net_path", "backend", "params_backend", "max_vram", "tokenizer",
+                      "flash_attn_mode")
 _CTX_BOOL_FIELDS = ("flash_attn", "diffusion_flash_attn", "enable_mmap", "vae_conv_direct",
                     "force_sdxl_vae_conv_scale",
                     "diffusion_conv_direct", "auto_fit", "batched_cfg")
@@ -380,6 +400,10 @@ def _do_load(payload):
     _State.model_desc = ""
     _State.vae_decoder_ch = None
     _State.wan_vae_conv = None
+    _State.dit_hidden = None
+    _State.dit_patch = None
+    _State.flash_auto = None
+    _State.dit_heads = None
     _State.paths = tuple(str(v) for k, v in ctx_fields.items()
                          if k.endswith("_path") and isinstance(v, str) and v) + tuple(
         str(path) for _name, path in (ctx_fields.get("embeddings") or ()))
@@ -402,8 +426,27 @@ def _do_load(payload):
         "devices": b.list_devices(lib),
         "vae_decoder_ch": _State.vae_decoder_ch,
         "wan_vae_conv": _State.wan_vae_conv,
+        "dit_hidden": _State.dit_hidden,
+        "dit_patch": _State.dit_patch,
+        "dit_heads": _State.dit_heads,
+        "flash_attn": _diffusion_flash(ctx_fields),
         "max_tensor_bytes": _max_tensor_bytes(lib, payload.get("runtime_dir")),
     }
+
+
+def _diffusion_flash(ctx_fields: dict) -> Optional[bool]:
+    """Whether the loaded diffusion model runs flash attention: the
+    ``diffusion=on|off`` part of *ctx_fields*' ``flash_attn_mode``, else True
+    for the legacy ``flash_attn`` / ``diffusion_flash_attn`` flags, else the
+    library's own decision from its load log; None when that was not logged."""
+    mode = str(ctx_fields.get("flash_attn_mode") or "")
+    for part in mode.split(","):
+        key, _, value = part.strip().partition("=")
+        if key == "diffusion" and value in ("on", "off"):
+            return value == "on"
+    if ctx_fields.get("diffusion_flash_attn") or ctx_fields.get("flash_attn"):
+        return True
+    return _State.flash_auto
 
 
 def _max_tensor_bytes(lib, runtime_dir) -> Optional[int]:
@@ -423,6 +466,27 @@ def _max_tensor_bytes(lib, runtime_dir) -> Optional[int]:
         return None
     known = [n for n in limits if n is not None]
     if not limits or len(known) != len(limits):
+        return None
+    return min(known)
+
+
+def _do_attention_rate(payload) -> Optional[float]:
+    """``_binding.attention_rate`` of the device the library runs the model on
+    (``_binding.default_device``), else the slowest over the loaded runtime's
+    non-CPU devices, in floating point operations per second. None when a
+    device could not be measured. Requires a loaded runtime."""
+    from . import _binding as b
+    lib = _State.lib
+    if lib is None:
+        raise RuntimeError("no stable-diffusion.cpp runtime is loaded")
+    runtime_dir = Path(payload["runtime_dir"])
+    device = b.default_device(lib, runtime_dir)
+    names = [device] if device else [name for name, _desc in b.list_devices(lib)
+                                     if name.upper() != "CPU"]
+    head_dim = int(payload.get("head_dim") or b._ATTENTION_PROBE_HEAD_DIM)
+    rates = [b.attention_rate(lib, runtime_dir, name, head_dim) for name in names]
+    known = [r for r in rates if r is not None]
+    if not rates or len(known) != len(rates):
         return None
     return min(known)
 
@@ -854,6 +918,8 @@ def worker_main(req_q, resp_q, cancel_event, crash_trace_path=None) -> None:
                 resp_q.put(("ok", _do_load(payload)))
             elif name == "upscale_image":
                 resp_q.put(("ok", _do_upscale_image(payload)))
+            elif name == "attention_rate":
+                resp_q.put(("ok", _do_attention_rate(payload)))
             elif name == "generate_image":
                 kind, value = _do_generate_image(payload, cancel_event)
                 resp_q.put((kind, value))

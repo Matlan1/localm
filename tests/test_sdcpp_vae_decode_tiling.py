@@ -265,6 +265,9 @@ class _Runner:
         self.loaded_key, self.loaded_ctx, self.alive = key, dict(ctx), True
         return dict(self.info)
 
+    def attention_rate(self, runtime_dir, head_dim=128, timeout=None):
+        return 1e15
+
     def generate_image(self, params, *, on_event=None, cancel_check=None, timeout=None):
         self.params.append(params)
         w, h = params["width"], params["height"]
@@ -275,12 +278,12 @@ class _Runner:
         self.alive = False
 
 
-def _generate(monkeypatch, tmp_path, info, **kw):
+def _generate(monkeypatch, tmp_path, info, backend="vulkan", **kw):
     runner = _Runner({"version": "Flux", "image": True, **info})
     monkeypatch.setattr(shared, "runner", runner)
     monkeypatch.setattr(shared, "arm_idle_timer", lambda seconds=None: None)
     monkeypatch.setattr(sd_runtime, "resolve", lambda choice="auto": sd_runtime.Runtime(
-        backend="vulkan", path=tmp_path / "rt"))
+        backend=backend, path=tmp_path / "rt"))
     monkeypatch.setattr(sd_budget, "_platform", lambda: "linux")
     monkeypatch.setattr(discover, "list_gpus", lambda **k: ([], discover.GPU_PROBE_OK))
     model = tmp_path / "model.gguf"
@@ -311,9 +314,10 @@ def test_a_decode_that_fits_is_not_tiled(monkeypatch, tmp_path):
     assert not [line for line in said if "tiles" in line]
 
 
-def test_a_runtime_without_a_limit_is_not_tiled(monkeypatch, tmp_path):
+@pytest.mark.parametrize("backend", ["rocm", "cuda"])
+def test_a_runtime_without_a_limit_is_not_tiled(monkeypatch, tmp_path, backend):
     params, _said = _generate(monkeypatch, tmp_path,
-                              {"max_tensor_bytes": None, "vae_decoder_ch": 128},
+                              {"max_tensor_bytes": None, "vae_decoder_ch": 128}, backend=backend,
                               width=64, height=64, hires={"upscaler": "lanczos", "scale": 16.0,
                                                           "steps": 1, "denoise": 0.5})
     assert params[0]["vae_tile_size"] is None
@@ -458,6 +462,11 @@ def test_the_worker_passes_the_tile_size_to_the_video_library(monkeypatch):
 
 
 class _VideoRunner(_Runner):
+    rate = 1e15
+
+    def attention_rate(self, runtime_dir, head_dim=128, timeout=None):
+        return self.rate
+
     def generate_video(self, params, *, on_event=None, cancel_check=None, timeout=None):
         self.params.append(params)
         w, h = params["width"], params["height"]
@@ -465,13 +474,13 @@ class _VideoRunner(_Runner):
                 "seed": params["seed"], "frames": [b"\0" * (w * h * 3)] * params["video_frames"]}
 
 
-def _generate_video(monkeypatch, tmp_path, info, **kw):
+def _generate_video(monkeypatch, tmp_path, info, backend="vulkan", **kw):
     from localm.plugins.builtin.video.backends import native as video_native
     runner = _VideoRunner({"version": "Wan 2.x", "video": True, "wan_vae_conv": "3D", **info})
     monkeypatch.setattr(shared, "runner", runner)
     monkeypatch.setattr(shared, "arm_idle_timer", lambda seconds=None: None)
     monkeypatch.setattr(sd_runtime, "resolve", lambda choice="auto": sd_runtime.Runtime(
-        backend="vulkan", path=tmp_path / "rt"))
+        backend=backend, path=tmp_path / "rt"))
     monkeypatch.setattr(sd_budget, "_platform", lambda: "linux")
     monkeypatch.setattr(discover, "list_gpus", lambda **k: ([], discover.GPU_PROBE_OK))
     monkeypatch.setattr(video_native, "_write_mp4", lambda out, result, fps: None)
@@ -498,10 +507,12 @@ def test_a_default_size_video_over_the_limit_is_decoded_in_tiles(monkeypatch, tm
                for line in said)
 
 
-@pytest.mark.parametrize("info", [{"max_tensor_bytes": None},
-                                  {"max_tensor_bytes": 2 * GIB, "wan_vae_conv": None}])
-def test_a_video_is_not_tiled_without_a_limit_or_a_wan_vae(monkeypatch, tmp_path, info):
-    ok, msg, params, said = _generate_video(monkeypatch, tmp_path, info, seconds=5, fps=16)
+@pytest.mark.parametrize("info,backend", [({"max_tensor_bytes": None}, "rocm"),
+                                          ({"max_tensor_bytes": 2 * GIB, "wan_vae_conv": None},
+                                           "vulkan")])
+def test_a_video_is_not_tiled_without_a_limit_or_a_wan_vae(monkeypatch, tmp_path, info, backend):
+    ok, msg, params, said = _generate_video(monkeypatch, tmp_path, info, backend=backend,
+                                            seconds=5, fps=16)
     assert ok, msg
     assert params[0]["vae_tile_size"] is None
     assert not [line for line in said if "tiles" in line]

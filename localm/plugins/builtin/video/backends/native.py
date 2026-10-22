@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
+from localm.media.sdcpp import attention
 from localm.media.sdcpp import budget as sd_budget
 from localm.media.sdcpp import families, pairing, sampling
 from localm.media.sdcpp import runtime as sd_runtime
@@ -467,20 +468,64 @@ def _event_relay(say, on_preview=None, cancel_check=None) -> _EventRelay:
 
 
 def _decode_tile(info: dict, width: int, height: int, frames: int,
-                 say: Callable[[str], None]) -> Optional[int]:
-    """The VAE decode tile size (``vaetile.wan_decode_tile_size``) for a
-    *width* x *height* clip of *frames* frames, from the load *info*'s
-    ``max_tensor_bytes``, ``version`` and ``wan_vae_conv``; says the tiling
-    through *say* when there is one. None decodes in one piece. Raises
-    ``vaetile.DecodeTooLarge`` when no tile fits the device."""
-    limit = info.get("max_tensor_bytes")
-    vae = vaetile.wan_vae(info.get("version") or "", info.get("wan_vae_conv"))
-    tile = vaetile.wan_decode_tile_size(width, height, frames, limit, vae)
+                 say: Callable[[str], None], backend: Optional[str] = None) -> Optional[int]:
+    """The VAE decode tile size for a *width* x *height* clip of *frames*
+    frames, from the load *info*'s ``max_tensor_bytes``
+    (``vaetile.device_limit`` on runtime *backend*) and ``version``:
+    ``vaetile.hunyuan_decode_tile_size`` for HunyuanVideo, else
+    ``vaetile.wan_decode_tile_size`` for the Wan VAE its ``wan_vae_conv``
+    names. Says the tiling through *say* when there is one. None decodes in
+    one piece. Raises ``vaetile.DecodeTooLarge`` when no tile fits the
+    device."""
+    limit, assumed = vaetile.device_limit(backend, info.get("max_tensor_bytes"))
+    version = info.get("version") or ""
+    if version == "Hunyuan Video":
+        tile = vaetile.hunyuan_decode_tile_size(width, height, frames, limit)
+    else:
+        vae = vaetile.wan_vae(version, info.get("wan_vae_conv"))
+        tile = vaetile.wan_decode_tile_size(width, height, frames, limit, vae)
     if tile and limit:
-        say(f"Decoding in {tile} px tiles: this GPU runtime takes buffers of up to "
-            f"{limit / 1024 ** 3:.1f} GB, too small to decode {width}x{height} in one piece "
-            "on the GPU.")
+        say(vaetile.tiling_note(tile, width, height, limit, assumed))
     return tile
+
+
+def _attention_refusal(runner, rt, info: dict, label: str, width: int, height: int,
+                       frames: int, fps: int) -> Optional[str]:
+    """None when the clip's longest attention op (``attention.dispatch_seconds``
+    at the worker's measured ``attention_rate``) stays within
+    ``attention.SAFE_DISPATCH_SECONDS`` on the Vulkan runtime, else the reason
+    to refuse it, naming the longest clip that fits. Other runtimes get None.
+    A rate that could not be measured refuses."""
+    if rt.backend != "vulkan":
+        return None
+    try:
+        rate = runner.attention_rate(rt.path)
+    except SdWorkerError as e:
+        rate, problem = None, f" ({e})"
+    else:
+        problem = ""
+    if not rate:
+        return (f"localm could not measure how fast this GPU runs {label}'s attention on the "
+                f"Vulkan runtime{problem}, so it cannot tell whether this clip finishes each step "
+                f"before the graphics driver resets the GPU. Pick the ROCm or CUDA runtime in "
+                f"Settings > Video if this GPU has one.")
+    att = attention.video_attention(info.get("version") or "", info.get("desc") or "",
+                                    info.get("dit_hidden"), info.get("dit_patch"))
+    secs = attention.dispatch_seconds(att, width, height, frames, rate)
+    from localm.debuglog import logger
+    logger.info("native video: Vulkan attention rate %.3g FLOP/s; one attention op of "
+                "%dx%dx%d takes about %.2f s", rate, width, height, frames, secs)
+    if secs <= attention.SAFE_DISPATCH_SECONDS:
+        return None
+    most = attention.max_frames(att, width, height, rate)
+    fit = (f"Make it at most {most} frames ({most / fps:.1f} s at {fps} fps) at this size, "
+           "or lower the size" if most else "Lower the size")
+    return (f"{frames} frames at {width}x{height} is too much for {label} on the Vulkan runtime "
+            f"on this GPU: each sampling step would run one attention job of about {secs:.1f} s "
+            f"on the GPU. The graphics driver resets the GPU when a single job runs longer than "
+            f"about {attention.DRIVER_RESET_SECONDS} s, so localm keeps each job under "
+            f"{attention.SAFE_DISPATCH_SECONDS:g} s. {fit}, or pick the ROCm or CUDA runtime in "
+            f"Settings > Video if this GPU has one.")
 
 
 def generate(s: dict, prompt: str, out_path: Path, **kwargs) -> tuple[bool, str]:
@@ -608,8 +653,12 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
             if input_image and "-T2V-" in (info.get("desc") or ""):
                 return False, _start_image_refusal(models["label"])
             init = _load_init_image(Path(input_image), width, height) if input_image else None
+            too_long = _attention_refusal(runner, rt, info, models["label"], width, height,
+                                          frames, int(fps))
+            if too_long:
+                return False, too_long
             try:
-                tile = _decode_tile(info, width, height, frames, say)
+                tile = _decode_tile(info, width, height, frames, say, rt.backend)
             except vaetile.DecodeTooLarge as e:
                 return False, (f"This video cannot be decoded on the GPU: {e}. Lower the size "
                                "or pick another GPU runtime in Settings > Video.")

@@ -184,6 +184,9 @@ class _FakeRunner:
         self.alive = True
         return {"version": "Wan 2.x", "desc": self.desc, "image": False, "video": self.video}
 
+    def attention_rate(self, runtime_dir, head_dim=128, timeout=None):
+        return 1e15
+
     def generate_video(self, params, *, on_event=None, cancel_check=None, timeout=None):
         self.generates.append(params)
         if self.raise_on_generate is not None:

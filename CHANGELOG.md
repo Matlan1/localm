@@ -176,6 +176,22 @@ permanent public record of what shipped and are never rewritten; the in-progress
   put part of the decode of a video (Wan 2.1 at its default 832x480) and of a Qwen-Image or Anima
   image at 1024x1024 on the CPU. localm now decodes them in tiles that fit the limit too, and
   refuses a job that would not fit even in the smallest tile instead of running it on the CPU.
+- **A long video no longer makes the graphics driver reset the GPU with the Vulkan runtime.** Each
+  sampling step of a video model runs its attention over the whole clip as one job on the GPU, and
+  on a GPU whose Vulkan attention is slow (an AMD Radeon RX 6900 XT, for example) that job ran for
+  several seconds at 49 or more frames of Wan 2.1 at 832x480, long enough for the driver to reset
+  the GPU and fail the job. localm now measures how fast the GPU runs attention, refuses a clip
+  whose attention job would run longer than a second before it starts, and names the most frames
+  that fit at that size and the ROCm or CUDA runtime as alternatives. HunyuanVideo now also decodes
+  in tiles that fit the Vulkan buffer limit, and a Vulkan runtime that does not report its limit
+  decodes in tiles under a conservative one and says so, instead of decoding part of the video or
+  image on the CPU.
+- **Larger images keep their attention on the GPU with the Vulkan runtime.** Without flash
+  attention, the attention of a larger image (SD-Turbo at 1024x1024, FLUX above about 1024x1024,
+  for example) needed a bigger buffer than the Vulkan driver allows and ran on the CPU. localm now
+  reloads the model with flash attention on for such an image when the GPU runs it fast enough,
+  turns it off when it would make a single GPU job run too long, and otherwise refuses the image
+  with the largest size that fits and the ROCm or CUDA runtime as alternatives.
 - **The global `localm` command works from a Shared install and uninstalls cleanly.** On Linux and
   macOS setup made `~/.local/bin/localm` a symlink with a relative target that pointed nowhere,
   and uninstall left it behind; on Windows it added the relative entry `bin` to your user PATH.

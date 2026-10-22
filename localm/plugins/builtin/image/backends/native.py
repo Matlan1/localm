@@ -18,11 +18,12 @@ import json
 import os
 import secrets
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Optional
 
 from localm.media.image_params import png_text_entries
+from localm.media.sdcpp import attention
 from localm.media.sdcpp import budget as sd_budget
 from localm.media.sdcpp import families, pairing, sampling
 from localm.media.sdcpp import runtime as sd_runtime
@@ -568,28 +569,95 @@ def _event_relay(say, on_preview=None, cancel_check=None) -> _EventRelay:
 
 
 def _decode_tile(info: dict, width: int, height: int, hires: Optional[dict],
-                 say: Callable[[str], None]) -> Optional[int]:
+                 say: Callable[[str], None], backend: Optional[str] = None) -> Optional[int]:
     """The VAE decode tile size for a job whose largest decode is *width* x
     *height*, or its hires target, from the load *info*'s ``max_tensor_bytes``
-    and its VAE: ``vaetile.wan_decode_tile_size`` for a Wan VAE (``version``
-    and ``wan_vae_conv``), else ``vaetile.decode_tile_size`` for a 2D
+    (``vaetile.device_limit`` on runtime *backend*) and its VAE:
+    ``vaetile.wan_decode_tile_size`` for a Wan VAE (``version`` and
+    ``wan_vae_conv``), else ``vaetile.decode_tile_size`` for a 2D
     AutoencoderKL (``vae_decoder_ch``). Says the tiling through *say* when
     there is one. None decodes in one piece. Raises ``vaetile.DecodeTooLarge``
     when no tile fits the device."""
     if hires:
         width = sampling.hires_side(width, float(hires["scale"]))
         height = sampling.hires_side(height, float(hires["scale"]))
-    limit = info.get("max_tensor_bytes")
+    limit, assumed = vaetile.device_limit(backend, info.get("max_tensor_bytes"))
     wan = vaetile.wan_vae(info.get("version") or "", info.get("wan_vae_conv"))
     if wan is not None:
         tile = vaetile.wan_decode_tile_size(width, height, 1, limit, wan)
     else:
         tile = vaetile.decode_tile_size(width, height, limit, info.get("vae_decoder_ch"))
     if tile and limit:
-        say(f"Decoding in {tile} px tiles: this GPU runtime takes buffers of up to "
-            f"{limit / 1024 ** 3:.1f} GB, too small to decode {width}x{height} in one piece "
-            "on the GPU.")
+        say(vaetile.tiling_note(tile, width, height, limit, assumed))
     return tile
+
+
+def _vulkan_attention_mode(runner, rt, info: dict, models: dict, width: int, height: int,
+                           hires: Optional[dict], ref_count: int,
+                           cfg_scale: Optional[float] = None) -> tuple[Optional[str], Optional[str]]:
+    """How the diffusion model's attention runs for a *width* x *height* job
+    (or its hires target) with *ref_count* reference images at CFG
+    *cfg_scale* on the Vulkan runtime: ``(mode, refusal)``. A CFG of 1 runs
+    one image per graph. *mode* is None to keep the loaded model, or
+    ``"on"`` / ``"off"`` to reload it with flash attention set that way;
+    *refusal* is the reason to refuse the job. A model whose flash attention
+    state is not known counts as running without it. Without flash attention the
+    score matrix (``attention.ImageAttention.score_bytes``) must fit the
+    device's buffer limit (``vaetile.device_limit``); with it, one attention
+    op must take at most ``attention.SAFE_DISPATCH_SECONDS`` at the worker's
+    measured ``attention_rate``. A rate that could not be measured counts as
+    too slow. Other runtimes, and a model family with no known attention shape,
+    get ``(None, None)``."""
+    if rt.backend != "vulkan":
+        return None, None
+    if hires:
+        width = sampling.hires_side(width, float(hires["scale"]))
+        height = sampling.hires_side(height, float(hires["scale"]))
+    att = attention.image_attention(models.get("family"), info.get("dit_hidden"),
+                                    info.get("dit_heads"))
+    if att is None:
+        return None, None
+    if cfg_scale is not None and abs(float(cfg_scale) - 1.0) < 1e-5:
+        att = replace(att, batch=1)
+    limit = (vaetile.device_limit(rt.backend, info.get("max_tensor_bytes"))[0]
+             or vaetile.VULKAN_ASSUMED_TENSOR_BYTES)
+    flash = info.get("flash_attn")
+
+    def scores_fit(w: int, h: int) -> bool:
+        return att.score_bytes(w, h, ref_count) <= limit
+
+    fits = scores_fit(width, height)
+    if fits and flash is not True:
+        return None, None
+    try:
+        rate: float = runner.attention_rate(rt.path, att.head_dim) or 0.0
+    except SdWorkerError:
+        rate = 0.0
+
+    def flash_fits(w: int, h: int) -> bool:
+        return rate > 0 and att.flops(w, h, ref_count) / rate <= attention.SAFE_DISPATCH_SECONDS
+
+    fast = flash_fits(width, height)
+    if flash is True:
+        if fast:
+            return None, None
+        if fits:
+            return "off", None
+    elif fast:
+        return "on", None
+    side = attention.largest_square(lambda s: scores_fit(s, s) or flash_fits(s, s))
+    fit = (f"The largest square image that fits is about {side}x{side}" if side
+           else "No image size fits")
+    secs = (f" and with flash attention one attention job would run about "
+            f"{att.flops(width, height, ref_count) / rate:.1f} s" if rate else
+            " and its flash attention speed on this GPU could not be measured")
+    return None, (f"{width}x{height} is too large for {models['label']} on the Vulkan runtime "
+                  f"on this GPU: its attention needs a "
+                  f"{att.score_bytes(width, height, ref_count) / 1024 ** 3:.1f} GB buffer, over "
+                  f"the {limit / 1024 ** 3:.1f} GB this runtime takes,{secs}, while the graphics "
+                  f"driver resets the GPU when a single job runs longer than about "
+                  f"{attention.DRIVER_RESET_SECONDS} s. {fit}; or pick the ROCm or CUDA runtime "
+                  f"in Settings > Images if this GPU has one.")
 
 
 def _batch_path(out_path: Path, index: int) -> Path:
@@ -807,6 +875,10 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
         try:
             ctx = load_ctx(models["ctx"], rt.backend)
             key = (models["key"], rt.backend)
+            held = runner.loaded_key
+            if (runner.is_alive() and isinstance(held, tuple) and len(held) == 3
+                    and held[:2] == key and runner.loaded_ctx is not None):
+                key, ctx = held, dict(runner.loaded_ctx)
             if runner.loaded_key != key or not runner.is_alive():
                 say(f"Loading {models['label']} (stable-diffusion.cpp, {rt.backend})...")
                 ctx = sd_budget.reload_ctx(runner, ctx, rt.backend, say,
@@ -858,7 +930,22 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
             components = {k: v["name"] for k, v in (models.get("components") or {}).items()} or None
             if negative_prompt and cfg_scale is not None and abs(float(cfg_scale) - 1.0) < 1e-5:
                 say(NEGATIVE_AT_CFG_1)
-            tile = _decode_tile(info, int(width), int(height), hires, say)
+            mode, refused = _vulkan_attention_mode(runner, rt, info, models, int(width),
+                                                   int(height), hires, len(refs), cfg_scale)
+            if refused:
+                return False, refused
+            if mode:
+                ctx = dict(runner.loaded_ctx or ctx, flash_attn_mode=f"diffusion={mode}")
+                ctx.pop("diffusion_flash_attn", None)
+                key = (models["key"], rt.backend, mode)
+                say(f"Reloading {models['label']} with flash attention {mode}: "
+                    + ("without it, this image's attention needs a larger buffer than this GPU "
+                       "runtime takes..." if mode == "on" else
+                       "with it, one attention job of this image would run longer on this GPU "
+                       "than the graphics driver allows..."))
+                info = runner.ensure_loaded(key, rt.path, ctx, extra_dirs=rt.extra_dirs,
+                                            on_event=relay, cancel_check=cancel_check)
+            tile = _decode_tile(info, int(width), int(height), hires, say, rt.backend)
 
             def reload_model(load: dict) -> None:
                 runner.ensure_loaded(key, rt.path, load, extra_dirs=rt.extra_dirs,
