@@ -20,6 +20,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 from typing import Callable
+from typing import NamedTuple
 from typing import Optional
 from rich.progress import BarColumn
 from rich.progress import DownloadColumn
@@ -1000,6 +1001,19 @@ def pull_model(
         local_type = None if model_type == "auto" else model_type
         return _mm.add_local(str(local), name=name, model_type=local_type, store=store)
 
+    # owner/repo@revision[:file] names a branch, tag or commit of a HuggingFace
+    # repo; the revision is split off here so every later step sees a plain spec.
+    ref: Optional[str] = None
+    if not (spec.startswith("http://") or spec.startswith("https://")):
+        try:
+            spec, ref = split_hf_revision(spec)
+            if mmproj_spec and split_hf_revision(mmproj_spec)[1] is not None:
+                raise ValueError("--mmproj does not take a revision; name the "
+                                 "projector as owner/repo:file.gguf")
+        except ValueError as e:
+            console.print(f"[red]Invalid model spec:[/red] {escape(str(e))}")
+            return False
+
     # net_mode=off means "no network at all", so it stops a remote model
     # download and the type auto-detect probe below - unless the owner has
     # exempted explicit downloads via net_allow_model_downloads.
@@ -1043,6 +1057,20 @@ def pull_model(
                 f"[red]Network policy refused the Hugging Face pull:[/red] "
                 f"{escape(refusal)}")
             return False
+
+    # A named revision is checked once, before any other Hugging Face call or
+    # download, and every later call is pinned to the commit it resolves to.
+    revision: Optional[HfRevision] = None
+    if ref is not None:
+        try:
+            revision = resolve_hf_revision(spec.split(":", 1)[0], ref)
+        except HfRevisionError as e:
+            console.print(f"[red]Cannot pull {escape(spec.split(':', 1)[0])}@{escape(ref)}:"
+                          f"[/red] {escape(str(e))}. Nothing was downloaded.")
+            return False
+        console.print(f"Revision [bold]{escape(ref)}[/bold] is commit "
+                      f"[dim]{revision.commit[:12]}[/dim]")
+    rev_kw: dict[str, Any] = {"revision": revision} if revision is not None else {}
 
     # Remote spec: resolve the model type (a network probe against HF for a bare
     # owner/repo). Only reached for confirmed-remote specs, after the local-path
@@ -1107,16 +1135,19 @@ def pull_model(
                                    redownload=redownload, model_type=detected_type,
                                    dest_dir=dest_dir, register=register,
                                    type_is_auto=type_is_auto, mmproj_spec=mmproj_spec,
-                                   pinned_starter=bool(starter_pin))
+                                   pinned_starter=bool(starter_pin), **rev_kw)
         else:
             # owner/repo  (no filename) -> full HuggingFace snapshot
             res = _mm._pull_hf_snapshot(spec, name, expected_sha256=expected_sha256,
-                                     redownload=redownload, model_type=detected_type)
+                                     redownload=redownload, model_type=detected_type,
+                                     **rev_kw)
     else:
         console.print(f"[red]Unknown spec:[/red] {escape(model_spec)}")
         console.print("Formats:")
         console.print("  [bold]owner/repo[/bold]              full HF model directory")
         console.print("  [bold]owner/repo:file.gguf[/bold]   single GGUF file")
+        console.print("  [bold]owner/repo@revision[/bold]     a branch, tag or commit "
+                      "(also owner/repo@revision:file)")
         console.print("  [bold]https://...[/bold]             direct URL")
         console.print("Run [bold]localm models[/bold] for GGUF shortcuts.")
         res = False
@@ -1214,25 +1245,175 @@ def _revision_kwargs(commit: Optional[str]) -> dict[str, Any]:
     return {"revision": commit} if commit else {}
 
 
+def _file_revision(published: Optional[str],
+                   revision: "Optional[HfRevision]") -> dict[str, Any]:
+    """The ``revision`` keyword for a hub download of the file *published*
+    describes, when the pull is at *revision*: the commit that last changed the
+    file, else the revision's own commit, so a file with no published digest is
+    still read at the revision and never from the default branch."""
+    return _at_commit(published) or _revision_kwargs(_rev_commit(revision))
+
+
 def _at_commit(published: Optional[str]) -> dict[str, Any]:
     """The ``revision`` keyword for a hub download of the file *published*
     describes."""
     return _revision_kwargs(getattr(published, "commit", None))
 
 
+_HF_NAME_PART = r"[A-Za-z0-9][A-Za-z0-9._-]*"
+_HF_REVISION_SPEC_RE = re.compile(
+    rf"^(?P<repo>{_HF_NAME_PART}/{_HF_NAME_PART})@(?P<rest>.*)$", re.DOTALL)
+_HF_REVISION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+/-]{0,254}$")
+
+
+def split_hf_revision(spec: str) -> "tuple[str, Optional[str]]":
+    """Split ``owner/repo@<revision>[:file]`` into ``(owner/repo[:file], revision)``.
+
+    A spec with no revision comes back unchanged with ``None``. The revision is
+    a branch, tag or commit and may itself contain ``/`` (``refs/pr/1``); it
+    ends at the first ``:``. Only the exact shape ``owner/repo@`` counts: a URL
+    (``https://user@host/m.gguf``), a drive path (``D:/a@b/m.gguf``), a path
+    starting ``~``, ``.`` or ``..``, a ``civitai:`` spec and a file name holding
+    an ``@`` (``owner/repo:m@2.gguf``, ``owner/repo/m@2.gguf``) are all
+    returned untouched.
+
+    Raises :class:`ValueError` with a user-facing message for a revision that
+    is empty or malformed, and for ``owner/repo@rev/file.gguf``, whose revision
+    would swallow the file name (``owner/repo@rev:file.gguf`` is the form).
+    Does no I/O."""
+    m = _HF_REVISION_SPEC_RE.match(spec)
+    if m is None:
+        return spec, None
+    repo, rest = m.group("repo"), m.group("rest")
+    ref, colon, remote = rest.partition(":")
+    if not ref:
+        raise ValueError(f"empty revision after '@' in {repo}@ - name a branch, "
+                         "tag or commit, e.g. owner/repo@main")
+    if (not _HF_REVISION_RE.match(ref) or ".." in ref or "//" in ref
+            or ref.endswith(("/", ".", ".lock"))):
+        raise ValueError(f"'{ref[:60]}' is not a valid branch, tag or commit name")
+    if colon and not remote:
+        raise ValueError(f"no file name after ':' in {repo}@{ref}:")
+    if not colon and ref.lower().endswith(".gguf"):
+        raise ValueError(f"'{ref}' looks like a file name. To pull one file at a "
+                         f"revision write {repo}@<revision>:<file>")
+    return (f"{repo}:{remote}" if colon else repo), ref
+
+
+class HfRevision(NamedTuple):
+    """A resolved Hugging Face revision: *ref* as the user typed it and the full
+    *commit* it pointed at when the pull started."""
+
+    ref: str
+    commit: str
+
+
+class HfRevisionError(Exception):
+    """A revision could not be resolved. *kind* is ``missing`` (the repo exists
+    and has no such revision), ``repo`` (no such repo, or one this account cannot
+    see), ``denied`` (gated or unauthorised) or ``unreachable`` (the hub could
+    not be asked at all)."""
+
+    def __init__(self, kind: str, message: str) -> None:
+        super().__init__(message)
+        self.kind = kind
+
+
+def resolve_hf_revision(repo_id: str, ref: str) -> HfRevision:
+    """Pin *ref* of *repo_id* to its commit with one metadata call, before any
+    download. Raises :class:`HfRevisionError`; a network or permission failure
+    is never reported as a missing revision."""
+    from huggingface_hub.errors import (
+        GatedRepoError, HfHubHTTPError, RepositoryNotFoundError, RevisionNotFoundError)
+    try:
+        info = _hf_api().model_info(repo_id, revision=ref)
+    except GatedRepoError as e:
+        raise HfRevisionError(
+            "denied", f"{repo_id} is gated: accept its terms on huggingface.co and "
+                      "set a Hugging Face token to pull it") from e
+    except RevisionNotFoundError as e:
+        raise HfRevisionError(
+            "missing", f"{repo_id} has no branch, tag or commit named '{ref}'") from e
+    except RepositoryNotFoundError as e:
+        raise HfRevisionError(
+            "repo", f"{repo_id} was not found on Hugging Face, or needs a token "
+                    "that can see it") from e
+    except HfHubHTTPError as e:
+        status = getattr(getattr(e, "response", None), "status_code", None)
+        if status in (401, 403):
+            raise HfRevisionError(
+                "denied", f"Hugging Face refused access to {repo_id} (HTTP {status})") from e
+        raise HfRevisionError(
+            "unreachable", f"could not ask Hugging Face about {repo_id}@{ref}: "
+                           f"HTTP {status or 'error'}") from e
+    except Exception as e:
+        raise HfRevisionError(
+            "unreachable", f"could not reach Hugging Face to check {repo_id}@{ref}: "
+                           f"{type(e).__name__}") from e
+    commit = _valid_commit(getattr(info, "sha", None))
+    if commit is None:
+        raise HfRevisionError(
+            "unreachable", f"Hugging Face did not report a commit for {repo_id}@{ref}")
+    return HfRevision(ref, commit)
+
+
+def _rev_commit(revision: "Optional[HfRevision]") -> Optional[str]:
+    """The commit a revision pull is pinned to, or None for a pull of the default branch."""
+    return revision.commit if revision is not None else None
+
+
+def _published_digest(repo_id: str, filename: str,
+                      revision: "Optional[HfRevision]") -> Optional[str]:
+    """``_mm._hf_file_sha256`` for *filename* as it is at *revision* (the default
+    branch when None)."""
+    if revision is None:
+        return _mm._hf_file_sha256(repo_id, filename)
+    return _mm._hf_file_sha256(repo_id, filename, revision=revision.commit)
+
+
+def _register_revision(revision: "Optional[HfRevision]") -> dict[str, Any]:
+    """The registry keywords recording *revision* on a pulled model's entry;
+    nothing for a pull of the default branch."""
+    if revision is None:
+        return {}
+    return {"revision": revision.ref, "commit": revision.commit}
+
+
+def _holds_other_revision(dest: Path, repo_id: str,
+                          revision: "Optional[HfRevision]") -> bool:
+    """True when *dest* is registered as *repo_id* at a different revision than
+    *revision* (the default branch when None): its files are another
+    revision's, so they never count as this pull's finished download."""
+    reg = _mm.load_registry()
+    wanted = revision.ref if revision else None
+    return any(
+        reg[n].get("source") == f"hf:{repo_id}" and (reg[n].get("revision") or None) != wanted
+        for n in find_aliases_by_path(dest, reg))
+
+
+def _entry_is_hf_source(info: dict, repo_id: str, revision: "Optional[HfRevision]") -> bool:
+    """True when registry entry *info* was pulled from *repo_id* at the same
+    revision ref as *revision* (the default branch when None)."""
+    return (info.get("source") == f"hf:{repo_id}"
+            and (info.get("revision") or None) == (revision.ref if revision else None))
+
+
 def _hf_file_sha256(repo_id: str, filename: str,
-                     token: Optional[str] = None) -> Optional[str]:
+                     token: Optional[str] = None,
+                     revision: Optional[str] = None) -> Optional[str]:
     """
     Ask the HuggingFace API for a file's LFS sha256 without downloading it.
     Returns a :class:`_PublishedDigest`, or None when offline, on any API error
     (logged at debug), or for non-LFS files.
 
     *token*: optional HF API token - needed for a gated repo's metadata. The
-    configured token is used when none is given.
+    configured token is used when none is given. *revision*: the branch, tag or
+    commit to read the file at; the default branch when None.
     """
     try:
         info = _hf_api().get_paths_info(
-            repo_id, [filename], token=token or _hf_token(), expand=True)
+            repo_id, [filename], token=token or _hf_token(), expand=True,
+            **({"revision": revision} if revision else {}))
         if info:
             lfs = getattr(info[0], "lfs", None)
             digest = getattr(lfs, "sha256", None) if lfs else None
@@ -1581,14 +1762,15 @@ def _maybe_fetch_repo_mmproj(repo_id: str, filename: str, base_dir: Path, *,
 
 def mmproj_backfill_candidate(entry: dict, path: Path) -> bool:
     """True when *entry* (a registry entry whose file is *path*) is a
-    plausible target for the mmproj backfill: pulled from an HF repo, a plain
+    plausible target for the mmproj backfill: pulled from the default branch of
+    an HF repo (a pull at a named revision is not backfilled from it), a plain
     LLM registration, and not already carrying a recorded ``mmproj``.
 
     Pure, with no I/O; the network decision lives in
     ``backfill_mmproj_for_entry`` below, so a caller can filter cheaply
     first."""
     source = str(entry.get("source", ""))
-    if not source.startswith("hf:"):
+    if not source.startswith("hf:") or entry.get("revision"):
         return False
     if entry.get("model_type") != "llm":
         return False
@@ -1750,17 +1932,22 @@ def _mmproj_for_registration(
     base_dir: Path,
     dest_dir: Optional[Path],
     mmproj_spec: Optional[str],
+    pinned_revision: bool = False,
 ) -> Optional[Path]:
     """The projector Path to record on this pull's registry entry, or None: the
     vision projector of an 'llm', or the speech generation stages of a 'tts'
     model. An explicit --mmproj wins when given, else the same-repo listing is
     auto-checked. Skipped entirely for a foreign destination (an explicit
     dest_dir), for any other registration type, and for a *filename* that
-    already looks like a projector by its own name."""
+    already looks like a projector by its own name. A pull at a pinned revision
+    (*pinned_revision*) attaches only an explicit --mmproj: the same-repo lookup
+    reads the default branch, whose projector may not pair with that revision."""
     if dest_dir is not None or reg_type not in ("llm", "tts") or "mmproj" in filename.lower():
         return None
     if mmproj_spec:
         return _fetch_explicit_mmproj(mmproj_spec, base_dir, model_filename=filename)
+    if pinned_revision:
+        return None
     return _maybe_fetch_repo_mmproj(repo_id, filename, base_dir, speech=reg_type == "tts")
 
 
@@ -1775,6 +1962,7 @@ def _pull_gguf_file(
     type_is_auto: bool = False,
     mmproj_spec: Optional[str] = None,
     pinned_starter: bool = False,
+    revision: Optional[HfRevision] = None,
 ) -> bool:
     """Download a single file from a HuggingFace repo (despite the name, not
     restricted to .gguf - any single-file ``owner/repo:filename`` spec dispatches
@@ -1795,6 +1983,11 @@ def _pull_gguf_file(
     ``pinned_starter`` marks *expected_sha256* as the digest localm pins for a
     starter model rather than one the user typed, which changes only the
     message printed when the hub now serves a different file.
+
+    ``revision``, when given, is a branch, tag or commit already resolved by
+    ``resolve_hf_revision``: the digests, the size checks and the download are
+    all taken at its commit, the registry entry records it, and the automatic
+    same-repo projector lookup (which reads the default branch) is skipped.
 
     ``mmproj_spec``, when given, is the user's explicit ``--mmproj
     owner/repo:file.gguf`` choice and always wins over the automatic same-repo
@@ -1869,10 +2062,10 @@ def _pull_gguf_file(
 
     # Expected digest from HF metadata - free, no download needed. Each file is
     # downloaded at the commit its digest was read at.
-    expected = _mm._hf_file_sha256(repo_id, _remote(filename))
+    expected = _published_digest(repo_id, _remote(filename), revision)
     part_digests = {}
     for part in all_parts[1:]:
-        part_digest = _mm._hf_file_sha256(repo_id, _remote(part))
+        part_digest = _published_digest(repo_id, _remote(part), revision)
         if part_digest:
             part_digests[part] = part_digest
     published = {filename: expected, **part_digests}
@@ -1986,11 +2179,13 @@ def _pull_gguf_file(
             if type_is_auto and not filename.lower().endswith(".gguf"):
                 reg_type = _content_media_type(dest, reg_type)
             mmproj_path = _mmproj_for_registration(
-                reg_type, repo_id, filename, base_dir, dest_dir, mmproj_spec)
+                reg_type, repo_id, filename, base_dir, dest_dir, mmproj_spec,
+                pinned_revision=revision is not None)
             _mm._register_with_dedup(model_name, dest, f"hf:{repo_id}",
                                  digest=verify_digest, model_type=reg_type,
                                  mmproj=mmproj_path, architecture=gguf_meta.get("architecture"),
-                                 expert_count=gguf_meta.get("expert_count"))
+                                 expert_count=gguf_meta.get("expert_count"),
+                                 **_register_revision(revision))
         return True
 
     # Pre-download duplicate check: are the same bytes already on disk
@@ -2025,7 +2220,7 @@ def _pull_gguf_file(
         total_size = 0
         for part in missing:
             cdn_url = hf_hub_url(repo_id, _remote(part), endpoint=_HF_ENDPOINT,
-                                 **_at_commit(published.get(part)))
+                                 **_file_revision(published.get(part), revision))
             head    = _policy_head(cdn_url)
             size = int(head.headers.get("content-length", 0))
             part_sizes[part] = size
@@ -2046,7 +2241,7 @@ def _pull_gguf_file(
     # already in base_dir. It is fetched after the model, outside the model's
     # progress.
     projector_size = 0
-    if (register and mmproj_spec is None and dest_dir is None
+    if (register and mmproj_spec is None and dest_dir is None and revision is None
             and model_type not in ("mmproj", "embedding")
             and "mmproj" not in filename.lower()):
         try:
@@ -2105,8 +2300,9 @@ def _pull_gguf_file(
             f"{len(missing)} to download)[/dim]"
         )
     else:
-        console.print(f"Pulling [bold cyan]{escape(repo_id)}[/bold cyan] / "
-                      f"[bold]{escape(filename)}[/bold]")
+        console.print(f"Pulling [bold cyan]{escape(repo_id)}[/bold cyan]"
+                      + (f"@[bold]{escape(revision.ref)}[/bold]" if revision else "")
+                      + f" / [bold]{escape(filename)}[/bold]")
 
     with _download_progress([base_dir / p for p in missing], total_size,
                             base_dir=stage_dir,
@@ -2121,7 +2317,7 @@ def _pull_gguf_file(
                     endpoint=_HF_ENDPOINT,
                     token=_hf_token(),
                     tqdm_class=meter_tqdm_class(),
-                    **_at_commit(published.get(part)),
+                    **_file_revision(published.get(part), revision),
                 )
                 final = base_dir / part
                 if Path(local) != final:
@@ -2191,11 +2387,13 @@ def _pull_gguf_file(
         if type_is_auto and not filename.lower().endswith(".gguf"):
             reg_type = _content_media_type(base_dir / filename, reg_type)
         mmproj_path = _mmproj_for_registration(
-            reg_type, repo_id, filename, base_dir, dest_dir, mmproj_spec)
+            reg_type, repo_id, filename, base_dir, dest_dir, mmproj_spec,
+            pinned_revision=revision is not None)
         _mm._register(model_name, base_dir / filename, f"hf:{repo_id}",
                   sha256=verify_digest, model_type=reg_type, mmproj=mmproj_path,
                   architecture=gguf_meta.get("architecture"),
-                  expert_count=gguf_meta.get("expert_count"))
+                  expert_count=gguf_meta.get("expert_count"),
+                  **_register_revision(revision))
         # model_name is _sanitize_name()-derived (A-Za-z0-9._- only) and is
         # escaped anyway.
         _report_success(f"[green]✓[/green] [bold]{escape(model_name)}[/bold] is ready",
@@ -2381,6 +2579,8 @@ def partial_download_kept(spec: str) -> Optional[str]:
     ``"repo"`` (a full-repo download keeps every file that finished), else
     None. Does no filesystem or network access."""
     spec = _mm.resolve_spec(spec.strip())
+    with contextlib.suppress(ValueError):
+        spec = split_hf_revision(spec)[0]
     if spec.startswith("civitai:"):
         return "civitai"
     if spec.startswith(("http://", "https://")) or "/" not in spec:
@@ -2398,6 +2598,12 @@ def discard_partial_download(spec: str, name: Optional[str] = None) -> int:
 
     Raises :class:`PullInFlight` when a download of it is running."""
     spec = _mm.resolve_spec(spec.strip())
+    ref = None
+    if not spec.startswith(("http://", "https://")):
+        try:
+            spec, ref = split_hf_revision(spec)
+        except ValueError:
+            return 0
     if spec.startswith(("http://", "https://")):
         stem = _stem_from_url(spec)
         filename = _safe_models_filename(stem + ".gguf") if stem else None
@@ -2424,7 +2630,8 @@ def discard_partial_download(spec: str, name: Optional[str] = None) -> int:
             return 0
         rels = [f"{remote_dir}/{p}" if remote_dir else p for p in parts]
         return _delete_hf_temp_files(base_dir, rels)
-    dest = _mm.MODELS_DIR / _sanitize_name(name or spec.split("/")[-1])
+    dest = _mm.MODELS_DIR / _sanitize_name(
+        name or spec.split("/")[-1] + (f"@{ref}" if ref else ""))
     return _delete_hf_temp_files(dest, None)
 
 
@@ -2555,8 +2762,14 @@ def _pull_hf_snapshot(
     expected_sha256: Optional[str] = None,
     redownload: bool = False,
     model_type: str = "llm",
+    revision: Optional[HfRevision] = None,
 ) -> bool:
-    """Download a complete HuggingFace model repo (for transformers/HF format models)."""
+    """Download a complete HuggingFace model repo (for transformers/HF format models).
+
+    *revision*, when given, is the branch, tag or commit already resolved by
+    ``resolve_hf_revision``: the listing, the download and the digest check all
+    use its commit, the registry entry records it, and the default folder name
+    carries it."""
     # repo_id is the raw caller-supplied spec (CLI/GUI/MCP), dest is derived
     # from it via _sanitize_name, and every exception's text is remote-sourced;
     # all are escaped. Several sites below interpolate repo_id/dest directly
@@ -2579,7 +2792,8 @@ def _pull_hf_snapshot(
         console.print("[red]Missing:[/red] huggingface-hub  (run: uv pip install huggingface-hub)")
         return False
 
-    model_name = _sanitize_name(name or repo_id.split("/")[-1])
+    default_name = repo_id.split("/")[-1] + (f"@{revision.ref}" if revision else "")
+    model_name = _sanitize_name(name or default_name)
     dest = _mm.MODELS_DIR / model_name
 
     # Fetch the repo's file listing once, used both to verify an existing
@@ -2588,14 +2802,14 @@ def _pull_hf_snapshot(
     # display below. A disk-full mid-download can leave config.json, one of the
     # smallest and earliest files, on disk while weight shards are missing.
     repo_siblings = None
-    commit = None
+    commit = _rev_commit(revision)
     total_size = 0
     try:
-        info = _hf_api().model_info(repo_id, files_metadata=True)
+        info = _hf_api().model_info(repo_id, files_metadata=True, **_revision_kwargs(commit))
         repo_siblings = info.siblings
         total_size = sum(getattr(s, "size", None) or 0 for s in repo_siblings)
         info_sha = getattr(info, "sha", None)
-        commit = _valid_commit(info_sha)
+        commit = _valid_commit(info_sha) or commit
     except Exception as e:
         # Offline or API error: fall back to a config.json-only completeness
         # check below and an indeterminate (0) progress total.
@@ -2605,14 +2819,17 @@ def _pull_hf_snapshot(
     damaged: list[str] = []
     if dest.exists() and repo_siblings is not None:
         damaged = _snapshot_files_damaged(dest, repo_siblings, repo_id)
-    if dest.exists() and not damaged and _snapshot_is_complete(dest, repo_siblings, repo_id):
+    if (dest.exists() and not damaged
+            and not _holds_other_revision(dest, repo_id, revision)
+            and _snapshot_is_complete(dest, repo_siblings, repo_id)):
         console.print(f"[yellow]Already downloaded:[/yellow] {escape(model_name)}")
         _mm._register_with_dedup(model_name, dest, f"hf:{repo_id}",
-                                 model_type=_resolve_snapshot_type(dest, model_type))
+                                 model_type=_resolve_snapshot_type(dest, model_type),
+                                 **_register_revision(revision))
         return True
     repairing = bool(damaged) or (
         dest.exists() and any(
-            _mm.load_registry()[n].get("source") == f"hf:{repo_id}"
+            _entry_is_hf_source(_mm.load_registry()[n], repo_id, revision)
             for n in find_aliases_by_path(dest, _mm.load_registry())))
 
     # Same repo already pulled under a different name?
@@ -2627,7 +2844,7 @@ def _pull_hf_snapshot(
             epath = _mm._entry_path(info)
             if epath is None:
                 return False
-            return info.get("source") == f"hf:{repo_id}" and Path(epath).is_dir()
+            return _entry_is_hf_source(info, repo_id, revision) and Path(epath).is_dir()
 
         same_source = sorted(n for n, info in reg.items() if _is_same_repo(info))
         if same_source:
@@ -2670,7 +2887,7 @@ def _pull_hf_snapshot(
     if dest.exists():
         reg_now = _mm.load_registry()
         foreign = [n for n in find_aliases_by_path(dest, reg_now)
-                  if reg_now[n].get("source") != f"hf:{repo_id}"]
+                  if not _entry_is_hf_source(reg_now[n], repo_id, revision)]
         if foreign:
             # repo_id/dest sit directly inside the OPEN [red]...[/red] tag, a
             # tag-injection position. `foreign` entries are registry keys,
@@ -2716,8 +2933,9 @@ def _pull_hf_snapshot(
     # TAG-INJECTION site: repo_id/dest sit directly inside OPEN
     # [bold cyan]/[bold] tags.
     console.print(
-        f"Downloading full model [bold cyan]{escape(repo_id)}[/bold cyan] "
-        f"-> [bold]{escape(str(dest))}[/bold]"
+        f"Downloading full model [bold cyan]{escape(repo_id)}[/bold cyan]"
+        + (f" at [bold]{escape(revision.ref)}[/bold]" if revision else "")
+        + f" -> [bold]{escape(str(dest))}[/bold]"
     )
     console.print("[dim]This may take a while for large models...[/dim]")
 
@@ -2766,7 +2984,8 @@ def _pull_hf_snapshot(
     # then the download has written real bytes to disk.
     registered = _mm._register_with_dedup(
         model_name, dest, f"hf:{repo_id}",
-        model_type=_resolve_snapshot_type(dest, model_type), refresh=True)
+        model_type=_resolve_snapshot_type(dest, model_type), refresh=True,
+        **_register_revision(revision))
     if not registered:
         # TAG-INJECTION site: repo_id/dest sit directly inside the OPEN
         # [yellow]...[/yellow] tag. model_name is _sanitize_name()-derived and

@@ -721,6 +721,12 @@ def pull(model_spec, name, sha256, redownload, mmproj, type, store,
       localm pull google/gemma-3-4b-it
 
     \b
+    A branch, tag or commit instead of the default branch (append @revision to
+    the repo; the revision is recorded and shown by `localm list`):
+      localm pull turboderp/Qwen3-0.6B-exl3@4.0bpw --name exl3
+      localm pull owner/repo@v1.0:model-Q4_K_M.gguf
+
+    \b
     Single GGUF file (quantized, lighter, works with GGUF backend):
       localm pull llama3.2-3b
       localm pull bartowski/Qwen2.5-7B-Instruct-GGUF:Qwen2.5-7B-Instruct-Q4_K_M.gguf
