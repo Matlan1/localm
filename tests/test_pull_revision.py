@@ -650,7 +650,6 @@ class TestAnUnfinishedRevisionIsNotMergedWithAnother(_InterruptedAfterTheFirstFi
         self._copy(hub, hub.repo_files[COMMIT])
         target = tmp_path / "elsewhere"
         target.mkdir()
-        (target / "extra.bin").write_bytes(b"x")
         subprocess.run(["cmd", "/c", "mklink", "/J", str(hub.models_dir / "q" / "linked"),
                         str(target)], check=True, capture_output=True)
         assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is False
