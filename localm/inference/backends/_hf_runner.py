@@ -239,7 +239,7 @@ def _arm_native_crash_trace(path) -> None:
             type(e).__name__, e)
 
 
-def _runner_entry(req_q, resp_q, ctrl_q, crash_trace_path=None, worker_target=None) -> None:
+def _runner_entry(req_q, resp_q, ctrl_q, worker_target=None, crash_trace_path=None) -> None:
     """Process target. Wraps ``_runner_main`` so any exception escaping it is
     logged via the ``logging`` module before the process dies, not left to
     multiprocessing's own ``traceback.print_exc()`` alone - mirrors
@@ -795,7 +795,7 @@ class HFRunner:
         self._proc = ctx.Process(
             target=_runner_entry,
             args=(self._req_q, self._resp_q, self._ctrl_q,
-                  self._crash_trace_path, self._worker_target),
+                  self._worker_target, self._crash_trace_path),
             name=f"localm-{self._process_name}", daemon=True)
         self._proc.start()
 

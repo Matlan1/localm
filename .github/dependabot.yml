@@ -23,6 +23,7 @@ updates:
         patterns:
           - "*"
         exclude-patterns:
+          - "exllamav2"
           - "huggingface-hub"
           - "mkdocs"
           - "mkdocs-material"

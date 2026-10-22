@@ -39,6 +39,7 @@ BROWSER = "browser"
 JOBS = "jobs"
 MEMORY = "memory"
 TTS = "tts"
+EXLLAMA = "exllama"
 
 KERNEL_SCOPES: dict[str, str] = {
     MODELS_READ:   "List and inspect installed models",
@@ -66,6 +67,7 @@ BUILTIN_PLUGIN_SCOPES: dict[str, str] = {
     JOBS:  "Scheduled recurring tasks",
     MEMORY: "Durable chat memory",
     TTS:   "Text-to-speech",
+    EXLLAMA: "EXL2 / EXL3 models through ExLlama (no routes of its own)",
 }
 
 # Capability variants that are not a plugin name of their own.
