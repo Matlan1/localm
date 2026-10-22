@@ -11,6 +11,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-22
+
 ### Added
 - **`localm pull owner/repo@revision` pulls a Hugging Face branch, tag or commit.** Append `@revision` to a repo (`localm pull turboderp/Qwen3-0.6B-exl3@4.0bpw -n exl3`) or to a single-file spec (`owner/repo@v1.0:model.gguf`) instead of taking the default branch, which is where repos that keep each quant on its own branch put their files. A revision that does not exist is refused before anything is downloaded, and a network or permission problem is reported as such rather than as a missing revision. Every file is read and downloaded at the commit the revision pointed at when the pull started; `localm list` shows `hf:owner/repo@revision`, and pulling again with the same spec reuses the download. A pull never mixes two revisions in one folder or replaces a same-named file that another pull registered: it stops and says what to remove.
 - **A VRAM cache for the MoE experts kept in system RAM.** The new `moe_cache_mib` setting
@@ -99,6 +101,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   `.localcoder/config.toml` to be asked every time.
 
 ### Changed
+- **A localm 0.2.0 install that never updated to 0.3.0 cannot update itself to 0.3.1.** 0.3.1 is
+  signed only with the release key 0.3.0 introduced, which 0.2.0 does not have. Install 0.3.1
+  fresh from the release page instead.
 - **Long agent and chat sessions stop re-reading the whole conversation every turn.** On models
   with recurrent layers (Qwen3.5, Qwen3-Next, LFM2 and other hybrid models) each reply now
   continues from a saved state near the end of the previous prompt instead of processing the
@@ -141,6 +146,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
   speed. A reply that does grow that long moves to system RAM at that point and is never cut
   short. A KV cache already in system RAM also moves back to VRAM at a smaller size when the
   next request fits in it.
+- **Export saves inside the app.** On the computer running localm, Export (the chat's, and the
+  coder's session, result and patch exports) asks for a folder in the app's own file browser and
+  saves there, without the browser's download prompt. Other devices still download the file.
 
 ### Fixed
 - **The Ollama API accepts the `curl -d` commands from Ollama's own documentation.** `curl http://127.0.0.1:<port>/api/chat -d '{...}'` sends its JSON body labelled `application/x-www-form-urlencoded`, and the Ollama routes that take a body (`/api/chat`, `/api/generate`, `/api/show`, `/api/embed`, `/api/embeddings`, `/api/copy`) refused it with HTTP 400. A body that is a JSON object is now read as JSON whatever its Content-Type says, as Ollama does; a body that is not JSON is still refused with the same 400, and a request from a web page (one that carries an `Origin` header) still needs a JSON Content-Type.
@@ -595,12 +603,6 @@ permanent public record of what shipped and are never rewritten; the in-progress
   the server after the run ends.
 - **Idle coder sessions and their agent browsers are closed after 24 hours again** when only the
   Browser tab is in use.
-
-### Changed
-
-- **Export saves inside the app.** On the computer running localm, Export (the chat's, and the
-  coder's session, result and patch exports) asks for a folder in the app's own file browser and
-  saves there, without the browser's download prompt. Other devices still download the file.
 
 ### Security
 
