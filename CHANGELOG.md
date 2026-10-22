@@ -181,6 +181,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   in tiles that fit the Vulkan buffer limit, and a Vulkan runtime that does not report its limit
   decodes in tiles under a conservative one and says so, instead of decoding part of the video or
   image on the CPU.
+- **Larger images keep their attention on the GPU with the Vulkan runtime.** Without flash
+  attention, the attention of a larger image (SD-Turbo at 1024x1024, FLUX above about 1024x1024,
+  for example) needed a bigger buffer than the Vulkan driver allows and ran on the CPU. localm now
+  reloads the model with flash attention on for such an image when the GPU runs it fast enough,
+  turns it off when it would make a single GPU job run too long, and otherwise refuses the image
+  with the largest size that fits and the ROCm or CUDA runtime as alternatives.
 - **The global `localm` command works from a Shared install and uninstalls cleanly.** On Linux and
   macOS setup made `~/.local/bin/localm` a symlink with a relative target that pointed nowhere,
   and uninstall left it behind; on Windows it added the relative entry `bin` to your user PATH.

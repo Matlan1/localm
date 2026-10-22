@@ -39,13 +39,12 @@ def test_a_load_log_shape_replaces_the_family_default():
     assert attention.image_attention("flux2").heads == 48
 
 
-def test_an_unknown_image_family_is_at_least_as_large_as_every_known_one():
-    unknown = attention.image_attention("something-new")
-    for family in ("sd1", "sd2", "sdxl", "sd3", "flux", "chroma", "flux2", "qwen-image",
-                   "z-image", "ovis-image", "anima", "ernie-image"):
-        known = attention.image_attention(family)
-        assert unknown.score_bytes(1024, 1024, 1) >= known.score_bytes(1024, 1024, 1), family
-        assert unknown.flops(1024, 1024, 1) >= known.flops(1024, 1024, 1), family
+def test_every_image_family_has_a_shape():
+    from localm.media.sdcpp import families
+    for family in families.IMAGE_FAMILIES:
+        assert attention.image_attention(family) is not None, family
+    assert attention.image_attention("something-new") is None
+    assert attention.image_attention(None) is None
 
 
 def test_largest_square():
@@ -189,10 +188,19 @@ def test_a_slow_auto_flash_attention_is_turned_off_when_the_scores_fit(monkeypat
     assert any(line.startswith("Reloading Model with flash attention off") for line in said)
 
 
-def test_an_unknown_flash_state_is_made_explicit_when_flash_is_slow(monkeypatch, tmp_path):
+def test_an_unknown_flash_state_counts_as_off(monkeypatch, tmp_path):
     ok, msg, runner, _said = _image(monkeypatch, tmp_path, 1024, flash=None, rate=1e11)
     assert ok, msg
-    assert runner.loads[-1][1]["flash_attn_mode"] == "diffusion=off"
+    assert len(runner.loads) == 1 and runner.asked == []
+    ok, msg, runner, _said = _image(monkeypatch, tmp_path, 1152, flash=None)
+    assert ok, msg
+    assert runner.loads[-1][1]["flash_attn_mode"] == "diffusion=on"
+
+
+def test_an_unknown_family_keeps_the_loaded_attention(monkeypatch, tmp_path):
+    ok, msg, runner, _said = _image(monkeypatch, tmp_path, 1536, family=None)
+    assert ok, msg
+    assert runner.asked == [] and len(runner.loads) == 1
 
 
 def test_an_image_that_fits_neither_way_is_refused(monkeypatch, tmp_path):

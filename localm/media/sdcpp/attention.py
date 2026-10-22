@@ -132,16 +132,16 @@ _IMAGE_SHAPES = {
     "anima": ImageAttention(16, 128, 16, refs=True),
     "ernie-image": ImageAttention(32, 128, 16, text_tokens=512),
 }
-_IMAGE_LARGEST = ImageAttention(48, 128, 8, text_tokens=512, batch=2, refs=True, ref_extra=400)
 
 
 def image_attention(family: Optional[str], hidden: Optional[int] = None,
-                    heads: Optional[int] = None) -> ImageAttention:
+                    heads: Optional[int] = None) -> Optional[ImageAttention]:
     """The largest attention of an image model of localm *family*; *hidden*
     and *heads* are the hidden size and head count its load log reported, which
-    replace the family's largest size. An unknown family gets a shape at least
-    as large as every known one."""
-    shape = _IMAGE_SHAPES.get(family or "", _IMAGE_LARGEST)
+    replace the family's largest size. None for a family with no known shape."""
+    shape = _IMAGE_SHAPES.get(family or "")
+    if shape is None:
+        return None
     if hidden and heads and hidden % heads == 0:
         return ImageAttention(int(heads), int(hidden) // int(heads), shape.stride,
                               shape.text_tokens, shape.batch, shape.refs, shape.ref_extra)

@@ -600,12 +600,14 @@ def _vulkan_attention_mode(runner, rt, info: dict, models: dict, width: int, hei
     *cfg_scale* on the Vulkan runtime: ``(mode, refusal)``. A CFG of 1 runs
     one image per graph. *mode* is None to keep the loaded model, or
     ``"on"`` / ``"off"`` to reload it with flash attention set that way;
-    *refusal* is the reason to refuse the job. Without flash attention the
+    *refusal* is the reason to refuse the job. A model whose flash attention
+    state is not known counts as running without it. Without flash attention the
     score matrix (``attention.ImageAttention.score_bytes``) must fit the
     device's buffer limit (``vaetile.device_limit``); with it, one attention
     op must take at most ``attention.SAFE_DISPATCH_SECONDS`` at the worker's
     measured ``attention_rate``. A rate that could not be measured counts as
-    too slow. Other runtimes get ``(None, None)``."""
+    too slow. Other runtimes, and a model family with no known attention shape,
+    get ``(None, None)``."""
     if rt.backend != "vulkan":
         return None, None
     if hires:
@@ -613,24 +615,27 @@ def _vulkan_attention_mode(runner, rt, info: dict, models: dict, width: int, hei
         height = sampling.hires_side(height, float(hires["scale"]))
     att = attention.image_attention(models.get("family"), info.get("dit_hidden"),
                                     info.get("dit_heads"))
+    if att is None:
+        return None, None
     if cfg_scale is not None and abs(float(cfg_scale) - 1.0) < 1e-5:
         att = replace(att, batch=1)
-    limit, _assumed = vaetile.device_limit(rt.backend, info.get("max_tensor_bytes"))
+    limit = (vaetile.device_limit(rt.backend, info.get("max_tensor_bytes"))[0]
+             or vaetile.VULKAN_ASSUMED_TENSOR_BYTES)
     flash = info.get("flash_attn")
 
     def scores_fit(w: int, h: int) -> bool:
         return att.score_bytes(w, h, ref_count) <= limit
 
     fits = scores_fit(width, height)
-    if fits and flash is False:
+    if fits and flash is not True:
         return None, None
     try:
-        rate = runner.attention_rate(rt.path, att.head_dim)
+        rate: float = runner.attention_rate(rt.path, att.head_dim) or 0.0
     except SdWorkerError:
-        rate = None
+        rate = 0.0
 
     def flash_fits(w: int, h: int) -> bool:
-        return bool(rate) and att.flops(w, h, ref_count) / rate <= attention.SAFE_DISPATCH_SECONDS
+        return rate > 0 and att.flops(w, h, ref_count) / rate <= attention.SAFE_DISPATCH_SECONDS
 
     fast = flash_fits(width, height)
     if flash is True:
@@ -638,8 +643,6 @@ def _vulkan_attention_mode(runner, rt, info: dict, models: dict, width: int, hei
             return None, None
         if fits:
             return "off", None
-    elif fits:
-        return (None if flash is False or fast else "off"), None
     elif fast:
         return "on", None
     side = attention.largest_square(lambda s: scores_fit(s, s) or flash_fits(s, s))

@@ -437,6 +437,7 @@ def test_the_worker_receives_lora_structs():
 class _Runner:
     def __init__(self):
         self.loads, self.generates, self.alive, self.loaded_key = [], [], False, None
+        self.loaded_ctx = None
         self.fill = b"\x10"
 
     def is_alive(self):
@@ -444,8 +445,11 @@ class _Runner:
 
     def ensure_loaded(self, key, runtime_dir, ctx, **kw):
         self.loads.append(ctx)
-        self.loaded_key, self.alive = key, True
+        self.loaded_key, self.loaded_ctx, self.alive = key, dict(ctx), True
         return {"version": "Flux", "image": True, "video": True}
+
+    def attention_rate(self, runtime_dir, head_dim=128, timeout=None):
+        return 1e15
 
     def generate_image(self, params, **kw):
         self.generates.append(params)
