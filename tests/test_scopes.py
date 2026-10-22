@@ -49,6 +49,24 @@ def test_is_valid_scope():
     assert not scopes.is_valid_scope(None)
 
 
+def test_a_registered_scope_need_not_be_an_identifier():
+    assert scopes.is_valid_scope("vendor.tool:read", extra={"vendor.tool:read"})
+    assert not scopes.is_valid_scope("vendor.tool:read", extra={"other"})
+    assert not scopes.is_valid_scope("bad name", extra={"x"})
+
+
+def test_a_dashed_plugin_name_is_a_valid_scope():
+    assert scopes.is_valid_scope("my-plugin")
+    assert scopes.is_valid_scope("-leading-dash")
+    assert not scopes.is_valid_scope("my-plugin!")
+
+
+def test_a_non_string_scope_is_refused_without_raising():
+    assert scopes.is_valid_scope(123) is False
+    assert scopes.is_valid_scope(["admin"]) is False
+    assert scopes.is_valid_scope(b"chat") is False
+
+
 def test_privileged_scopes_are_known():
     # Every privileged scope must be a real, known scope: a kernel scope or an
     # EXTRA capability variant like coder:full.
@@ -60,6 +78,15 @@ def test_grants_admin_implies_all():
     assert scopes.grants({scopes.ADMIN}, scopes.CODER)
     assert scopes.grants({scopes.CODER}, scopes.CODER)
     assert not scopes.grants({scopes.CHAT}, scopes.CODER)
+
+
+def test_coder_full_implies_only_the_base_coder_scope():
+    assert scopes.grants({scopes.CODER_FULL}, scopes.CODER)
+    assert scopes.grants({scopes.CODER_FULL}, scopes.CODER_FULL)
+    assert not scopes.grants({scopes.CODER_FULL}, scopes.CHAT)
+    assert not scopes.grants({scopes.CODER_FULL}, scopes.MODELS_WRITE)
+    assert not scopes.grants({scopes.CODER}, scopes.CODER_FULL)
+    assert not scopes.grants(set(), scopes.CODER)
 
 
 def test_normalize():

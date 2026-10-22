@@ -187,6 +187,40 @@ def test_owner_key_downgrade_warning_clears_when_the_file_is_deleted(auth):
     assert auth.owner_key_downgrade_warning() is None
 
 
+def _downgrade_notices(path):
+    from localm.debuglog import recent_activity
+    return len([ln for ln in recent_activity() if str(path) in ln
+                and "holds no key" in ln])
+
+
+def test_notice_re_arms_after_the_file_is_deleted(auth):
+    from localm.debuglog import install_ring_buffer
+    install_ring_buffer()
+    path = _write_key_file(auth, "")
+    before = _downgrade_notices(path)
+    assert auth.any_key_configured() is False
+    path.unlink()
+    assert auth.any_key_configured() is False
+    _write_key_file(auth, "")
+    assert auth.any_key_configured() is False
+    assert _downgrade_notices(path) == before + 2
+
+
+def test_notice_re_arms_after_the_file_was_unreadable(auth):
+    from localm.debuglog import install_ring_buffer
+    install_ring_buffer()
+    path = _write_key_file(auth, "")
+    before = _downgrade_notices(path)
+    assert auth.any_key_configured() is False
+    path.unlink()
+    path.mkdir()
+    assert auth.any_key_configured() is True
+    path.rmdir()
+    _write_key_file(auth, "")
+    assert auth.any_key_configured() is False
+    assert _downgrade_notices(path) == before + 2
+
+
 def test_owner_key_downgrade_warning_clears_when_the_file_becomes_unreadable(auth):
     """NEGATIVE-adjacent: if the empty file is later replaced by something
     unreadable, any_key_configured() flips to True (fail closed) - a stale

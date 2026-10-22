@@ -425,6 +425,10 @@ class TestIsUncOrDevicePath:
         "\\??/Q:/dir",
         "/??\\Q:\\dir",
         "/??/UNC/192.0.2.1/share",
+        "\\??\\",
+        "/??/",
+        "\\??/",
+        "/??\\",
     ])
     def test_nt_object_namespace_prefix_is_device_syntax(self, raw):
         """Win32 hands a path starting with the NT object-namespace prefix to
@@ -446,6 +450,7 @@ class TestIsUncOrDevicePath:
     @pytest.mark.parametrize("raw", [
         "/nonexistent/x", "relative/x", "a.png", "", "   ", "Q:/x", r"Q:\x",
         "/??x/dir", "??/dir", r"\?\Q:\dir",
+        "X??\\dir", "X??/dir", "\\??X\\dir", "/??X/dir",
         "Q://models/x.gguf",     # drive + DOUBLED slash: the drive-vs-scheme edge
         "Q:x",                   # drive-RELATIVE - not UNC (confined_under still
                                  # rejects it as a component; different question)

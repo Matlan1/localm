@@ -835,3 +835,486 @@ def test_rag_roots_for_revoked_key_falls_back_to_default(auth):
     made = auth.create_key("s", ["chat"], rag_roots=["D:/shared"])
     auth.revoke_key(made["id"])
     assert auth.rag_roots_for(made["key"]) == []          # gone -> the safe default
+
+
+# --------------------------------------------------------------------------- #
+#  Digests, keystore records and their logging                                #
+# --------------------------------------------------------------------------- #
+
+class _TimeProxy:
+    """Stands in for ``auth.time``: fixed ``time()``/``monotonic()`` when set,
+    recorded ``sleep()`` calls, everything else from the real module."""
+
+    def __init__(self, now=None, mono=None):
+        self.now = now
+        self.mono = mono
+        self.sleeps = []
+
+    def time(self):
+        import time
+        return time.time() if self.now is None else self.now
+
+    def monotonic(self):
+        import time
+        return time.monotonic() if self.mono is None else self.mono
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+
+    def __getattr__(self, name):
+        import time
+        return getattr(time, name)
+
+
+def _logged(caplog, needle):
+    return [r for r in caplog.records if needle.lower() in str(r.msg).lower()]
+
+
+def _sha256_hex(text):
+    import hashlib
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _write_keystore(auth, records):
+    import json
+    path = auth.keystore_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(records), encoding="utf-8")
+
+
+def _set_last_used(auth, key_id, value):
+    import json
+    path = auth.keystore_file()
+    records = json.loads(path.read_text(encoding="utf-8"))
+    for r in records:
+        if r["id"] == key_id:
+            r["last_used"] = value
+    path.write_text(json.dumps(records), encoding="utf-8")
+
+
+def _last_used(auth, key_id):
+    return next(k["last_used"] for k in auth.list_keys() if k["id"] == key_id)
+
+
+def test_credential_file_names(auth):
+    assert auth.key_file().name == "auth.key"
+    assert auth.keystore_file().name == "auth.json"
+    assert auth.owner_kdf_file().name == "auth.kdf.json"
+
+
+def test_generate_key_length_follows_nbytes(auth):
+    assert len(auth.generate_key()) == 43
+    assert len(auth.generate_key(16)) == 22
+
+
+def test_fast_digest_accepts_a_lone_surrogate(auth):
+    import hashlib
+    key = "ab\ud800cd"
+    assert auth._fast_digest(key) == hashlib.sha256(
+        key.encode("utf-8", "surrogatepass")).hexdigest()
+
+
+def test_scrypt_derive_honours_dklen_surrogates_and_its_memory_budget(auth):
+    import hashlib
+    salt = b"s" * 16
+    small = auth._scrypt_derive("k", salt, 16, 8, 1, 32)
+    assert small == hashlib.scrypt(b"k", salt=salt, n=16, r=8, p=1, dklen=32).hex()
+    assert len(small) == 64
+    odd = "a\udc80"
+    assert auth._scrypt_derive(odd, salt, 16, 8, 1, 32) == hashlib.scrypt(
+        odd.encode("utf-8", "surrogatepass"), salt=salt, n=16, r=8, p=1,
+        dklen=32).hex()
+    big = auth._scrypt_derive("k", salt, 2 ** 15, 8, 1, 32)
+    assert big == hashlib.scrypt(b"k", salt=salt, n=2 ** 15, r=8, p=1, dklen=32,
+                                 maxmem=64 * 1024 * 1024).hex()
+
+
+def test_atomic_write_private_passes_retrying_through(auth, monkeypatch, tmp_path):
+    import localm.config as cfg
+    seen = []
+    monkeypatch.setattr(cfg, "atomic_write_private",
+                        lambda path, text, **kw: seen.append(kw))
+    auth._atomic_write_private(tmp_path / "f", "x")
+    auth._atomic_write_private(tmp_path / "f", "x", retrying=True)
+    assert seen == [{"retrying": False}, {"retrying": True}]
+
+
+def test_keystore_is_saved_indented_through_the_retrying_writer(auth, monkeypatch):
+    seen = []
+    monkeypatch.setattr(auth, "_atomic_write_private",
+                        lambda path, text, **kw: seen.append((path, text, kw)))
+    auth._save_keystore([{"id": "a"}])
+    assert seen == [(auth.keystore_file(), '[\n  {\n    "id": "a"\n  }\n]',
+                     {"retrying": True})]
+
+
+def test_credential_stores_are_created_under_a_nested_new_home(auth, monkeypatch, tmp_path):
+    import json
+    monkeypatch.setenv("LOCALM_HOME", str(tmp_path / "a" / "b"))
+    auth._save_keystore([])
+    assert json.loads(auth.keystore_file().read_text(encoding="utf-8")) == []
+    monkeypatch.setenv("LOCALM_HOME", str(tmp_path / "c" / "d"))
+    auth._save_owner_kdf([{"x": 1}])
+    assert auth.owner_kdf_file().read_text(encoding="utf-8") == (
+        '{\n  "v": 1,\n  "records": [\n    {\n      "x": 1\n    }\n  ]\n}')
+
+
+def test_owner_digest_takes_its_lock_in_an_existing_or_nested_home(
+        auth, monkeypatch, tmp_path, caplog):
+    for home in (tmp_path, tmp_path / "x" / "y"):
+        monkeypatch.setenv("LOCALM_HOME", str(home))
+        auth._forget_cached_digests()
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="localm"):
+            digest = auth._owner_digest("owner-key-123")
+        assert len(digest) == 64
+        assert _logged(caplog, "could not lock") == []
+        assert auth.owner_kdf_file().is_file()
+
+
+def test_owner_digest_record_mints_once_then_reuses_it(auth):
+    import json
+    digest, minted = auth._owner_digest_record("owner-key-123")
+    [rec] = json.loads(auth.owner_kdf_file().read_text(encoding="utf-8"))["records"]
+    assert minted is True
+    assert digest == rec["digest"] and len(digest) == 64
+    assert len(bytes.fromhex(rec["salt"])) == 16
+    assert isinstance(rec["created"], float)
+    assert auth._owner_digest_record("owner-key-123") == (digest, False)
+
+
+def test_an_unpersistable_owner_kdf_record_is_reported(auth, monkeypatch, caplog):
+    def refuse(records):
+        raise OSError("disk full")
+    monkeypatch.setattr(auth, "_save_owner_kdf", refuse)
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        digest, minted = auth._owner_digest_record("owner-key-123")
+    assert minted is True and len(digest) == 64
+    [r] = _logged(caplog, "owner key derivation record")
+    assert r.msg == ("could not persist the owner key derivation record %s (%s); "
+                     "sessions and jobs stamped in this process may not be "
+                     "recognised after a restart")
+    assert r.args[0] == auth.owner_kdf_file()
+    assert str(r.args[1]) == "disk full"
+
+
+def test_a_corrupt_owner_kdf_file_is_reported_and_ignored(auth, caplog):
+    path = auth.owner_kdf_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{not json", encoding="utf-8")
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        assert auth._load_owner_kdf() == []
+    [r] = _logged(caplog, "is unreadable or corrupt")
+    assert r.msg == ("owner key KDF file %s is unreadable or corrupt (%s); "
+                     "minting a fresh derivation record. Sessions and jobs "
+                     "owned by the owner key are re-linked automatically on "
+                     "the next successful verify")
+    assert r.args[0] == path
+    assert isinstance(r.args[1], ValueError)
+
+
+def test_legacy_identity_relink_needs_two_distinct_digests(auth, monkeypatch):
+    from localm import sessions
+    calls = []
+    monkeypatch.setattr(sessions, "relink_key_hash",
+                        lambda old, new: calls.append((old, new)) or 0)
+    for legacy, current in (("", "new"), ("old", ""), ("", ""), ("same", "same")):
+        auth._migrate_legacy_owner_identity(legacy, current)
+    assert calls == []
+    auth._migrate_legacy_owner_identity("old", "new")
+    assert calls == [("old", "new")]
+
+
+def test_legacy_identity_relink_is_logged(auth, monkeypatch, caplog):
+    from localm import sessions
+    monkeypatch.setattr(sessions, "relink_key_hash", lambda old, new: 3)
+    with caplog.at_level(logging.DEBUG, logger="localm"):
+        auth._migrate_legacy_owner_identity("old", "new")
+    [r] = _logged(caplog, "re-linked")
+    assert r.msg == "re-linked %d session(s) to the owner key's derived identity"
+    assert r.args == (3,)
+
+
+def test_a_failed_legacy_identity_relink_is_reported(auth, monkeypatch, caplog):
+    from localm import sessions
+
+    def boom(old, new):
+        raise RuntimeError("store locked")
+    monkeypatch.setattr(sessions, "relink_key_hash", boom)
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        auth._migrate_legacy_owner_identity("old", "new")
+    [r] = _logged(caplog, "could not re-link")
+    assert r.msg == ("could not re-link existing sessions to the owner key's "
+                     "new derived identity (%s); those sessions stay valid, "
+                     "but a job created from one may not be recognised as the "
+                     "owner's until the next sign-in")
+    assert [str(a) for a in r.args] == ["store locked"]
+
+
+def test_owner_kdf_record_without_a_salt_uses_an_empty_salt(auth):
+    key = "owner-key-123"
+    rec = {"alg": "scrypt", "n": 16, "r": 8, "p": 1, "dklen": 32,
+           "digest": auth._scrypt_derive(key, b"", 16, 8, 1, 32)}
+    assert auth._owner_kdf_record_for(key, [rec]) is rec
+
+
+def test_record_digest_for_derives_a_declared_kdf_record(auth):
+    salt = b"\x01" * 16
+    rec = {"alg": "scrypt", "salt": salt.hex(), "n": 16, "r": 8, "p": 1, "dklen": 32}
+    assert auth._record_digest_for(rec, "k", lambda: "fast") == \
+        auth._scrypt_derive("k", salt, 16, 8, 1, 32)
+
+
+def test_record_with_an_unknown_alg_is_refused_and_reported(auth, caplog):
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        assert auth._record_digest_for({"id": "k1", "alg": "argon9"}, "k",
+                                       lambda: "fast") is None
+    [r] = _logged(caplog, "unknown hash algorithm")
+    assert r.msg == ("keystore record %s declares an unknown hash algorithm %r; "
+                     "refusing to match it. A key written by a NEWER localm cannot "
+                     "be verified by this one - upgrade rather than editing the "
+                     "keystore by hand")
+    assert r.args == ("k1", "argon9")
+
+
+def test_keystore_lookup_skips_an_unusable_record_and_matches_a_kdf_one(auth):
+    key = "tok"
+    salt = b"\x02" * 16
+    kdf = {"id": "b", "alg": "scrypt", "salt": salt.hex(), "n": 16, "r": 8,
+           "p": 1, "dklen": 32, "hash": auth._scrypt_derive(key, salt, 16, 8, 1, 32)}
+    unknown = {"id": "a", "alg": "argon9", "hash": "x"}
+    assert auth._find_keystore_record(key, [unknown, kdf]) is kdf
+
+
+def test_a_memoised_owner_digest_is_served_without_rechecking_the_owner(auth, monkeypatch):
+    monkeypatch.setenv("LOCALM_API_KEY", "owner-key-123")
+    auth._forget_cached_digests()
+    first = auth._hash_key("owner-key-123")
+    checks = []
+    real = auth._is_owner_key
+    monkeypatch.setattr(auth, "_is_owner_key", lambda k: checks.append(k) or real(k))
+    assert auth._hash_key("owner-key-123") == first
+    assert checks == []
+    auth._forget_cached_digests()
+
+
+def test_a_digest_memoised_while_waiting_for_the_lock_is_reused(auth, monkeypatch):
+    monkeypatch.setenv("LOCALM_API_KEY", "owner-key-123")
+    auth._forget_cached_digests()
+    ck = auth._memo_key("owner-key-123") + "@" + auth._cache_scope()
+    real = auth._is_owner_key
+
+    def owner_then_concurrent_fill(k):
+        result = real(k)
+        auth._cache_put(ck, "filled-by-a-concurrent-request")
+        return result
+    monkeypatch.setattr(auth, "_is_owner_key", owner_then_concurrent_fill)
+    derived = []
+    monkeypatch.setattr(auth, "_owner_digest", lambda k: derived.append(k) or "derived")
+    assert auth._hash_key("owner-key-123") == "filled-by-a-concurrent-request"
+    assert derived == []
+    auth._forget_cached_digests()
+
+
+def test_digest_memo_evicts_the_least_recently_used_entry(auth):
+    auth._forget_cached_digests()
+    newest = auth._DIGEST_CACHE_MAX
+    for i in range(newest + 1):
+        auth._cache_put(f"k{i}", f"d{i}")
+    assert auth._cache_get("k0") is None
+    assert auth._cache_get(f"k{newest}") == f"d{newest}"
+    assert len(auth._digest_cache) == auth._DIGEST_CACHE_MAX
+    auth._forget_cached_digests()
+
+
+def test_digest_memo_scope_is_the_kdf_file_of_the_current_home(auth):
+    assert auth._cache_scope() == str(auth.owner_kdf_file())
+
+
+def test_owner_key_read_retries_with_escalating_backoff(auth, monkeypatch):
+    from pathlib import Path
+    auth.set_api_key("s3cret-key")
+    key_path = auth.key_file()
+    real_read = Path.read_text
+    fails = {"left": auth._KEY_READ_RETRIES - 1}
+
+    def flaky(self, *a, **k):
+        if self == key_path and fails["left"]:
+            fails["left"] -= 1
+            raise PermissionError("sharing violation")
+        return real_read(self, *a, **k)
+    clock = _TimeProxy()
+    monkeypatch.setattr(auth, "time", clock)
+    monkeypatch.setattr(Path, "read_text", flaky)
+    status, text, err = auth._read_owner_key_file()
+    assert (status, text.strip(), err) == (auth._KEY_OK, "s3cret-key", None)
+    assert clock.sleeps == [
+        min(auth._KEY_READ_BACKOFF * (i + 1), auth._KEY_READ_BACKOFF_CAP)
+        for i in range(auth._KEY_READ_RETRIES - 1)]
+
+
+def test_persistently_unreadable_owner_key_reports_its_error(auth, monkeypatch):
+    from pathlib import Path
+    auth.set_api_key("s3cret-key")
+    key_path = auth.key_file()
+    real_read = Path.read_text
+
+    def denied(self, *a, **k):
+        if self == key_path:
+            raise PermissionError("denied")
+        return real_read(self, *a, **k)
+    clock = _TimeProxy()
+    monkeypatch.setattr(auth, "time", clock)
+    monkeypatch.setattr(Path, "read_text", denied)
+    status, text, err = auth._read_owner_key_file()
+    assert status == auth._KEY_UNREADABLE and text is None
+    assert isinstance(err, PermissionError)
+    assert len(clock.sleeps) == auth._KEY_READ_RETRIES - 1
+
+
+def test_unreadable_owner_key_file_is_reported(auth, monkeypatch, caplog):
+    path = auth.key_file()
+    path.mkdir(parents=True)
+    monkeypatch.setattr(auth, "time", _TimeProxy())
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        assert auth._read_key_file() is None
+    [r] = _logged(caplog, "exists but is unreadable")
+    assert r.msg == ("owner key file %s exists but is unreadable (%s); "
+                     "treating auth as IN EFFECT (fail closed) until it can "
+                     "be read - fix its permissions")
+    assert r.args[0] == path
+    assert isinstance(r.args[1], OSError)
+
+
+def test_verify_stamps_last_used_on_the_verified_key_only(auth, monkeypatch):
+    monkeypatch.setattr(auth, "_last_used_writes", {})
+    a = auth.create_key("a", ["chat"])
+    b = auth.create_key("b", ["chat"])
+    assert auth.verify(b["key"]) == {"chat"}
+    assert isinstance(_last_used(auth, b["id"]), float)
+    assert _last_used(auth, a["id"]) is None
+
+
+def test_last_used_is_rewritten_at_most_once_per_throttle_window(auth, monkeypatch):
+    monkeypatch.setattr(auth, "_last_used_writes", {})
+    clock = _TimeProxy(mono=10_000.0)
+    monkeypatch.setattr(auth, "time", clock)
+    made = auth.create_key("a", ["chat"])
+    key_hash = _sha256_hex(made["key"])
+    auth._touch_last_used(key_hash)
+    assert isinstance(_last_used(auth, made["id"]), float)
+    _set_last_used(auth, made["id"], 1.0)
+    clock.mono = 10_000.0 + auth._LAST_USED_THROTTLE_S - 1
+    auth._touch_last_used(key_hash)
+    assert _last_used(auth, made["id"]) == 1.0
+    clock.mono = 10_000.0 + auth._LAST_USED_THROTTLE_S
+    auth._touch_last_used(key_hash)
+    assert _last_used(auth, made["id"]) != 1.0
+
+
+def test_a_failed_last_used_stamp_is_logged_not_raised(auth, monkeypatch, caplog):
+    import localm.config as cfg
+    monkeypatch.setattr(auth, "_last_used_writes", {})
+    path = auth.keystore_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{corrupt", encoding="utf-8")
+    with caplog.at_level(logging.DEBUG, logger="localm"):
+        auth._touch_last_used("a" * 64)
+    [r] = _logged(caplog, "stamp failed")
+    assert r.msg == "last_used stamp failed (non-fatal): %s"
+    assert isinstance(r.args[0], cfg.ConfigUnreadable)
+
+
+def test_create_key_names_every_refused_scope(auth):
+    with pytest.raises(ValueError) as bad:
+        auth.create_key("n", ["bad one", "bad two"])
+    assert str(bad.value) == "Unknown scope(s): bad one, bad two"
+    with pytest.raises(PermissionError) as priv:
+        auth.create_key("n", ["admin", "config:write"])
+    assert str(priv.value) == (
+        "Refusing to grant privileged scope(s): admin, config:write. Only the "
+        "owner key may mint keys with these capabilities.")
+
+
+def test_create_key_record_shape(auth):
+    made = auth.create_key("  my key  ", ["chat"])
+    assert made["name"] == "my key"
+    assert len(made["id"]) == 12
+    int(made["id"], 16)
+    [listed] = auth.list_keys()
+    assert isinstance(listed["created"], float)
+    for blank in (None, "", "   "):
+        assert auth.create_key(blank, ["chat"])["name"] == "key"
+
+
+def test_legacy_record_attributes_fall_back_to_the_callers_default(auth):
+    _write_keystore(auth, [{"id": "legacy1", "hash": _sha256_hex("legacy-token")}])
+    assert auth.fs_access_for("legacy-token", default="host") == "host"
+    assert auth.rag_roots_for("legacy-token", default=["/srv/docs"]) == ["/srv/docs"]
+    assert auth.verify("legacy-token") == set()
+
+
+def test_fs_access_defaults_to_none(auth):
+    assert auth.fs_access_for("") == "none"
+    assert auth.fs_access_for(None) == "none"
+    assert auth.fs_access_for("unknown-token") == "none"
+    assert auth.norm_fs_access("bogus") == "none"
+
+
+def test_norm_rag_roots_skips_non_strings_and_keeps_going(auth):
+    assert auth.norm_rag_roots(["a", 5, "b", None, "a"]) == ["a", "b"]
+
+
+def test_removal_with_no_target_does_not_report_open_mode(auth):
+    assert auth.removal_leaves_no_key() is False
+
+
+@pytest.mark.parametrize("value", ["TRUE", "Yes", " on "])
+def test_require_auth_env_is_case_insensitive(auth, monkeypatch, value):
+    monkeypatch.setenv("LOCALM_REQUIRE_AUTH", value)
+    assert auth.require_auth_enabled() is True
+
+
+def test_require_auth_config_load_failure_message(auth, monkeypatch, caplog):
+    import localm.config as cfg
+
+    def boom():
+        raise OSError("no home")
+    monkeypatch.setattr(cfg, "load_config_checked", boom)
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        assert auth.require_auth_enabled() is True
+    [r] = _logged(caplog, "config unreadable")
+    assert r.msg == ("config unreadable; cannot confirm require_auth - treating as "
+                     "required (fail closed) until it can be read")
+
+
+def test_verify_refuses_absent_or_blank_tokens(auth):
+    assert auth.verify(None) is None
+    assert auth.verify("") is None
+    assert auth.verify("   ") is None
+
+
+def test_verify_rejects_a_key_at_or_after_its_expiry(auth, monkeypatch):
+    monkeypatch.setattr(auth, "_last_used_writes", {})
+    clock = _TimeProxy(now=1_000_000.0)
+    monkeypatch.setattr(auth, "time", clock)
+    live = auth.create_key("live", ["chat"], expires=1_000_010.0)
+    stale = auth.create_key("stale", ["chat"], expires=999_999.0)
+    assert auth.verify(stale["key"]) is None
+    clock.now = 1_000_010.0
+    assert auth.verify(live["key"]) == {"chat"}
+    clock.now = 1_000_010.5
+    assert auth.verify(live["key"]) is None
+
+
+def test_verify_stamps_the_alg_marker_only_on_a_legacy_record(auth, monkeypatch):
+    monkeypatch.setattr(auth, "_last_used_writes", {})
+    marks = []
+    monkeypatch.setattr(auth, "_mark_record_alg", lambda *a: marks.append(a))
+    made = auth.create_key("a", ["chat"])
+    assert auth.verify(made["key"]) == {"chat"}
+    assert marks == []
+    _write_keystore(auth, [{"id": "legacy1", "hash": _sha256_hex("legacy-token"),
+                            "scopes": ["chat"]}])
+    assert auth.verify("legacy-token") == {"chat"}
+    assert marks == [("legacy1", auth._ALG_FAST)]
