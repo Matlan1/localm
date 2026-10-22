@@ -1224,22 +1224,23 @@ def _dotdot_after_link(path: str, root: str) -> bool:
     resolve but an MSYS or Cygwin tool follows (a reparse point that is neither
     a symlink nor a junction, such as a WSL symlink; a file with the system
     attribute, such as a Cygwin symlink file); or a component below *root*
-    before the last exists and is not a directory. Components at or above
-    *root* are only checked for being a symlink or junction. One ``lstat`` per
-    component. Raises OSError or ValueError when a component cannot be
-    examined."""
+    before the last exists and is not a directory; or a ``..`` steps back over
+    such a link at or outside *root*. One ``lstat`` per component. Raises
+    OSError or ValueError when a component cannot be examined."""
     root_norm = os.path.normcase(os.path.normpath(root))
     drive, rest = os.path.splitdrive(path)
     current = drive + (os.sep if rest[:1] in ("/", "\\") else "")
     parts = [p for p in rest.replace("\\", "/").split("/") if p not in ("", ".")]
     linked = False
+    opaque_outside: list[bool] = []
     for i, part in enumerate(parts):
         if part == "..":
-            if linked:
+            if linked or (opaque_outside and opaque_outside.pop()):
                 return True
             current = os.path.dirname(current)
             continue
         current = os.path.join(current, part)
+        opaque_outside.append(False)
         if any(ch in part for ch in "*?["):
             linked = True
             continue
@@ -1251,11 +1252,12 @@ def _dotdot_after_link(path: str, root: str) -> bool:
         if stat.S_ISLNK(st.st_mode) or os.path.isjunction(current):
             linked = True
             continue
-        here = os.path.normcase(os.path.normpath(current))
-        if here == root_norm or not _real_within(here, root_norm):
-            continue
         opaque_link = bool(attrs & _REPARSE_POINT) or (
             stat.S_ISREG(st.st_mode) and bool(attrs & _SYSTEM_FILE))
+        here = os.path.normcase(os.path.normpath(current))
+        if here == root_norm or not _real_within(here, root_norm):
+            opaque_outside[-1] = opaque_link
+            continue
         file_in_the_middle = i < len(parts) - 1 and not stat.S_ISDIR(st.st_mode)
         if opaque_link or file_in_the_middle:
             return True
@@ -1432,9 +1434,10 @@ def _hooks_path_ok(value: str, base: str, root: str, root_real: str) -> bool:
     """Whether core.hooksPath *value* names a folder inside the project, taken
     relative to the work-tree root *base*, that holds no hook :func:`_has_hook`
     reports. False for a value this cannot place (empty, quoted, escaped,
-    commented, absolute, starting with ``~`` or holding a colon) and for a
+    commented, absolute, starting with ``~``, holding a colon or a ``%``
+    interpolation) and for a
     folder that cannot be examined."""
-    if (not value or any(ch in value for ch in '"\\#;~:')
+    if (not value or any(ch in value for ch in '"\\#;~:%')
             or os.path.isabs(value) or value.startswith("/")):
         return False
     path = os.path.join(base, value)

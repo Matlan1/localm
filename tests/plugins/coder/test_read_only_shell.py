@@ -484,7 +484,7 @@ def test_a_hooks_path_inside_the_project_is_checked_for_the_index_hook(tmp_path)
 
 @pytest.mark.parametrize("value", [
     "../hooks", "~/hooks", '".husky/_"', ".husky" + _BS + "_", ".husky/_ # x",
-    "/etc/hooks", "C:/hooks", "",
+    "/etc/hooks", "C:/hooks", "", "%(prefix)/hooks",
 ])
 def test_a_hooks_path_this_cannot_place_is_not_read_only(tmp_path, value):
     proj = tmp_path / "proj"
@@ -621,6 +621,33 @@ def test_an_ancestor_reparse_point_does_not_count_but_one_inside_the_project_doe
     assert is_read_only("cat src/../src/a.txt", proj) is True
     marked.add(os.path.normcase(str(proj / "src")))
     assert is_read_only("cat src/a.txt", proj) is False
+
+
+def test_dotdot_back_over_a_link_outside_the_project_is_not_read_only(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from localm.plugins.coder import shell_guard
+    proj = tmp_path / "a" / "proj"
+    (proj / "src").mkdir(parents=True)
+    (proj / "src" / "a.txt").write_text("a", encoding="utf-8")
+    (tmp_path / "a" / "sib" / "lx" / "inner").mkdir(parents=True)
+    marked = os.path.normcase(str(tmp_path / "a" / "sib" / "lx"))
+    real_lstat = os.lstat
+
+    def lstat(path, *a, **k):
+        st = real_lstat(path, *a, **k)
+        if os.path.normcase(os.path.normpath(str(path))) == marked:
+            return SimpleNamespace(st_mode=st.st_mode, st_reparse_tag=0xA000001D,
+                                   st_file_attributes=getattr(st, "st_file_attributes", 0)
+                                   | shell_guard._REPARSE_POINT)
+        return st
+
+    assert is_read_only("cat ../sib/lx/../../proj/src/a.txt", proj) is True
+    monkeypatch.setattr(shell_guard.os, "lstat", lstat)
+    assert is_read_only("cat ../sib/lx/../../proj/src/a.txt", proj) is False
+    assert is_read_only("cat ../sib/lx/inner/../../../proj/src/a.txt", proj) is False
+    abs_form = str(tmp_path / "a" / "sib" / "lx") + "/../../proj/src/a.txt"
+    assert is_read_only("cat " + abs_form.replace(os.sep, "/"), proj) is False
+    assert is_read_only("cat ../sib/../proj/src/a.txt", proj) is True
 
 
 @pytest.mark.parametrize("command", [
