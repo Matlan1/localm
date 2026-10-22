@@ -440,15 +440,19 @@ def _max_tensor_bytes(lib, runtime_dir) -> Optional[int]:
 
 
 def _do_attention_rate(payload) -> Optional[float]:
-    """The slowest ``_binding.attention_rate`` over the loaded runtime's non-CPU
-    devices, in floating point operations per second. None when no device
-    could be measured. Requires a loaded runtime."""
+    """``_binding.attention_rate`` of the device the library runs the model on
+    (``_binding.default_device``), else the slowest over the loaded runtime's
+    non-CPU devices, in floating point operations per second. None when a
+    device could not be measured. Requires a loaded runtime."""
     from . import _binding as b
     lib = _State.lib
     if lib is None:
         raise RuntimeError("no stable-diffusion.cpp runtime is loaded")
-    rates = [b.attention_rate(lib, Path(payload["runtime_dir"]), name)
-             for name, _desc in b.list_devices(lib) if name.upper() != "CPU"]
+    runtime_dir = Path(payload["runtime_dir"])
+    device = b.default_device(lib, runtime_dir)
+    names = [device] if device else [name for name, _desc in b.list_devices(lib)
+                                     if name.upper() != "CPU"]
+    rates = [b.attention_rate(lib, runtime_dir, name) for name in names]
     known = [r for r in rates if r is not None]
     if not rates or len(known) != len(rates):
         return None

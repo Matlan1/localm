@@ -764,6 +764,30 @@ def attention_flops(tokens: int, dim: int) -> int:
     return 4 * int(tokens) * int(tokens) * int(dim)
 
 
+_GGML_DEVICE_TYPE_GPU = 1
+_GGML_DEVICE_TYPE_IGPU = 2
+
+
+def default_device(lib, runtime_dir: Path) -> Optional[str]:
+    """The name of the ggml device the library runs a model on when no backend
+    is set: the first discrete GPU device, else the first integrated GPU
+    device. None when there is none or the runtime does not export the ggml
+    device functions. Call after :func:`load_library`."""
+    handles = _ggml_handles(lib, runtime_dir)
+    count = _ggml_fn(handles, "ggml_backend_dev_count", c_size_t)
+    get = _ggml_fn(handles, "ggml_backend_dev_get", c_void_p, c_size_t)
+    kind = _ggml_fn(handles, "ggml_backend_dev_type", _enum, c_void_p)
+    name = _ggml_fn(handles, "ggml_backend_dev_name", c_char_p, c_void_p)
+    if count is None or get is None or kind is None or name is None:
+        return None
+    devices = [get(i) for i in range(count())]
+    for wanted in (_GGML_DEVICE_TYPE_GPU, _GGML_DEVICE_TYPE_IGPU):
+        for dev in devices:
+            if dev and kind(dev) == wanted:
+                return (name(dev) or b"").decode("utf-8", "replace") or None
+    return None
+
+
 def attention_rate(lib, runtime_dir: Path, device_name: str) -> Optional[float]:
     """Flash attention throughput of ggml device *device_name*, in floating
     point operations per second: the fastest of two timed runs of one

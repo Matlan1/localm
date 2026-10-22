@@ -521,10 +521,11 @@ def _attention_refusal(runner, rt, info: dict, label: str, width: int, height: i
     fit = (f"Make it at most {most} frames ({most / fps:.1f} s at {fps} fps) at this size, "
            "or lower the size" if most else "Lower the size")
     return (f"{frames} frames at {width}x{height} is too much for {label} on the Vulkan runtime "
-            f"on this GPU: each sampling step would run one attention job of about {secs:.0f} s "
-            f"on the GPU, and the graphics driver resets the GPU when a single job runs longer "
-            f"than about {attention.DRIVER_RESET_SECONDS} s. {fit}, or pick the ROCm or CUDA "
-            f"runtime in Settings > Video if this GPU has one.")
+            f"on this GPU: each sampling step would run one attention job of about {secs:.1f} s "
+            f"on the GPU. The graphics driver resets the GPU when a single job runs longer than "
+            f"about {attention.DRIVER_RESET_SECONDS} s, so localm keeps each job under "
+            f"{attention.SAFE_DISPATCH_SECONDS:g} s. {fit}, or pick the ROCm or CUDA runtime in "
+            f"Settings > Video if this GPU has one.")
 
 
 def generate(s: dict, prompt: str, out_path: Path, **kwargs) -> tuple[bool, str]:

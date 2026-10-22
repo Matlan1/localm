@@ -229,9 +229,50 @@ def test_a_failed_compute_raises_and_frees(fa, tmp_path):
     assert fa.contexts == fa.buffers == fa.backends == 0
 
 
+class _DevGgml:
+    """The ggml device-list functions ``default_device`` calls."""
+
+    def __init__(self, devices):
+        self.devices = devices
+        self.ggml_backend_dev_count = lambda: len(self.devices)
+        self.ggml_backend_dev_get = lambda i: i + 1
+        self.ggml_backend_dev_type = lambda dev: self.devices[dev - 1][1]
+        self.ggml_backend_dev_name = lambda dev: self.devices[dev - 1][0].encode()
+
+
+@pytest.mark.parametrize("devices,expected", [
+    ([("CPU", 0), ("Vulkan0", 2), ("Vulkan1", 1)], "Vulkan1"),
+    ([("CPU", 0), ("Vulkan0", 1), ("Vulkan1", 1)], "Vulkan0"),
+    ([("Vulkan0", 2), ("CPU", 0)], "Vulkan0"),
+    ([("CPU", 0)], None),
+])
+def test_the_default_device_is_the_first_discrete_then_integrated_gpu(
+        monkeypatch, tmp_path, devices, expected):
+    monkeypatch.setattr(b, "_ggml_handles", lambda lib, runtime_dir: [_DevGgml(devices)])
+    assert b.default_device(None, tmp_path) == expected
+
+
+def test_the_default_device_is_unknown_without_the_device_functions(monkeypatch, tmp_path):
+    fake = _DevGgml([("Vulkan0", 1)])
+    del fake.ggml_backend_dev_type
+    monkeypatch.setattr(b, "_ggml_handles", lambda lib, runtime_dir: [fake])
+    assert b.default_device(None, tmp_path) is None
+
+
+def test_the_worker_measures_only_the_device_the_model_runs_on(monkeypatch):
+    rates = {"Vulkan0": 5e11, "Vulkan1": 2e12}
+    monkeypatch.setattr(b, "attention_rate", lambda lib, rt, name: rates[name])
+    monkeypatch.setattr(b, "default_device", lambda lib, rt: "Vulkan1")
+    monkeypatch.setattr(_child._State, "lib", object())
+    assert _child._do_attention_rate({"runtime_dir": "rt"}) == 2e12
+    rates["Vulkan0"] = None
+    assert _child._do_attention_rate({"runtime_dir": "rt"}) == 2e12
+
+
 def test_the_worker_reports_the_slowest_gpu(monkeypatch):
     rates = {"Vulkan0": 2e12, "Vulkan1": 5e11}
     monkeypatch.setattr(b, "attention_rate", lambda lib, rt, name: rates[name])
+    monkeypatch.setattr(b, "default_device", lambda lib, rt: None)
     monkeypatch.setattr(b, "list_devices", lambda lib: [("Vulkan0", "a"), ("Vulkan1", "b"),
                                                         ("CPU", "cpu")])
     monkeypatch.setattr(_child._State, "lib", object())
@@ -324,6 +365,12 @@ def test_a_clip_whose_attention_job_outlasts_the_driver_is_refused_before_sampli
     assert f"{frames} frames at 832x480" in msg
     assert "at most 17 frames (1.1 s at 16 fps)" in msg
     assert "about 2 s" in msg and "ROCm or CUDA" in msg
+
+
+def test_a_clip_just_over_the_bound_names_its_time_and_the_bound(monkeypatch, tmp_path):
+    ok, msg, params, _said, _asked = _video(monkeypatch, tmp_path, 21)
+    assert not ok and params == []
+    assert "about 1.2 s" in msg and "under 1 s" in msg and "about 2 s" in msg
 
 
 def test_the_longest_safe_clip_runs(monkeypatch, tmp_path):
