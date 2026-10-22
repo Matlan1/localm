@@ -150,8 +150,9 @@ scheduler also on the Video page); an empty field uses the model's own default.
 
   Every field you leave out takes the selected model's suggestion, which refines the
   picture rather than painting a new one: the `lanczos` upscaler, scale 2 for a model
-  made for images up to 640 pixels (SD 1.x, SD-Turbo) and 1.5 for larger ones (SDXL,
-  FLUX and the other 1024-pixel families, and SD 2.x at 768), the job's steps, and
+  made for images up to 640 pixels (SD 1.x, and the SD-Turbo model localm recommends) and
+  1.5 for larger ones (SDXL, FLUX and the other 1024-pixel families, and SD 2.x at 768,
+  which also covers an SD-Turbo file other than the recommended one), the job's steps, and
   denoise 0.35. With a latent upscaler and no denoise given, the denoise is 0.55, since
   a latent upscale needs more denoising to come out clean. A model localm cannot place
   in a family gets `lanczos`, 2 and 0.35. A suggested scale is lowered when the result
