@@ -14,6 +14,7 @@ import sys
 import time
 import zipfile
 import zlib
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from pathlib import PurePosixPath
@@ -71,6 +72,30 @@ _HF_LLM_ARCH_SUFFIXES = ("ForCausalLM", "ForConditionalGeneration", "LMHeadModel
 # Registry types whose entry records an mmproj: the vision projector of an 'llm',
 # the speech generation stages of a 'tts' model.
 _PROJECTOR_TYPES = ("llm", "tts")
+
+# Set inside prompts_disabled(); read by can_prompt().
+_PROMPTS_DISABLED = False
+
+
+@contextmanager
+def prompts_disabled():
+    """Within this block no model-registration question is asked in this
+    process: each one takes its non-interactive answer instead of waiting on
+    (or aborting at) stdin. A server serves inside it, because its console is
+    not a person. The previous state is restored on exit."""
+    global _PROMPTS_DISABLED
+    previous = _PROMPTS_DISABLED
+    _PROMPTS_DISABLED = True
+    try:
+        yield
+    finally:
+        _PROMPTS_DISABLED = previous
+
+
+def can_prompt() -> bool:
+    """True when a registration question may be asked: stdin is a terminal and
+    :func:`disable_prompts` has not been called in this process."""
+    return not _PROMPTS_DISABLED and sys.stdin.isatty()
 
 
 def is_auto_chat_eligible(entry: dict) -> bool:
@@ -1869,7 +1894,7 @@ def _prompt_predownload_dup(dup_names: list[str], model_name: str) -> str:
         f"[yellow]You already have this exact file - registered as "
         f"{names}[/yellow] [dim](sha256 match via HF metadata)[/dim]"
     )
-    if not sys.stdin.isatty():
+    if not can_prompt():
         console.print("[dim]Non-interactive session - skipping download. "
                       "Use --redownload to force.[/dim]")
         return "skip"
@@ -2193,7 +2218,7 @@ def _prompt_duplicate_action(existing_names: list[str], reason: str) -> str:
         f"[yellow]This model is already registered as {names}[/yellow] "
         f"[dim]({reason})[/dim]"
     )
-    if not sys.stdin.isatty():
+    if not can_prompt():
         console.print("[dim]Non-interactive session - skipping. "
                       "Use 'localm alias' to add a name for it.[/dim]")
         return "skip"
@@ -3420,7 +3445,7 @@ def _register_with_dedup(
             f"[yellow]'{escape(model_name)}' already points to a different file:"
             f"[/yellow] {escape(str(old_path))}"
         )
-        if sys.stdin.isatty():
+        if can_prompt():
             if not click.confirm(f"  Overwrite '{model_name}' with {p}?"):
                 console.print("[dim]Skipped.[/dim]")
                 return False
@@ -4574,7 +4599,7 @@ def _register_ollama_blob(
         # Refuse before touching the filesystem when registration is already
         # known to be refused (a name collision with no terminal to confirm an
         # overwrite): moving first would displace the file while reporting success.
-        if not sys.stdin.isatty():
+        if not can_prompt():
             reg = _mm.load_registry()
             conflict = _name_collision(model_name, blob_path, reg)
             if conflict is not None:
@@ -5160,7 +5185,7 @@ def add_local(
         # the file moved and the registry untouched, so it is unregistered under
         # ANY name until the next sync_models_dir scan picks it up under an
         # auto-generated name - never the one requested.
-        if not sys.stdin.isatty():
+        if not can_prompt():
             reg = _mm.load_registry()
             conflict = _name_collision(model_name, p, reg)
             if conflict is not None:
