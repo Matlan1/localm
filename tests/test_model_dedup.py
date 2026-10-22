@@ -368,9 +368,8 @@ class TestAddLocalDedup:
         mm.add_local(str(existing), "collision", on_duplicate="register")
         external = _file(tmp_path, "mymodel.gguf", b"two")
 
-        with patch("localm.model_manager.sys.stdin") as fake_stdin, \
+        with patch("localm.bugreport._common.stdin_is_interactive", return_value=True), \
              patch("click.confirm", return_value=False):
-            fake_stdin.isatty.return_value = True
             result = mm.add_local(str(external), "collision", store="move")
 
         assert result is False, "a declined overwrite must not report success"
@@ -692,10 +691,37 @@ class TestMalformedRegistryResilience:
 
 class TestNoQuestionsWhileServing:
     def _tty(self):
-        fake = patch("localm.model_manager.sys.stdin")
-        stdin = fake.start()
-        stdin.isatty.return_value = True
+        fake = patch("localm.bugreport._common.stdin_is_interactive", return_value=True)
+        fake.start()
         return fake
+
+    def test_a_child_with_devnull_stdin_is_never_asked(self):
+        """A child process started with stdin=DEVNULL, the way the GUI's job runner
+        starts `localm pull` for a folder add, may not ask a registration question
+        (on Windows its NUL stdin reports isatty() True)."""
+        import subprocess
+        import sys
+        root = Path(__file__).resolve().parents[1]
+        env = dict(os.environ, PYTHONPATH=str(root))
+        r = subprocess.run(
+            [sys.executable, "-c",
+             "from localm.model_manager import can_prompt; print(can_prompt())"],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env,
+            cwd=str(root), timeout=120)
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.strip().splitlines()[-1] == "False"
+
+    def test_no_registration_prompt_guard_reads_isatty_directly(self):
+        """Every registration question in the model manager is guarded by
+        can_prompt(), never by a bare isatty() check."""
+        import ast
+        root = Path(__file__).resolve().parents[1]
+        for rel in ("localm/model_manager/registry.py", "localm/model_manager/pull.py"):
+            tree = ast.parse((root / rel).read_text(encoding="utf-8"))
+            calls = [n.lineno for n in ast.walk(tree)
+                     if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                     and n.func.attr == "isatty"]
+            assert calls == [], f"{rel}: isatty() called at lines {calls}"
 
     def test_a_terminal_session_is_still_asked(self, fake_registry, tmp_path):
         store, _ = fake_registry

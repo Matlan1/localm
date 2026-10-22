@@ -208,7 +208,7 @@ class TestPullDedupRoutesThroughTheChokePoint:
                             lambda method, url, **k: FakeResp())
         monkeypatch.setattr(mm, "_check_disk_space", lambda d, b: True)
         # Take the interactive branch: that is the one holding the raw read.
-        monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+        monkeypatch.setattr("localm.bugreport._common.stdin_is_interactive", lambda: True)
         monkeypatch.setattr(click, "prompt", lambda *a, **k: answer)
 
         ok = mm._pull_url("https://x.test/url-model.gguf", "fresh")

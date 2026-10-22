@@ -109,19 +109,23 @@ class TestWillDownloadOnFirstUse:
     def test_a_missing_known_model_under_allow_will_download(self, fresh):
         assert embedder.will_download_on_first_use() is True
 
+    def test_a_missing_known_model_under_ask_will_download(self, fresh, monkeypatch):
+        monkeypatch.setattr("localm.netpolicy.network_mode", lambda: "ask")
+        assert embedder.will_download_on_first_use() is True
+
     def test_a_model_on_disk_will_not(self, fresh):
         _repo, filename = embedder.KNOWN_EMBEDDING_MODELS["bge-small-en-v1.5"]
         (fresh / filename).write_bytes(b"gguf")
         assert embedder.will_download_on_first_use() is False
 
-    @pytest.mark.parametrize("change", ["loaded", "tried", "ask", "path"])
+    @pytest.mark.parametrize("change", ["loaded", "tried", "off", "path"])
     def test_any_other_state_will_not(self, fresh, monkeypatch, change):
         if change == "loaded":
             monkeypatch.setattr(embedder, "_EMBEDDER", object())
         elif change == "tried":
             monkeypatch.setattr(embedder, "_TRIED_DOWNLOAD", True)
-        elif change == "ask":
-            monkeypatch.setattr("localm.netpolicy.network_mode", lambda: "ask")
+        elif change == "off":
+            monkeypatch.setattr("localm.netpolicy.network_mode", lambda: "off")
         else:
             monkeypatch.setattr(embedder, "_current_spec", lambda: "/path/to/x.gguf")
         assert embedder.will_download_on_first_use() is False

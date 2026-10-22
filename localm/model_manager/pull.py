@@ -1919,9 +1919,8 @@ def backfill_mmproj_for_entry(entry: dict, path: Path) -> Optional[Path]:
 
     Network policy: gated on ``network_mode() != "off"`` (or
     ``downloads_allowed_when_off()``), the same bar ``pull_model``'s net_mode
-    gate uses for this identical HF-listing-plus-download operation, not the
-    stricter ``== "allow"`` bar ``embedder.py`` applies to its background
-    fetch, and on ``_hf_endpoint_refusal()`` being None."""
+    gate uses for this identical HF-listing-plus-download operation, and on
+    ``_hf_endpoint_refusal()`` being None."""
     if not mmproj_backfill_candidate(entry, path):
         return None
     from localm.netpolicy import downloads_allowed_when_off, network_mode

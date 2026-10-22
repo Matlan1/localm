@@ -762,6 +762,36 @@ class TestEmbeddingRoutes:
         finally:
             emb.reset_embedder()
 
+    def test_a_probe_keeps_the_off_reason_and_a_failed_download_reason(
+            self, tmp_path, monkeypatch):
+        """A filesystem-only probe under net_mode=off records off's own reason,
+        and under ask it leaves the reason of a failed first-use download in
+        place."""
+        monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
+        monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
+        import localm.config as _cfg
+        monkeypatch.setattr(_cfg, "MODELS_DIR", tmp_path / "models")
+        from localm.inference import embedder as emb
+        fetched = []
+        monkeypatch.setattr(huggingface_hub, "hf_hub_download",
+                            lambda *a, **k: fetched.append(a) or None)
+        try:
+            set_config(monkeypatch, lambda: {"net_mode": "off"})
+            emb.reset_embedder()
+            assert emb.resolve_embedding_model_path(allow_download=False) is None
+            assert "net_mode=off" in (emb.last_error() or "")
+
+            set_config(monkeypatch, lambda: {"net_mode": "ask"})
+            emb.reset_embedder()
+            failed = "embedding model download failed: connection refused"
+            monkeypatch.setattr(emb, "_TRIED_DOWNLOAD", True)
+            monkeypatch.setattr(emb, "_LAST_ERROR", failed)
+            assert emb.resolve_embedding_model_path(allow_download=False) is None
+            assert emb.last_error() == failed
+            assert fetched == []
+        finally:
+            emb.reset_embedder()
+
     def test_download_route_short_circuits_when_installed(self, rag_client,
                                                           monkeypatch):
         from localm.inference.embedder import (

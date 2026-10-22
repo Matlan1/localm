@@ -93,9 +93,15 @@ def prompts_disabled():
 
 
 def can_prompt() -> bool:
-    """True when a registration question may be asked: stdin is a terminal and
-    :func:`disable_prompts` has not been called in this process."""
-    return not _PROMPTS_DISABLED and sys.stdin.isatty()
+    """True when a registration question may be asked: stdin is a terminal a
+    person can answer at (on Windows also a console, which the NUL device a
+    child process gets from ``stdin=DEVNULL`` is not, although it reports
+    ``isatty()``) and no :func:`prompts_disabled` block is active in this
+    process."""
+    if _PROMPTS_DISABLED:
+        return False
+    from localm.bugreport._common import stdin_is_interactive
+    return stdin_is_interactive()
 
 
 def is_auto_chat_eligible(entry: dict) -> bool:

@@ -622,16 +622,22 @@ def _download_known(name: str, repo: str, filename: str, dest: Path,
     if allow_download is None:
         allow_download = mode in ("allow", "ask")
     if not allow_download:
-        if probe_only:
-            reason = f"embedding model {name!r} not present yet"
-            _set_resolve_outcome(name, reason)
-            logger.debug(reason)
-            return None
         reason = (
             f"embedding model {name!r} not present and not auto-downloading "
             f"(net_mode={mode}); use the one-time download action, "
             "or set net_mode=ask or allow, to enable semantic search (memory/RAG use "
             "lexical BM25 until then)")
+        if probe_only:
+            if mode in ("allow", "ask"):
+                if _TRIED_DOWNLOAD:
+                    logger.debug("embedding model %r not present after the first-use "
+                                 "download attempt", name)
+                    return None
+                reason = (f"embedding model {name!r} not present yet; it is downloaded "
+                          "on first use")
+            _set_resolve_outcome(name, reason)
+            logger.debug(reason)
+            return None
         _set_resolve_outcome(name, reason)
         logger.info(reason)
         return None
@@ -1880,12 +1886,12 @@ def active_requests() -> int:
 def will_download_on_first_use() -> bool:
     """True when the next ``get_embedder()`` call will download the configured
     model first: nothing is loaded yet, no download was attempted, net_mode is
-    ``allow``, the model is a known key, and its file is not on disk. Does no
-    network I/O."""
+    ``allow`` or ``ask``, the model is a known key, and its file is not on disk.
+    Does no network I/O."""
     if _EMBEDDER is not None or _TRIED_DOWNLOAD:
         return False
     from localm.netpolicy import network_mode
-    if network_mode() != "allow":
+    if network_mode() not in ("allow", "ask"):
         return False
     spec = _current_spec()
     if spec not in KNOWN_EMBEDDING_MODELS:
