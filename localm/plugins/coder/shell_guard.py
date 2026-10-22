@@ -44,12 +44,14 @@ a rule in this module.
 from __future__ import annotations
 
 import glob
+import hashlib
 import os
 import posixpath
 import stat
+import struct
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 _HOME = "<home>"
 BSLASH = chr(92)
@@ -68,6 +70,10 @@ _MAX_SUB_DEPTH = 3
 #            span), ^ escapes the next character outside quotes, and there is
 #            no command substitution.
 _DIALECTS = ("mixed", "sh", "cmd")
+
+# Characters after an unquoted backslash that the "sh-nt" parse keeps the
+# backslash before, besides letters and digits.
+_PATH_CHARS = frozenset("._-/\\:+,=@")
 
 _POSIX_SYSTEM_DIRS = frozenset({
     "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib32", "/lib64",
@@ -252,9 +258,12 @@ def _lex(text: str, dialect: str = "mixed") -> list[_Segment]:
     targets are recorded as redirects instead of ordinary tokens. Command and
     process substitutions are kept verbatim inside their token AND collected in
     ``subs`` for the caller to parse separately. *dialect* is one of
-    :data:`_DIALECTS`.
+    :data:`_DIALECTS`, or ``"sh-nt"``: the sh rules, except that an unquoted
+    backslash before a letter, a digit or one of :data:`_PATH_CHARS` is kept,
+    as cmd.exe passes it to the program (a Windows path separator).
     """
-    sh = dialect == "sh"
+    sh = dialect in ("sh", "sh-nt")
+    nt_paths = dialect == "sh-nt"
     cmd = dialect == "cmd"
     segments: list[_Segment] = []
     tokens: list[str] = []
@@ -336,7 +345,10 @@ def _lex(text: str, dialect: str = "mixed") -> list[_Segment]:
             elif text[i + 1:i + 3] == "\r\n":
                 i += 3
             elif i + 1 < n:
-                cur.append(text[i + 1])
+                nxt = text[i + 1]
+                if nt_paths and (nxt.isalnum() or nxt in _PATH_CHARS):
+                    cur.append(ch)
+                cur.append(nxt)
                 i += 2
             else:
                 cur.append(ch)
@@ -979,10 +991,10 @@ def _collect(text: str, depth: int, base: int,
     return out, nxt
 
 
-def _parses(text: str) -> list[list[_Segment]]:
-    """The segments of *text* (substitutions included) in each of
-    :data:`_DIALECTS`, in that order."""
-    return [_collect(text, 0, 0, d)[0] for d in _DIALECTS]
+def _parses(text: str, dialects: Sequence[str] = _DIALECTS) -> list[list[_Segment]]:
+    """The segments of *text* (substitutions included) in each of *dialects*,
+    in that order."""
+    return [_collect(text, 0, 0, d)[0] for d in dialects]
 
 
 def classify_git_push(remote: str, branch: str) -> Optional[ShellRefusal]:
@@ -1091,13 +1103,22 @@ _READ_ONLY_GIT = frozenset({
 # Options that make an otherwise read-only command write a file, run a
 # program, read a file the option names, or follow symlinks while recursing:
 # (short option letters, matched anywhere in a cluster such as -ro; long
-# options, matched as written or abbreviated, with or without a value).
+# options, matched as written or abbreviated, with or without a value). git
+# is keyed by subcommand ("git branch"); every git subcommand also gets
+# _GIT_RISKY_LONG.
+_GIT_RISKY_LONG = ("--output", "--ext-diff", "--textconv", "--show-signature")
+_GIT_REF_WRITING = ("dDmMcCuf", (
+    "--delete", "--move", "--copy", "--set-upstream-to", "--unset-upstream",
+    "--edit-description", "--force", "--track", "--no-track", "--create-reflog"))
 _RISKY_OPTIONS: dict[str, tuple[str, tuple[str, ...]]] = {
-    "git": ("odDmMcCufOS", (
-        "--output", "--ext-diff", "--textconv", "--show-signature", "--delete",
-        "--move", "--copy", "--set-upstream-to", "--unset-upstream",
-        "--edit-description", "--force", "--track", "--no-track",
-        "--create-reflog", "--open-files-in-pager")),
+    "git branch": _GIT_REF_WRITING,
+    "git tag": _GIT_REF_WRITING,
+    "git grep": ("Of", ("--open-files-in-pager", "--file")),
+    "git blame": ("S", ("--contents", "--ignore-revs-file")),
+    "git ls-files": ("X", ("--exclude-from",)),
+    "git diff": ("O", ()),
+    "git log": ("O", ()),
+    "git show": ("O", ()),
     "rg": ("Lfz", ("--pre", "--hostname-bin", "--follow", "--search-zip",
                    "--file", "--ignore-file")),
     "grep": ("fR", ("--file", "--dereference-recursive", "--exclude-from")),
@@ -1112,6 +1133,21 @@ _RISKY_OPTIONS: dict[str, tuple[str, tuple[str, ...]]] = {
     "file": ("fmCzZ", ("--files-from", "--magic-file", "--compile",
                         "--uncompress", "--uncompress-noreport")),
     "ls": ("L", ("--dereference",)),
+}
+
+# Real options of a command that are also the start of one of its risky long
+# options: written in full they are that option, not an abbreviation.
+_EXACT_OPTIONS: dict[str, frozenset[str]] = {
+    "grep": frozenset({"--exclude"}),
+    "egrep": frozenset({"--exclude"}),
+    "fgrep": frozenset({"--exclude"}),
+    "du": frozenset({"--exclude"}),
+    "diff": frozenset({"--exclude"}),
+    "rg": frozenset({"--ignore"}),
+    "git diff": frozenset({"--text"}),
+    "git log": frozenset({"--text"}),
+    "git show": frozenset({"--text"}),
+    "git grep": frozenset({"--text"}),
 }
 
 # git remote subcommand words that write.
@@ -1132,8 +1168,9 @@ _UNSAFE_CHARS = ("$", "`", "<", ">", "%", "!")
 # another file: whole sections, and keys within a section. core.fsmonitor
 # names a program unless it is a boolean (true selects git's built-in
 # monitor); log.showSignature runs the signature program when true;
-# core.hooksPath points git at hook scripts.
-_GIT_RISKY_SECTIONS = frozenset({"include", "includeif", "filter", "pager"})
+# core.hooksPath points git at hook scripts (see _hooks_path_ok); a hook
+# section defines hooks in the configuration.
+_GIT_RISKY_SECTIONS = frozenset({"include", "includeif", "filter", "pager", "hook"})
 _GIT_RISKY_KEYS = {
     "core": frozenset({"fsmonitor", "pager", "hookspath"}),
     "diff": frozenset({"external", "textconv", "command"}),
@@ -1178,17 +1215,20 @@ _REPARSE_POINT = 0x400
 _SYSTEM_FILE = 0x4
 
 
-def _dotdot_after_link(path: str) -> bool:
+def _dotdot_after_link(path: str, root: str) -> bool:
     """True when absolute *path* cannot be judged by resolving it: a ``..``
     comes after a component that is a symlink or junction, or after a wildcard
     component that could match one (a POSIX-style tool applies that ``..`` to
     the link's target, while :func:`_real` collapses it first on Windows); or a
-    component is a link Python does not resolve but an MSYS or Cygwin tool
-    follows (a reparse point that is neither a symlink nor a junction, such as
-    a WSL symlink; a file with the system attribute, such as a Cygwin symlink
-    file); or a component before the last exists and is not a directory. One
-    ``lstat`` per component. Raises OSError or ValueError when a component
-    cannot be examined."""
+    component below the project *root* (as written) is a link Python does not
+    resolve but an MSYS or Cygwin tool follows (a reparse point that is neither
+    a symlink nor a junction, such as a WSL symlink; a file with the system
+    attribute, such as a Cygwin symlink file); or a component below *root*
+    before the last exists and is not a directory. Components at or above
+    *root* are only checked for being a symlink or junction. One ``lstat`` per
+    component. Raises OSError or ValueError when a component cannot be
+    examined."""
+    root_norm = os.path.normcase(os.path.normpath(root))
     drive, rest = os.path.splitdrive(path)
     current = drive + (os.sep if rest[:1] in ("/", "\\") else "")
     parts = [p for p in rest.replace("\\", "/").split("/") if p not in ("", ".")]
@@ -1211,6 +1251,9 @@ def _dotdot_after_link(path: str) -> bool:
         if stat.S_ISLNK(st.st_mode) or os.path.isjunction(current):
             linked = True
             continue
+        here = os.path.normcase(os.path.normpath(current))
+        if here == root_norm or not _real_within(here, root_norm):
+            continue
         opaque_link = bool(attrs & _REPARSE_POINT) or (
             stat.S_ISREG(st.st_mode) and bool(attrs & _SYSTEM_FILE))
         file_in_the_middle = i < len(parts) - 1 and not stat.S_ISDIR(st.st_mode)
@@ -1219,24 +1262,30 @@ def _dotdot_after_link(path: str) -> bool:
     return False
 
 
-def _real_inside(path: str, root_real: str) -> bool:
-    """Whether absolute *path* stays in *root_real* with links resolved, and has
-    no ``..`` after a link (see :func:`_dotdot_after_link`). Raises OSError or
-    ValueError when the path cannot be resolved."""
-    return not _dotdot_after_link(path) and _real_within(_real(path), root_real)
+def _real_inside(path: str, root: str, root_real: str) -> bool:
+    """Whether absolute *path* stays in *root_real* (the resolved form of
+    *root*) with links resolved, and has no ``..`` after a link (see
+    :func:`_dotdot_after_link`). Raises OSError or ValueError when the path
+    cannot be resolved."""
+    return not _dotdot_after_link(path, root) and _real_within(_real(path), root_real)
 
 
 def _real_within(real: str, root_real: str) -> bool:
     return real == root_real or real.startswith(root_real.rstrip(os.sep) + os.sep)
 
 
-def _risky_option(tok: str, short: str, long: Sequence[str]) -> bool:
+def _risky_option(tok: str, short: str, long: Sequence[str],
+                  exact: frozenset[str] = frozenset()) -> bool:
     """True when option *tok* is, or contains, one of the *short* letters or
-    *long* options (GNU getopt and git accept any unambiguous abbreviation of
-    a long option, so a prefix of one counts)."""
+    *long* options. A long option written in part counts as the risky options
+    it starts (GNU getopt and git accept any unambiguous abbreviation), unless
+    it is written exactly as one of the command's real options in *exact*."""
     if tok.startswith("--"):
         stem = tok.split("=", 1)[0]
-        return len(stem) > 2 and any(opt.startswith(stem) for opt in long)
+        if stem in long:
+            return True
+        return (len(stem) > 2 and stem not in exact
+                and any(opt.startswith(stem) for opt in long))
     return tok.startswith("-") and any(ch in short for ch in tok[1:])
 
 
@@ -1268,10 +1317,10 @@ def _operand_ok(tok: str, current: str, root: str, root_real: str) -> bool:
         return False
     path = tok if _canon(tok) is not None else os.path.join(current, tok)
     try:
-        if _dotdot_after_link(path):
+        if _dotdot_after_link(path, root):
             return False
         hits = glob.glob(path) if any(ch in tok for ch in "*?") else [path]
-        return all(_real_inside(p, root_real) for p in hits)
+        return all(_real_inside(p, root, root_real) for p in hits)
     except (OSError, ValueError, RecursionError):
         return False
 
@@ -1326,10 +1375,14 @@ def _program_shadowed(name: str, current: str, root: str, root_real: str,
     return False
 
 
-def _git_config_risky(text: str) -> bool:
+def _git_config_risky(text: str,
+                      hooks_path_ok: Optional[Callable[[str], bool]] = None) -> bool:
     """True when git config *text* sets something that makes a read command
     run a program (a filter, a diff driver or external diff, a pager, an
-    fsmonitor hook, signature checking) or includes another file."""
+    fsmonitor hook, a hook defined in the configuration, signature checking)
+    or includes another file. A core.hooksPath value is risky unless
+    *hooks_path_ok* is given and returns True for it (the value as written,
+    surrounding whitespace removed)."""
     section = ""
     for raw in text.splitlines():
         line = raw.strip()
@@ -1348,6 +1401,10 @@ def _git_config_risky(text: str) -> bool:
         key = key.strip().lower()
         if key not in _GIT_RISKY_KEYS.get(section, ()):
             continue
+        if (section, key) == ("core", "hookspath"):
+            if eq and hooks_path_ok is not None and hooks_path_ok(value.strip()):
+                continue
+            return True
         value = value.strip().strip('"').strip().lower() if eq else "true"
         if (section, key) == ("core", "fsmonitor") and value in _GIT_BOOL:
             continue
@@ -1357,15 +1414,155 @@ def _git_config_risky(text: str) -> bool:
     return False
 
 
+_INDEX_HOOK = "post-index-change"
+_GITLINK = 0o160000
+_MAX_SUBMODULE_DEPTH = 8
+
+
 def _has_hook(hooks_dir: str) -> bool:
-    """True when *hooks_dir* holds a file other than git's ``*.sample``
-    templates."""
+    """True when *hooks_dir* holds git's post-index-change hook: an entry
+    named ``post-index-change`` or ``post-index-change.exe``, in any letter
+    case. See test_only_the_index_hook_turns_the_git_shortcut_off."""
     try:
         names = os.listdir(hooks_dir)
     except FileNotFoundError:
         return False
-    return any(not n.endswith(".sample")
-               and os.path.isfile(os.path.join(hooks_dir, n)) for n in names)
+    return any(n.lower() in (_INDEX_HOOK, _INDEX_HOOK + ".exe") for n in names)
+
+
+def _hooks_path_ok(value: str, base: str, root: str, root_real: str) -> bool:
+    """Whether core.hooksPath *value* names a folder inside the project, taken
+    relative to the work-tree root *base*, that holds no hook :func:`_has_hook`
+    reports. False for a value this cannot place (empty, quoted, escaped,
+    commented, absolute, starting with ``~`` or holding a colon) and for a
+    folder that cannot be examined."""
+    if (not value or any(ch in value for ch in '"\\#;~:')
+            or os.path.isabs(value) or value.startswith("/")):
+        return False
+    path = os.path.join(base, value)
+    try:
+        return _real_inside(path, root, root_real) and not _has_hook(path)
+    except (OSError, ValueError):
+        return False
+
+
+def _varint(data: bytes, pos: int, end: int) -> tuple[int, int]:
+    """The index-format-4 offset varint at *pos* and the position after it."""
+    if pos >= end:
+        raise ValueError("truncated index")
+    c = data[pos]
+    pos += 1
+    value = c & 0x7F
+    while c & 0x80:
+        if pos >= end:
+            raise ValueError("truncated index")
+        c = data[pos]
+        pos += 1
+        value = ((value + 1) << 7) | (c & 0x7F)
+    return value, pos
+
+
+def _parse_index(data: bytes, hash_len: int) -> tuple[list[str], Optional[str]]:
+    """The gitlink (submodule) paths in index file content *data* whose object
+    ids are *hash_len* bytes, and the hex id of its shared index (split index)
+    or None. Raises ValueError when *data* is not such an index."""
+    end = len(data) - hash_len
+    if end < 12 or data[:4] != b"DIRC":
+        raise ValueError("not a git index")
+    version, count = struct.unpack_from(">II", data, 4)
+    if version not in (2, 3, 4):
+        raise ValueError(f"index version {version}")
+    fixed = 40 + hash_len
+    pos = 12
+    prev = b""
+    paths: list[str] = []
+    for _ in range(count):
+        if pos + fixed + 2 > end:
+            raise ValueError("truncated index")
+        mode = struct.unpack_from(">I", data, pos + 24)[0]
+        flags = struct.unpack_from(">H", data, pos + fixed)[0]
+        name_at = pos + fixed + 2
+        if flags & 0x4000:
+            if version < 3:
+                raise ValueError("extended flags in a version 2 index")
+            name_at += 2
+        if version == 4:
+            strip, name_at = _varint(data, name_at, end)
+            nul = data.index(b"\0", name_at, end)
+            if strip > len(prev):
+                raise ValueError("bad path compression")
+            name = prev[:len(prev) - strip] + data[name_at:nul]
+            pos = nul + 1
+        else:
+            nul = data.index(b"\0", name_at, end)
+            name = data[name_at:nul]
+            pos += (nul - pos + 8) & ~7
+        prev = name
+        if mode & 0o170000 == _GITLINK:
+            paths.append(name.decode("utf-8", "surrogateescape"))
+    shared = None
+    while pos < end:
+        if pos + 8 > end:
+            raise ValueError("truncated index extension")
+        signature = data[pos:pos + 4]
+        size = struct.unpack_from(">I", data, pos + 4)[0]
+        body = pos + 8
+        if body + size > end:
+            raise ValueError("truncated index extension")
+        if signature == b"link":
+            if size < hash_len:
+                raise ValueError("bad link extension")
+            oid = data[body:body + hash_len]
+            if any(oid):
+                shared = oid.hex()
+        pos = body + size
+    if pos != end:
+        raise ValueError("index entries overrun")
+    return paths, shared
+
+
+def _read_index(path: str) -> tuple[list[str], Optional[str], int]:
+    """:func:`_parse_index` of the index file at *path*, with the object id
+    length found from its trailing checksum (SHA-1 or SHA-256), or by trying
+    both when the checksum is zero (index.skipHash). Raises OSError or
+    ValueError."""
+    with open(path, "rb") as fh:
+        data = fh.read()
+    lengths = []
+    for hash_len, algo in ((20, "sha1"), (32, "sha256")):
+        if len(data) > hash_len and hashlib.new(algo, data[:-hash_len]).digest() == data[-hash_len:]:
+            lengths = [hash_len]
+            break
+    else:
+        if len(data) > 32 and not any(data[-20:]):
+            lengths = [20, 32]
+    if not lengths:
+        raise ValueError("index checksum does not match")
+    error: Optional[Exception] = None
+    for hash_len in lengths:
+        try:
+            paths, shared = _parse_index(data, hash_len)
+            return paths, shared, hash_len
+        except (ValueError, struct.error) as exc:
+            error = exc
+    raise ValueError(f"unreadable index: {error}")
+
+
+def _index_gitlinks(gitdir: str) -> list[str]:
+    """The paths, relative to the work tree and ``/``-separated, of the
+    submodule entries in the index of git directory *gitdir*, its shared index
+    included; empty when there is no index. Raises OSError or ValueError when
+    an index file cannot be read."""
+    index = os.path.join(gitdir, "index")
+    if not os.path.lexists(index):
+        return []
+    paths, shared, hash_len = _read_index(index)
+    if shared is not None:
+        more, _shared, more_len = _read_index(os.path.join(gitdir, "sharedindex." + shared))
+        if more_len != hash_len:
+            raise ValueError("shared index uses another object id length")
+        paths = paths + more
+    return paths
 
 
 def _network_path(path: str) -> bool:
@@ -1373,16 +1570,24 @@ def _network_path(path: str) -> bool:
     return path.replace("\\", "/").startswith("//")
 
 
-def _repo_config_risky(dotgit: str, base: str, root: str) -> bool:
-    """True when a local config file of the repository whose ``.git`` entry is
-    *dotgit* in directory *base* passes :func:`_git_config_risky`, or a
-    ``hooks`` folder of it holds a hook script (:func:`_has_hook`), its
-    submodules' (under ``modules/``) included; a ``gitdir:`` file and a ``commondir`` are
-    followed. Only files whose resolved path lies in the project *root* are
-    read: a target outside it is not looked at, and a network or device
+def _repo_config_risky(dotgit: str, base: str, root: str, depth: int = 0) -> bool:
+    """True when the repository whose git directory is *dotgit* (a ``.git``
+    entry in work-tree root *base*, or *base* itself for a bare repository)
+    can make a read command run a program: a local config file passes
+    :func:`_git_config_risky` (a core.hooksPath in the repository's own config
+    files passes when :func:`_hooks_path_ok` accepts it, one in a submodule's
+    config under ``modules/`` never does), or a ``hooks`` folder of it or of a
+    submodule under ``modules/`` holds a hook (:func:`_has_hook`), or the same
+    holds for the repository of a submodule entry in its index whose folder
+    has a ``.git`` entry, recursively. A ``gitdir:`` file and a ``commondir``
+    are followed. Only files whose resolved path lies in the project *root*
+    are read: a target outside it is not looked at, and a network or device
     target makes the answer True without being touched. A gitdir or commondir
-    with a ``..`` after a link (see :func:`_dotdot_after_link`) also makes the
-    answer True. True when a file cannot be read."""
+    with a ``..`` after a link (see :func:`_dotdot_after_link`), a submodule
+    path that is not a plain relative path, and submodules nested deeper than
+    :data:`_MAX_SUBMODULE_DEPTH` also make the answer True. Raises OSError or
+    ValueError when a file cannot be read."""
+    root_real = _real(root)
     prefix = os.path.realpath(root).rstrip(os.sep) + os.sep
     real = os.path.realpath(dotgit)
     if not real.startswith(prefix):
@@ -1397,21 +1602,25 @@ def _repo_config_risky(dotgit: str, base: str, root: str) -> bool:
         if _network_path(target):
             return True
         gitdirs = [target if os.path.isabs(target) else os.path.join(base, target)]
-    configs = []
+    configs: list[tuple[str, bool]] = []
     seen: set[str] = set()
+    primary: Optional[str] = None
     while gitdirs:
         nxt = gitdirs.pop()
-        if _dotdot_after_link(nxt):
+        if _dotdot_after_link(nxt, root):
             return True
         real = os.path.realpath(nxt)
         if not real.startswith(prefix) or real in seen:
             continue
         seen.add(real)
-        configs += [os.path.join(real, "config"), os.path.join(real, "config.worktree")]
+        if primary is None:
+            primary = real
+        configs += [(os.path.join(real, "config"), True),
+                    (os.path.join(real, "config.worktree"), True)]
         if _has_hook(os.path.join(real, "hooks")):
             return True
         for top, _dirs, files in os.walk(os.path.join(real, "modules")):
-            configs += [os.path.join(top, f) for f in files
+            configs += [(os.path.join(top, f), False) for f in files
                         if f in ("config", "config.worktree")]
             if os.path.basename(top) == "hooks" and _has_hook(top):
                 return True
@@ -1422,13 +1631,30 @@ def _repo_config_risky(dotgit: str, base: str, root: str) -> bool:
             if _network_path(target):
                 return True
             gitdirs.append(target if os.path.isabs(target) else os.path.join(real, target))
-    for path in configs:
+
+    def hooks_path_ok(value: str) -> bool:
+        return _hooks_path_ok(value, base, root, root_real)
+
+    for path, own in configs:
         real = os.path.realpath(path)
         if not real.startswith(prefix) or not os.path.isfile(real):
             continue
         with open(real, encoding="utf-8", errors="replace") as fh:
-            if _git_config_risky(fh.read()):
+            if _git_config_risky(fh.read(), hooks_path_ok if own else None):
                 return True
+    if primary is None or os.path.normcase(dotgit) == os.path.normcase(base):
+        return False
+    for rel in _index_gitlinks(primary):
+        parts = rel.split("/")
+        if (os.path.isabs(rel) or "\\" in rel or ":" in rel
+                or any(p in ("", ".", "..") for p in parts)):
+            return True
+        sub = os.path.join(base, *parts)
+        sub_git = os.path.join(sub, ".git")
+        if not os.path.lexists(sub_git):
+            continue
+        if depth >= _MAX_SUBMODULE_DEPTH or _repo_config_risky(sub_git, sub, root, depth + 1):
+            return True
     return False
 
 
@@ -1529,8 +1755,12 @@ def _read_only_segments(segments: Sequence[_Segment], root: str, root_real: str,
                 return False
             if name == "uniq" and len(operands) > 1:
                 return False
-        short, long = _RISKY_OPTIONS.get(name, ("", ()))
-        if any(_risky_option(o, short, long) for o in options):
+        key = f"git {sub}" if name == "git" else name
+        short, long = _RISKY_OPTIONS.get(key, ("", ()))
+        if name == "git":
+            long = long + _GIT_RISKY_LONG
+        exact = _EXACT_OPTIONS.get(key, frozenset())
+        if any(_risky_option(o, short, long, exact) for o in options):
             return False
         if any(o.startswith("-") and ch in o.split("=", 1)[0]
                for o in options for ch in "/\\"):
@@ -1545,7 +1775,7 @@ def _read_only_segments(segments: Sequence[_Segment], root: str, root_real: str,
             if current is None or not _inside(current, root):
                 return False
             try:
-                if not _real_inside(current, root_real):
+                if not _real_inside(current, root, root_real):
                     return False
             except (OSError, ValueError):
                 return False
@@ -1555,7 +1785,8 @@ def _read_only_segments(segments: Sequence[_Segment], root: str, root_real: str,
 def is_read_only(command: str, cwd: Optional[Path | str]) -> bool:
     """True when *command* provably only reads, and only inside *cwd*.
 
-    The command must be read-only in every one of :data:`_DIALECTS`. Unlike
+    The command must be read-only in every one of :data:`_DIALECTS` (on
+    Windows the sh parse is ``"sh-nt"``, see :func:`_lex`). Unlike
     :func:`classify` it reads the filesystem: operands are resolved with
     symlinks followed, a project file that a command name could run (a PATH
     entry inside the project, or on Windows the working directory) makes it
@@ -1576,7 +1807,8 @@ def is_read_only(command: str, cwd: Optional[Path | str]) -> bool:
         search = _search_path(root, root_real)
     except (OSError, ValueError):
         return False
-    for segments in _parses(command):
+    dialects = ("mixed", "sh-nt", "cmd") if os.name == "nt" else _DIALECTS
+    for segments in _parses(command, dialects):
         if not segments or not _read_only_segments(segments, root, root_real, search):
             return False
     return True

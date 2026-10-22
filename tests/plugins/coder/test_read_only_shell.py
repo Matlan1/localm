@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -303,7 +305,9 @@ def test_a_batch_file_in_the_folder_shadows_the_command_on_windows(tmp_path):
     ("[log]\n\tshowSignature\n", False),
     ("[gpg]\n\tprogram = ./g.sh\n", False),
     ("[core] fsmonitor = ./hook.sh\n", False),
-    ("[core]\n\thooksPath = .husky\n", False),
+    ("[core]\n\thooksPath = .husky\n", True),
+    ('[hook "fmt"]\n\tcommand = ./x.sh\n\tevent = post-index-change\n', False),
+    ('[hook "fmt"]\n\tevent = pre-push\n', False),
 ])
 def test_git_config_that_runs_programs_is_not_read_only(tmp_path, config, read_only):
     proj = tmp_path / "proj"
@@ -383,6 +387,265 @@ def test_a_submodule_config_that_runs_programs_is_not_read_only(tmp_path):
     assert is_read_only("git status", proj) is True
     (sub / "config").write_text("[core]\n\tfsmonitor = ../../../hook.sh\n", encoding="utf-8")
     assert is_read_only("git status", proj) is False
+
+
+_GIT = shutil.which("git")
+needs_git = pytest.mark.skipif(_GIT is None, reason="git is not installed")
+
+# Every hook git documents except post-index-change.
+_OTHER_HOOKS = (
+    "applypatch-msg", "pre-applypatch", "post-applypatch", "pre-commit",
+    "pre-merge-commit", "prepare-commit-msg", "commit-msg", "post-commit",
+    "pre-rebase", "post-checkout", "post-merge", "pre-push", "pre-receive",
+    "update", "proc-receive", "post-receive", "post-update",
+    "reference-transaction", "push-to-checkout", "pre-auto-gc", "post-rewrite",
+    "sendemail-validate", "fsmonitor-watchman", "p4-changelist",
+    "p4-prepare-changelist", "p4-post-changelist", "p4-pre-submit",
+)
+
+_READ_ONLY_GIT_COMMANDS = (
+    "git status", "git status -uno", "git diff", "git diff --cached", "git diff HEAD~1",
+    "git log --oneline", "git log -p", "git log -S foo", "git show", "git rev-parse HEAD",
+    "git ls-files", "git blame a.txt", "git describe --always", "git shortlog -s HEAD",
+    "git branch", "git branch -a", "git tag", "git remote -v", "git grep foo",
+)
+
+
+def _git_env() -> dict:
+    return dict(os.environ, GIT_PAGER="cat", PAGER="cat", GIT_TERMINAL_PROMPT="0",
+                GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+
+
+def _git(cwd: Path, *args: str) -> str:
+    return subprocess.run([_GIT, "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                           "-c", "core.autocrlf=false", *args], cwd=cwd, env=_git_env(),
+                          check=True, capture_output=True, text=True).stdout
+
+
+def _repo(path: Path, *init_args: str) -> Path:
+    path.mkdir(parents=True)
+    _git(path, "init", "-q", *init_args)
+    (path / "a.txt").write_text("foo\n", encoding="utf-8")
+    _git(path, "add", "a.txt")
+    _git(path, "commit", "-q", "-m", "one")
+    (path / "a.txt").write_text("foo\nbar\n", encoding="utf-8")
+    _git(path, "commit", "-q", "-am", "two")
+    return path
+
+
+def _marker_hook(hooks: Path, name: str, log: Path) -> None:
+    hooks.mkdir(parents=True, exist_ok=True)
+    (hooks / name).write_text(f'#!/bin/sh\necho {name} >> "{log.as_posix()}"\n',
+                              encoding="utf-8", newline="\n")
+    (hooks / name).chmod(0o755)
+
+
+def _stat_dirty(repo: Path) -> None:
+    later = (repo / "a.txt").stat().st_mtime + 5
+    os.utime(repo / "a.txt", (later, later))
+
+
+@needs_git
+def test_only_the_index_hook_turns_the_git_shortcut_off(tmp_path):
+    proj = _repo(tmp_path / "proj")
+    log = tmp_path / "fired.log"
+    for name in _OTHER_HOOKS:
+        _marker_hook(proj / ".git" / "hooks", name, log)
+    for command in _READ_ONLY_GIT_COMMANDS:
+        assert is_read_only(command, proj) is True, command
+        _stat_dirty(proj)
+        subprocess.run([_GIT, *command.split()[1:]], cwd=proj, capture_output=True,
+                       env=_git_env())
+        assert not log.exists(), (command, log.read_text(encoding="utf-8"))
+    _marker_hook(proj / ".git" / "hooks", "post-index-change", log)
+    _stat_dirty(proj)
+    subprocess.run([_GIT, "status"], cwd=proj, capture_output=True, env=_git_env())
+    assert log.read_text(encoding="utf-8").split() == ["post-index-change"]
+    for command in _READ_ONLY_GIT_COMMANDS:
+        assert is_read_only(command, proj) is False, command
+    (proj / ".git" / "hooks" / "post-index-change").unlink()
+    (proj / ".git" / "hooks" / "POST-INDEX-CHANGE.exe").write_bytes(b"MZ")
+    assert is_read_only("git status", proj) is False
+
+
+@needs_git
+def test_a_hooks_path_inside_the_project_is_checked_for_the_index_hook(tmp_path):
+    proj = _repo(tmp_path / "proj")
+    husky = proj / ".husky" / "_"
+    _marker_hook(husky, "pre-commit", tmp_path / "fired.log")
+    _git(proj, "config", "core.hooksPath", ".husky/_")
+    (proj / "src").mkdir()
+    assert is_read_only("git status", proj) is True
+    assert is_read_only("cd src && git log", proj) is True
+    _marker_hook(husky, "post-index-change", tmp_path / "fired.log")
+    assert is_read_only("git status", proj) is False
+    assert is_read_only("cd src && git log", proj) is False
+
+
+@pytest.mark.parametrize("value", [
+    "../hooks", "~/hooks", '".husky/_"', ".husky" + _BS + "_", ".husky/_ # x",
+    "/etc/hooks", "C:/hooks", "",
+])
+def test_a_hooks_path_this_cannot_place_is_not_read_only(tmp_path, value):
+    proj = tmp_path / "proj"
+    (proj / ".git").mkdir(parents=True)
+    (proj / ".husky" / "_").mkdir(parents=True)
+    (tmp_path / "hooks").mkdir()
+    (proj / ".git" / "config").write_text(f"[core]\n\thooksPath = {value}\n",
+                                          encoding="utf-8")
+    assert is_read_only("git status", proj) is False
+    assert is_read_only("ls", proj) is True
+
+
+def test_a_submodule_hooks_path_is_not_read_only(tmp_path):
+    proj = tmp_path / "proj"
+    sub = proj / ".git" / "modules" / "lib"
+    sub.mkdir(parents=True)
+    (proj / ".git" / "config").write_text("[core]\n\thooksPath = .husky\n", encoding="utf-8")
+    (sub / "config").write_text("[core]\n\tbare = false\n", encoding="utf-8")
+    assert is_read_only("git status", proj) is True
+    (sub / "config").write_text("[core]\n\thooksPath = .husky\n", encoding="utf-8")
+    assert is_read_only("git status", proj) is False
+
+
+def _gitlink(super_repo: Path, sub_repo: Path, rel: str) -> None:
+    head = _git(sub_repo, "rev-parse", "HEAD").strip()
+    _git(super_repo, "update-index", "--add", "--cacheinfo", f"160000,{head},{rel}")
+
+
+@needs_git
+def test_a_hook_in_a_submodule_repository_git_status_enters_is_not_read_only(tmp_path):
+    proj = _repo(tmp_path / "proj")
+    sub = _repo(proj / "vendor" / "lib")
+    _gitlink(proj, sub, "vendor/lib")
+    log = tmp_path / "fired.log"
+    assert is_read_only("git status", proj) is True
+    _marker_hook(sub / ".git" / "hooks", "post-index-change", log)
+    _stat_dirty(sub)
+    subprocess.run([_GIT, "status"], cwd=proj, capture_output=True, env=_git_env())
+    assert "post-index-change" in log.read_text(encoding="utf-8")
+    assert is_read_only("git status", proj) is False
+    assert is_read_only("git diff", proj) is False
+    (sub / ".git" / "hooks" / "post-index-change").unlink()
+    assert is_read_only("git status", proj) is True
+    (sub / ".git" / "config").write_text("[core]\n\tfsmonitor = ./x.sh\n", encoding="utf-8")
+    assert is_read_only("git status", proj) is False
+
+
+@needs_git
+def test_a_submodule_redirected_to_a_gitdir_with_the_index_hook_is_not_read_only(tmp_path):
+    proj = _repo(tmp_path / "proj")
+    sub = _repo(proj / "lib")
+    _gitlink(proj, sub, "lib")
+    evil = proj / "store"
+    (sub / ".git").rename(evil)
+    (sub / ".git").write_text("gitdir: ../store\n", encoding="utf-8")
+    assert is_read_only("git status", proj) is True
+    _marker_hook(evil / "hooks", "post-index-change", tmp_path / "fired.log")
+    assert is_read_only("git status", proj) is False
+
+
+@needs_git
+@pytest.mark.parametrize("init, config, version", [
+    ((), (), "2"), ((), (), "3"), ((), (), "4"),
+    ((), ("-c", "core.splitIndex=true"), "2"),
+    ((), ("-c", "index.skipHash=true"), "2"),
+    (("--object-format=sha256",), (), "4"),
+])
+def test_submodule_entries_are_read_from_every_index_format(tmp_path, init, config, version):
+    from localm.plugins.coder.shell_guard import _index_gitlinks, _read_index
+    proj = _repo(tmp_path / "proj", *init)
+    sub = _repo(proj / "deep" / "er" / "lib", *init)
+    _gitlink(proj, sub, "deep/er/lib")
+    for name in ("deep/er/z.txt", "deep/er/zz.txt", "b.txt"):
+        (proj / name).write_text("z", encoding="utf-8")
+    _git(proj, *config, "update-index", "--index-version", version)
+    _git(proj, *config, "add", "deep/er/z.txt", "deep/er/zz.txt")
+    _git(proj, *config, "add", "-N", "b.txt")
+    _paths, shared, hash_len = _read_index(str(proj / ".git" / "index"))
+    assert hash_len == (32 if init else 20)
+    assert (shared is not None) == ("core.splitIndex=true" in config)
+    raw = (proj / ".git" / "index").read_bytes()
+    assert int.from_bytes(raw[4:8], "big") == (3 if version == "2" else int(version))
+    assert any(raw[-hash_len:]) == ("index.skipHash=true" not in config)
+    assert _index_gitlinks(str(proj / ".git")) == ["deep/er/lib"]
+
+
+def test_an_unreadable_index_is_not_read_only(tmp_path):
+    proj = tmp_path / "proj"
+    (proj / ".git").mkdir(parents=True)
+    (proj / ".git" / "index").write_bytes(b"DIRC\x00\x00\x00\x09garbage" + bytes(20))
+    assert is_read_only("git status", proj) is False
+    (proj / ".git" / "index").unlink()
+    assert is_read_only("git status", proj) is True
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="run_shell uses cmd.exe on Windows")
+def test_an_unquoted_windows_path_is_read_as_cmd_passes_it(tmp_path):
+    proj = tmp_path / "proj"
+    (proj / "src").mkdir(parents=True)
+    (proj / "README.md").write_text("x", encoding="utf-8")
+    (tmp_path / "secret.txt").write_text("s", encoding="utf-8")
+    win = str(proj)
+    assert is_read_only(f"type {win}{_BS}README.md", proj) is True
+    assert is_read_only(f"cat {win}{_BS}src{_BS}..{_BS}README.md", proj) is True
+    assert is_read_only(f"cd {win}{_BS}src && dir", proj) is True
+    assert is_read_only(f"type {win}{_BS}..{_BS}secret.txt", proj) is False
+    assert is_read_only(f"cat src{_BS}..{_BS}..{_BS}secret.txt", proj) is False
+    assert is_read_only(f"cat .{_BS}./{_BS}../secret.txt", proj) is False
+    assert is_read_only(f"cat README.md {_BS}&{_BS}& del README.md", proj) is False
+    assert is_read_only(f"cat README.md{_BS}; del README.md", proj) is False
+    assert is_read_only(f"cat {_BS}$HOME/x", proj) is False
+
+
+def test_an_ancestor_reparse_point_does_not_count_but_one_inside_the_project_does(
+        tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from localm.plugins.coder import shell_guard
+    proj = tmp_path / "cloud" / "proj"
+    (proj / "src").mkdir(parents=True)
+    (proj / "src" / "a.txt").write_text("a", encoding="utf-8")
+    marked = {os.path.normcase(str(tmp_path / "cloud"))}
+    real_lstat = os.lstat
+
+    def lstat(path, *a, **k):
+        st = real_lstat(path, *a, **k)
+        if os.path.normcase(os.path.normpath(str(path))) in marked:
+            return SimpleNamespace(st_mode=st.st_mode, st_reparse_tag=0,
+                                   st_file_attributes=getattr(st, "st_file_attributes", 0)
+                                   | shell_guard._REPARSE_POINT)
+        return st
+
+    monkeypatch.setattr(shell_guard.os, "lstat", lstat)
+    assert is_read_only("cat src/a.txt", proj) is True
+    assert is_read_only("cat src/../src/a.txt", proj) is True
+    marked.add(os.path.normcase(str(proj / "src")))
+    assert is_read_only("cat src/a.txt", proj) is False
+
+
+@pytest.mark.parametrize("command", [
+    "grep -rn TODO --exclude=*.min.js .", "du -sh --exclude=node_modules .",
+    "diff --exclude=x a b", "git status -uno", "git status -uall", "git log -S foo",
+    "git log -M", "git log -C --stat", "git diff -M90 --stat", "git diff --text",
+    "git show --text HEAD", "git grep --text foo", "rg --ignore foo", "git log -D",
+    "git diff -c", "git log -m", "git log -u",
+])
+def test_real_options_that_start_a_risky_one_are_read_only(command):
+    assert is_read_only(command, PROJECT) is True, command
+
+
+@pytest.mark.parametrize("command", [
+    "grep --exclude-from=x foo .", "grep --exclude-f=x foo .", "du --exclude-from=x .",
+    "diff --exclude-from=x a b", "git diff --textconv", "git diff --textc",
+    "git log --textconv", "git log -Oorder.txt", "git diff -O order.txt",
+    "git branch -u origin/x", "git branch -d", "git branch --del", "git tag -d",
+    "git tag -f", "git blame -S revs a.txt", "git blame --contents x a.txt",
+    "rg --ignore-file x foo", "rg --ignore-f x foo", "git grep -O foo",
+    "git grep -f pat.txt foo", "git ls-files -X x", "git ls-files --exclude-from=x",
+    "git status --output=x", "git status --ext-diff", "git rev-parse --out=x",
+])
+def test_risky_options_and_their_abbreviations_still_ask(command):
+    assert is_read_only(command, PROJECT) is False, command
 
 
 def _make_agent(tmp_path, **kw):
