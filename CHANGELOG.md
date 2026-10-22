@@ -142,6 +142,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
   next request fits in it.
 
 ### Fixed
+- **Compiled PyTorch extensions stay in the data folder.** PyTorch keeps the C++/CUDA extensions
+  it builds on first import in the user's cache folder (`~/.cache/torch_extensions` on Linux),
+  outside the data folder, so "delete saved data" never removed them. They now go to
+  `cache/torch_extensions` inside it. A location you set yourself with `TORCH_EXTENSIONS_DIR` is
+  used as you set it. Files already in the old location are left where they are.
 - **The NVIDIA CUDA kernel cache stays in the data folder.** The CUDA driver keeps kernels it
   compiles on first use in `~/.nv/ComputeCache` (`%APPDATA%\NVIDIA\ComputeCache` on Windows), outside
   the data folder, so "delete saved data" never removed them. They now go to `cache/cuda` inside it.

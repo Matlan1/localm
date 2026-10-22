@@ -76,8 +76,10 @@ def is_valid_extra_name(extra: object) -> bool:
 
 def extra_requirements(extra: str) -> list:
     """Concrete requirement strings for one pip extra, read from the installed
-    ``localm`` metadata. Falls back to the ``localm[extra]`` specifier when the
-    metadata cannot be read, so the install is still attempted.
+    ``localm`` metadata, leaving out each one whose environment marker does not
+    hold on this machine (an empty list when none does). Falls back to the
+    ``localm[extra]`` specifier when the metadata cannot be read or does not
+    declare the extra, so the install is still attempted.
 
     Raises ValueError when *extra* is not an extra name
     (:func:`is_valid_extra_name`), so no other text reaches a requirement."""
@@ -91,12 +93,30 @@ def extra_requirements(extra: str) -> list:
                      exc_info=True)
         return [f"{DIST_NAME}[{extra}]"]
     out = []
+    declared = False
     for r in reqs:
         # e.g. "faster-whisper>=1.0; extra == 'voice'"
         head, _, marker = r.partition(";")
         if marker and _marker_names_extra(marker, extra):
-            out.append(head.strip())
-    return out or [f"{DIST_NAME}[{extra}]"]
+            declared = True
+            if _marker_applies(marker, extra):
+                out.append(head.strip())
+    if declared:
+        return out
+    return [f"{DIST_NAME}[{extra}]"]
+
+
+def _marker_applies(marker: str, extra: str) -> bool:
+    """Whether *marker* holds on this machine with ``extra`` set to *extra*
+    (``sys_platform == 'linux' and extra == 'x'`` is False on Windows). True
+    when ``packaging`` is not importable or the marker cannot be parsed."""
+    try:
+        from packaging.markers import Marker
+        return bool(Marker(marker.strip()).evaluate({"extra": extra}))
+    except Exception:
+        logger.debug("could not evaluate the marker %r of extra %r", marker, extra,
+                     exc_info=True)
+        return True
 
 
 def plugin_requirements(extras: Iterable[str]) -> list:

@@ -14,7 +14,7 @@ canonical built-in, *protected* plugin (cannot be disabled or uninstalled).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Optional, Protocol, runtime_checkable
+from typing import Any, Callable, Optional, Protocol, runtime_checkable
 
 #: Host<->plugin contract version. Bump on breaking changes; a plugin declares
 #: the api_version it targets and the engine refuses incompatible plugins.
@@ -66,6 +66,31 @@ class ModelRoleDescriptor:
     plugin_name: str = "" # filled in by the host/engine at registration time
     required: bool = True
     description: str = ""
+
+
+@dataclass(frozen=True)
+class InferenceBackendDescriptor:
+    """An inference backend a plugin offers for a model shape core does not load.
+
+    ``claims(model_path) -> bool`` says whether this backend runs the model at
+    *model_path* (a file or a folder). It must be cheap (read a small file at
+    most) and must not raise; an exception is logged and read as "not claimed".
+    It is asked only for a path the built-in backends would refuse: a ``.gguf``
+    file and a Hugging Face folder the HF backend loads never reach it.
+
+    ``create(model_path, **opts) -> BaseBackend`` builds the backend without
+    loading it. *opts* carries ``device`` and ``n_ctx`` (either may be None);
+    ignore any key you do not use. The backend must run its model in its own
+    child process and satisfy ``localm.inference.backends.base.BaseBackend``.
+
+    ``plugin_name`` is stamped by the host at registration; a value set here is
+    replaced.
+    """
+    name: str
+    claims: Callable[[str], bool]
+    create: Callable[..., Any]
+    label: str = ""
+    plugin_name: str = ""
 
 
 @dataclass
@@ -191,6 +216,21 @@ class Host(Protocol):
         model picker, which joins them to the active ComfyUI workflow's slots and
         to the registry's own models of each type (``plugins/media_roles.py``).
         See docs/plugins.md, "Model roles"."""
+        ...
+
+    def register_inference_backend(self, descriptor: InferenceBackendDescriptor) -> None:
+        """Offer a backend for model files or folders the built-in GGUF and
+        Hugging Face backends refuse (see :class:`InferenceBackendDescriptor`).
+
+        Registered backends are asked in registration order and the first whose
+        ``claims`` returns True builds the backend; the built-ins are always
+        asked first, so a registered backend never replaces one. The host drops
+        the descriptor when the plugin is disabled or uninstalled, and the
+        model's refusal returns unchanged. A plugin that registers one declares
+        ``capabilities = ["inference-backend"]`` in its manifest, which lets an
+        in-process load (``localm run --no-server``) find it without starting
+        the server. Raises ValueError for a descriptor without a name or with a
+        ``claims``/``create`` that is not callable."""
         ...
 
 

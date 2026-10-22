@@ -209,6 +209,7 @@ A pip extra and a plugin install are two separate steps. The extra installs a pl
 | `voice` | Whisper speech-to-text for the GUI mic (`faster-whisper` and `av`, CPU, no torch) |
 | `monitor` | Live hardware monitor in the GUI status bar (`psutil`) |
 | `grammar` | Grammar-constrained decoding for HuggingFace models (`xgrammar`, layers on `[gpu]`) |
+| `exllama` | ExLlama runtimes for EXL2 / EXL3 models (`exllamav3`, `exllamav2`; Linux with an NVIDIA GPU and the CUDA toolkit); used with `hf` |
 | `cpu` | Explicit CPU-only marker (empty; core already runs GGUF on CPU) |
 | `dev` | Contributor / CI tooling: the linter, type checker, test runner and its plugins, plus `pypdf`/`psutil` so the tests that need them do not skip |
 | `docs` | Building this documentation site locally (`mkdocs`, `mkdocs-material`) |

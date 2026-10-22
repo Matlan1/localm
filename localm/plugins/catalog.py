@@ -35,6 +35,9 @@ class CatalogEntry:
     github: str = ""              # explicit repo URL (else derived from GITHUB_BASE)
     preinstalled: bool = False    # installed out of the box (chat)
     protected: bool = False       # cannot be uninstalled or disabled (chat)
+    offered: bool = True          # listed as available to install; False keeps
+                                  # it out of every listing while an explicit
+                                  # `localm plugin install <name>` still works
 
     def source_url(self) -> str:
         """Repo to fetch from when the plugin is missing from the bundled store."""
@@ -71,6 +74,10 @@ CATALOG: tuple = (
                  commands=("mcp",)),
     CatalogEntry("jobs", "Scheduled recurring tasks",
                  commands=("job",)),
+    # Not offered until a real load and reply on an NVIDIA CUDA GPU has passed;
+    # set offered=True in the change that records that run.
+    CatalogEntry("exllama", "Run EXL2 and EXL3 models with ExLlama (NVIDIA GPU, Linux)",
+                 extra="exllama", offered=False),
 )
 
 _BY_NAME = {e.name: e for e in CATALOG}
@@ -111,6 +118,13 @@ def suggestion(command: str) -> str | None:
 
 def names() -> tuple:
     return tuple(_BY_NAME)
+
+
+def offered(name: str) -> bool:
+    """False for a catalog entry marked not offered; True for every other name,
+    including one the catalog does not list."""
+    entry = _BY_NAME.get(name)
+    return entry is None or entry.offered
 
 
 def preinstalled() -> tuple:

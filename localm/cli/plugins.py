@@ -232,7 +232,7 @@ def plugin_setup(plugins_csv, install_all, install_defaults, with_deps=None):
     from localm import cli as _cli
     mgr = _cli._engine_manager()
     installed = _installed_plugin_names(mgr)
-    available = [e for e in catalog.CATALOG if not e.preinstalled]
+    available = [e for e in catalog.CATALOG if not e.preinstalled and e.offered]
     interactive = False
 
     if install_all:

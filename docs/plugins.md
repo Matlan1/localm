@@ -181,6 +181,7 @@ that has to happen regardless of install path.
 | `browse_dirs(path)` | Server-side folder picker helper. |
 | `register_chat_hook(phase, fn, *, priority=0)` | Register an inlet/stream/outlet transform that runs on every chat turn (see [Chat pipeline hooks](#chat-pipeline-hooks)). |
 | `register_model_role(descriptor)` | Declare a model slot the plugin needs, by registry `model_type` (see [Model roles](#model-roles)). |
+| `register_inference_backend(descriptor)` | Offer a backend for model files or folders the built-in GGUF and Hugging Face backends refuse (see [Inference backends](#inference-backends)). |
 | `has_scope(scope)`, `require_scope(scope)` | Not implemented: both raise `NotImplementedError`. Scopes are enforced per request on the routes mounted via `mount_router`. |
 
 A routes-only plugin (`voice`) is:
@@ -432,6 +433,44 @@ Two things a role does **not** do. It does not reserve or load anything - it is
 a declaration, not an allocation. And it does not constrain what a user may
 pick: selection stays fitness-for-purpose, so a model whose recorded type is
 imperfect is still choosable.
+
+## Inference backends
+
+A plugin can run a model format core does not load (the bundled `exllama`
+plugin runs EXL2 and EXL3 folders). It registers an
+`InferenceBackendDescriptor`:
+
+```python
+from localm.plugins.contract import InferenceBackendDescriptor
+
+def register(host):
+    host.register_inference_backend(InferenceBackendDescriptor(
+        name="mybackend", claims=claims, create=create, label="My runtime"))
+```
+
+- `claims(model_path) -> bool` says whether the backend runs that file or
+  folder. Keep it cheap (read one small file at most). An exception is logged
+  and counts as "no".
+- `create(model_path, **opts)` returns an unloaded backend implementing
+  `localm.inference.backends.base.BaseBackend`. `opts` holds `device` and
+  `n_ctx` (either may be None).
+- Built-ins always win: a `.gguf` file, and a Hugging Face folder the HF
+  backend loads, never reach a plugin. A registered backend is asked only for
+  a path both built-ins refuse, and the first one that claims it builds it.
+- Disabling or uninstalling the plugin removes the backend, and the model's
+  refusal returns unchanged.
+- Run the model in its own child process. Core's
+  `localm.inference.backends._hf_runner.HFRunner(worker_target=(file, class))`
+  hosts your worker class in the same isolated process the HF backend uses
+  (crash detection, cancel and timeouts included); the class must not use
+  relative imports. A `ModelRefusedError` raised by its `load()` reaches the
+  user as a refusal.
+- Report the VRAM a load needs from `full_offload_vram_bytes()`; the server
+  reads it before choosing which resident models to unload.
+- Declare `capabilities = ["inference-backend"]` in `plugin.toml`. A process
+  that has not loaded its plugins (an in-process `localm run --no-server`, or
+  the server building its startup model) then loads the enabled plugins that
+  declare it, once, when no registered backend claims a refused path.
 
 ## Dependencies
 

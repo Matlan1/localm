@@ -1,0 +1,9 @@
+[plugin]
+name = "exllama"
+version = "0.1.0"
+description = "Run EXL2 and EXL3 quantized models with ExLlama on an NVIDIA GPU (Linux)."
+scope = "exllama"
+register = "plug"
+# hf brings the tokenizer and chat-template stack, exllama the ExLlama runtimes.
+requires_extras = ["hf", "exllama"]
+capabilities = ["inference-backend"]
