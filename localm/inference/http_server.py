@@ -2275,7 +2275,8 @@ async def _unload_engines_and_embedder(loop, _embedder_mod, unloaded_models,
                 None, functools.partial(_reranker_mod.reset_reranker, force=False)):
             embedder_was_loaded = True
         else:
-            skipped_in_use.append("reranker model")
+            resident = await loop.run_in_executor(None, _reranker_mod.reranker_info)
+            skipped_in_use.append(resident["kind"] if resident else "reranker model")
     from localm.inference import speech as _speech_mod
     if await loop.run_in_executor(None, _speech_mod.is_loaded):
         if await loop.run_in_executor(
