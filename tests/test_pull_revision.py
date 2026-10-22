@@ -129,7 +129,7 @@ def hub(tmp_path, monkeypatch):
         default_commit="c" * 40, info_error=None, info_calls=[], sha_calls=[],
         downloads=[], snapshots=[], digests={}, snapshot_error=None,
         repo_files={COMMIT: {"config.json": b"{}", "w.safetensors": BODY},
-                    OTHER_COMMIT: {"config.json": b"{}", "w.safetensors": BODY + b"x"},
+                    OTHER_COMMIT: {"config.json": b'{"bits": 2}', "w.safetensors": BODY + b"x"},
                     "c" * 40: {"README.md": b"readme"}},
         missing_error=lambda rev: RevisionNotFoundError(f"no {rev}", response=_response(404)))
 
@@ -369,11 +369,18 @@ class TestSingleFileRecords:
         assert mm.pull_model("o/r:w.safetensors", name="m", model_type="llm") is True
         assert "revision" not in mm.load_registry()["m"]
 
-    def test_a_same_named_file_with_no_digest_is_fetched_again_at_the_revision(self, hub):
-        assert mm.pull_model("o/r:w.safetensors", name="a", model_type="llm") is True
+    def test_a_file_this_revision_already_owns_is_fetched_again_without_a_digest(self, hub):
+        assert mm.pull_model("o/r@4.0bpw:w.safetensors", name="a", model_type="llm") is True
         hub.downloads.clear()
+        assert mm.pull_model("o/r@4.0bpw:w.safetensors", name="a", model_type="llm") is True
+        assert hub.downloads == [("o/r", "w.safetensors", COMMIT)]
+
+    def test_an_unregistered_same_named_file_is_fetched_again_at_the_revision(self, hub):
+        (hub.models_dir / "w.safetensors").write_bytes(b"stray")
         assert mm.pull_model("o/r@4.0bpw:w.safetensors", name="b", model_type="llm") is True
         assert hub.downloads == [("o/r", "w.safetensors", COMMIT)]
+        assert (hub.models_dir / "w.safetensors").read_bytes() == BODY
+
 
     def test_a_starter_pin_is_not_applied_to_a_revision(self, hub, monkeypatch):
         asked = []
@@ -390,33 +397,209 @@ class TestSingleFileRecords:
         assert registry._active_model_missing_mmproj(path) is None
 
 
-class TestAnUnfinishedRevisionIsNotMergedWithAnother:
-    def test_another_revision_into_the_same_folder_is_refused(self, hub, capsys):
+class TestASameNamedFileIsNeverOverwrittenByAnotherPull:
+    OTHER = b"another model's weights"
+
+    def _own(self, hub, name, source, **record):
+        path = hub.models_dir / "w.safetensors"
+        path.write_bytes(self.OTHER)
+        mm._register(name, path, source, **record)
+        return path
+
+    def _refused(self, hub, capsys, spec, name="b"):
+        capsys.readouterr()
+        assert mm.pull_model(spec, name=name, model_type="llm") is False
+        out = " ".join(capsys.readouterr().out.split())
+        assert "File name already in use" in out
+        assert hub.downloads == []
+        assert (hub.models_dir / "w.safetensors").read_bytes() == self.OTHER
+        assert name not in mm.load_registry()
+        return out
+
+    def test_a_file_registered_to_another_repo_is_not_replaced(self, hub, capsys):
+        self._own(hub, "a", "hf:x/y")
+        self._refused(hub, capsys, "o/r@4.0bpw:w.safetensors")
+        assert mm.load_registry()["a"]["source"] == "hf:x/y"
+
+    def test_a_file_registered_from_the_default_branch_is_not_replaced(self, hub, capsys):
+        self._own(hub, "a", "hf:o/r")
+        self._refused(hub, capsys, "o/r@4.0bpw:w.safetensors")
+
+    def test_a_file_registered_at_another_revision_is_not_replaced(self, hub, capsys):
+        self._own(hub, "a", "hf:o/r", revision="2.0bpw", commit=OTHER_COMMIT)
+        self._refused(hub, capsys, "o/r@4.0bpw:w.safetensors")
+        assert mm.load_registry()["a"]["revision"] == "2.0bpw"
+
+    def test_the_refusal_names_the_owner_and_how_to_free_the_name(self, hub, capsys):
+        self._own(hub, "a", "hf:o/r", revision="2.0bpw", commit=OTHER_COMMIT)
+        out = self._refused(hub, capsys, "o/r@4.0bpw:w.safetensors")
+        assert "'a' (hf:o/r@2.0bpw)" in out and "localm rm a" in out
+
+    def test_the_same_name_is_refused_as_well(self, hub, capsys):
+        self._own(hub, "a", "hf:x/y")
+        capsys.readouterr()
+        assert mm.pull_model("o/r@4.0bpw:w.safetensors", name="a", model_type="llm") is False
+        assert "File name already in use" in " ".join(capsys.readouterr().out.split())
+        assert hub.downloads == []
+        assert mm.load_registry()["a"]["source"] == "hf:x/y"
+
+    def test_the_default_branch_does_not_relabel_a_revisions_file(self, hub, capsys):
+        self._own(hub, "a", "hf:o/r", revision="2.0bpw", commit=OTHER_COMMIT)
+        self._refused(hub, capsys, "o/r:w.safetensors")
+        assert mm.load_registry()["a"]["revision"] == "2.0bpw"
+
+    def test_the_default_branch_refetches_a_revisions_file_it_replaces_by_name(self, hub):
+        self._own(hub, "a", "hf:o/r", revision="2.0bpw", commit=OTHER_COMMIT)
+        assert mm.pull_model("o/r:w.safetensors", name="a", model_type="llm") is True
+        assert hub.downloads == [("o/r", "w.safetensors", None)]
+        assert "revision" not in mm.load_registry()["a"]
+
+    def test_every_undigested_part_of_a_split_file_is_fetched_again_with_the_owned_one(self, hub):
+        for n in (1, 2):
+            (hub.models_dir / f"m-0000{n}-of-00002.gguf").write_bytes(self.OTHER)
+        mm._register("a", hub.models_dir / "m-00001-of-00002.gguf", "hf:o/r",
+                     revision="2.0bpw", commit=OTHER_COMMIT)
+        mm.pull_model("o/r:m-00001-of-00002.gguf", name="a", model_type="llm")
+        assert sorted(f for _r, f, _v in hub.downloads) == [
+            "m-00001-of-00002.gguf", "m-00002-of-00002.gguf"]
+
+    def test_a_split_file_whose_first_part_is_another_models_is_not_torn_down(self, hub, capsys):
+        first = hub.models_dir / "m-00001-of-00002.gguf"
+        first.write_bytes(self.OTHER)
+        mm._register("a", first, "hf:x/y")
+        hub.digests["m-00001-of-00002.gguf"] = hashlib.sha256(BODY).hexdigest()
+        capsys.readouterr()
+        assert mm.pull_model("o/r:m-00001-of-00002.gguf", name="b", model_type="llm") is False
+        assert "File name already in use" in " ".join(capsys.readouterr().out.split())
+        assert hub.downloads == []
+        assert first.read_bytes() == self.OTHER
+        assert mm.load_registry()["a"]["source"] == "hf:x/y"
+
+    def test_a_revision_replaces_its_own_name_from_the_default_branch(self, hub):
+        self._own(hub, "a", "hf:o/r")
+        assert mm.pull_model("o/r@4.0bpw:w.safetensors", name="a", model_type="llm") is True
+        assert hub.downloads == [("o/r", "w.safetensors", COMMIT)]
+        assert mm.load_registry()["a"]["revision"] == "4.0bpw"
+
+    def test_a_default_branch_file_without_a_digest_is_still_trusted(self, hub):
+        self._own(hub, "a", "hf:o/r")
+        assert mm.pull_model("o/r:w.safetensors", name="a", model_type="llm") is True
+        assert hub.downloads == []
+
+
+class _InterruptedAfterTheFirstFile:
+    """An unfinished snapshot: the first file of the listing is on disk."""
+
+    def stop(self, hub, spec, name="q"):
         hub.snapshot_error = OSError("disk full")
-        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is False
+        assert mm.pull_model(spec, name=name, model_type="llm") is False
         hub.snapshot_error = None
         hub.snapshots.clear()
+
+
+class TestAnUnfinishedRevisionIsNotMergedWithAnother(_InterruptedAfterTheFirstFile):
+    def test_another_revision_into_the_same_folder_is_refused(self, hub, capsys):
+        self.stop(hub, "o/r@4.0bpw")
         capsys.readouterr()
         assert mm.pull_model("o/r@2.0bpw", name="q", model_type="llm") is False
         assert "unfinished download of another revision" in " ".join(
             capsys.readouterr().out.split())
         assert hub.snapshots == [] and "q" not in mm.load_registry()
 
+    def test_the_first_revisions_file_is_left_untouched_by_the_refusal(self, hub):
+        self.stop(hub, "o/r@4.0bpw")
+        mm.pull_model("o/r@2.0bpw", name="q", model_type="llm")
+        assert (hub.models_dir / "q" / "config.json").read_bytes() == b"{}"
+
     def test_the_default_branch_into_that_folder_is_refused_too(self, hub, capsys):
-        hub.snapshot_error = OSError("disk full")
-        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is False
-        hub.snapshot_error = None
-        hub.repo_files["c" * 40] = {"config.json": b"{}"}
+        self.stop(hub, "o/r@4.0bpw")
+        hub.repo_files["c" * 40] = {"config.json": b'{"main": true}'}
+        capsys.readouterr()
         assert mm.pull_model("o/r", name="q", model_type="llm") is False
         assert "unfinished download of another revision" in " ".join(
             capsys.readouterr().out.split())
+        assert hub.snapshots == []
+
+    def test_a_revision_into_an_unfinished_default_branch_folder_is_refused(self, hub, capsys):
+        hub.repo_files["c" * 40] = {"README.md": b"readme", "main.bin": b"m"}
+        self.stop(hub, "o/r")
+        capsys.readouterr()
+        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is False
+        assert "unfinished download" in " ".join(capsys.readouterr().out.split())
+        assert hub.snapshots == [] and "q" not in mm.load_registry()
+
+    def test_another_repos_unfinished_download_is_not_merged_either(self, hub, capsys):
+        self.stop(hub, "o/r@4.0bpw")
+        capsys.readouterr()
+        assert mm.pull_model("p/s@4.0bpw", name="q", model_type="llm") is False
+        assert "unfinished download" in " ".join(capsys.readouterr().out.split())
+        assert hub.snapshots == []
 
     def test_the_same_revision_resumes_in_that_folder(self, hub):
-        hub.snapshot_error = OSError("disk full")
-        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is False
-        hub.snapshot_error = None
+        self.stop(hub, "o/r@4.0bpw")
         assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is True
         assert mm.load_registry()["q"]["revision"] == "4.0bpw"
+
+    def test_the_same_revision_repairs_a_damaged_file_in_that_folder(self, hub):
+        self.stop(hub, "o/r@4.0bpw")
+        (hub.models_dir / "q" / "config.json").write_bytes(b"torn")
+        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is True
+        assert (hub.models_dir / "q" / "config.json").read_bytes() == b"{}"
+
+    def test_an_unreadable_marker_is_reported_and_counts_as_no_claim(self, hub, caplog):
+        self.stop(hub, "o/r@4.0bpw")
+        (hub.models_dir / "q" / ".localm-revision.json").write_text("{not json", encoding="utf-8")
+        with caplog.at_level("WARNING"):
+            assert mm.pull_model("o/r@2.0bpw", name="q", model_type="llm") is True
+        assert ".localm-revision.json" in caplog.text
+
+    def test_a_folder_that_was_deleted_is_free_for_another_revision(self, hub):
+        import shutil
+        self.stop(hub, "o/r@4.0bpw")
+        shutil.rmtree(hub.models_dir / "q")
+        assert mm.pull_model("o/r@2.0bpw", name="q", model_type="llm") is True
+        assert mm.load_registry()["q"]["revision"] == "2.0bpw"
+
+
+class TestTheClaimMarkerEndsWithTheRegistration(_InterruptedAfterTheFirstFile):
+    MARKER = ".localm-revision.json"
+
+    def test_it_is_gone_once_the_revision_is_registered(self, hub):
+        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is True
+        assert not (hub.models_dir / "q" / self.MARKER).exists()
+
+    def test_it_is_gone_once_the_default_branch_is_registered(self, hub):
+        assert mm.pull_model("o/r", name="q", model_type="llm") is True
+        assert not (hub.models_dir / "q" / self.MARKER).exists()
+
+    def test_it_stays_while_the_download_is_unfinished(self, hub):
+        self.stop(hub, "o/r@4.0bpw")
+        assert (hub.models_dir / "q" / self.MARKER).is_file()
+
+    def test_it_is_removed_when_the_unfinished_download_is_finished(self, hub):
+        self.stop(hub, "o/r@4.0bpw")
+        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is True
+        assert not (hub.models_dir / "q" / self.MARKER).exists()
+
+    def test_a_stale_marker_on_a_registered_folder_is_cleared_by_a_repull(self, hub, capsys):
+        hub.repo_files["c" * 40] = {"config.json": b"{}"}
+        assert mm.pull_model("o/r", name="q", model_type="llm") is True
+        (hub.models_dir / "q" / self.MARKER).write_text(
+            '{"repo": "o/r", "revision": "4.0bpw"}', encoding="utf-8")
+        hub.snapshots.clear()
+        capsys.readouterr()
+        assert mm.pull_model("o/r", name="q", model_type="llm") is True
+        assert "Already downloaded" in capsys.readouterr().out
+        assert hub.snapshots == []
+        assert not (hub.models_dir / "q" / self.MARKER).exists()
+
+    def test_a_repull_of_a_revision_does_not_download_again(self, hub, capsys):
+        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is True
+        hub.snapshots.clear()
+        capsys.readouterr()
+        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is True
+        assert "Already downloaded" in capsys.readouterr().out
+        assert hub.snapshots == []
 
 
 class TestSpecsWithAnAtSignAreNotRevisions:

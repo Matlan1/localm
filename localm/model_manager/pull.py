@@ -1391,18 +1391,43 @@ def _revision_record_differs(model_name: str, revision: "Optional[HfRevision]") 
 _SNAPSHOT_CLAIM = ".localm-revision.json"
 
 
-def _snapshot_claimed_by_other_revision(dest: Path, repo_id: str,
-                                        revision: "Optional[HfRevision]") -> bool:
-    """True when *dest* holds the unfinished download of *repo_id* at a revision
-    other than *revision* (none when None): a pull at a revision leaves a marker
-    there until it is registered, because an unregistered folder has no registry
-    entry to say whose files it holds. An unreadable marker counts as no claim."""
+def _snapshot_claim_held_by_other(dest: Path, repo_id: str,
+                                  revision: "Optional[HfRevision]"
+                                  ) -> "Optional[tuple[str, Optional[str]]]":
+    """``(repo, revision)`` of the unfinished download that holds *dest* when it
+    is not the pull of *repo_id* at *revision* (the default branch when None),
+    else None. Every snapshot pull leaves a marker in its folder until the
+    folder is registered, because an unregistered folder has no registry entry
+    to say whose files it holds. A registered folder is described by its entry,
+    so a marker there is stale and counts as no claim, as does an unreadable
+    one."""
     try:
         claim = json.loads((dest / _SNAPSHOT_CLAIM).read_text(encoding="utf-8"))
-    except (OSError, ValueError, RecursionError):
-        return False
-    return (isinstance(claim, dict) and claim.get("repo") == repo_id
-            and (claim.get("revision") or None) != (revision.ref if revision else None))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, RecursionError) as e:
+        logger.warning("could not read %s in %s (%s); treating the folder as unclaimed",
+                       _SNAPSHOT_CLAIM, dest, e)
+        return None
+    if not isinstance(claim, dict) or not isinstance(claim.get("repo"), str):
+        logger.warning("%s in %s is not a claim; treating the folder as unclaimed",
+                       _SNAPSHOT_CLAIM, dest)
+        return None
+    held = (claim["repo"], claim.get("revision") or None)
+    if held == (repo_id, revision.ref if revision else None):
+        return None
+    if find_aliases_by_path(dest, _mm.load_registry()):
+        return None
+    return held
+
+
+def _clear_snapshot_claim(dest: Path) -> None:
+    """Delete the marker of *dest* once the folder is registered. A marker that
+    cannot be deleted is logged; a registered folder ignores it."""
+    try:
+        (dest / _SNAPSHOT_CLAIM).unlink(missing_ok=True)
+    except OSError as e:
+        logger.warning("could not remove %s from %s: %s", _SNAPSHOT_CLAIM, dest, e)
 
 
 def _holds_other_revision(dest: Path, repo_id: str,
@@ -2128,6 +2153,40 @@ def _pull_gguf_file(
     missing = [p for p in all_parts
                if not (base_dir / p).exists()
                or (revision is not None and p not in digests)]
+    for part in all_parts:
+        if part in digests or not (base_dir / part).exists():
+            continue
+        taken, own = _undigested_file_held_by_other_pull(
+            base_dir / part, repo_id, revision, model_name)
+        if own:
+            missing = [p for p in all_parts if p in missing or p not in digests]
+        if taken:
+            console.print(
+                f"[red]File name already in use:[/red] {escape(part)} in the "
+                "models folder is registered as "
+                f"{_civitai_registered_as(taken)}, not as "
+                f"{escape(repo_id)}{'@' + escape(revision.ref) if revision else ''}, "
+                "and was left as it is.\n"
+                "A file name holds one file, and --name only sets the registry "
+                "name. To keep both, pull a file of this repository that has "
+                "another name. To use this one instead, remove the other first, "
+                "which deletes its file "
+                f"({' and '.join('localm rm ' + escape(n) for n, _ in taken)}), "
+                "then pull again."
+            )
+            return False
+    if missing:
+        for part, expected_digest in digests.items():
+            if part in missing or (part == filename and want):
+                continue
+            taken = _hf_file_name_taken_by(base_dir / part, repo_id)
+            if not taken:
+                continue
+            on_disk = _verify_digest(base_dir / part,
+                                     purpose="to check the file already here")
+            if on_disk.lower() != expected_digest.lower():
+                _print_digest_name_in_use(part, on_disk, expected_digest, repo_id, taken)
+                return False
     if not missing:
         # If the user asserted a hash, verify the file actually on disk before
         # treating it as the requested model.
@@ -2153,19 +2212,7 @@ def _pull_gguf_file(
             if on_disk.lower() != published.lower():
                 taken = _hf_file_name_taken_by(base_dir / part, repo_id)
                 if taken:
-                    console.print(
-                        f"[red]File name already in use:[/red] {escape(part)} in "
-                        f"the models folder is a different file "
-                        f"({escape(on_disk[:16])}…) from the one {escape(repo_id)} "
-                        f"publishes ({escape(published[:16])}…). It is registered "
-                        f"as {_civitai_registered_as(taken)} and was left as it is.\n"
-                        "A file name holds one file, and --name only sets the "
-                        "registry name. To keep both, pull a file of this "
-                        "repository that has another name. To use this one "
-                        "instead, remove the other first, which deletes its file "
-                        f"({' and '.join('localm rm ' + escape(n) for n, _ in taken)}), "
-                        "then pull again."
-                    )
+                    _print_digest_name_in_use(part, on_disk, published, repo_id, taken)
                     return False
                 console.print(
                     f"[red]SHA256 mismatch![/red] The file already at "
@@ -2848,14 +2895,29 @@ def _pull_hf_snapshot(
     damaged: list[str] = []
     if dest.exists() and repo_siblings is not None:
         damaged = _snapshot_files_damaged(dest, repo_siblings, repo_id)
-    claimed = dest.exists() and _snapshot_claimed_by_other_revision(dest, repo_id, revision)
-    if (dest.exists() and not damaged and not claimed
+    claimed = _snapshot_claim_held_by_other(dest, repo_id, revision) if dest.exists() else None
+    if claimed is not None:
+        claim_repo, claim_revision = claimed
+        what = ("another revision of it" if claim_repo == repo_id
+                else f"{escape(claim_repo)}"
+                + (f"@{escape(claim_revision)}" if claim_revision else ""))
+        console.print(
+            f"[red]Refusing to pull {escape(repo_id)}"
+            + (f"@{escape(revision.ref)}" if revision else "")
+            + f" into {escape(str(dest))}:[/red] this folder holds an unfinished "
+            f"download of {what}. Pull with "
+            "[bold]-n <a-different-name>[/bold], or delete the folder first.")
+        return False
+    if (dest.exists() and not damaged
             and not _holds_other_revision(dest, repo_id, revision)
             and _snapshot_is_complete(dest, repo_siblings, repo_id)):
         console.print(f"[yellow]Already downloaded:[/yellow] {escape(model_name)}")
-        _mm._register_with_dedup(model_name, dest, f"hf:{repo_id}",
-                                 model_type=_resolve_snapshot_type(dest, model_type),
-                                 **_register_revision(revision))
+        registered = _mm._register_with_dedup(
+            model_name, dest, f"hf:{repo_id}",
+            model_type=_resolve_snapshot_type(dest, model_type),
+            **_register_revision(revision))
+        if registered:
+            _clear_snapshot_claim(dest)
         return True
     repairing = bool(damaged) or (
         dest.exists() and any(
@@ -2934,15 +2996,6 @@ def _pull_hf_snapshot(
             )
             return False
 
-    if claimed and not repairing:
-        console.print(
-            f"[red]Refusing to pull {escape(repo_id)}"
-            + (f"@{escape(revision.ref)}" if revision else "")
-            + f" into {escape(str(dest))}:[/red] this folder holds an unfinished "
-            "download of another revision of it. Pull with "
-            "[bold]-n <a-different-name>[/bold], or delete the folder first.")
-        return False
-
     if damaged:
         shown = ", ".join(escape(n) for n in damaged[:3]) + (" ..." if len(damaged) > 3 else "")
         stuck = _delete_snapshot_files(dest, damaged)
@@ -2969,15 +3022,15 @@ def _pull_hf_snapshot(
         return False
 
     _mm.ensure_dirs()
-    if revision is not None:
-        from ..storekit import atomic_write
-        dest.mkdir(parents=True, exist_ok=True)
-        try:
-            atomic_write(dest / _SNAPSHOT_CLAIM,
-                         json.dumps({"repo": repo_id, "revision": revision.ref}))
-        except OSError as e:
-            logger.warning("could not mark %s as holding %s@%s: %s",
-                           dest, repo_id, revision.ref, e)
+    from ..storekit import atomic_write
+    dest.mkdir(parents=True, exist_ok=True)
+    try:
+        atomic_write(dest / _SNAPSHOT_CLAIM,
+                     json.dumps({"repo": repo_id,
+                                 "revision": revision.ref if revision else None}))
+    except OSError as e:
+        logger.warning("could not mark %s as holding %s%s: %s", dest, repo_id,
+                       f"@{revision.ref}" if revision else "", e)
     # TAG-INJECTION site: repo_id/dest sit directly inside OPEN
     # [bold cyan]/[bold] tags.
     console.print(
@@ -3045,6 +3098,7 @@ def _pull_hf_snapshot(
             "different -n name, or 'localm alias' it in."
         )
         return False
+    _clear_snapshot_claim(dest)
     _report_success(
         f"[green]✓[/green] [bold]{escape(model_name)}[/bold] downloaded to "
         f"{escape(str(dest))}",
@@ -4195,6 +4249,59 @@ def _hf_file_name_taken_by(dest: Path, repo_id: str) -> "list[tuple[str, str]]":
     """``(name, source)`` of every registry entry whose path is *dest* and whose
     source is not ``hf:<repo_id>``."""
     return [(n, s) for n, s in _civitai_owners(dest) if s != f"hf:{repo_id}"]
+
+
+def _print_digest_name_in_use(part: str, on_disk: str, published: str,
+                              repo_id: str, taken: "list[tuple[str, str]]") -> None:
+    """Print why a pull stops: the file *part* in the models folder hashes to
+    *on_disk*, not to the *published* digest of *repo_id*, and the registry
+    entries *taken* (``(name, source)``) own it."""
+    from rich.markup import escape
+    console.print(
+        f"[red]File name already in use:[/red] {escape(part)} in "
+        f"the models folder is a different file "
+        f"({escape(on_disk[:16])}…) from the one {escape(repo_id)} "
+        f"publishes ({escape(published[:16])}…). It is registered "
+        f"as {_civitai_registered_as(taken)} and was left as it is.\n"
+        "A file name holds one file, and --name only sets the "
+        "registry name. To keep both, pull a file of this "
+        "repository that has another name. To use this one "
+        "instead, remove the other first, which deletes its file "
+        f"({' and '.join('localm rm ' + escape(n) for n, _ in taken)}), "
+        "then pull again."
+    )
+
+
+def _undigested_file_held_by_other_pull(
+        dest: Path, repo_id: str, revision: "Optional[HfRevision]",
+        model_name: str) -> "tuple[list[tuple[str, str]], bool]":
+    """``(blocking, own)`` for a file at *dest* that Hugging Face publishes no
+    digest for, so its bytes cannot be told from the pull's own.
+
+    Of the registry entries whose path is *dest*, those not pulled from
+    *repo_id* at *revision* hold a different pull's bytes (a pull on the default
+    branch, *revision* None, counts only an entry that records a revision, and
+    an unregistered file counts as nobody's). *blocking* lists ``(name, source)``
+    of those the pull must not replace: every one but an entry named
+    *model_name* of the same repo, whose own record the pull rewrites. *own* is
+    True when the file is held by such an entry alone and so is fetched again.
+    The source carries ``@revision`` when the entry records one."""
+    reg = _mm.load_registry()
+    wanted = revision.ref if revision else None
+    blocking: list[tuple[str, str]] = []
+    own = False
+    for name in find_aliases_by_path(dest, reg):
+        source = str(reg[name].get("source") or "")
+        recorded = reg[name].get("revision") or None
+        if source == f"hf:{repo_id}" and recorded == wanted:
+            continue
+        if wanted is None and recorded is None:
+            continue
+        if name == model_name and source == f"hf:{repo_id}":
+            own = True
+        else:
+            blocking.append((name, source + (f"@{recorded}" if recorded else "")))
+    return blocking, own and not blocking
 
 
 def _civitai_registry_unreadable() -> bool:
