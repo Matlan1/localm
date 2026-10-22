@@ -223,3 +223,100 @@ def test_a_stop_outside_a_download_does_not_report_an_earlier_stop(monkeypatch):
     assert "Download stopped; run the same command again to continue." in result.output
     assert "saved" not in result.output
     assert pull_mod.stopped_download() is None
+
+
+def test_a_first_download_above_the_http_limit_goes_through_xet(tmp_path, monkeypatch):
+    import huggingface_hub.file_download as fd
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    dest = tmp_path / "big.gguf"
+    huge = fd.constants.MAX_HTTP_DOWNLOAD_SIZE + 1
+    calls = {"xet": 0, "http": 0}
+
+    def xet_get(*, incomplete_path, expected_size, **kw):
+        calls["xet"] += 1
+        assert expected_size == huge
+        Path(incomplete_path).write_bytes(b"XET")
+
+    def http_get(*a, **kw):
+        calls["http"] += 1
+
+    monkeypatch.setattr(fd, "is_xet_available", lambda: True)
+    monkeypatch.setattr(fd, "xet_get", xet_get)
+    monkeypatch.setattr(fd, "http_get", http_get)
+    monkeypatch.setattr(fd, "_check_disk_space", lambda *a: None)
+
+    _resumable_download_to_tmp_and_move(
+        incomplete_path=cache / "big.etag.incomplete", destination_path=dest,
+        url_to_download="http://127.0.0.1:9/big.gguf", headers={},
+        expected_size=huge, filename="big.gguf", force_download=False,
+        etag="etag", xet_file_data=object())
+
+    assert calls == {"xet": 1, "http": 0}
+    assert dest.read_bytes() == b"XET"
+    assert _partials(cache) == []
+
+
+def test_a_snapshot_counts_the_partials_of_files_in_subfolders(tmp_path):
+    dest = tmp_path / "repo"
+    pending = dest / ".cache" / "huggingface" / "download"
+    (pending / "unet").mkdir(parents=True)
+    (pending / "unet" / "x.safetensors.etag.ab12cd34.incomplete").write_bytes(b"u" * 1000)
+    (pending / "top.etag.ab12cd34.incomplete").write_bytes(b"t" * 10)
+    (pending / "unet" / "x.safetensors.lock").write_bytes(b"l" * 7)
+    (dest / "config.json").write_bytes(b"c" * 5)
+
+    assert pull_mod._snapshot_bytes_on_disk(dest) == 1015
+
+
+def _stub_projector_lookups(monkeypatch):
+    monkeypatch.setattr(pull_mod._mm, "_hf_file_sha256", lambda *a, **kw: None)
+    monkeypatch.setattr(pull_mod, "_hf_token", lambda: None)
+
+
+def test_a_stopped_projector_download_records_its_partial(tmp_path, monkeypatch):
+    from huggingface_hub._local_folder import get_local_download_paths
+    _stub_projector_lookups(monkeypatch)
+    base = tmp_path / "models"
+    base.mkdir()
+
+    def stopped_hf_hub_download(*, filename, local_dir, **kw):
+        inc = get_local_download_paths(Path(local_dir), filename).incomplete_path("e1")
+        inc.parent.mkdir(parents=True, exist_ok=True)
+        tmp = inc.with_name(f"{inc.stem}.ab12cd34.incomplete")
+        tmp.write_bytes(b"p" * 4096)
+        pull_mod._write_partial_owner(tmp)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("huggingface_hub.hf_hub_download", stopped_hf_hub_download)
+    pull_mod.forget_stopped_download()
+
+    with pytest.raises(KeyboardInterrupt):
+        pull_mod._download_mmproj_file("owner/repo", "mmproj.gguf",
+                                       base / "mmproj.gguf", base)
+
+    assert pull_mod.stopped_download() == (4096, 0)
+
+
+def test_a_stopped_projector_download_beside_a_taken_name_records_nothing_saved(
+        tmp_path, monkeypatch):
+    _stub_projector_lookups(monkeypatch)
+    base = tmp_path / "models"
+    base.mkdir()
+    (base / "mmproj.gguf").write_bytes(b"other projector")
+
+    def stopped_hf_hub_download(*, filename, local_dir, **kw):
+        part = Path(local_dir) / ".cache" / "huggingface" / "download" / "x.e1.ab12cd34.incomplete"
+        part.parent.mkdir(parents=True, exist_ok=True)
+        part.write_bytes(b"p" * 4096)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("huggingface_hub.hf_hub_download", stopped_hf_hub_download)
+    pull_mod.forget_stopped_download()
+
+    with pytest.raises(KeyboardInterrupt):
+        pull_mod._download_mmproj_file("owner/repo", "mmproj.gguf",
+                                       base / "mmproj-owner-repo.gguf", base)
+
+    assert not any(p.name.startswith(".mmproj-") for p in base.iterdir())
+    assert pull_mod.stopped_download() == (0, 0)

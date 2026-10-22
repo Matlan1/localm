@@ -321,8 +321,10 @@ def _resumable_download_to_tmp_and_move(
     proven gone (live, unknown, or no sidecar) is never read, renamed or
     deleted. Every transfer goes over HTTP, a resume with a Range request, so
     the temp file holds every byte received when the transfer stops; a file
-    stored with Xet is fetched over HTTP too and *xet_file_data* is unused. See
-    test_a_stopped_first_download_of_a_xet_file_keeps_the_bytes_received. On
+    stored with Xet is fetched over HTTP too, except a first transfer larger
+    than huggingface_hub's HTTP limit (``constants.MAX_HTTP_DOWNLOAD_SIZE``),
+    which goes through Xet and keeps only what Xet has written when it stops.
+    See test_a_stopped_first_download_of_a_xet_file_keeps_the_bytes_received. On
     a failed transfer the temp file and its sidecar are kept for the next
     attempt, and a failure before the temp file exists removes the sidecar; a
     failed size check deletes both.
@@ -351,25 +353,37 @@ def _resumable_download_to_tmp_and_move(
             fd._check_disk_space(needed, tmp_path.parent)
             fd._check_disk_space(needed, destination_path.parent)
 
-        mode = "r+b" if resume_size > 0 else "wb"
-        try:
-            with tmp_path.open(mode) as f:
-                if resume_size > 0:
-                    f.seek(resume_size)
-                fd.http_get(
-                    url_to_download,
-                    f,
-                    resume_size=resume_size,
-                    headers=headers,
-                    expected_size=expected_size,
-                    displayed_filename=filename,
-                    tqdm_class=tqdm_class,
-                )
-        except OSError as e:
-            if "Consistency check failed" in str(e):
-                _unlink_quiet(tmp_path)
-                _unlink_quiet(_partial_owner_path(tmp_path))
-            raise
+        if (resume_size == 0 and xet_file_data is not None and expected_size
+                and expected_size > fd.constants.MAX_HTTP_DOWNLOAD_SIZE
+                and fd.is_xet_available()):
+            fd.xet_get(
+                incomplete_path=tmp_path,
+                xet_file_data=xet_file_data,
+                headers=headers,
+                expected_size=expected_size,
+                displayed_filename=filename,
+                tqdm_class=tqdm_class,
+            )
+        else:
+            mode = "r+b" if resume_size > 0 else "wb"
+            try:
+                with tmp_path.open(mode) as f:
+                    if resume_size > 0:
+                        f.seek(resume_size)
+                    fd.http_get(
+                        url_to_download,
+                        f,
+                        resume_size=resume_size,
+                        headers=headers,
+                        expected_size=expected_size,
+                        displayed_filename=filename,
+                        tqdm_class=tqdm_class,
+                    )
+            except OSError as e:
+                if "Consistency check failed" in str(e):
+                    _unlink_quiet(tmp_path)
+                    _unlink_quiet(_partial_owner_path(tmp_path))
+                raise
 
         fd._chmod_and_move(tmp_path, destination_path)
         _unlink_quiet(_partial_owner_path(tmp_path))
@@ -819,27 +833,13 @@ def _record_stop(measure, total_size: int):
         raise
 
 
-@contextlib.contextmanager
-def _download_progress(target_parts: list[Path], total_size: int, *,
+def _job_bytes_measure(target_parts: list[Path], total_size: int, *,
                        base_dir: "Path | None" = None,
                        rel_parts: "list[str] | None" = None,
                        etags: "dict[str, str | None] | None" = None):
-    """Report progress while files land under *base_dir*: JSON frames in GUI
-    mode (LOCALM_PROGRESS_JSON=1), a bar on a terminal, and lines for a
-    progress listener. A total of 0 means the size could not be determined:
-    progress still streams with ``pct: null`` so the GUI shows a busy bar with
-    a running byte count, matching _snapshot_progress.
-
-    In-flight bytes are counted from the ``.incomplete`` temp files of THIS
-    job's parts (and, when *etags* names them, of the current etag only) that
-    this process holds or whose owner is proven gone: the largest such file
-    per part, which is the one a resume reuses. The download's transfer rate
-    comes from the bytes received (see :mod:`._transfer`).
-
-    Yields a _ProgressOutcome; call ``.ok()`` on the success path or the closing
-    event reports the measured partial instead of 100%.
-    """
-    outcome = _ProgressOutcome()
+    """A function returning the bytes of a download job on disk: the finished
+    *target_parts* plus the ``.incomplete`` temp files under *base_dir* that
+    :func:`_download_progress` counts, clamped to *total_size* when known."""
     cache_root = (Path(base_dir) if base_dir is not None else _mm.MODELS_DIR) / ".cache"
     prefixes = _incomplete_prefixes(Path(base_dir), rel_parts, etags) \
         if base_dir is not None and rel_parts else None
@@ -885,6 +885,33 @@ def _download_progress(target_parts: list[Path], total_size: int, *,
         # Only clamp against a total that is actually known: min(x, 0) is 0,
         # which would pin an indeterminate download's byte count at zero.
         return min(total_now, total_size) if total_size else total_now
+
+    return _downloaded_bytes
+
+
+@contextlib.contextmanager
+def _download_progress(target_parts: list[Path], total_size: int, *,
+                       base_dir: "Path | None" = None,
+                       rel_parts: "list[str] | None" = None,
+                       etags: "dict[str, str | None] | None" = None):
+    """Report progress while files land under *base_dir*: JSON frames in GUI
+    mode (LOCALM_PROGRESS_JSON=1), a bar on a terminal, and lines for a
+    progress listener. A total of 0 means the size could not be determined:
+    progress still streams with ``pct: null`` so the GUI shows a busy bar with
+    a running byte count, matching _snapshot_progress.
+
+    In-flight bytes are counted from the ``.incomplete`` temp files of THIS
+    job's parts (and, when *etags* names them, of the current etag only) that
+    this process holds or whose owner is proven gone: the largest such file
+    per part, which is the one a resume reuses. The download's transfer rate
+    comes from the bytes received (see :mod:`._transfer`).
+
+    Yields a _ProgressOutcome; call ``.ok()`` on the success path or the closing
+    event reports the measured partial instead of 100%.
+    """
+    outcome = _ProgressOutcome()
+    _downloaded_bytes = _job_bytes_measure(target_parts, total_size, base_dir=base_dir,
+                                           rel_parts=rel_parts, etags=etags)
 
     if not _progress_wanted():
         with _record_stop(_downloaded_bytes, total_size):
@@ -1761,18 +1788,24 @@ def _download_mmproj_file(repo_id: str, remote_name: str, dest: Path, base_dir: 
     plain = base_dir / remote_name
     token = _hf_token()
     if dest == plain:
-        local = hf_hub_download(repo_id=repo_id, filename=remote_name,
-                                 local_dir=str(base_dir), endpoint=_HF_ENDPOINT,
-                                 token=token, tqdm_class=meter_tqdm_class(), **extra)
+        with _record_stop(_job_bytes_measure([dest], 0, base_dir=base_dir,
+                                             rel_parts=[remote_name]), 0):
+            local = hf_hub_download(repo_id=repo_id, filename=remote_name,
+                                     local_dir=str(base_dir), endpoint=_HF_ENDPOINT,
+                                     token=token, tqdm_class=meter_tqdm_class(), **extra)
         if Path(local) != dest:
             shutil.move(local, dest)
     else:
-        with tempfile.TemporaryDirectory(dir=base_dir, prefix=".mmproj-") as scratch:
-            local = hf_hub_download(repo_id=repo_id, filename=remote_name,
-                                     local_dir=scratch, endpoint=_HF_ENDPOINT,
-                                     token=token, tqdm_class=meter_tqdm_class(),
-                                     **extra)
-            shutil.move(local, dest)
+        scratches: list[Path] = []
+        with _record_stop(lambda: sum(_job_bytes_measure([], 0, base_dir=d)()
+                                      for d in scratches if d.is_dir()), 0):
+            with tempfile.TemporaryDirectory(dir=base_dir, prefix=".mmproj-") as scratch:
+                scratches.append(Path(scratch))
+                local = hf_hub_download(repo_id=repo_id, filename=remote_name,
+                                         local_dir=scratch, endpoint=_HF_ENDPOINT,
+                                         token=token, tqdm_class=meter_tqdm_class(),
+                                         **extra)
+                shutil.move(local, dest)
     if expected is None:
         _note_unverified(repo_id, [remote_name])
         _record_mmproj_origin(dest, repo_id, remote_name, None)
@@ -2411,7 +2444,7 @@ def _pull_gguf_file(
         console.print(
             f"Resuming [bold cyan]{escape(repo_id)}[/bold cyan] / "
             f"[bold]{escape(filename)}[/bold] "
-            f"[dim](skipping first {already_have / 1024**2:.1f} MB)[/dim]"
+            f"[dim](skipping first {format_size(already_have)})[/dim]"
         )
     elif len(all_parts) > 1:
         console.print(
@@ -2681,7 +2714,7 @@ def _snapshot_bytes_on_disk(dest: Path) -> int:
     pending = dest / ".cache" / "huggingface" / "download"
     for f in files:
         in_cache = ".cache" in f.parts
-        if in_cache and not (f.parent == pending and f.name.endswith(".incomplete")):
+        if in_cache and not (pending in f.parents and f.name.endswith(".incomplete")):
             continue
         try:
             if f.is_file():
@@ -4002,7 +4035,7 @@ def _pull_url_locked(
         # tag.
         console.print(
             f"Resuming [bold cyan]{escape(url)}[/bold cyan] "
-            f"[dim](skipping first {already_have / 1024**2:.1f} MB)[/dim]"
+            f"[dim](skipping first {format_size(already_have)})[/dim]"
         )
     else:
         console.print(f"Downloading [bold cyan]{escape(url)}[/bold cyan]")
@@ -4287,7 +4320,7 @@ def _pull_civitai_file_locked(
         console.print(
             f"Resuming [bold cyan]civitai:{escape(str(version_id))}[/bold cyan] / "
             f"[bold]{escape(filename)}[/bold] "
-            f"[dim](skipping first {already_have / 1024**2:.1f} MB)[/dim]"
+            f"[dim](skipping first {format_size(already_have)})[/dim]"
         )
     else:
         console.print(f"Pulling [bold cyan]civitai:{escape(str(version_id))}[/bold cyan] / "
