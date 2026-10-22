@@ -10,7 +10,6 @@ the file and honours Range requests."""
 from __future__ import annotations
 
 import http.server
-import os
 import threading
 from pathlib import Path
 
@@ -120,7 +119,7 @@ def xet_buffers_in_memory(monkeypatch):
     return calls
 
 
-def _partials(cache: Path) -> "list[Path]":
+def _partials(cache: Path) -> list[Path]:
     return [p for p in cache.iterdir() if p.name.endswith(".incomplete")]
 
 
