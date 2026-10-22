@@ -157,6 +157,9 @@ class _Runner:
         return {"width": w, "height": h, "channel": 3, "data": bytes([9, 9, 9]) * (w * h),
                 "seed": params["seed"]}
 
+    def attention_rate(self, runtime_dir, timeout=None):
+        return 1e15
+
     def generate_video(self, params, *, on_event=None, cancel_check=None, timeout=None):
         self._refuse(params, on_event)
         w, h = params["width"], params["height"]
