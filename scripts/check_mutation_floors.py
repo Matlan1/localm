@@ -289,14 +289,11 @@ def grown_functions(statuses: dict, base_mutants: dict) -> set[str]:
             if m not in base_mutants and function_of(m) in listed}
 
 
-def check(results: dict, baseline: dict, modules: list[str],
-          selected: list[str] | None = None) -> tuple[list[str], list[str], list[dict]]:
+def check(results: dict, baseline: dict, modules: list[str]) -> tuple[list[str], list[str], list[dict]]:
     """Pure check of parsed results against a parsed baseline. Returns
     ``(problems, warnings, rows)``: a non-empty ``problems`` is a failure;
-    ``rows`` is one summary dict per module for the report. *selected* (default
-    every module) names the modules this run mutated; the others, and their
-    controls, keep their committed baseline unchecked."""
-    selected = list(modules) if selected is None else selected
+    ``rows`` is one summary dict per module for the report. A module, or a
+    control's module, with no entry in *results* is not checked."""
     problems: list[str] = []
     warnings: list[str] = []
     rows: list[dict] = []
@@ -316,7 +313,7 @@ def check(results: dict, baseline: dict, modules: list[str],
                 f"{module}: in the baseline but not in [tool.mutmut] only_mutate "
                 "- stale entry, --update drops it")
 
-    for module in selected:
+    for module in modules:
         res = results.get(module)
         if res is None:
             continue
@@ -496,7 +493,7 @@ def check(results: dict, baseline: dict, modules: list[str],
         res = results.get(module)
         if res is None:
             if module in modules:
-                continue  # missing results are reported; an unselected module is not checked
+                continue  # reported by load_results when the run selected it
             problems.append(f"control {name!r}: module {module} is not mutated")
             continue
         fn = function_of(mutant)
@@ -724,7 +721,7 @@ def main(argv: list[str]) -> int:
         if out.resolve() == args.baseline.resolve():
             baseline = proposed
 
-    more, warnings, rows = check(results, baseline, modules, selected)
+    more, warnings, rows = check(results, baseline, modules)
     problems.extend(more)
     version_problem = mutmut_version_problem(baseline, installed_mutmut_version())
     if version_problem:
