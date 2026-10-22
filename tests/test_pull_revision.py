@@ -13,6 +13,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import hashlib
+
 import httpx
 import pytest
 
@@ -125,7 +127,7 @@ def hub(tmp_path, monkeypatch):
     state = SimpleNamespace(
         models_dir=models_dir, revisions={"4.0bpw": COMMIT, "2.0bpw": OTHER_COMMIT},
         default_commit="c" * 40, info_error=None, info_calls=[], sha_calls=[],
-        downloads=[], snapshots=[],
+        downloads=[], snapshots=[], digests={}, snapshot_error=None,
         repo_files={COMMIT: {"config.json": b"{}", "w.safetensors": BODY},
                     OTHER_COMMIT: {"config.json": b"{}", "w.safetensors": BODY + b"x"},
                     "c" * 40: {"README.md": b"readme"}},
@@ -133,7 +135,8 @@ def hub(tmp_path, monkeypatch):
 
     def fake_sha(repo, filename, token=None, revision=None):
         state.sha_calls.append((repo, filename, revision))
-        return None
+        digest = state.digests.get(filename)
+        return pull_mod._PublishedDigest(digest) if digest else None
 
     def fake_download(repo_id, filename, local_dir, revision=None, **kw):
         state.downloads.append((repo_id, filename, revision))
@@ -148,6 +151,8 @@ def hub(tmp_path, monkeypatch):
             p = Path(local_dir) / name
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_bytes(data)
+            if state.snapshot_error is not None:
+                raise state.snapshot_error
         return local_dir
 
     def fake_head(url, allow_redirects=None, timeout=None):
@@ -344,6 +349,74 @@ class TestFullRepoAtARevision:
         assert mm.pull_model("o/r@2.0bpw", name="exl", model_type="llm") is False
         assert "already holds a DIFFERENT model" in " ".join(capsys.readouterr().out.split())
         assert mm.load_registry()["exl"]["revision"] == "4.0bpw"
+
+
+class TestSingleFileRecords:
+    def _digest_for_body(self, hub):
+        hub.digests["w.safetensors"] = hashlib.sha256(BODY).hexdigest()
+
+    def test_the_same_file_pulled_again_at_a_revision_takes_the_revision_record(self, hub):
+        self._digest_for_body(hub)
+        assert mm.pull_model("o/r:w.safetensors", name="m", model_type="llm") is True
+        assert "revision" not in mm.load_registry()["m"]
+        assert mm.pull_model("o/r@4.0bpw:w.safetensors", name="m", model_type="llm") is True
+        entry = mm.load_registry()["m"]
+        assert (entry["revision"], entry["commit"]) == ("4.0bpw", COMMIT)
+
+    def test_the_same_file_pulled_again_without_a_revision_drops_the_record(self, hub):
+        self._digest_for_body(hub)
+        assert mm.pull_model("o/r@4.0bpw:w.safetensors", name="m", model_type="llm") is True
+        assert mm.pull_model("o/r:w.safetensors", name="m", model_type="llm") is True
+        assert "revision" not in mm.load_registry()["m"]
+
+    def test_a_same_named_file_with_no_digest_is_fetched_again_at_the_revision(self, hub):
+        assert mm.pull_model("o/r:w.safetensors", name="a", model_type="llm") is True
+        hub.downloads.clear()
+        assert mm.pull_model("o/r@4.0bpw:w.safetensors", name="b", model_type="llm") is True
+        assert hub.downloads == [("o/r", "w.safetensors", COMMIT)]
+
+    def test_a_starter_pin_is_not_applied_to_a_revision(self, hub, monkeypatch):
+        asked = []
+        monkeypatch.setattr(mm, "starter_model_sha256", lambda spec: asked.append(spec) or "0" * 64)
+        assert mm.pull_model("o/r@4.0bpw:w.safetensors", name="m", model_type="llm") is True
+        assert asked == []
+
+    def test_an_entry_pulled_at_a_revision_is_not_offered_a_projector_fetch(self, hub):
+        from localm.model_manager import registry
+        assert mm.pull_model("o/r:w.safetensors", name="plain", model_type="llm") is True
+        path = str(hub.models_dir / "w.safetensors")
+        assert registry._active_model_missing_mmproj(path) == ("plain", "o/r")
+        assert mm.pull_model("o/r@4.0bpw:w.safetensors", name="plain", model_type="llm") is True
+        assert registry._active_model_missing_mmproj(path) is None
+
+
+class TestAnUnfinishedRevisionIsNotMergedWithAnother:
+    def test_another_revision_into_the_same_folder_is_refused(self, hub, capsys):
+        hub.snapshot_error = OSError("disk full")
+        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is False
+        hub.snapshot_error = None
+        hub.snapshots.clear()
+        capsys.readouterr()
+        assert mm.pull_model("o/r@2.0bpw", name="q", model_type="llm") is False
+        assert "unfinished download of another revision" in " ".join(
+            capsys.readouterr().out.split())
+        assert hub.snapshots == [] and "q" not in mm.load_registry()
+
+    def test_the_default_branch_into_that_folder_is_refused_too(self, hub, capsys):
+        hub.snapshot_error = OSError("disk full")
+        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is False
+        hub.snapshot_error = None
+        hub.repo_files["c" * 40] = {"config.json": b"{}"}
+        assert mm.pull_model("o/r", name="q", model_type="llm") is False
+        assert "unfinished download of another revision" in " ".join(
+            capsys.readouterr().out.split())
+
+    def test_the_same_revision_resumes_in_that_folder(self, hub):
+        hub.snapshot_error = OSError("disk full")
+        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is False
+        hub.snapshot_error = None
+        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is True
+        assert mm.load_registry()["q"]["revision"] == "4.0bpw"
 
 
 class TestSpecsWithAnAtSignAreNotRevisions:

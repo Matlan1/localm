@@ -1471,7 +1471,7 @@ def _active_model_missing_mmproj(active_model_path: str) -> Optional[tuple]:
         return None
     source = str(entry.get("source", ""))
     if (entry.get("model_type") == "llm" and source.startswith("hf:")
-            and not entry.get("mmproj")):
+            and not entry.get("mmproj") and not entry.get("revision")):
         return names[0], source[len("hf:"):]
     return None
 

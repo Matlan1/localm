@@ -1130,7 +1130,8 @@ def pull_model(
     elif "/" in spec:
         if ":" in spec or spec.rsplit("/", 1)[-1].endswith(".gguf"):
             # owner/repo:file.gguf  or  owner/repo/file.gguf  -> single GGUF file
-            starter_pin = None if expected_sha256 else _mm.starter_model_sha256(spec)
+            starter_pin = (None if expected_sha256 or revision is not None
+                           else _mm.starter_model_sha256(spec))
             res = _mm._pull_gguf_file(spec, name, expected_sha256=expected_sha256 or starter_pin,
                                    redownload=redownload, model_type=detected_type,
                                    dest_dir=dest_dir, register=register,
@@ -1377,6 +1378,31 @@ def _register_revision(revision: "Optional[HfRevision]") -> dict[str, Any]:
     if revision is None:
         return {}
     return {"revision": revision.ref, "commit": revision.commit}
+
+
+def _revision_record_differs(model_name: str, revision: "Optional[HfRevision]") -> bool:
+    """True when registry entry *model_name* records a different revision than
+    *revision* (none when None), so registering the file again must rewrite it."""
+    entry = _mm.load_registry().get(model_name)
+    return isinstance(entry, dict) and (
+        (entry.get("revision") or None) != (revision.ref if revision else None))
+
+
+_SNAPSHOT_CLAIM = ".localm-revision.json"
+
+
+def _snapshot_claimed_by_other_revision(dest: Path, repo_id: str,
+                                        revision: "Optional[HfRevision]") -> bool:
+    """True when *dest* holds the unfinished download of *repo_id* at a revision
+    other than *revision* (none when None): a pull at a revision leaves a marker
+    there until it is registered, because an unregistered folder has no registry
+    entry to say whose files it holds. An unreadable marker counts as no claim."""
+    try:
+        claim = json.loads((dest / _SNAPSHOT_CLAIM).read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return False
+    return (isinstance(claim, dict) and claim.get("repo") == repo_id
+            and (claim.get("revision") or None) != (revision.ref if revision else None))
 
 
 def _holds_other_revision(dest: Path, repo_id: str,
@@ -2099,7 +2125,9 @@ def _pull_gguf_file(
     if unchecked:
         _note_unverified(repo_id, unchecked)
 
-    missing = [p for p in all_parts if not (base_dir / p).exists()]
+    missing = [p for p in all_parts
+               if not (base_dir / p).exists()
+               or (revision is not None and p not in digests)]
     if not missing:
         # If the user asserted a hash, verify the file actually on disk before
         # treating it as the requested model.
@@ -2185,6 +2213,7 @@ def _pull_gguf_file(
                                  digest=verify_digest, model_type=reg_type,
                                  mmproj=mmproj_path, architecture=gguf_meta.get("architecture"),
                                  expert_count=gguf_meta.get("expert_count"),
+                                 refresh=_revision_record_differs(model_name, revision),
                                  **_register_revision(revision))
         return True
 
@@ -2819,7 +2848,8 @@ def _pull_hf_snapshot(
     damaged: list[str] = []
     if dest.exists() and repo_siblings is not None:
         damaged = _snapshot_files_damaged(dest, repo_siblings, repo_id)
-    if (dest.exists() and not damaged
+    claimed = dest.exists() and _snapshot_claimed_by_other_revision(dest, repo_id, revision)
+    if (dest.exists() and not damaged and not claimed
             and not _holds_other_revision(dest, repo_id, revision)
             and _snapshot_is_complete(dest, repo_siblings, repo_id)):
         console.print(f"[yellow]Already downloaded:[/yellow] {escape(model_name)}")
@@ -2904,6 +2934,15 @@ def _pull_hf_snapshot(
             )
             return False
 
+    if claimed and not repairing:
+        console.print(
+            f"[red]Refusing to pull {escape(repo_id)}"
+            + (f"@{escape(revision.ref)}" if revision else "")
+            + f" into {escape(str(dest))}:[/red] this folder holds an unfinished "
+            "download of another revision of it. Pull with "
+            "[bold]-n <a-different-name>[/bold], or delete the folder first.")
+        return False
+
     if damaged:
         shown = ", ".join(escape(n) for n in damaged[:3]) + (" ..." if len(damaged) > 3 else "")
         stuck = _delete_snapshot_files(dest, damaged)
@@ -2930,6 +2969,15 @@ def _pull_hf_snapshot(
         return False
 
     _mm.ensure_dirs()
+    if revision is not None:
+        from ..storekit import atomic_write
+        dest.mkdir(parents=True, exist_ok=True)
+        try:
+            atomic_write(dest / _SNAPSHOT_CLAIM,
+                         json.dumps({"repo": repo_id, "revision": revision.ref}))
+        except OSError as e:
+            logger.warning("could not mark %s as holding %s@%s: %s",
+                           dest, repo_id, revision.ref, e)
     # TAG-INJECTION site: repo_id/dest sit directly inside OPEN
     # [bold cyan]/[bold] tags.
     console.print(
