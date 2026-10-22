@@ -265,6 +265,9 @@ class _Runner:
         self.loaded_key, self.loaded_ctx, self.alive = key, dict(ctx), True
         return dict(self.info)
 
+    def attention_rate(self, runtime_dir, head_dim=128, timeout=None):
+        return 1e15
+
     def generate_image(self, params, *, on_event=None, cancel_check=None, timeout=None):
         self.params.append(params)
         w, h = params["width"], params["height"]
@@ -461,7 +464,7 @@ def test_the_worker_passes_the_tile_size_to_the_video_library(monkeypatch):
 class _VideoRunner(_Runner):
     rate = 1e15
 
-    def attention_rate(self, runtime_dir, timeout=None):
+    def attention_rate(self, runtime_dir, head_dim=128, timeout=None):
         return self.rate
 
     def generate_video(self, params, *, on_event=None, cancel_check=None, timeout=None):

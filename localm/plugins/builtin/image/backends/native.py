@@ -18,11 +18,12 @@ import json
 import os
 import secrets
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Optional
 
 from localm.media.image_params import png_text_entries
+from localm.media.sdcpp import attention
 from localm.media.sdcpp import budget as sd_budget
 from localm.media.sdcpp import families, pairing, sampling
 from localm.media.sdcpp import runtime as sd_runtime
@@ -591,6 +592,71 @@ def _decode_tile(info: dict, width: int, height: int, hires: Optional[dict],
     return tile
 
 
+def _vulkan_attention_mode(runner, rt, info: dict, models: dict, width: int, height: int,
+                           hires: Optional[dict], ref_count: int,
+                           cfg_scale: Optional[float] = None) -> tuple[Optional[str], Optional[str]]:
+    """How the diffusion model's attention runs for a *width* x *height* job
+    (or its hires target) with *ref_count* reference images at CFG
+    *cfg_scale* on the Vulkan runtime: ``(mode, refusal)``. A CFG of 1 runs
+    one image per graph. *mode* is None to keep the loaded model, or
+    ``"on"`` / ``"off"`` to reload it with flash attention set that way;
+    *refusal* is the reason to refuse the job. Without flash attention the
+    score matrix (``attention.ImageAttention.score_bytes``) must fit the
+    device's buffer limit (``vaetile.device_limit``); with it, one attention
+    op must take at most ``attention.SAFE_DISPATCH_SECONDS`` at the worker's
+    measured ``attention_rate``. A rate that could not be measured counts as
+    too slow. Other runtimes get ``(None, None)``."""
+    if rt.backend != "vulkan":
+        return None, None
+    if hires:
+        width = sampling.hires_side(width, float(hires["scale"]))
+        height = sampling.hires_side(height, float(hires["scale"]))
+    att = attention.image_attention(models.get("family"), info.get("dit_hidden"),
+                                    info.get("dit_heads"))
+    if cfg_scale is not None and abs(float(cfg_scale) - 1.0) < 1e-5:
+        att = replace(att, batch=1)
+    limit, _assumed = vaetile.device_limit(rt.backend, info.get("max_tensor_bytes"))
+    flash = info.get("flash_attn")
+
+    def scores_fit(w: int, h: int) -> bool:
+        return att.score_bytes(w, h, ref_count) <= limit
+
+    fits = scores_fit(width, height)
+    if fits and flash is False:
+        return None, None
+    try:
+        rate = runner.attention_rate(rt.path, att.head_dim)
+    except SdWorkerError:
+        rate = None
+
+    def flash_fits(w: int, h: int) -> bool:
+        return bool(rate) and att.flops(w, h, ref_count) / rate <= attention.SAFE_DISPATCH_SECONDS
+
+    fast = flash_fits(width, height)
+    if flash is True:
+        if fast:
+            return None, None
+        if fits:
+            return "off", None
+    elif fits:
+        return (None if flash is False or fast else "off"), None
+    elif fast:
+        return "on", None
+    side = attention.largest_square(lambda s: scores_fit(s, s) or flash_fits(s, s))
+    fit = (f"The largest square image that fits is about {side}x{side}" if side
+           else "No image size fits")
+    secs = (f" and with flash attention one attention job would run about "
+            f"{att.flops(width, height, ref_count) / rate:.1f} s" if rate else
+            " and its flash attention speed on this GPU could not be measured")
+    return None, (f"{width}x{height} is too large for {models['label']} on the Vulkan runtime "
+                  f"on this GPU: its attention needs a "
+                  f"{att.score_bytes(width, height, ref_count) / 1024 ** 3:.1f} GB buffer, over "
+                  f"the {limit / 1024 ** 3:.1f} GB this runtime takes,{secs}, while the graphics "
+                  f"driver resets the GPU when a single job runs longer than about "
+                  f"{attention.DRIVER_RESET_SECONDS} s. {fit}; or pick the ROCm or CUDA runtime "
+                  f"in Settings > Images if this GPU has one.")
+
+
 def _batch_path(out_path: Path, index: int) -> Path:
     """The file image number *index* (from 0) of a batch is saved to: *out_path*
     for the first, ``<stem>_<n><suffix>`` beside it for the rest."""
@@ -806,6 +872,10 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
         try:
             ctx = load_ctx(models["ctx"], rt.backend)
             key = (models["key"], rt.backend)
+            held = runner.loaded_key
+            if (runner.is_alive() and isinstance(held, tuple) and len(held) == 3
+                    and held[:2] == key and runner.loaded_ctx is not None):
+                key, ctx = held, dict(runner.loaded_ctx)
             if runner.loaded_key != key or not runner.is_alive():
                 say(f"Loading {models['label']} (stable-diffusion.cpp, {rt.backend})...")
                 ctx = sd_budget.reload_ctx(runner, ctx, rt.backend, say,
@@ -857,6 +927,21 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
             components = {k: v["name"] for k, v in (models.get("components") or {}).items()} or None
             if negative_prompt and cfg_scale is not None and abs(float(cfg_scale) - 1.0) < 1e-5:
                 say(NEGATIVE_AT_CFG_1)
+            mode, refused = _vulkan_attention_mode(runner, rt, info, models, int(width),
+                                                   int(height), hires, len(refs), cfg_scale)
+            if refused:
+                return False, refused
+            if mode:
+                ctx = dict(runner.loaded_ctx or ctx, flash_attn_mode=f"diffusion={mode}")
+                ctx.pop("diffusion_flash_attn", None)
+                key = (models["key"], rt.backend, mode)
+                say(f"Reloading {models['label']} with flash attention {mode}: "
+                    + ("without it, this image's attention needs a larger buffer than this GPU "
+                       "runtime takes..." if mode == "on" else
+                       "with it, one attention job of this image would run longer on this GPU "
+                       "than the graphics driver allows..."))
+                info = runner.ensure_loaded(key, rt.path, ctx, extra_dirs=rt.extra_dirs,
+                                            on_event=relay, cancel_check=cancel_check)
             tile = _decode_tile(info, int(width), int(height), hires, say, rt.backend)
 
             def reload_model(load: dict) -> None:

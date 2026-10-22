@@ -53,7 +53,7 @@ class SdRunner:
         self.loaded_key: Optional[Any] = None
         self.load_info: Optional[dict] = None
         self.loaded_ctx: Optional[dict] = None
-        self._attention_rate: Optional[tuple] = None
+        self._attention_rate: Optional[dict] = None
 
     def is_alive(self) -> bool:
         proc = self._proc
@@ -217,15 +217,20 @@ class SdRunner:
         self.loaded_ctx = dict(ctx)
         return info
 
-    def attention_rate(self, runtime_dir, timeout: float = PROBE_TIMEOUT) -> Optional[float]:
-        """The loaded worker's flash attention throughput (``_child``
-        ``attention_rate``), in floating point operations per second, measured
-        once per worker. None when it could not be measured. Raises
-        :class:`SdWorkerError` when no worker is running or the probe fails."""
+    def attention_rate(self, runtime_dir, head_dim: int = 128,
+                       timeout: float = PROBE_TIMEOUT) -> Optional[float]:
+        """The loaded worker's flash attention throughput at head size
+        *head_dim* (``_child`` ``attention_rate``), in floating point
+        operations per second, measured once per worker and head size. None
+        when it could not be measured. Raises :class:`SdWorkerError` when no
+        worker is running or the probe fails."""
         if self._attention_rate is None:
-            self._attention_rate = (self._request("attention_rate",
-                                                  {"runtime_dir": str(runtime_dir)}, timeout),)
-        return self._attention_rate[0]
+            self._attention_rate = {}
+        if head_dim not in self._attention_rate:
+            self._attention_rate[head_dim] = self._request(
+                "attention_rate", {"runtime_dir": str(runtime_dir), "head_dim": int(head_dim)},
+                timeout)
+        return self._attention_rate[head_dim]
 
     def generate_image(self, params: dict, *, timeout: float = GENERATE_TIMEOUT,
                        on_event: Optional[EventCallback] = None,

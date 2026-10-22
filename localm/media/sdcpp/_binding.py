@@ -788,11 +788,12 @@ def default_device(lib, runtime_dir: Path) -> Optional[str]:
     return None
 
 
-def attention_rate(lib, runtime_dir: Path, device_name: str) -> Optional[float]:
+def attention_rate(lib, runtime_dir: Path, device_name: str,
+                   head_dim: int = _ATTENTION_PROBE_HEAD_DIM) -> Optional[float]:
     """Flash attention throughput of ggml device *device_name*, in floating
     point operations per second: the fastest of two timed runs of one
     FLASH_ATTN_EXT op (F32 queries, F16 keys and values, F32 accumulation, head
-    size 128, the attention the diffusion models run). The token count starts
+    size *head_dim*, the attention the diffusion models run). The token count starts
     at ``_ATTENTION_PROBE_FIRST_TOKENS`` and doubles until one op takes
     ``_ATTENTION_PROBE_MIN_SECONDS`` or the count reaches
     ``_ATTENTION_PROBE_MAX_TOKENS``, so no single op runs much past a few
@@ -829,7 +830,7 @@ def attention_rate(lib, runtime_dir: Path, device_name: str) -> Optional[float]:
     backend = fn["ggml_backend_dev_init"](dev, None)
     if not backend:
         raise RuntimeError(f"ggml could not start device {device_name}")
-    heads, head_dim = _ATTENTION_PROBE_HEADS, _ATTENTION_PROBE_HEAD_DIM
+    heads, head_dim = _ATTENTION_PROBE_HEADS, int(head_dim)
     try:
         tokens = _ATTENTION_PROBE_FIRST_TOKENS
         while True:

@@ -191,6 +191,13 @@ def test_the_probe_measures_the_flash_attention_rate(fa, tmp_path):
     assert fa.contexts == fa.buffers == fa.backends == 0
 
 
+def test_the_probe_runs_the_requested_head_size(fa, tmp_path):
+    b.attention_rate(None, tmp_path, "Vulkan0", 64)
+    assert {shape[1] for shape in fa.ops.values()} == {64}
+    b.attention_rate(None, tmp_path, "Vulkan0")
+    assert 128 in {shape[1] for shape in fa.ops.values()}
+
+
 def test_the_probe_stops_at_the_first_size_that_takes_long_enough(fa, tmp_path):
     b.attention_rate(None, tmp_path, "Vulkan0")
     sizes = sorted(set(fa.computed))
@@ -261,7 +268,7 @@ def test_the_default_device_is_unknown_without_the_device_functions(monkeypatch,
 
 def test_the_worker_measures_only_the_device_the_model_runs_on(monkeypatch):
     rates = {"Vulkan0": 5e11, "Vulkan1": 2e12}
-    monkeypatch.setattr(b, "attention_rate", lambda lib, rt, name: rates[name])
+    monkeypatch.setattr(b, "attention_rate", lambda lib, rt, name, hd=128: rates[name])
     monkeypatch.setattr(b, "default_device", lambda lib, rt: "Vulkan1")
     monkeypatch.setattr(_child._State, "lib", object())
     assert _child._do_attention_rate({"runtime_dir": "rt"}) == 2e12
@@ -271,7 +278,7 @@ def test_the_worker_measures_only_the_device_the_model_runs_on(monkeypatch):
 
 def test_the_worker_reports_the_slowest_gpu(monkeypatch):
     rates = {"Vulkan0": 2e12, "Vulkan1": 5e11}
-    monkeypatch.setattr(b, "attention_rate", lambda lib, rt, name: rates[name])
+    monkeypatch.setattr(b, "attention_rate", lambda lib, rt, name, hd=128: rates[name])
     monkeypatch.setattr(b, "default_device", lambda lib, rt: None)
     monkeypatch.setattr(b, "list_devices", lambda lib: [("Vulkan0", "a"), ("Vulkan1", "b"),
                                                         ("CPU", "cpu")])
@@ -318,7 +325,7 @@ def test_the_runner_measures_once_per_worker(monkeypatch):
     monkeypatch.setattr(r, "_request", request)
     assert r.attention_rate("rt") == 4e11
     assert r.attention_rate("rt") == 4e11
-    assert calls == [("attention_rate", {"runtime_dir": "rt"})]
+    assert calls == [("attention_rate", {"runtime_dir": "rt", "head_dim": 128})]
     r._reset()
     assert r.attention_rate("rt") == 4e11
     assert len(calls) == 2
@@ -342,7 +349,7 @@ def _video(monkeypatch, tmp_path, frames, rate=RX6900XT_VULKAN_RATE, backend="vu
     from tests import test_sdcpp_vae_decode_tiling as w28
     asked = []
 
-    def attention_rate(self, runtime_dir, timeout=None):
+    def attention_rate(self, runtime_dir, head_dim=128, timeout=None):
         asked.append(str(runtime_dir))
         if isinstance(rate, Exception):
             raise rate

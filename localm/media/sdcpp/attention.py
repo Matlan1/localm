@@ -82,3 +82,79 @@ def max_frames(att: VideoAttention, width: int, height: int, rate: float,
             att, width, height, (latent_frames - 1) * TEMPORAL_COMPRESSION + 1, rate) > budget:
         latent_frames -= 1
     return (latent_frames - 1) * TEMPORAL_COMPRESSION + 1
+
+
+@dataclass(frozen=True)
+class ImageAttention:
+    """An image model's largest attention: *heads* x *head_dim*, image pixels
+    per query token on a side (*stride*), the text tokens joined to the image
+    tokens (*text_tokens*), the tokens each reference image adds
+    (*ref_extra*, beside its image tokens), whether reference images join the
+    attention (*refs*), and how many images run in one graph (*batch*)."""
+    heads: int
+    head_dim: int
+    stride: int
+    text_tokens: int = 0
+    batch: int = 1
+    refs: bool = False
+    ref_extra: int = 0
+
+    def tokens(self, width: int, height: int, ref_count: int = 0) -> int:
+        """Query tokens of the attention over a *width* x *height* image with
+        *ref_count* reference images, each counted at the image's size."""
+        image = -(-int(width) // self.stride) * -(-int(height) // self.stride)
+        refs = int(ref_count) * (image + self.ref_extra) if self.refs else 0
+        return image + self.text_tokens + refs
+
+    def score_bytes(self, width: int, height: int, ref_count: int = 0) -> int:
+        """Bytes of the F32 attention score matrix the attention builds
+        without flash attention: heads x batch x tokens^2 x 4."""
+        n = self.tokens(width, height, ref_count)
+        return self.heads * self.batch * n * n * 4
+
+    def flops(self, width: int, height: int, ref_count: int = 0) -> int:
+        """Floating point operations of the attention as one flash attention op."""
+        return attention_flops(self.tokens(width, height, ref_count),
+                               self.heads * self.head_dim) * self.batch
+
+
+_IMAGE_SHAPES = {
+    "sd1": ImageAttention(8, 40, 8, batch=2),
+    "sd2": ImageAttention(5, 64, 8, batch=2),
+    "sdxl": ImageAttention(10, 64, 16, batch=2),
+    "sd3": ImageAttention(38, 64, 16, text_tokens=308),
+    "flux": ImageAttention(24, 128, 16, text_tokens=512, refs=True),
+    "chroma": ImageAttention(24, 128, 16, text_tokens=512, refs=True),
+    "ovis-image": ImageAttention(24, 128, 16, text_tokens=512, refs=True),
+    "flux2": ImageAttention(48, 128, 16, text_tokens=512, refs=True),
+    "qwen-image": ImageAttention(24, 128, 16, text_tokens=512, refs=True, ref_extra=400),
+    "z-image": ImageAttention(30, 128, 16, text_tokens=512, refs=True),
+    "anima": ImageAttention(16, 128, 16, refs=True),
+    "ernie-image": ImageAttention(32, 128, 16, text_tokens=512),
+}
+_IMAGE_LARGEST = ImageAttention(48, 128, 8, text_tokens=512, batch=2, refs=True, ref_extra=400)
+
+
+def image_attention(family: Optional[str], hidden: Optional[int] = None,
+                    heads: Optional[int] = None) -> ImageAttention:
+    """The largest attention of an image model of localm *family*; *hidden*
+    and *heads* are the hidden size and head count its load log reported, which
+    replace the family's largest size. An unknown family gets a shape at least
+    as large as every known one."""
+    shape = _IMAGE_SHAPES.get(family or "", _IMAGE_LARGEST)
+    if hidden and heads and hidden % heads == 0:
+        return ImageAttention(int(heads), int(hidden) // int(heads), shape.stride,
+                              shape.text_tokens, shape.batch, shape.refs, shape.ref_extra)
+    return shape
+
+
+def largest_square(fits, step: int = 64, top: int = 4096) -> int:
+    """The largest side, a multiple of *step* up to *top*, whose square image
+    ``fits(side)``; 0 when not even *step* does."""
+    best = 0
+    for side in range(step, top + 1, step):
+        if fits(side):
+            best = side
+        else:
+            break
+    return best
