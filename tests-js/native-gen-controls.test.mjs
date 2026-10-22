@@ -41,13 +41,13 @@ function sseResponse(events) {
 }
 
 function setup({ active = "native", importReply = null, jobEvents = [{ type: "end", status: "done", result: "a.png" }],
-                 options = OPTIONS } = {}) {
+                 options = OPTIONS, preview = null } = {}) {
   const calls = [];
   const fetchImpl = async (url, opts = {}) => {
     const u = String(url);
     calls.push({ url: u, opts });
     if (u.startsWith("/api/imagine/native-models")) {
-      return { ok: true, status: 200, json: async () => ({ ...options, preview: null }) };
+      return { ok: true, status: 200, json: async () => ({ ...options, preview }) };
     }
     if (u.startsWith("/api/video/native-models")) {
       return { ok: true, status: 200, json: async () => ({ ...options, preview: null }) };
@@ -96,14 +96,15 @@ test("the native controls show for the native backend and stay hidden for ComfyU
     .every((n) => n.hidden === true));
 });
 
-test("the dropdowns are filled from the server's names; hires offers the non-latent upscalers", async () => {
+test("the dropdowns are filled from the server's names; hires offers every upscaler after the suggestion", async () => {
   const { win, $ } = setup();
   await settle(win, "await refreshImageBackend();");
   await tick(); await tick();
   const opts = (id) => [...$(id).options].map((o) => o.value);
   assert.deepEqual(opts("img-sampler"), ["", "euler", "euler_a", "dpm++2m"]);
   assert.deepEqual(opts("img-scheduler"), ["", "discrete", "karras"]);
-  assert.deepEqual(opts("img-hires-upscaler"), ["", "latent-bicubic", "lanczos", "model"]);
+  assert.deepEqual(opts("img-hires-upscaler"), ["", "latent", "latent-bicubic", "lanczos", "model"]);
+  assert.equal($("img-hires-upscaler").options[0].textContent, "Suggested for the model");
   assert.deepEqual(opts("img-hires-model"), ["", "real-esrgan"]);
   assert.equal($("img-sampler").options[0].textContent, "Model default");
 });
@@ -147,7 +148,7 @@ test("batch, sampler, scheduler and hires are sent when set", async () => {
                                  model: "real-esrgan" });
 });
 
-test("a hires fix with only the checkbox ticked uses the latent defaults", async () => {
+test("a hires fix with only the checkbox ticked sends no values, so the server uses the model's suggestion", async () => {
   const { win, $, calls } = setup();
   await settle(win, "await refreshImageBackend();");
   await tick(); await tick();
@@ -155,7 +156,83 @@ test("a hires fix with only the checkbox ticked uses the latent defaults", async
   $("img-hires").checked = true;
   $("img-generate").onclick();
   await tick(); await tick(); await tick();
-  assert.deepEqual(imagineBody(calls).hires, { upscaler: "latent", scale: 2, steps: 0, denoise: 0.7 });
+  assert.deepEqual(imagineBody(calls).hires, {});
+});
+
+test("a hires fix sends only the fields the user set", async () => {
+  const { win, $, calls } = setup();
+  await settle(win, "await refreshImageBackend();");
+  await tick(); await tick();
+  $("img-prompt").value = "a fox";
+  $("img-hires").checked = true;
+  $("img-hires-upscaler").value = "latent";
+  $("img-hires-steps").value = "0";
+  $("img-generate").onclick();
+  await tick(); await tick(); await tick();
+  assert.deepEqual(imagineBody(calls).hires, { upscaler: "latent", steps: 0 });
+});
+
+const HIRES_SUGGESTION = { upscaler: "lanczos", scale: 1.5, steps: 0, denoise: 0.35,
+                           latent_denoise: 0.55 };
+
+test("the selected model's hires suggestion is shown as the default option and placeholders", async () => {
+  const { win, $ } = setup({ preview: { model: "sd-turbo", family: "sd2", defaults: { steps: 2 },
+                                        hires: HIRES_SUGGESTION } });
+  await settle(win, "await refreshImageBackend();");
+  await tick(); await tick();
+  assert.equal($("img-hires-upscaler").options[0].textContent, "Suggested: Lanczos");
+  assert.equal($("img-hires-scale").placeholder, "1.5");
+  assert.equal($("img-hires-denoise").placeholder, "0.35");
+  $("img-hires-upscaler").value = "latent-bicubic";
+  $("img-hires-upscaler").dispatchEvent(new win.Event("change"));
+  assert.equal($("img-hires-denoise").placeholder, "0.55");
+  $("img-hires-upscaler").value = "";
+  $("img-hires-upscaler").dispatchEvent(new win.Event("change"));
+  assert.equal($("img-hires-denoise").placeholder, "0.35");
+});
+
+test("a new suggestion never changes entered hires values; the button replaces them", async () => {
+  const { win, $, calls } = setup({ preview: { model: "sd-turbo", family: "sd2",
+                                               defaults: { steps: 2 }, hires: HIRES_SUGGESTION } });
+  await settle(win, "await refreshImageBackend();");
+  await tick(); await tick();
+  $("img-hires").checked = true;
+  $("img-hires-upscaler").value = "latent";
+  $("img-hires-scale").value = "3";
+  $("img-hires-denoise").value = "0.7";
+  await settle(win, "await refreshImageBackend();");
+  await tick(); await tick();
+  assert.equal($("img-hires-upscaler").value, "latent");
+  assert.equal($("img-hires-scale").value, "3");
+  assert.equal($("img-hires-denoise").value, "0.7");
+  $("img-hires-suggested").click();
+  assert.equal($("img-hires-upscaler").value, "lanczos");
+  assert.equal($("img-hires-scale").value, "1.5");
+  assert.equal($("img-hires-steps").value, "");
+  assert.equal($("img-hires-denoise").value, "0.35");
+  $("img-prompt").value = "a fox";
+  $("img-generate").onclick();
+  await tick(); await tick(); await tick();
+  assert.deepEqual(imagineBody(calls).hires, { upscaler: "lanczos", scale: 1.5, denoise: 0.35 });
+});
+
+test("without a suggestion the button empties the hires fields so the server's suggestion applies", async () => {
+  const { win, $ } = setup();
+  await settle(win, "await refreshImageBackend();");
+  await tick(); await tick();
+  $("img-hires-upscaler").value = "latent";
+  $("img-hires-scale").value = "3";
+  $("img-hires-suggested").click();
+  assert.equal($("img-hires-upscaler").value, "");
+  assert.equal($("img-hires-scale").value, "");
+});
+
+test("without a model preview the hires fields say the model's suggestion applies", async () => {
+  const { win, $ } = setup();
+  await settle(win, "await refreshImageBackend();");
+  await tick(); await tick();
+  assert.equal($("img-hires-scale").placeholder, "suggested");
+  assert.equal($("img-hires-denoise").placeholder, "suggested");
 });
 
 test("the controls are not sent while the backend is ComfyUI", async () => {

@@ -1054,6 +1054,22 @@ def test_the_steps_placeholder_follows_settings_then_the_curated_model_then_the_
         assert data["preview"]["defaults"]["cfg_scale"] == 2.5
 
 
+def test_the_hires_suggestion_follows_the_curated_model_then_the_family(media_app, flux_set):
+    from fastapi.testclient import TestClient
+
+    from localm.media.sdcpp import pairing, sampling
+    rec = {"fluxunchained-dev-q8-0-v2.gguf": {"steps": 2, "cfg_scale": 1.0, "width": 512,
+                                              "height": 512}}
+    assert pairing.preview("image", "fluxunchained")["hires"] == sampling.suggested_hires(1024)
+    assert pairing.preview("image", "fluxunchained")["hires"]["scale"] == 1.5
+    small = pairing.preview("image", "fluxunchained", None, None, rec)["hires"]
+    assert small == sampling.suggested_hires(512) and small["scale"] == 2.0
+    with TestClient(media_app) as c:
+        data = c.get("/api/imagine/native-models", params={"model": "fluxunchained"}).json()
+    assert data["preview"]["hires"] == {"upscaler": "lanczos", "scale": 1.5, "steps": 0,
+                                        "denoise": 0.35, "latent_denoise": 0.55}
+
+
 def test_native_models_route_without_a_model_marks_nothing(media_app, flux_set):
     from fastapi.testclient import TestClient
 

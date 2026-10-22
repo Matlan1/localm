@@ -160,7 +160,10 @@ export const imageInputs = createImageInputs({
 
 export const imageModelPicker = createNativeModelPicker(
   { media: "image", prefix: "imagine", mountId: "img-native-models",
-    onData: (data) => { showImageStepDefault(data); imageInputs.refresh(data); } });
+    onData: (data) => {
+      showImageStepDefault(data); imageInputs.refresh(data);
+      imageGen.suggest(data && data.preview && data.preview.hires);
+    } });
 
 const imageLivePreview = createJobPreview("img-preview");
 

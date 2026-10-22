@@ -205,6 +205,79 @@ def test_the_hires_limit_applies_to_the_size_taken_from_an_input_image(qol, tmp_
     assert ok, msg
 
 
+def test_a_hires_pass_with_every_field_left_out_refines_with_lanczos(qol, tmp_path):
+    runner, s = qol
+    out = tmp_path / "d.png"
+    hires = native_models.validate_hires(native_models.HiresChoice())
+    ok, msg = native.generate(s, "p", out, width=64, height=64, hires=hires)
+    assert ok, msg
+    assert runner.generates[0]["hires"] == {
+        "upscaler": "Lanczos", "model_path": None, "scale": 2.0, "steps": 0,
+        "denoising_strength": 0.35}
+    assert _sidecar(out)["hires"] == {"upscaler": "lanczos", "model": None, "scale": 2.0,
+                                      "steps": 0, "denoise": 0.35}
+
+
+def test_a_latent_upscaler_without_a_denoise_gets_the_latent_denoise(qol, tmp_path):
+    runner, s = qol
+    hires = native_models.validate_hires(native_models.HiresChoice(upscaler="latent-bicubic"))
+    ok, msg = native.generate(s, "p", tmp_path / "l.png", width=64, height=64, hires=hires)
+    assert ok, msg
+    sent = runner.generates[0]["hires"]
+    assert sent["upscaler"] == "Latent (bicubic)"
+    assert sent["denoising_strength"] == 0.55
+    hires = native_models.validate_hires(native_models.HiresChoice(upscaler="latent",
+                                                                   denoise=0.8))
+    native.generate(s, "p", tmp_path / "m.png", width=64, height=64, hires=hires)
+    assert runner.generates[1]["hires"]["denoising_strength"] == 0.8
+
+
+def test_the_hires_suggestion_follows_the_curated_model_then_the_family(qol, tmp_path,
+                                                                        monkeypatch):
+    from localm.media.sdcpp import families
+    runner, s = qol
+    turbo = tmp_path / native.RECOMMENDED_MODELS[0].file
+    turbo.write_bytes(b"weights")
+    s["native"]["model"] = str(turbo)
+    monkeypatch.setattr(families, "defaults_for",
+                        lambda info: families.Defaults(25, 6.0, 1024, 1024))
+    assert native.resolve_models(s)["hires"]["scale"] == 2.0
+    big = tmp_path / "big-model.gguf"
+    big.write_bytes(b"weights")
+    s["native"]["model"] = str(big)
+    assert native.resolve_models(s)["hires"]["scale"] == 1.5
+    ok, msg = native.generate(s, "p", tmp_path / "x.png", width=1024, height=1024,
+                              hires=native_models.validate_hires(native_models.HiresChoice()))
+    assert ok, msg
+    assert runner.generates[0]["hires"]["scale"] == 1.5
+    monkeypatch.setattr(families, "defaults_for", lambda info: None)
+    assert native.resolve_models(s)["hires"] == sampling.suggested_hires(None)
+
+
+def test_fill_hires_keeps_requested_values_and_fits_a_suggested_scale():
+    sug = sampling.suggested_hires(512)
+    asked = {"upscaler": "nearest", "model": None, "scale": 3.0, "steps": 5, "denoise": 0.6}
+    assert sampling.fill_hires(asked, sug, 512, 512) == asked
+    empty = {"upscaler": None, "model": None, "scale": None, "steps": None, "denoise": None}
+    filled = sampling.fill_hires(empty, sug, 3000, 1000)
+    assert filled["upscaler"] == "lanczos" and filled["denoise"] == 0.35
+    assert sampling.check_hires_target(3000, 1000, filled["scale"]) is None
+    assert 1.3 <= filled["scale"] < 1.37
+    assert sampling.fill_hires(empty, sug, 4096, 4096)["scale"] == sampling.MIN_HIRES_SCALE
+    assert sampling.fill_hires(empty, None, 512, 512)["scale"] == 2.0
+    assert sampling.fill_hires(dict(empty, steps=0), sug, 512, 512)["steps"] == 0
+
+
+def test_no_suggestion_ever_uses_the_regenerating_latent_default():
+    for side in (None, 512, 640, 768, 1024, 1280):
+        sug = sampling.suggested_hires(side)
+        assert sug["upscaler"] == "lanczos" and not sampling.is_latent_upscaler(sug["upscaler"])
+        assert sug["denoise"] <= 0.4 and 1.5 <= sug["scale"] <= 2.0
+        assert sampling.hires_side(side or 512, sug["scale"]) <= sampling.MAX_HIRES_SIDE
+    assert sampling.suggested_hires(512)["scale"] == 2.0
+    assert sampling.suggested_hires(1024)["scale"] == 1.5
+
+
 # --------------------------------------------------------------------------- #
 #  upscale a gallery image                                                    #
 # --------------------------------------------------------------------------- #
@@ -300,7 +373,8 @@ def test_hires_validation_requires_a_registered_upscaler_for_the_model_mode(tmp_
            "lora": {"path": str(up), "model_type": "lora"}}
     ok = native_models.validate_hires(
         native_models.HiresChoice(upscaler="model", model="up"), reg)
-    assert ok["model"] == "up" and ok["scale"] == 2.0 and ok["denoise"] == 0.7
+    assert ok == {"upscaler": "model", "model": "up", "scale": None, "steps": None,
+                  "denoise": None}
     for model in ("lora", "missing", None):
         with pytest.raises(ValueError):
             native_models.validate_hires(
@@ -428,6 +502,20 @@ def test_the_imagine_route_forwards_sampler_scheduler_and_hires(qol_app):
     g = runner.generates[0]
     assert (g["sample_method"], g["scheduler"]) == ("dpm++2m", "karras")
     assert g["hires"]["upscaler"] == "Latent (bicubic)" and g["hires"]["steps"] == 3
+
+
+@pytest.mark.parametrize("hires", [{}, {"upscaler": ""}, {"upscaler": None, "scale": None}])
+def test_the_imagine_route_fills_a_hires_pass_left_empty_from_the_model(qol_app, hires):
+    from fastapi.testclient import TestClient
+    app, runner = qol_app
+    with TestClient(app) as c:
+        r = c.post("/api/imagine", json={"prompt": "p", "size": "64x64", "hires": hires})
+        assert r.status_code == 200, r.text
+        job = _wait_job(app, r.json()["job_id"])
+    assert job.status == "done", _job_lines(job)
+    assert runner.generates[0]["hires"] == {
+        "upscaler": "Lanczos", "model_path": None, "scale": 2.0, "steps": 0,
+        "denoising_strength": 0.35}
 
 
 @pytest.mark.parametrize("body,status", [

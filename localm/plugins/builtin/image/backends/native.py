@@ -118,10 +118,11 @@ def missing_model_message() -> str:
 def resolve_models(s: dict) -> dict:
     """The model files the native backend would load for settings *s*:
     ``{"key", "ctx", "label", "recommended", "family", "components",
-    "notes", "defaults", "capabilities", "control_net", "embeddings"}`` (see
-    ``pairing.build_context``; ``defaults`` is the family's
+    "notes", "defaults", "capabilities", "control_net", "embeddings", "hires"}``
+    (see ``pairing.build_context``; ``defaults`` is the family's
     ``families.Defaults`` or None; ``capabilities`` is
-    ``families.capabilities``). A diffusion model's missing text encoders and
+    ``families.capabilities``; ``hires`` is ``sampling.suggested_hires`` for
+    the model's native size, the curated model's own size first). A diffusion model's missing text encoders and
     VAE are picked from the registry. The ``native`` block's ``control_net``
     (a registered ControlNet name) and ``embeddings`` (registered
     textual-inversion names) are loaded with the model
@@ -160,11 +161,24 @@ def resolve_models(s: dict) -> dict:
         ctx["embeddings"] = tuple((families.clip_text(e["trigger"], info.family), e["path"])
                                   for e in embeddings)
     key = tuple(sorted(ctx.items()))
+    defaults = families.defaults_for(info)
     return {"key": key, "ctx": ctx, "label": label, "recommended": rec,
             "family": info.family, "components": built["components"],
-            "notes": built["notes"], "defaults": families.defaults_for(info),
+            "notes": built["notes"], "defaults": defaults,
             "capabilities": families.capabilities(info), "control_net": control,
-            "embeddings": embeddings}
+            "embeddings": embeddings,
+            "hires": sampling.suggested_hires(_native_side(rec, defaults))}
+
+
+def _native_side(rec: Optional[RecommendedModel],
+                 defaults: Optional[families.Defaults]) -> Optional[int]:
+    """The longer side of the model's native size: the curated model's, else
+    the family's, else None."""
+    if rec is not None:
+        return max(rec.width, rec.height)
+    if defaults is not None:
+        return max(defaults.width, defaults.height)
+    return None
 
 
 FLASH_ATTENTION_BACKENDS = ("rocm",)
@@ -686,13 +700,14 @@ def _batch_path(out_path: Path, index: int) -> Path:
 
 def _hires_refusal(hires: dict, width, height) -> Optional[str]:
     """Why hires settings *hires* (``native_models.validate_hires``) cannot run,
-    or None. The size check applies when *width* and *height* are known."""
+    or None. The size check applies when *width*, *height* and the scale are
+    known; an unset scale is checked once the job fills it."""
     if hires.get("upscaler") == sampling.HIRES_MODEL_UPSCALER:
         try:
             _resolve_file(hires.get("model") or "", "hires upscaler")
         except _ModelError as e:
             return str(e)
-    if width is not None and height is not None:
+    if width is not None and height is not None and hires.get("scale") is not None:
         return sampling.check_hires_target(int(width), int(height), float(hires["scale"]))
     return None
 
@@ -786,7 +801,8 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
 
     *sample_method* and *scheduler* (``sampling`` names) override the settings'
     and the model's own defaults. *hires* (``native_models.validate_hires``)
-    adds a hires-fix pass.
+    adds a hires-fix pass; its unset fields take the model's suggestion
+    (``sampling.fill_hires``), and the sidecar records the values used.
 
     *loras* (``[{"name", "strength"}]``) and *lora_name* (with
     *lora_strength_model*) name registered LoRAs (``pairing.resolve_loras``);
@@ -922,6 +938,7 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
             control_px = (_load_rgb(control_image, (int(width), int(height)))
                           if control_image is not None else None)
             if hires:
+                hires = sampling.fill_hires(hires, models.get("hires"), int(width), int(height))
                 reason = sampling.check_hires_target(int(width), int(height),
                                                      float(hires["scale"]))
                 if reason:

@@ -304,10 +304,17 @@ function ngcSetSelect(sel, value) {
 
 /** The sampler / scheduler / batch / hires controls of a native media page,
  * wired to the ids `<prefix>-sampler`, `-scheduler`, `-batch`, `-hires`,
- * `-hires-upscaler`, `-hires-model`, `-hires-scale`, `-hires-steps` and
- * `-hires-denoise` (only those present are used). Every field's empty value
- * means "the model's / backend's own default" and sends nothing.
+ * `-hires-upscaler`, `-hires-model`, `-hires-scale`, `-hires-steps`,
+ * `-hires-denoise` and `-hires-suggested` (only those present are used). Every field's empty value
+ * means "the model's / backend's own default" and sends nothing; a hires
+ * pass with every field empty is sent as `hires: {}` and the server fills it
+ * from the model's suggestion.
  * `populate(data)` fills the dropdowns from a `/native-models` response,
+ * `suggest(hires)` shows a model's hires suggestion (`preview.hires`, or null)
+ * as the upscaler's default option and the scale / denoise placeholders
+ * without changing any entered value; only the `-hires-suggested` button
+ * replaces entered values (with the suggestion, or empties them when no
+ * suggestion is known),
  * `body()` returns the request fields, `set(meta)` restores a gallery item's
  * sidecar settings. */
 export function createNativeGenControls({ prefix }) {
@@ -321,10 +328,36 @@ export function createNativeGenControls({ prefix }) {
     return Number.isFinite(n) ? n : null;
   };
 
+  let suggestion = null;
+  let upscalerLabels = {};
+
   function syncHires() {
     const row = node("hires-model-row");
     const up = node("hires-upscaler");
     if (row && up) row.hidden = up.value !== "model";
+    const scale = node("hires-scale");
+    if (scale) {
+      scale.placeholder = suggestion ? String(suggestion.scale) : t("images.hiresScalePlaceholder");
+    }
+    const denoise = node("hires-denoise");
+    if (denoise) {
+      const latent = !!(up && up.value.startsWith("latent"));
+      const value = suggestion && (latent ? suggestion.latent_denoise : suggestion.denoise);
+      denoise.placeholder = value ? String(value) : t("images.hiresDenoisePlaceholder");
+    }
+  }
+
+  function suggestedText() {
+    if (!suggestion) return t("nativeModels.hiresSuggested");
+    const name = upscalerLabels[suggestion.upscaler] || suggestion.upscaler;
+    return t("nativeModels.hiresSuggestedValue", { name });
+  }
+
+  function suggest(hires) {
+    suggestion = hires && typeof hires === "object" ? hires : null;
+    const up = node("hires-upscaler");
+    if (up && up.options.length) up.options[0].textContent = suggestedText();
+    syncHires();
   }
 
   function populate(data) {
@@ -333,9 +366,11 @@ export function createNativeGenControls({ prefix }) {
     const asItems = (names) => names.map((n) => ({ value: n, label: n }));
     ngcFillSelect(node("sampler"), asItems(s.sample_methods || []), t("nativeModels.samplerDefault"));
     ngcFillSelect(node("scheduler"), asItems(s.schedulers || []), t("nativeModels.schedulerDefault"));
-    const ups = (s.hires_upscalers || []).filter((u) => u.id !== "latent");
+    const ups = s.hires_upscalers || [];
+    upscalerLabels = Object.fromEntries(ups.map((u) => [u.id, u.label]));
+    suggestion = (data.preview && data.preview.hires) || null;
     ngcFillSelect(node("hires-upscaler"),
-      ups.map((u) => ({ value: u.id, label: u.label })), t("nativeModels.hiresLatent"));
+      ups.map((u) => ({ value: u.id, label: u.label })), suggestedText());
     const models = (data.upscalers || []).map((u) => ({
       value: u.name, label: u.file && u.file !== u.name ? `${u.name} (${u.file})` : u.name }));
     ngcFillSelect(node("hires-model"), models, t("nativeModels.hiresModelPick"));
@@ -352,11 +387,16 @@ export function createNativeGenControls({ prefix }) {
     if (scheduler && scheduler.value) out.scheduler = scheduler.value;
     const hires = node("hires");
     if (hires && hires.checked) {
-      const upscaler = node("hires-upscaler").value || "latent";
-      const h = { upscaler, scale: number("hires-scale") ?? 2,
-                  steps: Math.floor(number("hires-steps") ?? 0),
-                  denoise: number("hires-denoise") ?? 0.7 };
+      const h = {};
+      const upscaler = node("hires-upscaler").value;
+      if (upscaler) h.upscaler = upscaler;
       if (upscaler === "model") h.model = node("hires-model").value || null;
+      const scale = number("hires-scale");
+      if (scale !== null) h.scale = scale;
+      const steps = number("hires-steps");
+      if (steps !== null) h.steps = Math.floor(steps);
+      const denoise = number("hires-denoise");
+      if (denoise !== null) h.denoise = denoise;
       out.hires = h;
     }
     return out;
@@ -370,7 +410,7 @@ export function createNativeGenControls({ prefix }) {
     if (!hires) return;
     const h = m.hires || null;
     hires.checked = !!h;
-    ngcSetSelect(node("hires-upscaler"), h && h.upscaler !== "latent" ? h.upscaler : "");
+    ngcSetSelect(node("hires-upscaler"), (h && h.upscaler) || "");
     ngcSetSelect(node("hires-model"), (h && h.model) || "");
     const put = (name, value) => { const el = node(name); if (el) el.value = value ?? ""; };
     put("hires-scale", h ? h.scale : "");
@@ -379,9 +419,21 @@ export function createNativeGenControls({ prefix }) {
     syncHires();
   }
 
+  function useSuggested() {
+    const s = suggestion;
+    ngcSetSelect(node("hires-upscaler"), s ? s.upscaler : "");
+    const put = (name, value) => { const el = node(name); if (el) el.value = value ?? ""; };
+    put("hires-scale", s ? s.scale : "");
+    put("hires-steps", s && s.steps ? s.steps : "");
+    put("hires-denoise", s ? s.denoise : "");
+    syncHires();
+  }
+
   const upscaler = node("hires-upscaler");
   if (upscaler) upscaler.addEventListener("change", syncHires);
-  return { populate, body, set, syncHires };
+  const suggestedButton = node("hires-suggested");
+  if (suggestedButton) suggestedButton.addEventListener("click", useSuggested);
+  return { populate, suggest, body, set, syncHires, useSuggested };
 }
 
 /** The music picker: one select per ACE-Step component. */
