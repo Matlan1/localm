@@ -66,6 +66,12 @@ class _Holder:
         self._close()
         self._until_free()
 
+    def kill_now(self) -> None:
+        """Kill and reap the holder without waiting for the OS to drop its lock."""
+        self.proc.kill()
+        self.proc.wait(60)
+        self._close()
+
     def _until_free(self) -> None:
         """Wait for the OS to drop the dead holder's lock: Windows does so a
         moment after the process is reaped."""
@@ -225,3 +231,35 @@ class TestDiscardingPartialDataOfAHeldFolder:
     def test_discard_works_once_the_holder_is_gone(self, hub, holder):  # noqa: F811
         holder("q").kill()
         assert pull_mod.discard_partial_download("o/r@4.0bpw", name="q") == 0
+
+    def test_discard_right_after_the_holder_is_killed_deletes(self, hub, holder):  # noqa: F811
+        for _ in range(8):
+            holder("q").kill_now()
+            assert pull_mod.discard_partial_download("o/r@4.0bpw", name="q") == 0
+
+    def test_a_pull_right_after_the_holder_is_killed_runs(self, hub, holder):  # noqa: F811
+        holder("q").kill_now()
+        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is True
+
+
+class TestALockThatCannotBeTaken:
+    def _deny(self, monkeypatch):
+        from filelock import FileLock
+
+        def refuse(self, *a, **k):
+            raise PermissionError(13, "Permission denied")
+        monkeypatch.setattr(FileLock, "acquire", refuse)
+
+    def test_a_pull_says_the_lock_failed_not_that_a_download_runs(
+            self, hub, monkeypatch, capsys):  # noqa: F811
+        self._deny(monkeypatch)
+        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is False
+        said = _said(capsys)
+        assert "Could not lock the download folder" in said and "Permission denied" in said
+        assert "already in progress" not in said and "Wait for it to finish" not in said
+        assert hub.snapshots == []
+
+    def test_discard_raises_the_lock_error_as_its_own_kind(self, hub, monkeypatch):  # noqa: F811
+        self._deny(monkeypatch)
+        with pytest.raises(pull_mod.PullLockUnavailable):
+            pull_mod.discard_partial_download("o/r@4.0bpw", name="q")
