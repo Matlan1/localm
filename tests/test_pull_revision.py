@@ -656,6 +656,29 @@ class TestAnUnfinishedRevisionIsNotMergedWithAnother(_InterruptedAfterTheFirstFi
         monkeypatch.setattr(os, "scandir", scandir)
         assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is False
 
+    def test_a_symlinked_subfolder_blocks_the_adoption(self, hub, monkeypatch):
+        self._copy(hub, hub.repo_files[COMMIT])
+        sub = hub.models_dir / "q" / "linked"
+        sub.mkdir()
+        real_islink = os.path.islink
+        monkeypatch.setattr(os.path, "islink",
+                            lambda p: os.path.basename(os.fspath(p)) == "linked" or real_islink(p))
+        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is False
+
+    def test_an_adopted_folder_whose_name_is_taken_reports_the_failure(self, hub, capsys, tmp_path):
+        hub.repo_files[COMMIT] = {"unet/diffusion.safetensors": BODY, "model_index.json": b"{}"}
+        self._copy(hub, hub.repo_files[COMMIT])
+        other = tmp_path / "elsewhere"
+        other.mkdir()
+        (other / "config.json").write_text("{}", encoding="utf-8")
+        reg = mm.load_registry()
+        reg["q"] = {"path": str(other), "source": "local", "model_type": "llm"}
+        mm.save_registry(reg)
+        capsys.readouterr()
+        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is False
+        assert "could not be registered as 'q'" in " ".join(capsys.readouterr().out.split())
+        assert mm.load_registry()["q"]["path"] == str(other)
+
     @pytest.mark.skipif(os.name != "nt", reason="directory junctions are a Windows feature")
     def test_a_linked_subfolder_blocks_the_adoption(self, hub, tmp_path):
         import subprocess

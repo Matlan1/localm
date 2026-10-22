@@ -46,6 +46,8 @@ the same route is not.
 """
 
 import json
+import os
+import stat
 from pathlib import Path
 from unittest.mock import patch
 
@@ -734,3 +736,20 @@ class TestSnapshotCompletenessConfinesRemoteFilenames:
 
         siblings = [_Sib("config.json", 2), _Sib("sub/w.safetensors", 5)]
         assert _pull._snapshot_is_complete(dest, siblings, "owner/repo") is True
+
+
+def test_rm_deletes_a_model_folder_holding_read_only_files(home, monkeypatch):
+    import localm.model_manager as _mm
+    from localm.model_manager import registry as reg
+    monkeypatch.setattr(_mm, "MODELS_DIR", home / "models")
+    folder = home / "models" / "cloned"
+    objects = folder / ".git" / "objects" / "ab"
+    objects.mkdir(parents=True)
+    (folder / "config.json").write_text("{}", encoding="utf-8")
+    locked = objects / "cdef"
+    locked.write_bytes(b"x")
+    os.chmod(locked, stat.S_IREAD)
+    _mm.save_registry({"cloned": {"path": str(folder), "source": "local", "model_type": "llm"}})
+    reg.remove_model("cloned")
+    assert not folder.exists()
+    assert "cloned" not in _mm.load_registry()
