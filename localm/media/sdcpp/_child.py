@@ -82,7 +82,7 @@ class _State:
     wan_vae_conv: Optional[str] = None
     dit_hidden: Optional[int] = None
     dit_patch: Optional[int] = None
-    flash_auto: Optional[bool] = None
+    flash_auto_by_name: dict = {}
     dit_heads: Optional[int] = None
     diffusion_backends: Optional[list] = None
 
@@ -156,7 +156,7 @@ _MODEL_DESC_RE = re.compile(r"\AWan\d\.[\dx]-[A-Za-z0-9.]+-[A-Za-z0-9.]+\Z")
 _CAPACITY_SHORT_TEXT = "cannot make enough memory available"
 _KL_DECODER_CH_RE = re.compile(r"\bvae decoder: ch = (\d+)")
 _WAN_VAE_CONV_RE = re.compile(r"\bWan VAE convolution type: (2D|3D)\b")
-_FLASH_AUTO_RE = re.compile(r"\bflash attention auto: \S+ -> (on|off)\b")
+_FLASH_AUTO_RE = re.compile(r"\bflash attention auto: (\S+) -> (on|off)\b")
 _FLUX_SHAPE_RE = re.compile(
     r"\bflux: .*\bhidden_size = (\d+), num_heads = (\d+)")
 _MMDIT_SHAPE_RE = re.compile(r"\bmmdit: num_layers = (\d+),.*\bhidden_size = (\d+)")
@@ -221,7 +221,8 @@ def _make_callbacks(resp_q):
             _State.wan_vae_conv = wan.group(1)
         flash = _FLASH_AUTO_RE.search(msg)
         if flash:
-            _State.flash_auto = flash.group(1) == "on"
+            _State.flash_auto_by_name = {**_State.flash_auto_by_name,
+                                         flash.group(1).lower(): flash.group(2) == "on"}
         flux = _FLUX_SHAPE_RE.search(msg)
         if flux:
             _State.dit_hidden, _State.dit_heads = int(flux.group(1)), int(flux.group(2))
@@ -414,7 +415,7 @@ def _do_load(payload):
     _State.wan_vae_conv = None
     _State.dit_hidden = None
     _State.dit_patch = None
-    _State.flash_auto = None
+    _State.flash_auto_by_name = {}
     _State.dit_heads = None
     _State.diffusion_backends = None
     _State.paths = tuple(str(v) for k, v in ctx_fields.items()
@@ -427,6 +428,8 @@ def _do_load(payload):
     _State.ctx = ctx
     version = (lib.sd_get_model_version_name(ctx) or b"").decode("utf-8", "replace")
     method = lib.sd_get_default_sample_method(ctx)
+    devices = _compute_devices(lib, payload.get("runtime_dir"))
+    names = [str(d["name"]) for d in devices]
     scheduler = lib.sd_get_default_scheduler(ctx, method)
     return {
         "version": version,
@@ -442,10 +445,10 @@ def _do_load(payload):
         "dit_hidden": _State.dit_hidden,
         "dit_patch": _State.dit_patch,
         "dit_heads": _State.dit_heads,
-        "flash_attn": _module_flash(ctx_fields, "diffusion"),
-        "controlnet_flash_attn": (_module_flash(ctx_fields, "controlnet")
+        "flash_attn": _module_flash(ctx_fields, "diffusion", names),
+        "controlnet_flash_attn": (_module_flash(ctx_fields, "controlnet", names)
                                   if ctx_fields.get("control_net_path") else None),
-        "compute_devices": _compute_devices(lib, payload.get("runtime_dir")),
+        "compute_devices": devices,
         "max_tensor_bytes": _max_tensor_bytes(lib, payload.get("runtime_dir")),
     }
 
@@ -465,13 +468,15 @@ def diffusion_backends(spec: str) -> Optional[list]:
     return None
 
 
-def _module_flash(ctx_fields: dict, module: str) -> Optional[bool]:
+def _module_flash(ctx_fields: dict, module: str,
+                  devices: Optional[list] = None) -> Optional[bool]:
     """Whether the loaded *module* (``"diffusion"`` or ``"controlnet"``) runs
     flash attention: its ``on|off`` part of *ctx_fields*' ``flash_attn_mode``
     (else the mode's ``on|off`` default), else, with no mode, True for the
     legacy ``flash_attn`` flag and, for the diffusion model, for
     ``diffusion_flash_attn``, else the library's own decision from its load
-    log; None when that was not logged."""
+    log (``_auto_flash``) for compute *devices*; None when that was not
+    logged."""
     mode = str(ctx_fields.get("flash_attn_mode") or "").strip()
     default = None
     for part in mode.split(","):
@@ -489,7 +494,24 @@ def _module_flash(ctx_fields: dict, module: str) -> Optional[bool]:
             return True
         if module == "diffusion" and ctx_fields.get("diffusion_flash_attn"):
             return True
-    return _State.flash_auto
+    return _auto_flash(module, devices)
+
+
+def _auto_flash(module: str, devices: Optional[list]) -> Optional[bool]:
+    """The library's logged flash attention decision for *module* computed on
+    ggml *devices* (names): off when it logged that the module's devices
+    disagree, else on only when every device's probe said on; without
+    *devices*, the decision every logged probe agrees on. None when a needed
+    probe was not logged or the probes disagree."""
+    by_name = _State.flash_auto_by_name
+    if by_name.get(module) is False:
+        return False
+    names = [str(n).lower() for n in devices or ()]
+    if names:
+        known = [by_name.get(n) for n in names]
+        return None if None in known else all(known)
+    seen = {v for k, v in by_name.items() if k not in _MODULE_ALIASES}
+    return seen.pop() if len(seen) == 1 else None
 
 
 def _compute_devices(lib, runtime_dir) -> list[dict]:

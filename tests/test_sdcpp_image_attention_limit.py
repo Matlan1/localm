@@ -66,10 +66,11 @@ def test_largest_square():
     (b"flash attention auto: Vulkan0 -> on (Vulkan NVIDIA RTX)", True),
 ])
 def test_the_worker_reads_the_flash_attention_decision(monkeypatch, line, expected):
-    monkeypatch.setattr(_child._State, "flash_auto", None)
+    monkeypatch.setattr(_child._State, "flash_auto_by_name", {})
     log_cb, _progress, _preview = _child._make_callbacks(queue.Queue())
     log_cb(b.SD_LOG_INFO, line + b" --- flash_attn.cpp:95", None)
-    assert _child._State.flash_auto is expected
+    assert _child._State.flash_auto_by_name == {"vulkan0": expected}
+    assert _child._module_flash({}, "diffusion", ["Vulkan0"]) is expected
 
 
 def test_the_worker_reads_the_flux_shape_from_the_load_log(monkeypatch):
@@ -90,7 +91,8 @@ def test_the_worker_reads_the_flux_shape_from_the_load_log(monkeypatch):
 ])
 def test_the_load_info_says_whether_the_model_runs_flash_attention(monkeypatch, ctx, auto,
                                                                     expected):
-    monkeypatch.setattr(_child._State, "flash_auto", auto)
+    monkeypatch.setattr(_child._State, "flash_auto_by_name",
+                        {} if auto is None else {"vulkan0": auto})
     assert _child._module_flash(ctx, "diffusion") is expected
 
 
@@ -376,7 +378,8 @@ def test_sd3_medium_at_1024_keeps_its_loaded_attention(monkeypatch, tmp_path):
 ])
 def test_the_load_info_says_whether_the_controlnet_runs_flash_attention(monkeypatch, ctx, auto,
                                                                          expected):
-    monkeypatch.setattr(_child._State, "flash_auto", auto)
+    monkeypatch.setattr(_child._State, "flash_auto_by_name",
+                        {} if auto is None else {"vulkan0": auto})
     assert _child._module_flash(ctx, "controlnet") is expected
 
 
@@ -413,3 +416,30 @@ def test_a_slow_flash_attention_is_turned_off_for_the_controlnet_too(monkeypatch
     info = {"max_tensor_bytes": 2 * GIB, "flash_attn": False, "controlnet_flash_attn": True}
     assert image_native._vulkan_attention_mode(runner, rt, info, models, 512, 512, None, 0,
                                                7.0) == ("off", None)
+
+
+def _auto_lines(monkeypatch, lines):
+    monkeypatch.setattr(_child._State, "flash_auto_by_name", {})
+    log_cb, _progress, _preview = _child._make_callbacks(queue.Queue())
+    for line in lines:
+        log_cb(b.SD_LOG_INFO, line + b" --- flash_attn.cpp:95", None)
+
+
+def test_the_auto_decision_is_the_one_for_the_models_device(monkeypatch):
+    _auto_lines(monkeypatch, [b"flash attention auto: Vulkan0 -> on (probe: normal 9 ms, flash 1 ms)",
+                              b"flash attention auto: CPU -> off (probe: normal 1 ms, flash 2 ms)"])
+    assert _child._module_flash({}, "diffusion", ["Vulkan0"]) is True
+    assert _child._module_flash({}, "controlnet", ["Vulkan0"]) is True
+    assert _child._module_flash({}, "diffusion", ["CPU"]) is False
+    assert _child._module_flash({}, "diffusion", ["Vulkan0", "CPU"]) is False
+    assert _child._module_flash({}, "diffusion", ["Vulkan1"]) is None
+    assert _child._module_flash({}, "diffusion") is None
+
+
+def test_a_module_whose_devices_disagree_runs_without_flash_attention(monkeypatch):
+    _auto_lines(monkeypatch, [b"flash attention auto: Vulkan0 -> on (probe)",
+                              b"flash attention auto: Vulkan1 -> off (probe)",
+                              b"flash attention auto: diffusion -> off (compute devices disagree)"])
+    assert _child._module_flash({}, "diffusion", ["Vulkan0"]) is False
+    assert _child._module_flash({}, "controlnet", ["Vulkan0"]) is True
+
