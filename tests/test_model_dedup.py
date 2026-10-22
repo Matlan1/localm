@@ -705,11 +705,15 @@ class TestNoQuestionsWhileServing:
         env = dict(os.environ, PYTHONPATH=str(root))
         r = subprocess.run(
             [sys.executable, "-c",
-             "from localm.model_manager import can_prompt; print(can_prompt())"],
+             "import sys; from localm.model_manager import can_prompt; "
+             "print(sys.stdin.isatty(), can_prompt())"],
             stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env,
             cwd=str(root), timeout=120)
         assert r.returncode == 0, r.stderr
-        assert r.stdout.strip().splitlines()[-1] == "False"
+        isatty, asked = r.stdout.strip().splitlines()[-1].split()
+        if sys.platform == "win32":
+            assert isatty == "True"
+        assert asked == "False"
 
     def test_no_registration_prompt_guard_reads_isatty_directly(self):
         """Every registration question in the model manager is guarded by

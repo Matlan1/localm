@@ -762,6 +762,29 @@ class TestEmbeddingRoutes:
         finally:
             emb.reset_embedder()
 
+    def test_first_use_under_off_does_not_use_up_the_download_attempt(
+            self, tmp_path, monkeypatch):
+        """get_embedder() under net_mode=off only checks the disk; after a switch
+        to ask the next call still makes its one first-use download attempt."""
+        monkeypatch.setenv("LOCALM_HOME", str(tmp_path))
+        monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
+        from localm.inference import embedder as emb
+        calls = []
+        monkeypatch.setattr(emb, "resolve_embedding_model_path",
+                            lambda allow_download=None, **k: calls.append(allow_download))
+        try:
+            set_config(monkeypatch, lambda: {"net_mode": "off"})
+            emb.reset_embedder()
+            assert emb.get_embedder() is None
+            assert calls == [False]
+
+            calls.clear()
+            set_config(monkeypatch, lambda: {"net_mode": "ask"})
+            assert emb.get_embedder() is None
+            assert calls == [False, None]
+        finally:
+            emb.reset_embedder()
+
     def test_a_probe_keeps_the_off_reason_and_a_failed_download_reason(
             self, tmp_path, monkeypatch):
         """A filesystem-only probe under net_mode=off records off's own reason,
