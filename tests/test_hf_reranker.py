@@ -457,7 +457,7 @@ class TestFailedRestart:
         hf.cls_labels = []
         hf._runner = None
         reranker._RERANKER = hf
-        reranker._RERANKER_KEY = reranker._file_key(str(folder))
+        reranker._RERANKER_KEY = (reranker._file_key(str(folder)), reranker._RERANK)
         return hf
 
     def test_the_restart_holds_the_engine_load_lock(self, tmp_path):

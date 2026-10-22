@@ -143,6 +143,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
   next request fits in it.
 
 ### Fixed
+- **An embedding model asked for by name answers with its own vectors.** `/v1/embeddings` and
+  Ollama's `/api/embed` and `/api/embeddings` answered a request for a pulled embedding GGUF (for
+  example nomic-embed-text) with the configured embedding model's vectors and dimension, labelled
+  with the requested name. The named model is now loaded and used, and the configured embedding
+  model that Knowledge and memory use is left as it is. An embedding model whose file is missing,
+  or whose registry entry has no path, is now refused with an error naming it.
 - **`localm rm` deletes a model folder that holds read-only files.** A model folder that is a git
   clone (its object files are read-only on Windows) was left half deleted and still registered;
   it is now removed completely.

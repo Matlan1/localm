@@ -471,6 +471,35 @@ def resolve_embedding_model_path(*, allow_download: Optional[bool] = None,
     return result
 
 
+def configured_model_path() -> Optional[str]:
+    """The GGUF file the configured ``embedding_model`` names on disk, found in
+    the same order as :func:`resolve_embedding_model_path` (a path, a registered
+    model name, a known key already downloaded), or None. Records no outcome in
+    ``last_error()``, downloads nothing and takes no lock."""
+    spec = _current_spec()
+    if not spec or _nonlocal_spec_reason(spec):
+        return None
+    p = Path(spec).expanduser()
+    if p.is_file():
+        return str(p)
+    try:
+        from localm.model_manager.registry import get_model_info
+        from localm.pathsafe import is_unc_or_device_path
+        info = get_model_info(spec)
+        if info:
+            path = info[0] if isinstance(info, tuple) else info
+            if path and not is_unc_or_device_path(str(path)) and Path(path).is_file():
+                return str(path)
+    except Exception:
+        logger.debug("configured_model_path: registry lookup failed", exc_info=True)
+    known = KNOWN_EMBEDDING_MODELS.get(spec)
+    if known:
+        dest = _embeddings_dir() / known[1]
+        if dest.is_file():
+            return str(dest)
+    return None
+
+
 def _download_progress_class(label: str, on_progress, every: float = 2.0):
     """A ``tqdm_class`` for ``hf_hub_download`` that draws no bar and passes
     ``on_progress`` a line naming *label* and the bytes received, at most

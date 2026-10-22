@@ -51,17 +51,27 @@ def test_a_registered_folder_embedder_is_served_by_its_own_engine(app_client, mo
     assert r.json()["model"] == "bge-st"
 
 
-def test_a_registered_gguf_embedder_still_uses_the_dedicated_embedder(app_client, monkeypatch, tmp_path):
+def test_a_registered_gguf_embedder_is_embedded_with_its_own_file(app_client, monkeypatch, tmp_path):
     gguf = tmp_path / "e.gguf"
     gguf.write_bytes(b"x")
     registry = {"emb": {"path": str(gguf), "source": "local", "model_type": "embedding"}}
     monkeypatch.setattr("localm.config.load_registry", lambda: registry)
     monkeypatch.setattr("localm.config.load_config", lambda: {"embedding_model": "other"})
+
+    async def folder_engine_must_not_run(name, load=True):
+        raise AssertionError("a GGUF embedder was served as a folder model")
+
+    monkeypatch.setattr(hs, "get_engine", folder_engine_must_not_run)
+    configured = []
     monkeypatch.setattr("localm.inference.embedder.embed_texts",
-                        lambda texts: [[0.5, 0.25] for _ in texts])
+                        lambda texts: configured.append(texts) or [[9.0] for _ in texts])
+    used = []
+    monkeypatch.setattr("localm.inference.reranker.embed",
+                        lambda path, texts: used.append(path) or [[0.5, 0.25] for _ in texts])
     r = app_client.post("/v1/embeddings", json={"model": "emb", "input": "hello"})
     assert r.status_code == 200, r.text
     assert r.json()["data"][0]["embedding"] == [0.5, 0.25]
+    assert used == [str(gguf.resolve())] and configured == []
 
 
 def test_a_folder_named_like_the_pinned_embedder_does_not_shadow_it(app_client, monkeypatch, tmp_path):
@@ -117,11 +127,13 @@ def test_an_embedder_entry_with_no_path_is_not_read_as_the_current_folder(
         raise AssertionError("an entry with no path was served as a folder model")
 
     monkeypatch.setattr(hs, "get_engine", folder_engine_must_not_run)
+    configured = []
     monkeypatch.setattr("localm.inference.embedder.embed_texts",
-                        lambda texts: [[0.5, 0.25] for _ in texts])
+                        lambda texts: configured.append(texts) or [[0.5, 0.25] for _ in texts])
     r = app_client.post("/v1/embeddings", json={"model": "emb", "input": "hello"})
-    assert r.status_code == 200, r.text
-    assert r.json()["data"][0]["embedding"] == [0.5, 0.25]
+    assert r.status_code == 422, r.text
+    assert "'emb'" in r.json()["detail"] and "no file path" in r.json()["detail"]
+    assert configured == []
 
 
 def test_the_folder_check_runs_off_the_event_loop(app_client, monkeypatch, tmp_path):
