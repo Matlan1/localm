@@ -319,11 +319,13 @@ def _resumable_download_to_tmp_and_move(
     The temp file is ``<stem>.<id>.incomplete`` beside *incomplete_path* with
     a ``.owner`` sidecar naming this process. A partial whose owner is not
     proven gone (live, unknown, or no sidecar) is never read, renamed or
-    deleted. A resume always transfers over HTTP with a Range request; Xet is
-    used only for a transfer that starts from byte 0. On a failed transfer the
-    temp file and its sidecar are kept for the next attempt, and a failure
-    before the temp file exists removes the sidecar; a failed size check
-    deletes both. See test_xet_partial_is_resumed_over_http_range.
+    deleted. Every transfer goes over HTTP, a resume with a Range request, so
+    the temp file holds every byte received when the transfer stops; a file
+    stored with Xet is fetched over HTTP too and *xet_file_data* is unused. See
+    test_a_stopped_first_download_of_a_xet_file_keeps_the_bytes_received. On
+    a failed transfer the temp file and its sidecar are kept for the next
+    attempt, and a failure before the temp file exists removes the sidecar; a
+    failed size check deletes both.
     """
     import huggingface_hub.file_download as fd
     import uuid
@@ -349,41 +351,25 @@ def _resumable_download_to_tmp_and_move(
             fd._check_disk_space(needed, tmp_path.parent)
             fd._check_disk_space(needed, destination_path.parent)
 
-        if resume_size == 0 and xet_file_data is not None and fd.is_xet_available():
-            fd.xet_get(
-                incomplete_path=tmp_path,
-                xet_file_data=xet_file_data,
-                headers=headers,
-                expected_size=expected_size,
-                displayed_filename=filename,
-                tqdm_class=tqdm_class,
-            )
-        else:
-            if (resume_size == 0 and xet_file_data is not None
-                    and not getattr(fd.constants, "HF_HUB_DISABLE_XET", False)):
-                logger.warning(
-                    "Xet Storage is enabled for this repo, but the 'hf_xet' package "
-                    "is not installed. Falling back to regular HTTP download."
+        mode = "r+b" if resume_size > 0 else "wb"
+        try:
+            with tmp_path.open(mode) as f:
+                if resume_size > 0:
+                    f.seek(resume_size)
+                fd.http_get(
+                    url_to_download,
+                    f,
+                    resume_size=resume_size,
+                    headers=headers,
+                    expected_size=expected_size,
+                    displayed_filename=filename,
+                    tqdm_class=tqdm_class,
                 )
-            mode = "r+b" if resume_size > 0 else "wb"
-            try:
-                with tmp_path.open(mode) as f:
-                    if resume_size > 0:
-                        f.seek(resume_size)
-                    fd.http_get(
-                        url_to_download,
-                        f,
-                        resume_size=resume_size,
-                        headers=headers,
-                        expected_size=expected_size,
-                        displayed_filename=filename,
-                        tqdm_class=tqdm_class,
-                    )
-            except OSError as e:
-                if "Consistency check failed" in str(e):
-                    _unlink_quiet(tmp_path)
-                    _unlink_quiet(_partial_owner_path(tmp_path))
-                raise
+        except OSError as e:
+            if "Consistency check failed" in str(e):
+                _unlink_quiet(tmp_path)
+                _unlink_quiet(_partial_owner_path(tmp_path))
+            raise
 
         fd._chmod_and_move(tmp_path, destination_path)
         _unlink_quiet(_partial_owner_path(tmp_path))
@@ -799,6 +785,34 @@ class _ProgressRun:
             _emit_progress(final, self._total, name=fn, index=fi, count=fc)
 
 
+_STOPPED: "tuple[int, int] | None" = None
+
+
+def stopped_download() -> "tuple[int, int] | None":
+    """``(bytes saved, total bytes)`` of the download in this process that a
+    KeyboardInterrupt stopped most recently, or None when no download was
+    stopped or its saved bytes could not be measured. The total is 0 when it
+    is unknown. The saved bytes are what a rerun of the same pull reuses."""
+    return _STOPPED
+
+
+@contextlib.contextmanager
+def _record_stop(measure, total_size: int):
+    """On a KeyboardInterrupt in the body, record ``(measure(), total_size)``
+    for :func:`stopped_download` and re-raise."""
+    global _STOPPED
+    _STOPPED = None
+    try:
+        yield
+    except KeyboardInterrupt:
+        try:
+            _STOPPED = (int(measure()), int(total_size or 0))
+        except Exception as e:
+            logger.warning("could not measure the saved part of the stopped "
+                           "download: %s", e)
+        raise
+
+
 @contextlib.contextmanager
 def _download_progress(target_parts: list[Path], total_size: int, *,
                        base_dir: "Path | None" = None,
@@ -820,10 +834,6 @@ def _download_progress(target_parts: list[Path], total_size: int, *,
     event reports the measured partial instead of 100%.
     """
     outcome = _ProgressOutcome()
-    if not _progress_wanted():
-        yield outcome
-        return
-
     cache_root = (Path(base_dir) if base_dir is not None else _mm.MODELS_DIR) / ".cache"
     prefixes = _incomplete_prefixes(Path(base_dir), rel_parts, etags) \
         if base_dir is not None and rel_parts else None
@@ -870,13 +880,19 @@ def _download_progress(target_parts: list[Path], total_size: int, *,
         # which would pin an indeterminate download's byte count at zero.
         return min(total_now, total_size) if total_size else total_now
 
+    if not _progress_wanted():
+        with _record_stop(_downloaded_bytes, total_size):
+            yield outcome
+        return
+
     label = target_parts[0].name if target_parts else ""
     if len(target_parts) > 1:
         label += f" (+{len(target_parts) - 1} more)"
     run = _ProgressRun(_downloaded_bytes, total_size, parts=target_parts, label=label)
     run.start()
     try:
-        yield outcome
+        with _record_stop(_downloaded_bytes, total_size):
+            yield outcome
     finally:
         run.finish(outcome.succeeded)
 
@@ -892,18 +908,21 @@ def _snapshot_progress(disk_bytes_fn, total_size: int, label: str = ""):
     event reports the measured partial instead of 100%.
     """
     outcome = _ProgressOutcome()
-    if not _progress_wanted():
-        yield outcome
-        return
 
     def _measured() -> int:
         dl = disk_bytes_fn()
         return min(dl, total_size) if total_size else dl
 
+    if not _progress_wanted():
+        with _record_stop(_measured, total_size):
+            yield outcome
+        return
+
     run = _ProgressRun(_measured, total_size, label=label)
     run.start()
     try:
-        yield outcome
+        with _record_stop(_measured, total_size):
+            yield outcome
     finally:
         run.finish(outcome.succeeded)
 
@@ -4040,22 +4059,23 @@ def _pull_url_locked(
             except requests.RequestException as e:
                 stream_error.append(e)
 
+    def _part_bytes() -> int:
+        try:
+            return part_file.stat().st_size
+        except OSError:
+            return 0
+
     if os.environ.get("LOCALM_PROGRESS_JSON") == "1":
         # GUI mode: stream JSON progress polled from the .part file on disk,
         # the same mechanism the HuggingFace path uses (_download_progress).
         # No Rich bar here: there is no terminal, and its ANSI would clutter the
         # captured stdout the GUI parses.
-        def _part_bytes() -> int:
-            try:
-                return part_file.stat().st_size
-            except OSError:
-                return 0
         with _snapshot_progress(_part_bytes, total_display or 0, label=filename) as _prog:
             _write_chunks()
             if not stream_error:
                 _prog.ok()
     else:
-        with Progress(
+        with _record_stop(_part_bytes, total_display or 0), Progress(
             TextColumn("[bold blue]{task.description}"),
             BarColumn(),
             DownloadColumn(),
