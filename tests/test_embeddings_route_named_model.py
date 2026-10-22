@@ -76,9 +76,18 @@ def worker(monkeypatch, home):
     FakeEmbedWorker.instances = []
     FakeEmbedWorker.dims = {"mini.gguf": 256}
     swaps = []
+    from localm.inference.engine import _LOAD_LOCK
+
+    def swap(path, ngl):
+        swaps.append((path, ngl))
+        held = [name for name, lock in (("engine _LOAD_LOCK", _LOAD_LOCK._lock),
+                                        ("reranker _LOCK", rr._LOCK),
+                                        ("embedder _LOCK", emb._LOCK))
+                if lock._is_owned()]
+        FakeEmbedWorker.held_at_swap.append(held)
+    FakeEmbedWorker.held_at_swap = []
     monkeypatch.setattr(emb, "IsolatedEmbedder", FakeEmbedWorker)
-    monkeypatch.setattr(emb, "_maybe_swap_for_embedder",
-                        lambda path, ngl: swaps.append((path, ngl)))
+    monkeypatch.setattr(emb, "_maybe_swap_for_embedder", swap)
     monkeypatch.setattr(emb, "_choose_embedder_gpu_layers", lambda path, cfg: (99, None))
     FakeEmbedWorker.swaps = swaps
     return FakeEmbedWorker
@@ -167,15 +176,33 @@ class TestARegisteredEmbedderIsAnsweredByItself:
         assert embed(client, "nomic").status_code == 200
         assert len(worker.instances) == 1
 
-    def test_the_load_runs_the_vram_swap_check_and_the_configured_pooling(self, client, worker, configured, tmp_path, home):
+    def test_the_load_runs_the_vram_swap_check_holding_no_lock(self, client, worker, configured, tmp_path):
         path = register(tmp_path, "nomic")
+        assert embed(client, "nomic").status_code == 200
+        assert worker.swaps == [(str(path.resolve()), 99)]
+        assert worker.held_at_swap == [[]]
+
+    def test_the_swap_check_takes_an_explicit_gpu_layer_choice(self, client, worker, configured, tmp_path, home):
+        path = register(tmp_path, "nomic")
+        (home / "config.json").write_text(json.dumps(
+            {"embedding_model": "bge-small-en-v1.5", "embedding_gpu_layers": 0}))
+        assert embed(client, "nomic").status_code == 200
+        assert worker.swaps == [(str(path.resolve()), 0)]
+
+    def test_the_placement_choice_reaches_the_worker(self, client, worker, configured, tmp_path, monkeypatch):
+        register(tmp_path, "nomic")
+        monkeypatch.setattr(emb, "_choose_embedder_gpu_layers", lambda path, cfg: (7, "tight VRAM"))
+        assert embed(client, "nomic").status_code == 200
+        kw = worker.instances[0].kw
+        assert kw["n_gpu_layers"] == 7 and kw["gpu_fallback_reason"] == "tight VRAM"
+
+    def test_the_model_pools_as_it_declares_whatever_embedding_pooling_says(self, client, worker, configured, tmp_path, home):
+        register(tmp_path, "nomic")
         cfg = json.loads((home / "config.json").read_text())
         cfg["embedding_pooling"] = "cls"
         (home / "config.json").write_text(json.dumps(cfg))
         assert embed(client, "nomic").status_code == 200
-        assert worker.swaps == [(str(path.resolve()), 99)]
-        assert worker.instances[0].kw["pooling_type"] == emb._POOLING_CLS
-        assert worker.instances[0].kw["n_gpu_layers"] == 99
+        assert worker.instances[0].kw["pooling_type"] == emb.POOLING_AUTO
 
     def test_a_model_that_loads_as_a_reranker_is_refused(self, client, worker, configured, tmp_path, monkeypatch):
         register(tmp_path, "sneaky")
@@ -192,15 +219,17 @@ class TestARegisteredEmbedderIsAnsweredByItself:
         assert not rr.is_loaded()
         assert configured == []
 
-    def test_a_load_failure_is_a_503_naming_the_cause(self, client, worker, configured, tmp_path, monkeypatch):
-        register(tmp_path, "broken")
+    def test_a_load_failure_is_a_503_naming_the_cause(self, client, worker, configured, home, monkeypatch):
+        register(home / "models", "broken")
 
         def boom(path, **kw):
-            raise RuntimeError("native load failed")
+            raise RuntimeError(f"native load failed for {path}")
         monkeypatch.setattr(emb, "IsolatedEmbedder", boom)
         r = embed(client, "broken")
         assert r.status_code == 503, r.text
-        assert "native load failed" in r.json()["detail"]
+        detail = r.json()["detail"]
+        assert "native load failed" in detail and "broken.gguf" in detail
+        assert str(home) not in detail
         assert configured == []
 
 
@@ -333,6 +362,91 @@ class TestLifecycle:
         assert embed(client, "nomic").status_code == 200
         assert rr.release_for_exit() is True
         assert worker.instances[0]._runner.grace == [5.0]
+
+    def test_exit_release_does_not_wait_for_an_embed_in_flight(self, client, worker, configured, tmp_path):
+        register(tmp_path, "nomic")
+        released = []
+        assert embed(client, "nomic").status_code == 200
+        w = worker.instances[0]
+        w.during_embed = lambda _w: released.append(rr.release_for_exit())
+        assert embed(client, "nomic").status_code == 200
+        assert released == [True] and w._runner.grace == [0]
+
+    def test_a_request_whose_model_is_replaced_before_it_is_counted_retries(self, home, worker, tmp_path, monkeypatch):
+        path = register(tmp_path, "nomic")
+        real = rr._get_resident
+        calls = []
+
+        def replaced_once(p, purpose):
+            model = real(p, purpose)
+            calls.append(model)
+            if len(calls) == 1:
+                rr.reset_reranker()
+            return model
+        monkeypatch.setattr(rr, "_get_resident", replaced_once)
+        vecs = rr.embed(str(path.resolve()), ["a"])
+        assert len(vecs[0]) == 768
+        assert len(calls) == 2 and calls[0].closed and not calls[1].closed
+
+    def test_a_request_replaced_twice_is_refused(self, home, worker, tmp_path, monkeypatch):
+        path = register(tmp_path, "nomic")
+        real = rr._get_resident
+
+        def always_replaced(p, purpose):
+            model = real(p, purpose)
+            rr.reset_reranker()
+            return model
+        monkeypatch.setattr(rr, "_get_resident", always_replaced)
+        with pytest.raises(rr.RerankerUnavailableError, match="was replaced"):
+            rr.embed(str(path.resolve()), ["a"])
+
+    def test_a_rerank_waits_for_a_named_embed_in_flight_then_replaces_it(self, home, worker, tmp_path, monkeypatch):
+        import threading
+        from tests._gguf_builder import reranker_bytes
+        emb_path = register(tmp_path, "nomic")
+        rer_path = tmp_path / "rer.gguf"
+        rer_path.write_bytes(reranker_bytes("bert"))
+
+        class Worker(FakeEmbedWorker):
+            def rerank(self, pairs):
+                return [{"scores": [1.0], "tokens": 1, "truncated": False} for _ in pairs]
+        monkeypatch.setattr(emb, "IsolatedEmbedder", Worker)
+        in_embed, finish = threading.Event(), threading.Event()
+        named = rr.get_embedding_model(str(emb_path.resolve()))
+
+        def slow(_w):
+            in_embed.set()
+            assert finish.wait(10)
+        named.during_embed = slow
+        out = {}
+        t = threading.Thread(target=lambda: out.setdefault(
+            "vecs", rr.embed(str(emb_path.resolve()), ["a"])))
+        t.start()
+        assert in_embed.wait(10)
+        r = threading.Thread(target=lambda: out.setdefault(
+            "rerank", rr.rerank(str(rer_path), "q", ["d"])))
+        r.start()
+        r.join(0.5)
+        assert r.is_alive() and not named.closed
+        finish.set()
+        t.join(10)
+        r.join(10)
+        assert len(out["vecs"][0]) == 768
+        assert out["rerank"].scored[0]["scores"] == [1.0]
+        assert named.closed and rr.reranker_info()["kind"] == "reranker model"
+
+    def test_a_wait_for_the_other_model_is_bounded(self, home, worker, tmp_path, monkeypatch):
+        from tests._gguf_builder import reranker_bytes
+        emb_path = register(tmp_path, "nomic")
+        rer_path = tmp_path / "rer.gguf"
+        rer_path.write_bytes(reranker_bytes("bert"))
+        monkeypatch.setattr(rr, "_REPLACE_WAIT_S", 0.2)
+        named = rr.get_embedding_model(str(emb_path.resolve()))
+        with rr._LOCK:
+            rr._RESIDENT_REQUESTS += 1
+        with pytest.raises(rr.RerankerUnavailableError, match="still scoring"):
+            rr.get_reranker(str(rer_path))
+        assert not named.closed
 
     def test_a_busy_named_embedder_is_reported_by_kind_by_unload_all(self, client, worker, configured, tmp_path):
         from localm.inference import http_server as hs

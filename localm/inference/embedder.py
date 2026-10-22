@@ -475,7 +475,7 @@ def configured_model_path() -> Optional[str]:
     """The GGUF file the configured ``embedding_model`` names on disk, found in
     the same order as :func:`resolve_embedding_model_path` (a path, a registered
     model name, a known key already downloaded), or None. Records no outcome in
-    ``last_error()``, downloads nothing and takes no lock."""
+    ``last_error()``, downloads nothing and takes no embedder lock."""
     spec = _current_spec()
     if not spec or _nonlocal_spec_reason(spec):
         return None

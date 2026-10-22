@@ -53,6 +53,12 @@ _EMBED = "embed"
 # Requests counted on _RERANKER by _pin and not yet released by _unpin. Read and
 # written with _LOCK held; zeroed whenever _RERANKER changes.
 _RESIDENT_REQUESTS = 0
+# Notified, with _LOCK held, when _RESIDENT_REQUESTS drops to zero or _RERANKER
+# changes.
+_IDLE = threading.Condition(_LOCK)
+# How long a request for a model other than the resident one waits for the
+# resident one's in-flight requests to finish before it is refused.
+_REPLACE_WAIT_S = 120.0
 # (resolved path, mtime_ns, size) -> (why that file failed to load, when). A file
 # that failed is refused again without respawning a worker for _LOAD_RETRY_AFTER_S
 # seconds, until it changes, or until reset_reranker() runs.
@@ -329,6 +335,13 @@ class HFReranker:
                     raise RerankerUnavailableError(reason) from e
                 self._runner = self._backend._runner
 
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        """Refuse: a cross-encoder scores query and document pairs and cannot
+        produce embeddings."""
+        raise RuntimeError(
+            f"{Path(self.model_path).name} is a reranker: it scores query and "
+            "document pairs and cannot produce embeddings")
+
     def _is_resident(self) -> bool:
         """Whether this reranker is still the module's resident one."""
         with _LOCK:
@@ -354,6 +367,7 @@ def _release_failed(failed, reason: str) -> None:
             _RERANKER = None
             _RERANKER_KEY = None
             _RESIDENT_REQUESTS = 0
+            _IDLE.notify_all()
         _LOAD_FAILED[_file_key(failed.model_path)] = (reason, time.monotonic())
 
 
@@ -369,18 +383,20 @@ def get_reranker(path: str):
 
 def get_embedding_model(path: str):
     """The resident embedding model for the GGUF file at *path*, loading it first
-    (and releasing a different resident model). Pooling follows the
-    ``embedding_pooling`` setting, as for the configured embedder. Raises
+    (and releasing a different resident model). Pooling is the one the model
+    declares (``embedder.POOLING_AUTO``); the ``embedding_pooling`` setting
+    applies to the configured embedder only. Raises
     :class:`RerankerUnavailableError` when the load fails (a failed file is not
     retried for a minute unless it changes), the model loads as a reranker, or a
-    different resident model is still busy."""
+    different resident model is still busy after ``_REPLACE_WAIT_S``."""
     return _get_resident(path, _EMBED)
 
 
 def _get_resident(path: str, purpose: str):
     """The resident model for *path* loaded for *purpose* (``_RERANK`` or
-    ``_EMBED``), loading it first. See :func:`get_reranker` and
-    :func:`get_embedding_model`."""
+    ``_EMBED``), loading it first. A different resident model with requests in
+    flight is waited for, up to ``_REPLACE_WAIT_S`` and holding no lock, before
+    it is replaced. See :func:`get_reranker` and :func:`get_embedding_model`."""
     global _RERANKER, _RERANKER_KEY, _RESIDENT_REQUESTS
     from localm.config import load_config
     from localm.inference import embedder as emb
@@ -393,10 +409,16 @@ def _get_resident(path: str, purpose: str):
         failed = _latched_failure(file_key)
         if failed is not None:
             raise RerankerUnavailableError(failed)
+        deadline = time.monotonic() + _REPLACE_WAIT_S
+        while (_RERANKER is not None and _RERANKER_KEY != key and _RESIDENT_REQUESTS > 0
+               and time.monotonic() < deadline):
+            _IDLE.wait(timeout=max(0.0, deadline - time.monotonic()))
+        if _RERANKER is not None and _RERANKER_KEY == key:
+            return _RERANKER
     hf_device: Optional[str] = None
+    pooling: object = emb.POOLING_AUTO
     if purpose == _EMBED:
         cfg = load_config()
-        pooling = emb.resolve_pooling_setting(cfg.get("embedding_pooling"))
         explicit = emb._explicit_embedder_gpu_layers(cfg)
         emb._maybe_swap_for_embedder(path, explicit if explicit is not None else 99)
         ngl, placement_reason = emb._choose_embedder_gpu_layers(path, cfg)
@@ -432,6 +454,7 @@ def _get_resident(path: str, purpose: str):
                 _RERANKER = None
                 _RERANKER_KEY = None
                 _RESIDENT_REQUESTS = 0
+                _IDLE.notify_all()
                 current.close()
             try:
                 if hf_folder:
@@ -501,6 +524,8 @@ def _unpin(model) -> None:
     with _LOCK:
         if _RERANKER is model:
             _RESIDENT_REQUESTS = max(0, _RESIDENT_REQUESTS - 1)
+            if _RESIDENT_REQUESTS == 0:
+                _IDLE.notify_all()
 
 
 def rerank(path: str, query: str, documents: list[str]) -> RerankOutcome:
@@ -571,6 +596,7 @@ def reset_reranker(*, force: bool = True) -> bool:
         _RERANKER = None
         _RERANKER_KEY = None
         _RESIDENT_REQUESTS = 0
+        _IDLE.notify_all()
         _LOAD_FAILED.clear()
         return current is not None
 
