@@ -46,12 +46,20 @@ class OllamaRoute(APIRoute):
     the body Ollama clients read: a refused credential or scope, a request that
     fails validation (a 400, as in Ollama) and an :class:`OllamaError`. The
     wrapped handler covers everything FastAPI does for the route, dependencies
-    and body validation included."""
+    and body validation included.
+
+    A request with no ``Origin`` header whose body parses as a JSON object is
+    read as JSON whatever its ``Content-Type`` says (``curl -d`` sends
+    ``application/x-www-form-urlencoded``), as Ollama does. A request carrying
+    ``Origin`` (any browser page) keeps FastAPI's strict content-type check, so
+    a cross-origin page cannot send a JSON body without a CORS preflight. A body
+    that is not a JSON object is left to FastAPI unchanged."""
 
     def get_route_handler(self):
         original = super().get_route_handler()
 
         async def handler(request: Request) -> Response:
+            await _read_untyped_json_as_json(request)
             try:
                 return await original(request)
             except P.OllamaError as exc:
@@ -62,6 +70,45 @@ class OllamaRoute(APIRoute):
             except RequestValidationError as exc:
                 return _error(400, validation_text(exc.errors()))
         return handler
+
+
+_BODY_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+_JSON_CONTENT_TYPE = (b"content-type", b"application/json")
+
+
+def _is_json_media_type(value: bytes) -> bool:
+    media = value.split(b";", 1)[0].strip().lower()
+    return media == b"application/json" or (
+        media.startswith(b"application/") and media.endswith(b"+json"))
+
+
+async def _read_untyped_json_as_json(request: Request) -> None:
+    """Relabel *request* as ``application/json`` when it has a body method, no
+    ``Origin`` header, a ``Content-Type`` that is missing or not JSON, and a
+    body that parses as a JSON object. Leaves every other request untouched.
+    Reads (and so caches) the body; never raises for a bad body."""
+    if request.method not in _BODY_METHODS:
+        return
+    headers = request.scope.get("headers") or []
+    content_type = None
+    for name, value in headers:
+        if name == b"origin":
+            return
+        if name == b"content-type":
+            content_type = value
+    if content_type is not None and _is_json_media_type(content_type):
+        return
+    body = await request.body()
+    if not body:
+        return
+    try:
+        parsed = json.loads(body)
+    except (ValueError, RecursionError):
+        return
+    if not isinstance(parsed, dict):
+        return
+    request.scope["headers"] = [
+        *(h for h in headers if h[0] != b"content-type"), _JSON_CONTENT_TYPE]
 
 
 def _error(status: int, message: str,

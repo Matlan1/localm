@@ -5069,6 +5069,7 @@ def create_app(engine: Optional[Engine], *, api_landing: bool = False) -> FastAP
     # 4. Kernel routes and middleware, innermost middleware first.
     if api_landing:
         mounting.add_api_landing(app)
+    transport.add_client_left_answer(app)   # innermost
     diagnostics.add_request_logging(app)     # debug mode only
     diagnostics.add_debug_stacks(app)
     cors_cfg = security.add_cors(app)
