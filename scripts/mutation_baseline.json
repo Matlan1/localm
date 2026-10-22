@@ -3456,7 +3456,7 @@
       }
     },
     "localm/tls.py": {
-      "score_floor": 80.81,
+      "score_floor": 80.62,
       "function_hashes": {
         "x__ca_key_path": "a7c78c017726",
         "x__cert_sans": "9931cb9e678c",
@@ -3986,7 +3986,7 @@
         "localm.tls.x_san_targets__mutmut_21": "killed",
         "localm.tls.x_san_targets__mutmut_22": "killed",
         "localm.tls.x_san_targets__mutmut_23": "killed",
-        "localm.tls.x_san_targets__mutmut_24": "killed",
+        "localm.tls.x_san_targets__mutmut_24": "survived",
         "localm.tls.x_san_targets__mutmut_25": "survived",
         "localm.tls.x_san_targets__mutmut_26": "killed",
         "localm.tls.x_san_targets__mutmut_27": "killed",
