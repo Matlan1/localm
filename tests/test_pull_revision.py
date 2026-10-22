@@ -103,7 +103,8 @@ class _FakeApi:
                 revision if revision in self.state.repo_files else None)
         if sha is None:
             raise self.state.missing_error(revision)
-        files = [SimpleNamespace(rfilename=n, size=len(b), lfs=None, blob_id=None)
+        files = [SimpleNamespace(rfilename=n, size=len(b), lfs=None,
+                                 blob_id=hashlib.sha1(b"blob %d\0" % len(b) + b).hexdigest())
                  for n, b in self.state.repo_files.get(sha, {}).items()]
         return SimpleNamespace(sha=sha, siblings=files)
 
@@ -580,6 +581,36 @@ class TestAnUnfinishedRevisionIsNotMergedWithAnother(_InterruptedAfterTheFirstFi
         assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is True
         assert "Already downloaded" in capsys.readouterr().out
         assert hub.snapshots == []
+        assert mm.load_registry()["q"]["revision"] == "4.0bpw"
+
+    def _copy(self, hub, files):
+        folder = hub.models_dir / "q"
+        for name, data in files.items():
+            (folder / name).parent.mkdir(parents=True, exist_ok=True)
+            (folder / name).write_bytes(data)
+
+    def test_a_copy_with_a_small_file_of_another_revision_is_refused(self, hub, capsys):
+        files = dict(hub.repo_files[COMMIT])
+        files["config.json"] = b"[]"
+        assert len(files["config.json"]) == len(hub.repo_files[COMMIT]["config.json"])
+        self._copy(hub, files)
+        capsys.readouterr()
+        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is False
+        assert "files localm cannot match" in " ".join(capsys.readouterr().out.split())
+        assert hub.snapshots == [] and "q" not in mm.load_registry()
+
+    def test_a_copy_with_a_file_the_revision_does_not_list_is_refused(self, hub, capsys):
+        self._copy(hub, dict(hub.repo_files[COMMIT], **{"chat_template.jinja": b"{{ x }}"}))
+        capsys.readouterr()
+        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is False
+        assert hub.snapshots == [] and "q" not in mm.load_registry()
+
+    def test_a_complete_copy_without_a_config_json_is_registered(self, hub, capsys):
+        hub.repo_files[COMMIT] = {"unet/diffusion.safetensors": BODY, "model_index.json": b"{}"}
+        self._copy(hub, hub.repo_files[COMMIT])
+        (hub.models_dir / "q" / ".cache" / "huggingface").mkdir(parents=True)
+        capsys.readouterr()
+        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is True
         assert mm.load_registry()["q"]["revision"] == "4.0bpw"
 
     def test_a_pull_that_cannot_write_its_marker_downloads_nothing(self, hub, capsys, monkeypatch):
