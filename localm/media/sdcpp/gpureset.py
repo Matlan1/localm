@@ -90,6 +90,8 @@ class Host:
     def tdr_value(self, name: str) -> Optional[int]:
         """The ``GraphicsDrivers`` DWORD *name*, or None when it is not set
         or cannot be read."""
+        if sys.platform != "win32":
+            return None
         try:
             import winreg
             with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
@@ -100,7 +102,8 @@ class Host:
         return int(value) if kind == 4 else None
 
     def adapters(self) -> list[Adapter]:
-        """Every Windows graphics adapter. Raises OSError when the query fails."""
+        """Every Windows graphics adapter. Raises OSError when the query fails
+        or this is not Windows."""
         return _windows_adapters()
 
     def read(self, path: str) -> Optional[str]:
@@ -136,6 +139,8 @@ _HOST = Host()
 
 
 def _windows_adapters() -> list[Adapter]:
+    if sys.platform != "win32":
+        raise OSError("not Windows")
     import ctypes
     from ctypes import wintypes
 
