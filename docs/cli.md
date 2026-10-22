@@ -279,8 +279,10 @@ signal is left as `unknown` rather than guessed. The types are `llm`, `mmproj`, 
 `textual-inversion`, and `unknown`.
 
 An `unknown` model still runs when you name it explicitly (`localm run NAME`, or an
-API request naming it), but is never auto-picked as the default chat model, so a
-diffusion checkpoint or text encoder cannot get loaded as if it were a chat model.
+API request naming it), but is never auto-picked as the default chat model. Neither
+is an `embedding`, `tts` or component model (`mmproj`, `diffusion-unet`, `text-encoder`,
+`vae`, `lora`, `upscaler`, `controlnet`, `textual-inversion`), so a diffusion checkpoint
+or a text encoder cannot get loaded as if it were a chat model.
 Correct a misdetected or `unknown` type at any time:
 
 ```bash

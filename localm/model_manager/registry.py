@@ -87,10 +87,12 @@ def is_auto_chat_eligible(entry: dict) -> bool:
     embedding-only registry a reachable first-run state. type='tts' (a
     text-to-speech model) runs through the speech path, never the chat path, and
     is excluded for the same reason. A GGUF LoRA adapter (see
-    :func:`is_gguf_adapter_entry`) cannot load on its own and is excluded too.
+    :func:`is_gguf_adapter_entry`) cannot load on its own and is excluded too, and
+    so is every other type in ``NON_CHAT_TYPES`` (mmproj, diffusion-unet,
+    text-encoder, vae, lora, upscaler, controlnet, textual-inversion).
     """
     return (isinstance(entry, dict)
-            and entry.get("model_type", "llm") not in ("unknown", "embedding", "tts")
+            and entry.get("model_type", "llm") not in NON_CHAT_TYPES | {"unknown", "embedding"}
             and not is_gguf_adapter_entry(entry))
 
 
@@ -134,8 +136,7 @@ def is_llm(entry: dict) -> bool:
     This is the same rule the GUI Models page uses (``isLlm`` in models.js); use it
     wherever a UI must offer ONLY chat-launchable models, e.g. the desktop
     launcher's model selector. Distinct from :func:`is_auto_chat_eligible`, which
-    only screens out 'unknown' (for auto-picking a default) and would still admit a
-    LoRA / VAE / other component model.
+    also admits a model of a type outside ``MODEL_TYPES`` (for auto-picking a default).
     """
     return isinstance(entry, dict) and entry.get("model_type", "llm") == "llm"
 

@@ -57,7 +57,6 @@ def test_is_llm_predicate():
     assert is_llm({"model_type": "vae"}) is False
     assert is_llm({"model_type": "text-encoder"}) is False
     assert is_llm("not a dict") is False
-    # is_llm is STRICTER than is_auto_chat_eligible: a LoRA is auto-chat-eligible
-    # (it is not 'unknown') yet is NOT an LLM, so the launcher must still hide it.
-    assert is_auto_chat_eligible({"model_type": "lora"}) is True
+    # Neither predicate admits a component model.
+    assert is_auto_chat_eligible({"model_type": "lora"}) is False
     assert is_llm({"model_type": "lora"}) is False
