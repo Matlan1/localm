@@ -57,3 +57,37 @@ def test_words_that_merely_contain_asr_are_not_transcription_models():
     assert not is_transcription_model("pasrat", {"path": "/m/x.gguf"})
     assert is_transcription_model("Qwen3-ASR", {"path": "/m/x.gguf"})
     assert auto_chat_candidates({"a": {"path": "/m/asr.gguf"}, "b": {"path": "/m/b.gguf"}}) == ["b", "a"]
+
+
+def test_the_music_components_setup_music_registers_are_never_the_startup_chat_model(tmp_path):
+    entries = {
+        "Qwen3-Embedding-0.6B-Q8_0": ("Qwen3-Embedding-0.6B-Q8_0.gguf", "text-encoder"),
+        "acestep-v15-turbo-Q4_K_M": ("acestep-v15-turbo-Q4_K_M.gguf", "diffusion-unet"),
+        "vae-BF16": ("vae-BF16.gguf", "vae"),
+        "acestep-5Hz-lm-0.6B-Q8_0": ("acestep-5Hz-lm-0.6B-Q8_0.gguf", "unknown"),
+        "embedding-bge-small-en-v1.5": ("bge-small-en-v1.5-q8_0.gguf", "embedding"),
+        "qcoder": ("Qwen2.5-Coder-7B-Instruct-Q6_K.gguf", "llm"),
+    }
+    registry = {name: {"model_type": kind, "path": _write_model(tmp_path, filename)}
+                for name, (filename, kind) in entries.items()}
+    save_registry(registry)
+    _registry, model, model_less = _select_startup_model(
+        Console(quiet=True), None, no_model=False, pull_spec=None, api_mode=True)
+    assert (model, model_less) == ("qcoder", False)
+
+
+def test_a_registry_of_only_components_starts_model_less(tmp_path):
+    registry = {"Qwen3-Embedding-0.6B-Q8_0": {
+        "model_type": "text-encoder", "path": _write_model(tmp_path, "te.gguf")}}
+    save_registry(registry)
+    _registry, model, model_less = _select_startup_model(
+        Console(quiet=True), None, no_model=False, pull_spec=None, api_mode=True)
+    assert (model, model_less) == (None, True)
+
+
+def test_no_component_type_is_auto_chat_eligible():
+    from localm.model_manager import is_auto_chat_eligible
+    from localm.model_manager.registry import NON_CHAT_TYPES
+    for kind in sorted(NON_CHAT_TYPES):
+        assert is_auto_chat_eligible({"model_type": kind, "path": "/m/x.safetensors"}) is False, kind
+    assert is_auto_chat_eligible({"model_type": "llm", "path": "/m/x.gguf"}) is True

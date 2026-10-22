@@ -232,10 +232,10 @@ class TestHeaderClassification:
         assert mm.is_gguf_adapter_entry({"model_type": "lora"}) is False
         assert mm.is_gguf_adapter_entry("not a dict") is False
 
-    def test_a_comfyui_lora_stays_auto_chat_eligible_as_before(self):
-        assert mm.is_auto_chat_eligible({"model_type": "lora"}) is True
+    def test_a_comfyui_lora_is_not_auto_chat_eligible(self):
+        assert mm.is_auto_chat_eligible({"model_type": "lora"}) is False
         assert mm.is_auto_chat_eligible(
-            {"model_type": "lora", "path": "/x/a.safetensors"}) is True
+            {"model_type": "lora", "path": "/x/a.safetensors"}) is False
 
     def test_a_gguf_adapter_is_not_offered_as_an_image_lora(self):
         from localm.plugins.media_roles import registry_models_of_type
