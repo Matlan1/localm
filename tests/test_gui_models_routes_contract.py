@@ -388,6 +388,17 @@ class TestPullDiscard:
             r = c.post("/api/models/pull/discard", json={"spec": "owner/repo:m.gguf"})
         assert r.status_code == 409
 
+    def test_it_reports_a_lock_that_cannot_be_taken_as_500(self, harness, monkeypatch):
+        from localm.model_manager.pull import PullLockUnavailable
+
+        def denied(spec, name=None):
+            raise PullLockUnavailable("could not take the download lock for 'q': denied")
+
+        monkeypatch.setattr("localm.model_manager.pull.discard_partial_download", denied)
+        with TestClient(harness.app) as c:
+            r = c.post("/api/models/pull/discard", json={"spec": "owner/repo"})
+        assert r.status_code == 500 and "could not take the download lock" in r.json()["detail"]
+
     @pytest.mark.parametrize("spec", ["", "--", "Z:/models/x.gguf", "~user/x.gguf", "../x.gguf"])
     def test_it_takes_remote_specs_only(self, harness, monkeypatch, spec):
         monkeypatch.setattr("localm.model_manager.pull.discard_partial_download",

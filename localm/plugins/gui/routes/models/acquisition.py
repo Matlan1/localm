@@ -165,7 +165,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                 409, f"{spec} is still downloading - stop it before deleting "
                      "its partial data.")
         from localm.model_manager.pull import (
-            PullInFlight, discard_partial_download, partial_download_kept,
+            PullInFlight, PullLockUnavailable, discard_partial_download,
+            partial_download_kept,
         )
 
         def _discard() -> int:
@@ -173,6 +174,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
 
         try:
             removed = await run_in_threadpool_bounded(_discard, timeout=60.0)
+        except PullLockUnavailable as e:
+            raise HTTPException(500, str(e)) from e
         except PullInFlight as e:
             raise HTTPException(409, str(e)) from e
         except ThreadCallTimeout as e:
