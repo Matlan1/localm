@@ -143,6 +143,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
   next request fits in it.
 
 ### Fixed
+- **Two pulls of one repo into the same folder no longer mix their files.** A full-repo `localm pull` now holds a lock on its destination folder while it downloads, so a second pull into that folder (another revision with the same `-n` name, or the same pull started twice) is refused straight away with "a download into the folder ... is already running" instead of downloading on top of the first. The lock is released when the pull ends or its process dies. Discarding the partial data of a full-repo pull that is still running is refused the same way.
 - **Compiled PyTorch extensions stay in the data folder.** PyTorch keeps the C++/CUDA extensions
   it builds on first import in the user's cache folder (`~/.cache/torch_extensions` on Linux),
   outside the data folder, so "delete saved data" never removed them. They now go to
