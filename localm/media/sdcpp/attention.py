@@ -4,7 +4,9 @@ self-attention over every video token, which the runtime runs as ONE flash
 attention op. ``video_attention`` gives a loaded model's attention shape,
 ``dispatch_seconds`` the time that op takes on a device of measured
 throughput (``_binding.attention_rate``), and ``max_frames`` the longest clip
-whose op stays within ``SAFE_DISPATCH_SECONDS``."""
+whose op stays within a time budget (``gpureset.ResetLimit.safe_seconds``,
+``SAFE_DISPATCH_SECONDS`` when not given). ``limit_sentence`` and
+``runtime_hint`` word a refusal."""
 
 from __future__ import annotations
 
@@ -12,11 +14,33 @@ import math
 from dataclasses import dataclass
 from typing import Optional
 
+from . import gpureset
 from ._binding import attention_flops
 
-SAFE_DISPATCH_SECONDS = 1.0
-DRIVER_RESET_SECONDS = 2
+SAFE_DISPATCH_SECONDS = gpureset.ASSUMED_RESET_SECONDS * gpureset.SAFE_FRACTION
 TEMPORAL_COMPRESSION = 4
+
+
+def compute_device_names(info: dict) -> list:
+    """The names of the non-CPU devices in an sd.cpp load *info*'s
+    ``compute_devices``."""
+    return [str(d.get("name")) for d in info.get("compute_devices") or ()
+            if d.get("name") and str(d.get("type") or "").lower() != "cpu"]
+
+
+def limit_sentence(limit: gpureset.ResetLimit) -> str:
+    """*limit*'s reason and the longest single job localm runs under it, as one
+    sentence ending in a period."""
+    return f"{limit.reason}, so localm keeps each job under {limit.safe_seconds:g} s."
+
+
+def runtime_hint(settings: str, runtimes: list) -> str:
+    """``", or pick the ROCm runtime in Settings > Images"`` for the runtime
+    names in *runtimes* and the Settings page *settings*; empty without any."""
+    if not runtimes:
+        return ""
+    names = " or ".join(runtimes)
+    return f", or pick the {names} runtime in Settings > {settings}"
 
 _WAN_SIZES = (("-1.3B", 1536), ("-5B", 3072), ("-14B", 5120))
 _WAN_LARGEST_DIM = 5120

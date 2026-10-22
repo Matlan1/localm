@@ -25,7 +25,7 @@ from typing import Callable, Optional
 from localm.media.image_params import png_text_entries
 from localm.media.sdcpp import attention
 from localm.media.sdcpp import budget as sd_budget
-from localm.media.sdcpp import families, pairing, sampling
+from localm.media.sdcpp import families, gpureset, pairing, sampling
 from localm.media.sdcpp import runtime as sd_runtime
 from localm.media.sdcpp import shared, vaetile
 from localm.media.sdcpp.logrelay import RecoveredWarnings
@@ -594,20 +594,26 @@ def _decode_tile(info: dict, width: int, height: int, hires: Optional[dict],
 
 def _vulkan_attention_mode(runner, rt, info: dict, models: dict, width: int, height: int,
                            hires: Optional[dict], ref_count: int,
-                           cfg_scale: Optional[float] = None) -> tuple[Optional[str], Optional[str]]:
+                           cfg_scale: Optional[float] = None,
+                           say: Optional[Callable[[str], None]] = None,
+                           ) -> tuple[Optional[str], Optional[str]]:
     """How the diffusion model's attention runs for a *width* x *height* job
     (or its hires target) with *ref_count* reference images at CFG
     *cfg_scale* on the Vulkan runtime: ``(mode, refusal)``. A CFG of 1 runs
     one image per graph. *mode* is None to keep the loaded model, or
-    ``"on"`` / ``"off"`` to reload it with flash attention set that way;
-    *refusal* is the reason to refuse the job. A model whose flash attention
-    state is not known counts as running without it. Without flash attention the
-    score matrix (``attention.ImageAttention.score_bytes``) must fit the
-    device's buffer limit (``vaetile.device_limit``); with it, one attention
-    op must take at most ``attention.SAFE_DISPATCH_SECONDS`` at the worker's
-    measured ``attention_rate``. A rate that could not be measured counts as
-    too slow. Other runtimes, and a model family with no known attention shape,
-    get ``(None, None)``."""
+    ``"on"`` / ``"off"`` to reload it with flash attention set that way for the
+    diffusion model and, when *models* has a ControlNet, for the ControlNet,
+    whose attention has the diffusion model's size; *refusal* is the reason to
+    refuse the job. A module whose flash attention state is not known counts
+    as running without it. Without flash attention the score matrix
+    (``attention.ImageAttention.score_bytes``) must fit the device's buffer
+    limit (``vaetile.device_limit``); with it, one attention op at the worker's
+    measured ``attention_rate`` on the load *info*'s ``compute_devices`` must
+    take at most the safe share of how long those devices may run one job
+    before they are reset (``gpureset.reset_limit``); devices no job length
+    resets have no time bound. A rate that could not be measured counts as too
+    slow. A limit localm could not read is said through *say*. Other runtimes,
+    and a model family with no known attention shape, get ``(None, None)``."""
     if rt.backend != "vulkan":
         return None, None
     if hires:
@@ -621,30 +627,41 @@ def _vulkan_attention_mode(runner, rt, info: dict, models: dict, width: int, hei
         att = replace(att, batch=1)
     limit = (vaetile.device_limit(rt.backend, info.get("max_tensor_bytes"))[0]
              or vaetile.VULKAN_ASSUMED_TENSOR_BYTES)
-    flash = info.get("flash_attn")
+    states = [info.get("flash_attn")]
+    if models.get("control_net"):
+        states.append(info.get("controlnet_flash_attn"))
 
     def scores_fit(w: int, h: int) -> bool:
         return att.score_bytes(w, h, ref_count) <= limit
 
     fits = scores_fit(width, height)
-    if fits and flash is not True:
+    if fits and all(state is not True for state in states):
         return None, None
-    try:
-        rate: float = runner.attention_rate(rt.path, att.head_dim) or 0.0
-    except SdWorkerError:
-        rate = 0.0
+    reset = gpureset.reset_limit(info.get("compute_devices"))
+    budget = reset.safe_seconds
+    rate = 0.0
+    if budget is not None:
+        if not reset.known and say is not None:
+            say(f"{reset.reason}.")
+        try:
+            rate = runner.attention_rate(rt.path, att.head_dim,
+                                         devices=attention.compute_device_names(info)) or 0.0
+        except SdWorkerError:
+            rate = 0.0
 
     def flash_fits(w: int, h: int) -> bool:
-        return rate > 0 and att.flops(w, h, ref_count) / rate <= attention.SAFE_DISPATCH_SECONDS
+        if budget is None:
+            return True
+        return rate > 0 and att.flops(w, h, ref_count) / rate <= budget
 
     fast = flash_fits(width, height)
-    if flash is True:
-        if fast:
+    if fits and fast:
+        return None, None
+    if fits or fast:
+        target = "on" if fast else "off"
+        if all((state is True) == (target == "on") for state in states):
             return None, None
-        if fits:
-            return "off", None
-    elif fast:
-        return "on", None
+        return target, None
     side = attention.largest_square(lambda s: scores_fit(s, s) or flash_fits(s, s))
     fit = (f"The largest square image that fits is about {side}x{side}" if side
            else "No image size fits")
@@ -654,10 +671,9 @@ def _vulkan_attention_mode(runner, rt, info: dict, models: dict, width: int, hei
     return None, (f"{width}x{height} is too large for {models['label']} on the Vulkan runtime "
                   f"on this GPU: its attention needs a "
                   f"{att.score_bytes(width, height, ref_count) / 1024 ** 3:.1f} GB buffer, over "
-                  f"the {limit / 1024 ** 3:.1f} GB this runtime takes,{secs}, while the graphics "
-                  f"driver resets the GPU when a single job runs longer than about "
-                  f"{attention.DRIVER_RESET_SECONDS} s. {fit}; or pick the ROCm or CUDA runtime "
-                  f"in Settings > Images if this GPU has one.")
+                  f"the {limit / 1024 ** 3:.1f} GB this runtime takes,{secs}. "
+                  f"{attention.limit_sentence(reset)} {fit}"
+                  f"{attention.runtime_hint('Images', sd_runtime.other_gpu_runtimes())}.")
 
 
 def _batch_path(out_path: Path, index: int) -> Path:
@@ -931,18 +947,20 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
             if negative_prompt and cfg_scale is not None and abs(float(cfg_scale) - 1.0) < 1e-5:
                 say(NEGATIVE_AT_CFG_1)
             mode, refused = _vulkan_attention_mode(runner, rt, info, models, int(width),
-                                                   int(height), hires, len(refs), cfg_scale)
+                                                   int(height), hires, len(refs), cfg_scale, say)
             if refused:
                 return False, refused
             if mode:
-                ctx = dict(runner.loaded_ctx or ctx, flash_attn_mode=f"diffusion={mode}")
+                flash_mode = f"diffusion={mode}" + (f",controlnet={mode}"
+                                                    if models.get("control_net") else "")
+                ctx = dict(runner.loaded_ctx or ctx, flash_attn_mode=flash_mode)
                 ctx.pop("diffusion_flash_attn", None)
                 key = (models["key"], rt.backend, mode)
                 say(f"Reloading {models['label']} with flash attention {mode}: "
                     + ("without it, this image's attention needs a larger buffer than this GPU "
                        "runtime takes..." if mode == "on" else
-                       "with it, one attention job of this image would run longer on this GPU "
-                       "than the graphics driver allows..."))
+                       "with it, one attention job of this image would run longer than this GPU "
+                       "may run one job before it is reset..."))
                 info = runner.ensure_loaded(key, rt.path, ctx, extra_dirs=rt.extra_dirs,
                                             on_event=relay, cancel_check=cancel_check)
             tile = _decode_tile(info, int(width), int(height), hires, say, rt.backend)

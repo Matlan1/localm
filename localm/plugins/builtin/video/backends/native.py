@@ -20,7 +20,7 @@ from typing import Callable, Optional
 
 from localm.media.sdcpp import attention
 from localm.media.sdcpp import budget as sd_budget
-from localm.media.sdcpp import families, pairing, sampling
+from localm.media.sdcpp import families, gpureset, pairing, sampling
 from localm.media.sdcpp import runtime as sd_runtime
 from localm.media.sdcpp import shared, vaetile
 from localm.media.sdcpp.logrelay import RecoveredWarnings
@@ -490,42 +490,52 @@ def _decode_tile(info: dict, width: int, height: int, frames: int,
 
 
 def _attention_refusal(runner, rt, info: dict, label: str, width: int, height: int,
-                       frames: int, fps: int) -> Optional[str]:
+                       frames: int, fps: int,
+                       say: Optional[Callable[[str], None]] = None) -> Optional[str]:
     """None when the clip's longest attention op (``attention.dispatch_seconds``
-    at the worker's measured ``attention_rate``) stays within
-    ``attention.SAFE_DISPATCH_SECONDS`` on the Vulkan runtime, else the reason
-    to refuse it, naming the longest clip that fits. Other runtimes get None.
-    A rate that could not be measured refuses."""
+    at the worker's measured ``attention_rate`` on the load *info*'s
+    ``compute_devices``) stays within the safe share of how long those devices
+    may run one job before they are reset (``gpureset.reset_limit``), else the
+    reason to refuse it, naming the longest clip that fits. Other runtimes, and
+    devices no job length resets, get None. A rate that could not be measured
+    refuses. A limit localm could not read is said through *say*."""
     if rt.backend != "vulkan":
         return None
+    from localm.debuglog import logger
+    limit = gpureset.reset_limit(info.get("compute_devices"))
+    if limit.safe_seconds is None:
+        logger.info("native video: no Vulkan attention time limit: %s", limit.reason)
+        return None
+    if not limit.known and say is not None:
+        say(f"{limit.reason}.")
+    runtimes = sd_runtime.other_gpu_runtimes()
     try:
-        rate = runner.attention_rate(rt.path)
+        rate = runner.attention_rate(rt.path, devices=attention.compute_device_names(info))
     except SdWorkerError as e:
         rate, problem = None, f" ({e})"
     else:
         problem = ""
     if not rate:
+        hint = f" Pick the {' or '.join(runtimes)} runtime in Settings > Video." if runtimes else ""
         return (f"localm could not measure how fast this GPU runs {label}'s attention on the "
-                f"Vulkan runtime{problem}, so it cannot tell whether this clip finishes each step "
-                f"before the graphics driver resets the GPU. Pick the ROCm or CUDA runtime in "
-                f"Settings > Video if this GPU has one.")
+                f"Vulkan runtime{problem}, so it cannot tell whether each sampling step stays "
+                f"under {limit.safe_seconds:g} s. {limit.reason}.{hint}")
     att = attention.video_attention(info.get("version") or "", info.get("desc") or "",
                                     info.get("dit_hidden"), info.get("dit_patch"))
     secs = attention.dispatch_seconds(att, width, height, frames, rate)
-    from localm.debuglog import logger
-    logger.info("native video: Vulkan attention rate %.3g FLOP/s; one attention op of "
-                "%dx%dx%d takes about %.2f s", rate, width, height, frames, secs)
-    if secs <= attention.SAFE_DISPATCH_SECONDS:
+    logger.info("native video: Vulkan attention rate %.3g FLOP/s on %s; one attention op of "
+                "%dx%dx%d takes about %.2f s; limit: %s", rate,
+                ", ".join(attention.compute_device_names(info)) or "the default device",
+                width, height, frames, secs, limit.reason)
+    if secs <= limit.safe_seconds:
         return None
-    most = attention.max_frames(att, width, height, rate)
+    most = attention.max_frames(att, width, height, rate, limit.safe_seconds)
     fit = (f"Make it at most {most} frames ({most / fps:.1f} s at {fps} fps) at this size, "
            "or lower the size" if most else "Lower the size")
     return (f"{frames} frames at {width}x{height} is too much for {label} on the Vulkan runtime "
             f"on this GPU: each sampling step would run one attention job of about {secs:.1f} s "
-            f"on the GPU. The graphics driver resets the GPU when a single job runs longer than "
-            f"about {attention.DRIVER_RESET_SECONDS} s, so localm keeps each job under "
-            f"{attention.SAFE_DISPATCH_SECONDS:g} s. {fit}, or pick the ROCm or CUDA runtime in "
-            f"Settings > Video if this GPU has one.")
+            f"on the GPU. {attention.limit_sentence(limit)} "
+            f"{fit}{attention.runtime_hint('Video', runtimes)}.")
 
 
 def generate(s: dict, prompt: str, out_path: Path, **kwargs) -> tuple[bool, str]:
@@ -654,7 +664,7 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
                 return False, _start_image_refusal(models["label"])
             init = _load_init_image(Path(input_image), width, height) if input_image else None
             too_long = _attention_refusal(runner, rt, info, models["label"], width, height,
-                                          frames, int(fps))
+                                          frames, int(fps), say)
             if too_long:
                 return False, too_long
             try:

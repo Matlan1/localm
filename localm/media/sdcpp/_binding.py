@@ -766,13 +766,56 @@ def attention_flops(tokens: int, dim: int) -> int:
 
 _GGML_DEVICE_TYPE_GPU = 1
 _GGML_DEVICE_TYPE_IGPU = 2
+_GGML_DEVICE_TYPES = {0: "cpu", 1: "gpu", 2: "igpu", 3: "accel", 4: "meta"}
+
+
+class _GgmlDevCaps(Structure):
+    _fields_ = [("async_", c_bool), ("host_buffer", c_bool), ("buffer_from_host_ptr", c_bool),
+                ("events", c_bool), ("mmap_support", c_bool)]
+
+
+class _GgmlDevProps(Structure):
+    _fields_ = [("name", c_char_p), ("description", c_char_p), ("memory_free", c_size_t),
+                ("memory_total", c_size_t), ("type", _enum), ("device_id", c_char_p),
+                ("caps", _GgmlDevCaps)]
+
+
+def device_props(lib, runtime_dir: Path) -> list[dict]:
+    """``{"name", "description", "type", "device_id"}`` for every ggml device,
+    from ``ggml_backend_dev_get_props``: *type* is ``"cpu"``, ``"gpu"``,
+    ``"igpu"``, ``"accel"`` or ``"meta"``; *device_id* the lower-case PCI bus id
+    (``"0000:2d:00.0"``) or None. Empty when the runtime does not export the
+    functions. Call after :func:`load_library`."""
+    handles = _ggml_handles(lib, runtime_dir)
+    count = _ggml_fn(handles, "ggml_backend_dev_count", c_size_t)
+    get = _ggml_fn(handles, "ggml_backend_dev_get", c_void_p, c_size_t)
+    props_fn = _ggml_fn(handles, "ggml_backend_dev_get_props", None, c_void_p,
+                        POINTER(_GgmlDevProps))
+    if count is None or get is None or props_fn is None:
+        return []
+    out = []
+    for i in range(count()):
+        dev = get(i)
+        if not dev:
+            continue
+        props = _GgmlDevProps()
+        props_fn(dev, ctypes.byref(props))
+        out.append({
+            "name": (props.name or b"").decode("utf-8", "replace"),
+            "description": (props.description or b"").decode("utf-8", "replace"),
+            "type": _GGML_DEVICE_TYPES.get(int(props.type)),
+            "device_id": (props.device_id.decode("ascii", "replace").lower()
+                          if props.device_id else None),
+        })
+    return out
 
 
 def default_device(lib, runtime_dir: Path) -> Optional[str]:
     """The name of the ggml device the library runs a model on when no backend
-    is set: the first discrete GPU device, else the first integrated GPU
-    device. None when there is none or the runtime does not export the ggml
-    device functions. Call after :func:`load_library`."""
+    is set and its auto-fit plan does not choose one: the first discrete GPU
+    device, else the first integrated GPU device. None when there is none or
+    the runtime does not export the ggml device functions. Call after
+    :func:`load_library`."""
     handles = _ggml_handles(lib, runtime_dir)
     count = _ggml_fn(handles, "ggml_backend_dev_count", c_size_t)
     get = _ggml_fn(handles, "ggml_backend_dev_get", c_void_p, c_size_t)

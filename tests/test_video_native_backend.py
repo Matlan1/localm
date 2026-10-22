@@ -22,6 +22,13 @@ from localm.media.sdcpp.runner import SdCancelled, SdWorkerError
 from localm.plugins.builtin.video import backend as video_backend
 from localm.plugins.builtin.video.backends import native
 
+
+@pytest.fixture(autouse=True)
+def _reference_box(monkeypatch):
+    from tests.test_sdcpp_gpu_reset_limit import pin_rx6900xt
+    pin_rx6900xt(monkeypatch)
+
+
 av = pytest.importorskip("av")
 
 
@@ -184,7 +191,7 @@ class _FakeRunner:
         self.alive = True
         return {"version": "Wan 2.x", "desc": self.desc, "image": False, "video": self.video}
 
-    def attention_rate(self, runtime_dir, head_dim=128, timeout=None):
+    def attention_rate(self, runtime_dir, head_dim=128, timeout=None, devices=None):
         return 1e15
 
     def generate_video(self, params, *, on_event=None, cancel_check=None, timeout=None):

@@ -14,6 +14,13 @@ from localm.media.sdcpp import runtime as sd_runtime
 from localm.plugins.builtin.image.backends import native as image_native
 from localm.plugins.builtin.video.backends import native as video_native
 
+
+@pytest.fixture(autouse=True)
+def _reference_box(monkeypatch):
+    from tests.test_sdcpp_gpu_reset_limit import pin_rx6900xt
+    pin_rx6900xt(monkeypatch)
+
+
 GIB = 1024 ** 3
 
 
@@ -250,7 +257,7 @@ class _Runner:
         return {"width": w, "height": h, "channel": 3, "data": bytes([9, 9, 9]) * (w * h),
                 "seed": params["seed"]}
 
-    def attention_rate(self, runtime_dir, head_dim=128, timeout=None):
+    def attention_rate(self, runtime_dir, head_dim=128, timeout=None, devices=None):
         return 1e15
 
     def generate_video(self, params, *, on_event=None, cancel_check=None, timeout=None):
