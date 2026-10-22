@@ -10,13 +10,20 @@ folder whose architecture is a single-score ``*ForSequenceClassification`` runs
 in an isolated HF worker (``backends.hf.HFBackend`` with ``task="rerank"``) and
 returns the head's raw logit.
 
-One reranker is resident at a time, loaded on first use and replaced when a
-request names a different one. Loading serialises on the engine's process-global
-load lock, so it never races a chat-model load onto the GPU.
+The same resident slot also serves a registered embedding GGUF that a request
+names when it is not the configured ``embedding_model`` (``embedder.get_embedder``
+keeps that one): its vectors come from that model, and the configured embedder is
+left as it is.
+
+One model is resident in the slot at a time, a reranker or such an embedding
+model, loaded on first use and replaced when a request names a different one.
+Loading serialises on the engine's process-global load lock, so it never races a
+chat-model load onto the GPU.
 
 ``resolve_reranker`` maps a registered model name to its GGUF file or model folder
 and refuses anything that is not a registered reranker; a request can never name a
 filesystem path. ``rerank`` scores and ``rank_results`` shapes the response.
+``named_embedding_path`` and ``embed`` do the same for an embedding model.
 """
 
 from __future__ import annotations
@@ -38,8 +45,20 @@ from localm.inference.backends.base import RerankerHeadMissingError
 # unbounded in waiting: none of them may be called from an `async def` handler.
 _LOCK = threading.RLock()
 _RERANKER = None
-# _file_key of the file _RERANKER was loaded from, taken when it was loaded.
-_RERANKER_KEY: Optional[tuple[str, int, int]] = None
+# (_file_key of the file _RERANKER was loaded from, taken when it was loaded,
+# _RERANK or _EMBED).
+_RERANKER_KEY: Optional[tuple[tuple[str, int, int], str]] = None
+_RERANK = "rerank"
+_EMBED = "embed"
+# Requests counted on _RERANKER by _pin and not yet released by _unpin. Read and
+# written with _LOCK held; zeroed whenever _RERANKER changes.
+_RESIDENT_REQUESTS = 0
+# Notified, with _LOCK held, when _RESIDENT_REQUESTS drops to zero or _RERANKER
+# changes.
+_IDLE = threading.Condition(_LOCK)
+# How long a request for a model other than the resident one waits for the
+# resident one's in-flight requests to finish before it is refused.
+_REPLACE_WAIT_S = 120.0
 # (resolved path, mtime_ns, size) -> (why that file failed to load, when). A file
 # that failed is refused again without respawning a worker for _LOAD_RETRY_AFTER_S
 # seconds, until it changes, or until reset_reranker() runs.
@@ -191,6 +210,42 @@ def resolve_reranker(model: Optional[str]) -> tuple[str, str]:
     return name, path
 
 
+def named_embedding_path(name: str, entry: dict) -> Optional[str]:
+    """The GGUF file of the registered embedding model *name* (registry *entry*)
+    to embed with in this module's resident slot, or None when that file is the
+    one the configured ``embedding_model`` resolves to, which
+    ``embedder.embed_texts`` serves.
+
+    Raises :class:`RerankerModelError` (422) when the entry has no path, a
+    network or device path, or no file on disk. Blocking: call it off the event
+    loop."""
+    from localm.inference import embedder as emb
+    from localm.model_manager import _entry_path
+    from localm.pathsafe import is_unc_or_device_path
+    raw = _entry_path(entry)
+    if not raw:
+        raise RerankerModelError(
+            f"Embedding model {name!r} is registered with no file path; remove it "
+            f"(localm rm {name}) and add it again.", 422)
+    if is_unc_or_device_path(str(raw)):
+        raise RerankerModelError(
+            f"Embedding model {name!r} is registered at a network or device path, "
+            "which is not loaded; register a local GGUF file instead.", 422)
+    path = Path(raw)
+    if not path.is_file():
+        raise RerankerModelError(
+            f"Embedding model {name!r} is registered but its GGUF file is missing; "
+            f"pull it again or remove the entry (localm rm {name}).", 422)
+    configured = emb.configured_model_path()
+    if configured is not None:
+        try:
+            if path.samefile(configured):
+                return None
+        except OSError:
+            pass
+    return str(path.resolve())
+
+
 def _check_head(path: str) -> None:
     """Refuse a model whose complete tensor list holds no classifier head."""
     from localm.model_manager.gguf import gguf_classifier_head_tensors
@@ -280,6 +335,13 @@ class HFReranker:
                     raise RerankerUnavailableError(reason) from e
                 self._runner = self._backend._runner
 
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        """Refuse: a cross-encoder scores query and document pairs and cannot
+        produce embeddings."""
+        raise RuntimeError(
+            f"{Path(self.model_path).name} is a reranker: it scores query and "
+            "document pairs and cannot produce embeddings")
+
     def _is_resident(self) -> bool:
         """Whether this reranker is still the module's resident one."""
         with _LOCK:
@@ -290,37 +352,79 @@ class HFReranker:
         self._runner = None
 
 
+def _busy(model) -> bool:
+    """Whether *model*, the resident one, has a request in flight. Call with
+    _LOCK held."""
+    return model.active_requests > 0 or _RESIDENT_REQUESTS > 0
+
+
 def _release_failed(failed, reason: str) -> None:
     """Drop *failed* as the resident reranker when it still is, and latch its
     file as a failed load with *reason*."""
-    global _RERANKER, _RERANKER_KEY
+    global _RERANKER, _RERANKER_KEY, _RESIDENT_REQUESTS
     with _LOCK:
         if _RERANKER is failed:
             _RERANKER = None
             _RERANKER_KEY = None
+            _RESIDENT_REQUESTS = 0
+            _IDLE.notify_all()
         _LOAD_FAILED[_file_key(failed.model_path)] = (reason, time.monotonic())
 
 
 def get_reranker(path: str):
     """The resident reranker for the GGUF file or Hugging Face model folder at
-    *path*, loading it first (and releasing a different resident reranker).
+    *path*, loading it first (and releasing a different resident model).
     Raises :class:`RerankerHeadMissingError` for a model without a classifier head
     and :class:`RerankerUnavailableError` when the load fails (a failed file is not
-    retried for a minute unless it changes) or a different reranker is still
-    busy."""
-    global _RERANKER, _RERANKER_KEY
+    retried for a minute unless it changes) or a different resident model is
+    still busy."""
+    return _get_resident(path, _RERANK)
+
+
+def get_embedding_model(path: str):
+    """The resident embedding model for the GGUF file at *path*, loading it first
+    (and releasing a different resident model). Pooling is the one the model
+    declares (``embedder.POOLING_AUTO``); the ``embedding_pooling`` setting
+    applies to the configured embedder only. Raises
+    :class:`RerankerUnavailableError` when the load fails (a failed file is not
+    retried for a minute unless it changes), the model loads as a reranker, or a
+    different resident model is still busy after ``_REPLACE_WAIT_S``."""
+    return _get_resident(path, _EMBED)
+
+
+def _get_resident(path: str, purpose: str):
+    """The resident model for *path* loaded for *purpose* (``_RERANK`` or
+    ``_EMBED``), loading it first. A different resident model with requests in
+    flight is waited for, up to ``_REPLACE_WAIT_S`` and holding no lock, before
+    it is replaced. See :func:`get_reranker` and :func:`get_embedding_model`."""
+    global _RERANKER, _RERANKER_KEY, _RESIDENT_REQUESTS
     from localm.config import load_config
     from localm.inference import embedder as emb
-    hf_folder = Path(path).is_dir()
-    key = _file_key(path)
+    hf_folder = purpose == _RERANK and Path(path).is_dir()
+    file_key = _file_key(path)
+    key = (file_key, purpose)
     with _LOCK:
         if _RERANKER is not None and _RERANKER_KEY == key:
             return _RERANKER
-        failed = _latched_failure(key)
+        failed = _latched_failure(file_key)
         if failed is not None:
             raise RerankerUnavailableError(failed)
+        deadline = time.monotonic() + _REPLACE_WAIT_S
+        while (_RERANKER is not None and _RERANKER_KEY != key and _RESIDENT_REQUESTS > 0
+               and time.monotonic() < deadline):
+            _IDLE.wait(timeout=max(0.0, deadline - time.monotonic()))
+        if _RERANKER is not None and _RERANKER_KEY == key:
+            return _RERANKER
     hf_device: Optional[str] = None
-    if hf_folder:
+    pooling: object = emb.POOLING_AUTO
+    if purpose == _EMBED:
+        cfg = load_config()
+        explicit = emb._explicit_embedder_gpu_layers(cfg)
+        emb._maybe_swap_for_embedder(path, explicit if explicit is not None else 99)
+        ngl, placement_reason = emb._choose_embedder_gpu_layers(path, cfg)
+        if placement_reason is not None:
+            logger.warning("embedding model placement: %s", placement_reason)
+    elif hf_folder:
         _check_hf_head(path)
         ngl, placement_reason = 0, None
         if emb._explicit_embedder_gpu_layers(load_config()) == 0:
@@ -338,33 +442,52 @@ def get_reranker(path: str):
         with _LOCK:
             if _RERANKER is not None and _RERANKER_KEY == key:
                 return _RERANKER
-            failed = _latched_failure(key)
+            failed = _latched_failure(file_key)
             if failed is not None:
                 raise RerankerUnavailableError(failed)
             current = _RERANKER
-            if current is not None and current.active_requests > 0:
+            if current is not None and _busy(current):
                 raise RerankerUnavailableError(
-                    "another reranker is still scoring a request; retry shortly")
+                    "another reranker or embedding model is still scoring or "
+                    "embedding a request; retry shortly")
             if current is not None:
                 _RERANKER = None
                 _RERANKER_KEY = None
+                _RESIDENT_REQUESTS = 0
+                _IDLE.notify_all()
                 current.close()
             try:
                 if hf_folder:
-                    _RERANKER = HFReranker(path, hf_device)
+                    loaded = HFReranker(path, hf_device)
+                elif purpose == _EMBED:
+                    loaded = emb.IsolatedEmbedder(
+                        path, n_gpu_layers=ngl, pooling_type=pooling,
+                        gpu_fallback_reason=placement_reason)
+                    if getattr(loaded, "effective_pooling", None) == emb._POOLING_RANK:
+                        loaded.close()
+                        raise RuntimeError(
+                            f"{Path(path).name} is a reranker (rank pooling), not "
+                            "an embedding model: it scores query and document "
+                            "pairs (POST /v1/rerank)")
                 else:
-                    _RERANKER = emb.IsolatedEmbedder(
+                    loaded = emb.IsolatedEmbedder(
                         path, n_gpu_layers=ngl, pooling_type=emb._POOLING_RANK,
                         gpu_fallback_reason=placement_reason)
             except Exception as e:
                 reason = pathscrub.scrub_paths(str(e))
-                _LOAD_FAILED[key] = (reason, time.monotonic())
-                logger.warning("could not load reranker %s (%s)",
+                _LOAD_FAILED[file_key] = (reason, time.monotonic())
+                logger.warning("could not load %s %s (%s)",
+                               "reranker" if purpose == _RERANK else "embedding model",
                                Path(path).name, e)
                 raise RerankerUnavailableError(reason) from e
+            _RERANKER = loaded
             _RERANKER_KEY = key
-            logger.info("reranker ready: %s (labels=%s)", Path(path).name,
-                        _RERANKER.cls_labels or "none declared")
+            if purpose == _EMBED:
+                logger.info("embedding model ready: %s (dim=%d)", Path(path).name,
+                            getattr(loaded, "dim", 0))
+            else:
+                logger.info("reranker ready: %s (labels=%s)", Path(path).name,
+                            _RERANKER.cls_labels or "none declared")
             return _RERANKER
 
 
@@ -376,19 +499,66 @@ class RerankOutcome(NamedTuple):
     labels: list[str]
 
 
+def _pin(path: str, purpose: str):
+    """Load or reuse the resident model for *path* and *purpose* and count one
+    request on it, in the same ``_LOCK`` hold that confirms it is still the
+    resident one, so ``reset_reranker(force=False)`` leaves it loaded until
+    :func:`_unpin`. Raises :class:`RerankerUnavailableError` when another
+    request replaces it twice in a row."""
+    global _RESIDENT_REQUESTS
+    for _attempt in range(2):
+        model = _get_resident(path, purpose)
+        with _LOCK:
+            if _RERANKER is model:
+                _RESIDENT_REQUESTS += 1
+                return model
+    raise RerankerUnavailableError(
+        f"{Path(path).name} was replaced by another model while this request "
+        "waited for it; retry the request")
+
+
+def _unpin(model) -> None:
+    """Release the request counted by :func:`_pin` on *model*; nothing when
+    *model* is no longer the resident one."""
+    global _RESIDENT_REQUESTS
+    with _LOCK:
+        if _RERANKER is model:
+            _RESIDENT_REQUESTS = max(0, _RESIDENT_REQUESTS - 1)
+            if _RESIDENT_REQUESTS == 0:
+                _IDLE.notify_all()
+
+
 def rerank(path: str, query: str, documents: list[str]) -> RerankOutcome:
     """Score *query* against each of *documents* with the reranker at *path*."""
-    emb = get_reranker(path)
-    scored = emb.rerank([(query, d) for d in documents])
+    emb = _pin(path, _RERANK)
+    try:
+        scored = emb.rerank([(query, d) for d in documents])
+    finally:
+        _unpin(emb)
     return RerankOutcome(scored, list(emb.cls_labels))
 
 
+def embed(path: str, texts: list[str]) -> list[list[float]]:
+    """Embed *texts* with the embedding model at *path* (see
+    :func:`get_embedding_model`). Raises :class:`RerankerUnavailableError` as
+    that does, and ``RuntimeError`` when the worker fails mid-call."""
+    model = _pin(path, _EMBED)
+    try:
+        return model.embed(list(texts))
+    finally:
+        _unpin(model)
+
+
 def reranker_info() -> Optional[dict]:
-    """``{"path", "labels"}`` of the resident reranker, or None. Does not load."""
+    """``{"path", "labels", "kind"}`` of the resident model, or None. *kind* is
+    ``"reranker model"`` or ``"embedding model"``. Does not load."""
     with _LOCK:
         if _RERANKER is None:
             return None
-        return {"path": _RERANKER.model_path, "labels": list(_RERANKER.cls_labels)}
+        kind = ("embedding model" if _RERANKER_KEY is not None and _RERANKER_KEY[1] == _EMBED
+                else "reranker model")
+        return {"path": _RERANKER.model_path, "labels": list(_RERANKER.cls_labels),
+                "kind": kind}
 
 
 def is_loaded() -> bool:
@@ -404,9 +574,11 @@ def is_resident() -> bool:
 
 
 def active_requests() -> int:
-    """In-flight rerank calls on the resident reranker, or 0."""
+    """In-flight requests on the resident model, or 0."""
     with _LOCK:
-        return _RERANKER.active_requests if _RERANKER is not None else 0
+        if _RERANKER is None:
+            return 0
+        return max(_RERANKER.active_requests, _RESIDENT_REQUESTS)
 
 
 def reset_reranker(*, force: bool = True) -> bool:
@@ -414,15 +586,17 @@ def reset_reranker(*, force: bool = True) -> bool:
     True when a reranker was released; with ``force=False`` a reranker with a
     request in flight is left alone (and nothing is cleared), checked and
     released in one locked step."""
-    global _RERANKER, _RERANKER_KEY
+    global _RERANKER, _RERANKER_KEY, _RESIDENT_REQUESTS
     with _LOCK:
-        if not force and _RERANKER is not None and _RERANKER.active_requests > 0:
+        if not force and _RERANKER is not None and _busy(_RERANKER):
             return False
         current = _RERANKER
         if current is not None:
             current.close()
         _RERANKER = None
         _RERANKER_KEY = None
+        _RESIDENT_REQUESTS = 0
+        _IDLE.notify_all()
         _LOAD_FAILED.clear()
         return current is not None
 
@@ -439,7 +613,7 @@ def release_for_exit() -> bool:
     runner = getattr(emb, "_runner", None)
     if runner is None:
         return False
-    runner.shutdown(grace=0 if emb.active_requests > 0 else 5.0)
+    runner.shutdown(grace=0 if (emb.active_requests > 0 or _RESIDENT_REQUESTS > 0) else 5.0)
     return True
 
 
