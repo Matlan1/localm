@@ -20,6 +20,12 @@ from localm.plugins.builtin.image.backends import native as image_native
 from localm.plugins.builtin.video.backends import native as video_native
 
 
+@pytest.fixture(autouse=True)
+def _reference_box(monkeypatch):
+    from tests.test_sdcpp_gpu_reset_limit import pin_rx6900xt
+    pin_rx6900xt(monkeypatch)
+
+
 def write_safetensors(path: Path, shapes: dict) -> Path:
     header = {name: {"dtype": "F16", "shape": list(shape), "data_offsets": [0, 0]}
               for name, shape in shapes.items()}
@@ -448,7 +454,7 @@ class _Runner:
         self.loaded_key, self.loaded_ctx, self.alive = key, dict(ctx), True
         return {"version": "Flux", "image": True, "video": True}
 
-    def attention_rate(self, runtime_dir, head_dim=128, timeout=None):
+    def attention_rate(self, runtime_dir, head_dim=128, timeout=None, devices=None):
         return 1e15
 
     def generate_image(self, params, **kw):

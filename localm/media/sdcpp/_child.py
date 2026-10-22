@@ -19,7 +19,7 @@ command at a time:
                         "fps", "steps", "cfg_scale", "flow_shift", "seed",
                         "sample_method", "scheduler", "init_image", "loras"})
     ("upscale_image", {"runtime_dir", "extra_dirs", "model_path", "image", "tile_size"})
-    ("attention_rate", {"runtime_dir", "head_dim"})
+    ("attention_rate", {"runtime_dir", "head_dim", "devices"})
     ("shutdown", None)
 
 ``resp_q``: zero or more events, then exactly one final reply per command:
@@ -84,6 +84,7 @@ class _State:
     dit_patch: Optional[int] = None
     flash_auto: Optional[bool] = None
     dit_heads: Optional[int] = None
+    diffusion_backends: Optional[list] = None
 
 
 class _BudgetRefused(RuntimeError):
@@ -158,6 +159,9 @@ _WAN_VAE_CONV_RE = re.compile(r"\bWan VAE convolution type: (2D|3D)\b")
 _FLASH_AUTO_RE = re.compile(r"\bflash attention auto: \S+ -> (on|off)\b")
 _FLUX_SHAPE_RE = re.compile(
     r"\bflux: .*\bhidden_size = (\d+), num_heads = (\d+)")
+_MMDIT_SHAPE_RE = re.compile(r"\bmmdit: num_layers = (\d+),.*\bhidden_size = (\d+)")
+_AUTOFIT_BACKEND_RE = re.compile(r'\bauto-fit: --backend "([^"]*)"')
+_AUTOFIT_CPU_TEXT = "auto-fit: no GPU memory budget available; using CPU"
 _HUNYUAN_SHAPE_RE = re.compile(
     r"\bhunyuan video: .*\bhidden_size = (\d+),.*\bpatch_size = \d+x(\d+)x\d+")
 _SEGMENT_REFUSED_RE = re.compile(r"\bsegment \d+/\d+ \([^)]*\) failed during weight preparation")
@@ -221,6 +225,14 @@ def _make_callbacks(resp_q):
         flux = _FLUX_SHAPE_RE.search(msg)
         if flux:
             _State.dit_hidden, _State.dit_heads = int(flux.group(1)), int(flux.group(2))
+        mmdit = _MMDIT_SHAPE_RE.search(msg)
+        if mmdit:
+            _State.dit_heads, _State.dit_hidden = int(mmdit.group(1)), int(mmdit.group(2))
+        plan = _AUTOFIT_BACKEND_RE.search(msg)
+        if plan:
+            _State.diffusion_backends = diffusion_backends(plan.group(1))
+        elif _AUTOFIT_CPU_TEXT in msg:
+            _State.diffusion_backends = ["CPU"]
         hunyuan = _HUNYUAN_SHAPE_RE.search(msg)
         if hunyuan:
             _State.dit_hidden, _State.dit_patch = int(hunyuan.group(1)), int(hunyuan.group(2))
@@ -404,6 +416,7 @@ def _do_load(payload):
     _State.dit_patch = None
     _State.flash_auto = None
     _State.dit_heads = None
+    _State.diffusion_backends = None
     _State.paths = tuple(str(v) for k, v in ctx_fields.items()
                          if k.endswith("_path") and isinstance(v, str) and v) + tuple(
         str(path) for _name, path in (ctx_fields.get("embeddings") or ()))
@@ -429,24 +442,79 @@ def _do_load(payload):
         "dit_hidden": _State.dit_hidden,
         "dit_patch": _State.dit_patch,
         "dit_heads": _State.dit_heads,
-        "flash_attn": _diffusion_flash(ctx_fields),
+        "flash_attn": _module_flash(ctx_fields, "diffusion"),
+        "controlnet_flash_attn": (_module_flash(ctx_fields, "controlnet")
+                                  if ctx_fields.get("control_net_path") else None),
+        "compute_devices": _compute_devices(lib, payload.get("runtime_dir")),
         "max_tensor_bytes": _max_tensor_bytes(lib, payload.get("runtime_dir")),
     }
 
 
-def _diffusion_flash(ctx_fields: dict) -> Optional[bool]:
-    """Whether the loaded diffusion model runs flash attention: the
-    ``diffusion=on|off`` part of *ctx_fields*' ``flash_attn_mode``, else True
-    for the legacy ``flash_attn`` / ``diffusion_flash_attn`` flags, else the
-    library's own decision from its load log; None when that was not logged."""
-    mode = str(ctx_fields.get("flash_attn_mode") or "")
-    for part in mode.split(","):
+_MODULE_ALIASES = {"diffusion": {"diffusion", "model", "unet", "dit"},
+                   "controlnet": {"controlnet", "control"}}
+
+
+def diffusion_backends(spec: str) -> Optional[list]:
+    """The device names the ``diffusion=`` part of an auto-fit ``--backend``
+    *spec* (``diffusion=Vulkan1,te=Vulkan1,vae=CPU``) names, split on ``&``;
+    None when it names none (``(default)``)."""
+    for part in spec.split(","):
         key, _, value = part.strip().partition("=")
-        if key == "diffusion" and value in ("on", "off"):
-            return value == "on"
-    if ctx_fields.get("diffusion_flash_attn") or ctx_fields.get("flash_attn"):
-        return True
+        if key.strip().lower() in _MODULE_ALIASES["diffusion"] and value.strip():
+            return [n.strip() for n in value.split("&") if n.strip()]
+    return None
+
+
+def _module_flash(ctx_fields: dict, module: str) -> Optional[bool]:
+    """Whether the loaded *module* (``"diffusion"`` or ``"controlnet"``) runs
+    flash attention: its ``on|off`` part of *ctx_fields*' ``flash_attn_mode``
+    (else the mode's ``on|off`` default), else, with no mode, True for the
+    legacy ``flash_attn`` flag and, for the diffusion model, for
+    ``diffusion_flash_attn``, else the library's own decision from its load
+    log; None when that was not logged."""
+    mode = str(ctx_fields.get("flash_attn_mode") or "").strip()
+    default = None
+    for part in mode.split(","):
+        key, sep, value = part.strip().partition("=")
+        if not sep:
+            default = key.strip().lower()
+            continue
+        name = key.strip().lower().replace("-", "").replace("_", "")
+        if name in _MODULE_ALIASES[module] and value.strip() in ("on", "off"):
+            return value.strip() == "on"
+    if default in ("on", "off"):
+        return default == "on"
+    if not mode:
+        if ctx_fields.get("flash_attn"):
+            return True
+        if module == "diffusion" and ctx_fields.get("diffusion_flash_attn"):
+            return True
     return _State.flash_auto
+
+
+def _compute_devices(lib, runtime_dir) -> list[dict]:
+    """The ggml devices (``_binding.device_props`` entries) the library
+    computes the diffusion model on: the ones its auto-fit plan names, else
+    ``_binding.default_device``. A device missing from the props gets only
+    its name. Empty when neither is known or the probe fails; a probe error is
+    logged."""
+    from . import _binding as b
+    try:
+        props = b.device_props(lib, Path(runtime_dir)) if runtime_dir is not None else []
+        names = _State.diffusion_backends
+        if names is None and runtime_dir is not None:
+            device = b.default_device(lib, Path(runtime_dir))
+            names = [device] if device else []
+    except Exception as e:  # noqa: BLE001
+        from localm.debuglog import logger
+        logger.warning("sd.cpp worker: the compute device probe failed (%s: %s)",
+                       type(e).__name__, e)
+        return []
+    by_name = {str(p["name"]).lower(): p for p in props}
+    return [dict(by_name.get(n.lower()) or {"name": n, "description": "",
+                                            "type": "cpu" if n.lower() == "cpu" else None,
+                                            "device_id": None})
+            for n in names or []]
 
 
 def _max_tensor_bytes(lib, runtime_dir) -> Optional[int]:
@@ -471,18 +539,22 @@ def _max_tensor_bytes(lib, runtime_dir) -> Optional[int]:
 
 
 def _do_attention_rate(payload) -> Optional[float]:
-    """``_binding.attention_rate`` of the device the library runs the model on
-    (``_binding.default_device``), else the slowest over the loaded runtime's
-    non-CPU devices, in floating point operations per second. None when a
-    device could not be measured. Requires a loaded runtime."""
+    """The slowest ``_binding.attention_rate`` over the payload's ``devices``
+    (the model's compute devices), else of the device the library runs a model
+    on by default (``_binding.default_device``), else over the loaded runtime's
+    non-CPU devices, in floating point operations per second. CPU devices are
+    skipped. None when a device could not be measured. Requires a loaded
+    runtime."""
     from . import _binding as b
     lib = _State.lib
     if lib is None:
         raise RuntimeError("no stable-diffusion.cpp runtime is loaded")
     runtime_dir = Path(payload["runtime_dir"])
-    device = b.default_device(lib, runtime_dir)
-    names = [device] if device else [name for name, _desc in b.list_devices(lib)
-                                     if name.upper() != "CPU"]
+    names = [str(n) for n in payload.get("devices") or () if str(n).upper() != "CPU"]
+    if not names:
+        device = b.default_device(lib, runtime_dir)
+        names = [device] if device else [name for name, _desc in b.list_devices(lib)
+                                         if name.upper() != "CPU"]
     head_dim = int(payload.get("head_dim") or b._ATTENTION_PROBE_HEAD_DIM)
     rates = [b.attention_rate(lib, runtime_dir, name, head_dim) for name in names]
     known = [r for r in rates if r is not None]

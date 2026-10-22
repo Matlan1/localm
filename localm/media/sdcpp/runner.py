@@ -218,19 +218,24 @@ class SdRunner:
         return info
 
     def attention_rate(self, runtime_dir, head_dim: int = 128,
-                       timeout: float = PROBE_TIMEOUT) -> Optional[float]:
+                       timeout: float = PROBE_TIMEOUT,
+                       devices: Optional[list] = None) -> Optional[float]:
         """The loaded worker's flash attention throughput at head size
-        *head_dim* (``_child`` ``attention_rate``), in floating point
-        operations per second, measured once per worker and head size. None
-        when it could not be measured. Raises :class:`SdWorkerError` when no
-        worker is running or the probe fails."""
+        *head_dim* on ggml *devices* (names; the worker's default device when
+        empty) (``_child`` ``attention_rate``), in floating point operations
+        per second, measured once per worker, head size and devices. None when
+        it could not be measured. Raises :class:`SdWorkerError` when no worker
+        is running or the probe fails."""
         if self._attention_rate is None:
             self._attention_rate = {}
-        if head_dim not in self._attention_rate:
-            self._attention_rate[head_dim] = self._request(
-                "attention_rate", {"runtime_dir": str(runtime_dir), "head_dim": int(head_dim)},
-                timeout)
-        return self._attention_rate[head_dim]
+        names = tuple(str(n) for n in devices or ())
+        key = (int(head_dim), names)
+        if key not in self._attention_rate:
+            payload: dict = {"runtime_dir": str(runtime_dir), "head_dim": int(head_dim)}
+            if names:
+                payload["devices"] = list(names)
+            self._attention_rate[key] = self._request("attention_rate", payload, timeout)
+        return self._attention_rate[key]
 
     def generate_image(self, params: dict, *, timeout: float = GENERATE_TIMEOUT,
                        on_event: Optional[EventCallback] = None,

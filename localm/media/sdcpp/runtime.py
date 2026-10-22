@@ -142,6 +142,20 @@ def recommended_backend(det=None) -> str:
     return "vulkan" if (plat, "vulkan") in pins.ASSETS else "cpu"
 
 
+def other_gpu_runtimes(det=None) -> list[str]:
+    """The names of the GPU runtimes besides Vulkan this machine's GPUs can
+    use where upstream ships them: ``"CUDA"`` for an NVIDIA GPU, ``"ROCm"`` for
+    an AMD GPU."""
+    plat = platform_key()
+    d = det if det is not None else _detected()
+    out = []
+    if "nvidia" in d.vendors and (plat, "cuda") in pins.ASSETS:
+        out.append("CUDA")
+    if "amd" in d.vendors and (plat, "rocm") in pins.ASSETS:
+        out.append("ROCm")
+    return out
+
+
 def _read_json(path: Path) -> Optional[dict]:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
