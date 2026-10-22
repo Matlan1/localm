@@ -435,6 +435,7 @@ _MIDDLEWARE_STACK = (
     ("BaseHTTPMiddleware", "_origin_guard"),
     ("CORSMiddleware", None),
 )
+_INNERMOST = (("ClientLeftMiddleware", None),)
 
 
 def _middleware_stack(app) -> tuple:
@@ -447,13 +448,14 @@ def _middleware_stack(app) -> tuple:
 @_SHAPES
 def test_middleware_stack_order(monkeypatch, api_landing):
     monkeypatch.delenv("LOCALM_DEBUG", raising=False)
-    assert _middleware_stack(create_app(None, api_landing=api_landing)) == _MIDDLEWARE_STACK
+    assert _middleware_stack(create_app(None, api_landing=api_landing)) == (
+        _MIDDLEWARE_STACK + _INNERMOST)
 
 
-def test_debug_mode_adds_request_logging_innermost(monkeypatch):
+def test_debug_mode_adds_request_logging_inside_the_other_handlers(monkeypatch):
     monkeypatch.setenv("LOCALM_DEBUG", "1")
     assert _middleware_stack(create_app(None)) == (
-        _MIDDLEWARE_STACK + (("BaseHTTPMiddleware", "_log_requests"),))
+        _MIDDLEWARE_STACK + (("BaseHTTPMiddleware", "_log_requests"),) + _INNERMOST)
 
 
 def test_origin_guard_refusal_carries_security_headers_and_no_cors_grant():
