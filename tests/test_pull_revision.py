@@ -563,13 +563,39 @@ class TestAnUnfinishedRevisionIsNotMergedWithAnother(_InterruptedAfterTheFirstFi
         capsys.readouterr()
         assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is False
         out = " ".join(capsys.readouterr().out.split())
-        assert "unfinished download of an earlier localm" in out
+        assert "files localm cannot match to a repo or revision" in out
         assert hub.snapshots == [] and "q" not in mm.load_registry()
 
     def test_the_default_branch_still_resumes_an_earlier_localms_folder(self, hub):
         self._unfinished_without_a_marker(hub)
         assert mm.pull_model("o/r", name="q", model_type="llm") is True
         assert "q" in mm.load_registry()
+
+    def test_a_complete_copy_of_the_revision_without_a_marker_is_registered(self, hub, capsys):
+        folder = hub.models_dir / "q"
+        folder.mkdir()
+        for name, data in hub.repo_files[COMMIT].items():
+            (folder / name).write_bytes(data)
+        capsys.readouterr()
+        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is True
+        assert "Already downloaded" in capsys.readouterr().out
+        assert hub.snapshots == []
+        assert mm.load_registry()["q"]["revision"] == "4.0bpw"
+
+    def test_a_pull_that_cannot_write_its_marker_downloads_nothing(self, hub, capsys, monkeypatch):
+        import localm.storekit as storekit
+
+        def refuse(path, *a, **k):
+            if str(path).endswith(".localm-revision.json"):
+                raise PermissionError(13, "Permission denied")
+            return real(path, *a, **k)
+        real = storekit.atomic_write
+        monkeypatch.setattr(storekit, "atomic_write", refuse)
+        capsys.readouterr()
+        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is False
+        out = " ".join(capsys.readouterr().out.split())
+        assert "could not write .localm-revision.json" in out and "Permission denied" in out
+        assert hub.snapshots == []
 
     def test_an_empty_folder_without_a_marker_is_free_for_a_revision(self, hub):
         (hub.models_dir / "q" / ".cache").mkdir(parents=True)
