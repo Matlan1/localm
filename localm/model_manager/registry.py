@@ -3685,6 +3685,21 @@ def _pop_model_entry(reg: dict, name: str) -> None:
             entry.pop("scale", None)
 
 
+def _rmtree_writable(path: Path) -> None:
+    """``shutil.rmtree`` that also removes read-only files (a git checkout's
+    object files on Windows). Links inside are removed, never followed."""
+    def _retry(func, p, _exc):
+        try:
+            os.chmod(p, _stat.S_IWRITE | _stat.S_IREAD)
+        except OSError:
+            pass
+        func(p)
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=_retry)
+    else:  # pragma: no cover - older interpreters
+        shutil.rmtree(path, onerror=lambda f, p, e: _retry(f, p, e[1]))
+
+
 def remove_model(name: str) -> None:
     # escape(): reachable via `POST /api/models/remove`, which spawns
     # `localm rm <model> --yes` and re-pushes its stdout into the GUI
@@ -3748,8 +3763,7 @@ def remove_model(name: str) -> None:
     # already-resolved path.
     if target is not None and is_owned_model_path(target):
         if target.is_dir():
-            import shutil
-            shutil.rmtree(target)
+            _rmtree_writable(target)
             # target: the on-disk path, whose filename component can come from
             # a remote HF repo's own filenames (pull.py) - not a safe charset.
             console.print(f"[dim]Deleted {escape(str(target))}[/dim]")

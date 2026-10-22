@@ -3059,8 +3059,13 @@ def _pull_hf_snapshot_locked(
             model_name, dest, f"hf:{repo_id}",
             model_type=_resolve_snapshot_type(dest, model_type),
             **_register_revision(revision))
-        if registered:
-            _clear_snapshot_claim(dest)
+        if not registered:
+            console.print(
+                f"[yellow]{escape(repo_id)} is in {escape(str(dest))}, but could not "
+                f"be registered as '{escape(model_name)}'[/yellow] (see message above). "
+                "Retry with a different -n name, or 'localm alias' it in.")
+            return False
+        _clear_snapshot_claim(dest)
         return True
     repairing = bool(damaged) or (
         dest.exists() and any(
