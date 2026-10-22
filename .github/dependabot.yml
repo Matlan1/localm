@@ -45,6 +45,10 @@ updates:
       # Pinned exactly: .github/basedpyright-baseline.json is regenerated with the
       # version it was written by. Bump by hand together with the baseline.
       - dependency-name: "basedpyright"
+      # Major versions stay held while tokenizers requires huggingface-hub<2.
+      # See test_huggingface_hub_stays_below_what_tokenizers_accepts.
+      - dependency-name: "huggingface-hub"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
