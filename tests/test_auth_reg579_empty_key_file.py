@@ -103,13 +103,12 @@ def test_bom_prefixed_real_key_still_matches_what_the_owner_typed(auth):
         "the owner's own correct key did not verify against a BOM'd key file")
 
 
-def test_notice_re_arms_so_a_later_downgrade_is_not_silent(auth):
+def test_notice_re_arms_so_a_later_downgrade_is_not_silent(auth, fresh_ring):
     """A server that drops KEYED -> OPEN mid-run (the file is truncated while it
     runs) must say so. If the one-shot latch never re-armed, the SECOND downgrade
     - the more alarming one, since the server was protected a moment ago - would
     be the silent one, defeating the point of the notice."""
-    from localm.debuglog import install_ring_buffer, recent_activity
-    install_ring_buffer()
+    from localm.debuglog import recent_activity
     path = _write_key_file(auth, "")
     assert auth.any_key_configured() is False
     assert len([ln for ln in recent_activity() if str(path) in ln]) == 1
@@ -132,7 +131,7 @@ def test_empty_owner_key_leaves_the_open_mode_recovery_path_intact(auth):
     assert was_open, "the open -> protected recovery transition is unreachable"
 
 
-def test_empty_owner_key_is_surfaced_not_silent(auth):
+def test_empty_owner_key_is_surfaced_not_silent(auth, fresh_ring):
     """localm itself never writes an empty auth.key (set_api_key('') unlinks
     it), so one is always an anomaly, and dropping to open mode over it is
     reported rather than silent.
@@ -140,8 +139,7 @@ def test_empty_owner_key_is_surfaced_not_silent(auth):
     Asserted against the REAL always-on mechanism - debuglog's in-memory ring
     buffer, which serve/gui install at startup and which bugreport renders under
     "Recent activity" - not merely a caplog record."""
-    from localm.debuglog import install_ring_buffer, recent_activity
-    install_ring_buffer()
+    from localm.debuglog import recent_activity
     path = _write_key_file(auth, "")
 
     assert auth.any_key_configured() is False
@@ -187,6 +185,68 @@ def test_owner_key_downgrade_warning_clears_when_the_file_is_deleted(auth):
     assert auth.owner_key_downgrade_warning() is None
 
 
+@pytest.fixture
+def fresh_ring():
+    """A clean ring buffer on the localm logger for one test; the logger's
+    handlers, level and ring global are restored afterwards."""
+    from localm import debuglog
+    logger = debuglog.logger
+    saved_handlers = list(logger.handlers)
+    saved_level = logger.level
+    saved_ring = debuglog._ring_handler
+    for h in list(logger.handlers):
+        if isinstance(h, debuglog._RingBufferHandler):
+            logger.removeHandler(h)
+    debuglog._ring_handler = None
+    assert debuglog.install_ring_buffer() is True
+    yield
+    logger.handlers[:] = saved_handlers
+    logger.setLevel(saved_level)
+    debuglog._ring_handler = saved_ring
+
+
+class _NoSleep:
+    """Stands in for ``auth.time`` with ``sleep()`` a no-op."""
+
+    def sleep(self, seconds):
+        pass
+
+    def __getattr__(self, name):
+        import time
+        return getattr(time, name)
+
+
+def _downgrade_notices(path):
+    from localm.debuglog import recent_activity
+    return len([ln for ln in recent_activity() if str(path) in ln
+                and "holds no key" in ln])
+
+
+def test_notice_re_arms_after_the_file_is_deleted(auth, fresh_ring):
+    path = _write_key_file(auth, "")
+    before = _downgrade_notices(path)
+    assert auth.any_key_configured() is False
+    path.unlink()
+    assert auth.any_key_configured() is False
+    _write_key_file(auth, "")
+    assert auth.any_key_configured() is False
+    assert _downgrade_notices(path) == before + 2
+
+
+def test_notice_re_arms_after_the_file_was_unreadable(auth, fresh_ring, monkeypatch):
+    monkeypatch.setattr(auth, "time", _NoSleep())
+    path = _write_key_file(auth, "")
+    before = _downgrade_notices(path)
+    assert auth.any_key_configured() is False
+    path.unlink()
+    path.mkdir()
+    assert auth.any_key_configured() is True
+    path.rmdir()
+    _write_key_file(auth, "")
+    assert auth.any_key_configured() is False
+    assert _downgrade_notices(path) == before + 2
+
+
 def test_owner_key_downgrade_warning_clears_when_the_file_becomes_unreadable(auth):
     """NEGATIVE-adjacent: if the empty file is later replaced by something
     unreadable, any_key_configured() flips to True (fail closed) - a stale
@@ -204,12 +264,11 @@ def test_owner_key_downgrade_warning_clears_when_the_file_becomes_unreadable(aut
         "any_key_configured()'s own answer")
 
 
-def test_empty_owner_key_warning_does_not_spam_the_request_path(auth):
+def test_empty_owner_key_warning_does_not_spam_the_request_path(auth, fresh_ring):
     """any_key_configured() runs on EVERY request (via _require_auth), so the
     notice must be throttled - an unthrottled warning would put one line per
     request in the log (and in every bug report) for a persistent state."""
-    from localm.debuglog import install_ring_buffer, recent_activity
-    install_ring_buffer()
+    from localm.debuglog import recent_activity
     path = _write_key_file(auth, "")
 
     for _ in range(20):
