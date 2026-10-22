@@ -1114,7 +1114,7 @@ _RISKY_OPTIONS: dict[str, tuple[str, tuple[str, ...]]] = {
     "git branch": _GIT_REF_WRITING,
     "git tag": _GIT_REF_WRITING,
     "git grep": ("Of", ("--open-files-in-pager", "--file")),
-    "git blame": ("S", ("--contents", "--ignore-revs-file")),
+    "git blame": ("S", ()),
     "git ls-files": ("X", ("--exclude-from",)),
     "git diff": ("O", ()),
     "git log": ("O", ()),
@@ -1282,8 +1282,6 @@ def _risky_option(tok: str, short: str, long: Sequence[str],
     it is written exactly as one of the command's real options in *exact*."""
     if tok.startswith("--"):
         stem = tok.split("=", 1)[0]
-        if stem in long:
-            return True
         return (len(stem) > 2 and stem not in exact
                 and any(opt.startswith(stem) for opt in long))
     return tok.startswith("-") and any(ch in short for ch in tok[1:])
@@ -1734,10 +1732,12 @@ def _read_only_segments(segments: Sequence[_Segment], root: str, root_real: str,
         if _program_shadowed(name, current, root, root_real, search):
             return False
         args = seg.tokens[1:]
+        key = name
         if name == "git":
             if not args or args[0].startswith("-") or args[0].lower() not in _READ_ONLY_GIT:
                 return False
             sub = args[0].lower()
+            key = f"git {sub}"
             options, operands = _split_args(name, args[1:])
             if sub in ("branch", "tag", "remote") and operands:
                 return False
@@ -1755,7 +1755,6 @@ def _read_only_segments(segments: Sequence[_Segment], root: str, root_real: str,
                 return False
             if name == "uniq" and len(operands) > 1:
                 return False
-        key = f"git {sub}" if name == "git" else name
         short, long = _RISKY_OPTIONS.get(key, ("", ()))
         if name == "git":
             long = long + _GIT_RISKY_LONG

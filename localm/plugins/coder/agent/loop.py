@@ -459,6 +459,9 @@ class _LoopMixin:
 
         def start_deferred_mcp(self) -> list: ...
 
+        # Set by Agent (core.py) through _ExecutionMixin.
+        def _hooks_may_ask(self, calls) -> bool: ...
+
         # Set by Agent (core.py) through _ContextMixin.
         def _note_typed_request(self, text) -> None: ...
 

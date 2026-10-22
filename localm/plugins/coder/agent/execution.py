@@ -984,7 +984,7 @@ class _ExecutionMixin:
     def _allow_hook_runs_for_session(self) -> None:
         """Allow hook runs without asking for the rest of the session, for the
         top agent and so for every agent below it."""
-        top = self
+        top: Any = self
         while getattr(top, "parent", None) is not None:
             top = top.parent
         with _SESSION_ALLOWED_LOCK:

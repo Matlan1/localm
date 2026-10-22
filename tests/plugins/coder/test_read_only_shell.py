@@ -639,7 +639,7 @@ def test_real_options_that_start_a_risky_one_are_read_only(command):
     "diff --exclude-from=x a b", "git diff --textconv", "git diff --textc",
     "git log --textconv", "git log -Oorder.txt", "git diff -O order.txt",
     "git branch -u origin/x", "git branch -d", "git branch --del", "git tag -d",
-    "git tag -f", "git blame -S revs a.txt", "git blame --contents x a.txt",
+    "git tag -f", "git blame -S revs a.txt", "git blame --contents=../x a.txt",
     "rg --ignore-file x foo", "rg --ignore-f x foo", "git grep -O foo",
     "git grep -f pat.txt foo", "git ls-files -X x", "git ls-files --exclude-from=x",
     "git status --output=x", "git status --ext-diff", "git rev-parse --out=x",
