@@ -342,3 +342,25 @@ def test_reset_limit_never_raises():
 def test_the_assumed_limit_is_the_one_the_rx6900xt_measurements_proved():
     assert gpureset.ASSUMED_RESET_SECONDS == gpureset.WINDOWS_DEFAULT_TDR_DELAY
     assert gpureset.ResetLimit(2.0, True, "").safe_seconds == 1.0
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows registry")
+def test_an_unreadable_or_mistyped_tdr_value_reads_as_unset(monkeypatch):
+    import winreg
+
+    class Key:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def denied(*a, **k):
+        raise PermissionError("access denied")
+    monkeypatch.setattr(winreg, "OpenKey", denied)
+    assert gpureset.Host().tdr_value("TdrDelay") is None
+    monkeypatch.setattr(winreg, "OpenKey", lambda *a, **k: Key())
+    monkeypatch.setattr(winreg, "QueryValueEx", lambda key, name: ("8", winreg.REG_SZ))
+    assert gpureset.Host().tdr_value("TdrDelay") is None
+    monkeypatch.setattr(winreg, "QueryValueEx", lambda key, name: (8, winreg.REG_DWORD))
+    assert gpureset.Host().tdr_value("TdrDelay") == 8
