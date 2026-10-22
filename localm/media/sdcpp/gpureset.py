@@ -330,7 +330,8 @@ def _amdgpu(host: Host) -> ResetLimit:
     if not limits:
         return ResetLimit(None, True, "the amdgpu driver's GPU job timeout is off")
     seconds = min(limits) / 1000
-    if out_of_tree:
+    explicit = [v.strip() for v in (param or "").split(",")][:2]
+    if out_of_tree and not (len(explicit) == 2 and all(v not in ("", "0") for v in explicit)):
         return ResetLimit(seconds, False,
                           "this amdgpu module was not built with the kernel, so localm cannot "
                           f"tell its default job timeout and assumes about {seconds:g} s")

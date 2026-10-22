@@ -1400,11 +1400,21 @@ def _snapshot_claim_held_by_other(dest: Path, repo_id: str,
     folder is registered, because an unregistered folder has no registry entry
     to say whose files it holds. A registered folder is described by its entry,
     so a marker there is stale and counts as no claim, as does an unreadable
-    one."""
+    one. Repo ids compare in any letter case (Hugging Face resolves either).
+    An unregistered folder that holds files but no marker (an unfinished pull
+    by a localm that wrote none) is held by an unknown default-branch download:
+    ``("", None)`` for a pull at a revision, no claim for a default-branch
+    pull."""
     try:
         claim = json.loads((dest / _SNAPSHOT_CLAIM).read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return None
+        if revision is None or find_aliases_by_path(dest, _mm.load_registry()):
+            return None
+        try:
+            has_files = any(p.name != ".cache" for p in dest.iterdir())
+        except OSError:
+            has_files = True
+        return ("", None) if has_files else None
     except (OSError, ValueError, RecursionError) as e:
         logger.warning("could not read %s in %s (%s); treating the folder as unclaimed",
                        _SNAPSHOT_CLAIM, dest, e)
@@ -1414,7 +1424,7 @@ def _snapshot_claim_held_by_other(dest: Path, repo_id: str,
                        _SNAPSHOT_CLAIM, dest)
         return None
     held = (claim["repo"], claim.get("revision") or None)
-    if held == (repo_id, revision.ref if revision else None):
+    if (held[0].casefold(), held[1]) == (repo_id.casefold(), revision.ref if revision else None):
         return None
     if find_aliases_by_path(dest, _mm.load_registry()):
         return None
@@ -2951,7 +2961,8 @@ def _pull_hf_snapshot_locked(
     claimed = _snapshot_claim_held_by_other(dest, repo_id, revision) if dest.exists() else None
     if claimed is not None:
         claim_repo, claim_revision = claimed
-        what = ("another revision of it" if claim_repo == repo_id
+        what = ("an earlier localm, whose revision it cannot tell" if not claim_repo
+                else "another revision of it" if claim_repo.casefold() == repo_id.casefold()
                 else f"{escape(claim_repo)}"
                 + (f"@{escape(claim_revision)}" if claim_revision else ""))
         console.print(
