@@ -1087,11 +1087,12 @@ class TestCommittedBaseline:
         scope_step = next(st for st in scope["steps"] if "mutation_scope.py" in (st.get("run") or ""))
         assert scope_step["id"] == "scope"
         assert "--notice" in scope_step["run"] and "--github-output" in scope_step["run"]
-        # Every shard runs on a dispatch, the weekly schedule and a labelled PR.
+        # Every shard runs on a dispatch and the weekly schedule; on a pull
+        # request the touched modules' shards run only with the label.
         label_clause = "contains(github.event.pull_request.labels.*.name, 'mutation-test')"
-        assert scope_step["env"]["MUTATION_ALL"] == (
-            "${{ github.event_name != 'pull_request' || %s }}" % label_clause)
-        assert '--all "$MUTATION_ALL"' in scope_step["run"]
+        assert scope_step["env"]["MUTATION_ALL"] == "${{ github.event_name != 'pull_request' }}"
+        assert scope_step["env"]["MUTATION_LABEL"] == "${{ %s }}" % label_clause
+        assert '--all "$MUTATION_ALL" --run "$MUTATION_LABEL"' in scope_step["run"]
         assert "${{" not in scope_step["run"]
         cond = " ".join(scope["if"].split())
         for event in ("github.event_name == 'pull_request'", "github.event_name == 'workflow_dispatch'",

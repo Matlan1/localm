@@ -310,6 +310,33 @@ class TestMain:
         out = capsys.readouterr().out
         assert out.splitlines()[0] == 'modules=["scopes","auth"]' and "a mutation-* job" in out
 
+    def test_without_the_label_a_touched_module_runs_no_shard(self, repo, capsys):
+        """NEGATIVE: an unlabelled pull request never starts a mutation shard."""
+        _commit(repo, "localm/auth.py", "def f():\n    return 2\n")
+        assert ms.main(_run(repo, "--run", "false", "--notice")) == 0
+        out = capsys.readouterr().out.splitlines()
+        assert out[:2] == ["modules=[]", "shards=[]"]
+        notice = [ln for ln in out if ln.startswith("::notice")]
+        assert len(notice) == 1
+        assert notice[0].startswith("::notice title=Mutation shards did not run::")
+        assert "auth" in notice[0] and "mutation-test label" in notice[0]
+
+    def test_without_the_label_github_output_is_empty(self, repo, tmp_path, monkeypatch, capsys):
+        out_file = tmp_path / "gh_output"
+        monkeypatch.setenv("GITHUB_OUTPUT", str(out_file))
+        _commit(repo, "localm/auth.py", "def f():\n    return 2\n")
+        assert ms.main(_run(repo, "--run", "false", "--github-output")) == 0
+        assert out_file.read_text(encoding="utf-8") == "modules=[]\nshards=[]\n"
+
+    def test_the_label_runs_only_the_touched_modules(self, repo, capsys):
+        _commit(repo, "localm/scopes.py", "def f():\n    return 3\n")
+        assert ms.main(_run(repo, "--run", "true")) == 0
+        assert capsys.readouterr().out.splitlines()[0] == 'modules=["scopes"]'
+
+    def test_all_true_runs_every_module_even_without_the_label(self, repo, capsys):
+        assert ms.main(["--repo", str(repo), "--all", "true", "--run", "false"]) == 0
+        assert capsys.readouterr().out.splitlines()[0] == 'modules=["scopes","auth"]'
+
     def test_all_true_selects_every_module_without_a_diff(self, repo, capsys):
         assert ms.main(["--base", "no-such-ref", "--repo", str(repo), "--all", "true"]) == 0
         assert capsys.readouterr().out.splitlines()[0] == 'modules=["scopes","auth"]'

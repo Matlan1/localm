@@ -3,10 +3,11 @@
 """Decides which mutation shards a run needs, for the `mutation-scope` job in
 .github/workflows/ci.yml, and keeps the test-file map that decision reads.
 
-SELECTION. ``--all true`` (the weekly schedule, a dispatch, a pull request
-carrying the ``mutation-test`` label) selects every ``[tool.mutmut]
-only_mutate`` module. Otherwise the diff from the merge base with ``--base``
-(default origin/master) to HEAD selects:
+SELECTION. ``--all true`` (the weekly schedule, a dispatch) selects every
+``[tool.mutmut] only_mutate`` module. Otherwise the diff from the merge base
+with ``--base`` (default origin/master) to HEAD selects the modules it
+touches, and ``--run false`` (a pull request without the ``mutation-test``
+label) runs none of them. A change touches:
 
 * every module, when the change touches the mutation gate itself
   (GATE_FILES), the ``[tool.mutmut]`` table of pyproject.toml (compared
@@ -27,12 +28,12 @@ only_mutate`` module. Otherwise the diff from the merge base with ``--base``
 A changed ``test_*.py`` outside the selection selects nothing: mutmut never
 runs it.
 
-Prints ``modules=<JSON list of module stems>`` in only_mutate order and
-``shards=<JSON list>``, the CI jobs those modules run as
+Prints ``modules=<JSON list of module stems>``, the modules that run, in
+only_mutate order and ``shards=<JSON list>``, the CI jobs they run as
 (scripts/mutation_parts.py), then one line per reason. ``--github-output``
 appends both lines to the file ``$GITHUB_OUTPUT`` names; ``--notice`` prints a
-``::notice`` annotation when
-any module is selected. Exits 1 when the diff cannot be computed, when
+``::notice`` annotation when the change touches any module, saying whether
+its shards run. Exits 1 when the diff cannot be computed, when
 ``only_mutate`` is empty or missing, or when the map is missing or malformed:
 an unknown answer is never reported as an empty selection.
 
@@ -289,6 +290,8 @@ def main(argv: list[str]) -> int:
                     help="ref the change is diffed from (via merge-base)")
     ap.add_argument("--all", choices=("true", "false"), default="false",
                     help="select every only_mutate module without diffing")
+    ap.add_argument("--run", choices=("true", "false"), default="true",
+                    help="false: run none of the touched modules (no mutation-test label)")
     ap.add_argument("--github-output", action="store_true",
                     help="also append modules=... to $GITHUB_OUTPUT")
     ap.add_argument("--notice", action="store_true",
@@ -387,7 +390,10 @@ def main(argv: list[str]) -> int:
                                  section != mutmut_section(base_pyproject), read_text,
                                  workflow_changed)
 
-    stems = [stem(m) for m in picked]
+    touched_stems = [stem(m) for m in picked]
+    stems = touched_stems if args.all == "true" or args.run == "true" else []
+    if touched_stems and not stems:
+        reasons.append("not run: no mutation-test label")
     line = "modules=" + json.dumps(stems, separators=(",", ":"))
     jobs = "shards=" + json.dumps(mutation_parts.shards(stems), separators=(",", ":"))
     print(line)
@@ -400,6 +406,11 @@ def main(argv: list[str]) -> int:
         print("::notice title=Mutation shards run on this change::"
               f"{', '.join(stems)} ({'; '.join(reasons)}). Every other module is judged "
               "from the committed baseline.")
+    elif args.notice and touched_stems:
+        print("::notice title=Mutation shards did not run::This change touches the "
+              f"mutation-tested modules {', '.join(touched_stems)} ({'; '.join(reasons[:-1])}). "
+              "Their shards run on the weekly schedule, on a dispatch, or on this pull request "
+              "with the mutation-test label.")
     return 0
 
 

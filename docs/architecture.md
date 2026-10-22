@@ -144,12 +144,14 @@ file. It is not a required check: it is not in `merge-policy`'s `needs`.
 `mutation-test` is the mutation-testing gate for the trust boundary: the
 eight modules in `[tool.mutmut] only_mutate` (`pyproject.toml`).
 `mutation-scope` (`scripts/mutation_scope.py`) picks the shards a run needs:
-every module on the weekly schedule, on a dispatch and on a pull request
-carrying the `mutation-test` label; otherwise the modules a pull request's
-diff reaches (a changed module, a changed test file that exercises one per
+every module on the weekly schedule and on a dispatch; on a pull request
+carrying the `mutation-test` label, the modules its diff touches (a changed
+module, a changed test file that exercises one per
 `scripts/mutation_test_map.json`, a test helper or fixture such a file names,
-or every module when the gate itself, the `[tool.mutmut]` table or
-`tests/conftest.py` changed). One `mutation-run` shard per selected module
+or every module when the gate itself, the `[tool.mutmut]` table, a
+`mutation-*` job or `tests/conftest.py` and what it imports changed). A pull
+request without the label runs no shard; its notice names the modules it
+touches. One `mutation-run` shard per selected module
 runs mutmut (`scripts/mutmut_run.py run "localm.<module>.*"`, under a random
 `PYTHONHASHSEED` it prints first) and uploads its result
 file; `mutation-test` merges them and runs
@@ -174,8 +176,8 @@ run keep their committed baseline. The job uploads a proposed baseline and
 map (`mutation-baseline-proposed`, floors ratcheted up, equivalent and
 unstable entries kept, no map edge dropped) so a
 changed function's new mutants can be classified and committed without a
-local run; mutmut itself runs on Linux only. A pull request that needs a
-shard cannot merge without a green `mutation-test`. `mutation-scope` fails
+local run; mutmut itself runs on Linux only. A labelled pull request whose
+shards ran cannot merge without a green `mutation-test`. `mutation-scope` fails
 when it cannot compute the diff or read the map, and `merge-policy` fails
 with it. The two decision classes that
 live in the app assembly (`localm/inference/app_assembly/security.py` and
