@@ -204,9 +204,13 @@ UNLISTED_TYPES = frozenset({"mmproj", "diffusion-unet", "text-encoder", "vae", "
 
 
 def _no_backend_runs_file(path: str) -> bool:
-    """True when *path* is a file that no chat backend (built-in or plugin) loads."""
+    """True when *path* is a file or folder that no chat backend (built-in or
+    plugin) loads, other than a Hugging Face folder, which the HF backend
+    explains itself."""
     from localm.inference import backend_registry
-    return (os.path.isfile(path) and backend_registry.builtin_refuses(path)
+    from localm.inference.engine import _is_hf_dir
+    return (os.path.exists(path) and not _is_hf_dir(path)
+            and backend_registry.builtin_refuses(path)
             and backend_registry.backend_for(path) is None)
 
 

@@ -211,6 +211,8 @@ def test_chat_naming_an_unknown_typed_file_no_backend_runs_is_a_clean_422(served
 def test_an_unknown_typed_entry_a_backend_can_run_is_not_refused(tmp_path):
     folder = tmp_path / "snapshot"
     folder.mkdir()
+    (folder / "config.json").write_text("{}", encoding="utf-8")
+    (folder / "model.safetensors").write_bytes(b"x" * 16)
     gguf = tmp_path / "odd.gguf"
     gguf.write_bytes(b"x" * 16)
     reg = {"snap": {"path": str(folder), "model_type": "unknown"},
@@ -251,3 +253,16 @@ def test_the_projector_keeps_its_own_message_naming_its_chat_model():
     reg = _registry()
     reg["chat"] = {"path": "models/proj-chat.gguf", "model_type": "llm"}
     assert "vision projector" in chat_load_refusal("proj", reg)
+
+
+def test_an_unknown_typed_folder_no_backend_runs_is_refused(tmp_path):
+    folder = tmp_path / "not-a-snapshot"
+    folder.mkdir()
+    (folder / "notes.txt").write_text("x", encoding="utf-8")
+    reg = {"u": {"path": str(folder), "model_type": "unknown"}}
+    assert "unknown type" in chat_load_refusal("u", reg)
+
+
+def test_an_unknown_typed_path_that_does_not_exist_is_not_refused(tmp_path):
+    reg = {"u": {"path": str(tmp_path / "gone.safetensors"), "model_type": "unknown"}}
+    assert chat_load_refusal("u", reg) is None

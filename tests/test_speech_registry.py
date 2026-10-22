@@ -41,7 +41,8 @@ class TestTyping:
         assert g.gguf_non_chat_model_type("llama") is None
         assert g.gguf_chat_refusal("llama") is None
 
-    def test_chatting_with_a_tts_model_is_refused_and_points_at_speech(self):
+    def test_chatting_with_a_tts_model_is_refused_and_points_at_speech(self, monkeypatch):
+        monkeypatch.setattr(g, "speech_route_available", lambda: True)
         refusal = g.gguf_chat_refusal("qwen3tts")
         assert refusal is not None
         assert "not a chat model" in refusal
