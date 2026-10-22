@@ -154,6 +154,12 @@ localm pull owner/repo:model-Q4_K_M.gguf
 # Full HuggingFace model directory (transformers format)
 localm pull owner/repo
 
+# A branch, tag or commit instead of the default branch: owner/repo@revision
+# (or owner/repo@revision:file for one file). The revision may contain "/"
+# (refs/pr/3). It must exist, or nothing is downloaded.
+localm pull owner/repo@4.0bpw --name myquant
+localm pull owner/repo@v1.0:model-Q4_K_M.gguf
+
 # Direct URL, with optional integrity check
 localm pull https://example.com/m.gguf --sha256 <hash>
 
@@ -170,7 +176,7 @@ localm pull owner/repo:model-Q4_K_M.gguf --mmproj mmproj-model-f16.gguf
 localm pull owner/repo:model-Q4_K_M.gguf --type llm
 ```
 
-Duplicate downloads are detected by path and SHA256. When you add or pull something already registered, localm offers alias / copy / move / register / skip instead of silently duplicating gigabytes. Two downloads to the same destination (from the CLI, the GUI, or both) are serialised rather than allowed to interleave their bytes into one file; starting a download that is already running is refused up front, and one interrupted by a crash resumes instead of restarting.
+A pull at a revision downloads every file at the commit the revision pointed at when the pull started, records the revision and that commit on the registry entry (`localm list` shows `hf:owner/repo@revision`), and names a full-repo folder `<repo>-<revision>` unless you pass `--name`, so two revisions of one repo are two models. Its vision projector is not looked up automatically (the default branch's may not match); name one with `--mmproj owner/repo:file.gguf`. Duplicate downloads are detected by path and SHA256. When you add or pull something already registered, localm offers alias / copy / move / register / skip instead of silently duplicating gigabytes. Two downloads to the same destination (from the CLI, the GUI, or both) are serialised rather than allowed to interleave their bytes into one file; starting a download that is already running is refused up front, and one interrupted by a crash resumes instead of restarting.
 
 ### Search HuggingFace
 

@@ -427,21 +427,25 @@ class TestOtherConsumersOfASpec:
         assert pull_mod._mmproj_for_registration(*args, None) == Path("p.gguf")
 
 
-class TestMcpPullAllowlistIgnoresTheRevision:
-    def test_a_registered_repo_may_be_pulled_at_a_revision(self, hub, monkeypatch):
+class TestMcpPullStaysOnTheDefaultBranch:
+    def _handler(self):
         from localm.plugins.mcpserver.tools import models as tools
+        return tools.build(SimpleNamespace(get_loaded=lambda n: None))["pull_model"]["handler"]
+
+    def test_a_registered_repo_is_not_pullable_at_a_revision_over_mcp(self, hub, monkeypatch):
         mm.pull_model("o/r:w.safetensors", name="first", model_type="llm")
         pulled = []
         monkeypatch.setattr(pull_mod, "pull_model", lambda spec, **k: pulled.append(spec) or True)
-        handler = tools.build(SimpleNamespace(get_loaded=lambda n: None))["pull_model"]["handler"]
-        result = handler({"repo": "o/r@4.0bpw", "file": "w.safetensors", "name": "second",
-                          "load": False})
-        assert not result.get("isError"), result
-        assert pulled == ["o/r@4.0bpw:w.safetensors"]
+        result = self._handler()({"repo": "o/r@refs/pr/3", "file": "w.safetensors",
+                                  "name": "second", "load": False})
+        assert result["isError"] is True and "Refusing to pull" in str(result)
+        assert pulled == []
 
-    def test_an_unknown_repo_is_still_refused_with_a_revision(self, hub):
-        from localm.plugins.mcpserver.tools import models as tools
-        handler = tools.build(SimpleNamespace(get_loaded=lambda n: None))["pull_model"]["handler"]
-        result = handler({"repo": "evil/repo@4.0bpw", "name": "x", "load": False})
-        assert result.get("isError")
-        assert "Refusing to pull" in str(result)
+    def test_a_registered_repo_is_still_pullable_over_mcp(self, hub, monkeypatch):
+        mm.pull_model("o/r:w.safetensors", name="first", model_type="llm")
+        pulled = []
+        monkeypatch.setattr(pull_mod, "pull_model", lambda spec, **k: pulled.append(spec) or True)
+        result = self._handler()({"repo": "o/r", "file": "w.safetensors",
+                                  "name": "second", "load": False})
+        assert not result["isError"], result
+        assert pulled == ["o/r:w.safetensors"]

@@ -135,12 +135,7 @@ def build(engines: EngineCache) -> dict[str, dict]:
                     "'localm add <path>' on the host.", is_error=True)
         except OSError:
             pass          # unreadable/oversized path: not a local add, fall through
-        from localm.model_manager.pull import split_hf_revision
-        try:
-            known_repo = split_hf_revision(repo)[0]
-        except ValueError as e:
-            return _text_result(f"Invalid 'repo': {e}", is_error=True)
-        if not _known_pull_repo(known_repo):
+        if not _known_pull_repo(repo):
             return _text_result(
                 f"Refusing to pull {repo!r} over MCP: it must be a known repo "
                 f"{tuple(KNOWN_PULL_REPOS)} or match an already-registered "
