@@ -1001,25 +1001,26 @@ def _terminal_answers(monkeypatch, *answers):
     return asked
 
 
-def test_a_terminal_a_allows_hook_runs_for_the_session_but_not_the_shell(tmp_path,
-                                                                         monkeypatch):
+def test_an_a_at_a_hook_prompt_covers_that_run_only(tmp_path, monkeypatch):
     argv = _py_hook(tmp_path, "pre", "record(payload)\n")
     proj = _project(tmp_path, _hooks_toml(PRE, argv))
     agent = _trusted_agent(proj, auto_approve=False)
     agent._interactive = True
     agent._session_allowed.add("write_file")
-    asked = _terminal_answers(monkeypatch, "a")
+    asked = _terminal_answers(monkeypatch, "a", "n")
     assert agent._execute_tool(_write_call("one.txt"), interactive=True).ok
-    assert len(asked) == 1 and "pre.py" in asked[0] and "a=allow this session" in asked[0]
-    assert agent._execute_tool(_write_call("two.txt"), interactive=True).ok
-    assert len(asked) == 1 and len(_log(tmp_path, "pre")) == 2
-    assert agent._hook_run_gate() is None
-    assert "run_hook" in agent._session_allowed_tools()
+    assert len(asked) == 1 and "pre.py" in asked[0]
+    assert "a=allow this session" not in asked[0]
+    script = Path(argv[1])
+    script.write_text(script.read_text(encoding="utf-8")
+                      + "open(os.path.join(os.path.dirname(LOG), 'pwned.txt'), 'w').close()\n",
+                      encoding="utf-8")
+    res = agent._execute_tool(_write_call("two.txt"), interactive=True)
+    assert len(asked) == 2 and not res.ok and not (proj / "two.txt").exists()
+    assert not (tmp_path / "pwned.txt").exists()
+    assert agent._hook_run_gate() == "confirm"
+    assert "run_hook" not in agent._session_allowed_tools()
     assert "run_shell" not in agent._session_allowed_tools()
-    asked_shell = _terminal_answers(monkeypatch, "n")
-    res = agent._execute_tool(_call("run_shell", {"command": "echo hi > x.txt"}),
-                              interactive=True)
-    assert not res.ok and len(asked_shell) == 1 and not (proj / "x.txt").exists()
 
 
 def test_a_terminal_y_runs_the_hook_once_and_asks_again(tmp_path, monkeypatch):
@@ -1035,44 +1036,60 @@ def test_a_terminal_y_runs_the_hook_once_and_asks_again(tmp_path, monkeypatch):
     assert len(_log(tmp_path, "pre")) == 1 and agent._hook_run_gate() == "confirm"
 
 
-def test_a_gui_always_allow_on_a_hook_card_never_allows_the_shell(tmp_path):
+def test_a_gui_hook_card_is_an_exact_approval_that_never_allows_a_later_run(tmp_path):
+    from localm.plugins.coder import display
     argv = _py_hook(tmp_path, "pre", "record(payload)\n")
     proj = _project(tmp_path, _hooks_toml(PRE, argv))
     agent = _trusted_agent(proj, auto_approve=False)
 
-    class _AlwaysAllowingGui(_GuiSession):
-        def confirm(self, call, agent=None):
-            approved = super().confirm(call, agent)
-            if call.name == "run_hook":
-                self.allowed_tools.add(call.name)
-            return approved
+    class _AlwaysTickingGui(_GuiSession):
+        """Ticks "always allow" on every card; like the GUI session, the tick
+        is ignored on a card asked for an exact approval."""
 
-    gui = _AlwaysAllowingGui({"write_file"}, True)
+        def __init__(self, allowed, answer):
+            super().__init__(allowed, answer)
+            self.exact = []
+
+        def confirm(self, call, agent=None):
+            exact = display.exact_approval_required()
+            if call.name in self.allowed_tools and not exact:
+                return True
+            self.asked.append(call)
+            self.exact.append(exact)
+            if self.answer and not exact:
+                self.allowed_tools.add(call.name)
+            return self.answer
+
+    gui = _AlwaysTickingGui({"write_file"}, True)
     agent.confirm_handler = gui.confirm
     assert agent._execute_tool(_write_call("one.txt"), interactive=False).ok
-    assert agent._execute_tool(_write_call("two.txt"), interactive=False).ok
-    assert [c.name for c in gui.asked] == ["run_hook"]
-    assert len(_log(tmp_path, "pre")) == 2
+    script = Path(argv[1])
+    script.write_text(script.read_text(encoding="utf-8")
+                      + "open(os.path.join(os.path.dirname(LOG), 'pwned.txt'), 'w').close()\n",
+                      encoding="utf-8")
     gui.answer = False
+    res = agent._execute_tool(_write_call("two.txt"), interactive=False)
+    assert [c.name for c in gui.asked] == ["run_hook", "run_hook"]
+    assert gui.exact == [True, True]
+    assert not res.ok and not (tmp_path / "pwned.txt").exists()
+    assert "run_hook" not in gui.allowed_tools
     res = agent._execute_tool(_call("run_shell", {"command": "echo hi > x.txt"}),
                               interactive=False)
-    assert [c.name for c in gui.asked] == ["run_hook", "run_shell"]
+    assert [c.name for c in gui.asked] == ["run_hook", "run_hook", "run_shell"]
     assert not res.ok and not (proj / "x.txt").exists()
 
 
-def test_a_hook_allow_answered_in_a_child_covers_the_parent_and_its_children(tmp_path):
-    proj = _project(tmp_path, _hooks_toml(PRE, ["x"]))
-    parent = _trusted_agent(proj, auto_approve=False)
-    parent._session_allowed.add("write_file")
-    child = _make_agent(proj, auto_approve=False)
-    child.parent = parent
-    sibling = _make_agent(proj, auto_approve=False)
-    sibling.parent = parent
-    assert child._hook_run_gate() == "confirm"
-    child._allow_hook_runs_for_session()
-    assert parent._hook_run_gate() is None
-    assert sibling._hook_run_gate() is None
-    assert "run_hook" not in child._session_allowed
+def test_the_gui_session_ignores_always_allow_on_a_hook_card(tmp_path):
+    import threading
+    from localm.plugins.coder.sessions import CoderSession, _PendingConfirm
+    session = object.__new__(CoderSession)
+    session.allowed_tools = set()
+    session._lock = threading.Lock()
+    session._pending = {}
+    pending = _PendingConfirm(id="c1", tool="run_hook", args={}, diff=None, exact=True)
+    session._pending["c1"] = pending
+    assert session.answer_confirm("c1", True, always_allow=True)
+    assert session.allowed_tools == set()
 
 
 def test_hooked_reads_in_one_reply_ask_at_the_terminal_instead_of_refusing(tmp_path,
@@ -1099,12 +1116,23 @@ def test_hooked_reads_in_one_reply_run_in_parallel_when_no_hook_needs_asking(tmp
     assert agent._hooks_may_ask(calls) is False
     agent._session_allowed.add("write_file")
     assert agent._hooks_may_ask(calls) is True
-    agent._allow_hook_runs_for_session()
+    agent._session_allowed.add("run_shell")
     assert agent._hooks_may_ask(calls) is False
     unhooked = _project(tmp_path / "other", _hooks_toml(PRE, ["x"], matcher="write_file"))
     other = _trusted_agent(unhooked, auto_approve=False)
     other._session_allowed.add("write_file")
     assert other._hooks_may_ask(calls) is False
+
+
+def test_hooks_trusted_elsewhere_mid_session_ask_before_a_batch_runs(tmp_path):
+    proj = _project(tmp_path, '[[hooks.pre_tool_use]]\ncommand = ["x"]\n')
+    agent = _make_agent(proj, auto_approve=False)
+    agent._session_allowed.add("write_file")
+    calls = [_call("read_file", {"path": "a.txt"}), _call("read_file", {"path": "b.txt"})]
+    assert agent._tool_hooks is not None and agent._tool_hooks.trusted is False
+    assert agent._hooks_may_ask(calls) is False
+    ToolHooks.load(proj).remember_trust()
+    assert agent._hooks_may_ask(calls) is True
 
 
 def test_a_child_thread_reads_the_session_allows_while_the_parent_adds_one(tmp_path):

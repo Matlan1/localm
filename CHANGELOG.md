@@ -666,9 +666,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Trusted project hooks ask before running once file writes are allowed for the session.**
   Answering "a" to a file write in the terminal, or "always allow" in the GUI, now gives every hook
   run the confirmation `run_shell` needs, as auto-approve already did, so a hook cannot run a
-  script the model has just rewritten without asking. That prompt (or GUI card) can allow hook runs
-  for the rest of the session without allowing `run_shell`, and hooked tool calls in one reply ask
-  in turn instead of being refused. The trust prompt (terminal and GUI) shows
+  script the model has just rewritten without asking. That prompt (or GUI card, now named
+  `run_hook`) approves that one hook run only: it offers no "always allow", so it can no longer allow
+  `run_shell` for the session, and hooked tool calls in one reply ask in turn instead of being
+  refused. The trust prompt (terminal and GUI) shows
   invisible and direction-changing characters in hook commands as `\uXXXX` escapes, the coder asks
   before touching the hook and MCP trust store, and an "a" answer applies only to the prompt it
   was given at.

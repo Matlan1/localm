@@ -402,6 +402,8 @@ class CoderSession:
             "diff": pending.diff,
             # Absent (None) for the session's own agent.
             "agent": agent,
+            # True when the approval covers this call only ("always allow" is ignored).
+            "exact": exact,
         })
         answered = pending.answered.wait(timeout=_confirm_timeout())
         with self._lock:
