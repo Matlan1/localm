@@ -314,7 +314,12 @@ class PluginHost:
 
     def mount_router(self, router) -> None:
         """Mount *router* on the live app, gating every route with the plugin's
-        capability scope, and remember the routes added for later removal."""
+        capability scope, and remember the routes added for later removal. With
+        no app (a backend-only load, see ``PluginManager.load_backend_plugins``)
+        nothing is mounted."""
+        if self._app is None:
+            self.audit("router_skipped_no_app", {})
+            return
         from fastapi import Depends
         from localm.inference.http_server import require_scope
         before = {id(r) for r in self._app.router.routes}
@@ -379,6 +384,9 @@ class PluginHost:
         if not d.is_dir():
             raise ValueError(
                 f"plugin {self._spec.name!r}: static dir {directory!r} not found")
+        if self._app is None:
+            self.audit("static_skipped_no_app", {"prefix": prefix})
+            return prefix
         before = {id(r) for r in self._app.router.routes}
         self._app.mount(prefix, StaticFiles(directory=str(d)),
                         name=f"plugin-static-{self._spec.name}")
@@ -613,10 +621,10 @@ class PluginHost:
         """Register an inlet/stream/outlet transform on the kernel chat pipeline
         (see localm.inference.chat_pipeline). Tracked so unmount drops this
         plugin's hooks when it is disabled or uninstalled."""
-        pipeline = getattr(self._app.state, "chat_pipeline", None)
+        pipeline = getattr(getattr(self._app, "state", None), "chat_pipeline", None)
         if pipeline is None:
-            # No chat pipeline on this app (e.g. a bare-FastAPI test harness):
-            # the hook is inert.
+            # No app, or no chat pipeline on it (a backend-only load, a
+            # bare-FastAPI test harness): the hook is inert.
             self.audit("chat_hook_skipped", {"phase": phase})
             return
         pipeline.add_hook(phase, fn, priority=priority, plugin=self._spec.name)
@@ -942,7 +950,8 @@ class PluginManager:
         ``inference-backend`` capability and is not loaded yet, for a process
         with no server app (an in-process ``localm run``). Returns the names
         loaded. Never raises: a failing plugin is recorded in errors and logged
-        at WARNING. A plugin that mounts routes or hooks fails to load here."""
+        at WARNING. Routes, static mounts and chat hooks a plugin registers are
+        skipped here (there is no app); its inference backend is registered."""
         self.discover()
         enabled = self._enabled_set()
         loaded = []

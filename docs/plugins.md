@@ -454,6 +454,11 @@ def register(host):
 - `create(model_path, **opts)` returns an unloaded backend implementing
   `localm.inference.backends.base.BaseBackend`. `opts` holds `device` and
   `n_ctx` (either may be None).
+- `refusal(model_path) -> str | None` (optional) returns the sentence a load
+  would be refused with on this machine (wrong operating system, no suitable
+  GPU, runtime not installed), or None. `localm add` prints it when it
+  registers a model your backend claims. It must not start the model's
+  process; an exception is logged and counts as None.
 - Built-ins always win: a `.gguf` file, and a Hugging Face folder the HF
   backend loads, never reach a plugin. A registered backend is asked only for
   a path both built-ins refuse, and the first one that claims it builds it.
@@ -470,7 +475,9 @@ def register(host):
 - Declare `capabilities = ["inference-backend"]` in `plugin.toml`. A process
   that has not loaded its plugins (an in-process `localm run --no-server`, or
   the server building its startup model) then loads the enabled plugins that
-  declare it, once, when no registered backend claims a refused path.
+  declare it, once, when no registered backend claims a refused path. That
+  load has no server app: routes, static mounts and chat hooks the plugin
+  registers are skipped there and mounted when the server loads its plugins.
 
 ## Dependencies
 

@@ -55,8 +55,19 @@ def create(model_path: str, **opts):
                           fmt=quant_format(model_path))
 
 
+def refusal(model_path: str) -> Optional[str]:
+    """The sentence a load of *model_path* would be refused with on this
+    machine, or None (see :func:`backend.load_refusal`)."""
+    fmt = quant_format(model_path)
+    if fmt is None:
+        return None
+    from .backend import load_refusal
+    return load_refusal(fmt)
+
+
 DESCRIPTOR = InferenceBackendDescriptor(
-    name="exllama", claims=claims, create=create, label="ExLlama (EXL2 / EXL3)")
+    name="exllama", claims=claims, create=create, label="ExLlama (EXL2 / EXL3)",
+    refusal=refusal)
 
 
 def register(host) -> None:

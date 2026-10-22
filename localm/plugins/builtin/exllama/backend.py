@@ -87,6 +87,17 @@ def _runtime_refusal(fmt: str) -> Optional[str]:
             "localm plugin install-deps exllama")
 
 
+def load_refusal(fmt: str) -> Optional[str]:
+    """The sentence a load of a *fmt* model is refused with on this machine
+    (no NVIDIA GPU, not Linux, runtime not installed), or None. Starts no
+    process."""
+    for refusal in (_gpu_refusal, _platform_refusal, _runtime_refusal):
+        sentence = refusal(fmt)
+        if sentence is not None:
+            return sentence
+    return None
+
+
 def _read_config(model_path: str) -> dict:
     try:
         data = json.loads((Path(model_path) / "config.json").read_text(encoding="utf-8"))
@@ -187,10 +198,9 @@ class ExllamaBackend(BaseBackend):
         any child is started, on a machine without an NVIDIA GPU, on an
         operating system other than Linux, or when the runtime is not
         installed; RuntimeError when the worker fails or crashes."""
-        for refusal in (_gpu_refusal, _platform_refusal, _runtime_refusal):
-            sentence = refusal(self._fmt)
-            if sentence is not None:
-                raise ModelRefusedError(sentence)
+        sentence = load_refusal(self._fmt)
+        if sentence is not None:
+            raise ModelRefusedError(sentence)
         from localm.inference.hf_shard_index_safety import validate_shard_index
         from localm.inference.hf_tokenizer_safety import validate_tokenizer_json
         validate_tokenizer_json(self.model_path)
@@ -198,7 +208,8 @@ class ExllamaBackend(BaseBackend):
 
         cache_tokens = cache_tokens_for(self.model_path, self._n_ctx)
         self._runner = HFRunner(worker_target=(str(WORKER_FILE), WORKER_CLASS),
-                                process_name="exllama-worker")
+                                process_name="exllama-worker",
+                                backend_label="ExLlama")
         meta = self._runner.spawn_and_load(
             {"model_path": self.model_path, "fmt": self._fmt,
              "cache_tokens": cache_tokens, "device": self._device},

@@ -70,6 +70,24 @@ def claiming(model_path: str) -> Optional[Any]:
     return None
 
 
+def refusal_for(descriptor: Any, model_path: str) -> Optional[str]:
+    """What *descriptor*'s ``refusal`` says about loading *model_path* on this
+    machine, or None when it has none, it returns no sentence, or it raises
+    (logged at WARNING)."""
+    refusal = getattr(descriptor, "refusal", None)
+    if not callable(refusal):
+        return None
+    try:
+        sentence = refusal(str(model_path))
+    except Exception as e:
+        logger.warning("inference backend %r (plugin %r): refusal() raised on %s "
+                       "(%s: %s); treated as no refusal",
+                       descriptor.name, descriptor.plugin_name, model_path,
+                       type(e).__name__, e)
+        return None
+    return sentence if isinstance(sentence, str) and sentence.strip() else None
+
+
 def builtin_refuses(model_path: str) -> bool:
     """True when neither built-in backend would load *model_path*: not a GGUF
     file, and not a Hugging Face folder the HF backend accepts (a folder in a
