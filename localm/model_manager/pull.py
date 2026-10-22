@@ -2607,8 +2607,7 @@ def _snapshot_dest_lock(model_name: str):
             path.parent.mkdir(parents=True, exist_ok=True)
             held.enter_context(_hold_download_lock(path, busy=(
                 f"a download into the folder '{model_name}' is already "
-                "running. Wait for it to finish, or pull with -n "
-                "<a-different-name>.")))
+                "running.")))
         except OSError as e:
             raise PullInFlight(
                 f"could not take the download lock for '{model_name}': {e}") from e
@@ -2860,7 +2859,8 @@ def _pull_hf_snapshot(
                 repo_id, model_name, redownload, model_type, revision,
                 snapshot_download)
     except PullInFlight as e:
-        console.print(f"[red]Download already in progress:[/red] {escape(str(e))}")
+        console.print(f"[red]Download already in progress:[/red] {escape(str(e))} "
+                      "Wait for it to finish, or pull with -n <a-different-name>.")
         return False
 
 

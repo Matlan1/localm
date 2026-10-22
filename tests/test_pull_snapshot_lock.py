@@ -171,6 +171,15 @@ class TestTheLockOfAPull:
         said = _said(capsys)
         assert "Download failed" in said and "already running" not in said
 
+    def test_an_oserror_outside_the_download_is_not_reported_as_a_pull_in_flight(
+            self, hub, monkeypatch):  # noqa: F811
+        def broken():
+            raise OSError("cannot create the models folder")
+
+        monkeypatch.setattr(mm, "ensure_dirs", broken)
+        with pytest.raises(OSError, match="cannot create the models folder"):
+            mm.pull_model("o/r@4.0bpw", name="q", model_type="llm")
+
     def test_the_lock_is_held_while_the_download_runs(self, hub, monkeypatch, capsys):  # noqa: F811
         import huggingface_hub
         inner = huggingface_hub.snapshot_download
