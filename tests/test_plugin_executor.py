@@ -226,3 +226,37 @@ def test_a_dead_pool_during_interpreter_exit_refuses_instead_of_replacing(
     assert "exiting" in str(excinfo.value)
     # And it must not have left a replacement behind on the way out.
     assert _ex._executor is pool
+
+
+_FORK_CHILD_SCRIPT = r"""
+import os, sys
+from concurrent.futures import TimeoutError as FutureTimeout
+from localm.executor import get_plugin_executor
+
+parent_pool = get_plugin_executor()
+assert parent_pool.submit(lambda: 1).result(timeout=10) == 1
+pid = os.fork()
+if pid == 0:
+    try:
+        pool = get_plugin_executor()
+        code = 0 if pool.submit(lambda: 42).result(timeout=10) == 42 else 3
+        code = code or (4 if pool is parent_pool else 0)
+    except FutureTimeout:
+        code = 2
+    os._exit(code)
+_, status = os.waitpid(pid, 0)
+print("child-exit", os.waitstatus_to_exitcode(status))
+"""
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="os.fork is POSIX-only")
+def test_a_forked_child_runs_plugin_work_on_its_own_pool():
+    """A child forked after the parent's pool has idle workers gets a pool of
+    its own whose work runs; the inherited one would queue it forever (exit 2)."""
+    import subprocess
+    import sys
+
+    proc = subprocess.run([sys.executable, "-c", _FORK_CHILD_SCRIPT], cwd=_REPO_ROOT,
+                          capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    assert "child-exit 0" in proc.stdout, (proc.stdout, proc.stderr)

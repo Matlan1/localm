@@ -1,0 +1,211 @@
+{
+  "schema": 1,
+  "test_files": {
+    "tests/plugins/coder/test_confine.py": [
+      "localm/pathsafe.py"
+    ],
+    "tests/plugins/coder/test_skills.py": [
+      "localm/pathsafe.py",
+      "localm/config.py"
+    ],
+    "tests/test_admin_fs_routes.py": [
+      "localm/bindhost.py",
+      "localm/scopes.py",
+      "localm/pathsafe.py",
+      "localm/auth.py",
+      "localm/config.py"
+    ],
+    "tests/test_auth.py": [
+      "localm/bindhost.py",
+      "localm/scopes.py",
+      "localm/auth.py",
+      "localm/config.py"
+    ],
+    "tests/test_auth_kdf.py": [
+      "localm/scopes.py",
+      "localm/auth.py",
+      "localm/config.py"
+    ],
+    "tests/test_auth_network_1_loopback_gate.py": [
+      "localm/bindhost.py",
+      "localm/auth.py",
+      "localm/config.py",
+      "localm/tls.py"
+    ],
+    "tests/test_auth_network_4_session_revalidation.py": [
+      "localm/scopes.py",
+      "localm/auth.py",
+      "localm/config.py"
+    ],
+    "tests/test_auth_reg579_empty_key_file.py": [
+      "localm/auth.py",
+      "localm/config.py"
+    ],
+    "tests/test_auth_secret_write_perms.py": [
+      "localm/auth.py",
+      "localm/config.py"
+    ],
+    "tests/test_bindhost.py": [
+      "localm/bindhost.py",
+      "localm/config.py"
+    ],
+    "tests/test_bindhost_adversarial.py": [
+      "localm/bindhost.py"
+    ],
+    "tests/test_cli_comfy_workflow.py": [
+      "localm/pathsafe.py",
+      "localm/config.py"
+    ],
+    "tests/test_coder_resume.py": [
+      "localm/scopes.py",
+      "localm/pathsafe.py",
+      "localm/auth.py",
+      "localm/config.py",
+      "localm/tls.py"
+    ],
+    "tests/test_comfy_cli_markup_escaping.py": [
+      "localm/pathsafe.py",
+      "localm/netpolicy.py",
+      "localm/config.py"
+    ],
+    "tests/test_config_admin_gating.py": [
+      "localm/bindhost.py",
+      "localm/scopes.py",
+      "localm/pathsafe.py",
+      "localm/netpolicy.py",
+      "localm/auth.py",
+      "localm/config.py"
+    ],
+    "tests/test_config_atomic_concurrency.py": [
+      "localm/config.py"
+    ],
+    "tests/test_config_corruption.py": [
+      "localm/bindhost.py",
+      "localm/scopes.py",
+      "localm/auth.py",
+      "localm/config.py"
+    ],
+    "tests/test_config_cross_process_lock.py": [
+      "localm/bindhost.py",
+      "localm/scopes.py",
+      "localm/auth.py",
+      "localm/config.py"
+    ],
+    "tests/test_config_delta_persistence.py": [
+      "localm/config.py"
+    ],
+    "tests/test_config_plugin_state_gate.py": [
+      "localm/bindhost.py",
+      "localm/scopes.py",
+      "localm/auth.py",
+      "localm/config.py"
+    ],
+    "tests/test_config_reg586_reg566_regressions.py": [
+      "localm/auth.py",
+      "localm/config.py"
+    ],
+    "tests/test_config_schema_endpoint.py": [
+      "localm/bindhost.py",
+      "localm/scopes.py",
+      "localm/auth.py",
+      "localm/config.py"
+    ],
+    "tests/test_config_temp_dir_unit.py": [
+      "localm/config.py"
+    ],
+    "tests/test_config_validation.py": [
+      "localm/bindhost.py",
+      "localm/scopes.py",
+      "localm/pathsafe.py",
+      "localm/auth.py",
+      "localm/config.py"
+    ],
+    "tests/test_contained_temp.py": [
+      "localm/config.py"
+    ],
+    "tests/test_gpu_cache_containment.py": [
+      "localm/config.py"
+    ],
+    "tests/test_hf_cache_containment.py": [
+      "localm/config.py"
+    ],
+    "tests/test_jobs_cwd_unc_guard.py": [
+      "localm/pathsafe.py",
+      "localm/auth.py",
+      "localm/config.py"
+    ],
+    "tests/test_mcpserver.py": [
+      "localm/pathsafe.py",
+      "localm/netpolicy.py",
+      "localm/config.py"
+    ],
+    "tests/test_media_paths.py": [
+      "localm/scopes.py",
+      "localm/pathsafe.py",
+      "localm/auth.py",
+      "localm/config.py"
+    ],
+    "tests/test_netpolicy.py": [
+      "localm/netpolicy.py"
+    ],
+    "tests/test_netpolicy_fetch_contract.py": [
+      "localm/netpolicy.py"
+    ],
+    "tests/test_netpolicy_ssrf_phase3.py": [
+      "localm/netpolicy.py"
+    ],
+    "tests/test_pathsafe_confined_name.py": [
+      "localm/pathsafe.py"
+    ],
+    "tests/test_pathsafe_confined_under.py": [
+      "localm/pathsafe.py"
+    ],
+    "tests/test_portmux.py": [
+      "localm/config.py",
+      "localm/tls.py"
+    ],
+    "tests/test_portmux_failure_paths.py": [
+      "localm/bindhost.py",
+      "localm/config.py",
+      "localm/portmux.py"
+    ],
+    "tests/test_portmux_lifecycle.py": [
+      "localm/config.py",
+      "localm/tls.py",
+      "localm/portmux.py"
+    ],
+    "tests/test_rag_confinement.py": [
+      "localm/scopes.py",
+      "localm/pathsafe.py",
+      "localm/netpolicy.py",
+      "localm/auth.py",
+      "localm/config.py"
+    ],
+    "tests/test_registry_confinement.py": [
+      "localm/scopes.py",
+      "localm/pathsafe.py",
+      "localm/auth.py",
+      "localm/config.py"
+    ],
+    "tests/test_scopes.py": [
+      "localm/scopes.py"
+    ],
+    "tests/test_tls.py": [
+      "localm/bindhost.py",
+      "localm/netpolicy.py",
+      "localm/config.py",
+      "localm/tls.py"
+    ],
+    "tests/test_tls_cli.py": [
+      "localm/bindhost.py",
+      "localm/config.py",
+      "localm/tls.py"
+    ],
+    "tests/test_upload.py": [
+      "localm/scopes.py",
+      "localm/pathsafe.py",
+      "localm/auth.py",
+      "localm/config.py"
+    ]
+  }
+}

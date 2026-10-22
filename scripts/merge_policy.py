@@ -8,8 +8,11 @@ test, mutation-scope and mutation-test have finished, whatever their
 results, and passes only when:
 
   - lint and mutation-scope succeeded, and no needed job failed or was
-    cancelled (mutation-test counts when it ran and is neutral when it was
-    skipped);
+    cancelled;
+  - mutation-test succeeded when mutation-scope selected any mutation shard
+    (``--mutation-modules``, a JSON list of module stems): a change that
+    touches a mutation-tested module never merges without that module's
+    result. With no shard selected a skipped mutation-test is neutral;
   - without the `full-ci` label: python-pr-gate succeeded and the change is
     not a release (VERSION is unchanged);
   - with the `full-ci` label: the test matrix and gui-tests succeeded.
@@ -28,7 +31,7 @@ release run to know what it covers; none of them blocks a merge.
     python scripts/merge_policy.py --full-ci false \
         --result python-pr-gate=success --result lint=success \
         --result gui-tests=skipped --result test=skipped \
-        --result mutation-scope=success --result mutation-test=skipped [--files ...]
+        --result mutation-scope=success --result mutation-test=skipped         [--mutation-modules '["auth"]'] [--files ...]
 
 The verdict, the results and the matched categories are printed, and appended
 to the file named by GITHUB_STEP_SUMMARY when that variable is set. Exit
@@ -40,6 +43,7 @@ Stdlib only; imports scripts/affected_tests.py and scripts/run_affected_tests.py
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from dataclasses import dataclass, field
@@ -172,6 +176,7 @@ class Verdict:
     full_ci: bool
     results: dict[str, str]                     # job -> result as reported
     categories: dict[str, list[str]] = field(default_factory=dict)
+    mutation_modules: list[str] = field(default_factory=list)
 
     @property
     def is_release(self) -> bool:
@@ -179,9 +184,10 @@ class Verdict:
 
 
 def decide(full_ci: bool, results: dict[str, str],
-           categories: dict[str, list[str]]) -> Verdict:
-    """Apply the policy to the label state, the needed jobs' results and the
-    matched categories."""
+           categories: dict[str, list[str]],
+           mutation_modules: list[str] | None = None) -> Verdict:
+    """Apply the policy to the label state, the needed jobs' results, the
+    matched categories and the mutation shards mutation-scope selected."""
     reasons: list[str] = []
     state = {job: results.get(job, "missing") for job in JOBS}
     for job in JOBS:
@@ -191,6 +197,10 @@ def decide(full_ci: bool, results: dict[str, str],
         if state[job] == "skipped":
             reasons.append(f"{job}: skipped (must be success on "
                            f"{'a labelled' if full_ci else 'an unlabelled'} PR)")
+    if mutation_modules and state["mutation-test"] != "success":
+        reasons.append(
+            f"mutation-test: {state['mutation-test']} (must be success: this change "
+            f"needs the mutation shards of {', '.join(mutation_modules)})")
     if not full_ci and RELEASE in categories:
         reasons.append(
             f"this is a release ({', '.join(categories[RELEASE])} changed) and a release "
@@ -198,15 +208,15 @@ def decide(full_ci: bool, results: dict[str, str],
             f"labelled `{LABEL}`: add the label, and merge-policy passes on the run the "
             "label starts once the matrix is green")
     return Verdict(ok=not reasons, reasons=reasons, full_ci=full_ci, results=dict(results),
-                   categories=categories)
+                   categories=categories, mutation_modules=list(mutation_modules or []))
 
 
 def evaluate(full_ci: bool, results: dict[str, str], base: str,
-             files: list[str] | None) -> Verdict:
+             files: list[str] | None, mutation_modules: list[str] | None = None) -> Verdict:
     """The verdict for the change git reports since the merge base with *base*
     (or *files*)."""
     changed = files if files is not None else affected_tests.changed_files(base)[0]
-    return decide(full_ci, results, classify(changed))
+    return decide(full_ci, results, classify(changed), mutation_modules)
 
 
 def render_summary(verdict: Verdict) -> str:
@@ -220,6 +230,9 @@ def render_summary(verdict: Verdict) -> str:
               "| job | result |", "| --- | --- |"]
     for job in JOBS:
         lines.append(f"| {job} | {verdict.results.get(job, 'missing')} |")
+    lines.append("")
+    lines.append("Mutation shards this change needs: "
+                 + (", ".join(f"`{m}`" for m in verdict.mutation_modules) or "none"))
     lines.append("")
     if verdict.categories:
         lines.append("Matrix categories this change touches (the two-platform matrix runs at "
@@ -239,6 +252,16 @@ def _parse_result(value: str) -> tuple[str, str]:
     return job, result.strip().lower()
 
 
+def _parse_modules(value: str) -> list[str]:
+    try:
+        data = json.loads(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(f"not JSON: {value!r} ({e})") from None
+    if not isinstance(data, list) or not all(isinstance(m, str) and m for m in data):
+        raise argparse.ArgumentTypeError(f"expected a JSON list of module stems, got {value!r}")
+    return data
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
     ap.add_argument("--full-ci", choices=("true", "false"), required=True,
@@ -248,8 +271,13 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--base", default="origin/master",
                     help="ref the committed changes are diffed from (via merge-base)")
     ap.add_argument("--files", nargs="*", help="use these changed paths instead of git")
+    ap.add_argument("--mutation-modules", type=_parse_modules, default=None, metavar="JSON",
+                    help="the mutation shards mutation-scope selected, a JSON list of stems")
     args = ap.parse_args(argv)
-    verdict = evaluate(args.full_ci == "true", dict(args.result), args.base, args.files)
+    if args.mutation_modules is None:
+        ap.error("--mutation-modules is required (mutation-scope's `modules` output)")
+    verdict = evaluate(args.full_ci == "true", dict(args.result), args.base, args.files,
+                       args.mutation_modules)
     run_affected_tests._publish(render_summary(verdict))
     return 0 if verdict.ok else 1
 

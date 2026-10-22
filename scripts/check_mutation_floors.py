@@ -31,7 +31,12 @@ source. This script compares those results against the committed baseline
   per security-decision class, that must stay killed) is missing, stale,
   recorded as unstable or not killed;
 * the run is incomplete (a mutant with no outcome), the baseline is missing
-  or malformed, or an ``only_mutate`` module has no results or no baseline.
+  or malformed, or a module of the run has no results or no baseline.
+
+A run mutates every ``only_mutate`` module unless ``--modules`` names a subset
+(the shards a pull request needs, see scripts/mutation_scope.py): only those
+modules and the controls pinned in them are checked, and every other module
+keeps its committed baseline entry, unchecked, in the proposal.
 
 DISPOSITIONS. ``killed`` and ``survived`` are strings; ``survived`` is a known
 test gap that counts against the score, and the floor ratchet stops the count
@@ -287,7 +292,8 @@ def grown_functions(statuses: dict, base_mutants: dict) -> set[str]:
 def check(results: dict, baseline: dict, modules: list[str]) -> tuple[list[str], list[str], list[dict]]:
     """Pure check of parsed results against a parsed baseline. Returns
     ``(problems, warnings, rows)``: a non-empty ``problems`` is a failure;
-    ``rows`` is one summary dict per module for the report."""
+    ``rows`` is one summary dict per module for the report. A module, or a
+    control's module, with no entry in *results* is not checked."""
     problems: list[str] = []
     warnings: list[str] = []
     rows: list[dict] = []
@@ -487,7 +493,7 @@ def check(results: dict, baseline: dict, modules: list[str]) -> tuple[list[str],
         res = results.get(module)
         if res is None:
             if module in modules:
-                continue  # already reported as missing results
+                continue  # reported by load_results when the run selected it
             problems.append(f"control {name!r}: module {module} is not mutated")
             continue
         fn = function_of(mutant)
@@ -652,6 +658,9 @@ def main(argv: list[str]) -> int:
                     help="write a baseline from the current results, then check it")
     ap.add_argument("--out", type=Path, default=None,
                     help="with --update: where to write (default: the --baseline path)")
+    ap.add_argument("--modules", default=None, metavar="JSON",
+                    help="JSON list of the module stems this run mutated (default: every "
+                         "only_mutate module); the others keep their committed baseline")
     args = ap.parse_args(argv)
 
     try:
@@ -664,7 +673,26 @@ def main(argv: list[str]) -> int:
               file=sys.stderr)
         return 1
 
-    results, problems = load_results(args.mutants, modules)
+    selected = list(modules)
+    if args.modules is not None:
+        try:
+            stems = json.loads(args.modules)
+            if not isinstance(stems, list) or not all(isinstance(x, str) for x in stems):
+                raise ValueError("not a list of strings")
+        except ValueError as e:
+            print(f"Mutation floor check could not run: --modules {args.modules!r}: {e}",
+                  file=sys.stderr)
+            return 1
+        by_stem = {Path(m).stem: m for m in modules}
+        unknown = [x for x in stems if x not in by_stem]
+        if unknown or not stems:
+            print("Mutation floor check could not run: --modules names "
+                  f"{', '.join(unknown) or 'no module'}; only_mutate has "
+                  f"{', '.join(by_stem)}", file=sys.stderr)
+            return 1
+        selected = [m for m in modules if Path(m).stem in stems]
+
+    results, problems = load_results(args.mutants, selected)
     if not results:
         problems.append(
             f"no mutation results under {args.mutants} at all - run "
@@ -711,8 +739,10 @@ def main(argv: list[str]) -> int:
             print("  " + p, file=sys.stderr)
         print(f"\n{len(problems)} problem(s).", file=sys.stderr)
         return 1
-    print(f"\nMutation floor check passed ({len(rows)} trust-boundary modules, "
-          f"{len(baseline.get('controls') or {})} controls killed).")
+    checked = [c for c in (baseline.get("controls") or {}).values()
+               if isinstance(c, dict) and c.get("module") in selected]
+    print(f"\nMutation floor check passed ({len(rows)} of {len(modules)} trust-boundary "
+          f"modules mutated, {len(checked)} controls killed).")
     return 0
 
 
