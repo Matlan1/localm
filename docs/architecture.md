@@ -102,8 +102,9 @@ others up. It runs on every pull request once `python-pr-gate`, `lint`,
 `gui-tests`, `test`, `mutation-scope` and `mutation-test` have finished,
 whatever their results, and it is never skipped on a pull request, so a
 needed job that was skipped or failed cannot read as a pass. It passes when
-`lint` and `mutation-scope` succeeded, `mutation-test` did not fail when it
-ran (skipped is neutral) and, on a PR without the `full-ci` label,
+`lint` and `mutation-scope` succeeded, `mutation-test` succeeded when
+`mutation-scope` selected any mutation shard (and otherwise did not fail when
+it ran; skipped is neutral then) and, on a PR without the `full-ci` label,
 `python-pr-gate` succeeded and the change is not a release (`VERSION`
 unchanged); on a PR with the label, when the `test` matrix and `gui-tests`
 succeeded. `gui-tests`, like the matrix, runs on a pull request only when
@@ -126,7 +127,7 @@ workflows and gates. None of those blocks a merge; the list lives in
 
 Scheduled runs on master. The nightly cron (03:23 UTC) runs `test`,
 `gui-tests`, `optional-stacks` and `lint`. The weekly cron (Monday 06:37 UTC)
-runs those and, only on that cron, the mutation shards and gate, `abi-check`,
+runs those and, only on that cron, every mutation shard and the gate, `abi-check`,
 `web-search-canary`, `voice-stack` and the two pin-currency checks. A
 weekly-only job's `if:` tests `github.event.schedule == '37 6 * * 1'`;
 `tests/test_ci_schedule_split.py` evaluates every job's `if:` under each
@@ -141,13 +142,18 @@ runs nightly, on a dispatch, and on pull requests that touch `localm/hwdetect*`,
 file. It is not a required check: it is not in `merge-policy`'s `needs`.
 
 `mutation-test` is the mutation-testing gate for the trust boundary: the
-eight modules in `[tool.mutmut] only_mutate` (`pyproject.toml`). On the
-weekly schedule, on a dispatch, or on a pull request carrying the
-`mutation-test` label, one `mutation-run` shard per module runs mutmut
-(`scripts/mutmut_run.py run "localm.<module>.*"`, under a random
+eight modules in `[tool.mutmut] only_mutate` (`pyproject.toml`).
+`mutation-scope` (`scripts/mutation_scope.py`) picks the shards a run needs:
+every module on the weekly schedule, on a dispatch and on a pull request
+carrying the `mutation-test` label; otherwise the modules a pull request's
+diff reaches (a changed module, a changed test file that exercises one per
+`scripts/mutation_test_map.json`, a test helper or fixture such a file names,
+or every module when the gate itself, the `[tool.mutmut]` table or
+`tests/conftest.py` changed). One `mutation-run` shard per selected module
+runs mutmut (`scripts/mutmut_run.py run "localm.<module>.*"`, under a random
 `PYTHONHASHSEED` it prints first) and uploads its result
-file; `mutation-test` merges the eight and runs
-`scripts/check_mutation_floors.py` against the committed baseline
+file; `mutation-test` merges them and runs
+`scripts/check_mutation_floors.py --modules` on the selected modules against the committed baseline
 `scripts/mutation_baseline.json`. The baseline records every mutant's
 disposition - `killed`, `survived` (a known gap, counted against the score),
 `{"equivalent": "<reason>"}` (excluded, never silently) or
@@ -162,18 +168,16 @@ a score below its floor, a mutant recorded as killed that now survives (a
 weakened test or a nondeterministic outcome; the message names the re-run
 that tells them apart), a mutant with no disposition
 (new, or in a function whose source hash changed), a control not killed or
-recorded as unstable, or an incomplete run. The job uploads a proposed baseline
-(`mutation-baseline-proposed`, floors ratcheted up, equivalent and unstable
-entries kept) so a
+recorded as unstable, an incomplete run, or a test-file edge mutmut's stats
+recorded that `scripts/mutation_test_map.json` lacks. Modules that did not
+run keep their committed baseline. The job uploads a proposed baseline and
+map (`mutation-baseline-proposed`, floors ratcheted up, equivalent and
+unstable entries kept, no map edge dropped) so a
 changed function's new mutants can be classified and committed without a
-local run; mutmut itself runs on Linux only. The shards never run
-automatically on a pull request (the `auth` shard alone takes about an hour);
-the weekly schedule is what gates master. `mutation-scope`
-(`scripts/mutation_scope.py`) instead annotates a pull request that touches
-a mutated module or the gate with a notice: that the gate runs on it when it
-carries the `mutation-test` label, and that the gate did not run on it
-otherwise. `mutation-scope` fails when it cannot compute the diff, and
-`merge-policy` fails with it. The two decision classes that
+local run; mutmut itself runs on Linux only. A pull request that needs a
+shard cannot merge without a green `mutation-test`. `mutation-scope` fails
+when it cannot compute the diff or read the map, and `merge-policy` fails
+with it. The two decision classes that
 live in the app assembly (`localm/inference/app_assembly/security.py` and
 `diagnostics.py`) rather than a mutated module - an unsafe route exempted from
 the origin gate, and `bind_host` replaced by the peer address - are pinned by

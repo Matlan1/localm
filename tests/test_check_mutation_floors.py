@@ -901,6 +901,60 @@ class TestMain:
         err = capsys.readouterr().err
         assert victim in err and "could not read" in err
 
+    def _two_module_setup(self, tmp_path, controls=None):
+        """scopes ran (its meta is written); auth did not."""
+        other = "localm/auth.py"
+        a1 = "localm.auth.x_verify__mutmut_1"
+        base = _baseline({M1: "killed", M2: "survived"}, floor=50.0, controls=controls)
+        base["modules"][other] = {"score_floor": 100.0, "function_hashes": {"x_verify": "cccccccccccc"},
+                                  "mutants": {a1: "killed"}}
+        argv = self._setup(tmp_path, {M1: 1, M2: 0}, base)
+        Path(argv[5]).write_text(
+            '[tool.mutmut]\nonly_mutate = ["localm/scopes.py", "localm/auth.py"]\n', encoding="utf-8")
+        return argv, base, other
+
+    def test_modules_checks_only_the_modules_that_ran(self, tmp_path, capsys):
+        argv, _, _ = self._two_module_setup(tmp_path)
+        assert cmf.main(argv) == 1, "without --modules a module with no results fails"
+        assert "localm/auth.py: no mutation results" in capsys.readouterr().err
+        assert cmf.main(argv + ["--modules", '["scopes"]']) == 0
+        assert "1 of 2 trust-boundary modules mutated" in capsys.readouterr().out
+
+    def test_modules_still_fails_a_selected_module_without_results(self, tmp_path, capsys):
+        """NEGATIVE: naming a module in --modules does not excuse its missing results."""
+        argv, _, _ = self._two_module_setup(tmp_path)
+        assert cmf.main(argv + ["--modules", '["scopes", "auth"]']) == 1
+        assert "localm/auth.py: no mutation results" in capsys.readouterr().err
+
+    def test_modules_still_catches_a_regression_in_a_module_that_ran(self, tmp_path, capsys):
+        argv, _, _ = self._two_module_setup(tmp_path)
+        _write_meta(tmp_path / "mutants", MOD, {M1: 0, M2: 0})
+        assert cmf.main(argv + ["--modules", '["scopes"]']) == 1
+        assert M1 in capsys.readouterr().err
+
+    def test_modules_skips_the_controls_of_a_module_that_did_not_run(self, tmp_path, capsys):
+        controls = {"auth-unknown-key-accepted": {"module": "localm/auth.py",
+                                                  "mutant": "localm.auth.x_verify__mutmut_1"},
+                    "scope-check-weakened": {"module": MOD, "mutant": M1}}
+        argv, _, _ = self._two_module_setup(tmp_path, controls=controls)
+        assert cmf.main(argv + ["--modules", '["scopes"]']) == 0
+        assert "1 controls killed" in capsys.readouterr().out
+        _write_meta(tmp_path / "mutants", MOD, {M1: 0, M2: 0})
+        assert cmf.main(argv + ["--modules", '["scopes"]']) == 1
+        assert "control 'scope-check-weakened'" in capsys.readouterr().err
+
+    def test_modules_update_keeps_the_entry_of_a_module_that_did_not_run(self, tmp_path, capsys):
+        argv, base, other = self._two_module_setup(tmp_path)
+        out = tmp_path / "proposed.json"
+        assert cmf.main(argv + ["--modules", '["scopes"]', "--update", "--out", str(out)]) == 0
+        assert json.loads(out.read_text(encoding="utf-8"))["modules"][other] == base["modules"][other]
+
+    @pytest.mark.parametrize("value", ["", "[]", '["nosuch"]', '"scopes"', "[1]", "{"])
+    def test_modules_refuses_a_bad_value(self, tmp_path, capsys, value):
+        argv, _, _ = self._two_module_setup(tmp_path)
+        assert cmf.main(argv + ["--modules", value]) == 1
+        assert "--modules" in capsys.readouterr().err
+
     def test_empty_only_mutate_exits_one(self, tmp_path, capsys):
         argv = self._setup(tmp_path, {M1: 1}, _baseline({M1: "killed"}))
         Path(argv[5]).write_text("[tool.mutmut]\nonly_mutate = []\n", encoding="utf-8")
@@ -977,42 +1031,66 @@ class TestCommittedBaseline:
         paths = [p.strip() for p in upload["with"]["path"].splitlines() if p.strip()]
         assert sorted(paths) == [
             "mutants/localm/${{ matrix.module }}.py",
-            "mutants/localm/${{ matrix.module }}.py.meta"]
-        download = next(st for st in wf["jobs"]["mutation-test"]["steps"]
-                        if st.get("name", "").startswith("Download every module"))
-        assert download["with"]["path"] == "mutants/localm"
+            "mutants/localm/${{ matrix.module }}.py.meta",
+            "mutants/localm/${{ matrix.module }}.stats.json"]
+        assert upload["with"]["name"] == "mutation-meta-${{ matrix.module }}-${{ matrix.part }}"
+        steps = wf["jobs"]["mutation-test"]["steps"]
+        download = next(st for st in steps if st.get("name", "").startswith("Download every shard"))
+        assert download["with"]["path"] == "mutants/parts"
+        assert "merge-multiple" not in download["with"]
+        merge = next(st for st in steps if "mutation_parts.py merge" in (st.get("run") or ""))
+        assert merge["run"] == "python scripts/mutation_parts.py merge --parts mutants/parts --out mutants/localm"
+        assert steps.index(download) < steps.index(merge) < next(
+            i for i, st in enumerate(steps) if "check_mutation_floors.py" in (st.get("run") or ""))
 
-    def test_ci_shards_are_exactly_the_only_mutate_modules(self, modules):
-        """The mutation-run matrix in ci.yml is the only_mutate list by
-        basename: a module added to one and not the other is either never
-        mutation-tested or a shard that mutates nothing."""
+    def test_ci_shards_are_the_modules_mutation_scope_selects(self, modules, capsys):
+        """The mutation-run matrix in ci.yml is mutation-scope's selection, and
+        a full run selects exactly the only_mutate list by basename: a module
+        added to one and not the other is either never mutation-tested or a
+        shard that mutates nothing."""
         import yaml
         wf = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
-        shards = wf["jobs"]["mutation-run"]["strategy"]["matrix"]["module"]
-        assert sorted(shards) == sorted(Path(m).stem for m in modules)
+        shards = wf["jobs"]["mutation-run"]["strategy"]["matrix"]
+        assert shards == {"include": "${{ fromJSON(needs.mutation-scope.outputs.shards) }}"}
+        assert wf["jobs"]["mutation-run"]["needs"] == ["mutation-scope"]
+        assert "needs.mutation-scope.outputs.modules != '[]'" in wf["jobs"]["mutation-run"]["if"]
+        ms = _load("mutation_scope")
+        assert ms.main(["--all", "true"]) == 0
+        line = capsys.readouterr().out.splitlines()[0]
+        assert json.loads(line.removeprefix("modules=")) == [Path(m).stem for m in modules]
         run_step = next(st for st in wf["jobs"]["mutation-run"]["steps"]
                         if st.get("name", "").startswith("Mutation test"))
-        assert run_step["run"].endswith(' "localm.${MUTATION_MODULE}.*"')
+        assert run_step["run"].endswith(' "$MUTATION_PATTERN"')
+        assert wf["jobs"]["mutation-run"]["env"]["MUTATION_PATTERN"] == "${{ matrix.pattern }}"
         assert "--max-children" in run_step["run"]
         gate = wf["jobs"]["mutation-test"]
-        assert gate["needs"] == ["mutation-run"]
+        assert gate["needs"] == ["mutation-scope", "mutation-run"]
         ratchet = [st for st in gate["steps"] if "check_mutation_floors.py" in (st.get("run") or "")]
         assert len(ratchet) == 1
         # --out keeps the proposal out of the check: the gate reads the
         # committed baseline, never a file synthesized from the same run.
         assert "--out mutants/mutation_baseline.proposed.json" in ratchet[0]["run"]
         assert "--baseline" not in ratchet[0]["run"]
-        # The shards never key on mutation-scope: a PR is never made to wait.
-        assert "mutation-scope" not in wf["jobs"]["mutation-run"]["if"]
-        scope_step = next(st for st in wf["jobs"]["mutation-scope"]["steps"]
-                          if "mutation_scope.py" in (st.get("run") or ""))
-        assert "--notice" in scope_step["run"] and "--github-output" not in scope_step["run"]
-        # The notice says the gate runs exactly when mutation-run's label clause holds.
+        # The gate checks exactly the modules the shards ran.
+        assert '--modules "$MUTATION_MODULES"' in ratchet[0]["run"]
+        assert gate["env"]["MUTATION_MODULES"] == "${{ needs.mutation-scope.outputs.modules }}"
+        mapcheck = [st for st in gate["steps"] if "--check-map" in (st.get("run") or "")]
+        assert len(mapcheck) == 1 and mapcheck[0]["if"] == "always()"
+        assert not mapcheck[0].get("continue-on-error")
+        scope = wf["jobs"]["mutation-scope"]
+        scope_step = next(st for st in scope["steps"] if "mutation_scope.py" in (st.get("run") or ""))
+        assert scope_step["id"] == "scope"
+        assert "--notice" in scope_step["run"] and "--github-output" in scope_step["run"]
+        # Every shard runs on a dispatch, the weekly schedule and a labelled PR.
         label_clause = "contains(github.event.pull_request.labels.*.name, 'mutation-test')"
-        assert label_clause in " ".join(wf["jobs"]["mutation-run"]["if"].split())
-        assert '--gate-runs "$MUTATION_TEST_LABEL"' in scope_step["run"]
-        assert scope_step["env"]["MUTATION_TEST_LABEL"] == "${{ %s }}" % label_clause
+        assert scope_step["env"]["MUTATION_ALL"] == (
+            "${{ github.event_name != 'pull_request' || %s }}" % label_clause)
+        assert '--all "$MUTATION_ALL"' in scope_step["run"]
         assert "${{" not in scope_step["run"]
+        cond = " ".join(scope["if"].split())
+        for event in ("github.event_name == 'pull_request'", "github.event_name == 'workflow_dispatch'",
+                      "github.event.schedule == '37 6 * * 1'"):
+            assert event in cond
 
     def test_every_control_class_is_pinned_to_a_killed_mutant(self, baseline):
         """The baseline's controls are exactly the controls of the control
