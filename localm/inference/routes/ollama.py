@@ -25,6 +25,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.routing import APIRoute
 from pydantic import ValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.requests import ClientDisconnect
 
 import localm
 import localm.inference.http_server as _hs
@@ -57,9 +58,11 @@ class OllamaRoute(APIRoute):
 
     def get_route_handler(self):
         original = super().get_route_handler()
+        takes_body = self.body_field is not None
 
         async def handler(request: Request) -> Response:
-            await _read_untyped_json_as_json(request)
+            if takes_body:
+                await _read_untyped_json_as_json(request)
             try:
                 return await original(request)
             except P.OllamaError as exc:
@@ -86,7 +89,8 @@ async def _read_untyped_json_as_json(request: Request) -> None:
     """Relabel *request* as ``application/json`` when it has a body method, no
     ``Origin`` header, a ``Content-Type`` that is missing or not JSON, and a
     body that parses as a JSON object. Leaves every other request untouched.
-    Reads (and so caches) the body; never raises for a bad body."""
+    Reads (and so caches) the body; never raises for a bad body or a client
+    that disconnects during the upload (FastAPI then answers it as before)."""
     if request.method not in _BODY_METHODS:
         return
     headers = request.scope.get("headers") or []
@@ -98,7 +102,10 @@ async def _read_untyped_json_as_json(request: Request) -> None:
             content_type = value
     if content_type is not None and _is_json_media_type(content_type):
         return
-    body = await request.body()
+    try:
+        body = await request.body()
+    except ClientDisconnect:
+        return
     if not body:
         return
     try:
