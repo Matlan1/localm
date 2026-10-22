@@ -2175,6 +2175,18 @@ def _pull_gguf_file(
                 "then pull again."
             )
             return False
+    if missing:
+        for part, expected_digest in digests.items():
+            if part in missing or (part == filename and want):
+                continue
+            taken = _hf_file_name_taken_by(base_dir / part, repo_id)
+            if not taken:
+                continue
+            on_disk = _verify_digest(base_dir / part,
+                                     purpose="to check the file already here")
+            if on_disk.lower() != expected_digest.lower():
+                _print_digest_name_in_use(part, on_disk, expected_digest, repo_id, taken)
+                return False
     if not missing:
         # If the user asserted a hash, verify the file actually on disk before
         # treating it as the requested model.
@@ -2200,19 +2212,7 @@ def _pull_gguf_file(
             if on_disk.lower() != published.lower():
                 taken = _hf_file_name_taken_by(base_dir / part, repo_id)
                 if taken:
-                    console.print(
-                        f"[red]File name already in use:[/red] {escape(part)} in "
-                        f"the models folder is a different file "
-                        f"({escape(on_disk[:16])}…) from the one {escape(repo_id)} "
-                        f"publishes ({escape(published[:16])}…). It is registered "
-                        f"as {_civitai_registered_as(taken)} and was left as it is.\n"
-                        "A file name holds one file, and --name only sets the "
-                        "registry name. To keep both, pull a file of this "
-                        "repository that has another name. To use this one "
-                        "instead, remove the other first, which deletes its file "
-                        f"({' and '.join('localm rm ' + escape(n) for n, _ in taken)}), "
-                        "then pull again."
-                    )
+                    _print_digest_name_in_use(part, on_disk, published, repo_id, taken)
                     return False
                 console.print(
                     f"[red]SHA256 mismatch![/red] The file already at "
@@ -4249,6 +4249,27 @@ def _hf_file_name_taken_by(dest: Path, repo_id: str) -> "list[tuple[str, str]]":
     """``(name, source)`` of every registry entry whose path is *dest* and whose
     source is not ``hf:<repo_id>``."""
     return [(n, s) for n, s in _civitai_owners(dest) if s != f"hf:{repo_id}"]
+
+
+def _print_digest_name_in_use(part: str, on_disk: str, published: str,
+                              repo_id: str, taken: "list[tuple[str, str]]") -> None:
+    """Print why a pull stops: the file *part* in the models folder hashes to
+    *on_disk*, not to the *published* digest of *repo_id*, and the registry
+    entries *taken* (``(name, source)``) own it."""
+    from rich.markup import escape
+    console.print(
+        f"[red]File name already in use:[/red] {escape(part)} in "
+        f"the models folder is a different file "
+        f"({escape(on_disk[:16])}…) from the one {escape(repo_id)} "
+        f"publishes ({escape(published[:16])}…). It is registered "
+        f"as {_civitai_registered_as(taken)} and was left as it is.\n"
+        "A file name holds one file, and --name only sets the "
+        "registry name. To keep both, pull a file of this "
+        "repository that has another name. To use this one "
+        "instead, remove the other first, which deletes its file "
+        f"({' and '.join('localm rm ' + escape(n) for n, _ in taken)}), "
+        "then pull again."
+    )
 
 
 def _undigested_file_held_by_other_pull(

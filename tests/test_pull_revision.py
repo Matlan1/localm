@@ -463,6 +463,18 @@ class TestASameNamedFileIsNeverOverwrittenByAnotherPull:
         assert sorted(f for _r, f, _v in hub.downloads) == [
             "m-00001-of-00002.gguf", "m-00002-of-00002.gguf"]
 
+    def test_a_split_file_whose_first_part_is_another_models_is_not_torn_down(self, hub, capsys):
+        first = hub.models_dir / "m-00001-of-00002.gguf"
+        first.write_bytes(self.OTHER)
+        mm._register("a", first, "hf:x/y")
+        hub.digests["m-00001-of-00002.gguf"] = hashlib.sha256(BODY).hexdigest()
+        capsys.readouterr()
+        assert mm.pull_model("o/r:m-00001-of-00002.gguf", name="b", model_type="llm") is False
+        assert "File name already in use" in " ".join(capsys.readouterr().out.split())
+        assert hub.downloads == []
+        assert first.read_bytes() == self.OTHER
+        assert mm.load_registry()["a"]["source"] == "hf:x/y"
+
     def test_a_revision_replaces_its_own_name_from_the_default_branch(self, hub):
         self._own(hub, "a", "hf:o/r")
         assert mm.pull_model("o/r@4.0bpw:w.safetensors", name="a", model_type="llm") is True
