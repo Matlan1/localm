@@ -42,14 +42,16 @@ class HiresChoice(BaseModel):
     """The hires-fix pass of a native image job: the first pass is upscaled by
     *scale* with *upscaler* (a ``sampling.HIRES_UPSCALER_LIBRARY_NAMES`` id; the
     ``model`` id needs *model*, a registered upscaler) and sampled again for
-    *steps* steps (0 keeps the job's steps) at *denoise* strength."""
-    upscaler: str = "latent"
+    *steps* steps (0 keeps the job's steps) at *denoise* strength. A field left
+    out (None) takes the selected model's suggestion
+    (``sampling.suggested_hires`` / ``sampling.fill_hires``) when the job runs."""
+    upscaler: Optional[str] = None
     model: Optional[str] = None
-    scale: float = Field(default=2.0, ge=sampling.MIN_HIRES_SCALE, le=sampling.MAX_HIRES_SCALE,
-                         allow_inf_nan=False)
-    steps: int = Field(default=0, ge=0, le=sampling.MAX_HIRES_STEPS)
-    denoise: float = Field(default=0.7, ge=sampling.MIN_HIRES_DENOISE, le=1.0,
-                           allow_inf_nan=False)
+    scale: Optional[float] = Field(default=None, ge=sampling.MIN_HIRES_SCALE,
+                                   le=sampling.MAX_HIRES_SCALE, allow_inf_nan=False)
+    steps: Optional[int] = Field(default=None, ge=0, le=sampling.MAX_HIRES_STEPS)
+    denoise: Optional[float] = Field(default=None, ge=sampling.MIN_HIRES_DENOISE, le=1.0,
+                                     allow_inf_nan=False)
 
 
 MAX_REF_IMAGES = 4
@@ -217,18 +219,22 @@ def validate_upscaler(name: Optional[str], reg: Optional[dict] = None) -> str:
 
 def validate_hires(hires: Optional[HiresChoice], reg: Optional[dict] = None) -> Optional[dict]:
     """*hires* as ``{"upscaler", "model", "scale", "steps", "denoise"}``, or None
-    without one. Raises ``ValueError`` with a user-facing reason."""
+    without one. A field the request left out (an empty upscaler included) is
+    None, filled from the model's suggestion when the job runs
+    (``sampling.fill_hires``). Raises ``ValueError`` with a user-facing reason."""
     if hires is None:
         return None
-    upscaler = hires.upscaler.strip()
-    if upscaler not in sampling.HIRES_UPSCALER_LIBRARY_NAMES:
+    upscaler = (hires.upscaler or "").strip() or None
+    if upscaler is not None and upscaler not in sampling.HIRES_UPSCALER_LIBRARY_NAMES:
         raise ValueError(f"Unknown hires upscaler '{upscaler}'. Allowed: "
                          + ", ".join(sampling.HIRES_UPSCALER_LIBRARY_NAMES) + ".")
     model = None
     if upscaler == sampling.HIRES_MODEL_UPSCALER:
         model = validate_upscaler(hires.model, reg)
-    return {"upscaler": upscaler, "model": model, "scale": float(hires.scale),
-            "steps": int(hires.steps), "denoise": float(hires.denoise)}
+    return {"upscaler": upscaler, "model": model,
+            "scale": None if hires.scale is None else float(hires.scale),
+            "steps": None if hires.steps is None else int(hires.steps),
+            "denoise": None if hires.denoise is None else float(hires.denoise)}
 
 
 def check_generation_extras(sample_method: Optional[str], scheduler: Optional[str],

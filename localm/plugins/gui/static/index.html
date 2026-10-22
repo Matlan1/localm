@@ -542,11 +542,12 @@
             </div>
             <div class="adv-fold-body grid2 img-native-gen" hidden>
               <div><label class="inline-check" title="Generates the image, upscales it, then samples it again for finer detail." data-i18n-title="images.hiresTitle"><input type="checkbox" id="img-hires"> <span data-i18n="images.hiresLabel">Hires fix</span></label></div>
-              <div><label data-i18n="images.hiresUpscalerLabel">Hires upscaler</label><select id="img-hires-upscaler"><option value="" data-i18n="nativeModels.hiresLatent">Latent</option></select></div>
+              <div><label data-i18n="images.hiresUpscalerLabel">Hires upscaler</label><select id="img-hires-upscaler"><option value="" data-i18n="nativeModels.hiresSuggested">Suggested for the model</option></select></div>
               <div id="img-hires-model-row" hidden><label data-i18n="images.hiresModelLabel">Upscaler model</label><select id="img-hires-model"><option value="" data-i18n="nativeModels.hiresModelPick">Choose an upscaler</option></select></div>
-              <div><label data-i18n="images.hiresScaleLabel">Hires scale</label><input type="number" id="img-hires-scale" step="0.1" min="1" max="4" placeholder="2" data-i18n-placeholder="images.hiresScalePlaceholder"></div>
+              <div><label data-i18n="images.hiresScaleLabel">Hires scale</label><input type="number" id="img-hires-scale" step="0.1" min="1" max="4" placeholder="suggested" data-i18n-placeholder="images.hiresScalePlaceholder"></div>
               <div><label data-i18n="images.hiresStepsLabel">Hires steps</label><input type="number" id="img-hires-steps" step="1" min="0" max="150" placeholder="same as the image" data-i18n-placeholder="images.hiresStepsPlaceholder"></div>
-              <div><label data-i18n="images.hiresDenoiseLabel">Hires denoise</label><input type="number" id="img-hires-denoise" step="0.05" min="0.05" max="1" placeholder="0.7" data-i18n-placeholder="images.hiresDenoisePlaceholder"></div>
+              <div><label data-i18n="images.hiresDenoiseLabel">Hires denoise</label><input type="number" id="img-hires-denoise" step="0.05" min="0.05" max="1" placeholder="suggested" data-i18n-placeholder="images.hiresDenoisePlaceholder"></div>
+              <div><button type="button" class="btn-secondary" id="img-hires-suggested" title="Fills the hires fields with the values suggested for the selected model, replacing what is entered. Empty fields always use the suggestion." data-i18n-title="images.hiresUseSuggestedTitle" data-i18n="images.hiresUseSuggested">Use suggested values</button></div>
             </div>
           </details>
           <div class="actions">

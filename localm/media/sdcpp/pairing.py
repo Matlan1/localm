@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from . import families, versionhint
+from . import families, sampling, versionhint
 from .families import FileInfo
 from .files import ModelFileError
 
@@ -661,12 +661,14 @@ def preview(media: str, model_name: str, explicit: Optional[dict] = None,
     *explicit* ``{slot: registered name}`` choices, without loading anything:
     ``{"model", "family", "family_label", "variant", "kind", "needs",
     "optional", "components", "missing", "notes", "defaults", "capabilities",
-    "error"}``.
+    "hires", "error"}``.
     ``needs`` lists the slots the family needs and ``optional`` the ones it
     can use; ``capabilities`` is
     ``families.capabilities`` of the model (None until it is read);
     ``defaults`` is ``{"steps", "cfg_scale",
-    "width", "height"}`` the family works with, or None; ``error`` is a
+    "width", "height"}`` the family works with, or None; ``hires`` is
+    ``sampling.suggested_hires`` for the native size in ``defaults`` (the
+    unknown-size suggestion without one); ``error`` is a
     user-facing reason it cannot run, or None. *recommended* maps a curated
     model's file name to its own ``defaults``, which replace the family's."""
     from .files import display_name, resolve_model_file
@@ -674,7 +676,8 @@ def preview(media: str, model_name: str, explicit: Optional[dict] = None,
     out = {"model": display_name(model_name), "family": None, "family_label": None,
            "variant": None, "kind": None, "needs": [], "optional": [], "components": {},
            "missing": [],
-           "notes": [], "defaults": None, "capabilities": None, "error": None}
+           "notes": [], "defaults": None, "capabilities": None,
+           "hires": sampling.suggested_hires(None), "error": None}
     try:
         main = resolve_model_file(model_name, f"{media} model")
         info = families.inspect_file(main)
@@ -693,6 +696,9 @@ def preview(media: str, model_name: str, explicit: Optional[dict] = None,
                 chosen[slot] = (display_name(name), resolve_model_file(name, f"{media} {slot}"))
         if recommended and main.name in recommended:
             out["defaults"] = dict(recommended[main.name])
+        d = out["defaults"]
+        if d and d.get("width") and d.get("height"):
+            out["hires"] = sampling.suggested_hires(max(int(d["width"]), int(d["height"])))
         built = build_context(main, display_name(model_name), chosen, where=f"the {media} page",
                               media=media, cands=cands)
         out.update(components=built["components"], notes=built["notes"])
