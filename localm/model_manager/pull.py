@@ -2565,14 +2565,18 @@ def _git_blob_id(path: Path) -> str:
     return digest.hexdigest()
 
 
+_SNAPSHOT_SIDE_FILES = frozenset({".ds_store", "thumbs.db", "desktop.ini"})
+
+
 def _snapshot_matches_listing(dest: Path, repo_siblings) -> bool:
     """True when *dest* holds exactly the files *repo_siblings* lists: each at
     its stated size, an LFS file with a published sha256 (which
     :func:`_snapshot_files_damaged` compares), every other file with the git
     blob id the listing gives it, and no file the listing does not name outside
-    ``.cache`` and the claim marker. False when a file carries no digest to
-    compare or the folder cannot be read. Reads every non-LFS file; deletes
-    nothing."""
+    ``.cache``, a top-level ``.git``, the claim marker and the operating
+    system's folder files (:data:`_SNAPSHOT_SIDE_FILES`). False when a file
+    carries no digest to compare, a subfolder is a link, or any part of the
+    folder cannot be read. Reads every non-LFS file; deletes nothing."""
     from localm import pathsafe
     listed: set[str] = set()
     try:
@@ -2594,13 +2598,21 @@ def _snapshot_matches_listing(dest: Path, repo_siblings) -> bool:
                 if not blob or _git_blob_id(fp) != str(blob).lower():
                     return False
             listed.add(name.replace("\\", "/"))
-        for root, dirs, files in os.walk(dest):
+        def _unreadable(error: OSError) -> None:
+            raise error
+
+        for root, dirs, files in os.walk(dest, onerror=_unreadable):
             rel_root = Path(root).relative_to(dest).as_posix()
             if rel_root == ".":
-                dirs[:] = [d for d in dirs if d != ".cache"]
+                dirs[:] = [d for d in dirs if d not in (".cache", ".git")]
+            for d in dirs:
+                sub = os.path.join(root, d)
+                if os.path.islink(sub) or os.path.isjunction(sub):
+                    return False
             for f in files:
                 rel = f if rel_root == "." else f"{rel_root}/{f}"
-                if rel != _SNAPSHOT_CLAIM and rel not in listed:
+                if (rel != _SNAPSHOT_CLAIM and rel not in listed
+                        and f.lower() not in _SNAPSHOT_SIDE_FILES):
                     return False
     except (OSError, ValueError):
         return False
@@ -3021,8 +3033,9 @@ def _pull_hf_snapshot_locked(
     if dest.exists() and repo_siblings is not None:
         damaged = _snapshot_files_damaged(dest, repo_siblings, repo_id)
     claimed = _snapshot_claim_held_by_other(dest, repo_id, revision) if dest.exists() else None
-    if (claimed == ("", None) and not damaged and repo_siblings is not None
-            and _snapshot_matches_listing(dest, repo_siblings)):
+    adopted = (claimed == ("", None) and not damaged and repo_siblings is not None
+               and _snapshot_matches_listing(dest, repo_siblings))
+    if adopted:
         claimed = None
     if claimed is not None:
         claim_repo, claim_revision = claimed
@@ -3040,7 +3053,7 @@ def _pull_hf_snapshot_locked(
         return False
     if (dest.exists() and not damaged
             and not _holds_other_revision(dest, repo_id, revision)
-            and _snapshot_is_complete(dest, repo_siblings, repo_id)):
+            and (adopted or _snapshot_is_complete(dest, repo_siblings, repo_id))):
         console.print(f"[yellow]Already downloaded:[/yellow] {escape(model_name)}")
         registered = _mm._register_with_dedup(
             model_name, dest, f"hf:{repo_id}",
