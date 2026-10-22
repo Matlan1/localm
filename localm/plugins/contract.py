@@ -83,6 +83,13 @@ class InferenceBackendDescriptor:
     ignore any key you do not use. The backend must run its model in its own
     child process and satisfy ``localm.inference.backends.base.BaseBackend``.
 
+    ``refusal(model_path) -> Optional[str]``, when given, returns the sentence
+    a load of *model_path* would be refused with on this machine (wrong
+    operating system, no suitable GPU, runtime not installed), or None when it
+    could load. It must be cheap, must not start the model's process, and must
+    not raise; an exception is logged and read as None. ``localm add`` prints
+    it when registering a claimed model.
+
     ``plugin_name`` is stamped by the host at registration; a value set here is
     replaced.
     """
@@ -91,6 +98,7 @@ class InferenceBackendDescriptor:
     create: Callable[..., Any]
     label: str = ""
     plugin_name: str = ""
+    refusal: Optional[Callable[[str], Optional[str]]] = None
 
 
 @dataclass
@@ -229,8 +237,10 @@ class Host(Protocol):
         model's refusal returns unchanged. A plugin that registers one declares
         ``capabilities = ["inference-backend"]`` in its manifest, which lets an
         in-process load (``localm run --no-server``) find it without starting
-        the server. Raises ValueError for a descriptor without a name or with a
-        ``claims``/``create`` that is not callable."""
+        the server; in that load there is no server app, so the plugin's
+        routes, static mounts and chat hooks are skipped. Raises ValueError for
+        a descriptor without a name or with a ``claims``/``create`` that is not
+        callable."""
         ...
 
 

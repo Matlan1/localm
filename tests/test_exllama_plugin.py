@@ -150,6 +150,19 @@ class TestParentRefusals:
         assert "exllamav3 is not installed" in str(exc.value)
         assert "localm plugin install-deps exllama" in str(exc.value)
 
+    def test_the_descriptor_refusal_is_the_load_refusal(self, tmp_path, monkeypatch, no_spawn):
+        monkeypatch.setattr("localm.hwdetect.detect", lambda: _Detection(["amd"], "found"))
+        d = str(_model_dir(tmp_path / "m", EXL2_QUANT))
+        with pytest.raises(ModelRefusedError) as exc:
+            exl_backend.ExllamaBackend(d, fmt="exl2").load()
+        assert exl_plug.DESCRIPTOR.refusal(d) == str(exc.value)
+        assert exl_plug.DESCRIPTOR.refusal(str(_model_dir(tmp_path / "awq", AWQ_QUANT))) is None
+
+    def test_no_descriptor_refusal_where_every_check_passes(self, tmp_path, monkeypatch):
+        for name in ("_gpu_refusal", "_platform_refusal", "_runtime_refusal"):
+            monkeypatch.setattr(exl_backend, name, lambda fmt: None)
+        assert exl_plug.DESCRIPTOR.refusal(str(_model_dir(tmp_path / "m", EXL3_QUANT))) is None
+
     def test_an_unanswered_gpu_probe_is_left_to_the_worker(self, monkeypatch):
         monkeypatch.setattr("localm.hwdetect.detect", lambda: _Detection([], "unknown"))
         assert exl_backend._gpu_refusal("exl2") is None

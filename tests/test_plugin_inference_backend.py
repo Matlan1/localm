@@ -188,13 +188,22 @@ def unregister():
 '''
 
 
-def _make_backend_plugin(root: Path, name: str = "fakeexl") -> Path:
+BACKEND_PLUGIN_WITH_ROUTES = BACKEND_PLUGIN.replace("def register(host):\n", '''def register(host):
+    from fastapi import APIRouter
+    router = APIRouter()
+    router.add_api_route("/fakeexl/ping", lambda: {"ok": True})
+    host.mount_router(router)
+    host.register_chat_hook("inlet", lambda body, **kw: body)
+''')
+
+
+def _make_backend_plugin(root: Path, name: str = "fakeexl", source: str = BACKEND_PLUGIN) -> Path:
     pdir = root / name
     pdir.mkdir(parents=True, exist_ok=True)
     (pdir / "plugin.toml").write_text(
         f'[plugin]\nname = "{name}"\nscope = "{name}"\nregister = "plug"\n'
         'capabilities = ["inference-backend"]\n', encoding="utf-8")
-    (pdir / "plug.py").write_text(textwrap.dedent(BACKEND_PLUGIN), encoding="utf-8")
+    (pdir / "plug.py").write_text(textwrap.dedent(source), encoding="utf-8")
     return pdir
 
 
@@ -278,23 +287,79 @@ class TestPluginLifecycle:
         assert imports.read_text() == "x"
 
 
+class TestBackendOnlyLoad:
+    def test_a_backend_plugin_with_routes_and_hooks_loads_in_process(self, tmp_path):
+        from localm.inference.engine import create_backend
+        _make_backend_plugin(tmp_path / "home" / "plugins", source=BACKEND_PLUGIN_WITH_ROUTES)
+        _enable("fakeexl")
+        made = create_backend(str(_exl2_dir(tmp_path)))
+        assert type(made).__name__ == "Made"
+        assert [d.name for d in backend_registry.registered()] == ["fakeexl"]
+
+    def test_its_routes_are_mounted_once_the_server_loads_it(self, tmp_path):
+        from localm.inference.engine import create_backend
+        from localm.plugins.engine import attach_engine
+        _make_backend_plugin(tmp_path / "home" / "plugins", source=BACKEND_PLUGIN_WITH_ROUTES)
+        _enable("fakeexl")
+        assert type(create_backend(str(_exl2_dir(tmp_path)))).__name__ == "Made"
+        app = FastAPI()
+        mgr = attach_engine(app)
+        assert mgr._errors == {}
+        assert "/fakeexl/ping" in app.openapi()["paths"]
+        assert [d.name for d in backend_registry.registered()] == ["fakeexl"]
+
+
+@pytest.fixture
+def add_local_env(tmp_path, monkeypatch):
+    import localm.config as cfg
+    import localm.model_manager as mm
+    from localm.model_manager import _shared
+    printed: list = []
+    monkeypatch.setattr(_shared.console, "print",
+                        lambda *a, **k: printed.append(" ".join(map(str, a))))
+    monkeypatch.setattr(mm, "MODELS_DIR", tmp_path / "home" / "models")
+    monkeypatch.setattr(mm, "REGISTRY_FILE", tmp_path / "home" / "registry.json")
+    monkeypatch.setattr(cfg, "MODELS_DIR", tmp_path / "home" / "models")
+    monkeypatch.setattr(cfg, "REGISTRY_FILE", tmp_path / "home" / "registry.json")
+    (tmp_path / "home" / "models").mkdir()
+    return mm, printed
+
+
 class TestRegistryNote:
     def test_add_local_drops_the_cannot_load_note_when_a_backend_claims(
-            self, tmp_path, monkeypatch):
-        import localm.model_manager as mm
-        from localm.model_manager import _shared
-        printed: list = []
-        monkeypatch.setattr(_shared.console, "print",
-                            lambda *a, **k: printed.append(" ".join(map(str, a))))
-        monkeypatch.setattr(mm, "MODELS_DIR", tmp_path / "home" / "models")
-        monkeypatch.setattr(mm, "REGISTRY_FILE", tmp_path / "home" / "registry.json")
-        import localm.config as cfg
-        monkeypatch.setattr(cfg, "MODELS_DIR", tmp_path / "home" / "models")
-        monkeypatch.setattr(cfg, "REGISTRY_FILE", tmp_path / "home" / "registry.json")
-        (tmp_path / "home" / "models").mkdir()
+            self, tmp_path, add_local_env):
+        mm, printed = add_local_env
         backend_registry.register(_descriptor([]))
         assert mm.add_local(str(_exl2_dir(tmp_path))) is True
         assert "cannot load it" not in "\n".join(printed)
+
+    def test_add_local_prints_the_claiming_backends_refusal_on_this_machine(
+            self, tmp_path, add_local_env):
+        mm, printed = add_local_env
+        backend_registry.register(InferenceBackendDescriptor(
+            name="fake", claims=lambda p: True, create=lambda p, **o: _Made(p, o),
+            plugin_name="fakeplug", refusal=lambda p: "This runs on Linux only."))
+        assert mm.add_local(str(_exl2_dir(tmp_path))) is True
+        out = "\n".join(printed)
+        assert "cannot load it" in out and "This runs on Linux only." in out
+        assert EXL2_SENTENCE not in out
+
+    def test_a_refusal_that_raises_is_logged_and_reads_as_none(self, tmp_path, caplog):
+        def boom(p):
+            raise OSError("probe failed")
+        d = InferenceBackendDescriptor(name="fake", claims=lambda p: True,
+                                       create=lambda p, **o: None, plugin_name="fakeplug",
+                                       refusal=boom)
+        with caplog.at_level("WARNING", logger="localm"):
+            assert backend_registry.refusal_for(d, str(tmp_path)) is None
+        assert "refusal() raised" in caplog.text and "probe failed" in caplog.text
+
+    @pytest.mark.parametrize("value", [None, "", "   ", 3])
+    def test_no_sentence_reads_as_none(self, tmp_path, value):
+        d = InferenceBackendDescriptor(name="fake", claims=lambda p: True,
+                                       create=lambda p, **o: None, refusal=lambda p: value)
+        assert backend_registry.refusal_for(d, str(tmp_path)) is None
+        assert backend_registry.refusal_for(_descriptor([]), str(tmp_path)) is None
 
 
 class TestAdmission:
@@ -350,4 +415,25 @@ class TestRunnerTypedLoadRefusal:
         runner = HFRunner(worker_target=(str(worker), "W"), process_name="test-worker")
         with pytest.raises(ModelRefusedError, match="no CUDA here"):
             runner.spawn_and_load({}, timeout=120)
+        assert not runner.is_alive()
+
+    def test_a_worker_crash_names_the_runners_backend(self, tmp_path):
+        from localm.inference.backends._hf_runner import HFRunner
+        worker = tmp_path / "crashing_worker.py"
+        worker.write_text(textwrap.dedent('''
+            import os
+
+            class W:
+                def __init__(self, **kw):
+                    pass
+                def load(self):
+                    os._exit(3)
+        '''), encoding="utf-8")
+        runner = HFRunner(worker_target=(str(worker), "W"), process_name="test-worker",
+                          backend_label="ExLlama")
+        with pytest.raises(RuntimeError) as exc:
+            runner.spawn_and_load({}, timeout=120)
+        message = str(exc.value)
+        assert "The ExLlama model-loading process crashed" in message
+        assert "HuggingFace" not in message
         assert not runner.is_alive()

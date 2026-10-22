@@ -614,13 +614,16 @@ class HFRunner:
     ``last_finish_reason``, ``count_tokens``, ``count_messages_tokens``,
     ``embed``, and the ``supports_images``, ``processor_error``, ``can_embed``
     and ``resolved_device`` attributes the load reply reads). *process_name*
-    names the child process and its native-fault trace file."""
+    names the child process and its native-fault trace file. *backend_label*
+    names the backend in the load, crash and timeout errors the runner raises."""
 
     def __init__(self, worker_target: Optional[tuple] = None,
-                 process_name: str = "hf-worker") -> None:
+                 process_name: str = "hf-worker",
+                 backend_label: str = "HuggingFace") -> None:
         self._worker_target = (None if worker_target is None
                                else (str(worker_target[0]), str(worker_target[1])))
         self._process_name = process_name
+        self._backend_label = backend_label
         self._proc = None
         self._req_q = None
         self._resp_q = None
@@ -820,14 +823,14 @@ class HFRunner:
             except _queue.Empty as e:
                 if not self._proc.is_alive():
                     raise RuntimeError(
-                        f"The HuggingFace model-loading process crashed (exit "
+                        f"The {self._backend_label} model-loading process crashed (exit "
                         f"code {self._exit_reason()}) while loading. The server "
                         "stayed up." + self._crash_detail()) from e
                 if time.monotonic() > deadline:
                     self.shutdown(grace=0)
                     from localm.debuglog import native_fault_hint
                     raise RuntimeError(
-                        f"HuggingFace model load timed out after {timeout:.0f}s "
+                        f"{self._backend_label} model load timed out after {timeout:.0f}s "
                         f"- the worker process may be hung ({native_fault_hint()}). "
                         "The server stayed up and the load was aborted; retry, "
                         "or raise hf_load_timeout_s if this model genuinely "
@@ -844,7 +847,7 @@ class HFRunner:
                 from .base import ModelRefusedError
                 raise ModelRefusedError(result[1])
             raise RuntimeError(result[1])
-        raise RuntimeError(f"Unexpected response from the HF model-loading process: {result!r}")
+        raise RuntimeError(f"Unexpected response from the {self._backend_label} model-loading process: {result!r}")
 
     def chat_stream(self, *, first_chunk_timeout: Optional[float] = None,
                     on_status: Optional[Callable[[str], None]] = None, **kwargs):
@@ -1059,12 +1062,12 @@ class HFRunner:
                 except _queue.Empty as e:
                     if not self.is_alive():
                         raise RuntimeError(
-                            f"The HF model process crashed (exit code "
+                            f"The {self._backend_label} model process crashed (exit code "
                             f"{self._exit_reason()}) while handling '{name}'."
                             + self._crash_detail()) from e
                     if time.monotonic() > deadline:
                         self.shutdown(grace=0)
-                        raise RuntimeError(f"'{name}' timed out waiting for the HF model process.") from e
+                        raise RuntimeError(f"'{name}' timed out waiting for the {self._backend_label} model process.") from e
             kind = result[0]
             if kind == "ok":
                 return result[1]
