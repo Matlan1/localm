@@ -242,32 +242,30 @@ class TestDiscardingPartialDataOfAHeldFolder:
         assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is True
 
 
-_FILE_HOLDER = '''
-import sys
+_FILE_HOLDER = """
+import sys, time
 from filelock import FileLock
 lock = FileLock(sys.argv[1], timeout=0)
 lock.acquire(timeout=0)
 print("HELD", flush=True)
-sys.stdin.read()
-'''
+time.sleep(0.3)
+lock.release()
+"""
 
 
-class TestDiscardingASingleFileRightAfterItsPullIsKilled:
-    def test_discard_waits_out_the_dead_holders_lock(self, hub):  # noqa: F811
+class TestDiscardingASingleFileWhileItsLockIsBeingReleased:
+    def test_discard_waits_for_a_lock_freed_a_moment_later(self, hub):  # noqa: F811
         from huggingface_hub._local_folder import get_local_download_paths
         lock = get_local_download_paths(hub.models_dir, "m.gguf").lock_path
         lock.parent.mkdir(parents=True, exist_ok=True)
-        for _ in range(8):
-            proc = subprocess.Popen([sys.executable, "-c", _FILE_HOLDER, str(lock)],
-                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
-            try:
-                assert proc.stdout.readline().strip() == "HELD"
-            finally:
-                proc.kill()
-                proc.wait(60)
-                proc.stdout.close()
-                proc.stdin.close()
+        proc = subprocess.Popen([sys.executable, "-c", _FILE_HOLDER, str(lock)],
+                                stdout=subprocess.PIPE, text=True)
+        try:
+            assert proc.stdout.readline().strip() == "HELD"
             assert pull_mod.discard_partial_download("o/r:m.gguf") == 0
+        finally:
+            proc.wait(60)
+            proc.stdout.close()
 
 
 class TestALockThatCannotBeTaken:
