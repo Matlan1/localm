@@ -748,18 +748,37 @@ def pull(model_spec, name, sha256, redownload, mmproj, type, store,
 
     Models are stored in <data dir>/models/ and registered automatically.
     """
+    from ..model_manager.pull import forget_stopped_download
+    forget_stopped_download()
     try:
         ok = pull_model(model_spec, name, expected_sha256=sha256, redownload=redownload,
                         mmproj_spec=mmproj, model_type=type, store=store,
                         dest_dir=comfy_dest_dir, register=register)
     except KeyboardInterrupt:
-        click.echo("\nDownload stopped. What has been downloaded is kept; run the same "
-                   "command again to continue from there.", err=True)
+        click.echo("\n" + _stopped_pull_message(), err=True)
         sys.exit(130)
     if not ok:
         sys.exit(1)
 
 
+
+
+def _stopped_pull_message() -> str:
+    """The line printed when Ctrl+C stops ``localm pull``: the bytes the
+    stopped download left on disk, measured after it stopped, and how to
+    continue."""
+    from ..model_manager._transfer import format_size
+    from ..model_manager.pull import stopped_download
+    stopped = stopped_download()
+    if stopped is None:
+        return "Download stopped; run the same command again to continue."
+    saved, total = stopped
+    if saved <= 0:
+        return ("Download stopped before anything was saved to disk. Run the "
+                "same command again to start it again.")
+    of_total = f" of {format_size(total)}" if total else ""
+    return (f"Download stopped. {format_size(saved)}{of_total} is saved to disk; "
+            "run the same command again to continue from there.")
 
 
 @main.command("search")
