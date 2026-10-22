@@ -221,3 +221,13 @@ class TestUnknownArchitectureLoadMessage:
     def test_other_runtime_errors_keep_the_repair_advice(self):
         msg = _load_failure_message(RuntimeError("Failed to load model: m.gguf"))
         assert "Provision or repair it" in msg
+
+
+@pytest.mark.parametrize("plugin_active", [True, False])
+def test_the_speech_architecture_refusal_names_the_speech_route_only_with_the_tts_plugin(
+        monkeypatch, plugin_active):
+    monkeypatch.setattr("localm.model_manager.gguf.speech_route_available",
+                        lambda: plugin_active)
+    msg = gguf_chat_refusal("qwen3tts")
+    assert "localm speak" in msg
+    assert ("/v1/audio/speech" in msg) is plugin_active

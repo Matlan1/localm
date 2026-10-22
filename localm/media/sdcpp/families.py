@@ -11,6 +11,7 @@ companion files a diffusion model needs.
   ``umt5``, ``llm``, ``llm_vision`` (the vision tower of an LLM text encoder,
   a llama.cpp mmproj file), ``vae``, ``clip_vision``, ``lora``, ``controlnet``,
   ``textual_inversion`` (an embedding a prompt names by its trigger word),
+  ``upscaler`` (an RGB ESRGAN image upscaler in the RRDBNet layout),
   ``music`` (a component of an ACE-Step music model, never an image or video
   file) or ``unknown``.
 * ``family``: the model family a diffusion model, checkpoint, VAE or LoRA
@@ -675,6 +676,20 @@ def _textual_inversion_info(t: dict) -> Optional[FileInfo]:
     return FileInfo("textual_inversion", family)
 
 
+_ESRGAN_RDB = re.compile(r"body\.\d+\.rdb1\.conv1\.weight")
+
+
+def _upscaler_info(t: dict) -> Optional[FileInfo]:
+    """An RGB ESRGAN upscaler in the RRDBNet layout (``conv_first``,
+    ``body.N.rdb1.conv1``, ``conv_last`` with three output channels), or None."""
+    last = t.get("conv_last.weight")
+    if not last or len(last) != 4 or last[0] != 3 or len(t.get("conv_first.weight") or ()) != 4:
+        return None
+    if not any(_ESRGAN_RDB.fullmatch(n) for n in t):
+        return None
+    return FileInfo("upscaler")
+
+
 def classify_tensors(tensors: dict, arch: Optional[str] = None) -> FileInfo:
     """Classify a file from its tensor names/shapes and GGUF architecture."""
     if not tensors:
@@ -691,6 +706,9 @@ def classify_tensors(tensors: dict, arch: Optional[str] = None) -> FileInfo:
         found = _diffusion_family(dv)
         return FileInfo("checkpoint", fam or (found[0] if found else None),
                         found[1] if found else {})
+    upscaler = _upscaler_info(tensors)
+    if upscaler is not None:
+        return upscaler
     control = _controlnet_info(tensors)
     if control is not None:
         return control
