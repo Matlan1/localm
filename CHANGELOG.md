@@ -143,6 +143,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
   next request fits in it.
 
 ### Fixed
+- **The Ollama API accepts the `curl -d` commands from Ollama's own documentation.** `curl http://127.0.0.1:<port>/api/chat -d '{...}'` sends its JSON body labelled `application/x-www-form-urlencoded`, and the Ollama routes that take a body (`/api/chat`, `/api/generate`, `/api/show`, `/api/embed`, `/api/embeddings`, `/api/copy`) refused it with HTTP 400. A body that is a JSON object is now read as JSON whatever its Content-Type says, as Ollama does; a body that is not JSON is still refused with the same 400, and a request from a web page (one that carries an `Origin` header) still needs a JSON Content-Type.
+- **A client that leaves during an image or speech generation is no longer logged as a server error.** The job was cancelled correctly, but each such leave logged `ERROR localm: unhandled error: POST /v1/images/generations` with a traceback and counted as HTTP 500 in `/metrics`. It is now answered and counted as 499, with no error in the log; a route that really fails is still a logged 500.
 - **An embedding model asked for by name answers with its own vectors.** `/v1/embeddings` and
   Ollama's `/api/embed` and `/api/embeddings` answered a request for a pulled embedding GGUF (for
   example nomic-embed-text) with the configured embedding model's vectors and dimension, labelled

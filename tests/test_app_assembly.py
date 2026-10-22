@@ -47,6 +47,7 @@ _EFFECTIVE_CHAIN = (
     ("BaseHTTPMiddleware", "_origin_guard"),
     ("CORSMiddleware", None),
 )
+_INNERMOST = (("ClientLeftMiddleware", None),)
 
 
 def _effective_chain(app) -> tuple:
@@ -80,7 +81,7 @@ def test_effective_middleware_chain(monkeypatch, debug):
     else:
         monkeypatch.delenv("LOCALM_DEBUG", raising=False)
     expected = _EFFECTIVE_CHAIN + (
-        (("BaseHTTPMiddleware", "_log_requests"),) if debug else ())
+        (("BaseHTTPMiddleware", "_log_requests"),) if debug else ()) + _INNERMOST
     assert _effective_chain(create_app(None)) == expected
 
 
