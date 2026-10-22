@@ -15,8 +15,8 @@ from localm import scopes
 from localm.debuglog import logger
 from localm.inference._threadpool_timeout import (ThreadCallTimeout,
                                                   run_in_threadpool_bounded)
-from localm.inference.http_server import (principal_id, require_fs_host,
-                                          require_scope)
+from localm.inference.http_server import (path_formatter, principal_id,
+                                          require_fs_host, require_scope)
 from localm.executor import get_plugin_executor
 from localm.plugins.gui.routes.models._context import ModelRouteContext
 from localm.plugins.gui.web import (ComfyPullRequest, ComfySourceLookupRequest,
@@ -175,9 +175,9 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         try:
             removed = await run_in_threadpool_bounded(_discard, timeout=60.0)
         except PullLockUnavailable as e:
-            raise HTTPException(500, str(e)) from e
+            raise HTTPException(500, path_formatter(request)(e)) from e
         except PullInFlight as e:
-            raise HTTPException(409, str(e)) from e
+            raise HTTPException(409, path_formatter(request)(e)) from e
         except ThreadCallTimeout as e:
             raise HTTPException(504, f"Deleting the partial download timed out: {e}") from e
         return {"removed_bytes": removed, "kept": partial_download_kept(spec)}

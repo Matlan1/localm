@@ -2614,7 +2614,8 @@ def _delete_hf_temp_files(base_dir: Path, rels: "list[str] | None") -> int:
             paths = get_local_download_paths(Path(base_dir), rel)
             if not paths.lock_path.parent.is_dir():
                 continue
-            held.enter_context(_hold_download_lock(paths.lock_path))
+            held.enter_context(_hold_download_lock(
+                paths.lock_path, wait=_SNAPSHOT_LOCK_WAIT_SECONDS))
             targets.append((paths.metadata_path.parent,
                             _short_hash(paths.metadata_path.name) + "."))
         files = []
@@ -2967,17 +2968,21 @@ def _pull_hf_snapshot_locked(
     if dest.exists() and repo_siblings is not None:
         damaged = _snapshot_files_damaged(dest, repo_siblings, repo_id)
     claimed = _snapshot_claim_held_by_other(dest, repo_id, revision) if dest.exists() else None
+    if (claimed == ("", None) and not damaged and repo_siblings is not None
+            and _snapshot_is_complete(dest, repo_siblings, repo_id)):
+        claimed = None
     if claimed is not None:
         claim_repo, claim_revision = claimed
-        what = ("an earlier localm, whose revision it cannot tell" if not claim_repo
+        what = ("files localm cannot match to a repo or revision" if not claim_repo
                 else "another revision of it" if claim_repo.casefold() == repo_id.casefold()
                 else f"{escape(claim_repo)}"
                 + (f"@{escape(claim_revision)}" if claim_revision else ""))
         console.print(
             f"[red]Refusing to pull {escape(repo_id)}"
             + (f"@{escape(revision.ref)}" if revision else "")
-            + f" into {escape(str(dest))}:[/red] this folder holds an unfinished "
-            f"download of {what}. Pull with "
+            + f" into {escape(str(dest))}:[/red] this folder holds "
+            + ("" if not claim_repo else "an unfinished download of ")
+            + f"{what}. Pull with "
             "[bold]-n <a-different-name>[/bold], or delete the folder first.")
         return False
     if (dest.exists() and not damaged
@@ -3101,8 +3106,10 @@ def _pull_hf_snapshot_locked(
                      json.dumps({"repo": repo_id,
                                  "revision": revision.ref if revision else None}))
     except OSError as e:
-        logger.warning("could not mark %s as holding %s%s: %s", dest, repo_id,
-                       f"@{revision.ref}" if revision else "", e)
+        console.print(
+            f"[red]Could not start the download into {escape(str(dest))}:[/red] "
+            f"localm could not write {_SNAPSHOT_CLAIM} there ({escape(str(e))}).")
+        return False
     # TAG-INJECTION site: repo_id/dest sit directly inside OPEN
     # [bold cyan]/[bold] tags.
     console.print(
