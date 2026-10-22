@@ -45,6 +45,7 @@ _PCI_ID_RE = re.compile(r"\A(?:[0-9a-fA-F]{4,8}:)?([0-9a-fA-F]{2}):([0-9a-fA-F]{
 _KERNEL_RE = re.compile(r"\A(\d+)\.(\d+)")
 
 _AMDGPU_PARAM = "/sys/module/amdgpu/parameters/lockup_timeout"
+_AMDGPU_TAINT = "/sys/module/amdgpu/taint"
 _I915_REQUEST_TIMEOUT = "/sys/module/i915/parameters/request_timeout_ms"
 _DRM_CLASS = "/sys/class/drm"
 _PCI_DEVICES = "/sys/bus/pci/devices"
@@ -275,15 +276,18 @@ def _kernel_version(host: Host) -> Optional[tuple[int, int]]:
     return (int(m.group(1)), int(m.group(2))) if m else None
 
 
-def amdgpu_timeouts(kernel: tuple[int, int], param: str) -> tuple[Optional[int], Optional[int]]:
+def amdgpu_timeouts(kernel: tuple[int, int], param: str,
+                    out_of_tree: bool = False) -> tuple[Optional[int], Optional[int]]:
     """The amdgpu GFX and compute job timeouts in milliseconds (None for no
     timeout) on Linux *kernel* (major, minor) with ``lockup_timeout`` set to
     *param*: 2000 for every queue from 6.19, 10000 from 6.17, earlier 10000 for
     GFX and 60000 for compute (none before 5.14). A value of 0 keeps the
     default, a negative one disables the timeout; one value sets every queue
-    from 6.17 and only the non-compute queues before. Raises ValueError for a
-    value that is not an integer."""
-    if kernel >= (6, 19):
+    from 6.19 and only the non-compute queues before (on bare metal). With
+    *out_of_tree* (a module not built with the kernel) the defaults are the
+    strictest of any version, 2000 for every queue, and one value sets only
+    the GFX queue. Raises ValueError for a value that is not an integer."""
+    if out_of_tree or kernel >= (6, 19):
         gfx, compute = 2000, 2000
     elif kernel >= (6, 17):
         gfx, compute = 10000, 10000
@@ -298,7 +302,7 @@ def amdgpu_timeouts(kernel: tuple[int, int], param: str) -> tuple[Optional[int],
 
     if len(values) == 1:
         gfx = apply(gfx, values[0])
-        if kernel >= (6, 17):
+        if kernel >= (6, 19) and not out_of_tree:
             compute = apply(compute, values[0])
     elif values:
         gfx = apply(gfx, values[0])
@@ -311,14 +315,25 @@ def _amdgpu(host: Host) -> ResetLimit:
     kernel = _kernel_version(host)
     if kernel is None:
         return _assumed("unknown Linux kernel version")
+    param = host.read(_AMDGPU_PARAM)
+    if param is None and host.realpath(_AMDGPU_PARAM) is not None:
+        return _assumed("unreadable amdgpu lockup_timeout")
+    taint = host.read(_AMDGPU_TAINT)
+    if taint is None and host.realpath(_AMDGPU_TAINT) is not None:
+        return _assumed("unreadable amdgpu module taint")
+    out_of_tree = "O" in (taint or "")
     try:
-        gfx, compute = amdgpu_timeouts(kernel, host.read(_AMDGPU_PARAM) or "")
+        gfx, compute = amdgpu_timeouts(kernel, param or "", out_of_tree)
     except ValueError:
         return _assumed("unreadable amdgpu lockup_timeout")
     limits = [ms for ms in (gfx, compute) if ms is not None]
     if not limits:
         return ResetLimit(None, True, "the amdgpu driver's GPU job timeout is off")
     seconds = min(limits) / 1000
+    if out_of_tree:
+        return ResetLimit(seconds, False,
+                          "this amdgpu module was not built with the kernel, so localm cannot "
+                          f"tell its default job timeout and assumes about {seconds:g} s")
     return ResetLimit(seconds, True,
                       f"the amdgpu driver resets this GPU when one job runs longer than {seconds:g} s")
 

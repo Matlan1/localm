@@ -203,6 +203,9 @@ ON_PCI = {"name": "Vulkan0", "description": "AMD Radeon RX 7900 XTX (RADV NAVI31
     ((7, 1), "", (2000, 2000)),
     ((6, 8), "5000", (5000, 60000)),
     ((6, 19), "5000", (5000, 5000)),
+    ((6, 17), "5000", (5000, 10000)),
+    ((6, 18), "-1", (None, 10000)),
+    ((6, 18), "30000", (30000, 10000)),
     ((6, 19), "-1", (None, None)),
     ((6, 8), "0,0,0,0", (10000, 60000)),
     ((6, 8), "20000,30000,10000,10000", (20000, 30000)),
@@ -210,6 +213,17 @@ ON_PCI = {"name": "Vulkan0", "description": "AMD Radeon RX 7900 XTX (RADV NAVI31
 ])
 def test_amdgpu_timeouts_by_kernel_and_parameter(kernel, param, expected):
     assert gpureset.amdgpu_timeouts(kernel, param) == expected
+
+
+@pytest.mark.parametrize("kernel,param,expected", [
+    ((6, 8), "", (2000, 2000)),
+    ((5, 10), "", (2000, 2000)),
+    ((6, 8), "-1", (None, 2000)),
+    ((6, 19), "30000", (30000, 2000)),
+    ((6, 8), "20000,30000", (20000, 30000)),
+])
+def test_an_out_of_tree_amdgpu_takes_the_strictest_defaults(kernel, param, expected):
+    assert gpureset.amdgpu_timeouts(kernel, param, out_of_tree=True) == expected
 
 
 def test_amdgpu_timeouts_reject_a_bad_value():
@@ -240,6 +254,38 @@ def test_amdgpu_with_the_timeout_off_has_no_limit():
 def test_amdgpu_without_a_readable_timeout_is_assumed(release, param):
     files = {gpureset._AMDGPU_PARAM: param} if param is not None else {}
     got = limit([ON_PCI], **linux("amdgpu", files, release))
+    assert got.seconds == gpureset.ASSUMED_RESET_SECONDS and not got.known
+
+
+@pytest.mark.parametrize("taint", ["", "E"])
+def test_an_in_tree_amdgpu_module_keeps_the_kernel_default(taint):
+    got = limit([ON_PCI], **linux("amdgpu", {gpureset._AMDGPU_TAINT: taint}, "6.8.0"))
+    assert got.seconds == 10 and got.known
+
+
+@pytest.mark.parametrize("param", [None, "-1"])
+def test_an_out_of_tree_amdgpu_module_is_assumed_strict(param):
+    files = {gpureset._AMDGPU_TAINT: "O"}
+    if param is not None:
+        files[gpureset._AMDGPU_PARAM] = param
+    got = limit([ON_PCI], **linux("amdgpu", files, "6.8.0-45-generic"))
+    assert got.seconds == 2 and not got.known
+    assert "not built with the kernel" in got.reason
+
+
+class _Unreadable(FakeHost):
+    def __init__(self, unreadable, **kw):
+        super().__init__(**kw)
+        self.unreadable = unreadable
+
+    def read(self, path):
+        return None if path == self.unreadable else super().read(path)
+
+
+@pytest.mark.parametrize("path", [gpureset._AMDGPU_PARAM, gpureset._AMDGPU_TAINT])
+def test_an_amdgpu_file_that_exists_but_cannot_be_read_is_assumed(path):
+    kw = linux("amdgpu", {path: "x"}, "6.19.0")
+    got = gpureset.reset_limit([ON_PCI], _Unreadable(path, **kw))
     assert got.seconds == gpureset.ASSUMED_RESET_SECONDS and not got.known
 
 
