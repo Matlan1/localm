@@ -34,7 +34,8 @@ from ..config import (
     save_registry,
     update_registry,
 )
-from ._shared import PROGRESS_SENTINEL, _emit_outcome, _emit_progress, _verify_digest, console
+from ._shared import (PROGRESS_SENTINEL, _emit_outcome, _emit_progress, _import_status,
+                      _verify_digest, console)
 from .gguf import (
     _GGUF_MIN_BYTES,
     _GGUF_SETTLE_SECONDS,
@@ -172,7 +173,7 @@ __all__ = [
     "HOME_DIR", "MODELS_DIR", "REGISTRY_FILE", "ensure_dirs", "load_config",
     "load_registry", "save_registry", "update_registry",
     # shared
-    "console", "PROGRESS_SENTINEL",
+    "console", "PROGRESS_SENTINEL", "_import_status",
     # gguf
     "_SPLIT_GGUF_RE", "split_gguf_parts", "first_split_part", "missing_split_parts",
     "_sha256_file", "_sha256_file_bytes", "_safe_models_filename",

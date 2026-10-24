@@ -3476,7 +3476,8 @@ def _register_with_dedup(
             if on_duplicate == "ask" else on_duplicate
         )
         if action == "skip":
-            console.print("[dim]Skipped.[/dim]")
+            console.print(f"[dim]Skipped {escape(model_name)}: {reason}, already "
+                          f"registered as {escape(dup_names[0])}.[/dim]")
             return False
         if action == "alias":
             alias_model(dup_names[0], model_name)
@@ -3859,6 +3860,17 @@ def remove_model(name: str) -> None:
 # component (see _resolve_ollama_manifest).
 _OLLAMA_BLOB_RE = re.compile(r"sha256-[0-9a-f]{64}")
 
+_OLLAMA_MANIFEST_MAX_BYTES = 1 << 20
+
+
+def _could_be_manifest(f: Path) -> bool:
+    """True for a regular file small enough to be an Ollama manifest (a few KB of
+    JSON); a model file in the folder is never read as one."""
+    try:
+        return f.is_file() and f.stat().st_size <= _OLLAMA_MANIFEST_MAX_BYTES
+    except OSError:
+        return False
+
 
 def _resolve_ollama_manifest(p: Path):
     """
@@ -3873,7 +3885,7 @@ def _resolve_ollama_manifest(p: Path):
     try:
         if not p.is_dir():
             return None
-        tag_files = [f for f in p.iterdir() if f.is_file()]
+        tag_files = [f for f in p.iterdir() if _could_be_manifest(f)]
     except OSError:
         # A pathological name must resolve to "not an Ollama manifest", not crash
         # the caller. On Windows, Path('....').is_dir() succeeds (trailing dots
@@ -4251,7 +4263,8 @@ def _skip_unusable_ggufs(first_parts: list[Path]) -> list[Path]:
     from rich.markup import escape
 
     usable: list[Path] = []
-    for gguf in first_parts:
+    for k, gguf in enumerate(first_parts, 1):
+        _mm._import_status(f"Checking {gguf.name} ({k} of {len(first_parts)})", log=False)
         reason = gguf_unusable_reason(gguf) or _unfinished_gguf_reason(gguf)
         if reason is None and gguf.name.startswith(_UNFINISHED_DOWNLOAD_PREFIX):
             reason = ("its name starts with 'incomplete', which GPT4All gives a "
@@ -4265,7 +4278,8 @@ def _skip_unusable_ggufs(first_parts: list[Path]) -> list[Path]:
 
 
 def _digest_for_add(gguf: Path, reg: dict, no_hash: bool,
-                    fast: bool) -> "tuple[Optional[str], Optional[int]]":
+                    fast: bool, label: Optional[str] = None
+                    ) -> "tuple[Optional[str], Optional[int]]":
     """``(sha256, size)`` to register *gguf* with: neither under *no_hash*; only
     the size under *fast* (dedup on size alone); otherwise the hash, computed only
     when it can change the outcome (an unknown path or a registered alias with no
@@ -4279,7 +4293,7 @@ def _digest_for_add(gguf: Path, reg: dict, no_hash: bool,
             return None, None
     already_known = find_aliases_by_path(gguf, reg)
     needs_backfill = any(not reg[n].get("sha256") for n in already_known)
-    digest = _mm._hash_with_progress(gguf) \
+    digest = _mm._hash_with_progress(gguf, label=label) \
         if (not already_known or needs_backfill) else None
     return digest, None
 
@@ -4293,6 +4307,9 @@ def _add_local_gguf_dir(
     model_type: Optional[str] = None,
     names: Optional[dict] = None,
     mmprojs: Optional[dict] = None,
+    stats: Optional[dict] = None,
+    total: Optional[int] = None,
+    first_index: int = 1,
 ) -> bool:
     """Register every loose .gguf model in a folder (the *first_parts* list).
 
@@ -4313,12 +4330,17 @@ def _add_local_gguf_dir(
     attached, seen leaving the folder and appearing in MODELS_DIR during that
     model's registration) is registered where it landed; one whose new
     location was not seen is skipped with a message.
+
+    Each model is announced as ``k of total`` (*first_index* is the first k,
+    *total* defaults to the list length). *stats*, when given, counts the
+    models left unregistered under ``declined``.
     """
     from rich.markup import escape
 
     use_given_name = bool(name) and len(first_parts) == 1
     carried_to: dict = {}   # resolved source path -> where an earlier move put it
-    for gguf in first_parts:
+    total = total if total is not None else len(first_parts)
+    for k, gguf in enumerate(first_parts, first_index):
         if not gguf.exists():
             carried = carried_to.get(gguf.resolve())
             if carried is None or not carried.is_file():
@@ -4334,14 +4356,16 @@ def _add_local_gguf_dir(
             (names or {}).get(gguf) or base)
         model_name = _unique_registry_name(reg, wanted)
 
-        digest, size = _digest_for_add(gguf, reg, no_hash, fast)
+        position = f"{k} of {total}"
+        _mm._import_status(f"Registering {gguf.name} ({position})", log=False)
+        digest, size = _digest_for_add(gguf, reg, no_hash, fast, label=position)
 
         detected_type, gmeta = _detect_local_model_type(gguf, is_gguf=True, is_hf=False)
         final_type = model_type if model_type is not None else detected_type
         sib = (find_sibling_mmproj(gguf)
                if on_duplicate in ("ask", "move") and _mm.is_external_path(gguf) else None)
         before = _gguf_names_in(_mm.MODELS_DIR) if sib is not None else set()
-        _mm._register_with_dedup(
+        done = _mm._register_with_dedup(
             model_name, gguf, "local", on_duplicate=on_duplicate,
             digest=digest, size=size,
             model_type=final_type,
@@ -4350,6 +4374,8 @@ def _add_local_gguf_dir(
             expert_count=gmeta.get("expert_count"),
             attached_projector_only=True,
         )
+        if not done and stats is not None:
+            stats["declined"] = stats.get("declined", 0) + 1
         if sib is not None and not sib.exists():
             stem = sib.stem.lower()
             landed = [n for n in _gguf_names_in(_mm.MODELS_DIR) - before
@@ -5103,6 +5129,7 @@ def add_local(
             console.print(f"[red]Not a usable model:[/red] {escape(str(p))}\n{escape(unusable)}")
             return False
     if p.is_dir() and not is_hf:
+        _mm._import_status(f"Scanning {p} for models")
         hub = scan_hub_cache(p)
         if hub is not None:
             return _add_local_hub_cache(
@@ -5117,13 +5144,23 @@ def add_local(
     max_depth = _import_max_depth()
     if p.is_dir() and not is_hf:
         first_parts, hf_dirs = _find_model_units(p, max_depth=max_depth)
+        found = len(first_parts)
+        _mm._import_status(
+            f"Found {found} GGUF file(s) and {len(hf_dirs)} Hugging Face folder(s) in {p}")
         first_parts = _skip_unusable_ggufs(first_parts)
+        refused = found - len(first_parts)
         if first_parts or hf_dirs:
             only_one = len(first_parts) + len(hf_dirs) == 1
             registered_any = False
+            names_before = set(_mm.load_registry())
+            stats: dict = {}
+            units = len(first_parts) + len(hf_dirs)
             if first_parts:
                 mmprojs: dict = {}
                 if store:
+                    verb = "Moving" if store == "move" else "Copying"
+                    _mm._import_status(
+                        f"{verb} {len(first_parts)} GGUF file(s) into the models folder")
                     stored = _mm._store_loose_gguf_dir(first_parts, store, mmprojs=mmprojs)
                     if stored is None:
                         return False
@@ -5131,14 +5168,24 @@ def add_local(
                 registered_any = _add_local_gguf_dir(
                     first_parts, name if only_one else None, on_duplicate, no_hash,
                     fast, model_type=model_type, mmprojs=mmprojs,
+                    stats=stats, total=units,
                 )
-            for hf_dir in hf_dirs:
+            for k, hf_dir in enumerate(hf_dirs, len(first_parts) + 1):
+                _mm._import_status(f"Registering {hf_dir.name} ({k} of {units})")
                 wanted = _sanitize_name(name) if (name and only_one) else hf_dir.name
-                registered_any = add_local(
+                done = add_local(
                     str(hf_dir), _unique_registry_name(_mm.load_registry(), wanted),
                     on_duplicate=on_duplicate, no_hash=no_hash, fast=fast,
                     model_type=model_type, store=store,
-                ) or registered_any
+                )
+                if not done:
+                    stats["declined"] = stats.get("declined", 0) + 1
+                registered_any = done or registered_any
+            added = len(set(_mm.load_registry()) - names_before)
+            declined = stats.get("declined", 0)
+            _mm._import_status(
+                f"Done: {added} registered, {max(units - added - declined, 0)} already "
+                f"registered, {declined} skipped or refused, {refused} not usable")
             return registered_any
 
     if not (is_gguf or is_hf or is_blob or media_type):

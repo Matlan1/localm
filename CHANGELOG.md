@@ -11,6 +11,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Changed
+- **Adding a folder of models says what it is doing, and starts much faster.** The Add a model card, the Activity list and the terminal now show each step: scanning the folder, how many models were found, which file is being checked, hashed (with a progress bar and speed) or registered and its place in the batch, which files were skipped and why, and a final summary. Before registering anything, localm also read every file in the folder in full to look for an Ollama manifest; on a folder of large models that was most of the wait (about 2 minutes of 3.5 on a 42 GB folder) and is now gone.
+
 ## [0.3.1] - 2026-10-22
 
 ### Added

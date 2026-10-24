@@ -2699,6 +2699,20 @@ async function runPull(payload) {
           fileLine.hidden = true;
         }
       }
+      if (ev.phase === "import") {
+        let line = ev.detail || t("models.pull.starting");
+        if (ev.pct != null && ev.total) {
+          bar.classList.remove("indeterminate");
+          bar.style.width = ev.pct + "%";
+          line += `  ·  ${ev.pct.toFixed(0)}%  ·  ${fmtBytes(ev.downloaded)} / ${fmtBytes(ev.total)}`;
+          if (ev.rate) line += `  ·  ${fmtBytes(ev.rate)}/s`;
+        } else {
+          bar.classList.add("indeterminate");
+          bar.style.width = "100%";
+        }
+        pct.textContent = line;
+        return;
+      }
       if (ev.phase === "verify") {
         bar.classList.remove("indeterminate");
         if (ev.pct != null) {

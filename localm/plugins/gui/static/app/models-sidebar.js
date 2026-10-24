@@ -302,6 +302,7 @@ function _buildActivityBody(body) {
       head.appendChild(stop);
     }
     row.appendChild(head);
+    if (op.status === "running" && op.detail) row.appendChild(el("div", "sub", op.detail));
     if (typeof op.pct === "number") {
       const dl = el("div", "dl-progress");
       const bar = el("div", "dl-bar");
@@ -411,8 +412,8 @@ export async function reattachActivity() {
         _refreshActivityModalIfOpen();
       }, (ev) => {
         const idx = _activityOps.findIndex((o) => o.id === op.id);
-        if (idx !== -1 && typeof ev.pct === "number") {
-          _activityOps[idx] = { ..._activityOps[idx], pct: ev.pct };
+        if (idx !== -1 && (typeof ev.pct === "number" || ev.detail)) {
+          _activityOps[idx] = { ..._activityOps[idx], pct: ev.pct, detail: ev.detail };
           renderActivityPill(_activityOps);
           _refreshActivityModalIfOpen();
         }
