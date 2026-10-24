@@ -11,6 +11,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Added
+- **Segment Anything (SAM) checkpoints are recognised as `segmentation` models.** A SAM or SAM 2 `.pth` file found by a ComfyUI or StabilityMatrix scan, or sitting in a `sam`, `sams` or `segmentation` folder, is now listed as a segmentation model instead of `unknown`, and `localm set-type MODEL segmentation` and the Models page type menu offer it. localm does not run segmentation models yet, so naming one for chat is refused with a clear message.
+
 ### Changed
 - **Adding a folder of models says what it is doing, and starts much faster.** The Add a model card, the Activity list and the terminal now show each step: scanning the folder, how many models were found, which file is being checked, hashed (with a progress bar and speed) or registered and its place in the batch, which files were skipped and why, and a final summary. Before registering anything, localm also read every file in the folder in full to look for an Ollama manifest; on a folder of large models that was most of the wait (about 2 minutes of 3.5 on a 42 GB folder) and is now gone.
 

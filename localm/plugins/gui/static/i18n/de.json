@@ -1163,6 +1163,7 @@
   "models.importComfy.type.controlnet": "ControlNets",
   "models.importComfy.type.diffusionUnet": "Diffusion / Checkpoints",
   "models.importComfy.type.lora": "LoRAs",
+  "models.importComfy.type.segmentation": "Segmentierungsmodelle (SAM)",
   "models.importComfy.type.textEncoder": "Text-Encoder",
   "models.importComfy.type.textualInversion": "Embeddings (Textual Inversion)",
   "models.importComfy.type.unknown": "Andere",
