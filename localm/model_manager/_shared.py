@@ -36,7 +36,7 @@ def _emit_progress(downloaded: int, total: int, *, phase: str = "download",
                    name: "str | None" = None, index: int = 0, count: int = 0,
                    zero_is_unknown: bool = False,
                    rate: "float | None" = None, eta: "int | None" = None,
-                   saved: "int | None" = None) -> None:
+                   saved: "int | None" = None, detail: "str | None" = None) -> None:
     """Write one progress frame on the sentinel channel.
 
     *zero_is_unknown* suppresses the percentage while NOTHING has landed yet, and
@@ -66,6 +66,8 @@ def _emit_progress(downloaded: int, total: int, *, phase: str = "download",
     # ahead of it.
     if saved is not None:
         payload["saved"] = int(saved)
+    if detail:
+        payload["detail"] = detail
     # For a multi-file download (a split GGUF), tell the GUI which file is in
     # flight so it can show "file 2 of 3: <name>". Omitted for a single file.
     if count > 1:
@@ -75,6 +77,18 @@ def _emit_progress(downloaded: int, total: int, *, phase: str = "download",
             payload["name"] = name
     sys.stdout.write(PROGRESS_SENTINEL + json.dumps(payload) + "\n")
     sys.stdout.flush()
+
+
+def _import_status(text: str, *, log: bool = True, done: int = 0, total: int = 0,
+                   rate: "float | None" = None) -> None:
+    """Say what a folder import is doing: a console line (unless *log* is False)
+    and, in GUI mode, an ``import`` progress frame carrying *text* as its detail
+    so the page and the Activity list show it."""
+    if log:
+        console.print(text, markup=False, highlight=False, style="dim")
+    if os.environ.get("LOCALM_PROGRESS_JSON") == "1":
+        _emit_progress(done, total, phase="import", detail=text, rate=rate,
+                       zero_is_unknown=True)
 
 
 def _emit_outcome(status: str) -> None:

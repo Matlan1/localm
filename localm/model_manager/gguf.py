@@ -293,8 +293,32 @@ _HASH_PROGRESS_MIN_BYTES = 512 * 1024 * 1024
 
 
 
+_IMPORT_HASH_EMIT_INTERVAL_S = 0.7
+
+
+def _hash_reporting(path: Path, size: int, text: str) -> str:
+    """SHA256 *path* for a folder import, streaming byte progress for *text* on
+    the GUI's progress channel (throttled)."""
+    start = time.monotonic()
+    last = 0.0
+
+    def _report(done: int, total: int) -> None:
+        nonlocal last
+        now = time.monotonic()
+        if now - last < _IMPORT_HASH_EMIT_INTERVAL_S:
+            return
+        last = now
+        _mm._emit_progress(done, total, phase="import", detail=text,
+                           rate=done / max(now - start, 1e-6), zero_is_unknown=True)
+
+    digest = _mm._sha256_file(path, progress=_report)
+    _mm._emit_progress(size, size, phase="import", detail=text)
+    return digest
+
+
 def _hash_with_progress(path: Path,
-                        *, purpose: str = "for duplicate detection") -> Optional[str]:
+                        *, purpose: str = "for duplicate detection",
+                        label: Optional[str] = None) -> Optional[str]:
     """SHA256 a model file, showing live progress for large files.
 
     For files larger than ``_HASH_PROGRESS_MIN_BYTES`` the hash runs in a
@@ -303,13 +327,22 @@ def _hash_with_progress(path: Path,
     detection); smaller files hash inline without any UI. Returns None for
     directories (HF models are identified by path only).
 
-    *purpose* completes the bar's label ("Hashing <file> <purpose>")."""
+    *purpose* completes the bar's label ("Hashing <file> <purpose>"). *label*,
+    given by a folder import, names the file's place in the batch ("2 of 5"): the
+    hash is then announced on the console and, under the GUI runner, streamed as
+    byte progress whatever the file's size."""
     if not path.is_file():
         return None
     try:
         size = path.stat().st_size
     except OSError:
         size = 0
+
+    if label is not None:
+        text = f"Hashing {path.name} {purpose} ({label}, {size / 1e6:,.0f} MB)"
+        _mm._import_status(text, total=size)
+        if os.environ.get("LOCALM_PROGRESS_JSON") == "1":
+            return _hash_reporting(path, size, text)
 
     if size <= _mm._HASH_PROGRESS_MIN_BYTES:
         return _mm._sha256_file(path)

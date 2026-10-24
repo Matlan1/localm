@@ -329,7 +329,7 @@ class Job:
         """This job as a listing row: enough for a client to render and then
         attach to it. Does not carry argv or the owner id.
 
-        pct/phase come from the last progress event. Both are absent, not zero,
+        pct/phase/detail come from the last progress event. All are absent, not zero,
         when the job has not reported progress. phase is the last one reported
         and stays on the row after the job ends; status is authoritative."""
         with self._sub_lock:
@@ -350,6 +350,9 @@ class Job:
             phase = progress.get("phase")
             if phase:
                 out["phase"] = phase
+            detail = progress.get("detail")
+            if isinstance(detail, str) and detail:
+                out["detail"] = detail
         return out
 
 
