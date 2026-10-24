@@ -159,3 +159,25 @@ class TestManifestProbeSkipsModelFiles:
             lambda self, *a, **k: (read.append(self.name), real(self, *a, **k))[1])
         assert reg._resolve_ollama_manifest(folder) is None
         assert read == []
+
+
+class TestOtherFolderBranches:
+    def test_jan_store_models_are_announced_with_their_place(self, home, tmp_path, printed):
+        for i, mid in enumerate(("janhq/one", "janhq/two")):
+            unit = tmp_path / "Jan" / "data" / "llamacpp" / "models" / mid
+            unit.mkdir(parents=True)
+            (unit / "model.yml").write_text("", encoding="utf-8")
+            _gguf(unit / "model.gguf", payload=bytes([i + 5]) * 2048)
+        assert mm.add_local(str(tmp_path / "Jan" / "data")) is True
+        assert _index(printed, "Scanning") < _index(printed, "Registered")
+        assert any("Hashing model.gguf for duplicate detection (1 of 2" in line
+                   for line in printed), printed
+        assert any("(2 of 2" in line for line in printed)
+
+    def test_store_copy_announces_the_copy_before_registering(self, home, tmp_path, printed):
+        assert mm.add_local(str(_folder(tmp_path / "pile")), store="copy") is True
+        assert _index(printed, "Copying 3 GGUF file(s) into the models folder") \
+            < _index(printed, "Registered")
+        assert "Done: 3 registered" in printed[-1]
+        assert {p.name for p in (home / "models").glob("*.gguf")} == {
+            "alpha.gguf", "beta.gguf", "gamma.gguf"}
