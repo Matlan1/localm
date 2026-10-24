@@ -827,6 +827,33 @@ class TestStoreLooseGgufDir:
         assert not (d / "modelA.gguf").exists()
         assert not (d / "mmproj-modelA-f16.gguf").exists()
 
+    @pytest.mark.parametrize("store", ["copy", "move"])
+    def test_model_already_in_models_dir_does_not_fail_the_import(
+            self, tmp_path, isolated_home, store):
+        mm.ensure_dirs()
+        (_models_dir() / "alpha.gguf").write_bytes(b"GGUF\x00\x00\x00\x00alpha.gguf")
+        d = tmp_path / "drop"
+        alpha = _gguf(d, "alpha.gguf")
+        _gguf(d, "beta.gguf")
+        assert add_local(str(d), store=store) is True
+        reg = load_registry()
+        assert {"alpha", "beta"} <= set(reg)
+        assert (_models_dir() / "beta.gguf").is_file()
+        assert alpha.exists()                               # duplicate left where it was
+
+    def test_different_file_under_same_name_is_skipped_not_fatal(
+            self, tmp_path, isolated_home):
+        mm.ensure_dirs()
+        occupied = _models_dir() / "alpha.gguf"
+        occupied.write_bytes(b"GGUF something else entirely")
+        d = tmp_path / "drop"
+        alpha = _gguf(d, "alpha.gguf")
+        _gguf(d, "beta.gguf")
+        assert add_local(str(d), store="move") is True
+        assert occupied.read_bytes() == b"GGUF something else entirely"
+        assert alpha.exists()
+        assert "beta" in load_registry()
+
 
 # --------------------------------------------------------------------------- #
 #  Collision refusal - a DIFFERENT file already occupies that name
@@ -1073,3 +1100,14 @@ def test_same_volume_move_of_a_directory_skips_the_space_check(isolated_home, tm
     assert dest == _models_dir() / "myhf"
     assert (dest / "config.json").is_file()
     assert not src.exists()
+
+
+class TestReimportOfAlreadyStoredFolder:
+    @pytest.mark.parametrize("store", ["copy", "move"])
+    def test_second_import_of_same_folder_succeeds(self, tmp_path, isolated_home, store):
+        d = tmp_path / "drop"
+        _gguf(d, "alpha.gguf")
+        _gguf(d, "beta.gguf")
+        assert add_local(str(d), store="copy") is True
+        assert add_local(str(d), store=store) is True
+        assert {"alpha", "beta"} <= set(load_registry())

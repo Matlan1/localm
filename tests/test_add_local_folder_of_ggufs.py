@@ -273,26 +273,38 @@ class TestFolderStoreProjectorCollision:
         assert not (d / "gemma-3-4b-it-Q4_K_M.gguf").exists()
         assert not (d / "mmproj-F16.gguf").exists()
 
-    def test_genuine_model_collision_still_refuses_and_leaves_folder_untouched(
+    def test_genuine_model_collision_is_skipped_and_the_rest_imports(
             self, tmp_path, isolated_home_for_store):
         models_dir = isolated_home_for_store
         _gguf(models_dir, "shared-model.gguf", b"GGUF existing DIFFERENT model content")
 
         d = tmp_path / "downloads"
-        # alpha sorts first and would transfer cleanly on its own - it must
-        # NOT be moved before the later, colliding file is discovered.
         _gguf(d, "alpha.gguf", b"GGUF alpha content")
         _gguf(d, "shared-model.gguf", b"GGUF incoming NEW model content")
 
-        assert add_local(str(d), store="move") is False
-        assert load_registry() == {}
-        # Preflighted: nothing in the folder transferred, not even the file
-        # that would otherwise have succeeded.
-        assert (d / "alpha.gguf").exists()
+        assert add_local(str(d), store="move") is True
+        assert "alpha" in load_registry()
+        assert (models_dir / "alpha.gguf").exists()
+        # The colliding file is neither moved nor allowed to overwrite.
         assert (d / "shared-model.gguf").exists()
-        assert not (models_dir / "alpha.gguf").exists()
         assert (models_dir / "shared-model.gguf").read_bytes() == \
             b"GGUF existing DIFFERENT model content"
+
+    @pytest.mark.parametrize("store", ["copy", "move"])
+    def test_identical_model_already_in_models_dir_does_not_fail_the_import(
+            self, tmp_path, isolated_home_for_store, store):
+        models_dir = isolated_home_for_store
+        _gguf(models_dir, "shared-model.gguf", b"GGUF same model content")
+
+        d = tmp_path / "downloads"
+        _gguf(d, "alpha.gguf", b"GGUF alpha content")
+        _gguf(d, "shared-model.gguf", b"GGUF same model content")
+
+        assert add_local(str(d), store=store) is True
+        reg = load_registry()
+        assert {"alpha", "shared-model"} <= set(reg)
+        assert Path(reg["shared-model"]["path"]) == models_dir / "shared-model.gguf"
+        assert (d / "shared-model.gguf").exists()
 
     def test_intra_batch_same_name_collision_strands_nothing(
             self, tmp_path, isolated_home_for_store):
