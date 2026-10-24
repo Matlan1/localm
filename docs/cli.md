@@ -276,17 +276,17 @@ is an `llm`); a HuggingFace directory is read from its `config.json`
 architectures (or `adapter_config.json` for a `lora`). Anything without a hard
 signal is left as `unknown` rather than guessed. The types are `llm`, `mmproj`, `diffusion-unet`,
 `text-encoder`, `vae`, `lora`, `embedding`, `tts`, `upscaler`, `controlnet`,
-`textual-inversion`, and `unknown`.
+`textual-inversion`, `segmentation`, and `unknown`.
 
 An `unknown` model still runs when you name it explicitly (`localm run NAME`, or an
 API request naming it), but is never auto-picked as the default chat model. Neither
 is an `embedding`, `tts` or component model (`mmproj`, `diffusion-unet`, `text-encoder`,
-`vae`, `lora`, `upscaler`, `controlnet`, `textual-inversion`), so a diffusion checkpoint
+`vae`, `lora`, `upscaler`, `controlnet`, `textual-inversion`, `segmentation`), so a diffusion checkpoint
 or a text encoder cannot get loaded as if it were a chat model.
 Correct a misdetected or `unknown` type at any time:
 
 ```bash
-localm set-type MODEL llm        # types: llm mmproj diffusion-unet text-encoder vae lora embedding tts upscaler controlnet textual-inversion unknown
+localm set-type MODEL llm        # types: llm mmproj diffusion-unet text-encoder vae lora embedding tts upscaler controlnet textual-inversion segmentation unknown
 ```
 
 Registering a lone `.safetensors` file scans its parent directory: if that folder

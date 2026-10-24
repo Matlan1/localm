@@ -12,6 +12,7 @@ from localm.media.comfy_client import (
     comfy_object_info, model_type_for_node, _MODEL_FILE_EXTS, _looks_like_model_files,
 )
 from localm.debuglog import logger
+from localm.model_manager.sam import is_sam_checkpoint
 
 # Folder name (lower case) -> localm model_type, for ComfyUI's models/ tree and
 # StabilityMatrix's Data/Models tree. Folders with no registry type map to
@@ -51,6 +52,9 @@ SUBFOLDER_MAPPING = {
     "hypernetwork": "unknown",
     "hypernetworks": "unknown",
     "diffusers": "unknown",
+    "sam": "segmentation",
+    "sams": "segmentation",
+    "segmentation": "segmentation",
 }
 
 _HEADER_TYPED_EXTS = frozenset({".safetensors", ".sft", ".gguf"})
@@ -208,9 +212,11 @@ def _in_component_dir(path: Path, cache: dict) -> bool:
 
 def _type_for_file(path: Path, folder_type: str, component_dirs: dict) -> str:
     """The model_type for one scanned file: what its header says (a diffusion
-    model, text encoder, VAE or LoRA, per localm.media.sdcpp.families), else the
-    type its folder names. Files in a component directory, and LoRAs of
+    model, text encoder, VAE or LoRA, per localm.media.sdcpp.families; a Segment
+    Anything checkpoint is "segmentation"), else the type its folder names. Files in a component directory, and LoRAs of
     language models, take the folder type."""
+    if is_sam_checkpoint(path):
+        return "segmentation"
     if path.suffix.lower() in _HEADER_TYPED_EXTS and not _in_component_dir(path, component_dirs):
         from localm.media.sdcpp.families import inspect_file
         info = inspect_file(path)

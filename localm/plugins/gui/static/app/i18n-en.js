@@ -1295,6 +1295,7 @@ export const I18N_EN = {
   "models.importComfy.type.controlnet": "ControlNets",
   "models.importComfy.type.diffusionUnet": "Diffusion / checkpoints",
   "models.importComfy.type.lora": "LoRAs",
+  "models.importComfy.type.segmentation": "Segmentation models (SAM)",
   "models.importComfy.type.textEncoder": "Text encoders",
   "models.importComfy.type.textualInversion": "Embeddings (textual inversion)",
   "models.importComfy.type.unknown": "Other",

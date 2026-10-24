@@ -60,7 +60,7 @@ from .gguf import hub_snapshot_repo_id
 from .gguf import logical_model_path
 from .gguf import scan_hub_cache
 
-MODEL_TYPES = frozenset({'llm', 'mmproj', 'diffusion-unet', 'text-encoder', 'vae', 'lora', 'embedding', 'tts', 'upscaler', 'controlnet', 'textual-inversion', 'unknown'})
+MODEL_TYPES = frozenset({'llm', 'mmproj', 'diffusion-unet', 'text-encoder', 'vae', 'lora', 'embedding', 'tts', 'upscaler', 'controlnet', 'textual-inversion', 'segmentation', 'unknown'})
 
 # HuggingFace architecture class-name suffixes that deterministically mark a text
 # generation (chat) model: LlamaForCausalLM, T5ForConditionalGeneration,
@@ -120,7 +120,7 @@ def is_auto_chat_eligible(entry: dict) -> bool:
     is excluded for the same reason. A GGUF LoRA adapter (see
     :func:`is_gguf_adapter_entry`) cannot load on its own and is excluded too, and
     so is every other type in ``NON_CHAT_TYPES`` (mmproj, diffusion-unet,
-    text-encoder, vae, lora, upscaler, controlnet, textual-inversion).
+    text-encoder, vae, lora, upscaler, controlnet, textual-inversion, segmentation).
     """
     return (isinstance(entry, dict)
             and entry.get("model_type", "llm") not in NON_CHAT_TYPES | {"unknown", "embedding"}
@@ -226,13 +226,13 @@ def projector_refusal(name: str, registry: dict) -> Optional[str]:
 # Registry types the chat Engine can never load: a request naming one is refused
 # before any model is evicted.
 NON_CHAT_TYPES = frozenset({"mmproj", "diffusion-unet", "text-encoder", "vae", "lora",
-                            "upscaler", "controlnet", "textual-inversion", "tts"})
+                            "upscaler", "controlnet", "textual-inversion", "segmentation", "tts"})
 
 # Registry types GET /v1/models leaves out: nothing under /v1 accepts one by name,
 # or (unknown) the type is not known to be a chat model. A 'tts' model stays
 # listed because POST /v1/audio/speech takes it as ``model``.
 UNLISTED_TYPES = frozenset({"mmproj", "diffusion-unet", "text-encoder", "vae", "lora",
-                            "upscaler", "controlnet", "textual-inversion", "unknown"})
+                            "upscaler", "controlnet", "textual-inversion", "segmentation", "unknown"})
 
 
 def _no_backend_runs_file(path: str) -> bool:

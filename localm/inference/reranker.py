@@ -149,6 +149,7 @@ _KIND_WORDS = {
     "upscaler": "an upscaler",
     "controlnet": "a ControlNet",
     "textual-inversion": "a textual-inversion embedding",
+    "segmentation": "a segmentation model",
     "tts": "a text-to-speech model",
     "unknown": "a model of unknown type",
 }

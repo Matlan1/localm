@@ -47,7 +47,7 @@ export const GROUP_BY_TYPE_KEY = "localm.modelsGroupByType";
 // group-by-type headings a stable order for a type the tab strip does not name.
 const MODEL_TYPE_OPTIONS =
   ["llm", "embedding", "mmproj", "tts", "diffusion-unet", "text-encoder", "vae", "lora", "upscaler",
-   "controlnet", "textual-inversion", "unknown"];
+   "controlnet", "textual-inversion", "segmentation", "unknown"];
 
 // The type reported for a registry entry with no recorded model_type. The route
 // still sends `model_type: "llm"` for such an entry, plus
@@ -3060,6 +3060,7 @@ export const IMPORT_TYPE_LABELS = {
   upscaler: "models.importComfy.type.upscaler",
   controlnet: "models.importComfy.type.controlnet",
   "textual-inversion": "models.importComfy.type.textualInversion",
+  segmentation: "models.importComfy.type.segmentation",
   unknown: "models.importComfy.type.unknown",
 };
 
