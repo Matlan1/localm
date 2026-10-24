@@ -4907,11 +4907,13 @@ def _add_local_jan(
                       f"{escape(str(root))}")
         return False
     registered_any = False
-    for model in models:
+    for k, model in enumerate(models, 1):
         reg = _mm.load_registry()
         wanted = _sanitize_name(name) if (name and len(models) == 1) else model.model_id
         model_name = _unique_registry_name(reg, wanted)
-        digest, size = _digest_for_add(model.weights, reg, no_hash, fast)
+        position = f"{k} of {len(models)}"
+        _mm._import_status(f"Registering {model.model_id} ({position})", log=False)
+        digest, size = _digest_for_add(model.weights, reg, no_hash, fast, label=position)
         detected, meta = _detect_local_model_type(model.weights, is_gguf=True, is_hf=False)
         effective = model_type if model_type is not None else detected
         registered_any = _mm._register_with_dedup(
