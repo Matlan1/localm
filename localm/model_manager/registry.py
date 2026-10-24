@@ -4032,6 +4032,42 @@ def _primary_name_collision(gguf: Path, claimed: dict) -> Optional[str]:
     return None
 
 
+def _models_dir_twin(gguf: Path):
+    """What MODELS_DIR already holds under *gguf*'s name: None when nothing
+    (every part's name is free); the first part's path there when every part
+    is a byte-identical copy (equal size and sha256); False when any part's
+    name is held by a different file.
+    """
+    parts = split_gguf_parts(gguf.name) or [gguf.name]
+    purpose = "to compare it with the file already in the models folder"
+    held = False
+    missing = False
+    first_dest = _mm.MODELS_DIR / parts[0]
+    for part in parts:
+        src = gguf.parent / part
+        dest = _mm.MODELS_DIR / part
+        if not dest.exists():
+            missing = True
+            if held:
+                return False
+            continue
+        if missing:
+            return False
+        if dest.resolve() == src.resolve():
+            return None
+        held = True
+        try:
+            if dest.stat().st_size != src.stat().st_size:
+                return False
+        except OSError:
+            return False
+        if _verify_digest(dest, purpose=purpose) != _verify_digest(src, purpose=purpose):
+            return False
+    if not held:
+        return None
+    return first_dest
+
+
 def _store_standalone_projector(src: Path, action: str) -> Path:
     """Bring a projector-shaped GGUF that is its own ``first_parts`` entry -
     nobody else in the folder claims it as their attached sibling - into
@@ -4137,6 +4173,40 @@ def _store_loose_gguf_dir(first_parts: list[Path], store: str,
     and aborts the whole import.
     """
     from rich.markup import escape
+
+    present: dict = {}   # resolved source path -> its identical copy already in MODELS_DIR
+    skipped: set = set()
+    projectors = {s.resolve() for s in map(find_sibling_mmproj, first_parts) if s is not None}
+    for gguf in first_parts:
+        if (not _mm.is_external_path(gguf) or gguf.resolve() in projectors
+                or "mmproj" in gguf.name.lower()):
+            continue
+        state = _models_dir_twin(gguf)
+        if state is None:
+            continue
+        if isinstance(state, Path):
+            present[gguf.resolve()] = state
+            console.print(f"[dim]{escape(gguf.name)} is already in the models folder "
+                          "with the same content; using that copy and leaving the "
+                          "original where it is.[/dim]")
+        else:
+            skipped.add(gguf.resolve())
+            console.print(f"[yellow]Skipping {escape(str(gguf))}: a different file "
+                          f"named {escape(gguf.name)} is already in the models "
+                          "folder.[/yellow]")
+    if present or skipped:
+        rest = [g for g in first_parts
+                if g.resolve() not in present and g.resolve() not in skipped]
+        moved = _store_loose_gguf_dir(rest, store, mmprojs=mmprojs) if rest else []
+        if moved is None:
+            return None
+        landed_rest = iter(moved)
+        out: list[Path] = []
+        for g in first_parts:
+            if g.resolve() in skipped:
+                continue
+            out.append(present[g.resolve()] if g.resolve() in present else next(landed_rest))
+        return out
 
     claimed_sibling_of: dict = {}   # resolved mmproj path -> its first owning model
     paired_with: dict = {}          # resolved model path -> resolved mmproj path
