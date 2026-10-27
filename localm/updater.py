@@ -701,8 +701,9 @@ def fetch_release(version: str, *, opener=None) -> dict:
     """The proxy's meta for the release tagged *version* (with or without a leading
     ``v``): ``{version, notes, published_at, prerelease, asset, signature}``, the
     signature being the release's localm-update-sig/2 envelope when it has one.
-    Raises :class:`~localm.bugreport.LocalmError` when there is no such release, and
-    like :func:`list_versions` otherwise."""
+    Raises :class:`~localm.bugreport.LocalmError` when there is no such release or
+    the proxy answers with a different version than *version*, and like
+    :func:`list_versions` otherwise."""
     from localm.bugreport import LocalmError
     want = str(version or "").strip()
     if not want:
@@ -711,6 +712,10 @@ def fetch_release(version: str, *, opener=None) -> dict:
     if not data.get("found") or not data.get("version"):
         raise LocalmError(f"there is no release {want}",
                           reason="localm update --list shows the releases you can install")
+    if _version.normalize(str(data["version"])) != _version.normalize(want):
+        raise LocalmError(
+            f"the update server answered {str(data['version'])[:40]} for {want}",
+            reason="it sent a different release than the one you chose; nothing was installed")
     return {
         "version": data["version"],
         "notes": str(data.get("notes") or ""),
@@ -1006,9 +1011,14 @@ def _backup_data_for_downgrade(new_version: str) -> Path:
     from localm.config import home_dir
     home = home_dir()
     safe = "".join(c if c.isalnum() or c in ".-_" else "_" for c in new_version)[:40]
-    dest = _updates_dir() / f"data-before-{safe}-{time.strftime('%Y%m%d-%H%M%S')}"
+    dest = (_updates_dir() / f"data-before-{safe}-{time.strftime('%Y%m%d-%H%M%S')}"
+            f"-{uuid.uuid4().hex[:8]}")
     try:
         dest.mkdir(parents=True)
+    except OSError as e:
+        raise LocalmError("could not back up your data before the downgrade",
+                          reason=f"{dest}: {e}") from None
+    try:
         for name in _DOWNGRADE_DATA:
             src = home / name
             if src.is_dir():
@@ -1064,7 +1074,12 @@ def _install_trust_bridge(root: Path) -> None:
     from localm.bugreport import LocalmError
     trusted = _load_trusted()
     pinned = {k: trusted[k] for k in ("seq", "release", "recovery")}
-    bridge = (Path(__file__).read_text(encoding="utf-8").rstrip("\n")
+    try:
+        source = Path(__file__).read_text(encoding="utf-8")
+    except OSError as e:
+        raise LocalmError("could not prepare the older version to verify later updates",
+                          reason=str(e)) from None
+    bridge = (source.rstrip("\n")
               + "\n\n\n_PINNED_KEYSET = " + _json.dumps(pinned, sort_keys=True) + "\n")
     stanza = (
         "\n\n# Verifies updates with the update signing keys of the localm build that\n"

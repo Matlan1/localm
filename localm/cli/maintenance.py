@@ -427,7 +427,7 @@ def _update_list(updater) -> None:
     for rel in rels:
         mark = {"same": "installed", "older": "older", "newer": "newer"}.get(
             rel["direction"], "?")
-        date = str(rel.get("published_at") or "")[:10]
+        date = escape(str(rel.get("published_at") or "")[:10])
         pre = " prerelease" if rel["prerelease"] else ""
         line = f"  {escape(rel['version']):<14} {date}  [dim]{mark}{pre}[/dim]"
         if not rel["installable"]:

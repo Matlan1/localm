@@ -136,6 +136,22 @@ def test_fetch_release_found_and_not_found(env):
     assert "no release 9.9.9" in ei.value.summary
 
 
+def test_fetch_release_refuses_a_different_release_than_the_one_asked_for(env):
+    op = _opener({"ok": True, "found": True, "version": "v0.3.0",
+                  "asset": {"id": 3}, "signature": "S"})
+    with pytest.raises(LocalmError) as ei:
+        updater.fetch_release("0.3.1", opener=op)
+    assert "answered v0.3.0 for 0.3.1" in ei.value.summary
+
+
+def test_data_backups_in_the_same_second_never_replace_each_other(env):
+    home, _inst = env
+    first = updater._backup_data_for_downgrade("0.2.0")
+    second = updater._backup_data_for_downgrade("0.2.0")
+    assert first != second
+    assert (first / "config.json").is_file() and (second / "config.json").is_file()
+
+
 # ------------------------- a selected install ------------------------------
 
 def test_selected_older_version_installs_and_backs_up_data(env):
