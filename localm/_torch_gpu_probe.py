@@ -81,16 +81,10 @@ def _enumerate() -> list:
 
 def main() -> int:
     """Print the device list as one JSON line. Exit 0 with ``[]`` when torch
-    is not installed or sees no device; exit 1 with ``[]`` when torch failed."""
+    is not installed or sees no device; exit 1 with ``[]`` when torch failed.
+    A failure, torch not installed included, is described on stderr."""
     try:
         devices = _enumerate()
-    except ModuleNotFoundError as e:
-        if e.name != "torch":
-            print(f"torch GPU probe failed: {type(e).__name__}: {e}", file=sys.stderr)
-            print("[]", flush=True)
-            return 1
-        print("[]", flush=True)
-        return 0
     except BaseException as e:
         # BaseException, not Exception: a torch import can fault hard enough to
         # raise something outside the Exception tree, and a child that dies
@@ -98,7 +92,7 @@ def main() -> int:
         # cause goes to stderr for the parent's debug log.
         print(f"torch GPU probe failed: {type(e).__name__}: {e}", file=sys.stderr)
         print("[]", flush=True)
-        return 1
+        return 0 if isinstance(e, ModuleNotFoundError) and e.name == "torch" else 1
     print(json.dumps(devices), flush=True)
     return 0
 
