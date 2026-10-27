@@ -20,6 +20,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._tk_root import build_tk_root, collect_tk_garbage  # noqa: F401
+
 from localm import setup_spec as spec
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -277,7 +279,6 @@ def _gui_module(tmp_path, monkeypatch):
 def test_the_window_starts_on_the_spec_defaults(tmp_path, monkeypatch):
     tk = pytest.importorskip("tkinter")
     from tkinter import filedialog, ttk
-    from tests._tk_root import build_tk_root
     gui = _gui_module(tmp_path, monkeypatch)
     root = build_tk_root(tk.Tk)
     root.withdraw()

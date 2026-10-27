@@ -21,6 +21,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._tk_root import build_tk_root, collect_tk_garbage  # noqa: F401
+
 _GUI_PATH = Path(__file__).resolve().parents[1] / "installer" / "gui.py"
 _MOD_NAME = "localm_installer_gui_parity"
 
@@ -110,7 +112,6 @@ class TestExistingVenv:
     def test_the_question_is_shown_only_when_a_venv_exists(self, gui, tmp_path):
         tk = pytest.importorskip("tkinter")
         from tkinter import filedialog, ttk
-        from tests._tk_root import build_tk_root
         for exists in (False, True):
             if exists:
                 (tmp_path / ".venv").mkdir()
@@ -402,7 +403,6 @@ class TestLauncherUv:
     def test_the_window_shows_the_answer_and_never_asks(self, gui, monkeypatch):
         tk = pytest.importorskip("tkinter")
         from tkinter import filedialog, ttk
-        from tests._tk_root import build_tk_root
         monkeypatch.setenv(gui.STORE_ENV, "shared")
         root = build_tk_root(tk.Tk)
         root.withdraw()
@@ -550,3 +550,12 @@ def test_the_window_lists_the_recommendation_first(gui):
     keys = [k for k, _ in gui.backend_choices(rec)]
     assert keys[0] == rec and keys.count(rec) == 1
     assert sorted(keys[:-1]) == sorted(offered) and keys[-1] == "own"
+
+
+def test_a_launcher_that_was_not_built_reaches_the_summary(gui, tmp_path, monkeypatch):
+    monkeypatch.setattr(gui.sys, "platform", "win32")
+    fake, _ = _recorder(gui, tmp_path, [(1, [])])
+    monkeypatch.setattr(gui, "_run", fake)
+    step = _step(gui, gui.Plan(backend="own"), "Building the launcher")
+    failures, stopped = gui.run_steps([step], lambda s: None)
+    assert stopped is None and failures and "launcher was not built" in failures[0]

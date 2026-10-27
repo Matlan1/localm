@@ -447,6 +447,7 @@ class TestManifestRecordSurvivesBangInInstallPath:
             'set "SCPATH=C:\\FakeDesktop\\LocaLM.lnk"\r\nset "RCFLAG=--runtime-contained"\r\n'
             'set "PYDIR=C:\\FakePython"\r\nset "CACHEDIR=C:\\FakeCache"\r\n'
             'set "UVDIR=C:\\FakeUv"\r\nset "UVSHARED=--uv-shared-installed"\r\n'
+            'set "UVEXE=D:\\FakeShared\\uv.exe"\r\n'
             'set "PATHDIR=C:\\FakeBin"\r\n'
             'set "CMDSHIM=C:\\FakeBin\\localm.cmd"\r\nset "PATHMOD=--path-modified"\r\n')
         out = self._run(bangdir, echoed, extra_setup)
@@ -455,7 +456,7 @@ class TestManifestRecordSurvivesBangInInstallPath:
             f'"{bangdir}\\runtime\\localm_llama_runtime\\lib" '
             '--shortcut "C:\\FakeDesktop\\LocaLM.lnk" --runtime-contained '
             '--python-dir "C:\\FakePython" --cache-dir "C:\\FakeCache" --uv-dir "C:\\FakeUv" '
-            '--uv-shared-installed '
+            '--uv-exe "D:\\FakeShared\\uv.exe" --uv-shared-installed '
             '--path-dir "C:\\FakeBin" --command-shim "C:\\FakeBin\\localm.cmd" --path-modified'
         )
         assert expected in out.stdout, (out.stdout, out.stderr)
@@ -473,14 +474,14 @@ class TestManifestRecordSurvivesBangInInstallPath:
         extra_setup = (
             'set "SCPATH=C:\\FakeDesktop\\LocaLM.lnk"\r\nset "RCFLAG="\r\n'
             'set "PYDIR="\r\nset "CACHEDIR="\r\n'
-            'set "UVDIR=C:\\FakeUv"\r\nset "UVSHARED="\r\nset "PATHDIR="\r\n'
+            'set "UVDIR=C:\\FakeUv"\r\nset "UVSHARED="\r\nset "UVEXE="\r\nset "PATHDIR="\r\n'
             'set "CMDSHIM="\r\nset "PATHMOD="\r\n')
         out = self._run(bangdir, echoed, extra_setup)
         expected = (
             f'MANIFEST_ARGS --root . --venv "{bangdir}\\.venv" --lib-dir '
             f'"{bangdir}\\runtime\\localm_llama_runtime\\lib" '
             '--shortcut "C:\\FakeDesktop\\LocaLM.lnk"  --python-dir "" --cache-dir "" '
-            '--uv-dir "C:\\FakeUv"  --path-dir "" --command-shim "" '
+            '--uv-dir "C:\\FakeUv" --uv-exe ""  --path-dir "" --command-shim "" '
         )
         assert expected in out.stdout, (out.stdout, out.stderr)
         assert "AFTER_MARK" in out.stdout, (out.stdout, out.stderr)

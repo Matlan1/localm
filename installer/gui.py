@@ -402,7 +402,7 @@ def _run(cmd: list[str], emit: Callable[[str], None], plan: Plan,
     if code != 0 and not allow_fail:
         raise StepFailed(f"{cmd[0]} exited {code}")
     if code != 0:
-        emit(f"[!] {cmd[0]} exited {code} - continuing (this step is optional)")
+        emit(f"[!] {cmd[0]} exited {code}")
     return code
 
 
@@ -776,8 +776,10 @@ def build_steps(plan: Plan, resume: Optional[dict] = None) -> list[Step]:
     on_macos = sys.platform == "darwin"
     if not on_macos:
         def launcher(emit):
-            _run([str(venv_python(ROOT)), "-m", "localm", "make-launcher",
-                  "--force", "--quiet"], emit, plan, allow_fail=True)
+            if _run([str(venv_python(ROOT)), "-m", "localm", "make-launcher",
+                     "--force", "--quiet"], emit, plan, allow_fail=True):
+                raise StepFailed("the LocaLM launcher was not built; 'localm gui' "
+                                 "still works")
         steps.append(Step("Building the launcher", launcher, fatal=False, key="launcher"))
 
     if plan.shortcut != "none" and not on_macos:
