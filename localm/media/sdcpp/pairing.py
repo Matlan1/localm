@@ -373,8 +373,20 @@ def unknown_family_message(label: str, info: FileInfo, media: str) -> str:
     return (f"'{label}' is not {art} {media} model localm can identify "
             f"({families.unknown_reason(info)}), so it is not passed to "
             "stable-diffusion.cpp: choose a model of a supported family (see the native "
-            f"{media} docs), update localm if this is a newer family, or use the ComfyUI "
-            "backend.")
+            f"{media} docs), update localm if this is a newer family, use the ComfyUI "
+            "backend, or choose its text encoder yourself so stable-diffusion.cpp "
+            "detects the family.")
+
+
+def unknown_family_notice(label: str, info: FileInfo, media: str) -> str:
+    """The user-facing remark that the model file *label* (classified as *info*)
+    is passed to stable-diffusion.cpp although localm cannot tell which family
+    it is, because the user chose its text encoders."""
+    art = "an" if media[:1] in "aeiou" else "a"
+    return (f"'{label}' is {art} {media} model whose family localm does not recognise "
+            f"({families.unknown_reason(info)}); it is passed to stable-diffusion.cpp "
+            "with the encoders you chose, and stable-diffusion.cpp will detect the "
+            "family itself.")
 
 
 def build_context(main: Path, label: str, explicit: dict, *, where: str, media: str,
@@ -392,8 +404,11 @@ def build_context(main: Path, label: str, explicit: dict, *, where: str, media: 
     any text encoder is set, else as ``model_path``. Raises
     ``MissingComponents`` when a needed slot has no file, and
     ``ModelFileError`` when *main* is a component or a music model file, not
-    an image or video model, or when localm read its header and it is of no
-    family localm knows (``unknown_family_message``).
+    an image or video model, or when localm read its header, it is of no
+    family localm knows and no text encoder (``clip_l``, ``clip_g``, ``t5xxl``,
+    ``llm``) is in *explicit* (``unknown_family_message``). With an encoder in
+    *explicit* such a file is passed through as 0.3.1 did and ``notes`` leads
+    with ``unknown_family_notice``.
     *media* (``"image"``/``"video"``) and *where* (the settings page) word the
     messages."""
     info = families.inspect_file(main)
@@ -412,10 +427,16 @@ def build_context(main: Path, label: str, explicit: dict, *, where: str, media: 
         raise ModelFileError(f"'{label}' is {KIND_WORDS[info.kind]}, not {art} {media} model. "
                              f"Choose it as a component in {where}, and {art} {media} model "
                              "as the model.")
+    encoders = {"clip_l", "clip_g", "t5xxl", "llm"} & set(explicit)
+    passthrough_note = None
     if (main.suffix.lower() in READABLE_SUFFIXES
             and (info.kind != "unknown" or info.detail.get("read"))
             and not families.known_family(info.family)):
-        raise ModelFileError(unknown_family_message(label, info, media))
+        if not encoders:
+            raise ModelFileError(unknown_family_message(label, info, media))
+        passthrough_note = unknown_family_notice(label, info, media)
+        from localm.debuglog import logger
+        logger.info("sdcpp: %s", passthrough_note)
     if info.kind == "diffusion":
         pairing = pair_components(info, explicit,
                                   registry_candidates() if cands is None else cands)
@@ -440,13 +461,14 @@ def build_context(main: Path, label: str, explicit: dict, *, where: str, media: 
             if slot in CTX_FIELDS:
                 ctx[CTX_FIELDS[slot]] = str(path)
                 components[slot] = {"name": name, "auto": False}
-        encoders = {"clip_l", "clip_g", "t5xxl", "llm"} & set(explicit)
         if info.kind == "unknown" and encoders:
             ctx["diffusion_model_path"] = str(main)
         else:
             ctx["model_path"] = str(main)
     if info.family == "sdxl" and "vae_path" in ctx:
         ctx["force_sdxl_vae_conv_scale"] = True
+    if passthrough_note:
+        notes = [passthrough_note] + list(notes)
     return {"ctx": ctx, "info": info, "components": components, "notes": notes}
 
 
