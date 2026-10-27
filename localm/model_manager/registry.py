@@ -4510,16 +4510,18 @@ def _add_local_gguf_dir(
 
 
 def _registered_name_for_file(reg: dict, gguf: Path, wanted: str) -> Optional[str]:
-    """The name *gguf* is already registered under that an import of it would
-    have chosen: *wanted* itself, or *wanted* with the ``-N`` suffix
-    :func:`_unique_registry_name` adds. None when the file is not registered
-    under such a name. Used when a duplicate would only be skipped, so the file
+    """The name *gguf* is already registered under. Prefers the name an import
+    of it would have chosen: *wanted* itself, or *wanted* with the ``-N``
+    suffix :func:`_unique_registry_name` adds; otherwise any other name
+    registered for the same path (a model the user renamed). None when the path
+    is not registered. Used when a duplicate would only be skipped, so the file
     is reported as already registered instead of declined."""
     base = _sanitize_name(wanted)
-    for alias in find_aliases_by_path(gguf, reg):
+    aliases = find_aliases_by_path(gguf, reg)
+    for alias in aliases:
         if alias == base or re.fullmatch(re.escape(base) + r"-\d+", alias):
             return alias
-    return None
+    return aliases[0] if aliases else None
 
 
 def _gguf_names_in(folder: Path) -> set:
@@ -5333,7 +5335,8 @@ def add_local(
                 wanted = _sanitize_name(name) if (name and only_one) else hf_dir.name
                 reg = _mm.load_registry()
                 would_skip = on_duplicate == "skip" or (on_duplicate == "ask" and not can_prompt())
-                hf_name = ((_registered_name_for_file(reg, hf_dir, wanted) if would_skip else None)
+                reuse = would_skip and not (store and _mm.is_external_path(hf_dir))
+                hf_name = ((_registered_name_for_file(reg, hf_dir, wanted) if reuse else None)
                            or _unique_registry_name(reg, wanted))
                 done = add_local(
                     str(hf_dir), hf_name,
