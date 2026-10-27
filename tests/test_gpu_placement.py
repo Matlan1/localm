@@ -75,8 +75,9 @@ class TestPlanner:
         assert len(p.loads) == 5
         assert all(d.need <= d.device.free for d in p.loads)
         assert sum(d.units for d in p.loads) == 65
+        assert [d.device.index for d in p.loads] == [0, 1, 2, 3, 4]
         out = p.loads[-1]
-        assert out.output and out.device.index == 1, "output on the card with the most free"
+        assert out.output and out.device.index == 4, "output on the last card"
 
     def test_tensor_split_reproduces_the_planned_layers_in_llama_cpp(self):
         p = plan_placement(_devices(_BUSY), _dense())
@@ -89,11 +90,25 @@ class TestPlanner:
         assert p.fits
         assert 4 not in [d.device.index for d in p.loads], "0.3 GB free holds nothing"
 
-    def test_a_small_card_never_gets_the_output_layer(self):
-        for frees in (_IDLE, _BUSY):
-            p = plan_placement(_devices(frees), _dense())
-            holder = next(d for d in p.loads if d.output)
-            assert holder.device.free == max(d.device.free for d in p.loads)
+    def test_the_cards_take_the_layers_in_the_order_given(self):
+        devices = _devices(_IDLE)
+        order = [3, 1, 0, 2, 4]
+        p = plan_placement([devices[i] for i in order], _dense())
+        assert p.fits and p.full_offload
+        assert [d.device.index for d in p.loads] == order
+        layers = [il for d in p.loads for il in d.layers]
+        assert layers == sorted(layers) and p.loads[0].layers[0] == 0, \
+            "card 3 holds the first layers, card 4 the last"
+        assert p.loads[-1].output and not any(d.output for d in p.loads[:-1])
+        counts, out = _llama_counts(p)
+        assert counts == [len(d.layers) for d in p.loads] and out == len(p.loads) - 1
+
+    def test_a_last_card_with_no_room_leaves_the_output_on_the_card_before(self):
+        frees = [23.1, 23.1, 0.3]
+        p = plan_placement(_devices(frees), _dense(n_layer=40))
+        assert p.fits and p.full_offload
+        assert [d.device.index for d in p.loads] == [0, 1]
+        assert p.loads[-1].output and p.loads[-1].device.index == 1
 
     def test_moe_experts_go_to_ram_before_any_layer_leaves_the_gpus(self):
         frees = [8, 8]
@@ -246,6 +261,18 @@ class TestDeviceMatching:
         with _box(_torch_reading(_IDLE), reg):
             devices, reason = discover.gguf_split_devices({"gpu_split_indices": None})
         assert devices is None and "not in the llama.cpp runtime" in reason
+
+    def test_chosen_cards_keep_the_order_they_were_chosen_in(self):
+        with _box(_torch_reading(_IDLE), _registry(_IDLE, self._LLAMA_ORDER)):
+            devices, _ = discover.gguf_split_devices({"gpu_split_indices": [3, 1, 4, 0]})
+        assert [d["index"] for d in devices] == [3, 1, 4, 0]
+        assert [d["slot"] for d in devices] == [3, 0, 4, 2]
+
+    def test_with_no_card_chosen_the_cards_go_by_number(self):
+        readings = list(reversed(_torch_reading(_IDLE)))
+        with _box(readings, _registry(_IDLE, self._LLAMA_ORDER)):
+            devices, _ = discover.gguf_split_devices({"gpu_split_indices": None})
+        assert [d["index"] for d in devices] == [0, 1, 2, 3, 4]
 
     def test_ratios_pair_with_the_chosen_cards(self):
         with _box(_torch_reading(_IDLE), _registry(_IDLE, self._LLAMA_ORDER)):
@@ -654,3 +681,15 @@ class TestBackendLoad:
         assert "gpu_devices" not in params or params["gpu_devices"] is None
         assert any(r.levelno == logging.WARNING and "cannot be matched" in r.getMessage()
                    for r in caplog.records)
+
+    def test_the_worker_gets_the_chosen_cards_in_the_chosen_order(self, tmp_path):
+        from localm.config import load_config
+        b = self._backend(tmp_path)
+        readings, registry = self._world([30_000, 30_000, 30_000], [2, 0, 1])
+        cfg = dict(load_config(), gpu_split_indices=[2, 0], gpu_split_ratios=None,
+                   ctx_auto=False)
+        params = self._load(b, readings, registry, cfg)
+        devices = params["gpu_devices"]
+        assert [d["device_id"] for d in devices] == ["0000:30:00.0", "0000:10:00.0"]
+        assert [d["slot"] for d in devices] == [0, 1], "card 2 is slot 0, card 0 is slot 1"
+        assert [d["index"] for d in b.applied_gpu_split["devices"]] == [2, 0]

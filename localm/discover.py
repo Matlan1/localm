@@ -4461,8 +4461,8 @@ def gguf_split_devices(config: Optional[dict] = None, *, gpus: Optional[list] = 
     else ``(None, reason)``.
 
     The GPUs are the ``gpu_split_indices`` ones when two or more are set
-    (in GPU numbering, the one ``localm gpus`` and the GUI show), else every
-    discrete GPU. Each entry is ``{"slot", "index", "name", "free", "total",
+    (in GPU numbering, the one ``localm gpus`` and the GUI show), in that
+    order, else every discrete GPU by number. Each entry is ``{"slot", "index", "name", "free", "total",
     "device_id", "ratio"}``: ``slot`` is the device's position in llama.cpp's
     own device list, ``device_id`` its PCI bus id when the runtime reports
     one, ``ratio`` the ``gpu_split_ratios`` entry paired with it (None when
@@ -4563,7 +4563,7 @@ def gguf_split_devices(config: Optional[dict] = None, *, gpus: Optional[list] = 
                 for e in picked:
                     e["ratio"] = None
         else:
-            picked = [dict(c, ratio=None) for c in candidates]
+            picked = [dict(c, ratio=None) for c in sorted(candidates, key=lambda c: c["index"])]
         if len(picked) < 2:
             return None, "fewer than two of the chosen GPUs are present"
         for e in picked:

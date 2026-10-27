@@ -345,6 +345,32 @@ export function setupMainGpuSelector() {
 // second network round trip.
 let _lastSplitGpus = [];
 
+// The checked GPUs in load order: the stored gpu_split_indices order, then
+// each newly checked GPU at the end.
+let _splitOrder = [];
+
+/** The checked GPUs of *list* in load order (updates _splitOrder): GPUs
+ *  still checked keep their place, newly checked ones are appended in list
+ *  order, unchecked ones drop out. */
+function _checkedInOrder(list) {
+  const checked = [...list.querySelectorAll("input[type=checkbox]:checked")]
+    .map((cb) => Number(cb.value));
+  const kept = _splitOrder.filter((i) => checked.includes(i));
+  _splitOrder = kept.concat(checked.filter((i) => !kept.includes(i)));
+  return _splitOrder.slice();
+}
+
+/** Show the load order of the checked GPUs under the checkboxes when two or
+ *  more are checked; hidden otherwise. */
+function renderGpuSplitOrder(order) {
+  const line = $("perf-gpu-split-order");
+  if (!line) return;
+  if (order.length < 2) { line.hidden = true; return; }
+  line.textContent = t("settings.perf.splitOrder",
+    { order: order.map((i) => "GPU " + i).join(", ") });
+  line.hidden = false;
+}
+
 /** Ratio inputs currently on screen, keyed by GPU index - read BEFORE a
  *  rebuild so a value the user already typed survives a checkbox toggle
  *  that does not affect that device (e.g. a 3rd box being checked while
@@ -443,6 +469,7 @@ export async function refreshGpuSplitCheckboxes() {
     }
     const indices = Array.isArray(data.gpu_split_indices) ? data.gpu_split_indices : [];
     const current = new Set(indices);
+    _splitOrder = [...current].filter((i) => gpus.some((g) => g.index === i));
     list.replaceChildren();
     for (const g of gpus) {
       const label = el("label", "perf-gpu-split-item");
@@ -460,7 +487,8 @@ export async function refreshGpuSplitCheckboxes() {
     // indices (not `current`, a Set) preserves the stored ORDER, which is what
     // gpu_split_ratios is position-paired against.
     renderGpuSplitRatioRow(gpus, indices, data.gpu_split_ratios);
-    renderGpuSingleHint(gpus, indices.filter((i) => gpus.some((g) => g.index === i)));
+    renderGpuSingleHint(gpus, _splitOrder);
+    renderGpuSplitOrder(_splitOrder);
     row.hidden = false;
     syncIndexSpaceHint(data.index_space ?? null);   // after row.hidden - it reads it
   } catch {
@@ -483,8 +511,7 @@ export async function refreshGpuSplitCheckboxes() {
 async function _saveGpuSplit() {
   const list = $("perf-gpu-split-list");
   if (!list) return;
-  const checked = [...list.querySelectorAll("input[type=checkbox]:checked")]
-    .map((cb) => Number(cb.value));
+  const checked = _checkedInOrder(list);
   const value = checked.length >= 1 ? checked : null;
   const body = { gpu_split_indices: value };
   let ratioWarning = "";
@@ -525,10 +552,10 @@ async function _saveGpuSplit() {
 async function onGpuSplitCheckboxChange() {
   const list = $("perf-gpu-split-list");
   if (!list) return;
-  const checked = [...list.querySelectorAll("input[type=checkbox]:checked")]
-    .map((cb) => Number(cb.value));
+  const checked = _checkedInOrder(list);
   renderGpuSplitRatioRow(_lastSplitGpus, checked.length >= 2 ? checked : [], null);
   renderGpuSingleHint(_lastSplitGpus, checked);
+  renderGpuSplitOrder(checked);
   await _saveGpuSplit();
 }
 
