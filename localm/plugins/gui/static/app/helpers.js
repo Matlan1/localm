@@ -285,6 +285,8 @@ export function formatToolCalls(text) {
  *  streaming-boundary concern here. */
 export function scrubMarkers(text) {
   return (text || "")
+    .replace(/language [^<\n]{0,40}<asr_text>/g, "")
+    .replace(/<asr_text>/g, "")
     .replace(/<\|"\|>/g, '"')
     .replace(/<\|?\s*channel\s*\|?>(thought|thinking|analysis|reasoning|commentary|reflection)\n?(<\|?\s*message\s*\|?>)?/g, "<think>\n")
     .replace(/<\s*channel\s*\|>|<\|?\s*channel\s*\|?>final\n?(<\|?\s*message\s*\|?>)?/g, "\n</think>\n")
@@ -651,6 +653,43 @@ function mainHasVisibleContent(main) {
   return main.querySelector("img, svg, canvas, video, audio, iframe, table, hr, input") !== null;
 }
 
+const _CODE_SPAN = /(```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)|`[^`\n]+`)/;
+const _MATH_SPAN = new RegExp([
+  String.raw`\$\$[\s\S]+?\$\$`,
+  String.raw`\\\[[\s\S]+?\\\]`,
+  String.raw`\\\([\s\S]+?\\\)`,
+  String.raw`(?<![\\$])\$(?!\s)[^$\n]*[^$\s\n]\$(?!\d)`,
+].join("|"), "g");
+
+/** Swap each math span of *text* that lies outside code for an inert token, so
+ *  the markdown pass cannot consume its escapes (`\,`, `\\`, `\{`) or emphasis
+ *  marks. Returns `{ text, restore }`; `restore(root)` puts the original source
+ *  back into the TEXT NODES of the sanitised, rendered *root*. A token that
+ *  ended up in an attribute (a link target, an image source) is left as the
+ *  inert token, so math source never reaches an attribute after sanitising. */
+export function protectMath(text) {
+  const spans = [];
+  const tag = "ZZLMATH" + Math.random().toString(36).slice(2, 8);
+  const protectedText = String(text || "").split(_CODE_SPAN).map((part, i) =>
+    i % 2 === 1 ? part : part.replace(_MATH_SPAN, (src) => {
+      spans.push(src);
+      return `${tag}${spans.length - 1}ZZ`;
+    })).join("");
+  const restore = (root) => {
+    if (!spans.length) return;
+    const re = new RegExp(`${tag}(\\d+)ZZ`, "g");
+    const walker = document.createTreeWalker(root, 4);
+    const nodes = [];
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) nodes.push(n);
+    for (const node of nodes) {
+      if (node.nodeValue.includes(tag)) {
+        node.nodeValue = node.nodeValue.replace(re, (_m, i) => spans[Number(i)]);
+      }
+    }
+  };
+  return { text: protectedText, restore };
+}
+
 /** Render one model reply into *target*.
  *
  *  opts.final          this is a SETTLED render (a reload or a post-stream
@@ -682,7 +721,10 @@ export function renderMarkdown(target, text, opts = {}) {
       target.insertBefore(det, target.firstChild);
     }
     det.querySelector("summary").textContent = open ? t("common.reasoning.thinking") : t("common.reasoning.thoughts");
-    det.querySelector("div").innerHTML = DOMPurify.sanitize(marked.parse(think));
+    const thinkMath = protectMath(think);
+    const thinkBody = det.querySelector("div");
+    thinkBody.innerHTML = DOMPurify.sanitize(marked.parse(thinkMath.text));
+    thinkMath.restore(thinkBody);
     if (!det.dataset.userset) det.open = open;
   } else if (det) {
     det.remove();
@@ -696,7 +738,9 @@ export function renderMarkdown(target, text, opts = {}) {
     main.className = "md-main";
     target.appendChild(main);
   }
-  main.innerHTML = DOMPurify.sanitize(marked.parse(rest || ""));
+  const restMath = protectMath(rest || "");
+  main.innerHTML = DOMPurify.sanitize(marked.parse(restMath.text));
+  restMath.restore(main);
   // On `target`, not `main`, so the think block's sink is covered by the same
   // call. Idempotent across a streaming re-render: an already-proxied src is
   // same-origin, so the second pass leaves it alone.
