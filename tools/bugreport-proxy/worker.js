@@ -404,12 +404,14 @@ const APP_TAG_RE = /^v\d+\.\d+\.\d+/;
 // the release tooling reads this constant and refuses such a build.
 const LEGACY_CLIENT_CEILING = "v0.3.2";
 
-// A prerelease suffix: rc, a, b, alpha or beta, then a number (rc1, b.2, alpha3).
-const PRERELEASE_SUFFIX_RE = /^(rc|a|b|alpha|beta)\.?\d+$/i;
+// A prerelease suffix: rc, a, b, alpha or beta, then a number with no separator
+// (rc1, b2, alpha3); a dotted number (rc.1) is not one.
+const PRERELEASE_SUFFIX_RE = /^(rc|a|b|alpha|beta)\d+$/i;
 
 // [major, minor, patch, final (1) or prerelease (0), prerelease suffix] for an app
 // tag, or null when the tag does not start with vX.Y.Z or its suffix is neither
-// empty nor a prerelease suffix (v0.3.2.1, v0.3.2-hotfix, v0.3.2+b, v0.3.2a).
+// empty nor a prerelease suffix (v0.3.2.1, v0.3.2-hotfix, v0.3.2+b, v0.3.2a,
+// v0.3.2-rc.1).
 function tagKey(tag) {
   const m = /^v(\d+)\.(\d+)\.(\d+)(.*)$/.exec(String(tag || ""));
   if (!m) return null;

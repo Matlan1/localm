@@ -160,14 +160,9 @@ def _gpu_units(units: ModelUnits, n_cpu_moe: int, n_gpu_layers: int) -> list:
 
 
 def _order(devices: Sequence[PlanDevice]) -> list[PlanDevice]:
-    """Devices in the order they receive units: by user-visible index, with
-    the device that has the most free memory last, where the output layer
-    goes."""
-    ordered = sorted(devices, key=lambda d: d.index)
-    if len(ordered) < 2:
-        return ordered
-    out_dev = max(ordered, key=lambda d: (d.free, -d.index))
-    return [d for d in ordered if d is not out_dev] + [out_dev]
+    """Devices in the order they receive units: the order of *devices*. The
+    output layer goes on the last one that receives any unit."""
+    return list(devices)
 
 
 def _charge(ordered: Sequence[PlanDevice], counts: Sequence[int], gpu_units: list,
@@ -275,7 +270,8 @@ def _fit(devices: Sequence[PlanDevice], units: ModelUnits, n_cpu_moe: int,
 def plan_placement(devices: Sequence[PlanDevice], units: ModelUnits, *,
                    n_gpu_layers: Optional[int] = None,
                    n_cpu_moe: Optional[int] = None) -> Placement:
-    """Place a model over *devices* (two or more).
+    """Place a model over *devices* (two or more), in their order: the first
+    device gets the first units placed on a GPU.
 
     *n_gpu_layers* None places as many units as fit, else exactly that many
     (``n_layer + 1`` or more means every unit); *n_cpu_moe* None chooses how

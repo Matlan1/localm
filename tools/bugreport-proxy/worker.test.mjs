@@ -733,8 +733,9 @@ test("update: a legacy client is never served a tag lookup answer that is not th
   } finally { restore(); }
 });
 
-test("update: a legacy client never gets a tag that only looks like the ceiling (v0.3.2.1, -hotfix, +b, a)", async () => {
-  for (const tag of ["v0.3.2.1", "v0.3.2-hotfix", "v0.3.2+b", "v0.3.2a"]) {
+test("update: a legacy client never gets a tag that only looks like the ceiling (v0.3.2.1, -hotfix, +b, a, rc.1)", async () => {
+  for (const tag of ["v0.3.2.1", "v0.3.2-hotfix", "v0.3.2+b", "v0.3.2a",
+                     "v0.3.2-rc.1", "v0.3.2rc.1", "v0.3.2b.2", "v0.3.2alpha.3"]) {
     const restore = stubFetch(async (url) => {
       if (url.includes("/releases/tags/")) return new Response("{}", { status: 404 });
       return new Response(JSON.stringify([
