@@ -1344,9 +1344,15 @@ export function elideAudioForWire(messages) {
   return messages;
 }
 
-/** True when the wire *messages* carry both an image part and an audio clip:
- *  no model reads both, so a request that needs only one of them must leave
- *  the other out. */
+/** True when the registry row of the model *name* records that it cannot take
+ *  audio input (`audio_input: false`). An unknown model, or one whose files
+ *  could not be inspected (no `audio_input` key), is not reported as deaf. */
+export function modelCannotHearAudio(name) {
+  const row = ((modelCache && modelCache.models) || []).find((m) => m.name === name);
+  return !!row && row.audio_input === false;
+}
+
+/** True when the wire *messages* carry both an image part and an audio clip. */
 export function wireHasImageAndAudio(messages) {
   const has = (type) => messages.some((m) => Array.isArray(m.content) &&
     m.content.some((p) => p.type === type));
