@@ -11,9 +11,11 @@ across llama.cpp versions, so this binding avoids version-specific struct layout
 
 * ``mtmd_context_params`` is treated as an OVER-ALLOCATED opaque buffer. We call the
   exported ``mtmd_context_params_default()`` and pass it through UNMODIFIED except
-  two leading fields: ``use_gpu`` at byte 0 and ``n_threads`` at byte 4. On Win64 a
-  struct that large is passed by hidden pointer, so an over-sized buffer is safe
-  regardless of the real field layout.
+  ``use_gpu`` at byte 0, ``n_threads`` and, on request, ``image_min_tokens``. The
+  last two sit where :func:`_params_layout` finds them (``n_threads`` at byte 4
+  when the layout is not recognised). On Win64 a struct that large is passed by
+  hidden pointer, so an over-sized buffer is safe regardless of the real field
+  layout.
 * THE PROJECTOR RUNS ON THE GPU, falling back to CPU only when the GPU path
   ACTUALLY fails, which is logged plainly. A GPU failure is specific to
   the projector in use - gfx1030 / RDNA2 hipBLAS fails a BF16 GEMM
@@ -37,9 +39,10 @@ from __future__ import annotations
 import ctypes
 import hashlib
 import os
+import struct
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Callable, Iterable, Optional
+from typing import Callable, Iterable, NamedTuple, Optional
 
 from ..base import VisionInputError
 from . import _api as api
@@ -234,6 +237,50 @@ def _encode_threads() -> int:
     Falls back to mtmd's own default when the CPU count is unknown."""
     n = os.cpu_count() or 4
     return max(1, n - 1)
+
+
+class _ParamLayout(NamedTuple):
+    """Byte offsets of the ``mtmd_context_params`` fields localm sets."""
+
+    n_threads: int
+    image_min_tokens: int
+
+
+# (media_marker, layout) for each layout of mtmd_context_params in the runtimes
+# localm has shipped, found by where the struct holds the address of
+# ``mtmd_default_marker()``:
+#   - media_marker at 16: use_gpu, print_timings, n_threads (4), image_marker,
+#     media_marker, flash_attn_type, warmup, image_min_tokens (32), image_max_tokens.
+#   - media_marker at 32: the same with a ``device`` pointer after use_gpu, so
+#     print_timings sits at 16, n_threads at 20 and image_min_tokens at 48.
+_PARAM_LAYOUTS = ((16, _ParamLayout(4, 32)), (32, _ParamLayout(20, 48)))
+
+
+def _marker_address(m) -> Optional[int]:
+    """The address ``mtmd_default_marker()`` returns, or None when *m* does not
+    expose it as a native function."""
+    try:
+        getter = ctypes.CFUNCTYPE(ctypes.c_void_p)(
+            ctypes.cast(m.mtmd_default_marker, ctypes.c_void_p).value)
+        return getter()
+    except (AttributeError, TypeError, ValueError, ctypes.ArgumentError):
+        return None
+
+
+def _params_layout(m, params) -> Optional[_ParamLayout]:
+    """The :class:`_ParamLayout` of the runtime *m* whose default params are
+    *params*, or None when the struct does not hold the default marker's
+    address at either known offset (an unknown layout, or a 32-bit process)."""
+    if ctypes.sizeof(ctypes.c_void_p) != 8:
+        return None
+    marker = _marker_address(m)
+    if not marker:
+        return None
+    raw = ctypes.string_at(ctypes.byref(params), 64)
+    for marker_at, layout in _PARAM_LAYOUTS:
+        if struct.unpack_from("<Q", raw, marker_at)[0] == marker:
+            return layout
+    return None
 
 
 _MTMD_DEVICE_ENV = "MTMD_BACKEND_DEVICE"
@@ -699,11 +746,16 @@ class MtmdContext:
             logger.debug("mtmd input_text layout: %s", _input_text_class.__name__)
         self._input_text_class = _input_text_class
 
-    def _open(self, *, use_gpu: bool) -> Optional[int]:
+    def _open(self, *, use_gpu: bool,
+              min_image_tokens: Optional[int] = None) -> Optional[int]:
         """Create the native mtmd context, on GPU or CPU.
 
-        Only two fields of the opaque params buffer are touched (see the module
-        docstring): ``use_gpu`` at byte 0 and ``n_threads`` at byte 4.
+        Only three fields of the opaque params buffer are touched (see the module
+        docstring): ``use_gpu`` at byte 0, ``n_threads`` (byte 4 when the layout
+        is not recognised, else where :func:`_params_layout` finds it) and, when
+        *min_image_tokens* is given and the layout is recognised,
+        ``image_min_tokens``. *min_image_tokens* given with an unrecognised
+        layout is ignored; :meth:`apply_min_image_tokens` checks that first.
 
         ``n_threads`` applies on the GPU path too (parts of preprocessing stay on
         the host) and dominates the CPU one: mtmd's own default is a flat 4
@@ -729,8 +781,12 @@ class MtmdContext:
         params = self._m.mtmd_context_params_default()
         buf = ctypes.cast(ctypes.byref(params), ctypes.POINTER(ctypes.c_uint8))
         buf[0] = 1 if use_gpu else 0
-        ctypes.cast(ctypes.byref(params, 4),
+        layout = _params_layout(self._m, params)
+        ctypes.cast(ctypes.byref(params, layout.n_threads if layout else 4),
                     ctypes.POINTER(ctypes.c_int32))[0] = _encode_threads()
+        if min_image_tokens is not None and layout is not None:
+            ctypes.cast(ctypes.byref(params, layout.image_min_tokens),
+                        ctypes.POINTER(ctypes.c_int32))[0] = int(min_image_tokens)
 
         # An explicitly exported MTMD_BACKEND_DEVICE is the user's own choice and
         # outranks anything derived from config: it is never overwritten. Only
@@ -763,6 +819,40 @@ class MtmdContext:
             # restore and a user's own export is never clobbered.
             if device_name is not None:
                 os.environ.pop(_MTMD_DEVICE_ENV, None)
+
+    def apply_min_image_tokens(self, tokens: int) -> bool:
+        """Rebuild this context asking mtmd for at least *tokens* image tokens
+        (llama.cpp's ``--image-min-tokens``), on the device it already uses.
+
+        Returns True when the new context is in place. Returns False, with the
+        context unchanged, when the params layout of this runtime is not
+        recognised (:func:`_params_layout`) or the runtime's default for the
+        field is not "read it from the model" (-1). When the rebuild itself
+        fails the context is rebuilt without the setting; if that fails too,
+        raises :class:`MtmdUnavailable`. Drops the cached embeddings."""
+        params = self._m.mtmd_context_params_default()
+        layout = _params_layout(self._m, params)
+        if layout is None:
+            return False
+        current = ctypes.cast(ctypes.byref(params, layout.image_min_tokens),
+                              ctypes.POINTER(ctypes.c_int32))[0]
+        if current != -1:
+            return False
+        try:
+            self._m.mtmd_free(self._ctx)
+        except Exception:   # noqa: BLE001 - freeing a wedged context must not mask the rebuild
+            pass
+        self._ctx = None
+        self.clear_embeddings()
+        self._ctx = self._open(use_gpu=self.on_gpu, min_image_tokens=tokens)
+        if self._ctx:
+            return True
+        self._ctx = self._open(use_gpu=self.on_gpu)
+        if not self._ctx:
+            raise MtmdUnavailable(
+                f"mtmd_init_from_file returned NULL for {self._mmproj_path} "
+                "after asking for a minimum of image tokens")
+        return False
 
     def retry_on_cpu(self) -> bool:
         """Rebuild this context on the CPU after a GPU encode failed at RUNTIME.
