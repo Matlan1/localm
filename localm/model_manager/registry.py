@@ -40,6 +40,7 @@ from .gguf import _has_gguf_magic
 from .gguf import gguf_unusable_reason
 from .unsupported import explain_unsupported_model, hf_folder_refusal
 from .jan_store import find_jan_models_root, scan_jan_models
+from .localm_home import RecordedDigests, find_localm_home, recorded_digests
 from .gguf import gguf_n_embd
 from .gguf import _gguf_recently_written
 from .gguf import first_split_part
@@ -192,21 +193,30 @@ def projector_owners(name: str, registry: dict) -> list[str]:
     file; failing that, when it is a chat model whose file sits in the
     projector's folder. Reads the registry only: no file is opened. Empty when
     *name* is not a projector entry or nothing claims it."""
+    recorded, in_folder = _projector_claims(name, registry)
+    return recorded or in_folder
+
+
+def _projector_claims(name: str, registry: dict) -> "tuple[list[str], list[str]]":
+    """``(recorded, in_folder)`` for the projector registered as *name*: the
+    sorted chat models whose ``mmproj`` is its file, and the sorted chat models
+    whose file sits in its folder (empty when *recorded* is not, as they are
+    only the fallback). Both empty when *name* is not a projector entry."""
     entry = registry.get(name)
     if not is_projector_entry(entry):
-        return []
+        return [], []
     mmproj_path = _entry_path(entry)
     if mmproj_path is None:
-        return []
+        return [], []
     chat = {n: e for n, e in registry.items()
             if n != name and isinstance(e, dict) and e.get("model_type", "llm") == "llm"}
     recorded = sorted(n for n, e in chat.items() if _same_file(e.get("mmproj"), mmproj_path))
     if recorded:
-        return recorded
+        return recorded, []
     folder = os.path.dirname(os.path.normpath(mmproj_path))
-    return sorted(n for n, e in chat.items()
-                  if (p := _entry_path(e)) is not None
-                  and _same_file(os.path.dirname(os.path.normpath(p)), folder))
+    return [], sorted(n for n, e in chat.items()
+                      if (p := _entry_path(e)) is not None
+                      and _same_file(os.path.dirname(os.path.normpath(p)), folder))
 
 
 def projector_refusal(name: str, registry: dict) -> Optional[str]:
@@ -215,11 +225,15 @@ def projector_refusal(name: str, registry: dict) -> Optional[str]:
     models that use the projector when the registry identifies any."""
     if not is_projector_entry(registry.get(name)):
         return None
-    owners = projector_owners(name, registry)
+    recorded, in_folder = _projector_claims(name, registry)
     msg = f"'{name}' is a vision projector, not a model that can be loaded or chatted with."
-    if owners:
-        msg += (" It belongs to " + ", ".join(f"'{o}'" for o in owners)
+    if recorded:
+        msg += (" It belongs to " + ", ".join(f"'{o}'" for o in recorded)
                 + "; name that model instead and the projector is attached automatically.")
+    elif in_folder:
+        msg += (" No model records it as its projector; the chat models in the same folder are "
+                + ", ".join(f"'{o}'" for o in in_folder)
+                + ". A projector is attached only to a model that records it.")
     return msg
 
 
@@ -4360,12 +4374,18 @@ def _skip_unusable_ggufs(first_parts: list[Path]) -> list[Path]:
 
 
 def _digest_for_add(gguf: Path, reg: dict, no_hash: bool,
-                    fast: bool, label: Optional[str] = None
+                    fast: bool, label: Optional[str] = None,
+                    recorded: Optional[RecordedDigests] = None
                     ) -> "tuple[Optional[str], Optional[int]]":
     """``(sha256, size)`` to register *gguf* with: neither under *no_hash*; only
     the size under *fast* (dedup on size alone); otherwise the hash, computed only
     when it can change the outcome (an unknown path or a registered alias with no
-    digest)."""
+    digest).
+
+    *recorded* holds the sha256 digests another localm install stored. When it
+    holds a usable digest for *gguf* (``RecordedDigests.lookup``), that digest is
+    returned without reading the file; the recorded value is trusted as the
+    file's hash."""
     if no_hash:
         return None, None
     if fast:
@@ -4375,9 +4395,15 @@ def _digest_for_add(gguf: Path, reg: dict, no_hash: bool,
             return None, None
     already_known = find_aliases_by_path(gguf, reg)
     needs_backfill = any(not reg[n].get("sha256") for n in already_known)
-    digest = _mm._hash_with_progress(gguf, label=label) \
-        if (not already_known or needs_backfill) else None
-    return digest, None
+    if already_known and not needs_backfill:
+        return None, None
+    stored = recorded.lookup(gguf) if recorded is not None else None
+    if stored is not None:
+        _mm._import_status(
+            f"Using the hash recorded by the other install for {gguf.name}"
+            + (f" ({label})" if label else ""))
+        return stored, None
+    return _mm._hash_with_progress(gguf, label=label), None
 
 
 def _add_local_gguf_dir(
@@ -4392,6 +4418,7 @@ def _add_local_gguf_dir(
     stats: Optional[dict] = None,
     total: Optional[int] = None,
     first_index: int = 1,
+    recorded: Optional[RecordedDigests] = None,
 ) -> bool:
     """Register every loose .gguf model in a folder (the *first_parts* list).
 
@@ -4415,7 +4442,8 @@ def _add_local_gguf_dir(
 
     Each model is announced as ``k of total`` (*first_index* is the first k,
     *total* defaults to the list length). *stats*, when given, counts the
-    models left unregistered under ``declined``.
+    models left unregistered under ``declined``. *recorded* is passed to
+    :func:`_digest_for_add`.
     """
     from rich.markup import escape
 
@@ -4440,7 +4468,8 @@ def _add_local_gguf_dir(
 
         position = f"{k} of {total}"
         _mm._import_status(f"Registering {gguf.name} ({position})", log=False)
-        digest, size = _digest_for_add(gguf, reg, no_hash, fast, label=position)
+        digest, size = _digest_for_add(gguf, reg, no_hash, fast, label=position,
+                                       recorded=recorded)
 
         detected_type, gmeta = _detect_local_model_type(gguf, is_gguf=True, is_hf=False)
         final_type = model_type if model_type is not None else detected_type
@@ -5225,6 +5254,19 @@ def add_local(
             if outcome is not None:
                 return outcome
 
+    recorded: Optional[RecordedDigests] = None
+    if p.is_dir() and not is_hf and not store and not no_hash and not fast:
+        other_home = find_localm_home(p)
+        if other_home is not None:
+            recorded, problem = recorded_digests(other_home, _entry_path)
+            if problem is not None:
+                console.print(f"[yellow]Found another localm install in {escape(str(other_home))} "
+                              f"but {escape(problem)}; hashing its files instead.[/yellow]")
+            else:
+                _mm._import_status(
+                    f"Found another localm install in {other_home}: reusing the hashes "
+                    f"it recorded for {len(recorded)} file(s)")
+
     max_depth = _import_max_depth()
     if p.is_dir() and not is_hf:
         first_parts, hf_dirs = _find_model_units(p, max_depth=max_depth)
@@ -5252,7 +5294,7 @@ def add_local(
                 registered_any = _add_local_gguf_dir(
                     first_parts, name if only_one else None, on_duplicate, no_hash,
                     fast, model_type=model_type, mmprojs=mmprojs,
-                    stats=stats, total=units,
+                    stats=stats, total=units, recorded=recorded,
                 )
             for k, hf_dir in enumerate(hf_dirs, len(first_parts) + 1):
                 _mm._import_status(f"Registering {hf_dir.name} ({k} of {units})")
