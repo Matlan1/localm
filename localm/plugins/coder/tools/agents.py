@@ -592,6 +592,7 @@ def tool_spawn_agent_background(
             release(token)
             return prepared
         full_task = prepared
+        child.detached = True
         # Make the child's location introspectable, as dispatch_parallel does.
         child.worktree_path = str(info["worktree"])
         child.worktree_branch = info["branch"]

@@ -4,7 +4,7 @@
   "private": true,
   "description": "jsdom test harness for the localm GUI (localm/plugins/gui/static). Python is the product; this only tests the vanilla-JS frontend.",
   "scripts": {
-    "test": "node --test --test-force-exit tests-js/*.test.mjs",
+    "test": "node --test --test-force-exit tests-js/*.test.mjs tools/bugreport-proxy/*.test.mjs",
     "test:e2e": "playwright test",
     "lint": "eslint localm/plugins/gui/static tests-js"
   },

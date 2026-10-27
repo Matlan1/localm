@@ -429,6 +429,16 @@ class TestGpusCli:
         assert "RTX 3060" in r.output
         assert "24.0 GB total" in r.output
 
+    def test_nvidia_smi_numbers_are_not_paired_with_the_saved_choice(self, cli_runner):
+        from localm.cli import main
+        cli_runner.invoke(main, ["config", "main_gpu_index", "1"])
+        gpus = [dict(g, source="nvidia-smi", numbering="nvidia-smi") for g in self._GPUS]
+        with patch("localm.discover.list_gpus", return_value=(gpus, GPU_PROBE_OK)):
+            r = cli_runner.invoke(main, ["gpus"])
+        assert r.exit_code == 0, r.output
+        assert "(configured)" not in r.output
+        assert "nvidia-smi's" in r.output
+
     def test_marks_the_configured_device(self, cli_runner):
         from localm.cli import main
         cli_runner.invoke(main, ["config", "main_gpu_index", "1"])

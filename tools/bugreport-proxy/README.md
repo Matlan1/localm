@@ -125,8 +125,19 @@ GET  /issues[?state=all|open|closed][&per_page=N] -> 200 { ok, issues: [...] }
 GET  /issues?number=N                             -> 200 { ok, issue }
 GET  /update                -> 200 { ok, version, notes, published_at, asset:{id,name,size} }
                                (version null when there are no releases yet)
+GET  /update/releases       -> 200 { ok, releases: [{ version, name, published_at,
+                               prerelease, notes, asset, signed }] }   (newest first)
+GET  /update/release?version=V
+                            -> 200 { ok, found, version, notes, published_at,
+                               prerelease, asset, signature }   (found false: no such release)
 GET  /update/download?id=N  -> 200 application/zip  (streams the release asset)
 ```
+
+`/update/releases` and `/update/release` serve `localm update --list` / `--to`. Both
+take `?channel=prerelease` like `/update`, list only app releases (never a draft),
+and `/update/release` serves the release's `*.envelope` asset as its signature when
+it has one, else its `*.sig`. A client that meets a 404 on them tells the user the
+proxy needs redeploying.
 
 `/issues` items are trimmed to `{number, title, state, created_at, closed_at,
 html_url, labels}` and PR entries are filtered out. `/update*` use the separate

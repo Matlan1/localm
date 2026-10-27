@@ -930,27 +930,27 @@ class VramSizingMixin:
         from localm.inference.backends.llamacpp import _loader
         if _loader.native_lib_loaded():
             return None
-        import sys
-
         from localm.debuglog import logger as _dbg
-        from localm.discover import gguf_split_devices, renumber_saved_gpu_selection
-        if "pytest" not in sys.modules:
-            renumber_saved_gpu_selection()
+        from localm.discover import gguf_split_devices
         devices, reason = gguf_split_devices(
             gpus=getattr(self, "_sizing_gpus", None) or None, wait_for_inflight=True)
+        from localm.discover import listed_gpu_order
+        order = listed_gpu_order()
+        unordered = (f", not in the listed order {order}" if order else "")
         if not devices:
-            if reason in self._ONE_GPU_REASONS or reason.startswith("no fresh GPU reading"):
+            if reason in self._ONE_GPU_REASONS or (
+                    reason.startswith("no fresh GPU reading") and not order):
                 _dbg.debug("GPU placement: not spread over GPUs (%s)", reason)
             else:
                 _dbg.warning("GPU placement: the GPUs could not be matched to "
                              "llama.cpp's device list (%s); llama.cpp places the "
-                             "layers by its own default", reason)
+                             "layers by its own default%s", reason, unordered)
             return None
         units = self._placement_units()
         if units is None:
             _dbg.warning("GPU placement: the layer sizes of %s could not be read; "
-                         "llama.cpp splits it by free memory",
-                         Path(self.model_path).name)
+                         "llama.cpp splits it by free memory%s",
+                         Path(self.model_path).name, unordered)
             return None
         from localm.inference.backends.llamacpp._gpu_plan import PlanDevice, plan_placement
         plan_devices = [PlanDevice(slot=d["slot"], index=d["index"], name=d["name"],

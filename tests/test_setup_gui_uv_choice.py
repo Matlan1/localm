@@ -54,6 +54,7 @@ def _run(tmp_path: Path, *, answer: str, system_uv: bool, contained_uv: bool = F
         path = str(stub) + os.pathsep + path
     env = dict(os.environ, PATH=path)
     env.pop("LOCALM_GUI_STORE", None)
+    env.pop("UV_PYTHON_INSTALL_DIR", None)
     out = subprocess.run(["cmd", "/c", str(clone / "probe.bat")], cwd=str(clone), env=env,
                          input=answer, capture_output=True, text=True, timeout=120)
     return clone, stub, out

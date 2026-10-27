@@ -2045,6 +2045,136 @@ export async function updateApply() {
 if ($("update-check")) $("update-check").onclick = updateCheck;
 if ($("update-apply")) $("update-apply").onclick = updateApply;
 
+// Choose a version: the GUI form of `localm update --list` / `--to <version>`.
+// The server re-derives the build and signature from the proxy; a build whose
+// signature does not verify comes back as needs_confirmation, and is installed
+// only when the user confirms a warning that names the reason.
+let _updateReleases = [];
+let _updateCurrent = "";
+
+function _selectedRelease() {
+  const sel = $("update-version-select");
+  return sel ? _updateReleases.find((r) => r.version === sel.value) || null : null;
+}
+
+function _renderVersionInfo() {
+  const info = $("update-version-info"), btn = $("update-install-version");
+  const rel = _selectedRelease();
+  if (btn) btn.disabled = !(rel && rel.installable);
+  if (!info) return;
+  if (!rel) { info.textContent = ""; return; }
+  const lines = [];
+  if (rel.published_at) lines.push(t("settings.update.versionPublished", { date: String(rel.published_at).slice(0, 10) }));
+  if (!rel.installable) lines.push(t("settings.update.versionNotInstallable", { reason: rel.reason || "" }));
+  for (const w of rel.warnings || []) lines.push(w);
+  info.textContent = lines.join(" · ");
+}
+
+export async function updateListVersions() {
+  const picker = $("update-version-picker"), sel = $("update-version-select");
+  const out = $("update-version-status"), btn = $("update-versions");
+  if (btn) btn.disabled = true;
+  if (out) { out.hidden = false; out.textContent = t("settings.update.versionsLoading"); }
+  try {
+    const r = await fetch("/api/update/releases", { headers: authHeaders() });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.detail || r.statusText);
+    if (!d.available) { if (out) out.textContent = t("settings.update.notConfigured"); return; }
+    if (d.error) { if (out) out.textContent = t("settings.update.versionsFailed", { message: d.error }); return; }
+    _updateReleases = Array.isArray(d.releases) ? d.releases : [];
+    _updateCurrent = d.current || "";
+    if (!_updateReleases.length) {
+      if (picker) picker.hidden = true;
+      if (out) out.textContent = t("settings.update.versionsNone", { current: d.current || "" });
+      return;
+    }
+    if (sel) {
+      sel.textContent = "";
+      for (const rel of _updateReleases) {
+        const tag = t(`settings.update.direction.${rel.direction}`);
+        const label = rel.version + "  (" + tag + (rel.prerelease ? ", " + t("settings.update.prerelease") : "") + ")";
+        const opt = el("option", "", label);
+        opt.value = rel.version;
+        opt.disabled = !rel.installable;
+        sel.appendChild(opt);
+      }
+      const first = _updateReleases.find((x) => x.installable && x.direction !== "same");
+      if (first) sel.value = first.version;
+      sel.onchange = _renderVersionInfo;
+    }
+    if (picker) picker.hidden = false;
+    if (out) out.textContent = t("settings.update.versionsCurrent", { current: d.current || "" });
+    _renderVersionInfo();
+  } catch (e) {
+    if (out) { out.hidden = false; out.textContent = t("settings.update.versionsFailed", { message: e.message }); }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function _postSelectedVersion(rel, extra) {
+  const out = $("update-version-status"), btn = $("update-install-version");
+  if (btn) btn.disabled = true;
+  if (out) { out.hidden = false; out.textContent = t("settings.update.installing", { version: rel.version }); }
+  try {
+    const r = await fetch("/api/update/apply", {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ version: rel.version, ...extra }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.detail || r.statusText);
+    if (d.needs_confirmation === "unverified" && !extra.allow_unverified) {
+      if (out) out.textContent = t("settings.update.unverifiedStatus", { version: rel.version, reason: d.reason || "" });
+      const ok = await confirmDangerAsync(
+        t("settings.update.unverifiedTitle", { version: rel.version }),
+        t("settings.update.unverifiedBody", { reason: d.reason || "" }),
+        t("settings.update.unverifiedConfirm"));
+      if (!ok) { if (out) out.textContent = t("settings.update.notInstalled"); return; }
+      return await _postSelectedVersion(rel, { allow_unverified: true, sha256: d.sha256 });
+    }
+    if (d.applied) {
+      const version = d.version || rel.version;
+      if (out) {
+        out.textContent = (d.restarting
+          ? t("settings.update.installedRestarting", { version })
+          : (d.klass === "setup"
+            ? t("settings.update.updatedSetup", { version })
+            : t("settings.update.updatedPlain", { version })))
+          + (d.data_backup ? "  " + t("settings.update.dataBackup", { path: d.data_backup }) : "");
+      }
+      if (btn) btn.hidden = true;
+      if (d.restarting && window.onServerUnreachable) {
+        setTimeout(() => onServerUnreachable(), d.data_backup ? 6000 : 800);
+      }
+    } else if (d.error) {
+      if (out) out.textContent = t("settings.update.failedRolledBack", { error: d.error });
+    } else {
+      if (out) out.textContent = d.reason || t("settings.update.nothingToApply");
+    }
+  } catch (e) {
+    if (out) out.textContent = t("settings.update.applyFailed", { message: e.message });
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+export async function updateInstallVersion() {
+  const rel = _selectedRelease();
+  if (!rel || !rel.installable) return;
+  const current = _updateCurrent;
+  const key = rel.direction === "older" ? "downgrade" : (rel.direction === "same" ? "reinstall" : "install");
+  const ok = await confirmDangerAsync(
+    t(`settings.update.${key}Title`, { version: rel.version }),
+    t(`settings.update.${key}Body`, { version: rel.version, current }),
+    t(`settings.update.${key}Confirm`));
+  if (!ok) return;
+  await _postSelectedVersion(rel, {});
+}
+
+if ($("update-versions")) $("update-versions").onclick = updateListVersions;
+if ($("update-install-version")) $("update-install-version").onclick = updateInstallVersion;
+
 // Roll back: the GUI form of `localm update --rollback`. Probes first - the GET
 // is read-only and never performs the rollback - so the control appears only
 // when a backup exists. The server owner-gates the POST and restarts itself
