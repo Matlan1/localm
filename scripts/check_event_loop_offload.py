@@ -94,6 +94,14 @@ WAIT_RECEIVER_HINTS = ("proc", "thread", "queue", "conn", "child", "future",
 ALLOWED: dict[tuple[str, str], str] = {}
 
 
+def _param_names(node) -> set[str]:
+    """The parameter names of function *node*, including *args and **kwargs."""
+    args = node.args
+    names = {a.arg for a in args.posonlyargs + args.args + args.kwonlyargs}
+    names.update(a.arg for a in (args.vararg, args.kwarg) if a is not None)
+    return names
+
+
 def _dotted(node: ast.AST) -> str:
     parts: list[str] = []
     cur = node
@@ -346,6 +354,8 @@ class Analyzer:
             nested = mod.funcs.get(func.qual + "." + name)
             if nested is not None:
                 return [(nested, True)]
+        if not rest and name in _param_names(func.node):
+            return []
         if name in mod.funcs:
             return [(mod.funcs[name], True)]
 
