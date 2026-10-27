@@ -505,6 +505,13 @@ function releasesFetch(seen = {}) {
       seen.auth = opts.headers.Authorization;
       return new Response(JSON.stringify(RELEASES), { status: 200 });
     }
+    const byTag = url.match(/\/releases\/tags\/([^/]+)$/);
+    if (byTag) {
+      seen.auth = opts.headers.Authorization;
+      const rel = RELEASES.find((r) => r.tag_name === decodeURIComponent(byTag[1]));
+      return rel ? new Response(JSON.stringify(rel), { status: 200 })
+        : new Response("{}", { status: 404 });
+    }
     const m = url.match(/\/releases\/assets\/(\d+)$/);
     if (m) {
       return { status: 302, ok: false, headers: { get: (k) =>
@@ -639,6 +646,59 @@ test("update/release: wrong secret -> 401 and no GitHub call", async () => {
       path: "/update/release?version=0.3.0", headers: { "X-Localm-Token": "nope" } }), ENV_UP);
     assert.equal(r.status, 401);
     assert.equal(called, false);
+  } finally { restore(); }
+});
+
+test("update/release: looks the tag up directly, so a release far down the list is found", async () => {
+  const seen = [];
+  const restore = stubFetch(async (url) => {
+    seen.push(url);
+    if (url.includes("/releases?")) return new Response("[]", { status: 200 });
+    if (url.endsWith("/releases/tags/v0.0.1")) {
+      return new Response(JSON.stringify({ tag_name: "v0.0.1", draft: false, prerelease: false,
+        published_at: "2020-01-01T00:00:00Z", assets: [{ id: 5, name: "localm-0.0.1.zip", size: 1 }] }),
+      { status: 200 });
+    }
+    return new Response("{}", { status: 404 });
+  });
+  try {
+    const r = await worker.fetch(req(undefined,
+      { method: "GET", path: "/update/release?version=0.0.1", headers: UP_HDR }), ENV_UP);
+    const out = await r.json();
+    assert.equal(out.found, true);
+    assert.equal(out.asset.id, 5);
+    assert.ok(!seen.some((u) => u.includes("/releases?")), "no list read for one tag");
+  } finally { restore(); }
+});
+
+test("update/release: a GitHub error other than 404 on the tag lookup is a 502", async () => {
+  const restore = stubFetch(async () => new Response("boom", { status: 500 }));
+  try {
+    const r = await worker.fetch(req(undefined,
+      { method: "GET", path: "/update/release?version=0.3.0", headers: UP_HDR }), ENV_UP);
+    assert.equal(r.status, 502);
+  } finally { restore(); }
+});
+
+test("update/releases: reads further pages while a page is full, and stops at a short page", async () => {
+  const mk = (n) => ({ id: n, tag_name: `v0.0.${n}`, draft: false, prerelease: false,
+    published_at: new Date(Date.UTC(2026, 0, 1) + n * 1000).toISOString(),
+    assets: [{ id: 1000 + n, name: `localm-0.0.${n}.zip`, size: 1 }] });
+  const pages = { 1: Array.from({ length: 30 }, (_, i) => mk(i + 1)),
+    2: Array.from({ length: 5 }, (_, i) => mk(i + 31)) };
+  const urls = [];
+  const restore = stubFetch(async (url) => {
+    urls.push(url);
+    const page = Number((url.match(/[?&]page=(\d+)/) || [0, 1])[1]);
+    return new Response(JSON.stringify(pages[page] || []), { status: 200 });
+  });
+  try {
+    const r = await worker.fetch(
+      req(undefined, { method: "GET", path: "/update/releases", headers: UP_HDR }), ENV_UP);
+    const out = await r.json();
+    assert.equal(out.releases.length, 35);
+    assert.equal(out.releases[0].version, "v0.0.35");
+    assert.equal(urls.length, 2, "page 2 was short, so no page 3");
   } finally { restore(); }
 });
 

@@ -557,3 +557,17 @@ def test_route_rejects_allow_unverified_without_sha256_and_bad_bodies(routes):
                    "Content-Type": "application/json"}, content=raw)
         assert r.status_code == 400, raw[:10]
     assert applied == []
+
+
+# ---------------------------------- CLI ------------------------------------
+
+def test_cli_check_with_to_never_installs(monkeypatch):
+    from click.testing import CliRunner
+
+    from localm.cli import main
+    monkeypatch.setattr(updater, "available", lambda: True)
+    monkeypatch.setattr(updater, "fetch_release", lambda v: pytest.fail("--check looked up a release"))
+    monkeypatch.setattr(updater, "apply", lambda *a, **k: pytest.fail("--check installed a build"))
+    r = CliRunner().invoke(main, ["update", "--check", "--to", "0.2.0", "--yes"])
+    assert r.exit_code == 2, r.output
+    assert "only one of" in r.output

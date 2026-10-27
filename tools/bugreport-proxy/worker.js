@@ -340,7 +340,7 @@ async function listAppReleases(request, env, url) {
   const gate = updateGateOrError(request, env);
   if (gate) return gate;
   const wantsPrerelease = url.searchParams.get("channel") === "prerelease";
-  const all = await appReleases(env, wantsPrerelease);
+  const all = await appReleases(env, wantsPrerelease, RELEASE_LIST_PAGES);
   if (all === undefined) return json({ error: "release lookup failed", status: 502 }, 502);
   const releases = all.map((rel) => {
     const assets = (rel.assets || []).map((a) => ({ id: a.id, name: a.name, size: a.size }));
@@ -367,11 +367,16 @@ async function oneAppRelease(request, env, url) {
   const want = url.searchParams.get("version") || "";
   if (!VERSION_PARAM_RE.test(want)) return json({ error: "missing or bad version" }, 400);
   const wantsPrerelease = url.searchParams.get("channel") === "prerelease";
-  const all = await appReleases(env, wantsPrerelease);
-  if (all === undefined) return json({ error: "release lookup failed", status: 502 }, 502);
-  const bare = want.replace(/^v/, "");
-  const rel = all.find((r) => String(r.tag_name).replace(/^v/, "") === bare);
-  if (!rel) return json({ ok: true, found: false, version: null });
+  const tag = "v" + want.replace(/^v/, "");
+  const gh = await ghFetch(env.UPDATE_GITHUB_TOKEN,
+    `/repos/${env.TARGET_REPO}/releases/tags/${encodeURIComponent(tag)}`);
+  if (gh.status === 404) return json({ ok: true, found: false, version: null });
+  if (!gh.ok) return json({ error: "release lookup failed", status: 502 }, 502);
+  const rel = await gh.json();
+  if (!rel || rel.draft === true || (!wantsPrerelease && rel.prerelease === true)
+      || !APP_TAG_RE.test(String(rel.tag_name || ""))) {
+    return json({ ok: true, found: false, version: null });
+  }
   return json({ ok: true, found: true, ...(await releaseMeta(env, rel, SELECT_SIG_PATTERNS)) });
 }
 
@@ -414,14 +419,27 @@ async function latestAppRelease(env, includePrerelease) {
   return candidates.length ? candidates[0] : null;
 }
 
+// Pages of 30 the release list route reads at most.
+const RELEASE_LIST_PAGES = 10;
+
 // The qualifying releases (see latestAppRelease), newest first by published_at, or
-// undefined when the GitHub call failed.
-async function appReleases(env, includePrerelease) {
-  const gh = await ghFetch(env.UPDATE_GITHUB_TOKEN, `/repos/${env.TARGET_REPO}/releases?per_page=30`);
-  if (!gh.ok) return undefined;
-  const all = await gh.json();
+// undefined when a GitHub call failed. Reads up to *pages* pages of 30, stopping at
+// the first page that is not full.
+async function appReleases(env, includePrerelease, pages = 1) {
+  const all = [];
+  for (let page = 1; page <= pages; page++) {
+    const gh = await ghFetch(env.UPDATE_GITHUB_TOKEN,
+      `/repos/${env.TARGET_REPO}/releases?per_page=30` + (page > 1 ? `&page=${page}` : ""));
+    if (!gh.ok) return undefined;
+    const chunk = await gh.json();
+    if (!Array.isArray(chunk)) break;
+    all.push(...chunk);
+    if (chunk.length < 30) break;
+  }
+  const seen = new Set();
   const when = (r) => Date.parse(r.published_at || r.created_at || 0) || 0;
-  return (Array.isArray(all) ? all : [])
+  return all
+    .filter((r) => !seen.has(r.id ?? r.tag_name) && seen.add(r.id ?? r.tag_name))
     .filter((r) => r.draft !== true)
     .filter((r) => includePrerelease || r.prerelease !== true)
     .filter((r) => APP_TAG_RE.test(String(r.tag_name || "")))

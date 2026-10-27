@@ -2359,6 +2359,7 @@
   "settings.update.unverifiedConfirm": "Trotzdem installieren",
   "settings.update.notInstalled": "Nicht installiert.",
   "settings.update.installedRestarting": "{version} installiert. Wird neu gestartet…",
+  "settings.update.dataBackup": "Ihre Daten von vor dem Zurückgehen wurden nach {path} kopiert; kopieren Sie die Dateien bei beendetem LocaLM zurück in den Datenordner, um sie wiederherzustellen.",
   "settings.update.available": "Update verfügbar: {latest} (Sie haben {current}).",
   "settings.update.availableNoAsset": "Update {latest} ist verfügbar, hat aber keinen zugehörigen Build.",
   "settings.loadingMore": "Weitere Einstellungen werden geladen…",

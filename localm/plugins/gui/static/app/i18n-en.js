@@ -2425,6 +2425,7 @@ export const I18N_EN = {
   "settings.update.unverifiedConfirm": "Install anyway",
   "settings.update.notInstalled": "Not installed.",
   "settings.update.installedRestarting": "Installed {version}. Restarting…",
+  "settings.update.dataBackup": "Your data from before the downgrade was copied to {path}; copy the files back into the data folder while LocaLM is stopped to restore them.",
 
   // ---- Settings > Updates > Roll back ----
   "settings.rollback.subHead": "Roll back",

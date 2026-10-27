@@ -2126,14 +2126,17 @@ async function _postSelectedVersion(rel, extra) {
     if (d.applied) {
       const version = d.version || rel.version;
       if (out) {
-        out.textContent = d.restarting
+        out.textContent = (d.restarting
           ? t("settings.update.installedRestarting", { version })
           : (d.klass === "setup"
             ? t("settings.update.updatedSetup", { version })
-            : t("settings.update.updatedPlain", { version }));
+            : t("settings.update.updatedPlain", { version })))
+          + (d.data_backup ? "  " + t("settings.update.dataBackup", { path: d.data_backup }) : "");
       }
       if (btn) btn.hidden = true;
-      if (d.restarting && window.onServerUnreachable) setTimeout(() => onServerUnreachable(), 800);
+      if (d.restarting && window.onServerUnreachable) {
+        setTimeout(() => onServerUnreachable(), d.data_backup ? 6000 : 800);
+      }
     } else if (d.error) {
       if (out) out.textContent = t("settings.update.failedRolledBack", { error: d.error });
     } else {

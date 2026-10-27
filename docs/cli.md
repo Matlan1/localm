@@ -1243,6 +1243,8 @@ has an "Update now" button for the same flow.
 that is a downgrade and asks first; before a downgrade it copies your settings, model
 registry, coder sessions, memory and plugins to `updates/data-before-<version>-<time>/`
 in the data directory, and `localm update --rollback` returns to the version you had.
+That copy is not restored automatically; to restore it, stop localm and copy its files
+back into the data directory.
 The build must be the version you named. When its signature does not verify (for
 example a release from before 0.3.0, signed with a retired key), localm says why and
 installs it only if you confirm; with `-y`, add `--allow-unverified`. A version you go

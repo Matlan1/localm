@@ -511,7 +511,8 @@ def _update_to(updater, version: str, *, yes: bool, allow_unverified: bool) -> N
         console.print("[yellow]Installed without a verified signature.[/yellow]")
     if res.get("data_backup"):
         console.print(f"[dim]Your data from before the downgrade: "
-                      f"{escape(res['data_backup'])}[/dim]")
+                      f"{escape(res['data_backup'])} (to restore it, copy those files back "
+                      "into the data folder while localm is stopped)[/dim]")
     if res["klass"] == "setup":
         console.print("[yellow]This version needs setup.bat re-run (a Python/venv change) "
                       "before it will start.[/yellow]")
@@ -551,8 +552,8 @@ def update_cmd(check_only: bool, yes: bool, do_rollback: bool, list_only: bool,
     from localm.bugreport import LocalmError
     from rich.markup import escape
 
-    if sum(map(bool, (do_rollback, list_only, to_version))) > 1:
-        console.print("[yellow]Use only one of --rollback, --list and --to.[/yellow]")
+    if sum(map(bool, (do_rollback, list_only, to_version, check_only))) > 1:
+        console.print("[yellow]Use only one of --check, --rollback, --list and --to.[/yellow]")
         sys.exit(2)
     if list_only or to_version:
         if not updater.available():
