@@ -875,15 +875,17 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # the worker gets exactly those devices and layer counts.
         gpu_placement = getattr(self, "_gpu_placement", None) if gpu_layers != 0 else None
         gpu_devices = None
+        placed: list = []
+        main_slot = None
         if gpu_placement is not None and gpu_placement.loads:
+            placed = list(gpu_placement.loads)
             gpu_devices = [{"slot": d.device.slot, "device_id": d.device.device_id,
-                            "units": d.units} for d in gpu_placement.loads]
-            self._fit_source_index = {d.device.slot: d.device.index
-                                      for d in gpu_placement.loads}
+                            "units": d.units} for d in placed]
+            self._fit_source_index = {d.device.slot: d.device.index for d in placed}
             # The vision projector's GPU: the configured main_gpu_index when the
             # placement uses it, else the worker's default (the output GPU).
             chosen_main = load_config().get("main_gpu_index")
-            main_slot = next((d.device.slot for d in gpu_placement.loads
+            main_slot = next((d.device.slot for d in placed
                               if d.device.index == chosen_main), None)
         auto_ratios = (None if gpu_devices is not None
                        else resolve_auto_split_ratios(wait_for_inflight=True))
@@ -922,7 +924,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # The context ceiling is sized from the devices this load uses: a fit
         # that leaves devices out bounds it by the devices it keeps, and a
         # placement by the device that fills first as the window grows.
-        if gpu_devices is not None:
+        if gpu_devices is not None and gpu_placement is not None:
             ctx_max = self._placement_ctx_max(gpu_placement)
         else:
             ctx_budget = None
@@ -946,16 +948,16 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         _display_ratios = auto_ratios if auto_ratios else cfg.get("gpu_split_ratios")
         _pairs = resolve_gpu_split(cfg.get("gpu_split_indices"), _display_ratios)
         if gpu_devices is not None:
-            units = sum(d.units for d in gpu_placement.loads) or 1
-            pinned = all(d.device.ratio is not None for d in gpu_placement.loads)
+            units = sum(d.units for d in placed) or 1
+            pinned = all(d.device.ratio is not None for d in placed)
             self.applied_gpu_split = {
                 "source": "pinned" if pinned else "auto",
                 "devices": [{"index": d.device.index, "share": d.units / units,
                              "layers": len(d.layers), "output": d.output}
-                            for d in gpu_placement.loads],
-            } if len(gpu_placement.loads) >= 2 else None
-            if len(gpu_placement.loads) == 1:
-                self.load_gpu_index = gpu_placement.loads[0].device.index
+                            for d in placed],
+            } if len(placed) >= 2 else None
+            if len(placed) == 1:
+                self.load_gpu_index = placed[0].device.index
         elif placement is not None and not placement.mapping:
             self.applied_gpu_split = None
         elif isinstance(worker_split, dict) and placement is None:

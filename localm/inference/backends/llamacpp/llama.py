@@ -4681,9 +4681,9 @@ class LlamaCpp:
         _no_devices = (ctypes.c_void_p * 1)(None)
         if not on_gpu:
             mp.devices = ctypes.cast(_no_devices, ctypes.c_void_p).value
-        elif getattr(self, "_gpu_devices_arg", None):
+        elif placed_devices := getattr(self, "_gpu_devices_arg", None):
             from localm.discover import apply_gpu_devices
-            _tensor_split_keepalive = apply_gpu_devices(mp, self._gpu_devices_arg)
+            _tensor_split_keepalive = apply_gpu_devices(mp, placed_devices)
         else:
             from localm.discover import apply_gpu_split, apply_main_gpu
             if self._main_gpu_arg is not None:

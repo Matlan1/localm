@@ -2428,7 +2428,7 @@ def native_gpu_devices() -> Optional[list]:
     out = []
     for d in raw:
         try:
-            entry = {"index": int(d["index"])}
+            entry: dict = {"index": int(d["index"])}
         except (KeyError, TypeError, ValueError):
             continue   # defensive: gpu_devices_isolated already shape-checked
         name = str(d.get("description") or "").strip() or str(d.get("name") or "").strip()
@@ -3596,6 +3596,7 @@ def vram_info(*, return_status: bool = False, deadline: Optional[float] = None,
     else:
         gpus = _list_gpus_kw(deadline=deadline, wait_for_inflight=wait_for_inflight)
         status = None   # unused: _vram_info_from() never reads it then
+    gpus = list(gpus) if isinstance(gpus, list) else []
     _vram_info_reading.gpus = gpus
     info = _vram_info_from(gpus, status)
     return (info, status) if return_status else info
@@ -3848,7 +3849,7 @@ def _discrete_gpus_sum(gpus) -> Optional[dict]:
     if len(kept) < 2 or not all(isinstance(g, dict) and isinstance(g.get("total"), int)
                                 for g in kept):
         return None
-    out = {"total": sum(g["total"] for g in kept), "devices": len(kept)}
+    out: dict = {"total": sum(g["total"] for g in kept), "devices": len(kept)}
     frees = [g.get("free") for g in kept]
     if all(isinstance(f, int) for f in frees):
         out["free"] = sum(frees)

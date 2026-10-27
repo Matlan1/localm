@@ -264,6 +264,8 @@ def _fit(devices: Sequence[PlanDevice], units: ModelUnits, n_cpu_moe: int,
             else:
                 hi = mid
         counts = _pack(gpu_units, rooms, hi)
+        if counts is None:
+            return None
         loads = _charge(ordered, counts, gpu_units, units)
         if all(ld.fits for ld in loads):
             return Placement(loads, len(gpu_units), n_cpu_moe, units.n_layer, True)

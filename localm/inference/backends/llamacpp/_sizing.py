@@ -814,8 +814,8 @@ class VramSizingMixin:
             expert_bytes = [0] * n_layer
             recurrent = set()
             for name, size in sizes.items():
-                if _RECURRENT_LAYER_TENSOR_RE.match(name):
-                    recurrent.add(int(_RECURRENT_LAYER_TENSOR_RE.match(name).group(1)))
+                if (m := _RECURRENT_LAYER_TENSOR_RE.match(name)) is not None:
+                    recurrent.add(int(m.group(1)))
                 key = name[4:] if name.startswith(("enc.blk.", "dec.blk.")) else name
                 if not key.startswith("blk."):
                     continue
@@ -1010,9 +1010,10 @@ class VramSizingMixin:
         model that keeps no KV cache."""
         if self._keeps_no_kv_cache():
             return None
-        if not self.ctx_auto:
-            return self.n_ctx_max
-        unlimited = self.n_ctx_max == 0
+        n_ctx_max = getattr(self, "n_ctx_max", None)
+        if not getattr(self, "ctx_auto", False):
+            return n_ctx_max
+        unlimited = n_ctx_max == 0
         share = -(-embedder_ctx_reservation_bytes() // max(1, len(placement.loads)))
         tokens = placement.max_ctx(self.n_ctx, reserve_each=share)
         if tokens is None:
