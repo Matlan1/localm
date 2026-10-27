@@ -3,6 +3,7 @@
 "use strict";
 
 // --- ES module imports ---
+import { clearRecentGuiErrors, onRecentGuiErrorsChange, recentGuiErrors } from "../app/client-log.js";
 import { pickDirectory } from "../app/picker.js";
 import { $, GIB, authHeaders, cancelJob, confirmDanger, confirmDangerAsync, downloadRate, el, fmtBytes, fmtDuration, openModal, promptText, renderMarkdown, streamJob, toast, whileBusy } from "../app/helpers.js";
 import { t, tn } from "../app/i18n.js";
@@ -1964,6 +1965,80 @@ async function countdownRetryBugReport(secs, out, rep) {
   if (out) out.textContent = t("settings.bug.retrying");
   await sendReviewedBugReport(true, rep);
 }
+
+// Settings "Recent errors": the last errors this page showed (client-log.js),
+// newest first, each with Copy and "Report this error". Report fills the bug
+// report form above with the error and opens it; nothing is saved or sent until
+// the user presses one of that form's own buttons.
+
+function _recentErrorWhen(entry) {
+  try { return new Date(entry.time).toLocaleString(); } catch { return ""; }
+}
+
+/** Fill the bug report form with *entry* (from recentGuiErrors()) and show it.
+ *  Closes an open review; never saves or sends. */
+export function reportGuiErrorEntry(entry) {
+  const happened = $("bug-happened"), desc = $("bug-desc");
+  if (!happened || !entry) return;
+  _showBugReview(null);
+  _reviewedBugReport = null;
+  happened.value = entry.text;
+  if (desc && !desc.value.trim()) {
+    desc.value = t("settings.recentErrors.reportDescription", {
+      page: entry.page || "-", time: _recentErrorWhen(entry) });
+  }
+  if (typeof window.showView === "function") window.showView("settings");
+  if (typeof window.gotoSettingsSection === "function") window.gotoSettingsSection("sec-bugreport");
+  (desc || happened).focus();
+}
+
+/** Open Settings at the "Recent errors" card. */
+export function openRecentErrors() {
+  if (typeof window.showView === "function") window.showView("settings");
+  if (typeof window.gotoSettingsSection === "function") window.gotoSettingsSection("sec-recent-errors");
+}
+window.openRecentErrors = openRecentErrors;
+
+/** Render the "Recent errors" card from *list* (newest first). */
+export function renderRecentErrors(list = recentGuiErrors()) {
+  const box = $("recent-errors-list");
+  if (!box) return;
+  box.replaceChildren();
+  for (const entry of list) {
+    const li = el("li", "recent-error");
+    const meta = el("div", "recent-error-meta sub");
+    const bits = [_recentErrorWhen(entry), entry.page, entry.source].filter(Boolean);
+    meta.textContent = bits.join("  ·  ");
+    if (entry.count > 1) meta.textContent += "  " + t("toast.repeatCount", { count: entry.count });
+    const text = el("div", "recent-error-text", entry.text);
+    const actions = el("div", "actions");
+    const copy = el("button", "btn-secondary", t("settings.recentErrors.copy"));
+    copy.type = "button";
+    copy.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(entry.text);
+        copy.textContent = t("settings.recentErrors.copied");
+        setTimeout(() => (copy.textContent = t("settings.recentErrors.copy")), 1200);
+      } catch {
+        toast(t("chat.copyBlocked"), true);
+      }
+    };
+    const report = el("button", "btn-secondary", t("settings.recentErrors.report"));
+    report.type = "button";
+    report.onclick = () => reportGuiErrorEntry(entry);
+    actions.append(copy, report);
+    li.append(meta, text, actions);
+    box.appendChild(li);
+  }
+  const empty = $("recent-errors-empty");
+  if (empty) empty.hidden = list.length > 0;
+  const clear = $("recent-errors-clear");
+  if (clear) clear.disabled = list.length === 0;
+}
+
+onRecentGuiErrorsChange(renderRecentErrors);
+renderRecentErrors();
+if ($("recent-errors-clear")) $("recent-errors-clear").onclick = () => clearRecentGuiErrors();
 
 if ($("bug-send")) $("bug-send").onclick = () => submitBugReport(false);
 if ($("bug-upload")) $("bug-upload").onclick = () => submitBugReport(true);

@@ -152,6 +152,17 @@ model name or a model path, in any session mode. It writes nothing to disk.
 logs each request (method, path, status, timing - never request bodies). It does
 NOT record your chat content in privacy mode (see the guarantee below).
 
+### GUI error messages
+
+Every error message the GUI shows (an error toast, the sidebar status error) and
+every script error in the page is also sent to the server, which writes it to its
+log as one `gui:` line at WARNING, with home paths, credentials, email addresses
+and machine names removed. Like the server's own warnings, that line goes to the
+in-memory activity list behind the status window in every mode, and to the debug
+log file only when the debug log is on. The Settings "Recent errors" list (the
+last five) is kept in the browser's memory in privacy mode and gone on reload; in
+`log` and `full` mode it is also kept in the browser's local storage.
+
 ### "Keep diagnostics for bug reports" (`keep_diagnostics`)
 
 Privacy mode saves nothing - which also means a hang or crash leaves nothing to

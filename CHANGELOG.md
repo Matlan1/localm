@@ -22,6 +22,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **More upscalers are recognised.** ESRGAN files in the original key layout (such as 4x-UltraSharp) and Real-ESRGAN compact (SRVGGNet) files are now typed `upscaler` when pulled, added or scanned, instead of `unknown`.
 
 ### Changed
+- **Error messages in the GUI stay until you close them.** An error toast now has a close button (Escape closes the focused one) instead of vanishing after a few seconds, a later message no longer replaces it, up to three are shown at once with a "+N more" link, and the same error repeated shows a count instead of piling up. Settings > Recent errors lists the last five with Copy and "Report this error", which fills in the bug report form for you to review; nothing is sent until you send it. Every GUI error, including script errors in the page, is now also written to the server log, so it shows in the status window's log and in the debug log.
 - **The bundled llama.cpp runtime moved from b11757 to b11928.** An existing install picks it up with `localm setup-llama --force`.
 - **The bundled AMD ROCm llama.cpp runtime moved from b1349 to b1355.** An existing install picks it up with `localm setup-llama --force`.
 - **localm's managed ComfyUI now installs v0.43.0, up from v0.42.1.** An existing install picks it up with `localm comfy update --reinstall-requirements` (this release's Python requirements changed).

@@ -2353,6 +2353,20 @@ export const I18N_EN = {
   "settings.instances.stoppedToast": "Stopped {name}",
   "settings.instances.stopFailed": "Could not stop: {message}",
 
+  // ---- Settings > Recent errors, and the error toast ----
+  "settings.recentErrors.title": "Recent errors",
+  "settings.recentErrors.help": "The last five error messages this page showed, newest first. In privacy mode the list is kept only until the page is reloaded.",
+  "settings.recentErrors.empty": "No errors so far.",
+  "settings.recentErrors.clear": "Clear",
+  "settings.recentErrors.copy": "Copy",
+  "settings.recentErrors.copied": "Copied",
+  "settings.recentErrors.report": "Report this error",
+  "settings.recentErrors.reportDescription": "The GUI showed this error (page {page}, {time}).",
+  "toast.dismissError": "Dismiss this error",
+  "toast.dismissAll": "Dismiss all",
+  "toast.moreErrors": "+{count} more",
+  "toast.repeatCount": "(x{count})",
+
   // ---- Settings > Report a bug ----
   "settings.bug.title": "Report a bug",
   "settings.bug.help":

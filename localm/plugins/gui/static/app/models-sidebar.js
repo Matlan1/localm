@@ -4,6 +4,7 @@
 
 // --- ES module imports ---
 import { lsSetScoped } from "./chat.js";
+import { recordGuiError } from "./client-log.js";
 import { $, GIB, authHeaders, cancelJob, confirmDangerAsync, el, fmtDuration, instanceCacheTrusted, openModal, streamJob, toast } from "./helpers.js";
 import { t, tn } from "./i18n.js";
 import { interruptedCount, loadInterrupted, onInterruptedChange, renderInterrupted } from "./interrupted-pulls.js";
@@ -29,8 +30,12 @@ const STATUS_STATE_CLASS = { ok: "st-ok", busy: "st-running", err: "st-error" };
 export function setStatus(state, text) {
   _statusBusy = state === "busy";
   _statusFromPoll = false;
-  $("status-text").className = "job-state " + (STATUS_STATE_CLASS[state] || "");
-  $("status-text").textContent = text;
+  const pill = $("status-text");
+  // An error is recorded when it newly appears, not on every repeat of it.
+  const repeat = pill.classList.contains(STATUS_STATE_CLASS.err) && pill.textContent === text;
+  pill.className = "job-state " + (STATUS_STATE_CLASS[state] || "");
+  pill.textContent = text;
+  if (state === "err" && !repeat) recordGuiError(text, "status");
   // The pill is hidden for "ok" alone: the dropdown above already renders the
   // active model's name, or its disabled "No model loaded" placeholder. "busy"
   // and "err" stay visible - neither is expressible in the select, and "err" is

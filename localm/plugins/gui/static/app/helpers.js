@@ -6,6 +6,7 @@
 "use strict";
 
 // --- ES module imports ---
+import { recordGuiError, setGuiErrorAuth } from "./client-log.js";
 import { t } from "./i18n.js";
 
 export const $ = (id) => document.getElementById(id);
@@ -78,6 +79,7 @@ export const INSTANCE_SCOPED_KEYS = [
   "localm.studioOpen",
   "localm.coderOpen",
   "localm.backendHintDismissed",
+  "localm.recentErrors",
 ];
 
 const INSTANCE_ID_KEY = "localm.instanceId";
@@ -163,6 +165,7 @@ export function authHeaders(extra = {}) {
   }
   return h;
 }
+setGuiErrorAuth(() => authHeaders());
 
 /** True when *headers* is a request header set WE built (authHeaders above) that
  *  carries the OPEN-MODE shell token as its credential.
@@ -220,12 +223,108 @@ export async function whileBusy(btn, label, work) {
   }
 }
 
+export const TOAST_ERROR_STACK_MAX = 3;
+// Undismissed error toasts, oldest first: { text, count }.
+let _toastErrors = [];
+
+/** Show *msg* as a toast. An info toast replaces the previous info toast and
+ *  hides after 3.5 s. An error toast (isError true) stays until dismissed: it
+ *  joins the error stack (the newest TOAST_ERROR_STACK_MAX shown, the rest
+ *  counted in a "+N more" row), an error equal to one already on the stack
+ *  raises that one's count instead, and the error is recorded in the recent
+ *  errors list and the server log. #toast always holds the latest message and
+ *  carries the "error" class for an error; it is shown only for an info toast. */
 export function toast(msg, isError = false) {
   const el = $("toast");
-  el.textContent = msg;
-  el.className = "show" + (isError ? " error" : "");
+  const text = String(msg ?? "");
+  el.textContent = text;
   clearTimeout(el._t);
+  if (isError) {
+    el.className = "error";
+    showErrorToast(text);
+    recordGuiError(text, "toast");
+    return;
+  }
+  el.className = "show";
   el._t = setTimeout(() => (el.className = ""), 3500);
+}
+
+/** Put *text* on the error toast stack (or raise the count of the same error
+ *  already there) without recording it anywhere. */
+export function showErrorToast(text) {
+  const i = _toastErrors.findIndex((e) => e.text === text);
+  if (i >= 0) {
+    const [same] = _toastErrors.splice(i, 1);
+    same.count += 1;
+    _toastErrors.push(same);
+  } else {
+    _toastErrors.push({ text, count: 1 });
+  }
+  renderErrorToasts();
+}
+
+/** Remove the error toast for *text* from the stack. */
+export function dismissErrorToast(text) {
+  _toastErrors = _toastErrors.filter((e) => e.text !== text);
+  renderErrorToasts();
+}
+
+/** Remove every error toast from the stack. */
+export function dismissAllErrorToasts() {
+  _toastErrors = [];
+  renderErrorToasts();
+}
+
+/** The error toasts on the stack, oldest first (a copy). */
+export function errorToasts() {
+  return _toastErrors.map((e) => ({ ...e }));
+}
+
+function _focusNextErrorClose(box) {
+  const next = box.querySelector(".toast-error-close");
+  if (next) next.focus();
+}
+
+/** Render the error toast stack into #toast-errors. */
+export function renderErrorToasts() {
+  const box = $("toast-errors");
+  if (!box) return;
+  box.replaceChildren();
+  const shown = _toastErrors.slice(-TOAST_ERROR_STACK_MAX);
+  const hidden = _toastErrors.length - shown.length;
+  if (hidden > 0) {
+    const row = el("div", "toast-error toast-error-more");
+    const more = el("button", "toast-error-more-btn", t("toast.moreErrors", { count: hidden }));
+    more.type = "button";
+    more.onclick = () => { if (typeof window.openRecentErrors === "function") window.openRecentErrors(); };
+    const all = el("button", "toast-error-dismiss-all", t("toast.dismissAll"));
+    all.type = "button";
+    all.onclick = () => dismissAllErrorToasts();
+    row.append(more, all);
+    box.appendChild(row);
+  }
+  for (const entry of shown) {
+    const item = el("div", "toast-error");
+    item.setAttribute("role", "alert");
+    const text = el("span", "toast-error-text", entry.text);
+    item.appendChild(text);
+    if (entry.count > 1) item.appendChild(el("span", "toast-error-count", t("toast.repeatCount", { count: entry.count })));
+    const close = el("button", "toast-error-close", "×");
+    close.type = "button";
+    close.setAttribute("aria-label", t("toast.dismissError"));
+    close.title = t("toast.dismissError");
+    close.onclick = () => { dismissErrorToast(entry.text); _focusNextErrorClose(box); };
+    item.appendChild(close);
+    item.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopPropagation();
+      dismissErrorToast(entry.text);
+      _focusNextErrorClose(box);
+    });
+    box.appendChild(item);
+  }
+  box.hidden = _toastErrors.length === 0;
 }
 
 marked.setOptions({ breaks: true });

@@ -80,7 +80,9 @@ test("preflight unavailable: non-blocking warning shown, still resolves true, no
   const toastEl = win.document.getElementById("toast");
   assert.ok(toastEl.textContent.toLowerCase().includes("could not check"),
     "toast says the pre-check itself could not run, not that nothing is missing");
-  assert.equal(toastEl.className, "show error", "surfaced with error-level visual weight");
+  assert.ok(toastEl.className.includes("error"), "surfaced as an error toast");
+  assert.equal(win.document.querySelector("#toast-errors .toast-error-text").textContent,
+    toastEl.textContent, "shown on the error toast stack, which stays until dismissed");
   assert.ok(log.textContent.toLowerCase().includes("could not check"),
     "the persistent log also gets the line");
 });
@@ -103,7 +105,9 @@ test("missing WITHOUT a curated source: no modal, but an honest toast+log messag
     "toast names the class_type/input_name generically, not LoRA-specific wording");
   assert.ok(toastEl.textContent.toLowerCase().includes("no automatic download"),
     "toast is honest that it cannot auto-fetch this file");
-  assert.equal(toastEl.className, "show error", "surfaced with error-level visual weight");
+  assert.ok(toastEl.className.includes("error"), "surfaced as an error toast");
+  assert.equal(win.document.querySelector("#toast-errors .toast-error-text").textContent,
+    toastEl.textContent, "shown on the error toast stack, which stays until dismissed");
   assert.ok(log.textContent.includes("custom.safetensors"), "the persistent log also gets the line");
 });
 
