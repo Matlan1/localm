@@ -333,6 +333,11 @@ class HFBackend(BaseBackend):
         params = {"model_path": self.model_path, "device": self._device}
         if self._task != "chat":
             params["task"] = self._task
+        if self._device in (None, "cuda"):
+            from localm.discover import hf_gpu_order
+            order = hf_gpu_order()
+            if order:
+                params["gpu_order"] = order
         meta = self._runner.spawn_and_load(params, timeout=self._load_timeout_seconds())
         self.rerank_labels = [str(n) for n in (meta.get("rerank_labels") or [])]
         self._supports_images = bool(meta.get("supports_images"))

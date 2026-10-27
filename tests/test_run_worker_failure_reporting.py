@@ -70,6 +70,23 @@ def test_the_error_record_carries_one_line_and_no_traceback(localm_log):
     assert "worker exit -1" in msg
 
 
+def test_a_death_the_runner_already_logged_adds_no_second_error_line(localm_log):
+    from localm.inference.backends.base import WorkerDiedError
+
+    class _LoggedDeath(_DyingRunner):
+        def chat_stream(self, **_kwargs):
+            yield "partial"
+            raise WorkerDiedError(_DEATH)
+
+    b = _backend()
+    b._runner = _LoggedDeath()
+    with pytest.raises(WorkerDiedError):
+        list(b.chat_stream([{"role": "user", "content": "hi"}], max_tokens=8))
+    assert [r for r in localm_log.records if r.levelno >= logging.WARNING] == []
+    assert any("dropping model instance" in r.getMessage() for r in localm_log.records)
+    assert b._runner is None
+
+
 def test_the_traceback_is_still_in_the_debug_log(localm_log):
     b = _backend()
     with pytest.raises(RuntimeError):

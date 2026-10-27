@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from localm import config, hwdetect
+from localm import config, hwdetect, uv_tool
 from localm.debuglog import logger
 from localm.setup_llama._common import _net_allowed, console
 from localm.setup_llama.library_files import _BLAS_LIBRARY_DIRS
@@ -332,8 +332,11 @@ def _install_runtime_wheel(pkg_dir: Path) -> bool:
     if not _net_allowed():
         env = {**env, "UV_OFFLINE": "1", "PIP_NO_INDEX": "1"}
     last_err = ""
-    for cmd in (["uv", "pip", "install", "-e", str(pkg_dir)],
-                [sys.executable, "-m", "pip", "install", "-e", str(pkg_dir)]):
+    uv = uv_tool.find_uv(uv_tool.install_root())
+    commands = [[sys.executable, "-m", "pip", "install", "-e", str(pkg_dir)]]
+    if uv:
+        commands.insert(0, [uv, "pip", "install", "-e", str(pkg_dir)])
+    for cmd in commands:
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, env=env)
             if r.returncode == 0:

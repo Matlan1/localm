@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""A coder agent that runs inside the server (it has a confirm_handler) fails a
-turn on a 401 from its backend instead of asking for a key on the server's
-console; the terminal coder (no confirm_handler) still asks."""
+"""A coder agent that runs inside the server (a GUI session or a scheduled job) and
+its sub-agents fail a turn on a 401 from the backend instead of asking for a key on
+the server's console; the terminal coder and its sub-agents still ask."""
 
 from __future__ import annotations
 
@@ -80,7 +80,8 @@ def console(monkeypatch):
 
 def test_a_server_session_fails_the_turn_without_prompting(tmp_path, stub, console):
     url, hits = stub
-    agent = _agent(tmp_path, url, on_event=lambda e: None, confirm_handler=lambda *a, **k: True)
+    agent = _agent(tmp_path, url, on_event=lambda e: None,
+                   confirm_handler=lambda *a, **k: True, server_side=True)
 
     with pytest.raises(CoderAuthError) as exc:
         agent._call_llm([{"role": "user", "content": "hi"}], interactive=False)
@@ -100,3 +101,85 @@ def test_the_terminal_coder_still_asks_for_a_key(tmp_path, stub, console):
     assert result == "ok"
     assert console == ["Enter API key: "]
     assert hits == ["Bearer wrong-key", f"Bearer {GOOD_KEY}"]
+
+
+def _child(parent, tmp_path: Path, url: str):
+    from localm.plugins.coder.agent import Agent
+    from localm.plugins.coder.tools.agents import (
+        _inherited_confirm_handler, inherited_child_kwargs)
+    backend = HTTPBackend(url, "other-model", api_key="wrong-key")
+    with patch("localm.plugins.coder.agent.ProjectMap") as pm, \
+         patch("localm.plugins.coder.agent.make_audit_log"), \
+         patch("localm.plugins.coder.agent.load_memory", return_value=""):
+        pm.build.return_value.file_count.return_value = 0
+        return Agent(**inherited_child_kwargs(
+            parent, backend=backend, cwd=tmp_path, name="child", max_turns=3,
+            confirm_handler=_inherited_confirm_handler(parent)))
+
+
+def test_a_terminal_sub_agent_still_asks_for_a_key(tmp_path, stub, console):
+    url, hits = stub
+    parent = _agent(tmp_path, url)
+    parent._interactive = True
+    child = _child(parent, tmp_path, url)
+    assert child.confirm_handler is not None
+
+    result = child._call_llm([{"role": "user", "content": "hi"}], interactive=False)
+
+    assert result == "ok"
+    assert console == ["Enter API key: "]
+    assert hits == ["Bearer wrong-key", f"Bearer {GOOD_KEY}"]
+
+
+def test_a_server_session_sub_agent_fails_the_turn_without_prompting(tmp_path, stub, console):
+    url, hits = stub
+    parent = _agent(tmp_path, url, on_event=lambda e: None,
+                    confirm_handler=lambda *a, **k: True, server_side=True)
+    child = _child(parent, tmp_path, url)
+
+    with pytest.raises(CoderAuthError):
+        child._call_llm([{"role": "user", "content": "hi"}], interactive=False)
+
+    assert console == []
+    assert len(hits) == 1
+
+
+def test_a_scheduled_coder_job_fails_on_a_401_and_the_next_job_still_runs(
+        tmp_path, stub, console, monkeypatch):
+    url, hits = stub
+    monkeypatch.setenv("LOCALM_HOME", str(tmp_path / "home"))
+    from localm.plugins.builtin.jobs import runner
+    from localm.plugins.builtin.jobs.store import Job
+
+    keys = iter(["wrong-key", GOOD_KEY])
+    monkeypatch.setattr(
+        runner, "_coder_backend",
+        lambda job: HTTPBackend(url, "remote-model", api_key=next(keys)))
+
+    def job():
+        return Job(name="j", task_kind="coder", prompt="hi", cwd=str(tmp_path),
+                   schedule_kind="interval", schedule=60)
+
+    first = runner.run_job(job())
+    second = runner.run_job(job())
+
+    assert first["status"] == "error"
+    assert "CoderAuthError" in first["error"]
+    assert console == []
+    assert second["status"] == "ok"
+    assert hits == ["Bearer wrong-key", f"Bearer {GOOD_KEY}"]
+
+
+def test_a_real_gui_coder_session_and_its_sub_agent_never_prompt(tmp_path, stub, console):
+    url, hits = stub
+    from localm.plugins.coder.sessions import CoderSession
+    session = CoderSession(tmp_path, HTTPBackend(url, "remote-model", api_key="wrong-key"),
+                           auto_verify=False)
+    child = _child(session.agent, tmp_path, url)
+
+    for agent in (session.agent, child):
+        with pytest.raises(CoderAuthError):
+            agent._call_llm([{"role": "user", "content": "hi"}], interactive=False)
+
+    assert console == []
+    assert len(hits) == 2

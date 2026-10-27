@@ -955,6 +955,32 @@ def _close_dedup_scope(scope: _DedupScope) -> None:
         os.dup2(scope.saved_fd, above.console_fd)
 
 
+_native_console_pauses = 0
+_native_console_pauses_lock = threading.Lock()
+
+
+@contextlib.contextmanager
+def native_console_paused():
+    """While active, :func:`dedup_native_stderr` scopes entered keep their lines
+    off the terminal: they still reach the recent-activity ring buffer and, in
+    debug mode, the debug log. For a caller that streams text to the terminal
+    itself and must not have native log lines printed into it. A scope already
+    open when this starts keeps its console. Re-entrant and thread-safe."""
+    global _native_console_pauses
+    with _native_console_pauses_lock:
+        _native_console_pauses += 1
+    try:
+        yield
+    finally:
+        with _native_console_pauses_lock:
+            _native_console_pauses -= 1
+
+
+def native_console_is_paused() -> bool:
+    with _native_console_pauses_lock:
+        return _native_console_pauses > 0
+
+
 @contextlib.contextmanager
 def dedup_native_stderr(swap_lock=None):
     """
@@ -1009,7 +1035,7 @@ def dedup_native_stderr(swap_lock=None):
     # CPU-spinning infinite loop with no forward progress.
     guard = swap_lock if swap_lock is not None else contextlib.nullcontext()
     with guard:
-        console = _stable_console_stream()
+        console = None if native_console_is_paused() else _stable_console_stream()
         console_fd = (console.fileno()
                       if console is not None and _stderr_fileno() == 2 else None)
 

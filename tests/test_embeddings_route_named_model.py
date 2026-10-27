@@ -118,6 +118,19 @@ def raw_entry(home, name, path):
     reg_file.write_text(json.dumps(reg))
 
 
+def _spy_is_dir(monkeypatch):
+    """Record every path ``Path.is_dir`` is asked about; returns the list."""
+    from pathlib import Path
+    seen: list[str] = []
+    real_is_dir = Path.is_dir
+
+    def spy(self, *a, **kw):
+        seen.append(str(self))
+        return real_is_dir(self, *a, **kw)
+    monkeypatch.setattr(Path, "is_dir", spy)
+    return seen
+
+
 @pytest.fixture
 def client(home):
     from localm.inference.http_server import create_app
@@ -295,12 +308,140 @@ class TestABrokenEntryIsRefusedByName:
         assert "network or device path" in r.json()["detail"]
         assert configured == [] and worker.instances == []
 
+    def test_a_dotdot_path_is_refused_without_being_stat_ed(
+            self, client, worker, configured, home, tmp_path, monkeypatch):
+        real = register(tmp_path, "nomic-real")
+        dotdot = str(tmp_path / "sub" / ".." / real.name)
+        raw_entry(home, "nomic-dotdot", dotdot)
+        stat_ed = _spy_is_dir(monkeypatch)
+        r = embed(client, "nomic-dotdot")
+        assert r.status_code == 422, r.text
+        assert "nomic-dotdot" in r.json()["detail"]
+        assert not [p for p in stat_ed if ".." in p], stat_ed
+        assert configured == [] and worker.instances == []
+
     def test_ollama_embed_reports_the_same_refusal(self, client, worker, configured, home, tmp_path):
         raw_entry(home, "nomic-gone", str(tmp_path / "nowhere.gguf"))
         r = client.post("/api/embed", json={"model": "nomic-gone", "input": "hi"})
         assert r.status_code == 422, r.text
         assert "nomic-gone" in r.text
         assert configured == []
+
+
+class TestMcpEmbedTool:
+    @staticmethod
+    def _mcp(default_model="chat-model"):
+        from unittest.mock import MagicMock
+
+        from localm.plugins.mcpserver.server import (EngineCache, MCPStdioServer,
+                                                      build_tools)
+        engines = EngineCache(default_model=default_model,
+                              engine_factory=lambda name: MagicMock())
+        return MCPStdioServer(build_tools(engines)), engines
+
+    @staticmethod
+    def _call(server, model, texts=("hello",)):
+        args = {"texts": list(texts)}
+        if model is not None:
+            args["model"] = model
+        resp = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                              "params": {"name": "embed", "arguments": args}})
+        return resp["result"]
+
+    def test_a_named_embedding_gguf_embeds_with_its_own_file(self, home, worker, configured, tmp_path):
+        path = register(tmp_path, "nomic")
+        server, engines = self._mcp()
+        resident = list(engines.resident)
+        made_room = []
+        engines._make_room_for = lambda name: made_room.append(name)
+        result = self._call(server, "nomic", ["a", "b"])
+        assert not result.get("isError"), result
+        vecs = json.loads(result["content"][0]["text"])
+        assert [len(v) for v in vecs] == [768, 768]
+        assert configured == []
+        assert [w.model_path for w in worker.instances] == [str(path.resolve())]
+        assert made_room == [] and engines.resident == resident
+
+    def test_the_resident_chat_model_is_not_unloaded_for_it(self, home, worker, configured, tmp_path):
+        register(tmp_path, "nomic")
+        server, engines = self._mcp()
+        resident = list(engines.resident)
+        assert resident == ["chat-model"]
+        engines._make_room_for = lambda name: pytest.fail(f"made room for {name}")
+        assert not self._call(server, "nomic").get("isError")
+        assert engines.resident == resident
+
+    def test_an_alias_of_the_configured_file_is_served_by_the_configured_embedder_without_an_engine(
+            self, home, worker, configured, tmp_path):
+        dest = emb._embeddings_dir() / emb.KNOWN_EMBEDDING_MODELS["bge-small-en-v1.5"][1]
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(embedding_bytes("bert"))
+        R._register("embedding-bge-small-en-v1.5", dest, model_type="embedding")
+        server, engines = self._mcp()
+        resident = list(engines.resident)
+        engines._make_room_for = lambda name: pytest.fail(f"made room for {name}")
+        for name in ("embedding-bge-small-en-v1.5", "bge-small-en-v1.5"):
+            result = self._call(server, name)
+            assert not result.get("isError"), result
+            assert [len(v) for v in json.loads(result["content"][0]["text"])] == [CONFIGURED_DIM]
+        assert configured == [["hello"], ["hello"]]
+        assert worker.instances == [] and engines.resident == resident
+
+    def test_a_reranker_is_refused_before_the_folder_check(self, home, worker, configured, tmp_path):
+        from localm.plugins.mcpserver.tools import chat as chat_tools
+        path = register(tmp_path, "rr")
+        import localm.model_manager.registry as reg
+        orig = reg.entry_is_reranker
+        reg.entry_is_reranker = lambda name, entry: name == "rr"
+        try:
+            with pytest.raises(rr.RerankerModelError):
+                chat_tools._named_embedding_path("rr")
+        finally:
+            reg.entry_is_reranker = orig
+        assert path.is_file()
+
+    def test_the_configured_name_and_an_unnamed_call_are_left_to_the_engine_path(self, home, worker, configured, tmp_path):
+        from localm.plugins.mcpserver.tools.chat import _named_embedding_path
+        dest = emb._embeddings_dir() / emb.KNOWN_EMBEDDING_MODELS["bge-small-en-v1.5"][1]
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(embedding_bytes("bert"))
+        R._register("embedding-bge-small-en-v1.5", dest, model_type="embedding")
+        register(tmp_path, "nomic")
+        assert _named_embedding_path(None) is None
+        assert _named_embedding_path("") is None
+        assert _named_embedding_path("not-registered") is None
+        assert _named_embedding_path("nomic") not in (None, "configured")
+
+    def test_a_missing_file_is_refused_naming_the_entry(self, home, worker, configured, tmp_path):
+        raw_entry(home, "nomic-gone", str(tmp_path / "nowhere.gguf"))
+        server, _ = self._mcp()
+        result = self._call(server, "nomic-gone")
+        assert result["isError"] is True
+        assert "nomic-gone" in result["content"][0]["text"]
+        assert configured == [] and worker.instances == []
+
+    def test_a_dotdot_path_is_refused_without_being_stat_ed(
+            self, home, worker, configured, tmp_path, monkeypatch):
+        real = register(tmp_path, "nomic-real")
+        raw_entry(home, "nomic-dotdot", str(tmp_path / "sub" / ".." / real.name))
+        stat_ed = _spy_is_dir(monkeypatch)
+        server, _ = self._mcp()
+        result = self._call(server, "nomic-dotdot")
+        assert result["isError"] is True
+        assert "nomic-dotdot" in result["content"][0]["text"]
+        assert not [p for p in stat_ed if ".." in p], stat_ed
+        assert configured == [] and worker.instances == []
+
+    def test_a_worker_failure_is_a_tool_error(self, home, worker, configured, tmp_path, monkeypatch):
+        register(tmp_path, "nomic")
+
+        def boom(path, **kw):
+            raise RuntimeError("native load failed")
+        monkeypatch.setattr(emb, "IsolatedEmbedder", boom)
+        server, _ = self._mcp()
+        result = self._call(server, "nomic")
+        assert result["isError"] is True
+        assert "native load failed" in result["content"][0]["text"]
 
 
 class TestOllamaRoutes:

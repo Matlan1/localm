@@ -5,7 +5,8 @@
 // --- ES module imports ---
 import { lsSetScoped } from "./chat.js";
 import { $, GIB, authHeaders, cancelJob, confirmDangerAsync, el, fmtDuration, instanceCacheTrusted, openModal, streamJob, toast } from "./helpers.js";
-import { t } from "./i18n.js";
+import { t, tn } from "./i18n.js";
+import { interruptedCount, loadInterrupted, onInterruptedChange, renderInterrupted } from "./interrupted-pulls.js";
 import { refreshPerfEstimate } from "./settings-perf.js";
 
 export const modelSelect = $("model-select");
@@ -144,6 +145,7 @@ export let _hwStatsTimer = null;
 export function startHwStats(intervalMs = 2500) {
   pollHwStats();
   pollActivity();   // ADR-0008 U4: folded into this existing poll, not a new timer
+  loadInterrupted();
   if (_hwStatsTimer) clearInterval(_hwStatsTimer);
   _hwStatsTimer = setInterval(() => { pollHwStats(); pollActivity(); }, intervalMs);
   document.addEventListener("visibilitychange", () => {
@@ -230,9 +232,16 @@ export function renderActivityPill(ops) {
   const stale = _activityKnown && _activityStaleReads >= _ACTIVITY_STALE_AFTER_READS;
   const running = ops.filter((op) => op.status === "running");
   if (!running.length && !stale) {
-    pill.style.display = "none";
     pill.classList.remove("st-unknown");
     pill.classList.add("st-running");
+    const interrupted = interruptedCount();
+    if (interrupted) {
+      pill.style.display = "";
+      pill.title = "Click for details";
+      pill.textContent = tn("activity.interruptedPill", interrupted);
+    } else {
+      pill.style.display = "none";
+    }
     return;
   }
   pill.style.display = "";
@@ -279,10 +288,7 @@ function _buildActivityBody(body) {
     body.appendChild(el("p", "sub",
       "Could not reach the server for an update - showing the last known state below."));
   }
-  if (!_activityOps.length) {
-    body.appendChild(el("p", "sub", "Nothing running."));
-    return;
-  }
+  if (!_activityOps.length) body.appendChild(el("p", "sub", t("activity.nothingRunning")));
   for (const op of _activityOps) {
     const row = el("div", "job-row");
     const head = el("div", "job-head");
@@ -320,7 +326,17 @@ function _buildActivityBody(body) {
     }
     body.appendChild(row);
   }
+  const list = el("div", "interrupted-list");
+  if (renderInterrupted(list) || list.childNodes.length) {
+    body.appendChild(el("h4", "", t("activity.interruptedHead")));
+    body.appendChild(list);
+  }
 }
+
+onInterruptedChange(() => {
+  renderActivityPill(_activityOps);
+  _refreshActivityModalIfOpen();
+});
 
 export function showActivityDetails() {
   openModal(_ACTIVITY_MODAL_TITLE, _buildActivityBody);
@@ -1111,7 +1127,10 @@ export async function switchModel(model, { local = false } = {}) {
   if (data.status === "confirm_required") {
     const confirmed = await confirmDangerAsync(
       t("models.switch.confirmTitle"), data.detail, t("models.switch.confirmLabel"));
-    if (!confirmed) return { status: "cancelled", reason: "declined by user", model };
+    if (!confirmed) {
+      setStatus("ok", modelCache.active || t("sidebar.status.noModel"));
+      return { status: "cancelled", reason: "declined by user", model };
+    }
     setStatus("busy", t("sidebar.status.loading", { model }));
     data = await _postLoad(model, true);
   }
@@ -1187,11 +1206,17 @@ export async function reloadModel(model) {
 // model that may not fit in available RAM and runs from disk-backed memory,
 // res.mmap_cpu_from_disk one whose CPU layers read it from disk on every token.
 // res.mmap_ram_short marks a use_mmap off load larger than available RAM; its
-// warning is res.mmap_note.
+// warning is res.mmap_note. A res.mmap_cpu_from_disk load with
+// res.mmap_cpu_read_bytes and res.mmap_ram_available_bytes names both sizes.
 export function toastLoadResult(res, model) {
   const fromDisk = !!(res && res.mmap_from_disk);
-  const diskNote = t(res && res.mmap_cpu_from_disk
-    ? "models.switch.mmapCpuFromDisk" : "models.switch.mmapFromDisk");
+  const cpuFromDisk = !!(res && res.mmap_cpu_from_disk);
+  const gib = (n) => (n / 1024 ** 3).toFixed(1);
+  const sized = cpuFromDisk && res.mmap_cpu_read_bytes > 0 && res.mmap_ram_available_bytes >= 0;
+  const diskNote = sized
+    ? t("models.switch.mmapCpuFromDiskSized", {
+      read: gib(res.mmap_cpu_read_bytes), avail: gib(res.mmap_ram_available_bytes) })
+    : t(cpuFromDisk ? "models.switch.mmapCpuFromDisk" : "models.switch.mmapFromDisk");
   if (res && res.degraded) {
     const parts = [];
     if (res.gpu_layers_offloaded < res.gpu_layers_total) {

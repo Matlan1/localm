@@ -83,6 +83,11 @@ yourself - and are written in every session mode, privacy included:
   defaults) is written to `prompts.json`.
 - **GUI uploads.** A file you upload for a model or tool to read is written
   to `<home>/uploads/`.
+- **Download records.** A model download in progress is recorded in
+  `<data dir>/pending-pulls/` (the model spec, its source URLs and sizes) so an
+  interrupted one can be resumed; the record is removed when it finishes or you
+  delete or resume it. Like the model registry, it holds model source details
+  only, never conversation content.
 
 None of this is silent: each is something you explicitly asked localm to
 keep, not a trace of a conversation. But if you are relying on privacy mode
@@ -223,9 +228,16 @@ nothing when `perl`, which it needs to remove personal details, is missing.
   (`\\FILESERVER01\share`, also in its doubled-backslash and `\\?\UNC\` forms),
   a host name ending in a local-network suffix (`nas.local`, `pc.lan`,
   `printer.home.arpa`, `.internal`, `.localdomain`; the suffix is kept), and this
-  computer's own name wherever it appears as a whole word (not inside a dotted
-  name or a path, and not when it is a distribution's default name such as
-  `ubuntu`). `\\wsl$`, `\\wsl.localhost`, `localhost`, localm's own
+  computer's own name. The name is always replaced where it stands as a machine
+  name: in a URL (`http://server:8080`), after `@` (`me@server`), before a port
+  (`server:5000`), or as the value of a `host`, `computer`, `machine`, `node`,
+  `device` or `pc` setting, also with `name` after it (`Host Name: SERVER`,
+  `hostname=server`). A name with a digit, hyphen or other non-letter (such as
+  `DESKTOP-4F2K9` or `node01`) is also replaced wherever else it appears as a
+  whole word (not inside a dotted name or a path). A name made only of letters
+  can be an ordinary word (`server`, `ubuntu`), so elsewhere in the text it is
+  kept: if your computer has such a name and you mention it in your own words,
+  review the report before sending it. `\\wsl$`, `\\wsl.localhost`, `localhost`, localm's own
   `localm.local`, Docker's `host.docker.internal` and public domain names are
   kept.
 - Config values are sent only from a small allowlist of operational keys

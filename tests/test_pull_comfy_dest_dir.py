@@ -142,7 +142,7 @@ class TestRepoFolderSpec:
     it is fetched from that path, staged under the destination's hidden
     ``.cache/localm-staging`` and saved under its bare filename."""
 
-    SPEC = "Comfy-Org/ACE-Step_ComfyUI_repackaged:all_in_one/ace_step_v1_3.5b.safetensors"
+    SPEC = "Comfy-Org/ACE-Step:all_in_one/ace_step_v1_3.5b.safetensors"
 
     def _record_downloads(self, monkeypatch, body=b"ace-bytes"):
         """Fake huggingface_hub.hf_hub_download the way the real one behaves
@@ -182,7 +182,7 @@ class TestRepoFolderSpec:
 
         assert (dest_dir / "ace_step_v1_3.5b.safetensors").read_bytes() == b"ace-bytes"
         assert not (dest_dir / "all_in_one").exists(), "a repo folder appeared in the destination"
-        assert calls == [("Comfy-Org/ACE-Step_ComfyUI_repackaged",
+        assert calls == [("Comfy-Org/ACE-Step",
                           "all_in_one/ace_step_v1_3.5b.safetensors",
                           dest_dir / ".cache" / "localm-staging")]
         assert ok is True
@@ -197,7 +197,7 @@ class TestRepoFolderSpec:
         mm._pull_gguf_file(self.SPEC, None, model_type="diffusion-unet",
                            dest_dir=tmp_path / "ckpt", register=False)
 
-        assert asked == [("Comfy-Org/ACE-Step_ComfyUI_repackaged",
+        assert asked == [("Comfy-Org/ACE-Step",
                           "all_in_one/ace_step_v1_3.5b.safetensors")]
 
     def test_a_same_named_folder_in_the_destination_is_left_alone(

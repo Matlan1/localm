@@ -71,6 +71,32 @@ class TestEngineLoadIdempotency(unittest.TestCase):
         engine._backend.load.assert_not_called()
 
 
+class TestEngineLoadingFlag(unittest.TestCase):
+    def _make_engine(self, load_side_effect):
+        from localm.inference.engine import Engine
+        engine = object.__new__(Engine)
+        engine.model_path = "/fake/model.gguf"
+        engine.display_name = "fake-model"
+        engine._backend = _make_mock_backend(loaded=False)
+        engine._backend.load.side_effect = load_side_effect
+        return engine
+
+    def test_loading_is_true_only_while_the_backend_loads(self):
+        seen = []
+        engine = self._make_engine(lambda: seen.append(engine.loading))
+        engine.load()
+        self.assertEqual(seen, [True])
+        self.assertFalse(engine.loading)
+
+    def test_a_failed_load_clears_loading(self):
+        def _fail():
+            raise RuntimeError("load failed")
+        engine = self._make_engine(_fail)
+        with self.assertRaises(RuntimeError):
+            engine.load()
+        self.assertFalse(engine.loading)
+
+
 class TestEngineAutoReload(unittest.TestCase):
     def _make_engine(self, loaded=False):
         from localm.inference.engine import Engine

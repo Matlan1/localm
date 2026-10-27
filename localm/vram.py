@@ -104,7 +104,8 @@ def decide_media_swap(settings: dict, *,
     Pass *read_free* to inject the free-VRAM reading in tests.
 
     The default reading uses ``discover.vram_capacity_joined()`` (combined
-    free across a configured multi-GPU split, else the same single-GPU number
+    free across a configured multi-GPU split, or across every discrete GPU when
+    neither a split nor a main GPU is chosen, else the same single-GPU number
     ``vram_info()`` reports, waiting for a probe already in flight) - the same
     "will it fit" ceiling
     ``http_server.switch_engine``'s eviction gate uses, so a split-configured
@@ -174,11 +175,12 @@ def media_single_device_shortfall(settings: dict, *,
     not held to a thinner margin than the aggregate ceiling it composes with.
 
     Returns None (nothing to check) when the policy is not 'auto' (an explicit
-    always/never is the user's choice), when no split is configured (the combined
-    reading already IS the single card's), when the estimate is unknown ('auto'
-    already swaps on unknown), when the live per-device reading did not complete
-    fresh this call, or when per-device free is unmeasurable (cannot check; do not
-    block a load that might work).
+    always/never is the user's choice), when the capacity ``decide_media_swap``
+    reads is one card's (no split configured and either a main GPU chosen or
+    fewer than two discrete GPUs, ``discover.vram_capacity``), when the estimate
+    is unknown ('auto' already swaps on unknown), when the live per-device
+    reading did not complete fresh this call, or when per-device free is
+    unmeasurable (cannot check; do not block a load that might work).
 
     Freshness, NOT scope, is what this checks. A non-fresh (GPU_PROBE_TIMEOUT or
     BUSY) reading is a frozen last-known-good value from an earlier probe, and like
@@ -201,13 +203,26 @@ def media_single_device_shortfall(settings: dict, *,
                                  list_gpus, resolve_preferred_device)
     cfg = config if config is not None else load_config()
     # applied_split_device_count is loader truth; the detected count reports < 2
-    # for a live split on vulkan.
-    if applied_split_device_count(cfg) < 2:
+    # for a live split on vulkan. With no split and no main GPU, the capacity is
+    # summed over every discrete GPU (discover.vram_capacity) and needs the same check.
+    split = applied_split_device_count(cfg) >= 2
+    if not split and (cfg.get("gpu_split_indices")
+                      or cfg.get("main_gpu_index") is not None):
         return None
     gpus, status = list_gpus(return_status=True)
     if status != GPU_PROBE_OK:
         return None
+    if not split:
+        from localm.discover import _discrete_gpus_sum
+        if _discrete_gpus_sum(gpus) is None:
+            return None
     idx = resolve_preferred_device(cfg, gpus=gpus)
+    if idx is None and not split:
+        # Nothing chosen: the media backend loads on the first GPU.
+        from localm.discover import _llama_visible_torch_devices
+        firsts = sorted(g.get("index") for g in _llama_visible_torch_devices(gpus)
+                        if isinstance(g.get("index"), int))
+        idx = firsts[0] if firsts else None
     if idx is None:
         return None
     dev = {g.get("index"): g for g in gpus}.get(idx)

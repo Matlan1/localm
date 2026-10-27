@@ -73,12 +73,12 @@ RECOMMENDED_VIDEO_MODELS: tuple[RecommendedVideoModel, ...] = (
     RecommendedVideoModel(
         name="wan2.1-t2v-1.3b",
         parts=(
-            RecommendedPart("model", "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
+            RecommendedPart("model", "Comfy-Org/Wan-2.1",
                             "split_files/diffusion_models/wan2.1_t2v_1.3B_fp16.safetensors",
                             2_838_303_560,
                             "be531024cd9018cb5b48c40cfbb6a6191645b1c792eb8bf4f8c1c6e10f924dc5",
                             "diffusion-unet"),
-            RecommendedPart("vae", "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
+            RecommendedPart("vae", "Comfy-Org/Wan-2.1",
                             "split_files/vae/wan_2.1_vae.safetensors", 253_815_318,
                             "2fc39d31359a4b0a64f55876d8ff7fa8d780956ae2cb13463b0223e15148976b",
                             "vae"),
@@ -308,6 +308,24 @@ def _start_image_refusal(name: str) -> str:
     return (f"{name} is a text-to-video model and cannot start from an image. Set an "
             "image-to-video model (for example a Wan I2V model with its CLIP vision "
             "encoder) in Settings > Video, or leave the start image out.")
+
+
+def lora_refusal(s: dict, loras: list) -> Optional[str]:
+    """Why the LoRAs *loras* (``[{"name", "strength"}]``) cannot be applied to
+    the model the settings *s* resolve to (``pairing.resolve_loras``), or
+    None. A model set that does not resolve is left to ``ensure_available``,
+    which reports it. Checked before any VRAM handover."""
+    if not loras:
+        return None
+    try:
+        models = resolve_models(s)
+    except _ModelError:
+        return None
+    try:
+        pairing.resolve_loras(list(loras), models.get("family"))
+    except _ModelError as e:
+        return str(e)
+    return None
 
 
 def refusal(*, model_overrides=None, placement=None, width=None, height=None,
@@ -731,7 +749,8 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
                     "backend": "native", "model": models["label"],
                     "components": {k: v["name"] for k, v in
                                    (models.get("components") or {}).items()} or None,
-                    "loras": [{"name": x["name"], "strength": x["multiplier"]}
+                    "loras": [{"name": x["name"], "strength": x["multiplier"],
+                               **({} if x.get("checked", True) else {"family_checked": False})}
                               for x in lora_files] or None,
                     "runtime": f"stable-diffusion.cpp {sd_runtime.pins.TAG} ({rt.backend})",
                     "elapsed_seconds": round(elapsed, 1),

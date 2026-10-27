@@ -116,6 +116,22 @@ test("declining a confirm_required switch does not publish the new model as acti
     "a declined switch must not publish the requested model as active");
 });
 
+test("declining a confirm_required switch clears the sidebar loading status", async () => {
+  const { window } = loadApp();
+  runScript(window, "modelCache.active = 'other-model';");
+  _confirmRequiredStub(window, []);
+  runScript(window, "confirmDangerAsync = async () => false;");
+
+  await window.switchModel("busy-model");
+
+  const text = window.document.getElementById("status-text").textContent;
+  assert.ok(!/busy-model/.test(text) && !/loading/i.test(text),
+    "a declined load must not leave the status on 'loading <model>': " + text);
+  assert.equal(window.document.getElementById("model-status").hidden, true,
+    "the busy pill must be hidden once the load was declined");
+  assert.equal(text, "other-model", "the status returns to the model that is still active");
+});
+
 test("confirming a confirm_required switch retries with force and publishes the new active model", async () => {
   const { window } = loadApp();
   runScript(window, "modelCache.active = 'other-model';");

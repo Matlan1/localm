@@ -270,24 +270,48 @@ localm config gpu_split_indices 0,1     # which devices to split across (one = a
 localm config gpu_split_ratios 3,1      # relative weight per device, same order/length
 ```
 
-Left blank, `gpu_split_indices` still spreads a model over every detected GPU by
-free VRAM; set it explicitly to choose which cards, and `gpu_split_ratios` to pin
-exact relative weights instead of following free VRAM at load time (blank
-distributes evenly when free VRAM cannot be measured). On a CUDA or ROCm build the
-indices are the ones `localm gpus` and the GUI list. A computer with an integrated
-GPU alongside a discrete one lists the integrated GPU too, and llama.cpp usually does
-not use it then: for a GGUF load localm checks llama.cpp's own device list and
-renumbers a configured split and main GPU into it, and refuses a split (or single
-GPU) that names an integrated GPU llama.cpp leaves out, with a message saying so.
-When the runtime keeps the integrated GPU the numbers already match; when localm
-cannot match the two lists, llama.cpp's default split is kept and the reason is
-logged. On the `vulkan` or `sycl` build the indices are llama.cpp's own device order.
+Left blank, `gpu_split_indices` spreads a model over every discrete GPU, by GPU
+number; set it to choose which cards and the order they are filled in (`3,1,0`
+puts the first layers on GPU 3, then GPU 1, then GPU 0), and `gpu_split_ratios`
+to pin the relative share of each instead of letting localm size it. The indices are the ones `localm gpus` and the
+GUI list. Before a GGUF load localm matches each card to llama.cpp's own device
+list by its PCI bus, so the cards you chose are the ones llama.cpp uses, even
+when llama.cpp numbers them in another order.
+
+For a GGUF load over two or more GPUs localm plans the placement per card: each
+card gets a run of layers that fits its free memory, counting the layers'
+weights, their share of the context (KV cache), and about 1.5 GB per card for
+llama.cpp's working buffers (`vram_overhead_mb`). The cards are filled in the
+order above, and the output layer goes on the last card that holds a layer; when
+localm cannot plan the load (the log says why), llama.cpp uses its own device
+order instead. A card that cannot hold anything useful, or that you did
+not tick, is left out and llama.cpp does not touch it. When the model does not fit
+on the chosen cards, the routed experts of a Mixture-of-Experts model move to
+system RAM first, then whole layers move to the CPU. The console prints the plan,
+for example:
+
+```
+  gpu split: GPU 0 (RTX 4060 Ti): 12 layers, 6.6 of 14.9 GB free; GPU 1 (RTX 3090): 20 layers, 10.1 of 23.1 GB free; ...; GPU 4 (RTX 3050): 2 layers + output, 3.1 of 5.4 GB free
+```
+
+The automatic context window grows only as far as the fullest card allows. With
+`gpu_split_ratios` set, the layers follow your ratios: with automatic GPU layers,
+fewer layers go on the GPUs when a card would be over its free memory; with a
+fixed `n_gpu_layers`, the plan says which card is short.
+
+A computer with an integrated GPU alongside a discrete one lists the integrated
+GPU too, and llama.cpp does not use it then: a split that names it is refused with
+a message saying so. On the `vulkan` or `sycl` build the indices are llama.cpp's
+own device order.
 
 In the GUI, the same controls live in Settings' Live Tuning card as a **Main
 GPU** selector and a "Split across GPUs" checkbox row (populated from the
 detected device list), with a ratio-weight input beside each checked device for
-`gpu_split_ratios`. Ticking one GPU loads a model on that GPU only; leaving
-every box unticked keeps automatic placement.
+`gpu_split_ratios`. Ticking one GPU loads a model on that GPU only; the ticked
+cards are filled in the order you tick them, shown as the load order under the
+boxes (untick and tick a card again to move it to the end); leaving every box
+unticked uses every discrete GPU. The Models page compares models
+against the VRAM of the GPUs a load would use.
 
 ## Mixture-of-Experts: reducing VRAM footprint
 
@@ -296,9 +320,8 @@ instead of VRAM, so it fits in far less GPU memory. When such a model does not
 fit and GPU layers are auto-sized (the default), localm does this by itself: it
 keeps the routed experts of as few layers as needed in system RAM and every
 layer on the GPU, and only moves whole layers to the CPU when even that does
-not fit. On several GPUs it checks that each card can hold its own share; with
-a configured split (`gpu_split_indices`) it leaves the choice to you. To choose
-it yourself:
+not fit. On several GPUs it checks that each card can hold its own share. To
+choose it yourself:
 
 ```bash
 localm config n_cpu_moe 16        # keep 16 layers' worth of experts on system RAM
@@ -356,11 +379,15 @@ output, the GUI load toast and the load response (`mmap`, `mmap_from_disk`)
 then say it runs from disk-backed memory and that first tokens are slower. A
 model split between GPU and CPU, a machine with no GPU, and a load where
 available RAM cannot be read use llama.cpp's own default, which memory-maps the
-file wherever the device supports it; when the weights such a load keeps in
-system RAM (its CPU layers, plus a draft model placed on the CPU) do not fit
-available RAM with 2 GiB to spare, the same three places say the CPU layers read
-them from disk-backed memory and every token is slower (`mmap_cpu_from_disk` in
-the load response). `on` and `off` are used as given; with `off`, a load whose
+file wherever the device supports it. When the weights the CPU reads while
+generating (its CPU layers, plus a draft model placed on the CPU; the embedding
+tables, of which a token reads one row, are not counted, except the token
+embeddings when the output layer runs on the CPU and shares them) do not fit
+available RAM with 2 GiB to spare, the load warns before it starts that the CPU
+reads them from disk and generation speed is limited by the disk, with both sizes
+and the ways out (free more RAM, a smaller quant, more of the model on the GPU if
+VRAM allows); the GUI load toast and the load response (`mmap_cpu_from_disk`,
+`mmap_note`) carry the same warning. `on` and `off` are used as given; with `off`, a load whose
 weights do not fit available RAM warns before it starts that it may fail or
 swap, and the GUI load toast and the load response (`mmap_ram_short`,
 `mmap_note`) carry the same warning. The

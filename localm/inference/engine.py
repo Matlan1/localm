@@ -446,6 +446,8 @@ class Engine:
         # has already passed, so active_requests alone does not close that
         # window.
         self.unloading = False
+        # True while load() runs the backend load, under the load lock.
+        self.loading = False
 
     @property
     def loaded(self) -> bool:
@@ -465,24 +467,33 @@ class Engine:
         with self._load_lock:
             if self._backend.loaded:
                 return
-            args = getattr(self, "_backend_args", None)
-            if args is not None and not getattr(self, "_backend_fresh", True):
-                # A reload builds a new backend: config-read settings take their
-                # current values, the explicit arguments are kept.
-                self._backend = create_backend(self.model_path, **args)
-                if getattr(self, "_load_cancel", None) is not None:
-                    self._backend.set_load_cancel(self._load_cancel)
-            self._backend_fresh = False
-            backend_type = type(self._backend).__name__.replace("Backend", "")
-            console.print(
-                f"Loading [bold cyan]{self.display_name}[/bold cyan] "
-                f"[dim](backend: {backend_type})[/dim]"
-            )
-            self._attach_registered_adapters()
-            for path, scale in getattr(self._backend, "adapters", None) or ():
-                console.print(f"[dim]  with LoRA adapter {escape(Path(path).name)} "
-                              f"(scale {scale:g})[/dim]")
-            self._backend.load()
+            self.loading = True
+            try:
+                self._load_locked()
+            finally:
+                self.loading = False
+
+    def _load_locked(self) -> None:
+        """The body of load(), for a backend that is not loaded yet. Caller
+        must hold the load lock."""
+        args = getattr(self, "_backend_args", None)
+        if args is not None and not getattr(self, "_backend_fresh", True):
+            # A reload builds a new backend: config-read settings take their
+            # current values, the explicit arguments are kept.
+            self._backend = create_backend(self.model_path, **args)
+            if getattr(self, "_load_cancel", None) is not None:
+                self._backend.set_load_cancel(self._load_cancel)
+        self._backend_fresh = False
+        backend_type = type(self._backend).__name__.replace("Backend", "")
+        console.print(
+            f"Loading [bold cyan]{self.display_name}[/bold cyan] "
+            f"[dim](backend: {backend_type})[/dim]"
+        )
+        self._attach_registered_adapters()
+        for path, scale in getattr(self._backend, "adapters", None) or ():
+            console.print(f"[dim]  with LoRA adapter {escape(Path(path).name)} "
+                          f"(scale {scale:g})[/dim]")
+        self._backend.load()
 
     def _attach_registered_adapters(self) -> None:
         """Give a GGUF backend the LoRA adapters currently attached to this
@@ -623,8 +634,12 @@ class Engine:
         when those weights are read by CPU layers on every token). ``mmap_note``
         is the one-line description
         (``mmap_setting.describe_mmap``), present only when there is something
-        to say. A ``use_mmap`` off load whose weights did not fit available RAM
-        also carries ``mmap_ram_short`` True, and its warning as ``mmap_note``."""
+        to say; for ``mmap_cpu_from_disk`` it is the backend's disk-speed
+        warning (``mmap_disk_note``) when it has one, and
+        ``mmap_cpu_read_bytes`` / ``mmap_ram_available_bytes`` carry its sizes
+        when the load's mmap decision knew them. A ``use_mmap`` off load
+        whose weights did not fit available RAM also carries
+        ``mmap_ram_short`` True, and its warning as ``mmap_note``."""
         effective = getattr(self._backend, "effective_use_mmap", None)
         if effective is None:
             return None
@@ -635,6 +650,17 @@ class Engine:
         state = {"use_mmap": setting, "mmap": bool(effective),
                  "mmap_from_disk": forced, "mmap_cpu_from_disk": cpu}
         note = describe_mmap(setting, bool(effective), forced, cpu)
+        disk = getattr(self._backend, "mmap_disk_note", "")
+        if cpu and isinstance(disk, str) and disk:
+            note = disk
+            decision = getattr(self._backend, "last_mmap_decision", None)
+            read = getattr(decision, "cpu_read_bytes", None)
+            if read is None:
+                read = getattr(decision, "host_bytes", None)
+            avail = getattr(decision, "ram_available", None)
+            if isinstance(read, int) and isinstance(avail, int):
+                state["mmap_cpu_read_bytes"] = read
+                state["mmap_ram_available_bytes"] = avail
         short = getattr(self._backend, "mmap_ram_short_note", "")
         if setting == "off" and isinstance(short, str) and short:
             state["mmap_ram_short"] = True

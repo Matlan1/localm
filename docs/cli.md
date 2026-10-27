@@ -178,6 +178,20 @@ localm pull owner/repo:model-Q4_K_M.gguf --type llm
 
 A pull at a revision downloads every file at the commit the revision pointed at when the pull started, records the revision and that commit on the registry entry (`localm list` shows `hf:owner/repo@revision`), and names a full-repo folder `<repo>-<revision>` unless you pass `--name`, so two revisions of one repo are two models. Its vision projector is not looked up automatically (the default branch's may not match); name one with `--mmproj owner/repo:file.gguf`. A single file keeps its repo file name, so two revisions of the same file cannot both sit in the models folder: a pull refuses to replace a file that another pull registered (another repo, or another revision of this one), so remove that one first. A folder that holds an unfinished download of one revision is likewise never completed with another; pull with a different `--name`, or delete the folder. Duplicate downloads are detected by path and SHA256. When you add or pull something already registered, localm offers alias / copy / move / register / skip instead of silently duplicating gigabytes. Two downloads to the same destination (from the CLI, the GUI, or both) are serialised rather than allowed to interleave their bytes into one file; starting a download that is already running is refused up front, and one interrupted by a crash resumes instead of restarting.
 
+### Interrupted downloads
+
+Every download (Hugging Face file or repo, direct URL, CivitAI) is recorded under `<data dir>/pending-pulls/` while it runs: the model spec and options, the repository and revision, the source URLs, the expected size and digest, and where its partial data is. The record is removed when the download finishes. A download that stops before it finishes (Ctrl+C, a closed window, a crash, a stopped server) keeps its record while partial data is on disk, so it can be continued later with its original options:
+
+```bash
+localm pull --list-interrupted               # what stopped, from where, how much is saved
+localm pull --resume                         # continue the only one (or pick one at a prompt)
+localm pull --resume <id>                    # continue a specific one
+localm pull --delete-interrupted <id>        # delete its partial data and record
+localm pull --dismiss-interrupted <id>       # stop offering it; its data is kept
+```
+
+At a terminal, `localm pull <spec>` first offers each other interrupted download (resume it now, delete its data, hide it, or skip); without a terminal it prints one line, and `localm list` names how many there are. A download still running in another process is never offered or deleted; one counts as stopped only when its process is gone. Resuming is a download, so it follows `net_mode` like any pull. Before resuming, the source is checked: if the file changed (another etag or size, or a repo at another commit), the saved data cannot be continued, nothing is downloaded, and you are told to delete it and pull again. `--list-interrupted` also lists partial files from older versions that no record claims, with an id `--delete-interrupted` accepts. The records hold model source details only, never chat content, and are written in every session mode, privacy included.
+
 ### Search HuggingFace
 
 ```bash
@@ -589,11 +603,11 @@ Long chats compact automatically before they collide with the ceiling. See [docs
 
 ### Multi-GPU: picking the main device
 
-On a multi-GPU system, localm loads models onto device 0 by default. `localm gpus` lists every detected device (index, name, VRAM) and marks the configured one:
+On a multi-GPU system a GGUF model is spread over every GPU by default (see the next section); the main GPU is where an HF (transformers) model loads and where a GGUF model's vision projector goes. `localm gpus` lists every detected device (index, name, VRAM) and marks the configured one:
 
 ```bash
 localm gpus                        # list detected GPUs
-localm config main_gpu_index 1     # load models onto device 1 instead
+localm config main_gpu_index 1     # make device 1 the main GPU
 ```
 
 The GUI has the same control: Settings > Live tuning shows a "Main GPU" dropdown once more than one GPU is detected. An index that no longer matches a currently-detected device falls back to device 0 with a logged warning rather than silently loading onto the wrong card.
@@ -606,8 +620,7 @@ When a Mixture-of-Experts model does not fit in VRAM and GPU layers are
 auto-sized (`n_gpu_layers_auto`, with `n_gpu_layers` left at 99, the
 defaults), localm keeps the routed experts of as few layers as needed in system
 RAM with every layer on the GPU, before it moves any whole layer to the CPU
-(on several GPUs, checking each card's own share; not with a configured
-`gpu_split_indices` split). The load output names the choice and how much
+(on several GPUs, checking each card's own share). The load output names the choice and how much
 expert data each generated token reads from RAM, which bounds the speed:
 
 ```
@@ -683,10 +696,14 @@ Reads then come from disk until the pages are cached, which is why the first
 tokens are slower. A model split between GPU and CPU, a load on a machine with
 no GPU, and a load where available RAM cannot be read use llama.cpp's own
 default instead, which memory-maps the file wherever the device supports it.
-When the weights such a load keeps in system RAM (its CPU layers, plus a draft
-model placed on the CPU) do not fit available RAM with 2 GiB to spare, the load
-output says the CPU layers read them from disk-backed memory and every token is
-slower. `on` and `off` are used as given and the load output names
+Such a load stays memory-mapped whatever the RAM. When the weights the CPU reads
+while generating (its CPU layers, plus a draft model placed on the CPU; the
+embedding tables, of which a token reads one row, are not counted, except the
+token embeddings when the output layer runs on the CPU and shares them) do not
+fit available RAM with 2 GiB to spare, a warning before the load names both sizes
+and says the CPU reads them from disk, so generation speed is limited by the
+disk, and how to avoid it: free more RAM, use a smaller quant, or put more of the
+model on the GPU if VRAM allows. Nothing is said when they fit. `on` and `off` are used as given and the load output names
 them (`mmap on` / `mmap off`); with `off`, a load whose weights do not fit
 available RAM warns before it starts that it may fail or swap. The setting applies to the loaded model on its
 next load; the Settings page has the same field ("Memory-map model files").
@@ -698,14 +715,15 @@ A model too large for any single card's VRAM can load using the combined VRAM of
 ```bash
 localm gpus                              # (split) marks any device in the split
 localm config gpu_split_indices 0,1      # split the model across devices 0 and 1
+localm config gpu_split_indices 3,1,0    # GPU 3 gets the first layers, then GPU 1, then GPU 0
 localm config gpu_split_ratios 3,1       # optional: PIN device 0 to three times device 1's share
 localm config gpu_split_indices 1        # GGUF chat model: load on device 1 only
 localm config gpu_split_indices ""       # clear it - llama.cpp spreads a GGUF model over every GPU again
 ```
 
-How much of the model lands on each card is figured out automatically: at load time localm reads every split device's free VRAM and sizes each card's share proportionally, so a card that is half-occupied gets a half-sized share instead of an equal one that would not fit. Set `gpu_split_ratios` only to pin exact weights (that disables the automatic distribution); when free VRAM cannot be measured per device, the split falls back to even shares, and the decision is logged either way.
+How much of a GGUF model lands on each card is planned at load time from every card's free VRAM: each card gets a run of layers that fits its free memory, counting the layers' weights, their share of the context (KV cache) and about 1.5 GB per card for llama.cpp's working buffers (`vram_overhead_mb`); the cards are filled in the order `gpu_split_indices` lists them (by GPU number when it is blank) whenever localm plans the load (when it cannot, the log says so and llama.cpp uses its own device order), the output layer goes on the last card that holds a layer, and a card that cannot hold anything useful is left out. localm then tells llama.cpp exactly which cards to use and how many layers each takes, so llama.cpp sets nothing up on cards outside the plan. The load output prints the plan (`gpu split: GPU 0 (...): 12 layers, 6.6 of 14.9 GB free; ...`). When the model does not fit, the routed experts of a Mixture-of-Experts model move to system RAM first, then whole layers move to the CPU. Set `gpu_split_ratios` only to pin the shares yourself; the plan then follows your ratios (with automatic GPU layers, fewer layers go on the GPUs when a card would be over its free memory; with a fixed `n_gpu_layers`, the plan says which card is short).
 
-GGUF models use llama.cpp's native layer-split; HF (transformers) models use accelerate's `device_map="auto"` restricted to just the listed devices. A single entry loads a GGUF chat model on that device alone, when localm can match the device to llama.cpp's own device list (otherwise llama.cpp's default split is kept and the reason is logged), and loads an HF model on that device with any overflow on the CPU. A longer list with fewer than 2 currently-detected devices (a stale index, or only one still present) drops the split with a logged warning - it never crashes a load. On a CUDA or ROCm build with an integrated GPU beside a discrete one, the integrated GPU is listed, and llama.cpp usually does not use it: for a GGUF load localm checks llama.cpp's own device list and renumbers the split and `main_gpu_index` into it (when the runtime keeps the integrated GPU, the numbers already match and nothing changes; when localm cannot match the two lists, llama.cpp's default split is kept, device 0 is the primary, and the reason is logged). A split or single entry that names an integrated GPU llama.cpp leaves out refuses the GGUF load with a message saying so. On the `vulkan` or `sycl` runtime build the indices are passed to the native loader as-is (torch and nvidia-smi cannot see or number Vulkan-only or SYCL-only devices, so there is nothing to cross-check them against); there the numbers mean that backend's own device order, which is exactly what the GUI's selectors list on that build. The GUI has the same control: Settings > Live tuning shows "Split across GPUs" checkboxes next to the Main GPU dropdown (one ticked GPU loads a GGUF model on that GPU only, none ticked keeps automatic placement), and the model search results hint when a model would fit split across your GPUs but not on the largest one alone.
+GGUF models use llama.cpp's native layer-split; HF (transformers) models use accelerate's `device_map="auto"` restricted to just the listed devices (every GPU when none are listed), filled in the listed order, with `vram_overhead_mb` left free on each GPU for generation. A single entry loads a GGUF chat model on that device alone, when localm can match the device to llama.cpp's own device list (otherwise llama.cpp's default split is kept and the reason is logged), and loads an HF model on that device with any overflow on the CPU. A longer list with fewer than 2 currently-detected devices (a stale index, or only one still present) drops the split with a logged warning - it never crashes a load. For a GGUF load localm matches each card to llama.cpp's own device list by its PCI bus, so the cards you chose are the ones llama.cpp uses even when it numbers them in another order; when the two lists cannot be matched, llama.cpp's default split is kept and a warning says why. On a CUDA or ROCm build with an integrated GPU beside a discrete one, the integrated GPU is listed, and llama.cpp does not use it. A split or single entry that names an integrated GPU llama.cpp leaves out refuses the GGUF load with a message saying so. On the `vulkan` or `sycl` runtime build the indices are passed to the native loader as-is (torch and nvidia-smi cannot see or number Vulkan-only or SYCL-only devices, so there is nothing to cross-check them against); there the numbers mean that backend's own device order, which is exactly what the GUI's selectors list on that build. The GUI has the same control: Settings > Live tuning shows "Split across GPUs" checkboxes next to the Main GPU dropdown (one ticked GPU loads a GGUF model on that GPU only, two or more are filled in the order you tick them, none ticked uses every discrete GPU), and the model search results hint when a model would fit split across your GPUs but not on the largest one alone.
 
 ### Keeping more than one model loaded
 
@@ -1218,6 +1236,9 @@ localm update                   # check for and apply a newer localm build (you 
 localm update --check           # only report whether an update is available; do not apply
 localm update -y                # apply without the confirmation prompt
 localm update --rollback        # restore the previous build from the last update backup
+localm update --list            # list every release you can install
+localm update --to 0.3.0        # install that release, older or newer than yours
+localm update --to 0.3.0 -y --allow-unverified   # non-interactive, even if its signature does not verify
 localm bug-report -m "..."      # generate an editable bug report and offer to send it to the maintainer
 localm bug-report -m "what I did" -e "what I expected" -w "what happened" --send   # non-interactive, send immediately
 localm issues [NUMBER]          # list the project's issues, or show one by number
@@ -1231,6 +1252,18 @@ before applying anything, and refuses a build that is not newer. The keys are
 pinned in its own source and can be replaced by a signed update.
 See [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md) for the update trust model. The GUI Models page
 has an "Update now" button for the same flow.
+
+`--to VERSION` installs the release you name, including an older one. It says when
+that is a downgrade and asks first; before a downgrade it copies your settings, model
+registry, coder sessions, memory and plugins to `updates/data-before-<version>-<date>-<time>-<8 hex>/`
+in the data directory, and `localm update --rollback` returns to the version you had.
+That copy is not restored automatically; to restore it, stop localm and copy its files
+back into the data directory.
+The build must be the version you named. When its signature does not verify (for
+example a release from before 0.3.0, signed with a retired key), localm says why and
+installs it only if you confirm; with `-y`, add `--allow-unverified`. A version you go
+back to this way can still update to newer releases. Settings > Updates > Choose a
+version does the same in the GUI.
 
 `localm bug-report` needs a working localm. When localm will not start at all (a
 failed install, a broken venv, setup itself failing), use the standalone reporter

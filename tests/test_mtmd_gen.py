@@ -31,19 +31,58 @@ class _FakeLib:
         return _Fn()
 
 
+def _exports(interface):
+    return {*g._SIGNATURES, *g._INTERFACE_SIGNATURES[interface]}
+
+
+def _offsets(cls):
+    return {n: getattr(cls, n).offset for n, _t in cls._fields_}
+
+
 class TestAbiGate:
-    def test_an_mtmd_without_the_marker_export_is_refused(self):
-        lib = _FakeLib(set(g._SIGNATURES) - {"mtmd_gen_inp_default"})
+    def test_an_mtmd_without_either_marker_export_is_refused(self):
+        lib = _FakeLib(_exports(g.INTERFACE_LEGACY) - {"mtmd_gen_inp_default"})
         with pytest.raises(g.SpeechUnavailable, match="localm setup-llama"):
             g.bind_generation_api(lib)
 
-    def test_an_mtmd_missing_a_helper_function_is_refused(self):
-        lib = _FakeLib({"mtmd_gen_inp_default", "mtmd_gen_audio_get_info"})
+    @pytest.mark.parametrize("interface", [g.INTERFACE_LEGACY, g.INTERFACE_STATE])
+    def test_an_mtmd_missing_a_helper_function_is_refused(self, interface):
+        lib = _FakeLib(_exports(interface) - {"mtmd_helper_gen_audio_step_gen"})
         with pytest.raises(g.SpeechUnavailable, match="lacks a speech generation function"):
             g.bind_generation_api(lib)
 
+    def test_a_state_marker_without_the_state_functions_is_refused(self):
+        lib = _FakeLib(_exports(g.INTERFACE_LEGACY) | {"mtmd_gen_state_init"})
+        with pytest.raises(g.SpeechUnavailable, match="lacks a speech generation function"):
+            g.bind_generation_api(lib)
+
+    def test_an_mtmd_without_the_state_marker_binds_the_legacy_interface(self):
+        ns = g.bind_generation_api(_FakeLib(_exports(g.INTERFACE_LEGACY)))
+        assert ns.interface == g.INTERFACE_LEGACY
+        assert ns.helper_input is g._HelperInputLegacy
+        assert ns.mtmd_gen_audio_process.argtypes == [
+            ctypes.c_void_p, ctypes.POINTER(g._GenInpLegacy),
+            ctypes.POINTER(g._GenOutLegacy)]
+        assert ns.mtmd_gen_inp_default.restype is g._GenInpLegacy
+        assert ns.mtmd_helper_gen_audio_set_input.argtypes[1] is ctypes.POINTER(
+            g._HelperInputLegacy)
+        assert not hasattr(ns, "mtmd_gen_state_init")
+
+    def test_an_mtmd_with_the_state_marker_binds_the_state_interface(self):
+        ns = g.bind_generation_api(_FakeLib(_exports(g.INTERFACE_STATE)))
+        assert ns.interface == g.INTERFACE_STATE
+        assert ns.helper_input is g._HelperInput
+        assert ns.mtmd_gen_audio_process.argtypes == [
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(g._GenInp),
+            ctypes.POINTER(g._GenOut)]
+        assert ns.mtmd_gen_inp_default.restype is g._GenInp
+        assert ns.mtmd_helper_gen_audio_set_input.argtypes[1] is ctypes.POINTER(
+            g._HelperInput)
+        assert ns.mtmd_gen_state_init.argtypes == [ctypes.c_void_p, g._GenStateParams]
+        assert ns.mtmd_gen_state_free.argtypes == [ctypes.c_void_p]
+
     def test_binding_leaves_the_shared_attributes_of_the_library_alone(self):
-        lib = _FakeLib({"mtmd_gen_inp_default", *g._SIGNATURES})
+        lib = _FakeLib(_exports(g.INTERFACE_STATE))
         shared = _Fn(argtypes=[ctypes.c_char_p])
         lib.mtmd_bitmap_init_from_audio = shared
         ns = g.bind_generation_api(lib)
@@ -53,14 +92,37 @@ class TestAbiGate:
             ctypes.c_size_t, ctypes.POINTER(ctypes.c_float)]
         assert g.bind_generation_api(lib) is ns
 
-    def test_the_helper_input_matches_the_c_layout(self):
+    def test_the_helper_inputs_match_the_c_layouts(self):
         assert ctypes.sizeof(ctypes.c_void_p) == 8
-        offsets = {name: getattr(g._HelperInput, name).offset
-                   for name, _t in g._HelperInput._fields_}
-        assert offsets == {"seq_id": 0, "prompt": 8, "prompt_len": 16,
-                           "speaker_ref": 24, "lang": 32, "top_k": 40,
-                           "top_p": 44, "seed": 48, "out_type": 52}
+        assert _offsets(g._HelperInputLegacy) == {
+            "seq_id": 0, "prompt": 8, "prompt_len": 16, "speaker_ref": 24, "lang": 32,
+            "top_k": 40, "top_p": 44, "seed": 48, "out_type": 52}
+        assert ctypes.sizeof(g._HelperInputLegacy) == 56
+        assert _offsets(g._HelperInput) == {
+            "stream": 0, "seq_id": 4, "prompt": 8, "prompt_len": 16, "speaker_ref": 24,
+            "lang": 32, "top_k": 40, "top_p": 44, "seed": 48, "out_type": 52}
         assert ctypes.sizeof(g._HelperInput) == 56
+
+    def test_the_gen_structs_match_the_c_layouts(self):
+        assert _offsets(g._GenInpLegacy) == {
+            "type": 0, "code0": 4, "embd": 8, "top_k": 16, "top_p": 20, "seed": 24,
+            "temp": 28, "codes": 32, "n_codes": 40, "feats": 48, "n_feats": 56,
+            "state_data": 64, "state_size": 72}
+        assert ctypes.sizeof(g._GenInpLegacy) == 80
+        assert _offsets(g._GenOutLegacy) == {
+            "codes": 0, "n_codes": 8, "feats": 16, "n_feats": 24, "embd": 32,
+            "is_eos": 40, "audio": 48, "n_samples": 56, "state_data": 64,
+            "state_size": 72}
+        assert ctypes.sizeof(g._GenOutLegacy) == 80
+        assert _offsets(g._GenInp) == {
+            "type": 0, "code0": 4, "embd": 8, "top_k": 16, "top_p": 20, "temp": 24,
+            "codes": 32, "n_codes": 40, "feats": 48, "n_feats": 56}
+        assert ctypes.sizeof(g._GenInp) == 64
+        assert _offsets(g._GenOut) == {
+            "codes": 0, "n_codes": 8, "feats": 16, "n_feats": 24, "embd": 32,
+            "is_eos": 40, "audio": 48, "n_samples": 56}
+        assert ctypes.sizeof(g._GenOut) == 64
+        assert ctypes.sizeof(g._GenStateParams) == 4
 
 
 class TestSamplingFromMeta:
@@ -128,7 +190,9 @@ class _FakeMtmd:
     """The helper's C API over Python state: *frames* frames, then end of
     speech; *fail_step* makes step_gen fail once at that frame."""
 
-    def __init__(self, frames=4, fail_step=None):
+    def __init__(self, frames=4, fail_step=None, interface=g.INTERFACE_STATE):
+        self.interface = interface
+        self.helper_input = g._INTERFACE_STRUCTS[interface]["mtmd_helper_gen_audio_inp"]
         self.frames = frames
         self.fail_step = fail_step
         self.calls = []
@@ -140,7 +204,10 @@ class _FakeMtmd:
 
     def mtmd_helper_gen_audio_set_input(self, helper, inp_ref):
         inp = inp_ref._obj
-        self.inputs.append({"seed": inp.seed, "top_k": inp.top_k, "top_p": inp.top_p,
+        if type(inp) is not self.helper_input:
+            return 1
+        self.inputs.append({"layout": type(inp), "stream": getattr(inp, "stream", None),
+                            "seed": inp.seed, "top_k": inp.top_k, "top_p": inp.top_p,
                             "lang": inp.lang,
                             "prompt": inp.prompt, "speaker": bool(inp.speaker_ref)})
         self.step = 0
@@ -187,10 +254,18 @@ class _FakeMtmd:
         self.calls.append("bitmap_free")
 
     def mtmd_gen_inp_default(self, ctx):
-        return g._GenInp(seed=0xFFFFFFFF)
+        if self.interface == g.INTERFACE_STATE:
+            return g._GenInp()
+        return g._GenInpLegacy(seed=0xFFFFFFFF)
 
-    def mtmd_gen_audio_process(self, ctx, inp_ref, out_ref):
-        inp = inp_ref._obj
+    def mtmd_gen_audio_process(self, ctx, *args):
+        if self.interface == g.INTERFACE_STATE:
+            if len(args) != 3:
+                self.calls.append("invalid gen state")
+                return 1
+            self.calls.append(("process", args[1]._obj.type))
+            return 0
+        inp = args[0]._obj
         self.calls.append(("reseed", inp.type, inp.seed, bool(inp.embd)))
         return 0
 
@@ -213,8 +288,8 @@ class _FakeProjector:
         return True
 
 
-@pytest.fixture
-def synth(monkeypatch):
+@pytest.fixture(params=[g.INTERFACE_STATE, g.INTERFACE_LEGACY])
+def synth(monkeypatch, request):
     calls = []
     api = g.api
     monkeypatch.setattr(api, "llama_memory_clear", lambda mem, data=True: calls.append("mem_clear"))
@@ -235,7 +310,7 @@ def synth(monkeypatch):
                         lambda vocab, raw, n, buf, cap, add, parse: _tokenize(raw, buf, parse))
 
     s = object.__new__(g.SpeechSynthesizer)
-    s._m = _FakeMtmd()
+    s._m = _FakeMtmd(interface=request.param)
     s._mtmd = _FakeProjector(on_gpu=False)
     s._helper = 7
     s._ctx = 3
@@ -294,7 +369,17 @@ class TestSynthesisLoop:
         assert out.wav == synth._m.wav
         assert synth._m.inputs[0]["seed"] == 42 and synth._m.inputs[0]["top_k"] == 40
 
-    def test_a_repeated_seed_resets_the_generator_before_the_request(self, synth):
+    def test_the_helper_gets_the_input_layout_of_the_interface(self, synth):
+        synth.synthesize("hello", seed=3)
+        sent = synth._m.inputs[0]
+        assert sent["layout"] is synth._m.helper_input
+        if synth._m.interface == g.INTERFACE_STATE:
+            assert sent["stream"] is False
+        assert sent["seed"] == 3
+
+    def test_a_repeated_seed_resets_the_legacy_generator_before_the_request(self, synth):
+        if synth._m.interface != g.INTERFACE_LEGACY:
+            pytest.skip("the legacy interface only")
         synth.synthesize("hello", seed=42)
         assert not any(isinstance(c, tuple) and c[0] == "reseed" for c in synth._m.calls)
         synth._m.calls.clear()
@@ -306,19 +391,18 @@ class TestSynthesisLoop:
         synth.synthesize("hello", seed=7)
         assert not any(isinstance(c, tuple) and c[0] == "reseed" for c in synth._m.calls)
 
-    def test_the_gen_structs_match_the_c_layout(self):
-        def offsets(cls):
-            return {n: getattr(cls, n).offset for n, _t in cls._fields_}
-        assert offsets(g._GenInp) == {
-            "type": 0, "code0": 4, "embd": 8, "top_k": 16, "top_p": 20, "seed": 24,
-            "temp": 28, "codes": 32, "n_codes": 40, "feats": 48, "n_feats": 56,
-            "state_data": 64, "state_size": 72}
-        assert ctypes.sizeof(g._GenInp) == 80
-        assert offsets(g._GenOut) == {
-            "codes": 0, "n_codes": 8, "feats": 16, "n_feats": 24, "embd": 32,
-            "is_eos": 40, "audio": 48, "n_samples": 56, "state_data": 64,
-            "state_size": 72}
-        assert ctypes.sizeof(g._GenOut) == 80
+    @pytest.mark.parametrize("on_gpu", [False, True])
+    def test_a_repeated_seed_on_the_state_interface_makes_no_generator_call(
+            self, synth, on_gpu):
+        if synth._m.interface != g.INTERFACE_STATE:
+            pytest.skip("the state interface only")
+        synth._mtmd.on_gpu = on_gpu
+        outs = [synth.synthesize("hello", seed=42) for _ in range(3)]
+        assert [o.seed for o in outs] == [42, 42, 42]
+        assert [i["seed"] for i in synth._m.inputs] == [42, 42, 42]
+        assert "invalid gen state" not in synth._m.calls
+        assert not any(isinstance(c, tuple) and c[0] == "process" for c in synth._m.calls)
+        assert synth._mtmd.retries == 0 and synth._mtmd.on_gpu is on_gpu
 
     def test_state_is_reset_after_every_request(self, synth):
         synth.synthesize("hello", seed=1)

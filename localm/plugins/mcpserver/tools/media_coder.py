@@ -401,7 +401,8 @@ def build(engines: EngineCache) -> dict[str, dict]:
                     always_confirm=cfg.always_confirm,
                     session_mode=cfg.session_mode, gen_kw=cfg.gen_kw,
                     browser_enabled=coder_runner.browser_enabled(),
-                    max_tokens_explicit=cfg.max_tokens_explicit)
+                    max_tokens_explicit=cfg.max_tokens_explicit,
+                    server_side=True)
         except Exception as e:
             _release()
             return _text_result(f"coder task failed to start: {e}", is_error=True)
@@ -419,7 +420,8 @@ def build(engines: EngineCache) -> dict[str, dict]:
         try:
             with _quiet_stdout():
                 result = coder_runner.run_task_with_timeout(
-                    agent, task, remaining, on_finished=_release)
+                    agent, task, remaining, on_finished=_release,
+                    requested_timeout=timeout)
         except Exception as e:
             return _text_result(f"coder task failed to run: {e}", is_error=True)
 

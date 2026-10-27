@@ -1685,6 +1685,14 @@ def test_unregister_failure_is_logged_and_the_plugin_still_unloads(env, caplog):
         assert c.get("/api/tear/ping").status_code == 404
     assert any("tear" in r.getMessage() and "teardown broke" in r.getMessage()
                for r in caplog.records)
+    state = mgr.api_state()
+    assert "teardown broke" in state["errors"].get("tear", "")
+    row = next(p for p in state["plugins"] if p["name"] == "tear")
+    assert "teardown broke" in (row["error"] or "")
+    assert "tear" not in mgr._errors, "the loader's retry gate must not see it"
+
+    mgr.enable("tear")
+    assert "tear" not in mgr.api_state()["errors"]
 
 
 @pytest.mark.parametrize("delete_data", [True, False])
