@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.routing import Mount, Route, WebSocketRoute, compile_path
 
+from localm.config import ConfigLockTimeout
 from localm.inference.http_server import create_app
 
 # --------------------------------------------------------------------------- #
@@ -550,7 +551,7 @@ def _shell_auth(app) -> dict:
 
 def test_exception_handler_registry():
     handlers = create_app(None).exception_handlers
-    assert set(handlers) == {Exception, StarletteHTTPException,
+    assert set(handlers) == {Exception, ConfigLockTimeout, StarletteHTTPException,
                              RequestValidationError, WebSocketRequestValidationError}
     assert handlers[WebSocketRequestValidationError] is (
         websocket_request_validation_exception_handler)

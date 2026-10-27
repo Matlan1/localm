@@ -384,8 +384,9 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
 
     @app.post("/api/models/load", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def gui_load_model(req: LoadModelRequest):
-        from localm.model_manager.registry import chat_load_refusal
-        refusal = chat_load_refusal(req.model, _require_registered(req.model))
+        from localm.model_manager.registry import chat_load_refusal_off_loop
+        refusal = await chat_load_refusal_off_loop(
+            req.model, _require_registered(req.model))
         if refusal is not None:
             raise HTTPException(422, refusal)
         # Route every switch through the coordinator so a new selection preempts an
@@ -476,7 +477,11 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         when that is in VRAM, and the overhead), ``available`` is ``free +
         held`` and ``fits`` compares ``needed`` with ``available``: a reload at
         the new settings frees what the current load holds first. Both are
-        None when nothing is loaded for *model*, or ``free`` is unknown."""
+        None when nothing is loaded for *model*, or ``free`` is unknown.
+
+        ``loading`` is True while *model*'s load is in flight. ``held``,
+        ``available`` and ``fits`` are then None: the free reading already
+        excludes part of that load."""
         from localm.config import load_config, load_registry
         from localm.discover import vram_capacity
         from localm.model_meta import cached_n_layers
@@ -501,7 +506,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         n_cpu_moe = int(cfg.get("n_cpu_moe") or 0)
         kv_cache_type = resolve_kv_cache_type(cfg)
         running = _hs._engines.get(name) if name else None
-        if not (running is not None and getattr(running, "loaded", False)
+        loading = getattr(running, "loading", False) is True
+        if loading or not (running is not None and getattr(running, "loaded", False)
                 and getattr(running, "unloading", False) is not True):
             running = None
         held_placement = (getattr(running, "gpu_placement", None)
@@ -626,11 +632,11 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                                      kv_cache_type=held_kv_type)["needed"]
         available = (free + held) if isinstance(free, int) and held is not None else None
         budget = available if available is not None else free
-        fits = (est["needed"] <= budget) if isinstance(budget, int) else None
+        fits = (est["needed"] <= budget) if isinstance(budget, int) and not loading else None
         return {"model": name, "model_bytes": model_bytes, **est,
                 "free": free, "held": held if isinstance(free, int) else None,
                 "available": available, "total": total, "fits": fits,
-                "approximate": True}
+                "loading": loading, "approximate": True}
 
     @app.get("/api/gpus", dependencies=[Depends(require_scope(scopes.MODELS_READ))])
     async def gui_gpus():

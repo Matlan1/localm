@@ -9,6 +9,7 @@ import { t, tn } from "../app/i18n.js";
 import { onServerUnreachable } from "../app/init.js";
 import { emptyState, iconEl } from "../app/icons.js";
 import { refreshModels, showKeyGate, switchModel, toastLoadResult } from "../app/models-sidebar.js";
+import { deleteInterrupted, findInterrupted, interruptedState, loadInterrupted, onInterruptedChange, renderInterrupted, setResumeHandler, startResume } from "../app/interrupted-pulls.js";
 import { backendOverrideNote, refreshBackendInfo, refreshPerfEstimate } from "../app/settings-perf.js";
 
 /* ================================================================ */
@@ -404,6 +405,7 @@ export async function refreshModelsPage() {
     _loadPullShortcuts().then((ok) => { if (!ok) _pullShortcutsLoaded = false; });
   }
   await refreshModels();
+  loadInterrupted();
 
   const box = $("models-table");
   if (myGen !== _modelsRenderGen) return;
@@ -928,6 +930,7 @@ async function _gpuInfo() {
     return {
       gpus: Array.isArray(data.gpus) ? data.gpus : [],
       gpu_split_indices: Array.isArray(data.gpu_split_indices) ? data.gpu_split_indices : [],
+      main_gpu_index: Number.isInteger(data.main_gpu_index) ? data.main_gpu_index : null,
     };
   } catch { return { gpus: [], gpu_split_indices: [] }; }
 }
@@ -936,11 +939,13 @@ async function _gpuInfo() {
 async function _splitGpus() { return (await _gpuInfo()).gpus; }
 
 /** Caption naming what the fit-badge VRAM number is. Mirrors
- *  discover.vram_capacity: the number is COMBINED only when 2+ configured split
- *  indices map to detected devices; a 1-entry gpu_split_indices naming a
- *  detected device makes it that GPU's (discover.resolve_load_gpu_index);
- *  otherwise it is the single main GPU's.
- *  `gpuInfo` is {gpus, gpu_split_indices} from _gpuInfo(). */
+ *  discover.vram_capacity: the number is COMBINED when 2+ configured split
+ *  indices map to detected devices, or when neither a split nor a main GPU is
+ *  configured and 2+ discrete GPUs are detected (a load then spreads over all
+ *  of them); a 1-entry gpu_split_indices naming a detected device makes it that
+ *  GPU's (discover.resolve_load_gpu_index); a chosen main GPU, or a split
+ *  naming GPUs that are not present, makes it the main GPU's.
+ *  `gpuInfo` is {gpus, gpu_split_indices, main_gpu_index} from _gpuInfo(). */
 export function vramBasisCaption(totalBytes, gpuInfo) {
   const gib = (totalBytes / GIB).toFixed(0);
   const gpus = Array.isArray(gpuInfo?.gpus) ? gpuInfo.gpus : [];
@@ -953,6 +958,11 @@ export function vramBasisCaption(totalBytes, gpuInfo) {
   }
   if (rawSplit.length === 1 && split.length === 1 && gpus.length > 1) {
     return t("models.vramBasis.oneGpu", { gib, index: split[0] });
+  }
+  const discrete = gpus.filter((g) => g.integrated !== true);
+  const mainChosen = Number.isInteger(gpuInfo?.main_gpu_index);
+  if (rawSplit.length === 0 && !mainChosen && discrete.length >= 2) {
+    return t("models.vramBasis.combined", { gib, count: discrete.length });
   }
   if (gpus.length > 1) {
     return t("models.vramBasis.mainGpu", { gib, count: gpus.length });
@@ -2760,6 +2770,12 @@ function setPullButtons(state) {
 }
 
 async function discardPartialPull(payload) {
+  if (payload.fromInterrupted) {
+    const view = await findInterrupted(payload.spec, payload.name);
+    if (!view) return { ok: true, removed: 0, kept: null };
+    const res = await deleteInterrupted(view.id);
+    return { ...res, kept: null };
+  }
   try {
     const r = await fetch("/api/models/pull/discard", {
       method: "POST", headers: authHeaders(),
@@ -2788,7 +2804,20 @@ function cancelledStatusText(discard) {
                                : "models.pull.cancelledNothingStatus");
 }
 
-async function runPull(payload) {
+async function postPull(payload) {
+  const r = await fetch("/api/models/pull", {
+    method: "POST", headers: authHeaders(),
+    body: JSON.stringify(payload),
+  });
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.detail || r.statusText);
+  return data;
+}
+
+// Runs a pull and shows its progress. *start* posts the request and resolves to
+// {job_id}, or to null when nothing was started; it defaults to POST
+// /api/models/pull with *payload*.
+async function runPull(payload, start = () => postPull(payload)) {
   const sha256Input = $("pull-sha256");
   const storeInput = $("pull-store");
   pausedPull = null;
@@ -2811,12 +2840,13 @@ async function runPull(payload) {
   const samples = [];   // rolling {t, downloaded} window, used when the server sends no rate
   let last = { downloaded: 0, total: 0, pct: null };
   try {
-    const r = await fetch("/api/models/pull", {
-      method: "POST", headers: authHeaders(),
-      body: JSON.stringify(payload),
-    });
-    const data = await r.json();
-    if (!r.ok) throw new Error(data.detail || r.statusText);
+    const data = await start();
+    if (!data) {
+      prog.style.display = "none";
+      log.style.display = "none";
+      setPullButtons("idle");
+      return;
+    }
     const mine = { id: data.job_id, payload, intent: null };
     activePull = mine;
     const end = await streamJob(data.job_id, (line) => {
@@ -2955,8 +2985,28 @@ async function runPull(payload) {
     toast(t("models.pull.failedException", { message: e.message }), true);
   } finally {
     $("pull-start").disabled = false;
+    loadInterrupted();
   }
 }
+
+function renderInterruptedCard() {
+  const card = $("interrupted-card");
+  if (!card) return;
+  const rows = renderInterrupted($("interrupted-list"));
+  const dismissed = interruptedState().downloads.some((d) => d.dismissed);
+  card.hidden = rows === 0 && !dismissed;
+  const intro = card.querySelector(".sub");
+  if (intro) intro.hidden = rows === 0;
+}
+onInterruptedChange(renderInterruptedCard);
+
+// Resume from the interrupted-downloads list runs in this card's progress
+// display, with its Pause and Cancel.
+setResumeHandler(async (view, start) => {
+  if (activePull) throw new Error(t("models.interrupted.busy"));
+  const payload = { spec: view.spec, name: view.name || null, fromInterrupted: true };
+  await runPull(payload, start);
+});
 
 $("pull-start").onclick = async () => {
   const spec = $("pull-spec").value.trim();
@@ -3011,7 +3061,17 @@ $("pull-cancel").onclick = async () => {
 
 $("pull-resume").onclick = async () => {
   if (!pausedPull) return;
-  await runPull(pausedPull);
+  const payload = pausedPull;
+  if (payload.fromInterrupted) {
+    const view = await findInterrupted(payload.spec, payload.name);
+    if (view) {
+      await runPull(payload, () => startResume(view));
+      return;
+    }
+    toast(t("models.interrupted.recordGone"), true);
+    return;
+  }
+  await runPull(payload);
 };
 
 

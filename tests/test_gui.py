@@ -979,6 +979,29 @@ class TestVramEstimate:
         assert data["kv_cache"] == estimate_vram(22 * _GB, 4096, 99,
                                                  n_layers=32)["kv_cache"]
 
+    def test_a_model_whose_load_is_in_flight_gets_no_verdict(
+            self, gui_app, tmp_path, monkeypatch):
+        """Mid-load the free reading already excludes part of the load and the
+        engine holds nothing yet, so neither "fits" nor "may not fit" is right."""
+        engine = self._engine()
+        engine.loaded = False
+        engine.loading = True
+        data = self._running_estimate(gui_app, tmp_path, monkeypatch, engine,
+                                      {"n_ctx": 4096, "n_gpu_layers": 99})
+        assert data["free"] == 20 * _GB
+        assert data["needed"] > data["free"]
+        assert data["loading"] is True
+        assert data["held"] is None and data["available"] is None
+        assert data["fits"] is None
+
+    def test_a_loaded_model_is_not_reported_loading(
+            self, gui_app, tmp_path, monkeypatch):
+        engine = self._engine()
+        engine.loading = False
+        data = self._running_estimate(gui_app, tmp_path, monkeypatch, engine,
+                                      {"n_ctx": 4096, "n_gpu_layers": 99})
+        assert data["loading"] is False and data["fits"] is True
+
     def test_a_model_that_is_not_loaded_holds_nothing(
             self, gui_app, tmp_path, monkeypatch):
         data = self._running_estimate(gui_app, tmp_path, monkeypatch, None,

@@ -5,7 +5,8 @@
 // --- ES module imports ---
 import { lsSetScoped } from "./chat.js";
 import { $, GIB, authHeaders, cancelJob, confirmDangerAsync, el, fmtDuration, instanceCacheTrusted, openModal, streamJob, toast } from "./helpers.js";
-import { t } from "./i18n.js";
+import { t, tn } from "./i18n.js";
+import { interruptedCount, loadInterrupted, onInterruptedChange, renderInterrupted } from "./interrupted-pulls.js";
 import { refreshPerfEstimate } from "./settings-perf.js";
 
 export const modelSelect = $("model-select");
@@ -144,6 +145,7 @@ export let _hwStatsTimer = null;
 export function startHwStats(intervalMs = 2500) {
   pollHwStats();
   pollActivity();   // ADR-0008 U4: folded into this existing poll, not a new timer
+  loadInterrupted();
   if (_hwStatsTimer) clearInterval(_hwStatsTimer);
   _hwStatsTimer = setInterval(() => { pollHwStats(); pollActivity(); }, intervalMs);
   document.addEventListener("visibilitychange", () => {
@@ -230,9 +232,16 @@ export function renderActivityPill(ops) {
   const stale = _activityKnown && _activityStaleReads >= _ACTIVITY_STALE_AFTER_READS;
   const running = ops.filter((op) => op.status === "running");
   if (!running.length && !stale) {
-    pill.style.display = "none";
     pill.classList.remove("st-unknown");
     pill.classList.add("st-running");
+    const interrupted = interruptedCount();
+    if (interrupted) {
+      pill.style.display = "";
+      pill.title = "Click for details";
+      pill.textContent = tn("activity.interruptedPill", interrupted);
+    } else {
+      pill.style.display = "none";
+    }
     return;
   }
   pill.style.display = "";
@@ -279,10 +288,7 @@ function _buildActivityBody(body) {
     body.appendChild(el("p", "sub",
       "Could not reach the server for an update - showing the last known state below."));
   }
-  if (!_activityOps.length) {
-    body.appendChild(el("p", "sub", "Nothing running."));
-    return;
-  }
+  if (!_activityOps.length) body.appendChild(el("p", "sub", t("activity.nothingRunning")));
   for (const op of _activityOps) {
     const row = el("div", "job-row");
     const head = el("div", "job-head");
@@ -320,7 +326,17 @@ function _buildActivityBody(body) {
     }
     body.appendChild(row);
   }
+  const list = el("div", "interrupted-list");
+  if (renderInterrupted(list) || list.childNodes.length) {
+    body.appendChild(el("h4", "", t("activity.interruptedHead")));
+    body.appendChild(list);
+  }
 }
+
+onInterruptedChange(() => {
+  renderActivityPill(_activityOps);
+  _refreshActivityModalIfOpen();
+});
 
 export function showActivityDetails() {
   openModal(_ACTIVITY_MODAL_TITLE, _buildActivityBody);

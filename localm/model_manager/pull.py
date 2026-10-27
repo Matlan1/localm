@@ -302,6 +302,20 @@ def _reap_stale_etag_partials(incomplete_path: Path) -> None:
         _unlink_quiet(_partial_owner_path(p))
 
 
+def _check_xet_endpoint(xet_file_data: Any, headers: dict) -> None:
+    """Raise ``netpolicy.NetworkPolicyError`` when the network policy refuses
+    the Xet storage endpoint a transfer of *xet_file_data* would connect to.
+
+    The endpoint comes from huggingface_hub's Xet connection info (the token
+    answer's ``casUrl``), which huggingface_hub caches per repo revision, so
+    the transfer reuses this lookup. Lookup errors propagate."""
+    from huggingface_hub.utils._xet import refresh_xet_connection_info
+    from localm import netpolicy
+    info = refresh_xet_connection_info(file_data=xet_file_data, headers=headers)
+    netpolicy.check_url(info.endpoint,
+                        allow_when_off=netpolicy.downloads_allowed_when_off())
+
+
 def _resumable_download_to_tmp_and_move(
     incomplete_path: Path,
     destination_path: Path,
@@ -357,6 +371,7 @@ def _resumable_download_to_tmp_and_move(
         if (resume_size == 0 and xet_file_data is not None and expected_size
                 and expected_size > fd.constants.MAX_HTTP_DOWNLOAD_SIZE
                 and fd.is_xet_available()):
+            _check_xet_endpoint(xet_file_data, headers)
             fd.xet_get(
                 incomplete_path=tmp_path,
                 xet_file_data=xet_file_data,
@@ -1064,6 +1079,25 @@ def pull_model(
         local_type = None if model_type == "auto" else model_type
         return _mm.add_local(str(local), name=name, model_type=local_type, store=store)
 
+    from . import pending_pulls
+    with pending_pulls.tracking({
+            "spec": model_spec, "name": name, "sha256": expected_sha256,
+            "mmproj": mmproj_spec, "type": model_type, "redownload": redownload,
+            "dest_dir": str(dest_dir) if dest_dir is not None else None,
+            "register": register}) as outcome:
+        res = _pull_remote(model_spec, spec, name, expected_sha256, redownload,
+                           mmproj_spec, model_type, dest_dir, register, type_is_auto)
+        outcome["ok"] = bool(res)
+    return res
+
+
+def _pull_remote(model_spec: str, spec: str, name: Optional[str],
+                 expected_sha256: Optional[str], redownload: bool,
+                 mmproj_spec: Optional[str], model_type: str,
+                 dest_dir: Optional[Path], register: bool, type_is_auto: bool) -> bool:
+    """The remote half of :func:`pull_model`: *spec* is *model_spec* resolved
+    by ``resolve_spec`` and is not a local path."""
+    from rich.markup import escape
     # owner/repo@revision[:file] names a branch, tag or commit of a HuggingFace
     # repo; the revision is split off here so every later step sees a plain spec.
     ref: Optional[str] = None
@@ -2121,6 +2155,16 @@ def _mmproj_for_registration(
     return _maybe_fetch_repo_mmproj(repo_id, filename, base_dir, speech=reg_type == "tts")
 
 
+def _record_url(hf_hub_url, repo_id: str, rel: str, **kw) -> Optional[str]:
+    """``hf_hub_url`` for the download record, or None (logged) when the hub
+    library rejects the repo id or path; the download itself reports that."""
+    try:
+        return hf_hub_url(repo_id, rel, endpoint=_HF_ENDPOINT, **kw)
+    except Exception as e:
+        logger.debug("no source URL recorded for %s / %s: %s", repo_id, rel, e)
+        return None
+
+
 def _pull_gguf_file(
     spec: str,
     name: Optional[str],
@@ -2498,6 +2542,19 @@ def _pull_gguf_file(
         console.print(f"Pulling [bold cyan]{escape(repo_id)}[/bold cyan]"
                       + (f"@[bold]{escape(revision.ref)}[/bold]" if revision else "")
                       + f" / [bold]{escape(filename)}[/bold]")
+
+    from . import pending_pulls
+    pending_pulls.note_source(source="hf-file", repo=repo_id,
+                              revision=revision.ref if revision else None,
+                              commit=revision.commit if revision else None,
+                              sha256=verify_digest)
+    pending_pulls.note_hf_files(stage_dir, [{
+        "rel": _remote(p),
+        "url": _record_url(hf_hub_url, repo_id, _remote(p),
+                           **_file_revision(published.get(p), revision)),
+        "check_url": _record_url(hf_hub_url, repo_id, _remote(p),
+                                 **({"revision": revision.ref} if revision else {})),
+        "size": part_sizes.get(p), "etag": etags.get(p)} for p in missing])
 
     with _download_progress([base_dir / p for p in missing], total_size,
                             base_dir=stage_dir,
@@ -3330,6 +3387,7 @@ def _pull_hf_snapshot_locked(
 
     _mm.ensure_dirs()
     from ..storekit import atomic_write
+    created = not dest.exists()
     dest.mkdir(parents=True, exist_ok=True)
     try:
         atomic_write(dest / _SNAPSHOT_CLAIM,
@@ -3349,6 +3407,11 @@ def _pull_hf_snapshot_locked(
     )
     console.print("[dim]This may take a while for large models...[/dim]")
 
+    from . import pending_pulls
+    pending_pulls.note_source(source="hf-repo", repo=repo_id,
+                              revision=revision.ref if revision else None,
+                              commit=commit)
+    pending_pulls.note_snapshot(dest, model_name, created, total_size)
     try:
         _ensure_hf_resumable_download()
         with _snapshot_progress(_disk_bytes, total_size, label=repo_id) as _prog:
@@ -4097,9 +4160,11 @@ def _pull_url_locked(
     # HEAD the final URL for the total file size the disk-space check needs.
     # Pinned to the validated IP like the GET below. A connect error here is
     # non-fatal; the GET still fails closed.
+    head_etag = None
     try:
         head  = netpolicy.pinned_request("HEAD", dl_url, allow_redirects=False, timeout=10)
         total = int(head.headers.get("content-length", 0))
+        head_etag = head.headers.get("etag")
     except NetworkPolicyError as e:
         # A policy refusal is not the benign case: it is surfaced and fails
         # closed, like the GET below, rather than collapsing into total=0.
@@ -4119,6 +4184,11 @@ def _pull_url_locked(
     remaining = max(0, total - already_have)
     if not _mm._check_disk_space(_mm.MODELS_DIR, remaining):
         return False
+
+    from . import pending_pulls
+    pending_pulls.note_source(source="url", url=url,
+                              sha256=expected_sha256.lower() if expected_sha256 else None)
+    pending_pulls.note_part(part_file, filename, total or None, etag=head_etag)
 
     # Build request - try to resume from where we left off
     headers: dict = {}
@@ -4401,6 +4471,11 @@ def _pull_civitai_file_locked(
     remaining = max(0, (resolved.size_bytes or 0) - already_have)
     if not _mm._check_disk_space(dest_dir, remaining):
         return False
+
+    from . import pending_pulls
+    pending_pulls.note_source(source="civitai", repo=f"civitai:{version_id}",
+                              sha256=verify_digest.lower() if verify_digest else None)
+    pending_pulls.note_part(part_file, filename, resolved.size_bytes or None)
 
     try:
         dl_url = _ssrf_resolve_final_url(resolved.url)

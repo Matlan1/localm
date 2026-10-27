@@ -523,6 +523,30 @@ test("unchecking a GPU down to 1 clears the ratio-weight row too", async () => {
     "fewer than 2 checked GPUs leaves no ratio inputs to fill in");
 });
 
+test("an estimate taken while the model loads gives no verdict and refreshes once it has loaded", async () => {
+  const calls = [];
+  const base = makeFetch(calls, { free: 3.5 * GIB, held: 7.6 * GIB });
+  let estimates = 0;
+  const fetchImpl = async (url, opts) => {
+    if (String(url).includes("/api/vram-estimate") && ++estimates === 1)
+      return { ok: true, status: 200, json: async () => ({
+        model: "m", model_bytes: 4 * GIB, weights: 4 * GIB, kv_cache: 0.6 * GIB,
+        overhead: 1.5 * GIB, needed: 6.1 * GIB, free: 3.5 * GIB, held: null,
+        available: null, total: 16 * GIB, fits: null, loading: true, approximate: true }) };
+    return base(url, opts);
+  };
+  const { window } = loadApp({ fetchImpl });
+  const est = window.document.getElementById("perf-estimate");
+  assert.ok(await waitFor(() => /still loading/.test(est.textContent)),
+    "a mid-load estimate says the model is loading");
+  assert.doesNotMatch(est.textContent, /fits|may not fit/,
+    "no fit verdict while the load is in flight");
+  assert.equal(est.classList.contains("perf-warn"), false);
+  assert.ok(await waitFor(() => /held by this model/.test(est.textContent), 3500),
+    "the estimate is fetched again after the load and shows the held share");
+  assert.match(est.textContent, /fits/);
+});
+
 test("estimate counts what the running model holds beside the free VRAM", async () => {
   const calls = [];
   const { window } = loadApp({ fetchImpl: makeFetch(calls, { free: 3.5 * GIB, held: 7.6 * GIB }) });
