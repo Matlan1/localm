@@ -25,6 +25,7 @@ import datetime as dt
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -1051,6 +1052,68 @@ def test_ensure_pipeline_worktree_creates_and_reuses_the_same_dedicated_worktree
 
     second = pipeline.ensure_pipeline_worktree(repo)
     assert second == first, "a second call must reuse the same worktree, not create another"
+
+
+def test_ensure_pipeline_worktree_recreates_a_registered_but_missing_folder(tmp_path):
+    repo = _init_scratch_repo(tmp_path)
+    subprocess.run(["git", "remote", "add", "origin", str(repo)], cwd=repo, check=True)
+    subprocess.run(["git", "fetch", "-q", "origin"], cwd=repo, check=True)
+    first = pipeline.ensure_pipeline_worktree(repo)
+    shutil.rmtree(first)
+    listing = subprocess.run(["git", "worktree", "list", "--porcelain"], cwd=repo,
+                             capture_output=True, text=True, check=True).stdout
+    assert "prunable" in listing, "the fixture must reproduce git's prunable state"
+
+    again = pipeline.ensure_pipeline_worktree(repo)
+
+    assert again == first
+    assert (again / "README.md").is_file()
+    status = subprocess.run(["git", "status", "--porcelain"], cwd=again,
+                            capture_output=True, text=True, check=True)
+    assert status.returncode == 0
+
+
+def test_ensure_pipeline_worktree_leaves_other_prunable_registrations_alone(tmp_path):
+    repo = _init_scratch_repo(tmp_path)
+    subprocess.run(["git", "remote", "add", "origin", str(repo)], cwd=repo, check=True)
+    subprocess.run(["git", "fetch", "-q", "origin"], cwd=repo, check=True)
+    other = tmp_path / "someone-elses-worktree"
+    subprocess.run(["git", "worktree", "add", "-q", "--detach", str(other), "master"],
+                   cwd=repo, check=True)
+    shutil.rmtree(other)
+    first = pipeline.ensure_pipeline_worktree(repo)
+    shutil.rmtree(first)
+
+    pipeline.ensure_pipeline_worktree(repo)
+
+    listing = subprocess.run(["git", "worktree", "list", "--porcelain"], cwd=repo,
+                             capture_output=True, text=True, check=True).stdout
+    assert "someone-elses-worktree" in listing
+
+
+def test_inconclusive_issue_text_says_the_candidate_is_retried_after_cooldown(
+        monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline, "STATE_DIR", tmp_path)
+    issues_path = tmp_path / "issues.txt"
+    issues_path.write_text(_ISSUES_FIXTURE, encoding="utf-8")
+    monkeypatch.setattr(pipeline, "ISSUES_PATH", issues_path)
+
+    pipeline._record_inconclusive("b777", tmp_path / "r.json", reason="boom",
+                                  force_issue=True)
+
+    out = issues_path.read_text(encoding="utf-8")
+    assert "NEW-PIN-PIPELINE-LLAMA-B777-CONFIRM-FAILED" in out
+    assert "will not be retried automatically" not in out
+    assert f"{pipeline.INCONCLUSIVE_COOLDOWN_HOURS}h cooldown" in out
+
+
+def test_genuine_fail_issue_text_still_says_it_is_not_retried(tmp_path):
+    issues_path = tmp_path / "issues.txt"
+    issues_path.write_text(_ISSUES_FIXTURE, encoding="utf-8")
+
+    pipeline.append_fail_issue("b778", "really bad", None, issues_path=issues_path)
+
+    assert "will not be retried automatically" in issues_path.read_text(encoding="utf-8")
 
 
 def test_sync_main_checkout_refuses_when_not_on_master(tmp_path):

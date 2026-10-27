@@ -43,6 +43,7 @@ from ._transfer import meter_tqdm_class
 from .gguf import _safe_models_filename
 from .gguf import first_split_part
 from .gguf import gguf_n_embd
+from .gguf import logical_model_path
 from .gguf import split_gguf_parts
 from .registry import _detect_local_model_type, _media_component_type, _sanitize_name
 from .registry import alias_model
@@ -1819,6 +1820,46 @@ def _download_mmproj_file(repo_id: str, remote_name: str, dest: Path, base_dir: 
     _record_mmproj_origin(dest, repo_id, remote_name, actual)
 
 
+def _repoint_unrecorded_projector(model_path: Path, plain: Path, fetched: Path) -> None:
+    """Point the registry entry of *model_path* at *fetched*, the projector
+    just verified against the digest its repo publishes, when the entry records
+    *plain* (the same-named copy that differs from that digest) and *plain* has
+    no origin record beside it (a copy from before origins were recorded, which
+    cannot be told from another repo's projector). No-op when *fetched* is
+    *plain*, when *plain* has an origin record, or when no entry holds this
+    model with *plain* as its projector. Entries of other models are left alone.
+    Prints the change."""
+    if fetched == plain or _mmproj_origin_path(plain).exists():
+        return
+    try:
+        want_model = logical_model_path(model_path)
+        want_old = logical_model_path(plain)
+        new_value = str(logical_model_path(fetched))
+        names: list[str] = []
+        for name, entry in _mm.load_registry().items():
+            if (isinstance(entry, dict) and entry.get("path") and entry.get("mmproj")
+                    and logical_model_path(Path(entry["path"])) == want_model
+                    and logical_model_path(Path(entry["mmproj"])) == want_old):
+                names.append(name)
+    except OSError as e:
+        logger.warning("could not check which model uses %s: %s", plain, e)
+        return
+    if not names:
+        return
+
+    def _swap(reg: dict) -> None:
+        for name in names:
+            entry = reg.get(name)
+            if isinstance(entry, dict):
+                entry["mmproj"] = new_value
+
+    _mm.update_registry(_swap)
+    from rich.markup import escape
+    console.print(
+        f"[yellow]{escape(plain.name)} does not match the digest its repo publishes; "
+        f"{escape(', '.join(names))} now uses {escape(fetched.name)}.[/yellow]")
+
+
 def _maybe_fetch_repo_mmproj(repo_id: str, filename: str, base_dir: Path, *,
                              speech: bool = False) -> Optional[Path]:
     """Auto-attach companion: look for a vision projector shipped in the SAME
@@ -1879,6 +1920,7 @@ def _maybe_fetch_repo_mmproj(repo_id: str, filename: str, base_dir: Path, *,
             "projector (GGUF metadata check failed) - not attaching it.[/yellow]"
         )
         return None
+    _repoint_unrecorded_projector(base_dir / filename, base_dir / candidate, dest)
     return dest
 
 
@@ -2596,6 +2638,26 @@ def _snapshot_files_failing_digest(dest: Path, repo_siblings, repo_id: str) -> l
     return failing
 
 
+_WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt", ".pth", ".ckpt", ".gguf", ".onnx",
+                    ".h5", ".msgpack", ".npz")
+
+
+def _snapshot_weight_files_without_digest(repo_siblings) -> list[str]:
+    """Names of the weight files (by extension, :data:`_WEIGHT_SUFFIXES`) in
+    *repo_siblings* that carry no published LFS sha256, so a download of them
+    cannot be checked against one."""
+    names = []
+    for sib in repo_siblings:
+        name = str(sib.rfilename)
+        if not name.lower().endswith(_WEIGHT_SUFFIXES):
+            continue
+        lfs = getattr(sib, "lfs", None)
+        published = (lfs.get("sha256") if isinstance(lfs, dict) else getattr(lfs, "sha256", None)) if lfs else None
+        if not published:
+            names.append(name)
+    return names
+
+
 def _snapshot_files_damaged(dest: Path, repo_siblings, repo_id: str) -> list[str]:
     """Names of the files of the snapshot at *dest* that are present but do not
     have the size, or the LFS sha256, *repo_siblings* gives them. A file that is
@@ -2610,11 +2672,12 @@ def _snapshot_files_damaged(dest: Path, repo_siblings, repo_id: str) -> list[str
             continue
         if not fp.is_file():
             continue
+        lfs = getattr(sib, "lfs", None)
         size = getattr(sib, "size", None)
         if size is not None and fp.stat().st_size != size:
-            damaged.append(name)
-            continue
-        lfs = getattr(sib, "lfs", None)
+            if lfs or not _is_crlf_copy_of_blob(fp, getattr(sib, "blob_id", None)):
+                damaged.append(name)
+                continue
         published = (lfs.get("sha256") if isinstance(lfs, dict) else getattr(lfs, "sha256", None)) if lfs else None
         if published and _verify_digest(fp, purpose=f"to check {name}").lower() != str(published).lower():
             damaged.append(name)
@@ -2630,6 +2693,29 @@ def _git_blob_id(path: Path) -> str:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+_CRLF_CHECK_LIMIT = 16 * 1024 * 1024
+
+
+def _is_crlf_copy_of_blob(path: Path, blob_id) -> bool:
+    """True when *path* holds the file whose git blob id is *blob_id* with its
+    line endings changed to CRLF, as a git checkout with ``core.autocrlf`` writes
+    a text file: the content with every CRLF turned back into LF has that id.
+    False for no *blob_id*, a file over :data:`_CRLF_CHECK_LIMIT` (files stored
+    outside LFS are small), a file without a CRLF, or an unreadable file."""
+    if not blob_id:
+        return False
+    try:
+        if path.stat().st_size > _CRLF_CHECK_LIMIT:
+            return False
+        data = path.read_bytes()
+    except OSError:
+        return False
+    if b"\r\n" not in data:
+        return False
+    data = data.replace(b"\r\n", b"\n")
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest() == str(blob_id).lower()
 
 
 _SNAPSHOT_SIDE_FILES = frozenset({".ds_store", "thumbs.db", "desktop.ini"})
@@ -2653,16 +2739,17 @@ def _snapshot_matches_listing(dest: Path, repo_siblings) -> bool:
             if not fp.is_file():
                 return False
             size = getattr(sib, "size", None)
-            if size is not None and fp.stat().st_size != size:
-                return False
             lfs = getattr(sib, "lfs", None)
+            blob = getattr(sib, "blob_id", None)
+            if size is not None and fp.stat().st_size != size:
+                if lfs or not _is_crlf_copy_of_blob(fp, blob):
+                    return False
+            elif not lfs and (not blob or _git_blob_id(fp) != str(blob).lower()
+                              and not _is_crlf_copy_of_blob(fp, blob)):
+                return False
             if lfs:
                 sha = lfs.get("sha256") if isinstance(lfs, dict) else getattr(lfs, "sha256", None)
                 if not sha:
-                    return False
-            else:
-                blob = getattr(sib, "blob_id", None)
-                if not blob or _git_blob_id(fp) != str(blob).lower():
                     return False
             listed.add(name.replace("\\", "/"))
         def _unreadable(error: OSError) -> None:
@@ -3104,6 +3191,11 @@ def _pull_hf_snapshot_locked(
                and _snapshot_matches_listing(dest, repo_siblings))
     if adopted:
         claimed = None
+    if claimed == ("", None) and redownload:
+        console.print(
+            f"[yellow]--redownload:[/yellow] fetching into {escape(str(dest))}, which holds "
+            "files localm cannot match to a repo or revision.")
+        claimed = None
     if claimed is not None:
         claim_repo, claim_revision = claimed
         what = ("files localm cannot match to a repo or revision" if not claim_repo
@@ -3289,6 +3381,9 @@ def _pull_hf_snapshot_locked(
                 f"{escape(repo_id)} do not match the digests Hugging Face publishes "
                 f"({shown}) - deleted. Pull again to fetch them; the model was not registered.")
             return False
+        unchecked = _snapshot_weight_files_without_digest(repo_siblings)
+        if unchecked:
+            _note_unverified(repo_id, unchecked)
 
     _warn_if_repo_ships_code(dest, repo_id)
     # _register_with_dedup, the same dedup-aware registration _pull_gguf_file
