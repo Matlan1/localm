@@ -13,9 +13,9 @@
 // version floor. A test below asserts the field stays absent, so a release that
 // adds one fails the guard and gets upgraded to a floor.
 //
-// Advisory status for 18.1.1: OSV reports 0 vulns (control queries:
+// Advisory status for 18.1.2: OSV reports 0 vulns (control queries:
 // marked@18.0.1 -> 1, marked@4.0.0 -> 2) and the repository's advisory list has
-// no range containing 18.1.1 (GHSA-6v9c-7cg6-27q7 covers 18.0.0 to 18.0.1, fixed
+// no range containing 18.1.2 (GHSA-6v9c-7cg6-27q7 covers 18.0.0 to 18.0.1, fixed
 // in 18.0.2).
 //
 // The hash is taken over CRLF-normalised bytes so a Windows checkout with
@@ -30,10 +30,10 @@ const VENDOR = new URL("../localm/plugins/gui/static/vendor/", import.meta.url);
 
 // Provenance pin. sha256, base64, over CRLF-normalised bytes. Recorded from the
 // npm registry artefact, tarball shasum-verified against the registry's own
-// published dist.shasum (dd6288f8217971f7b0beefcabc52c92a6519b3e3) before
-// extraction:  npm pack marked@18.1.1  ->  package/lib/marked.umd.js
-const VENDORED_VERSION = "18.1.1";
-const PINNED_HASH = "uCuTNEBti90WtiNsCN4ctlsqhZhzypUD2cwLKSyjwSo=";
+// published dist.shasum (358c831ed0c4278f97e517af6769e2f213b048ac) before
+// extraction:  npm pack marked@18.1.2  ->  package/lib/marked.umd.js
+const VENDORED_VERSION = "18.1.2";
+const PINNED_HASH = "nrcw0jYq4ajGIBaY8XAJ4WZxvmlG09BlA93AV1KD23w=";
 
 function readVendored(name) {
   return fs.readFileSync(new URL(name, VENDOR));
@@ -77,7 +77,7 @@ test("marked still exposes NO runtime version, so the byte pin is the only signa
   } finally { win.close(); }
 });
 
-test("the banner comment says 18.1.1", () => {
+test("the banner comment says 18.1.2", () => {
   const banner = readVendored("marked.min.js").toString("latin1").slice(0, 300);
   const m = banner.match(/marked v(\d+\.\d+\.\d+)/);
   assert.ok(m, "no version banner found in the first 300 bytes: "

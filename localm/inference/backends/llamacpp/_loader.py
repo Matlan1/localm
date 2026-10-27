@@ -780,7 +780,7 @@ def compute_devices() -> list[tuple]:
 
 
 _NON_GPU_BACKENDS = frozenset(
-    {"cpu", "blas", "amx", "rpc", "accelerate", "kleidiai"})
+    {"cpu", "blas", "amx", "rpc", "accelerate", "kleidiai", "zendnn", "zdnn"})
 
 
 def classify_gpu_devices(devices: list[tuple]) -> Optional[bool]:
@@ -812,6 +812,8 @@ def has_gpu_device() -> Optional[bool]:
     get = _ggml_sym(handles, "ggml_backend_dev_get")
     type_fn = _ggml_sym(handles, "ggml_backend_dev_type")
     if not (cnt and get and type_fn):
+        logger.debug("has_gpu_device(): the runtime lacks the ggml_backend_dev_* "
+                     "registry symbols; the device check is skipped")
         return None
     reg_fn = _ggml_sym(handles, "ggml_backend_dev_backend_reg")
     reg_name_fn = _ggml_sym(handles, "ggml_backend_reg_name")
@@ -835,9 +837,15 @@ def has_gpu_device() -> Optional[bool]:
                 raw = reg_name_fn(reg_fn(dev))
                 backend = raw.decode("utf-8", "replace") if raw else None
             devices.append((dev_type, backend))
-    except Exception:
+    except Exception as e:  # noqa: BLE001 - the caller falls back to the offload flag
+        logger.debug("has_gpu_device(): the device registry could not be read (%s); "
+                     "the device check is skipped", type(e).__name__)
         return None
-    return classify_gpu_devices(devices)
+    result = classify_gpu_devices(devices)
+    if result is None:
+        logger.debug("has_gpu_device(): a non-CPU device has no readable backend name; "
+                     "the device check is skipped")
+    return result
 
 
 def native_device_inventory() -> Optional[list]:
