@@ -323,9 +323,10 @@ class TestUvResolution:
 
         def fake_run(cmd, emit, plan, **kw):
             seen.append([str(c) for c in cmd])
+            if [str(c) for c in cmd][1:2] == ["venv"]:
+                (gui.ROOT / ".venv").mkdir(exist_ok=True)
             return 0
 
-        (gui.ROOT / ".venv").mkdir(exist_ok=True)
         monkeypatch.setattr(gui, "_run", fake_run)
         monkeypatch.setattr(gui, "make_shortcut",
                             lambda plan, emit: str(gui.ROOT / "LocaLM.lnk"))
@@ -416,12 +417,13 @@ def _commands_for(gui, monkeypatch, plan, spec="torch", code_for=None):
     def fake_run(cmd, emit, plan, **kw):
         flat = [str(c) for c in cmd]
         seen.append(flat)
+        if flat[1:2] == ["venv"]:
+            (gui.ROOT / ".venv").mkdir(exist_ok=True)
         for needle, code in (code_for or {}).items():
             if any(needle in part for part in flat):
                 return code
         return 0
 
-    (gui.ROOT / ".venv").mkdir(exist_ok=True)
     monkeypatch.setattr(gui, "_run", fake_run)
     monkeypatch.setattr(gui, "find_uv", lambda root: "uv")
     # make_shortcut does NOT go through _run: it shells out to PowerShell on
@@ -439,6 +441,15 @@ def _commands_for(gui, monkeypatch, plan, spec="torch", code_for=None):
     return seen
 
 
+def _creates_venv(root):
+    """A _run stand-in for which every `uv venv` creates root/.venv."""
+    def fake_run(cmd, emit, plan, **kw):
+        if [str(c) for c in cmd][1:2] == ["venv"]:
+            (root / ".venv").mkdir(exist_ok=True)
+        return 0
+    return fake_run
+
+
 def _labels(gui, plan):
     return [s.label for s in gui.build_steps(plan)]
 
@@ -448,8 +459,7 @@ class TestInstallParity:
 
     def test_the_venv_marker_is_written(self, gui, tmp_path, monkeypatch):
         """uninstall removes .venv only when this marker says setup made it."""
-        (tmp_path / ".venv").mkdir()
-        monkeypatch.setattr(gui, "_run", lambda *a, **k: 0)
+        monkeypatch.setattr(gui, "_run", _creates_venv(tmp_path))
         monkeypatch.setattr(gui, "find_uv", lambda root: "uv")
         step = _step(gui, gui.Plan(), "Creating the Python environment")
         step.run(lambda s: None)
@@ -500,9 +510,8 @@ class TestInstallParity:
     def test_the_environment_is_recorded_as_soon_as_it_exists(
             self, gui, tmp_path, monkeypatch):
         """An install that stops later can then still be uninstalled."""
-        (tmp_path / ".venv").mkdir()
         (tmp_path / ".python").mkdir()
-        monkeypatch.setattr(gui, "_run", lambda *a, **k: 0)
+        monkeypatch.setattr(gui, "_run", _creates_venv(tmp_path))
         monkeypatch.setattr(gui, "find_uv", lambda root: "uv")
         _step(gui, gui.Plan(), "Creating the Python environment").run(lambda s: None)
         rec = _record(tmp_path)
@@ -537,8 +546,7 @@ class TestInstallParity:
 
     def test_the_tooling_inside_the_folder_is_recorded(
             self, gui, tmp_path, monkeypatch):
-        """The launcher puts the window's own interpreter inside the folder
-        whichever way the tooling question was answered, so uninstall has to
+        """On Portable the tooling lives inside the folder, so uninstall has to
         know about it."""
         (tmp_path / ".python").mkdir()
         (tmp_path / ".uv").mkdir()
@@ -550,13 +558,17 @@ class TestInstallParity:
         assert rec[rec.index("--uv-dir") + 1] == str(tmp_path / ".uv")
         assert "--cache-dir" not in rec, "a directory that does not exist"
 
-    def test_it_is_recorded_for_a_shared_install_too(
+    def test_a_shared_install_never_records_tooling_left_in_the_folder(
             self, gui, tmp_path, monkeypatch):
+        """setup.bat's Shared choice records no tooling inside the folder, so a
+        .python or .uv left by an earlier Portable install is not claimed."""
         (tmp_path / ".python").mkdir()
+        (tmp_path / ".uv").mkdir()
         cmds = _commands_for(gui, monkeypatch,
                              gui.Plan(backend="own", portable_store=False))
         rec = [c for c in cmds if "localm.install_manifest" in c][0]
-        assert "--runtime-contained" in rec
+        assert "--runtime-contained" not in rec
+        assert "--python-dir" not in rec and "--uv-dir" not in rec
 
     def test_nothing_outside_the_folder_is_ever_claimed(
             self, gui, tmp_path, monkeypatch):
@@ -683,7 +695,7 @@ class TestBackendMenu:
 
     def test_every_offered_backend_is_one_the_provisioner_accepts(self, gui):
         from localm import setup_llama
-        for key, _ in gui._BACKEND_CHOICES:
+        for key, _ in gui.backend_choices():
             if key == "own":
                 continue
             assert key in setup_llama.BACKENDS, f"{key} is not a real backend"
@@ -767,7 +779,9 @@ class TestPluginChoices:
         from localm.plugins import catalog
         offered = [n for n, _ in gui.plugin_choices()]
         assert offered, "no optional features are offered"
-        assert set(offered) == set(catalog.names()) - set(catalog.preinstalled())
+        assert offered == [n for n in catalog.names()
+                           if n not in catalog.preinstalled() and catalog.offered(n)]
+        assert "exllama" not in offered
 
     def test_chat_is_never_offered_because_it_is_always_installed(self, gui):
         assert "chat" not in [n for n, _ in gui.plugin_choices()]
@@ -1015,7 +1029,7 @@ class _Answer:
         self.asked = []
         self.told = []
 
-    def askyesno(self, title, message):
+    def askyesno(self, title, message, **kw):
         self.asked.append(message)
         return self.yes
 

@@ -8,22 +8,23 @@ Run by `setup-gui.bat` (Windows) or `setup-gui.sh` via:
 
 SEPARATE FROM THE INSTALL IT CREATES. This script is not part of the `localm`
 package and never imports the installed distribution: it runs on a managed
-CPython that uv provides, before `.venv` exists, and its only import from this
-source tree is `localm.hwdetect`, which is stdlib-only by design so GPU
-detection can happen BEFORE anything is installed. That is what lets the whole
-install be described on one page up front, the way an installer should be,
-rather than interrogating the user between steps.
+CPython that uv provides, before `.venv` exists, and imports only stdlib-only
+modules from this source tree: `localm.setup_spec` (the questions, defaults,
+backend menu and plugin list every setup variant shares), `localm.hwdetect`,
+`localm.uv_tool` and `localm.install_manifest`.
 
 DEPENDENCIES: none. tkinter ships with the managed CPython uv installs, so the
 window costs nothing to provision. If tkinter is genuinely unavailable the
 launcher scripts fall back to the console installer and say why.
 
 WHAT IT DOES is exactly what setup.bat's prompts decide, in setup.bat's own
-order and with its own commands, so the two installers cannot drift: create
-the venv, install localm and the native-runtime wheel, install the PyTorch
-stack that matches the chosen backend, provision llama.cpp, record where data
-lives, build the launcher, optionally create a desktop shortcut, and
-optionally put `localm` on PATH.
+order and with its own commands: create (or keep) the venv, install localm
+and the native-runtime wheel, install the PyTorch stack that matches the
+chosen backend, provision llama.cpp, record where data lives, build the
+launcher, optionally create a desktop shortcut, optionally put `localm` on
+PATH, and install the chosen plugins. The tooling question (Portable or
+Shared) is asked once, by setup-gui.bat / setup-gui.sh, and only shown here.
+Questions setup-llama asks while it runs are shown as dialogs.
 
 When setup has run in the folder before, it first offers to repair the
 install or uninstall it. Uninstall runs localm.install_manifest in the window
@@ -33,11 +34,13 @@ setup-gui.sh, which remove it after the window closes (exit code 42).
 
 from __future__ import annotations
 
+import json
 import os
 import queue
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, UTC
 from pathlib import Path
@@ -45,12 +48,26 @@ from typing import Callable, Optional
 
 ROOT = Path(__file__).resolve().parents[1]
 _SRC = Path(__file__).resolve().parents[1]
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+from localm import setup_spec as spec  # noqa: E402
+
 APP_NAME = "LocaLM"
 PYVER = "3.12"
 
-# Set by setup-gui.bat / setup-gui.sh to "shared" when the user chose to keep using
-# their own uv, so the window's tooling question starts on that answer.
+# Set by setup-gui.bat / setup-gui.sh from the tooling question they ask:
+# "portable" or "shared", the full path of the uv they chose, and "1" when they
+# installed that uv at its per-user location.
 STORE_ENV = "LOCALM_GUI_STORE"
+UV_ENV = "LOCALM_GUI_UV"
+UV_INSTALLED_ENV = "LOCALM_GUI_UV_INSTALLED"
+
+
+def launcher_store() -> str:
+    """The launcher's answer to the tooling question: "portable" or "shared";
+    the spec's default when the window was started without a launcher."""
+    value = os.environ.get(STORE_ENV, "").strip().lower()
+    return value if value in ("portable", "shared") else spec.default_choice("tooling-store")
 
 # Exit codes telling setup-gui.bat / setup-gui.sh how an uninstall in the window
 # ended. 42 and 43: the Python runtime folders named in
@@ -62,51 +79,56 @@ EXIT_FINISH_UNINSTALL_PARTIAL = 43
 EXIT_UNINSTALL_PARTIAL = 44
 EXIT_UNINSTALL_FAILED = 45
 
-# The extras setup.bat installs. `desktop` is added only when the user asks for
-# an app window, because it pulls pythonnet in and no install should take on a
-# dependency nobody asked for.
-BASE_EXTRAS = "coder,voice,monitor"
-
-# Mirrors setup.bat's backend menu. The recommendation is computed at runtime
-# and shown as the default; "own" skips the download for people who build
-# llama.cpp themselves.
-_BACKEND_CHOICES = [
-    ("vulkan", "Vulkan - any GPU (AMD/NVIDIA/Intel), no vendor toolkit"),
-    ("cuda", "CUDA - NVIDIA, peak performance"),
-    ("hip", "ROCm/HIP - AMD, peak performance (needs the ROCm runtime)"),
-    ("amd-rocm", "ROCm - AMD RX 6000 (gfx103X), self-contained"),
-    ("sycl", "SYCL - Intel GPU (incl. integrated), often faster than Vulkan"),
-    ("metal", "Metal - Apple Silicon, native GPU acceleration"),
-    ("cpu", "CPU only - no GPU"),
-    ("own", "I will provide my own llama.cpp build (skip the download)"),
-]
+BASE_EXTRAS = spec.BASE_EXTRAS
 
 
 def backend_choices() -> list[tuple]:
-    """The runtime menu for this machine: every backend setup-llama has a
-    prebuilt build of for this platform and CPU architecture
-    (``hwdetect.has_prebuilt``), then "own"."""
-    sys.path.insert(0, str(ROOT))
-    from localm import hwdetect
-    return [(key, desc) for key, desc in _BACKEND_CHOICES
-            if key == "own" or hwdetect.has_prebuilt(key)]
+    """The runtime menu for this machine, from localm.setup_spec: every backend
+    setup-llama has a prebuilt build of for this platform and CPU architecture,
+    in the console menu's order, then "own"."""
+    return ([(key, f"{key} - {spec.backend_label(key)}")
+             for key in spec.offered_backends()]
+            + [(spec.OWN, spec.OWN_LABEL)])
 
 
-# The plugins the console installer preselects.
-RECOMMENDED_PLUGINS = ("coder", "rag", "web", "tts")
+RECOMMENDED_PLUGINS = spec.RECOMMENDED_PLUGINS
 
 
 def plugin_choices() -> list[tuple]:
-    """(name, description) for every plugin a user can choose, read from the
-    package's own catalog so this menu cannot drift from it. Returns an empty
-    list when the catalog cannot be read, and the Features page says so."""
+    """(name, description) for every plugin setup offers
+    (localm.setup_spec.setup_plugins). Returns an empty list when the catalog
+    cannot be read, and the Features page says so."""
     try:
-        sys.path.insert(0, str(ROOT))
-        from localm.plugins import catalog
-        return [(n, catalog.get(n).description)
-                for n in catalog.names() if n not in catalog.preinstalled()]
+        return spec.setup_plugins()
     except Exception:
         return []
+
+
+# Answers questions the steps ask: called with a question dict (kind "confirm"
+# or "choose", text, default, and for "choose" the choices) and returns the
+# answer string. None answers every question with its default. The window sets
+# it while an install runs.
+ASK: Optional[Callable[[dict], str]] = None
+
+
+def ask(question: dict) -> str:
+    """The answer to *question* from ASK, or its default when ASK is unset or
+    fails."""
+    if ASK is not None:
+        try:
+            answer = ASK(question)
+        except Exception:
+            answer = None
+        if answer is not None:
+            return str(answer)
+    return str(question.get("default", ""))
+
+
+def ask_yes(qid: str, text: str) -> bool:
+    """A yes/no question with the spec default of *qid*."""
+    default = "y" if spec.default_yes(qid) else "n"
+    return ask({"kind": "confirm", "id": qid, "text": text,
+                "default": default}).strip().lower()[:1] == "y"
 
 IS_WINDOWS = sys.platform == "win32"
 
@@ -131,12 +153,16 @@ def uv_tool():
 def find_uv(root: Path) -> Optional[str]:
     """The full path of the uv to run, or None if there is none.
 
-    The same lookup the updater uses (localm.uv_tool.find_uv): the contained
-    copy in the folder, the shared uv the install record names, a uv on PATH,
-    then Astral's default install directories. Every uv invocation and the
-    entry check below both go through this, so a uv that starts the installer
-    is always a uv the steps can run. See tests/test_installer_gui.py
+    The uv the launcher chose (LOCALM_GUI_UV) when it names an existing file;
+    otherwise the same lookup the updater uses (localm.uv_tool.find_uv): the
+    contained copy in the folder, the shared uv the install record names, a uv
+    on PATH, then Astral's default install directories. Every uv invocation and
+    the entry check below both go through this, so a uv that starts the
+    installer is always a uv the steps can run. See tests/test_installer_gui.py
     TestUvResolution."""
+    chosen = os.environ.get(UV_ENV, "").strip()
+    if chosen and os.path.isfile(chosen):
+        return chosen
     return uv_tool().find_uv(root)
 
 
@@ -156,10 +182,12 @@ def existing_install(root: Path) -> bool:
             or (root / ".venv" / ".localm-venv").is_file())
 
 
-def _tooling_fields(root: Path) -> dict:
+def _tooling_fields(root: Path, portable: bool = True) -> dict:
     """install_manifest.record() keywords for the tooling folders inside
-    *root*; empty when there are none."""
+    *root*; empty when there are none or the tooling is shared."""
     fields = {}
+    if not portable:
+        return fields
     for key, name in (("python_dir", ".python"), ("cache_dir", ".cache"),
                       ("uv_dir", ".uv")):
         if (root / name).exists():
@@ -216,14 +244,27 @@ class Plan:
     portable_store: bool = True       # keep uv's python + cache inside the clone
     plugins: tuple = ()               # optional features to install
     plugin_deps: bool = True          # install the pip extras those need
+    replace_venv: bool = False        # recreate an existing .venv
+    own_build_dir: str = ""           # with backend "own": the build to copy in
 
     @property
     def extras(self) -> str:
-        return BASE_EXTRAS + (",desktop" if self.app_window else "")
+        return spec.extras(self.app_window)
 
 
 class StepFailed(Exception):
     """A step that must not be reported as success."""
+
+
+class StopSetup(StepFailed):
+    """The user chose to stop setup at this step; ends the run like a failed
+    required step, whatever the step's own fatal flag says."""
+
+
+# Whether uv verifies against the platform's certificate store
+# (UV_SYSTEM_CERTS=1). Turned off for the rest of the run after a certificate
+# error, the console installers' fallback to uv's bundled roots.
+_CERTS = {"system": True}
 
 
 def uv_argv(*args: str) -> list[str]:
@@ -293,7 +334,10 @@ def _env_for(plan: Plan) -> dict:
     same containment setup.bat's Portable option gives."""
     env = dict(os.environ)
     env["LOCALM_SETUP"] = "1"
-    env["UV_SYSTEM_CERTS"] = "1"
+    if _CERTS["system"]:
+        env["UV_SYSTEM_CERTS"] = "1"
+    else:
+        env.pop("UV_SYSTEM_CERTS", None)
     # Put the uv being used on PATH for everything the steps run. localm's own
     # plugin dependency installer shells out to a bare uv, and a portable copy
     # inside the folder is not on PATH; its fallback cannot help either,
@@ -314,16 +358,23 @@ def _env_for(plan: Plan) -> dict:
 
 
 def _run(cmd: list[str], emit: Callable[[str], None], plan: Plan,
-         *, allow_fail: bool = False) -> int:
+         *, allow_fail: bool = False, collect: Optional[list] = None,
+         answers: bool = False) -> int:
     """Run a command, streaming its output into the log a line at a time.
 
     Returns the exit code. Raises StepFailed on a non-zero exit unless
     *allow_fail*, so a step can never be silently skipped and still reported as
-    done."""
+    done. *collect*, when given, receives every output line. With *answers*,
+    the command's questions (localm.setup_spec ASK protocol) are answered
+    through ask(); without it stdin is closed."""
     emit("$ " + " ".join(str(c) for c in cmd))
+    env = _env_for(plan)
+    if answers:
+        env[spec.ASK_ENV] = "stdio"
     try:
         proc = subprocess.Popen(
-            [str(c) for c in cmd], cwd=str(ROOT), env=_env_for(plan),
+            [str(c) for c in cmd], cwd=str(ROOT), env=env,
+            stdin=subprocess.PIPE if answers else subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, encoding="utf-8", errors="replace", bufsize=1)
     except OSError as e:
@@ -333,13 +384,45 @@ def _run(cmd: list[str], emit: Callable[[str], None], plan: Plan,
         raise StepFailed(f"could not start {cmd[0]}: {e}") from e
     assert proc.stdout is not None
     for line in proc.stdout:
+        line = line.rstrip("\r\n")
+        if answers and line.startswith(spec.ASK_PREFIX):
+            _answer(proc, line[len(spec.ASK_PREFIX):], emit)
+            continue
+        if collect is not None:
+            collect.append(line)
         emit(line.rstrip())
+    if proc.stdin is not None:
+        try:
+            proc.stdin.close()
+        except OSError as e:
+            emit(f"[!] could not close the command's input: {e}")
     code = proc.wait()
     if code != 0 and not allow_fail:
         raise StepFailed(f"{cmd[0]} exited {code}")
     if code != 0:
         emit(f"[!] {cmd[0]} exited {code} - continuing (this step is optional)")
     return code
+
+
+def _answer(proc, payload: str, emit: Callable[[str], None]) -> None:
+    """Answer one ASK-protocol question from *proc* through ask(), echoing the
+    question and the answer into the log. A question that cannot be parsed is
+    answered with an empty line, which the asker reads as its default."""
+    try:
+        question = json.loads(payload)
+        if not isinstance(question, dict):
+            raise ValueError("not an object")
+    except ValueError:
+        question = {}
+    reply = ask(question) if question else ""
+    if question:
+        emit(f"? {question.get('text', '')}  -> {reply or question.get('default', '')}")
+    try:
+        assert proc.stdin is not None
+        proc.stdin.write(reply + "\n")
+        proc.stdin.flush()
+    except (OSError, ValueError) as e:
+        emit(f"[!] could not send the answer: {e}")
 
 
 def _query(args: list[str]) -> str:
@@ -379,7 +462,7 @@ def run_steps(steps: list[Step], emit: Callable[[str], None],
         try:
             step.run(emit)
         except Exception as e:                # never leave the UI hanging
-            if step.fatal:
+            if step.fatal or isinstance(e, StopSetup):
                 return failures, f"{step.label}: {e}"
             failures.append(f"{step.label}: {e}")
             emit(f"[!] {step.label} did not finish: {e}")
@@ -417,6 +500,134 @@ def contained_uv_step(plan: Plan) -> Optional[Step]:
     return Step("Installing uv into this folder", install, key="uv-portable")
 
 
+def venv_is_ours(root: Path) -> bool:
+    """Whether root/.venv was made by setup: its marker, or localm's entry point."""
+    venv = root / ".venv"
+    return ((venv / ".localm-venv").is_file()
+            or (venv_bin(root) / ("localm.exe" if IS_WINDOWS else "localm")).exists())
+
+
+def find_venv_lockers(root: Path) -> list[tuple]:
+    """(pid, name) of every process whose executable lies inside root/.venv, on
+    Windows; empty elsewhere or when the process list cannot be read."""
+    if not IS_WINDOWS:
+        return []
+    prefix = str(root / ".venv").rstrip("\\") + "\\"
+    ps = ("$root = $env:LOCALM_VENV_PREFIX.ToLowerInvariant();"
+          "Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and "
+          "$_.ExecutablePath.ToLowerInvariant().StartsWith($root) } | "
+          "ForEach-Object { '{0}|{1}' -f $_.ProcessId, $_.Name }")
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                             capture_output=True, text=True, timeout=60,
+                             env={**os.environ, "LOCALM_VENV_PREFIX": prefix})
+    except (OSError, subprocess.SubprocessError):
+        return []
+    found = []
+    for line in (out.stdout or "").splitlines():
+        pid, _, name = line.strip().partition("|")
+        if pid.isdigit():
+            found.append((int(pid), name))
+    return found
+
+
+def onedrive_root(root: Path) -> str:
+    """The OneDrive folder (OneDrive, OneDriveConsumer or OneDriveCommercial)
+    that contains *root*, or empty."""
+    here = os.path.normcase(str(root)).rstrip("\\/") + os.sep
+    for name in ("OneDrive", "OneDriveConsumer", "OneDriveCommercial"):
+        value = os.environ.get(name, "")
+        if value and here.startswith(os.path.normcase(value).rstrip("\\/") + os.sep):
+            return value
+    return ""
+
+
+def create_venv(plan: Plan, emit: Callable[[str], None]) -> None:
+    """``uv venv --clear .venv``, recovering the way setup.bat does: one retry
+    with uv's bundled certificates after a certificate error, and on Windows,
+    for a locked .venv, an attribute reset, stopping this folder's own
+    processes (asked first), one short wait, then the question whether to try
+    again. Raises StepFailed when the user stops trying."""
+    args = ["venv", "--python", PYVER]
+    if plan.portable_store:
+        args += ["--python-preference", "only-managed"]
+    args += ["--clear", ".venv"]
+    attrib_tried = wait_tried = False
+    while True:
+        lines: list = []
+        if _run(uv_argv(*args), emit, plan, allow_fail=True, collect=lines) == 0:
+            return
+        text = "\n".join(lines)
+        if _CERTS["system"] and "certificate" in text.lower():
+            emit("[i] Your system's certificate store did not verify a required "
+                 "download. Falling back to uv's own verified certificate bundle ...")
+            _CERTS["system"] = False
+            continue
+        reason = "generic"
+        if IS_WINDOWS and ("os error 5" in text or "os error 32" in text):
+            if not attrib_tried:
+                attrib_tried = True
+                subprocess.run(["attrib", "-R", "-H", str(ROOT / ".venv" / "*.*"),
+                                "/S", "/D"], capture_output=True)
+                continue
+            lockers = find_venv_lockers(ROOT)
+            if lockers:
+                emit("One or more LocaLM processes from this folder are still "
+                     "running and holding .venv locked:")
+                for pid, name in lockers:
+                    emit(f"  - PID {pid}  {name}")
+                # SETUP-Q: venv-lockers
+                if ASK is not None and ask_yes("venv-lockers", "Stop them and retry now?"):
+                    for pid, _ in lockers:
+                        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                                       capture_output=True)
+                    time.sleep(2)
+                    continue
+                reason = "lockers_declined"
+            elif not wait_tried:
+                wait_tried = True
+                emit("[i] .venv looks locked but nothing obvious owns it; it may be "
+                     "a brief antivirus or search-indexer scan. Waiting a moment "
+                     "and retrying once more ...")
+                time.sleep(3)
+                continue
+            else:
+                reason = "unknown_lock"
+        emit("[!] Could not create the environment.")
+        if reason == "lockers_declined":
+            emit("    A LocaLM process from this folder was still running and "
+                 "holding .venv locked. Close it, then try again.")
+        elif reason == "unknown_lock" and onedrive_root(ROOT):
+            emit(f"    This folder is inside a OneDrive-synced location "
+                 f"({onedrive_root(ROOT)}), which can briefly lock a file while "
+                 "it syncs. Pausing OneDrive syncing for this folder, or moving "
+                 "it outside OneDrive, usually fixes this.")
+        else:
+            emit("    If a LocaLM process is still running it may be locking the "
+                 "folder. Close any open LocaLM windows and check your antivirus "
+                 "is not scanning this folder.")
+        # SETUP-Q: venv-retry
+        if ASK is None or not ask_yes("venv-retry",
+                                      "Could not create the environment. Try again?"):
+            raise StepFailed("the Python environment could not be created")
+        attrib_tried = wait_tried = False
+
+
+def runtime_failed(emit: Callable[[str], None], retry: str, detail: str) -> None:
+    """After a failed setup-llama: say so with the exact retry command, then ask
+    whether to continue without a working runtime (setup.sh's question). Raises
+    StepFailed (the install goes on, and the summary names it) on continue,
+    StopSetup on stop."""
+    emit(f"[!] {detail}")
+    emit("    No model can load until this is fixed. Retry any time with:")
+    emit(f"      {retry}")
+    # SETUP-Q: runtime-failed
+    if ask_yes("runtime-failed",
+               "Continue the rest of setup without a working runtime?"):
+        raise StepFailed(f"no model can load until the runtime is provisioned: {retry}")
+    raise StopSetup(f"stopped after the runtime failed. Retry with: {retry}")
+
+
 def all_steps(plan: Plan, resume: Optional[dict] = None) -> list[Step]:
     """What the window runs: the install, preceded by the contained-uv step when
     the Portable choice needs it."""
@@ -434,11 +645,13 @@ def build_steps(plan: Plan, resume: Optional[dict] = None) -> list[Step]:
     state: dict = {}
 
     def venv(emit):
-        args = ["venv", "--python", PYVER]
-        if plan.portable_store:
-            args += ["--python-preference", "only-managed"]
-        args += ["--clear", ".venv"]
-        _run(uv_argv(*args), emit, plan)
+        if (ROOT / ".venv").exists() and not plan.replace_venv and not (
+                "venv" in cut_short and not venv_is_ours(ROOT)):
+            emit("Keeping the existing .venv.")
+            return
+        if "venv" in cut_short and not plan.replace_venv:
+            emit("The previous setup stopped while creating .venv; recreating it.")
+        create_venv(plan, emit)
         # uninstall removes .venv only when this marker says setup created it.
         try:
             (ROOT / ".venv" / ".localm-venv").write_text("", encoding="utf-8")
@@ -448,7 +661,7 @@ def build_steps(plan: Plan, resume: Optional[dict] = None) -> list[Step]:
         # Recorded now; the manifest step at the end records again.
         try:
             install_manifest().record(ROOT, venv=str(ROOT / ".venv"),
-                                      **_tooling_fields(ROOT))
+                                      **_tooling_fields(ROOT, plan.portable_store))
         except Exception as e:
             emit(f"[!] could not record the environment yet: {e}")
     steps.append(Step("Creating the Python environment", venv, key="venv"))
@@ -505,13 +718,36 @@ def build_steps(plan: Plan, resume: Optional[dict] = None) -> list[Step]:
     steps.append(Step("Installing PyTorch and transformers", install_torch, fatal=False,
                       key="torch"))
 
-    if plan.backend != "own":
+    localm_exe = str(venv_bin(ROOT) / "localm")
+    if plan.backend != spec.OWN:
         def provision(emit):
             force = ["--force"] if "native-runtime" in cut_short else []
-            _run([str(venv_bin(ROOT) / "localm"), "setup-llama",
-                  "--backend", plan.backend, "--yes", *force], emit, plan)
+            code = _run([localm_exe, "setup-llama", "--backend", plan.backend, *force],
+                        emit, plan, allow_fail=True, answers=True)
+            if code != 0:
+                runtime_failed(
+                    emit, f"{localm_exe} setup-llama --backend {plan.backend} --force",
+                    f"Provisioning the native llama.cpp runtime (--backend "
+                    f"{plan.backend}) failed during setup.")
         steps.append(Step(f"Provisioning the {plan.backend} inference runtime", provision,
-                          key="native-runtime"))
+                          fatal=False, key="native-runtime"))
+    elif plan.own_build_dir:
+        def provision_own(emit):
+            code = _run([localm_exe, "setup-llama", "--from", plan.own_build_dir],
+                        emit, plan, allow_fail=True, answers=True)
+            if code != 0:
+                runtime_failed(
+                    emit, f'{localm_exe} setup-llama --from "{plan.own_build_dir}"',
+                    "Provisioning the native llama.cpp runtime with --from failed "
+                    "during setup.")
+        steps.append(Step("Copying in your own llama.cpp build", provision_own,
+                          fatal=False, key="native-runtime"))
+    else:
+        def skip_runtime(emit):
+            emit("Skipped. Provision later:  "
+                 f"{localm_exe} setup-llama --backend <{spec.backend_hint()}>")
+        steps.append(Step("Skipping the inference runtime download", skip_runtime,
+                          fatal=False))
 
     # macOS has no launcher or shortcut; see test_macos_gets_no_launcher_or_shortcut.
     on_macos = sys.platform == "darwin"
@@ -556,9 +792,10 @@ def build_steps(plan: Plan, resume: Optional[dict] = None) -> list[Step]:
     if plan.plugins:
         def plugins(emit):
             # An explicit deps flag: the default asks, and nothing can answer.
-            _run([str(venv_bin(ROOT) / "localm"), "plugin", "setup",
+            _run([localm_exe, "plugin", "setup",
                   "--plugins", ",".join(plan.plugins),
-                  "--with-deps" if plan.plugin_deps else "--no-deps"],
+                  "--with-deps" if plan.plugin_deps else "--no-deps",
+                  "--remember-deps"],
                  emit, plan)
         steps.append(Step("Installing the optional features you chose",
                           plugins, fatal=False, key="plugins"))
@@ -578,19 +815,20 @@ def build_steps(plan: Plan, resume: Optional[dict] = None) -> list[Step]:
             args += ["--file", str(ROOT / "LocaLM.desktop")]
         if state.get("path_modified"):
             args.append("--path-modified")
-        # These sit inside the folder whichever way the tooling question was
-        # answered: the launcher puts the window's own interpreter there.
-        contained = [("--python-dir", ROOT / ".python"),
-                     ("--cache-dir", ROOT / ".cache"),
-                     ("--uv-dir", ROOT / ".uv")]
-        present = [(flag, d) for flag, d in contained if d.exists()]
-        if present:
-            args.append("--runtime-contained")
-            for flag, d in present:
-                args += [flag, str(d)]
+        if plan.portable_store:
+            contained = [("--python-dir", ROOT / ".python"),
+                         ("--cache-dir", ROOT / ".cache"),
+                         ("--uv-dir", ROOT / ".uv")]
+            present = [(flag, d) for flag, d in contained if d.exists()]
+            if present:
+                args.append("--runtime-contained")
+                for flag, d in present:
+                    args += [flag, str(d)]
         own_uv = shared_uv()
         if own_uv:
             args += ["--uv-exe", own_uv]
+            if os.environ.get(UV_INSTALLED_ENV) == "1":
+                args.append("--uv-shared-installed")
         _run(args, emit, plan)
         emit("Recorded what this install created, so uninstall removes only that.")
     steps.append(Step("Writing the install record", manifest, fatal=False, key="record"))
@@ -612,7 +850,12 @@ def intended_shortcut_path() -> str:
             return ""
         lines = (out.stdout or "").strip().splitlines()
         return str(Path(lines[-1]) / "LocaLM.lnk") if lines and lines[-1].strip() else ""
-    return str(Path.home() / ".local/share/applications" / "LocaLM.desktop")
+    return str(Path.home() / ".local/share/applications" / MENU_ENTRY)
+
+
+# The Linux menu entry setup.sh writes, and the name this window used before.
+MENU_ENTRY = "localm.desktop"
+OLD_MENU_ENTRY = "LocaLM.desktop"
 
 
 def intended_command_path() -> Path:
@@ -656,12 +899,14 @@ def make_shortcut(plan: Plan, emit: Callable[[str], None]) -> str:
         emit("Shortcut created on your Desktop.")
         return written[-1] if written else ""
 
-    if plan.shortcut == "gui":
+    branded = venv_bin(ROOT) / "LocaLM"
+    if plan.shortcut == "gui" and os.access(branded, os.X_OK):
+        exec_line = f"{branded} -m localm gui"
+    elif plan.shortcut == "gui":
         exec_line = f"{venv_bin(ROOT) / 'localm'} gui"
-        comment = "Local AI, offline"
     else:
         exec_line = str(ROOT / "localm-launcher.sh")
-        comment = "LocaLM launcher: GUI, chat, server or coder"
+    comment = "Local LLM - chat, coder, models, images"
     svg = ROOT / "assets" / "localm.svg"
     ico = ROOT / "assets" / "localm.ico"
     icon = svg if svg.exists() else (ico if ico.exists() else None)
@@ -675,9 +920,16 @@ def make_shortcut(plan: Plan, emit: Callable[[str], None]) -> str:
             "Terminal=false\n"
             "Categories=Utility;Development;Science;\n")
     d = Path.home() / ".local/share/applications"
+    old = d / OLD_MENU_ENTRY
+    try:
+        if old.is_file() and str(ROOT) in old.read_text(encoding="utf-8", errors="replace"):
+            old.unlink()
+            emit(f"Removed the older menu entry {old}")
+    except OSError as e:
+        emit(f"[!] could not remove the older menu entry {old}: {e}")
     try:
         d.mkdir(parents=True, exist_ok=True)
-        f = d / "LocaLM.desktop"
+        f = d / MENU_ENTRY
         f.write_text(text, encoding="utf-8")
         f.chmod(0o755)
     except OSError as e:
@@ -968,29 +1220,45 @@ class Wizard:
         self.container = ttk.Frame(root, padding=18)
         self.container.pack(fill="both", expand=True)
 
+        # SETUP-Q: backend
         self.backend_var = tk.StringVar(value=self.recommended)
-        self.portable_var = tk.BooleanVar(value=True)
+        # SETUP-Q: data-folder
+        self.portable_var = tk.BooleanVar(
+            value=spec.default_choice("data-folder") == "portable")
         self.path_var = tk.StringVar(value=str(ROOT / "home"))
         self.path_var.trace_add("write", self._on_path_typed)
         self.missing_data = ""
-        if self.existing:
+        # SETUP-Q: keep-data
+        if self.existing and spec.default_yes("keep-data"):
             current, exists = install_manifest().configured_data_dir(ROOT)
             if current and os.path.normcase(current) != os.path.normcase(str(ROOT / "home")):
                 self.path_var.set(current)
                 self.portable_var.set(False)
                 if not exists:
                     self.missing_data = current
-        self.store_var = tk.BooleanVar(value=os.environ.get(STORE_ENV) != "shared")
-        self.appwin_var = tk.BooleanVar(value=False)
-        self.path_cmd_var = tk.BooleanVar(value=False)
-        self.shortcut_var = tk.StringVar(value="launcher")
-        self.deps_var = tk.BooleanVar(value=True)
+        self.store_var = tk.BooleanVar(value=launcher_store() == "portable")
+        # SETUP-Q: window-mode
+        self.appwin_var = tk.BooleanVar(
+            value=spec.default_choice("window-mode") == "app-window")
+        # SETUP-Q: global-command
+        self.path_cmd_var = tk.BooleanVar(value=spec.default_yes("global-command"))
+        # SETUP-Q: shortcut
+        self.shortcut_var = tk.StringVar(value=spec.default_choice("shortcut"))
+        # SETUP-Q: plugin-deps
+        self.deps_var = tk.BooleanVar(value=spec.default_yes("plugin-deps"))
+        # SETUP-Q: plugins
         self.plugin_vars = {
             name: tk.BooleanVar(value=name in RECOMMENDED_PLUGINS)
             for name, _ in self.plugin_rows
         }
-        self.choice_var = tk.StringVar(value="repair")
-        self.purge_var = tk.BooleanVar(value=False)
+        # SETUP-Q: replace-venv
+        self.replace_venv_var = tk.BooleanVar(value=spec.default_yes("replace-venv"))
+        # SETUP-Q: own-build-dir
+        self.own_dir_var = tk.StringVar(value=spec.question("own-build-dir").default)
+        # SETUP-Q: existing-install
+        self.choice_var = tk.StringVar(value=spec.default_choice("existing-install"))
+        # SETUP-Q: uninstall-data
+        self.purge_var = tk.BooleanVar(value=spec.default_yes("uninstall-data"))
 
         self.pages = []
         self._build_runtime_page()
@@ -1032,10 +1300,16 @@ class Wizard:
         ttk.Label(page, text="Which inference runtime should LocaLM use?",
                   font=("Segoe UI", 10, "bold")).pack(anchor="w")
         for key, desc in backend_choices():
-            suffix = ("   (recommended for your hardware)"
+            suffix = (f"   {spec.RECOMMENDED_SUFFIX}"
                       if key == self.recommended else "")
             ttk.Radiobutton(page, text=desc + suffix, value=key,
                             variable=self.backend_var).pack(anchor="w")
+        row = ttk.Frame(page)
+        ttk.Label(row, text="Your build folder (with the last option; blank = "
+                            "skip):").pack(side="left")
+        ttk.Entry(row, textvariable=self.own_dir_var, width=26).pack(side="left", padx=6)
+        ttk.Button(row, text="Browse...", command=self._browse_build).pack(side="left")
+        row.pack(anchor="w", pady=(6, 0), padx=(22, 0))
 
     def _build_location_page(self):
         ttk = self.ttk
@@ -1067,12 +1341,20 @@ class Wizard:
 
         ttk.Label(page, text="Python tooling",
                   font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(16, 0))
-        ttk.Radiobutton(page, text="Keep it inside this folder - nothing is "
-                                   "written to your user profile",
-                        value=True, variable=self.store_var).pack(anchor="w")
-        ttk.Radiobutton(page, text="Share it with other installs - saves disk if "
-                                   "you have more than one",
-                        value=False, variable=self.store_var).pack(anchor="w")
+        ttk.Label(page, text=("Portable - uv, its Python and downloads all inside "
+                              "this folder" if self.store_var.get() else
+                              "Shared - uv and its Python + cache at their "
+                              "normal per-user location")
+                  + " (chosen when setup started)",
+                  wraplength=560).pack(anchor="w")
+
+        if (ROOT / ".venv").exists():
+            kind = "LocaLM" if venv_is_ours(ROOT) else "Foreign"
+            ttk.Label(page, text="Python environment",
+                      font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(16, 0))
+            ttk.Checkbutton(page, text=f"{kind} .venv found. Replace it (reinstall "
+                                       "from scratch)",
+                            variable=self.replace_venv_var).pack(anchor="w")
 
     def _build_features_page(self):
         ttk = self.ttk
@@ -1222,6 +1504,12 @@ class Wizard:
         if self.pages[self.index][0] == "Where things live":
             if not self.portable_var.get() and not self.path_var.get().strip():
                 return "Choose a data folder, or pick the one inside this folder."
+            # SETUP-Q: data-offline
+            if (self.missing_data and not self.portable_var.get()
+                    and os.path.normcase(self.path_var.get().strip())
+                    == os.path.normcase(self.missing_data)
+                    and not os.path.isdir(self.missing_data)):
+                return "That data folder is not available: connect it, or choose another."
         return ""
 
     def next_page(self) -> None:
@@ -1270,7 +1558,15 @@ class Wizard:
             plugins=tuple(n for n, _ in self.plugin_rows
                           if self.plugin_vars[n].get()),
             plugin_deps=bool(self.deps_var.get()),
+            replace_venv=bool(self.replace_venv_var.get()),
+            own_build_dir=self.own_dir_var.get().strip(),
         )
+
+    def _browse_build(self) -> None:
+        chosen = self.filedialog.askdirectory(title="Choose your llama.cpp build folder")
+        if chosen:
+            self.own_dir_var.set(chosen)
+            self.backend_var.set(spec.OWN)
 
     def _browse(self) -> None:
         chosen = self.filedialog.askdirectory(title="Choose a data folder")
@@ -1296,6 +1592,8 @@ class Wizard:
         self.action.configure(state="disabled", text="Installing...")
 
         self.lines = queue.Queue()
+        global ASK
+        ASK = self._ask_from_worker
         resume = begin_journal(self._emit)
         steps = all_steps(plan, resume)
         threading.Thread(target=self._worker, args=(steps,), daemon=True).start()
@@ -1303,6 +1601,51 @@ class Wizard:
 
     def _emit(self, text: str) -> None:
         self.lines.put(("log", text))
+
+    def _ask_from_worker(self, question: dict) -> str:
+        """ASK for the install thread: hands *question* to the window thread and
+        waits for the answer."""
+        box: list = []
+        done = threading.Event()
+        self.lines.put(("ask", (question, box, done)))
+        done.wait()
+        return box[0] if box else str(question.get("default", ""))
+
+    def _show_question(self, question: dict) -> str:
+        """Ask *question* in a dialog and return the answer; its default when
+        the window has no dialogs."""
+        default = str(question.get("default", ""))
+        text = str(question.get("text", ""))
+        if self.messagebox is None:
+            return default
+        if question.get("kind") == "choose":
+            return self._choose_dialog(text, question.get("choices") or [], default)
+        yes = self.messagebox.askyesno(f"{APP_NAME} Setup", text,
+                                       default="yes" if default == "y" else "no")
+        return "y" if yes else "n"
+
+    def _choose_dialog(self, text: str, choices: list, default: str) -> str:
+        """A modal pick from *choices* ``[answer, label]``; *default* when the
+        dialog is closed."""
+        tk, ttk = self.tk, self.ttk
+        top = tk.Toplevel(self.root)
+        top.title(f"{APP_NAME} Setup")
+        top.transient(self.root)
+        picked = tk.StringVar(value=default)
+        ttk.Label(top, text=text, wraplength=420).pack(anchor="w", padx=14, pady=(12, 6))
+        for answer, label in choices:
+            ttk.Radiobutton(top, text=str(label), value=str(answer),
+                            variable=picked).pack(anchor="w", padx=14)
+        result = [default]
+
+        def ok():
+            result[0] = picked.get()
+            top.destroy()
+        ttk.Button(top, text="OK", command=ok).pack(anchor="e", padx=14, pady=12)
+        top.protocol("WM_DELETE_WINDOW", top.destroy)
+        top.grab_set()
+        self.root.wait_window(top)
+        return result[0]
 
     def _worker(self, steps: list[Step]) -> None:
         def on_step(i: int, total: int, label: str) -> None:
@@ -1329,6 +1672,15 @@ class Wizard:
                     self.step_label.configure(
                         text=f"Step {i + 1} of {total}: {label}")
                     self.bar.configure(maximum=total, value=i)
+                elif kind == "ask":
+                    question, box, done = payload
+                    try:
+                        box.append(self._show_question(question))
+                    except Exception as e:
+                        self.lines.put(("log", f"[!] could not show the question "
+                                               f"({e}); using its default"))
+                    finally:
+                        done.set()
                 elif kind == "done":
                     self._finish(payload)
                     return
@@ -1357,7 +1709,10 @@ class Wizard:
             question = (f"Remove {APP_NAME} from this folder?\n\n"
                         + ("Your saved data will be DELETED too."
                            if purge else "Your saved data is kept."))
-            if not self.messagebox.askyesno(f"Uninstall {APP_NAME}", question):
+            # SETUP-Q: uninstall-confirm
+            default = "yes" if spec.default_yes("uninstall-confirm") else "no"
+            if not self.messagebox.askyesno(f"Uninstall {APP_NAME}", question,
+                                            default=default):
                 return
         self.installing = True
         self.mode = "uninstalling"
