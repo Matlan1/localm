@@ -504,10 +504,15 @@ def _cuda_device_map(torch, config: Optional[dict] = None) -> dict:
 
     headroom = int(0.5e9)   # kept free on the one device of a one-device placement
     from localm.vram import VRAM_OVERHEAD_BYTES
-    try:
-        split_headroom = int(cfg.get("vram_overhead_mb")) * 1024 ** 2
-    except (TypeError, ValueError):
-        split_headroom = VRAM_OVERHEAD_BYTES
+    split_headroom = VRAM_OVERHEAD_BYTES
+    raw_overhead = cfg.get("vram_overhead_mb")
+    if isinstance(raw_overhead, (int, str)) and not isinstance(raw_overhead, bool):
+        try:
+            split_headroom = int(raw_overhead) * 1024 ** 2
+        except ValueError:
+            logger.warning("vram_overhead_mb is not a number (%r); each GPU keeps "
+                           "the default %.1f GB free", raw_overhead,
+                           VRAM_OVERHEAD_BYTES / 1024 ** 3)
 
     def _free_minus_headroom(idx: int, keep: int = headroom,
                              setting: str = "gpu_split_indices") -> Optional[int]:

@@ -4416,8 +4416,10 @@ def gguf_split_devices(config: Optional[dict] = None, *, gpus: Optional[list] = 
         ratios = cfg.get("gpu_split_ratios") if chosen else None
         if _native_gpu_index_space_is_opaque():
             native = native_gpu_devices()
+            if native is None:
+                return None, "no fresh GPU reading (the runtime's device list could not be read)"
             if not native:
-                return None, "the llama.cpp runtime's device list could not be read"
+                return None, "fewer than two discrete GPUs"
             from localm.inference.backends.llamacpp._loader import GGML_DEV_TYPE_GPU
             candidates = [
                 {"slot": d["index"], "index": d["index"], "name": d.get("name", ""),
