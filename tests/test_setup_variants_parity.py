@@ -336,6 +336,13 @@ def test_the_console_backend_menu_comes_from_the_spec(name):
     assert "localm.setup_spec extras" in text
 
 
+@pytest.mark.parametrize("name", ("setup.bat", "setup.sh", "installer/gui.py"))
+def test_every_variant_records_the_uv_it_used(name):
+    """Shared installs record the uv they ran with, so the updater finds it."""
+    text = (ROOT / name).read_text(encoding="utf-8")
+    assert "--uv-exe" in text
+
+
 def test_no_variant_hardcodes_the_plugin_set():
     text = (ROOT / "installer" / "gui.py").read_text(encoding="utf-8")
     assert '"coder", "rag"' not in text and "'coder', 'rag'" not in text

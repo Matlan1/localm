@@ -543,6 +543,9 @@ if [ "$uv_present" != 1 ]; then
   fi
   step_done "$UVSTEP"
 fi
+# Shared: the uv in use, recorded so the updater finds it later.
+UVEXE=""
+if [ "$CONTAINED" != 1 ]; then UVEXE="$(command -v uv || true)"; fi
 
 # ---- GPU probe fallback and platform flags -----------------------------------
 # detect_gpu is used only when `python -m localm.hwdetect` (once the venv
@@ -581,7 +584,7 @@ record_runtime() {  # record the environment now; the record at the end repeats 
   # $RCFLAG / $UVSHARED are flags or empty; unquoted on purpose.
   # shellcheck disable=SC2086
   .venv/bin/python -m localm.install_manifest record --root . --venv "$(pwd)/.venv" \
-    $RCFLAG --python-dir "$PYDIR" --cache-dir "$CACHEDIR" --uv-dir "${UVDIR:-}" $UVSHARED \
+    $RCFLAG --python-dir "$PYDIR" --cache-dir "$CACHEDIR" --uv-dir "${UVDIR:-}" --uv-exe "${UVEXE:-}" $UVSHARED \
     >/dev/null 2>&1 || true
 }
 create_venv() {
@@ -1165,7 +1168,7 @@ step_begin record
   --venv "$(pwd)/.venv" \
   --lib-dir "$(pwd)/runtime/localm_llama_runtime/lib" \
   --shortcut "${SHORTCUT:-}" --file "${LAUNCHER_FILE:-}" \
-  $RCFLAG --python-dir "$PYDIR" --cache-dir "$CACHEDIR" --uv-dir "${UVDIR:-}" $UVSHARED \
+  $RCFLAG --python-dir "$PYDIR" --cache-dir "$CACHEDIR" --uv-dir "${UVDIR:-}" --uv-exe "${UVEXE:-}" $UVSHARED \
   --path-dir "${PATH_DIR:-}" --command-shim "${CMD_SHIM:-}" ${PATH_MOD:-} \
   --stamp "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")" \
   >/dev/null 2>&1 || say "  [!] Could not record the install manifest (uninstall will be conservative)."

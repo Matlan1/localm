@@ -268,6 +268,9 @@ exit /b 1
 
 :uv_ready
 if defined UVSTEP call :step_done %UVSTEP% || exit /b 99
+rem  Shared: the uv in use, recorded so the updater finds it later.
+set "UVEXE="
+if not "%CONTAINED%"=="1" for /f "delims=" %%u in ('where uv 2^>nul') do if not defined UVEXE set "UVEXE=%%u"
 
 rem ---- create the venv in the repo root -------------------------------------
 rem  An existing .venv is reused unless the user opts to replace it, so a
@@ -450,7 +453,7 @@ echo  Environment ready.
 type nul > ".venv\.localm-venv"
 rem  Record the environment now; the record at the end of setup repeats it.
 setlocal DisableDelayedExpansion
-.venv\Scripts\python -m localm.install_manifest record --root . --venv "%CD%\.venv" %RCFLAG% --python-dir "%PYDIR%" --cache-dir "%CACHEDIR%" --uv-dir "%UVDIR%" %UVSHARED% >nul 2>nul
+.venv\Scripts\python -m localm.install_manifest record --root . --venv "%CD%\.venv" %RCFLAG% --python-dir "%PYDIR%" --cache-dir "%CACHEDIR%" --uv-dir "%UVDIR%" --uv-exe "%UVEXE%" %UVSHARED% >nul 2>nul
 endlocal
 :venv_done
 call :step_done venv || exit /b 99
@@ -865,7 +868,7 @@ rem ---- record what we installed (uninstall removes ONLY what we created) -----
 rem  The data folder was recorded when it was chosen (prepare-data).
 call :jr begin record
 setlocal DisableDelayedExpansion
-.venv\Scripts\python -m localm.install_manifest record --root . --venv "%CD%\.venv" --lib-dir "%CD%\runtime\localm_llama_runtime\lib" --shortcut "%SCPATH%" %RCFLAG% --python-dir "%PYDIR%" --cache-dir "%CACHEDIR%" --uv-dir "%UVDIR%" %UVSHARED% --path-dir "%PATHDIR%" --command-shim "%CMDSHIM%" %PATHMOD% >nul 2>nul
+.venv\Scripts\python -m localm.install_manifest record --root . --venv "%CD%\.venv" --lib-dir "%CD%\runtime\localm_llama_runtime\lib" --shortcut "%SCPATH%" %RCFLAG% --python-dir "%PYDIR%" --cache-dir "%CACHEDIR%" --uv-dir "%UVDIR%" --uv-exe "%UVEXE%" %UVSHARED% --path-dir "%PATHDIR%" --command-shim "%CMDSHIM%" %PATHMOD% >nul 2>nul
 endlocal
 if errorlevel 1 echo  [^^!] Could not record the install manifest (uninstall will be conservative).
 call :step_done record || exit /b 99
