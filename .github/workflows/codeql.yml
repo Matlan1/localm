@@ -10,17 +10,13 @@ name: CodeQL
 # are in .github/codeql/codeql-config.yml.
 
 on:
-  # Mirrors ci.yml: push only on master (post-merge verification), branch work
-  # covered by pull_request, so a PR gets ONE run rather than push + PR.
-  push:
-    branches: [master]
+  # Nightly full scan of master, a manual run, and a pull request only when it
+  # carries the `codeql` or `full-ci` label (the release PR carries `full-ci`).
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
   schedule:
-    # Weekly full scan so a newly released CodeQL query reaches code that has not
-    # changed since the last push. Offset an hour from ci.yml's Mon 06:00 cron so
-    # the two do not contend for runners.
-    - cron: "0 7 * * 1"
+    - cron: "0 2 * * *"
 
 # A newer push to the same pull request cancels its running analysis; master
 # pushes, the schedule and manual runs always finish.
@@ -36,6 +32,10 @@ permissions:
 jobs:
   analyze:
     name: analyze (${{ matrix.language }})
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'codeql') ||
+      contains(github.event.pull_request.labels.*.name, 'full-ci')
     runs-on: ubuntu-latest
     permissions:
       # Least privilege per job. security-events:write is what uploads the SARIF
