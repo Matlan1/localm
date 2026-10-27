@@ -302,21 +302,15 @@ def _scrub_lan_hosts(text: str) -> str:
     return _LAN_TOKEN_RE.sub(replace, text)
 
 
-# Host names never treated as this machine's own: placeholders and default
-# names that are also ordinary words in a report.
-_OWN_NAME_SKIP = frozenset({"admin", "archlinux", "build", "builder", "client", "cloud", "computer",
-                            "container", "debian", "default", "desktop", "dev", "devbox", "docker",
-                            "fedora", "gpu", "home", "host", "kali", "laptop", "linux", "localhost",
-                            "localm", "macbook", "machine", "main", "node", "notebook", "office",
-                            "prod", "production", "raspberrypi", "redacted", "root", "runner",
-                            "server", "staging", "system", "test", "ubuntu", "user", "windows",
-                            "work", "worker", "workstation"})
+# A host name of letters only, and the setting names whose value is a host name.
+_WORD_NAME_RE = re.compile(r"[A-Za-z]+")
+_HOST_KEY = r"(?:host|computer|machine|node|device|pc)(?:[ _-]?name)?"
 
 
 def _own_host_names() -> list:
     """This machine's names (``socket.gethostname()``, its first label, and
     ``COMPUTERNAME``), longest first. Names shorter than three characters and
-    those in ``_OWN_NAME_SKIP`` are left out. Empty when none can be read."""
+    ``localhost`` are left out. Empty when none can be read."""
     raw = []
     try:
         raw.append(socket.gethostname())
@@ -329,28 +323,48 @@ def _own_host_names() -> list:
         if name:
             names.add(name)
             names.add(name.split(".")[0])
-    return sorted((n for n in names
-                   if len(n) >= 3 and n.lower() not in _OWN_NAME_SKIP),
+    return sorted((n for n in names if len(n) >= 3 and n.lower() != "localhost"),
                   key=lambda n: (-len(n), n))
+
+
+def _scrub_own_names(text: str, names: list) -> str:
+    """Replace this machine's *names* with ``<host>``, case-insensitively.
+    Every name is replaced where it stands as a machine name: right after
+    ``//`` or ``@``, right before ``:<digit>``, or as the value of a host,
+    computer, machine, node, device or pc key, each optionally followed by
+    ``name`` (``key=name``, ``Key Name: name``). A name holding anything but
+    letters is also replaced wherever else it stands as a whole word (not
+    inside a dotted name or a path); a name of letters only, which can be an
+    ordinary word, is not."""
+    marked = [n for n in names if not _WORD_NAME_RE.fullmatch(n)]
+    if marked:
+        own = re.compile(r"(?<![A-Za-z0-9_./\\-])(?:"
+                         + "|".join(re.escape(n) for n in marked)
+                         + r")(?![A-Za-z0-9_-]|[./\\][A-Za-z0-9_])",
+                         re.IGNORECASE)
+        text = own.sub("<host>", text)
+    if names:
+        alt = "(?:" + "|".join(re.escape(n) for n in names) + ")"
+        end = r"(?![A-Za-z0-9_-]|\.[A-Za-z0-9])"
+        text = re.sub(r"(?:(?<=//)|(?<=@))" + alt + end, "<host>", text,
+                      flags=re.IGNORECASE)
+        text = re.sub(r"(?<![A-Za-z0-9_./\\@<-])" + alt + r"(?=:\d)", "<host>", text,
+                      flags=re.IGNORECASE)
+        text = re.sub(r"(?<![A-Za-z0-9_])(" + _HOST_KEY + r"[\"']?[ \t]*[:=][ \t]*[\"']?)"
+                      + alt + end, r"\1<host>", text, flags=re.IGNORECASE)
+    return text
 
 
 def _scrub_hosts(text: str) -> str:
     """Replace machine names with ``<host>``: a UNC path's machine name
     (``_UNC_HOST_RE``), a host name under a local-network suffix
-    (``_scrub_lan_hosts``, suffix kept), and this machine's own names wherever they
-    stand as a whole word (case-insensitive). Idempotent."""
+    (``_scrub_lan_hosts``, suffix kept), and this machine's own names
+    (``_scrub_own_names``). Idempotent."""
     if not text:
         return text
     text = _UNC_HOST_RE.sub(r"\1<host>", text)
     text = _scrub_lan_hosts(text)
-    names = _own_host_names()
-    if names:
-        own = re.compile(r"(?<![A-Za-z0-9_./\\-])(?:"
-                         + "|".join(re.escape(n) for n in names)
-                         + r")(?![A-Za-z0-9_-]|[./\\][A-Za-z0-9_])",
-                         re.IGNORECASE)
-        text = own.sub("<host>", text)
-    return text
+    return _scrub_own_names(text, _own_host_names())
 
 
 def _scrub_secrets(text: str) -> str:

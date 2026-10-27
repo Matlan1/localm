@@ -29,9 +29,14 @@ def _report_preload_failure(console, exc: Exception) -> None:
     AND log it. ``console.print`` alone never reaches the debug log file (it is
     not a logging call), so a preload failure with no other symptom - the user
     never explicitly tries to chat - leaves NO trace a bug report could surface.
-    The log call carries the full traceback."""
+    The log call carries the full traceback, except for a ModelRefusedError (the
+    expected answer for that file), which is logged as one line."""
     console.print(f"[yellow]Background model load failed: {exc}[/yellow]")
     from localm.debuglog import logger
+    from localm.inference.backends.base import ModelRefusedError
+    if isinstance(exc, ModelRefusedError):
+        logger.warning("background model preload refused: %s", exc)
+        return
     logger.exception("background model preload failed")
 
 

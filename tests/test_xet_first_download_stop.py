@@ -240,10 +240,14 @@ def test_a_first_download_above_the_http_limit_goes_through_xet(tmp_path, monkey
     def http_get(*a, **kw):
         calls["http"] += 1
 
+    checked = []
     monkeypatch.setattr(fd, "is_xet_available", lambda: True)
     monkeypatch.setattr(fd, "xet_get", xet_get)
     monkeypatch.setattr(fd, "http_get", http_get)
     monkeypatch.setattr(fd, "_check_disk_space", lambda *a: None)
+    _fake_xet_endpoint(monkeypatch)
+    monkeypatch.setattr("localm.netpolicy.check_url",
+                        lambda url, **kw: checked.append(url))
 
     _resumable_download_to_tmp_and_move(
         incomplete_path=cache / "big.etag.incomplete", destination_path=dest,
@@ -252,8 +256,52 @@ def test_a_first_download_above_the_http_limit_goes_through_xet(tmp_path, monkey
         etag="etag", xet_file_data=object())
 
     assert calls == {"xet": 1, "http": 0}
+    assert checked == [CAS_URL], "the Xet storage endpoint is checked before the transfer"
     assert dest.read_bytes() == b"XET"
     assert _partials(cache) == []
+
+
+CAS_URL = "https://cas-server.xethub.hf.co"
+
+
+def _fake_xet_endpoint(monkeypatch):
+    """huggingface_hub's Xet connection lookup answers with CAS_URL, offline."""
+    import types
+    monkeypatch.setattr(
+        "huggingface_hub.utils._xet.refresh_xet_connection_info",
+        lambda **kw: types.SimpleNamespace(endpoint=CAS_URL, access_token="t",
+                                           expiration_unix_epoch=0))
+
+
+def test_a_denied_xet_storage_host_refuses_the_transfer_before_it_starts(
+        tmp_path, monkeypatch):
+    import huggingface_hub.file_download as fd
+    from localm.config import load_config, save_config
+    from localm.netpolicy import NetworkPolicyError
+    cfg = load_config()
+    cfg.update(net_mode="allow", net_deny=["cas-server.xethub.hf.co"])
+    save_config(cfg)
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    dest = tmp_path / "big.gguf"
+    calls = []
+    monkeypatch.setattr(fd, "is_xet_available", lambda: True)
+    monkeypatch.setattr(fd, "xet_get", lambda **kw: calls.append("xet"))
+    monkeypatch.setattr(fd, "http_get", lambda *a, **kw: calls.append("http"))
+    monkeypatch.setattr(fd, "_check_disk_space", lambda *a: None)
+    _fake_xet_endpoint(monkeypatch)
+
+    with pytest.raises(NetworkPolicyError) as err:
+        _resumable_download_to_tmp_and_move(
+            incomplete_path=cache / "big.etag.incomplete", destination_path=dest,
+            url_to_download="http://127.0.0.1:9/big.gguf", headers={},
+            expected_size=fd.constants.MAX_HTTP_DOWNLOAD_SIZE + 1, filename="big.gguf",
+            force_download=False, etag="etag", xet_file_data=object())
+
+    assert "cas-server.xethub.hf.co" in str(err.value)
+    assert calls == []
+    assert not dest.exists()
+    assert list(cache.iterdir()) == [], "no temp file and no owner record are left"
 
 
 def test_a_snapshot_counts_the_partials_of_files_in_subfolders(tmp_path):

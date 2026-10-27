@@ -23,16 +23,38 @@ test("vramBasisCaption: single GPU -> plain 'your N GB VRAM', never 'total'", ()
   assert.doesNotMatch(msg, /main GPU/, "with one GPU there is no 'main' to distinguish");
 });
 
-test("vramBasisCaption: multi-GPU, NO split configured -> names the main GPU, not the machine total", () => {
+test("vramBasisCaption: multi-GPU, NO split configured -> combined across every discrete GPU", () => {
   const cap = caption();
-  // With no split, vram_capacity() returns the single main GPU's 16 GB.
-  const msg = cap(16 * GIB, {
+  // With no split a load spreads over every discrete GPU, and vram_capacity()
+  // returns their combined 32 GB.
+  const msg = cap(32 * GIB, {
     gpus: [{ index: 0, total: 16 * GIB, free: 14 * GIB }, { index: 1, total: 16 * GIB, free: 15 * GIB }],
     gpu_split_indices: [],
   });
-  assert.match(msg, /your main GPU's 16 GB/);
-  assert.match(msg, /use all 2/, "invites configuring a split to combine both cards");
-  assert.doesNotMatch(msg, /total VRAM/);
+  assert.match(msg, /your 32 GB VRAM combined across 2 GPUs/);
+  assert.doesNotMatch(msg, /main GPU/);
+});
+
+test("vramBasisCaption: no split but a main GPU chosen -> that GPU, not combined", () => {
+  const cap = caption();
+  // vram_capacity() answers for the chosen main GPU then (an HF load runs on it).
+  const msg = cap(16 * GIB, {
+    gpus: [{ index: 0, total: 16 * GIB }, { index: 1, total: 16 * GIB }],
+    gpu_split_indices: [],
+    main_gpu_index: 1,
+  });
+  assert.match(msg, /main GPU's 16 GB/);
+  assert.doesNotMatch(msg, /combined/);
+});
+
+test("vramBasisCaption: no split, one discrete GPU beside an integrated one -> that GPU alone", () => {
+  const cap = caption();
+  // llama.cpp leaves the integrated GPU out, so the number is the discrete card's.
+  const msg = cap(16 * GIB, {
+    gpus: [{ index: 0, total: 2 * GIB, integrated: true }, { index: 1, total: 16 * GIB, integrated: false }],
+    gpu_split_indices: [],
+  });
+  assert.doesNotMatch(msg, /combined/);
 });
 
 test("vramBasisCaption: 2-GPU split configured -> 'combined across 2 GPUs'", () => {

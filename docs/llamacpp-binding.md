@@ -21,6 +21,7 @@
 | `_stepcosts.py` | Measured step costs of speculative decoding and the draft length they pick |
 | `_diffusion.py` | Text generation for diffusion language models (Dream, LLaDA, LLaDA-MoE, RND1) |
 | `_split_fit.py` | Per-device fit of llama.cpp's implicit multi-GPU layer split |
+| `_gpu_plan.py` | Placement of one model over two or more GPUs: each GPU's layers, the output layer's GPU, the context ceiling |
 | `mtmd.py` | Multimodal (vision and audio input) support: binds the bundled `mtmd.dll` for GGUF mmproj |
 | `mtmd_gen.py` | Speech synthesis with a text-to-speech GGUF through `libmtmd`; runs inside the isolated speech worker |
 | `_runner.py` | Subprocess isolation for the whole GGUF model lifecycle (load, generate, tokenize, grammar-check, unload), so a native abort in the child kills only that child |

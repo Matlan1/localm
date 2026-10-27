@@ -21,6 +21,8 @@ Three clean-rejection or info-leak guards:
 import os
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from fastapi.testclient import TestClient
 
 from localm.inference.http_server import create_app
@@ -255,3 +257,34 @@ def test_model_detail_reports_the_pulled_revision():
         plain = client.get("/v1/models/plain").json()
     assert pinned["revision"] == "refs/pr/3"
     assert "revision" not in plain
+
+
+PNG_BYTES = bytes.fromhex("89504e470d0a1a0a0000000d49484452") + bytes(range(128, 256)) * 3
+
+
+@pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/embeddings",
+                                  "/v1/completions"])
+def test_binary_bytes_labelled_json_are_a_clear_422(path):
+    r = _raw_client().post(path, content=PNG_BYTES,
+                           headers={"Content-Type": "application/json"})
+    assert r.status_code == 422, r.text[:300]
+    assert "not valid UTF-8" in r.json()["detail"]
+    assert "error parsing the body" not in r.text
+
+
+@pytest.mark.parametrize("path", ["/api/chat", "/v1/messages", "/v1/responses"])
+def test_binary_bytes_labelled_json_are_named_on_the_other_wire_formats(path):
+    r = _raw_client().post(path, content=PNG_BYTES,
+                           headers={"Content-Type": "application/json"})
+    assert r.status_code == 400, r.text[:300]
+    assert "not valid UTF-8" in r.text
+    assert "error parsing the body" not in r.text
+
+
+def test_text_that_is_not_json_names_the_decoder_reason():
+    r = _raw_client().post("/v1/chat/completions", content=b"hello not json",
+                           headers={"Content-Type": "application/json"})
+    assert r.status_code == 422
+    detail = r.json()["detail"]
+    assert detail.startswith("The request body is not valid JSON: Expecting value")
+    assert "jSON" not in detail

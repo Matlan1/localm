@@ -278,15 +278,22 @@ export function formatToolCalls(text) {
     });
 }
 
+/** Remove the Qwen3-ASR transcript prefix (`language English<asr_text>`) and any
+ *  stray `<asr_text>` tag from *text*. Used for display, Copy, Speak and the
+ *  stored reply. */
+export function stripAsrPrefix(text) {
+  return (text || "")
+    .replace(/language [^<\n]{0,40}<asr_text>/g, "")
+    .replace(/<asr_text>/g, "");
+}
+
 /** Last-resort client scrub of model-internal control markers. The backend
  *  (localm/inference/textnorm.py) normalises these, but a third-party or
  *  plugged-in backend might not, so the GUI never renders raw channel tokens.
  *  Mirrors the server regexes; runs on the full accumulated text so there is no
  *  streaming-boundary concern here. */
 export function scrubMarkers(text) {
-  return (text || "")
-    .replace(/language [^<\n]{0,40}<asr_text>/g, "")
-    .replace(/<asr_text>/g, "")
+  return stripAsrPrefix(text)
     .replace(/<\|"\|>/g, '"')
     .replace(/<\|?\s*channel\s*\|?>(thought|thinking|analysis|reasoning|commentary|reflection)\n?(<\|?\s*message\s*\|?>)?/g, "<think>\n")
     .replace(/<\s*channel\s*\|>|<\|?\s*channel\s*\|?>final\n?(<\|?\s*message\s*\|?>)?/g, "\n</think>\n")
@@ -654,19 +661,33 @@ function mainHasVisibleContent(main) {
 }
 
 const _CODE_SPAN = /(```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)|`[^`\n]+`)/;
+const _DISPLAY_LINE = String.raw`(?![ \t]*$)(?![ \t]*(?:[-*]|\d+[.)]|#{1,6})[ \t])[^\n]{0,2000}\n`;
 const _MATH_SPAN = new RegExp([
-  String.raw`\$\$[\s\S]+?\$\$`,
+  String.raw`(?<![\\($\w])\$\$(?![\s$])[^\n]{0,500}?(?<![\s$])\$\$(?!\$)`,
+  String.raw`(?<=^[ \t]*)\$\$(?:[ \t]*\n|(?=[^\s$]))(?:${_DISPLAY_LINE}){1,40}?(?:[ \t]*|[^\n]{0,2000}[^\s$])\$\$[ \t]*$`,
   String.raw`\\\[[\s\S]+?\\\]`,
   String.raw`\\\([\s\S]+?\\\)`,
   String.raw`(?<![\\$])\$(?!\s)[^$\n]*[^$\s\n]\$(?!\d)`,
-].join("|"), "g");
+].join("|"), "gm");
 
 /** Swap each math span of *text* that lies outside code for an inert token, so
  *  the markdown pass cannot consume its escapes (`\,`, `\\`, `\{`) or emphasis
  *  marks. Returns `{ text, restore }`; `restore(root)` puts the original source
  *  back into the TEXT NODES of the sanitised, rendered *root*. A token that
  *  ended up in an attribute (a link target, an image source) is left as the
- *  inert token, so math source never reaches an attribute after sanitising. */
+ *  inert token, so math source never reaches an attribute after sanitising.
+ *
+ *  `$$` display math is protected in two shapes only, so a price marker such as
+ *  `($$)`, `$$$$` or `Price: $$ for A` never pairs across the text between two
+ *  of them:
+ *   - one line: `$$` not preceded by `(`, a word character or `$`, followed by a
+ *     character that is neither whitespace nor `$`, closed on the same line (at
+ *     most 500 characters later) by `$$` that follows neither whitespace nor `$`
+ *     and is not followed by `$`;
+ *   - several lines: `$$` opens a line (alone or followed at once by TeX) and a
+ *     later line (at most 40 lines on) ends with `$$`; no line in between may be
+ *     blank or start a markdown list item (`-`, `*`, `1.`) or heading (`#`).
+ *  Any other `$$` is left to the markdown pass and KaTeX's own auto-render. */
 export function protectMath(text) {
   const spans = [];
   const tag = "ZZLMATH" + Math.random().toString(36).slice(2, 8);

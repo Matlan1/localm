@@ -414,6 +414,12 @@
             <div id="disc-results"></div>
           </div>
         </div>
+        <div class="card" id="interrupted-card" hidden>
+          <div class="card-head"><span class="ic cat-ic cat-blue" data-icon="download"></span>
+            <div class="card-head-text"><h3 data-i18n="models.interrupted.title">Interrupted downloads</h3></div></div>
+          <div class="sub" data-i18n="models.interrupted.intro">These downloads stopped before they finished, for example because localm was closed. Resume continues from the data already saved.</div>
+          <div id="interrupted-list" class="interrupted-list"></div>
+        </div>
         <div class="card">
           <div class="card-head"><span class="ic cat-ic cat-blue" data-icon="download"></span>
             <div class="card-head-text"><h3 data-i18n="models.pull.title">Add a model</h3></div></div>
@@ -1175,6 +1181,19 @@
                   <button class="btn-primary" id="update-apply" hidden data-i18n="settings.update.applyButton">Update now</button>
                 </div>
                 <div id="update-status" class="sub" hidden></div>
+                <!-- The GUI form of `localm update --list` / `--to <version>`. -->
+                <div class="actions">
+                  <button class="btn-secondary" id="update-versions" data-i18n="settings.update.versionsButton">Choose a version</button>
+                </div>
+                <div id="update-version-picker" hidden>
+                  <label class="sub" for="update-version-select" data-i18n="settings.update.versionLabel">Version to install</label>
+                  <select id="update-version-select"></select>
+                  <div id="update-version-info" class="sub"></div>
+                  <div class="actions">
+                    <button class="btn-secondary" id="update-install-version" data-i18n="settings.update.installVersionButton">Install this version</button>
+                  </div>
+                </div>
+                <div id="update-version-status" class="sub" hidden></div>
               </div>
 
               <!-- The GUI half of `localm update --rollback`. Its OWN sub-block, not

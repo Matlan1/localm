@@ -103,6 +103,10 @@ class Agent(
     interactive_tools:
         Offer ask_user and the plan-mode tools. Only a session with a terminal
         the user answers on sets it; otherwise they are disabled.
+    server_side:
+        True for an agent that runs inside the server (a GUI coder session, a
+        scheduled job): a backend 401/403 fails the turn instead of asking for an
+        API key on the server's console. A sub-agent inherits its parent's value.
     gen_kwargs:
         Extra kwargs forwarded to every LLM call (temperature, max_tokens, …).
     """
@@ -136,6 +140,7 @@ class Agent(
         custom_instructions: Optional[str] = None,
         max_tokens_explicit: Optional[bool] = None,
         interactive_tools: bool = False,
+        server_side: bool = False,
         **gen_kwargs,
     ) -> None:
         # Live-attribute access, so a patched agent.load_memory /
@@ -165,6 +170,7 @@ class Agent(
         self.patch_mode     = patch_mode
         self._patch_chunks: list[str] = [] # accumulated diffs when patch_mode=True
         self.parent         = parent
+        self.server_side    = bool(server_side or getattr(parent, "server_side", False))
         self.mode           = mode
         # Publish this session's own cwd-resolved mode for debug_content_enabled()
         # (localm.debuglog) to see - it cannot resolve a project's own

@@ -47,6 +47,58 @@ def _invalid_config_errors() -> tuple:
     return (ValueError, StrictDataclassError)
 
 
+def _load_text_tokenizer(tr, model_path, trust_remote_code: bool):
+    """Load the plain tokenizer of *model_path* with transformers module *tr*.
+
+    Raises ``ModelRefusedError`` when that fails with a ``ValueError`` or a
+    ``StrictDataclassError``. The headline says the configuration is not valid
+    only when ``AutoConfig`` itself rejects the model's ``config.json``; any
+    other such failure (no tokenizer files, an unresolvable tokenizer class, a
+    SentencePiece or tiktoken file whose package is missing) is headlined as a
+    tokenizer failure. Both carry the original error text."""
+    from localm.inference.backends.base import ModelRefusedError
+    from localm.inference.backends.llamacpp._runner import shorten_long_digits
+
+    def _flat(err: BaseException) -> str:
+        return " ".join(shorten_long_digits(str(err)).split())
+
+    name = Path(model_path).name
+    try:
+        with _filter_docstring_leak():
+            return tr.AutoTokenizer.from_pretrained(
+                model_path, trust_remote_code=trust_remote_code)
+    except _invalid_config_errors() as tok_err:
+        config_err: BaseException | None = None
+        if _is_strict_dataclass_error(tok_err):
+            config_err = tok_err
+        else:
+            try:
+                tr.AutoConfig.from_pretrained(
+                    model_path, trust_remote_code=trust_remote_code)
+            except _invalid_config_errors() as e:
+                config_err = e
+            except Exception as e:
+                logger.debug("hf load: config probe after a tokenizer failure raised "
+                             "%s: %s", type(e).__name__, e)
+        if config_err is not None:
+            raise ModelRefusedError(
+                f"{name} cannot be loaded: its configuration is not valid. "
+                + _flat(config_err)) from tok_err
+        raise ModelRefusedError(
+            f"{name} cannot be loaded: its tokenizer could not be loaded. "
+            + _flat(tok_err)) from tok_err
+
+
+def _is_strict_dataclass_error(err: BaseException) -> bool:
+    """True for huggingface_hub's ``StrictDataclassError`` (a validation failure
+    of a strict dataclass such as a model config)."""
+    try:
+        from huggingface_hub.errors import StrictDataclassError
+    except ImportError:
+        return False
+    return isinstance(err, StrictDataclassError)
+
+
 def _require_torch():
     try:
         import torch
@@ -481,7 +533,13 @@ def _cuda_device_map(torch, config: Optional[dict] = None) -> dict:
       (``discover.single_gpu_index``), else a valid ``main_gpu_index`` ->
       ``"auto"`` confined to that ONE device by the same technique (its id is
       the only GPU in ``max_memory``).
-    - neither configured -> ``"auto"`` across every visible device.
+    - neither configured -> ``"auto"`` across every visible discrete device,
+      each given a budget (plain ``"auto"`` when fewer than two devices can be
+      read).
+
+    A device in a multi-device placement keeps ``vram_overhead_mb`` free (the
+    per-device reserve the GGUF backend charges, for the KV cache and the
+    activations of generation); a one-device placement keeps 0.5 GB.
 
     Every ``max_memory`` built here also carries a ``"cpu"`` budget: passing a
     max_memory at all suppresses the one accelerate would otherwise build for
@@ -496,17 +554,28 @@ def _cuda_device_map(torch, config: Optional[dict] = None) -> dict:
                                  single_gpu_index)
     cfg = config if config is not None else load_config()
 
-    headroom = int(0.5e9)   # leave a little free per device, like the GGUF backend
+    headroom = int(0.5e9)   # kept free on the one device of a one-device placement
+    from localm.vram import VRAM_OVERHEAD_BYTES
+    split_headroom = VRAM_OVERHEAD_BYTES
+    raw_overhead = cfg.get("vram_overhead_mb")
+    if isinstance(raw_overhead, (int, str)) and not isinstance(raw_overhead, bool):
+        try:
+            split_headroom = int(raw_overhead) * 1024 ** 2
+        except ValueError:
+            logger.warning("vram_overhead_mb is not a number (%r); each GPU keeps "
+                           "the default %.1f GB free", raw_overhead,
+                           VRAM_OVERHEAD_BYTES / 1024 ** 3)
 
-    def _free_minus_headroom(idx: int) -> Optional[int]:
+    def _free_minus_headroom(idx: int, keep: int = headroom,
+                             setting: str = "gpu_split_indices") -> Optional[int]:
         try:
             free, _total = torch.cuda.mem_get_info(idx)
         except Exception as e:
-            logger.warning("gpu_split_indices: free VRAM of device %s could not be "
-                           "read (%s: %s); it is left out of the split", idx,
+            logger.warning("%s: free VRAM of device %s could not be read (%s: %s); "
+                           "it is left out of the split", setting, idx,
                            type(e).__name__, e)
             return None
-        return max(0, int(free) - headroom)
+        return max(0, int(free) - keep)
 
     def _cpu_budget() -> int:
         """Mirrors accelerate's own default for the "cpu" entry."""
@@ -517,7 +586,7 @@ def _cuda_device_map(torch, config: Optional[dict] = None) -> dict:
     if len(pairs) >= 2:
         max_memory: dict = {}
         for idx, _ratio in pairs:
-            budget = _free_minus_headroom(idx)
+            budget = _free_minus_headroom(idx, split_headroom)
             if budget is None:
                 continue   # one device failing to report never blocks the rest
             max_memory[idx] = budget
@@ -549,6 +618,24 @@ def _cuda_device_map(torch, config: Optional[dict] = None) -> dict:
         return {"device_map": "auto",
                 "max_memory": {idx: budget, "cpu": _cpu_budget()}}
 
+    try:
+        count = int(torch.cuda.device_count())
+    except Exception as e:
+        logger.debug("device_map: the CUDA device count could not be read (%s)",
+                     type(e).__name__)
+        count = 0
+    if count >= 2:
+        from localm._torch_gpu_probe import integrated_flag
+        max_memory = {}
+        for idx in range(count):
+            if integrated_flag(torch, idx) is True:
+                continue
+            budget = _free_minus_headroom(idx, split_headroom, "device_map")
+            if budget is not None:
+                max_memory[idx] = budget
+        if len(max_memory) >= 2:
+            max_memory["cpu"] = _cpu_budget()
+            return {"device_map": "auto", "max_memory": max_memory}
     return {"device_map": "auto"}
 
 
@@ -1554,17 +1641,7 @@ class HFWorker:
                 "processor load failed (%s); falling back to text-only tokenizer", shown)
             self._processor = None
             self.processor_error = shown
-            try:
-                with _filter_docstring_leak():
-                    self._tokenizer = tr.AutoTokenizer.from_pretrained(
-                        self.model_path, trust_remote_code=trust_remote_code
-                    )
-            except _invalid_config_errors() as tok_err:
-                from localm.inference.backends.base import ModelRefusedError
-                raise ModelRefusedError(
-                    f"{Path(self.model_path).name} cannot be loaded: its configuration "
-                    f"is not valid. "
-                    + " ".join(shorten_long_digits(str(tok_err)).split())) from tok_err
+            self._tokenizer = _load_text_tokenizer(tr, self.model_path, trust_remote_code)
 
         # --- Model ---
         logger.debug("hf load: loading weights")

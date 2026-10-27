@@ -20,6 +20,8 @@ from localm.inference.backends._hf_worker import _cuda_device_map
 from tests._real_gguf import require_native_runtime
 
 _HEADROOM = int(0.5e9)   # must match the headroom baked into _cuda_device_map
+# What a device of a multi-device placement keeps free: vram_overhead_mb's default.
+_SPLIT_HEADROOM = int(1.5e9)
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -73,6 +75,32 @@ class TestNoSplitNoMainGpu:
             _fake_torch(), config={"gpu_split_indices": None, "main_gpu_index": None})
         assert result == {"device_map": "auto"}
         assert calls == []
+
+    def test_every_gpu_gets_a_budget_that_keeps_room_free(self):
+        # With no choice made, a model spreads over every GPU, and each keeps
+        # vram_overhead_mb free for generation.
+        torch = _fake_torch({0: (8_000_000_000, 16_000_000_000),
+                             1: (20_000_000_000, 24_000_000_000)})
+        torch.cuda.device_count.return_value = 2
+        torch.cuda.get_device_properties.return_value.is_integrated = False
+        result = _cuda_device_map(torch, config={"gpu_split_indices": None,
+                                                 "main_gpu_index": None,
+                                                 "vram_overhead_mb": 1024})
+        assert result["device_map"] == "auto"
+        assert result["max_memory"][0] == 8_000_000_000 - 1024 ** 3
+        assert result["max_memory"][1] == 20_000_000_000 - 1024 ** 3
+        assert result["max_memory"]["cpu"] > 0
+
+    def test_an_integrated_gpu_gets_no_budget(self):
+        torch = _fake_torch({1: (8_000_000_000, 16_000_000_000),
+                             2: (20_000_000_000, 24_000_000_000)})
+        torch.cuda.device_count.return_value = 3
+        props = {0: True, 1: False, 2: False}
+        torch.cuda.get_device_properties.side_effect = (
+            lambda i: MagicMock(is_integrated=props[i]))
+        result = _cuda_device_map(torch, config={"gpu_split_indices": None,
+                                                 "main_gpu_index": None})
+        assert {k for k in result["max_memory"] if isinstance(k, int)} == {1, 2}
 
     def test_defaults_to_auto_via_load_config(self, monkeypatch):
         # config=None -> _cuda_device_map reads localm.config.load_config() itself.
@@ -161,7 +189,7 @@ class TestGpuSplitSuccess:
         for idx, (free, _total) in mem.items():
             got = result["max_memory"][idx]
             assert isinstance(got, int)
-            assert got == free - _HEADROOM
+            assert got == free - _SPLIT_HEADROOM
             assert got < free   # strictly less than the raw free bytes (headroom)
 
     def test_split_also_keeps_the_cpu_offload_fallback(self, monkeypatch):
@@ -187,7 +215,7 @@ class TestGpuSplitSuccess:
             _fake_torch(mem), config={"gpu_split_indices": [0, 1, 2]})
         assert result["device_map"] == "auto"
         assert {k: v for k, v in result["max_memory"].items() if isinstance(k, int)} == {
-            0: 7_500_000_000, 1: 3_500_000_000, 2: 1_500_000_000}
+            0: 6_500_000_000, 1: 2_500_000_000, 2: 500_000_000}
         assert result["max_memory"].get("cpu", 0) > 0
 
 

@@ -50,10 +50,20 @@ def _records(caplog, level):
 
 
 def test_a_projector_clip_places_on_the_cpu_is_marked_and_reported(monkeypatch, caplog):
+    monkeypatch.setattr(llama_mod.api, "llama_supports_gpu_offload", lambda: True)
     with caplog.at_level("INFO", logger="localm"):
         inst = _load(monkeypatch, "clip_ctx: CLIP using CPU backend\n")
     assert inst._mtmd.on_gpu is False
     assert any("placed the vision projector on the CPU" in m for m in _records(caplog, "WARNING"))
+
+
+def test_a_projector_on_the_cpu_of_a_cpu_only_runtime_is_marked_but_not_warned(
+        monkeypatch, caplog):
+    monkeypatch.setattr(llama_mod.api, "llama_supports_gpu_offload", lambda: False)
+    with caplog.at_level("INFO", logger="localm"):
+        inst = _load(monkeypatch, "clip_ctx: CLIP using CPU backend\n")
+    assert inst._mtmd.on_gpu is False
+    assert not _records(caplog, "WARNING")
 
 
 def test_a_projector_clip_places_on_the_gpu_is_not_reported(monkeypatch, caplog):

@@ -135,9 +135,11 @@ def estimate_tokens(
 
 
 def _is_users_own(message: dict) -> bool:
-    """True for a user message the user wrote: role ``user``, no ``origin``
-    marker, and not a ``<tool_result`` block."""
-    if message.get("role") != "user" or message.get("origin"):
+    """True for a user message the user wrote: ``protocol.is_user_written``
+    (role ``user``, no ``origin`` marker, ``user_spans`` not empty) and not a
+    ``<tool_result`` block."""
+    from localm.inference.protocol import is_user_written
+    if not is_user_written(message):
         return False
     content = message.get("content", "")
     return not (isinstance(content, str) and content.lstrip().startswith("<tool_result"))
