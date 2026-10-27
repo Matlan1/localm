@@ -7,8 +7,8 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { iconEl } from "./icons.js";
-import { COMPACT_KEEP, addMessageRow, audioPart, chat, chatBusy, chatParams, compactConversation, currentConv, elideImagesForWire, isToolEvent, latestTurnIsAudioOnly, lsSetScoped, maybeCompactConversation, mountStatusIndicator, msgAudioClips, msgImages, msgText, newConversation, newToolEvent, noteLabel, refreshWebPolicy, removeStatusIndicator, renderAttachChips, renderChat, renderConvList, saveConversations, scopedKeyPrivate, setConversationPin, stripUserAudio, stripUserImages, syncPinModelToggle, updateStatusIndicator, wireParts } from "./chat.js";
-import { $, CHAT_SURFACE_HEADERS, GIB, TOOL_CALL_DELIM, authHeaders, autoGrow, confirmDanger, el, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setPreviewAllowed, splitThink, streamJob, stripThink, toast } from "./helpers.js";
+import { COMPACT_KEEP, addMessageRow, audioPart, chat, chatBusy, chatParams, compactConversation, currentConv, elideAudioForWire, elideImagesForWire, isToolEvent, latestTurnHasAudio, latestTurnIsAudioOnly, lsSetScoped, maybeCompactConversation, mountStatusIndicator, msgAudioClips, msgImages, msgText, newConversation, newToolEvent, noteLabel, refreshWebPolicy, removeStatusIndicator, renderAttachChips, renderChat, renderConvList, saveConversations, scopedKeyPrivate, setConversationPin, stripUserAudio, stripUserImages, syncPinModelToggle, updateStatusIndicator, wireHasImageAndAudio, wireParts } from "./chat.js";
+import { $, CHAT_SURFACE_HEADERS, GIB, TOOL_CALL_DELIM, authHeaders, autoGrow, confirmDanger, el, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setPreviewAllowed, splitThink, streamJob, stripAsrPrefix, stripThink, toast } from "./helpers.js";
 import { t } from "./i18n.js";
 import { modelCache, modelSelect, reloadModel, toastLoadResult } from "./models-sidebar.js";
 import { pickPath, saveTextFs } from "./picker.js";
@@ -1549,7 +1549,7 @@ export function selectedBrowserVoice() {
  *  never when this call only stopped a prior one. Returns whether a new
  *  utterance actually started. */
 export function speak(text, opts = {}) {
-  const clean = stripThink(text).replace(/[*_`#>[\]()]/g, " ").trim();
+  const clean = stripAsrPrefix(stripThink(text)).replace(/[*_`#>[\]()]/g, " ").trim();
   if (ttsProvider) {
     if (ttsProvider.speaking()) {
       ttsProvider.stop();
@@ -2665,6 +2665,11 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     body.grammar_triggers = [TOOL_CALL_TRIGGER];
   }
 
+  // A turn that carries no clip of its own is sent without the clips of earlier
+  // turns when the chat also holds an image: no model reads both. The
+  // conversation keeps the clips.
+  if (!latestTurnHasAudio(conv) && wireHasImageAndAudio(messages)) elideAudioForWire(messages);
+
   // VIS-1: did this request carry a user-attached image? If a text-only model
   // rejects it (400), we must drop the image so the chat is not wedged.
   const sentImage = messages.some((m) => Array.isArray(m.content) &&
@@ -2965,7 +2970,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     if (full.trim() || reasoning.trim()) {
       const reply = {
         role: "assistant",
-        content: reasoning ? "<think>\n" + reasoning + "\n</think>\n" + full : full,
+        content: reasoning ? "<think>\n" + reasoning + "\n</think>\n" + stripAsrPrefix(full) : stripAsrPrefix(full),
         model: answeredBy || undefined,
         stopped: true,
       };
@@ -3024,7 +3029,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   if (finishReason === "error") {
     const failedReply = {
       role: "assistant",
-      content: reasoning ? "<think>\n" + reasoning + "\n</think>\n" + full : full,
+      content: reasoning ? "<think>\n" + reasoning + "\n</think>\n" + stripAsrPrefix(full) : stripAsrPrefix(full),
       model: answeredBy || undefined,
       failed: true,
     };
@@ -3042,7 +3047,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   // unaffected.
   const reply = {
     role: "assistant",
-    content: reasoning ? "<think>\n" + reasoning + "\n</think>\n" + full : full,
+    content: reasoning ? "<think>\n" + reasoning + "\n</think>\n" + stripAsrPrefix(full) : stripAsrPrefix(full),
     // NEW-1: record which model produced this turn so the transcript can show a
     // divider when the active model changes between turns (model-switch-indication).
     model: answeredBy || undefined,
