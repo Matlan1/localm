@@ -418,7 +418,7 @@ def register(app: FastAPI, ctx) -> None:
         if raw.strip():
             try:
                 body = _json.loads(raw)
-            except ValueError:
+            except (ValueError, RecursionError):
                 raise HTTPException(400, "The request body is not valid JSON.") from None
             if not isinstance(body, dict):
                 raise HTTPException(400, "The request body must be a JSON object.")

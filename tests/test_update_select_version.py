@@ -552,7 +552,8 @@ def test_route_rejects_allow_unverified_without_sha256_and_bad_bodies(routes):
                  {"version": ""}, {"version": 5}):
         r = c.post("/api/update/apply", headers=_bearer(OWNER_KEY), json=body)
         assert r.status_code == 400, (body, r.text)
-    r = c.post("/api/update/apply", headers={**_bearer(OWNER_KEY),
-               "Content-Type": "application/json"}, content=b"{not json")
-    assert r.status_code == 400
+    for raw in (b"{not json", b"[" * 100000):
+        r = c.post("/api/update/apply", headers={**_bearer(OWNER_KEY),
+                   "Content-Type": "application/json"}, content=raw)
+        assert r.status_code == 400, raw[:10]
     assert applied == []
