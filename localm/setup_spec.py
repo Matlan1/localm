@@ -42,6 +42,12 @@ GUI = "gui"
 
 RECOMMENDED_PLUGINS = ("coder", "rag", "web", "tts")
 
+# The graphical installer runs `localm setup-llama` with ASK_ENV=stdio; each
+# question it asks is one ASK_PREFIX + JSON line on stdout, answered by one line
+# on stdin.
+ASK_ENV = "LOCALM_SETUP_ASK"
+ASK_PREFIX = "@@localm-ask "
+
 
 @dataclass(frozen=True)
 class Question:

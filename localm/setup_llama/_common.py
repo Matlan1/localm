@@ -9,6 +9,7 @@ import os
 import sys
 
 from localm.console import SafeConsole as Console
+from localm.setup_spec import ASK_ENV, ASK_PREFIX
 
 console = Console(highlight=False)
 
@@ -61,8 +62,6 @@ def _flush_stdin() -> None:
         pass
 
 
-ASK_ENV = "LOCALM_SETUP_ASK"
-ASK_PREFIX = "@@localm-ask "
 
 
 def _asks_over_stdio() -> bool:
