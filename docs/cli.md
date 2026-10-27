@@ -1235,6 +1235,9 @@ localm update                   # check for and apply a newer localm build (you 
 localm update --check           # only report whether an update is available; do not apply
 localm update -y                # apply without the confirmation prompt
 localm update --rollback        # restore the previous build from the last update backup
+localm update --list            # list every release you can install
+localm update --to 0.3.0        # install that release, older or newer than yours
+localm update --to 0.3.0 -y --allow-unverified   # non-interactive, even if its signature does not verify
 localm bug-report -m "..."      # generate an editable bug report and offer to send it to the maintainer
 localm bug-report -m "what I did" -e "what I expected" -w "what happened" --send   # non-interactive, send immediately
 localm issues [NUMBER]          # list the project's issues, or show one by number
@@ -1248,6 +1251,18 @@ before applying anything, and refuses a build that is not newer. The keys are
 pinned in its own source and can be replaced by a signed update.
 See [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md) for the update trust model. The GUI Models page
 has an "Update now" button for the same flow.
+
+`--to VERSION` installs the release you name, including an older one. It says when
+that is a downgrade and asks first; before a downgrade it copies your settings, model
+registry, coder sessions, memory and plugins to `updates/data-before-<version>-<date>-<time>-<8 hex>/`
+in the data directory, and `localm update --rollback` returns to the version you had.
+That copy is not restored automatically; to restore it, stop localm and copy its files
+back into the data directory.
+The build must be the version you named. When its signature does not verify (for
+example a release from before 0.3.0, signed with a retired key), localm says why and
+installs it only if you confirm; with `-y`, add `--allow-unverified`. A version you go
+back to this way can still update to newer releases. Settings > Updates > Choose a
+version does the same in the GUI.
 
 `localm bug-report` needs a working localm. When localm will not start at all (a
 failed install, a broken venv, setup itself failing), use the standalone reporter

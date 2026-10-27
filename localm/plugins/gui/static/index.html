@@ -1181,6 +1181,19 @@
                   <button class="btn-primary" id="update-apply" hidden data-i18n="settings.update.applyButton">Update now</button>
                 </div>
                 <div id="update-status" class="sub" hidden></div>
+                <!-- The GUI form of `localm update --list` / `--to <version>`. -->
+                <div class="actions">
+                  <button class="btn-secondary" id="update-versions" data-i18n="settings.update.versionsButton">Choose a version</button>
+                </div>
+                <div id="update-version-picker" hidden>
+                  <label class="sub" for="update-version-select" data-i18n="settings.update.versionLabel">Version to install</label>
+                  <select id="update-version-select"></select>
+                  <div id="update-version-info" class="sub"></div>
+                  <div class="actions">
+                    <button class="btn-secondary" id="update-install-version" data-i18n="settings.update.installVersionButton">Install this version</button>
+                  </div>
+                </div>
+                <div id="update-version-status" class="sub" hidden></div>
               </div>
 
               <!-- The GUI half of `localm update --rollback`. Its OWN sub-block, not
