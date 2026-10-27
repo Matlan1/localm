@@ -323,6 +323,35 @@ test("dollar signs in code stay literal and math beside prices still typesets", 
   assert.match(both.textContent, /It costs \$5 and \$10 while/);
 });
 
+test("a dollar sign in a link or image address is left exactly as written", () => {
+  const win = loadRealPipeline();
+  const link = render(win, "[a](https://example.com/p?price=$5) and see https://example.com/a$b/c ok");
+  const hrefs = [...link.querySelectorAll("a")].map((a) => a.getAttribute("href"));
+  assert.deepEqual(hrefs, ["https://example.com/p?price=$5", "https://example.com/a$b/c"]);
+  noMath(link, "links");
+  assert.doesNotMatch(link.innerHTML, /ZZLMATH/);
+  const img = render(win, "![i](https://example.com/i.png?w=$5)");
+  assert.doesNotMatch(img.innerHTML, /ZZLMATH/);
+  assert.match(img.innerHTML, /\$5/);
+});
+
+test("a price between two unprotected double dollars leaves no token in the output", () => {
+  const win = loadRealPipeline();
+  for (const src of ["Price: $$ for A, costs $5, and $$ for B", "a $$ b $5 c $$ d", "<think>a $$ b $5 c $$ d</think>ok"]) {
+    const out = render(win, src);
+    noMath(out, src);
+    assert.doesNotMatch(out.innerHTML, /ZZLMATH/, src);
+    assert.match(out.textContent, /\$\$.*\$5.*\$\$/, src);
+  }
+});
+
+test("an escaped dollar keeps its backslash inside indented code", () => {
+  const win = loadRealPipeline();
+  const out = render(win, "Run:\n\n    echo \\$HOME costs $5\n\nthen \\$5.");
+  assert.equal(out.querySelector("pre code").textContent.trim(), "echo \\$HOME costs $5");
+  assert.match(out.querySelector("p:last-of-type").textContent, /then \$5\./);
+});
+
 test("a price in a streamed reply never turns into math and back", () => {
   const win = loadRealPipeline();
   const full = "It costs $5 and $10 each, so $3.50 or $4 is fine ($$$$).";

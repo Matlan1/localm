@@ -675,10 +675,11 @@ const _MATH_OR_DOLLAR = new RegExp(`${_MATH_SPAN.source}|(?<lit>${_LITERAL_DOLLA
 
 /** Swap each math span of *text* that lies outside code for an inert token, so
  *  the markdown pass cannot consume its escapes (`\,`, `\\`, `\{`) or emphasis
- *  marks. Returns `{ text, restore }`; `restore(root)` puts the original source
- *  back into the TEXT NODES of the sanitised, rendered *root*. A token that
- *  ended up in an attribute (a link target, an image source) is left as the
- *  inert token, so math source never reaches an attribute after sanitising.
+ *  marks. Returns `{ text, restore, finish }`; `restore(root)` puts the original
+ *  source back into the TEXT NODES of the sanitised, rendered *root*. A math
+ *  token that ended up in an attribute (a link target, an image source) is left
+ *  as the inert token, so math source never reaches an attribute after
+ *  sanitising.
  *
  *  `$$` display math is protected in two shapes only, so a price marker such as
  *  `($$)`, `**$$**`, `$$$$` or `Price: $$ for A` never pairs across the text between
@@ -698,19 +699,25 @@ const _MATH_OR_DOLLAR = new RegExp(`${_MATH_SPAN.source}|(?<lit>${_LITERAL_DOLLA
  *  is not followed by a digit. Every other dollar sign outside code (a lone `$`,
  *  a run of three or more, an empty `$$ $$`, a `$$` standing alone between
  *  brackets, quotes or `*`/`~` marks, an escaped `\$`) is swapped for an inert
- *  token so KaTeX's auto-render never pairs it.
- *  `restore(root)` puts the math source back and runs before the auto-render
- *  pass; `finish(root)` puts the literal `$` back and runs after it. */
+ *  token so KaTeX's auto-render never pairs it. A leftover `$$ ... $$` pair that
+ *  encloses such a dollar sign is prose, so its `$$` are swapped as well.
+ *  `restore(root)` puts the math source back and the literal `$` into every
+ *  attribute, and runs before the auto-render pass; `finish(root)` puts the
+ *  literal `$` back into the text nodes (an escaped `\$` stays `\$` inside
+ *  `pre` and `code`) and runs after it. */
 export function protectMath(text) {
   const spans = [];
   const tag = "ZZLMATH" + Math.random().toString(36).slice(2, 8);
   const dollar = `${tag}DZZ`;
+  const escaped = `${tag}EZZ`;
+  const pricePair = new RegExp(
+    `\\$\\$(?:(?!\\$\\$)[\\s\\S]){0,2000}?(?:${dollar}|${escaped})(?:(?!\\$\\$)[\\s\\S]){0,2000}?\\$\\$`, "g");
   const protectedText = String(text || "").split(_CODE_SPAN).map((part, i) =>
     i % 2 === 1 ? part : part.replace(_MATH_OR_DOLLAR, (src, ...rest) => {
-      if (rest[rest.length - 1].lit !== undefined) return src.replace(/^\\/, "").replace(/\$/g, dollar);
+      if (rest[rest.length - 1].lit !== undefined) return src === "\\$" ? escaped : src.replace(/\$/g, dollar);
       spans.push(src);
       return `${tag}${spans.length - 1}ZZ`;
-    })).join("");
+    }).replace(pricePair, (pair) => pair.replace(/\$/g, dollar))).join("");
   const rewrite = (root, from, to) => {
     const walker = document.createTreeWalker(root, 4);
     const nodes = [];
@@ -719,11 +726,25 @@ export function protectMath(text) {
       if (node.nodeValue.includes(tag)) node.nodeValue = node.nodeValue.replace(from, to);
     }
   };
+  const literalRe = new RegExp(`${dollar}|${escaped}`, "g");
   const restore = (root) => {
-    if (!spans.length) return;
-    rewrite(root, new RegExp(`${tag}(\\d+)ZZ`, "g"), (_m, i) => spans[Number(i)]);
+    if (spans.length) rewrite(root, new RegExp(`${tag}(\\d+)ZZ`, "g"), (_m, i) => spans[Number(i)]);
+    for (const el of root.querySelectorAll("*")) {
+      for (const attr of el.attributes) {
+        if (attr.value.includes(tag)) attr.value = attr.value.replace(literalRe, () => "$");
+      }
+    }
   };
-  const finish = (root) => rewrite(root, new RegExp(dollar, "g"), () => "$");
+  const finish = (root) => {
+    const walker = document.createTreeWalker(root, 4);
+    const nodes = [];
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) nodes.push(n);
+    for (const node of nodes) {
+      if (!node.nodeValue.includes(tag)) continue;
+      const inCode = !!(node.parentElement && node.parentElement.closest("pre, code"));
+      node.nodeValue = node.nodeValue.replace(literalRe, (m) => (m === escaped && inCode ? "\\$" : "$"));
+    }
+  };
   return { text: protectedText, restore, finish };
 }
 
