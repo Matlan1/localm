@@ -243,6 +243,11 @@ def register(app: FastAPI, ctx) -> None:
             if tools or has_tool_history(messages):
                 messages = render_messages(messages, list(tools), choice)
 
+            if (_hs._engine_is_encoder_decoder(engine)
+                    and request.headers.get("x-client-id", "") == "chat"):
+                messages = [m for m in messages
+                            if not (isinstance(m, dict) and m.get("role") == "system")]
+
             sem = _hs._inference_sems.setdefault(engine.display_name, InferenceGate())
 
             # Reject image input on a text-only model with a 400 instead of dropping

@@ -90,9 +90,38 @@ test("VIS-1: the chat is recoverable - the next turn sends no image and answers"
     /ask me anything/.test(String(m.content))), "the model's reply is saved");
 });
 
-test("a 413 image-limit refusal keeps the conversation's images", async () => {
+test("a 413 image refusal drops only the image just sent and keeps earlier turns' images", async () => {
+  const { window, calls } = await setup(413,
+    "The attached image could not be read (UnidentifiedImageError).");
+  const conv = { id: "c1", title: "t", messages: [
+    { role: "user", content: [
+      { type: "text", text: "first picture" },
+      { type: "image_url", image_url: { url: IMG + "AAAA" } },
+    ] },
+    { role: "assistant", content: "A red square." },
+    { role: "user", content: [
+      { type: "text", text: "second picture" },
+      { type: "image_url", image_url: { url: IMG + "BBBB" } },
+    ] },
+  ] };
+  await window.runCompletion(conv);
+
+  assert.equal(window.msgImages(conv.messages[0]).length, 1, "the earlier image stays");
+  assert.equal(window.msgImages(conv.messages[2]).length, 0, "the refused image is dropped");
+  assert.match(conv.messages[2].content, /second picture/);
+  assert.match(conv.messages[2].content, /\[Image removed: the server did not accept it\.\]/);
+  assert.equal(conv.messages.length, 3, "no blank assistant turn was persisted");
+
+  await window.runCompletion(conv);
+  const posts = calls.filter((c) => c.url === "/v1/chat/completions");
+  const last = posts[posts.length - 1].body.messages;
+  const sentBBBB = JSON.stringify(last).includes("BBBB");
+  assert.equal(sentBBBB, false, "the next message no longer carries the refused image");
+});
+
+test("a 413 that is not an image refusal keeps the conversation's images", async () => {
   const { window } = await setup(413,
-    "The request attaches more than 64 images; send at most 64.");
+    "The conversation is too long for this model.", "");
   const conv = imageConv();
   await window.runCompletion(conv);
 

@@ -139,6 +139,7 @@ export const chat = {
   systemDefault: "", // default system prompt from Settings; a blank drawer inherits it
   toolGrammar: true, // chat_tool_grammar from /v1/config - grammar-constrain web-tool calls
   webMaxLookups: null, // chat_web_max_lookups from /v1/config; null = the built-in default
+  netOff: false,       // net_mode is "off": the Web access toggle is hidden
   userAvatar: "",           // user_avatar from /v1/config: "", an emoji/glyph, or a data: URI
   userName: "",             // user_name from /v1/config: "" falls back to "You"
   modelAvatarDefault: "",   // model_avatar_default from /v1/config, same shape
@@ -442,6 +443,34 @@ async function summaryPass(content, maxTokens, signal, pinnedModel) {
   return "";
 }
 
+const BRIDGE_SUMMARY_PREFIX = "[Conversation summary]\n";
+
+/** The earlier summary carried by the leading bridge of *older*, and how many
+ *  leading messages the bridge occupies: `{ summary, skip }`. A digest bridge,
+ *  or no bridge, gives `{ summary: "", skip: 0 }`. */
+export function leadingBridgeSummary(older) {
+  const first = older[0];
+  if (!first || !first.bridge || first.role !== "user" ||
+      typeof first.content !== "string" ||
+      !first.content.startsWith(BRIDGE_SUMMARY_PREFIX)) {
+    return { summary: "", skip: 0 };
+  }
+  const skip = older[1] && older[1].bridge ? 2 : 1;
+  return { summary: first.content.slice(BRIDGE_SUMMARY_PREFIX.length).trim(), skip };
+}
+
+/** The text the summariser reads for *m*: its text, then one note per image and
+ *  per audio clip (the clip's file name when it has one). */
+export function compactionText(m) {
+  const notes = [];
+  for (let i = 0; i < msgImages(m).length; i++) notes.push("[image attached]");
+  for (const clip of msgAudioClips(m)) {
+    notes.push(clip.name ? `[audio clip attached: ${clip.name}]` : "[audio clip attached]");
+  }
+  const text = stripThink(msgText(m));
+  return notes.length ? (text ? text + "\n" : "") + notes.join("\n") : text;
+}
+
 /** Summarises or condenses the older part of *conv*. The kept tail starts at
  *  a user turn (see compactionCut). Each summary request is sized to fit
  *  chat.ctxMax and older turns that do not fit one request are summarised in
@@ -474,18 +503,25 @@ export async function compactConversation(conv, signal = null) {
 
   // R44: feed whole messages truncated at a word boundary, with reasoning blocks
   // stripped, so the summariser never sees half-words or display-only <think>.
-  const entries = older.map((m) =>
+  // A summary left by an earlier compaction seeds the rolling passes instead of
+  // being re-summarised as one more turn.
+  const { summary: earlier, skip } = leadingBridgeSummary(older);
+  const fresh = older.slice(skip);
+  const entries = fresh.map((m) =>
     `${isToolEvent(m) ? "WEB" : m.role.toUpperCase()}: ` +
-    truncateAtWord(stripThink(msgText(m)), 1200));
+    truncateAtWord(compactionText(m), 1200));
   const ctxMax = chat.ctxMax > 0 ? chat.ctxMax : 0;
   const reply = summaryReplyTokens(ctxMax);
-  const groups = planSummaryPasses(entries, ctxMax, reply,
-    budgetTokens(ROLLING_SUMMARY_INSTRUCTION + "\n\n"));
+  const groups = fresh.length
+    ? planSummaryPasses(entries, ctxMax, reply,
+        budgetTokens(ROLLING_SUMMARY_INSTRUCTION + "\n\n") +
+        (earlier ? earlierSummaryTokens(reply) : 0))
+    : [];
 
   // The summary is written by the model that answers the conversation: its
   // pinned model, pinned, else the selected model as a preference.
   const pinnedModel = conv.pinnedModel || "";
-  let summary = "";
+  let summary = earlier;
   // A placeholder assistant row shows "Compacting conversation..." until the
   // summary requests settle.
   const box = $("chat-messages");
@@ -520,7 +556,12 @@ export async function compactConversation(conv, signal = null) {
   // Both halves of the bridge carry `bridge: true` so a later archive walk
   // can tell them from real turns.
   const bridge = summary
-    ? [{ role: "user", content: "[Conversation summary]\n" + summary,
+    ? [{ role: "user", content: BRIDGE_SUMMARY_PREFIX + summary,
+         compacted: archived, bridge: true },
+       { role: "assistant", content: "Understood. Continuing from this summary.", bridge: true }]
+    : earlier
+    ? [{ role: "user",
+         content: BRIDGE_SUMMARY_PREFIX + earlier + "\n\n" + compactionDigest(fresh),
          compacted: archived, bridge: true },
        { role: "assistant", content: "Understood. Continuing from this summary.", bridge: true }]
     : [{ role: "user", content: compactionDigest(older), compacted: archived, bridge: true },
@@ -614,6 +655,30 @@ function markInstanceUnknown(why) {
     "but will not be uploaded until a future check confirms this backend");
 }
 
+/** Applies the web-related settings of the /v1/config payload *cfg*: the
+ *  per-message lookup ceiling, and whether network access is off, in which case
+ *  the chat's Web access toggle is hidden. */
+export function applyWebPolicy(cfg) {
+  if ("chat_web_max_lookups" in cfg) {
+    chat.webMaxLookups = Number.isInteger(cfg.chat_web_max_lookups)
+      ? cfg.chat_web_max_lookups : null;
+  }
+  if ("net_mode" in cfg) {
+    chat.netOff = cfg.net_mode === "off";
+    const row = $("p-web") && $("p-web").closest(".check-row");
+    if (row) row.style.display = chat.netOff ? "none" : "";
+  }
+}
+
+/** Re-reads the web settings from the server. Best effort: an unreachable
+ *  server leaves the values already applied. */
+export async function refreshWebPolicy() {
+  try {
+    const r = await fetch("/v1/config", { headers: authHeaders() });
+    if (r.ok) applyWebPolicy(await r.json());
+  } catch { /* server unreachable - the applied values stay */ }
+}
+
 export async function refreshCtxLimit() {
   // Set once reconcileInstanceId has returned a real verdict for THIS call, so
   // a throw from the rendering work further down (which runs only AFTER the
@@ -638,8 +703,7 @@ export async function refreshCtxLimit() {
       // field inherits this (the per-chat drawer overrides it).
       chat.systemDefault = (cfg.chat_system_prompt || "").trim();
       chat.toolGrammar = cfg.chat_tool_grammar !== false;
-      chat.webMaxLookups = Number.isInteger(cfg.chat_web_max_lookups)
-        ? cfg.chat_web_max_lookups : null;
+      applyWebPolicy(cfg);
       chat.userAvatar = cfg.user_avatar || "";
       chat.userName = (cfg.user_name || "").trim();
       chat.modelAvatarDefault = cfg.model_avatar_default || "";
@@ -1189,12 +1253,27 @@ export function wireParts(content) {
       : p);
 }
 
-/** Drop every user-attached audio clip from the conversation, leaving a text
- *  note, so a clip the server refused is never sent again. Returns the number
- *  of clips dropped. */
-export function stripUserAudio(conv) {
+/** The messages of *conv* an attachment strip acts on: all of them, or with
+ *  *latestOnly* just the newest user message for which *carries* is true (the
+ *  turn that was just sent). */
+function stripTargets(conv, latestOnly, carries) {
+  if (!latestOnly) return conv.messages;
+  for (let i = conv.messages.length - 1; i >= 0; i--) {
+    const m = conv.messages[i];
+    if (m.role === "user" && Array.isArray(m.content) && carries(m)) return [m];
+  }
+  return [];
+}
+
+/** Drop user-attached audio clips from the conversation, leaving a text note,
+ *  so a clip the server refused is never sent again: every clip, or with
+ *  *latestOnly* only those of the newest message that has any. Returns the
+ *  number of clips dropped. */
+export function stripUserAudio(conv, latestOnly = false) {
   let dropped = 0;
-  for (const m of conv.messages) {
+  const targets = stripTargets(conv, latestOnly,
+    (m) => m.content.some((p) => p.type === "input_audio"));
+  for (const m of targets) {
     if (m.role !== "user" || !Array.isArray(m.content)) continue;
     const clips = m.content.filter((p) => p.type === "input_audio");
     if (!clips.length) continue;
@@ -1219,21 +1298,48 @@ export function stripUserAudio(conv) {
  *  it again. Re-sending a rejected image 400s on every turn and wedges the chat
  *  in endless empty assistant replies; dropping it keeps the chat usable.
  *  Server-generated /api/ images are display-only (already mapped to text before
- *  sending), so they are left alone. Returns the number of images dropped. */
-export function stripUserImages(conv) {
+ *  sending), so they are left alone. With *latestOnly* only the newest message
+ *  that carries an image is stripped. *note* replaces the default text note.
+ *  Returns the number of images dropped. */
+export function stripUserImages(conv, latestOnly = false,
+                                note = "[Image removed: this model cannot read images.]") {
+  const isUserImage = (p) => p.type === "image_url" && !p.image_url?.url?.startsWith("/api/");
   let dropped = 0;
-  for (const m of conv.messages) {
+  const targets = stripTargets(conv, latestOnly, (m) => m.content.some(isUserImage));
+  for (const m of targets) {
     if (m.role !== "user" || !Array.isArray(m.content)) continue;
-    const imgs = m.content.filter(
-      (p) => p.type === "image_url" && !p.image_url?.url?.startsWith("/api/"));
+    const imgs = m.content.filter(isUserImage);
     if (!imgs.length) continue;
     dropped += imgs.length;
     const text = m.content.filter((p) => p.type === "text")
       .map((p) => p.text).join("");
-    m.content = (text ? text + "\n" : "") +
-      "[Image removed: this model cannot read images.]";
+    m.content = (text ? text + "\n" : "") + note;
   }
   return dropped;
+}
+
+/** Replace, in place, every image part of the wire *messages* with a text
+ *  note, so one request leaves the images out while the conversation keeps
+ *  them. */
+export function elideImagesForWire(messages) {
+  for (const m of messages) {
+    if (!Array.isArray(m.content)) continue;
+    m.content = m.content.map((p) => p.type === "image_url"
+      ? { type: "text", text: "[An image from an earlier message is not included in this request.]" }
+      : p);
+  }
+  return messages;
+}
+
+/** True when the newest user message of *conv* carries an audio clip and no
+ *  image, so the images still in the conversation belong to earlier turns. */
+export function latestTurnIsAudioOnly(conv) {
+  for (let i = conv.messages.length - 1; i >= 0; i--) {
+    const m = conv.messages[i];
+    if (m.role !== "user" || isToolEvent(m)) continue;
+    return msgAudioClips(m).length > 0 && msgImages(m).length === 0;
+  }
+  return false;
 }
 
 /* ---- conversation list: search, pin, folders ---- */
