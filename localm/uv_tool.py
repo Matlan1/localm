@@ -35,6 +35,11 @@ class UvBootstrapError(Exception):
     """The pinned uv could not be installed; the message says why."""
 
 
+def install_root() -> Path:
+    """The folder this localm runs from (one level above the package)."""
+    return Path(__file__).resolve().parents[1]
+
+
 def usable(path) -> bool:
     """Whether *path* is a file that can be run as uv (executable on POSIX)."""
     p = Path(path)
