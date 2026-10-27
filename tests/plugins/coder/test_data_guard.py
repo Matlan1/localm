@@ -708,10 +708,10 @@ def _file_system_spy(monkeypatch, drive: str = "") -> list:
 
 
 @pytest.mark.parametrize("operand", [
-    r"\attacker\share\x\..\y",
+    r"\\attacker\share\x\..\y",
     "//attacker/share/x/../y",
-    r"\?\UNC\attacker\share\x\..\y",
-    r"\.\attacker\x\..\y",
+    r"\\?\UNC\attacker\share\x\..\y",
+    r"\\.\attacker\x\..\y",
 ])
 def test_a_dotdot_network_operand_is_never_probed(tmp_path, monkeypatch, operand):
     home = tmp_path / "home"
