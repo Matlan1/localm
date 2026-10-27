@@ -5078,9 +5078,10 @@ def hf_gpu_order(config: Optional[dict] = None, *,
             gpus, status = list_gpus(return_status=True, wait_for_inflight=True)
             if status != GPU_PROBE_OK:
                 return None
-        if any(g.get("numbering") == GPU_NUMBERING_NVIDIA_SMI for g in gpus):
+        reading = list(gpus or [])
+        if any(g.get("numbering") == GPU_NUMBERING_NVIDIA_SMI for g in reading):
             return None
-        present = {g.get("index") for g in gpus}
+        present = {g.get("index") for g in reading}
         order = [i for i in order if i in present]
         if len(order) < 2 or order == sorted(order):
             return None
