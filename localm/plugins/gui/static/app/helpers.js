@@ -223,9 +223,25 @@ export async function whileBusy(btn, label, work) {
   }
 }
 
+/** Show *text* as an error message in *target* (when given) and record it the way an
+ *  error toast is recorded: the Recent errors list and the server log. Nothing is
+ *  recorded when *target* already shows exactly this text. */
+export function showInlineError(target, text, source = "inline") {
+  const msg = String(text ?? "");
+  if (target) {
+    if (target.textContent === msg) return;
+    target.textContent = msg;
+  }
+  recordGuiError(msg, source);
+}
+
 export const TOAST_ERROR_STACK_MAX = 3;
+// Undismissed error toasts kept for the "+N more" count; the oldest go first.
+export const TOAST_ERROR_KEEP_MAX = 50;
 // Undismissed error toasts, oldest first: { text, count }.
 let _toastErrors = [];
+// The element that had focus before focus moved into the error stack.
+let _toastErrorFocusReturn = null;
 // The error toast to announce on the next render (the one just added or raised).
 let _toastErrorAnnounce = null;
 
@@ -261,6 +277,7 @@ export function showErrorToast(text) {
     _toastErrors.push(same);
   } else {
     _toastErrors.push({ text, count: 1 });
+    if (_toastErrors.length > TOAST_ERROR_KEEP_MAX) _toastErrors.shift();
   }
   _toastErrorAnnounce = text;
   renderErrorToasts();
@@ -283,15 +300,26 @@ export function errorToasts() {
   return _toastErrors.map((e) => ({ ...e }));
 }
 
+// Focus the next close button, or, when the stack is empty, the element that had
+// focus before focus moved into the stack.
 function _focusNextErrorClose(box) {
   const next = box.querySelector(".toast-error-close");
-  if (next) next.focus();
+  if (next) { next.focus(); return; }
+  const back = _toastErrorFocusReturn;
+  _toastErrorFocusReturn = null;
+  if (back && back.isConnected && typeof back.focus === "function") back.focus();
 }
 
 /** Render the error toast stack into #toast-errors. */
 export function renderErrorToasts() {
   const box = $("toast-errors");
   if (!box) return;
+  if (!box._focusReturnWatched) {
+    box._focusReturnWatched = true;
+    box.addEventListener("focusin", (e) => {
+      if (e.relatedTarget && !box.contains(e.relatedTarget)) _toastErrorFocusReturn = e.relatedTarget;
+    });
+  }
   const focused = box.contains(document.activeElement)
     ? document.activeElement.closest(".toast-error")?.dataset.text : undefined;
   const announce = _toastErrorAnnounce;

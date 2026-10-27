@@ -106,10 +106,11 @@ def register_exception_handlers(app: FastAPI) -> None:
                 _dbg.debug("%s %s refused %d: %s", request.method,
                            request.url.path, status, detail)
             else:
-                held = _server_error_due((request.method, request.url.path, status))
+                path = _ONE_LINE_RE.sub(" ", request.url.path)
+                held = _server_error_due((request.method, path, status))
                 if held >= 0:
                     _dbg.warning("%s %s failed %d: %s%s", request.method,
-                                 request.url.path, status,
+                                 path, status,
                                  _ONE_LINE_RE.sub(" ", detail),
                                  f" ({held} more like this not logged)" if held else "")
         if undecodable:

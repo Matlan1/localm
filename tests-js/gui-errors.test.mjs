@@ -262,3 +262,84 @@ test("a status-pill error is recorded when it appears, not on every repeat", asy
   assert.doesNotMatch(items[0].querySelector(".recent-error-meta").textContent, /\(x\d/,
     "a repeat of the shown status error is not counted again");
 });
+
+test("repeats held back by the resend interval are sent as one line with their count", async () => {
+  const { window, log } = await boot();
+  runScript(window, "GUI_ERROR_RESEND_MS = 120;");
+  for (let i = 0; i < 4; i++) window.toast("storm", true);
+  await flush();
+  assert.deepEqual(guiPosts(log).map((p) => p.message), ["storm"]);
+  await new Promise((r) => setTimeout(r, 250));
+  assert.deepEqual(guiPosts(log).map((p) => p.message), ["storm", "storm (repeated 3 more time(s))"]);
+});
+
+test("reports over the per-window budget are counted in one line, not lost", async () => {
+  const { window, log } = await boot();
+  runScript(window, "GUI_ERROR_SEND_PER_MIN = 2; GUI_ERROR_SEND_WINDOW_MS = 150;");
+  for (const m of ["a", "b", "c", "d", "e"]) window.toast(m, true);
+  await flush();
+  assert.deepEqual(guiPosts(log).map((p) => p.message), ["a", "b"]);
+  await new Promise((r) => setTimeout(r, 300));
+  const msgs = guiPosts(log).map((p) => p.message);
+  assert.equal(msgs.length, 3);
+  assert.match(msgs[2], /^3 more GUI error report/);
+});
+
+test("an inline error (a failed update check) reaches the log and the Recent errors list once", async () => {
+  const log = [];
+  const base = makeFetch(log);
+  const fetchImpl = async (url, opts) => {
+    if (String(url) === "/api/update/check") {
+      log.push({ url: String(url), opts });
+      return { ok: true, status: 200, text: async () => "", json: async () => ({ error: "proxy unreachable" }) };
+    }
+    return base(url, opts);
+  };
+  const { window } = loadAppWithPages({ fetchImpl });
+  await flush(8);
+  await window.refreshCtxLimit();
+  await window.updateCheck();
+  await flush();
+  const out = window.document.getElementById("update-status");
+  assert.match(out.textContent, /proxy unreachable/);
+  const posts = guiPosts(log);
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].source, "inline");
+  assert.equal(posts[0].message, out.textContent);
+  window.showInlineError(out, out.textContent);
+  await flush();
+  assert.equal(guiPosts(log).length, 1, "the same text already shown is not recorded again");
+  const items = [...window.document.querySelectorAll("#recent-errors-list .recent-error-text")];
+  assert.equal(items[0].textContent, out.textContent);
+});
+
+test("Report this error appends to text already typed and leaves an open review open", async () => {
+  const { window, doc } = await boot();
+  window.toast("Model load failed: out of memory", true);
+  doc.getElementById("bug-happened").value = "It froze first.";
+  runScript(window, `_showBugReview("saved report text")`);
+  doc.querySelector("#recent-errors-list .recent-error .actions button:nth-child(2)").click();
+  await flush();
+  assert.equal(doc.getElementById("bug-happened").value, "It froze first.\n\nModel load failed: out of memory");
+  assert.equal(doc.getElementById("bug-review").hidden, false, "the open review stays open");
+  doc.querySelector("#recent-errors-list .recent-error .actions button:nth-child(2)").click();
+  assert.equal(doc.getElementById("bug-happened").value, "It froze first.\n\nModel load failed: out of memory",
+    "the same error is not added twice");
+});
+
+test("focus returns to where it was once the last error toast is closed", async () => {
+  const { window, doc } = await boot();
+  const input = doc.getElementById("bug-desc");
+  input.focus();
+  window.toast("only one", true);
+  doc.querySelector("#toast-errors .toast-error-close").focus();
+  doc.querySelector("#toast-errors .toast-error-close").click();
+  assert.equal(doc.activeElement, input);
+});
+
+test("the stack keeps at most TOAST_ERROR_KEEP_MAX undismissed errors", async () => {
+  const { window, doc } = await boot();
+  for (let i = 0; i < 60; i++) window.toast(`distinct ${i}`, true);
+  assert.equal(window.errorToasts().length, 50);
+  assert.equal(doc.querySelector("#toast-errors .toast-error-more-btn").textContent, "+47 more");
+});

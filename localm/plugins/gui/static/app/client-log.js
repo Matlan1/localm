@@ -39,8 +39,9 @@ window.addEventListener("unhandledrejection", (e) => {
 // --- GUI errors: the "Recent errors" list and the server error log ---------
 
 export const RECENT_GUI_ERRORS_MAX = 5;
-const GUI_ERROR_RESEND_MS = 5000;
-const GUI_ERROR_SEND_PER_MIN = 30;
+export let GUI_ERROR_RESEND_MS = 5000;
+export let GUI_ERROR_SEND_PER_MIN = 30;
+export let GUI_ERROR_SEND_WINDOW_MS = 60000;
 const GUI_ERROR_MAX_CHARS = 1000;
 
 // Newest first: { text, time (ms), page, source, count }.
@@ -50,8 +51,12 @@ const _guiErrListeners = new Set();
 // list in memory only.
 let _guiErrStore = null;
 let _guiErrAuth = () => ({});
+// source + text -> { last (ms), held (repeats not sent yet), timer }.
 const _guiErrLastSent = new Map();
 let _guiErrSendTimes = [];
+// Reports the per-window cap kept back, sent as one count line per window.
+let _guiErrDropped = 0;
+let _guiErrDroppedTimer = null;
 
 /** The recent GUI errors, newest first (a copy). */
 export function recentGuiErrors() {
@@ -111,19 +116,9 @@ function _guiErrPage() {
 }
 
 // POST one report to /api/gui-error. Never throws, never logs, never retries:
-// a failed report is dropped. The same message is sent at most once per
-// GUI_ERROR_RESEND_MS, and at most GUI_ERROR_SEND_PER_MIN reports per minute.
-function _guiErrSend(text, source, page) {
+// a failed POST is dropped.
+function _guiErrPost(text, source, page) {
   try {
-    const now = Date.now();
-    const key = source + "\u0000" + text;
-    const last = _guiErrLastSent.get(key);
-    if (last !== undefined && now - last < GUI_ERROR_RESEND_MS) return;
-    _guiErrSendTimes = _guiErrSendTimes.filter((t) => now - t < 60000);
-    if (_guiErrSendTimes.length >= GUI_ERROR_SEND_PER_MIN) return;
-    _guiErrSendTimes.push(now);
-    _guiErrLastSent.set(key, now);
-    if (_guiErrLastSent.size > 200) _guiErrLastSent.delete(_guiErrLastSent.keys().next().value);
     const send = window.__localmRawFetch || window.fetch;
     if (typeof send !== "function") return;
     let headers = {};
@@ -131,10 +126,81 @@ function _guiErrSend(text, source, page) {
     const p = send("/api/gui-error", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...headers },
-      body: JSON.stringify({ message: text, source, page, time: new Date(now).toISOString() }),
+      body: JSON.stringify({ message: text, source, page, time: new Date().toISOString() }),
       keepalive: true,
     });
     if (p && typeof p.catch === "function") p.catch(() => {});
+  } catch { /* dropped */ }
+}
+
+// Take one place in the per-window send budget. False when it is used up.
+function _guiErrAdmit(now) {
+  _guiErrSendTimes = _guiErrSendTimes.filter((t) => now - t < GUI_ERROR_SEND_WINDOW_MS);
+  if (_guiErrSendTimes.length >= GUI_ERROR_SEND_PER_MIN) return false;
+  _guiErrSendTimes.push(now);
+  return true;
+}
+
+// Count *n* reports the budget kept back; one line with the total is sent when
+// the oldest send leaves the window.
+function _guiErrDrop(n) {
+  _guiErrDropped += n;
+  if (_guiErrDroppedTimer) return;
+  const oldest = _guiErrSendTimes.length ? _guiErrSendTimes[0] : Date.now();
+  const wait = Math.max(0, GUI_ERROR_SEND_WINDOW_MS - (Date.now() - oldest));
+  _guiErrDroppedTimer = setTimeout(() => {
+    _guiErrDroppedTimer = null;
+    const count = _guiErrDropped;
+    _guiErrDropped = 0;
+    if (count) {
+      _guiErrPost(`${count} more GUI error report(s) were not sent one by one ` +
+        `(this page sends at most ${GUI_ERROR_SEND_PER_MIN} per minute)`, "gui", _guiErrPage());
+    }
+  }, wait);
+}
+
+// Send the repeats of *key* held back during its resend interval as one line.
+function _guiErrFlushRepeats(key, text, source) {
+  const st = _guiErrLastSent.get(key);
+  if (!st) return;
+  st.timer = null;
+  const n = st.held;
+  st.held = 0;
+  if (!n) return;
+  st.last = Date.now();
+  if (!_guiErrAdmit(st.last)) { _guiErrDrop(n); return; }
+  _guiErrPost(`${text} (repeated ${n} more time(s))`, source, _guiErrPage());
+}
+
+// Send one report, within two limits: the same source and text at most once
+// per GUI_ERROR_RESEND_MS (the repeats in between follow as one "repeated N
+// more time(s)" line), and at most GUI_ERROR_SEND_PER_MIN reports per
+// GUI_ERROR_SEND_WINDOW_MS (the rest follow as one count line).
+function _guiErrSend(text, source, page) {
+  try {
+    const now = Date.now();
+    const key = source + "\u0000" + text;
+    const st = _guiErrLastSent.get(key);
+    if (st && now - st.last < GUI_ERROR_RESEND_MS) {
+      st.held += 1;
+      if (!st.timer) {
+        st.timer = setTimeout(() => _guiErrFlushRepeats(key, text, source),
+          GUI_ERROR_RESEND_MS - (now - st.last));
+      }
+      return;
+    }
+    if (!_guiErrAdmit(now)) { _guiErrDrop(1); return; }
+    if (st && st.timer) clearTimeout(st.timer);
+    if (st && st.held) _guiErrDrop(st.held);
+    _guiErrLastSent.delete(key);
+    _guiErrLastSent.set(key, { last: now, held: 0, timer: null });
+    if (_guiErrLastSent.size > 200) {
+      const [oldKey, old] = _guiErrLastSent.entries().next().value;
+      if (old.timer) clearTimeout(old.timer);
+      if (old.held) _guiErrDrop(old.held);
+      _guiErrLastSent.delete(oldKey);
+    }
+    _guiErrPost(text, source, page);
   } catch { /* dropped */ }
 }
 

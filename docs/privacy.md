@@ -154,10 +154,11 @@ NOT record your chat content in privacy mode (see the guarantee below).
 
 ### GUI error messages
 
-Every error message the GUI shows (an error toast, the sidebar status error) and
-every script error in the page is also sent to the server, which writes it to its
-log as one `gui:` line at WARNING, with home paths, credentials, email addresses
-and machine names removed. Like the server's own warnings, that line goes to the
+Every error message the GUI shows (an error toast, the sidebar status error, an
+error shown inside a page) and every script error in the page is also sent to the
+server, which writes it to its log as one `gui:` line at WARNING, with home paths,
+credentials, email addresses and machine names removed. A burst of the same error
+is sent as one line with a count. Like the server's own warnings, that line goes to the
 in-memory activity list behind the status window in every mode, and to the debug
 log file only when the debug log is on. The Settings "Recent errors" list (the
 last five) is kept in the browser's memory in privacy mode and gone on reload; in

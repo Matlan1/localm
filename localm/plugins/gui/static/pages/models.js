@@ -5,7 +5,7 @@
 // --- ES module imports ---
 import { clearRecentGuiErrors, onRecentGuiErrorsChange, recentGuiErrors } from "../app/client-log.js";
 import { pickDirectory } from "../app/picker.js";
-import { $, GIB, authHeaders, cancelJob, confirmDanger, confirmDangerAsync, downloadRate, el, fmtBytes, fmtDuration, openModal, promptText, renderMarkdown, streamJob, toast, whileBusy } from "../app/helpers.js";
+import { $, GIB, authHeaders, cancelJob, confirmDanger, confirmDangerAsync, downloadRate, el, fmtBytes, fmtDuration, openModal, promptText, renderMarkdown, showInlineError, streamJob, toast, whileBusy } from "../app/helpers.js";
 import { t, tn } from "../app/i18n.js";
 import { onServerUnreachable } from "../app/init.js";
 import { emptyState, iconEl } from "../app/icons.js";
@@ -374,7 +374,7 @@ export function openAdapterAttachModal(m) {
                 { name: m.name, base: baseSel.value }));
         refreshModelsPage();
       } catch (e) {
-        err.textContent = t("models.adapter.attachFailedWith", { message: e.message });
+        showInlineError(err, t("models.adapter.attachFailedWith", { message: e.message }));
         err.hidden = false;
       } finally { ok.disabled = false; }
     };
@@ -1854,7 +1854,7 @@ export async function submitBugReport(review) {
     if (out) {
       out.hidden = false;
       if (review) {
-        out.textContent = t("settings.bug.reviewUnavailable", { where });
+        showInlineError(out, t("settings.bug.reviewUnavailable", { where }));
       } else {
         const maintainerSuffix = data.maintainer
           ? t("settings.bug.maintainerSuffix", { maintainer: data.maintainer }) : "";
@@ -1913,7 +1913,9 @@ export async function sendReviewedBugReport(isRetry = false, rep = _reviewedBugR
         const message = data.upload_message || data.upload_error;
         const whereSuffix = rep.where ? t("settings.bug.whereSuffix", { where: rep.where }) : "";
         const maintainer = data.maintainer || t("settings.bug.defaultMaintainer");
-        out.textContent = t("settings.bug.couldNotSend", { message, whereSuffix, maintainer });
+        const text = t("settings.bug.couldNotSend", { message, whereSuffix, maintainer });
+        if (uploadFailed) out.textContent = text;
+        else showInlineError(out, text);
       }
     }
     if (sent) {
@@ -1975,14 +1977,16 @@ function _recentErrorWhen(entry) {
   try { return new Date(entry.time).toLocaleString(); } catch { return ""; }
 }
 
-/** Fill the bug report form with *entry* (from recentGuiErrors()) and show it.
- *  Closes an open review; never saves or sends. */
+/** Add *entry* (from recentGuiErrors()) to the bug report form and show it: the
+ *  error text goes into "What happened" (appended below text already there, never
+ *  twice), and "What were you doing" is filled only when empty. An open review is
+ *  left as it is. Never saves or sends. */
 export function reportGuiErrorEntry(entry) {
   const happened = $("bug-happened"), desc = $("bug-desc");
   if (!happened || !entry) return;
-  _showBugReview(null);
-  _reviewedBugReport = null;
-  happened.value = entry.text;
+  const current = happened.value.trim();
+  if (!current) happened.value = entry.text;
+  else if (!current.includes(entry.text)) happened.value = current + "\n\n" + entry.text;
   if (desc && !desc.value.trim()) {
     desc.value = t("settings.recentErrors.reportDescription", {
       page: entry.page || "-", time: _recentErrorWhen(entry) });
@@ -2060,7 +2064,7 @@ export async function updateCheck() {
     const d = await r.json().catch(() => ({}));
     if (out) out.hidden = false;
     if (!r.ok) throw new Error(d.detail || r.statusText);
-    if (d.error) { if (out) out.textContent = t("settings.update.checkFailed", { message: d.error }); return; }
+    if (d.error) { showInlineError(out, t("settings.update.checkFailed", { message: d.error })); return; }
     if (!d.available) { if (out) out.textContent = t("settings.update.notConfigured"); return; }
     if (d.newer && d.asset && d.asset.id) {
       if (out) out.textContent = t("settings.update.available",
@@ -2084,7 +2088,8 @@ export async function updateCheck() {
       if (applyBtn) applyBtn.hidden = true;
     }
   } catch (e) {
-    if (out) { out.hidden = false; out.textContent = t("settings.update.checkFailed", { message: e.message }); }
+    if (out) out.hidden = false;
+    showInlineError(out, t("settings.update.checkFailed", { message: e.message }));
   } finally {
     if (checkBtn) checkBtn.disabled = false;
   }
@@ -2110,11 +2115,11 @@ export async function updateApply() {
       }
       if (btn) btn.hidden = true;
     } else if (d.error) {
-      if (out) out.textContent = t("settings.update.failedRolledBack", { error: d.error });
+      showInlineError(out, t("settings.update.failedRolledBack", { error: d.error }));
     } else {
       if (out) out.textContent = d.reason || t("settings.update.nothingToApply");
     }
-  } catch (e) { if (out) out.textContent = t("settings.update.applyFailed", { message: e.message }); }
+  } catch (e) { showInlineError(out, t("settings.update.applyFailed", { message: e.message })); }
   finally { if (btn) btn.disabled = false; }
 }
 if ($("update-check")) $("update-check").onclick = updateCheck;
@@ -2155,7 +2160,7 @@ export async function updateListVersions() {
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.detail || r.statusText);
     if (!d.available) { if (out) out.textContent = t("settings.update.notConfigured"); return; }
-    if (d.error) { if (out) out.textContent = t("settings.update.versionsFailed", { message: d.error }); return; }
+    if (d.error) { showInlineError(out, t("settings.update.versionsFailed", { message: d.error })); return; }
     _updateReleases = Array.isArray(d.releases) ? d.releases : [];
     _updateCurrent = d.current || "";
     if (!_updateReleases.length) {
@@ -2181,7 +2186,8 @@ export async function updateListVersions() {
     if (out) out.textContent = t("settings.update.versionsCurrent", { current: d.current || "" });
     _renderVersionInfo();
   } catch (e) {
-    if (out) { out.hidden = false; out.textContent = t("settings.update.versionsFailed", { message: e.message }); }
+    if (out) out.hidden = false;
+    showInlineError(out, t("settings.update.versionsFailed", { message: e.message }));
   } finally {
     if (btn) btn.disabled = false;
   }
@@ -2223,12 +2229,12 @@ async function _postSelectedVersion(rel, extra) {
         setTimeout(() => onServerUnreachable(), d.data_backup ? 6000 : 800);
       }
     } else if (d.error) {
-      if (out) out.textContent = t("settings.update.failedRolledBack", { error: d.error });
+      showInlineError(out, t("settings.update.failedRolledBack", { error: d.error }));
     } else {
       if (out) out.textContent = d.reason || t("settings.update.nothingToApply");
     }
   } catch (e) {
-    if (out) out.textContent = t("settings.update.applyFailed", { message: e.message });
+    showInlineError(out, t("settings.update.applyFailed", { message: e.message }));
   } finally {
     if (btn) btn.disabled = false;
   }
@@ -2298,7 +2304,7 @@ export async function updateRollback() {
         if (btn) btn.hidden = true;
         if (window.onServerUnreachable) setTimeout(() => onServerUnreachable(), 800);
       } catch (e) {
-        if (out) out.textContent = t("settings.rollback.failed", { message: e.message });
+        showInlineError(out, t("settings.rollback.failed", { message: e.message }));
         if (btn) btn.disabled = false;
       }
     });
@@ -2330,7 +2336,7 @@ export async function rebuildLauncher() {
           (notes ? t("settings.launcher.notesColonSuffix", { notes }) : ".");
     }
   } catch (e) {
-    if (out) out.textContent = t("settings.launcher.failed", { message: e.message });
+    showInlineError(out, t("settings.launcher.failed", { message: e.message }));
   } finally {
     if (btn) btn.disabled = false;
   }
@@ -2454,7 +2460,7 @@ export async function runtimeKeepInstalled(installed) {
   } catch (e) {
     if (out) {
       out.hidden = false;
-      out.textContent = t("settings.runtime.choiceKeepFailed", { installed, message: e.message });
+      showInlineError(out, t("settings.runtime.choiceKeepFailed", { installed, message: e.message }));
     }
     return;
   }
@@ -2517,7 +2523,8 @@ export async function runtimeUpdateCheck() {
     }
   } catch (e) {
     runtimeCheckState = null;
-    if (out) { out.hidden = false; out.textContent = t("settings.runtime.checkFailed", { message: e.message }); }
+    if (out) out.hidden = false;
+    showInlineError(out, t("settings.runtime.checkFailed", { message: e.message }));
   }
   syncRuntimeApply();
   syncRuntimeRollback();
@@ -2653,7 +2660,7 @@ export async function showChangelog() {
         md.textContent = "";
         renderMarkdown(md, d.markdown || "");
       })
-      .catch((e) => { md.textContent = t("settings.changelog.failed", { message: e.message }); });
+      .catch((e) => { showInlineError(md, t("settings.changelog.failed", { message: e.message })); });
   });
 }
 if ($("changelog-show")) $("changelog-show").onclick = showChangelog;
@@ -2667,7 +2674,7 @@ export async function issuesRefresh() {
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.detail || r.statusText);
     if (!out) return;
-    if (d.error) { out.textContent = t("settings.issues.loadError", { error: d.error }); return; }
+    if (d.error) { showInlineError(out, t("settings.issues.loadError", { error: d.error })); return; }
     const list = d.issues || [];
     // Reached only on a SUCCESSFUL fetch of an empty list; the error paths above
     // and below say "could not load" instead.
@@ -2688,7 +2695,7 @@ export async function issuesRefresh() {
       }
       out.appendChild(row);
     }
-  } catch (e) { if (out) out.textContent = t("settings.issues.loadFailed", { message: e.message }); }
+  } catch (e) { showInlineError(out, t("settings.issues.loadFailed", { message: e.message })); }
 }
 if ($("issues-refresh")) $("issues-refresh").onclick = issuesRefresh;
 

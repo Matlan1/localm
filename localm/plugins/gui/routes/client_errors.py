@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """GUI client-error route: ``POST /api/gui-error`` records an error the browser
 showed or threw on the ``localm`` logger at WARNING, prefixed ``gui:``, so it
-reaches the in-memory recent-activity buffer (``/api/activity``, the debug
-window) and, in debug mode, the debug log file.
+reaches the in-memory recent-activity buffer (``debuglog.recent_activity()``,
+which the status window shows) and, in debug mode, the debug log file.
 
 Every field is untrusted: the body is size-capped, each field is length-capped,
 ANSI escape sequences, control characters, line and paragraph separators and
@@ -172,7 +172,7 @@ def register(app: FastAPI, ctx) -> None:
         where = f"[{source}{' ' + page if page else ''}]"
         line = _scrub(f"{where} {message}")
         if line is None:
-            _dbg.warning("gui: %s error report not logged: the scrubber failed", source)
+            _dbg.warning("gui: an error report was not logged: the scrubber failed")
             return {"logged": False}
         _dbg.warning("gui: %s", line)
         return {"logged": True}

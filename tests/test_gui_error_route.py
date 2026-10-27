@@ -140,11 +140,13 @@ def test_a_scrubber_failure_logs_no_text(app, monkeypatch):
     monkeypatch.setattr(scrub, "_scrub_secrets", _boom)
     c = TestClient(app)
     r = c.post("/api/gui-error", headers=_shell(app),
-               json={"message": "token " + "sk-" + "SHOULDNOTAPPEAR123456"})
+               json={"message": "token " + "sk-" + "SHOULDNOTAPPEAR123456",
+                     "source": "SOURCEMUSTNOTAPPEAR"})
     assert r.status_code == 200 and r.json() == {"logged": False}
     lines = _gui_lines()
     assert len(lines) == 1 and "scrubber failed" in lines[0]
     assert "SHOULDNOTAPPEAR" not in "\n".join(lines)
+    assert "SOURCEMUSTNOTAPPEAR" not in "\n".join(lines)
 
 
 def test_rate_limit_drops_extra_reports_and_counts_them(app, monkeypatch):
@@ -260,3 +262,60 @@ def test_a_5xx_refusal_is_logged_at_warning_on_one_line_and_throttled(app, monke
     c.get("/api/test-boom", headers=_shell(app))
     lines = [ln for ln in recent_activity() if "/api/test-" in ln]
     assert len(lines) == 2 and lines[1].endswith("(2 more like this not logged)")
+
+
+def test_the_rate_limit_key_is_the_api_key_identity(app):
+    """Each key gets its own bucket, a bearer key and a session minted from it share one."""
+    from localm import auth
+    from localm import scopes as S
+    from starlette.requests import Request
+
+    a = auth.create_key("A", [S.MODELS_READ])["key"]
+    b = auth.create_key("B", [S.MODELS_READ])["key"]
+
+    def req(token):
+        return Request({"type": "http", "method": "POST", "path": "/api/gui-error",
+                        "headers": [(b"authorization", f"Bearer {token}".encode())],
+                        "app": app})
+
+    ka, kb = ce._client_key(req(a)), ce._client_key(req(b))
+    assert ka != kb
+    assert ka == ce._client_key(req(a))
+    assert a not in ka and ka != "local"
+    assert ka == auth._hash_key(a)
+
+
+def test_keys_have_separate_rate_limit_buckets_on_the_route(app, monkeypatch):
+    from localm import auth
+    from localm import scopes as S
+    monkeypatch.setattr(ce.time, "monotonic", lambda: 50.0)
+    a = auth.create_key("A", [S.MODELS_READ])["key"]
+    b = auth.create_key("B", [S.MODELS_READ])["key"]
+    c = TestClient(app)
+    for i in range(ce.RATE_LIMIT_COUNT):
+        assert c.post("/api/gui-error", headers={"Authorization": f"Bearer {a}"},
+                      json={"message": f"a{i}"}).status_code == 200
+    assert c.post("/api/gui-error", headers={"Authorization": f"Bearer {a}"},
+                  json={"message": "a over"}).status_code == 429
+    assert c.post("/api/gui-error", headers={"Authorization": f"Bearer {b}"},
+                  json={"message": "b first"}).status_code == 200
+
+
+def test_a_5xx_line_carries_the_path_on_one_line(app):
+    from fastapi import HTTPException
+
+    from localm.debuglog import recent_activity
+
+    @app.get("/api/test-path/{name}")
+    async def _boom(name: str):
+        raise HTTPException(500, "x")
+
+    app.router.routes.insert(0, app.router.routes.pop())
+    c = TestClient(app)
+    esc, ls = chr(27), chr(0x2028)
+    r = c.get(f"/api/test-path/a%0D%0Aforged{esc}[31m{ls}b", headers=_shell(app))
+    assert r.status_code == 500
+    lines = [ln for ln in recent_activity() if "/api/test-path/" in ln]
+    assert len(lines) == 1
+    assert "\n" not in lines[0] and "\r" not in lines[0]
+    assert esc not in lines[0] and ls not in lines[0]
