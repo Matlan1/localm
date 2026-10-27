@@ -8,7 +8,6 @@ import logging
 import os
 from unittest.mock import MagicMock
 
-import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 

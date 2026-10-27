@@ -56,8 +56,8 @@ def test_interactive_path_logs_a_warning_with_the_exit_reason(monkeypatch, caplo
     def _input(*a, **kw):
         try:
             return next(answers)
-        except StopIteration:
-            raise EOFError()
+        except StopIteration as e:
+            raise EOFError() from e
     monkeypatch.setattr(chat_mod.console, "input", _input)
 
     with caplog.at_level(logging.DEBUG, logger="localm"):
