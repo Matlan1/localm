@@ -2032,6 +2032,7 @@
   "settings.perf.estimateFreeHeldSuffix": " · {free} GB frei + {held} GB von diesem Modell belegt - ",
   "settings.perf.estimateFreeKnownSuffix": " · {free} GB frei - ",
   "settings.perf.estimateFreeUnknownSuffix": " · freier VRAM unbekannt",
+  "settings.perf.estimateLoadingSuffix": " · das Modell lädt noch, die Passprüfung folgt, sobald es geladen ist",
   "settings.perf.estimateMayNotFit": "passt eventuell nicht",
   "settings.perf.estimateSummary": "~{needed} GB benötigt (Gewichte {weights} · Kontext {kv} · Overhead {overhead})",
   "settings.perf.estimateUnavailable": "Schätzung nicht verfügbar",

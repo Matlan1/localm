@@ -446,6 +446,8 @@ class Engine:
         # has already passed, so active_requests alone does not close that
         # window.
         self.unloading = False
+        # True while load() runs the backend load, under the load lock.
+        self.loading = False
 
     @property
     def loaded(self) -> bool:
@@ -465,24 +467,33 @@ class Engine:
         with self._load_lock:
             if self._backend.loaded:
                 return
-            args = getattr(self, "_backend_args", None)
-            if args is not None and not getattr(self, "_backend_fresh", True):
-                # A reload builds a new backend: config-read settings take their
-                # current values, the explicit arguments are kept.
-                self._backend = create_backend(self.model_path, **args)
-                if getattr(self, "_load_cancel", None) is not None:
-                    self._backend.set_load_cancel(self._load_cancel)
-            self._backend_fresh = False
-            backend_type = type(self._backend).__name__.replace("Backend", "")
-            console.print(
-                f"Loading [bold cyan]{self.display_name}[/bold cyan] "
-                f"[dim](backend: {backend_type})[/dim]"
-            )
-            self._attach_registered_adapters()
-            for path, scale in getattr(self._backend, "adapters", None) or ():
-                console.print(f"[dim]  with LoRA adapter {escape(Path(path).name)} "
-                              f"(scale {scale:g})[/dim]")
-            self._backend.load()
+            self.loading = True
+            try:
+                self._load_locked()
+            finally:
+                self.loading = False
+
+    def _load_locked(self) -> None:
+        """The body of load(), for a backend that is not loaded yet. Caller
+        must hold the load lock."""
+        args = getattr(self, "_backend_args", None)
+        if args is not None and not getattr(self, "_backend_fresh", True):
+            # A reload builds a new backend: config-read settings take their
+            # current values, the explicit arguments are kept.
+            self._backend = create_backend(self.model_path, **args)
+            if getattr(self, "_load_cancel", None) is not None:
+                self._backend.set_load_cancel(self._load_cancel)
+        self._backend_fresh = False
+        backend_type = type(self._backend).__name__.replace("Backend", "")
+        console.print(
+            f"Loading [bold cyan]{self.display_name}[/bold cyan] "
+            f"[dim](backend: {backend_type})[/dim]"
+        )
+        self._attach_registered_adapters()
+        for path, scale in getattr(self._backend, "adapters", None) or ():
+            console.print(f"[dim]  with LoRA adapter {escape(Path(path).name)} "
+                          f"(scale {scale:g})[/dim]")
+        self._backend.load()
 
     def _attach_registered_adapters(self) -> None:
         """Give a GGUF backend the LoRA adapters currently attached to this

@@ -2191,6 +2191,7 @@ export const I18N_EN = {
   "settings.perf.estimateFits": "fits",
   "settings.perf.estimateMayNotFit": "may not fit",
   "settings.perf.estimateFreeUnknownSuffix": " · free VRAM unknown",
+  "settings.perf.estimateLoadingSuffix": " · the model is still loading, the fit check follows once it has loaded",
   "settings.perf.savedNextLoad": "Saved - applies on the next model load",
   "settings.perf.reloadingToast": "Saved - reloading {model} with the new settings",
   "settings.perf.reloadBusyToast": "Saved, but {model} is busy - the new settings apply on its next load",
