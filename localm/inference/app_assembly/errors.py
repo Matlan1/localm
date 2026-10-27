@@ -64,9 +64,10 @@ def register_exception_handlers(app: FastAPI) -> None:
     # logging seam, not a response change.
     from starlette.exceptions import HTTPException as _StarletteHTTPException
 
-    # A 5xx refusal is logged at WARNING in every mode, at most once per
-    # (method, path, status) per SERVER_ERROR_LOG_INTERVAL_S; the next line for
-    # that key counts the ones held back. A 4xx stays a debug-mode DEBUG line.
+    # A 5xx refusal other than 503 is logged at WARNING in every mode, at most
+    # once per (method, path, status) per SERVER_ERROR_LOG_INTERVAL_S; the next
+    # line for that key counts the ones held back. A 4xx and a 503 (not
+    # available right now, e.g. /health with no model) stay debug-mode DEBUG lines.
     _5xx_lock = threading.Lock()
     _5xx_seen: dict = {}
 
@@ -94,7 +95,7 @@ def register_exception_handlers(app: FastAPI) -> None:
             return JSONResponse(status_code=422,
                                 content={"detail": UNDECODABLE_BODY_MESSAGE,
                                          "errors": []})
-        server_error = exc.status_code >= 500
+        server_error = exc.status_code >= 500 and exc.status_code != 503
         if server_error or debug_enabled():
             # Truncated: a detail can be long by design (the VRAM-overflow 503
             # carries a multi-line "Options:" list), and the point here is to

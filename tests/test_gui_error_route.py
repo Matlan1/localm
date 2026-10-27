@@ -235,9 +235,13 @@ def test_a_5xx_refusal_is_logged_at_warning_on_one_line_and_throttled(app, monke
     async def _missing():
         raise HTTPException(404, "no such thing")
 
+    @app.get("/api/test-busy")
+    async def _busy():
+        raise HTTPException(503, "No engine initialised")
+
     # Ahead of attach_gui's catch-all static mount.
-    app.router.routes.insert(0, app.router.routes.pop())
-    app.router.routes.insert(0, app.router.routes.pop())
+    for _ in range(3):
+        app.router.routes.insert(0, app.router.routes.pop())
 
     clock = [500.0]
     monkeypatch.setattr(errors.time, "monotonic", lambda: clock[0])
@@ -246,6 +250,7 @@ def test_a_5xx_refusal_is_logged_at_warning_on_one_line_and_throttled(app, monke
     for _ in range(3):
         assert c.get("/api/test-boom", headers=_shell(app)).status_code == 500
     assert c.get("/api/test-missing", headers=_shell(app)).status_code == 404
+    assert c.get("/api/test-busy", headers=_shell(app)).status_code == 503
     lines = [ln for ln in recent_activity() if "/api/test-" in ln]
     assert len(lines) == 1, lines
     assert "WARNING" in lines[0]

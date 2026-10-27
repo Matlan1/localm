@@ -114,6 +114,17 @@ test("the Recent errors list keeps exactly the last five, newest first", async (
   assert.equal(doc.getElementById("recent-errors-empty").hidden, false);
 });
 
+test("an error already in the list moves to the top with a count instead of a new row", async () => {
+  const { window, doc } = await boot();
+  window.toast("load failed for x", true);
+  runScript(window, `setStatus("err", "load failed")`);
+  window.toast("load failed for x", true);
+  const rows = [...doc.querySelectorAll("#recent-errors-list .recent-error")];
+  assert.deepEqual(rows.map((r) => r.querySelector(".recent-error-text").textContent),
+    ["load failed for x", "load failed"]);
+  assert.match(rows[0].querySelector(".recent-error-meta").textContent, /\(x2\)/);
+});
+
 test("privacy mode keeps the list in memory only: nothing reaches any browser storage", async () => {
   const { window, doc } = await boot({ mode: "privacy" });
   const before = { ls: window.localStorage.length, ss: window.sessionStorage.length };

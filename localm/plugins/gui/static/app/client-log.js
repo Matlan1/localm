@@ -139,7 +139,8 @@ function _guiErrSend(text, source, page) {
 }
 
 /** Record an error the GUI showed or threw: add it to the recent-errors list
- *  (an error equal to the newest entry raises its count instead) and send it
+ *  (an error equal to one already listed moves to the top and raises its
+ *  count instead) and send it
  *  to the server log. *source* names where it came from ("toast", "status",
  *  "window", "promise"). Never throws. */
 export function recordGuiError(message, source = "gui") {
@@ -147,15 +148,10 @@ export function recordGuiError(message, source = "gui") {
     const text = String(message ?? "").trim().slice(0, GUI_ERROR_MAX_CHARS);
     if (!text) return;
     const page = _guiErrPage();
-    const top = _guiErrRecent[0];
-    if (top && top.text === text && top.source === source) {
-      top.count += 1;
-      top.time = Date.now();
-      top.page = page;
-    } else {
-      _guiErrRecent.unshift({ text, time: Date.now(), page, source, count: 1 });
-      if (_guiErrRecent.length > RECENT_GUI_ERRORS_MAX) _guiErrRecent.length = RECENT_GUI_ERRORS_MAX;
-    }
+    const i = _guiErrRecent.findIndex((e) => e.text === text && e.source === source);
+    const count = i >= 0 ? _guiErrRecent.splice(i, 1)[0].count + 1 : 1;
+    _guiErrRecent.unshift({ text, time: Date.now(), page, source, count });
+    if (_guiErrRecent.length > RECENT_GUI_ERRORS_MAX) _guiErrRecent.length = RECENT_GUI_ERRORS_MAX;
     _guiErrChanged();
     _guiErrSend(text, source, page);
   } catch { /* recording an error must never raise */ }
