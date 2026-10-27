@@ -74,7 +74,6 @@ def test_bug_report_command_prints_the_saved_path_in_one_piece(cli_runner, tmp_p
     monkeypatch.setattr(bugreport, "stdin_is_interactive", lambda: False)
     monkeypatch.setattr(bugreport, "live_server_hang_trace", lambda *a, **k: "")
     monkeypatch.setattr(bugreport, "save_user_report", lambda *a, **k: report)
-    monkeypatch.setattr(bugreport, "offer_to_send", lambda *a, **k: None)
 
     result = cli_runner.invoke(maintenance.bug_report_cmd, ["-w", "it crashed"])
 
