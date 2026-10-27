@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Optional
 
 from localm.bugreport._common import console, MAINTAINER_EMAIL
+from localm.console import markup_safe
 from localm.bugreport.errors import LocalmError, RateLimitedError
 from localm.bugreport.assembly import build_report
 from localm.bugreport.transport import mailto_url
@@ -41,7 +42,6 @@ def report_failure(*, summary: str, reason: str = "",
     False: privacy mode without ``keep_diagnostics``) and ``auto_send`` is
     False, no report is built or saved unless an interactive user answers yes
     to a save prompt; otherwise this prints how to file one and returns None."""
-    from localm.console import markup_safe
     console.print()
     if as_failure:
         console.print(f"[bold red]Sorry - {markup_safe(summary)}.[/bold red]")
@@ -60,7 +60,8 @@ def report_failure(*, summary: str, reason: str = "",
     text = build_report(summary, reason=reason, error=error, context=context)
     path = _br.save_report(text)
     if path is not None:
-        console.print(f"[dim]A bug report was saved (edit it before sending):[/dim] {path}")
+        console.print(f"[dim]A bug report was saved (edit it before sending):[/dim] {markup_safe(path)}",
+                      soft_wrap=True)
     else:
         console.print("[yellow]Could not save a report file; you can still copy the "
                       "details above.[/yellow]")
@@ -175,13 +176,13 @@ def offer_to_send(summary: str, path: Optional[Path], text: str, *,
             open_browser(mailto_url(summary, body))
             console.print(f"[green]Opened your mail app to {MAINTAINER_EMAIL}.[/green]")
         elif action == "self":
-            console.print(f"[dim]Thanks. Send {where} to {MAINTAINER_EMAIL} or on Discord "
-                          "when you can.[/dim]")
+            console.print(f"[dim]Thanks. Send {markup_safe(where)} to {MAINTAINER_EMAIL} or on "
+                          "Discord when you can.[/dim]", soft_wrap=True)
         else:
             console.print("[dim]No report sent. It is saved if you change your mind.[/dim]")
     except Exception:
         console.print("[yellow]Could not open that automatically - the report is at "
-                      f"{where}.[/yellow]")
+                      f"{markup_safe(where)}.[/yellow]", soft_wrap=True)
 
 
 def _auto_send(summary: str, path: Optional[Path], text: str,
@@ -194,7 +195,8 @@ def _auto_send(summary: str, path: Optional[Path], text: str,
     where = str(path) if path is not None else "the text above"
     if not can_upload:
         console.print("[yellow]No hosted send channel is configured - the report is "
-                      f"saved at {where}; email it to {MAINTAINER_EMAIL} instead.[/yellow]")
+                      f"saved at {markup_safe(where)}; email it to {MAINTAINER_EMAIL} "
+                      "instead.[/yellow]", soft_wrap=True)
         return
     try:
         res = _br.upload_report(summary, body, url=up_url, token=up_token)
@@ -211,7 +213,6 @@ def _auto_send(summary: str, path: Optional[Path], text: str,
                           f"{MAINTAINER_EMAIL} instead.[/dim]")
             return
     except LocalmError as e:
-        from localm.console import markup_safe
         console.print(f"[yellow]Could not send it.[/yellow] {markup_safe(e.hint or e.reason)}")
         console.print(f"[dim]The report is at {where} - email it to "
                       f"{MAINTAINER_EMAIL} instead.[/dim]")
@@ -222,7 +223,6 @@ def _auto_send(summary: str, path: Optional[Path], text: str,
 
 def _print_sent(res) -> None:
     """Confirm an upload, with the tracking link the proxy returned when there is one."""
-    from localm.console import markup_safe
     link = res.get("url") if isinstance(res, dict) else None
     console.print("[green]Sent to the maintainer.[/green]"
                   + (f" Tracking issue: {markup_safe(link)}" if link else ""))

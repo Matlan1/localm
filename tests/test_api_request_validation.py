@@ -241,6 +241,24 @@ def test_an_ordinary_validation_error_is_still_readable():
     assert "elided" not in r.text
 
 
+def test_model_detail_reports_the_pulled_revision():
+    engine = MagicMock()
+    engine.display_name = "m"
+    type(engine).loaded = property(lambda self: True)
+    os.environ.pop("LOCALM_API_KEY", None)
+    client = TestClient(create_app(engine), raise_server_exceptions=True)
+    registry = {
+        "pinned": {"path": "", "source": "hf:owner/repo", "model_type": "llm",
+                   "revision": "refs/pr/3"},
+        "plain": {"path": "", "source": "hf:owner/repo", "model_type": "llm"},
+    }
+    with patch("localm.config.load_registry", return_value=registry):
+        pinned = client.get("/v1/models/pinned").json()
+        plain = client.get("/v1/models/plain").json()
+    assert pinned["revision"] == "refs/pr/3"
+    assert "revision" not in plain
+
+
 PNG_BYTES = bytes.fromhex("89504e470d0a1a0a0000000d49484452") + bytes(range(128, 256)) * 3
 
 

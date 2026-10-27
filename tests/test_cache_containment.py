@@ -235,3 +235,25 @@ class _R2:
     returncode = 0
     stdout = ""
     stderr = ""
+
+
+def test_runtime_wheel_install_runs_the_found_uv_by_path_and_never_a_bare_one(monkeypatch):
+    from localm import setup_llama
+    seen = []
+
+    class _Ok:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setitem(sys.modules, "localm_llama_runtime", None)
+    monkeypatch.setattr(setup_llama.subprocess, "run", lambda cmd, **kw: seen.append(cmd) or _Ok())
+    fake_uv = str(Path("/somewhere/uv"))
+    monkeypatch.setattr(setup_llama.runtime_dir.uv_tool, "find_uv", lambda root: fake_uv)
+    assert setup_llama._install_runtime_wheel(Path("some/pkg/dir")) is True
+    assert seen[0][:3] == [fake_uv, "pip", "install"]
+
+    seen.clear()
+    monkeypatch.setattr(setup_llama.runtime_dir.uv_tool, "find_uv", lambda root: None)
+    assert setup_llama._install_runtime_wheel(Path("some/pkg/dir")) is True
+    assert seen[0][:3] == [sys.executable, "-m", "pip"] and len(seen) == 1

@@ -282,7 +282,31 @@ def _runner_entry(req_q, resp_q, ctrl_q, crash_trace_path=None,
         raise
 
 
+_NATIVE_CONSOLE_PAUSED_KEY = "native_console_paused"
+
+
+def _forward_native_console_pause(kwargs: dict) -> dict:
+    """*kwargs* for a ``chat_stream`` request to the child, carrying the
+    caller's :func:`~localm.debuglog.native_console_paused` state so the child
+    keeps its native log lines off the terminal for that stream."""
+    from localm.debuglog import native_console_is_paused
+    if native_console_is_paused():
+        return {**kwargs, _NATIVE_CONSOLE_PAUSED_KEY: True}
+    return kwargs
+
+
 def _serve_stream(worker, payload: dict, emit: Callable, cancel_event) -> None:
+    """Child side of one stream: :func:`_serve_stream_body` with the native
+    console paused when *payload* carries the pause the caller forwarded with
+    :func:`_forward_native_console_pause`. That key is not passed to *worker*."""
+    from localm.debuglog import native_console_paused
+    payload = dict(payload)
+    paused = payload.pop(_NATIVE_CONSOLE_PAUSED_KEY, False)
+    with native_console_paused() if paused else contextlib.nullcontext():
+        _serve_stream_body(worker, payload, emit, cancel_event)
+
+
+def _serve_stream_body(worker, payload: dict, emit: Callable, cancel_event) -> None:
     """Child side: run one ``chat_stream`` on *worker* with *payload*, sending
     its envelopes through *emit*: ``status`` and ``chunk`` while it runs, then
     ``done``, or a tagged ``error`` for a refusal that leaves the model
@@ -1194,7 +1218,7 @@ class ModelRunner:
         chunks_received = 0
         _stream_t0 = time.monotonic()
         with self._stream_turn():
-            self._req_q.put(("chat_stream", kwargs))
+            self._req_q.put(("chat_stream", _forward_native_console_pause(kwargs)))
             try:
                 while True:
                     deadline = time.monotonic() + (
@@ -1464,7 +1488,8 @@ class ModelRunner:
             req_q = self._req_q
             if req_q is None:
                 raise self._mux_unloaded_error()
-            req_q.put(("chat_stream_mux", {"sid": sid, "kwargs": kwargs}))
+            req_q.put(("chat_stream_mux", {
+                "sid": sid, "kwargs": _forward_native_console_pause(kwargs)}))
             while True:
                 deadline = time.monotonic() + (
                     first_budget if awaiting_first else _STREAM_CHUNK_TIMEOUT)
