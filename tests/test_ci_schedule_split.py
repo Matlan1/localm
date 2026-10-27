@@ -266,4 +266,4 @@ def test_the_gui_tests_run_on_an_unlabelled_pull_request_only_for_gui_changes_on
     assert '"$FULL_CI" = "true"' in scope["run"]
     assert '"$HOST_OS" != "Linux"' in scope["run"]
     after = steps[steps.index(scope) + 1:]
-    assert after and all(s.get("if") == "steps.scope.outputs.run == 'true'" for s in after)
+    assert after and all("steps.scope.outputs.run == 'true'" in s.get("if", "") for s in after)

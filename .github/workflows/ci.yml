@@ -419,7 +419,7 @@ jobs:
       # job. One host only: matches the ruff job's "result does not vary by
       # host" below. (#1780)
       - name: Lint (eslint, non-blocking)
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-latest' && steps.scope.outputs.run == 'true'
         continue-on-error: true
         run: npm run lint
 
