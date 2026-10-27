@@ -27,7 +27,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Iterator, Optional
+from typing import Any, Iterator, NamedTuple, Optional
 
 import localm.model_manager as _mm
 from localm import instances
@@ -53,6 +53,7 @@ class _Active:
     def __init__(self, request: dict) -> None:
         self.id = uuid.uuid4().hex
         self.written = False
+        self.done_target: Optional[tuple] = None
         self.rec: dict[str, Any] = {
             "version": _VERSION,
             "id": self.id,
@@ -78,6 +79,24 @@ _CURRENT: contextvars.ContextVar[_Active | None] = contextvars.ContextVar(
 _LIVE_IDS: set[str] = set()
 _LIVE_LOCK = threading.Lock()
 _WRITE_LOCK = threading.Lock()
+
+
+def _snapshot_target(rec: dict) -> Optional[tuple]:
+    """``(repo, revision, folder)`` that identifies the full-repo download of
+    *rec* whatever options requested it, or None for any other record."""
+    snap = rec.get("snapshot")
+    if (rec.get("source") != "hf-repo" or not isinstance(snap, dict)
+            or not isinstance(snap.get("dir"), str) or not isinstance(rec.get("repo"), str)):
+        return None
+    return (rec["repo"].casefold(), rec.get("revision") or None,
+            os.path.normcase(os.path.abspath(snap["dir"])))
+
+
+def _same_pull(old: dict, request: dict, target: Optional[tuple]) -> bool:
+    """True when the record *old* is of the pull of *request*, or of the
+    full-repo download *target*."""
+    return old["request"] == request or (target is not None
+                                         and _snapshot_target(old) == target)
 
 
 def records_dir() -> Path:
@@ -140,13 +159,15 @@ def _read(path: Path) -> Optional[dict]:
 
 def _save_current(act: _Active) -> None:
     """Write the record of *act*; on its first write, records of the same
-    request that are not running are replaced by it. A failed write is
-    logged and the download goes on without a record."""
+    request or of the same full-repo target (see :func:`_snapshot_target`)
+    that are not running are replaced by it. A failed write is logged and the
+    download goes on without a record."""
     with _WRITE_LOCK:
         first = not act.written
         if first:
+            target = _snapshot_target(act.rec)
             for _path, old in _iter_records():
-                if old["id"] == act.id or old["request"] != act.rec["request"]:
+                if old["id"] == act.id or not _same_pull(old, act.rec["request"], target):
                     continue
                 if _is_running(old):
                     continue
@@ -174,7 +195,9 @@ def tracking(request: dict) -> Iterator[dict]:
     when the pull succeeded. Nothing is written until a ``note_*`` call marks
     the start of a transfer. On exit: success removes the record; any other
     exit (a failure, an exception, Ctrl+C) keeps it, marked ended, when
-    partial data of it is on disk, and removes it otherwise."""
+    partial data of it is on disk, and removes it otherwise. Success also
+    removes the records of other pulls of the same request or of the same
+    full-repo target."""
     act = _Active(request)
     token = _CURRENT.set(act)
     with _LIVE_LOCK:
@@ -193,8 +216,9 @@ def tracking(request: dict) -> Iterator[dict]:
 
 def _finish(act: _Active, ok: bool) -> None:
     if ok:
+        target = act.done_target or _snapshot_target(act.rec)
         for _p, old in _iter_records():
-            if old["id"] != act.id and old["request"] == act.rec["request"] \
+            if old["id"] != act.id and _same_pull(old, act.rec["request"], target) \
                     and not _is_running(old):
                 _remove(old["id"])
     if not act.written:
@@ -203,7 +227,7 @@ def _finish(act: _Active, ok: bool) -> None:
         _remove(act.id)
         return
     try:
-        have = bytes_on_disk(act.rec)
+        have = bytes_on_disk(act.rec) or int(bool(_locate(act.rec).outside))
     except Exception as e:
         logger.warning("could not measure the partial data of %s: %s",
                        act.rec["request"]["spec"], e)
@@ -277,6 +301,18 @@ def note_snapshot(folder: Path, name: str, created: bool, size: Optional[int]) -
     _save_current(act)
 
 
+def note_snapshot_complete(folder: Path, repo: str, revision: Optional[str]) -> None:
+    """Record that the full-repo download of *repo* at *revision* (None: the
+    default branch) in *folder* was already complete, so no transfer ran.
+    Success of this pull then removes the records of that download. No effect
+    outside :func:`tracking`."""
+    act = _CURRENT.get()
+    if act is None:
+        return
+    act.done_target = (repo.casefold(), revision or None,
+                       os.path.normcase(os.path.abspath(str(folder))))
+
+
 def note_part(part_file: Path, lock_name: str, size: Optional[int],
               etag: Optional[str] = None) -> None:
     """Record that a ``.part`` download into *part_file* (serialised by the
@@ -330,17 +366,39 @@ def _is_running(rec: dict) -> bool:
     return not _record_holder_is_gone(owner, records_dir())
 
 
-def _hf_layout(base: Path, rel: str):
-    """huggingface_hub's local-dir paths for *rel* under *base*, or None when
-    *rel* is not a plain relative repo path."""
+class _HfPaths(NamedTuple):
+    metadata_path: Path
+    lock_path: Path
+
+
+def _as_extended_path(path: Path, max_length: int) -> Path:
+    """*path* in its Windows extended-length form when it is longer than
+    *max_length*, as huggingface_hub names it; unchanged elsewhere."""
+    if os.name != "nt":
+        return path
+    absolute = os.path.abspath(str(path))
+    if len(absolute) <= max_length or absolute.startswith("\\\\?\\"):
+        return path
+    if absolute.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + absolute[2:])
+    return Path("\\\\?\\" + absolute)
+
+
+def _hf_layout(base: Path, rel: str) -> Optional[_HfPaths]:
+    """The metadata and lock paths huggingface_hub uses for *rel* under the
+    local dir *base*, or None when *rel* is not a plain relative repo path.
+    Creates nothing on disk (huggingface_hub's own helper makes folders and
+    writes marker files)."""
     from .pull import _REPO_PATH_PART_RE
     comps = rel.split("/")
     if not comps or any(c in ("", ".", "..") or not _REPO_PATH_PART_RE.match(c)
                         for c in comps):
         return None
     try:
-        from huggingface_hub._local_folder import get_local_download_paths
-        return get_local_download_paths(Path(base), rel)
+        metadata = Path(base) / ".cache" / "huggingface" / "download" / (
+            os.path.join(*comps) + ".metadata")
+        return _HfPaths(_as_extended_path(metadata, 247),
+                        _as_extended_path(metadata.with_suffix(".lock"), 247))
     except Exception as e:
         logger.debug("cannot compute the download paths of %s: %s", rel, e)
         return None
@@ -371,12 +429,11 @@ def _size(p: Path) -> int:
         return 0
 
 
-def _snapshot_bytes(snap: dict) -> int:
+def _snapshot_bytes(folder: Path, created: bool) -> int:
     from .pull import _snapshot_bytes_on_disk
-    folder = Path(snap["dir"])
     if not folder.is_dir():
         return 0
-    if snap.get("created"):
+    if created:
         return _snapshot_bytes_on_disk(folder)
     pending = folder / ".cache" / "huggingface" / "download"
     try:
@@ -385,19 +442,78 @@ def _snapshot_bytes(snap: dict) -> int:
         return 0
 
 
-def bytes_on_disk(rec: dict) -> int:
-    """Bytes of partial data the pull of *rec* left on disk."""
-    total = 0
+class _Located(NamedTuple):
+    """The places a record names that its pull could have written to.
+
+    ``files``: (resolved base folder, repo path, etag, base folder as
+    recorded) of Hugging Face files;
+    ``parts``: (``.part`` file, lock name); ``snapshot``: (resolved folder,
+    model name, created by the pull) of a full-repo download or None;
+    ``outside``: the recorded places that are not under the models folder or
+    the record's own destination, which nothing ever reads or deletes."""
+    files: list
+    parts: list
+    snapshot: Optional[tuple]
+    outside: list
+
+
+def _locate(rec: dict) -> _Located:
+    """Check every path *rec* names against the folders its pull may use (see
+    :func:`_allowed_bases`). Only a resolved path is looked at before it
+    passes; a ``.part.json`` identity is read for a CivitAI partial whose
+    folder is not an allowed base."""
+    from .pull import _safe_models_filename
+    allowed = _allowed_bases(rec)
+    files: list = []
+    parts: list = []
+    outside: list = []
     for f in rec.get("files") or []:
-        if isinstance(f, dict) and isinstance(f.get("base"), str) and isinstance(f.get("rel"), str):
-            total += max((_size(t) for t in _hf_temp_files(Path(f["base"]), f["rel"],
-                                                             _etag(f))), default=0)
+        if not (isinstance(f, dict) and isinstance(f.get("base"), str)
+                and isinstance(f.get("rel"), str)):
+            continue
+        base = _resolved(Path(f["base"]))
+        if base is None or base not in allowed or _hf_layout(base, f["rel"]) is None:
+            outside.append(f"{f['base']}/{f['rel']}")
+            continue
+        files.append((base, f["rel"], _etag(f), Path(f["base"])))
     for p in rec.get("parts") or []:
-        if isinstance(p, dict) and isinstance(p.get("path"), str):
-            total += _size(Path(p["path"]))
+        if not (isinstance(p, dict) and isinstance(p.get("path"), str)
+                and isinstance(p.get("lock"), str)):
+            continue
+        part, lock = Path(p["path"]), p["lock"]
+        parent = _resolved(part.parent)
+        if (part.name.endswith(".part") and part.name == lock + ".part"
+                and _safe_models_filename(lock, part.parent) is not None
+                and parent is not None
+                and (parent in allowed or _is_civitai_dest(rec, parent))):
+            parts.append((part, lock))
+        else:
+            outside.append(str(part))
+    snapshot = None
     snap = rec.get("snapshot")
     if isinstance(snap, dict) and isinstance(snap.get("dir"), str):
-        total += _snapshot_bytes(snap)
+        rfolder = _resolved(Path(snap["dir"]))
+        models = _resolved(_mm.MODELS_DIR)
+        name = snap.get("name")
+        if (isinstance(name, str) and rfolder is not None and models is not None
+                and rfolder.parent == models and rfolder.name.lower() == name.lower()):
+            snapshot = (rfolder, name, bool(snap.get("created")))
+        else:
+            outside.append(snap["dir"])
+    return _Located(files, parts, snapshot, outside)
+
+
+def bytes_on_disk(rec: dict, located: Optional[_Located] = None) -> int:
+    """Bytes of partial data the pull of *rec* left on disk, counting only the
+    places :func:`_locate` accepts."""
+    loc = located or _locate(rec)
+    total = 0
+    for base, rel, etag, _raw in loc.files:
+        total += max((_size(t) for t in _hf_temp_files(base, rel, etag)), default=0)
+    for part, _lock in loc.parts:
+        total += _size(part)
+    if loc.snapshot is not None:
+        total += _snapshot_bytes(loc.snapshot[0], loc.snapshot[2])
     return total
 
 
@@ -415,6 +531,14 @@ def _source_urls(rec: dict) -> list[str]:
     urls = [f.get("url") for f in rec.get("files") or [] if isinstance(f, dict)]
     if rec.get("url"):
         urls.append(rec["url"])
+    repo = rec.get("repo")
+    if rec.get("source") == "hf-repo" and isinstance(repo, str) and repo:
+        from .pull import _HF_ENDPOINT
+        rev = rec.get("revision")
+        urls.append(f"{_HF_ENDPOINT}/{repo}" + (f"/tree/{rev}" if isinstance(rev, str) and rev else ""))
+    elif rec.get("source") == "civitai" and isinstance(repo, str) and repo.startswith("civitai:"):
+        from .sources import CIVITAI_API
+        urls.append(f"{CIVITAI_API}/api/v1/model-versions/{repo[len('civitai:'):]}")
     out: list[str] = []
     for u in urls:
         if isinstance(u, str) and u and u not in out:
@@ -422,17 +546,22 @@ def _source_urls(rec: dict) -> list[str]:
     return out
 
 
-def resumable(rec: dict) -> bool:
+def resumable(rec: dict, located: Optional[_Located] = None) -> bool:
     """True when re-running the recorded pull continues from its partial
     data. Every pull source localm has resumes; a request without a remote
-    spec does not."""
+    spec does not, and neither does a record that names a place outside the
+    folders its pull may use."""
     spec = str(rec["request"].get("spec") or "")
-    return bool(spec) and rec.get("source") in ("hf-file", "hf-repo", "url", "civitai")
+    return (bool(spec) and rec.get("source") in ("hf-file", "hf-repo", "url", "civitai")
+            and not (located or _locate(rec)).outside)
 
 
 def describe(rec: dict) -> dict:
-    """The client view of *rec*."""
+    """The client view of *rec*. ``invalid`` is True when the record names a
+    place outside the folders its pull may use; nothing there is read or
+    counted."""
     req = rec["request"]
+    loc = _locate(rec)
     return {
         "id": rec["id"],
         "spec": req.get("spec"),
@@ -445,13 +574,14 @@ def describe(rec: dict) -> dict:
         "commit": rec.get("commit"),
         "urls": _source_urls(rec),
         "files": [f.get("rel") for f in rec.get("files") or [] if isinstance(f, dict)],
-        "bytes_on_disk": bytes_on_disk(rec),
+        "bytes_on_disk": bytes_on_disk(rec, loc),
         "expected_size": _expected_size(rec),
         "sha256": rec.get("sha256"),
         "created": rec.get("created"),
         "ended_at": rec.get("ended_at"),
         "dismissed": bool(rec.get("dismissed")),
-        "resumable": resumable(rec),
+        "resumable": resumable(rec, loc),
+        "invalid": bool(loc.outside),
     }
 
 
@@ -463,7 +593,7 @@ def list_interrupted(include_dismissed: bool = False) -> list[dict]:
         if _is_running(rec):
             continue
         view = describe(rec)
-        if view["bytes_on_disk"] <= 0:
+        if view["bytes_on_disk"] <= 0 and not view["invalid"]:
             logger.info("removing the record of %s: none of its partial data is "
                         "on disk any more", rec["request"].get("spec"))
             _remove(rec["id"])
@@ -575,6 +705,11 @@ class DeleteFailed(OSError):
     """Partial data that should have been deleted is still on disk."""
 
 
+class DownloadComplete(Exception):
+    """The download is finished (only unregistered), so deleting it would
+    remove a complete model."""
+
+
 _ETAG_RE = re.compile(r"\A[A-Za-z0-9._-]{1,200}\Z")
 
 
@@ -604,47 +739,51 @@ def _unlink_checked(path: Path, left: list[Path]) -> int:
     return size
 
 
+def _snapshot_looks_complete(folder: Path, expected: Optional[int]) -> bool:
+    """True when the full-repo download in *folder* has no temp file left and
+    holds at least *expected* bytes, so it is a finished download and not a
+    partial one. With *expected* unknown, any finished file and no temp file
+    counts as finished, so a folder is never taken for partial on missing
+    information."""
+    from .pull import _snapshot_bytes_on_disk
+    if not folder.is_dir():
+        return False
+    pending = folder / ".cache" / "huggingface" / "download"
+    try:
+        if any(pending.rglob("*.incomplete")):
+            return False
+    except OSError:
+        return False
+    have = _snapshot_bytes_on_disk(folder)
+    if not isinstance(expected, int) or expected <= 0:
+        return have > 0
+    return have >= expected
+
+
 def _delete_partials(rec: dict) -> tuple[int, list[Path]]:
-    """Delete the partial data of *rec* under the locks its pull takes.
-    Raises ``pull.PullInFlight`` when a download holds one of those locks.
-    Returns ``(bytes freed, files that could not be
-    deleted)``."""
+    """Delete the partial data of *rec* under the locks its pull takes, only
+    in the places :func:`_locate` accepts.
+    Raises ``pull.PullInFlight`` when a download holds one of those locks and
+    :class:`DownloadComplete` when the folder it would remove holds a finished
+    download. Returns ``(bytes freed, files that could not be deleted)``."""
     from .pull import (_SNAPSHOT_LOCK_WAIT_SECONDS, _delete_hf_temp_files,
                        _hold_download_lock, _part_lock, _part_record_path,
-                       _safe_models_filename, _snapshot_bytes_on_disk,
-                       _snapshot_dest_lock)
+                       _snapshot_bytes_on_disk, _snapshot_dest_lock)
     freed = 0
     left: list[Path] = []
-    allowed = _allowed_bases(rec)
-    for f in rec.get("files") or []:
-        if not (isinstance(f, dict) and isinstance(f.get("base"), str)
-                and isinstance(f.get("rel"), str)):
-            continue
-        base = _resolved(Path(f["base"]))
-        paths = _hf_layout(base, f["rel"]) if base is not None else None
-        if base is None or base not in allowed or paths is None:
-            logger.warning("not deleting partial data outside the models folder: "
-                           "%s / %s", f.get("base"), f.get("rel"))
-            continue
-        if not paths.lock_path.parent.is_dir():
+    loc = _locate(rec)
+    for place in loc.outside:
+        logger.warning("not deleting partial data outside the folders of its download: %s",
+                       place)
+    for base, rel, etag, _raw in loc.files:
+        paths = _hf_layout(base, rel)
+        if paths is None or not paths.lock_path.parent.is_dir():
             continue
         with _hold_download_lock(paths.lock_path, wait=_SNAPSHOT_LOCK_WAIT_SECONDS):
-            for t in _hf_temp_files(base, f["rel"], _etag(f)):
+            for t in _hf_temp_files(base, rel, etag):
                 freed += _unlink_checked(t, left)
 
-    for p in rec.get("parts") or []:
-        if not (isinstance(p, dict) and isinstance(p.get("path"), str)
-                and isinstance(p.get("lock"), str)):
-            continue
-        part = Path(p["path"])
-        lock = p["lock"]
-        parent = _resolved(part.parent)
-        if (not part.name.endswith(".part") or part.name != lock + ".part"
-                or _safe_models_filename(lock, part.parent) is None or parent is None
-                or not (parent in allowed or _is_civitai_dest(rec, parent))):
-            logger.warning("not deleting the partial file %s: it is not a "
-                           "download partial this record owns", part)
-            continue
+    for part, lock in loc.parts:
         with _part_lock(lock):
             try:
                 _part_record_path(part).unlink(missing_ok=True)
@@ -652,24 +791,24 @@ def _delete_partials(rec: dict) -> tuple[int, list[Path]]:
                 logger.warning("could not delete %s: %s", _part_record_path(part), e)
             freed += _unlink_checked(part, left)
 
-    snap = rec.get("snapshot")
-    if isinstance(snap, dict) and isinstance(snap.get("dir"), str) and isinstance(snap.get("name"), str):
-        folder = Path(snap["dir"])
-        rfolder = _resolved(folder)
+    if loc.snapshot is not None:
+        folder, name, created = loc.snapshot
         models = _resolved(_mm.MODELS_DIR)
-        if (rfolder is None or models is None or rfolder.parent != models
-                or rfolder.name.lower() != snap["name"].lower()):
-            logger.warning("not deleting %s: it is not a folder in the models "
-                           "folder", folder)
-        else:
-            with _snapshot_dest_lock(snap["name"]):
-                if snap.get("created") and folder.is_dir() \
-                        and not _snapshot_is_registered(folder):
-                    size = _snapshot_bytes_on_disk(folder)
-                    shutil.rmtree(folder)
-                    freed += size
-                elif folder.is_dir():
-                    freed += _delete_hf_temp_files(folder, None)
+        with _snapshot_dest_lock(name):
+            current = _resolved(folder)
+            if current != folder or models is None or current.parent != models                     or current.name.lower() != name.lower():
+                logger.warning("not deleting %s: it is no longer a folder in the "
+                               "models folder", folder)
+            elif created and folder.is_dir() and not _snapshot_is_registered(folder):
+                if _snapshot_looks_complete(folder, (rec.get("snapshot") or {}).get("size")):
+                    raise DownloadComplete(
+                        f"{name} is a complete download that is not registered; "
+                        "resume it to register it, or dismiss it. Its files were not deleted.")
+                size = _snapshot_bytes_on_disk(folder)
+                shutil.rmtree(folder)
+                freed += size
+            elif folder.is_dir():
+                freed += _delete_hf_temp_files(folder, None)
     return freed, left
 
 
@@ -680,7 +819,9 @@ def _is_civitai_dest(rec: dict, parent: Path) -> bool:
     if rec.get("source") != "civitai":
         return False
     for p in rec.get("parts") or []:
-        part = Path(p.get("path", ""))
+        if not (isinstance(p, dict) and isinstance(p.get("path"), str)):
+            continue
+        part = Path(p["path"])
         if _resolved(part.parent) != parent:
             continue
         try:
@@ -695,8 +836,9 @@ def delete_interrupted(pull_id: str) -> int:
     """Delete the partial data of the interrupted download *pull_id* and its
     record. Returns the bytes freed. Raises :class:`UnknownPull`;
     ``pull.PullInFlight`` when it or another download of the same files is
-    running; :class:`DeleteFailed` when a file could not be deleted. The
-    record is kept whenever one of these is raised."""
+    running; :class:`DeleteFailed` when a file could not be deleted;
+    :class:`DownloadComplete` when the download is finished. The record is
+    kept whenever one of these is raised."""
     rec = get_interrupted(pull_id)
     freed, left = _delete_partials(rec)
     if left:
@@ -778,17 +920,23 @@ def check_upstream(rec: dict) -> dict:
             unchecked.append(rec["url"])
     snap = rec.get("snapshot")
     if rec.get("source") == "hf-repo" and isinstance(snap, dict) and rec.get("commit"):
-        try:
-            from .pull import _hf_api
-            kw = {"revision": rec["revision"]} if rec.get("revision") else {}
-            now = getattr(_hf_api().model_info(rec["repo"], **kw), "sha", None)
-            if now and now != rec["commit"]:
-                changed.append(f"{rec['repo']} changed at the source (now at commit {now[:12]})")
-        except netpolicy.NetworkPolicyError:
-            raise
-        except Exception as e:
-            logger.debug("upstream commit check of %s failed: %s", rec.get("repo"), e)
-            unchecked.append(str(rec.get("repo")))
+        from .pull import _hf_endpoint_refusal
+        refusal = _hf_endpoint_refusal()
+        if refusal:
+            logger.info("not checking the commit of %s: %s", rec.get("repo"), refusal)
+            unchecked.append(f"{rec.get('repo')} (network policy: {refusal})")
+        else:
+            try:
+                from .pull import _hf_api
+                kw = {"revision": rec["revision"]} if rec.get("revision") else {}
+                now = getattr(_hf_api().model_info(rec["repo"], **kw), "sha", None)
+                if now and now != rec["commit"]:
+                    changed.append(f"{rec['repo']} changed at the source (now at commit {now[:12]})")
+            except netpolicy.NetworkPolicyError:
+                raise
+            except Exception as e:
+                logger.debug("upstream commit check of %s failed: %s", rec.get("repo"), e)
+                unchecked.append(str(rec.get("repo")))
     if changed:
         return {"changed": True,
                 "detail": "cannot be continued: " + "; ".join(changed)}
@@ -811,15 +959,17 @@ def _claimed_paths() -> tuple[set[Path], set[Path]]:
     files: set[Path] = set()
     folders: set[Path] = set()
     for _p, rec in _iter_records():
-        for f in rec.get("files") or []:
-            if isinstance(f, dict) and isinstance(f.get("base"), str) and isinstance(f.get("rel"), str):
-                files.update(_hf_temp_files(Path(f["base"]), f["rel"], _etag(f)))
+        loc = _locate(rec)
+        for _base, rel, etag, raw in loc.files:
+            files.update(_hf_temp_files(raw, rel, etag))
         for p in rec.get("parts") or []:
             if isinstance(p, dict) and isinstance(p.get("path"), str):
                 files.add(Path(p["path"]))
         snap = rec.get("snapshot")
         if isinstance(snap, dict) and isinstance(snap.get("dir"), str):
             folders.add(Path(snap["dir"]))
+        if loc.snapshot is not None:
+            folders.add(loc.snapshot[0])
     return files, folders
 
 

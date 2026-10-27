@@ -634,6 +634,44 @@ class TestGuiRoutes:
         assert c.post("/api/models/pulls/interrupted/nope/resume", json={}).status_code == 404
         assert c.post("/api/models/pulls/orphans/orphan-zz/delete").status_code == 404
 
+    def test_delete_of_a_complete_unregistered_folder_is_refused_with_409(
+            self, client, home, monkeypatch):
+        c, _ = client
+        monkeypatch.setattr(mm, "load_registry", lambda: {})
+        folder = home / "Repo"
+        (folder / ".cache" / "huggingface" / "download").mkdir(parents=True)
+        (folder / "model.safetensors").write_bytes(b"w" * 1000)
+        with pending_pulls.tracking({"spec": "o/Repo"}):
+            pending_pulls.note_source(source="hf-repo", repo="o/Repo", commit="a" * 40)
+            pending_pulls.note_snapshot(folder, "Repo", True, 1000)
+        [d] = [x for x in c.get("/api/models/pulls/interrupted").json()["downloads"]
+               if x["spec"] == "o/Repo"]
+        assert (folder / "model.safetensors").stat().st_size == 1000
+        r = c.post(f"/api/models/pulls/interrupted/{d['id']}/delete")
+        assert r.status_code == 409 and "complete" in r.json()["detail"]
+        assert (folder / "model.safetensors").stat().st_size == 1000
+        r = c.post(f"/api/models/pulls/interrupted/{d['id']}/resume", json={"fresh": True})
+        assert r.status_code == 409
+        assert (folder / "model.safetensors").stat().st_size == 1000
+
+    def test_a_refused_second_pull_of_a_running_file_adds_no_row(self, client, home, monkeypatch):
+        import subprocess
+        import textwrap
+        c, _ = client
+        before = c.get("/api/models/pulls/interrupted").json()["downloads"]
+        TestSecondPullOfOneHfFile()._fakes(monkeypatch)
+        child = subprocess.Popen(
+            [sys.executable, "-I", "-c", textwrap.dedent(HOLD_A_HF_LOCK),
+             str(home), "tiny-Q4.gguf"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            assert child.stdout.readline().strip() == "HOLDING", child.stderr.read()
+            assert mm.pull_model("owner/repo:tiny-Q4.gguf", name="tiny2") is False
+            assert c.get("/api/models/pulls/interrupted").json()["downloads"] == before
+        finally:
+            child.stdin.close()
+            child.wait(timeout=30)
+
 
 # ------------------------------------------------------------------ #
 #  Review findings                                                     #
@@ -746,3 +784,343 @@ def test_a_failed_delete_at_the_pull_prompt_still_runs_the_requested_pull(home, 
     monkeypatch.setattr(pending_pulls, "delete_interrupted", busy)
     cli._offer_interrupted("owner/other:x.gguf", None)
     assert len(_records(home)) == 1
+
+
+# ------------------------------------------------------------------ #
+#  U12: audit of the interrupted-download feature                       #
+# ------------------------------------------------------------------ #
+
+def _fs_snapshot(root: Path) -> list[str]:
+    return sorted(str(p.relative_to(root)) for p in root.rglob("*"))
+
+
+def _link_or_skip(link: Path, target: Path) -> None:
+    """Make *link* a directory link to *target*: a symlink, else (Windows
+    without the symlink privilege) a junction."""
+    import subprocess
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError:
+        if sys.platform != "win32":
+            pytest.skip("cannot create a directory link here")
+        out = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                             capture_output=True)
+        if out.returncode != 0:
+            pytest.skip("cannot create a directory link here")
+
+
+@pytest.fixture()
+def net_policy(tmp_path, monkeypatch):
+    """A throwaway config the tests write net_* keys into."""
+    cfg_home = tmp_path / "cfg" / ".localm"
+    monkeypatch.setenv("LOCALM_HOME", str(cfg_home))
+    monkeypatch.delenv("LOCALM_NET_MODE", raising=False)
+    import localm.config as _cfg
+    monkeypatch.setattr(_cfg, "HOME_DIR", cfg_home)
+    monkeypatch.setattr(_cfg, "CONFIG_FILE", cfg_home / "config.json")
+    cfg_home.mkdir(parents=True)
+
+    def _set(**values):
+        cfg = _cfg.load_config()
+        cfg.update(values)
+        _cfg.save_config(cfg)
+    return _set
+
+
+class TestUpstreamCheckHonoursNetworkPolicy:
+    REC = {"source": "hf-repo", "repo": "o/Repo", "revision": None, "commit": "a" * 40,
+           "files": [], "parts": [], "snapshot": {"dir": "x", "name": "Repo"}}
+
+    def _count_model_info(self, monkeypatch, sha):
+        calls = []
+
+        def model_info(repo, **kw):
+            calls.append(repo)
+            return MagicMock(sha=sha)
+        monkeypatch.setattr("localm.model_manager.pull._hf_api",
+                            lambda: MagicMock(model_info=model_info))
+        return calls
+
+    def test_a_denied_hub_endpoint_gets_no_request_and_is_reported(
+            self, home, monkeypatch, net_policy):
+        net_policy(net_mode="allow", net_deny=["huggingface.co"])
+        calls = self._count_model_info(monkeypatch, "b" * 40)
+        check = pending_pulls.check_upstream(dict(self.REC))
+        assert calls == []
+        assert check["changed"] is None
+        assert "o/Repo" in check["detail"] and "network policy" in check["detail"]
+
+    def test_an_allowed_hub_endpoint_is_asked_and_a_new_commit_is_seen(
+            self, home, monkeypatch, net_policy):
+        net_policy(net_mode="allow", net_deny=[])
+        calls = self._count_model_info(monkeypatch, "b" * 40)
+        check = pending_pulls.check_upstream(dict(self.REC))
+        assert calls == ["o/Repo"]
+        assert check["changed"] is True
+
+
+class TestListingWritesNothing:
+    def _comfy_record(self, home, tmp_path, dead_pid):
+        comfy = tmp_path / "comfy"
+        (comfy / ".cache" / "localm-staging").mkdir(parents=True)
+        _hf_temp(comfy / ".cache" / "localm-staging", "sub/a.gguf", "e1", b"t" * 4, *dead_pid)
+        with pending_pulls.tracking({"spec": "o/r:sub/a.gguf", "dest_dir": str(comfy)}):
+            pending_pulls.note_source(source="hf-file", repo="o/r")
+            pending_pulls.note_hf_files(comfy / ".cache" / "localm-staging",
+                                        [{"rel": "sub/a.gguf", "etag": "e1", "size": 9}])
+        return comfy
+
+    def test_listing_a_record_whose_folder_is_gone_leaves_it_gone(
+            self, home, tmp_path, dead_pid):
+        import shutil
+        comfy = self._comfy_record(home, tmp_path, dead_pid)
+        assert len(_records(home)) == 1
+        shutil.rmtree(comfy)
+        assert pending_pulls.list_interrupted() == []
+        assert pending_pulls.list_orphans() == []
+        assert not comfy.exists()
+
+    def test_deleting_a_record_whose_folder_is_gone_creates_nothing(
+            self, home, tmp_path, dead_pid):
+        import shutil
+        comfy = self._comfy_record(home, tmp_path, dead_pid)
+        shutil.rmtree(comfy)
+        [rec] = _records(home)
+        assert pending_pulls.delete_interrupted(rec["id"]) == 0
+        assert not comfy.exists()
+        assert _records(home) == []
+
+    def test_listing_an_existing_folder_adds_no_file_or_folder(self, home, tmp_path, dead_pid):
+        comfy = self._comfy_record(home, tmp_path, dead_pid)
+        before = _fs_snapshot(comfy)
+        [view] = pending_pulls.list_interrupted()
+        assert view["bytes_on_disk"] == 4
+        assert _fs_snapshot(comfy) == before
+
+    def test_a_record_outside_the_allowed_folders_is_shown_invalid_and_untouched(
+            self, home, tmp_path, dead_pid):
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        victim = _hf_temp(elsewhere, "a.gguf", "e1", b"v" * 10, *dead_pid)
+        with pending_pulls.tracking({"spec": "o/r:a.gguf"}):
+            pending_pulls.note_source(source="hf-file", repo="o/r")
+            pending_pulls.note_hf_files(elsewhere, [{"rel": "a.gguf", "etag": "e1"}])
+        before = _fs_snapshot(elsewhere)
+        [view] = pending_pulls.list_interrupted()
+        assert view["invalid"] is True and view["resumable"] is False
+        assert view["bytes_on_disk"] == 0
+        assert _fs_snapshot(elsewhere) == before and victim.read_bytes() == b"v" * 10
+        assert pending_pulls.list_orphans() == [] or all(
+            o["file"] != victim.name for o in pending_pulls.list_orphans())
+        assert pending_pulls.delete_interrupted(view["id"]) == 0
+        assert victim.read_bytes() == b"v" * 10 and _records(home) == []
+
+    def test_the_layout_matches_the_one_huggingface_hub_uses(self, tmp_path):
+        import os
+        from huggingface_hub._local_folder import get_local_download_paths
+        deep = tmp_path / ("d" * 120) / ("e" * 120)
+        for base in (tmp_path / "plain", deep):
+            os.makedirs(pending_pulls._as_extended_path(base, 0), exist_ok=True)
+            for rel in ("a.gguf", "sub/dir/b.safetensors", "x" * 90 + ".bin"):
+                real = get_local_download_paths(base, rel)
+                mine = pending_pulls._hf_layout(base, rel)
+                assert (mine.metadata_path, mine.lock_path) == (
+                    real.metadata_path, real.lock_path)
+
+    def test_the_layout_refuses_a_path_that_is_not_plain(self, tmp_path):
+        for rel in ("../a.gguf", "/etc/a", "a//b", ""):
+            assert pending_pulls._hf_layout(tmp_path, rel) is None
+        assert list(tmp_path.iterdir()) == []
+
+
+class TestFinishedDownloadIsNotInterrupted:
+    def _stop(self, home, dead_pid, request, folder):
+        (folder / ".cache" / "huggingface" / "download").mkdir(parents=True)
+        (folder / "config.json").write_text("{}", encoding="utf-8")
+        _hf_temp(folder, "model.safetensors", "e1", b"p" * 30, *dead_pid)
+        with pending_pulls.tracking(request):
+            pending_pulls.note_source(source="hf-repo", repo="o/Repo", commit="a" * 40)
+            pending_pulls.note_snapshot(folder, "Repo", True, 1000)
+
+    def test_a_pull_of_the_same_repo_with_other_options_clears_the_record(
+            self, home, dead_pid):
+        folder = home / "Repo"
+        self._stop(home, dead_pid, {"spec": "o/Repo", "type": "llm"}, folder)
+        assert len(_records(home)) == 1
+        with pending_pulls.tracking({"spec": "o/Repo", "type": "auto"}) as outcome:
+            pending_pulls.note_source(source="hf-repo", repo="o/Repo", commit="a" * 40)
+            pending_pulls.note_snapshot(folder, "Repo", False, 1000)
+            outcome["ok"] = True
+        assert _records(home) == []
+        assert pending_pulls.list_interrupted() == []
+
+    def test_a_pull_that_found_the_folder_complete_clears_the_record(self, home, dead_pid):
+        folder = home / "Repo"
+        self._stop(home, dead_pid, {"spec": "o/Repo", "type": "llm"}, folder)
+        with pending_pulls.tracking({"spec": "o/Repo", "type": "auto"}) as outcome:
+            pending_pulls.note_snapshot_complete(folder, "o/repo", None)
+            outcome["ok"] = True
+        assert _records(home) == []
+
+    def test_another_repo_or_revision_in_the_list_is_kept(self, home, dead_pid):
+        folder = home / "Repo"
+        self._stop(home, dead_pid, {"spec": "o/Repo"}, folder)
+        with pending_pulls.tracking({"spec": "o/Other"}) as outcome:
+            pending_pulls.note_source(source="hf-repo", repo="o/Other", commit="a" * 40)
+            pending_pulls.note_snapshot(home / "Other", "Other", True, 5)
+            outcome["ok"] = True
+        with pending_pulls.tracking({"spec": "o/Repo@dev"}) as outcome:
+            pending_pulls.note_source(source="hf-repo", repo="o/Repo", revision="dev")
+            pending_pulls.note_snapshot(folder, "Repo", False, 1000)
+            outcome["ok"] = True
+        assert [r["request"]["spec"] for r in _records(home)] == ["o/Repo"]
+
+    def test_a_second_stopped_pull_replaces_the_record_of_the_first(self, home, dead_pid):
+        folder = home / "Repo"
+        self._stop(home, dead_pid, {"spec": "o/Repo", "type": "llm"}, folder)
+        first = _records(home)[0]["id"]
+        with pending_pulls.tracking({"spec": "o/Repo", "type": "auto"}):
+            pending_pulls.note_source(source="hf-repo", repo="o/Repo", commit="a" * 40)
+            pending_pulls.note_snapshot(folder, "Repo", False, 1000)
+        [rec] = _records(home)
+        assert rec["id"] != first and rec["snapshot"]["created"] is True
+
+    def _complete_folder(self, home, size=1000):
+        folder = home / "Repo"
+        (folder / ".cache" / "huggingface" / "download").mkdir(parents=True)
+        (folder / "model.safetensors").write_bytes(b"w" * size)
+        return folder
+
+    def test_delete_refuses_a_complete_unregistered_folder(self, home, monkeypatch):
+        monkeypatch.setattr(mm, "load_registry", lambda: {})
+        folder = self._complete_folder(home)
+        with pending_pulls.tracking({"spec": "o/Repo"}):
+            pending_pulls.note_source(source="hf-repo", repo="o/Repo", commit="a" * 40)
+            pending_pulls.note_snapshot(folder, "Repo", True, 1000)
+        [rec] = _records(home)
+        assert (folder / "model.safetensors").stat().st_size == 1000
+        with pytest.raises(pending_pulls.DownloadComplete):
+            pending_pulls.delete_interrupted(rec["id"])
+        assert (folder / "model.safetensors").stat().st_size == 1000
+        assert [r["id"] for r in _records(home)] == [rec["id"]]
+
+    def test_delete_refuses_a_folder_with_finished_files_when_the_size_is_unknown(
+            self, home, monkeypatch):
+        monkeypatch.setattr(mm, "load_registry", lambda: {})
+        folder = self._complete_folder(home)
+        with pending_pulls.tracking({"spec": "o/Repo"}):
+            pending_pulls.note_source(source="hf-repo", repo="o/Repo", commit="a" * 40)
+            pending_pulls.note_snapshot(folder, "Repo", True, None)
+        [rec] = _records(home)
+        with pytest.raises(pending_pulls.DownloadComplete):
+            pending_pulls.delete_interrupted(rec["id"])
+        assert (folder / "model.safetensors").stat().st_size == 1000
+
+    def test_delete_still_removes_a_folder_with_a_temp_file_left(
+            self, home, monkeypatch, dead_pid):
+        monkeypatch.setattr(mm, "load_registry", lambda: {})
+        folder = self._complete_folder(home)
+        _hf_temp(folder, "model2.safetensors", "e1", b"p" * 30, *dead_pid)
+        with pending_pulls.tracking({"spec": "o/Repo"}):
+            pending_pulls.note_source(source="hf-repo", repo="o/Repo", commit="a" * 40)
+            pending_pulls.note_snapshot(folder, "Repo", True, 1000)
+        [rec] = _records(home)
+        assert pending_pulls.delete_interrupted(rec["id"]) > 0
+        assert not folder.exists()
+
+    def test_delete_does_not_follow_a_folder_swapped_for_a_link(
+            self, home, tmp_path, monkeypatch, dead_pid):
+        import shutil
+        from localm.model_manager import pull
+        monkeypatch.setattr(mm, "load_registry", lambda: {})
+        folder = home / "Repo"
+        (folder / ".cache" / "huggingface" / "download").mkdir(parents=True)
+        _hf_temp(folder, "model.safetensors", "e1", b"p" * 30, *dead_pid)
+        with pending_pulls.tracking({"spec": "o/Repo"}):
+            pending_pulls.note_source(source="hf-repo", repo="o/Repo", commit="a" * 40)
+            pending_pulls.note_snapshot(folder, "Repo", True, 1000)
+        [rec] = _records(home)
+        outside = tmp_path / "precious"
+        outside.mkdir()
+        (outside / "keep.txt").write_text("keep", encoding="utf-8")
+        real_lock = pull._snapshot_dest_lock
+
+        import contextlib
+
+        @contextlib.contextmanager
+        def swap_then_lock(name):
+            with real_lock(name):
+                shutil.rmtree(folder)
+                _link_or_skip(folder, outside)
+                yield
+        monkeypatch.setattr(pull, "_snapshot_dest_lock", swap_then_lock)
+        assert pending_pulls.delete_interrupted(rec["id"]) == 0
+        assert (outside / "keep.txt").read_text(encoding="utf-8") == "keep"
+
+
+class TestSourceUrlsOfEveryShape:
+    def test_a_full_repo_row_shows_the_repo_address_and_its_revision(self, home, dead_pid):
+        folder = home / "Repo"
+        (folder / ".cache" / "huggingface" / "download").mkdir(parents=True)
+        _hf_temp(folder, "m.safetensors", "e1", b"p" * 3, *dead_pid)
+        with pending_pulls.tracking({"spec": "o/Repo@dev"}):
+            pending_pulls.note_source(source="hf-repo", repo="o/Repo", revision="dev",
+                                      commit="a" * 40)
+            pending_pulls.note_snapshot(folder, "Repo", False, 10)
+        [view] = pending_pulls.list_interrupted()
+        assert view["urls"] == ["https://huggingface.co/o/Repo/tree/dev"]
+
+    def test_a_civitai_row_shows_the_model_version_address(self, home):
+        part = home / "m.safetensors.part"
+        part.write_bytes(b"x" * 3)
+        with pending_pulls.tracking({"spec": "civitai:456"}):
+            pending_pulls.note_source(source="civitai", repo="civitai:456")
+            pending_pulls.note_part(part, "m.safetensors", 10)
+        [view] = pending_pulls.list_interrupted()
+        assert view["urls"] == ["https://civitai.com/api/v1/model-versions/456"]
+
+
+HOLD_A_HF_LOCK = '''
+    import sys
+    from pathlib import Path
+    from filelock import FileLock
+    from huggingface_hub._local_folder import get_local_download_paths
+    lock = FileLock(str(get_local_download_paths(Path(sys.argv[1]), sys.argv[2]).lock_path))
+    with lock:
+        print("HOLDING", flush=True)
+        sys.stdin.read()
+'''
+
+
+class TestSecondPullOfOneHfFile:
+    def _fakes(self, monkeypatch):
+        monkeypatch.setattr(mm, "_hf_file_sha256", lambda *a: None)
+        monkeypatch.setattr("localm.model_manager.pull._published_digest", lambda *a: None)
+        _fake_hf_head(monkeypatch, 5000, "etag1")
+        downloads = []
+
+        def download(repo_id, filename, local_dir, **kw):
+            downloads.append(filename)
+            raise requests.ConnectionError("connection dropped")
+        monkeypatch.setattr("huggingface_hub.hf_hub_download", download)
+        return downloads
+
+    def test_a_pull_of_a_file_another_process_downloads_is_refused_up_front(
+            self, home, monkeypatch):
+        import subprocess
+        downloads = self._fakes(monkeypatch)
+        child = subprocess.Popen(
+            [sys.executable, "-I", "-c", __import__("textwrap").dedent(HOLD_A_HF_LOCK),
+             str(home), "tiny-Q4.gguf"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            assert child.stdout.readline().strip() == "HOLDING", child.stderr.read()
+            assert mm.pull_model("owner/repo:tiny-Q4.gguf", name="tiny") is False
+            assert downloads == []
+            assert _records(home) == []
+            assert pending_pulls.list_interrupted() == []
+        finally:
+            child.stdin.close()
+            child.wait(timeout=30)
+        assert mm.pull_model("owner/repo:tiny-Q4.gguf", name="tiny") is False
+        assert downloads == ["tiny-Q4.gguf"]

@@ -84,15 +84,23 @@ yourself - and are written in every session mode, privacy included:
 - **GUI uploads.** A file you upload for a model or tool to read is written
   to `<home>/uploads/`.
 - **Download records.** A model download in progress is recorded in
-  `<data dir>/pending-pulls/` (the model spec, its source URLs and sizes) so an
-  interrupted one can be resumed; the record is removed when it finishes or you
-  delete or resume it. Like the model registry, it holds model source details
-  only, never conversation content.
+  `<data dir>/pending-pulls/` so an interrupted one can be resumed. A record
+  holds the model spec and options, its source URLs, sizes and digests, the
+  absolute paths of the partial files on this machine, and the identity of the
+  localm process that ran the download (its process id and start time). It is
+  removed when that download finishes, when you delete it, when none of its
+  partial data is left on disk (noticed the next time interrupted downloads are
+  listed), and when a later download of the same model finishes. Resuming does
+  not remove it at once: the resumed download writes its own record, which
+  replaces it. A record you dismiss stays until one of those happens. Like the
+  model registry, it holds model source details only, never conversation
+  content.
 
 None of this is silent: each is something you explicitly asked localm to
 keep, not a trace of a conversation. But if you are relying on privacy mode
 alone to leave nothing behind, know that a job you scheduled, a document you
-indexed, a persona you saved, or a file you uploaded still lands on disk.
+indexed, a persona you saved, a file you uploaded, or a model download that
+stopped before it finished still lands on disk.
 
 ### Another localm instance answering for this one
 

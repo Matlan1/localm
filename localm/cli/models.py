@@ -837,6 +837,9 @@ def _print_interrupted(include_dismissed: bool) -> None:
         console.print(_interrupted_line(r))
         for u in r["urls"]:
             console.print(f"          [dim]{escape(u)}[/dim]")
+        if r.get("invalid"):
+            console.print("          [yellow]it names a place that is not a download folder "
+                          "of localm; nothing there is touched[/yellow]")
         if not r["resumable"]:
             console.print("          [yellow]cannot be resumed; delete or dismiss it[/yellow]")
     if recs:
@@ -963,7 +966,7 @@ def _delete_one(key: str) -> bool:
     except pending_pulls.UnknownPull:
         console.print(f"[red]Nothing to delete for {escape(key)}.[/red]")
         return False
-    except PullInFlight as e:
+    except (PullInFlight, pending_pulls.DownloadComplete) as e:
         console.print(f"[red]Not deleted:[/red] {escape(str(e))}")
         return False
     except OSError as e:

@@ -257,7 +257,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                     pending_pulls.delete_interrupted, pull_id, timeout=60.0)
             except PullLockUnavailable as e:
                 raise HTTPException(500, path_formatter(request)(e)) from e
-            except PullInFlight as e:
+            except (PullInFlight, pending_pulls.DownloadComplete) as e:
                 raise HTTPException(409, path_formatter(request)(e)) from e
             except pending_pulls.UnknownPull:
                 pass
@@ -309,7 +309,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             raise HTTPException(404, "No such interrupted download.") from e
         except PullLockUnavailable as e:
             raise HTTPException(500, path_formatter(request)(e)) from e
-        except PullInFlight as e:
+        except (PullInFlight, pending_pulls.DownloadComplete) as e:
             raise HTTPException(409, path_formatter(request)(e)) from e
         except ThreadCallTimeout as e:
             raise HTTPException(504, f"Deleting the partial download timed out: {e}") from e
