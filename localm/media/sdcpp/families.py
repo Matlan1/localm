@@ -184,7 +184,7 @@ _FAMILY_DEFAULTS = {
     "sdxl": Defaults(25, 6.0, 1024, 1024), "sd3": Defaults(28, 4.5, 1024, 1024),
     "flux": Defaults(20, 1.0, 1024, 1024), "chroma": Defaults(26, 4.0, 1024, 1024),
     "flux2": Defaults(28, 1.0, 1024, 1024), "qwen-image": Defaults(20, 2.5, 1024, 1024),
-    "qwen-image-2.1": Defaults(40, 6.0, 2048, 2048),
+    "qwen-image-2.1": Defaults(40, 6.0, 1024, 1024),
     "z-image": Defaults(9, 1.0, 1024, 1024), "ovis-image": Defaults(20, 5.0, 1024, 1024),
     "anima": Defaults(30, 4.0, 1024, 1024), "ernie-image": Defaults(20, 4.0, 1024, 1024),
     "wan2.1": Defaults(30, 6.0, 832, 480, 3.0), "wan2.2": Defaults(30, 5.0, 1280, 704, 5.0),

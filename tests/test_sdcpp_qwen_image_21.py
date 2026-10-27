@@ -100,7 +100,7 @@ def test_qwen_image_21_needs_qwen3_vl_and_its_own_vae_and_takes_reference_images
                                                    ("llm_vision", False)]
     caps = families.capabilities(info)
     assert caps["references"] and not caps["controlnet"] and not caps["embeddings"]
-    assert families.defaults_for(info) == families.Defaults(40, 6.0, 2048, 2048)
+    assert families.defaults_for(info) == families.Defaults(40, 6.0, 1024, 1024)
 
 
 def test_components_are_classified_from_their_headers(tmp_path):

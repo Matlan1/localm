@@ -84,8 +84,9 @@ from the file's tensors whatever the file is called. It needs:
 The Qwen-Image parts (the Qwen2.5-VL encoder and the 16-channel Qwen-Image VAE) do not
 fit and are never picked for it. Reference images (editing) need the vision encoder; a
 job with reference images and no vision encoder is refused with the download. Defaults:
-40 steps, CFG 6. The model can output transparent images when the prompt asks for one
-(the PNG keeps the alpha channel).
+40 steps, CFG 6, 1024x1024 (the model also makes images up to 2048x2048, which takes
+several times longer and needs a GPU with 16 GB or more). The model can output transparent
+images when the prompt asks for one (the PNG keeps the alpha channel).
 
 ## Settings
 
