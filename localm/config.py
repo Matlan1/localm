@@ -697,8 +697,9 @@ DEFAULT_CONFIG: dict = {
     # device_map restricted to these devices). 2+ entries split the model
     # across them. GGUF chat model: 1 entry loads it on that one GPU only, when
     # the device can be matched to llama.cpp's own device list
-    # (discover.single_gpu_load_slot); None/empty leaves llama.cpp's default,
-    # a layer split over every GPU by free memory. A GGUF split that names an
+    # (discover.single_gpu_load_slot); None/empty spreads a GGUF model over
+    # every discrete GPU. A GGUF load over 2+ GPUs is placed per card
+    # (llamacpp/_gpu_plan.py, discover.gguf_split_devices). A GGUF split that names an
     # integrated GPU llama.cpp leaves out is refused. HF: 1 entry loads the
     # model on that GPU, overflowing to CPU; with no entries main_gpu_index
     # applies when set. A device no longer detected
@@ -706,14 +707,14 @@ DEFAULT_CONFIG: dict = {
     # discover.resolve_gpu_split).
     "gpu_split_indices": None,
     # Optional relative weight per entry in gpu_split_indices (same length,
-    # any positive numbers - llama.cpp treats them as proportions, not values
-    # that must sum to 1). None means AUTOMATIC distribution: each card's
-    # share is proportional to the free VRAM it reports at load time
-    # (discover.resolve_auto_split_ratios), falling back to an equal split
-    # when per-device free cannot be measured. A length mismatch also falls
-    # back to the equal split (warned). Set explicit ratios (e.g. [1, 1])
-    # to pin exact shares and opt out of the automatic distribution.
+    # any positive numbers, read as proportions). None means AUTOMATIC: a GGUF
+    # load gives each card the layers that fit its free VRAM
+    # (llamacpp/_gpu_plan.py). A length mismatch is ignored (warned). Set
+    # explicit ratios (e.g. [1, 1]) to pin the shares.
     "gpu_split_ratios": None,
+    # "pci_bus" once main_gpu_index / gpu_split_indices are in PCI-bus GPU
+    # numbering (discover.renumber_saved_gpu_selection); None before.
+    "gpu_numbering": None,
     # How many chat models may stay loaded at once. None (default) = no cap:
     # free-VRAM arithmetic alone decides, so a second model loads alongside the
     # first only when it provably fits (see inference/residency.py). Set an

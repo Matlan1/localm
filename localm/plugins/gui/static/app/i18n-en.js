@@ -1467,7 +1467,7 @@ export const I18N_EN = {
   "models.vramBasis.combined":
     "Badges compare each file against your {gib} GB VRAM combined across {count} GPUs (weights + ~1.5 GB overhead).",
   "models.vramBasis.mainGpu":
-    "Badges compare each file against your main GPU's {gib} GB (set a split in Settings to use all {count}) (weights + ~1.5 GB overhead).",
+    "Badges compare each file against your main GPU's {gib} GB (weights + ~1.5 GB overhead).",
   "models.vramBasis.oneGpu":
     "Badges compare each file against the {gib} GB of GPU {index}, the one GPU chosen in Settings (weights + ~1.5 GB overhead).",
   "models.vramBasis.single":
