@@ -728,3 +728,103 @@ def test_prototype_parameters():
     ret, params = abichk._prototype(text, "mtmd_helper_gen_audio_step_gen")
     assert ret == "int32_t" and len(params) == 5
     assert abichk._prototype(text, "mtmd_gen_nonexistent") is None
+
+
+def _rebind(monkeypatch, interface, name, restype=None, argtypes=None):
+    structs, signatures = abichk._localm_speech_binding(interface)
+    signatures = dict(signatures)
+    old_restype, old_argtypes = signatures[name]
+    signatures[name] = (old_restype if restype is None else restype,
+                        old_argtypes if argtypes is None else argtypes)
+    monkeypatch.setattr(abichk, "_localm_speech_binding",
+                        lambda i: (structs, signatures))
+
+
+def test_a_pointer_to_the_other_interface_struct_fails(monkeypatch, capsys):
+    import ctypes
+    from localm.inference.backends.llamacpp import mtmd_gen as G
+    _rebind(monkeypatch, "state", "mtmd_helper_gen_audio_set_input",
+            argtypes=[ctypes.c_void_p, ctypes.POINTER(G._HelperInputLegacy)])
+    assert abichk.check_speech(_MTMD_STATE, "fixture", set()) == 1
+    assert "not _HelperInput" in capsys.readouterr().out
+
+
+def test_a_scalar_of_the_wrong_width_fails(monkeypatch, capsys):
+    import ctypes
+    _rebind(monkeypatch, "state", "mtmd_helper_gen_audio_step_prompt",
+            argtypes=[ctypes.c_void_p, ctypes.c_int64])
+    assert abichk.check_speech(_MTMD_STATE, "fixture", set()) == 1
+    assert "int32_t n_batch" in capsys.readouterr().out
+
+
+def test_a_wrong_return_type_fails(monkeypatch, capsys):
+    import ctypes
+    _rebind(monkeypatch, "state", "mtmd_helper_gen_audio_step_prompt",
+            restype=ctypes.c_void_p)
+    assert abichk.check_speech(_MTMD_STATE, "fixture", set()) == 1
+    assert "mtmd_helper_gen_audio_step_prompt: upstream 'int32_t'" in (
+        capsys.readouterr().out)
+
+
+def test_a_float_bound_as_an_int_fails(monkeypatch, capsys):
+    import ctypes
+    _rebind(monkeypatch, "state", "mtmd_bitmap_init_from_audio",
+            argtypes=[ctypes.c_size_t, ctypes.POINTER(ctypes.c_int32)])
+    assert abichk.check_speech(_MTMD_STATE, "fixture", set()) == 1
+    assert "float-ness differs" in capsys.readouterr().out
+
+
+def test_a_void_function_bound_with_a_result_fails(monkeypatch, capsys):
+    import ctypes
+    _rebind(monkeypatch, "state", "mtmd_gen_state_free", restype=ctypes.c_int)
+    assert abichk.check_speech(_MTMD_STATE, "fixture", set()) == 1
+    assert "not void" in capsys.readouterr().out
+
+
+@pytest.fixture
+def offline_main(monkeypatch):
+    """main() with the llama.h half stubbed: every pinned ref passes and the
+    layouts it reports cover every layout, so only the speech half decides."""
+    layouts = iter(["v1", "v2", "v3", "v3"] * 4)
+    ctx_layouts = iter(["v1", "v2", "v3", "v3"] * 4)
+    monkeypatch.setattr(abichk, "_fetch_header", lambda ref: "")
+    monkeypatch.setattr(abichk, "_header_model_params_layout", lambda h: next(layouts))
+    monkeypatch.setattr(abichk, "_header_context_params_layout",
+                        lambda h: next(ctx_layouts))
+    monkeypatch.setattr(abichk, "_check", lambda *a: 0)
+    monkeypatch.setattr(abichk, "_check_enum", lambda *a: 0)
+    fetched = []
+
+    def run(argv, headers):
+        def fetch(ref):
+            fetched.append(ref)
+            return headers[ref]
+        monkeypatch.setattr(abichk, "_fetch_mtmd_headers", fetch)
+        monkeypatch.setattr("sys.argv", ["check_llama_abi.py", *argv])
+        return abichk.main()
+    run.fetched = fetched
+    return run
+
+
+def test_the_default_run_checks_both_speech_interfaces(offline_main):
+    refs = abichk.MTMD_SPEECH_REFS
+    assert offline_main([], {refs["legacy"]: _MTMD_LEGACY,
+                             refs["state"]: _MTMD_STATE}) == 0
+    assert sorted(offline_main.fetched) == sorted(refs.values())
+
+
+def test_the_default_run_fails_when_an_interface_goes_unchecked(offline_main, capsys):
+    refs = abichk.MTMD_SPEECH_REFS
+    assert offline_main([], {refs["legacy"]: _MTMD_STATE,
+                             refs["state"]: _MTMD_STATE}) == 1
+    assert "expected to check every speech generation interface" in (
+        capsys.readouterr().out)
+
+
+def test_a_ref_run_checks_the_speech_binding_at_that_ref(offline_main, monkeypatch,
+                                                         capsys):
+    legacy = abichk._localm_speech_binding("legacy")
+    monkeypatch.setattr(abichk, "_localm_speech_binding", lambda interface: legacy)
+    assert offline_main(["--ref", "b99999"], {"b99999": _MTMD_STATE}) == 1
+    assert offline_main.fetched == ["b99999"]
+    assert "upstream takes 4 argument(s)" in capsys.readouterr().out

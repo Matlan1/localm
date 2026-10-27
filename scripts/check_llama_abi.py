@@ -582,15 +582,49 @@ def _prototype(text: str, name: str):
     return m.group(1).strip(), params
 
 
-def _by_value_struct(decl: str):
-    """The C struct name *decl* passes or returns by value, else None."""
-    if "*" in decl:
-        return None
-    m = re.search(r"\bstruct\s+(\w+)", decl)
-    if m:
-        return m.group(1)
-    m = re.match(r"\s*(?:const\s+)?(mtmd_\w+)\b", decl)
-    return m.group(1) if m else None
+_C_QUALIFIERS = {"const", "struct", "enum", "unsigned", "signed"}
+
+
+def _c_type(decl: str, *, named: bool):
+    """(base type name, pointer depth) of a C declaration; *named* drops the
+    trailing parameter name."""
+    stars = decl.count("*")
+    words = [w for w in re.findall(r"[A-Za-z_]\w*", decl) if w not in _C_QUALIFIERS]
+    if named and len(words) > 1:
+        words = words[:-1]
+    return (words[-1] if words else ""), stars
+
+
+def _ctype_mismatch(base: str, stars: int, bound, structs) -> str:
+    """Why the ctypes type *bound* cannot stand for the C type *base* with
+    *stars* pointer levels, or "" when it can. A pointer to a struct localm
+    binds must point at localm's class for it; any other pointer may be bound
+    as ``c_void_p``; a scalar must have the C type's size and float-ness."""
+    import ctypes
+
+    if stars:
+        if bound is ctypes.c_void_p:
+            return "" if base not in structs else f"is c_void_p, not POINTER({base})"
+        if bound is ctypes.c_char_p:
+            return "" if stars == 1 and base == "char" else "is c_char_p"
+        target = getattr(bound, "_type_", None)
+        if not isinstance(bound, type) or not issubclass(bound, ctypes._Pointer):
+            return f"is {getattr(bound, '__name__', bound)}, not a pointer"
+        return _ctype_mismatch(base, stars - 1, target, structs)
+    if base == "void":
+        return "" if bound is None else f"returns {bound.__name__}, not void"
+    if base in structs:
+        return "" if bound is structs[base] else (
+            f"is {getattr(bound, '__name__', bound)}, not {structs[base].__name__}")
+    if (bound is None or bound in (ctypes.c_void_p, ctypes.c_char_p)
+            or not hasattr(bound, "_type_") or isinstance(bound._type_, type)):
+        return f"is {getattr(bound, '__name__', bound)}, not a scalar"
+    size = _field_size(base)
+    if ctypes.sizeof(bound) != size:
+        return f"is {bound.__name__} ({ctypes.sizeof(bound)} bytes), not {size} bytes"
+    if (base in ("float", "double")) != (bound in (ctypes.c_float, ctypes.c_double)):
+        return f"is {bound.__name__}, float-ness differs"
+    return ""
 
 
 def _localm_speech_binding(interface: str):
@@ -638,9 +672,10 @@ def _check_speech_struct(name: str, text: str, cls) -> int:
     return problems
 
 
-def _check_speech_function(name: str, text: str, restype, argtypes, by_class) -> int:
+def _check_speech_function(name: str, text: str, restype, argtypes, structs) -> int:
     """The prototype of *name* has as many parameters as localm's *argtypes*,
-    and every struct it passes or returns by value is the one localm binds."""
+    and the return type and every parameter type match localm's ctypes types
+    (see :func:`_ctype_mismatch`)."""
     proto = _prototype(text, name)
     if proto is None:
         print(f"  FAIL  {name}: not declared in the mtmd headers")
@@ -651,13 +686,12 @@ def _check_speech_function(name: str, text: str, restype, argtypes, by_class) ->
         print(f"  FAIL  {name}: upstream takes {len(params)} argument(s) "
               f"({', '.join(params) or 'void'}), localm declares {len(argtypes)}")
         problems += 1
-    pairs = [(ret, restype)] + list(zip(params, argtypes, strict=False))
-    for decl, bound in pairs:
-        want = _by_value_struct(decl)
-        have = by_class.get(bound)
-        if want != have and (want is not None or have is not None):
-            print(f"  FAIL  {name}: upstream {decl!r} is bound as "
-                  f"{getattr(bound, '__name__', bound)}")
+    pairs = [(ret, restype, False)] + [
+        (p, a, True) for p, a in zip(params, argtypes, strict=False)]
+    for decl, bound, named in pairs:
+        why = _ctype_mismatch(*_c_type(decl, named=named), bound, structs)
+        if why:
+            print(f"  FAIL  {name}: upstream {decl!r} is bound wrongly: {why}")
             problems += 1
     if not problems:
         print(f"  ok    {name}({len(params)})")
@@ -678,13 +712,12 @@ def check_speech(mtmd_text: str, label: str, seen: set) -> int:
     seen.add(interface)
     text = _strip_comments(mtmd_text)
     structs, signatures = _localm_speech_binding(interface)
-    by_class = {cls: cname for cname, cls in structs.items()}
     problems = 0
     for cname, cls in structs.items():
         problems += _check_speech_struct(cname, text, cls)
     print("\n=== speech generation prototypes ===")
     for fname, (restype, argtypes) in signatures.items():
-        problems += _check_speech_function(fname, text, restype, argtypes, by_class)
+        problems += _check_speech_function(fname, text, restype, argtypes, structs)
     return problems
 
 
