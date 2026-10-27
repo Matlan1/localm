@@ -2140,6 +2140,16 @@ def _mmproj_for_registration(
     return _maybe_fetch_repo_mmproj(repo_id, filename, base_dir, speech=reg_type == "tts")
 
 
+def _record_url(hf_hub_url, repo_id: str, rel: str, **kw) -> Optional[str]:
+    """``hf_hub_url`` for the download record, or None (logged) when the hub
+    library rejects the repo id or path; the download itself reports that."""
+    try:
+        return hf_hub_url(repo_id, rel, endpoint=_HF_ENDPOINT, **kw)
+    except Exception as e:
+        logger.debug("no source URL recorded for %s / %s: %s", repo_id, rel, e)
+        return None
+
+
 def _pull_gguf_file(
     spec: str,
     name: Optional[str],
@@ -2525,10 +2535,10 @@ def _pull_gguf_file(
                               sha256=verify_digest)
     pending_pulls.note_hf_files(stage_dir, [{
         "rel": _remote(p),
-        "url": hf_hub_url(repo_id, _remote(p), endpoint=_HF_ENDPOINT,
-                          **_file_revision(published.get(p), revision)),
-        "check_url": hf_hub_url(repo_id, _remote(p), endpoint=_HF_ENDPOINT,
-                                **({"revision": revision.ref} if revision else {})),
+        "url": _record_url(hf_hub_url, repo_id, _remote(p),
+                           **_file_revision(published.get(p), revision)),
+        "check_url": _record_url(hf_hub_url, repo_id, _remote(p),
+                                 **({"revision": revision.ref} if revision else {})),
         "size": part_sizes.get(p), "etag": etags.get(p)} for p in missing])
 
     with _download_progress([base_dir / p for p in missing], total_size,
