@@ -216,6 +216,36 @@ test("saving POSTs only the fields the user actually changed, to that plugin's o
     "the untouched count field must not be sent (it would pin an override)");
 });
 
+test("the Save button shows a disabled working state until a slow save settles", async () => {
+  const payload = pluginsPayload({ plugins: [
+    { plugin: "myplug", label: "My Plugin", fields: [
+      pluginField("greeting", { value: "hi", default: "hi" }),
+    ] },
+  ] });
+  const inner = makeFetch({ plugins: payload });
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const slow = async (url, opts = {}) => {
+    if (String(url).endsWith("/settings") && (opts.method || "GET") === "POST") await gate;
+    return inner(url, opts);
+  };
+  const { window: win } = loadAppWithPages({ fetchImpl: slow });
+  await render(win);
+  const sec = section(win, "myplug");
+  const btn = sec.querySelector(".settings-section-save");
+  const idle = btn.textContent;
+  ctrl(sec, "greeting").querySelector("input").value = "hello";
+  btn.click();
+  for (let i = 0; i < 8; i++) await new Promise((r) => setTimeout(r, 0));
+  assert.equal(btn.disabled, true, "the button is disabled while the save runs");
+  assert.equal(btn.textContent, "Saving...");
+  release();
+  for (let i = 0; i < 24; i++) await new Promise((r) => setTimeout(r, 0));
+  const after = section(win, "myplug").querySelector(".settings-section-save");
+  assert.equal(after.disabled, false);
+  assert.equal(after.textContent, idle);
+});
+
 test("saving nothing does not POST", async () => {
   const payload = pluginsPayload({ plugins: [
     { plugin: "myplug", label: "My Plugin", fields: [
