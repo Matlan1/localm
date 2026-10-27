@@ -672,12 +672,13 @@ class Agent(
     def _register_mcp_servers(self, hooks) -> list:
         """Start *hooks*' MCP servers, register their tools and set
         ``_mcp_docs``. Returns the registered tool names; start failures are
-        printed as warnings."""
+        printed as warnings and sent to the event sink as ``info`` events."""
         from ..mcp import register_mcp_tools
         mcp_names, mcp_warnings = register_mcp_tools(
             hooks.project_dir, servers=hooks.mcp_servers)
         for w in mcp_warnings:
             _agent.print_warning(w, to_stderr=True)
+            self._emit("info", text=w)
         if mcp_names:
             self._mcp_docs = _foreign_tool_docs(
                 "EXTERNAL MCP TOOLS (call exactly like built-in tools)\n",

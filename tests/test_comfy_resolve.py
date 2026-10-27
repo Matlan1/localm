@@ -151,10 +151,10 @@ WAN = "wan2.1_t2v_1.3B_fp16.safetensors"
 
 class TestHuggingFaceSearch:
     def test_a_comfy_org_file_wins_over_a_more_downloaded_mirror(self, hf):
-        hf.org = [_repo("Comfy-Org/Wan_2.1_ComfyUI_repackaged",
+        hf.org = [_repo("Comfy-Org/Wan-2.1",
                         [f"split_files/diffusion_models/{WAN}"], downloads=10)]
         hf.searches = {cr._stem(WAN): [_repo("someone/mirror", [WAN], downloads=10**9)]}
-        hf.trees = {_tree_url("Comfy-Org/Wan_2.1_ComfyUI_repackaged",
+        hf.trees = {_tree_url("Comfy-Org/Wan-2.1",
                               "split_files/diffusion_models"): [
             {"path": f"split_files/diffusion_models/{WAN}", "size": 99,
              "lfs": {"size": 2838303560}}]}
@@ -164,7 +164,7 @@ class TestHuggingFaceSearch:
         assert hf.searched == [], "a Comfy-Org match needs no search"
         assert lookup.status == cr.LOOKUP_FOUND
         d = lookup.download
-        assert (d.repo, d.path) == ("Comfy-Org/Wan_2.1_ComfyUI_repackaged",
+        assert (d.repo, d.path) == ("Comfy-Org/Wan-2.1",
                                     f"split_files/diffusion_models/{WAN}")
         assert (d.comfy_subfolder, d.model_type, d.origin) == (
             "unet", "diffusion-unet", cr.ORIGIN_HUGGINGFACE)
@@ -266,7 +266,7 @@ class TestSubfolderNames:
         assert cr.split_model_name(value) == expected
 
     def test_a_subfolder_name_is_searched_by_its_file_name_and_keeps_the_subfolder(self, hf):
-        hf.org = [_repo("Comfy-Org/Wan_2.1_ComfyUI_repackaged",
+        hf.org = [_repo("Comfy-Org/Wan-2.1",
                         [f"split_files/diffusion_models/{WAN}"])]
         lookup = cr.lookup_comfy_download(f"wan\\{WAN}", "UNETLoader", "unet_name")
         assert lookup.status == cr.LOOKUP_FOUND
