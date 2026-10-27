@@ -348,8 +348,8 @@ export function createNativeGenControls({ prefix }) {
   }
 
   function suggestedText() {
-    if (!suggestion) return t("nativeModels.hiresSuggested");
-    const name = upscalerLabels[suggestion.upscaler] || suggestion.upscaler;
+    const name = suggestion && upscalerLabels[suggestion.upscaler];
+    if (!name) return t("nativeModels.hiresSuggested");
     return t("nativeModels.hiresSuggestedValue", { name });
   }
 
@@ -433,6 +433,7 @@ export function createNativeGenControls({ prefix }) {
   if (upscaler) upscaler.addEventListener("change", syncHires);
   const suggestedButton = node("hires-suggested");
   if (suggestedButton) suggestedButton.addEventListener("click", useSuggested);
+  document.addEventListener("localm:language", () => suggest(suggestion));
   return { populate, suggest, body, set, syncHires, useSuggested };
 }
 
