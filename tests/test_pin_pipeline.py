@@ -25,6 +25,7 @@ import datetime as dt
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -930,6 +931,21 @@ def test_a_record_in_the_future_waits_at_most_one_spacing(monkeypatch, tmp_path)
     now = pipeline.time.time()
     pipeline.record_pr_opened(now=now + 10 * pipeline.PR_OPEN_SPACING_SECONDS)
     assert pipeline.seconds_until_next_pr(now=now) == pipeline.PR_OPEN_SPACING_SECONDS
+
+
+def test_a_record_that_cannot_be_written_does_not_fail_the_opened_pr(monkeypatch, tmp_path, capsys):
+    (tmp_path / "a-file").write_text("", encoding="utf-8")
+    monkeypatch.setattr(pipeline, "PR_OPENED_PATH", tmp_path / "a-file" / "last-pr-opened.json")
+    _open_pr_with_fake_gh(monkeypatch, tmp_path)
+    assert pipeline.open_pr(tmp_path, "b", "b999", "b998") == 7
+    assert "could not record" in capsys.readouterr().out
+
+
+def test_spacing_plus_ci_wait_fit_the_scheduled_llama_task_limit():
+    ps1 = (pipeline.REPO / "scripts" / "setup_pin_pipeline_task.ps1").read_text(encoding="utf-8")
+    hours = int(re.search(r"default \{ (\d+) \}", ps1).group(1))
+    budget = pipeline.PR_OPEN_SPACING_SECONDS + pipeline.CI_WAIT_TIMEOUT_SECONDS
+    assert budget + 20 * 60 <= hours * 3600
 
 
 def test_an_unreadable_record_warns_and_waits_one_spacing(monkeypatch, tmp_path, capsys):

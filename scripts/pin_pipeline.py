@@ -921,9 +921,15 @@ def seconds_until_next_pr(now: float | None = None) -> float:
 
 
 def record_pr_opened(now: float | None = None) -> None:
-    PR_OPENED_PATH.parent.mkdir(parents=True, exist_ok=True)
-    PR_OPENED_PATH.write_text(json.dumps({"epoch": time.time() if now is None else now}) + "\n",
-                              encoding="utf-8")
+    """Write the time a pull request was opened to PR_OPENED_PATH. Never raises: a
+    failed write prints a warning, and the next PR is then not held back."""
+    try:
+        PR_OPENED_PATH.parent.mkdir(parents=True, exist_ok=True)
+        PR_OPENED_PATH.write_text(json.dumps({"epoch": time.time() if now is None else now}) + "\n",
+                                  encoding="utf-8")
+    except OSError as e:
+        print(f"WARNING: could not record the PR just opened in {PR_OPENED_PATH} ({e}); "
+              "the next PR will not wait for the spacing")
 
 
 def open_pr(worktree: Path, branch: str, candidate: str, old_tag: str,
