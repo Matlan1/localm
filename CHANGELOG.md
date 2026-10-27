@@ -11,6 +11,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Security
+- **Updates refuse the retired signing key everywhere.** An update signed by the release key that was replaced in 0.3.0, or one that tries to bring that key back in a new key set, is refused, even when the new key set carries valid recovery signatures.
+
 ### Added
 - **Segment Anything (SAM) checkpoints are recognised as `segmentation` models.** A SAM or SAM 2 `.pth` file found by a ComfyUI or StabilityMatrix scan, or sitting in a `sam`, `sams` or `segmentation` folder, is now listed as a segmentation model instead of `unknown`, and `localm set-type MODEL segmentation` and the Models page type menu offer it. localm does not run segmentation models yet, so naming one for chat is refused with a clear message.
 - **More upscalers are recognised.** ESRGAN files in the original key layout (such as 4x-UltraSharp) and Real-ESRGAN compact (SRVGGNet) files are now typed `upscaler` when pulled, added or scanned, instead of `unknown`.
@@ -28,6 +31,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **A plugin settings field named like a built-in setting (for example `mode`) keeps the plugin's own label and help text.**
 - **The Models list and the model details show the revision a model was pulled at** (for example `hf:owner/repo@refs/pr/3`).
 - **The hires scale and denoise suggestions on the Images page survive a language switch**, and the upscaler's suggested option no longer briefly shows the raw name `lanczos`.
+- **Installs from 0.3.1 and earlier update reliably.** Those versions reinstall dependencies with a `uv` they look up on the system path, which is missing on some installs, so an update that changed dependencies failed and rolled back. They are now always offered 0.3.2 first, which installs without that step, and newer releases after it.
 - **A wrong API key in a GUI coder session now fails the turn with a clear message.** When the remote backend answered 401 or 403, the session used to wait for a key typed at the console the server was started from, which nobody watches. The turn now ends with an error naming the backend and saying to start a new session with a valid key. The terminal coder still asks for the key.
 - **`localm list` no longer fails while another localm process is writing the model registry.** It lists the models without syncing the models folder and says so in one line, instead of waiting ten seconds and reporting an unexpected error.
 - **A mapped network drive can be indexed for search (RAG) again, and the "network drives" setting now applies to it.** Indexing `Y:\docs` from the command line ignored the setting, the GUI refused the same folder as a UNC path in both settings, and a collection built from the command line stored a path that a re-sync skipped. The drive letter is now kept, so the setting is honoured and re-sync works.
