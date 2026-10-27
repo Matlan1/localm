@@ -49,6 +49,8 @@ def test_interactive_path_logs_a_warning_with_the_exit_reason(monkeypatch, caplo
     from localm.cli import chat as chat_mod
     engine = _engine_raising(WorkerDiedError(REASON))
     engine.display_name = "m"
+    engine.context_capacity.return_value = 4096
+    engine.count_tokens.return_value = 3
     answers = iter(["hello"])
 
     def _input(*a, **kw):
