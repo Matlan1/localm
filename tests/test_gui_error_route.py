@@ -108,7 +108,8 @@ def test_a_body_over_the_cap_is_refused_and_not_logged(app):
 
 
 @pytest.mark.parametrize("body", ["not json", "[1, 2]", '{"message": ""}',
-                                  '{"message": 42}', '{"message": "\\u0000\\r\\n"}', ""])
+                                  '{"message": 42}', '{"message": "\\u0000\\r\\n"}', "",
+                                  "[" * 5000])
 def test_a_malformed_or_empty_report_is_refused(app, body):
     c = TestClient(app)
     r = c.post("/api/gui-error", headers={**_shell(app), "Content-Type": "application/json"},

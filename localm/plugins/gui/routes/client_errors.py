@@ -7,13 +7,12 @@ window) and, in debug mode, the debug log file.
 Every field is untrusted: the body is size-capped, each field is length-capped,
 ANSI escape sequences, control characters, line and paragraph separators and
 bidi overrides are removed, and home paths and credentials are scrubbed before
-anything is logged. Reports are rate-limited per credential; the reports dropped
+anything is logged. Reports are rate-limited per API key; the reports dropped
 by the limit are counted in one line instead of being logged one by one.
 """
 
 from __future__ import annotations
 
-import hashlib
 import re
 import threading
 import time
@@ -22,7 +21,7 @@ from typing import Optional
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from localm.inference.http_server import SESSION_COOKIE, _bearer_token, _require_auth
+from localm.inference.http_server import _require_auth, principal_id
 
 MAX_BODY_BYTES = 8192
 MAX_MESSAGE_CHARS = 1000
@@ -102,14 +101,10 @@ class _RateLimiter:
 
 
 def _client_key(request: Request) -> str:
-    """A short digest of the credential the request presented (bearer token,
-    X-API-Key or session cookie), or "anonymous" when it presented none."""
-    token = (_bearer_token(request)
-             or (request.headers.get("x-api-key") or "").strip()
-             or (request.cookies.get(SESSION_COOKIE) or "").strip())
-    if not token:
-        return "anonymous"
-    return hashlib.sha256(token.encode("utf-8", "replace")).hexdigest()[:16]
+    """The caller's key identity (``principal_id``: the same for a bearer key and
+    a session minted from it), or "local" in open mode, where every caller is the
+    local operator."""
+    return principal_id(request) or "local"
 
 
 async def _read_capped(request: Request, limit: int) -> Optional[bytes]:
@@ -153,7 +148,7 @@ def register(app: FastAPI, ctx) -> None:
             return JSONResponse(status_code=413, content={"detail": "Error report too large."})
         try:
             body = json.loads(raw.decode("utf-8", "replace") or "null")
-        except ValueError:
+        except (ValueError, RecursionError):
             body = None
         if not isinstance(body, dict):
             return JSONResponse(status_code=400, content={"detail": "Expected a JSON object."})
