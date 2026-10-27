@@ -22,6 +22,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Stop ends a running coder sub-agent at its next step.** Pressing Stop while a sub-agent was working did nothing to it until it finished on its own, so it kept taking turns and editing files. It now takes no further turn and runs no further tool after Stop, and the session stops after it. A sub-agent running in the background is not affected.
 - **A `rem` or `::` comment, a `:label` line or a `& rem ...` comment at the end of a line in a multi-line Windows command no longer hides the lines after it.** The coder's shell tool ran nothing past the comment and still reported success; the comment is now skipped and every other line runs.
 - **The speech endpoint answers an undecodable request body with its own 400.** The 422 "not valid UTF-8 text" answer for a body labelled JSON applies to the other endpoints. `/v1/audio/speech` keeps answering 400 "The request body is not valid JSON." for a body that is not UTF-8 text.
+- **The "vision projector on the CPU" warning no longer appears on a machine without a GPU.** A runtime with no GPU device could still report that it can offload to the GPU, which made the warning show on CPU-only machines; localm now looks at the devices the runtime actually has.
+- **Adding a folder again with `--store move` or `--store copy` registers a Hugging Face model folder inside it right away, and a model you renamed counts as already registered.** A moved folder keeps its registry name and now points at its new location.
+- **A model folder that fails to copy or move no longer stops the import or blocks the retry.** If a Hugging Face folder cannot be copied or moved (a full disk, a locked file), localm reports it, removes the half-copied folder, and carries on with the rest. A copied folder is now checked against the original before it is registered.
 
 ## [0.3.2rc1] - 2026-10-27
 
