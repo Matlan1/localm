@@ -260,9 +260,10 @@ def _marker_address(m) -> Optional[int]:
     """The address ``mtmd_default_marker()`` returns, or None when *m* does not
     expose it as a native function."""
     try:
-        getter = ctypes.CFUNCTYPE(ctypes.c_void_p)(
-            ctypes.cast(m.mtmd_default_marker, ctypes.c_void_p).value)
-        return getter()
+        function_address = ctypes.cast(m.mtmd_default_marker, ctypes.c_void_p).value
+        if not function_address:
+            return None
+        return ctypes.cast(function_address, ctypes.CFUNCTYPE(ctypes.c_void_p))()
     except (AttributeError, TypeError, ValueError, ctypes.ArgumentError):
         return None
 
