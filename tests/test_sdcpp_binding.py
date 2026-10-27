@@ -68,6 +68,7 @@ def _fill_vid(s):
     s.width, s.height, s.seed, s.video_frames, s.fps = 512, 512, -1, 6, 16
     s.strength, s.moe_boundary, s.vace_strength = 0.75, 0.875, 1.0
     s.vae_tiling_params.target_overlap = 0.5
+    s.ref_image_args = b""
     _fill_cache(s.cache)
     _fill_hires(s.hires)
 

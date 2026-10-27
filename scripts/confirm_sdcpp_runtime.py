@@ -15,8 +15,12 @@ WHAT IT CHECKS (each recorded in the receipt with status PASS / FAIL / SKIP and 
                    pins table needs, and resolves to the commit its tag names
   header_layout    the C structs in include/stable-diffusion.h at the candidate
                    commit equal the structs localm's ctypes binding declares, field
-                   for field. A difference is a FAIL: "binding needs a code update,
-                   not an automatic bump"
+                   for field, and every function the binding declares (_FUNCTIONS)
+                   has the header's argument and return types; the ggml structs the
+                   binding names in GGML_STRUCTS are
+                   compared with ggml's own headers at the ggml submodule commit the
+                   candidate pins. A difference is a FAIL: "binding needs a code
+                   update, not an automatic bump"
   download_<b>     the archive downloads through localm's own installer
                    (runtime.install) into a throwaway runtime directory; the
                    installer verifies the sha256, this script checks the size
@@ -96,6 +100,10 @@ COMPONENT = "sdcpp"
 
 HEADER_URL = ("https://raw.githubusercontent.com/leejet/stable-diffusion.cpp/%s/"
               "include/stable-diffusion.h")
+GGML_SUBMODULE_URL = ("https://api.github.com/repos/leejet/stable-diffusion.cpp/contents/"
+                      "ggml?ref=%s")
+GGML_HEADER_URL = "https://raw.githubusercontent.com/%s/%s/include/%s"
+_GITHUB_REPO_RE = re.compile(r"https://github\.com/([\w.-]+/[\w.-]+?)(?:\.git)?/?")
 PINS_ENV = "LOCALM_CONFIRM_SDCPP_PINS"
 CHILD_TIMEOUT = 2400
 PROMPT = "a red apple on a wooden table"
@@ -222,6 +230,10 @@ def _now() -> str:
 # --------------------------------------------------------------------------- #
 
 _STRUCT_RE = re.compile(r"typedef\s+struct\s*\{(?P<body>[^{}]*)\}\s*(?P<name>\w+)\s*;")
+_TAGGED_STRUCT_RE = re.compile(r"\bstruct\s+(?P<name>\w+)\s*\{(?P<body>[^{}]*)\}\s*;")
+_FUNCTION_RE = re.compile(
+    r"\bSD_API\s+(?P<ret>[^;{}()]*?)\b(?P<name>\w+)\s*\((?P<args>[^;{}()]*)\)\s*;")
+_CALLBACK_TYPE_RE = re.compile(r"\w+_(?:cb|callback)_t")
 _SCALARS = {"bool": "bool", "int": "int", "float": "float", "uint32_t": "u32",
             "uint64_t": "u64", "size_t": "u64", "int64_t": "i64", "uint8_t": "u8",
             "void": "void"}
@@ -234,7 +246,7 @@ def _strip_comments(src: str) -> str:
 
 def _c_kind(ctype: str) -> str:
     """The comparable kind of C type text *ctype* (``"const char*"`` -> ``"str"``)."""
-    t = " ".join(ctype.replace("const ", " ").split())
+    t = re.sub(r"\s*\*", "*", " ".join(ctype.replace("const ", " ").split()))
     if t == "char*":
         return "str"
     if t.endswith("*"):
@@ -242,15 +254,18 @@ def _c_kind(ctype: str) -> str:
         return "voidp" if inner == "void" else f"ptr:{inner}"
     if t.startswith("enum "):
         return "int"
+    if t.startswith("struct "):
+        t = t[len("struct "):]
     return _SCALARS.get(t, f"struct:{t}")
 
 
 def parse_header_structs(source: str) -> dict:
     """``{struct name: [(kind, field name), ...]}`` for every ``typedef struct {...}
-    name;`` in C header text *source*. A member that does not parse as ``type name``
-    is recorded as ``("unparsed", text)``."""
+    name;`` and every ``struct name {...};`` in C header text *source*. A member that
+    does not parse as ``type name`` is recorded as ``("unparsed", text)``."""
     out = {}
-    for m in _STRUCT_RE.finditer(_strip_comments(source)):
+    text = _strip_comments(source)
+    for m in list(_STRUCT_RE.finditer(text)) + list(_TAGGED_STRUCT_RE.finditer(text)):
         fields = []
         for stmt in m.group("body").split(";"):
             stmt = " ".join(stmt.split())
@@ -262,6 +277,34 @@ def parse_header_structs(source: str) -> dict:
                 continue
             fields.append((_c_kind(stmt[:nm.start()].strip()), nm.group(1)))
         out[m.group("name")] = fields
+    return out
+
+
+def parse_header_functions(source: str) -> dict:
+    """``{function name: (return kind, [argument kind, ...])}`` for every ``SD_API``
+    declaration in C header text *source*. A function-pointer typedef argument
+    (``*_cb_t``, ``*_callback_t``) is kind ``"cb"``; an argument that does not parse
+    as ``type name`` is ``"unparsed"``."""
+    text = "\n".join(line for line in _strip_comments(source).splitlines()
+                     if not line.lstrip().startswith("#"))
+
+    def kind(ctype: str) -> str:
+        t = " ".join(ctype.replace("const ", " ").split())
+        return "cb" if _CALLBACK_TYPE_RE.fullmatch(t) else _c_kind(ctype)
+
+    out = {}
+    for m in _FUNCTION_RE.finditer(text):
+        args = []
+        raw = " ".join(m.group("args").split())
+        if raw not in ("", "void"):
+            for arg in raw.split(","):
+                arg = arg.strip()
+                nm = re.search(r"(\w+)\s*$", arg)
+                if nm is None or nm.start() == 0:
+                    args.append("unparsed")
+                else:
+                    args.append(kind(arg[:nm.start()].strip()))
+        out[m.group("name")] = (kind(m.group("ret").strip()), args)
     return out
 
 
@@ -280,16 +323,96 @@ def _py_kind(ct) -> str:
     return f"other:{ct.__name__}"
 
 
+def _c_field_name(name: str) -> str:
+    """The C member name of ctypes field *name*: a Python keyword with a trailing
+    underscore (``async_``) is the keyword itself."""
+    import keyword
+    if name.endswith("_") and keyword.iskeyword(name[:-1]):
+        return name[:-1]
+    return name
+
+
 def binding_structs(binding) -> dict:
     """``{struct name: [(kind, field name), ...]}`` for every ctypes Structure
-    declared in module *binding*."""
+    declared in module *binding*, with field names as C spells them."""
     import ctypes
     out = {}
     for name, obj in vars(binding).items():
         if isinstance(obj, type) and issubclass(obj, ctypes.Structure) \
                 and obj.__module__ == binding.__name__:
-            out[name] = [(_py_kind(t), f) for f, t in obj._fields_]
+            out[name] = [(_py_kind(t), _c_field_name(f)) for f, t in obj._fields_]
     return out
+
+
+def _py_function_kind(ct) -> str:
+    import ctypes
+    if ct is None:
+        return "void"
+    if isinstance(ct, type) and issubclass(ct, ctypes._CFuncPtr):
+        return "cb"
+    return _py_kind(ct)
+
+
+def binding_functions(binding) -> dict:
+    """``{function name: (return kind, [argument kind, ...])}`` for every entry of
+    *binding*'s ``_FUNCTIONS`` table ((name, restype, argtypes))."""
+    return {name: (_py_function_kind(restype), [_py_function_kind(a) for a in argtypes])
+            for name, restype, argtypes in getattr(binding, "_FUNCTIONS", ())}
+
+
+def _kind_fits(bound: str, header: str) -> bool:
+    """Whether binding kind *bound* passes a C value of kind *header*: equal, or a
+    ``c_void_p`` standing for any pointer."""
+    return bound == header or (bound == "voidp" and header.startswith("ptr:"))
+
+
+def compare_functions(header: dict, bound: dict) -> list[str]:
+    """What differs between the header's function declarations and the binding's,
+    one line per difference. Empty when every bound function matches."""
+    diffs = []
+    for name, (ret, args) in sorted(bound.items()):
+        want = header.get(name)
+        if want is None:
+            diffs.append(f"{name}(): not declared in the header")
+            continue
+        h_ret, h_args = want
+        if not _kind_fits(ret, h_ret):
+            diffs.append(f"{name}(): returns {h_ret} in the header, {ret} in the binding")
+        if len(h_args) != len(args):
+            diffs.append(f"{name}(): takes {len(h_args)} argument(s) in the header, "
+                         f"{len(args)} in the binding")
+            continue
+        for i, (b, h) in enumerate(zip(args, h_args, strict=True)):
+            if not _kind_fits(b, h):
+                diffs.append(f"{name}(): argument {i + 1} is {h} in the header, {b} in the "
+                             "binding")
+    return diffs
+
+
+def split_ggml(bound: dict, ggml_structs: dict) -> tuple[dict, dict]:
+    """*bound* split into the structs of stable-diffusion.h and, per ggml header
+    file, the structs *ggml_structs* (``{binding name: (header file, C name)}``)
+    places there, renamed to their C names, with every nested ``struct:`` kind
+    renamed the same way."""
+    rename = {f"struct:{py}": f"struct:{c}" for py, (_h, c) in ggml_structs.items()}
+
+    def renamed(fields):
+        out = []
+        for kind, f in fields:
+            for py, c in rename.items():
+                if kind == py or kind.endswith(":" + py):
+                    kind = kind[: len(kind) - len(py)] + c
+            out.append((kind, f))
+        return out
+
+    sd, ggml = {}, {}
+    for name, fields in bound.items():
+        if name in ggml_structs:
+            header, c_name = ggml_structs[name]
+            ggml.setdefault(header, {})[c_name] = renamed(fields)
+        else:
+            sd[name] = fields
+    return sd, ggml
 
 
 def compare_layout(header: dict, bound: dict) -> list[str]:
@@ -319,40 +442,84 @@ def compare_layout(header: dict, bound: dict) -> list[str]:
     return diffs
 
 
-def fetch_header(commit: str, opener=None) -> str:
-    """The text of include/stable-diffusion.h at *commit*. Raises Inconclusive."""
+def _read_text(url: str, opener, what: str) -> str:
+    """The body of *url* as text. Raises Inconclusive naming *what*."""
     if opener is None:
         from localm.http_ssl import verified_urlopen
         opener = verified_urlopen
     import urllib.request
-    req = urllib.request.Request(HEADER_URL % commit,
-                                 headers={"User-Agent": "localm-confirm-sdcpp"})
+    req = urllib.request.Request(url, headers={"User-Agent": "localm-confirm-sdcpp"})
     try:
         with opener(req, timeout=60) as resp:
             return resp.read().decode("utf-8")
     except Exception as e:
-        raise Inconclusive(f"could not read the header at {commit}: "
-                           f"{type(e).__name__}: {e}") from e
+        raise Inconclusive(f"could not read {what}: {type(e).__name__}: {e}") from e
+
+
+def fetch_header(commit: str, opener=None) -> str:
+    """The text of include/stable-diffusion.h at *commit*. Raises Inconclusive."""
+    return _read_text(HEADER_URL % commit, opener, f"the header at {commit}")
+
+
+def ggml_source(commit: str, opener=None) -> tuple[str, str]:
+    """``(owner/repo, commit)`` of the ggml submodule stable-diffusion.cpp pins at
+    *commit*. Raises Inconclusive when the lookup fails or does not name a 40-hex
+    commit of a GitHub repository."""
+    text = _read_text(GGML_SUBMODULE_URL % commit, opener, f"the ggml submodule at {commit}")
+    try:
+        body = json.loads(text)
+    except ValueError as e:
+        raise Inconclusive(f"the ggml submodule lookup at {commit} is not JSON") from e
+    if not isinstance(body, dict):
+        raise Inconclusive(f"the ggml submodule lookup at {commit} is not an object")
+    sha, url = body.get("sha"), body.get("submodule_git_url")
+    m = _GITHUB_REPO_RE.fullmatch(url) if isinstance(url, str) else None
+    if (body.get("type") != "submodule" or not isinstance(sha, str)
+            or not re.fullmatch(r"[0-9a-f]{40}", sha) or m is None):
+        raise Inconclusive(f"the ggml path at {commit} is not a GitHub submodule: "
+                           f"type={body.get('type')!r}, url={url!r}")
+    return m.group(1), sha
 
 
 def header_check(commit: str, opener=None, binding=None) -> tuple[str, str]:
-    """(status, detail) of the header_layout check for *commit*."""
-    try:
-        text = fetch_header(commit, opener)
-    except Inconclusive as e:
-        return SKIP, str(e)
+    """(status, detail) of the header_layout check for *commit*: the binding's
+    stable-diffusion.h structs against that header at *commit*, and the structs
+    the binding's ``GGML_STRUCTS`` names against ggml's headers at the ggml
+    submodule commit *commit* pins. SKIP when a header cannot be read."""
     if binding is None:
         from localm.media.sdcpp import _binding as binding
-    header = parse_header_structs(text)
     bound = binding_structs(binding)
     if not bound:
         return SKIP, "the binding declares no structs; nothing to compare"
-    diffs = compare_layout(header, bound)
+    sd_bound, ggml_bound = split_ggml(bound, getattr(binding, "GGML_STRUCTS", {}))
+    ggml_headers, ggml_at = {}, None
+    try:
+        text = fetch_header(commit, opener)
+        if ggml_bound:
+            repo, ggml_at = ggml_source(commit, opener)
+            for name in sorted(ggml_bound):
+                ggml_headers[name] = _read_text(GGML_HEADER_URL % (repo, ggml_at, name),
+                                                opener, f"ggml's {name} at {ggml_at}")
+    except Inconclusive as e:
+        return SKIP, str(e)
+    diffs = compare_layout(parse_header_structs(text), sd_bound)
+    functions = binding_functions(binding)
+    diffs += compare_functions(parse_header_functions(text), functions)
+    for name in sorted(ggml_bound):
+        diffs += [f"{name}: {d}" for d in compare_layout(
+            parse_header_structs(ggml_headers[name]), ggml_bound[name])]
     if diffs:
-        return FAIL, ("binding needs a code update, not an automatic bump: the C structs "
+        return FAIL, ("binding needs a code update, not an automatic bump: the C declarations "
                       "at this commit differ from localm's binding: " + "; ".join(diffs))
-    return PASS, (f"{len(bound)} struct(s) of the binding match include/stable-diffusion.h "
-                  f"at {commit[:7]} field for field")
+    detail = (f"{len(sd_bound)} struct(s) of the binding match include/stable-diffusion.h "
+              f"at {commit[:7]} field for field")
+    if functions:
+        detail += f", and its {len(functions)} function(s) argument for argument"
+    if ggml_bound:
+        n = sum(len(v) for v in ggml_bound.values())
+        detail += (f"; {n} ggml struct(s) match {', '.join(sorted(ggml_bound))} at ggml "
+                   f"{ggml_at[:7]} field for field")
+    return PASS, detail
 
 
 # --------------------------------------------------------------------------- #
