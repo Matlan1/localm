@@ -99,6 +99,8 @@ def test_an_unreadable_device_registry_falls_back_to_the_offload_flag(
 
 GPU, CPU = _loader.GGML_DEV_TYPE_GPU, _loader.GGML_DEV_TYPE_CPU
 
+ACCEL = 3
+
 
 @pytest.mark.parametrize("devices, expected", [
     ([(CPU, "CPU")], False),
@@ -114,6 +116,9 @@ GPU, CPU = _loader.GGML_DEV_TYPE_GPU, _loader.GGML_DEV_TYPE_CPU
     ([(2, "BLAS"), (3, "Vulkan"), (CPU, "CPU")], True),
     ([(2, None), (CPU, "CPU")], None),
     ([(2, None), (GPU, "CUDA")], True),
+    ([(2, "ZenDNN"), (CPU, "CPU")], False),
+    ([(3, "zDNN"), (CPU, "CPU")], False),
+    ([(ACCEL, "ZenDNN"), (3, "Vulkan"), (CPU, "CPU")], True),
     ([], False),
 ])
 def test_only_a_gpu_or_an_integrated_gpu_counts_as_a_gpu_device(devices, expected):
@@ -143,14 +148,69 @@ def test_the_gate_reads_the_native_devices_not_the_offload_flag():
     require_native_runtime()
     hidden = {"HIP_VISIBLE_DEVICES": "-1", "CUDA_VISIBLE_DEVICES": "-1",
               "ROCR_VISIBLE_DEVICES": "-1", "GGML_VK_VISIBLE_DEVICES": "-1"}
-    for env in ({}, hidden):
-        got = _probe_native_runtime(env)
-        if not got["devices"]:
-            pytest.skip("runtime lacks the ggml_backend_dev_* registry symbols")
-        if all(t == CPU for _, t in got["devices"]):
-            assert got["gpu"] is False, got
-        if any(t == GPU for _, t in got["devices"]):
-            assert got["gpu"] is True, got
+    visible = _probe_native_runtime({})
+    if not visible["devices"]:
+        pytest.skip("runtime lacks the ggml_backend_dev_* registry symbols")
+    if any(t == GPU for _, t in visible["devices"]):
+        assert visible["gpu"] is True, visible
+    masked = _probe_native_runtime(hidden)
+    if any(t != CPU for _, t in masked["devices"]):
+        pytest.skip("the visible-devices variables do not hide every GPU on this machine, "
+                    "so the all-CPU arm cannot be reached")
+    assert masked["gpu"] is False, masked
+
+
+class _Sym:
+    def __init__(self, fn=None):
+        self.fn = fn
+        self.restype = None
+        self.argtypes = None
+
+    def __call__(self, *a):
+        return self.fn(*a)
+
+
+def _debug_lines(caplog):
+    return [m for m in _records(caplog, "DEBUG") if m.startswith("has_gpu_device()")]
+
+
+def test_a_runtime_without_the_registry_symbols_logs_why_the_check_is_skipped(
+        monkeypatch, caplog):
+    monkeypatch.setattr(_loader, "load_lib", lambda *a, **k: None)
+    monkeypatch.setattr(_loader, "_ggml_dev_handles", lambda: [])
+    monkeypatch.setattr(_loader, "_ggml_sym", lambda handles, name: None)
+    with caplog.at_level("DEBUG", logger="localm"):
+        assert _loader.has_gpu_device() is None
+    assert any("lacks the ggml_backend_dev_* registry symbols" in m
+               for m in _debug_lines(caplog))
+
+
+def test_an_unreadable_registry_logs_why_the_check_is_skipped(monkeypatch, caplog):
+    def _boom():
+        raise OSError("registry gone")
+
+    syms = {"ggml_backend_dev_count": _Sym(_boom),
+            "ggml_backend_dev_get": _Sym(lambda i: 1),
+            "ggml_backend_dev_type": _Sym(lambda d: 0)}
+    monkeypatch.setattr(_loader, "load_lib", lambda *a, **k: None)
+    monkeypatch.setattr(_loader, "_ggml_dev_handles", lambda: [])
+    monkeypatch.setattr(_loader, "_ggml_sym", lambda handles, name: syms.get(name))
+    with caplog.at_level("DEBUG", logger="localm"):
+        assert _loader.has_gpu_device() is None
+    lines = _debug_lines(caplog)
+    assert any("device registry could not be read (OSError)" in m for m in lines)
+
+
+def test_a_device_without_a_backend_name_logs_why_the_check_is_skipped(monkeypatch, caplog):
+    syms = {"ggml_backend_dev_count": _Sym(lambda: 1),
+            "ggml_backend_dev_get": _Sym(lambda i: 1),
+            "ggml_backend_dev_type": _Sym(lambda d: 2)}
+    monkeypatch.setattr(_loader, "load_lib", lambda *a, **k: None)
+    monkeypatch.setattr(_loader, "_ggml_dev_handles", lambda: [])
+    monkeypatch.setattr(_loader, "_ggml_sym", lambda handles, name: syms.get(name))
+    with caplog.at_level("DEBUG", logger="localm"):
+        assert _loader.has_gpu_device() is None
+    assert any("no readable backend name" in m for m in _debug_lines(caplog))
 
 
 def test_a_projector_clip_places_on_the_gpu_is_not_reported(monkeypatch, caplog):

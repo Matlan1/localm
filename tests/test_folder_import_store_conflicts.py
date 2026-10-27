@@ -6,10 +6,12 @@ folder reports its models as already registered."""
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from localm import model_manager as mm
 from localm.config import load_registry
+from localm.model_manager import registry as _registry
 from tests import test_adopt_hub_cache as _hub
 from tests import test_folder_import_progress as _progress
 
@@ -187,3 +189,115 @@ class TestReaddingARenamedModel:
         assert printed[-1] == (
             "Done: 0 registered, 3 already registered, 0 skipped or refused, 0 not usable"
         ), printed[-1]
+
+
+def _two_hf_pile(root: Path) -> Path:
+    _hf_pile(root)
+    other = root / "hfn"
+    other.mkdir()
+    (other / "config.json").write_text('{"model_type": "llama"}')
+    (other / "tokenizer.json").write_text("{}")
+    (other / "model.safetensors").write_bytes(b"y" * 64)
+    return root
+
+
+class TestMovingAHfFolderAgain:
+    def test_the_old_entry_follows_the_folder_and_no_second_name_is_added(
+            self, home, tmp_path, printed):
+        pile = _hf_pile(tmp_path / "pile")
+        assert mm.add_local(str(pile)) is True
+        assert mm.add_local(str(pile), store="move") is True
+        reg = load_registry()
+        assert set(reg) == {"hfm"}, set(reg)
+        assert Path(reg["hfm"]["path"]).resolve() == (home / "models" / "hfm").resolve()
+        assert not (pile / "hfm").exists()
+
+    def test_a_move_that_has_to_copy_first_still_repoints_and_removes_the_source(
+            self, home, tmp_path, printed, monkeypatch):
+        def _no_rename(src, dst):
+            raise OSError("cross-device")
+        monkeypatch.setattr(_registry.os, "rename", _no_rename)
+        pile = _hf_pile(tmp_path / "pile")
+        assert mm.add_local(str(pile)) is True
+        assert mm.add_local(str(pile), store="move") is True
+        reg = load_registry()
+        assert set(reg) == {"hfm"}, set(reg)
+        assert Path(reg["hfm"]["path"]).resolve() == (home / "models" / "hfm").resolve()
+        assert (home / "models" / "hfm" / "model.safetensors").read_bytes() == b"x" * 64
+        assert not (pile / "hfm").exists()
+
+
+def _failing_copytree(monkeypatch, name, *, corrupt=False):
+    real = shutil.copytree
+
+    def _copytree(src, dst, *a, **k):
+        out = real(src, dst, *a, **k)
+        if Path(dst).name == name:
+            if corrupt:
+                (Path(dst) / "model.safetensors").write_bytes(b"z" * 64)
+            else:
+                raise OSError("disk full")
+        return out
+    monkeypatch.setattr(_registry.shutil, "copytree", _copytree)
+
+
+class TestAHfFolderTransferThatFails:
+    def test_an_oserror_skips_that_folder_cleans_up_and_the_rest_continues(
+            self, home, tmp_path, printed, monkeypatch):
+        pile = _two_hf_pile(tmp_path / "pile")
+        _failing_copytree(monkeypatch, "hfm")
+        assert mm.add_local(str(pile), store="copy") is True
+        assert not (home / "models" / "hfm").exists()
+        assert (pile / "hfm" / "model.safetensors").read_bytes() == b"x" * 64
+        assert set(load_registry()) == {"hfn"}
+        assert any("Cannot copy" in line and "disk full" in line for line in printed), printed
+
+    def test_a_retry_after_the_failure_is_not_blocked_by_a_partial_folder(
+            self, home, tmp_path, printed, monkeypatch):
+        pile = _two_hf_pile(tmp_path / "pile")
+        real = shutil.copytree
+        _failing_copytree(monkeypatch, "hfm")
+        mm.add_local(str(pile), store="copy")
+        monkeypatch.setattr(_registry.shutil, "copytree", real)
+        assert mm.add_local(str(pile), store="copy") is True
+        assert (home / "models" / "hfm" / "config.json").is_file()
+        assert "hfm" in load_registry()
+
+    def test_a_failed_move_leaves_the_source_in_place(
+            self, home, tmp_path, printed, monkeypatch):
+        def _no_rename(src, dst):
+            raise OSError("cross-device")
+        monkeypatch.setattr(_registry.os, "rename", _no_rename)
+        pile = _two_hf_pile(tmp_path / "pile")
+        _failing_copytree(monkeypatch, "hfm")
+        mm.add_local(str(pile), store="move")
+        assert (pile / "hfm" / "model.safetensors").read_bytes() == b"x" * 64
+        assert not (home / "models" / "hfm").exists()
+        assert not (pile / "hfn").exists()
+
+
+class TestAHfFolderCopyIsVerified:
+    def test_a_copy_that_differs_from_the_source_is_removed_and_not_registered(
+            self, home, tmp_path, printed, monkeypatch):
+        pile = _hf_pile(tmp_path / "pile")
+        _failing_copytree(monkeypatch, "hfm", corrupt=True)
+        assert mm.add_local(str(pile), store="copy") is False
+        assert not (home / "models" / "hfm").exists()
+        assert (pile / "hfm" / "model.safetensors").read_bytes() == b"x" * 64
+        assert load_registry() == {}
+        assert any("Copy verification failed" in line and "sha256 mismatch" in line
+                   for line in printed), printed
+
+    def test_a_missing_file_in_the_copy_is_reported(self, tmp_path):
+        src, dest = tmp_path / "a", tmp_path / "b"
+        src.mkdir()
+        dest.mkdir()
+        (src / "x.bin").write_bytes(b"1")
+        assert "file list differs" in _registry._verify_dir_copy(src, dest)
+
+    def test_an_identical_copy_verifies(self, tmp_path):
+        src, dest = tmp_path / "a", tmp_path / "b"
+        src.mkdir()
+        (src / "x.bin").write_bytes(b"1")
+        shutil.copytree(src, dest)
+        assert _registry._verify_dir_copy(src, dest) is None

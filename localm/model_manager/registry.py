@@ -3091,6 +3091,119 @@ def _repoint_projector_references(moved: dict) -> None:
         console.print(f"[dim]Updated the projector path recorded for {names}.[/dim]")
 
 
+def _remove_partial_dir(dest: Path) -> str:
+    """Remove *dest*, a directory a failed transfer left behind. Returns ``""``
+    when it is gone, else a sentence saying it could not be removed (also
+    logged)."""
+    try:
+        shutil.rmtree(dest)
+    except FileNotFoundError:
+        return ""
+    except OSError as e:
+        logger.warning("_transfer_model_dir: could not remove the partial folder %s: %s",
+                       dest, e)
+        return f" The partial folder {dest} could not be removed ({e}); delete it by hand."
+    return ""
+
+
+def _verify_dir_copy(src: Path, dest: Path) -> Optional[str]:
+    """Compare the file tree under *src* with the copy under *dest*: the same
+    relative paths, the same sizes and the same SHA-256 per file. None when
+    they match, else a sentence naming the first difference."""
+    src_files = sorted(f.relative_to(src) for f in src.rglob("*") if f.is_file())
+    dest_files = sorted(f.relative_to(dest) for f in dest.rglob("*") if f.is_file())
+    if src_files != dest_files:
+        missing = sorted(set(src_files) - set(dest_files))
+        extra = sorted(set(dest_files) - set(src_files))
+        return f"the copy's file list differs (missing {missing[:3]}, unexpected {extra[:3]})"
+    for rel in src_files:
+        if (src / rel).stat().st_size != (dest / rel).stat().st_size:
+            return f"{rel} has a different size after the copy"
+    for rel in src_files:
+        a = _verify_digest(src / rel, purpose="to check the source before copying")
+        b = _verify_digest(dest / rel, purpose="to confirm the copy")
+        if a != b:
+            return f"sha256 mismatch for {rel} after the copy"
+    return None
+
+
+def _repoint_directory_references(old: Path, new: Path) -> None:
+    """Point every registry entry whose ``path`` resolves to the directory *old*,
+    which was just moved to *new*, at *new*, in one atomic registry update.
+    Prints the names of the entries it changed."""
+    from rich.markup import escape
+
+    target = str(old.resolve())
+    new_path = str(new.resolve())
+    repointed: list[str] = []
+
+    def _repoint(reg: dict) -> None:
+        repointed.clear()
+        for entry_name, entry in reg.items():
+            value = _entry_path(entry)
+            if value is None:
+                continue
+            try:
+                if str(Path(value).resolve()) == target:
+                    entry["path"] = new_path
+                    repointed.append(entry_name)
+            except OSError:
+                continue
+
+    _mm.update_registry(_repoint)
+    if repointed:
+        # repointed: registry names, not restricted to a safe charset.
+        names = ", ".join(escape(n) for n in repointed)
+        console.print(f"[dim]Updated the path recorded for {names}.[/dim]")
+
+
+def _transfer_model_dir(path: Path, dest: Path, action: str) -> None:
+    """Copy or move the directory *path* to *dest*, which must not exist.
+
+    A copy is verified against the source (:func:`_verify_dir_copy`) and removed
+    again on a mismatch. A move renames when it can; otherwise it copies, verifies
+    and removes the source, and a source that cannot be fully removed is reported
+    while *dest* stays. Registry entries that named a moved directory are pointed
+    at *dest*.
+
+    Raises RuntimeError, after removing the partial *dest* it created, when the
+    transfer or its verification fails. The source is untouched in that case."""
+    from rich.markup import escape
+
+    old_resolved = path.resolve()
+    renamed = False
+    if action == "move":
+        try:
+            os.rename(path, dest)
+            renamed = True
+        except OSError:
+            renamed = False
+    if not renamed:
+        try:
+            shutil.copytree(path, dest)
+            problem = _verify_dir_copy(path, dest)
+        except OSError as e:
+            leftover = _remove_partial_dir(dest)
+            raise RuntimeError(
+                f"Cannot {action} {path} into {_mm.MODELS_DIR}: {e}.{leftover}") from e
+        if problem is not None:
+            leftover = _remove_partial_dir(dest)
+            raise RuntimeError(
+                f"Copy verification failed for {path.name}: {problem} (source left "
+                f"untouched, bad copy removed).{leftover}")
+        if action == "move":
+            try:
+                shutil.rmtree(path)
+            except OSError as e:
+                logger.warning("_transfer_model_dir: could not remove the source %s "
+                               "after moving it: %s", path, e)
+                console.print(
+                    f"[yellow]{escape(str(path))} was copied to {escape(str(dest))} but "
+                    f"could not be fully removed: {escape(str(e))}[/yellow]")
+    if action == "move":
+        _repoint_directory_references(old_resolved, dest)
+
+
 def _store_into_models_dir(path: Path, action: str, *,
                            attached_projector_only: bool = False) -> Path:
     """:func:`_store_with_projector`, returning only the new primary path."""
@@ -3114,7 +3227,11 @@ def _store_with_projector(path: Path, action: str, *,
         projector another model in the source folder may also use is copied,
         not moved, and a console note names that model. With
         *attached_projector_only* only the attached one travels.
-      - an HF-style model directory - the whole tree (shutil.copytree/move)
+      - an HF-style model directory - the whole tree (:func:`_transfer_model_dir`)
+
+    A directory transfer that fails with an OSError raises RuntimeError after
+    removing the partial destination it created; the source is left as it was.
+    A directory copy is verified like a file copy (every file's size and sha256).
 
     Refuses (raises RuntimeError, does not touch anything) when a name inside
     MODELS_DIR is already occupied by a genuinely different file - the same
@@ -3165,10 +3282,7 @@ def _store_with_projector(path: Path, action: str, *,
         # path/dest: a caller-named filesystem path (add_local's path_str) -
         # not restricted to a safe charset.
         console.print(f"[dim]{verb} {escape(str(path))} to {escape(str(dest))}…[/dim]")
-        if action == "copy":
-            shutil.copytree(path, dest)
-        else:
-            shutil.move(str(path), str(dest))
+        _transfer_model_dir(path, dest, action)
         return StoredModel(dest, None)
 
     # Single GGUF: every split part, plus the projector files _plan_projectors
@@ -5335,7 +5449,9 @@ def add_local(
                 wanted = _sanitize_name(name) if (name and only_one) else hf_dir.name
                 reg = _mm.load_registry()
                 would_skip = on_duplicate == "skip" or (on_duplicate == "ask" and not can_prompt())
-                reuse = would_skip and not (store and _mm.is_external_path(hf_dir))
+                external_store = bool(store) and _mm.is_external_path(hf_dir)
+                reuse = (would_skip and not external_store) or (
+                    store == "move" and external_store)
                 hf_name = ((_registered_name_for_file(reg, hf_dir, wanted) if reuse else None)
                            or _unique_registry_name(reg, wanted))
                 done = add_local(
