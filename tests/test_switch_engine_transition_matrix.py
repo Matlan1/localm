@@ -1600,6 +1600,23 @@ class TestBackendSizedAdmission:
                        "eviction; loading it anyway will let the backend "
                        "fall back to partial CPU offload, which is slower")}
 
+    def test_the_ask_for_a_moe_model_says_its_experts_go_to_system_ram(self, monkeypatch):
+        b = _BackendSizedEngine("model-b", 13 * GB)
+        a = GatedEngine("model-a")
+        env = _install(monkeypatch, {"model-a": a, "model-b": b}, total=12 * GB)
+        _seat("model-a", a, active=True)
+        import localm.config as cfg
+        registry = cfg.load_registry()
+        registry["model-b"] = dict(registry["model-b"], expert_count=128)
+        monkeypatch.setattr("localm.config.load_registry", lambda: registry)
+
+        result = asyncio.run(hs.switch_engine("model-b", env.factory, preempt=True,
+                                              activate=False))
+
+        assert result["status"] == "confirm_required"
+        assert "keep the experts in system RAM" in result["detail"]
+        assert "partial CPU offload" not in result["detail"]
+
     def test_a_registered_engine_evicted_while_it_is_sized_is_not_committed(
             self, monkeypatch):
         stale = _BackendSizedEngine("model-a", GB)

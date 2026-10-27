@@ -193,21 +193,30 @@ def projector_owners(name: str, registry: dict) -> list[str]:
     file; failing that, when it is a chat model whose file sits in the
     projector's folder. Reads the registry only: no file is opened. Empty when
     *name* is not a projector entry or nothing claims it."""
+    recorded, in_folder = _projector_claims(name, registry)
+    return recorded or in_folder
+
+
+def _projector_claims(name: str, registry: dict) -> "tuple[list[str], list[str]]":
+    """``(recorded, in_folder)`` for the projector registered as *name*: the
+    sorted chat models whose ``mmproj`` is its file, and the sorted chat models
+    whose file sits in its folder (empty when *recorded* is not, as they are
+    only the fallback). Both empty when *name* is not a projector entry."""
     entry = registry.get(name)
     if not is_projector_entry(entry):
-        return []
+        return [], []
     mmproj_path = _entry_path(entry)
     if mmproj_path is None:
-        return []
+        return [], []
     chat = {n: e for n, e in registry.items()
             if n != name and isinstance(e, dict) and e.get("model_type", "llm") == "llm"}
     recorded = sorted(n for n, e in chat.items() if _same_file(e.get("mmproj"), mmproj_path))
     if recorded:
-        return recorded
+        return recorded, []
     folder = os.path.dirname(os.path.normpath(mmproj_path))
-    return sorted(n for n, e in chat.items()
-                  if (p := _entry_path(e)) is not None
-                  and _same_file(os.path.dirname(os.path.normpath(p)), folder))
+    return [], sorted(n for n, e in chat.items()
+                      if (p := _entry_path(e)) is not None
+                      and _same_file(os.path.dirname(os.path.normpath(p)), folder))
 
 
 def projector_refusal(name: str, registry: dict) -> Optional[str]:
@@ -216,11 +225,15 @@ def projector_refusal(name: str, registry: dict) -> Optional[str]:
     models that use the projector when the registry identifies any."""
     if not is_projector_entry(registry.get(name)):
         return None
-    owners = projector_owners(name, registry)
+    recorded, in_folder = _projector_claims(name, registry)
     msg = f"'{name}' is a vision projector, not a model that can be loaded or chatted with."
-    if owners:
-        msg += (" It belongs to " + ", ".join(f"'{o}'" for o in owners)
+    if recorded:
+        msg += (" It belongs to " + ", ".join(f"'{o}'" for o in recorded)
                 + "; name that model instead and the projector is attached automatically.")
+    elif in_folder:
+        msg += (" No model records it as its projector; the chat models in the same folder are "
+                + ", ".join(f"'{o}'" for o in in_folder)
+                + ". A projector is attached only to a model that records it.")
     return msg
 
 

@@ -209,6 +209,22 @@ def test_refusal_is_none_for_chat_models_and_unknown_names():
     assert projector_refusal(PROJECTOR, reg) is not None
 
 
+def test_refusal_names_the_model_that_records_the_projector():
+    reg = _registry()
+    reg[OWNER]["mmproj"] = reg[PROJECTOR]["path"]
+    msg = projector_refusal(PROJECTOR, reg)
+    assert f"It belongs to '{OWNER}'" in msg
+
+
+def test_refusal_for_an_unrecorded_projector_does_not_claim_the_folder_models_own_it():
+    reg = _registry()
+    reg["elsewhere"] = {"path": "models/ministral/x.gguf", "model_type": "llm"}
+    msg = projector_refusal(PROJECTOR, reg)
+    assert "belongs to" not in msg
+    assert "No model records it" in msg
+    assert f"'{OWNER}'" in msg and "'elsewhere'" in msg
+
+
 def test_refusal_without_a_known_owner_still_refuses():
     reg = {PROJECTOR: {"path": "models/lonely/p-mmproj.gguf", "model_type": "mmproj"}}
     msg = projector_refusal(PROJECTOR, reg)

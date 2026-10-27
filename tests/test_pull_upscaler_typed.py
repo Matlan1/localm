@@ -127,3 +127,67 @@ def test_pulling_again_never_changes_a_type_that_is_already_set(isolated_home, m
     mm.update_registry(set_vae)
     assert mm.pull_model(spec) is True
     assert mm.load_registry()["RealESRGAN_x4plus.safetensors"]["model_type"] == "vae"
+
+
+ORIGINAL_ESRGAN = {
+    "model.0.weight": (64, 3, 3, 3), "model.0.bias": (64,),
+    "model.1.sub.0.RDB1.conv1.0.weight": (32, 64, 3, 3),
+    "model.1.sub.0.RDB1.conv1.0.bias": (32,),
+    "model.1.sub.22.RDB3.conv5.0.weight": (64, 160, 3, 3),
+    "model.1.sub.23.weight": (64, 64, 3, 3),
+    "model.3.weight": (64, 64, 3, 3), "model.6.weight": (64, 64, 3, 3),
+    "model.8.weight": (64, 64, 3, 3),
+    "model.10.weight": (3, 64, 3, 3), "model.10.bias": (3,),
+}
+
+SRVGG_COMPACT = {
+    "body.0.weight": (64, 3, 3, 3), "body.0.bias": (64,),
+    "body.1.weight": (64,),
+    "body.2.weight": (64, 64, 3, 3), "body.2.bias": (64,),
+    "body.3.weight": (64,),
+    "body.4.weight": (48, 64, 3, 3), "body.4.bias": (48,),
+}
+
+
+def test_the_original_esrgan_layout_is_an_upscaler():
+    assert classify_tensors(ORIGINAL_ESRGAN).kind == "upscaler"
+
+
+def test_an_srvgg_compact_layout_is_an_upscaler():
+    assert classify_tensors(SRVGG_COMPACT).kind == "upscaler"
+
+
+def test_an_srvgg_compact_layout_without_activation_weights_is_an_upscaler():
+    tensors = {k: v for k, v in SRVGG_COMPACT.items() if k not in ("body.1.weight", "body.3.weight")}
+    assert classify_tensors(tensors).kind == "upscaler"
+
+
+@pytest.mark.parametrize("change", [
+    lambda t: t.pop("model.0.weight"),
+    lambda t: t.pop("model.1.sub.0.RDB1.conv1.0.weight"),
+    lambda t: t.update({"model.10.weight": (4, 64, 3, 3)}),
+    lambda t: t.update({"model.10.weight": (3, 64)}),
+])
+def test_an_original_esrgan_layout_missing_a_part_is_not_an_upscaler(change):
+    tensors = dict(ORIGINAL_ESRGAN)
+    change(tensors)
+    assert classify_tensors(tensors).kind != "upscaler"
+
+
+@pytest.mark.parametrize("change", [
+    lambda t: t.update({"head.weight": (3, 3, 3, 3)}),
+    lambda t: t.update({"body.5.weight": (64, 64, 3, 3), "body.6.weight": (48, 64, 3, 3)}),
+    lambda t: t.update({"body.4.weight": (50, 64, 3, 3)}),
+    lambda t: t.update({"body.0.weight": (64, 4, 3, 3)}),
+    lambda t: [t.pop(k) for k in ("body.2.weight", "body.2.bias")],
+])
+def test_a_layout_that_is_not_srvgg_compact_is_not_an_upscaler(change):
+    tensors = dict(SRVGG_COMPACT)
+    change(tensors)
+    assert classify_tensors(tensors).kind != "upscaler"
+
+
+@pytest.mark.parametrize("shapes", [ORIGINAL_ESRGAN, SRVGG_COMPACT])
+def test_a_scanned_file_in_another_upscaler_layout_takes_the_upscaler_type(tmp_path, shapes):
+    path = _safetensors(tmp_path / "4x-UltraSharp.safetensors", shapes)
+    assert _type_for_file(path, "unknown", {}) == "upscaler"
