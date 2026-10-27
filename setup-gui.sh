@@ -45,26 +45,48 @@ echo "  LocaLM graphical setup"
 echo
 
 # ---- locate uv --------------------------------------------------------------
+# A uv already inside this folder (setup.sh's Portable option puts one there) is
+# used as is. A uv found elsewhere on this computer is used only when the user
+# says so: the same Portable / Shared question setup.sh asks, because Portable
+# means uv itself lives in this folder.
 UVEXE=""
+SYSUV=""
 if [ -x "./.uv/uv" ]; then
     UVEXE="$PWD/.uv/uv"
 elif command -v uv >/dev/null 2>&1; then
-    UVEXE="uv"
+    SYSUV=1
+    echo "  A uv is already installed on this computer."
+    echo
+    echo "  Keep localm's Python tooling (uv itself, its runtime, and downloads) inside this folder?"
+    echo "    [1] Portable - everything in this folder (self-contained; re-downloads per clone)"
+    echo "    [2] Shared   - reuse/install uv at its normal per-user location (faster; lives in ~/.local)"
+    STOREPICK=""
+    read -r -p "  Pick 1 or 2 [1]: " STOREPICK || STOREPICK=""
+    case "${STOREPICK:-1}" in
+        2*)
+            UVEXE="$(command -v uv)"
+            export LOCALM_GUI_STORE=shared
+            echo "  Using $UVEXE"
+            ;;
+    esac
+    echo
 fi
 
 if [ -z "$UVEXE" ]; then
-    echo "  uv (the Python package manager LocaLM builds on) is not installed yet."
-    echo "  It is a small download and is needed before any window can open."
-    echo
-    read -r -p "  Install it now? [Y/n]: " GETUV
-    case "${GETUV:-Y}" in
-        [Nn]*)
-            echo
-            echo "  Nothing was installed. Run ./setup.sh for the console installer."
-            exit 1
-            ;;
-    esac
-    echo "  Installing uv ..."
+    if [ -z "$SYSUV" ]; then
+        echo "  uv (the Python package manager LocaLM builds on) is not installed yet."
+        echo "  It is a small download and is needed before any window can open."
+        echo
+        read -r -p "  Install it now? [Y/n]: " GETUV
+        case "${GETUV:-Y}" in
+            [Nn]*)
+                echo
+                echo "  Nothing was installed. Run ./setup.sh for the console installer."
+                exit 1
+                ;;
+        esac
+    fi
+    echo "  Installing uv into this folder ..."
     # UV_UNMANAGED_INSTALL keeps it in ./.uv without editing shell startup
     # files or writing an install receipt under ~/.config/uv.
     export UV_INSTALL_DIR="$PWD/.uv"
@@ -84,14 +106,15 @@ if [ -z "$UVEXE" ]; then
     export PATH="$PWD/.uv:$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
     if [ -x "./.uv/uv" ]; then
         UVEXE="$PWD/.uv/uv"
-    elif command -v uv >/dev/null 2>&1; then
-        UVEXE="uv"
+    elif [ -z "$SYSUV" ] && command -v uv >/dev/null 2>&1; then
+        UVEXE="$(command -v uv)"
     fi
 fi
 
 if [ -z "$UVEXE" ]; then
     echo
     echo "  [!] uv still is not callable, so the graphical setup cannot start."
+    echo "      Looked for $PWD/.uv/uv (the installer did not leave one there)."
     echo "      Open a NEW terminal and run ./setup.sh instead."
     exit 1
 fi
@@ -111,8 +134,10 @@ fi
 echo "  Opening the setup window ..."
 # Keep the interpreter this window runs on inside the folder, so a portable
 # install reuses it rather than downloading a second copy.
-export UV_PYTHON_INSTALL_DIR="$PWD/.python"
-export UV_CACHE_DIR="$PWD/.cache"
+if [ "${LOCALM_GUI_STORE:-}" != shared ]; then
+    export UV_PYTHON_INSTALL_DIR="$PWD/.python"
+    export UV_CACHE_DIR="$PWD/.cache"
+fi
 export UV_SYSTEM_CERTS=1
 rc=0
 "$UVEXE" run --no-project --python 3.12 python installer/gui.py || rc=$?

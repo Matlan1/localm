@@ -22,6 +22,7 @@ from rich.progress import DownloadColumn
 from rich.progress import Progress
 from rich.progress import TextColumn
 from rich.progress import TimeRemainingColumn
+from rich.table import Column
 from ..debuglog import logger
 from ..kv_cache import kv_bytes_for_type
 from ._shared import console
@@ -316,6 +317,25 @@ def _hash_reporting(path: Path, size: int, text: str) -> str:
     return digest
 
 
+_HASH_BAR_RESERVED_COLUMNS = 42
+
+
+def _hash_bar_label(name: str, purpose: str, width: int) -> str:
+    """The hashing bar's label, cut to fit *width* columns beside the spinner,
+    a bar, the size and the time left: the whole ``Hashing <name> <purpose>``
+    when it fits, else without *purpose*, else with *name* ending in an
+    ellipsis."""
+    budget = max(20, width - _HASH_BAR_RESERVED_COLUMNS)
+    full = f"Hashing {name} {purpose}"
+    if len(full) <= budget:
+        return full
+    short = f"Hashing {name}"
+    if len(short) <= budget:
+        return short
+    keep = max(1, budget - len("Hashing ") - 1)
+    return f"Hashing {name[:keep]}…"
+
+
 def _hash_with_progress(path: Path,
                         *, purpose: str = "for duplicate detection",
                         label: Optional[str] = None) -> Optional[str]:
@@ -359,17 +379,16 @@ def _hash_with_progress(path: Path,
 
     with Progress(
         SpinnerColumn(),
-        # {task.description} is rich's own placeholder and must survive the
-        # f-string, hence the doubled braces; only *purpose* is interpolated.
-        TextColumn(f"[dim]Hashing {{task.description}} {purpose}[/dim]"),
-        BarColumn(),
-        DownloadColumn(),
-        TimeRemainingColumn(),
+        TextColumn("[dim]{task.description}[/dim]", table_column=Column(no_wrap=True)),
+        BarColumn(bar_width=None),
+        DownloadColumn(table_column=Column(no_wrap=True)),
+        TimeRemainingColumn(table_column=Column(no_wrap=True)),
         transient=True,
         console=console,
     ) as prog:
         from rich.markup import escape
-        task = prog.add_task(escape(path.name), total=size)
+        task = prog.add_task(escape(_hash_bar_label(path.name, purpose, console.width)),
+                             total=size)
         worker = threading.Thread(
             target=_worker,
             args=(lambda done, total: prog.update(task, completed=done),),
