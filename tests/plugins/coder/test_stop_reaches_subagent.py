@@ -44,8 +44,8 @@ class _Scripted:
         return None
 
 
-def _tc(name: str, **args) -> str:
-    return "<tool_call>" + json.dumps({"name": name, "args": args}) + "</tool_call>"
+def _tc(tool: str, /, **args) -> str:
+    return "<tool_call>" + json.dumps({"name": tool, "args": args}) + "</tool_call>"
 
 
 def _build(backend, project, max_turns=8):

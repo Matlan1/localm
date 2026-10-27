@@ -662,7 +662,7 @@ def test_a_dotdot_through_a_unc_link_target_is_never_followed(tmp_path, monkeypa
     project.mkdir()
     (project / "l").mkdir()
     seen = _realpath_spy(monkeypatch)
-    monkeypatch.setattr(data_guard.os, "readlink", lambda p: "\\localhost\nonexistentshare")
+    monkeypatch.setattr(data_guard.os, "readlink", lambda p: "\\\\localhost\\nonexistentshare")
     monkeypatch.setattr(data_guard, "_is_link", lambda p: os.path.basename(p) == "l")
     assert data_guard._posix_resolve(str(project / "l" / ".." / "x")) is None
     assert not [s for s in seen if s.startswith("\\\\")], seen
