@@ -487,14 +487,12 @@ def _hf_blob_lock_is_free(base_dir: Path, rel: str) -> bool:
         return False
 
 
-def _hf_blob_lock_is_held(base_dir: Path, rel: str) -> bool:
-    """True only when a download of *rel* under *base_dir* holds
-    huggingface_hub's per-file download lock right now, in this or another
-    process. False when the lock is free or the probe cannot tell."""
+def _lock_file_is_held(lock_path: Path) -> bool:
+    """True only when someone holds the file lock at *lock_path* right now, in
+    this or another process. False when it is free or the probe cannot tell."""
     try:
         from filelock import FileLock, Timeout
-        from huggingface_hub._local_folder import get_local_download_paths
-        lock = FileLock(str(get_local_download_paths(Path(base_dir), rel).lock_path), timeout=0)
+        lock = FileLock(str(lock_path), timeout=0)
         try:
             lock.acquire(timeout=0)
         except Timeout:
@@ -502,7 +500,19 @@ def _hf_blob_lock_is_held(base_dir: Path, rel: str) -> bool:
         lock.release()
         return False
     except Exception as e:
-        logger.debug("cannot probe the download lock of %s: %s", rel, e)
+        logger.debug("cannot probe the download lock %s: %s", lock_path, e)
+        return False
+
+
+def _hf_blob_lock_is_held(base_dir: Path, rel: str) -> bool:
+    """True only when a download of *rel* under *base_dir* holds
+    huggingface_hub's per-file download lock right now. False when the lock is
+    free or the probe cannot tell."""
+    try:
+        from huggingface_hub._local_folder import get_local_download_paths
+        return _lock_file_is_held(get_local_download_paths(Path(base_dir), rel).lock_path)
+    except Exception as e:
+        logger.debug("cannot compute the download lock path for %s: %s", rel, e)
         return False
 
 

@@ -90,9 +90,10 @@ yourself - and are written in every session mode, privacy included:
   localm process that ran the download (its process id and start time). It is
   removed when that download finishes, when you delete it, when none of its
   partial data is left on disk (noticed the next time interrupted downloads are
-  listed), and when a later download of the same model finishes. Resuming does
-  not remove it at once: the resumed download writes its own record, which
-  replaces it. A record you dismiss stays until one of those happens. Like the
+  listed), and when a later download with the same options finishes (a
+  full-repository download of the same folder also clears it when the later
+  one used other options). Resuming does not remove it at once: the resumed
+  download writes its own record, which replaces it. A record you dismiss stays until one of those happens. Like the
   model registry, it holds model source details only, never conversation
   content.
 

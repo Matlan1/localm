@@ -933,6 +933,11 @@ def _resume_interrupted(r: dict) -> int:
                       f"localm pull --delete-interrupted {rec['id'][:8]} and pull "
                       "the model again to download the current version.")
         return 1
+    if check.get("refused"):
+        console.print(f"[red]Cannot resume {escape(str(rec['request']['spec']))}:[/red] "
+                      f"network policy refuses Hugging Face ({escape(check['detail'])}). "
+                      "Nothing was downloaded.")
+        return 1
     if check["changed"] is None:
         console.print(f"[yellow]Note:[/yellow] {escape(check['detail'])}; the "
                       "download checks each file again before continuing.")

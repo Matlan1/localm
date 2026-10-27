@@ -273,6 +273,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                 raise HTTPException(403, f"Network policy refused the check: {e}") from e
             except ThreadCallTimeout as e:
                 raise HTTPException(504, f"Checking the download source timed out: {e}") from e
+            if check.get("refused"):
+                raise HTTPException(403, f"Network policy refused the check: {check['detail']}")
             if check["changed"]:
                 return {"status": "changed", "detail": check["detail"], "spec": spec}
             note = check["detail"]

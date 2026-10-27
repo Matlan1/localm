@@ -227,7 +227,8 @@ def _finish(act: _Active, ok: bool) -> None:
         _remove(act.id)
         return
     try:
-        have = bytes_on_disk(act.rec) or int(bool(_locate(act.rec).outside))
+        have = (bytes_on_disk(act.rec, skip_locked=True)
+                or int(bool(_locate(act.rec).outside)))
     except Exception as e:
         logger.warning("could not measure the partial data of %s: %s",
                        act.rec["request"]["spec"], e)
@@ -503,12 +504,26 @@ def _locate(rec: dict) -> _Located:
     return _Located(files, parts, snapshot, outside)
 
 
-def bytes_on_disk(rec: dict, located: Optional[_Located] = None) -> int:
+def _download_lock_held(base: Path, rel: str) -> bool:
+    """True when a download of *rel* under *base* holds huggingface_hub's file
+    lock right now. Creates nothing."""
+    from .pull import _lock_file_is_held
+    paths = _hf_layout(base, rel)
+    return (paths is not None and paths.lock_path.is_file()
+            and _lock_file_is_held(paths.lock_path))
+
+
+def bytes_on_disk(rec: dict, located: Optional[_Located] = None,
+                  skip_locked: bool = False) -> int:
     """Bytes of partial data the pull of *rec* left on disk, counting only the
-    places :func:`_locate` accepts."""
+    places :func:`_locate` accepts. With *skip_locked*, the temp files of a
+    file whose download lock another download holds are not counted: they are
+    that download's."""
     loc = located or _locate(rec)
     total = 0
     for base, rel, etag, _raw in loc.files:
+        if skip_locked and _download_lock_held(base, rel):
+            continue
         total += max((_size(t) for t in _hf_temp_files(base, rel, etag)), default=0)
     for part, _lock in loc.parts:
         total += _size(part)
@@ -739,25 +754,44 @@ def _unlink_checked(path: Path, left: list[Path]) -> int:
     return size
 
 
+def _raise_walk_error(error: OSError) -> None:
+    raise error
+
+
+def _finished_bytes(folder: Path) -> int:
+    """Bytes of the finished files in *folder*: everything outside a
+    ``.cache`` folder except the download claim marker. Raises OSError when
+    any entry cannot be read."""
+    from .pull import _SNAPSHOT_CLAIM
+    total = 0
+    for root, dirs, names in os.walk(folder, onerror=_raise_walk_error):
+        dirs[:] = [d for d in dirs if d != ".cache"]
+        for n in names:
+            if n == _SNAPSHOT_CLAIM and Path(root) == folder:
+                continue
+            total += os.lstat(os.path.join(root, n)).st_size
+    return total
+
+
 def _snapshot_looks_complete(folder: Path, expected: Optional[int]) -> bool:
-    """True when the full-repo download in *folder* has no temp file left and
-    holds at least *expected* bytes, so it is a finished download and not a
-    partial one. With *expected* unknown, any finished file and no temp file
-    counts as finished, so a folder is never taken for partial on missing
-    information."""
-    from .pull import _snapshot_bytes_on_disk
+    """True when the full-repo download in *folder* must be treated as a
+    finished one: its finished files (temp files not counted) hold at least
+    *expected* bytes, even with a stale temp file left; or *expected* is
+    unknown, no temp file is left and some file is finished. Anything that
+    cannot be read counts as finished, so a folder is never taken for partial
+    on missing information."""
     if not folder.is_dir():
         return False
-    pending = folder / ".cache" / "huggingface" / "download"
     try:
-        if any(pending.rglob("*.incomplete")):
-            return False
-    except OSError:
-        return False
-    have = _snapshot_bytes_on_disk(folder)
-    if not isinstance(expected, int) or expected <= 0:
-        return have > 0
-    return have >= expected
+        have = _finished_bytes(folder)
+        if not isinstance(expected, int) or expected <= 0:
+            pending = folder / ".cache" / "huggingface" / "download"
+            return have > 0 and not any(pending.rglob("*.incomplete"))
+        return have >= expected
+    except OSError as e:
+        logger.warning("cannot tell whether %s is a finished download (%s); "
+                       "treating it as finished", folder, e)
+        return True
 
 
 def _delete_partials(rec: dict) -> tuple[int, list[Path]]:
@@ -870,16 +904,19 @@ def records_for_request(spec: str, name: Optional[str]) -> list[dict]:
 def check_upstream(rec: dict) -> dict:
     """Compare what the source serves now with what the record holds.
 
-    Returns ``{"changed": True|False|None, "detail": str}``: True when the
-    partial data cannot be continued safely (a recorded file's etag or size,
-    a direct URL's size or etag, or a full repo's commit differs now, or a
-    direct URL with no expected digest has neither size nor etag to compare),
-    None when the check could not be made. Raises ``netpolicy.NetworkPolicyError``
-    when the network policy refuses the request."""
+    Returns ``{"changed": True|False|None, "detail": str, "refused": bool}``:
+    True when the partial data cannot be continued safely (a recorded file's
+    etag or size, a direct URL's size or etag, or a full repo's commit differs
+    now, or a direct URL with no expected digest has neither size nor etag to
+    compare), None when the check could not be made. ``refused`` is True when
+    the network policy refuses the Hugging Face endpoint of a full-repo check,
+    so the resumed pull is refused too. Raises ``netpolicy.NetworkPolicyError``
+    when the policy refuses a file or URL request."""
     from localm import netpolicy
     from .pull import _etag_from_head, _policy_head
     changed: list[str] = []
     unchecked: list[str] = []
+    refused = False
     for f in rec.get("files") or []:
         url, etag, size = f.get("check_url") or f.get("url"), f.get("etag"), f.get("size")
         if not url:
@@ -927,6 +964,7 @@ def check_upstream(rec: dict) -> dict:
         if refusal:
             logger.info("not checking the commit of %s: %s", rec.get("repo"), refusal)
             unchecked.append(f"{rec.get('repo')} (network policy: {refusal})")
+            refused = True
         else:
             try:
                 from .pull import _hf_api
@@ -940,12 +978,12 @@ def check_upstream(rec: dict) -> dict:
                 logger.debug("upstream commit check of %s failed: %s", rec.get("repo"), e)
                 unchecked.append(str(rec.get("repo")))
     if changed:
-        return {"changed": True,
+        return {"changed": True, "refused": refused,
                 "detail": "cannot be continued: " + "; ".join(changed)}
     if unchecked:
-        return {"changed": None,
+        return {"changed": None, "refused": refused,
                 "detail": "could not check the source of: " + ", ".join(unchecked)}
-    return {"changed": False, "detail": ""}
+    return {"changed": False, "detail": "", "refused": False}
 
 
 # ------------------------------------------------------------------ #
