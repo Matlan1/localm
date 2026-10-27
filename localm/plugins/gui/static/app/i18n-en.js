@@ -2237,11 +2237,15 @@ export const I18N_EN = {
   "settings.perf.mainGpuHelp": "Which device the model loads onto. Saves immediately; applies on the next model load.",
   "settings.perf.splitLabel": "Split across GPUs",
   "settings.perf.splitHelp":
-    "Check one GPU to load a model on that GPU only, or 2 or more to spread a model too large for one card over them (overrides Main GPU); leave all unchecked for automatic placement. Each card's share follows its free VRAM at load time, unless pinned below. Saves immediately; applies on the next model load.",
+    "Check one GPU to load a model on that GPU only, or 2 or more to spread a model too large for one card over them (overrides Main GPU); leave all unchecked for automatic placement. The checked cards are filled in the order you check them: the first one gets the first layers. Each card's share follows its free VRAM at load time, unless pinned below. Saves immediately; applies on the next model load.",
+  "settings.perf.splitOrder": "Load order: {order}",
+  "settings.perf.splitOrderGpu": "GPU {index}",
   "settings.perf.singleGpuHint": "One GPU chosen: a model loads on GPU {index} ({name}) only.",
   "settings.perf.singleGpuToast": "Saved - a model loads on GPU {index} only, from the next model load",
   "settings.perf.ratioHint":
     "Optional relative weight per checked device (e.g. 3 and 1 gives the first card three times the second's share). Leave every weight blank to keep the automatic free-VRAM sizing above.",
+  "settings.perf.numberingUnknownHint":
+    "GPU numbers are not available right now: the GPU check through torch did not answer, and nvidia-smi numbers the cards its own way. The GPU choices are locked until torch answers.",
   "settings.perf.indexSpaceHint":
     "Device numbers are the installed GPU backend's own order (what a model load uses); other tools may number GPUs differently.",
   "settings.perf.splitPartialWarningToast":

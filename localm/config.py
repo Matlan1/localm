@@ -712,9 +712,6 @@ DEFAULT_CONFIG: dict = {
     # (llamacpp/_gpu_plan.py). A length mismatch is ignored (warned). Set
     # explicit ratios (e.g. [1, 1]) to pin the shares.
     "gpu_split_ratios": None,
-    # "pci_bus" once main_gpu_index / gpu_split_indices are in PCI-bus GPU
-    # numbering (discover.renumber_saved_gpu_selection); None before.
-    "gpu_numbering": None,
     # How many chat models may stay loaded at once. None (default) = no cap:
     # free-VRAM arithmetic alone decides, so a second model loads alongside the
     # first only when it provably fits (see inference/residency.py). Set an

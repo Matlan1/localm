@@ -1188,6 +1188,23 @@ class Agent(
         """Ask the loop to stop at the next safe point (turn or token boundary)."""
         self._stop_requested = True
 
+    detached = False
+
+    @property
+    def stop_pending(self) -> bool:
+        """True once this run should stop: a stop was requested on this agent
+        or on an ancestor that is blocked on this run, or it was cancelled.
+        A detached (background) agent follows only its own stop and cancel;
+        the ancestor walk ends at it."""
+        if self._stop_requested or self.cancelled:
+            return True
+        agent = self
+        while agent is not None and not agent.detached:
+            agent = getattr(agent, "parent", None)
+            if agent is not None and getattr(agent, "_stop_requested", False):
+                return True
+        return False
+
     @property
     def cancelled(self) -> bool:
         """True once this agent, or any ancestor, has been cancelled."""
