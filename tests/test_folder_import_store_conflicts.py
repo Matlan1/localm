@@ -131,3 +131,59 @@ class TestReaddingAFolder:
         assert printed[-1] == (
             "Done: 0 registered, 2 already registered, 0 skipped or refused, 0 not usable"
         ), printed[-1]
+
+
+def _hf_pile(root: Path) -> Path:
+    hf = root / "hfm"
+    hf.mkdir(parents=True)
+    (hf / "config.json").write_text('{"model_type": "llama"}')
+    (hf / "tokenizer.json").write_text("{}")
+    (hf / "model.safetensors").write_bytes(b"x" * 64)
+    (root / "notes.txt").write_text("keep me")
+    return root
+
+
+class TestReaddingAnHfFolderWithStore:
+    def _readd(self, home, tmp_path, store):
+        pile = _hf_pile(tmp_path / "pile")
+        assert mm.add_local(str(pile)) is True
+        assert Path(load_registry()["hfm"]["path"]).resolve() == (pile / "hfm").resolve()
+        assert mm.add_local(str(pile), store=store) is True
+        return pile
+
+    def _stored_paths(self, home):
+        models = (home / "models").resolve()
+        return {Path(e["path"]).resolve() for e in load_registry().values()
+                if Path(e["path"]).resolve().parent == models}
+
+    def test_move_registers_the_stored_folder_in_the_same_call(
+            self, home, tmp_path, printed):
+        pile = self._readd(home, tmp_path, "move")
+        assert self._stored_paths(home) == {(home / "models" / "hfm").resolve()}
+        assert (home / "models" / "hfm" / "config.json").is_file()
+        assert not (pile / "hfm").exists()
+        assert (pile / "notes.txt").read_text() == "keep me"
+        assert not any("not registered" in line for line in printed), printed
+
+    def test_copy_registers_the_stored_folder_and_keeps_the_source(
+            self, home, tmp_path, printed):
+        pile = self._readd(home, tmp_path, "copy")
+        assert self._stored_paths(home) == {(home / "models" / "hfm").resolve()}
+        assert (pile / "hfm" / "config.json").is_file()
+        assert (pile / "notes.txt").read_text() == "keep me"
+        assert not any("not registered" in line for line in printed), printed
+
+
+class TestReaddingARenamedModel:
+    def test_a_renamed_model_counts_as_already_registered(
+            self, home, tmp_path, printed):
+        folder = _folder(tmp_path / "pile")
+        assert mm.add_local(str(folder)) is True
+        assert mm.rename_model("alpha", "my-llama") is True
+        before = dict(load_registry())
+        printed.clear()
+        assert mm.add_local(str(folder)) is True
+        assert load_registry() == before
+        assert printed[-1] == (
+            "Done: 0 registered, 3 already registered, 0 skipped or refused, 0 not usable"
+        ), printed[-1]
