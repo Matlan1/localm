@@ -13,6 +13,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ### Added
 - **Segment Anything (SAM) checkpoints are recognised as `segmentation` models.** A SAM or SAM 2 `.pth` file found by a ComfyUI or StabilityMatrix scan, or sitting in a `sam`, `sams` or `segmentation` folder, is now listed as a segmentation model instead of `unknown`, and `localm set-type MODEL segmentation` and the Models page type menu offer it. localm does not run segmentation models yet, so naming one for chat is refused with a clear message.
+- **More upscalers are recognised.** ESRGAN files in the original key layout (such as 4x-UltraSharp) and Real-ESRGAN compact (SRVGGNet) files are now typed `upscaler` when pulled, added or scanned, instead of `unknown`.
 
 ### Changed
 - **Importing another localm install's folder no longer hashes every model again.** When the folder you add (or its `models` folder) belongs to another localm install, the hash that install recorded for each model is reused instead of reading the whole file, so a large library registers in seconds. A file that is missing from that install's registry, was changed after the registry was written, or has no recorded hash is hashed as before, and so is everything when the registry cannot be read.
@@ -21,6 +22,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ### Fixed
 - **A wrong API key in a GUI coder session now fails the turn with a clear message.** When the remote backend answered 401 or 403, the session used to wait for a key typed at the console the server was started from, which nobody watches. The turn now ends with an error naming the backend and saying to start a new session with a valid key. The terminal coder still asks for the key.
 - **Importing a folder of models into an install that already has some no longer fails.** With the move or copy option, a model already in the models folder under the same name and with the same content is now used as it is (the original is left where it was) and the rest of the folder imports. A different file under the same name is skipped with a message instead of aborting the whole import.
+- **Pulling a vision model again attaches a good projector in place of a damaged one.** When the projector next to the model does not match the digest its repo publishes and has no record of where it came from, the fresh copy was downloaded but never attached, so the model kept loading the damaged file. The pull now points the model at the good copy and says so.
+- **A full-repo pull says when a weight file cannot be checked.** A weight file with no published digest now gets the same "not checked" note a single-file pull prints.
+- **`--redownload` works on a revision folder localm cannot identify, and a git clone with Windows line endings is accepted.** `localm pull owner/repo@revision --redownload` no longer refuses a folder that holds files but no marker, and a clone whose text files were checked out with CRLF line endings is recognised as that revision instead of refused.
+- **A model whose `config.json` holds an invalid value gives a clear refusal.** A Hugging Face model with, for example, a 4300-digit hidden size now stops with one sentence naming the problem (the number shortened) instead of a traceback and the unexpected-error banner.
+- **The message for a vision projector that no model records no longer claims every model in its folder owns it.** It says that no model records it and lists the chat models in the same folder.
+- **The VRAM confirmation for a mixture-of-experts model says what will happen.** It now says the experts stay in system RAM (and layers move to the CPU only if that is still too large) instead of "partial CPU offload".
+- **A vision projector that llama.cpp places on the CPU, or that it advises needs more image tokens, is reported.** localm warns when the projector loads on the CPU although the GPU was requested (image encoding is then much slower), and relays the advice to raise the minimum image tokens for Qwen-VL projectors.
 
 ## [0.3.1] - 2026-10-22
 

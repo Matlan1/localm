@@ -253,6 +253,11 @@ class TestMessages:
                        "let the backend fall back to partial CPU offload, which "
                        "is slower")}
 
+    def test_degraded_load_confirm_for_a_moe_model_names_the_experts(self):
+        detail = sa.degraded_load_confirm("m", 4800 * MB, 3000 * MB, moe=True)["detail"]
+        assert "keep the experts in system RAM" in detail
+        assert "partial CPU offload" not in detail
+
     def test_busy_victim_confirm(self):
         assert sa.busy_victim_confirm("m", "v", "still in use") == {
             "status": "confirm_required", "model": "m",
