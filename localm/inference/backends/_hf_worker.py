@@ -27,6 +27,7 @@ import hashlib
 import inspect
 import io
 import logging
+import os
 import sys
 import threading
 from collections import OrderedDict
@@ -45,6 +46,141 @@ def _invalid_config_errors() -> tuple:
     except ImportError:
         return (ValueError,)
     return (ValueError, StrictDataclassError)
+
+
+def _load_text_tokenizer(tr, model_path, trust_remote_code: bool):
+    """Load the plain tokenizer of *model_path* with transformers module *tr*.
+
+    Raises ``ModelRefusedError`` when that fails with a ``ValueError`` or a
+    ``StrictDataclassError``. The headline says the configuration is not valid
+    only when ``AutoConfig`` itself rejects the model's ``config.json``; any
+    other such failure (no tokenizer files, an unresolvable tokenizer class, a
+    SentencePiece or tiktoken file whose package is missing) is headlined as a
+    tokenizer failure. Both carry the original error text."""
+    from localm.inference.backends.base import ModelRefusedError
+    from localm.inference.backends.llamacpp._runner import shorten_long_digits
+
+    def _flat(err: BaseException) -> str:
+        return " ".join(shorten_long_digits(str(err)).split())
+
+    name = Path(model_path).name
+    try:
+        with _filter_docstring_leak():
+            return tr.AutoTokenizer.from_pretrained(
+                model_path, trust_remote_code=trust_remote_code)
+    except _invalid_config_errors() as tok_err:
+        config_err: BaseException | None = None
+        if _is_strict_dataclass_error(tok_err):
+            config_err = tok_err
+        else:
+            try:
+                tr.AutoConfig.from_pretrained(
+                    model_path, trust_remote_code=trust_remote_code)
+            except _invalid_config_errors() as e:
+                config_err = e
+            except Exception as e:
+                logger.debug("hf load: config probe after a tokenizer failure raised "
+                             "%s: %s", type(e).__name__, e)
+        if config_err is not None:
+            raise ModelRefusedError(
+                f"{name} cannot be loaded: its configuration is not valid. "
+                + _flat(config_err)) from tok_err
+        raise ModelRefusedError(
+            f"{name} cannot be loaded: its tokenizer could not be loaded. "
+            + _flat(tok_err)) from tok_err
+
+
+def _is_strict_dataclass_error(err: BaseException) -> bool:
+    """True for huggingface_hub's ``StrictDataclassError`` (a validation failure
+    of a strict dataclass such as a model config)."""
+    try:
+        from huggingface_hub.errors import StrictDataclassError
+    except ImportError:
+        return False
+    return isinstance(err, StrictDataclassError)
+
+
+# The listed GPUs, in their listed order, when this process sees only them in
+# that order (_apply_gpu_order): a GPU's position here is its torch number in
+# this process. None otherwise.
+_GPU_ORDER: Optional[list] = None
+
+
+def _parse_torch_build(version_py: str) -> Optional[str]:
+    """``"hip"`` or ``"cuda"`` from the text of torch's ``version.py``: hip when
+    its ``hip`` value is set, cuda when its ``cuda`` value is set; None
+    otherwise."""
+    import re
+    values = {}
+    for key in ("hip", "cuda"):
+        m = re.search(rf"^{key}\s*(?::[^=\n]*)?=\s*(.+?)\s*$", version_py, re.MULTILINE)
+        values[key] = m.group(1) if m else None
+    if values["hip"] not in (None, "None"):
+        return "hip"
+    if values["cuda"] not in (None, "None"):
+        return "cuda"
+    return None
+
+
+def _torch_build() -> Optional[str]:
+    """``"hip"`` or ``"cuda"``: the build of the torch this process would
+    import, read from its ``version.py`` without importing torch; None when
+    that file cannot be read or names neither."""
+    try:
+        import importlib.util
+        spec = importlib.util.find_spec("torch")
+        locations = list(spec.submodule_search_locations or []) if spec else []
+        if not locations:
+            return None
+        return _parse_torch_build((Path(locations[0]) / "version.py").read_text(
+            encoding="utf-8", errors="replace"))
+    except Exception as e:
+        logger.debug("hf worker: torch build not read (%s: %s)", type(e).__name__, e)
+        return None
+
+
+def _apply_gpu_order(order: Optional[list]) -> bool:
+    """Make torch in this process see only the GPUs in *order* (GPU numbers of
+    the parent's torch), numbered from 0 in that order. On a CUDA torch build
+    it sets ``CUDA_VISIBLE_DEVICES``, narrowing an inherited value (entry N of
+    it is GPU N). On a ROCm (HIP) torch build it sets ``HIP_VISIBLE_DEVICES``,
+    narrowing an inherited ``HIP_VISIBLE_DEVICES``, else an inherited
+    ``CUDA_VISIBLE_DEVICES`` (which it then removes). Must run before torch is
+    imported. Returns True when applied (and sets ``_GPU_ORDER``); False, with
+    a WARNING, when torch is already imported, its build cannot be read, or
+    the inherited value has no entry for a GPU in *order*; False when *order*
+    is empty."""
+    global _GPU_ORDER
+    if not order:
+        return False
+    if "torch" in sys.modules:
+        logger.warning("gpu_split_indices %s: torch was loaded before the GPU order "
+                       "could be set, so the GPUs are filled by number", order)
+        return False
+    build = _torch_build()
+    if build is None:
+        logger.warning("gpu_split_indices %s: the torch build (CUDA or ROCm) could "
+                       "not be read, so the GPUs are filled by number", order)
+        return False
+    if build == "cuda":
+        var, source = "CUDA_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"
+    else:
+        var = "HIP_VISIBLE_DEVICES"
+        source = ("HIP_VISIBLE_DEVICES" if os.environ.get("HIP_VISIBLE_DEVICES", "").strip()
+                  else "CUDA_VISIBLE_DEVICES")
+    inherited = [v.strip() for v in os.environ.get(source, "").split(",") if v.strip()]
+    if inherited and any(i >= len(inherited) for i in order):
+        logger.warning("gpu_split_indices %s: %s=%s has no entry for every listed GPU, "
+                       "so the GPUs are filled by number", order, source,
+                       os.environ.get(source))
+        return False
+    visible = [inherited[i] for i in order] if inherited else [str(i) for i in order]
+    os.environ[var] = ",".join(visible)
+    if source != var:
+        os.environ.pop(source, None)
+    _GPU_ORDER = list(order)
+    logger.debug("hf worker: %s=%s (GPUs %s in this order)", var, os.environ[var], order)
+    return True
 
 
 def _require_torch():
@@ -481,6 +617,8 @@ def _cuda_device_map(torch, config: Optional[dict] = None) -> dict:
       (``discover.single_gpu_index``), else a valid ``main_gpu_index`` ->
       ``"auto"`` confined to that ONE device by the same technique (its id is
       the only GPU in ``max_memory``).
+    - when the worker sees only the listed GPUs in their listed order
+      (``_apply_gpu_order``), positions 0..N-1 stand for them in that order.
     - neither configured -> ``"auto"`` across every visible discrete device,
       each given a budget (plain ``"auto"`` when fewer than two devices can be
       read).
@@ -501,6 +639,16 @@ def _cuda_device_map(torch, config: Optional[dict] = None) -> dict:
     from localm.discover import (resolve_gpu_split, resolve_main_gpu_index,
                                  single_gpu_index)
     cfg = config if config is not None else load_config()
+    if _GPU_ORDER:
+        # This process sees only the listed GPUs, numbered from 0 in their order.
+        ratios = cfg.get("gpu_split_ratios")
+        if isinstance(ratios, (list, tuple)) and len(ratios) == len(cfg.get("gpu_split_indices") or []):
+            by_gpu = dict(zip(cfg.get("gpu_split_indices") or [], ratios, strict=True))
+            ratios = [by_gpu.get(i) for i in _GPU_ORDER]
+        else:
+            ratios = None
+        cfg = dict(cfg, gpu_split_indices=list(range(len(_GPU_ORDER))),
+                   gpu_split_ratios=ratios, main_gpu_index=None)
 
     headroom = int(0.5e9)   # kept free on the one device of a one-device placement
     from localm.vram import VRAM_OVERHEAD_BYTES
@@ -1437,9 +1585,11 @@ class HFWorker:
     can_be_multimodal = True
 
     def __init__(self, model_path: str, device: Optional[str] = None,
-                 task: str = "chat") -> None:
+                 task: str = "chat", gpu_order: Optional[list] = None) -> None:
         self.model_path = str(Path(model_path).resolve())
         self._device = device      # None = auto-detect
+        # The listed GPUs in their order, applied before torch loads (_apply_gpu_order).
+        self._gpu_order = gpu_order
         # "chat" for every ordinary model; "rerank" loads the checkpoint's
         # sequence-classification head for rerank() instead.
         self.task = task
@@ -1496,6 +1646,7 @@ class HFWorker:
         # This method only needs the boolean for the trust_remote_code= kwarg
         # below.
         trust_remote_code = _trust_remote_code_enabled()
+        _apply_gpu_order(self._gpu_order)
         torch = _require_torch()
         from localm.inference.backends import _st_plan
         self._st_plan = (_st_plan.load_plan(self.model_path)
@@ -1550,7 +1701,9 @@ class HFWorker:
                 # device to name nor sortable against an int.
                 gpus = sorted(i for i in device_map_kwargs["max_memory"]
                               if isinstance(i, int))
-                names = ", ".join(f"{i}:{torch.cuda.get_device_name(i)}" for i in gpus)
+                names = ", ".join(
+                    f"{_GPU_ORDER[i] if _GPU_ORDER and i < len(_GPU_ORDER) else i}:"
+                    f"{torch.cuda.get_device_name(i)}" for i in gpus)
                 where = f"split across {names}" if len(gpus) > 1 else names
                 logger.debug("hf load: gpu=%s (overflow to CPU if needed)", where)
             else:
@@ -1589,17 +1742,7 @@ class HFWorker:
                 "processor load failed (%s); falling back to text-only tokenizer", shown)
             self._processor = None
             self.processor_error = shown
-            try:
-                with _filter_docstring_leak():
-                    self._tokenizer = tr.AutoTokenizer.from_pretrained(
-                        self.model_path, trust_remote_code=trust_remote_code
-                    )
-            except _invalid_config_errors() as tok_err:
-                from localm.inference.backends.base import ModelRefusedError
-                raise ModelRefusedError(
-                    f"{Path(self.model_path).name} cannot be loaded: its configuration "
-                    f"is not valid. "
-                    + " ".join(shorten_long_digits(str(tok_err)).split())) from tok_err
+            self._tokenizer = _load_text_tokenizer(tr, self.model_path, trust_remote_code)
 
         # --- Model ---
         logger.debug("hf load: loading weights")

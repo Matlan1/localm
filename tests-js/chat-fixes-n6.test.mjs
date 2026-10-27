@@ -179,6 +179,196 @@ test("a Qwen3-ASR reply shows the transcript without the language prefix", () =>
   assert.doesNotMatch(none.textContent, /language|asr_text/);
 });
 
+const noMath = (out, why) => {
+  assert.equal(out.querySelectorAll(".katex, .katex-error").length, 0, why);
+};
+
+test("price markers of two or more dollar signs keep the markdown between them", () => {
+  const win = loadRealPipeline();
+  const numbered = render(win,
+    "1. **Cafe Luna** ($$) cosy\n2. **Taco Hut** ($) cheap\n3. **Le Bernardin** ($$$$) fancy");
+  assert.equal(numbered.querySelectorAll("ol > li").length, 3);
+  assert.equal(numbered.querySelectorAll("strong").length, 3);
+  assert.equal(numbered.querySelectorAll(".katex-error").length, 0);
+  assert.doesNotMatch(numbered.textContent, /\*\*/);
+
+  const bullets = render(win, "- **A** ($$)\n- **B** ($$$)\n- **C** ($)");
+  assert.equal(bullets.querySelectorAll("ul > li").length, 3);
+  noMath(bullets, "bullet list");
+
+  const paragraphs = render(win, "Price: $$ for A.\n\nPrice: $$$ for B.");
+  assert.equal(paragraphs.querySelectorAll("p").length, 2);
+  noMath(paragraphs, "paragraphs");
+
+  const heading = render(win, "Cheap ($$)\n\n## Heading\n\nmore ($$)");
+  assert.equal(heading.querySelectorAll("h2").length, 1);
+  assert.doesNotMatch(heading.textContent, /##/);
+  noMath(heading, "heading");
+
+  for (const line of ["Cafe: $$, Taco: $$ and Bar $$.", "Cafe ($$), Taco ($$), Bar ($$$$)", "A $$ b, C $$ d"]) {
+    assert.equal(win.protectMath(line).text, line, line);
+  }
+
+  const alone = render(win, "Cheap\n$$\n- Taco\n$$\nfancy");
+  noMath(alone, "a list between two lines holding only $$");
+});
+
+test("display math on one line or across lines is still typeset", () => {
+  const win = loadRealPipeline();
+  const block = render(win, "Before\n\n$$\nx^2 + y^2\n$$\n\nAfter");
+  assert.deepEqual(tex(block).map((x) => x.trim()), ["x^2 + y^2"]);
+  assert.match(block.textContent, /Before/);
+  assert.match(block.textContent, /After/);
+
+  const aligned = render(win,
+    String.raw`$$\begin{aligned}` + "\na &= b \\\\\n  + c\n" + String.raw`\end{aligned}$$`);
+  const found = tex(aligned);
+  assert.equal(found.length, 1);
+  assert.match(found[0], /a &= b/);
+  assert.match(found[0], /\+ c/);
+  assert.equal(aligned.querySelectorAll(".katex-error").length, 0);
+
+  const line = render(win, "Then $$a_1\\,b_2$$.");
+  assert.deepEqual(tex(line), ["a_1\\,b_2"]);
+});
+
+test("single-dollar prices are not math", () => {
+  const win = loadRealPipeline();
+  for (const text of ["It costs $5 and $10, or $5-$10, not $20.", "From $3 up, $4 for two."]) {
+    assert.equal(win.protectMath(text).text, text);
+  }
+});
+
+const okResponse = { ok: true, status: 200, headers: { get: () => null },
+  json: async () => ({}), text: async () => "" };
+
+test("a Qwen3-ASR prefix is left out of Copy, Speak and the stored reply", async () => {
+  const raw = "language English<asr_text>Please remember the meeting.";
+  const { window } = loadApp({ fetchImpl: async () => okResponse });
+  stubStream(window);
+  window.readSSE = async (_r, onData) => {
+    onData(JSON.stringify({ choices: [{ delta: { content: "language Eng" } }] }));
+    onData(JSON.stringify({ choices: [{ delta: { content: "lish<asr_text>Please remember the meeting." } }] }));
+    onData(JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] }));
+  };
+  const conv = { id: "c1", title: "t", messages: [{ role: "user", content: "transcribe" }] };
+  await window.runCompletion(conv);
+  const reply = conv.messages.find((m) => m.role === "assistant");
+  assert.equal(reply.content, "Please remember the meeting.", "the stored reply");
+
+  const writes = [];
+  Object.defineProperty(window.navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: (t) => { writes.push(t); return Promise.resolve(); } },
+  });
+  const box = window.document.createElement("div");
+  window.document.body.appendChild(box);
+  window.addMessageRow(box, "assistant", raw, {});
+  box.querySelector(".copy-btn").click();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(writes, ["Please remember the meeting."], "Copy of a reply stored with the prefix");
+
+  window.speak(raw);
+  assert.equal(window.__spoken.length, 1);
+  assert.equal(window.__spoken[0].text, "Please remember the meeting.", "Speak");
+});
+
+const refuseImageWithAudio = (calls, onlyWhenBoth) => async (url, opts = {}) => {
+  let body = null;
+  try { body = opts.body ? JSON.parse(opts.body) : null; } catch { body = null; }
+  calls.push({ url: String(url), body });
+  if (String(url) === "/v1/chat/completions") {
+    const text = JSON.stringify(body.messages);
+    if (text.includes("image_url") && (!onlyWhenBoth || text.includes("input_audio"))) {
+      return { ok: false, status: 400,
+        headers: { get: (k) => (k === "X-Localm-Refusal" ? "image" : null) },
+        json: async () => ({ detail: "This model cannot accept image input." }),
+        text: async () => "" };
+    }
+  }
+  return okResponse;
+};
+
+const imageThenClip = () => [
+  { role: "user", content: [
+    { type: "text", text: "what colour?" },
+    { type: "image_url", image_url: { url: IMG } },
+  ] },
+  { role: "assistant", content: "Red." },
+  { role: "user", content: [
+    { type: "text", text: "transcribe" },
+    { type: "input_audio", input_audio: { data: WAV_B64, format: "wav" }, name: "clip.wav", seconds: 2 },
+  ] },
+  { role: "assistant", content: "hello there" },
+];
+
+test("a text turn after an audio turn leaves the clip out of the request and keeps both attachments", async () => {
+  const calls = [];
+  const { window } = loadApp({ fetchImpl: refuseImageWithAudio(calls, true) });
+  stubStream(window);
+  const conv = { id: "c1", title: "t",
+    messages: [...imageThenClip(), { role: "user", content: "thanks, and in one word?" }] };
+  await window.runCompletion(conv);
+
+  const posts = chatCalls(calls);
+  assert.equal(posts.length, 1, "no refused request, no repeat");
+  const sent = JSON.stringify(posts[0].body.messages);
+  assert.equal(sent.includes("input_audio"), false, "no clip on the wire");
+  assert.equal(sent.includes("image_url"), true, "the image is still sent");
+  assert.equal(window.msgImages(conv.messages[0]).length, 1, "the conversation keeps the image");
+  assert.equal(window.msgAudioClips(conv.messages[2]).length, 1, "the conversation keeps the clip");
+  assert.ok(conv.messages.some((m) => m.role === "assistant" && m.content === "a reply"),
+    "the text turn is answered");
+});
+
+test("a text turn in a chat with clips and no image still sends the clips", async () => {
+  const calls = [];
+  const { window } = loadApp({ fetchImpl: refuseImageWithAudio(calls, true) });
+  stubStream(window);
+  const conv = { id: "c1", title: "t",
+    messages: [...imageThenClip().slice(2), { role: "user", content: "again?" }] };
+  await window.runCompletion(conv);
+  const posts = chatCalls(calls);
+  assert.equal(posts.length, 1);
+  assert.equal(JSON.stringify(posts[0].body.messages).includes("input_audio"), true);
+});
+
+test("the elided repeat of an audio turn tells the user the images were left out", async () => {
+  const calls = [];
+  const { window } = loadApp({ fetchImpl: refuseImageWithAudio(calls, false) });
+  stubStream(window);
+  const toasts = [];
+  window.toast = (msg) => { toasts.push(String(msg)); };
+  const conv = { id: "c1", title: "t", messages: imageThenClip().slice(0, 3) };
+  await window.runCompletion(conv);
+  assert.equal(chatCalls(calls).length, 2);
+  assert.ok(toasts.some((m) => /cannot read images/.test(m) && /left out/.test(m)), toasts.join(" | "));
+});
+
+test("the wire helpers leave the conversation untouched", () => {
+  const { window } = loadApp();
+  const conv = { messages: imageThenClip() };
+  assert.equal(window.latestTurnIsAudioOnly({ messages: imageThenClip().slice(0, 3) }), true);
+  assert.equal(window.latestTurnIsAudioOnly({ messages: imageThenClip().slice(0, 1) }), false, "an image turn");
+  assert.equal(window.latestTurnIsAudioOnly({ messages: [...imageThenClip(), { role: "user", content: "hi" }] }),
+    false, "a text turn");
+  assert.equal(window.latestTurnHasAudio({ messages: imageThenClip().slice(0, 3) }), true);
+  assert.equal(window.latestTurnHasAudio({ messages: [...imageThenClip(), { role: "user", content: "hi" }] }), false);
+
+  const wire = JSON.parse(JSON.stringify(conv.messages));
+  assert.equal(window.wireHasImageAndAudio(wire), true);
+  window.elideImagesForWire(wire);
+  assert.equal(JSON.stringify(wire).includes("image_url"), false);
+  assert.equal(JSON.stringify(wire).includes("input_audio"), true);
+  assert.equal(window.wireHasImageAndAudio(wire), false);
+  const wire2 = JSON.parse(JSON.stringify(conv.messages));
+  window.elideAudioForWire(wire2);
+  assert.equal(JSON.stringify(wire2).includes("input_audio"), false);
+  assert.equal(JSON.stringify(wire2).includes("image_url"), true);
+  assert.equal(JSON.stringify(conv.messages).includes("input_audio"), true, "the source is unchanged");
+  assert.equal(JSON.stringify(conv.messages).includes("image_url"), true, "the source is unchanged");
+});
+
 function compactionFixture(summaryReply) {
   const prompts = [];
   const impl = async (url, opts = {}) => {

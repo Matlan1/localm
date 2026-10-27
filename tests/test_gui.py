@@ -1468,6 +1468,23 @@ class TestGpusEndpoint:
         # JS can trust an empty/short list as a real "that is all there is".
         assert data["probe_status"] == GPU_PROBE_OK
 
+    def test_nvidia_smi_numbering_is_reported_as_the_index_space(self, gui_app):
+        app, _ = gui_app
+        fake_gpus = [
+            {"index": i, "name": f"GPU {i}", "total": 24 * 1024 ** 3,
+             "free": 20 * 1024 ** 3, "source": "nvidia-smi", "numbering": numbering}
+            for i, numbering in ((0, "nvidia-smi"), (1, "nvidia-smi"))]
+        with patch("localm.discover.list_gpus", new=probe_double(fake_gpus)), \
+             patch("localm.discover._native_gpu_index_space_is_opaque", return_value=False), \
+             patch("localm.config.load_config", return_value={"main_gpu_index": 1}):
+            with TestClient(app) as client:
+                marked = client.get("/api/gpus").json()
+                for g in fake_gpus:
+                    g["numbering"] = "torch"
+                renumbered = client.get("/api/gpus").json()
+        assert marked["index_space"] == "nvidia-smi"
+        assert "index_space" not in renumbered
+
     def test_empty_when_nothing_detected(self, gui_app):
         app, _ = gui_app
         with patch("localm.discover.list_gpus", new=probe_double([])), \

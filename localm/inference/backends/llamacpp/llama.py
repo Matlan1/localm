@@ -234,16 +234,17 @@ def _apply_projector_notices(mt, notices: dict) -> None:
     """Act on what llama.cpp reported while loading the projector *mt*
     (``_CapturedStderr.projector_notices``): a warning when it encodes images on
     the CPU although the GPU was requested (*mt* is then marked as not on the
-    GPU), and the minimum image tokens it advised, which *mt* is rebuilt with
+    GPU; the warning is skipped when the runtime has no GPU backend), and the minimum image tokens it advised, which *mt* is rebuilt with
     (:meth:`MtmdContext.apply_min_image_tokens`); a warning when the runtime's
     params layout does not allow that."""
     from localm.debuglog import logger
     if notices.get("cpu") and getattr(mt, "on_gpu", False):
         mt.on_gpu = False
-        logger.warning(
-            "mtmd: llama.cpp placed the vision projector on the CPU (CLIP using CPU "
-            "backend) although the GPU was requested, so image encoding is much "
-            "slower on large images.")
+        if api.llama_supports_gpu_offload():
+            logger.warning(
+                "mtmd: llama.cpp placed the vision projector on the CPU (CLIP using CPU "
+                "backend) although the GPU was requested, so image encoding is much "
+                "slower on large images.")
     tokens = notices.get("min_tokens")
     if not tokens:
         return
@@ -1631,8 +1632,7 @@ class LlamaCpp:
             # alive through llama_load_model_from_file below.
             _tensor_split_keepalive = apply_gpu_devices(mp, self._gpu_devices_arg)
             # The vision projector goes on main_gpu (a slot in llama.cpp's
-            # device list) when the parent chose one, else on the last device,
-            # which holds the output layer.
+            # device list) when the parent gives one, else on the last device.
             self._main_gpu_index = int(main_gpu if main_gpu is not None
                                        else self._gpu_devices_arg[-1]["slot"])
         else:

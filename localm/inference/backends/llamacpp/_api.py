@@ -76,6 +76,16 @@ def llama_backend_free() -> None:
     _bind("llama_backend_free", None)()
 
 
+def llama_supports_gpu_offload() -> bool:
+    """True when the loaded runtime has a GPU backend (``llama_supports_gpu_offload``);
+    False for a CPU-only runtime. True as well when the runtime does not export
+    the function, since its answer is then unknown."""
+    lib = load_lib()
+    if not hasattr(lib, "llama_supports_gpu_offload"):
+        return True
+    return bool(_bind("llama_supports_gpu_offload", ctypes.c_bool)())
+
+
 # ---------------------------------------------------------------------------
 #  Default params
 # ---------------------------------------------------------------------------
