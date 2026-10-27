@@ -796,7 +796,8 @@ def _delete_partials(rec: dict) -> tuple[int, list[Path]]:
         models = _resolved(_mm.MODELS_DIR)
         with _snapshot_dest_lock(name):
             current = _resolved(folder)
-            if current != folder or models is None or current.parent != models                     or current.name.lower() != name.lower():
+            if (current != folder or models is None or current.parent != models
+                    or current.name.lower() != name.lower()):
                 logger.warning("not deleting %s: it is no longer a folder in the "
                                "models folder", folder)
             elif created and folder.is_dir() and not _snapshot_is_registered(folder):
