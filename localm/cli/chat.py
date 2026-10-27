@@ -795,6 +795,17 @@ def _collect_summary(engine, messages: list, max_tokens: int) -> str:
                                           temperature=0.3, thinking=False))
 
 
+def _log_worker_death(exc: BaseException) -> None:
+    """Log the first line of a ``WorkerDiedError`` (the worker exit reason) at
+    INFO so a bug report's ring buffer carries it without a second console
+    line; any other exception is left alone. Never raises."""
+    from localm.inference.backends.base import WorkerDiedError
+    if isinstance(exc, WorkerDiedError):
+        from localm.debuglog import logger as _dbg
+        _dbg.info("generation worker died: %s",
+                  (str(exc).splitlines() or [""])[0])
+
+
 def _stream_once(engine, messages: list, **kwargs) -> str:
     """Stream response to stdout, print tok/s on completion, and return the full text."""
     import time as _time
@@ -844,6 +855,7 @@ def _stream_once(engine, messages: list, **kwargs) -> str:
         # An attached server returned an error (no model loaded, unreachable, ...).
         # Surface it cleanly instead of a traceback (the interactive path already
         # catches Exception; this is the single-prompt path).
+        _log_worker_death(e)
         console.print(f"\n[red]{escape(str(e))}[/red]")
         sys.exit(1)
     end = _time.monotonic()
@@ -1016,6 +1028,7 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
             _withdraw(messages, msg)
             continue
         except Exception as e:
+            _log_worker_death(e)
             console.print(f"\n[red]Inference error: {escape(str(e))}[/red]")
             _record_failed_turn(audit, transcript, user_input, "".join(parts), e)
             # The failed message is withdrawn so the next one is not sent after
