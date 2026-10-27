@@ -168,3 +168,18 @@ def test_a_scheduled_coder_job_fails_on_a_401_and_the_next_job_still_runs(
     assert console == []
     assert second["status"] == "ok"
     assert hits == ["Bearer wrong-key", f"Bearer {GOOD_KEY}"]
+
+
+def test_a_real_gui_coder_session_and_its_sub_agent_never_prompt(tmp_path, stub, console):
+    url, hits = stub
+    from localm.plugins.coder.sessions import CoderSession
+    session = CoderSession(tmp_path, HTTPBackend(url, "remote-model", api_key="wrong-key"),
+                           auto_verify=False)
+    child = _child(session.agent, tmp_path, url)
+
+    for agent in (session.agent, child):
+        with pytest.raises(CoderAuthError):
+            agent._call_llm([{"role": "user", "content": "hi"}], interactive=False)
+
+    assert console == []
+    assert len(hits) == 2
