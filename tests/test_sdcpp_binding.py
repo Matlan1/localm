@@ -291,7 +291,7 @@ def test_a_ctx_default_other_than_the_pinned_init_is_reported(field, value, expe
 
 def test_a_runtime_lacking_a_bound_function_is_refused_with_the_reinstall_hint(
         monkeypatch, tmp_path):
-    class _Lib(_FakeLib):
+    class _Lib:
         def __getattr__(self, name):
             if name == "free_sd_video_generation_result":
                 raise AttributeError(f"function '{name}' not found")
