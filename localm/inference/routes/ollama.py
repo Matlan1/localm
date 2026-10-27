@@ -32,6 +32,7 @@ import localm.inference.http_server as _hs
 from localm import peer_routing, scopes
 from localm.executor import get_plugin_executor
 from localm.inference import ollama_protocol as P
+from localm.inference.errors import UNDECODABLE_BODY_MESSAGE, is_undecodable_body
 from localm.inference.protocol import ChatRequest, EmbeddingRequest
 from localm.inference.routes._chat_bridge import (
     EndpointMissing, chat_endpoint, collect_body, derived_request, validation_text,
@@ -68,6 +69,8 @@ class OllamaRoute(APIRoute):
             except P.OllamaError as exc:
                 return _error(exc.status, exc.message)
             except StarletteHTTPException as exc:
+                if is_undecodable_body(exc):
+                    return _error(400, UNDECODABLE_BODY_MESSAGE)
                 detail = exc.detail if isinstance(exc.detail, str) else json.dumps(exc.detail)
                 return _error(exc.status_code, detail, exc.headers)
             except RequestValidationError as exc:

@@ -25,6 +25,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 import localm.inference.http_server as _hs
 from localm.inference import responses_protocol as R
 from localm.inference.ollama_protocol import iter_sse_json
+from localm.inference.errors import UNDECODABLE_BODY_MESSAGE, is_undecodable_body
 from localm.inference.protocol import ChatRequest
 from localm.inference.routes._chat_bridge import (
     EndpointMissing, chat_endpoint, collect_body, derived_request, validation_text,
@@ -45,6 +46,8 @@ class ResponsesRoute(APIRoute):
             except R.ResponsesError as exc:
                 return _error(exc.status, exc.message, exc.param)
             except StarletteHTTPException as exc:
+                if is_undecodable_body(exc):
+                    return _error(400, UNDECODABLE_BODY_MESSAGE)
                 detail = exc.detail if isinstance(exc.detail, str) else json.dumps(exc.detail)
                 return _error(exc.status_code, detail, headers=exc.headers)
             except RequestValidationError as exc:

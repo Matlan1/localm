@@ -125,6 +125,51 @@ def answer_with(engines: EngineCache, decision, run):
     raise RuntimeError("no model could answer: " + "; ".join(errors))
 
 
+_CONFIGURED_EMBEDDER = "configured"
+
+
+def _named_embedding_path(model: Optional[str]) -> Optional[str]:
+    """How to embed when *model* names a registered embedding GGUF or the
+    configured ``embedding_model``, else None (no name, an unregistered or
+    non-embedding name, or a model folder: all served by the engine path).
+    Returns the GGUF file to embed with, or :data:`_CONFIGURED_EMBEDDER` when
+    the configured embedder serves it. Raises ``reranker.RerankerModelError``
+    for a reranker or a broken entry. Blocking."""
+    name = (model or "").strip()
+    if not name:
+        return None
+    from localm.config import load_config, load_registry
+    from localm.inference import reranker
+    from localm.model_manager.registry import entry_is_reranker
+    entry = load_registry().get(name)
+    configured = str(load_config().get("embedding_model") or "").strip()
+    if name == configured:
+        return _CONFIGURED_EMBEDDER
+    if not isinstance(entry, dict) or entry.get("model_type") != "embedding":
+        return None
+    if entry_is_reranker(name, entry):
+        raise reranker.RerankerModelError(
+            f"Model {name!r} is a reranker, not an embedding model: it scores "
+            "query and document pairs (use the rerank tool).", 422)
+    raw = str(entry.get("path") or "")
+    if raw and Path(raw).is_dir():
+        return None
+    return reranker.named_embedding_path(name, entry) or _CONFIGURED_EMBEDDER
+
+
+def _registered_embedding_model() -> bool:
+    """True when the registry holds an entry of model type 'embedding'; False
+    when the registry cannot be read."""
+    try:
+        from localm.config import load_registry
+        return any(isinstance(e, dict) and e.get("model_type") == "embedding"
+                   for e in load_registry().values())
+    except Exception as e:
+        from localm.debuglog import logger
+        logger.debug("mcp: registered-embedding probe failed: %s", e)
+        return False
+
+
 def build(engines: EngineCache) -> dict[str, dict]:
     """``chat`` and ``embed``, both served from *engines*, and ``rerank``,
     served by the reranker model."""
@@ -174,6 +219,30 @@ def build(engines: EngineCache) -> dict[str, dict]:
             texts = [texts]
         if not texts:
             return _text_result("'texts' is required (string or list)", is_error=True)
+        from localm.inference import reranker
+        from localm.inference.backends.base import PretokenizerUnsafeInputError
+        try:
+            with _quiet_stdout():
+                named_path = _named_embedding_path(args.get("model"))
+        except reranker.RerankerModelError as e:
+            return _text_result(str(e), is_error=True)
+        if named_path is not None:
+            try:
+                with _quiet_stdout():
+                    if named_path == _CONFIGURED_EMBEDDER:
+                        from localm.inference.embedder import embed_texts, last_error
+                        vecs = embed_texts(list(texts))
+                        if vecs is None:
+                            return _text_result(
+                                f"Embedding model unavailable ({last_error() or 'not installed'}). "
+                                "Run 'localm setup-embeddings'.", is_error=True)
+                    else:
+                        vecs = reranker.embed(named_path, texts)
+            except (reranker.RerankerUnavailableError, PretokenizerUnsafeInputError,
+                    RuntimeError) as e:
+                return _text_result(f"Embedding failed: {e}", is_error=True)
+            return _text_result(json.dumps(vecs))
+
         def _embed_once():
             # A fresh embedder load can print to stdout too, like chat() above.
             with _quiet_stdout():

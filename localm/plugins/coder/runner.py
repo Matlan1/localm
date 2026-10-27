@@ -192,7 +192,8 @@ def build_agent(backend, work_dir: Path, *, task: str, max_turns: int,
                 dry_run: bool = False, scope: Optional[str] = None,
                 custom_instructions: Optional[str] = None, verify_cmd=None,
                 browser_enabled: bool = False, on_event=None,
-                max_tokens_explicit: bool = False) -> Agent:
+                max_tokens_explicit: bool = False,
+                server_side: bool = False) -> Agent:
     """Construct the Agent for a session the way the CLI does.
 
     A one-shot task auto-approves file writes; without ``auto_approve`` the
@@ -202,7 +203,11 @@ def build_agent(backend, work_dir: Path, *, task: str, max_turns: int,
     ``max_tokens_explicit`` should be ``TaskConfig.max_tokens_explicit`` from
     the same ``resolve_task_config`` call that produced ``gen_kw``, so a later
     ``set_model`` can tell a project/CLI-pinned max_tokens from the
-    cli_max_tokens default."""
+    cli_max_tokens default.
+
+    ``server_side`` marks an agent that runs inside the server (the MCP
+    ``run_coder_task`` tool): a backend 401 fails the turn instead of asking for
+    a key on the server's console."""
     always_confirm = set(always_confirm or ())
     if unattended_shell_gated(task, auto_approve):
         always_confirm = set(always_confirm) | set(_SHELL_EXEC_TOOLS)
@@ -222,6 +227,7 @@ def build_agent(backend, work_dir: Path, *, task: str, max_turns: int,
         browser_enabled=browser_enabled,
         max_tokens_explicit=max_tokens_explicit,
         on_event=on_event,
+        server_side=server_side,
         # Only the interactive REPL (no task) can answer a question or approve a plan.
         interactive_tools=not task,
         **(gen_kw or {}),
@@ -346,8 +352,13 @@ def finish_agent(agent: Agent) -> Optional[Path]:
 
 
 def run_task_with_timeout(agent: Agent, task: str, timeout: Optional[float],
-                          *, on_finished=None) -> TaskResult:
+                          *, on_finished=None,
+                          requested_timeout: Optional[float] = None) -> TaskResult:
     """Run one task on a worker thread, then close the agent there.
+
+    ``requested_timeout``, when given, is the budget the timeout messages name
+    (a caller that spent part of its budget before this call passes the
+    remainder as ``timeout``).
 
     ``on_finished`` runs on the worker thread once the agent is closed, whether
     or not the caller is still waiting. When ``timeout`` elapses the run is
@@ -393,9 +404,10 @@ def run_task_with_timeout(agent: Agent, task: str, timeout: Optional[float],
             raise box["close_error"]
         return box["result"]
     box["cancelled"] = True
-    agent.cancel(f"timed out after {timeout:g}s")
+    shown = timeout if requested_timeout is None else requested_timeout
+    agent.cancel(f"timed out after {shown:g}s")
     worker.join(STOP_GRACE_SECONDS)
-    note = f"coder task timed out after {timeout:g}s and was cancelled"
+    note = f"coder task timed out after {shown:g}s and was cancelled"
     if worker.is_alive():
         response = (f"{note}: no further tool call will run; it is being "
                     "wound down")
