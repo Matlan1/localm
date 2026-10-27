@@ -307,6 +307,10 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # How the last load chose its n_gpu_layers (see
         # VramSizingMixin._record_gpu_sizing), or None before the first sizing.
         self.last_gpu_sizing: Optional[dict] = None
+        # The last load's placement over 2+ GPUs (_gpu_plan.Placement) and its
+        # GPU list, or None and [] for a load on one GPU or the CPU.
+        self._gpu_placement = None
+        self._gpu_placement_devices: list = []
         # The isolated worker process holding the real model. None until load()
         # succeeds.
         self._runner = None
@@ -706,10 +710,22 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         (``last_gpu_sizing``), so memory another process took after planning
         counts. It names both figures, where they were read
         (the GPU, or the N GPUs of a split) and the options
-        ``_vram_fit_options`` gives for that free figure. Never raises."""
+        ``_vram_fit_options`` gives for that free figure. A load placed over
+        several GPUs (``_gpu_placement``) names each GPU whose planned charge
+        exceeded its free VRAM instead. Never raises."""
         layers = self.effective_gpu_layers
         if not layers:
             return ""
+        placement = getattr(self, "_gpu_placement", None)
+        if placement is not None:
+            short = [d for d in placement.loads if not d.fits]
+            if not short:
+                return ""
+            return " " + "; ".join(
+                f"GPU {d.device.index} needed about {d.need / 1024**3:.1f} GB of VRAM "
+                f"and had {d.device.free / 1024**3:.1f} GB free" for d in short) + (
+                " - free VRAM on those GPUs, untick them under Settings > Split "
+                "across GPUs, or offload fewer layers (-g).")
         try:
             planned = self._planned_vram(layers)
             if planned is None:
@@ -798,11 +814,6 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # load() resolves this before _check_vram; recompute it for a direct
         # _load_native() call so the value is never None here. Resolved before the
         # VRAM-display read below, which is skipped for a CPU-only load.
-        gpu_layers = self.effective_gpu_layers
-        if gpu_layers is None:
-            gpu_layers = self._effective_gpu_layers()
-            self.effective_gpu_layers = gpu_layers
-
         # VRAM before load, read through discover.list_gpus so it gets the same
         # cross-process correction and trust gate as every other VRAM display.
         # wait_for_inflight=True requires running off the event loop; this method
@@ -810,14 +821,32 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         #
         # Skipped for a CPU-only load (gpu_layers == 0): nothing is placed on a
         # GPU, and this would otherwise be the first VRAM touch of the process.
-        from localm.discover import list_gpus
-        vram_before, vram_before_status = [], None
-        if gpu_layers != 0:
+        from localm.discover import GPU_PROBE_OK, list_gpus
+
+        def _read_before():
             try:
-                vram_before, vram_before_status = list_gpus(
-                    return_status=True, wait_for_inflight=True)
+                return list_gpus(return_status=True, wait_for_inflight=True)
             except Exception:
-                vram_before, vram_before_status = [], None
+                return [], None
+
+        gpu_layers = self.effective_gpu_layers
+        vram_before, vram_before_status = [], None
+        read = False
+        if gpu_layers is None:
+            # Sized here (a direct call, not through load()): the placement is
+            # planned from the same reading as the VRAM-before figure.
+            if self.n_gpu_layers != 0:
+                vram_before, vram_before_status = _read_before()
+                read = True
+            self._sizing_gpus = (vram_before if vram_before_status == GPU_PROBE_OK
+                                 else None)
+            try:
+                gpu_layers = self._effective_gpu_layers()
+            finally:
+                self._sizing_gpus = None
+            self.effective_gpu_layers = gpu_layers
+        if gpu_layers != 0 and not read:
+            vram_before, vram_before_status = _read_before()
 
         # Resolve the effective split distribution parent-side and pin it into the
         # worker: with gpu_split_ratios unset this is the auto
@@ -837,21 +866,38 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                                      default_split_main_gpu, fit_main_gpu,
                                      resolve_auto_split_ratios, resolve_gpu_split,
                                      single_gpu_placement)
-        auto_ratios = resolve_auto_split_ratios(wait_for_inflight=True)
-        worker_split = auto_ratios
-        main_gpu = None
         self._split_fit_note = ""
         self._fit_source_index = {}
         self.load_gpu_index = None
         placement = None
         plan = None
-        if gpu_layers != 0:
+        # A load spread over 2+ GPUs carries its placement (_plan_gpu_placement):
+        # the worker gets exactly those devices and layer counts.
+        gpu_placement = getattr(self, "_gpu_placement", None) if gpu_layers != 0 else None
+        gpu_devices = None
+        if gpu_placement is not None and gpu_placement.loads:
+            gpu_devices = [{"slot": d.device.slot, "device_id": d.device.device_id,
+                            "units": d.units} for d in gpu_placement.loads]
+            self._fit_source_index = {d.device.slot: d.device.index
+                                      for d in gpu_placement.loads}
+            # The vision projector's GPU: the configured main_gpu_index when the
+            # placement uses it, else the worker's default (the output GPU).
+            chosen_main = load_config().get("main_gpu_index")
+            main_slot = next((d.device.slot for d in gpu_placement.loads
+                              if d.device.index == chosen_main), None)
+        auto_ratios = (None if gpu_devices is not None
+                       else resolve_auto_split_ratios(wait_for_inflight=True))
+        worker_split = auto_ratios
+        main_gpu = None
+        if gpu_layers != 0 and gpu_devices is None:
             placement = configured_split_placement(ratios=auto_ratios,
                                                    gpus=vram_before,
                                                    wait_for_inflight=True)
             if placement is None and not auto_ratios:
                 placement = single_gpu_placement(wait_for_inflight=True)
-        if placement is not None:
+        if gpu_devices is not None:
+            main_gpu = main_slot
+        elif placement is not None:
             worker_split, main_gpu = placement.mapping, placement.main_gpu
             if len(placement.mapping) == 1:
                 from localm.discover import single_gpu_index
@@ -869,16 +915,21 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                     self.load_gpu_index = self._fit_source_index.get(slot, slot)
             elif plan is not None and not plan.default_fits:
                 self._report_split_fit(plan)
-        if gpu_layers != 0 and placement is None and not isinstance(worker_split, dict):
+        if (gpu_layers != 0 and gpu_devices is None and placement is None
+                and not isinstance(worker_split, dict)):
             main_gpu = default_split_main_gpu(gpus=vram_before, wait_for_inflight=True)
 
         # The context ceiling is sized from the devices this load uses: a fit
-        # that leaves devices out bounds it by the devices it keeps.
-        ctx_budget = None
-        if plan is not None and plan.tensor_split:
-            used = [c for c in plan.default if c.index in plan.tensor_split]
-            ctx_budget = (sum(c.free for c in used), len(used))
-        ctx_max = self._effective_ctx_max(split_budget=ctx_budget)
+        # that leaves devices out bounds it by the devices it keeps, and a
+        # placement by the device that fills first as the window grows.
+        if gpu_devices is not None:
+            ctx_max = self._placement_ctx_max(gpu_placement)
+        else:
+            ctx_budget = None
+            if plan is not None and plan.tensor_split:
+                used = [c for c in plan.default if c.index in plan.tensor_split]
+                ctx_budget = (sum(c.free for c in used), len(used))
+            ctx_max = self._effective_ctx_max(split_budget=ctx_budget)
         self.effective_ctx_max = ctx_max
 
         # Whether the worker memory-maps the model file (VramSizingMixin.
@@ -894,7 +945,18 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         cfg = load_config()
         _display_ratios = auto_ratios if auto_ratios else cfg.get("gpu_split_ratios")
         _pairs = resolve_gpu_split(cfg.get("gpu_split_indices"), _display_ratios)
-        if placement is not None and not placement.mapping:
+        if gpu_devices is not None:
+            units = sum(d.units for d in gpu_placement.loads) or 1
+            pinned = all(d.device.ratio is not None for d in gpu_placement.loads)
+            self.applied_gpu_split = {
+                "source": "pinned" if pinned else "auto",
+                "devices": [{"index": d.device.index, "share": d.units / units,
+                             "layers": len(d.layers), "output": d.output}
+                            for d in gpu_placement.loads],
+            } if len(gpu_placement.loads) >= 2 else None
+            if len(gpu_placement.loads) == 1:
+                self.load_gpu_index = gpu_placement.loads[0].device.index
+        elif placement is not None and not placement.mapping:
             self.applied_gpu_split = None
         elif isinstance(worker_split, dict) and placement is None:
             self.applied_gpu_split = {
@@ -943,6 +1005,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             params["spec_draft_tokens"] = int(self.spec_draft_tokens)
         if main_gpu is not None:
             params["main_gpu"] = main_gpu
+        if gpu_devices is not None:
+            params["gpu_devices"] = gpu_devices
         if self.is_diffusion:
             for key in ("diffusion_steps", "diffusion_max_tokens"):
                 value = cfg.get(key)

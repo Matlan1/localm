@@ -814,7 +814,10 @@ def native_device_inventory() -> Optional[list]:
     ``description`` is the human device name when the build exposes
     ``ggml_backend_dev_description`` (ggml-vulkan's terse ``name`` is
     "Vulkan<n>"), else "". ``free``/``total`` are ``ggml_backend_dev_memory``'s
-    live bytes, 0 when that call fails for a device.
+    live bytes, 0 when that call fails for a device. ``device_id`` is the
+    lower-case PCI bus id ``ggml_backend_dev_get_props`` reports
+    (``"0000:2d:00.0"``), present only when the build exports that call and
+    the backend knows the id.
 
     Calls ``load_lib()`` and per-device native queries IN-PROCESS: the memory
     query shares ``gpu_memory()``'s abort risk (see its RISK docstring), so
@@ -875,11 +878,76 @@ def native_device_inventory() -> Optional[list]:
                     free, total = int(f.value), int(t.value)
                 except Exception:
                     free = total = 0   # memory unreadable; the device itself still counts
-            out.append({"index": len(out), "name": name, "description": desc,
-                        "type": dev_type, "free": free, "total": total})
+            entry = {"index": len(out), "name": name, "description": desc,
+                     "type": dev_type, "free": free, "total": total}
+            device_id = _device_pci_id(handles, dev)
+            if device_id:
+                entry["device_id"] = device_id
+            out.append(entry)
         except Exception:
             # One unreadable device must not lose the others.
             continue
+    return out
+
+
+class _GgmlDevCaps(ctypes.Structure):
+    _fields_ = [("async_", ctypes.c_bool), ("host_buffer", ctypes.c_bool),
+                ("buffer_from_host_ptr", ctypes.c_bool), ("events", ctypes.c_bool),
+                ("mmap_support", ctypes.c_bool)]
+
+
+class _GgmlDevProps(ctypes.Structure):
+    """``struct ggml_backend_dev_props``, with trailing room for fields a newer
+    build appends."""
+    _fields_ = [("name", ctypes.c_char_p), ("description", ctypes.c_char_p),
+                ("memory_free", ctypes.c_size_t), ("memory_total", ctypes.c_size_t),
+                ("type", ctypes.c_int), ("device_id", ctypes.c_char_p),
+                ("caps", _GgmlDevCaps), ("_room", ctypes.c_char * 256)]
+
+
+def _device_pci_id(handles, dev) -> Optional[str]:
+    """The lower-case PCI bus id of ggml device *dev*
+    (``ggml_backend_dev_get_props``' ``device_id``), or None when the build
+    does not export the call or the backend does not know the id."""
+    props_fn = _ggml_sym(handles, "ggml_backend_dev_get_props")
+    if props_fn is None:
+        return None
+    try:
+        props_fn.restype = None
+        props_fn.argtypes = [ctypes.c_void_p, ctypes.POINTER(_GgmlDevProps)]
+        props = _GgmlDevProps()
+        props_fn(dev, ctypes.byref(props))
+        raw = props.device_id
+        return raw.decode("ascii", "replace").strip().lower() if raw else None
+    except Exception as e:
+        logger.debug("ggml_backend_dev_get_props failed (%s)", type(e).__name__)
+        return None
+
+
+def gpu_device_handles() -> list:
+    """``[(handle, device_id or None), ...]`` for the GPU-type
+    (:data:`GGML_DEV_TYPE_GPU`) devices of the native registry, in registry
+    order: llama.cpp's own device list on a box with a discrete GPU, the
+    numbering ``discover.native_gpu_devices`` and the GPU readings are mapped
+    to. Loads the native library. Call only in a process whose crash is
+    acceptable (the model worker)."""
+    load_lib()
+    handles = _ggml_dev_handles()
+    cnt = _ggml_sym(handles, "ggml_backend_dev_count")
+    get = _ggml_sym(handles, "ggml_backend_dev_get")
+    type_fn = _ggml_sym(handles, "ggml_backend_dev_type")
+    if not (cnt and get and type_fn):
+        return []
+    cnt.restype = ctypes.c_size_t
+    get.restype = ctypes.c_void_p
+    get.argtypes = [ctypes.c_size_t]
+    type_fn.restype = ctypes.c_int
+    type_fn.argtypes = [ctypes.c_void_p]
+    out = []
+    for i in range(int(cnt())):
+        dev = get(i)
+        if int(type_fn(dev)) == GGML_DEV_TYPE_GPU:
+            out.append((dev, _device_pci_id(handles, dev)))
     return out
 
 

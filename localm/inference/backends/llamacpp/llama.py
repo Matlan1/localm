@@ -1456,6 +1456,7 @@ class LlamaCpp:
         n_cpu_moe: int = 0,
         mtp_enabled: bool = False,
         main_gpu: Optional[int] = None,
+        gpu_devices: Optional[list] = None,
         mtp_draft_tokens: int = MTP_DRAFT_TOKENS_DEFAULT,
         spec_source: Optional[str] = None,
         spec_draft_tokens: Optional[int] = None,
@@ -1581,30 +1582,42 @@ class LlamaCpp:
         # the devices actually visible right now), or the parent's main_gpu in
         # llama.cpp's device numbering when given; leaves the native default
         # (device 0) untouched when unset. See discover.apply_main_gpu.
-        from localm.discover import apply_gpu_split, apply_main_gpu
-        if main_gpu is not None:
-            apply_main_gpu(mp, slot=main_gpu)
+        from localm.discover import apply_gpu_devices, apply_gpu_split, apply_main_gpu
+        self._gpu_devices_arg = list(gpu_devices) if gpu_devices else None
+        if self._gpu_devices_arg:
+            # The parent's placement over 2+ GPUs: exactly those devices, in
+            # its order, with its layer counts. The returned arrays must stay
+            # alive through llama_load_model_from_file below.
+            _tensor_split_keepalive = apply_gpu_devices(mp, self._gpu_devices_arg)
+            # The vision projector goes on main_gpu (a slot in llama.cpp's
+            # device list) when the parent chose one, else on the last device,
+            # which holds the output layer.
+            self._main_gpu_index = int(main_gpu if main_gpu is not None
+                                       else self._gpu_devices_arg[-1]["slot"])
         else:
-            apply_main_gpu(mp)
-        # Multi-GPU tensor-split: spreads the model across 2+ configured
-        # devices when gpu_split_indices is set, or loads it on the one device
-        # a 1-entry ratios mapping from the parent names (see
-        # discover.apply_gpu_split).
-        # gpu_split_ratios carries the PARENT's already-resolved effective
-        # ratios (auto free-VRAM-proportional distribution,
-        # discover.resolve_auto_split_ratios) into this isolated worker, which
-        # must not probe for them itself - see that function's docstring.
-        # The returned buffer must stay alive through llama_load_model_from_file
-        # below - it is read once at load time, not held as a live pointer.
-        _tensor_split_keepalive = apply_gpu_split(
-            mp, ratios_override=gpu_split_ratios)
-        # Read AFTER apply_gpu_split, which is what makes this value meaningful:
-        # it forces main_gpu inside the configured split set (substituting the
-        # first split device, with a warning, when the configured main_gpu_index
-        # is not one of them). So this is the load's RESOLVED primary device, not
-        # the raw config value. The vision projector follows it (below) so it does
-        # not land on a card the user's split excludes.
-        self._main_gpu_index = int(mp.main_gpu)
+            if main_gpu is not None:
+                apply_main_gpu(mp, slot=main_gpu)
+            else:
+                apply_main_gpu(mp)
+            # Multi-GPU tensor-split: spreads the model across 2+ configured
+            # devices when gpu_split_indices is set, or loads it on the one device
+            # a 1-entry ratios mapping from the parent names (see
+            # discover.apply_gpu_split).
+            # gpu_split_ratios carries the PARENT's already-resolved effective
+            # ratios (auto free-VRAM-proportional distribution,
+            # discover.resolve_auto_split_ratios) into this isolated worker, which
+            # must not probe for them itself - see that function's docstring.
+            # The returned buffer must stay alive through llama_load_model_from_file
+            # below - it is read once at load time, not held as a live pointer.
+            _tensor_split_keepalive = apply_gpu_split(
+                mp, ratios_override=gpu_split_ratios)
+            # Read AFTER apply_gpu_split, which is what makes this value meaningful:
+            # it forces main_gpu inside the configured split set (substituting the
+            # first split device, with a warning, when the configured main_gpu_index
+            # is not one of them). So this is the load's RESOLVED primary device, not
+            # the raw config value. The vision projector follows it (below) so it does
+            # not land on a card the user's split excludes.
+            self._main_gpu_index = int(mp.main_gpu)
 
         # MoE expert placement (opt-in, n_cpu_moe > 0): keep the EXPERT weights of
         # the first N layers in system RAM while everything else follows the normal
@@ -4639,6 +4652,9 @@ class LlamaCpp:
         _no_devices = (ctypes.c_void_p * 1)(None)
         if not on_gpu:
             mp.devices = ctypes.cast(_no_devices, ctypes.c_void_p).value
+        elif getattr(self, "_gpu_devices_arg", None):
+            from localm.discover import apply_gpu_devices
+            _tensor_split_keepalive = apply_gpu_devices(mp, self._gpu_devices_arg)
         else:
             from localm.discover import apply_gpu_split, apply_main_gpu
             if self._main_gpu_arg is not None:

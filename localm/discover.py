@@ -794,6 +794,7 @@ def _reset_gpu_probe_cache() -> None:
     global _isolated_torch_broken_warned, _child_stderr_cap_reported
     global _isolated_torch_unanswered
     global _isolated_torch_retry_wait, _isolated_torch_retry_at
+    _LLAMA_SLOTS_CACHE.clear()
     with _gpu_probe_lock:
         _gpu_last_good = None
         _gpu_probe_inflight = False
@@ -1987,7 +1988,7 @@ def _list_gpus_probe() -> list:
     try:
         import subprocess
         proc = subprocess.Popen(
-            ["nvidia-smi", "--query-gpu=index,name,memory.total,memory.free",
+            ["nvidia-smi", "--query-gpu=index,name,memory.total,memory.free,pci.bus_id",
              "--format=csv,noheader,nounits"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
@@ -2009,6 +2010,7 @@ def _list_gpus_probe() -> list:
                 if len(parts) < 4:
                     continue
                 idx_s, name, total_mb, free_mb = parts[0], parts[1], parts[2], parts[3]
+                bus = _pci_bus_number(parts[4]) if len(parts) > 4 else None
                 try:
                     out.append({
                         "index": int(idx_s), "name": name,
@@ -2022,6 +2024,8 @@ def _list_gpus_probe() -> list:
                         # need not match the CUDA runtime's device ordinals.
                         "source": GPU_SOURCE_NVIDIA_SMI,
                     })
+                    if bus is not None:
+                        out[-1]["pci_bus_id"] = bus
                 except ValueError:
                     continue   # a malformed line never hides the rest
             if out:
@@ -2443,6 +2447,9 @@ def native_gpu_devices() -> Optional[list]:
         t = d.get("type")
         if isinstance(t, int):
             entry["type"] = t
+        device_id = d.get("device_id")
+        if isinstance(device_id, str) and device_id:
+            entry["device_id"] = device_id
         out.append(entry)
     return _llama_visible_devices(out)
 
@@ -3463,6 +3470,55 @@ def _single_mapping_index(mapping: dict) -> Optional[int]:
     return idx
 
 
+def apply_gpu_devices(mp, devices: list) -> tuple:
+    """Point ``mp`` at exactly the GPUs of *devices*, in that order, with
+    ``tensor_split`` set to their ``"units"`` (a layer count, or any
+    non-negative weight).
+
+    Each entry is ``{"slot", "device_id"?, "units"}`` as the parent planned it
+    (:func:`gguf_split_devices`, ``_gpu_plan.Placement``). A device is found
+    in this process's native registry by its PCI ``device_id`` when the entry
+    carries one, else by ``slot`` among the registry's GPU-type devices.
+    ``mp.devices`` becomes the NULL-terminated list of those devices, so
+    llama.cpp creates no backend on any other GPU; ``split_mode`` is LAYER and
+    ``main_gpu`` 0.
+
+    Returns ``(devices array, tensor_split array)``: the CALLER MUST keep it
+    referenced until the ``llama_model_load_from_file`` call that reads *mp*
+    has returned. Raises RuntimeError when a device cannot be found, so a load
+    is never placed on a GPU other than the one planned."""
+    from localm.inference.backends.llamacpp import _loader
+    handles = _loader.gpu_device_handles()
+    by_id = {pid: h for h, pid in handles if pid}
+    arr = (ctypes.c_void_p * (len(devices) + 1))()
+    used = set()
+    for k, d in enumerate(devices):
+        pid = d.get("device_id")
+        handle = by_id.get(pid) if pid else None
+        if handle is None and not pid:
+            slot = d.get("slot")
+            if isinstance(slot, int) and 0 <= slot < len(handles):
+                handle = handles[slot][0]
+        if handle is None or handle in used:
+            raise RuntimeError(
+                f"GPU placement: llama.cpp device {d.get('slot')} "
+                f"({pid or 'no PCI id'}) is not among this runtime's "
+                f"{len(handles)} GPU(s)")
+        used.add(handle)
+        arr[k] = handle
+    arr[len(devices)] = None
+    mp.devices = ctypes.cast(arr, ctypes.c_void_p).value
+    split = (ctypes.c_float * _tensor_split_capacity(len(devices)))()
+    for k, d in enumerate(devices):
+        split[k] = float(max(0, d.get("units") or 0))
+    mp.tensor_split = ctypes.cast(split, ctypes.c_void_p)
+    mp.split_mode = _LLAMA_SPLIT_MODE_LAYER
+    mp.main_gpu = 0
+    logger.info("GPU placement: %s", ", ".join(
+        f"llama.cpp device {d.get('slot')} {d.get('units')}" for d in devices))
+    return arr, split
+
+
 def _apply_single_gpu(mp, idx: int, main_chosen: bool) -> None:
     """Confine the load to llama.cpp device *idx* (``LLAMA_SPLIT_MODE_NONE``,
     ``main_gpu`` = *idx*)."""
@@ -3534,19 +3590,34 @@ def vram_info(*, return_status: bool = False, deadline: Optional[float] = None,
     result up to ``deadline`` instead of being handed an instant last-known-good/BUSY.
     Only safe for a caller OFF the event loop. Forwarded, not defaulted, for the same
     byte-identical-call reason as ``deadline``."""
-    from localm.config import load_config
     if return_status:
         gpus, status = _list_gpus_kw(deadline=deadline, return_status=True,
                                      wait_for_inflight=wait_for_inflight)
     else:
         gpus = _list_gpus_kw(deadline=deadline, wait_for_inflight=wait_for_inflight)
-        status = None   # unused: _ret() never reads it when return_status=False
+        status = None   # unused: _vram_info_from() never reads it then
+    _vram_info_reading.gpus = gpus
+    info = _vram_info_from(gpus, status)
+    return (info, status) if return_status else info
+
+
+# The reading the calling thread's last vram_info() call answered from, for
+# vram_capacity() to sum without a second probe.
+_vram_info_reading = threading.local()
+
+
+def _vram_info_from(gpus: list, status, config: Optional[dict] = None) -> dict:
+    """:func:`vram_info`'s answer for the reading *gpus* taken with probe
+    *status* (None when the caller did not ask for one), under *config* (the
+    loaded config when None)."""
+    from localm.config import load_config
 
     def _ret(info: dict):
-        return (info, status) if return_status else info
+        return info
 
     if gpus:
-        idx = resolve_load_gpu_index(load_config(), gpus=gpus, quiet=True)
+        idx = resolve_load_gpu_index(config if config is not None else load_config(),
+                                     gpus=gpus, quiet=True)
         # Look up by the "index" field, not list position (list_gpus() can
         # have a gap when one device fails to report - see
         # resolve_main_gpu_index); gpus[0] is a defensive fallback that should
@@ -3630,6 +3701,13 @@ def vram_capacity(config: Optional[dict] = None, *, return_status: bool = False,
     because the capacity check only ever looked at one device (the bug this
     function fixes - a model refused/mis-badged despite a working split).
 
+    With no ``gpu_split_indices`` and no ``main_gpu_index``, sums every
+    discrete GPU of one reading when there are two or more
+    (:func:`_discrete_gpus_sum`): a GGUF load and the HF backend's automatic
+    device map both spread a model over all of them. With ``main_gpu_index``
+    set (the HF backend then loads on that GPU), or one GPU, it answers as
+    :func:`vram_info` would.
+
     Sums ``total``/``free`` across every device in :func:`resolve_gpu_split`'s
     validated split (via :func:`list_gpus`) when 2+ valid devices are
     configured; ``free`` is included only when EVERY split device reports a
@@ -3697,7 +3775,16 @@ def vram_capacity(config: Optional[dict] = None, *, return_status: bool = False,
     if not cfg.get("gpu_split_indices"):
         if combined_only:
             return ({}, GPU_PROBE_OK) if return_status else {}
-        return _vi()
+        _vram_info_reading.gpus = None
+        single = _vi()
+        gpus = getattr(_vram_info_reading, "gpus", None)
+        _vram_info_reading.gpus = None
+        summed = (_discrete_gpus_sum(gpus) if cfg.get("main_gpu_index") is None
+                  else None)
+        if summed is None:
+            return single
+        summed.pop("devices", None)
+        return (summed, single[1]) if return_status else summed
 
     if return_status:
         gpus, status = _list_gpus_kw(deadline=deadline, return_status=True,
@@ -3747,6 +3834,31 @@ def vram_capacity(config: Optional[dict] = None, *, return_status: bool = False,
                                  if all(s == FREE_SCOPE_DEVICE for s in scopes)
                                  else FREE_SCOPE_PROCESS)
     return _ret(out)
+
+
+def _discrete_gpus_sum(gpus) -> Optional[dict]:
+    """``{"total", "free"?, "free_scope"?, "devices"}`` summed over the
+    discrete GPUs of reading *gpus* (integrated ones left out as llama.cpp
+    does, :func:`_llama_visible_torch_devices`), or None when there are fewer
+    than two or one lacks an integer total. ``free`` is present only when every
+    one reports it; ``free_scope`` follows :func:`vram_capacity`'s rule."""
+    if not isinstance(gpus, list) or len(gpus) < 2:
+        return None
+    kept = _llama_visible_torch_devices(gpus)
+    if len(kept) < 2 or not all(isinstance(g, dict) and isinstance(g.get("total"), int)
+                                for g in kept):
+        return None
+    out = {"total": sum(g["total"] for g in kept), "devices": len(kept)}
+    frees = [g.get("free") for g in kept]
+    if all(isinstance(f, int) for f in frees):
+        out["free"] = sum(frees)
+        scopes = [g.get("free_scope") for g in kept if g.get("free_scope")]
+        if scopes:
+            out["free_scope"] = (FREE_SCOPE_DEVICE
+                                 if len(scopes) == len(kept)
+                                 and all(sc == FREE_SCOPE_DEVICE for sc in scopes)
+                                 else FREE_SCOPE_PROCESS)
+    return out
 
 
 def implicit_split_capacity(config: Optional[dict] = None, *,
@@ -4161,6 +4273,187 @@ def implicit_split_devices(config: Optional[dict] = None, *,
     if len({d["index"] for d in out}) != len(out):
         return None
     return out
+
+
+def _pci_bus_number(pci_id) -> Optional[int]:
+    """The bus number of a PCI address (``"0000:2d:00.0"``,
+    ``"00000000:2D:00.0"``), or None when *pci_id* is not one."""
+    if not isinstance(pci_id, str):
+        return None
+    parts = pci_id.strip().split(":")
+    if len(parts) != 3:
+        return None
+    try:
+        return int(parts[1], 16)
+    except ValueError:
+        return None
+
+
+def _llama_slots(kept: list, every: list) -> tuple[Optional[dict], str]:
+    """``({gpu index: (llama.cpp slot, device_id or None, registry total)}, "")``
+    for each GPU reading in *kept* (the discrete GPUs of the whole reading
+    *every*), or ``(None, reason)`` when they cannot be matched to the
+    runtime's own device list.
+
+    The runtime's GPU-type devices are read once (:func:`_runtime_device_registry`).
+    When every reading and every runtime device report a PCI bus, each reading
+    is matched to the device on its bus, so any difference in order is
+    resolved. Otherwise the lists must match in count and, position by
+    position, in total memory (:func:`_totals_mismatch`)."""
+    if not kept:
+        return None, "no discrete GPU was read"
+    indices = [d.get("index") for d in every]
+    if not all(isinstance(i, int) for i in indices) or len(set(indices)) != len(indices):
+        return None, f"the GPU reading has unusable device numbers {indices}"
+    key = (tuple(_native_backend_ggml_names()),
+           tuple((d.get("index"), d.get("pci_bus_id"), d.get("total")) for d in kept))
+    cached = _LLAMA_SLOTS_CACHE.get(key)
+    if cached is not None:
+        return dict(cached), ""
+    out, reason = _llama_slots_uncached(kept)
+    if out is not None:
+        _LLAMA_SLOTS_CACHE.clear()
+        _LLAMA_SLOTS_CACHE[key] = dict(out)
+    return out, reason
+
+
+# The last proven _llama_slots answer, keyed by the runtime's ggml libraries and
+# each GPU's index, PCI bus and total memory, so a load reads the registry once.
+_LLAMA_SLOTS_CACHE: dict = {}
+
+
+def _llama_slots_uncached(kept: list) -> tuple[Optional[dict], str]:
+    """:func:`_llama_slots` without its cache."""
+    registry = _runtime_device_registry()
+    if registry is None:
+        return None, "the llama.cpp runtime's device list could not be read"
+    native = _registry_gpus(registry)
+    buses = [d.get("pci_bus_id") for d in kept]
+    native_buses = [_pci_bus_number(n.get("device_id")) for n in native]
+    if (buses and all(isinstance(b, int) for b in buses)
+            and all(isinstance(b, int) for b in native_buses)
+            and len(set(native_buses)) == len(native_buses)):
+        slot_of_bus = {b: pos for pos, b in enumerate(native_buses)}
+        out = {}
+        for d, bus in zip(kept, buses, strict=True):
+            pos = slot_of_bus.get(bus)
+            if pos is None:
+                return None, (f"GPU {d['index']} (PCI bus {bus:02x}) is not in the "
+                              f"llama.cpp runtime's device list")
+            out[d["index"]] = (pos, native[pos].get("device_id"), native[pos].get("total"))
+        if len({v[0] for v in out.values()}) != len(out):
+            return None, "two GPUs share a PCI bus"
+        return out, ""
+    reason = _totals_mismatch(kept, native)
+    if reason:
+        return None, reason
+    return {d["index"]: (pos, native[pos].get("device_id"), native[pos].get("total"))
+            for pos, d in enumerate(kept)}, ""
+
+
+def gguf_split_devices(config: Optional[dict] = None, *, gpus: Optional[list] = None,
+                       wait_for_inflight: bool = False) -> tuple[Optional[list], str]:
+    """``(devices, "")`` for a GGUF load that spreads over two or more GPUs,
+    else ``(None, reason)``.
+
+    The GPUs are the ``gpu_split_indices`` ones when two or more are set
+    (in GPU numbering, the one ``localm gpus`` and the GUI show), else every
+    discrete GPU. Each entry is ``{"slot", "index", "name", "free", "total",
+    "device_id", "ratio"}``: ``slot`` is the device's position in llama.cpp's
+    own device list, ``device_id`` its PCI bus id when the runtime reports
+    one, ``ratio`` the ``gpu_split_ratios`` entry paired with it (None when
+    ratios are not set).
+
+    The reading is *gpus*, else a probe (*wait_for_inflight* joins one in
+    flight). On a vulkan or sycl build the devices are the runtime's own
+    (:func:`native_gpu_devices`). Otherwise the reading is matched to the
+    runtime's device list (:func:`_llama_slots`). Raises
+    :class:`GpuSplitConfigError` when a configured index names an integrated
+    GPU the runtime leaves out. Never raises otherwise."""
+    from localm.config import load_config
+    try:
+        cfg = config if config is not None else load_config()
+        configured = cfg.get("gpu_split_indices")
+        chosen = None
+        if isinstance(configured, (list, tuple)) and configured:
+            try:
+                chosen = [int(i) for i in configured]
+            except (TypeError, ValueError):
+                return None, f"gpu_split_indices {configured!r} is not a list of GPU numbers"
+            if len(chosen) < 2:
+                return None, "one GPU is chosen"
+        ratios = cfg.get("gpu_split_ratios") if chosen else None
+        if _native_gpu_index_space_is_opaque():
+            native = native_gpu_devices()
+            if not native:
+                return None, "the llama.cpp runtime's device list could not be read"
+            from localm.inference.backends.llamacpp._loader import GGML_DEV_TYPE_GPU
+            candidates = [
+                {"slot": d["index"], "index": d["index"], "name": d.get("name", ""),
+                 "free": d.get("free"), "total": d.get("total"),
+                 "device_id": d.get("device_id")}
+                for d in native if d.get("type") == GGML_DEV_TYPE_GPU]
+        else:
+            if gpus:
+                readings, status = list(gpus), GPU_PROBE_OK
+            else:
+                readings, status = _list_gpus_kw(return_status=True,
+                                                 wait_for_inflight=wait_for_inflight)
+            if status != GPU_PROBE_OK or not readings:
+                return None, f"no fresh GPU reading (probe status {status})"
+            kept = _llama_visible_torch_devices(readings)
+            if chosen:
+                by_index = {g.get("index"): g for g in readings}
+                kept_ids = {g.get("index") for g in kept}
+                for i in chosen:
+                    if i in by_index and i not in kept_ids:
+                        raise _integrated_gpu_refusal(i, by_index[i])
+            if len(kept) < 2:
+                return None, "fewer than two discrete GPUs"
+            slots, reason = _llama_slots(kept, readings)
+            if slots is None:
+                return None, reason
+            candidates = [
+                {"slot": slots[g["index"]][0], "index": g["index"],
+                 "name": str(g.get("name") or f"GPU {g['index']}"),
+                 "free": g.get("free"), "total": g.get("total"),
+                 "device_id": slots[g["index"]][1]}
+                for g in kept]
+        by_index = {c["index"]: c for c in candidates}
+        if chosen:
+            unknown = [i for i in chosen if i not in by_index]
+            if unknown:
+                logger.warning("gpu_split_indices: GPU(s) %s are not present; "
+                               "splitting over the others", unknown)
+            seen, picked = set(), []
+            for pos, i in enumerate(chosen):
+                if i in by_index and i not in seen:
+                    seen.add(i)
+                    entry = dict(by_index[i])
+                    entry["ratio"] = None
+                    if isinstance(ratios, (list, tuple)) and len(ratios) == len(chosen):
+                        try:
+                            r = float(ratios[pos])
+                            entry["ratio"] = r if r > 0 else None
+                        except (TypeError, ValueError):
+                            entry["ratio"] = None
+                    picked.append(entry)
+            if picked and any(e["ratio"] is None for e in picked):
+                for e in picked:
+                    e["ratio"] = None
+        else:
+            picked = [dict(c, ratio=None) for c in candidates]
+        if len(picked) < 2:
+            return None, "fewer than two of the chosen GPUs are present"
+        for e in picked:
+            if not (isinstance(e["free"], int) and isinstance(e["total"], int)):
+                return None, f"GPU {e['index']} did not report its free memory"
+        return picked, ""
+    except GpuSplitConfigError:
+        raise
+    except Exception as e:
+        logger.debug("GPU split devices unavailable (%s: %s)", type(e).__name__, e)
+        return None, f"the GPU list could not be built ({type(e).__name__})"
 
 
 def split_device_count(config: Optional[dict] = None) -> int:

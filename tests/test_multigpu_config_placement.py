@@ -365,7 +365,7 @@ class TestAdmissionJudgesTheDefaultSplit:
                  "integrated": ig}
                 for i, (f, ig) in enumerate(specs)]
 
-    def _probe(self, gpus, budget):
+    def _probe(self, gpus, budget, main_gpu_index=None):
         from localm.inference import http_server
 
         async def _run():
@@ -374,7 +374,7 @@ class TestAdmissionJudgesTheDefaultSplit:
 
         with _box(gpus, _registry(gpus)), \
                 mock.patch("localm.config.load_config", return_value=_config(
-                    gpu_split_indices=None, main_gpu_index=None)):
+                    gpu_split_indices=None, main_gpu_index=main_gpu_index)):
             return asyncio.run(_run())
 
     def test_a_model_that_fits_across_the_gpus_is_admitted(self):
@@ -393,10 +393,19 @@ class TestAdmissionJudgesTheDefaultSplit:
         probe = self._probe(gpus, budget)
         assert probe.free == 8 * GiB and probe.implicit_split
 
-    def test_an_hf_load_is_still_judged_by_one_gpu(self):
+    def test_an_hf_load_is_judged_by_every_gpu_its_device_map_uses(self):
+        # With no split and no main GPU, the HF backend's device_map "auto"
+        # spreads the model over every GPU.
         budget = self._budget(gguf=False)
         gpus = self._gpus((4.0, False), (20.0, False))
         probe = self._probe(gpus, budget)
+        assert probe.free == 24 * GiB and not probe.implicit_split
+
+    def test_an_hf_load_with_a_main_gpu_is_judged_by_that_gpu(self):
+        # main_gpu_index pins an HF load to that GPU (overflowing to the CPU).
+        budget = self._budget(gguf=False)
+        gpus = self._gpus((4.0, False), (20.0, False))
+        probe = self._probe(gpus, budget, main_gpu_index=0)
         assert probe.free == 4 * GiB and not probe.implicit_split
 
     def test_one_gpu_is_judged_by_its_own_reading(self):
