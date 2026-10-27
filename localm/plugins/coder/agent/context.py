@@ -466,6 +466,7 @@ class _ContextMixin:
         cwd: Path
         backend: Any
         confirm_handler: Any
+        server_side: bool
         _episode_store: Any
         _system_prompt: str
 
@@ -1872,12 +1873,11 @@ ws     ::= [ \t\n\r]*
                 from ..display import print_error
                 import getpass
 
-                if self.confirm_handler is not None:
+                if self.server_side:
                     raise CoderAuthError(
                         f"The coder backend at {getattr(self.backend, '_base_url', 'its server')} "
                         f"(model {getattr(self.backend, 'model_id', '?')}) rejected the API key. "
-                        "Start a new coder session with a valid key for that backend, or "
-                        "correct the key in its settings."
+                        "Use a valid key for that backend and run it again."
                     ) from e
 
                 # Cannot prompt for a key if there's no TTY or we are in CI
