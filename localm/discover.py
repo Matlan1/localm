@@ -5053,42 +5053,62 @@ def resolve_preferred_device(config: Optional[dict] = None, *,
     return idx if idx in by_index else None
 
 
-def hf_gpu_order(config: Optional[dict] = None, *,
-                 gpus: Optional[list] = None) -> Optional[list]:
-    """The ``gpu_split_indices`` GPUs, in their listed order, that an HF
-    (transformers) load must be the only ones it sees, in that order, so that
-    accelerate (which fills GPUs by number) fills them in that order.
-
-    ``None`` when no reordering is needed or it cannot be done safely: fewer
-    than two of the listed GPUs are detected, they are already listed by
-    number, the build's GPU numbering is opaque to torch (vulkan or sycl), the
-    reading is not fresh, or it is in nvidia-smi's own numbering. Listed GPUs
-    that are not detected are left out. *gpus* is a reading to use instead of
-    probing. Never raises."""
+def listed_gpu_order(config: Optional[dict] = None) -> Optional[list]:
+    """The ``gpu_split_indices`` GPU numbers, duplicates dropped, when two or
+    more are listed in another order than by number; else None. Reads only
+    the config. Never raises."""
     from localm.config import load_config
     try:
         cfg = config if config is not None else load_config()
         raw = cfg.get("gpu_split_indices")
-        if not isinstance(raw, (list, tuple)) or len(raw) < 2:
+        if not isinstance(raw, (list, tuple)):
             return None
         order = list(dict.fromkeys(int(i) for i in raw))
+    except Exception:
+        return None
+    return order if len(order) >= 2 and order != sorted(order) else None
+
+
+def hf_gpu_order(config: Optional[dict] = None, *,
+                 gpus: Optional[list] = None) -> Optional[list]:
+    """The ``gpu_split_indices`` GPUs, in their listed order, for an HF
+    (transformers) load to see as its only GPUs, numbered from 0 in that order.
+
+    ``None`` when the GPUs are not listed out of number order
+    (:func:`listed_gpu_order`), and, with a WARNING naming why, when the order
+    cannot be applied: the build's GPU numbering is opaque to torch (vulkan or
+    sycl), the reading is not fresh or is in nvidia-smi's own numbering, fewer
+    than two of the listed GPUs are detected or the detected ones are by
+    number, or the reading fails. Listed GPUs that are not detected are left
+    out. *gpus* is a reading to use instead of probing. Never raises."""
+    order = listed_gpu_order(config)
+    if order is None:
+        return None
+
+    def _not_applied(reason: str) -> None:
+        logger.warning("gpu_split_indices %s: a Transformers model fills the GPUs "
+                       "by number, not in the listed order (%s)", order, reason)
+        return None
+
+    try:
         if _native_gpu_index_space_is_opaque():
-            return None
+            return _not_applied("this GPU runtime numbers the GPUs its own way")
         if gpus is None:
             gpus, status = list_gpus(return_status=True, wait_for_inflight=True)
             if status != GPU_PROBE_OK:
-                return None
+                return _not_applied(f"no fresh GPU reading, probe status {status}")
         reading = list(gpus or [])
         if any(g.get("numbering") == GPU_NUMBERING_NVIDIA_SMI for g in reading):
-            return None
+            return _not_applied("torch did not answer, and nvidia-smi numbers the "
+                                "GPUs its own way")
         present = {g.get("index") for g in reading}
-        order = [i for i in order if i in present]
-        if len(order) < 2 or order == sorted(order):
-            return None
-        return order
+        kept = [i for i in order if i in present]
+        if len(kept) < 2 or kept == sorted(kept):
+            return _not_applied(f"GPU(s) {[i for i in order if i not in present]} "
+                                "are not detected")
+        return kept
     except Exception as e:
-        logger.debug("hf_gpu_order: no GPU order (%s: %s)", type(e).__name__, e)
-        return None
+        return _not_applied(f"the GPU reading failed: {type(e).__name__}: {e}")
 
 
 def visible_device_order(config: Optional[dict] = None, *,

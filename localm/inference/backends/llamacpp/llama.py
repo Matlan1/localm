@@ -1632,8 +1632,7 @@ class LlamaCpp:
             # alive through llama_load_model_from_file below.
             _tensor_split_keepalive = apply_gpu_devices(mp, self._gpu_devices_arg)
             # The vision projector goes on main_gpu (a slot in llama.cpp's
-            # device list) when the parent chose one, else on the last device,
-            # which holds the output layer.
+            # device list) when the parent gives one, else on the last device.
             self._main_gpu_index = int(main_gpu if main_gpu is not None
                                        else self._gpu_devices_arg[-1]["slot"])
         else:

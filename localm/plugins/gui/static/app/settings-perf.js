@@ -367,7 +367,7 @@ function renderGpuSplitOrder(order) {
   if (!line) return;
   if (order.length < 2) { line.hidden = true; return; }
   line.textContent = t("settings.perf.splitOrder",
-    { order: order.map((i) => "GPU " + i).join(", ") });
+    { order: order.map((i) => t("settings.perf.splitOrderGpu", { index: i })).join(", ") });
   line.hidden = false;
 }
 

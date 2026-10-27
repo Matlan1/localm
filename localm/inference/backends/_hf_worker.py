@@ -106,15 +106,50 @@ def _is_strict_dataclass_error(err: BaseException) -> bool:
 _GPU_ORDER: Optional[list] = None
 
 
+def _parse_torch_build(version_py: str) -> Optional[str]:
+    """``"hip"`` or ``"cuda"`` from the text of torch's ``version.py``: hip when
+    its ``hip`` value is set, cuda when its ``cuda`` value is set; None
+    otherwise."""
+    import re
+    values = {}
+    for key in ("hip", "cuda"):
+        m = re.search(rf"^{key}\s*(?::[^=\n]*)?=\s*(.+?)\s*$", version_py, re.MULTILINE)
+        values[key] = m.group(1) if m else None
+    if values["hip"] not in (None, "None"):
+        return "hip"
+    if values["cuda"] not in (None, "None"):
+        return "cuda"
+    return None
+
+
+def _torch_build() -> Optional[str]:
+    """``"hip"`` or ``"cuda"``: the build of the torch this process would
+    import, read from its ``version.py`` without importing torch; None when
+    that file cannot be read or names neither."""
+    try:
+        import importlib.util
+        spec = importlib.util.find_spec("torch")
+        locations = list(spec.submodule_search_locations or []) if spec else []
+        if not locations:
+            return None
+        return _parse_torch_build((Path(locations[0]) / "version.py").read_text(
+            encoding="utf-8", errors="replace"))
+    except Exception as e:
+        logger.debug("hf worker: torch build not read (%s: %s)", type(e).__name__, e)
+        return None
+
+
 def _apply_gpu_order(order: Optional[list]) -> bool:
     """Make torch in this process see only the GPUs in *order* (GPU numbers of
-    the parent's torch), numbered from 0 in that order, by setting
-    ``HIP_VISIBLE_DEVICES`` when that is set and ``CUDA_VISIBLE_DEVICES``
-    otherwise. An inherited value is narrowed: entry N of it is GPU N. Must run
-    before torch is imported. Returns True when applied (and sets
-    ``_GPU_ORDER``); False, with a WARNING, when torch is already imported or an
-    inherited value has no entry for a GPU in *order*; False when *order* is
-    empty."""
+    the parent's torch), numbered from 0 in that order. On a CUDA torch build
+    it sets ``CUDA_VISIBLE_DEVICES``, narrowing an inherited value (entry N of
+    it is GPU N). On a ROCm (HIP) torch build it sets ``HIP_VISIBLE_DEVICES``,
+    narrowing an inherited ``HIP_VISIBLE_DEVICES``, else an inherited
+    ``CUDA_VISIBLE_DEVICES`` (which it then removes). Must run before torch is
+    imported. Returns True when applied (and sets ``_GPU_ORDER``); False, with
+    a WARNING, when torch is already imported, its build cannot be read, or
+    the inherited value has no entry for a GPU in *order*; False when *order*
+    is empty."""
     global _GPU_ORDER
     if not order:
         return False
@@ -122,15 +157,27 @@ def _apply_gpu_order(order: Optional[list]) -> bool:
         logger.warning("gpu_split_indices %s: torch was loaded before the GPU order "
                        "could be set, so the GPUs are filled by number", order)
         return False
-    var = "HIP_VISIBLE_DEVICES" if os.environ.get("HIP_VISIBLE_DEVICES") else "CUDA_VISIBLE_DEVICES"
-    inherited = [v.strip() for v in os.environ.get(var, "").split(",") if v.strip()]
+    build = _torch_build()
+    if build is None:
+        logger.warning("gpu_split_indices %s: the torch build (CUDA or ROCm) could "
+                       "not be read, so the GPUs are filled by number", order)
+        return False
+    if build == "cuda":
+        var, source = "CUDA_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"
+    else:
+        var = "HIP_VISIBLE_DEVICES"
+        source = ("HIP_VISIBLE_DEVICES" if os.environ.get("HIP_VISIBLE_DEVICES", "").strip()
+                  else "CUDA_VISIBLE_DEVICES")
+    inherited = [v.strip() for v in os.environ.get(source, "").split(",") if v.strip()]
     if inherited and any(i >= len(inherited) for i in order):
         logger.warning("gpu_split_indices %s: %s=%s has no entry for every listed GPU, "
-                       "so the GPUs are filled by number", order, var,
-                       os.environ.get(var))
+                       "so the GPUs are filled by number", order, source,
+                       os.environ.get(source))
         return False
     visible = [inherited[i] for i in order] if inherited else [str(i) for i in order]
     os.environ[var] = ",".join(visible)
+    if source != var:
+        os.environ.pop(source, None)
     _GPU_ORDER = list(order)
     logger.debug("hf worker: %s=%s (GPUs %s in this order)", var, os.environ[var], order)
     return True
@@ -571,8 +618,7 @@ def _cuda_device_map(torch, config: Optional[dict] = None) -> dict:
       ``"auto"`` confined to that ONE device by the same technique (its id is
       the only GPU in ``max_memory``).
     - when the worker sees only the listed GPUs in their listed order
-      (``_apply_gpu_order``), positions 0..N-1 stand for them, so accelerate,
-      which fills GPUs by number, fills them in the listed order.
+      (``_apply_gpu_order``), positions 0..N-1 stand for them in that order.
     - neither configured -> ``"auto"`` across every visible discrete device,
       each given a budget (plain ``"auto"`` when fewer than two devices can be
       read).
@@ -1655,7 +1701,9 @@ class HFWorker:
                 # device to name nor sortable against an int.
                 gpus = sorted(i for i in device_map_kwargs["max_memory"]
                               if isinstance(i, int))
-                names = ", ".join(f"{i}:{torch.cuda.get_device_name(i)}" for i in gpus)
+                names = ", ".join(
+                    f"{_GPU_ORDER[i] if _GPU_ORDER and i < len(_GPU_ORDER) else i}:"
+                    f"{torch.cuda.get_device_name(i)}" for i in gpus)
                 where = f"split across {names}" if len(gpus) > 1 else names
                 logger.debug("hf load: gpu=%s (overflow to CPU if needed)", where)
             else:

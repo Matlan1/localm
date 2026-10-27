@@ -499,6 +499,7 @@ class TestApplyGpuOrder:
     def _clean(self, monkeypatch):
         from localm.inference.backends import _hf_worker
         monkeypatch.setattr(_hf_worker, "_GPU_ORDER", None)
+        monkeypatch.setattr(_hf_worker, "_torch_build", lambda: "cuda")
         for var in ("CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES"):
             monkeypatch.delenv(var, raising=False)
         modules = dict(sys.modules)
@@ -522,14 +523,43 @@ class TestApplyGpuOrder:
         assert _hf_worker._apply_gpu_order([3, 1]) is True
         assert os.environ["CUDA_VISIBLE_DEVICES"] == "8,6"
 
-    def test_a_set_hip_list_is_the_one_narrowed(self, monkeypatch):
+    def test_a_cuda_build_ignores_a_set_hip_list(self, monkeypatch):
         import os
 
         from localm.inference.backends import _hf_worker
         monkeypatch.setenv("HIP_VISIBLE_DEVICES", "0,1,2,3")
         assert _hf_worker._apply_gpu_order([3, 1]) is True
-        assert os.environ["HIP_VISIBLE_DEVICES"] == "3,1"
+        assert os.environ["CUDA_VISIBLE_DEVICES"] == "3,1"
+        assert os.environ["HIP_VISIBLE_DEVICES"] == "0,1,2,3"
+
+    @pytest.mark.parametrize("env, hip, cuda", [
+        ({}, "3,1", None),
+        ({"HIP_VISIBLE_DEVICES": "0,1,2,3"}, "3,1", None),
+        ({"HIP_VISIBLE_DEVICES": "4,5,6,7"}, "7,5", None),
+        ({"CUDA_VISIBLE_DEVICES": "5,6,7,8"}, "8,6", None),
+        ({"HIP_VISIBLE_DEVICES": "0,1,2,3", "CUDA_VISIBLE_DEVICES": "0,1,2,3"},
+         "3,1", "0,1,2,3"),
+    ])
+    def test_a_rocm_build_narrows_hip_visible_devices(self, monkeypatch, env, hip, cuda):
+        import os
+
+        from localm.inference.backends import _hf_worker
+        monkeypatch.setattr(_hf_worker, "_torch_build", lambda: "hip")
+        for var, value in env.items():
+            monkeypatch.setenv(var, value)
+        assert _hf_worker._apply_gpu_order([3, 1]) is True
+        assert os.environ["HIP_VISIBLE_DEVICES"] == hip
+        assert os.environ.get("CUDA_VISIBLE_DEVICES") == cuda
+
+    def test_an_unknown_torch_build_leaves_the_gpus_alone(self, monkeypatch, caplog):
+        import os
+
+        from localm.inference.backends import _hf_worker
+        monkeypatch.setattr(_hf_worker, "_torch_build", lambda: None)
+        assert _hf_worker._apply_gpu_order([3, 1]) is False
         assert "CUDA_VISIBLE_DEVICES" not in os.environ
+        assert "HIP_VISIBLE_DEVICES" not in os.environ
+        assert "filled by number" in caplog.text
 
     def test_an_inherited_list_without_a_listed_gpu_is_left_alone(self, monkeypatch, caplog):
         import os
@@ -591,3 +621,34 @@ def test_the_parent_hands_the_listed_order_to_the_worker(tmp_path, device, expec
             backend.load()
     params = runner.return_value.spawn_and_load.call_args.args[0]
     assert params.get("gpu_order") == expected
+
+
+@pytest.mark.parametrize("text, build", [
+    ("cuda: Optional[str] = None\nhip: Optional[str] = '7.13.99004'\n", "hip"),
+    ("cuda: Optional[str] = '12.8'\nhip: Optional[str] = None\n", "cuda"),
+    ("cuda = '11.8'\nhip = None\n", "cuda"),
+    ("cuda: Optional[str] = None\nhip: Optional[str] = None\n", None),
+    ("__version__ = '2.11.0'\n", None),
+])
+def test_the_torch_build_is_read_from_its_version_file(text, build):
+    from localm.inference.backends._hf_worker import _parse_torch_build
+    assert _parse_torch_build(text) == build
+
+
+def test_the_torch_build_is_read_without_importing_torch(tmp_path, monkeypatch):
+    import importlib.machinery
+    import importlib.util
+
+    from localm.inference.backends import _hf_worker
+    pkg = tmp_path / "torch"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("raise RuntimeError('torch was imported')\n",
+                                     encoding="utf-8")
+    (pkg / "version.py").write_text("cuda: Optional[str] = '12.8'\nhip = None\n",
+                                    encoding="utf-8")
+    spec = importlib.machinery.ModuleSpec("torch", None, is_package=True)
+    spec.submodule_search_locations = [str(pkg)]
+    real = importlib.util.find_spec
+    monkeypatch.setattr(importlib.util, "find_spec",
+                        lambda name, *a: spec if name == "torch" else real(name, *a))
+    assert _hf_worker._torch_build() == "cuda"

@@ -92,10 +92,11 @@ class TestPlanner:
         assert p.fits
         assert 4 not in [d.device.index for d in p.loads], "0.3 GB free holds nothing"
 
-    def test_a_last_card_too_small_for_the_output_layer_is_left_out(self):
+    def test_a_last_card_the_even_fill_does_not_reach_is_left_out(self):
         p = plan_placement(_devices(_IDLE), _dense())
         assert p.fits and p.full_offload
-        assert [d.device.index for d in p.loads] == [0, 1, 2, 3],             "2.7 GB of output and logits do not fit the 5.4 GB card's room"
+        assert [d.device.index for d in p.loads] == [0, 1, 2, 3], \
+            "the even fill places every unit, the output layer included, on cards 0-3"
         assert p.loads[-1].output
 
     def test_the_cards_take_the_layers_in_the_order_given(self):
@@ -329,16 +330,35 @@ class TestHfGpuOrder:
         cfg = {"gpu_split_indices": listed}
         assert discover.hf_gpu_order(cfg, gpus=_torch_reading(_IDLE)) == expected
 
-    def test_nvidia_smi_numbers_give_no_order(self):
+    def test_nvidia_smi_numbers_give_no_order_and_say_so(self, caplog):
         readings = [dict(g, numbering=discover.GPU_NUMBERING_NVIDIA_SMI)
                     for g in _torch_reading(_IDLE)]
         assert discover.hf_gpu_order({"gpu_split_indices": [3, 1]}, gpus=readings) is None
+        assert "nvidia-smi numbers the GPUs its own way" in caplog.text
+        assert "[3, 1]" in caplog.text
 
-    def test_a_vulkan_or_sycl_build_gives_no_order(self):
+    def test_a_vulkan_or_sycl_build_gives_no_order_and_says_so(self, caplog):
         with mock.patch.object(discover, "_native_gpu_index_space_is_opaque",
                                return_value=True):
             assert discover.hf_gpu_order({"gpu_split_indices": [3, 1]},
                                          gpus=_torch_reading(_IDLE)) is None
+        assert "numbers the GPUs its own way" in caplog.text
+
+    def test_a_stale_reading_or_a_missing_gpu_says_so(self, caplog):
+        with mock.patch.object(discover, "list_gpus",
+                               return_value=([], discover.GPU_PROBE_TIMEOUT)):
+            assert discover.hf_gpu_order({"gpu_split_indices": [3, 1]}) is None
+        assert "no fresh GPU reading" in caplog.text
+        caplog.clear()
+        assert discover.hf_gpu_order({"gpu_split_indices": [9, 3]},
+                                     gpus=_torch_reading(_IDLE)) is None
+        assert "[9] are not detected" in caplog.text
+
+    @pytest.mark.parametrize("listed", [[1, 3], [3], None])
+    def test_a_list_by_number_or_none_says_nothing(self, caplog, listed):
+        assert discover.hf_gpu_order({"gpu_split_indices": listed},
+                                     gpus=_torch_reading(_IDLE)) is None
+        assert caplog.text == ""
 
 
 class _MP:
@@ -674,7 +694,8 @@ class TestBackendLoad:
         assert {d["device_id"] for d in devices} == {"0000:10:00.0", "0000:30:00.0"}
         assert {d["slot"] for d in devices} == {1, 0}, "card 0 is slot 1, card 2 is slot 0"
         assert sum(d["units"] for d in devices) == 9
-        assert params["gpu_split_ratios"] is None and "main_gpu" not in params
+        assert params["gpu_split_ratios"] is None
+        assert params["main_gpu"] in {0, 1}, "the projector goes on a placed card"
         assert params["n_gpu_layers"] >= 9
         assert b.applied_gpu_split["source"] == "auto"
         assert sorted(d["index"] for d in b.applied_gpu_split["devices"]) == [0, 2]
@@ -735,3 +756,27 @@ class TestBackendLoad:
         assert [d["device_id"] for d in devices] == ["0000:30:00.0", "0000:10:00.0"]
         assert [d["slot"] for d in devices] == [0, 1], "card 2 is slot 0, card 0 is slot 1"
         assert [d["index"] for d in b.applied_gpu_split["devices"]] == [2, 0]
+
+    @pytest.mark.usefixtures("_fresh_probe_state")
+    def test_a_fallback_says_the_listed_order_is_not_applied(self, tmp_path, caplog):
+        import logging
+
+        from localm.config import load_config
+        readings = _probe([], torch_unanswered=True)
+        cfg = dict(load_config(), gpu_split_indices=[2, 1], gpu_split_ratios=None,
+                   ctx_auto=False)
+        with caplog.at_level(logging.WARNING, logger="localm"):
+            self._load(self._backend(tmp_path), readings, _llama_cards(), cfg)
+        assert any(r.levelno == logging.WARNING
+                   and "not in the listed order [2, 1]" in r.getMessage()
+                   for r in caplog.records)
+
+    def test_the_projector_goes_on_the_placed_card_with_the_most_room(self, tmp_path):
+        from localm.config import load_config
+        b = self._backend(tmp_path)
+        readings, registry = self._world([30_000, 90_000, 30_000], [2, 0, 1])
+        cfg = dict(load_config(), gpu_split_indices=None, gpu_split_ratios=None,
+                   main_gpu_index=None, ctx_auto=False)
+        params = self._load(b, readings, registry, cfg)
+        assert 2 in [d["slot"] for d in params["gpu_devices"]]
+        assert params["main_gpu"] == 2, "card 1 (the most room left) is llama.cpp's slot 2"

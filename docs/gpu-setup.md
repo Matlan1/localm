@@ -282,7 +282,9 @@ For a GGUF load over two or more GPUs localm plans the placement per card: each
 card gets a run of layers that fits its free memory, counting the layers'
 weights, their share of the context (KV cache), and about 1.5 GB per card for
 llama.cpp's working buffers (`vram_overhead_mb`). The cards are filled in the
-order above, and the output layer goes on the last card that holds a layer. A card that cannot hold anything useful, or that you did
+order above, and the output layer goes on the last card that holds a layer; when
+localm cannot plan the load (the log says why), llama.cpp uses its own device
+order instead. A card that cannot hold anything useful, or that you did
 not tick, is left out and llama.cpp does not touch it. When the model does not fit
 on the chosen cards, the routed experts of a Mixture-of-Experts model move to
 system RAM first, then whole layers move to the CPU. The console prints the plan,
