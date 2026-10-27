@@ -237,3 +237,21 @@ def test_an_ordinary_validation_error_is_still_readable():
     assert r.status_code == 422
     assert "max_tokens" in r.json()["detail"]
     assert "elided" not in r.text
+
+
+def test_model_detail_reports_the_pulled_revision():
+    engine = MagicMock()
+    engine.display_name = "m"
+    type(engine).loaded = property(lambda self: True)
+    os.environ.pop("LOCALM_API_KEY", None)
+    client = TestClient(create_app(engine), raise_server_exceptions=True)
+    registry = {
+        "pinned": {"path": "", "source": "hf:owner/repo", "model_type": "llm",
+                   "revision": "refs/pr/3"},
+        "plain": {"path": "", "source": "hf:owner/repo", "model_type": "llm"},
+    }
+    with patch("localm.config.load_registry", return_value=registry):
+        pinned = client.get("/v1/models/pinned").json()
+        plain = client.get("/v1/models/plain").json()
+    assert pinned["revision"] == "refs/pr/3"
+    assert "revision" not in plain

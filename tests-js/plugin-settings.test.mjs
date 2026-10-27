@@ -98,6 +98,23 @@ test("one section per plugin, each in the Plugins nav group", async () => {
   assert.ok(ctrl(sec2, "mode"));
 });
 
+test("a plugin field named like a core field keeps the plugin's own label and help", async () => {
+  const payload = pluginsPayload({ plugins: [
+    { plugin: "other", label: "Other Plugin", fields: [
+      pluginField("mode", { widget: "select", label: "Plugin mode label", help: "Plugin mode help text",
+                           value: "fast", options: ["fast", "accurate"], default: "fast" }),
+    ] },
+  ] });
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch({ plugins: payload }) });
+  await render(win);
+  const wrap = ctrl(section(win, "other"), "mode");
+  assert.ok(wrap, "the mode control rendered");
+  assert.match(wrap.textContent, /Plugin mode label/);
+  assert.match(wrap.textContent, /Plugin mode help text/);
+  assert.doesNotMatch(wrap.textContent, /Session persistence/,
+    "the core 'mode' field's catalog label must not replace the plugin's own");
+});
+
 test("a HIDDEN field never renders a control", async () => {
   const payload = pluginsPayload({ plugins: [
     { plugin: "myplug", label: "My Plugin", fields: [
