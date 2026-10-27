@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 pytestmark = pytest.mark.skipif(os.name == "nt" or shutil.which("bash") is None,
                                 reason="setup-gui.sh runs under bash on Linux/macOS")
 
-_REPORT = '#!/bin/sh\necho "WINDOW-UV=$0"\necho "WINDOW-STORE=${LOCALM_GUI_STORE:-}"\nexit 0\n'
+_REPORT = '#!/bin/sh\necho "WINDOW-UV=$0"\necho "WINDOW-STORE=${LOCALM_GUI_STORE:-}"\necho "WINDOW-PYDIR=${UV_PYTHON_INSTALL_DIR:-}"\nexit 0\n'
 
 
 def _pinned_sha() -> str:
@@ -53,7 +53,7 @@ def _run(tmp_path: Path, *, answer: str, system_uv: bool, contained_uv: bool = F
     _write_exec(stubs / "curl", (
         "#!/bin/sh\n"
         "while [ $# -gt 0 ]; do [ \"$1\" = -o ] && dest=\"$2\"; shift; done\n"
-        f"cat > \"$dest\" <<'EOT'\n{installer}EOT\n"))
+        f"cat > \"$dest\" <<'STUB_END'\n{installer}STUB_END\n"))
     _write_exec(stubs / "sha256sum", f"#!/bin/sh\necho \"{_pinned_sha()}  $1\"\n")
     path = str(stubs) + os.pathsep + "/usr/bin" + os.pathsep + "/bin"
     system = tmp_path / "systemuv"
@@ -77,8 +77,8 @@ def _field(out, name: str) -> str:
 
 def test_a_system_uv_is_not_taken_silently_and_portable_installs_the_contained_one(tmp_path):
     clone, _, out = _run(tmp_path, answer="1\n", system_uv=True)
-    assert "Pick 1 or 2" in out.stdout and "INSTALLER-RAN" in out.stdout, (out.stdout, out.stderr)
-    assert "Install it now?" not in out.stdout
+    assert "[1] Portable - everything in this folder" in out.stdout, (out.stdout, out.stderr)
+    assert "INSTALLER-RAN" in out.stdout and "is not installed yet" not in out.stdout
     assert _field(out, "WINDOW-UV") == str(clone / ".uv" / "uv")
     assert _field(out, "WINDOW-STORE") == ""
     assert _field(out, "WINDOW-PYDIR") == str(clone / ".python")
@@ -99,13 +99,14 @@ def test_choosing_shared_uses_the_system_uv_and_says_so_to_the_window(tmp_path):
 
 def test_a_contained_uv_is_used_without_asking(tmp_path):
     clone, _, out = _run(tmp_path, answer="", system_uv=True, contained_uv=True)
-    assert "Pick 1 or 2" not in out.stdout and "INSTALLER-RAN" not in out.stdout
+    assert "[1] Portable" not in out.stdout and "INSTALLER-RAN" not in out.stdout
     assert _field(out, "WINDOW-UV") == str(clone / ".uv" / "uv")
 
 
 def test_no_uv_anywhere_still_offers_the_install(tmp_path):
     clone, _, out = _run(tmp_path, answer="Y\n", system_uv=False)
-    assert "Pick 1 or 2" not in out.stdout and "Install it now?" in out.stdout
+    assert "[1] Portable" not in out.stdout and "is not installed yet" in out.stdout
+    assert "INSTALLER-RAN" in out.stdout
     assert _field(out, "WINDOW-UV") == str(clone / ".uv" / "uv")
 
 
