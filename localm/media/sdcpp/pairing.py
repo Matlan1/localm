@@ -88,7 +88,7 @@ _CLIP_H = Download("sd2-community/stable-diffusion-2-1-base",
                    "text_encoder/model.fp16.safetensors", 680_821_096,
                    "681c555376658c81dc273f2d737a2aeb23ddb6d1d8e5b3a7064636d359a22668",
                    "text-encoder", name="openclip_h")
-_CLIP_G = Download("Comfy-Org/stable-diffusion-3.5-fp8", "text_encoders/clip_g.safetensors",
+_CLIP_G = Download("Comfy-Org/stable-diffusion-3.5", "text_encoders/clip_g.safetensors",
                    1_389_382_176,
                    "ec310df2af79c318e24d20511b601a591ca8cd4f1fce1d8dff822a356bcdb1f4",
                    "text-encoder")
@@ -99,22 +99,22 @@ _T5XXL = Download("comfyanonymous/flux_text_encoders", "t5xxl_fp8_e4m3fn.safeten
 _UMT5 = Download("city96/umt5-xxl-encoder-gguf", "umt5-xxl-encoder-Q4_K_M.gguf", 3_655_145_312,
                  "17cf97a5bbbc60a646d6105b832b6f657ce904a8a1ad970e4b59df0c67584a40",
                  "text-encoder")
-_FLUX_AE = Download("Comfy-Org/Lumina_Image_2.0_Repackaged", "split_files/vae/ae.safetensors",
+_FLUX_AE = Download("Comfy-Org/Lumina-Image-2", "split_files/vae/ae.safetensors",
                     335_304_388,
                     "afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38", "vae")
-_FLUX2_VAE = Download("Comfy-Org/flux2-dev", "split_files/vae/flux2-vae.safetensors",
+_FLUX2_VAE = Download("Comfy-Org/Flux-2-Dev", "split_files/vae/flux2-vae.safetensors",
                       336_213_556,
                       "d64f3a68e1cc4f9f4e29b6e0da38a0204fe9a49f2d4053f0ec1fa1ca02f9c4b5", "vae")
-_WAN21_VAE = Download("Comfy-Org/Wan_2.1_ComfyUI_repackaged",
+_WAN21_VAE = Download("Comfy-Org/Wan-2.1",
                       "split_files/vae/wan_2.1_vae.safetensors", 253_815_318,
                       "2fc39d31359a4b0a64f55876d8ff7fa8d780956ae2cb13463b0223e15148976b", "vae")
-_WAN22_VAE = Download("Comfy-Org/Wan_2.2_ComfyUI_Repackaged",
+_WAN22_VAE = Download("Comfy-Org/Wan-2.2",
                       "split_files/vae/wan2.2_vae.safetensors", 1_409_400_960,
                       "e40321bd36b9709991dae2530eb4ac303dd168276980d3e9bc4b6e2b75fed156", "vae")
-_QWEN_VAE = Download("Comfy-Org/Qwen-Image_ComfyUI", "split_files/vae/qwen_image_vae.safetensors",
+_QWEN_VAE = Download("Comfy-Org/Qwen-Image", "split_files/vae/qwen_image_vae.safetensors",
                      253_806_246,
                      "a70580f0213e67967ee9c95f05bb400e8fb08307e017a924bf3441223e023d1f", "vae")
-_CLIP_VISION_H = Download("Comfy-Org/Wan_2.1_ComfyUI_repackaged",
+_CLIP_VISION_H = Download("Comfy-Org/Wan-2.1",
                           "split_files/clip_vision/clip_vision_h.safetensors", 1_264_219_396,
                           "64a7ef761bfccbadbaa3da77366aac4185a6c58fa5de5f589b42a65bcc21f161",
                           "text-encoder")
@@ -122,7 +122,7 @@ _QWEN25_VL = Download("unsloth/Qwen2.5-VL-7B-Instruct-GGUF", "Qwen2.5-VL-7B-Inst
                       4_683_072_384,
                       "d16776dcd9a28d42758c2958ed3a752aabf20a305252cd64ff2be72b4a78c503",
                       "text-encoder")
-_QWEN3_4B = Download("Comfy-Org/z_image_turbo", "split_files/text_encoders/qwen_3_4b.safetensors",
+_QWEN3_4B = Download("Comfy-Org/Z-Image-Turbo", "split_files/text_encoders/qwen_3_4b.safetensors",
                      8_044_982_048,
                      "6c671498573ac2f7a5501502ccce8d2b08ea6ca2f661c458e708f36b36edfc5a",
                      "text-encoder")

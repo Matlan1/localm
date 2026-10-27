@@ -644,25 +644,25 @@ COMFY_MODEL_SOURCES: dict[str, ComfySource] = {
         "text-encoder", "clip", 4_893_934_904,
         "7d330da4816157540d6bb7838bf63a0f02f573fc48ca4d8de34bb0cbfd514f09"),
     "ae.safetensors": ComfySource(
-        "Comfy-Org/z_image_turbo:split_files/vae/ae.safetensors",
+        "Comfy-Org/Z-Image-Turbo:split_files/vae/ae.safetensors",
         "vae", "vae", 335_304_388,
         "afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38"),
     "ace_step_v1_3.5b.safetensors": ComfySource(
-        "Comfy-Org/ACE-Step_ComfyUI_repackaged:all_in_one/ace_step_v1_3.5b.safetensors",
+        "Comfy-Org/ACE-Step:all_in_one/ace_step_v1_3.5b.safetensors",
         "diffusion-unet", "checkpoints", 7_699_743_341,
         "f07cad74c4adce52ca14ca1bdf74cf3c14cbafb0823b95eca4459467fa369f40"),
     "wan2.2_ti2v_5B_fp16.safetensors": ComfySource(
-        "Comfy-Org/Wan_2.2_ComfyUI_Repackaged:"
+        "Comfy-Org/Wan-2.2:"
         "split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors",
         "diffusion-unet", "diffusion_models", 9_999_658_848,
         "456f901338bd9eadbded3828b819109a9b68e8a525ca5cf8d0049a69fcfeca1e"),
     "umt5_xxl_fp8_e4m3fn_scaled.safetensors": ComfySource(
-        "Comfy-Org/Wan_2.2_ComfyUI_Repackaged:"
+        "Comfy-Org/Wan-2.2:"
         "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
         "text-encoder", "text_encoders", 6_735_906_897,
         "c3355d30191f1f066b26d93fba017ae9809dce6c627dda5f6a66eaa651204f68"),
     "wan2.2_vae.safetensors": ComfySource(
-        "Comfy-Org/Wan_2.2_ComfyUI_Repackaged:split_files/vae/wan2.2_vae.safetensors",
+        "Comfy-Org/Wan-2.2:split_files/vae/wan2.2_vae.safetensors",
         "vae", "vae", 1_409_400_960,
         "e40321bd36b9709991dae2530eb4ac303dd168276980d3e9bc4b6e2b75fed156"),
 }
