@@ -289,6 +289,26 @@ def test_a_ctx_default_other_than_the_pinned_init_is_reported(field, value, expe
         b.verify_abi(lib)
 
 
+def test_a_runtime_lacking_a_bound_function_is_refused_with_the_reinstall_hint(
+        monkeypatch, tmp_path):
+    class _Lib(_FakeLib):
+        def __getattr__(self, name):
+            if name == "free_sd_video_generation_result":
+                raise AttributeError(f"function '{name}' not found")
+            fn = type("_Fn", (), {"restype": None, "argtypes": None})()
+            object.__setattr__(self, name, fn)
+            return fn
+
+    lib = _Lib()
+    monkeypatch.setattr(b.ctypes, "CDLL", lambda path, mode=0: lib)
+    monkeypatch.setattr(b, "_register_backends", lambda lib, d: None)
+    monkeypatch.setattr(b, "_add_dll_dir", lambda d: None)
+    with pytest.raises(b.AbiMismatch) as ei:
+        b.load_library(tmp_path)
+    assert "free_sd_video_generation_result" in str(ei.value)
+    assert "localm setup-sdcpp --force" in str(ei.value)
+
+
 class _LoadLib(_FakeLib):
     """A library the worker's load request can run against; records the
     ``sd_ctx_params_t`` that ``new_sd_ctx`` receives."""

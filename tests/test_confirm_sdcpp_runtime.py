@@ -136,17 +136,18 @@ def _opener_for(text: str, seen: list | None = None):
 def _c_fn_type(kind: str, i: int) -> str:
     if kind == "void":
         return "void"
-    if kind == "cb":
-        return "sd_log_cb_t"
+    if kind.startswith("cb:"):
+        return kind[3:]
     if kind == "voidp":
         return "const sd_ctx_t*" if i % 2 else "void*"
     return _c_type(kind, i)
 
 
-def render_functions(functions: dict, *, edit=None) -> str:
+def render_functions(functions: dict, *, edit=None, typedefs=()) -> str:
     """``SD_API`` declarations of *functions* ({name: (return kind, [arg kinds])}),
     split over lines and commented the way the upstream header has them, behind
-    the export macro's own definition. *edit* may change the dict first."""
+    the export macro's own definition; the names in *typedefs* are rendered as
+    function-pointer typedefs. *edit* may change the dict first."""
     functions = {k: (r, list(a)) for k, (r, a) in functions.items()}
     if edit:
         edit(functions)
@@ -154,7 +155,10 @@ def render_functions(functions: dict, *, edit=None) -> str:
     for n, (name, (ret, args)) in enumerate(functions.items()):
         out.append(f"// {name} does a thing (see notes);")
         params = ",\n        ".join(f"{_c_fn_type(k, n + i)} a{i}" for i, k in enumerate(args))
-        out.append(f"SD_API {_c_fn_type(ret, n)} {name}({params or 'void'});")
+        if name in typedefs:
+            out.append(f"typedef {_c_fn_type(ret, n)} (*{name})({params or 'void'});")
+        else:
+            out.append(f"SD_API {_c_fn_type(ret, n)} {name}({params or 'void'});")
     return "\n".join(out)
 
 
@@ -188,7 +192,8 @@ def header_routes(cf, binding, bound, commit=NEW_COMMIT, *, edit=None, ggml_edit
     body."""
     sd, ggml = cf.split_ggml(bound, binding.GGML_STRUCTS)
     text = (render_header(sd, edit=edit) + "\n"
-            + render_functions(cf.binding_functions(binding), edit=fn_edit))
+            + render_functions(cf.binding_functions(binding), edit=fn_edit,
+                               typedefs=tuple(binding.CALLBACKS)))
     routes = {cf.HEADER_URL % commit: text.encode()}
     lookup = submodule if submodule is not None else {
         "type": "submodule", "sha": GGML_COMMIT,
@@ -371,7 +376,9 @@ def test_the_binding_declares_the_functions_this_check_covers(cf, binding):
     assert fns["generate_image"] == (
         "bool", ["voidp", "ptr:struct:sd_img_gen_params_t",
                  "ptr:ptr:struct:sd_image_generation_result_t"])
-    assert fns["sd_set_log_callback"] == ("void", ["cb", "voidp"])
+    assert fns["sd_set_log_callback"] == ("void", ["cb:sd_log_cb_t", "voidp"])
+    assert fns["sd_preview_cb_t"] == (
+        "void", ["int", "int", "ptr:struct:sd_image_t", "bool", "voidp"])
 
 
 @pytest.mark.parametrize("label,edit,expect", [
@@ -388,6 +395,16 @@ def test_the_binding_declares_the_functions_this_check_covers(cf, binding):
     ("a function removed",
      lambda f: f.pop("free_sd_video_generation_result"),
      "free_sd_video_generation_result(): not declared in the header"),
+    ("a callback typedef gains an argument",
+     lambda f: f["sd_progress_cb_t"][1].insert(3, "int"),
+     "sd_progress_cb_t(): takes 5 argument(s) in the header, 4 in the binding"),
+    ("a callback typedef argument retyped",
+     lambda f: f["sd_preview_cb_t"][1].__setitem__(2, "ptr:float"),
+     "sd_preview_cb_t(): argument 3 is ptr:float in the header"),
+    ("a function takes another callback type",
+     lambda f: f["sd_set_log_callback"][1].__setitem__(0, "cb:sd_progress_cb_t"),
+     "sd_set_log_callback(): argument 1 is cb:sd_progress_cb_t in the header, "
+     "cb:sd_log_cb_t in the binding"),
 ])
 def test_any_change_to_a_bound_function_is_a_difference(cf, binding, bound, label, edit,
                                                          expect):
@@ -401,6 +418,7 @@ def test_a_void_pointer_argument_fits_any_typed_pointer_and_nothing_else(cf):
     assert cf._kind_fits("voidp", "voidp")
     assert not cf._kind_fits("voidp", "int")
     assert not cf._kind_fits("voidp", "str")
+    assert not cf._kind_fits("voidp", "ptr:ptr:struct:sd_ctx_t")
     assert not cf._kind_fits("ptr:struct:sd_ctx_t", "voidp")
 
 
@@ -425,7 +443,8 @@ def test_header_function_declarations_parse_over_lines_and_comments(cf):
         SD_API sd_preview_info_t sd_get_preview_info();
     """)
     assert cf.parse_header_functions(src) == {
-        "sd_set_log_callback": ("void", ["cb", "voidp"]),
+        "sd_log_cb_t": ("void", ["int", "str", "voidp"]),
+        "sd_set_log_callback": ("void", ["cb:sd_log_cb_t", "voidp"]),
         "sd_list_devices": ("u64", ["str", "u64"]),
         "sd_commit": ("str", []),
         "sd_get_default_scheduler": ("int", ["ptr:struct:sd_ctx_t", "int"]),

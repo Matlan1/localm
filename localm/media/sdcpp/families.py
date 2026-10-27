@@ -293,8 +293,9 @@ def capabilities(info: FileInfo) -> dict:
     """The extra inputs the diffusion model or checkpoint *info* takes:
     ``{"references", "controlnet", "embeddings", "inpaint", "edit"}``, each a
     bool. ``references``: reference images (an edit family that is not a
-    dedicated inpainting model or a FLUX.1 structural-control model such as
-    FLUX.1 Canny/Depth or Flex.2, or an instruct pix2pix UNet); ``controlnet``
+    dedicated inpainting model, a FLUX.1 structural-control model such as
+    FLUX.1 Canny/Depth or Flex.2, or Z-Image L2P, or an instruct pix2pix UNet);
+    ``controlnet``
     and ``embeddings``: a UNet family;
     ``inpaint``: a dedicated inpainting model (a mask works with every model);
     ``edit``: the header marks an edit model (pix2pix, Qwen-Image-Edit 2511)."""
@@ -303,7 +304,7 @@ def capabilities(info: FileInfo) -> dict:
     pix2pix = bool(detail.get("pix2pix"))
     return {
         "references": (family in REFERENCE_FAMILIES and not detail.get("inpaint")
-                       and not detail.get("control")) or pix2pix,
+                       and not detail.get("control") and not detail.get("l2p")) or pix2pix,
         "controlnet": family in UNET_FAMILIES,
         "embeddings": family in UNET_FAMILIES,
         "inpaint": bool(detail.get("inpaint")),
@@ -461,7 +462,7 @@ def _diffusion_family(t: dict) -> Optional[tuple[str, dict]]:
     if _has(names, p + "transformer_blocks.0.img_mod.1.weight"):
         return "qwen-image", {"edit": True} if _has(names, "__index_timestep_zero__") else {}
     if _has(names, p + "cap_embedder.0.weight"):
-        return "z-image", {}
+        return "z-image", {"l2p": True} if _has(names, p + "local_decoder.out_conv.weight") else {}
     if _has(names, "llm_adapter.blocks.0.cross_attn.q_proj.weight"):
         return "anima", {}
     if _has(names, p + "layers.0.adaLN_sa_ln.weight"):

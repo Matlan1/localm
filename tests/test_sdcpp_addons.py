@@ -19,7 +19,7 @@ from localm.media import native_models as nm
 from localm.media.sdcpp import families, pairing
 from localm.plugins.builtin.image.backends import native as image_native
 from tests.test_sdcpp_families import (  # noqa: F401
-    FLUX_DEV, QWEN_IMAGE, SD1_UNET, SDXL_UNET, _finish, _register, flux_set, media_app, runner,
+    FLUX_DEV, QWEN_IMAGE, SD1_UNET, SDXL_UNET, Z_IMAGE, _finish, _register, flux_set, media_app, runner,
     write_gguf, write_safetensors,
 )
 
@@ -50,6 +50,7 @@ SD1_PIX2PIX = dict(SD1_UNET, **{P + "input_blocks.0.0.weight": (320, 8, 3, 3)})
 FLUX_FILL = dict(FLUX_DEV, **{"img_in.weight": (3072, 384)})
 FLUX_CONTROLS = dict(FLUX_DEV, **{"img_in.weight": (3072, 128)})
 FLEX_2 = dict(FLUX_DEV, **{"img_in.weight": (3072, 196)})
+Z_IMAGE_L2P = dict(Z_IMAGE, **{"local_decoder.out_conv.weight": (3, 64, 3, 3)})
 QWEN_EDIT_2511 = dict(QWEN_IMAGE, **{"transformer_blocks.0.__index_timestep_zero__": (1,)})
 
 
@@ -135,6 +136,10 @@ def test_other_small_files_are_not_embeddings(tmp_path, shapes):
                            "inpaint": False, "edit": False}),
     (FLEX_2, "gguf", {"references": False, "controlnet": False, "embeddings": False,
                       "inpaint": False, "edit": False}),
+    (Z_IMAGE, "st", {"references": True, "controlnet": False, "embeddings": False,
+                     "inpaint": False, "edit": False}),
+    (Z_IMAGE_L2P, "st", {"references": False, "controlnet": False, "embeddings": False,
+                         "inpaint": False, "edit": False}),
     (QWEN_IMAGE, "st", {"references": True, "controlnet": False, "embeddings": False,
                         "inpaint": False, "edit": False}),
     (QWEN_EDIT_2511, "st", {"references": True, "controlnet": False, "embeddings": False,

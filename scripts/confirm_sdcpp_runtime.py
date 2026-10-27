@@ -16,7 +16,8 @@ WHAT IT CHECKS (each recorded in the receipt with status PASS / FAIL / SKIP and 
   header_layout    the C structs in include/stable-diffusion.h at the candidate
                    commit equal the structs localm's ctypes binding declares, field
                    for field, and every function the binding declares (_FUNCTIONS)
-                   has the header's argument and return types; the ggml structs the
+                   and every callback typedef it binds (CALLBACKS) has the header's
+                   argument and return types; the ggml structs the
                    binding names in GGML_STRUCTS are
                    compared with ggml's own headers at the ggml submodule commit the
                    candidate pins. A difference is a FAIL: "binding needs a code
@@ -234,6 +235,9 @@ _TAGGED_STRUCT_RE = re.compile(r"\bstruct\s+(?P<name>\w+)\s*\{(?P<body>[^{}]*)\}
 _FUNCTION_RE = re.compile(
     r"\bSD_API\s+(?P<ret>[^;{}()]*?)\b(?P<name>\w+)\s*\((?P<args>[^;{}()]*)\)\s*;")
 _CALLBACK_TYPE_RE = re.compile(r"\w+_(?:cb|callback)_t")
+_CALLBACK_TYPEDEF_RE = re.compile(
+    r"\btypedef\s+(?P<ret>[^;{}()]*?)\(\s*\*\s*(?P<name>\w+)\s*\)\s*"
+    r"\((?P<args>[^;{}()]*)\)\s*;")
 _SCALARS = {"bool": "bool", "int": "int", "float": "float", "uint32_t": "u32",
             "uint64_t": "u64", "size_t": "u64", "int64_t": "i64", "uint8_t": "u8",
             "void": "void"}
@@ -282,18 +286,18 @@ def parse_header_structs(source: str) -> dict:
 
 def parse_header_functions(source: str) -> dict:
     """``{function name: (return kind, [argument kind, ...])}`` for every ``SD_API``
-    declaration in C header text *source*. A function-pointer typedef argument
-    (``*_cb_t``, ``*_callback_t``) is kind ``"cb"``; an argument that does not parse
-    as ``type name`` is ``"unparsed"``."""
+    declaration and every function-pointer ``typedef`` in C header text *source*.
+    An argument of a ``*_cb_t`` / ``*_callback_t`` type is kind ``"cb:<type>"``; an
+    argument that does not parse as ``type name`` is ``"unparsed"``."""
     text = "\n".join(line for line in _strip_comments(source).splitlines()
                      if not line.lstrip().startswith("#"))
 
     def kind(ctype: str) -> str:
         t = " ".join(ctype.replace("const ", " ").split())
-        return "cb" if _CALLBACK_TYPE_RE.fullmatch(t) else _c_kind(ctype)
+        return f"cb:{t}" if _CALLBACK_TYPE_RE.fullmatch(t) else _c_kind(ctype)
 
     out = {}
-    for m in _FUNCTION_RE.finditer(text):
+    for m in list(_FUNCTION_RE.finditer(text)) + list(_CALLBACK_TYPEDEF_RE.finditer(text)):
         args = []
         raw = " ".join(m.group("args").split())
         if raw not in ("", "void"):
@@ -344,26 +348,35 @@ def binding_structs(binding) -> dict:
     return out
 
 
-def _py_function_kind(ct) -> str:
+def _py_function_kind(ct, callbacks: dict) -> str:
     import ctypes
     if ct is None:
         return "void"
     if isinstance(ct, type) and issubclass(ct, ctypes._CFuncPtr):
-        return "cb"
+        name = next((n for n, t in callbacks.items() if t is ct), None)
+        return f"cb:{name}" if name else "cb"
     return _py_kind(ct)
 
 
 def binding_functions(binding) -> dict:
     """``{function name: (return kind, [argument kind, ...])}`` for every entry of
-    *binding*'s ``_FUNCTIONS`` table ((name, restype, argtypes))."""
-    return {name: (_py_function_kind(restype), [_py_function_kind(a) for a in argtypes])
-            for name, restype, argtypes in getattr(binding, "_FUNCTIONS", ())}
+    *binding*'s ``_FUNCTIONS`` table ((name, restype, argtypes)) and every callback
+    type in its ``CALLBACKS`` (``{typedef name: CFUNCTYPE}``)."""
+    callbacks = getattr(binding, "CALLBACKS", {})
+    out = {name: (_py_function_kind(restype, callbacks),
+                  [_py_function_kind(a, callbacks) for a in argtypes])
+           for name, restype, argtypes in getattr(binding, "_FUNCTIONS", ())}
+    for name, cb in callbacks.items():
+        out[name] = (_py_function_kind(cb._restype_, callbacks),
+                     [_py_function_kind(a, callbacks) for a in cb._argtypes_])
+    return out
 
 
 def _kind_fits(bound: str, header: str) -> bool:
     """Whether binding kind *bound* passes a C value of kind *header*: equal, or a
-    ``c_void_p`` standing for any pointer."""
-    return bound == header or (bound == "voidp" and header.startswith("ptr:"))
+    ``c_void_p`` standing for a single-level pointer."""
+    return bound == header or (bound == "voidp" and header.startswith("ptr:")
+                               and not header.startswith("ptr:ptr:"))
 
 
 def compare_functions(header: dict, bound: dict) -> list[str]:

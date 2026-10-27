@@ -353,6 +353,10 @@ SD_LOG_CB = ctypes.CFUNCTYPE(None, c_int, c_char_p, c_void_p)
 SD_PROGRESS_CB = ctypes.CFUNCTYPE(None, c_int, c_int, c_float, c_void_p)
 SD_PREVIEW_CB = ctypes.CFUNCTYPE(None, c_int, c_int, POINTER(sd_image_t), c_bool, c_void_p)
 
+# The header's callback typedefs these function types bind.
+CALLBACKS = {"sd_log_cb_t": SD_LOG_CB, "sd_progress_cb_t": SD_PROGRESS_CB,
+             "sd_preview_cb_t": SD_PREVIEW_CB}
+
 # Bytes reserved past ctypes' sizeof for every struct the library initialises,
 # so a library whose struct grew writes into padding instead of past the buffer
 # before verify_abi can refuse it.
@@ -478,8 +482,8 @@ def load_library(runtime_dir: Path, extra_dll_dirs: Optional[list] = None) -> ct
 
     *extra_dll_dirs*: further directories for transitive imports (the ROCm
     build's hipBLAS/rocBLAS). Raises ``OSError`` when the library or one of its
-    imports cannot be loaded, and :class:`AbiMismatch` when the layout check
-    fails."""
+    imports cannot be loaded, and :class:`AbiMismatch` when it lacks a function
+    in ``_FUNCTIONS`` or the layout check fails."""
     runtime_dir = Path(runtime_dir)
     _add_dll_dir(runtime_dir)
     for d in extra_dll_dirs or []:
@@ -487,7 +491,12 @@ def load_library(runtime_dir: Path, extra_dll_dirs: Optional[list] = None) -> ct
     mode = 0 if sys.platform == "win32" else ctypes.RTLD_GLOBAL
     lib = ctypes.CDLL(str(runtime_dir / lib_filename()), mode=mode)
     _register_backends(lib, runtime_dir)
-    _declare(lib)
+    try:
+        _declare(lib)
+    except AttributeError as e:
+        raise AbiMismatch(
+            f"stable-diffusion.cpp runtime in {runtime_dir} lacks a function localm binds "
+            f"({e}). Reinstall it with 'localm setup-sdcpp --force'.") from e
     verify_abi(lib)
     return lib
 
