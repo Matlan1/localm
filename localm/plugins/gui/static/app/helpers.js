@@ -667,10 +667,10 @@ const _MATH_SPAN = new RegExp([
   String.raw`(?<=^[ \t]*)\$\$(?:[ \t]*\n|(?=[^\s$]))(?:${_DISPLAY_LINE}){1,40}?(?:[ \t]*|[^\n]{0,2000}[^\s$])\$\$[ \t]*$`,
   String.raw`\\\[[\s\S]+?\\\]`,
   String.raw`\\\([\s\S]+?\\\)`,
-  String.raw`(?<![\\$])\$(?![\s\d])[^$\n]*[^$\s\n]\$(?!\d)`,
+  String.raw`(?<![\\$])\$(?![\s\d)\]},.;:!?])[^$\n]*[^$\s\n(\[{]\$(?!\d)`,
 ].join("|"), "gm");
 
-const _LITERAL_DOLLAR = String.raw`\\\$|\${3,}|\$\$[ \t]+\$\$|(?<!\$)\$(?!\$)`;
+const _LITERAL_DOLLAR = String.raw`\\\$|\${3,}|\$\$[ \t]+\$\$|(?<=["'(\[*~])\$\$(?=["')\]*~])|(?<!\$)\$(?!\$)`;
 const _MATH_OR_DOLLAR = new RegExp(`${_MATH_SPAN.source}|(?<lit>${_LITERAL_DOLLAR})`, "gm");
 
 /** Swap each math span of *text* that lies outside code for an inert token, so
@@ -693,10 +693,12 @@ const _MATH_OR_DOLLAR = new RegExp(`${_MATH_SPAN.source}|(?<lit>${_LITERAL_DOLLA
  *  Any other pair of `$$` is left to the markdown pass and KaTeX's own auto-render.
  *
  *  Inline `$...$` is math only when the opening `$` is followed by a character
- *  that is neither whitespace nor a digit and the closing `$` follows a
- *  non-space character and is not followed by a digit. Every other dollar sign
- *  outside code (a lone `$`, a run of three or more, an empty `$$ $$`, an escaped
- *  `\$`) is swapped for an inert token so KaTeX's auto-render never pairs it.
+ *  that is neither whitespace, a digit nor closing punctuation and the closing
+ *  `$` follows a character that is neither whitespace nor an opening bracket and
+ *  is not followed by a digit. Every other dollar sign outside code (a lone `$`,
+ *  a run of three or more, an empty `$$ $$`, a `$$` standing alone between
+ *  brackets, quotes or `*`/`~` marks, an escaped `\$`) is swapped for an inert
+ *  token so KaTeX's auto-render never pairs it.
  *  `restore(root)` puts the math source back and runs before the auto-render
  *  pass; `finish(root)` puts the literal `$` back and runs after it. */
 export function protectMath(text) {
