@@ -261,6 +261,10 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             models.append(row_out)
         out = {"models": models, "active": current}
         loading = _hs._switch_loading
+        if not loading and current:
+            engine_now = _hs._engines.get(current)
+            if getattr(engine_now, "loading", False) is True:
+                loading = current
         if loading:
             out["loading"] = loading
         # Models this instance answers through a peer instance on the same

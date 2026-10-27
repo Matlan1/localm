@@ -472,6 +472,22 @@ class TestModelsList:
         assert rows["m-a"]["loaded"] is True and rows["m-b"]["loaded"] is False
         assert data["active_gpu_split"] == [0.75, 0.25]
 
+    def test_active_engine_mid_load_is_reported_as_loading(self, harness, engines, monkeypatch):
+        monkeypatch.setattr(_hs, "_switch_loading", "")
+        engines["m-a"] = FakeEngine(loaded=False)
+        engines["m-a"].loading = True
+        with TestClient(harness.app) as c:
+            assert c.get("/api/models").json()["loading"] == "m-a"
+            engines["m-a"].loading = False
+            assert "loading" not in c.get("/api/models").json()
+
+    def test_a_switch_load_name_wins_over_the_active_engine(self, harness, engines, monkeypatch):
+        monkeypatch.setattr(_hs, "_switch_loading", "m-b")
+        engines["m-a"] = FakeEngine(loaded=False)
+        engines["m-a"].loading = True
+        with TestClient(harness.app) as c:
+            assert c.get("/api/models").json()["loading"] == "m-b"
+
     def test_resumable_is_reported_only_without_an_active_model(self, harness, monkeypatch):
         monkeypatch.setattr(_hs, "_resolve_unnamed_model_name", lambda: "m-b")
         with TestClient(harness.app) as c:
