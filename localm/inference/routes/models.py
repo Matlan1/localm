@@ -162,6 +162,8 @@ def register(app: FastAPI, ctx) -> None:
             "loaded": model_id in _hs._engines and _hs._engines[model_id].loaded,
             "model_type": entry.get("model_type", "llm"),
         }
+        if entry.get("revision"):
+            out["revision"] = str(entry["revision"])
         # The "llm" above is a default, not a recorded fact. This flag is emitted
         # only when the entry records no model_type.
         from localm.model_manager import has_recorded_model_type

@@ -180,7 +180,7 @@ def test_settings_write_blocked_by_another_process_answers_busy_not_500(
     cfg.save_config({"temperature": 0.7})
     lockpath = cfg.CONFIG_FILE.with_name(cfg.CONFIG_FILE.name + ".lock")
     caplog.set_level(logging.WARNING, logger="localm")
-    with TestClient(create_app(None), raise_server_exceptions=False) as client:
+    with TestClient(create_app(None)) as client:
         lockpath.write_text("12345", encoding="utf-8")
         try:
             response = client.patch(

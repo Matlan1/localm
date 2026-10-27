@@ -289,6 +289,41 @@ class TestProjectorRepull:
         assert projector.read_bytes() == right + b"damaged"
         assert (models_dir / "mmproj-main-f16-2.gguf").read_bytes() == right
 
+    def test_the_good_copy_made_beside_an_unrecorded_projector_is_attached(
+            self, fake_registry, monkeypatch, blobs, capsys):
+        store, models_dir = fake_registry
+        model, right = blobs
+        _wire_hub_by_repo(monkeypatch, {
+            ("o/r", "main.gguf"): model, ("o/r", "mmproj-main-f16.gguf"): right})
+        assert mm._pull_gguf_file("o/r:main.gguf", None) is True
+        projector = models_dir / "mmproj-main-f16.gguf"
+        projector.write_bytes(right + b"damaged")
+        (models_dir / "mmproj-main-f16.gguf.origin.json").unlink()
+        capsys.readouterr()
+
+        assert mm._pull_gguf_file("o/r:main.gguf", None) is True
+
+        good = models_dir / "mmproj-main-f16-2.gguf"
+        assert store["main"]["mmproj"] == str(good.resolve())
+        assert "mmproj-main-f16-2.gguf" in " ".join(capsys.readouterr().out.split())
+
+    def test_a_pull_of_another_model_does_not_repoint_this_models_projector(
+            self, fake_registry, monkeypatch, blobs):
+        store, models_dir = fake_registry
+        model, right = blobs
+        _wire_hub_by_repo(monkeypatch, {
+            ("o/r", "main.gguf"): model, ("o/r", "other.gguf"): model,
+            ("o/r", "mmproj-main-f16.gguf"): right})
+        assert mm._pull_gguf_file("o/r:main.gguf", None) is True
+        projector = models_dir / "mmproj-main-f16.gguf"
+        projector.write_bytes(right + b"damaged")
+        (models_dir / "mmproj-main-f16.gguf.origin.json").unlink()
+
+        assert mm._pull_gguf_file("o/r:other.gguf", None) is True
+
+        assert store["main"]["mmproj"] == str(projector.resolve())
+        assert store["other"]["mmproj"] == str((models_dir / "mmproj-main-f16-2.gguf").resolve())
+
     def test_a_hostile_origin_file_is_read_as_no_origin(
             self, fake_registry, monkeypatch, blobs):
         store, models_dir = fake_registry

@@ -234,10 +234,17 @@ def test_the_labelled_arm_fails_on_red_gui_tests(mp):
     assert v.reasons == ["gui-tests: failure"]
 
 
-def test_an_unlabelled_pr_passes_with_gui_tests_skipped_by_its_label_gate(mp):
-    v = mp.decide(False, GREEN_UNLABELLED, mp.classify(["localm/plugins/gui/static/app/chat.js"]))
+@pytest.mark.parametrize("gui", ["skipped", "success"])
+def test_an_unlabelled_pr_passes_with_gui_tests_skipped_or_green(mp, gui):
+    v = mp.decide(False, {**GREEN_UNLABELLED, "gui-tests": gui},
+                  mp.classify(["localm/plugins/gui/static/app/chat.js"]))
     assert v.ok, v.reasons
-    assert GREEN_UNLABELLED["gui-tests"] == "skipped"
+
+
+def test_an_unlabelled_pr_fails_when_its_gui_tests_failed(mp):
+    v = mp.decide(False, {**GREEN_UNLABELLED, "gui-tests": "failure"}, {})
+    assert not v.ok
+    assert v.reasons == ["gui-tests: failure"]
 
 
 def test_the_unlabelled_arm_fails_when_the_gate_was_skipped_rather_than_passing_silently(mp):
@@ -491,10 +498,7 @@ def test_the_merge_policy_check_name_exists_only_on_pull_request_runs():
 def test_the_master_ruleset_requires_exactly_the_checks_the_workflows_report():
     rules = json.loads((REPO_ROOT / ".github" / "rulesets" / "master.json").read_text(encoding="utf-8"))["rules"]
     required = next(r for r in rules if r["type"] == "required_status_checks")["parameters"]["required_status_checks"]
-    codeql = _load_workflow(REPO_ROOT / ".github" / "workflows" / "codeql.yml")["jobs"]["analyze"]
-    assert _norm(codeql["name"]) == "analyze (${{ matrix.language }})"
-    reported = {"merge-policy"} | {f"analyze ({lang})" for lang in codeql["strategy"]["matrix"]["language"]}
-    assert {c["context"] for c in required} == reported
+    assert {c["context"] for c in required} == {"merge-policy"}
     assert {c["integration_id"] for c in required} == {15368}, "GitHub Actions app: no other app may satisfy a required check"
     pr_rule = next(r for r in rules if r["type"] == "pull_request")["parameters"]
     assert pr_rule["required_approving_review_count"] == 0 and pr_rule["require_code_owner_review"] is False
@@ -549,9 +553,9 @@ def test_the_jobs_the_policy_needs_still_exist_with_their_gating():
     assert "full-ci" in ci["jobs"]["test"]["if"]
     assert "full-ci" in ci["jobs"]["python-pr-gate"]["if"]
     assert ci["jobs"]["lint"]["if"] == "github.event_name != 'push'"
-    assert "full-ci" in ci["jobs"]["gui-tests"]["if"]
-    assert _norm(ci["jobs"]["gui-tests"]["if"]) == _norm(ci["jobs"]["test-shard"]["if"]), (
-        "gui-tests runs under exactly the matrix's label gate")
+    assert ci["jobs"]["gui-tests"]["if"] == "github.event_name != 'push'"
+    scope = next(s for s in ci["jobs"]["gui-tests"]["steps"] if s.get("id") == "scope")
+    assert "full-ci" in scope["env"]["FULL_CI"], "a labelled PR runs the GUI tests on both hosts"
     assert _norm(ci["jobs"]["test"]["if"]) == "!cancelled() && " + _norm(ci["jobs"]["test-shard"]["if"])
     # merge-policy requires mutation-scope on both arms: it runs on every pull_request.
     assert "github.event_name == 'pull_request'" in _norm(ci["jobs"]["mutation-scope"]["if"])
@@ -559,3 +563,16 @@ def test_the_jobs_the_policy_needs_still_exist_with_their_gating():
     assert "labeled" in ci["on"]["pull_request"]["types"]
     assert ci["jobs"]["mutation-scope"]["outputs"]["modules"] == "${{ steps.scope.outputs.modules }}"
     assert ci["jobs"]["mutation-run"]["needs"] == ["mutation-scope"]
+
+
+def test_codeql_runs_on_a_pull_request_only_with_its_label_and_nightly_on_master():
+    wf = _load_workflow(REPO_ROOT / ".github" / "workflows" / "codeql.yml")
+    on = wf["on"]
+    assert "push" not in on
+    assert on["pull_request"]["types"] == ["opened", "synchronize", "reopened", "labeled"]
+    assert "workflow_dispatch" in on and on["schedule"][0]["cron"] == "0 2 * * *"
+    cond = _norm(wf["jobs"]["analyze"]["if"])
+    assert "github.event_name != 'pull_request'" in cond
+    assert "contains(github.event.pull_request.labels.*.name, 'codeql')" in cond
+    assert "contains(github.event.pull_request.labels.*.name, 'full-ci')" in cond
+    assert wf["concurrency"]["cancel-in-progress"] == "${{ github.event_name == 'pull_request' }}"

@@ -363,3 +363,27 @@ def test_the_watchdog_writes_no_log_file_outside_debug_mode(spawn, monkeypatch):
     monkeypatch.delenv("LOCALM_DEBUG", raising=False)
     _spawn()
     assert "--log-file" not in calls[0][0]
+
+
+@pytest.mark.parametrize("args,port,expected", [
+    (["serve"], 8443, ["serve", "-p", "8443"]),
+    (["serve", "-p", "8443"], 8443, ["serve", "-p", "8443"]),
+    (["serve", "-p", "8000", "m", "-p", "8000", "-p", "8000"], 8443,
+     ["serve", "m", "-p", "8443"]),
+    (["serve", "--port", "8000", "--no-browser"], 8443,
+     ["serve", "--no-browser", "-p", "8443"]),
+    (["serve", "--port=8000", "-p8001"], 8443, ["serve", "-p", "8443"]),
+    (["serve", "-p", "8000"], None, ["serve", "-p", "8000"]),
+    (["gui", "--no-model"], 0, ["gui", "--no-model"]),
+])
+def test_a_relaunch_keeps_exactly_one_port_option(args, port, expected):
+    assert portmux.argv_with_port(args, port) == expected
+
+
+def test_the_watchdog_relaunch_of_a_relaunched_process_has_one_port_option(spawn, monkeypatch):
+    _root, calls = spawn
+    monkeypatch.setattr(portmux.sys, "argv",
+                        ["localm", "serve", "-p", "8443", "-p", "8443", "-p", "8443"])
+    _spawn()
+    relaunch = json.loads(_arg(calls[0][0], "--relaunch-argv"))
+    assert relaunch[3:] == ["serve", "-p", "8443"]

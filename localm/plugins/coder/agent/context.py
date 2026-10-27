@@ -465,6 +465,10 @@ class _ContextMixin:
         # Set by Agent (core.py), which this class is mixed into.
         cwd: Path
         backend: Any
+        @property
+        def stop_pending(self) -> bool: ...
+        confirm_handler: Any
+        server_side: bool
         _episode_store: Any
         _system_prompt: str
 
@@ -1769,7 +1773,7 @@ ws     ::= [ \t\n\r]*
                 full += piece
                 if not hidden:
                     on_token(piece)
-                if self._stop_requested or self.cancelled:
+                if self.stop_pending:
                     break
         except KeyboardInterrupt:
             if on_interrupt is None:
@@ -1870,6 +1874,13 @@ ws     ::= [ \t\n\r]*
                 import os
                 from ..display import print_error
                 import getpass
+
+                if self.server_side:
+                    raise CoderAuthError(
+                        f"The coder backend at {getattr(self.backend, '_base_url', 'its server')} "
+                        f"(model {getattr(self.backend, 'model_id', '?')}) rejected the API key. "
+                        "Use a valid key for that backend and run it again."
+                    ) from e
 
                 # Cannot prompt for a key if there's no TTY or we are in CI
                 if not sys.stdin.isatty() or os.environ.get("CI"):

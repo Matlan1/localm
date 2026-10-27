@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Optional
 
-from localm.pathsafe import is_mapped_network_drive, is_unc_or_device_path
+from localm.pathsafe import (is_mapped_network_drive, is_unc_or_device_path,
+                             resolve_keeping_mapped_drive)
 
 from ..extract import SECRET_SUFFIXES, is_secret_index_name
 
@@ -155,8 +157,8 @@ def _network_drives_allowed_fresh() -> bool:
 def hard_floor(p, allow_net: Optional[bool] = None) -> Path:
     """Resolve *p* and apply the checks no caller can switch off: a UNC or
     device path, a credential folder anywhere in the resolved path, and a mapped
-    network drive when *allow_net* is False. Returns the resolved path, else
-    raises ``ConfinementError``. *allow_net* None reads the
+    network drive when *allow_net* is False. Returns the resolved path (one on a
+    mapped network drive keeps its drive letter), else raises ``ConfinementError``. *allow_net* None reads the
     ``allow_network_drives`` setting fresh."""
     try:
         rp = Path(p).expanduser()
@@ -168,19 +170,25 @@ def hard_floor(p, allow_net: Optional[bool] = None) -> Path:
     if is_unc_or_device_path(str(rp)):
         raise ConfinementError(f"Refusing to index a UNC or device path: {p}",
                                path=Path(str(p)), reason="unc_or_device")
+    if allow_net is None:
+        allow_net = _network_drives_allowed_fresh()
+    typed = os.path.abspath(str(rp))
     try:
-        rp = rp.resolve()
+        resolved = rp.resolve()
+        rp = resolve_keeping_mapped_drive(rp)
     except (OSError, ValueError) as e:
         raise ConfinementError(f"Invalid path: {p}",
                                path=Path(str(p)), reason="invalid") from e
 
-    if is_credential_path(rp):
+    if is_unc_or_device_path(str(rp)):
+        raise ConfinementError(f"Refusing to index a UNC or device path: {p}",
+                               path=rp, reason="unc_or_device")
+
+    if is_credential_path(resolved) or is_credential_path(rp):
         raise ConfinementError(f"Refusing to index a credential directory: {p}",
                                path=rp, reason="credential")
 
-    if allow_net is None:
-        allow_net = _network_drives_allowed_fresh()
-    if not allow_net and is_mapped_network_drive(str(rp)):
+    if not allow_net and (is_mapped_network_drive(typed) or is_mapped_network_drive(str(rp))):
         raise ConfinementError(f"Refusing to index a network drive: {p}",
                                path=rp, reason="network_drive_denied")
     return rp

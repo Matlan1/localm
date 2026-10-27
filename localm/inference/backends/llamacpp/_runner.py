@@ -134,7 +134,7 @@ from localm.inference.backends.base import (
     ModelLoadCancelled,
     PerThread,
     PretokenizerUnsafeInputError, PretokenizerUnusableModelError,
-    UnsupportedInputError, UnsupportedModelRoleError, VisionInputError,
+    UnsupportedInputError, UnsupportedModelRoleError, VisionInputError, WorkerDiedError,
     stream_stop_requested)
 from ._abi import AbiMismatch
 
@@ -282,7 +282,31 @@ def _runner_entry(req_q, resp_q, ctrl_q, crash_trace_path=None,
         raise
 
 
+_NATIVE_CONSOLE_PAUSED_KEY = "native_console_paused"
+
+
+def _forward_native_console_pause(kwargs: dict) -> dict:
+    """*kwargs* for a ``chat_stream`` request to the child, carrying the
+    caller's :func:`~localm.debuglog.native_console_paused` state so the child
+    keeps its native log lines off the terminal for that stream."""
+    from localm.debuglog import native_console_is_paused
+    if native_console_is_paused():
+        return {**kwargs, _NATIVE_CONSOLE_PAUSED_KEY: True}
+    return kwargs
+
+
 def _serve_stream(worker, payload: dict, emit: Callable, cancel_event) -> None:
+    """Child side of one stream: :func:`_serve_stream_body` with the native
+    console paused when *payload* carries the pause the caller forwarded with
+    :func:`_forward_native_console_pause`. That key is not passed to *worker*."""
+    from localm.debuglog import native_console_paused
+    payload = dict(payload)
+    paused = payload.pop(_NATIVE_CONSOLE_PAUSED_KEY, False)
+    with native_console_paused() if paused else contextlib.nullcontext():
+        _serve_stream_body(worker, payload, emit, cancel_event)
+
+
+def _serve_stream_body(worker, payload: dict, emit: Callable, cancel_event) -> None:
     """Child side: run one ``chat_stream`` on *worker* with *payload*, sending
     its envelopes through *emit*: ``status`` and ``chunk`` while it runs, then
     ``done``, or a tagged ``error`` for a refusal that leaves the model
@@ -396,6 +420,12 @@ def _digits_summary(match: re.Match[str]) -> str:
     return f"{run[:12]}...({len(run)} digits)"
 
 
+def shorten_long_digits(text: str) -> str:
+    """*text* with every run of 40 or more digits replaced by its first 12 digits
+    and its length."""
+    return _LONG_DIGITS_RE.sub(_digits_summary, text)
+
+
 def load_error_text(e: BaseException) -> str:
     """The text a worker sends for a failed load: ``str(e)`` for a
     ``RuntimeError``/``OSError``/``AbiMismatch`` (a runtime failure) with a
@@ -403,7 +433,7 @@ def load_error_text(e: BaseException) -> str:
     when the message is empty. A run of 40 or more digits in the message (a
     model config holding a huge number) is shortened to its first 12 digits and
     its length."""
-    msg = _LONG_DIGITS_RE.sub(_digits_summary, str(e).strip())
+    msg = shorten_long_digits(str(e).strip())
     if not msg:
         return type(e).__name__
     if isinstance(e, (RuntimeError, OSError, AbiMismatch)):
@@ -1188,7 +1218,7 @@ class ModelRunner:
         chunks_received = 0
         _stream_t0 = time.monotonic()
         with self._stream_turn():
-            self._req_q.put(("chat_stream", kwargs))
+            self._req_q.put(("chat_stream", _forward_native_console_pause(kwargs)))
             try:
                 while True:
                     deadline = time.monotonic() + (
@@ -1239,7 +1269,7 @@ class ModelRunner:
                                     "already streamed)")
                                 logger.error(
                                     "gguf worker: died mid-stream during %s", phase)
-                                raise RuntimeError(
+                                raise WorkerDiedError(
                                     f"{opening} (worker exit "
                                     f"{self._exit_reason()}). The model has been "
                                     "unloaded and will reload on the next "
@@ -1458,7 +1488,8 @@ class ModelRunner:
             req_q = self._req_q
             if req_q is None:
                 raise self._mux_unloaded_error()
-            req_q.put(("chat_stream_mux", {"sid": sid, "kwargs": kwargs}))
+            req_q.put(("chat_stream_mux", {
+                "sid": sid, "kwargs": _forward_native_console_pause(kwargs)}))
             while True:
                 deadline = time.monotonic() + (
                     first_budget if awaiting_first else _STREAM_CHUNK_TIMEOUT)
@@ -1484,7 +1515,7 @@ class ModelRunner:
                                      if awaiting_first else
                                      f"decode ({chunks_received} token(s) already streamed)")
                             logger.error("gguf worker: died mid-stream during %s", phase)
-                            raise RuntimeError(
+                            raise WorkerDiedError(
                                 f"{opening} (worker exit {self._exit_reason()}). The "
                                 "model has been unloaded and will reload on the next "
                                 "request." + detail) from e

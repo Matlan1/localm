@@ -1,9 +1,9 @@
 # Running localm in Docker
 
-The image runs `localm serve`: the OpenAI-compatible API server, without the web
-GUI. It listens on every interface inside the container, so it **refuses to start
-without an API key**, and it serves **HTTPS** with localm's built-in certificate
-(see [tls.md](tls.md)).
+By default the image runs `localm serve`: the OpenAI-compatible API server, without
+the web GUI. It can also serve the web GUI (see [Web GUI](#web-gui)). It listens on
+every interface inside the container, so it **refuses to start without an API key**,
+and it serves **HTTPS** with localm's built-in certificate (see [tls.md](tls.md)).
 
 Images are published to `ghcr.io/matlan1/localm` when a release is published; see
 the package page for the tags that exist. You can always build the same image from
@@ -58,6 +58,31 @@ docker run -d -v localm-data:/data -p 8642:8642 -e LOCALM_API_KEY=<key> ghcr.io/
 
 Scoped keys for individual clients are created the same way, for example
 `docker run --rm -v localm-data:/data ghcr.io/matlan1/localm key create dashboard --scope models:read`.
+
+## Web GUI
+
+Start the image with `gui` as its first argument to serve the web GUI instead of the
+API alone. The container binds every interface, so give it a key (8 or more
+characters) and tell the GUI not to open a browser inside the container:
+
+```bash
+docker run -d --name localm-gui -e LOCALM_API_KEY=<key> -v localm-data:/data -p 8642:8642   ghcr.io/matlan1/localm gui -H 0.0.0.0 -p 8642 --no-browser
+```
+
+Open `https://localhost:8642` (the certificate is the local one described under
+[Certificate](#certificate), so the browser warns until you trust the CA). The
+container log prints an "Open the GUI" link. The API on the same port still needs the
+key. This mode was checked with the published `0.3.1` CPU image under Podman on
+Linux: the page loads with the title LocaLM and `/v1/models` answers 401 without the
+key.
+
+`gui` is a different command from the default `serve`, so the `serve` options below
+(`serve <model-name>`, `serve --no-tls`) do not apply to it.
+
+Docker Desktop (Windows and macOS) runs containers in a virtual machine. The project
+has not run these images under Docker Desktop, so where its disk image lives and
+whether a GPU can be passed through to it are not documented here; the
+[GPU](#gpu) notes below describe Linux hosts.
 
 ## Verifying an image
 

@@ -310,13 +310,22 @@ class TestFeatureGates:
             seen.append(engines)
             return can_embed
 
+        from localm.plugins.mcpserver.tools import chat as chat_tools
         _force_gates(monkeypatch)
         monkeypatch.setattr(srv, "_backend_can_embed", probe)
+        monkeypatch.setattr(chat_tools, "_registered_embedding_model", lambda: False)
         engines = _engines()
         tools = build_tools(engines)
         assert ("embed" in tools) is can_embed
         # The probe is asked once, about this server's own engine cache.
         assert seen == [engines]
+
+    def test_embed_is_advertised_for_a_backend_that_cannot_embed_when_an_embedding_model_is_registered(
+            self, monkeypatch):
+        from localm.plugins.mcpserver.tools import chat as chat_tools
+        _force_gates(monkeypatch, embed=False)
+        monkeypatch.setattr(chat_tools, "_registered_embedding_model", lambda: True)
+        assert "embed" in build_tools(_engines())
 
     @pytest.mark.parametrize("flag,available,expected", [
         (True, True, True), (True, False, False),

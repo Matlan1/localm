@@ -140,6 +140,32 @@ class TestSelfVerificationNudge:
         assert len(nudges) == 1
         assert "src/app.py" in str(nudges[0]["content"])
 
+    @pytest.mark.parametrize("reply", ["", "   ", "[no tool needed]"])
+    def test_an_empty_reply_to_the_nudge_is_not_verified(self, tmp_path, reply):
+        """An empty answer to the self-verification request ends the run as not
+        finished, naming the unverified files, instead of a silent success."""
+        agent = _make_agent(tmp_path)
+        agent._unverified_writes = {"a.py"}
+        responses = iter(["Now let me run the tests.", reply])
+        with patch.object(agent, "_call_llm", side_effect=lambda *a, **k: next(responses)), \
+             patch("localm.plugins.coder.agent.parse_tool_calls", return_value=[]):
+            result = agent.run_task("change something")
+
+        assert "[not verified:" in result, result
+        assert "a.py" in result
+        assert agent.last_run_ok is False
+
+    def test_a_real_reply_to_the_nudge_is_still_accepted(self, tmp_path):
+        agent = _make_agent(tmp_path)
+        agent._unverified_writes = {"a.py"}
+        responses = iter(["All done!", "I re-read a.py; it is correct."])
+        with patch.object(agent, "_call_llm", side_effect=lambda *a, **k: next(responses)), \
+             patch("localm.plugins.coder.agent.parse_tool_calls", return_value=[]):
+            result = agent.run_task("change something")
+
+        assert "[not verified:" not in result
+        assert _final_answer(result) == "I re-read a.py; it is correct."
+
     def test_nudge_fires_only_once(self, tmp_path):
         agent = _make_agent(tmp_path)
         agent._unverified_writes = {"a.py"}

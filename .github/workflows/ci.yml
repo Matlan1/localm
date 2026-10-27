@@ -368,25 +368,49 @@ jobs:
     # The other job that runs a test suite, and jsdom has its own documented
     # hang. It finishes in a couple of minutes, so 20 fails a hang quickly.
     timeout-minutes: 20
-    # Same gate as the `test` matrix: on a pull_request only when the PR
-    # carries the `full-ci` label, never on push, unconditional for
-    # workflow_dispatch and schedule.
-    if: >-
-      github.event_name != 'push' &&
-      (github.event_name != 'pull_request' ||
-       contains(github.event.pull_request.labels.*.name, 'full-ci'))
+    # Never on push; unconditional for workflow_dispatch and schedule. On a
+    # pull_request: both hosts with the `full-ci` label; without it, the Linux
+    # host only and only when the change touches the GUI or its tests (the
+    # scope step below), the Windows host skips its steps.
+    if: github.event_name != 'push'
     strategy:
       fail-fast: false
       matrix:
         os: [windows-latest, ubuntu-latest]
     steps:
+      # fetch-depth: 2 so a pull request's merge commit has its base as HEAD^1.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
           persist-credentials: false
+          fetch-depth: 2
+
+      - name: Does this pull request touch the GUI?
+        id: scope
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          FULL_CI: ${{ contains(github.event.pull_request.labels.*.name, 'full-ci') }}
+          HOST_OS: ${{ runner.os }}
+        run: |
+          if [ "$EVENT" != "pull_request" ] || [ "$FULL_CI" = "true" ]; then echo "run=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          if [ "$HOST_OS" != "Linux" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Unlabelled pull request: GUI tests run on the Linux host only."
+            exit 0
+          fi
+          if git diff --name-only HEAD^1 HEAD | grep -qE '^(localm/plugins/gui/static/|tests-js/|package\.json|package-lock\.json|\.github/workflows/ci\.yml)'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No GUI file changed in this pull request; the GUI tests run nightly."
+          fi
+
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        if: steps.scope.outputs.run == 'true'
         with:
           node-version: "22"
       - name: GUI tests (jsdom)
+        if: steps.scope.outputs.run == 'true'
         run: |
           npm ci
           npm test
@@ -395,7 +419,7 @@ jobs:
       # job. One host only: matches the ruff job's "result does not vary by
       # host" below. (#1780)
       - name: Lint (eslint, non-blocking)
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-latest' && steps.scope.outputs.run == 'true'
         continue-on-error: true
         run: npm run lint
 
@@ -623,14 +647,16 @@ jobs:
 
   # Maintenance signal for a second bundled-and-pinned dependency, same shape as
   # abi-check above but far cheaper: one GitHub API call, no clone, no prebuilt
-  # download. Runs on every trigger of this workflow except the nightly
-  # schedule (no run_abi-style opt-in needed) because unlike abi-check it can never fail the build - the script
+  # download. Runs on every trigger of this workflow except pull requests and the
+  # nightly schedule (no run_abi-style opt-in needed) because unlike abi-check it can never fail the build - the script
   # always exits 0 and the step itself is continue-on-error, so a stale pin (or
   # even a bug in the script) never turns CI red. See scripts/check_comfyui_pin.py.
   comfyui-pin-check:
     name: ComfyUI pin currency (warn-only)
     runs-on: ubuntu-latest
-    if: github.event_name != 'schedule' || github.event.schedule == '37 6 * * 1'
+    if: >-
+      github.event_name != 'pull_request' &&
+      (github.event_name != 'schedule' || github.event.schedule == '37 6 * * 1')
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
@@ -893,13 +919,15 @@ jobs:
 
   # Maintenance signal for a third bundled-and-pinned dependency, same shape as
   # comfyui-pin-check above: one GitHub API call, no clone, no prebuilt
-  # download. Runs on every trigger of this workflow except the nightly
-  # schedule, and can never fail the build - the script always exits 0
+  # download. Runs on every trigger of this workflow except pull requests and the
+  # nightly schedule, and can never fail the build - the script always exits 0
   # and the step itself is continue-on-error. See scripts/check_llama_rocm_pin.py.
   llama-rocm-pin-check:
     name: llama.cpp ROCm pin currency (warn-only)
     runs-on: ubuntu-latest
-    if: github.event_name != 'schedule' || github.event.schedule == '37 6 * * 1'
+    if: >-
+      github.event_name != 'pull_request' &&
+      (github.event_name != 'schedule' || github.event.schedule == '37 6 * * 1')
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
@@ -955,12 +983,53 @@ jobs:
         continue-on-error: true
         run: python scripts/check_web_search_canary.py
 
+  # The update proxy's tests (tools/bugreport-proxy/worker.js). Runs on a pull
+  # request only when it changes the proxy or its tests, and on every schedule
+  # and dispatch. node:test only, no dependencies to install.
+  proxy-tests:
+    name: update proxy tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: >-
+      github.event_name == 'pull_request' ||
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch'
+    steps:
+      # fetch-depth: 2 so a pull request's merge commit has its base as HEAD^1.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+
+      - name: Does this pull request touch the update proxy?
+        id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" != "pull_request" ]; then echo "run=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          if git diff --name-only HEAD^1 HEAD | grep -qE '^(tools/bugreport-proxy/|tests-js/bugreport-proxy-worker\.test\.mjs|\.github/workflows/ci\.yml)'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No update proxy file changed in this pull request; its tests run nightly."
+          fi
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        if: steps.scope.outputs.run == 'true'
+        with:
+          node-version: "22"
+
+      - name: Proxy tests
+        if: steps.scope.outputs.run == 'true'
+        run: node --test --test-force-exit tools/bugreport-proxy/worker.test.mjs tests-js/bugreport-proxy-worker.test.mjs
+
   # Speech-to-text against the voice stack a user actually gets. Every other job
   # installs `.[dev,rag]`, which has no PyAV or faster-whisper, so the voice
   # tests skip there; this job installs the voice extra with pip, which resolves
   # the NEWEST versions the extra allows, and runs the real decode tests on them.
-  # A PyAV or faster-whisper release that breaks decoding shows up here within a
-  # week at the latest (the weekly schedule), or on the next pull request. It is
+  # A PyAV or faster-whisper release that breaks decoding shows up here on the
+  # next nightly run. On a pull request it runs only when the pull request changes
+  # a voice file, pyproject.toml, uv.lock or this workflow. It is
   # deliberately not one of the jobs merge-policy requires: an upstream break
   # must be visible, but must not block an unrelated change.
   voice-stack:
@@ -969,32 +1038,54 @@ jobs:
     timeout-minutes: 20
     if: >-
       github.event_name == 'pull_request' ||
-      (github.event_name == 'schedule' && github.event.schedule == '37 6 * * 1') ||
+      github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch'
     steps:
+      # fetch-depth: 2 so a pull request's merge commit has its base as HEAD^1.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
           persist-credentials: false
+          fetch-depth: 2
+
+      # On a pull request the remaining steps run only when it changes a voice
+      # file; otherwise the job ends with a notice saying it was not needed.
+      - name: Does this pull request touch the voice stack?
+        id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" != "pull_request" ]; then echo "run=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          if git diff --name-only HEAD^1 HEAD | grep -qE '^(localm/voice\.py|localm/inference/media\.py|localm/plugins/builtin/voice/|tests/_voice_stack\.py|tests/test_voice_|pyproject\.toml|uv\.lock|\.github/workflows/ci\.yml)'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No voice file changed in this pull request; the voice stack runs nightly."
+          fi
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        if: steps.scope.outputs.run == 'true'
         with:
           python-version: "3.12"
 
       - name: Install uv
+        if: steps.scope.outputs.run == 'true'
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
       - name: Install the voice extra
+        if: steps.scope.outputs.run == 'true'
         run: |
           uv export --quiet --locked --no-emit-project --extra dev --extra voice -o "$RUNNER_TEMP/requirements.txt"
           pip install --require-hashes --no-deps -r "$RUNNER_TEMP/requirements.txt"
           pip install --no-deps -e .
 
       - name: Show the resolved versions
+        if: steps.scope.outputs.run == 'true'
         run: pip list 2>/dev/null | grep -i -E "^(av|faster-whisper|ctranslate2|numpy|tokenizers|onnxruntime) "
 
       # LOCALM_REQUIRE_VOICE_STACK=1 turns "the voice stack is missing" into a
       # test FAILURE instead of a skip, and the step then also fails if anything
       # at all was skipped: a skipped voice test checks nothing and reads green.
       - name: Real decode tests (nothing may be skipped)
+        if: steps.scope.outputs.run == 'true'
         env:
           LOCALM_REQUIRE_VOICE_STACK: "1"
         run: |
@@ -1004,7 +1095,7 @@ jobs:
             exit 1
           fi
 
-      - name: Whisper smoke (weekly and manual runs only, downloads the tiny model)
+      - name: Whisper smoke (scheduled and manual runs only, downloads the tiny model)
         if: github.event_name != 'pull_request'
         run: |
           python - <<'PY'
@@ -1072,7 +1163,8 @@ jobs:
   # lint and mutation-scope must have succeeded; without the `full-ci`
   # label python-pr-gate must have succeeded and the change must not be a
   # release (VERSION unchanged); with the label the test matrix and
-  # gui-tests must have succeeded (gui-tests runs only on a labelled PR);
+  # gui-tests must have succeeded (without the label gui-tests runs its
+  # steps only for a GUI change, on the Linux host, and reads success otherwise);
   # mutation-test must have succeeded when mutation-scope selected any
   # shard, and must not have failed otherwise (skipped is neutral then). A release PR without the label fails here with the
   # label named; every other PR merges without the matrix. A skipped

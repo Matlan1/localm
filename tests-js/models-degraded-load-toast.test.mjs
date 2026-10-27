@@ -175,6 +175,25 @@ test("CPU layers reading from disk-backed memory say every token is slower", asy
   assert.ok(toastEl.className.includes("error"));
 });
 
+test("CPU layers reading from disk name both sizes and the ways out", async () => {
+  const { window } = loadApp();
+  stubLoad(window, {
+    status: "loaded", model: "huge-model",
+    gpu_layers_offloaded: 10, gpu_layers_total: 48, degraded: true,
+    use_mmap: "auto", mmap: true, mmap_from_disk: true, mmap_cpu_from_disk: true,
+    mmap_cpu_read_bytes: 58544328960, mmap_ram_available_bytes: 26183057408,
+    mmap_note: "server text that the toast does not use",
+  });
+
+  await selectAndLoad(window, "huge-model");
+
+  const toastEl = window.document.getElementById("toast");
+  assert.match(toastEl.textContent,
+    /10\/48 layers on GPU, rest on CPU - slower; the 54\.5 GB of weights the CPU reads do not fit the 24\.4 GB of available RAM, so they are read from disk and generation speed is limited by the disk\. Free more RAM, use a smaller quant, or put more of the model on the GPU if VRAM allows/);
+  assert.ok(!/server text/.test(toastEl.textContent));
+  assert.ok(toastEl.className.includes("error"));
+});
+
 test("a use_mmap off load larger than available RAM warns with the server's note", async () => {
   const { window } = loadApp();
   const note = "use_mmap is off and this load reads 12.0 GB of weights into system RAM with 3.0 GB available: the load may fail or swap. Set use_mmap to auto to map them from disk instead.";

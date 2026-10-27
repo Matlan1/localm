@@ -10,8 +10,21 @@ from fastapi.responses import JSONResponse
 
 
 def register_exception_handlers(app: FastAPI) -> None:
-    """Install the three handlers. The response of each is pinned by
+    """Install the four handlers. The response of each is pinned by
     tests/test_create_app_characterization.py."""
+    from localm.config import ConfigLockTimeout
+
+    @app.exception_handler(ConfigLockTimeout)
+    async def _config_busy(request, exc):  # noqa: ANN001 - framework signature
+        from localm.debuglog import logger as _dbg
+        _dbg.warning("%s %s not saved: %s", request.method, request.url.path, exc)
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "localm's settings are busy: another localm "
+                               "process is writing them. Nothing was saved; "
+                               "try again in a moment."},
+            headers={"Retry-After": "5"})
+
     # One backstop so an unexpected error in ANY route returns a consistent
     # JSON 500 and is logged, instead of leaking a traceback or bare body. This
     # standardises the response shape and logging so a failing request is a clean
@@ -20,16 +33,7 @@ def register_exception_handlers(app: FastAPI) -> None:
     # audio is validated before the native path, and surfaced via the crash marker.)
     @app.exception_handler(Exception)
     async def _unhandled_error(request, exc):  # noqa: ANN001 - framework signature
-        from localm.config import ConfigLockTimeout
         from localm.debuglog import logger as _dbg
-        if isinstance(exc, ConfigLockTimeout):
-            _dbg.warning("%s %s not saved: %s", request.method, request.url.path, exc)
-            return JSONResponse(
-                status_code=503,
-                content={"detail": "localm's settings are busy: another localm "
-                                   "process is writing them. Nothing was saved; "
-                                   "try again in a moment."},
-                headers={"Retry-After": "5"})
         _dbg.exception("unhandled error: %s %s", request.method, request.url.path)
         return JSONResponse(status_code=500,
                             content={"detail": "Internal server error"})
@@ -56,18 +60,29 @@ def register_exception_handlers(app: FastAPI) -> None:
     async def _log_http_exception(request, exc):  # noqa: ANN001 - framework signature
         from fastapi.exception_handlers import http_exception_handler
         from localm.debuglog import debug_enabled, logger as _dbg
+        from localm.inference.errors import (UNDECODABLE_BODY_MESSAGE,
+                                             is_undecodable_body)
+        undecodable = is_undecodable_body(exc)
+        status = 422 if undecodable else exc.status_code
         if debug_enabled():
             # Truncated: a detail can be long by design (the VRAM-overflow 503
             # carries a multi-line "Options:" list), and the point here is to
             # name the cause, not to mirror the whole body into the log.
-            detail = str(getattr(exc, "detail", "") or "")
+            detail = (UNDECODABLE_BODY_MESSAGE if undecodable
+                      else str(getattr(exc, "detail", "") or ""))
             if len(detail) > 500:
                 detail = detail[:500] + " ...[truncated]"
             _dbg.debug("%s %s refused %d: %s", request.method,
-                       request.url.path, exc.status_code, detail)
+                       request.url.path, status, detail)
+        if undecodable:
+            return JSONResponse(status_code=422,
+                                content={"detail": UNDECODABLE_BODY_MESSAGE,
+                                         "errors": []})
         return await http_exception_handler(request, exc)
 
     from fastapi.exceptions import RequestValidationError
+
+    from localm.inference.errors import json_invalid_text
 
     @app.exception_handler(RequestValidationError)
     async def _validation_error(request, exc):  # noqa: ANN001 - framework signature
@@ -152,6 +167,8 @@ def register_exception_handlers(app: FastAPI) -> None:
             return ".".join(parts) or "request"
 
         def _one(err) -> str:
+            if err.get("type") == "json_invalid":
+                return json_invalid_text(err)
             name = _field(err)
             msg = (err.get("msg") or "is invalid").strip()
             # pydantic phrases these as "Input should be X", which reads as

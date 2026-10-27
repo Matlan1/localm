@@ -286,7 +286,7 @@ def no_hf(monkeypatch):
 
 @pytest.fixture
 def wan_on_hf(no_hf):
-    no_hf.org = [{"id": "Comfy-Org/Wan_2.1_ComfyUI_repackaged", "downloads": 5,
+    no_hf.org = [{"id": "Comfy-Org/Wan-2.1", "downloads": 5,
                   "siblings": [{"rfilename": WAN_PATH}]}]
     return no_hf
 
@@ -312,7 +312,7 @@ class TestSourceLookupRoute:
         body = r.json()
         assert body["status"] == "found"
         assert body["source"] == {
-            "repo": "Comfy-Org/Wan_2.1_ComfyUI_repackaged", "file": WAN_PATH,
+            "repo": "Comfy-Org/Wan-2.1", "file": WAN_PATH,
             "size_bytes": None, "model_type": "diffusion-unet", "sha256": None,
             "origin": "huggingface"}
         assert body["dest_dir"] == str(workdir / "models" / "unet")
@@ -382,7 +382,7 @@ class TestPullComfySourceFromASearch:
         assert captured.get("args") == [
             "pull", "--type", "diffusion-unet", "--comfy-dest-dir",
             str(workdir / "models" / "unet"), "--no-register", "--",
-            f"Comfy-Org/Wan_2.1_ComfyUI_repackaged:{WAN_PATH}"]
+            f"Comfy-Org/Wan-2.1:{WAN_PATH}"]
         assert "--sha256" not in captured["args"]
         assert r.status_code == 200, r.text
 
@@ -415,11 +415,11 @@ class TestPullComfySourceFromASearch:
             stale = c.post("/api/models/pull-comfy-source", json={
                 **body, "repo": "someone/older-copy", "file": WAN})
             same = c.post("/api/models/pull-comfy-source", json={
-                **body, "repo": "Comfy-Org/Wan_2.1_ComfyUI_repackaged", "file": WAN_PATH})
+                **body, "repo": "Comfy-Org/Wan-2.1", "file": WAN_PATH})
         assert stale.status_code == 409
-        assert "Comfy-Org/Wan_2.1_ComfyUI_repackaged" in stale.json()["detail"]
+        assert "Comfy-Org/Wan-2.1" in stale.json()["detail"]
         assert same.status_code == 200, same.text
-        assert captured["args"][-1] == f"Comfy-Org/Wan_2.1_ComfyUI_repackaged:{WAN_PATH}"
+        assert captured["args"][-1] == f"Comfy-Org/Wan-2.1:{WAN_PATH}"
 
     def test_a_file_in_a_workflow_subfolder_goes_into_that_subfolder(
             self, scoped_app, tmp_path, monkeypatch, wan_on_hf):
@@ -444,7 +444,7 @@ class TestPullComfySourceFromASearch:
                 "class_type": "CheckpointLoaderSimple", "input_name": "ckpt_name"})
         assert no_hf.calls == []
         assert captured["args"][-1] == (
-            "Comfy-Org/ACE-Step_ComfyUI_repackaged:all_in_one/ace_step_v1_3.5b.safetensors")
+            "Comfy-Org/ACE-Step:all_in_one/ace_step_v1_3.5b.safetensors")
         assert captured["args"][4] == str(workdir / "models" / "checkpoints")
         assert captured["args"][-4:-2] == [
             "--sha256", "f07cad74c4adce52ca14ca1bdf74cf3c14cbafb0823b95eca4459467fa369f40"]

@@ -490,7 +490,7 @@ def test_run_abi_input_gates_only_the_abi_check_job():
         (github.event_name != 'pull_request' ||
          contains(github.event.pull_request.labels.*.name, 'full-ci'))
         """)
-    assert _norm(ci["jobs"]["gui-tests"]["if"]) == full_ci_gated
+    assert _norm(ci["jobs"]["gui-tests"]["if"]) == "github.event_name != 'push'"
     assert _norm(ci["jobs"]["test-shard"]["if"]) == full_ci_gated
     assert _norm(ci["jobs"]["test"]["if"]) == "!cancelled() && " + full_ci_gated
     # mutation-scope runs on a pull request, a dispatch and the weekly cron

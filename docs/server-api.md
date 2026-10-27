@@ -790,7 +790,9 @@ Scope: `models:read`.
 
 Lists every registered model (and the startup model when it is not
 registered) as `{"object": "list", "data": [{"id", "object": "model",
-"created", "owned_by", "loaded", "active"}]}`. `GET /v1/models/{id}` (same
+"created", "owned_by", "loaded", "active"}]}`, each row also carrying `vision`
+and `audio_input` (true or false) when the model's files could be inspected.
+`GET /v1/models/{id}` (same
 scope) returns registry detail for any registered model: `id`, `object`,
 `owned_by`, `path` (basename only), `source`, `sha256`, `size_bytes`, `aliases`,
 `active`, `loaded`, `model_type`, plus `model_type_recorded: false` when the
@@ -836,7 +838,10 @@ count landed on the GPU, so a caller can tell that apart from a full GPU
 load. `parallel_slots` appears when the loaded model answers more than one
 request at once, and says how many. A load that reports its memory-mapping also
 carries `use_mmap`, `mmap`, `mmap_from_disk` and `mmap_cpu_from_disk`, with
-`mmap_note` and `mmap_ram_short` when there is something to say, and `adapters`
+`mmap_note` and `mmap_ram_short` when there is something to say; a
+`mmap_cpu_from_disk` load that warned about disk speed also carries
+`mmap_cpu_read_bytes` (the weights the CPU reads while generating) and
+`mmap_ram_available_bytes`, and `adapters`
 lists the LoRA adapters applied. Without `model` and with nothing active,
 loaded or configured to fall back to, the load is a 503; an unregistered name is a
 404.
@@ -1280,6 +1285,42 @@ When the memory plugin recalls facts for a chat turn, `POST /v1/chat/completions
 returns an `X-Localm-Memory` response header: a compact JSON blob with the count
 of injected facts, the items, and a degrade reason when semantic recall could not
 be used (for example `no_embedder` before `localm setup-embeddings`).
+
+## Other routes the GUI and plugins serve
+
+These routes exist when the GUI or the named plugin is mounted (see the note on
+GUI-only routes under Behaviour notes).
+
+### `POST /api/fs/save-text`
+
+Scopes: `config:write`, and a key with host filesystem access (an owner key, open
+mode, or a key granted `fs_access: host`; 403 otherwise). Writes `content` as a
+new UTF-8 text file named `name` inside the existing folder `path`. The name must
+end in `.md`, `.txt`, `.json` or `.patch` (400 otherwise). An existing file is
+never overwritten: when the name is taken, `<stem>-2<ext>` up to `<stem>-99<ext>`
+are tried in turn, and the answer is 409 when all are taken. `content` over
+64 MB is 413; a missing folder is 404. Returns `{"path", "parent", "name"}` of the
+file written.
+
+### `/api/<image|video|music>/native-workflows`
+
+Each media plugin serves saved native workflows: `GET` lists them, `GET /{id}`
+returns one, `POST` saves one, `POST /{id}/rename`, `DELETE /{id}`,
+`POST /import` and `POST /{id}/resolve`. An invalid workflow is a 400, an unknown
+id a 404, a call that does not finish within 60 s a 504. The request and answer
+shapes are in [native-workflows.md](native-workflows.md).
+
+### `/api/coder/hooks` (coder plugin)
+
+Owner-only: the tool hooks and MCP servers a project's config declares, and
+whether they are trusted. A non-owner caller gets `{"configured": false}`
+from `GET`, and 404 from the other two.
+
+| Route | Purpose |
+|---|---|
+| `GET /api/coder/hooks?cwd=<folder>` | The hooks and MCP servers of the project config nearest `cwd`. Returns `{"configured": false, "cwd", "warnings"}` when there are none, otherwise `{"configured": true, "cwd", "config_path", "trusted", "digest", "warnings", "hooks": [{"event", "index", "label", "matcher", "command", "timeout", "error"}], "mcp_servers": [{"name", "argv", "env", "trusted_calls", "line"}]}`. 422 when the project config cannot be read. |
+| `POST /api/coder/hooks/trust` | Trust and remember them. Body `{"cwd", "digest"}`, where `digest` is the one `GET` returned. 409 when they changed since they were shown, 404 when none are configured. Returns `{"trusted": true, "digest"}`. |
+| `POST /api/coder/hooks/forget` | Withdraw the remembered trust. Body `{"cwd"}`. Returns `{"forgotten": ...}`; 404 when no project config is found. |
 
 ## Client example
 

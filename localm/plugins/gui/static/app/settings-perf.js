@@ -7,8 +7,8 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { iconEl } from "./icons.js";
-import { COMPACT_KEEP, addMessageRow, audioPart, chat, chatBusy, chatParams, compactConversation, currentConv, isToolEvent, lsSetScoped, maybeCompactConversation, mountStatusIndicator, msgAudioClips, msgImages, msgText, newConversation, newToolEvent, noteLabel, removeStatusIndicator, renderAttachChips, renderChat, renderConvList, saveConversations, scopedKeyPrivate, setConversationPin, stripUserAudio, stripUserImages, syncPinModelToggle, updateStatusIndicator, wireParts } from "./chat.js";
-import { $, CHAT_SURFACE_HEADERS, GIB, TOOL_CALL_DELIM, authHeaders, autoGrow, confirmDanger, el, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setPreviewAllowed, splitThink, streamJob, stripThink, toast } from "./helpers.js";
+import { COMPACT_KEEP, addMessageRow, audioPart, chat, chatBusy, chatParams, compactConversation, currentConv, elideAudioForWire, elideImagesForWire, isToolEvent, latestTurnHasAudio, latestTurnIsAudioOnly, lsSetScoped, maybeCompactConversation, mountStatusIndicator, msgAudioClips, msgImages, msgText, newConversation, newToolEvent, noteLabel, refreshWebPolicy, removeStatusIndicator, renderAttachChips, renderChat, renderConvList, saveConversations, scopedKeyPrivate, setConversationPin, stripUserAudio, stripUserImages, syncPinModelToggle, updateStatusIndicator, wireHasImageAndAudio, wireParts } from "./chat.js";
+import { $, CHAT_SURFACE_HEADERS, GIB, TOOL_CALL_DELIM, authHeaders, autoGrow, confirmDanger, el, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setPreviewAllowed, splitThink, streamJob, stripAsrPrefix, stripThink, toast } from "./helpers.js";
 import { t } from "./i18n.js";
 import { modelCache, modelSelect, reloadModel, toastLoadResult } from "./models-sidebar.js";
 import { pickPath, saveTextFs } from "./picker.js";
@@ -23,6 +23,7 @@ export function _perfGiB(b) { return (Number(b) / GIB).toFixed(1); }
 
 export let _perfEstTimer = null;
 const PERF_ESTIMATE_AFTER_RELOAD_MS = 4000;
+const PERF_ESTIMATE_LOADING_POLL_MS = 2000;
 export async function refreshPerfEstimate() {
   const gl = $("perf-gpu-layers"), ctx = $("perf-ctx"), out = $("perf-estimate");
   if (!gl || !ctx || !out) return;
@@ -36,7 +37,11 @@ export async function refreshPerfEstimate() {
       kv: _perfGiB(d.kv_cache), overhead: _perfGiB(d.overhead),
     });
     out.replaceChildren();
-    if (typeof d.free === "number") {
+    if (d.loading === true) {
+      out.appendChild(document.createTextNode(text + t("settings.perf.estimateLoadingSuffix")));
+      clearTimeout(_perfEstTimer);
+      _perfEstTimer = setTimeout(refreshPerfEstimate, PERF_ESTIMATE_LOADING_POLL_MS);
+    } else if (typeof d.free === "number") {
       const suffix = typeof d.held === "number"
         ? t("settings.perf.estimateFreeHeldSuffix", { free: _perfGiB(d.free), held: _perfGiB(d.held) })
         : t("settings.perf.estimateFreeKnownSuffix", { free: _perfGiB(d.free) });
@@ -266,6 +271,9 @@ export function syncIndexSpaceHint(indexSpace) {
   if (anyVisible && _gpuIndexSpace === "native") {
     hint.textContent = t("settings.perf.indexSpaceHint");
     hint.hidden = false;
+  } else if (anyVisible && _gpuIndexSpace === "nvidia-smi") {
+    hint.textContent = t("settings.perf.numberingUnknownHint");
+    hint.hidden = false;
   } else {
     hint.hidden = true;
   }
@@ -302,6 +310,7 @@ export async function refreshMainGpuSelector() {
     }
     const current = typeof data.main_gpu_index === "number" ? data.main_gpu_index : 0;
     sel.value = String(current);
+    sel.disabled = data.index_space === "nvidia-smi";
     row.hidden = false;
     syncIndexSpaceHint(data.index_space ?? null);   // after row.hidden - it reads it
   } catch {
@@ -335,6 +344,32 @@ export function setupMainGpuSelector() {
 // checkbox toggle can re-render the ratio row (device names) without a
 // second network round trip.
 let _lastSplitGpus = [];
+
+// The checked GPUs in load order: the stored gpu_split_indices order, then
+// each newly checked GPU at the end.
+let _splitOrder = [];
+
+/** The checked GPUs of *list* in load order (updates _splitOrder): GPUs
+ *  still checked keep their place, newly checked ones are appended in list
+ *  order, unchecked ones drop out. */
+function _checkedInOrder(list) {
+  const checked = [...list.querySelectorAll("input[type=checkbox]:checked")]
+    .map((cb) => Number(cb.value));
+  const kept = _splitOrder.filter((i) => checked.includes(i));
+  _splitOrder = kept.concat(checked.filter((i) => !kept.includes(i)));
+  return _splitOrder.slice();
+}
+
+/** Show the load order of the checked GPUs under the checkboxes when two or
+ *  more are checked; hidden otherwise. */
+function renderGpuSplitOrder(order) {
+  const line = $("perf-gpu-split-order");
+  if (!line) return;
+  if (order.length < 2) { line.hidden = true; return; }
+  line.textContent = t("settings.perf.splitOrder",
+    { order: order.map((i) => t("settings.perf.splitOrderGpu", { index: i })).join(", ") });
+  line.hidden = false;
+}
 
 /** Ratio inputs currently on screen, keyed by GPU index - read BEFORE a
  *  rebuild so a value the user already typed survives a checkbox toggle
@@ -434,6 +469,7 @@ export async function refreshGpuSplitCheckboxes() {
     }
     const indices = Array.isArray(data.gpu_split_indices) ? data.gpu_split_indices : [];
     const current = new Set(indices);
+    _splitOrder = [...current].filter((i) => gpus.some((g) => g.index === i));
     list.replaceChildren();
     for (const g of gpus) {
       const label = el("label", "perf-gpu-split-item");
@@ -441,6 +477,7 @@ export async function refreshGpuSplitCheckboxes() {
       cb.type = "checkbox";
       cb.value = String(g.index);
       cb.checked = current.has(g.index);
+      cb.disabled = data.index_space === "nvidia-smi";
       cb.onchange = onGpuSplitCheckboxChange;
       label.appendChild(cb);
       const gb = typeof g.total === "number" ? ` (${_perfGiB(g.total)} GB)` : "";
@@ -450,7 +487,8 @@ export async function refreshGpuSplitCheckboxes() {
     // indices (not `current`, a Set) preserves the stored ORDER, which is what
     // gpu_split_ratios is position-paired against.
     renderGpuSplitRatioRow(gpus, indices, data.gpu_split_ratios);
-    renderGpuSingleHint(gpus, indices.filter((i) => gpus.some((g) => g.index === i)));
+    renderGpuSingleHint(gpus, _splitOrder);
+    renderGpuSplitOrder(_splitOrder);
     row.hidden = false;
     syncIndexSpaceHint(data.index_space ?? null);   // after row.hidden - it reads it
   } catch {
@@ -473,8 +511,7 @@ export async function refreshGpuSplitCheckboxes() {
 async function _saveGpuSplit() {
   const list = $("perf-gpu-split-list");
   if (!list) return;
-  const checked = [...list.querySelectorAll("input[type=checkbox]:checked")]
-    .map((cb) => Number(cb.value));
+  const checked = _checkedInOrder(list);
   const value = checked.length >= 1 ? checked : null;
   const body = { gpu_split_indices: value };
   let ratioWarning = "";
@@ -515,10 +552,10 @@ async function _saveGpuSplit() {
 async function onGpuSplitCheckboxChange() {
   const list = $("perf-gpu-split-list");
   if (!list) return;
-  const checked = [...list.querySelectorAll("input[type=checkbox]:checked")]
-    .map((cb) => Number(cb.value));
+  const checked = _checkedInOrder(list);
   renderGpuSplitRatioRow(_lastSplitGpus, checked.length >= 2 ? checked : [], null);
   renderGpuSingleHint(_lastSplitGpus, checked);
+  renderGpuSplitOrder(checked);
   await _saveGpuSplit();
 }
 
@@ -1544,7 +1581,7 @@ export function selectedBrowserVoice() {
  *  never when this call only stopped a prior one. Returns whether a new
  *  utterance actually started. */
 export function speak(text, opts = {}) {
-  const clean = stripThink(text).replace(/[*_`#>[\]()]/g, " ").trim();
+  const clean = stripAsrPrefix(stripThink(text)).replace(/[*_`#>[\]()]/g, " ").trim();
   if (ttsProvider) {
     if (ttsProvider.speaking()) {
       ttsProvider.stop();
@@ -2517,6 +2554,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   // `repaired` whether the pending-action repair ran, and `final` that the next
   // completion is the tool-free last one of this send.
   if (!web) {
+    if ($("p-web").checked) await refreshWebPolicy();
     web = { seen: new Set(), found: new Set(), lookups: 0, stale: 0,
             formatRepairs: 0, ask: null, repaired: false, final: false,
             evidence: false, max: webMaxLookups() };
@@ -2524,7 +2562,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   const contextRouting = await maybeCompactConversation(conv, signal);
   if (signal.aborted) return { stopped: true, liveRow: null };
   const params = chatParams();
-  const webEnabled = $("p-web").checked;
+  const webEnabled = $("p-web").checked && !chat.netOff;
   const messages = [];
   // Per-chat System prompt (the drawer) OVERRIDES; a blank drawer inherits the
   // Settings "Default system prompt" (chat.systemDefault, from /v1/config).
@@ -2556,7 +2594,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   const mapped = conv.messages.map((m, i) => {
     if (isToolEvent(m)) {
       const { content, untrusted_spans } = toolEventPrompt(m);
-      return { role: "user", content, origin: "tool",
+      return { role: "user", content, origin: "tool", own: [],
                untrusted_spans: untrusted_spans.length ? untrusted_spans : undefined };
     }
     if (Array.isArray(m.content) &&
@@ -2578,11 +2616,13 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       return { role: m.role, content: text };
     }
     if (m.role === "user" && m.continues && typeof m.content === "string") {
-      return { role: m.role, content: m.content + "\n\n[" + CONTINUE_PROMPT + "]" };
+      return { role: m.role, content: m.content + "\n\n[" + CONTINUE_PROMPT + "]",
+               own: [[0, m.content.length]] };
     }
     return {
       role: m.role, content: wireParts(m.content),
       untrusted_spans: m.untrusted_spans ? m.untrusted_spans.slice() : undefined,
+      own: m.role === "user" && (m.tag === "kb" || m.tag === "doc") ? [] : undefined,
     };
   });
   // Attached documents and knowledge excerpts are stored as separate user
@@ -2591,24 +2631,44 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   // merged message's untrusted_spans (LM-DA-014, web/plug.py) are shifted by
   // the length of what now precedes them and folded into the surviving entry.
   // A merged message keeps origin "tool" only while every part of it is a tool
-  // event: one that holds any text the user wrote is theirs.
+  // event: one that holds any text the user wrote is theirs. A user message
+  // whose text is not all the user's (a merged web result, knowledge excerpt or
+  // attached document, a continue note) carries user_spans: the ranges the user
+  // wrote, which is all the server records as the user's words.
+  const ownOf = (x) => (x.own === undefined ? [[0, x.content.length]] : x.own);
   for (const m of mapped) {
     const prev = messages[messages.length - 1];
     if (prev && prev.role === m.role && prev.role !== "system" &&
         typeof prev.content === "string" && typeof m.content === "string") {
+      const shift = prev.content.length + 2;   // "\n\n" separator
       if (m.untrusted_spans && m.untrusted_spans.length) {
-        const shift = prev.content.length + 2;   // "\n\n" separator
         (prev.untrusted_spans || (prev.untrusted_spans = []))
           .push(...m.untrusted_spans.map(([a, b]) => [a + shift, b + shift]));
       }
+      prev.own = [...ownOf(prev), ...ownOf(m).map(([a, b]) => [a + shift, b + shift])];
       prev.content += "\n\n" + m.content;
       if (prev.origin !== m.origin) delete prev.origin;
     } else {
       const entry = { role: m.role, content: m.content };
       if (m.untrusted_spans && m.untrusted_spans.length) entry.untrusted_spans = m.untrusted_spans;
       if (m.origin) entry.origin = m.origin;
+      if (m.own !== undefined) entry.own = m.own;
       messages.push(entry);
     }
+  }
+  // Spans go on the wire in Unicode code points, which is how the server
+  // indexes content, not in UTF-16 units.
+  for (const m of messages) {
+    const own = m.own;
+    delete m.own;
+    if (typeof m.content !== "string") continue;
+    const points = (i) => [...m.content.slice(0, i)].length;
+    if (m.untrusted_spans) {
+      m.untrusted_spans = m.untrusted_spans.map(([a, b]) => [points(a), points(b)]);
+    }
+    if (own === undefined || m.role !== "user" || m.origin) continue;
+    const whole = own.length === 1 && own[0][0] === 0 && own[0][1] === m.content.length;
+    if (!whole) m.user_spans = own.map(([a, b]) => [points(a), points(b)]);
   }
 
   // The <select> can desync from what the server actually has loaded (e.g. an
@@ -2636,6 +2696,11 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     body.grammar_lazy = true;
     body.grammar_triggers = [TOOL_CALL_TRIGGER];
   }
+
+  // A turn that carries no clip of its own is sent without the clips of earlier
+  // turns when the chat also holds an image: no model reads both. The
+  // conversation keeps the clips.
+  if (!latestTurnHasAudio(conv) && wireHasImageAndAudio(messages)) elideAudioForWire(messages);
 
   // VIS-1: did this request carry a user-attached image? If a text-only model
   // rejects it (400), we must drop the image so the chat is not wedged.
@@ -2810,6 +2875,17 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
         renderMarkdown(liveBody, "");
         mountStatusIndicator(liveBody, t("chat.status.processing"));
         await postAndRead(body);
+      } else if (e.status === 400 && e.refusal === "image" && sentAudio && sentImage &&
+                 !full.trim() && latestTurnIsAudioOnly(conv)) {
+        // The clip just sent went to a model that hears audio but cannot read the
+        // images of earlier turns: answer the clip with those images left out of
+        // this request only. The conversation keeps them.
+        elideImagesForWire(messages);
+        finishReason = null;
+        renderMarkdown(liveBody, "");
+        mountStatusIndicator(liveBody, t("chat.status.encodingAudio"));
+        toast(t("chat.audio.imagesSkipped"));
+        await postAndRead(body);
       } else {
         throw e;
       }
@@ -2837,6 +2913,25 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
           ? t("chat.audio.rejected", { detail: e.detail || e.message })
           : "Chat request failed: " + e.message, true);
       }
+    } else if (sentAudio && e.status === 501 && e.refusal !== "image" && !full.trim()) {
+      // The server cannot read this clip (no decoder for its format): drop the
+      // clip just sent so later turns are not refused for it.
+      audioRejected = true;
+      const n = stripUserAudio(conv, true);
+      saveConversations(conv);
+      toast(n
+        ? t("chat.audio.rejected", { detail: e.detail || e.message })
+        : "Chat request failed: " + e.message, true);
+    } else if (sentImage && (e.status === 413 || e.status === 501) && e.refusal === "image" && !full.trim()) {
+      // The server could not use the image just sent (unreadable, too large, a
+      // format it does not decode, over a request limit): drop that image so
+      // later turns are not refused for it. Earlier turns' images stay.
+      visionRejected = true;
+      const n = stripUserImages(conv, true, "[Image removed: the server did not accept it.]");
+      saveConversations(conv);
+      toast(n
+        ? t("chat.image.rejectedServer", { detail: e.detail || e.message })
+        : "Chat request failed: " + e.message, true);
     } else if (sentImage && e.status === 400 && e.refusal === "image" && !full.trim()) {
       // VIS-1: a text-only model rejected the image. Drop it from history so the
       // next turn is text-only and the chat stays usable, instead of re-sending
@@ -2907,7 +3002,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     if (full.trim() || reasoning.trim()) {
       const reply = {
         role: "assistant",
-        content: reasoning ? "<think>\n" + reasoning + "\n</think>\n" + full : full,
+        content: reasoning ? "<think>\n" + reasoning + "\n</think>\n" + stripAsrPrefix(full) : stripAsrPrefix(full),
         model: answeredBy || undefined,
         stopped: true,
       };
@@ -2966,7 +3061,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   if (finishReason === "error") {
     const failedReply = {
       role: "assistant",
-      content: reasoning ? "<think>\n" + reasoning + "\n</think>\n" + full : full,
+      content: reasoning ? "<think>\n" + reasoning + "\n</think>\n" + stripAsrPrefix(full) : stripAsrPrefix(full),
       model: answeredBy || undefined,
       failed: true,
     };
@@ -2984,7 +3079,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   // unaffected.
   const reply = {
     role: "assistant",
-    content: reasoning ? "<think>\n" + reasoning + "\n</think>\n" + full : full,
+    content: reasoning ? "<think>\n" + reasoning + "\n</think>\n" + stripAsrPrefix(full) : stripAsrPrefix(full),
     // NEW-1: record which model produced this turn so the transcript can show a
     // divider when the active model changes between turns (model-switch-indication).
     model: answeredBy || undefined,
