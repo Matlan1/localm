@@ -5319,8 +5319,12 @@ def add_local(
             for k, hf_dir in enumerate(hf_dirs, len(first_parts) + 1):
                 _mm._import_status(f"Registering {hf_dir.name} ({k} of {units})")
                 wanted = _sanitize_name(name) if (name and only_one) else hf_dir.name
+                reg = _mm.load_registry()
+                would_skip = on_duplicate == "skip" or (on_duplicate == "ask" and not can_prompt())
+                hf_name = ((_registered_name_for_file(reg, hf_dir, wanted) if would_skip else None)
+                           or _unique_registry_name(reg, wanted))
                 done = add_local(
-                    str(hf_dir), _unique_registry_name(_mm.load_registry(), wanted),
+                    str(hf_dir), hf_name,
                     on_duplicate=on_duplicate, no_hash=no_hash, fast=fast,
                     model_type=model_type, store=store,
                 )

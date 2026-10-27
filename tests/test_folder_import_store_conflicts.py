@@ -113,3 +113,21 @@ class TestReaddingAFolder:
         assert mm.add_local(str(folder), on_duplicate="skip") is True
         assert load_registry() == before
         assert "0 registered, 3 already registered, 0 skipped" in printed[-1], printed[-1]
+
+    def test_a_hugging_face_folder_inside_is_also_already_registered(
+            self, home, tmp_path, printed):
+        folder = tmp_path / "pile"
+        hf = folder / "hfm"
+        hf.mkdir(parents=True)
+        (hf / "config.json").write_text('{"model_type": "llama"}')
+        (hf / "tokenizer.json").write_text("{}")
+        (hf / "model.safetensors").write_bytes(b"x" * 64)
+        _gguf(folder / "alpha.gguf", payload=b"" * 2048)
+        assert mm.add_local(str(folder)) is True
+        before = dict(load_registry())
+        printed.clear()
+        assert mm.add_local(str(folder)) is True
+        assert load_registry() == before
+        assert printed[-1] == (
+            "Done: 0 registered, 2 already registered, 0 skipped or refused, 0 not usable"
+        ), printed[-1]
