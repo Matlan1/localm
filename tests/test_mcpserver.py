@@ -2136,6 +2136,21 @@ class TestRunCoderTaskInProcess:
         assert factory.loads == ["stub-model"]
         assert engines.resident == ["stub-model"]
 
+    def test_the_agent_is_marked_server_side(self, coder_env, tmp_path):
+        from localm.plugins.coder import runner as coder_runner
+        built = []
+        real = coder_runner.build_agent
+
+        def spy(*a, **k):
+            built.append(real(*a, **k))
+            return built[-1]
+
+        server, _ = _coder_server(_scripted_engine_factory(["done"]))
+        with patch.object(coder_runner, "build_agent", spy):
+            resp = _run_task(server, _project(tmp_path))
+        assert resp["result"]["isError"] is False, resp["result"]
+        assert [a.server_side for a in built] == [True]
+
     def test_three_projects_share_one_model_load(self, coder_env, tmp_path):
         factory = _scripted_engine_factory(["done"])
         server, engines = _coder_server(factory)

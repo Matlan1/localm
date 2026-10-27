@@ -830,6 +830,7 @@ def _run_coder(job: Job, *, engine=None) -> str:
         mode=mode,
         scope=job.scope,
         restricted=restricted,
+        server_side=True,
     )
     try:
         out = (agent.run_task(job.prompt) or "").strip()

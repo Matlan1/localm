@@ -308,6 +308,7 @@ class CoderSession:
             # and refuse the call: a GUI session runs _loop(interactive=False),
             # so there is no terminal to fall back to.
             confirm_handler=self._confirm,
+            server_side=True,
             verify_cmd=verify_cmd,
             verify_max_retries=verify_max_retries,
             **gen_kwargs,
