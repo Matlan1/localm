@@ -118,6 +118,14 @@ def test_restart_argv_preserves_the_running_executable():
     assert argv[1:3] == ["-m", "localm"]
 
 
+def test_restart_argv_keeps_exactly_one_port_option(monkeypatch):
+    from localm.inference import http_server
+    monkeypatch.setattr(sys, "argv", ["localm", "gui", "-p", "8642", "-p", "8642"])
+    assert http_server._restart_argv(8642)[3:] == ["gui", "-p", "8642"]
+    assert http_server._restart_argv(8643)[3:] == ["gui", "-p", "8643"]
+    assert http_server._restart_argv(None)[3:] == ["gui", "-p", "8642", "-p", "8642"]
+
+
 # ------------------------------------------------------------------ #
 #  Best-effort guards: never raise, no-op off platform               #
 # ------------------------------------------------------------------ #

@@ -572,16 +572,18 @@ _BUSY_VICTIM_IDLE_WAIT_S = 30.0
 _VICTIM_RELEASE_EXTRA_WAIT_S = 25.0
 
 
-def _refuse_non_chat_model(name: str, registry: dict | None = None) -> None:
+async def _refuse_non_chat_model(name: str, registry: dict | None = None) -> None:
     """Raise HTTPException 422 when *name* is a registered entry the chat engine
     can never load (a vision projector, an image or video component, a
-    text-to-speech model). Runs before any eviction or cancellation, so the
-    resident model stays loaded. *registry* defaults to the current registry."""
-    from localm.model_manager.registry import chat_load_refusal
+    text-to-speech model, an unknown-typed file no backend runs). Runs before
+    any eviction or cancellation, so the resident model stays loaded. The check
+    of an unknown-typed entry reads the file system on a worker thread.
+    *registry* defaults to the current registry."""
+    from localm.model_manager.registry import chat_load_refusal_off_loop
     if registry is None:
         from localm.config import load_registry
         registry = load_registry()
-    msg = chat_load_refusal(name, registry)
+    msg = await chat_load_refusal_off_loop(name, registry)
     if msg is not None:
         raise HTTPException(422, msg)
 
@@ -706,7 +708,7 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
     """
     global _engine_factory, _switch_desired
 
-    _refuse_non_chat_model(name)
+    await _refuse_non_chat_model(name)
 
     if preempt:
         _switch_desired = name
@@ -1913,7 +1915,7 @@ async def get_engine(model_name: str | None, *, load: bool = True,
         raise HTTPException(503, "No model is loaded and none was specified. "
                             "Load a model first or name one explicitly.")
 
-    _refuse_non_chat_model(name, registry)
+    await _refuse_non_chat_model(name, registry)
 
     # `not unloading`: never hand back (and let the caller pin) an engine that an
     # eviction/unload path is mid-freeing - that is the pin-arrives-during-the-
@@ -4342,16 +4344,14 @@ def _restart_argv(port: Optional[int] = None) -> list:
     making the post-update watchdog poll the old port until it times out and
     auto-rolls back a perfectly healthy build.
 
-    Appending is safe against a user-supplied -p: click takes the LAST occurrence
-    of an option, and *port* is the port that value already resolved to, so the
-    two agree. Only serve/gui reach a restart, and both accept -p; a caller with
-    no known port (a bare create_app() that never advertised) passes None and gets
-    the untouched command line."""
+    Any -p / --port already on the command line is replaced by the one appended,
+    so repeated restarts keep a single -p. Only serve/gui reach a restart, and
+    both accept -p; a caller with no known port (a bare create_app() that never
+    advertised) passes None and gets the untouched command line."""
     import sys
-    argv = [sys.executable, "-m", "localm", *sys.argv[1:]]
-    if port:
-        argv += ["-p", str(port)]
-    return argv
+
+    from localm.portmux import argv_with_port
+    return [sys.executable, "-m", "localm", *argv_with_port(sys.argv[1:], port)]
 
 
 def _execv_argv(argv: list) -> list:
