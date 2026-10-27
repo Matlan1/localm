@@ -310,6 +310,24 @@ def _start_image_refusal(name: str) -> str:
             "encoder) in Settings > Video, or leave the start image out.")
 
 
+def lora_refusal(s: dict, loras: list) -> Optional[str]:
+    """Why the LoRAs *loras* (``[{"name", "strength"}]``) cannot be applied to
+    the model the settings *s* resolve to (``pairing.resolve_loras``), or
+    None. A model set that does not resolve is left to ``ensure_available``,
+    which reports it. Checked before any VRAM handover."""
+    if not loras:
+        return None
+    try:
+        models = resolve_models(s)
+    except _ModelError:
+        return None
+    try:
+        pairing.resolve_loras(list(loras), models.get("family"))
+    except _ModelError as e:
+        return str(e)
+    return None
+
+
 def refusal(*, model_overrides=None, placement=None, width=None, height=None,
             seconds=None, fps=None, input_image=None, s: Optional[dict] = None,
             unsupported=(), sample_method=None, scheduler=None,
@@ -731,7 +749,8 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
                     "backend": "native", "model": models["label"],
                     "components": {k: v["name"] for k, v in
                                    (models.get("components") or {}).items()} or None,
-                    "loras": [{"name": x["name"], "strength": x["multiplier"]}
+                    "loras": [{"name": x["name"], "strength": x["multiplier"],
+                               **({} if x.get("checked", True) else {"family_checked": False})}
                               for x in lora_files] or None,
                     "runtime": f"stable-diffusion.cpp {sd_runtime.pins.TAG} ({rt.backend})",
                     "elapsed_seconds": round(elapsed, 1),

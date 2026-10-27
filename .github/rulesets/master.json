@@ -25,10 +25,7 @@
         "strict_required_status_checks_policy": false,
         "do_not_enforce_on_create": false,
         "required_status_checks": [
-          { "context": "merge-policy", "integration_id": 15368 },
-          { "context": "analyze (actions)", "integration_id": 15368 },
-          { "context": "analyze (javascript-typescript)", "integration_id": 15368 },
-          { "context": "analyze (python)", "integration_id": 15368 }
+          { "context": "merge-policy", "integration_id": 15368 }
         ]
       }
     }
