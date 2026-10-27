@@ -486,8 +486,7 @@ def _update_to(updater, version: str, *, yes: bool, allow_unverified: bool) -> N
         except updater.UnverifiedBuild as e:
             console.print(f"[bold yellow]Warning: the signature of {escape(rel['version'])} "
                           f"does not verify:[/bold yellow] {escape(e.reason)}.")
-            console.print("[yellow]Nothing shows that this build is the one localm "
-                          "published. Install it only if you trust where it came "
+            console.print("[yellow]Install it only if you trust where it came "
                           "from.[/yellow]")
             if accept:
                 console.print("[red]Not installed:[/red] the build did not verify again.")

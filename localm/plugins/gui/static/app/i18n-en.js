@@ -2275,7 +2275,7 @@ export const I18N_EN = {
   "settings.update.unverifiedStatus": "The signature of {version} does not verify: {reason}",
   "settings.update.unverifiedTitle": "Install {version} without a verified signature?",
   "settings.update.unverifiedBody":
-    "Its signature does not verify: {reason}. Nothing shows that this build is the one LocaLM published. Install it only if you trust where it came from.",
+    "Its signature does not verify: {reason}. Install it only if you trust where it came from.",
   "settings.update.unverifiedConfirm": "Install anyway",
   "settings.update.notInstalled": "Not installed.",
   "settings.update.installedRestarting": "Installed {version}. Restarting…",

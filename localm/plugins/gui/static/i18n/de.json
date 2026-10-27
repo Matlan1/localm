@@ -2209,7 +2209,7 @@
   "settings.update.installing": "{version} wird heruntergeladen und geprüft…",
   "settings.update.unverifiedStatus": "Die Signatur von {version} lässt sich nicht bestätigen: {reason}",
   "settings.update.unverifiedTitle": "{version} ohne bestätigte Signatur installieren?",
-  "settings.update.unverifiedBody": "Die Signatur lässt sich nicht bestätigen: {reason}. Nichts belegt, dass dieser Build der von LocaLM veröffentlichte ist. Installieren Sie ihn nur, wenn Sie seiner Herkunft vertrauen.",
+  "settings.update.unverifiedBody": "Die Signatur lässt sich nicht bestätigen: {reason}. Installieren Sie ihn nur, wenn Sie seiner Herkunft vertrauen.",
   "settings.update.unverifiedConfirm": "Trotzdem installieren",
   "settings.update.notInstalled": "Nicht installiert.",
   "settings.update.installedRestarting": "{version} installiert. Wird neu gestartet…",
