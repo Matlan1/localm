@@ -419,7 +419,8 @@ def build(engines: EngineCache) -> dict[str, dict]:
         try:
             with _quiet_stdout():
                 result = coder_runner.run_task_with_timeout(
-                    agent, task, remaining, on_finished=_release)
+                    agent, task, remaining, on_finished=_release,
+                    requested_timeout=timeout)
         except Exception as e:
             return _text_result(f"coder task failed to run: {e}", is_error=True)
 

@@ -134,7 +134,7 @@ from localm.inference.backends.base import (
     ModelLoadCancelled,
     PerThread,
     PretokenizerUnsafeInputError, PretokenizerUnusableModelError,
-    UnsupportedInputError, UnsupportedModelRoleError, VisionInputError,
+    UnsupportedInputError, UnsupportedModelRoleError, VisionInputError, WorkerDiedError,
     stream_stop_requested)
 from ._abi import AbiMismatch
 
@@ -1239,7 +1239,7 @@ class ModelRunner:
                                     "already streamed)")
                                 logger.error(
                                     "gguf worker: died mid-stream during %s", phase)
-                                raise RuntimeError(
+                                raise WorkerDiedError(
                                     f"{opening} (worker exit "
                                     f"{self._exit_reason()}). The model has been "
                                     "unloaded and will reload on the next "
@@ -1484,7 +1484,7 @@ class ModelRunner:
                                      if awaiting_first else
                                      f"decode ({chunks_received} token(s) already streamed)")
                             logger.error("gguf worker: died mid-stream during %s", phase)
-                            raise RuntimeError(
+                            raise WorkerDiedError(
                                 f"{opening} (worker exit {self._exit_reason()}). The "
                                 "model has been unloaded and will reload on the next "
                                 "request." + detail) from e

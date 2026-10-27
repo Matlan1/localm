@@ -1098,7 +1098,7 @@ class PluginManager:
             if callable(unreg):
                 unreg()
         except Exception as e:
-            # Teardown errors do not block the unmount.
+            self._errors[name] = f"unregister failed during unload: {e}"
             _log.warning("plugin %s: unregister failed during unload: %s", name, e,
                          exc_info=True)
         host.unmount()

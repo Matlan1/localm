@@ -33,7 +33,7 @@ from localm.console import console
 from .base import (AdapterLoadError, BaseBackend, ModelFileDamagedError,
                    ModelFileUnreadableError, ModelLoadCancelled, PerThread,
                    PretokenizerUnsafeInputError, PretokenizerUnusableModelError,
-                   UnsupportedModelRoleError)
+                   UnsupportedModelRoleError, WorkerDiedError)
 from .llamacpp._runner import RunnerBusy
 
 if TYPE_CHECKING:
@@ -1583,8 +1583,13 @@ class GgufBackend(VramSizingMixin, BaseBackend):
             # raises - a native fault, an uncaught Python exception in the worker, a
             # generation stall, and an unload racing the stream. The console line is
             # one line; the traceback goes to the debug log only.
-            _dbg.error("worker failure during generation - dropping model instance: %s",
-                       (str(failure).splitlines() or [""])[0])
+            summary = (str(failure).splitlines() or [""])[0]
+            if isinstance(failure, WorkerDiedError):
+                _dbg.debug("worker failure during generation - dropping model "
+                           "instance: %s", summary)
+            else:
+                _dbg.error("worker failure during generation - dropping model "
+                           "instance: %s", summary)
             _dbg.debug("worker failure traceback", exc_info=True)
             if self._runner is runner:
                 try:

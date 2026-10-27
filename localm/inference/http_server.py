@@ -4335,16 +4335,14 @@ def _restart_argv(port: Optional[int] = None) -> list:
     making the post-update watchdog poll the old port until it times out and
     auto-rolls back a perfectly healthy build.
 
-    Appending is safe against a user-supplied -p: click takes the LAST occurrence
-    of an option, and *port* is the port that value already resolved to, so the
-    two agree. Only serve/gui reach a restart, and both accept -p; a caller with
-    no known port (a bare create_app() that never advertised) passes None and gets
-    the untouched command line."""
+    Any -p / --port already on the command line is replaced by the one appended,
+    so repeated restarts keep a single -p. Only serve/gui reach a restart, and
+    both accept -p; a caller with no known port (a bare create_app() that never
+    advertised) passes None and gets the untouched command line."""
     import sys
-    argv = [sys.executable, "-m", "localm", *sys.argv[1:]]
-    if port:
-        argv += ["-p", str(port)]
-    return argv
+
+    from localm.portmux import argv_with_port
+    return [sys.executable, "-m", "localm", *argv_with_port(sys.argv[1:], port)]
 
 
 def _execv_argv(argv: list) -> list:

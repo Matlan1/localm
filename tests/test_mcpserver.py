@@ -1128,6 +1128,29 @@ class TestStdioRobustness:
         assert server.handle(123)["error"]["code"] == -32600
         assert server.handle([{"x": 1}])["error"]["code"] == -32600
 
+    def test_an_object_with_no_method_gets_invalid_request_with_a_null_id(self):
+        server, _ = _server()
+        stdout = io.StringIO()
+        ping = json.dumps({"jsonrpc": "2.0", "id": 5, "method": "ping"})
+        server.run_stdio(stdin=io.StringIO("{}" + chr(10) + ping + chr(10)),
+                         stdout=stdout)
+        replies = [json.loads(l) for l in stdout.getvalue().splitlines()]
+        assert len(replies) == 2
+        assert replies[0]["id"] is None
+        assert replies[0]["error"]["code"] == -32600
+        assert replies[1] == {"jsonrpc": "2.0", "id": 5, "result": {}}
+
+    def test_an_object_with_an_id_and_no_method_is_answered_under_that_id(self):
+        server, _ = _server()
+        reply = server.handle({"jsonrpc": "2.0", "id": 7})
+        assert reply["id"] == 7 and reply["error"]["code"] == -32600
+        assert server.handle({"jsonrpc": "2.0", "id": 8, "method": 5})["error"]["code"] == -32600
+
+    def test_a_client_reply_object_gets_no_answer(self):
+        server, _ = _server()
+        assert server.handle({"jsonrpc": "2.0", "id": 9, "result": {}}) is None
+        assert server.handle({"jsonrpc": "2.0", "id": 9, "error": {"code": 1}}) is None
+
 
 # --------------------------------------------------------------------------- #
 #  generate_image safety: stdout purity, privacy sidecar, path confinement     #
@@ -2371,7 +2394,7 @@ class TestRunCoderTaskInProcess:
             resp = _run_task(server, _project(tmp_path), timeout_seconds=60)
             result = resp["result"]
             assert result["isError"] is True
-            assert "timed out" in result["content"][0]["text"]
+            assert "timed out after 60s" in result["content"][0]["text"]
             engine = engines._engines["stub-model"]
             # Still generating: the run's pin and the generation's pin both
             # stay, so the residency gate cannot evict the engine from under

@@ -60,6 +60,12 @@ def register_exception_handlers(app: FastAPI) -> None:
     async def _log_http_exception(request, exc):  # noqa: ANN001 - framework signature
         from fastapi.exception_handlers import http_exception_handler
         from localm.debuglog import debug_enabled, logger as _dbg
+        from localm.inference.errors import (UNDECODABLE_BODY_MESSAGE,
+                                             is_undecodable_body)
+        if is_undecodable_body(exc):
+            return JSONResponse(status_code=422,
+                                content={"detail": UNDECODABLE_BODY_MESSAGE,
+                                         "errors": []})
         if debug_enabled():
             # Truncated: a detail can be long by design (the VRAM-overflow 503
             # carries a multi-line "Options:" list), and the point here is to
@@ -72,6 +78,8 @@ def register_exception_handlers(app: FastAPI) -> None:
         return await http_exception_handler(request, exc)
 
     from fastapi.exceptions import RequestValidationError
+
+    from localm.inference.errors import json_invalid_text
 
     @app.exception_handler(RequestValidationError)
     async def _validation_error(request, exc):  # noqa: ANN001 - framework signature
@@ -156,6 +164,8 @@ def register_exception_handlers(app: FastAPI) -> None:
             return ".".join(parts) or "request"
 
         def _one(err) -> str:
+            if err.get("type") == "json_invalid":
+                return json_invalid_text(err)
             name = _field(err)
             msg = (err.get("msg") or "is invalid").strip()
             # pydantic phrases these as "Input should be X", which reads as

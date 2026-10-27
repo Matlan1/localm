@@ -1123,6 +1123,12 @@ class MCPStdioServer:
         method = msg.get("method", "")
         mid = msg.get("id")
 
+        if not isinstance(method, str) or not method:
+            if "result" in msg or "error" in msg:
+                return None     # a client's reply to a request; this server sends none
+            return self._error(mid if isinstance(mid, (str, int)) else None, -32600,
+                               "Invalid Request: a request object needs a 'method' string")
+
         if mid is None:
             return None   # notification (e.g. notifications/initialized)
 
