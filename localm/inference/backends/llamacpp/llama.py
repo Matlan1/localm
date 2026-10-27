@@ -230,17 +230,28 @@ class _CapturedStderr:
 _IMAGE_MIN_TOKENS_ADVICE = re.compile(r"--image-min-tokens (\d{1,6})\b")
 
 
+def _runtime_has_gpu_device() -> bool:
+    """True when the runtime registers a non-CPU ggml device; when the device
+    registry cannot be read, the runtime's own ``llama_supports_gpu_offload``
+    answer."""
+    from . import _loader
+    present = _loader.has_gpu_device()
+    if present is None:
+        return api.llama_supports_gpu_offload()
+    return present
+
+
 def _apply_projector_notices(mt, notices: dict) -> None:
     """Act on what llama.cpp reported while loading the projector *mt*
     (``_CapturedStderr.projector_notices``): a warning when it encodes images on
     the CPU although the GPU was requested (*mt* is then marked as not on the
-    GPU; the warning is skipped when the runtime has no GPU backend), and the minimum image tokens it advised, which *mt* is rebuilt with
+    GPU; the warning is skipped when the runtime registers no GPU device), and the minimum image tokens it advised, which *mt* is rebuilt with
     (:meth:`MtmdContext.apply_min_image_tokens`); a warning when the runtime's
     params layout does not allow that."""
     from localm.debuglog import logger
     if notices.get("cpu") and getattr(mt, "on_gpu", False):
         mt.on_gpu = False
-        if api.llama_supports_gpu_offload():
+        if _runtime_has_gpu_device():
             logger.warning(
                 "mtmd: llama.cpp placed the vision projector on the CPU (CLIP using CPU "
                 "backend) although the GPU was requested, so image encoding is much "

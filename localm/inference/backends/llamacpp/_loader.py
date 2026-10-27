@@ -779,6 +779,23 @@ def compute_devices() -> list[tuple]:
     return devices
 
 
+def has_gpu_device() -> Optional[bool]:
+    """True when the ggml registry holds a device that is not the CPU, False when
+    it holds only the CPU, None when the registry cannot be read (see
+    :func:`compute_devices`).
+
+    This is the question "can this machine run anything on a GPU", which
+    ``llama_supports_gpu_offload`` does not answer: llama.cpp reports True there
+    whenever the RPC backend is registered, and localm ships ggml-rpc, so a
+    machine with no GPU at all still gets True. An RPC backend with no server
+    added registers no device, so it does not count here. Any non-CPU type
+    counts (GPU, IGPU, ACCEL): the enum values past GPU move between runtimes."""
+    devices = compute_devices()
+    if not devices:
+        return None
+    return any(dev_type != GGML_DEV_TYPE_CPU for _name, dev_type in devices)
+
+
 def native_device_inventory() -> Optional[list]:
     """``[{"index", "name", "description", "type", "free", "total"}, ...]`` for
     every NON-CPU compute device the ACTIVE ggml runtime registers, or ``None``
