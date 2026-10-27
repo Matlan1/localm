@@ -272,7 +272,9 @@ def _send(client, method, path, body, key):
 
 
 def _route_key(method, path):
-    return (method, path.split("?", 1)[0].replace("/image/", "/{kind}/"))
+    path = path.split("?", 1)[0].replace("/image/", "/{kind}/")
+    path = path.replace("/interrupted/" + "0" * 32 + "/", "/interrupted/{pull_id}/")
+    return (method, path.replace("/orphans/orphan-" + "0" * 24 + "/", "/orphans/{orphan_id}/"))
 
 
 class TestScopeEnforcement:
