@@ -153,6 +153,16 @@ def test_a_multi_line_cmd_block_runs(tmp_path):
     ("echo rem x\necho b", "echo rem x & echo b"),
     ("remove x\necho b", "remove x & echo b"),
     ("echo a ^\nrem tail", "echo a rem tail"),
+    ("echo a & rem note\necho b", "echo a & echo b"),
+    ("echo a && rem note\necho b", "echo a & echo b"),
+    ("echo a || :: note\necho b", "echo a & echo b"),
+    ("echo a &rem note\necho b", "echo a & echo b"),
+    ("echo a\n:here\necho b", "echo a & echo b"),
+    ("echo a\n  :: note\n:eof\necho b", "echo a & echo b"),
+    ('echo "a & rem b"\necho c', 'echo "a & rem b" & echo c'),
+    ("echo a ^& rem b\necho c", "echo a ^& rem b & echo c"),
+    ("echo a | findstr a\necho b", "echo a | findstr a & echo b"),
+    ("echo a & remove\necho b", "echo a & remove & echo b"),
 ])
 def test_cmd_join_lines(command, joined):
     assert _cmd_join_lines(command) == joined
@@ -165,6 +175,15 @@ def test_comment_lines_do_not_swallow_the_later_lines(tmp_path):
     assert result.ok, result.output
     assert "AFTER_REM" in result.output
     assert "AFTER_COLONS" in result.output
+
+
+@pytest.mark.skipif(not _WIN, reason="cmd.exe comment lines")
+def test_a_trailing_comment_and_a_label_do_not_swallow_the_later_lines(tmp_path):
+    cmd = "echo ONE & rem note\necho TWO\n:here\necho THREE"
+    result = tool_run_shell(tmp_path, cmd, timeout=30)
+    assert result.ok, result.output
+    for word in ("ONE", "TWO", "THREE"):
+        assert word in result.output, result.output
 
 
 @pytest.mark.skipif(not _WIN, reason="cmd.exe comment lines")

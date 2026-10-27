@@ -185,10 +185,10 @@ def _cmd_join_lines(command: str) -> str:
     ``cmd /S /C`` ends the command at the first line break, so every later line
     would be dropped. Lines are joined with `` & ``, which runs each in turn
     whatever the previous one returned, as ``sh`` does with separate lines; the
-    exit code is the last line's. A line that is only a ``rem`` or ``::``
-    comment is dropped, since cmd would read the lines joined after it as part
-    of the comment (a comment line right after a ``^`` continuation stays, as
-    cmd reads it as part of that command). A line ending in ``(``, ``&`` or
+    exit code is the last line's. A line that is only a ``rem`` comment or
+    starts with ``:`` (a ``::`` comment or a label) is dropped, and so is an
+    unquoted ``& rem ...`` or ``& :: ...`` tail of a line (a comment line right
+    after a ``^`` continuation stays, as part of that command). A line ending in ``(``, ``&`` or
     ``|``, a line starting with ``)``, ``&`` or ``|``, and a line ending in a ``^``
     continuation are joined with a space instead (the caret is removed). Blank
     lines are dropped. When several statements result, each ``if`` or ``for``
@@ -242,6 +242,9 @@ def _cmd_join_lines(command: str) -> str:
             continue
         if not continued and _RE_CMD_COMMENT.match(piece):
             continue
+        piece = _cmd_strip_comment_tail(piece)
+        if not piece:
+            continue
         if statements and (glue == " " or piece[0] in ")&|"):
             statements[-1] += " " + piece
         else:
@@ -261,8 +264,32 @@ def _cmd_join_lines(command: str) -> str:
     return " & ".join(statements)
 
 
-# A whole-line ``rem`` or ``::`` comment; _cmd_join_lines drops it.
-_RE_CMD_COMMENT = re.compile(r"@?\s*(?:rem(?:\s|$)|::)", re.IGNORECASE)
+# A whole-line ``rem`` comment, ``::`` comment or ``:`` label; _cmd_join_lines
+# drops it.
+_RE_CMD_COMMENT = re.compile(r"@?\s*(?:rem(?:\s|$)|:)", re.IGNORECASE)
+
+# What follows an ``&``, ``&&`` or ``||`` when the rest of the line is a comment.
+_RE_CMD_COMMENT_TAIL = re.compile(r"[&|]*\s*@?\s*(?:rem(?:\s|$)|::)", re.IGNORECASE)
+
+
+def _cmd_strip_comment_tail(line: str) -> str:
+    """*line* without an unquoted, uncaret-escaped ``&``, ``&&`` or ``||``
+    followed by a ``rem`` or ``::`` comment to its end."""
+    in_quotes = False
+    escaped = False
+    for i, ch in enumerate(line):
+        if escaped:
+            escaped = False
+        elif ch == "^" and not in_quotes:
+            escaped = True
+        elif ch == '"':
+            in_quotes = not in_quotes
+        elif not in_quotes and ch in "&|" and (i == 0 or line[i - 1] not in "&|"):
+            if ch == "|" and line[i + 1:i + 2] != "|":
+                continue
+            if _RE_CMD_COMMENT_TAIL.match(line, i):
+                return line[:i].rstrip()
+    return line
 
 # An ``if`` or ``for`` statement; _cmd_join_lines parenthesises it when other
 # statements follow it.

@@ -683,3 +683,78 @@ def test_a_file_tool_path_with_dotdot_after_a_link_is_resolved_link_first(tmp_pa
     control = data_guard.check("read_file", {"path": "sub/l/../notes.txt"}, project,
                                path_args=("path",), home=data)
     assert control is None, control
+
+
+def _file_system_spy(monkeypatch, drive: str = "") -> list:
+    """Records every file system probe of a UNC or device path, or of a path on
+    *drive* (such as ``z:``)."""
+    hits: list = []
+
+    def watch(real):
+        def wrapper(path, *a, **kw):
+            text = str(path)
+            if text.startswith(("\\\\", "//")) or (drive and text.lower().startswith(drive)):
+                hits.append(text)
+            return real(path, *a, **kw)
+        return wrapper
+
+    for owner, name in ((os, "lstat"), (os, "stat"), (os, "readlink"),
+                        (os.path, "lexists"), (os.path, "islink"),
+                        (os.path, "isjunction"), (os.path, "exists")):
+        real = getattr(owner, name, None)
+        if real is not None:
+            monkeypatch.setattr(owner, name, watch(real))
+    return hits
+
+
+@pytest.mark.parametrize("operand", [
+    r"\attacker\share\x\..\y",
+    "//attacker/share/x/../y",
+    r"\?\UNC\attacker\share\x\..\y",
+    r"\.\attacker\x\..\y",
+])
+def test_a_dotdot_network_operand_is_never_probed(tmp_path, monkeypatch, operand):
+    home = tmp_path / "home"
+    home.mkdir()
+    hits = _file_system_spy(monkeypatch)
+    assert data_guard._dotdot_form(operand, data_guard._sg._canon(str(tmp_path))) is None
+    assert _shell(f"type {operand}", tmp_path, home) is None
+    assert data_guard.check("run_shell", {"command": f"type {operand} > out.txt"}, tmp_path,
+                            shell_args=("command",), home=home) is None
+    assert hits == [], hits
+
+
+def test_a_dotdot_mapped_drive_operand_is_never_probed(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr("localm.pathsafe.is_mapped_network_drive",
+                        lambda raw: str(raw).lower().startswith("z:"))
+    hits = _file_system_spy(monkeypatch, "z:")
+    assert data_guard._dotdot_form(r"z:\attacker\x\..\y", data_guard._sg._canon(str(tmp_path))) is None
+    assert data_guard._posix_resolve("z:/attacker/x/../y") is None
+    assert hits == [], hits
+
+
+def test_a_dotdot_operand_under_a_network_cwd_is_never_probed(tmp_path, monkeypatch):
+    hits = _file_system_spy(monkeypatch)
+    assert data_guard._dotdot_form("dl/../config.json", "//attacker/share/proj") is None
+    assert hits == [], hits
+
+
+@pytest.mark.parametrize("cmd", [
+    "cat ~/proj/dl/../config.json",
+    "cat $HOME/proj/dl/../config.json",
+    "cd ~/proj && cat dl/../config.json",
+])
+def test_a_dotdot_after_a_link_under_the_user_home_is_named(tmp_path, monkeypatch, cmd):
+    user_home = tmp_path / "userhome"
+    project = user_home / "proj"
+    project.mkdir(parents=True)
+    data = tmp_path / "home"
+    (data / "models").mkdir(parents=True)
+    (data / "config.json").write_text("{}", encoding="utf-8")
+    _link_dir(project / "dl", data / "models")
+    monkeypatch.setenv("HOME", str(user_home))
+    monkeypatch.setenv("USERPROFILE", str(user_home))
+    hit = _shell(cmd, tmp_path, data)
+    assert hit and "settings" in hit, (cmd, hit)

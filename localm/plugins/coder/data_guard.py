@@ -173,15 +173,22 @@ def _local_realpath(path: str) -> Optional[str]:
     return None
 
 
-def _posix_resolve(path: str) -> Optional[str]:
-    """*path* resolved the way a POSIX tool does: each ``..`` steps back from
-    the link's target, because links are followed before the ``..`` that comes
-    after them is applied (:func:`os.path.realpath` and ``ntpath.realpath``
-    collapse ``..`` first). None when a link on the way, or its target, is a UNC
-    or device path or a mapped network drive, or more than
-    :data:`_MAX_LINK_HOPS` links are followed. Never opens a network path."""
+def _is_network_path(path: str) -> bool:
+    """True for a UNC or device path or a path on a mapped network drive. No
+    file system call is made on *path*."""
     from localm.pathsafe import is_mapped_network_drive, is_unc_or_device_path
-    if is_unc_or_device_path(path) or not os.path.isabs(path):
+    return is_unc_or_device_path(path) or is_mapped_network_drive(path)
+
+
+def _posix_resolve(path: str) -> Optional[str]:
+    """*path* resolved the way a POSIX tool does: a ``..`` after a link steps
+    back from the link's target, where :func:`os.path.realpath` and
+    ``ntpath.realpath`` collapse ``..`` first. None when *path* is not absolute,
+    when it, a link on the way or a link's target is a UNC or device path or a
+    mapped network drive, or when more than :data:`_MAX_LINK_HOPS` links are
+    followed. Never opens a network path."""
+    from localm.pathsafe import is_mapped_network_drive, is_unc_or_device_path
+    if _is_network_path(path) or not os.path.isabs(path):
         return None
     drive, rest = os.path.splitdrive(path)
     pending = [p for p in rest.replace("\\", "/").split("/") if p not in ("", ".")]
@@ -214,24 +221,59 @@ def _posix_resolve(path: str) -> Optional[str]:
     return _local_realpath(current)
 
 
+_HOME_MARKERS = ("${home}", "$home", "%userprofile%", "%homepath%",
+                 "$env:userprofile", "$env:home", "~")
+
+
+def _expand_home(text: str) -> Optional[str]:
+    """*text* with a leading home marker (``~``, ``$HOME``, ``%USERPROFILE%``)
+    or the shell guard's ``<home>`` sentinel replaced by the user's home
+    directory, or *text* itself when it has none. None when the home directory
+    is unknown."""
+    low = text.lower()
+    prefix = None
+    for marker in _HOME_MARKERS:
+        if low == marker or (low.startswith(marker) and text[len(marker)] in "/\\"):
+            prefix = len(marker)
+            break
+    if prefix is None and (text == _sg._HOME or text.startswith(_sg._HOME + "/")):
+        prefix = len(_sg._HOME)
+    if prefix is None:
+        return text
+    try:
+        home = Path.home().as_posix().rstrip("/")
+    except (RuntimeError, OSError):
+        return None
+    return home + text[prefix:].replace("\\", "/")
+
+
 def _dotdot_form(token: str, current: Optional[str]) -> Optional[str]:
     """The canonical :func:`_posix_resolve` form of the shell operand *token*
     (relative to the canonical directory *current*) when it has a ``..`` after
     a link, which :func:`shell_guard._norm_target` has already collapsed, else
-    None."""
+    None. A ``~``, ``$HOME`` or ``<home>`` prefix is expanded first. No file
+    system call is made on a UNC, device or mapped network path."""
     tok = token.strip()
     while tok.endswith("*"):
         tok = tok[:-1]
     if ".." not in tok.replace("\\", "/").split("/"):
         return None
+    tok = _expand_home(tok)
+    base = _expand_home(current) if current else None
+    if tok is None or (current and base is None):
+        return None
+    if _is_network_path(tok) or (base and _is_network_path(base)):
+        return None
     if _sg._canon(tok) is not None:
         raw = tok
-    elif current:
-        raw = current.rstrip("/") + "/" + tok
+    elif base:
+        raw = base.rstrip("/") + "/" + tok
     else:
         return None
+    if _is_network_path(raw):
+        return None
     try:
-        if not _sg._dotdot_after_link(raw, current or raw):
+        if not _sg._dotdot_after_link(raw, base or raw):
             return None
         resolved = _posix_resolve(raw)
     except (OSError, ValueError):
