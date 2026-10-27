@@ -27,6 +27,7 @@ import hashlib
 import inspect
 import io
 import logging
+import os
 import sys
 import threading
 from collections import OrderedDict
@@ -97,6 +98,42 @@ def _is_strict_dataclass_error(err: BaseException) -> bool:
     except ImportError:
         return False
     return isinstance(err, StrictDataclassError)
+
+
+# The listed GPUs, in their listed order, when this process sees only them in
+# that order (_apply_gpu_order): a GPU's position here is its torch number in
+# this process. None otherwise.
+_GPU_ORDER: Optional[list] = None
+
+
+def _apply_gpu_order(order: Optional[list]) -> bool:
+    """Make torch in this process see only the GPUs in *order* (GPU numbers of
+    the parent's torch), numbered from 0 in that order, by setting
+    ``HIP_VISIBLE_DEVICES`` when that is set and ``CUDA_VISIBLE_DEVICES``
+    otherwise. An inherited value is narrowed: entry N of it is GPU N. Must run
+    before torch is imported. Returns True when applied (and sets
+    ``_GPU_ORDER``); False, with a WARNING, when torch is already imported or an
+    inherited value has no entry for a GPU in *order*; False when *order* is
+    empty."""
+    global _GPU_ORDER
+    if not order:
+        return False
+    if "torch" in sys.modules:
+        logger.warning("gpu_split_indices %s: torch was loaded before the GPU order "
+                       "could be set, so the GPUs are filled by number", order)
+        return False
+    var = "HIP_VISIBLE_DEVICES" if os.environ.get("HIP_VISIBLE_DEVICES") else "CUDA_VISIBLE_DEVICES"
+    inherited = [v.strip() for v in os.environ.get(var, "").split(",") if v.strip()]
+    if inherited and any(i >= len(inherited) for i in order):
+        logger.warning("gpu_split_indices %s: %s=%s has no entry for every listed GPU, "
+                       "so the GPUs are filled by number", order, var,
+                       os.environ.get(var))
+        return False
+    visible = [inherited[i] for i in order] if inherited else [str(i) for i in order]
+    os.environ[var] = ",".join(visible)
+    _GPU_ORDER = list(order)
+    logger.debug("hf worker: %s=%s (GPUs %s in this order)", var, os.environ[var], order)
+    return True
 
 
 def _require_torch():
@@ -533,6 +570,9 @@ def _cuda_device_map(torch, config: Optional[dict] = None) -> dict:
       (``discover.single_gpu_index``), else a valid ``main_gpu_index`` ->
       ``"auto"`` confined to that ONE device by the same technique (its id is
       the only GPU in ``max_memory``).
+    - when the worker sees only the listed GPUs in their listed order
+      (``_apply_gpu_order``), positions 0..N-1 stand for them, so accelerate,
+      which fills GPUs by number, fills them in the listed order.
     - neither configured -> ``"auto"`` across every visible discrete device,
       each given a budget (plain ``"auto"`` when fewer than two devices can be
       read).
@@ -553,6 +593,16 @@ def _cuda_device_map(torch, config: Optional[dict] = None) -> dict:
     from localm.discover import (resolve_gpu_split, resolve_main_gpu_index,
                                  single_gpu_index)
     cfg = config if config is not None else load_config()
+    if _GPU_ORDER:
+        # This process sees only the listed GPUs, numbered from 0 in their order.
+        ratios = cfg.get("gpu_split_ratios")
+        if isinstance(ratios, (list, tuple)) and len(ratios) == len(cfg.get("gpu_split_indices") or []):
+            by_gpu = dict(zip(cfg.get("gpu_split_indices") or [], ratios, strict=True))
+            ratios = [by_gpu.get(i) for i in _GPU_ORDER]
+        else:
+            ratios = None
+        cfg = dict(cfg, gpu_split_indices=list(range(len(_GPU_ORDER))),
+                   gpu_split_ratios=ratios, main_gpu_index=None)
 
     headroom = int(0.5e9)   # kept free on the one device of a one-device placement
     from localm.vram import VRAM_OVERHEAD_BYTES
@@ -1489,9 +1539,11 @@ class HFWorker:
     can_be_multimodal = True
 
     def __init__(self, model_path: str, device: Optional[str] = None,
-                 task: str = "chat") -> None:
+                 task: str = "chat", gpu_order: Optional[list] = None) -> None:
         self.model_path = str(Path(model_path).resolve())
         self._device = device      # None = auto-detect
+        # The listed GPUs in their order, applied before torch loads (_apply_gpu_order).
+        self._gpu_order = gpu_order
         # "chat" for every ordinary model; "rerank" loads the checkpoint's
         # sequence-classification head for rerank() instead.
         self.task = task
@@ -1548,6 +1600,7 @@ class HFWorker:
         # This method only needs the boolean for the trust_remote_code= kwarg
         # below.
         trust_remote_code = _trust_remote_code_enabled()
+        _apply_gpu_order(self._gpu_order)
         torch = _require_torch()
         from localm.inference.backends import _st_plan
         self._st_plan = (_st_plan.load_plan(self.model_path)

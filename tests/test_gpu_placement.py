@@ -70,7 +70,9 @@ def _llama_counts(placement):
 
 class TestPlanner:
     def test_reported_box_full_offload_fits_every_card(self):
-        p = plan_placement(_devices(_IDLE), _dense())
+        # A 32B model's real output layer (Q4) and one batch's logits.
+        p = plan_placement(_devices(_IDLE), _dense(output=int(0.45 * GiB),
+                                                   logits=int(0.3 * GiB)))
         assert p.fits and p.full_offload and p.n_cpu_moe == 0
         assert len(p.loads) == 5
         assert all(d.need <= d.device.free for d in p.loads)
@@ -90,15 +92,21 @@ class TestPlanner:
         assert p.fits
         assert 4 not in [d.device.index for d in p.loads], "0.3 GB free holds nothing"
 
+    def test_a_last_card_too_small_for_the_output_layer_is_left_out(self):
+        p = plan_placement(_devices(_IDLE), _dense())
+        assert p.fits and p.full_offload
+        assert [d.device.index for d in p.loads] == [0, 1, 2, 3],             "2.7 GB of output and logits do not fit the 5.4 GB card's room"
+        assert p.loads[-1].output
+
     def test_the_cards_take_the_layers_in_the_order_given(self):
         devices = _devices(_IDLE)
-        order = [3, 1, 0, 2, 4]
+        order = [3, 1, 4, 0, 2]
         p = plan_placement([devices[i] for i in order], _dense())
         assert p.fits and p.full_offload
         assert [d.device.index for d in p.loads] == order
         layers = [il for d in p.loads for il in d.layers]
         assert layers == sorted(layers) and p.loads[0].layers[0] == 0, \
-            "card 3 holds the first layers, card 4 the last"
+            "card 3 holds the first layers, card 2 the last"
         assert p.loads[-1].output and not any(d.output for d in p.loads[:-1])
         counts, out = _llama_counts(p)
         assert counts == [len(d.layers) for d in p.loads] and out == len(p.loads) - 1
@@ -297,6 +305,40 @@ class TestDeviceMatching:
             discover.gguf_split_devices({"gpu_split_indices": None})
             discover.gguf_split_devices({"gpu_split_indices": [0, 1]})
         assert reg.call_count == 1
+
+
+class TestHfGpuOrder:
+    """discover.hf_gpu_order: the GPUs an HF load must see, in the listed order."""
+
+    @pytest.fixture(autouse=True)
+    def _torch_numbering(self):
+        with mock.patch.object(discover, "_native_gpu_index_space_is_opaque",
+                               return_value=False):
+            yield
+
+    @pytest.mark.parametrize("listed, expected", [
+        ([3, 1], [3, 1]),
+        ([3, 1, 4, 0], [3, 1, 4, 0]),
+        ([1, 3], None),
+        ([3], None),
+        ([3, 9], None),
+        ([3, 9, 1], [3, 1]),
+        (None, None),
+    ])
+    def test_the_listed_order_when_it_is_not_by_number(self, listed, expected):
+        cfg = {"gpu_split_indices": listed}
+        assert discover.hf_gpu_order(cfg, gpus=_torch_reading(_IDLE)) == expected
+
+    def test_nvidia_smi_numbers_give_no_order(self):
+        readings = [dict(g, numbering=discover.GPU_NUMBERING_NVIDIA_SMI)
+                    for g in _torch_reading(_IDLE)]
+        assert discover.hf_gpu_order({"gpu_split_indices": [3, 1]}, gpus=readings) is None
+
+    def test_a_vulkan_or_sycl_build_gives_no_order(self):
+        with mock.patch.object(discover, "_native_gpu_index_space_is_opaque",
+                               return_value=True):
+            assert discover.hf_gpu_order({"gpu_split_indices": [3, 1]},
+                                         gpus=_torch_reading(_IDLE)) is None
 
 
 class _MP:

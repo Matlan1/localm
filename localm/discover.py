@@ -5053,6 +5053,43 @@ def resolve_preferred_device(config: Optional[dict] = None, *,
     return idx if idx in by_index else None
 
 
+def hf_gpu_order(config: Optional[dict] = None, *,
+                 gpus: Optional[list] = None) -> Optional[list]:
+    """The ``gpu_split_indices`` GPUs, in their listed order, that an HF
+    (transformers) load must be the only ones it sees, in that order, so that
+    accelerate (which fills GPUs by number) fills them in that order.
+
+    ``None`` when no reordering is needed or it cannot be done safely: fewer
+    than two of the listed GPUs are detected, they are already listed by
+    number, the build's GPU numbering is opaque to torch (vulkan or sycl), the
+    reading is not fresh, or it is in nvidia-smi's own numbering. Listed GPUs
+    that are not detected are left out. *gpus* is a reading to use instead of
+    probing. Never raises."""
+    from localm.config import load_config
+    try:
+        cfg = config if config is not None else load_config()
+        raw = cfg.get("gpu_split_indices")
+        if not isinstance(raw, (list, tuple)) or len(raw) < 2:
+            return None
+        order = list(dict.fromkeys(int(i) for i in raw))
+        if _native_gpu_index_space_is_opaque():
+            return None
+        if gpus is None:
+            gpus, status = list_gpus(return_status=True, wait_for_inflight=True)
+            if status != GPU_PROBE_OK:
+                return None
+        if any(g.get("numbering") == GPU_NUMBERING_NVIDIA_SMI for g in gpus):
+            return None
+        present = {g.get("index") for g in gpus}
+        order = [i for i in order if i in present]
+        if len(order) < 2 or order == sorted(order):
+            return None
+        return order
+    except Exception as e:
+        logger.debug("hf_gpu_order: no GPU order (%s: %s)", type(e).__name__, e)
+        return None
+
+
 def visible_device_order(config: Optional[dict] = None, *,
                          gpus: Optional[list] = None) -> Optional[list]:
     """Every torch-visible device index with the PREFERRED one FIRST, or ``None`` when
