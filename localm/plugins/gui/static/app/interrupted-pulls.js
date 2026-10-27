@@ -64,6 +64,29 @@ async function _json(r) {
   return data;
 }
 
+/** The interrupted download recorded for *spec* and *name*, read fresh from
+ *  the server, or null. */
+export async function findInterrupted(spec, name) {
+  await loadInterrupted();
+  return _state.downloads.find((d) => d.spec === spec
+    && (d.name || null) === (name || null)) || null;
+}
+
+/** Delete the partial data and record of the interrupted download *id*.
+ *  Resolves to {ok, removed}; a failure is shown as a toast. */
+export async function deleteInterrupted(id) {
+  try {
+    const data = await _json(await fetch(
+      `/api/models/pulls/interrupted/${encodeURIComponent(id)}/delete`, _post()));
+    return { ok: true, removed: Number(data.removed_bytes) || 0 };
+  } catch (e) {
+    toast(t("models.interrupted.deleteFailed", { message: e.message }), true);
+    return { ok: false, removed: 0 };
+  } finally {
+    loadInterrupted();
+  }
+}
+
 /** Post the resume of *view*. When the source changed, asks whether to
  *  download it again from the start. Resolves to the started job's response
  *  ({job_id, spec, note}) or null when nothing was started. */

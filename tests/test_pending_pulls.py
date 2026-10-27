@@ -615,3 +615,114 @@ class TestGuiRoutes:
         assert c.post("/api/models/pulls/interrupted/" + "f" * 32 + "/delete").status_code == 404
         assert c.post("/api/models/pulls/interrupted/nope/resume", json={}).status_code == 404
         assert c.post("/api/models/pulls/orphans/orphan-zz/delete").status_code == 404
+
+
+# ------------------------------------------------------------------ #
+#  Review findings                                                     #
+# ------------------------------------------------------------------ #
+
+class TestDeleteScope:
+    def test_delete_keeps_another_etags_temp_file_of_the_same_file(self, home, dead_pid):
+        mine = _hf_temp(home, "f.gguf", "e1", b"a" * 10, *dead_pid)
+        other = _hf_temp(home, "f.gguf", "e2", b"b" * 20, *dead_pid)
+        with pending_pulls.tracking({"spec": "o/r:f.gguf"}):
+            pending_pulls.note_hf_files(home, [{"rel": "f.gguf", "etag": "e1"}])
+        [view] = pending_pulls.list_interrupted()
+        assert view["bytes_on_disk"] == 10
+        assert pending_pulls.delete_interrupted(view["id"]) == 10
+        assert not mine.exists()
+        assert other.read_bytes() == b"b" * 20
+
+    def test_a_part_that_cannot_be_deleted_keeps_the_record_and_says_so(self, home, monkeypatch):
+        monkeypatch.setattr("localm.netpolicy.pinned_request",
+                            _Server(BODY, stop_after=1500))
+        assert mm.pull_model(URL, name="tiny") is False
+        [view] = pending_pulls.list_interrupted()
+        part = home / "tiny.gguf.part"
+        real_unlink = Path.unlink
+
+        def stuck(self, missing_ok=False):
+            if self == part:
+                raise PermissionError("in use")
+            return real_unlink(self, missing_ok=missing_ok)
+        monkeypatch.setattr(Path, "unlink", stuck)
+        with pytest.raises(pending_pulls.DeleteFailed):
+            pending_pulls.delete_interrupted(view["id"])
+        monkeypatch.setattr(Path, "unlink", real_unlink)
+        assert part.stat().st_size == 1500
+        assert [r["id"] for r in _records(home)] == [view["id"]]
+
+    def test_a_hidden_part_of_an_import_is_not_an_orphan(self, home):
+        (home / ".model.gguf.part").write_bytes(b"i" * 9)
+        (home / "nojson.gguf.part").write_bytes(b"n" * 9)
+        assert pending_pulls.list_orphans() == []
+
+    def test_an_unclaimed_url_part_with_its_identity_is_an_orphan(self, home):
+        (home / "old.gguf.part").write_bytes(b"u" * 9)
+        (home / "old.gguf.part.json").write_text(json.dumps({"source": "url"}), encoding="utf-8")
+        [o] = pending_pulls.list_orphans()
+        assert o["file"] == "old.gguf.part"
+        assert pending_pulls.delete_orphan(o["id"]) == 9
+        assert not (home / "old.gguf.part").exists()
+        assert not (home / "old.gguf.part.json").exists()
+
+
+class TestRecordHygiene:
+    def test_a_record_whose_data_is_gone_is_pruned(self, home, monkeypatch):
+        monkeypatch.setattr("localm.netpolicy.pinned_request",
+                            _Server(BODY, stop_after=1500))
+        assert mm.pull_model(URL, name="tiny") is False
+        (home / "tiny.gguf.part").unlink()
+        assert pending_pulls.list_interrupted() == []
+        assert _records(home) == []
+
+    def test_own_pid_in_another_pid_space_counts_as_running(self, home):
+        import os
+        with pending_pulls.tracking({"spec": "o/r:x.gguf"}):
+            part = home / "x.gguf.part"
+            part.write_bytes(b"x")
+            pending_pulls.note_part(part, "x.gguf", 2)
+        [rec] = _records(home)
+        rec.update(ended=False, owner={"pid": os.getpid(), "space": "another-space",
+                                       "host": "elsewhere", "local": False, "start": None})
+        (home.parent / pending_pulls.RECORDS_DIR_NAME / f"{rec['id']}.json").write_text(
+            json.dumps(rec), encoding="utf-8")
+        assert pending_pulls.list_interrupted() == []
+        with pytest.raises(PullInFlight):
+            pending_pulls.delete_interrupted(rec["id"])
+
+    def test_a_url_with_nothing_to_compare_and_no_digest_is_not_resumed(self, home, monkeypatch):
+        class Bare(_Server):
+            def __call__(self, method, url, **kw):
+                r = super().__call__(method, url, **kw)
+                if method == "HEAD":
+                    r.headers = {}
+                return r
+        monkeypatch.setattr("localm.netpolicy.pinned_request", Bare(BODY, stop_after=1500))
+        assert mm.pull_model(URL, name="tiny") is False
+        rec = pending_pulls.get_interrupted(pending_pulls.list_interrupted()[0]["id"])
+        check = pending_pulls.check_upstream(rec)
+        assert check["changed"] is True and "no size or etag" in check["detail"]
+
+    def test_the_view_does_not_name_a_comfyui_folder(self, home):
+        with pending_pulls.tracking({"spec": "o/r:x.gguf", "dest_dir": "\\server\share\comfy"}):
+            part = home / "x.gguf.part"
+            part.write_bytes(b"x")
+            pending_pulls.note_part(part, "x.gguf", 2)
+        [view] = pending_pulls.list_interrupted()
+        assert "dest_dir" not in view["options"] and view["comfy_dest"] is True
+        assert "share" not in json.dumps(view)
+
+
+def test_a_failed_delete_at_the_pull_prompt_still_runs_the_requested_pull(home, monkeypatch):
+    from localm.cli import models as cli
+    monkeypatch.setattr("localm.netpolicy.pinned_request", _Server(BODY, stop_after=1500))
+    assert mm.pull_model(URL, name="tiny") is False
+    monkeypatch.setattr("localm.model_manager.registry.can_prompt", lambda: True)
+    monkeypatch.setattr("click.prompt", lambda *a, **k: "d")
+
+    def busy(_id):
+        raise PullInFlight("busy")
+    monkeypatch.setattr(pending_pulls, "delete_interrupted", busy)
+    cli._offer_interrupted("owner/other:x.gguf", None)
+    assert len(_records(home)) == 1

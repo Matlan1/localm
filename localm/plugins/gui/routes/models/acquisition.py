@@ -175,7 +175,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             from localm.model_manager import pending_pulls
             removed = discard_partial_download(spec, req.name)
             for rec in pending_pulls.records_for_request(spec, req.name):
-                pending_pulls.forget(rec["id"])
+                if not rec["request"].get("dest_dir"):
+                    pending_pulls.forget(rec["id"])
             return removed
 
         try:
@@ -260,6 +261,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                 raise HTTPException(409, path_formatter(request)(e)) from e
             except pending_pulls.UnknownPull:
                 pass
+            except OSError as e:
+                raise HTTPException(500, path_formatter(request)(e)) from e
             except ThreadCallTimeout as e:
                 raise HTTPException(504, f"Deleting the partial download timed out: {e}") from e
         else:
@@ -283,9 +286,22 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
               dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def interrupted_pull_delete(pull_id: str, request: Request):
         """Delete the partial data of an interrupted download and its record.
-        Returns {"removed_bytes": n}; 409 while a download of it runs."""
+        Returns {"removed_bytes": n}; 409 while a download of it runs; 500
+        when a file could not be deleted (the record is kept). A download into
+        a ComfyUI folder needs host filesystem access."""
         from localm.model_manager import pending_pulls
         from localm.model_manager.pull import PullInFlight, PullLockUnavailable
+        try:
+            rec = await run_in_threadpool_bounded(
+                pending_pulls.get_interrupted, pull_id, timeout=20.0)
+        except pending_pulls.UnknownPull as e:
+            raise HTTPException(404, "No such interrupted download.") from e
+        except PullInFlight as e:
+            raise HTTPException(409, str(e)) from e
+        except ThreadCallTimeout as e:
+            raise HTTPException(504, f"Reading the download record timed out: {e}") from e
+        if rec["request"].get("dest_dir"):
+            require_fs_host(request)
         try:
             removed = await run_in_threadpool_bounded(
                 pending_pulls.delete_interrupted, pull_id, timeout=60.0)
@@ -295,6 +311,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             raise HTTPException(500, path_formatter(request)(e)) from e
         except PullInFlight as e:
             raise HTTPException(409, path_formatter(request)(e)) from e
+        except OSError as e:
+            raise HTTPException(500, path_formatter(request)(e)) from e
         except ThreadCallTimeout as e:
             raise HTTPException(504, f"Deleting the partial download timed out: {e}") from e
         return {"removed_bytes": removed}
@@ -331,6 +349,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             raise HTTPException(500, path_formatter(request)(e)) from e
         except PullInFlight as e:
             raise HTTPException(409, path_formatter(request)(e)) from e
+        except OSError as e:
+            raise HTTPException(500, path_formatter(request)(e)) from e
         except ThreadCallTimeout as e:
             raise HTTPException(504, f"Deleting the partial file timed out: {e}") from e
         return {"removed_bytes": removed}

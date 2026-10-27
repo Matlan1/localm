@@ -321,10 +321,12 @@ def _is_running(rec: dict) -> bool:
         pid = int(owner.get("pid", -1))
     except (TypeError, ValueError):
         return True
+    from .pull import _record_holder_is_gone, _same_pid_space
+    if owner.get("space") is not None and not _same_pid_space(owner, records_dir()):
+        return True
     if pid == os.getpid():
         with _LIVE_LOCK:
             return rec.get("id") in _LIVE_IDS
-    from .pull import _record_holder_is_gone
     return not _record_holder_is_gone(owner, records_dir())
 
 
@@ -344,14 +346,17 @@ def _hf_layout(base: Path, rel: str):
         return None
 
 
-def _hf_temp_files(base: Path, rel: str) -> "list[Path]":
-    """The temp files of every download of *rel* under *base*."""
+def _hf_temp_files(base: Path, rel: str, etag: Optional[str] = None) -> "list[Path]":
+    """The temp files of the downloads of *rel* under *base*: those of
+    *etag* only, or of every etag when *etag* is None."""
     paths = _hf_layout(base, rel)
     if paths is None:
         return []
     from huggingface_hub._local_folder import _short_hash
     folder = paths.metadata_path.parent
     prefix = _short_hash(paths.metadata_path.name) + "."
+    if etag:
+        prefix += etag + "."
     try:
         return [f for f in folder.glob("*.incomplete")
                 if f.name.startswith(prefix) and f.is_file()]
@@ -385,8 +390,8 @@ def bytes_on_disk(rec: dict) -> int:
     total = 0
     for f in rec.get("files") or []:
         if isinstance(f, dict) and isinstance(f.get("base"), str) and isinstance(f.get("rel"), str):
-            total += max((_size(t) for t in _hf_temp_files(Path(f["base"]), f["rel"])),
-                         default=0)
+            total += max((_size(t) for t in _hf_temp_files(Path(f["base"]), f["rel"],
+                                                             _etag(f))), default=0)
     for p in rec.get("parts") or []:
         if isinstance(p, dict) and isinstance(p.get("path"), str):
             total += _size(Path(p["path"]))
@@ -432,7 +437,8 @@ def describe(rec: dict) -> dict:
         "id": rec["id"],
         "spec": req.get("spec"),
         "name": req.get("name"),
-        "options": {k: req.get(k) for k in _REQUEST_KEYS if k not in ("spec",)},
+        "options": {k: req.get(k) for k in _REQUEST_KEYS if k not in ("spec", "dest_dir")},
+        "comfy_dest": bool(req.get("dest_dir")),
         "source": rec.get("source"),
         "repo": rec.get("repo"),
         "revision": rec.get("revision"),
@@ -456,9 +462,15 @@ def list_interrupted(include_dismissed: bool = False) -> "list[dict]":
     for _p, rec in _iter_records():
         if _is_running(rec):
             continue
+        view = describe(rec)
+        if view["bytes_on_disk"] <= 0:
+            logger.info("removing the record of %s: none of its partial data is "
+                        "on disk any more", rec["request"].get("spec"))
+            _remove(rec["id"])
+            continue
         if rec.get("dismissed") and not include_dismissed:
             continue
-        out.append(describe(rec))
+        out.append(view)
     out.sort(key=lambda r: r.get("created") or 0)
     return out
 
@@ -559,28 +571,66 @@ def _snapshot_is_registered(folder: Path) -> bool:
     return False
 
 
-def _delete_partials(rec: dict) -> int:
+class DeleteFailed(OSError):
+    """Partial data that should have been deleted is still on disk."""
+
+
+_ETAG_RE = re.compile(r"\A[A-Za-z0-9._-]{1,200}\Z")
+
+
+def _etag(f: dict) -> Optional[str]:
+    """The recorded etag of the file entry *f* when it can name a temp file,
+    else None."""
+    e = f.get("etag")
+    return e if isinstance(e, str) and _ETAG_RE.match(e) else None
+
+
+def _unlink_checked(path: Path, left: "list[Path]") -> int:
+    """Delete *path* (and an owner sidecar beside it); returns its size, or 0
+    with *path* appended to *left* when it is still there afterwards."""
+    from .pull import _partial_owner_path
+    size = _size(path)
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as e:
+        logger.warning("could not delete the partial download %s: %s", path, e)
+    if path.exists():
+        left.append(path)
+        return 0
+    try:
+        _partial_owner_path(path).unlink(missing_ok=True)
+    except OSError as e:
+        logger.warning("could not delete %s: %s", _partial_owner_path(path), e)
+    return size
+
+
+def _delete_partials(rec: dict) -> "tuple[int, list[Path]]":
     """Delete the partial data of *rec* under the locks its pull takes.
-    Returns the bytes freed. Raises ``pull.PullInFlight`` when a download
-    holds one of those locks."""
-    from .pull import (_delete_hf_temp_files, _discard_part, _part_lock,
-                       _snapshot_dest_lock, _snapshot_bytes_on_disk,
-                       _safe_models_filename)
+    Raises ``pull.PullInFlight`` when a download holds one of those locks.
+    Returns ``(bytes freed, files that could not be
+    deleted)``."""
+    from .pull import (_SNAPSHOT_LOCK_WAIT_SECONDS, _delete_hf_temp_files,
+                       _hold_download_lock, _part_lock, _part_record_path,
+                       _safe_models_filename, _snapshot_bytes_on_disk,
+                       _snapshot_dest_lock)
     freed = 0
+    left: list[Path] = []
     allowed = _allowed_bases(rec)
-    by_base: dict[str, list[str]] = {}
     for f in rec.get("files") or []:
         if not (isinstance(f, dict) and isinstance(f.get("base"), str)
                 and isinstance(f.get("rel"), str)):
             continue
         base = _resolved(Path(f["base"]))
-        if base is None or base not in allowed or _hf_layout(base, f["rel"]) is None:
+        paths = _hf_layout(base, f["rel"]) if base is not None else None
+        if base is None or base not in allowed or paths is None:
             logger.warning("not deleting partial data outside the models folder: "
                            "%s / %s", f.get("base"), f.get("rel"))
             continue
-        by_base.setdefault(f["base"], []).append(f["rel"])
-    for base, rels in by_base.items():
-        freed += _delete_hf_temp_files(Path(base), rels)
+        if not paths.lock_path.parent.is_dir():
+            continue
+        with _hold_download_lock(paths.lock_path, wait=_SNAPSHOT_LOCK_WAIT_SECONDS):
+            for t in _hf_temp_files(base, f["rel"], _etag(f)):
+                freed += _unlink_checked(t, left)
 
     for p in rec.get("parts") or []:
         if not (isinstance(p, dict) and isinstance(p.get("path"), str)
@@ -596,8 +646,11 @@ def _delete_partials(rec: dict) -> int:
                            "download partial this record owns", part)
             continue
         with _part_lock(lock):
-            freed += _size(part)
-            _discard_part(part)
+            try:
+                _part_record_path(part).unlink(missing_ok=True)
+            except OSError as e:
+                logger.warning("could not delete %s: %s", _part_record_path(part), e)
+            freed += _unlink_checked(part, left)
 
     snap = rec.get("snapshot")
     if isinstance(snap, dict) and isinstance(snap.get("dir"), str) and isinstance(snap.get("name"), str):
@@ -617,7 +670,7 @@ def _delete_partials(rec: dict) -> int:
                     freed += size
                 elif folder.is_dir():
                     freed += _delete_hf_temp_files(folder, None)
-    return freed
+    return freed, left
 
 
 def _is_civitai_dest(rec: dict, parent: Path) -> bool:
@@ -640,11 +693,15 @@ def _is_civitai_dest(rec: dict, parent: Path) -> bool:
 
 def delete_interrupted(pull_id: str) -> int:
     """Delete the partial data of the interrupted download *pull_id* and its
-    record. Returns the bytes freed. Raises :class:`UnknownPull`, or
+    record. Returns the bytes freed. Raises :class:`UnknownPull`;
     ``pull.PullInFlight`` when it or another download of the same files is
-    running (nothing is deleted then)."""
+    running; :class:`DeleteFailed` when a file could not be deleted. The
+    record is kept whenever one of these is raised."""
     rec = get_interrupted(pull_id)
-    freed = _delete_partials(rec)
+    freed, left = _delete_partials(rec)
+    if left:
+        raise DeleteFailed("could not delete " + ", ".join(str(p) for p in left)
+                           + f" ({freed} bytes of other files were deleted)")
     _remove(pull_id)
     return freed
 
@@ -669,10 +726,11 @@ def records_for_request(spec: str, name: Optional[str]) -> "list[dict]":
 def check_upstream(rec: dict) -> dict:
     """Compare what the source serves now with what the record holds.
 
-    Returns ``{"changed": True|False|None, "detail": str}``: True when a
-    recorded file's etag or size, a direct URL's size or etag, or a full
-    repo's commit differs now (the partial data cannot be continued), None
-    when the check could not be made. Raises ``netpolicy.NetworkPolicyError``
+    Returns ``{"changed": True|False|None, "detail": str}``: True when the
+    partial data cannot be continued safely (a recorded file's etag or size,
+    a direct URL's size or etag, or a full repo's commit differs now, or a
+    direct URL with no expected digest has neither size nor etag to compare),
+    None when the check could not be made. Raises ``netpolicy.NetworkPolicyError``
     when the network policy refuses the request."""
     from localm import netpolicy
     from .pull import _etag_from_head, _policy_head
@@ -697,7 +755,7 @@ def check_upstream(rec: dict) -> dict:
         except (TypeError, ValueError):
             now_size = None
         if (etag and now_etag and etag != now_etag) or (size and now_size and size != now_size):
-            changed.append(str(f.get("rel")))
+            changed.append(f"{f.get('rel')} changed at the source")
     if rec.get("source") == "url" and rec.get("url"):
         part = (rec.get("parts") or [{}])[0]
         try:
@@ -708,7 +766,11 @@ def check_upstream(rec: dict) -> dict:
             now_etag = head.headers.get("etag")
             if ((part.get("size") and now_size and part["size"] != now_size)
                     or (part.get("etag") and now_etag and part["etag"] != now_etag)):
-                changed.append(rec["url"])
+                changed.append(f"{rec['url']} changed at the source")
+            elif not ((part.get("size") and now_size) or (part.get("etag") and now_etag)):
+                target = changed if not rec.get("sha256") else unchecked
+                target.append(rec["url"] + " cannot be compared (the server reports no "
+                              "size or etag)" if target is changed else rec["url"])
         except netpolicy.NetworkPolicyError:
             raise
         except Exception as e:
@@ -721,7 +783,7 @@ def check_upstream(rec: dict) -> dict:
             kw = {"revision": rec["revision"]} if rec.get("revision") else {}
             now = getattr(_hf_api().model_info(rec["repo"], **kw), "sha", None)
             if now and now != rec["commit"]:
-                changed.append(f"{rec['repo']} (now at commit {now[:12]})")
+                changed.append(f"{rec['repo']} changed at the source (now at commit {now[:12]})")
         except netpolicy.NetworkPolicyError:
             raise
         except Exception as e:
@@ -729,8 +791,7 @@ def check_upstream(rec: dict) -> dict:
             unchecked.append(str(rec.get("repo")))
     if changed:
         return {"changed": True,
-                "detail": "changed at the source since the download started: "
-                          + ", ".join(changed)}
+                "detail": "cannot be continued: " + "; ".join(changed)}
     if unchecked:
         return {"changed": None,
                 "detail": "could not check the source of: " + ", ".join(unchecked)}
@@ -752,7 +813,7 @@ def _claimed_paths() -> "tuple[set[Path], set[Path]]":
     for _p, rec in _iter_records():
         for f in rec.get("files") or []:
             if isinstance(f, dict) and isinstance(f.get("base"), str) and isinstance(f.get("rel"), str):
-                files.update(_hf_temp_files(Path(f["base"]), f["rel"]))
+                files.update(_hf_temp_files(Path(f["base"]), f["rel"], _etag(f)))
         for p in rec.get("parts") or []:
             if isinstance(p, dict) and isinstance(p.get("path"), str):
                 files.add(Path(p["path"]))
@@ -796,6 +857,16 @@ def _temp_roots() -> "list[Path]":
     return [r / ".cache" / "huggingface" / "download" for r in roots]
 
 
+def _is_url_partial(p: Path) -> bool:
+    """True when the ``.part.json`` beside *p* records a direct-URL or CivitAI
+    download."""
+    try:
+        ident = json.loads(p.with_name(p.name + ".json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return False
+    return isinstance(ident, dict) and ident.get("source") in ("url", "civitai")
+
+
 def _scan_orphans() -> "list[dict]":
     files, folders = _claimed_paths()
     out: list[dict] = []
@@ -818,7 +889,8 @@ def _scan_orphans() -> "list[dict]":
         parts = []
     for p in parts:
         lock_dir = _part_lock_dir(p.name[:-len(".part")])
-        if p in files or (lock_dir.exists() and not _lock_is_reclaimable(lock_dir)):
+        if (p.name.startswith(".") or p in files or not _is_url_partial(p)
+                or (lock_dir.exists() and not _lock_is_reclaimable(lock_dir))):
             continue
         out.append({"id": _orphan_id(p), "path": p, "kind": "part", "size": _size(p)})
     return out
@@ -843,19 +915,23 @@ def delete_orphan(orphan_id: str) -> int:
     a path from the caller). Returns the bytes freed. Raises
     :class:`UnknownPull` when no such orphan exists now and
     ``pull.PullInFlight`` when a download took it over."""
-    from .pull import (PullInFlight, _discard_part, _hold_download_lock, _part_lock,
-                       _partial_owner_is_gone, _partial_owner_path,
-                       _read_partial_owner, _unlink_quiet)
+    from .pull import (PullInFlight, _hold_download_lock, _part_lock,
+                       _partial_owner_is_gone, _read_partial_owner, _unlink_quiet)
     if not isinstance(orphan_id, str) or not _ORPHAN_ID_RE.match(orphan_id):
         raise UnknownPull(orphan_id)
     match = next((o for o in _scan_orphans() if o["id"] == orphan_id), None)
     if match is None:
         raise UnknownPull(orphan_id)
     path: Path = match["path"]
+    left: list[Path] = []
     if match["kind"] == "part":
+        from .pull import _part_record_path
         with _part_lock(path.name[:-len(".part")]):
-            size = _size(path)
-            _discard_part(path)
+            size = _unlink_checked(path, left)
+            if not left:
+                _unlink_quiet(_part_record_path(path))
+        if left:
+            raise DeleteFailed(f"could not delete {path}")
         return size
     lock = _lock_for_temp(path)
     with contextlib.ExitStack() as held:
@@ -866,7 +942,7 @@ def delete_orphan(orphan_id: str) -> int:
             raise PullInFlight("a download is writing that file")
         if lock is None and _read_partial_owner(path) is None:
             raise PullInFlight("cannot tell whether a download is writing that file")
-        size = _size(path)
-        path.unlink(missing_ok=True)
-        _unlink_quiet(_partial_owner_path(path))
+        size = _unlink_checked(path, left)
+    if left:
+        raise DeleteFailed(f"could not delete {path}")
     return size

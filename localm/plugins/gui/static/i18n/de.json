@@ -1223,6 +1223,7 @@
   "models.interrupted.resumingToast": "{spec} wird fortgesetzt; den Fortschritt zeigt Aktivität",
   "models.interrupted.resumeFailed": "Der Download konnte nicht fortgesetzt werden: {message}",
   "models.interrupted.busy": "In der Karte Modell hinzufügen läuft bereits ein Download; warte darauf oder halte ihn zuerst an.",
+  "models.interrupted.recordGone": "Dieser Download ist nicht mehr aufgezeichnet und kann daher nicht mit seinen ursprünglichen Optionen fortgesetzt werden. Starte ihn erneut in der Karte Modell hinzufügen.",
   "activity.interruptedPill.one": "{count} unterbrochener Download",
   "activity.interruptedPill.other": "{count} unterbrochene Downloads",
   "activity.interruptedHead": "Unterbrochene Downloads",

@@ -9,7 +9,7 @@ import { t, tn } from "../app/i18n.js";
 import { onServerUnreachable } from "../app/init.js";
 import { emptyState, iconEl } from "../app/icons.js";
 import { refreshModels, showKeyGate, switchModel, toastLoadResult } from "../app/models-sidebar.js";
-import { interruptedState, loadInterrupted, onInterruptedChange, renderInterrupted, setResumeHandler } from "../app/interrupted-pulls.js";
+import { deleteInterrupted, findInterrupted, interruptedState, loadInterrupted, onInterruptedChange, renderInterrupted, setResumeHandler, startResume } from "../app/interrupted-pulls.js";
 import { backendOverrideNote, refreshBackendInfo, refreshPerfEstimate } from "../app/settings-perf.js";
 
 /* ================================================================ */
@@ -2626,6 +2626,12 @@ function setPullButtons(state) {
 }
 
 async function discardPartialPull(payload) {
+  if (payload.fromInterrupted) {
+    const view = await findInterrupted(payload.spec, payload.name);
+    if (!view) return { ok: true, removed: 0, kept: null };
+    const res = await deleteInterrupted(view.id);
+    return { ...res, kept: null };
+  }
   try {
     const r = await fetch("/api/models/pull/discard", {
       method: "POST", headers: authHeaders(),
@@ -2854,7 +2860,7 @@ onInterruptedChange(renderInterruptedCard);
 // display, with its Pause and Cancel.
 setResumeHandler(async (view, start) => {
   if (activePull) throw new Error(t("models.interrupted.busy"));
-  const payload = { spec: view.spec, name: view.name || null };
+  const payload = { spec: view.spec, name: view.name || null, fromInterrupted: true };
   await runPull(payload, start);
 });
 
@@ -2911,7 +2917,17 @@ $("pull-cancel").onclick = async () => {
 
 $("pull-resume").onclick = async () => {
   if (!pausedPull) return;
-  await runPull(pausedPull);
+  const payload = pausedPull;
+  if (payload.fromInterrupted) {
+    const view = await findInterrupted(payload.spec, payload.name);
+    if (view) {
+      await runPull(payload, () => startResume(view));
+      return;
+    }
+    toast(t("models.interrupted.recordGone"), true);
+    return;
+  }
+  await runPull(payload);
 };
 
 

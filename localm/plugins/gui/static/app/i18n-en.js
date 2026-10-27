@@ -1359,6 +1359,7 @@ export const I18N_EN = {
   "models.interrupted.resumingToast": "Resuming {spec}; see Activity for its progress",
   "models.interrupted.resumeFailed": "Could not resume the download: {message}",
   "models.interrupted.busy": "Another download is running in the Add a model card; wait for it or stop it first.",
+  "models.interrupted.recordGone": "This download is no longer recorded, so it cannot be resumed with its original options. Start it again from the Add a model card.",
   "activity.interruptedPill.one": "{count} interrupted download",
   "activity.interruptedPill.other": "{count} interrupted downloads",
   "activity.interruptedHead": "Interrupted downloads",

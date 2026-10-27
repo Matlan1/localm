@@ -925,8 +925,8 @@ def _resume_interrupted(r: dict) -> int:
         console.print(f"[red]Network policy refused the check:[/red] {escape(str(e))}")
         return 1
     if check["changed"]:
-        console.print(f"[red]Cannot resume:[/red] the model {escape(check['detail'])}. "
-                      "The partial data cannot be continued. Delete it with "
+        console.print(f"[red]Cannot resume {escape(str(rec['request']['spec']))}:[/red] "
+                      f"{escape(check['detail'])}. Delete its saved data with "
                       f"localm pull --delete-interrupted {rec['id'][:8]} and pull "
                       "the model again to download the current version.")
         return 1
@@ -942,42 +942,71 @@ def _resume_interrupted(r: dict) -> int:
                      req.get("register") is not False)
 
 
-def _act_on_interrupted(delete_id: Optional[str], dismiss_id: Optional[str]) -> None:
-    """Handle --delete-interrupted / --dismiss-interrupted."""
+def _delete_one(key: str) -> bool:
+    """Delete the interrupted download (or orphan partial file) *key*,
+    printing the outcome; False when nothing was deleted."""
     from rich.markup import escape
 
     from ..model_manager import pending_pulls
     from ..model_manager._transfer import format_size
     from ..model_manager.pull import PullInFlight
-    if dismiss_id:
-        r = _find_interrupted(dismiss_id)
-        if r is None:
-            sys.exit(1)
+    try:
+        if key.startswith("orphan-"):
+            freed = pending_pulls.delete_orphan(key)
+            what = "the partial file"
+        else:
+            r = _find_interrupted(key)
+            if r is None:
+                return False
+            freed = pending_pulls.delete_interrupted(r["id"])
+            what = escape(str(r["spec"]))
+    except pending_pulls.UnknownPull:
+        console.print(f"[red]Nothing to delete for {escape(key)}.[/red]")
+        return False
+    except PullInFlight as e:
+        console.print(f"[red]Not deleted:[/red] {escape(str(e))}")
+        return False
+    except OSError as e:
+        console.print(f"[red]Not fully deleted:[/red] {escape(str(e))}")
+        return False
+    console.print(f"Deleted the partial data of {what} ({format_size(freed)} freed).")
+    return True
+
+
+def _dismiss_one(key: str) -> bool:
+    """Dismiss the interrupted download *key*; False when it was not."""
+    from rich.markup import escape
+
+    from ..model_manager import pending_pulls
+    from ..model_manager.pull import PullInFlight
+    r = _find_interrupted(key)
+    if r is None:
+        return False
+    try:
         pending_pulls.set_dismissed(r["id"], True)
-        console.print(f"Dismissed {escape(str(r['spec']))}; its files are kept.")
+    except (pending_pulls.UnknownPull, PullInFlight, OSError) as e:
+        console.print(f"[red]Not dismissed:[/red] {escape(str(e))}")
+        return False
+    console.print(f"Dismissed {escape(str(r['spec']))}; its files are kept.")
+    return True
+
+
+def _act_on_interrupted(delete_id: Optional[str], dismiss_id: Optional[str]) -> None:
+    """Handle --delete-interrupted / --dismiss-interrupted; exits 1 when one
+    of them did nothing."""
+    ok = True
+    if dismiss_id:
+        ok = _dismiss_one(dismiss_id) and ok
     if delete_id:
-        try:
-            if delete_id.startswith("orphan-"):
-                freed = pending_pulls.delete_orphan(delete_id)
-                what = "the partial file"
-            else:
-                r = _find_interrupted(delete_id)
-                if r is None:
-                    sys.exit(1)
-                freed = pending_pulls.delete_interrupted(r["id"])
-                what = escape(str(r["spec"]))
-        except pending_pulls.UnknownPull:
-            console.print(f"[red]Nothing to delete for {escape(delete_id)}.[/red]")
-            sys.exit(1)
-        except PullInFlight as e:
-            console.print(f"[red]Not deleted:[/red] {escape(str(e))}")
-            sys.exit(1)
-        console.print(f"Deleted the partial data of {what} ({format_size(freed)} freed).")
+        ok = _delete_one(delete_id) and ok
+    if not ok:
+        sys.exit(1)
 
 
 def _offer_interrupted(model_spec: str, name: Optional[str]) -> None:
     """At a terminal, offer each interrupted download other than *model_spec*
-    for resuming, deleting or dismissing; elsewhere print one line."""
+    for resuming, deleting or dismissing; elsewhere print one line. Exits 130
+    when Ctrl+C stops a prompt or a resumed download."""
     from ..model_manager import pending_pulls
     from ..model_manager._transfer import format_size
     from ..model_manager.registry import can_prompt
@@ -996,16 +1025,21 @@ def _offer_interrupted(model_spec: str, name: Optional[str]) -> None:
     for r in recs:
         console.print("Interrupted download: " + _interrupted_line(r))
         choices = ["r", "d", "h", "s"] if r["resumable"] else ["d", "h", "s"]
-        label = ("[r]esume it now  " if r["resumable"] else "") + \
-            f"[d]elete its data ({format_size(r['bytes_on_disk'])})  [h]ide it  [s]kip"
-        choice = click.prompt(f"  {label}", type=click.Choice(choices, case_sensitive=False),
-                              default="s", show_choices=False).lower()
+        label = (("[r]esume it now  " if r["resumable"] else "")
+                 + f"[d]elete its data ({format_size(r['bytes_on_disk'])})  [h]ide it  [s]kip")
+        try:
+            choice = click.prompt(f"  {label}", type=click.Choice(choices, case_sensitive=False),
+                                  default="s", show_choices=False).lower()
+        except (click.exceptions.Abort, KeyboardInterrupt):
+            click.echo("", err=True)
+            sys.exit(130)
         if choice == "r":
-            _resume_interrupted(r)
+            if _resume_interrupted(r) == 130:
+                sys.exit(130)
         elif choice == "d":
-            _act_on_interrupted(r["id"], None)
+            _delete_one(r["id"])
         elif choice == "h":
-            pending_pulls.set_dismissed(r["id"], True)
+            _dismiss_one(r["id"])
 
 
 
