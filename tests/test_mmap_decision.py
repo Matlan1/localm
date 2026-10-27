@@ -853,8 +853,12 @@ class TestDescribeMmapDecision:
         (MmapDecision(None, "exceeds_ram", 9 * GIB, 8 * GIB, 6 * GIB),
          "on (llama.cpp default)", "first tokens slower"),
         (MmapDecision(None, "partial_offload", 9 * GIB, 8 * GIB, 6 * GIB, 3 * GIB),
-         "on (llama.cpp default)", "part of the model runs on the CPU; the 3.0 GB of "
+         "on (llama.cpp default)", "not every layer is on the GPU; the 3.0 GB of "
          "weights the CPU reads (9.0 GB of weights kept in system RAM) fit 6.0 GB"),
+        (MmapDecision(None, "partial_offload", 9 * GIB, None, None, 3 * GIB),
+         "on (llama.cpp default)", "the weights the CPU reads were not compared with RAM"),
+        (MmapDecision(None, "no_gpu", None, None, None),
+         "on (llama.cpp default)", "the weights the CPU reads were not compared with RAM"),
         (MmapDecision(None, "no_gpu", 4 * GIB, 8 * GIB, 6 * GIB),
          "on (llama.cpp default)", "no GPU takes the layers"),
         (MmapDecision(None, "host_unknown"), "on (llama.cpp default)",
@@ -937,6 +941,27 @@ class TestDiskSpeedWarning:
         state = e.mmap_state
         assert state["mmap_cpu_from_disk"] is True
         assert state["mmap_note"] == b.mmap_disk_note
+        assert state["mmap_cpu_read_bytes"] == b.last_mmap_decision.cpu_read_bytes
+        assert state["mmap_ram_available_bytes"] == 1 * GIB
+
+    def test_a_runtime_that_did_not_map_the_model_withdraws_the_warning(self, tmp_path):
+        b = _backend(_per_layer_model(tmp_path), n_gpu_layers=2)
+        order = []
+
+        def _spawn(params, **_kw):
+            order.append("spawn")
+            return {"n_layers": 4, "kv_bytes_per_token": 0, "supports_images": False,
+                    "weight_placement": [], "moe_skip_reason": None, "mmap": False}
+
+        with _ram(64 * GIB, 1 * GIB),              patch("localm.inference.backends.gguf.console.print",
+                   lambda *a, **k: order.append(str(a[0]) if a else "")),              patch("localm.discover.list_gpus", return_value=(list(GPU), "ok")),              patch("localm.inference.backends.llamacpp._runner.ModelRunner."
+                   "spawn_and_load", side_effect=_spawn):
+            b._load_native()
+        warned = next(i for i, line in enumerate(order) if "limited by the disk" in line)
+        withdrawn = next(i for i, line in enumerate(order)
+                         if "warning above does not apply" in line)
+        assert warned < order.index("spawn") < withdrawn
+        assert b.mmap_cpu_from_disk is False
 
 
 class TestFullOffloadNeedsWording:
@@ -953,19 +978,23 @@ class TestFullOffloadNeedsWording:
         b = _backend(_moe_model(tmp_path), n_cpu_moe=2)
         model, cause = self._cause(b)
         assert model == b._model_bytes() - TOKEN_EMBD - PINNED_TWO
-        assert (f"the weights that go on the GPU need {model / GIB:.1f} GB of VRAM "
-                f"at any context size with n_cpu_moe 2; a higher n_cpu_moe, or 0 "
+        assert (f"every layer on the GPU needs {model / GIB:.1f} GB of VRAM for its "
+                f"weights at any context size with n_cpu_moe 2; a higher n_cpu_moe, or 0 "
                 f"to size it automatically, keeps more experts in system RAM") in cause
 
     def test_a_dense_model_never_mentions_n_cpu_moe(self, tmp_path):
         b = _backend(_dense_model(tmp_path), n_cpu_moe=2)
         model, cause = self._cause(b)
         assert model == b._model_bytes() - TOKEN_EMBD
-        assert cause.endswith("GB of VRAM at any context size")
+        assert cause.endswith("GB of VRAM for its weights at any context size")
         assert "n_cpu_moe" not in cause
 
-    def test_an_automatic_n_cpu_moe_is_not_named(self, tmp_path):
-        _model, cause = self._cause(_backend(_moe_model(tmp_path)))
+    def test_an_automatic_n_cpu_moe_says_the_figure_has_every_expert_on_the_gpu(
+            self, tmp_path):
+        b = _backend(_moe_model(tmp_path))
+        model, cause = self._cause(b)
+        assert model == b._model_bytes() - TOKEN_EMBD
+        assert cause.endswith("at any context size with every expert on the GPU")
         assert "n_cpu_moe" not in cause and "regardless" not in cause
 
 

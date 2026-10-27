@@ -1266,6 +1266,7 @@
   "models.switch.confirmTitle": "Modellwechsel bestätigen",
   "models.switch.mmapFromDisk": "läuft aus festplattengestütztem Speicher, erste Tokens langsamer",
   "models.switch.mmapCpuFromDisk": "CPU-Schichten lesen aus festplattengestütztem Speicher, jedes Token langsamer",
+  "models.switch.mmapCpuFromDiskSized": "die {read} GB Gewichte, die die CPU liest, passen nicht in die {avail} GB verfügbaren RAM, daher werden sie von der Festplatte gelesen und die Generierung ist durch die Festplatte begrenzt. Mehr RAM freigeben, eine kleinere Quantisierung verwenden oder mehr vom Modell auf die GPU legen, wenn der VRAM reicht",
   "models.tab.all": "Alle",
   "models.tab.diffusionUnet": "Diffusion",
   "models.tab.embedding": "Embedding",

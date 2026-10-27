@@ -1416,6 +1416,7 @@ export const I18N_EN = {
   "models.switch.confirmTitle": "Confirm model switch",
   "models.switch.mmapFromDisk": "running from disk-backed memory, first tokens slower",
   "models.switch.mmapCpuFromDisk": "CPU layers read from disk-backed memory, every token slower",
+  "models.switch.mmapCpuFromDiskSized": "the {read} GB of weights the CPU reads do not fit the {avail} GB of available RAM, so they are read from disk and generation speed is limited by the disk. Free more RAM, use a smaller quant, or put more of the model on the GPU if VRAM allows",
   "models.tab.all": "All",
   "models.tab.diffusionUnet": "Diffusion",
   "models.tab.embedding": "Embedding",

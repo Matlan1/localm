@@ -685,7 +685,8 @@ no GPU, and a load where available RAM cannot be read use llama.cpp's own
 default instead, which memory-maps the file wherever the device supports it.
 Such a load stays memory-mapped whatever the RAM. When the weights the CPU reads
 while generating (its CPU layers, plus a draft model placed on the CPU; the
-token embedding tables, of which a token reads one row, are not counted) do not
+embedding tables, of which a token reads one row, are not counted, except the
+token embeddings when the output layer runs on the CPU and shares them) do not
 fit available RAM with 2 GiB to spare, a warning before the load names both sizes
 and says the CPU reads them from disk, so generation speed is limited by the
 disk, and how to avoid it: free more RAM, use a smaller quant, or put more of the

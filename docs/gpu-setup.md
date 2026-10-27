@@ -357,8 +357,9 @@ then say it runs from disk-backed memory and that first tokens are slower. A
 model split between GPU and CPU, a machine with no GPU, and a load where
 available RAM cannot be read use llama.cpp's own default, which memory-maps the
 file wherever the device supports it. When the weights the CPU reads while
-generating (its CPU layers, plus a draft model placed on the CPU; the token
-embedding tables, of which a token reads one row, are not counted) do not fit
+generating (its CPU layers, plus a draft model placed on the CPU; the embedding
+tables, of which a token reads one row, are not counted, except the token
+embeddings when the output layer runs on the CPU and shares them) do not fit
 available RAM with 2 GiB to spare, the load warns before it starts that the CPU
 reads them from disk and generation speed is limited by the disk, with both sizes
 and the ways out (free more RAM, a smaller quant, more of the model on the GPU if

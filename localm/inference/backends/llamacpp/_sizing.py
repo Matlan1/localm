@@ -145,9 +145,14 @@ def describe_mmap_decision(setting, decision: MmapDecision) -> str:
     ram = f"{gb(decision.ram_available)} of {gb(decision.ram_total)} RAM available"
     host = f"{gb(decision.host_bytes)} of weights kept in system RAM"
     read = decision.cpu_read_bytes
-    cpu = f"{gb(read if read is not None else decision.host_bytes)} of weights the CPU reads"
+    if read is None:
+        read = decision.host_bytes
+    cpu = f"{gb(read)} of weights the CPU reads"
     if read is not None and read != decision.host_bytes:
         cpu += f" ({host})"
+    cpu_fit = (f"the {cpu} fit {ram}"
+               if read is not None and decision.ram_available is not None
+               else f"the weights the CPU reads were not compared with RAM ({cpu}, {ram})")
     mode = {True: "on", False: "off", None: "on (llama.cpp default)"}[decision.use_mmap]
     why = {
         "user_on": "use_mmap is on",
@@ -158,8 +163,8 @@ def describe_mmap_decision(setting, decision: MmapDecision) -> str:
                        f"so they stay mapped from the model file (first tokens slower)",
         "cpu_exceeds_ram": f"the {cpu} do not fit {ram}, so it reads them from the "
                            f"model file on disk while generating",
-        "partial_offload": f"part of the model runs on the CPU; the {cpu} fit {ram}",
-        "no_gpu": f"no GPU takes the layers; the {cpu} fit {ram}",
+        "partial_offload": f"not every layer is on the GPU; {cpu_fit}",
+        "no_gpu": f"no GPU takes the layers; {cpu_fit}",
         "host_unknown": "the weight bytes kept in system RAM could not be counted",
         "ram_unknown": f"available RAM could not be read ({host})",
     }.get(decision.reason, decision.reason)
@@ -1992,12 +1997,16 @@ class VramSizingMixin:
                 if budget.split_devices >= 2 else
                 f"this GPU only has {total / 1024**3:.1f} GB total"
             )
-            need = (f"{where} - the weights that go on the GPU need "
-                    f"{budget.model / 1024**3:.1f} GB of VRAM at any context size")
+            need = (f"{where} - every layer on the GPU needs "
+                    f"{budget.model / 1024**3:.1f} GB of VRAM for its weights at any "
+                    f"context size")
             configured_moe = int(getattr(self, "n_cpu_moe", 0) or 0)
-            if configured_moe > 0 and self._moe_expert_bytes_by_layer():
-                need += (f" with n_cpu_moe {configured_moe}; a higher n_cpu_moe, or 0 "
-                         f"to size it automatically, keeps more experts in system RAM")
+            if self._moe_expert_bytes_by_layer():
+                if configured_moe > 0:
+                    need += (f" with n_cpu_moe {configured_moe}; a higher n_cpu_moe, or 0 "
+                             f"to size it automatically, keeps more experts in system RAM")
+                else:
+                    need += " with every expert on the GPU"
             return need, False
         if (total is not None and budget.free < total
                 and budget.model + budget.kv > budget.free):

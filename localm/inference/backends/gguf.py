@@ -1188,9 +1188,16 @@ class GgufBackend(VramSizingMixin, BaseBackend):
     def _print_mmap_note(self) -> None:
         """Print the one-line mmap note for the load just finished (see
         ``mmap_setting.describe_mmap``), or nothing when there is none or when
-        ``mmap_disk_note`` already said it before the load."""
+        ``mmap_disk_note`` already said it before the load. When the load
+        warned about disk speed and the worker reports the model unmapped, say
+        the warning does not apply."""
         from localm.inference.mmap_setting import describe_mmap
         if self.mmap_cpu_from_disk and self.mmap_disk_note:
+            return
+        if self.mmap_disk_note and self.effective_use_mmap is False:
+            console.print("[dim]  mmap off: the runtime read the model into memory "
+                          "instead of memory-mapping it, so the disk-speed warning "
+                          "above does not apply[/dim]")
             return
         note = describe_mmap(self.use_mmap, self.effective_use_mmap,
                              self.mmap_forced_by_ram, self.mmap_cpu_from_disk)
