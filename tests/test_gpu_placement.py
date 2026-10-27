@@ -421,14 +421,15 @@ class _SmiProc:
         pass
 
 
-def _probe(torch_out, *, torch_present=True):
+def _probe(torch_out, *, torch_present=True, torch_unanswered=False):
     """discover._list_gpus_probe on the three-card box, torch answering
-    *torch_out* (an empty list: torch did not answer) and nvidia-smi answering
-    in bus order."""
+    *torch_out* (with *torch_unanswered*, an empty list is torch failing to
+    answer) and nvidia-smi answering in bus order."""
     smi = "".join(f"{i}, card{b:02x}, 24576, 20480, 00000000:{b:02X}:00.0\n"
                   for i, b in enumerate(sorted(_TORCH_BUSES)))
     with mock.patch.object(discover, "_torch_gpu_probe_known_doomed",
                            return_value=not torch_present), \
+            mock.patch.object(discover, "_isolated_torch_unavailable", torch_unanswered), \
             mock.patch.object(discover, "_torch_is_resident", return_value=False), \
             mock.patch.object(discover, "_torch_gpus_isolated_once",
                               return_value=torch_out), \
@@ -453,14 +454,14 @@ class TestSelectorNumbering:
         first = _probe(_torch_cards())
         assert [(d["index"], d["pci_bus_id"]) for d in first] == \
             [(0, 0x30), (1, 0x10), (2, 0x20)]
-        second = _probe([])
+        second = _probe([], torch_unanswered=True)
         assert [d["source"] for d in second] == [discover.GPU_SOURCE_NVIDIA_SMI] * 3
         assert [(d["index"], d["pci_bus_id"]) for d in second] == \
             [(0, 0x30), (1, 0x10), (2, 0x20)]
         assert {d["numbering"] for d in second} == {discover.GPU_NUMBERING_TORCH}
 
     def test_nvidia_smi_alone_on_a_torch_box_cannot_name_the_chosen_cards(self):
-        readings = _probe([])
+        readings = _probe([], torch_unanswered=True)
         assert [(d["index"], d["pci_bus_id"]) for d in readings] == \
             [(0, 0x10), (1, 0x20), (2, 0x30)]
         with _box(readings, _llama_cards()):
@@ -472,8 +473,9 @@ class TestSelectorNumbering:
                 {"gpu_split_indices": None}, gpus=readings)
         assert reason == "" and sorted(d["slot"] for d in devices) == [0, 1, 2]
 
-    def test_a_box_without_torch_keeps_nvidia_smis_numbers(self):
-        readings = _probe([], torch_present=False)
+    @pytest.mark.parametrize("torch_present", [True, False])
+    def test_a_box_without_torch_keeps_nvidia_smis_numbers(self, torch_present):
+        readings = _probe([], torch_present=torch_present)
         assert [(d["index"], d["pci_bus_id"]) for d in readings] == \
             [(0, 0x10), (1, 0x20), (2, 0x30)]
         assert all("numbering" not in d for d in readings)
@@ -563,7 +565,7 @@ class TestBackendLoad:
         from localm.config import load_config
         readings = _probe(_torch_cards())
         if answered_by == "nvidia-smi":
-            readings = _probe([])
+            readings = _probe([], torch_unanswered=True)
         assert next(d for d in readings if d["index"] == 1)["pci_bus_id"] == 0x10
         cfg = dict(load_config(), gpu_split_indices=None, gpu_split_ratios=None,
                    main_gpu_index=1, ctx_auto=False)

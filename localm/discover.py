@@ -2090,12 +2090,15 @@ def _nvidia_smi_numbering(out: list, torch_asked: bool) -> list:
     """nvidia-smi reading *out* in the GPU numbering ``localm gpus`` and the
     GUI show.
 
-    With *torch_asked* false torch does not number this box's GPUs and *out*
-    is returned unchanged. Otherwise, when the last torch reading
-    (:func:`_note_torch_numbering`) covered exactly *out*'s PCI buses, each
-    entry takes torch's number for its bus and ``"numbering":
-    GPU_NUMBERING_TORCH``, sorted by that number; else each entry keeps
-    nvidia-smi's number and carries ``"numbering": GPU_NUMBERING_NVIDIA_SMI``."""
+    With *torch_asked* false *out* is returned unchanged. When the last torch
+    reading (:func:`_note_torch_numbering`) covered exactly *out*'s PCI buses,
+    each entry takes torch's number for its bus and ``"numbering":
+    GPU_NUMBERING_TORCH``, sorted by that number. Otherwise, when torch could
+    not answer (``_isolated_torch_unavailable`` or
+    ``_isolated_torch_unanswered``), each entry keeps nvidia-smi's number and
+    carries ``"numbering": GPU_NUMBERING_NVIDIA_SMI``; when torch answered with
+    no GPU, *out* is returned unchanged (nvidia-smi's numbers are the only
+    ones)."""
     if not torch_asked:
         return out
     with _gpu_probe_lock:
@@ -2105,7 +2108,9 @@ def _nvidia_smi_numbering(out: list, torch_asked: bool) -> list:
         return sorted((dict(d, index=index_of_bus[d["pci_bus_id"]],
                             numbering=GPU_NUMBERING_TORCH) for d in out),
                       key=lambda d: d["index"])
-    return [dict(d, numbering=GPU_NUMBERING_NVIDIA_SMI) for d in out]
+    if _isolated_torch_unavailable or _isolated_torch_unanswered:
+        return [dict(d, numbering=GPU_NUMBERING_NVIDIA_SMI) for d in out]
+    return out
 
 # Probe budget below which a COLD (not-yet-opened) device-global source is skipped
 # rather than risk overrunning the probe deadline. The cold open costs about

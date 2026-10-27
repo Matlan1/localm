@@ -1118,9 +1118,14 @@ class TestListGpus:
         # memory.free is the whole board's across every process, so it needs no
         # correction on any platform. source "nvidia-smi" marks an index in
         # nvidia-smi's own order rather than a CUDA device ordinal.
-        assert gpus[0] == {"index": 0, "name": "NVIDIA RTX 4090",
-                            "total": 24576 * 1024 ** 2, "free": 20000 * 1024 ** 2,
-                            "free_scope": "device", "source": "nvidia-smi"}
+        # When torch could not answer (the isolated probe got this CSV), the
+        # entries also say their numbers are nvidia-smi's own.
+        expected = {"index": 0, "name": "NVIDIA RTX 4090",
+                    "total": 24576 * 1024 ** 2, "free": 20000 * 1024 ** 2,
+                    "free_scope": "device", "source": "nvidia-smi"}
+        if discover._isolated_torch_unavailable or discover._isolated_torch_unanswered:
+            expected["numbering"] = discover.GPU_NUMBERING_NVIDIA_SMI
+        assert gpus[0] == expected
         assert gpus[1]["index"] == 1
         assert gpus[1]["name"] == "NVIDIA RTX 3060"
 
