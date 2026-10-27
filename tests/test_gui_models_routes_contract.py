@@ -607,10 +607,11 @@ class TestVramEstimate:
         data = r.json()
         assert set(data) == {"model", "model_bytes", "weights", "kv_cache", "overhead",
                              "needed", "free", "held", "available", "total", "fits",
-                             "approximate"}
+                             "loading", "approximate"}
         assert data["model"] == "m-b" and data["model_bytes"] == 0
         assert data["free"] == 6 * _GB and data["total"] == 8 * _GB
         assert data["fits"] is True and data["approximate"] is True
+        assert data["loading"] is False
 
     def test_defaults_to_the_active_model_and_withholds_a_stale_free(self, harness, monkeypatch):
         monkeypatch.setattr("localm.discover.vram_capacity", probe_double(

@@ -23,6 +23,7 @@ export function _perfGiB(b) { return (Number(b) / GIB).toFixed(1); }
 
 export let _perfEstTimer = null;
 const PERF_ESTIMATE_AFTER_RELOAD_MS = 4000;
+const PERF_ESTIMATE_LOADING_POLL_MS = 2000;
 export async function refreshPerfEstimate() {
   const gl = $("perf-gpu-layers"), ctx = $("perf-ctx"), out = $("perf-estimate");
   if (!gl || !ctx || !out) return;
@@ -36,7 +37,11 @@ export async function refreshPerfEstimate() {
       kv: _perfGiB(d.kv_cache), overhead: _perfGiB(d.overhead),
     });
     out.replaceChildren();
-    if (typeof d.free === "number") {
+    if (d.loading === true) {
+      out.appendChild(document.createTextNode(text + t("settings.perf.estimateLoadingSuffix")));
+      clearTimeout(_perfEstTimer);
+      _perfEstTimer = setTimeout(refreshPerfEstimate, PERF_ESTIMATE_LOADING_POLL_MS);
+    } else if (typeof d.free === "number") {
       const suffix = typeof d.held === "number"
         ? t("settings.perf.estimateFreeHeldSuffix", { free: _perfGiB(d.free), held: _perfGiB(d.held) })
         : t("settings.perf.estimateFreeKnownSuffix", { free: _perfGiB(d.free) });
