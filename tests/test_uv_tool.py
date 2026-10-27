@@ -94,6 +94,25 @@ class TestFindUv:
         (root / ".localm-install.json").write_text("{not json", encoding="utf-8")
         assert uv_tool.find_uv(root) == str(_uv(root / ".uv"))
 
+    @pytest.mark.skipif(uv_tool.IS_WINDOWS, reason="POSIX execute bit")
+    def test_a_file_that_cannot_be_executed_is_not_a_uv(self, machine):
+        root, _ = machine
+        (root / ".uv").mkdir()
+        (root / ".uv" / UV).write_bytes(b"")
+        (root / ".uv" / UV).chmod(0o644)
+        assert uv_tool.find_uv(root) is None
+        assert uv_tool.contained_uv(root) is None
+
+    def test_a_recorded_contained_folder_outside_the_install_is_ignored(self, machine, tmp_path):
+        root, _ = machine
+        old_clone = tmp_path / "old-clone"
+        _uv(old_clone / ".uv")
+        _record(root, uv_dir=str(old_clone / ".uv"))
+        assert uv_tool.find_uv(root) is None
+        assert uv_tool.find_uv(root) != str(old_clone / ".uv" / UV)
+        own = _uv(root / ".uv")
+        assert uv_tool.find_uv(root) == str(own)
+
     def test_describe_search_names_every_place(self, machine, tmp_path):
         root, home = machine
         _record(root, uv_exe=str(tmp_path / "mine" / UV))
@@ -110,6 +129,12 @@ class TestPin:
 
     def test_a_missing_setup_script_is_an_error_that_names_the_cause(self, tmp_path):
         with pytest.raises(uv_tool.UvBootstrapError, match="pins could not be read|could not be read"):
+            uv_tool.read_pin(tmp_path)
+
+    def test_a_setup_script_that_is_not_utf8_is_reported_not_raised(self, tmp_path):
+        (tmp_path / "setup.sh").write_bytes(bytes([0xFF, 0xFE, 0x80]) + b" not utf-8")
+        (tmp_path / "setup.bat").write_bytes(bytes([0xFF, 0xFE, 0x80]) + b" not utf-8")
+        with pytest.raises(uv_tool.UvBootstrapError):
             uv_tool.read_pin(tmp_path)
 
     def test_the_module_carries_no_pin_of_its_own(self):

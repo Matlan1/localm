@@ -81,6 +81,7 @@ def test_a_system_uv_is_not_taken_silently_and_portable_installs_the_contained_o
     assert "Install it now?" not in out.stdout
     assert _field(out, "WINDOW-UV") == str(clone / ".uv" / "uv")
     assert _field(out, "WINDOW-STORE") == ""
+    assert _field(out, "WINDOW-PYDIR") == str(clone / ".python")
 
 
 def test_with_no_answer_possible_the_default_is_portable(tmp_path):
@@ -93,6 +94,7 @@ def test_choosing_shared_uses_the_system_uv_and_says_so_to_the_window(tmp_path):
     assert "INSTALLER-RAN" not in out.stdout and not (clone / ".uv").exists()
     assert _field(out, "WINDOW-UV") == str(system / "uv")
     assert _field(out, "WINDOW-STORE") == "shared"
+    assert _field(out, "WINDOW-PYDIR") == ""
 
 
 def test_a_contained_uv_is_used_without_asking(tmp_path):

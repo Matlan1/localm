@@ -33,9 +33,9 @@ if not defined SYSUV goto uv_missing
 
 echo   A uv is already installed on this computer.
 echo.
-echo   Keep LocaLM's Python tooling ^(uv itself, its runtime, and downloads^) inside this folder?
+echo   Keep localm's Python tooling ^(uv itself, its runtime, and downloads^) inside this folder?
 echo     [1] Portable - everything in this folder ^(self-contained; re-downloads per clone^)
-echo     [2] Shared   - use the uv already installed on this computer
+echo     [2] Shared   - reuse/install uv at its normal per-user location ^(faster; lives in your user profile^)
 set "STOREPICK="
 set /p "STOREPICK=  Pick 1 or 2 [1]: "
 if not defined STOREPICK set "STOREPICK=1"
@@ -81,6 +81,7 @@ if defined UVEXE goto open_window
 
 echo.
 echo   [!] uv still is not callable, so the graphical setup cannot start.
+echo       Looked for %CD%\.uv\uv.exe ^(the installer did not leave one there^).
 echo       Open a NEW terminal and run setup.bat instead.
 pause
 exit /b 1
@@ -106,8 +107,8 @@ rem  targets rather than whatever else is on the machine.
 echo   Opening the setup window ...
 rem  Keep the interpreter this window runs on inside the folder, so a portable
 rem  install reuses it rather than downloading a second copy.
-set "UV_PYTHON_INSTALL_DIR=%CD%\.python"
-set "UV_CACHE_DIR=%CD%\.cache"
+if not "%LOCALM_GUI_STORE%"=="shared" set "UV_PYTHON_INSTALL_DIR=%CD%\.python"
+if not "%LOCALM_GUI_STORE%"=="shared" set "UV_CACHE_DIR=%CD%\.cache"
 set "UV_SYSTEM_CERTS=1"
 "%UVEXE%" run --no-project --python 3.12 python "installer\gui.py"
 set "RC=%errorlevel%"

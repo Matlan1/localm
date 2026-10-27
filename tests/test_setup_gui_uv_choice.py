@@ -33,7 +33,7 @@ def _probe_text(installer_creates_uv: bool) -> str:
     lines[ps[0]] = ("echo INSTALLER-RAN& mkdir .uv& type nul > .uv\\uv.exe& cmd /c exit 0"
                     if installer_creates_uv else "echo INSTALLER-RAN& cmd /c exit 0")
     text = "\n".join(lines).replace(
-        _UV_RUN, 'echo WINDOW-UV=%UVEXE%& echo WINDOW-STORE=%LOCALM_GUI_STORE%& cmd /c exit 0')
+        _UV_RUN, 'echo WINDOW-UV=%UVEXE%& echo WINDOW-STORE=%LOCALM_GUI_STORE%& echo WINDOW-PYDIR=%UV_PYTHON_INSTALL_DIR%& cmd /c exit 0')
     return text.replace("\r\n", "\n").replace("\n", "\r\n")
 
 
@@ -72,6 +72,7 @@ def test_a_system_uv_is_not_taken_silently_and_portable_installs_the_contained_o
     assert "Install it now?" not in out.stdout
     assert _field(out, "WINDOW-UV") == str(clone / ".uv" / "uv.exe")
     assert _field(out, "WINDOW-STORE") == ""
+    assert _field(out, "WINDOW-PYDIR") == str(clone / ".python")
     assert out.returncode == 0, (out.stdout, out.stderr)
 
 
@@ -86,6 +87,7 @@ def test_choosing_shared_uses_the_system_uv_and_says_so_to_the_window(tmp_path):
     assert "INSTALLER-RAN" not in out.stdout and not (clone / ".uv").exists(), out.stdout
     assert _field(out, "WINDOW-UV") == str(stub / "uv.cmd")
     assert _field(out, "WINDOW-STORE") == "shared"
+    assert _field(out, "WINDOW-PYDIR") == "", "Shared must not point uv's Python folder into the clone"
 
 
 def test_a_contained_uv_is_used_without_asking(tmp_path):
@@ -118,5 +120,7 @@ def test_a_folder_with_a_bang_in_its_path_still_asks_and_installs(tmp_path):
 def test_the_question_is_worded_like_setup_bat():
     gui = (ROOT / "setup-gui.bat").read_text(encoding="utf-8")
     console = (ROOT / "setup.bat").read_text(encoding="utf-8")
-    for fragment in ("[1] Portable - everything in this folder", "Pick 1 or 2 [1]:"):
+    for fragment in ("Keep localm's Python tooling", "[1] Portable - everything in this folder",
+                     "[2] Shared   - reuse/install uv at its normal per-user location",
+                     "Pick 1 or 2 [1]:"):
         assert fragment in gui and fragment in console

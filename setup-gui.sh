@@ -57,9 +57,9 @@ elif command -v uv >/dev/null 2>&1; then
     SYSUV=1
     echo "  A uv is already installed on this computer."
     echo
-    echo "  Keep LocaLM's Python tooling (uv itself, its runtime, and downloads) inside this folder?"
+    echo "  Keep localm's Python tooling (uv itself, its runtime, and downloads) inside this folder?"
     echo "    [1] Portable - everything in this folder (self-contained; re-downloads per clone)"
-    echo "    [2] Shared   - use the uv already installed on this computer"
+    echo "    [2] Shared   - reuse/install uv at its normal per-user location (faster; lives in ~/.local)"
     STOREPICK=""
     read -r -p "  Pick 1 or 2 [1]: " STOREPICK || STOREPICK=""
     case "${STOREPICK:-1}" in
@@ -114,6 +114,7 @@ fi
 if [ -z "$UVEXE" ]; then
     echo
     echo "  [!] uv still is not callable, so the graphical setup cannot start."
+    echo "      Looked for $PWD/.uv/uv (the installer did not leave one there)."
     echo "      Open a NEW terminal and run ./setup.sh instead."
     exit 1
 fi
@@ -133,8 +134,10 @@ fi
 echo "  Opening the setup window ..."
 # Keep the interpreter this window runs on inside the folder, so a portable
 # install reuses it rather than downloading a second copy.
-export UV_PYTHON_INSTALL_DIR="$PWD/.python"
-export UV_CACHE_DIR="$PWD/.cache"
+if [ "${LOCALM_GUI_STORE:-}" != shared ]; then
+    export UV_PYTHON_INSTALL_DIR="$PWD/.python"
+    export UV_CACHE_DIR="$PWD/.cache"
+fi
 export UV_SYSTEM_CERTS=1
 rc=0
 "$UVEXE" run --no-project --python 3.12 python installer/gui.py || rc=$?

@@ -35,14 +35,23 @@ class UvBootstrapError(Exception):
     """The pinned uv could not be installed; the message says why."""
 
 
+def usable(path) -> bool:
+    """Whether *path* is a file that can be run as uv (executable on POSIX)."""
+    p = Path(path)
+    return p.is_file() and (IS_WINDOWS or os.access(p, os.X_OK))
+
+
 def _recorded(root: Path) -> tuple[Optional[Path], Optional[Path]]:
-    """(contained uv, shared uv) as the install record names them."""
+    """(contained uv, shared uv) as the install record names them. A recorded
+    contained folder outside *root* (the install was copied or moved) is ignored."""
     try:
         from localm import install_manifest
         m = install_manifest.load(root) or {}
     except Exception:
         return None, None
-    contained = Path(str(m["uv_dir"])) / UV_NAME if m.get("uv_dir") else None
+    contained = None
+    if m.get("uv_dir") and is_inside(m["uv_dir"], root):
+        contained = Path(str(m["uv_dir"])) / UV_NAME
     shared = Path(str(m["uv_exe"])) if m.get("uv_exe") else None
     return contained, shared
 
@@ -68,13 +77,13 @@ def find_uv(root) -> Optional[str]:
     before the installer ran does not have those on PATH yet)."""
     before, after = search_places(root)
     for candidate in before:
-        if candidate.is_file():
+        if usable(candidate):
             return str(candidate)
     on_path = shutil.which("uv")
     if on_path:
         return on_path
     for candidate in after:
-        if candidate.is_file():
+        if usable(candidate):
             return str(candidate)
     return None
 
@@ -89,7 +98,7 @@ def describe_search(root) -> str:
 def contained_uv(root) -> Optional[Path]:
     """The uv copy inside *root* (``.uv``), or None."""
     for rel in (Path(CONTAINED_DIR) / UV_NAME, Path(CONTAINED_DIR) / "bin" / UV_NAME):
-        if (Path(root) / rel).is_file():
+        if usable(Path(root) / rel):
             return Path(root) / rel
     return None
 
@@ -112,7 +121,7 @@ def read_pin(root) -> tuple[str, str]:
         path = Path(root) / name
         try:
             text = path.read_text(encoding="utf-8")
-        except OSError as e:
+        except (OSError, ValueError) as e:
             problems.append(f"{name}: {e}")
             continue
         version, sha = _VERSION_RE.search(text), _SHA_RE.search(text)

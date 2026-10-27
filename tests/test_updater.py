@@ -553,6 +553,8 @@ def test_apply_deps_installs_the_pinned_uv_when_the_install_has_none(tmp_path, m
                         runner=lambda c: ran.append(c) or 0)
     assert res["applied"] is True and boots == [inst]
     assert ran[0][0] == str(inst / ".uv" / _UV_NAME)
+    recorded = json.loads((inst / ".localm-install.json").read_text(encoding="utf-8"))
+    assert pathlib.Path(recorded["uv_dir"]) == (inst / ".uv").resolve()
 
 
 def test_apply_deps_without_any_uv_refuses_before_swapping_and_says_what_it_tried(

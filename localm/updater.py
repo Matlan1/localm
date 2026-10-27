@@ -889,12 +889,25 @@ def _uv_for_deps(target: Path) -> str:
         return found
     searched = uv_tool.describe_search(target)
     try:
-        return str(uv_tool.bootstrap_uv(target))
+        installed = uv_tool.bootstrap_uv(target)
+        _record_contained_uv(target, installed)
+        return str(installed)
     except uv_tool.UvBootstrapError as e:
         raise LocalmError(
             "this update needs uv to reinstall the dependencies, and uv could not be found or installed",
             reason=f"looked for uv in: {searched}. Installing the pinned uv into "
                    f"{target / uv_tool.CONTAINED_DIR} failed: {e}") from None
+
+
+def _record_contained_uv(target: Path, installed) -> None:
+    """Note the uv just installed in the install record, so uninstall removes it.
+    A record that cannot be written is logged and does not fail the update."""
+    try:
+        from localm import install_manifest
+        install_manifest.record(target, uv_dir=str(Path(installed).parent))
+    except (OSError, ValueError) as e:
+        _apply_warn("installed uv into %s but could not note it in the install record: %s; "
+                    "uninstall will not remove that folder", Path(installed).parent, e)
 
 
 def _deps_env(target: Path) -> dict:
