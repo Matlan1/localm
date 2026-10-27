@@ -140,7 +140,7 @@ def _named_embedding_path(model: Optional[str]) -> Optional[str]:
         return None
     from localm.config import load_config, load_registry
     from localm.inference import reranker
-    from localm.model_manager.registry import entry_is_reranker
+    from localm.model_manager.registry import _entry_path, entry_is_reranker
     entry = load_registry().get(name)
     configured = str(load_config().get("embedding_model") or "").strip()
     if name == configured:
@@ -151,7 +151,7 @@ def _named_embedding_path(model: Optional[str]) -> Optional[str]:
         raise reranker.RerankerModelError(
             f"Model {name!r} is a reranker, not an embedding model: it scores "
             "query and document pairs (use the rerank tool).", 422)
-    raw = str(entry.get("path") or "")
+    raw = _entry_path(entry)
     if raw and Path(raw).is_dir():
         return None
     return reranker.named_embedding_path(name, entry) or _CONFIGURED_EMBEDDER

@@ -91,29 +91,31 @@ def register_exception_handlers(app: FastAPI) -> None:
         from localm.debuglog import debug_enabled, logger as _dbg
         from localm.inference.errors import (UNDECODABLE_BODY_MESSAGE,
                                              is_undecodable_body)
-        if is_undecodable_body(exc):
-            return JSONResponse(status_code=422,
-                                content={"detail": UNDECODABLE_BODY_MESSAGE,
-                                         "errors": []})
-        server_error = exc.status_code >= 500 and exc.status_code != 503
+        undecodable = is_undecodable_body(exc)
+        status = 422 if undecodable else exc.status_code
+        server_error = status >= 500 and status != 503
         if server_error or debug_enabled():
             # Truncated: a detail can be long by design (the VRAM-overflow 503
             # carries a multi-line "Options:" list), and the point here is to
             # name the cause, not to mirror the whole body into the log.
-            detail = str(getattr(exc, "detail", "") or "")
+            detail = (UNDECODABLE_BODY_MESSAGE if undecodable
+                      else str(getattr(exc, "detail", "") or ""))
             if len(detail) > 500:
                 detail = detail[:500] + " ...[truncated]"
             if not server_error:
                 _dbg.debug("%s %s refused %d: %s", request.method,
-                           request.url.path, exc.status_code, detail)
+                           request.url.path, status, detail)
             else:
-                held = _server_error_due(
-                    (request.method, request.url.path, exc.status_code))
+                held = _server_error_due((request.method, request.url.path, status))
                 if held >= 0:
                     _dbg.warning("%s %s failed %d: %s%s", request.method,
-                                 request.url.path, exc.status_code,
+                                 request.url.path, status,
                                  _ONE_LINE_RE.sub(" ", detail),
                                  f" ({held} more like this not logged)" if held else "")
+        if undecodable:
+            return JSONResponse(status_code=422,
+                                content={"detail": UNDECODABLE_BODY_MESSAGE,
+                                         "errors": []})
         return await http_exception_handler(request, exc)
 
     from fastapi.exceptions import RequestValidationError
