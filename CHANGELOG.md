@@ -18,6 +18,12 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Adding a folder of models says what it is doing, and starts much faster.** The Add a model card, the Activity list and the terminal now show each step: scanning the folder, how many models were found, which file is being checked, hashed (with a progress bar and speed) or registered and its place in the batch, which files were skipped and why, and a final summary. Before registering anything, localm also read every file in the folder in full to look for an Ollama manifest; on a folder of large models that was most of the wait (about 2 minutes of 3.5 on a 42 GB folder) and is now gone.
 
 ### Fixed
+- **Cancelling the "does not fit the free VRAM" confirmation no longer leaves the sidebar on "loading ...".** The status returns to the model that is still loaded.
+- **The Settings Save buttons show "Saving..." and are disabled while a save is running**, instead of looking idle until the confirmation appears.
+- **The German Settings pages no longer fall back to English** for the Media, Avatars, Text-to-speech, speech model and managed ComfyUI sections, the Save buttons, and the messages those sections show.
+- **A plugin settings field named like a built-in setting (for example `mode`) keeps the plugin's own label and help text.**
+- **The Models list and the model details show the revision a model was pulled at** (for example `hf:owner/repo@refs/pr/3`).
+- **The hires scale and denoise suggestions on the Images page survive a language switch**, and the upscaler's suggested option no longer briefly shows the raw name `lanczos`.
 - **Importing a folder of models into an install that already has some no longer fails.** With the move or copy option, a model already in the models folder under the same name and with the same content is now used as it is (the original is left where it was) and the rest of the folder imports. A different file under the same name is skipped with a message instead of aborting the whole import.
 
 ## [0.3.1] - 2026-10-22

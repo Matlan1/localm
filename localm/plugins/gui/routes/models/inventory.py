@@ -222,6 +222,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             _vis = vision_caps.get(name)
             if _vis is not None:
                 row_out["vision"] = _vis
+            if entry.get("revision"):
+                row_out["revision"] = str(entry["revision"])
             # Audio input capability in the same true / false / KEY ABSENT shape.
             if audio_caps.get(name) is not None:
                 row_out["audio_input"] = audio_caps[name]

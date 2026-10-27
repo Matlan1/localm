@@ -4,9 +4,9 @@
 
 // --- ES module imports ---
 import { pickDirectory, pickFile } from "../app/picker.js";
-import { $, applyChatBackground, authHeaders, clearImageProxyCache, confirmDanger, confirmDangerAsync, el, fileToAvatarDataUri, fileToBackgroundDataUri, openModal, promptText, safeAvatarImageSrc, streamJob, toast } from "../app/helpers.js";
+import { $, applyChatBackground, authHeaders, clearImageProxyCache, confirmDanger, confirmDangerAsync, el, fileToAvatarDataUri, fileToBackgroundDataUri, openModal, promptText, safeAvatarImageSrc, streamJob, toast, whileBusy } from "../app/helpers.js";
 import { refreshCtxLimit } from "../app/chat.js";
-import { t, tOr, tOrFirst } from "../app/i18n.js";
+import { t, tn, tOr, tOrFirst } from "../app/i18n.js";
 import { emptyState } from "../app/icons.js";
 import { loginWithKey } from "../app/models-sidebar.js";
 import { nativeModelSelect } from "../app/native-models.js";
@@ -178,6 +178,12 @@ export function settingsDirty() {
   return false;
 }
 window.settingsDirty = settingsDirty;
+
+/** Run a Save click handler with the button showing a disabled "Saving..." state
+ *  until the request has settled. */
+function savingState(btn, work) {
+  return whileBusy(btn, t("settings.saving"), work);
+}
 
 /** R09: Ctrl+S on the Settings page saves the section the user is working in.
  *  A group shows several sections stacked, so target the one holding the focused
@@ -1519,7 +1525,7 @@ export async function saveSettingsSection(secId) {
     if (value === undefined) continue;     // untouched secret / blank number
     updates[field.key] = value;
   }
-  if (!Object.keys(updates).length) { toast("Nothing changed"); return; }
+  if (!Object.keys(updates).length) { toast(t("settings.toast.nothingChanged")); return; }
   let r = await fetch("/v1/config", {
     method: "PATCH", headers: authHeaders(),
     body: JSON.stringify(updates),
@@ -1527,7 +1533,7 @@ export async function saveSettingsSection(secId) {
   let data = await r.json().catch(() => ({}));
   if (r.ok && data.needs_confirm) {
     const proceed = await confirmEmbeddingModelSwitch(data.model, data);
-    if (!proceed) { toast("Cancelled"); return; }
+    if (!proceed) { toast(t("settings.toast.cancelled")); return; }
     r = await fetch("/v1/config", {
       method: "PATCH", headers: authHeaders(),
       body: JSON.stringify({ ...updates, confirm: true }),
@@ -1535,7 +1541,7 @@ export async function saveSettingsSection(secId) {
     data = await r.json().catch(() => ({}));
   }
   if (r.ok) {
-    toast("Saved - engine values apply on the next model load");
+    toast(t("settings.toast.savedEngine"));
     // A save may have moved "Show remote images in replies" (off / ask / on).
     // The route re-decides immediately, but an already-fetched image is held in
     // a page-lifetime blob cache and the reader's per-origin answers are held
@@ -1548,7 +1554,7 @@ export async function saveSettingsSection(secId) {
     // Re-reads the session mode and the other chat values a save can change.
     refreshCtxLimit();
   } else {
-    toast(data.detail || "Save failed", true);
+    toast(data.detail || t("settings.toast.saveFailed"), true);
   }
 }
 
@@ -1671,7 +1677,7 @@ export async function refreshSettingsPage() {
     fields = (await r.json()).fields || [];
   } catch (e) {
     if (myToken === _settingsRenderToken) {
-      form.replaceChildren(el("div", "sub", "Could not load settings: " + e.message));
+      form.replaceChildren(el("div", "sub", t("settings.loadFailed", { message: e.message })));
     }
     return;
   }
@@ -1745,7 +1751,7 @@ export async function refreshSettingsPage() {
       const grid = $("settings-sec-core-Updates");
       grid.replaceChildren(...sec.ctrls.map((c) => c.node));
       const save = $("update-toggles-save");
-      if (save) save.onclick = () => saveSettingsSection(sec.id);
+      if (save) save.onclick = () => savingState(save, () => saveSettingsSection(sec.id));
       updateToggleBlock.hidden = false;
       continue;
     }
@@ -1766,11 +1772,11 @@ export async function refreshSettingsPage() {
 
     if (sec.label === "Voice") {
       const sttBox = el("div", "media-comfy-box voice-model-setup-box");
-      sttBox.appendChild(subCardHead("Speech model setup", "mic", "cat-violet"));
-      const sttStatus = el("div", "sub voice-setup-status", "Checking speech model status...");
+      sttBox.appendChild(subCardHead(t("settings.voice.setupHead"), "mic", "cat-violet"));
+      const sttStatus = el("div", "sub voice-setup-status", t("settings.voice.checking"));
       const sttActions = el("div", "actions");
       sttActions.style.marginTop = "0.5rem";
-      const sttBtn = el("button", "btn-secondary voice-download-model-btn", "Download speech model");
+      const sttBtn = el("button", "btn-secondary voice-download-model-btn", t("settings.voice.download"));
       sttBtn.type = "button";
       sttBtn.style.display = "none";
       sttActions.appendChild(sttBtn);
@@ -1782,30 +1788,30 @@ export async function refreshSettingsPage() {
         try {
           const r = await fetch("/api/voice/status", { headers: authHeaders() });
           if (!r.ok) {
-            sttStatus.textContent = "Speech-to-text plugin is not active.";
+            sttStatus.textContent = t("settings.voice.inactive");
             sttBtn.style.display = "none";
             return;
           }
           const data = await r.json();
           if (data.model_cached) {
-            sttStatus.textContent = "Speech model (" + (data.model || "Whisper") + ") is downloaded and ready.";
-            sttBtn.textContent = "Re-download speech model";
+            sttStatus.textContent = t("settings.voice.ready", { model: data.model || "Whisper" });
+            sttBtn.textContent = t("settings.voice.redownload");
             sttBtn.style.display = "";
           } else {
-            sttStatus.textContent = "Speech model (" + (data.model || "Whisper") + ") is not downloaded yet." +
+            sttStatus.textContent = t("settings.voice.notDownloaded", { model: data.model || "Whisper" }) +
               (data.reason ? " " + data.reason : "");
-            sttBtn.textContent = "Download speech model now";
+            sttBtn.textContent = t("settings.voice.downloadNow");
             sttBtn.style.display = "";
           }
         } catch {
-          sttStatus.textContent = "Could not check speech model status.";
+          sttStatus.textContent = t("settings.voice.statusFailed");
         }
       };
       updateSttStatus();
 
       sttBtn.onclick = async () => {
         sttBtn.disabled = true;
-        sttBtn.textContent = "Downloading speech model...";
+        sttBtn.textContent = t("settings.voice.downloading");
         try {
           const r = await fetch("/api/voice/model/download", {
             method: "POST", headers: authHeaders(),
@@ -1813,16 +1819,16 @@ export async function refreshSettingsPage() {
           const d = await r.json().catch(() => ({}));
           if (!r.ok) throw new Error(d.detail || r.statusText);
           if (d.job_id) {
-            toast("Downloading the speech model...");
+            toast(t("settings.voice.downloadingToast"));
             let lastLine = "";
             const end = await streamJob(d.job_id, (line) => { lastLine = line; });
             if (end.status !== "done" || /^error:/i.test(lastLine)) {
-              throw new Error(lastLine.replace(/^error:\s*/i, "") || "download did not complete");
+              throw new Error(lastLine.replace(/^error:\s*/i, "") || t("settings.voice.downloadIncomplete"));
             }
           }
-          toast("Speech model ready");
+          toast(t("settings.voice.readyToast"));
         } catch (err) {
-          toast("Speech model download failed: " + (err.message || err), true);
+          toast(t("settings.voice.downloadFailed", { message: err.message || err }), true);
         } finally {
           sttBtn.disabled = false;
           await updateSttStatus();
@@ -1836,9 +1842,10 @@ export async function refreshSettingsPage() {
     }
 
     const actions = el("div", "actions");
-    const save = el("button", "btn-primary settings-section-save", "Save " + (heading || sec.label));
+    const save = el("button", "btn-primary settings-section-save",
+      t("settings.save.section", { name: heading || sec.label }));
     save.dataset.sec = sec.id;
-    save.onclick = () => saveSettingsSection(sec.id);
+    save.onclick = () => savingState(save, () => saveSettingsSection(sec.id));
     actions.appendChild(save);
     panel.appendChild(actions);
     form.appendChild(panel);
@@ -1927,7 +1934,7 @@ export function syncRagIndexingModeHint() {
     const label = wrap.querySelector("label");
     if (!label) return;
     let tag = label.querySelector(".rag-inuse");
-    if (on && !tag) label.appendChild(el("span", "rag-inuse", " · in use"));
+    if (on && !tag) label.appendChild(el("span", "rag-inuse", t("settings.rag.inUse")));
     else if (!on && tag) tag.remove();
   };
   const apply = () => {
@@ -1955,7 +1962,7 @@ export function syncEmbeddingWarmupButton() {
   // class rendered a fully native light-grey/black/square button inside the
   // dark app (gui-design.md rules 3 and 8). Only visible in a real browser -
   // jsdom parses but never paints, so every DOM test passed on it.
-  const btn = el("button", "btn-secondary", "Warm up now");
+  const btn = el("button", "btn-secondary", t("settings.warmup.button"));
   btn.type = "button";
   const status = el("span", "embedding-warmup-status sub");
   row.appendChild(btn);
@@ -1964,7 +1971,7 @@ export function syncEmbeddingWarmupButton() {
 
   btn.onclick = async () => {
     btn.disabled = true;
-    status.textContent = "Starting...";
+    status.textContent = t("settings.warmup.starting");
     try {
       const r = await fetch("/api/embedding/warmup",
                             { method: "POST", headers: authHeaders() });
@@ -1972,11 +1979,11 @@ export function syncEmbeddingWarmupButton() {
       if (!r.ok) throw new Error(data.detail || r.statusText);
       const end = await streamJob(data.job_id, (line) => { status.textContent = line; });
       if (end.status !== "done") {
-        toast("Warm-up did not finish cleanly - see the status line above", true);
+        toast(t("settings.warmup.notClean"), true);
       }
     } catch (e) {
-      status.textContent = "Warm-up failed: " + e.message;
-      toast("Warm-up failed: " + e.message, true);
+      status.textContent = t("settings.warmup.failed", { message: e.message });
+      toast(t("settings.warmup.failed", { message: e.message }), true);
     } finally {
       btn.disabled = false;
     }
@@ -2020,11 +2027,10 @@ export async function buildMediaSection(form, fields) {
     fail.id = "settings-sec-media";
     fail.dataset.sec = "media";
     fail.dataset.group = "media";
-    fail.dataset.secLabel = "Media";
-    fail.appendChild(settingsSectionHead("Media", "media"));
+    fail.dataset.secLabel = t("settings.sectionHeading.media");
+    fail.appendChild(settingsSectionHead(t("settings.sectionHeading.media"), "media"));
     fail.appendChild(el("div", "sub",
-      "Could not load media settings (" + e.message + "). The image/music/video "
-      + "config is unavailable - check the server logs."));
+      t("settings.media.loadFailed", { message: e.message })));
     form.appendChild(fail);
     return;
   }
@@ -2035,11 +2041,10 @@ export async function buildMediaSection(form, fields) {
   panel.id = "settings-sec-media";
   panel.dataset.sec = "media";
   panel.dataset.group = "media";
-  panel.dataset.secLabel = "Media";
-  panel.appendChild(settingsSectionHead("Media", "media"));
+  panel.dataset.secLabel = t("settings.sectionHeading.media");
+  panel.appendChild(settingsSectionHead(t("settings.sectionHeading.media"), "media"));
   panel.appendChild(el("div", "sub",
-    "ComfyUI settings for image, music, and video, each configured "
-    + "independently. A blank field uses the shared default."));
+    t("settings.media.intro")));
 
   // S5: localm's OWN managed ComfyUI (set up / status / remove), plus the S1
   // coexistence field (comfy_target) it needs to be useful - a compact box of
@@ -2065,9 +2070,9 @@ export async function buildMediaSection(form, fields) {
   const sharedCtrls = sharedFields.map(f => buildSettingControl(f)).filter(Boolean);
   if (sharedCtrls.length) {
     const box = el("div", "media-comfy-box");
-    box.appendChild(subCardHead("Shared", "sliders", "cat-teal"));
+    box.appendChild(subCardHead(t("settings.media.sharedHead"), "sliders", "cat-teal"));
     box.appendChild(el("div", "sub",
-      "Applies to every media plugin (whichever ComfyUI is used)."));
+      t("settings.media.sharedHelp")));
     for (const ctrl of sharedCtrls) {
       box.appendChild(ctrl.node);
       // Same de-dup-then-register dance as the boxes below: a re-render must
@@ -2076,9 +2081,9 @@ export async function buildMediaSection(form, fields) {
       _settingsControls.push(ctrl);
     }
     const actions = el("div", "actions");
-    const save = el("button", "btn-primary", "Save");
+    const save = el("button", "btn-primary", t("settings.save"));
     save.type = "button";
-    save.onclick = () => saveSettingsSection("media");
+    save.onclick = () => savingState(save, () => saveSettingsSection("media"));
     actions.appendChild(save);
     box.appendChild(actions);
     panel.appendChild(box);
@@ -2102,9 +2107,9 @@ export async function buildMediaSection(form, fields) {
       _settingsControls = _settingsControls.filter(c => c.field.key !== placementField.key);
       _settingsControls.push(ctrl);
       const actions = el("div", "actions");
-      const save = el("button", "btn-primary", "Save");
+      const save = el("button", "btn-primary", t("settings.save"));
       save.type = "button";
-      save.onclick = () => saveSettingsSection("media");
+      save.onclick = () => savingState(save, () => saveSettingsSection("media"));
       actions.appendChild(save);
       box.appendChild(actions);
     }
@@ -2146,16 +2151,16 @@ function buildAvatarPicker(initial) {
   const preview = el("div", "avatar-picker-preview");
   const glyphInput = document.createElement("input");
   glyphInput.type = "text";
-  glyphInput.placeholder = "emoji or short text";
+  glyphInput.placeholder = t("settings.avatars.glyphPlaceholder");
   glyphInput.maxLength = 16;
   glyphInput.className = "avatar-picker-glyph";
   const fileInput = document.createElement("input");
   fileInput.type = "file";
   fileInput.accept = "image/png,image/jpeg,image/gif,image/webp";
   fileInput.hidden = true;
-  const uploadBtn = el("button", "btn-secondary", "Upload image");
+  const uploadBtn = el("button", "btn-secondary", t("settings.avatars.upload"));
   uploadBtn.type = "button";
-  const clearBtn = el("button", "btn-secondary", "Clear");
+  const clearBtn = el("button", "btn-secondary", t("settings.avatars.clear"));
   clearBtn.type = "button";
 
   function renderPreview() {
@@ -2209,19 +2214,19 @@ function buildAvatarOverrideRow(modelId, iconValue, installedNames) {
   if (!names.length) {
     const placeholder = document.createElement("option");
     placeholder.value = "";
-    placeholder.textContent = "No models installed";
+    placeholder.textContent = t("settings.avatars.noModels");
     placeholder.disabled = true;
     idSelect.appendChild(placeholder);
   }
   for (const name of names) {
     const opt = document.createElement("option");
     opt.value = name;
-    opt.textContent = (installedNames || []).includes(name) ? name : `${name} (not installed)`;
+    opt.textContent = (installedNames || []).includes(name) ? name : t("settings.avatars.notInstalled", { name });
     idSelect.appendChild(opt);
   }
   idSelect.value = modelId || "";
   const picker = buildAvatarPicker(iconValue);
-  const removeBtn = el("button", "btn-secondary", "Remove");
+  const removeBtn = el("button", "btn-secondary", t("settings.avatars.remove"));
   removeBtn.type = "button";
   removeBtn.onclick = () => row.remove();
   row.append(idSelect, picker.node, removeBtn);
@@ -2268,32 +2273,30 @@ export async function buildAvatarsSection(form, fields) {
   panel.id = "settings-sec-avatars";
   panel.dataset.sec = "avatars";
   panel.dataset.group = "model";
-  panel.dataset.secLabel = "Avatars";
-  panel.appendChild(settingsSectionHead("Avatars", "model"));
+  panel.dataset.secLabel = t("settings.sectionHeading.avatars");
+  panel.appendChild(settingsSectionHead(t("settings.sectionHeading.avatars"), "model"));
   panel.appendChild(el("div", "sub",
-    "A short emoji or a small uploaded image next to a turn. Always local - "
-    + "never a URL or a remote fetch. A model with nothing set here falls "
-    + "back to a generated monogram."));
+    t("settings.avatars.intro")));
 
   const userPicker = buildAvatarPicker(current.user_avatar || "");
   const userRow = el("div", "avatar-field-row");
   const nameInput = document.createElement("input");
   nameInput.type = "text";
-  nameInput.placeholder = "Your name (shown instead of \"You\")";
+  nameInput.placeholder = t("settings.avatars.namePlaceholder");
   nameInput.value = current.user_name || "";
   nameInput.className = "avatar-name-input";
   nameInput.addEventListener("input", () => markSettingDirty(nameInput));
   nameInput.addEventListener("change", () => markSettingDirty(nameInput));
-  userRow.append(el("div", "avatar-field-label", "Your icon"), userPicker.node, nameInput);
+  userRow.append(el("div", "avatar-field-label", t("settings.avatars.yourIcon")), userPicker.node, nameInput);
   panel.appendChild(userRow);
 
   const modelPicker = buildAvatarPicker(current.model_avatar_default || "");
   const modelRow = el("div", "avatar-field-row");
-  modelRow.append(el("div", "avatar-field-label", "Model icon (default)"), modelPicker.node);
+  modelRow.append(el("div", "avatar-field-label", t("settings.avatars.modelIcon")), modelPicker.node);
   panel.appendChild(modelRow);
 
   const overridesBox = el("div", "avatar-overrides-box");
-  overridesBox.appendChild(el("div", "avatar-field-label", "Per-model icons"));
+  overridesBox.appendChild(el("div", "avatar-field-label", t("settings.avatars.perModel")));
   const overridesList = el("div", "avatar-overrides-list");
   overridesBox.appendChild(overridesList);
   const rows = [];
@@ -2302,7 +2305,7 @@ export async function buildAvatarsSection(form, fields) {
     rows.push(row);
     overridesList.appendChild(row.node);
   }
-  const addBtn = el("button", "btn-secondary", "Add override");
+  const addBtn = el("button", "btn-secondary", t("settings.avatars.addOverride"));
   addBtn.type = "button";
   addBtn.onclick = () => {
     const row = buildAvatarOverrideRow("", "", installedModels);
@@ -2332,9 +2335,9 @@ export async function buildAvatarsSection(form, fields) {
   });
 
   const actions = el("div", "actions");
-  const save = el("button", "btn-primary", "Save Avatars");
+  const save = el("button", "btn-primary", t("settings.save.section", { name: t("settings.sectionHeading.avatars") }));
   save.type = "button";
-  save.onclick = () => saveSettingsSection("avatars");
+  save.onclick = () => savingState(save, () => saveSettingsSection("avatars"));
   actions.appendChild(save);
   panel.appendChild(actions);
 
@@ -2379,7 +2382,7 @@ export function setupChatBackgroundPicker() {
     } catch (e) {
       applyChatBackground(current);
       renderPreview(current);
-      toast("Could not save background: " + e.message, true);
+      toast(t("settings.chatBg.saveFailed", { message: e.message }), true);
       return false;
     }
   };
@@ -2402,11 +2405,11 @@ export function setupChatBackgroundPicker() {
       dataUri = await fileToBackgroundDataUri(f);
     } catch (e) { toast(e.message, true); return; }
     renderPreview(dataUri);
-    if (await save(dataUri)) toast("Background saved");
+    if (await save(dataUri)) toast(t("settings.chatBg.saved"));
   };
   clearBtn.onclick = async () => {
     renderPreview("");
-    if (await save("")) toast("Background cleared");
+    if (await save("")) toast(t("settings.chatBg.cleared"));
   };
 }
 
@@ -2439,10 +2442,10 @@ export async function buildTtsSection(form) {
     fail.id = "settings-sec-tts";
     fail.dataset.sec = "tts";
     fail.dataset.group = "plugins";
-    fail.dataset.secLabel = "Text-to-speech";
-    fail.appendChild(settingsSectionHead("Text-to-speech", "plugins"));
+    fail.dataset.secLabel = t("settings.sectionHeading.tts");
+    fail.appendChild(settingsSectionHead(t("settings.sectionHeading.tts"), "plugins"));
     fail.appendChild(el("div", "sub",
-      "Could not load the text-to-speech settings (" + e.message + ")."));
+      t("settings.tts.loadFailed", { message: e.message })));
     form.appendChild(fail);
     return;
   }
@@ -2453,11 +2456,10 @@ export async function buildTtsSection(form) {
   panel.id = "settings-sec-tts";
   panel.dataset.sec = "tts";
   panel.dataset.group = "plugins";
-  panel.dataset.secLabel = "Text-to-speech";
-  panel.appendChild(settingsSectionHead("Text-to-speech plugin", "plugins"));
+  panel.dataset.secLabel = t("settings.sectionHeading.tts");
+  panel.appendChild(settingsSectionHead(t("settings.sectionHeading.ttsPlugin"), "plugins"));
   panel.appendChild(el("div", "sub",
-    "Replies are spoken by the Kokoro voice model running in your browser. "
-    + "These are the server-side defaults, shared by every browser."));
+    t("settings.tts.intro")));
 
   const mkControl = (f) => {
     // A SELECT can only round-trip a value that is one of its options: a value
@@ -2480,7 +2482,7 @@ export async function buildTtsSection(form) {
     }
     if (options && f.is_override) {
       options.unshift("");                   // buildSettingControl labels it "(inherit)"
-      if (labels) labels.unshift("(inherit)");
+      if (labels) labels.unshift(t("settings.tts.inherit"));
     }
     const ctrl = buildSettingControl({
       key: f.key, widget, label: f.label, help: f.help, catalog_scopes: ["tts"],
@@ -2506,7 +2508,7 @@ export async function buildTtsSection(form) {
         const CUSTOM = "__custom__";
         const custom = document.createElement("option");
         custom.value = CUSTOM;
-        custom.textContent = "Custom (type your own)...";
+        custom.textContent = t("settings.tts.custom");
         sel.appendChild(custom);
         const box = document.createElement("input");
         box.type = "text";
@@ -2553,21 +2555,19 @@ export async function buildTtsSection(form) {
   const override = browserVoiceOverride();
   if (override && override !== serverVoice) {
     const note = el("div", "sub tts-browser-override");
-    note.append("This browser plays " + voiceName(override) + ", picked in chat. "
-      + "That overrides the default above, here only. ");
+    note.append(t("settings.tts.browserPlays", { voice: voiceName(override) }));
     const clear = el("button", "btn-secondary tts-clear-override",
-                     "Use the server default in this browser");
+                     t("settings.tts.useServerDefault"));
     clear.type = "button";
     clear.onclick = () => {
       // Never report a clear that did not happen (rule 5): this button exists
       // only because the value was READ back, so a failure is a real one and
       // the override is still in force.
       if (!clearBrowserVoiceOverride(serverVoice)) {
-        toast("Could not clear it: this browser is blocking storage, so its own "
-              + "voice is still in use here", true);
+        toast(t("settings.tts.clearBlocked"), true);
         return;
       }
-      toast("This browser now follows the server default voice");
+      toast(t("settings.tts.followsDefault"));
       refreshSettingsPage();
     };
     note.appendChild(clear);
@@ -2577,10 +2577,9 @@ export async function buildTtsSection(form) {
   const advanced = fields.filter(f => f.advanced);
   if (advanced.length) {
     const box = el("div", "media-comfy-box");
-    box.appendChild(subCardHead("Advanced", "sliders", "cat-violet"));
+    box.appendChild(subCardHead(t("settings.tts.advancedHead"), "sliders", "cat-violet"));
     box.appendChild(el("div", "sub",
-      "How the browser runs the voice model. Changes here (and to the model "
-      + "above) apply the next time the page is loaded."));
+      t("settings.tts.advancedHelp")));
     const advGrid = el("div", "settings-fields");
     for (const f of advanced) {
       const ctrl = mkControl(f);
@@ -2593,11 +2592,11 @@ export async function buildTtsSection(form) {
   const modelField = fields.find(f => f.key === "model") || {};
   const currentModel = modelField.value || "onnx-community/Kokoro-82M-v1.0-ONNX";
   const setupBox = el("div", "media-comfy-box tts-model-setup-box");
-  setupBox.appendChild(subCardHead("Voice model setup", "voice", "cat-violet"));
-  const setupStatus = el("div", "sub tts-setup-status", "Checking voice model cache...");
+  setupBox.appendChild(subCardHead(t("settings.tts.setupHead"), "voice", "cat-violet"));
+  const setupStatus = el("div", "sub tts-setup-status", t("settings.tts.checking"));
   const setupActions = el("div", "actions");
   setupActions.style.marginTop = "0.5rem";
-  const setupBtn = el("button", "btn-secondary tts-download-model-btn", "Download voice model");
+  const setupBtn = el("button", "btn-secondary tts-download-model-btn", t("settings.tts.download"));
   setupBtn.type = "button";
   setupBtn.style.display = "none";
   setupActions.appendChild(setupBtn);
@@ -2607,7 +2606,7 @@ export async function buildTtsSection(form) {
 
   const updateKokoroStatus = async () => {
     if (typeof caches === "undefined") {
-      setupStatus.textContent = "Voice model caching is unavailable in an insecure context (plain HTTP). Use HTTPS or localhost to cache models.";
+      setupStatus.textContent = t("settings.tts.insecure");
       setupBtn.style.display = "none";
       return;
     }
@@ -2616,16 +2615,16 @@ export async function buildTtsSection(form) {
       const keys = await c.keys();
       const cached = keys.some((req) => req.url && req.url.includes(currentModel));
       if (cached) {
-        setupStatus.textContent = "Voice model (" + currentModel + ") is downloaded and cached in this browser.";
-        setupBtn.textContent = "Re-download / Verify model";
+        setupStatus.textContent = t("settings.tts.cached", { model: currentModel });
+        setupBtn.textContent = t("settings.tts.redownload");
         setupBtn.style.display = "";
       } else {
-        setupStatus.textContent = "Voice model (" + currentModel + ") is not downloaded yet (~86 MB).";
-        setupBtn.textContent = "Download voice model now";
+        setupStatus.textContent = t("settings.tts.notCached", { model: currentModel });
+        setupBtn.textContent = t("settings.tts.downloadNow");
         setupBtn.style.display = "";
       }
     } catch (e) {
-      setupStatus.textContent = "Could not check voice model cache: " + e.message;
+      setupStatus.textContent = t("settings.tts.cacheCheckFailed", { message: e.message });
       setupBtn.style.display = "";
     }
   };
@@ -2633,7 +2632,7 @@ export async function buildTtsSection(form) {
 
   setupBtn.onclick = async () => {
     setupBtn.disabled = true;
-    setupBtn.textContent = "Downloading voice model...";
+    setupBtn.textContent = t("settings.tts.downloading");
     try {
       if (ttsProvider && typeof ttsProvider.ready === "function") {
         await ttsProvider.ready();
@@ -2643,9 +2642,7 @@ export async function buildTtsSection(form) {
         const mode = cfg.net_mode || "ask";
         const allowOff = !!cfg.net_allow_model_downloads;
         if (mode !== "allow" && !(mode === "off" && allowOff)) {
-          throw new Error(
-            "Voice model download needs network access (Settings -> Network) " +
-            "- the TTS plugin has not finished starting up to offer its own confirmation.");
+          throw new Error(t("settings.tts.needsNetwork"));
         }
         const libUrl = new URL(cfg.library || "vendor/kokoro.min.js", window.location.origin + "/plugins/tts/");
         const mod = await import(libUrl.href);
@@ -2653,9 +2650,9 @@ export async function buildTtsSection(form) {
         const dt = cfg.dtype && cfg.dtype !== "auto" ? cfg.dtype : "fp32";
         await mod.KokoroTTS.from_pretrained(currentModel, { dtype: dt, device: dev });
       }
-      toast("Voice model ready in browser");
+      toast(t("settings.tts.modelReady"));
     } catch (err) {
-      toast("Voice model setup failed: " + (err.message || err), true);
+      toast(t("settings.tts.setupFailed", { message: err.message || err }), true);
     } finally {
       setupBtn.disabled = false;
       await updateKokoroStatus();
@@ -2663,10 +2660,10 @@ export async function buildTtsSection(form) {
   };
 
   const actions = el("div", "actions");
-  const save = el("button", "btn-primary settings-section-save", "Save Text-to-speech");
+  const save = el("button", "btn-primary settings-section-save", t("settings.save.section", { name: t("settings.sectionHeading.tts") }));
   save.type = "button";
   save.dataset.sec = "tts";
-  save.onclick = () => saveTtsSettings();
+  save.onclick = () => savingState(save, () => saveTtsSettings());
   actions.appendChild(save);
   panel.appendChild(actions);
   form.appendChild(panel);
@@ -2681,17 +2678,16 @@ export async function saveTtsSettings() {
     const cur = c.read();
     if (_mediaChanged(cur, c.orig)) updates[c.field.key] = cur === undefined ? "" : cur;
   }
-  if (!Object.keys(updates).length) { toast("Nothing changed"); return; }
+  if (!Object.keys(updates).length) { toast(t("settings.toast.nothingChanged")); return; }
   const r = await fetch("/v1/tts/config", {
     method: "POST", headers: authHeaders(), body: JSON.stringify(updates),
   });
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) { toast(data.detail || "Save failed", true); return; }
+  if (!r.ok) { toast(data.detail || t("settings.toast.saveFailed"), true); return; }
   if (!Array.isArray(data.fields)) {
     // A 200 whose body we cannot read means the save probably landed but we
     // cannot say what is now in effect - do not claim a clean "Saved".
-    toast("Saved, but the server's reply could not be read - reloading the "
-          + "settings to show what is actually stored", true);
+    toast(t("settings.tts.savedUnreadable"), true);
     refreshSettingsPage();
     return;
   }
@@ -2703,13 +2699,13 @@ export async function saveTtsSettings() {
   // and precision are baked into the loaded model; this browser's own voice pick
   // deliberately still wins until it is cleared.
   const voiceChanged = "voice" in updates;
-  let msg = "Saved";
+  let msg = t("settings.toast.saved");
   if (["model", "device", "dtype"].some(k => k in updates)) {
-    msg = "Saved - the voice model reloads on the next page load";
+    msg = t("settings.tts.savedReload");
   } else if (voiceChanged && browserVoiceOverride()) {
-    msg = "Saved - this browser keeps its own voice until you clear it below";
+    msg = t("settings.tts.savedBrowserVoice");
   } else if (voiceChanged && !live) {
-    msg = "Saved - the new voice applies on the next page load";
+    msg = t("settings.tts.savedNextLoad");
   }
   toast(msg);
   refreshSettingsPage();
@@ -2746,7 +2742,7 @@ export async function buildPluginSettingsSections(form) {
     fail.dataset.sec = "plugin-settings";
     fail.dataset.group = "plugins";
     fail.dataset.secLabel = "Plugin settings";
-    fail.appendChild(settingsSectionHead("Plugin settings", "plugins"));
+    fail.appendChild(settingsSectionHead(t("settings.sectionHeading.pluginSettings"), "plugins"));
     fail.appendChild(el("div", "sub",
       "Could not load plugin-contributed settings (" + e.message + ")."));
     form.appendChild(fail);
@@ -2779,6 +2775,7 @@ export async function buildPluginSettingsSections(form) {
       }
       const ctrl = buildSettingControl({
         key: f.key, widget, label: f.label, help: f.help,
+        catalog_scopes: ["plugin-" + sec.plugin],
         default: f.value, options, min: f.min, max: f.max, step: f.step,
         is_set: f.is_set, is_override: f.is_override, env_set: f.env_set,
       });
@@ -2790,10 +2787,10 @@ export async function buildPluginSettingsSections(form) {
     }
     panel.appendChild(grid);
     const actions = el("div", "actions");
-    const save = el("button", "btn-primary settings-section-save", "Save " + sec.label);
+    const save = el("button", "btn-primary settings-section-save", t("settings.save.section", { name: sec.label }));
     save.type = "button";
     save.dataset.sec = "plugin-" + sec.plugin;
-    save.onclick = () => savePluginSettings(sec.plugin);
+    save.onclick = () => savingState(save, () => savePluginSettings(sec.plugin));
     actions.appendChild(save);
     panel.appendChild(actions);
     form.appendChild(panel);
@@ -2814,13 +2811,13 @@ export async function savePluginSettings(name) {
       updates[c.field.key] = cur === undefined ? "" : cur;
     }
   }
-  if (!Object.keys(updates).length) { toast("Nothing changed"); return; }
+  if (!Object.keys(updates).length) { toast(t("settings.toast.nothingChanged")); return; }
   const r = await fetch("/v1/plugins/" + encodeURIComponent(name) + "/settings", {
     method: "POST", headers: authHeaders(), body: JSON.stringify(updates),
   });
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) { toast(data.detail || "Save failed", true); return; }
-  toast("Saved");
+  if (!r.ok) { toast(data.detail || t("settings.toast.saveFailed"), true); return; }
+  toast(t("settings.toast.saved"));
   refreshSettingsPage();
 }
 
@@ -2849,8 +2846,8 @@ function startComfyJobIndicator(anchorEl, logEl) {
   const tick = () => {
     const secs = Math.max(0, Math.round((Date.now() - lastOutput) / 1000));
     readout.textContent = secs < 2
-      ? "Still working..."
-      : `Still working... (no new output for ${secs}s)`;
+      ? t("settings.comfy.stillWorking")
+      : t("settings.comfy.stillWorkingQuiet", { secs });
   };
   tick();
   const timer = setInterval(tick, 1000);
@@ -2876,8 +2873,8 @@ function startComfyJobIndicator(anchorEl, logEl) {
  *  until the user clicks Set up. */
 export async function renderManagedComfyPanel(host, toggleFields) {
   host.replaceChildren();
-  const head = subCardHead("localm's own ComfyUI", "download", "cat-teal");
-  const pill = el("span", "comfy-pill", "checking...");
+  const head = subCardHead(t("settings.comfy.ownHead"), "download", "cat-teal");
+  const pill = el("span", "comfy-pill", t("settings.comfy.pillChecking"));
   head.appendChild(pill);
   host.appendChild(head);
 
@@ -2889,9 +2886,9 @@ export async function renderManagedComfyPanel(host, toggleFields) {
   } catch (e) {
     // Surface, do not hide (rule 5): if the managed state cannot be read, say so
     // rather than defaulting to a possibly-wrong (e.g. Set-up) view.
-    pill.textContent = "unknown";
+    pill.textContent = t("settings.comfy.pillUnknown");
     host.appendChild(el("div", "sub",
-      "Could not read the managed ComfyUI status (" + e.message + ")."));
+      t("settings.comfy.statusFailed", { message: e.message })));
     return;
   }
 
@@ -2900,14 +2897,13 @@ export async function renderManagedComfyPanel(host, toggleFields) {
     // right now (matches `localm comfy status`'s "Target now" line) - not
     // just a one-time setup toast, so it stays visible on every later visit
     // to this page too, whichever way comfy_target is currently set.
-    pill.textContent = st.managed_active ? "installed - in use" : "installed - not in use";
+    pill.textContent = st.managed_active ? t("settings.comfy.pillInUse") : t("settings.comfy.pillNotInUse");
     if (st.managed_active) pill.classList.add("ok");
     const info = el("div", "sub");
-    info.append("Installed at ");
+    info.append(t("settings.comfy.installedAt"));
     info.appendChild(el("code", null, st.path || ""));
     if (!st.managed_active) {
-      info.append(" - image/music/video generation is using your OWN ComfyUI "
-        + "instead (set \"ComfyUI to use\" to \"own\" below to switch).");
+      info.append(t("settings.comfy.usingOwn"));
     }
     host.appendChild(info);
 
@@ -2939,9 +2935,9 @@ export async function renderManagedComfyPanel(host, toggleFields) {
 
     const actions = el("div", "actions");
     if (ctrls.length) {
-      const save = el("button", "btn-primary", "Save");
+      const save = el("button", "btn-primary", t("settings.save"));
       save.type = "button";
-      save.onclick = () => saveSettingsSection("media");
+      save.onclick = () => savingState(save, () => saveSettingsSection("media"));
       actions.appendChild(save);
     }
     // Update: move the managed checkout to the pin localm ships. Long (a re-checkout,
@@ -2949,30 +2945,29 @@ export async function renderManagedComfyPanel(host, toggleFields) {
     // ALWAYS rendered once installed - an unreadable/unknown update status must never
     // silently remove the only way to update (rule 5); it is disabled only for the one
     // case where updating is genuinely impossible, and then it says why.
-    const update = el("button", "btn-secondary comfy-managed-update-btn", "Update");
+    const update = el("button", "btn-secondary comfy-managed-update-btn", t("settings.comfy.update"));
     update.type = "button";
     if (st.updatable === false) {
       update.disabled = true;
-      update.title = st.update_blocked_reason || "This install cannot be updated.";
+      update.title = st.update_blocked_reason || t("settings.comfy.cannotUpdate");
     }
     actions.appendChild(update);
 
-    const remove = el("button", "btn-secondary comfy-managed-remove-btn", "Remove");
+    const remove = el("button", "btn-secondary comfy-managed-remove-btn", t("settings.comfy.remove"));
     remove.type = "button";
     remove.onclick = () => confirmDanger(
-      "Remove localm's ComfyUI?",
-      "This deletes localm's own ComfyUI under the data folder. Your own ComfyUI is "
-      + "not touched, and downloaded models are kept.",
-      "Remove",
+      t("settings.comfy.removeTitle"),
+      t("settings.comfy.removeBody"),
+      t("settings.comfy.remove"),
       async () => {
         remove.disabled = true;
         try {
           const r = await fetch("/api/comfy/remove",
                                 { method: "POST", headers: authHeaders() });
           const d = await r.json().catch(() => ({}));
-          toast(r.ok ? "Removed localm's ComfyUI" : (d.detail || "Remove failed"), !r.ok);
+          toast(r.ok ? t("settings.comfy.removed") : (d.detail || t("settings.comfy.removeFailed")), !r.ok);
         } catch {
-          toast("Remove failed", true);
+          toast(t("settings.comfy.removeFailed"), true);
         }
         renderManagedComfyPanel(host, toggleFields);
       });
@@ -2984,15 +2979,14 @@ export async function renderManagedComfyPanel(host, toggleFields) {
     // tri-state: null means the marker could not be read, which is NOT "up to date".
     const vers = el("div", "sub comfy-managed-version");
     if (st.update_available === true) {
-      vers.textContent = "Installed ComfyUI " + (st.installed_version || st.installed_commit || "")
-        + " - localm ships " + (st.pinned_version || "a newer pin") + ". Update to move to it.";
+      vers.textContent = t("settings.comfy.updateAvailable", {
+        installed: st.installed_version || st.installed_commit || "",
+        pinned: st.pinned_version || t("settings.comfy.newerPin"),
+      });
     } else if (st.update_available === false) {
-      vers.textContent = "Up to date with the ComfyUI localm ships ("
-        + (st.pinned_version || "") + ").";
+      vers.textContent = t("settings.comfy.upToDate", { pinned: st.pinned_version || "" });
     } else if (st.installed) {
-      vers.textContent = "Could not read which ComfyUI version is installed, so it is "
-        + "unknown whether an update is due. Update is safe to run either way: it rolls "
-        + "back if it fails.";
+      vers.textContent = t("settings.comfy.versionUnknown");
     }
     if (vers.textContent) host.appendChild(vers);
 
@@ -3007,8 +3001,7 @@ export async function renderManagedComfyPanel(host, toggleFields) {
     depsBox.type = "checkbox";
     depsBox.className = "comfy-managed-reinstall-box";
     deps.appendChild(depsBox);
-    deps.append(" Also reinstall ComfyUI's dependencies (needed when the new version "
-                + "changed them; slower)");
+    deps.append(t("settings.comfy.reinstallDeps"));
     if (st.updatable !== false) host.appendChild(deps);
 
     // Advanced/testing knob, matching `localm comfy update --commit` exactly - update
@@ -3016,12 +3009,12 @@ export async function renderManagedComfyPanel(host, toggleFields) {
     // case) it is omitted entirely, so update_managed_comfy() falls back to its own
     // COMFYUI_PINNED_COMMIT default rather than the GUI silently pinning "".
     const commitRow = el("label", "comfy-managed-commit");
-    commitRow.append("Advanced: update to a specific commit ");
+    commitRow.append(t("settings.comfy.commitLabel"));
     const commitBox = el("input");
     commitBox.type = "text";
     commitBox.className = "comfy-managed-commit-box";
     commitBox.style.maxWidth = "220px";
-    commitBox.placeholder = "leave blank for the shipped pin";
+    commitBox.placeholder = t("settings.comfy.commitPlaceholder");
     commitRow.appendChild(commitBox);
     if (st.updatable !== false) host.appendChild(commitRow);
 
@@ -3031,13 +3024,13 @@ export async function renderManagedComfyPanel(host, toggleFields) {
 
     update.onclick = async () => {
       update.disabled = true;
-      update.textContent = "Updating...";
+      update.textContent = t("settings.comfy.updating");
       ulog.style.display = "";
       ulog.textContent = "";
       // Drop any error block from a PREVIOUS attempt, or a retry stacks a stale
       // reason above the fresh one and the user reads the wrong failure.
       for (const old of host.querySelectorAll(".comfy-managed-update-error")) old.remove();
-      const resetUpdate = () => { update.disabled = false; update.textContent = "Update"; };
+      const resetUpdate = () => { update.disabled = false; update.textContent = t("settings.comfy.update"); };
       const indicator = startComfyJobIndicator(update, ulog);
       let jobId;
       try {
@@ -3050,7 +3043,7 @@ export async function renderManagedComfyPanel(host, toggleFields) {
                               { method: "POST", headers: authHeaders() });
         const d = await r.json().catch(() => ({}));
         if (!r.ok) {
-          toast(d.detail || "Update failed", true);
+          toast(d.detail || t("settings.comfy.updateFailed"), true);
           indicator.stop();
           resetUpdate();
           ulog.style.display = "none";
@@ -3058,7 +3051,7 @@ export async function renderManagedComfyPanel(host, toggleFields) {
         }
         jobId = d.job_id;
       } catch {
-        toast("Update failed", true);
+        toast(t("settings.comfy.updateFailed"), true);
         indicator.stop();
         resetUpdate();
         return;
@@ -3083,11 +3076,11 @@ export async function renderManagedComfyPanel(host, toggleFields) {
         // that renders all of them as "update failed" swallows exactly the
         // distinction that module goes to trouble to make, so show its own words.
         const why = el("div", "sub comfy-managed-update-error");
-        why.textContent = reason || "The update did not finish. See the log below.";
+        why.textContent = reason || t("settings.comfy.updateUnfinished");
         host.insertBefore(why, ulog);
       }
-      toast(ok ? "localm's ComfyUI is up to date"
-               : (reason || "Update did not finish (see the log)"), !ok);
+      toast(ok ? t("settings.comfy.updatedToast")
+               : (reason || t("settings.comfy.updateUnfinishedToast")), !ok);
       // Same reasoning as Set up: never re-render over a failure log the toast just
       // pointed at. On success re-render so the version line and pill refresh.
       if (ok) renderManagedComfyPanel(host, toggleFields);
@@ -3104,13 +3097,11 @@ export async function renderManagedComfyPanel(host, toggleFields) {
     // own "already exists" 409, and there is no Remove button in THIS branch
     // (that only appears once genuinely installed) - a user would otherwise
     // have no way out short of the CLI.
-    pill.textContent = "incomplete - needs repair";
+    pill.textContent = t("settings.comfy.pillIncomplete");
     host.appendChild(el("div", "sub",
-      "A previous setup attempt did not finish (the folder exists at "
-      + (st.path || "the data folder") + " but the install is incomplete) - your "
-      + "downloaded models and settings are untouched either way."));
+      t("settings.comfy.incompleteBody", { path: st.path || t("settings.comfy.dataFolder") })));
     const actions = el("div", "actions");
-    const repair = el("button", "btn-primary comfy-managed-repair-btn", "Repair");
+    const repair = el("button", "btn-primary comfy-managed-repair-btn", t("settings.comfy.repair"));
     repair.type = "button";
     actions.appendChild(repair);
     host.appendChild(actions);
@@ -3118,14 +3109,12 @@ export async function renderManagedComfyPanel(host, toggleFields) {
     log.style.display = "none";
     host.appendChild(log);
     repair.onclick = () => confirmDanger(
-      "Repair localm's ComfyUI?",
-      "This clears the incomplete install folder and sets it up again from "
-      + "scratch. Your downloaded models and localm settings live outside it "
-      + "and are not touched.",
-      "Repair",
+      t("settings.comfy.repairTitle"),
+      t("settings.comfy.repairBody"),
+      t("settings.comfy.repair"),
       async () => {
         repair.disabled = true;
-        repair.textContent = "Repairing...";
+        repair.textContent = t("settings.comfy.repairing");
         log.style.display = "";
         log.textContent = "";
         const indicator = startComfyJobIndicator(repair, log);
@@ -3135,19 +3124,19 @@ export async function renderManagedComfyPanel(host, toggleFields) {
                                 { method: "POST", headers: authHeaders() });
           const d = await r.json().catch(() => ({}));
           if (!r.ok) {
-            toast(d.detail || "Repair failed", true);
+            toast(d.detail || t("settings.comfy.repairFailed"), true);
             indicator.stop();
             repair.disabled = false;
-            repair.textContent = "Repair";
+            repair.textContent = t("settings.comfy.repair");
             log.style.display = "none";
             return;
           }
           jobId = d.job_id;
         } catch {
-          toast("Repair failed", true);
+          toast(t("settings.comfy.repairFailed"), true);
           indicator.stop();
           repair.disabled = false;
-          repair.textContent = "Repair";
+          repair.textContent = t("settings.comfy.repair");
           return;
         }
         const end = await streamJob(jobId, (line) => {
@@ -3157,14 +3146,14 @@ export async function renderManagedComfyPanel(host, toggleFields) {
         });
         indicator.stop();
         const ok = !!(end && end.status === "done");
-        toast(ok ? "localm's ComfyUI is ready" : "Repair did not finish (see the log)", !ok);
+        toast(ok ? t("settings.comfy.readyToast") : t("settings.comfy.repairUnfinishedToast"), !ok);
         if (ok) {
           renderManagedComfyPanel(host, toggleFields);
         } else {
           // Same reasoning as the Set-up flow below: do not re-render over a
           // failure log the toast just pointed the user at.
           repair.disabled = false;
-          repair.textContent = "Repair";
+          repair.textContent = t("settings.comfy.repair");
         }
       });
     return;
@@ -3179,10 +3168,10 @@ export async function renderManagedComfyPanel(host, toggleFields) {
   // (ADR-0008 - the one route that finds a job without already holding its
   // id) and re-attach a live log to it, same as the Setup button's own flow,
   // instead of leaving the user with a static "please wait".
-  pill.textContent = st.state === "installing" ? "installing..." : "not set up";
+  pill.textContent = st.state === "installing" ? t("settings.comfy.pillInstalling") : t("settings.comfy.pillNotSetUp");
   if (st.state === "installing") {
     host.appendChild(el("div", "sub",
-      "A setup is already in progress - showing its live output below."));
+      t("settings.comfy.setupRunning")));
     const log = el("pre", "comfy-managed-log");
     host.appendChild(log);
     let jobId = null;
@@ -3204,8 +3193,7 @@ export async function renderManagedComfyPanel(host, toggleFields) {
       // would turn that into an unbounded fetch loop. Say plainly that the
       // live log is unavailable and stop; the pill above already shows
       // "installing...", and revisiting this page later re-checks fresh.
-      log.textContent = "(its live output is not available from here - check back "
-        + "later, or from wherever the setup was started)";
+      log.textContent = t("settings.comfy.noLiveOutput");
       return;
     }
     // No button exists in this branch (an "installing" state deliberately
@@ -3219,7 +3207,7 @@ export async function renderManagedComfyPanel(host, toggleFields) {
     });
     indicator.stop();
     const ok = !!(end && end.status === "done");
-    toast(ok ? "localm's ComfyUI is ready" : "Setup did not finish (see the log)", !ok);
+    toast(ok ? t("settings.comfy.readyToast") : t("settings.comfy.setupUnfinishedToast"), !ok);
     // Same reasoning as the Set-up flow below: only re-render on success. On
     // failure, renderManagedComfyPanel's host.replaceChildren() would destroy
     // the log this toast just told the user to check, the instant it appears.
@@ -3227,15 +3215,13 @@ export async function renderManagedComfyPanel(host, toggleFields) {
     return;
   }
   host.appendChild(el("div", "sub",
-    "Optional: let localm run its OWN ComfyUI under the localm data folder so it "
-    + "can pin a known-good version and carry fixes. Off by default; your own "
-    + "ComfyUI is never modified."));
+    t("settings.comfy.setupIntro")));
 
   // Not installed: offer to set it up. Provisioning is long (multi-GB), so it runs
   // as a background job whose log streams into <pre> below - the request never blocks.
   const actions = el("div", "actions");
   const setup = el("button", "btn-primary comfy-managed-setup-btn",
-                   "Set up localm's own ComfyUI");
+                   t("settings.comfy.setup"));
   setup.type = "button";
   actions.appendChild(setup);
   host.appendChild(actions);
@@ -3244,11 +3230,11 @@ export async function renderManagedComfyPanel(host, toggleFields) {
   host.appendChild(log);
   const reset = () => {
     setup.disabled = false;
-    setup.textContent = "Set up localm's own ComfyUI";
+    setup.textContent = t("settings.comfy.setup");
   };
   setup.onclick = async () => {
     setup.disabled = true;
-    setup.textContent = "Setting up...";
+    setup.textContent = t("settings.comfy.settingUp");
     log.style.display = "";
     log.textContent = "";
     const indicator = startComfyJobIndicator(setup, log);
@@ -3258,7 +3244,7 @@ export async function renderManagedComfyPanel(host, toggleFields) {
                             { method: "POST", headers: authHeaders() });
       const d = await r.json().catch(() => ({}));
       if (!r.ok) {
-        toast(d.detail || "Setup failed", true);
+        toast(d.detail || t("settings.comfy.setupFailed"), true);
         indicator.stop();
         reset();
         log.style.display = "none";
@@ -3266,7 +3252,7 @@ export async function renderManagedComfyPanel(host, toggleFields) {
       }
       jobId = d.job_id;
     } catch {
-      toast("Setup failed", true);
+      toast(t("settings.comfy.setupFailed"), true);
       indicator.stop();
       reset();
       return;
@@ -3278,7 +3264,7 @@ export async function renderManagedComfyPanel(host, toggleFields) {
     });
     indicator.stop();
     const ok = !!(end && end.status === "done");
-    toast(ok ? "localm's ComfyUI is ready" : "Setup did not finish (see the log)", !ok);
+    toast(ok ? t("settings.comfy.readyToast") : t("settings.comfy.setupUnfinishedToast"), !ok);
     if (ok) {
       // Re-read status: swaps to the coexistence-fields + Remove view.
       renderManagedComfyPanel(host, toggleFields);
@@ -3318,14 +3304,14 @@ export function renderMediaSubsection(name) {
     // docs/gui-design.md rule 6: state renders as a .job-state pill, not an
     // inline-JS-styled span. checking -> base pill (neutral, matches the old
     // no-color-set look); Running/Stopped/Unknown are set in checkComfy() below.
-    const badge = el("span", "comfy-status-badge job-state", "ComfyUI: checking...");
+    const badge = el("span", "comfy-status-badge job-state", t("settings.comfy.checking"));
     head.appendChild(badge);
     
     // NEW-STOPCOMFY: Stop/Restart controls. Stop shows whenever ComfyUI is up
     // (it always aborts the render + clears the queue; it terminates the process
     // only if localm launched it). Restart shows only for a localm-launched one.
-    const stopBtn = el("button", "btn-secondary comfy-stop-btn", "Stop");
-    const restartBtn = el("button", "btn-secondary comfy-restart-btn", "Restart");
+    const stopBtn = el("button", "btn-secondary comfy-stop-btn", t("settings.comfy.stop"));
+    const restartBtn = el("button", "btn-secondary comfy-restart-btn", t("settings.comfy.restart"));
     for (const b of [stopBtn, restartBtn]) {
       b.type = "button";
       b.style.marginLeft = "8px";
@@ -3345,12 +3331,12 @@ export function renderMediaSubsection(name) {
       fetch("/v1/comfy/status", { headers: authHeaders() })
         .then(r => r.json())
         .then(d => {
-          badge.textContent = d.alive ? "ComfyUI: Running" : "ComfyUI: Stopped";
+          badge.textContent = d.alive ? t("settings.comfy.running") : t("settings.comfy.stopped");
           badge.className = "comfy-status-badge job-state " + (d.alive ? "st-ok" : "st-error");
           stopBtn.style.display = d.alive ? "" : "none";
           restartBtn.style.display = d.launched_by_localm ? "" : "none";
         }).catch(() => {
-          badge.textContent = "ComfyUI: Unknown";
+          badge.textContent = t("settings.comfy.unknown");
           badge.className = "comfy-status-badge job-state st-unknown";
           stopBtn.style.display = "none";
           restartBtn.style.display = "none";
@@ -3363,11 +3349,11 @@ export function renderMediaSubsection(name) {
       fetch(path, { method: "POST", headers: authHeaders() })
         .then(r => r.json())
         .then(d => { if (d && d.message) toast(d.message, !d.ok); })
-        .catch(() => toast("ComfyUI control failed", true))
+        .catch(() => toast(t("settings.comfy.controlFailed"), true))
         .finally(() => { btn.disabled = false; btn.textContent = prev; checkComfy(); });
     };
-    stopBtn.onclick = () => comfyAction("/v1/comfy/stop", stopBtn, "Stopping...");
-    restartBtn.onclick = () => comfyAction("/v1/comfy/restart", restartBtn, "Restarting...");
+    stopBtn.onclick = () => comfyAction("/v1/comfy/stop", stopBtn, t("settings.comfy.stopping"));
+    restartBtn.onclick = () => comfyAction("/v1/comfy/restart", restartBtn, t("settings.comfy.restarting"));
 
     checkComfy();
   }
@@ -3400,14 +3386,14 @@ export function renderMediaSubsection(name) {
   for (const other of MEDIA_PLUGIN_ORDER) {
     if (other === name || !_mediaSubs[other]) continue;
     const copy = el("button", "btn-secondary media-copy-from",
-                    "Copy from " + _mediaSubs[other].label);
+                    t("settings.media.copyFrom", { name: _mediaSubs[other].label }));
     copy.type = "button";
     copy.dataset.from = other;
     copy.onclick = () => copyMediaFields(other, name);
     actions.appendChild(copy);
   }
-  const save = el("button", "btn-primary media-save", "Save " + label);
-  save.onclick = () => saveMediaPlugin(name);
+  const save = el("button", "btn-primary media-save", t("settings.save.section", { name: label }));
+  save.onclick = () => savingState(save, () => saveMediaPlugin(name));
   actions.appendChild(save);
   sub.appendChild(actions);
 }
@@ -3494,8 +3480,8 @@ export function copyMediaFields(from, to) {
     n += 1;
   }
   const label = (_mediaSubs[from] || {}).label || from;
-  toast(n ? `Copied ${n} field${n > 1 ? "s" : ""} from ${label} - review, then Save`
-          : "No shared fields to copy", !n);
+  toast(n ? tn("settings.media.copied", n, { label })
+          : t("settings.media.nothingToCopy"), !n);
 }
 
 /** Wire the search box (top level, like the other page controls). Typing filters
@@ -3521,13 +3507,13 @@ export async function saveMediaPlugin(name) {
     const cur = c.read();
     if (_mediaChanged(cur, c.orig)) updates[c.field.key] = cur === undefined ? "" : cur;
   }
-  if (!Object.keys(updates).length) { toast("Nothing changed"); return; }
+  if (!Object.keys(updates).length) { toast(t("settings.toast.nothingChanged")); return; }
   const r = await fetch("/v1/media/config/" + encodeURIComponent(name), {
     method: "POST", headers: authHeaders(), body: JSON.stringify(updates),
   });
   const data = await r.json().catch(() => ({}));
   if (r.ok) {
-    toast("Saved");
+    toast(t("settings.toast.saved"));
     // R12: re-render ONLY this subsection from the server's normalised fields. A
     // full refreshSettingsPage() here wiped unsaved edits in the other two.
     if (data && Array.isArray(data.fields) && _mediaSubs[name]) {
@@ -3537,7 +3523,7 @@ export async function saveMediaPlugin(name) {
       refreshSettingsPage();   // fallback if the response shape is unexpected
     }
   } else {
-    toast(data.detail || "Save failed", true);
+    toast(data.detail || t("settings.toast.saveFailed"), true);
   }
 }
 

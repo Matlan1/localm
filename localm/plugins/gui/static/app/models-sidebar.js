@@ -1111,7 +1111,10 @@ export async function switchModel(model, { local = false } = {}) {
   if (data.status === "confirm_required") {
     const confirmed = await confirmDangerAsync(
       t("models.switch.confirmTitle"), data.detail, t("models.switch.confirmLabel"));
-    if (!confirmed) return { status: "cancelled", reason: "declined by user", model };
+    if (!confirmed) {
+      setStatus("ok", modelCache.active || t("sidebar.status.noModel"));
+      return { status: "cancelled", reason: "declined by user", model };
+    }
     setStatus("busy", t("sidebar.status.loading", { model }));
     data = await _postLoad(model, true);
   }
