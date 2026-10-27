@@ -11,6 +11,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Changed
+- **The chat's Markdown and math renderers are updated (marked 18.1.2, KaTeX 0.19.1).** The marked update fixes a batch of Markdown edge cases, among them emphasis next to punctuation, block quotes with tabs or blank lines, and a `#` line inside a list item; KaTeX 0.19.1 accepts a percent sign in a raw argument.
+- **The Docker images are built on the current Ubuntu 24.04 base image.**
+
 ### Fixed
 - **Dollar amounts in a chat reply are no longer typeset as math.** A reply such as "$5 and $10" showed as "5and10", and "($$$$)" split the line with an empty block. A `$` now starts inline math only when it is followed by a character that is not a space or a digit and the closing `$` follows a non-space character and is not followed by a digit, so "$5", "$3.50 or $4" and "pay $5, get $10 back" stay text while `$x^2$` and `$$\int_0^1 x\,dx$$` still render as math. Write `\$` for a literal dollar sign anywhere.
 - **An image or video model localm cannot identify is refused with a reason instead of failing inside the runtime, unless you chose its text encoders.** A `.gguf` or `.safetensors` model of a family localm does not know, with no text encoder chosen for it, now stops before loading, with one sentence naming what its header shows (GGUF architecture, input channels) and what to do. With a text encoder chosen under Settings > Images or Video (or on the Images or Video page), the file is passed to stable-diffusion.cpp as before, which detects the family itself, and the job log says localm does not recognise it.
