@@ -236,7 +236,8 @@ def plugin_setup(plugins_csv, install_all, install_defaults, with_deps=None,
     mgr = _cli._engine_manager()
     installed = _installed_plugin_names(mgr)
     from localm import setup_spec
-    available = [catalog.get(n) for n, _ in setup_spec.setup_plugins()]
+    offered = {n for n, _ in setup_spec.setup_plugins()}
+    available = [e for e in catalog.CATALOG if e.name in offered]
     interactive = False
 
     if install_all:
