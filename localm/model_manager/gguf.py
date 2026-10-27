@@ -1848,6 +1848,45 @@ def gguf_input_layer_bytes(
     return total
 
 
+# Input-layer tensors llama.cpp only reads with GGML_OP_GET_ROWS (one row per
+# token), so a token touches a row of each, never the whole table.
+_ROW_LOOKUP_TENSOR_NAMES = ("token_embd", "position_embd", "token_types",
+                            "per_layer_token_embd")
+
+
+def gguf_row_lookup_bytes(path: Path, output_on_cpu: bool,
+                          *, _parsed: object = _UNSET) -> Optional[int]:
+    """Bytes of *path*'s row-lookup input tensors (``_ROW_LOOKUP_TENSOR_NAMES``),
+    summed over every part of a split GGUF.
+
+    ``token_embd.weight`` is left out when *output_on_cpu* is True and the model
+    has no ``output.weight``: llama.cpp then uses it as the output matrix, which
+    the CPU reads in full for every token.
+
+    *_parsed*, if given, is used for a single-file model instead of reading
+    *path* again (an already-computed ``_gguf_tensor_offset_entries(path)``
+    result, or its ``None`` failure).
+
+    ``None`` - never raises - when any part does not parse or a part of a
+    split model is missing."""
+    if split_gguf_parts(Path(path).name):
+        all_parts = _gguf_all_parts_entries(Path(path))
+    else:
+        parsed = _gguf_tensor_offset_entries(path) if _parsed is _UNSET else _parsed
+        all_parts = None if parsed is None else [
+            cast("tuple[list[tuple[str, int]], int, int]", parsed)]
+    if all_parts is None:
+        return None
+    sizes: dict[str, int] = {}
+    for entries, file_size, data_start in all_parts:
+        for idx, (name, offset) in enumerate(entries):
+            nxt = entries[idx + 1][1] if idx + 1 < len(entries) else (file_size - data_start)
+            sizes[name] = sizes.get(name, 0) + max(0, nxt - offset)
+    names = [n for n in _ROW_LOOKUP_TENSOR_NAMES
+             if not (n == "token_embd" and output_on_cpu and "output.weight" not in sizes)]
+    return sum(sizes.get(f"{n}.weight", 0) for n in names)
+
+
 def _input_layer_bytes_of(parsed: "tuple[list[tuple[str, int]], int, int]") -> int:
     """Bytes of the input-layer tensors in one file's ``_gguf_tensor_offset_entries``
     result."""

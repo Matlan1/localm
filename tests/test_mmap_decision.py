@@ -270,9 +270,10 @@ class TestCpuDraftWeightBytes:
     def test_a_cpu_draft_joins_the_ram_check(self, tmp_path):
         b = self._draft_backend(tmp_path, False)
         base = b._host_resident_bytes()
-        with _ram(64 * GIB, base + 7_000 + HOST_RAM_HEADROOM_BYTES - 1):
+        with _ram(64 * GIB, 7_000 + HOST_RAM_HEADROOM_BYTES - 1):
             d = b._resolve_use_mmap(99, GPU)
-        assert (d.reason, d.host_bytes) == ("cpu_exceeds_ram", base + 7_000)
+        assert (d.reason, d.host_bytes, d.cpu_read_bytes) == (
+            "cpu_exceeds_ram", base + 7_000, 7_000)
 
     def test_a_cpu_draft_that_fits_is_a_plain_full_offload(self, tmp_path):
         b = self._draft_backend(tmp_path, False)
@@ -294,14 +295,14 @@ class TestResolveUseMmap:
         with _ram(64 * GIB, host + HOST_RAM_HEADROOM_BYTES) as probe:
             d = b._resolve_use_mmap(99, GPU)
         assert d == MmapDecision(False, "fits_ram", host, 64 * GIB,
-                                 host + HOST_RAM_HEADROOM_BYTES)
+                                 host + HOST_RAM_HEADROOM_BYTES, PINNED_TWO)
         assert b.last_mmap_decision == d
         assert probe.call_count == 1
 
     def test_moe_experts_larger_than_ram_keep_mmap(self, tmp_path):
         b = _backend(_moe_model(tmp_path), n_cpu_moe=2)
         host = b._host_resident_bytes()
-        with _ram(64 * GIB, host + HOST_RAM_HEADROOM_BYTES - 1):
+        with _ram(64 * GIB, PINNED_TWO + HOST_RAM_HEADROOM_BYTES - 1):
             d = b._resolve_use_mmap(99, GPU)
         assert (d.use_mmap, d.reason, d.host_bytes) == (None, "cpu_exceeds_ram", host)
 
@@ -336,7 +337,8 @@ class TestResolveUseMmap:
         b.use_mmap = "off"
         with _ram(64 * GIB, 1) as probe:
             d = b._resolve_use_mmap(99, GPU)
-        assert d == MmapDecision(False, "user_off", b._host_resident_bytes(), 64 * GIB, 1)
+        assert d == MmapDecision(False, "user_off", b._host_resident_bytes(), 64 * GIB, 1,
+                                 PINNED_TWO)
         assert probe.call_count == 1
 
     @pytest.mark.parametrize("layers", [0, 3, 98])
@@ -344,17 +346,21 @@ class TestResolveUseMmap:
         b = _backend(_moe_model(tmp_path))
         with _ram(64 * GIB, 64 * GIB) as probe:
             d = b._resolve_use_mmap(layers, GPU)
-        assert d == MmapDecision(None, "partial_offload", b._cpu_held_weight_bytes(layers),
-                                 64 * GIB, 64 * GIB)
+        held = b._cpu_held_weight_bytes(layers)
+        # With no GPU layer the tied output reads token_embd in full.
+        read = held if layers == 0 else held - 5_000
+        assert d == MmapDecision(None, "partial_offload", held, 64 * GIB, 64 * GIB, read)
         assert probe.call_count == 1
 
     @pytest.mark.parametrize("layers", [0, 3, 98])
     def test_a_partial_offload_whose_cpu_weights_exceed_ram_says_so(self, tmp_path, layers):
         b = _backend(_moe_model(tmp_path))
         held = b._cpu_held_weight_bytes(layers)
-        with _ram(64 * GIB, held + HOST_RAM_HEADROOM_BYTES - 1):
+        read = held if layers == 0 else held - 5_000
+        with _ram(64 * GIB, read + HOST_RAM_HEADROOM_BYTES - 1):
             d = b._resolve_use_mmap(layers, GPU)
-        assert (d.use_mmap, d.reason, d.host_bytes) == (None, "cpu_exceeds_ram", held)
+        assert (d.use_mmap, d.reason, d.host_bytes, d.cpu_read_bytes) == (
+            None, "cpu_exceeds_ram", held, read)
 
     def test_a_failing_host_byte_count_never_raises(self, tmp_path):
         b = _backend(_moe_model(tmp_path))
@@ -374,7 +380,8 @@ class TestNoGpu:
         b = _backend(_dense_model(tmp_path))
         with _ram(64 * GIB, 64 * GIB) as probe:
             d = b._resolve_use_mmap(99, [])
-        assert d == MmapDecision(None, "no_gpu", b._model_bytes(), 64 * GIB, 64 * GIB)
+        assert d == MmapDecision(None, "no_gpu", b._model_bytes(), 64 * GIB, 64 * GIB,
+                                 b._model_bytes())
         assert probe.call_count == 1
 
     def test_no_gpu_with_a_model_larger_than_ram_says_so(self, tmp_path):
@@ -691,3 +698,284 @@ class TestMappedFromTheLoadLog:
         start = time.perf_counter()
         assert _mapped(tmp_path, text) is None
         assert time.perf_counter() - start < 2.0
+
+
+# --------------------------------------------------------------------------- #
+#  Row-lookup tables: kept in RAM, but a token reads one row of them          #
+# --------------------------------------------------------------------------- #
+
+PER_LAYER_EMBD = 3_000_000
+TOKEN_EMBD = 5_000
+
+
+def _per_layer_model(tmp_path, *, tied=False, name="ple.gguf"):
+    """Four MoE blocks plus a per-layer embedding table far larger than every
+    block together, the shape of the reported 110 GB model."""
+    from tests.test_gguf_moe_vram_sizing import _gguf_with_tensors
+    from tests.test_moe_auto_placement import _kv
+    tensors = [("token_embd.weight", [4], 0, TOKEN_EMBD),
+               ("per_layer_token_embd.weight", [4], 0, PER_LAYER_EMBD)]
+    for il, size in enumerate(EXPERT_BYTES):
+        tensors += [(f"blk.{il}.attn_q.weight", [4], 0, 2_000),
+                    (f"blk.{il}.ffn_gate_exps.weight", [4], 0, size)]
+    if not tied:
+        tensors += [("output.weight", [4], 0, 7_000)]
+    return _gguf_with_tensors(tmp_path / name, _kv("testmoe"), tensors)
+
+
+class TestRowLookupBytes:
+    def test_both_embedding_tables_are_lookups_with_a_separate_output(self, tmp_path):
+        b = _backend(_per_layer_model(tmp_path))
+        assert b._cpu_row_lookup_bytes(3) == PER_LAYER_EMBD + TOKEN_EMBD
+        assert b._cpu_row_lookup_bytes(0) == PER_LAYER_EMBD + TOKEN_EMBD
+
+    def test_a_tied_output_on_the_cpu_reads_the_token_table_in_full(self, tmp_path):
+        b = _backend(_per_layer_model(tmp_path, tied=True))
+        assert b._cpu_row_lookup_bytes(0) == PER_LAYER_EMBD
+        assert b._cpu_row_lookup_bytes(1) == PER_LAYER_EMBD + TOKEN_EMBD
+
+    def test_a_split_model_counts_a_table_in_a_later_part(self, tmp_path):
+        from tests.test_gguf_moe_vram_sizing import _T_STRING, _gguf_with_tensors
+        kv = [("general.architecture", _T_STRING, "llama")]
+        first = _gguf_with_tensors(tmp_path / "m-00001-of-00002.gguf", kv,
+                                   [("blk.0.attn_q.weight", [4], 0, 4096),
+                                    ("output.weight", [4], 0, 512)])
+        _gguf_with_tensors(tmp_path / "m-00002-of-00002.gguf", kv,
+                           [("per_layer_token_embd.weight", [4], 0, 9000)])
+        assert _backend(first)._cpu_row_lookup_bytes(0) == 9000
+
+    def test_a_missing_split_part_is_unknown(self, tmp_path):
+        from tests.test_gguf_moe_vram_sizing import _T_STRING, _gguf_with_tensors
+        kv = [("general.architecture", _T_STRING, "llama")]
+        first = _gguf_with_tensors(tmp_path / "m-00001-of-00002.gguf", kv,
+                                   [("token_embd.weight", [4], 0, 4096)])
+        assert _backend(first)._cpu_row_lookup_bytes(3) is None
+
+    def test_an_unreadable_header_is_unknown(self, tmp_path):
+        bad = tmp_path / "bad.gguf"
+        bad.write_bytes(b"\0" * 4096)
+        assert _backend(bad)._cpu_row_lookup_bytes(3) is None
+
+
+class TestCpuReadBytesDecideTheDiskWarning:
+    """The RAM check for a partial offload compares the weights the CPU reads
+    while generating, not the row-lookup tables it keeps beside them."""
+
+    def test_the_reported_shape_counts_the_cpu_blocks_and_the_lookups_apart(self, tmp_path):
+        b = _backend(_per_layer_model(tmp_path))
+        blocks = b._block_bytes()
+        # 2 GPU layers: the output layer and block 3; blocks 0..2 stay on the CPU.
+        cpu_blocks = sum(blocks[i][0] for i in range(3))
+        with _ram(64 * GIB, 64 * GIB):
+            d = b._resolve_use_mmap(2, GPU)
+        assert d.host_bytes == PER_LAYER_EMBD + TOKEN_EMBD + cpu_blocks
+        assert d.cpu_read_bytes == cpu_blocks
+        assert d.host_bytes < b._model_bytes()
+
+    def test_lookup_tables_larger_than_ram_alone_are_not_flagged(self, tmp_path):
+        b = _backend(_per_layer_model(tmp_path))
+        with _ram(64 * GIB, 64 * GIB):
+            read = b._resolve_use_mmap(2, GPU).cpu_read_bytes
+        with _ram(64 * GIB, read + HOST_RAM_HEADROOM_BYTES):
+            d = b._resolve_use_mmap(2, GPU)
+        assert d.host_bytes + HOST_RAM_HEADROOM_BYTES > d.ram_available
+        assert (d.use_mmap, d.reason) == (None, "partial_offload")
+
+    def test_cpu_blocks_larger_than_ram_are_flagged(self, tmp_path):
+        b = _backend(_per_layer_model(tmp_path))
+        with _ram(64 * GIB, 64 * GIB):
+            read = b._resolve_use_mmap(2, GPU).cpu_read_bytes
+        with _ram(64 * GIB, read + HOST_RAM_HEADROOM_BYTES - 1):
+            d = b._resolve_use_mmap(2, GPU)
+        assert (d.use_mmap, d.reason) == (None, "cpu_exceeds_ram")
+
+    def test_a_failing_lookup_probe_counts_every_held_byte(self, tmp_path):
+        b = _backend(_per_layer_model(tmp_path))
+        with patch.object(GgufBackend, "_cpu_row_lookup_bytes", return_value=None), \
+             _ram(64 * GIB, 64 * GIB):
+            d = b._resolve_use_mmap(2, GPU)
+        assert d.cpu_read_bytes == d.host_bytes
+
+    def test_pinned_experts_that_fit_ram_are_not_read_from_disk(self, tmp_path):
+        b = _backend(_per_layer_model(tmp_path), n_cpu_moe=2)
+        pinned = EXPERT_BYTES[0] + EXPERT_BYTES[1]
+        with _ram(64 * GIB, pinned + HOST_RAM_HEADROOM_BYTES):
+            d = b._resolve_use_mmap(99, GPU)
+        assert d.cpu_read_bytes == pinned
+        assert d.host_bytes == pinned + PER_LAYER_EMBD + TOKEN_EMBD
+        assert (d.use_mmap, d.reason) == (None, "exceeds_ram")
+
+    def test_pinned_experts_larger_than_ram_are_read_from_disk(self, tmp_path):
+        b = _backend(_per_layer_model(tmp_path), n_cpu_moe=2)
+        pinned = EXPERT_BYTES[0] + EXPERT_BYTES[1]
+        with _ram(64 * GIB, pinned + HOST_RAM_HEADROOM_BYTES - 1):
+            d = b._resolve_use_mmap(99, GPU)
+        assert (d.use_mmap, d.reason) == (None, "cpu_exceeds_ram")
+
+    def test_decide_prefers_the_cpu_read_figure(self):
+        fits = decide_use_mmap("auto", False, 100 * GIB, 32 * GIB, 16 * GIB, 4 * GIB)
+        over = decide_use_mmap("auto", False, 1 * GIB, 32 * GIB, 16 * GIB, 20 * GIB)
+        assert fits == MmapDecision(None, "partial_offload", 100 * GIB, 32 * GIB,
+                                    16 * GIB, 4 * GIB)
+        assert over.reason == "cpu_exceeds_ram"
+
+    def test_a_full_offload_still_reads_every_host_byte_into_memory(self):
+        d = decide_use_mmap("auto", True, 40 * GIB, 64 * GIB, 16 * GIB, 1 * GIB)
+        assert (d.use_mmap, d.reason) == (None, "exceeds_ram")
+
+
+# --------------------------------------------------------------------------- #
+#  What the load says: debug line, pre-load warning, post-load note           #
+# --------------------------------------------------------------------------- #
+
+# The reported load: 113,620,020,480 bytes kept in RAM, 26,183,057,408 of
+# 34,278,871,040 available, 54.52 GB of them read by the CPU layers.
+REPORTED = MmapDecision(None, "cpu_exceeds_ram", 113_620_020_480, 34_278_871_040,
+                        26_183_057_408, 58_544_328_960)
+
+
+class TestDescribeMmapDecision:
+    def test_the_reported_load_says_on_and_why_in_words(self):
+        from localm.inference.backends.llamacpp._sizing import describe_mmap_decision
+        line = describe_mmap_decision("auto", REPORTED)
+        assert line.startswith("mmap: use_mmap=auto -> on (llama.cpp default): ")
+        assert ("the 54.5 GB of weights the CPU reads (105.8 GB of weights kept in "
+                "system RAM) do not fit 24.4 GB of 31.9 GB RAM available") in line
+        assert "from the model file on disk" in line
+        assert "None" not in line
+
+    @pytest.mark.parametrize("decision, mode, phrase", [
+        (MmapDecision(True, "user_on"), "on", "use_mmap is on"),
+        (MmapDecision(False, "user_off", 4 * GIB, 8 * GIB, 6 * GIB), "off",
+         "4.0 GB of weights kept in system RAM are read into memory"),
+        (MmapDecision(False, "fits_ram", 4 * GIB, 8 * GIB, 6 * GIB), "off",
+         "fit 6.0 GB of 8.0 GB RAM available, so they are read into memory"),
+        (MmapDecision(None, "exceeds_ram", 9 * GIB, 8 * GIB, 6 * GIB),
+         "on (llama.cpp default)", "first tokens slower"),
+        (MmapDecision(None, "partial_offload", 9 * GIB, 8 * GIB, 6 * GIB, 3 * GIB),
+         "on (llama.cpp default)", "part of the model runs on the CPU; the 3.0 GB of "
+         "weights the CPU reads (9.0 GB of weights kept in system RAM) fit 6.0 GB"),
+        (MmapDecision(None, "no_gpu", 4 * GIB, 8 * GIB, 6 * GIB),
+         "on (llama.cpp default)", "no GPU takes the layers"),
+        (MmapDecision(None, "host_unknown"), "on (llama.cpp default)",
+         "could not be counted"),
+        (MmapDecision(None, "ram_unknown", 4 * GIB), "on (llama.cpp default)",
+         "available RAM could not be read"),
+    ])
+    def test_every_reason_names_the_mode_and_the_cause(self, decision, mode, phrase):
+        from localm.inference.backends.llamacpp._sizing import describe_mmap_decision
+        line = describe_mmap_decision("auto", decision)
+        assert line.startswith(f"mmap: use_mmap=auto -> {mode}: ")
+        assert phrase in line
+        assert line.endswith(f"[{decision.reason}]")
+        assert "-> None" not in line
+
+    def test_the_resolver_logs_it(self, tmp_path):
+        b = _backend(_per_layer_model(tmp_path))
+        with _ram(64 * GIB, 1 * GIB), patch("localm.debuglog.logger.debug") as dbg:
+            b._resolve_use_mmap(2, GPU)
+        lines = [c.args[0] % c.args[1:] for c in dbg.call_args_list]
+        assert any(line.startswith("mmap: use_mmap=auto -> on (llama.cpp default): ")
+                   and "[cpu_exceeds_ram]" in line for line in lines)
+
+
+class TestDiskSpeedWarning:
+    def test_the_reported_load_warns_with_sizes_and_levers(self):
+        with patch("localm.inference.backends.gguf.console.print") as printed, \
+             patch("localm.debuglog.logger.warning") as warned:
+            note = GgufBackend._warn_cpu_reads_from_disk(REPORTED)
+        assert note.startswith("mmap on: the 54.5 GB of weights the CPU reads")
+        assert "24.4 GB of available RAM with 2 GB to spare" in note
+        assert "generation speed is limited by the disk" in note
+        for lever in ("Free more RAM", "a smaller quant", "more of the model on the GPU"):
+            assert lever in note
+        assert printed.call_count == 1 and warned.call_count == 1
+
+    @pytest.mark.parametrize("decision", [
+        MmapDecision(None, "partial_offload", 4 * GIB, 8 * GIB, 6 * GIB, 1 * GIB),
+        MmapDecision(None, "exceeds_ram", 9 * GIB, 8 * GIB, 6 * GIB, 1 * GIB),
+        MmapDecision(False, "user_off", 9 * GIB, 8 * GIB, 1 * GIB, 9 * GIB),
+        MmapDecision(True, "user_on"),
+        MmapDecision(None, "cpu_exceeds_ram", 9 * GIB, None, None, 9 * GIB),
+    ])
+    def test_nothing_is_said_when_the_weights_fit_or_the_mode_is_forced(self, decision):
+        with patch("localm.inference.backends.gguf.console.print") as printed:
+            assert GgufBackend._warn_cpu_reads_from_disk(decision) == ""
+        printed.assert_not_called()
+
+    def test_a_load_warns_before_it_starts_and_not_again_after(self, tmp_path):
+        b = _backend(_per_layer_model(tmp_path), n_gpu_layers=2)
+        order = []
+        with _ram(64 * GIB, 1 * GIB), \
+             patch("localm.inference.backends.gguf.console.print",
+                   lambda *a, **k: order.append(str(a[0]) if a else "")):
+            _load_mapped_ordered(b, order)
+        hits = [i for i, line in enumerate(order) if "limited by the disk" in line]
+        assert len(hits) == 1 and hits[0] < order.index("spawn")
+        assert not any("every token slower" in line for line in order)
+        assert b.mmap_cpu_from_disk is True
+        assert b.mmap_disk_note and "limited by the disk" in b.mmap_disk_note
+
+    def test_a_partial_load_that_fits_does_not_warn(self, tmp_path):
+        b = _backend(_per_layer_model(tmp_path), n_gpu_layers=2)
+        order = []
+        with _ram(64 * GIB, 32 * GIB), \
+             patch("localm.inference.backends.gguf.console.print",
+                   lambda *a, **k: order.append(str(a[0]) if a else "")):
+            _load_mapped_ordered(b, order)
+        assert not any("limited by the disk" in line for line in order)
+        assert b.mmap_disk_note == ""
+
+    def test_the_api_note_is_the_warning(self, tmp_path):
+        from localm.inference.engine import Engine
+        b = _backend(_per_layer_model(tmp_path), n_gpu_layers=2)
+        with _ram(64 * GIB, 1 * GIB), \
+             patch("localm.inference.backends.gguf.console.print"):
+            _load_mapped_ordered(b, [])
+        e = Engine.__new__(Engine)
+        e._backend = b
+        state = e.mmap_state
+        assert state["mmap_cpu_from_disk"] is True
+        assert state["mmap_note"] == b.mmap_disk_note
+
+
+class TestFullOffloadNeedsWording:
+    """The partial-offload notice for weights larger than the card names what
+    the figure counts and, with a configured n_cpu_moe, the lever."""
+
+    def _cause(self, b):
+        from localm.inference.backends.llamacpp._sizing import _AutoLayerBudget
+        model, kv, overhead = b._full_offload_parts(1)
+        budget = _AutoLayerBudget(1, 1_000, 1_000, model, kv, overhead, 1)
+        return model, b._auto_gpu_layers_cause(budget)[0]
+
+    def test_a_configured_n_cpu_moe_is_named_with_its_lever(self, tmp_path):
+        b = _backend(_moe_model(tmp_path), n_cpu_moe=2)
+        model, cause = self._cause(b)
+        assert model == b._model_bytes() - TOKEN_EMBD - PINNED_TWO
+        assert (f"the weights that go on the GPU need {model / GIB:.1f} GB of VRAM "
+                f"at any context size with n_cpu_moe 2; a higher n_cpu_moe, or 0 "
+                f"to size it automatically, keeps more experts in system RAM") in cause
+
+    def test_a_dense_model_never_mentions_n_cpu_moe(self, tmp_path):
+        b = _backend(_dense_model(tmp_path), n_cpu_moe=2)
+        model, cause = self._cause(b)
+        assert model == b._model_bytes() - TOKEN_EMBD
+        assert cause.endswith("GB of VRAM at any context size")
+        assert "n_cpu_moe" not in cause
+
+    def test_an_automatic_n_cpu_moe_is_not_named(self, tmp_path):
+        _model, cause = self._cause(_backend(_moe_model(tmp_path)))
+        assert "n_cpu_moe" not in cause and "regardless" not in cause
+
+
+def _load_mapped_ordered(backend, order):
+    def _spawn(params, **_kw):
+        order.append("spawn")
+        return {"n_layers": 4, "kv_bytes_per_token": 0, "supports_images": False,
+                "weight_placement": [], "moe_skip_reason": None, "mmap": True}
+
+    with patch("localm.discover.list_gpus", return_value=(list(GPU), "ok")), \
+         patch("localm.inference.backends.llamacpp._runner.ModelRunner."
+               "spawn_and_load", side_effect=_spawn):
+        backend._load_native()

@@ -1765,7 +1765,7 @@
   "settings.field.updateAllowPrerelease.label": "Prerelease-Updates anbieten",
   "settings.field.updateIgnoreNetPolicy.help": "Die Update-Prüfung folgt normalerweise Netzwerkzugriff, daher schaltet dessen Ausschalten auch Update-Prüfungen aus. Aktivieren, um den Update-Kanal unabhängig davon durchzulassen.",
   "settings.field.updateIgnoreNetPolicy.label": "Auch bei ausgeschaltetem Netzwerkzugriff nach Updates suchen",
-  "settings.field.useMmap.help": "auto läuft aus festplattengestütztem Speicher, wenn das Modell möglicherweise nicht in den verfügbaren RAM passt. on erzwingt es; off liest zuerst das ganze Modell in den Speicher.",
+  "settings.field.useMmap.help": "auto läuft aus festplattengestütztem Speicher, wenn das Modell möglicherweise nicht in den verfügbaren RAM passt. Ein zwischen GPU und CPU aufgeteiltes Modell bleibt immer gemappt, mit einer Warnung, wenn seine CPU-Schichten nicht in den verfügbaren RAM passen und mit Festplattengeschwindigkeit laufen. on erzwingt es; off liest zuerst das ganze Modell in den Speicher.",
   "settings.field.useMmap.label": "Modelldateien in den Speicher abbilden (mmap)",
   "settings.field.kvCacheType.label": "KV-Cache-Typ",
   "settings.field.kvCacheType.help": "f16 ist der Standard. q8_0 speichert den KV-Cache in etwa halb so viel Speicher, sodass etwa 1,9-mal so viel Kontext in den VRAM passt, bei etwas langsamerer Dekodierung. q8_0 braucht Flash Attention.",

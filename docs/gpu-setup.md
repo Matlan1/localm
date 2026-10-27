@@ -356,11 +356,14 @@ output, the GUI load toast and the load response (`mmap`, `mmap_from_disk`)
 then say it runs from disk-backed memory and that first tokens are slower. A
 model split between GPU and CPU, a machine with no GPU, and a load where
 available RAM cannot be read use llama.cpp's own default, which memory-maps the
-file wherever the device supports it; when the weights such a load keeps in
-system RAM (its CPU layers, plus a draft model placed on the CPU) do not fit
-available RAM with 2 GiB to spare, the same three places say the CPU layers read
-them from disk-backed memory and every token is slower (`mmap_cpu_from_disk` in
-the load response). `on` and `off` are used as given; with `off`, a load whose
+file wherever the device supports it. When the weights the CPU reads while
+generating (its CPU layers, plus a draft model placed on the CPU; the token
+embedding tables, of which a token reads one row, are not counted) do not fit
+available RAM with 2 GiB to spare, the load warns before it starts that the CPU
+reads them from disk and generation speed is limited by the disk, with both sizes
+and the ways out (free more RAM, a smaller quant, more of the model on the GPU if
+VRAM allows); the GUI load toast and the load response (`mmap_cpu_from_disk`,
+`mmap_note`) carry the same warning. `on` and `off` are used as given; with `off`, a load whose
 weights do not fit available RAM warns before it starts that it may fail or
 swap, and the GUI load toast and the load response (`mmap_ram_short`,
 `mmap_note`) carry the same warning. The
