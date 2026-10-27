@@ -16,6 +16,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import threading
 from pathlib import Path
 
 import pytest
@@ -297,9 +298,25 @@ class TestAskProtocol:
         ask, asked = _answers("n", "3")
         monkeypatch.setattr(gui, "ASK", ask)
         logged = []
-        code = gui._run([sys.executable, str(script)], logged.append, gui.Plan(),
-                        answers=True)
-        assert code == 0, logged
+        result = []
+        started = []
+        real_popen = gui.subprocess.Popen
+
+        def popen(*a, **kw):
+            proc = real_popen(*a, **kw)
+            started.append(proc)
+            return proc
+        monkeypatch.setattr(gui.subprocess, "Popen", popen)
+        worker = threading.Thread(target=lambda: result.append(gui._run(
+            [sys.executable, str(script)], logged.append, gui.Plan(), answers=True)))
+        worker.start()
+        worker.join(60)
+        if worker.is_alive():
+            for proc in started:
+                proc.kill()
+            worker.join(10)
+            pytest.fail(f"the child waited for an answer that never came: {logged}")
+        assert result == [0], logged
         assert [q["kind"] for q in asked] == ["confirm", "choose"]
         assert asked[0]["default"] == "y" and asked[1]["default"] == "2"
         assert asked[1]["choices"] == [["1", "a"], ["2", "b"], ["3", "c"]]
