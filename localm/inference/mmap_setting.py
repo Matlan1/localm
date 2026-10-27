@@ -30,6 +30,20 @@ def unmapped_exceeds_ram_note(host_bytes: int, ram_available: int) -> str:
             f"map them from disk instead.")
 
 
+def cpu_reads_from_disk_note(cpu_read_bytes: int, ram_available: int,
+                             headroom_bytes: int) -> str:
+    """The warning for an ``auto`` load whose *cpu_read_bytes* of weights the CPU
+    reads while generating do not fit the *ram_available* bytes of available
+    RAM with *headroom_bytes* to spare."""
+    gib = 1024 ** 3
+    return (f"the {cpu_read_bytes / gib:.1f} GB of weights the CPU reads while "
+            f"generating do not fit the {ram_available / gib:.1f} GB of available RAM "
+            f"with {headroom_bytes / gib:.0f} GB to spare, so llama.cpp "
+            f"memory-maps the model file and reads them from disk: generation speed "
+            f"is limited by the disk. Free more RAM, use a smaller quant, or put more "
+            f"of the model on the GPU if VRAM allows.")
+
+
 def coerce_use_mmap(val) -> Optional[str]:
     """*val* as one of USE_MMAP_MODES (case and surrounding spaces ignored), or
     None when it is not one of them. A bool is not a mode: None, never

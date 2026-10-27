@@ -216,6 +216,32 @@ def test_the_load_output_prints_the_hint_when_ram_forced_mmap():
     assert "disk-backed memory" in printed and "first tokens slower" in printed
 
 
+def test_the_load_output_does_not_repeat_the_disk_speed_warning():
+    b = _backend("auto", True, True)
+    b.mmap_cpu_from_disk = True
+    b.mmap_disk_note = "mmap on: the 54.5 GB of weights ..."
+    with patch("localm.inference.backends.gguf.console") as console:
+        b._print_mmap_note()
+    console.print.assert_not_called()
+
+
+def test_the_load_output_names_cpu_layers_without_a_disk_speed_warning():
+    b = _backend("auto", True, True)
+    b.mmap_cpu_from_disk = True
+    with patch("localm.inference.backends.gguf.console") as console:
+        b._print_mmap_note()
+    assert MMAP_CPU_FROM_DISK_NOTE in str(console.print.call_args.args[0])
+
+
+def test_the_disk_speed_warning_names_both_sizes_the_headroom_and_the_levers():
+    from localm.inference.mmap_setting import cpu_reads_from_disk_note
+    note = cpu_reads_from_disk_note(20 * 1024 ** 3, 8 * 1024 ** 3, 2 * 1024 ** 3)
+    assert note.startswith("the 20.0 GB of weights the CPU reads while generating")
+    assert "8.0 GB of available RAM with 2 GB to spare" in note
+    assert "limited by the disk" in note
+    assert "smaller quant" in note
+
+
 @pytest.mark.parametrize("setting,effective", [
     ("auto", None), ("auto", False), ("auto", True),
 ])
