@@ -1116,7 +1116,8 @@ async def _switch_exhaustion_ladder(loop, probe: switch_admission.VramProbe,
     if final == switch_admission.CONFIRM_DEGRADED_LOAD:
         return step(switch_admission.RETURN_RESULT,
                     result=switch_admission.degraded_load_confirm(
-                        budget.name, budget.whole_model_bytes, probe.free))
+                        budget.name, budget.whole_model_bytes, probe.free,
+                        moe=_registered_as_moe(budget.name)))
     from localm.debuglog import logger as _dbg
     _dbg.info(
         "switch_engine: '%s' exceeds the whole-model VRAM estimate "
@@ -1125,6 +1126,14 @@ async def _switch_exhaustion_ladder(loop, probe: switch_admission.VramProbe,
         budget.name, budget.whole_model_bytes // 1024 ** 2, probe.free // 1024 ** 2)
     attempt.deferred_to_backend = True
     return step(switch_admission.PROCEED_TO_LOAD)
+
+
+def _registered_as_moe(name: str) -> bool:
+    """True when the registry records mixture-of-experts weights for *name*
+    (a non-zero ``expert_count``)."""
+    from localm.config import load_registry
+    entry = load_registry().get(name)
+    return isinstance(entry, dict) and bool(entry.get("expert_count"))
 
 
 async def _switch_evict_embedder(loop, probe: switch_admission.VramProbe,

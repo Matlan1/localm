@@ -194,6 +194,14 @@ class _CapturedStderr:
             })
         return out
 
+    def projector_notices(self) -> dict:
+        """What the captured native projector load reported about itself:
+        ``cpu`` (True when mtmd logged ``CLIP using CPU backend``) and
+        ``min_tokens`` (True when it advised ``--image-min-tokens``)."""
+        text = self._read()
+        return {"cpu": "CLIP using CPU backend" in text,
+                "min_tokens": "--image-min-tokens" in text}
+
     def mapped(self) -> Optional[bool]:
         """Whether the captured native load memory-mapped the model file: False
         when the log says mmap is not supported on this platform; else the
@@ -214,6 +222,25 @@ class _CapturedStderr:
         if any(b["backend"] == "CPU_Mapped" for b in self.model_buffers()):
             return True
         return None
+
+
+def _warn_projector_notices(mt, notices: dict) -> None:
+    """Warn about what llama.cpp reported while loading the projector *mt*
+    (``_CapturedStderr.projector_notices``): that it encodes images on the CPU
+    although the GPU was requested (*mt* is then marked as not on the GPU), and
+    its advice to raise the minimum image tokens, which localm does not set."""
+    from localm.debuglog import logger
+    if notices.get("cpu") and getattr(mt, "on_gpu", False):
+        mt.on_gpu = False
+        logger.warning(
+            "mtmd: llama.cpp placed the vision projector on the CPU (CLIP using CPU "
+            "backend) although the GPU was requested, so image encoding is much "
+            "slower on large images.")
+    if notices.get("min_tokens"):
+        logger.warning(
+            "mtmd: llama.cpp advises this projector needs at least 1024 image tokens "
+            "for accurate grounding answers (--image-min-tokens 1024); localm does not "
+            "set that option, so locating things in images may be less accurate.")
 
 
 _ADAPTER_LOG_LINE = re.compile(r"lora|adapter|fail|error|incorrect|mismatch", re.I)
@@ -2024,6 +2051,8 @@ class LlamaCpp:
                     mt = MtmdContext(
                         compatible_mmproj_path(mmproj_path), self._model_ptr,
                         gpu_index=getattr(self, "_main_gpu_index", 0))
+                    if captured is not None:
+                        _warn_projector_notices(mt, captured.projector_notices())
                 except Exception:
                     if captured is not None:
                         _mtmd_detail = captured.tail()

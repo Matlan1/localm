@@ -396,6 +396,12 @@ def _digits_summary(match: re.Match[str]) -> str:
     return f"{run[:12]}...({len(run)} digits)"
 
 
+def shorten_long_digits(text: str) -> str:
+    """*text* with every run of 40 or more digits replaced by its first 12 digits
+    and its length."""
+    return _LONG_DIGITS_RE.sub(_digits_summary, text)
+
+
 def load_error_text(e: BaseException) -> str:
     """The text a worker sends for a failed load: ``str(e)`` for a
     ``RuntimeError``/``OSError``/``AbiMismatch`` (a runtime failure) with a
@@ -403,7 +409,7 @@ def load_error_text(e: BaseException) -> str:
     when the message is empty. A run of 40 or more digits in the message (a
     model config holding a huge number) is shortened to its first 12 digits and
     its length."""
-    msg = _LONG_DIGITS_RE.sub(_digits_summary, str(e).strip())
+    msg = shorten_long_digits(str(e).strip())
     if not msg:
         return type(e).__name__
     if isinstance(e, (RuntimeError, OSError, AbiMismatch)):

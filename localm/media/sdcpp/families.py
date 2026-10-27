@@ -679,15 +679,57 @@ def _textual_inversion_info(t: dict) -> Optional[FileInfo]:
 _ESRGAN_RDB = re.compile(r"body\.\d+\.rdb1\.conv1\.weight")
 
 
-def _upscaler_info(t: dict) -> Optional[FileInfo]:
-    """An RGB ESRGAN upscaler in the RRDBNet layout (``conv_first``,
-    ``body.N.rdb1.conv1``, ``conv_last`` with three output channels), or None."""
+_ESRGAN_ORIGINAL_RDB = re.compile(r"model\.1\.sub\.\d+\.RDB1\.conv1\.0\.weight")
+_ESRGAN_ORIGINAL_CONV = re.compile(r"model\.(\d+)\.weight")
+_SRVGG_PARAM = re.compile(r"body\.(\d+)\.(weight|bias)")
+
+
+def _is_basicsr_rrdbnet(t: dict) -> bool:
+    """``conv_first``, ``body.N.rdb1.conv1`` and a ``conv_last`` with three output
+    channels."""
     last = t.get("conv_last.weight")
     if not last or len(last) != 4 or last[0] != 3 or len(t.get("conv_first.weight") or ()) != 4:
-        return None
-    if not any(_ESRGAN_RDB.fullmatch(n) for n in t):
-        return None
-    return FileInfo("upscaler")
+        return False
+    return any(_ESRGAN_RDB.fullmatch(n) for n in t)
+
+
+def _is_original_esrgan(t: dict) -> bool:
+    """The original ESRGAN layout: ``model.0`` first convolution,
+    ``model.1.sub.N.RDB1.conv1.0`` dense blocks and the highest numbered
+    ``model.N`` convolution with three output channels."""
+    if len(t.get("model.0.weight") or ()) != 4:
+        return False
+    if not any(_ESRGAN_ORIGINAL_RDB.fullmatch(n) for n in t):
+        return False
+    convs = {int(m.group(1)): shape for n, shape in t.items()
+             if (m := _ESRGAN_ORIGINAL_CONV.fullmatch(n)) and len(shape) == 4}
+    return len(convs) > 2 and convs[max(convs)][0] == 3
+
+
+def _is_srvgg_compact(t: dict) -> bool:
+    """SRVGGNetCompact: every tensor is ``body.N.weight|bias``; the convolutions
+    sit at the even indices; the first takes three channels and the last yields
+    3 * scale ** 2 of them."""
+    indices = {}
+    for name, shape in t.items():
+        m = _SRVGG_PARAM.fullmatch(name)
+        if m is None:
+            return False
+        if m.group(2) == "weight" and len(shape) == 4:
+            indices[int(m.group(1))] = shape
+    if len(indices) < 3 or 0 not in indices or any(i % 2 for i in indices):
+        return False
+    out = indices[max(indices)][0]
+    scale_squared, remainder = divmod(out, 3)
+    return indices[0][1] == 3 and remainder == 0 and int(scale_squared ** 0.5) ** 2 == scale_squared
+
+
+def _upscaler_info(t: dict) -> Optional[FileInfo]:
+    """An RGB ESRGAN upscaler (basicsr RRDBNet, original ESRGAN or Real-ESRGAN's
+    SRVGGNetCompact layout), or None."""
+    if _is_basicsr_rrdbnet(t) or _is_original_esrgan(t) or _is_srvgg_compact(t):
+        return FileInfo("upscaler")
+    return None
 
 
 def classify_tensors(tensors: dict, arch: Optional[str] = None) -> FileInfo:

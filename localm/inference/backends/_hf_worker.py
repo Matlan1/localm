@@ -36,6 +36,17 @@ from typing import Any, Callable, Iterator, Literal, Mapping, Optional, Sequence
 from localm.debuglog import logger
 
 
+def _invalid_config_errors() -> tuple:
+    """The exception types transformers raises for a model configuration whose
+    values fail validation: ``ValueError`` and, where huggingface_hub provides
+    it, ``StrictDataclassError`` (not a ``ValueError``)."""
+    try:
+        from huggingface_hub.errors import StrictDataclassError
+    except ImportError:
+        return (ValueError,)
+    return (ValueError, StrictDataclassError)
+
+
 def _require_torch():
     try:
         import torch
@@ -1537,16 +1548,23 @@ class HFWorker:
             # processor to load), but a logged failure here may mean a genuine
             # multimodal model lost its image/audio capability, so it is
             # surfaced rather than swallowed.
+            from localm.inference.backends.llamacpp._runner import shorten_long_digits
+            shown = shorten_long_digits(f"{type(e).__name__}: {e}")
             logger.warning(
-                "processor load failed (%s: %s); falling back to text-only tokenizer",
-                type(e).__name__, e,
-            )
+                "processor load failed (%s); falling back to text-only tokenizer", shown)
             self._processor = None
-            self.processor_error = f"{type(e).__name__}: {e}"
-            with _filter_docstring_leak():
-                self._tokenizer = tr.AutoTokenizer.from_pretrained(
-                    self.model_path, trust_remote_code=trust_remote_code
-                )
+            self.processor_error = shown
+            try:
+                with _filter_docstring_leak():
+                    self._tokenizer = tr.AutoTokenizer.from_pretrained(
+                        self.model_path, trust_remote_code=trust_remote_code
+                    )
+            except _invalid_config_errors() as tok_err:
+                from localm.inference.backends.base import ModelRefusedError
+                raise ModelRefusedError(
+                    f"{Path(self.model_path).name} cannot be loaded: its configuration "
+                    f"is not valid. "
+                    + " ".join(shorten_long_digits(str(tok_err)).split())) from tok_err
 
         # --- Model ---
         logger.debug("hf load: loading weights")
