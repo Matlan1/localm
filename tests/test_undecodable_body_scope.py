@@ -5,7 +5,6 @@ FastAPI's own body parse. A route that raises its own 400 chained from a
 writes the debug refusal line."""
 
 import logging
-import os
 from unittest.mock import MagicMock
 
 from fastapi import FastAPI, HTTPException
@@ -64,9 +63,9 @@ def test_tts_route_keeps_its_own_400_for_a_non_utf8_body():
     assert r.json()["detail"] == "The request body is not valid JSON."
 
 
-def _api_client() -> TestClient:
+def _api_client(monkeypatch) -> TestClient:
     from localm.inference.http_server import create_app
-    os.environ.pop("LOCALM_API_KEY", None)
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     engine = MagicMock()
     engine.display_name = "m"
     engine.active_requests = 0
@@ -74,8 +73,8 @@ def _api_client() -> TestClient:
     return TestClient(create_app(engine), raise_server_exceptions=False)
 
 
-def test_fastapis_own_parse_of_a_non_utf8_json_body_is_still_422():
-    r = _api_client().post("/v1/chat/completions", content=BAD_BYTES,
+def test_fastapis_own_parse_of_a_non_utf8_json_body_is_still_422(monkeypatch):
+    r = _api_client(monkeypatch).post("/v1/chat/completions", content=BAD_BYTES,
                            headers=JSON_HEADERS)
     assert r.status_code == 422, r.text[:300]
     assert r.json()["detail"] == UNDECODABLE_BODY_MESSAGE
@@ -84,8 +83,8 @@ def test_fastapis_own_parse_of_a_non_utf8_json_body_is_still_422():
 def test_the_422_branch_writes_the_debug_refusal_line(monkeypatch, caplog):
     monkeypatch.setenv("LOCALM_DEBUG", "1")
     with caplog.at_level(logging.DEBUG, logger="localm"):
-        r = _api_client().post("/v1/chat/completions", content=BAD_BYTES,
-                               headers=JSON_HEADERS)
+        r = _api_client(monkeypatch).post("/v1/chat/completions", content=BAD_BYTES,
+                                          headers=JSON_HEADERS)
     assert r.status_code == 422
     lines = [rec.getMessage() for rec in caplog.records
              if " refused 422: " in rec.getMessage()]

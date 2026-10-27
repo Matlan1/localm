@@ -14,8 +14,12 @@ REASON = "the model worker exited during the reply (worker exit code 3221225477)
 
 
 def _worker_records(caplog):
-    return [r for r in caplog.records
-            if r.levelno == logging.WARNING and "worker exit code 3221225477" in r.getMessage()]
+    """The INFO records carrying the exit reason; asserts none is WARNING or
+    above (the console mirror shows WARNING+ and the CLI already prints it)."""
+    carrying = [r for r in caplog.records
+                if "worker exit code 3221225477" in r.getMessage()]
+    assert all(r.levelno == logging.INFO for r in carrying), carrying
+    return carrying
 
 
 def _engine_raising(exc):
@@ -26,7 +30,7 @@ def _engine_raising(exc):
     return engine
 
 
-def test_single_prompt_path_logs_a_warning_with_the_exit_reason(
+def test_single_prompt_path_logs_the_exit_reason_at_info(
         cli_runner, tmp_path, monkeypatch, caplog):
     model_f = tmp_path / "some-model.gguf"
     model_f.write_bytes(b"GGUF")
@@ -45,7 +49,7 @@ def test_single_prompt_path_logs_a_warning_with_the_exit_reason(
     assert "detail" not in _worker_records(caplog)[0].getMessage()
 
 
-def test_interactive_path_logs_a_warning_with_the_exit_reason(monkeypatch, caplog):
+def test_interactive_path_logs_the_exit_reason_at_info(monkeypatch, caplog):
     from localm.cli import chat as chat_mod
     engine = _engine_raising(WorkerDiedError(REASON))
     engine.display_name = "m"

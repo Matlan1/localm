@@ -797,13 +797,13 @@ def _collect_summary(engine, messages: list, max_tokens: int) -> str:
 
 def _log_worker_death(exc: BaseException) -> None:
     """Log the first line of a ``WorkerDiedError`` (the worker exit reason) at
-    WARNING so a bug report's ring buffer carries it; any other exception is
-    left alone. Never raises."""
+    INFO so a bug report's ring buffer carries it without a second console
+    line; any other exception is left alone. Never raises."""
     from localm.inference.backends.base import WorkerDiedError
     if isinstance(exc, WorkerDiedError):
         from localm.debuglog import logger as _dbg
-        _dbg.warning("generation worker died: %s",
-                     (str(exc).splitlines() or [""])[0])
+        _dbg.info("generation worker died: %s",
+                  (str(exc).splitlines() or [""])[0])
 
 
 def _stream_once(engine, messages: list, **kwargs) -> str:
