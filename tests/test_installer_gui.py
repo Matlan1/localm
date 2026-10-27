@@ -202,6 +202,7 @@ def test_the_uv_being_used_is_on_the_path_the_steps_inherit(gui, tmp_path,
     d.mkdir()
     exe = d / ("uv.exe" if gui.IS_WINDOWS else "uv")
     exe.write_bytes(b"")
+    exe.chmod(0o755)
     monkeypatch.setenv("PATH", str(tmp_path / "nothing"))
     env = gui._env_for(gui.Plan())
     first = env["PATH"].split(os.pathsep)[0]
@@ -1713,3 +1714,120 @@ def test_the_title_bar_setting_reaches_the_real_window(gui, dark):
         assert value.value == int(dark)
     finally:
         root.destroy()
+
+
+class TestContainedUv:
+    """Portable means uv itself lives in the folder (setup.bat's wording), whatever
+    uv the launcher used to open the window."""
+
+    @staticmethod
+    def _uv(directory, gui):
+        directory.mkdir(parents=True, exist_ok=True)
+        exe = directory / ("uv.exe" if gui.IS_WINDOWS else "uv")
+        exe.write_bytes(b"")
+        exe.chmod(0o755)
+        return exe
+
+    def test_portable_with_only_an_outside_uv_installs_the_contained_one_first(
+            self, gui, tmp_path, monkeypatch):
+        monkeypatch.setenv("PATH", str(self._uv(tmp_path / "sysbin", gui).parent))
+        steps = gui.all_steps(gui.Plan(backend="own", portable_store=True))
+        assert steps[0].label == "Installing uv into this folder"
+        assert steps[0].key == "uv-portable" and steps[0].fatal
+        assert [s.label for s in steps[1:]] == [s.label for s in gui.build_steps(
+            gui.Plan(backend="own", portable_store=True))]
+
+    def test_the_step_installs_into_the_folder_and_reports_a_failure(
+            self, gui, tmp_path, monkeypatch):
+        calls = []
+        tool = gui.uv_tool()
+
+        def fake(root, **kw):
+            calls.append(Path(root))
+            return self._uv(Path(root) / ".uv", gui)
+
+        monkeypatch.setattr(tool, "bootstrap_uv", fake)
+        gui.all_steps(gui.Plan(portable_store=True))[0].run(lambda s: None)
+        assert calls == [tmp_path]
+
+        def failing(root, **kw):
+            raise tool.UvBootstrapError("offline")
+
+        monkeypatch.setattr(tool, "bootstrap_uv", failing)
+        shutil.rmtree(tmp_path / ".uv")
+        with pytest.raises(gui.StepFailed, match="offline"):
+            gui.all_steps(gui.Plan(portable_store=True))[0].run(lambda s: None)
+
+    def test_no_step_when_the_contained_uv_is_already_there(self, gui, tmp_path):
+        self._uv(tmp_path / ".uv", gui)
+        assert gui.contained_uv_step(gui.Plan(portable_store=True)) is None
+
+    def test_no_step_for_the_shared_choice(self, gui, tmp_path, monkeypatch):
+        monkeypatch.setenv("PATH", str(self._uv(tmp_path / "sysbin", gui).parent))
+        assert gui.contained_uv_step(gui.Plan(portable_store=False)) is None
+        assert [s.label for s in gui.all_steps(gui.Plan(portable_store=False))] == [
+            s.label for s in gui.build_steps(gui.Plan(portable_store=False))]
+
+    def test_a_uv_outside_the_folder_is_reported_as_shared(self, gui, tmp_path, monkeypatch):
+        own = self._uv(tmp_path.parent / (tmp_path.name + "-outside") / "sysbin", gui)
+        monkeypatch.setenv("PATH", str(own.parent))
+        assert Path(gui.shared_uv()).samefile(own)
+        self._uv(tmp_path / ".uv", gui)
+        assert gui.shared_uv() is None, "a contained uv wins and is not a shared one"
+
+    def test_a_shared_uv_is_recorded_by_its_full_path(self, gui, tmp_path, monkeypatch):
+        own = tmp_path / "sysbin" / "uv"
+        monkeypatch.setattr(gui, "shared_uv", lambda: str(own))
+        cmds = _commands_for(gui, monkeypatch, gui.Plan(backend="own", portable_store=False))
+        rec = [c for c in cmds if "localm.install_manifest" in c][0]
+        assert rec[rec.index("--uv-exe") + 1] == str(own)
+
+    def test_a_contained_uv_is_recorded_as_uv_dir_and_not_as_a_shared_one(
+            self, gui, tmp_path, monkeypatch):
+        self._uv(tmp_path / ".uv", gui)
+        cmds = _commands_for(gui, monkeypatch, gui.Plan(backend="own", portable_store=True))
+        rec = [c for c in cmds if "localm.install_manifest" in c][0]
+        assert rec[rec.index("--uv-dir") + 1] == str(tmp_path / ".uv")
+        assert "--uv-exe" not in rec
+
+    def test_the_launcher_preset_starts_the_window_on_shared(self, gui, monkeypatch):
+        assert gui.STORE_ENV == "LOCALM_GUI_STORE"
+        monkeypatch.setenv(gui.STORE_ENV, "shared")
+        assert os.environ.get(gui.STORE_ENV) == "shared"
+
+    def test_a_missing_uv_names_every_place_it_looked(self, gui, tmp_path, monkeypatch):
+        monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+        monkeypatch.setattr(gui.Path, "home", classmethod(lambda cls: tmp_path / "nohome"))
+        with pytest.raises(gui.StepFailed) as ei:
+            gui.uv_argv("venv")
+        assert str(tmp_path / ".uv") in str(ei.value) and "PATH" in str(ei.value)
+
+
+class TestLauncherStorePreset:
+    """setup-gui.bat / setup-gui.sh pass the Portable or Shared answer to the window."""
+
+    @staticmethod
+    def _wizard(gui):
+        tk = pytest.importorskip("tkinter")
+        from tkinter import filedialog, ttk
+        root = build_tk_root(tk.Tk)
+        root.withdraw()
+        return root, gui.Wizard(root, tk, ttk, filedialog)
+
+    def test_the_window_starts_on_portable_by_default(self, gui, monkeypatch):
+        monkeypatch.delenv(gui.STORE_ENV, raising=False)
+        root, wizard = self._wizard(gui)
+        try:
+            assert wizard.store_var.get() is True
+            assert wizard.current_plan().portable_store is True
+        finally:
+            root.destroy()
+
+    def test_the_window_starts_on_shared_when_the_launcher_says_so(self, gui, monkeypatch):
+        monkeypatch.setenv(gui.STORE_ENV, "shared")
+        root, wizard = self._wizard(gui)
+        try:
+            assert wizard.store_var.get() is False
+            assert wizard.current_plan().portable_store is False
+        finally:
+            root.destroy()

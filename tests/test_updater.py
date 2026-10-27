@@ -442,6 +442,33 @@ def _fake_install(tmp_path, deps=("click",)):
     return inst
 
 
+_UV_NAME = "uv.exe" if sys.platform == "win32" else "uv"
+
+
+def _fake_uv(directory):
+    """An executable-looking uv file in *directory*; returns its path."""
+    directory.mkdir(parents=True, exist_ok=True)
+    exe = directory / _UV_NAME
+    exe.write_bytes(b"")
+    exe.chmod(0o755)
+    return exe
+
+
+@pytest.fixture
+def no_uv(tmp_path, monkeypatch):
+    """A machine with no uv on PATH and none in the home directory."""
+    home = tmp_path / "userhome"
+    home.mkdir()
+    monkeypatch.setattr(pathlib.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setenv("PATH", str(tmp_path / "emptypath"))
+    return home
+
+
+def _config(monkeypatch, tmp_path):
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
+    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
+
+
 def test_apply_reboot_swaps_and_reports(tmp_path, monkeypatch, sig_env):
     set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
     monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
@@ -454,22 +481,158 @@ def test_apply_reboot_swaps_and_reports(tmp_path, monkeypatch, sig_env):
     assert (inst / "localm" / "__init__.py").read_text() == "# 0.2.0"
 
 
-def test_apply_deps_runs_post_command(tmp_path, monkeypatch, sig_env):
-    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
-    monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
+def test_apply_deps_runs_post_command(tmp_path, monkeypatch, sig_env, no_uv):
+    _config(monkeypatch, tmp_path)
     inst = _fake_install(tmp_path, deps=("click",))
+    uv = _fake_uv(inst / ".uv")
     ran = []
     op, sig = _signed_build("0.2.0", ["click", "httpx"])
     res = updater.apply(5, installed=inst, signature=sig, download_opener=op,
                         runner=lambda c: ran.append(c) or 0)
     assert res["klass"] == "deps"
-    assert ran and ran[0][:3] == ["uv", "pip", "install"]
+    assert ran and ran[0][:4] == [str(uv), "pip", "install", "-p"]
 
 
-def test_apply_rolls_back_on_post_command_failure(tmp_path, monkeypatch, sig_env):
+def test_apply_deps_uses_the_contained_uv_that_is_not_on_path(tmp_path, monkeypatch, sig_env, no_uv):
+    """The reported failure: a Portable install whose uv lives in .uv and nowhere on PATH."""
+    _config(monkeypatch, tmp_path)
+    inst = _fake_install(tmp_path, deps=("click",))
+    uv = _fake_uv(inst / ".uv")
+    ran = []
+    op, sig = _signed_build("0.2.0", ["click", "httpx"])
+    updater.apply(5, installed=inst, signature=sig, download_opener=op,
+                  runner=lambda c: ran.append(c) or 0)
+    assert ran[0][0] == str(uv)
+    assert (inst / "VERSION").read_text().strip() == "0.2.0"
+
+
+def test_apply_deps_uses_the_uv_on_path_when_the_install_has_none(tmp_path, monkeypatch, sig_env, no_uv):
+    _config(monkeypatch, tmp_path)
+    inst = _fake_install(tmp_path, deps=("click",))
+    on_path = _fake_uv(tmp_path / "somebin")
+    monkeypatch.setenv("PATH", str(on_path.parent))
+    ran = []
+    op, sig = _signed_build("0.2.0", ["click", "httpx"])
+    updater.apply(5, installed=inst, signature=sig, download_opener=op,
+                  runner=lambda c: ran.append(c) or 0)
+    assert pathlib.Path(ran[0][0]).samefile(on_path)
+    assert not (inst / ".uv").exists()
+
+
+def test_apply_deps_uses_the_shared_uv_the_install_record_names(tmp_path, monkeypatch, sig_env, no_uv):
+    """A user's own uv, chosen at setup and recorded: found by its recorded path
+    even though it is on no PATH, and preferred over a different uv on PATH."""
+    _config(monkeypatch, tmp_path)
+    inst = _fake_install(tmp_path, deps=("click",))
+    own = _fake_uv(tmp_path / "my-uv-home")
+    other = _fake_uv(tmp_path / "otherbin")
+    monkeypatch.setenv("PATH", str(other.parent))
+    (inst / ".localm-install.json").write_text(
+        json.dumps({"schema": 3, "uv_exe": str(own)}), encoding="utf-8")
+    ran = []
+    op, sig = _signed_build("0.2.0", ["click", "httpx"])
+    updater.apply(5, installed=inst, signature=sig, download_opener=op,
+                  runner=lambda c: ran.append(c) or 0)
+    assert ran[0][0] == str(own)
+
+
+def test_apply_deps_installs_the_pinned_uv_when_the_install_has_none(tmp_path, monkeypatch, sig_env, no_uv):
+    _config(monkeypatch, tmp_path)
+    inst = _fake_install(tmp_path, deps=("click",))
+    from localm import uv_tool
+    boots = []
+
+    def fake_bootstrap(root, **kw):
+        boots.append(pathlib.Path(root))
+        return _fake_uv(pathlib.Path(root) / ".uv")
+
+    monkeypatch.setattr(uv_tool, "bootstrap_uv", fake_bootstrap)
+    ran = []
+    op, sig = _signed_build("0.2.0", ["click", "httpx"])
+    res = updater.apply(5, installed=inst, signature=sig, download_opener=op,
+                        runner=lambda c: ran.append(c) or 0)
+    assert res["applied"] is True and boots == [inst]
+    assert ran[0][0] == str(inst / ".uv" / _UV_NAME)
+    recorded = json.loads((inst / ".localm-install.json").read_text(encoding="utf-8"))
+    assert pathlib.Path(recorded["uv_dir"]) == (inst / ".uv").resolve()
+
+
+def test_apply_deps_without_any_uv_refuses_before_swapping_and_says_what_it_tried(
+        tmp_path, monkeypatch, sig_env, no_uv):
+    _config(monkeypatch, tmp_path)
+    inst = _fake_install(tmp_path, deps=("click",))
+    from localm import uv_tool
+    from localm.bugreport import LocalmError
+
+    def failing_bootstrap(root, **kw):
+        raise uv_tool.UvBootstrapError("could not download the uv 0.13.4 installer: offline")
+
+    monkeypatch.setattr(uv_tool, "bootstrap_uv", failing_bootstrap)
+    ran = []
+    op, sig = _signed_build("0.2.0", ["click", "httpx"])
+    with pytest.raises(LocalmError) as ei:
+        updater.apply(5, installed=inst, signature=sig, download_opener=op,
+                      runner=lambda c: ran.append(c) or 0)
+    text = f"{ei.value.summary} {ei.value.reason}"
+    assert "uv" in ei.value.summary and "Errno" not in text
+    assert str(inst / ".uv") in text and "PATH" in text and "offline" in text
+    assert ran == []
+    assert (inst / "VERSION").read_text().strip() == "0.1.0"
+    assert (inst / "localm" / "__init__.py").read_text() == "# 0.1.0"
+
+
+def test_apply_without_a_deps_change_never_needs_uv(tmp_path, monkeypatch, sig_env, no_uv):
+    _config(monkeypatch, tmp_path)
+    inst = _fake_install(tmp_path, deps=("click",))
+    from localm import uv_tool
+
+    def boom(root, **kw):
+        raise AssertionError("a reboot-class update must not look for or install uv")
+
+    monkeypatch.setattr(uv_tool, "bootstrap_uv", boom)
+    op, sig = _signed_build("0.2.0", ["click"])
+    res = updater.apply(5, installed=inst, signature=sig, download_opener=op)
+    assert res["klass"] == "reboot" and res["applied"] is True
+
+
+def test_apply_deps_names_the_uv_it_could_not_start(tmp_path, monkeypatch, sig_env, no_uv):
+    """A uv that vanishes between the look-up and the run rolls back with its path
+    in the reason, not a bare Errno 2."""
+    _config(monkeypatch, tmp_path)
+    inst = _fake_install(tmp_path, deps=("click",))
+    uv = _fake_uv(inst / ".uv")
+    from localm.bugreport import LocalmError
+
+    def runner(cmd):
+        raise FileNotFoundError(2, "No such file or directory", cmd[0])
+
+    op, sig = _signed_build("0.2.0", ["click", "httpx"])
+    with pytest.raises(LocalmError) as ei:
+        updater.apply(5, installed=inst, signature=sig, download_opener=op, runner=runner)
+    assert f"could not start {uv}" in ei.value.reason
+    assert (inst / "VERSION").read_text().strip() == "0.1.0"
+
+
+def test_deps_env_points_a_contained_install_at_its_own_cache(tmp_path, monkeypatch):
+    inst = tmp_path / "inst"
+    inst.mkdir()
+    (inst / ".localm-install.json").write_text(json.dumps({
+        "schema": 3, "runtime_contained": True,
+        "cache_dir": str(inst / ".cache"), "python_dir": str(inst / ".python")}), encoding="utf-8")
+    monkeypatch.delenv("UV_CACHE_DIR", raising=False)
+    monkeypatch.setenv("UV_PYTHON_INSTALL_DIR", "kept-as-set")
+    env = updater._deps_env(inst)
+    assert env["UV_CACHE_DIR"] == str(inst / ".cache")
+    assert env["UV_PYTHON_INSTALL_DIR"] == "kept-as-set"
+    (inst / ".localm-install.json").write_text(json.dumps({"schema": 3}), encoding="utf-8")
+    assert "UV_CACHE_DIR" not in updater._deps_env(inst)
+
+
+def test_apply_rolls_back_on_post_command_failure(tmp_path, monkeypatch, sig_env, no_uv):
     set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
     monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
     inst = _fake_install(tmp_path, deps=("click",))
+    _fake_uv(inst / ".uv")
     op, sig = _signed_build("0.2.0", ["click", "httpx"])
     from localm.bugreport import LocalmError
     with pytest.raises(LocalmError):
@@ -492,12 +655,13 @@ def test_rollback_last_restores(tmp_path, monkeypatch, sig_env):
     assert (inst / "localm" / "__init__.py").read_text() == "# 0.1.0"
 
 
-def test_apply_surfaces_rollback_failure(tmp_path, monkeypatch, sig_env):
+def test_apply_surfaces_rollback_failure(tmp_path, monkeypatch, sig_env, no_uv):
     """If the post-update step fails AND rollback also fails, apply() must say so
     (manual recovery needed) - never report a clean rollback over a broken install."""
     set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
     monkeypatch.setattr("localm.config.home_dir", lambda: tmp_path / "home")
     inst = _fake_install(tmp_path, deps=("click",))
+    _fake_uv(inst / ".uv")
     from localm import _apply_update as au
     from localm.bugreport import LocalmError
 

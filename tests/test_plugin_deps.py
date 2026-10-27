@@ -8,6 +8,8 @@ that exits 0 without actually providing the package is still reported failed.
 """
 
 import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -246,20 +248,48 @@ class _FakeProc:
 
 def test_run_pip_uv_missing_falls_back_to_pip(monkeypatch):
     calls = []
+    fake_uv = str(Path("/somewhere/uv"))
+    monkeypatch.setattr(deps.uv_tool, "find_uv", lambda root: fake_uv)
 
     def fake_popen(cmd, **kw):
         calls.append(cmd[0])
-        if cmd[0] == "uv":
+        if cmd[0] == fake_uv:
             raise FileNotFoundError("no uv")
         return _FakeProc(["collecting x\n", "installed x\n"], 0)
 
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
     ok, out = deps._run_pip(["x>=1"])
     assert ok is True
-    assert calls[0] == "uv"                 # tried uv first
+    assert calls[0] == fake_uv              # tried uv first, by the path find_uv gave
     assert "pip" in "".join(str(c) for c in calls[1:]) or calls[1].endswith("python") \
         or "python" in calls[1]             # then the python -m pip fallback
     assert "installed x" in out
+
+
+def test_run_pip_never_runs_a_bare_uv_when_none_is_found(monkeypatch):
+    calls, lines = [], []
+    monkeypatch.setattr(deps.uv_tool, "find_uv", lambda root: None)
+
+    def fake_popen(cmd, **kw):
+        calls.append(cmd)
+        return _FakeProc(["installed x\n"], 0)
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    ok, _out = deps._run_pip(["x>=1"], on_progress=lines.append)
+    assert ok is True and len(calls) == 1
+    assert calls[0][0] == sys.executable and calls[0][1:3] == ["-m", "pip"]
+    assert any("uv not found" in line for line in lines)
+
+
+def test_run_pip_runs_the_uv_find_uv_returns_by_that_path(monkeypatch):
+    calls = []
+    fake_uv = str(Path("/somewhere/uv"))
+    monkeypatch.setattr(deps.uv_tool, "find_uv", lambda root: fake_uv)
+    monkeypatch.setattr(subprocess, "Popen",
+                        lambda cmd, **kw: calls.append(cmd) or _FakeProc(["ok\n"], 0))
+    ok, _out = deps._run_pip(["x>=1"])
+    assert ok is True and calls[0][:3] == [fake_uv, "pip", "install"]
+    assert calls[0][3:5] == ["--python", sys.executable]
 
 
 def test_run_pip_both_fail_returns_false(monkeypatch):
