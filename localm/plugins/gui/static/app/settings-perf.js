@@ -2619,14 +2619,18 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       messages.push(entry);
     }
   }
+  // Spans go on the wire in Unicode code points, which is how the server
+  // indexes content, not in UTF-16 units.
   for (const m of messages) {
-    if (m.own === undefined) continue;
     const own = m.own;
     delete m.own;
-    if (m.role !== "user" || m.origin || typeof m.content !== "string") continue;
-    const whole = own.length === 1 && own[0][0] === 0 && own[0][1] === m.content.length;
-    // The server counts Unicode code points, not UTF-16 units.
+    if (typeof m.content !== "string") continue;
     const points = (i) => [...m.content.slice(0, i)].length;
+    if (m.untrusted_spans) {
+      m.untrusted_spans = m.untrusted_spans.map(([a, b]) => [points(a), points(b)]);
+    }
+    if (own === undefined || m.role !== "user" || m.origin) continue;
+    const whole = own.length === 1 && own[0][0] === 0 && own[0][1] === m.content.length;
     if (!whole) m.user_spans = own.map(([a, b]) => [points(a), points(b)]);
   }
 
