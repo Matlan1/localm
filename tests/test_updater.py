@@ -70,7 +70,7 @@ def test_check_reports_newer(monkeypatch):
     assert res["latest"] == "v0.2.0"
     assert res["newer"] is True
     assert res["asset"]["id"] == 3
-    assert op.url.endswith("/update")
+    assert op.url.endswith("/update?client=0.1.0")
 
 
 def test_check_not_newer_when_same(monkeypatch):
@@ -154,7 +154,7 @@ def test_check_net_mode_off_but_exempted_still_calls_opener(monkeypatch):
     res = updater.check(opener=op)
     assert op.calls["n"] == 1
     assert res["newer"] is True
-    assert op.url.endswith("/update")
+    assert op.url.endswith("/update?client=0.1.0")
 
 
 @pytest.mark.parametrize("mode", ["ask", "allow"])
@@ -209,12 +209,12 @@ def test_net_policy_allows_update_check_fails_safe_on_unreadable_config(monkeypa
 
 def test_check_stable_by_default_no_channel_param(monkeypatch):
     """Opt-in only: with the setting absent OR explicitly False, the request
-    carries no query string at all, not even an empty one."""
+    carries no channel parameter, only the client version."""
     set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
     monkeypatch.setattr(_version, "read_version", lambda: "0.1.0")
     op = _opener({"ok": True, "version": "v0.2.0"})
     updater.check(opener=op)
-    assert op.url.endswith("/update")
+    assert op.url.endswith("/update?client=0.1.0")
     assert "channel" not in op.url
 
 
@@ -224,7 +224,23 @@ def test_check_prerelease_opt_in_adds_channel_param(monkeypatch):
     monkeypatch.setattr(_version, "read_version", lambda: "0.1.0")
     op = _opener({"ok": True, "version": "v0.2.0"})
     updater.check(opener=op)
-    assert op.url.endswith("/update?channel=prerelease")
+    assert op.url.endswith("/update?client=0.1.0&channel=prerelease")
+
+
+def test_check_names_the_running_version(monkeypatch):
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
+    monkeypatch.setattr(_version, "read_version", lambda: "0.3.2rc1+local")
+    op = _opener({"ok": True, "version": "v0.3.2"})
+    updater.check(opener=op)
+    assert op.url.endswith("/update?client=0.3.2rc1%2Blocal")
+
+
+def test_check_without_a_readable_version_still_identifies_as_a_client(monkeypatch):
+    set_config(monkeypatch, lambda: {"bugreport_upload_url": "https://w"})
+    monkeypatch.setattr(_version, "read_version", lambda: "")
+    op = _opener({"ok": True, "version": "v0.3.2"})
+    updater.check(opener=op)
+    assert op.url.endswith("/update?client=unknown")
 
 
 def test_prerelease_channel_enabled_reads_the_setting(monkeypatch):

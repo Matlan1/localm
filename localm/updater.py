@@ -71,6 +71,12 @@ _PINNED_KEYSET: dict = {
     },
 }
 
+# Public keys that must never be trusted again, in any role and from any source
+# (built in, saved trust file, or a key set offered by a signature envelope).
+_REVOKED_KEYS: frozenset = frozenset({
+    "3501b23eb1ab6ec245b5e9d9c6a70b522ca89d6250d13060a9642ce1c8868ecf",
+})
+
 _HEX_DIGITS = frozenset("0123456789abcdef")
 
 
@@ -129,6 +135,8 @@ def _parse_role(obj, where: str, min_threshold: int) -> dict:
         raise _BadSignature(f"{where} keys must be a non-empty list")
     for k in keys:
         _public_key(k)
+        if k in _REVOKED_KEYS:
+            raise _BadSignature(f"{where} contains the revoked key {k[:8]}")
     if len(set(keys)) != len(keys):
         raise _BadSignature(f"{where} keys are not distinct")
     if len(keys) < threshold:
@@ -437,10 +445,12 @@ def check(*, opener=None) -> dict:
     request is built or attempted, so a blocked check never resolves DNS or
     opens a socket, and it RAISES rather than returning a dict.
 
-    When the prerelease channel is opted into, appends ``?channel=prerelease`` to
-    the request; the PROXY (not this client) decides which single candidate
-    release to return for that channel, and is_newer() below orders that one
-    candidate against the running version."""
+    The request carries ``client=<running version>``; the proxy offers a request
+    without it (a client from 0.3.1 or earlier) no release newer than its legacy
+    ceiling. When the prerelease channel is opted into, it also carries
+    ``channel=prerelease``; the PROXY (not this client) decides which single
+    candidate release to return for that channel, and is_newer() below orders that
+    one candidate against the running version."""
     from localm import _proxy
     from localm.bugreport import LocalmError
     base, token = endpoint()
@@ -452,9 +462,13 @@ def check(*, opener=None) -> dict:
             "update checks are off because network access is set to off",
             reason='turn on "Check for updates even when network access is off" '
                    "in Settings, or set network access to ask or allow")
-    path = "/update?channel=prerelease" if _prerelease_channel_enabled() else "/update"
-    data = _proxy.request(base, path, token=token, opener=opener)
+    import urllib.parse
     current = _version.read_version()
+    query = {"client": current or "unknown"}
+    if _prerelease_channel_enabled():
+        query["channel"] = "prerelease"
+    path = "/update?" + urllib.parse.urlencode(query)
+    data = _proxy.request(base, path, token=token, opener=opener)
     latest = data.get("version") if isinstance(data, dict) else None
     newer = bool(latest) and _version.is_newer(latest, current)
     # Whether "not newer" means anything: is_newer() returns False both for a

@@ -155,7 +155,7 @@ def test_wan_video_graph():
         wf, report = ci.convert(data, "video", reg={})
         assert set(wf["models"]) == {"model", "t5xxl", "vae"}
         assert wf["models"]["model"]["source"]["sha256"].startswith("be531024")
-        assert wf["models"]["t5xxl"]["source"]["repo"] == "Comfy-Org/Wan_2.2_ComfyUI_Repackaged"
+        assert wf["models"]["t5xxl"]["source"]["repo"] == "Comfy-Org/Wan-2.2"
         assert wf["params"] == {"steps": 30, "cfg": 6.0, "prompt": "a cat",
                                 "negative_prompt": "static", "flow_shift": 8.0,
                                 "width": 832, "height": 480, "fps": 16, "seconds": 2.06}

@@ -217,7 +217,8 @@ def print_banner(
     mode_colours = {"privacy": "dim", "log": "yellow", "full": "green"}
     mode_info = ""
     if session_mode:
-        colour   = mode_colours.get(str(session_mode).lower(), "dim")
+        session_mode = str(getattr(session_mode, "value", session_mode))
+        colour   = mode_colours.get(session_mode.lower(), "dim")
         mode_info = f"  ·  [{colour}]mode: {session_mode}[/{colour}]"
     console.print(Panel(
         f"[bold cyan]{agent_name}[/bold cyan]  ·  "

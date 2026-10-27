@@ -18,8 +18,8 @@ The recommended native model is **Wan2.1 T2V 1.3B**, which needs three files (ab
 6.3 GB in total):
 
 ```bash
-localm pull Comfy-Org/Wan_2.1_ComfyUI_repackaged:split_files/diffusion_models/wan2.1_t2v_1.3B_fp16.safetensors --type diffusion-unet
-localm pull Comfy-Org/Wan_2.1_ComfyUI_repackaged:split_files/vae/wan_2.1_vae.safetensors --type vae
+localm pull Comfy-Org/Wan-2.1:split_files/diffusion_models/wan2.1_t2v_1.3B_fp16.safetensors --type diffusion-unet
+localm pull Comfy-Org/Wan-2.1:split_files/vae/wan_2.1_vae.safetensors --type vae
 localm pull city96/umt5-xxl-encoder-gguf:umt5-xxl-encoder-Q4_K_M.gguf --type text-encoder
 ```
 
@@ -87,7 +87,7 @@ The default poll timeout is 60 minutes; very long/large clips on slow cards can 
 
 ## Model files
 
-The template expects the public Comfy-Org repackaged files (ComfyUI v0.3.46+ has the Wan 2.2 nodes built in). Download from `https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged` into ComfyUI's model directories:
+The template expects the public Comfy-Org repackaged files (ComfyUI v0.3.46+ has the Wan 2.2 nodes built in). Download from `https://huggingface.co/Comfy-Org/Wan-2.2` into ComfyUI's model directories:
 
 | File | ComfyUI directory |
 |---|---|

@@ -5,7 +5,8 @@ Offline. Covers the pieces that decide the verdict:
 
   * the C header read against localm's ctypes binding: an unchanged header matches, any
     added, dropped, reordered or retyped field is a FAIL that says the binding needs a
-    code update;
+    code update; the binding's ggml structs are read against ggml's own headers at the
+    submodule commit, never against stable-diffusion.h;
   * the candidate's pins reaching a freshly started interpreter AND a spawned child (the
     sd.cpp worker is one), and not reaching either without the shim;
   * how a backend child's result becomes download / abi / device / generate checks, with
@@ -110,21 +111,110 @@ def bound(cf, binding):
     return cf.binding_structs(binding)
 
 
+class _Resp:
+    def __init__(self, body: bytes):
+        self.body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def read(self):
+        return self.body
+
+
 def _opener_for(text: str, seen: list | None = None):
-    class Resp:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-        def read(self):
-            return text.encode()
-
     def opener(req, timeout=30):
         if seen is not None:
             seen.append(req.full_url)
-        return Resp()
+        return _Resp(text.encode())
+    return opener
+
+
+def _c_fn_type(kind: str, i: int) -> str:
+    if kind == "void":
+        return "void"
+    if kind.startswith("cb:"):
+        return kind[3:]
+    if kind == "voidp":
+        return "const sd_ctx_t*" if i % 2 else "void*"
+    return _c_type(kind, i)
+
+
+def render_functions(functions: dict, *, edit=None, typedefs=()) -> str:
+    """``SD_API`` declarations of *functions* ({name: (return kind, [arg kinds])}),
+    split over lines and commented the way the upstream header has them, behind
+    the export macro's own definition; the names in *typedefs* are rendered as
+    function-pointer typedefs. *edit* may change the dict first."""
+    functions = {k: (r, list(a)) for k, (r, a) in functions.items()}
+    if edit:
+        edit(functions)
+    out = ['#define SD_API __attribute__((visibility("default")))', ""]
+    for n, (name, (ret, args)) in enumerate(functions.items()):
+        out.append(f"// {name} does a thing (see notes);")
+        params = ",\n        ".join(f"{_c_fn_type(k, n + i)} a{i}" for i, k in enumerate(args))
+        if name in typedefs:
+            out.append(f"typedef {_c_fn_type(ret, n)} (*{name})({params or 'void'});")
+        else:
+            out.append(f"SD_API {_c_fn_type(ret, n)} {name}({params or 'void'});")
+    return "\n".join(out)
+
+
+GGML_REPO = "leejet/ggml"
+GGML_COMMIT = "c" * 40
+
+
+def render_tagged(structs: dict) -> str:
+    """C text declaring *structs* the way ggml's headers do: ``struct name { ... };``
+    with ``const char * name`` spacing."""
+    out = ["#pragma once", "    struct ggml_tensor;", ""]
+    for name, fields in structs.items():
+        out.append(f"    struct {name} {{")
+        for i, (kind, field) in enumerate(fields):
+            c = _c_type(kind, i).replace("*", " *")
+            if kind.startswith("struct:"):
+                c = "struct " + c
+            out.append(f"        // member {i}")
+            out.append(f"        {c} {field};")
+        out.append("    };")
+        out.append("")
+    return "\n".join(out)
+
+
+def header_routes(cf, binding, bound, commit=NEW_COMMIT, *, edit=None, ggml_edit=None,
+                  submodule=None, fn_edit=None):
+    """URL -> body for every read header_check makes for *commit*: stable-diffusion.h
+    declaring the binding's own structs, the ggml submodule lookup, and each ggml
+    header declaring the ggml structs. *edit* / *ggml_edit* change the struct dicts
+    first, *fn_edit* the function declarations; *submodule* replaces the lookup
+    body."""
+    sd, ggml = cf.split_ggml(bound, binding.GGML_STRUCTS)
+    text = (render_header(sd, edit=edit) + "\n"
+            + render_functions(cf.binding_functions(binding), edit=fn_edit,
+                               typedefs=tuple(binding.CALLBACKS)))
+    routes = {cf.HEADER_URL % commit: text.encode()}
+    lookup = submodule if submodule is not None else {
+        "type": "submodule", "sha": GGML_COMMIT,
+        "submodule_git_url": f"https://github.com/{GGML_REPO}.git"}
+    routes[cf.GGML_SUBMODULE_URL % commit] = json.dumps(lookup).encode()
+    for header, structs in ggml.items():
+        structs = {k: list(v) for k, v in structs.items()}
+        if ggml_edit:
+            ggml_edit(header, structs)
+        routes[cf.GGML_HEADER_URL % (GGML_REPO, GGML_COMMIT, header)] = \
+            render_tagged(structs).encode()
+    return routes
+
+
+def _routes_opener(routes: dict, seen: list | None = None):
+    def opener(req, timeout=30):
+        if seen is not None:
+            seen.append(req.full_url)
+        if req.full_url not in routes:
+            raise OSError(f"404 {req.full_url}")
+        return _Resp(routes[req.full_url])
     return opener
 
 
@@ -196,17 +286,191 @@ def test_a_struct_the_binding_does_not_declare_is_ignored(cf, bound):
 def test_header_check_passes_on_a_matching_header_and_reads_the_candidate_commit(
         cf, binding, bound):
     seen = []
-    status, detail = cf.header_check(NEW_COMMIT, _opener_for(render_header(bound), seen),
-                                     binding)
-    assert status == cf.PASS and "field for field" in detail
-    assert seen == [cf.HEADER_URL % NEW_COMMIT]
+    routes = header_routes(cf, binding, bound)
+    status, detail = cf.header_check(NEW_COMMIT, _routes_opener(routes, seen), binding)
+    assert status == cf.PASS and "field for field" in detail, detail
+    assert seen[0] == cf.HEADER_URL % NEW_COMMIT
+    assert sorted(seen) == sorted(routes)
+    assert f"ggml {GGML_COMMIT[:7]}" in detail
+
+
+def test_the_binding_names_its_ggml_structs_and_none_is_in_stable_diffusion_h(binding, bound):
+    assert set(binding.GGML_STRUCTS) <= set(bound)
+    assert {"_GgmlInitParams", "_GgmlDevCaps", "_GgmlDevProps"} <= set(binding.GGML_STRUCTS)
+    assert all(h in ("ggml.h", "ggml-backend.h") for h, _c in binding.GGML_STRUCTS.values())
+
+
+def test_ggml_structs_absent_from_stable_diffusion_h_are_not_a_difference(cf, binding, bound):
+    sd, _ggml = cf.split_ggml(bound, binding.GGML_STRUCTS)
+    assert not set(binding.GGML_STRUCTS) & set(sd)
+    routes = header_routes(cf, binding, bound)
+    status, detail = cf.header_check(NEW_COMMIT, _routes_opener(routes), binding)
+    assert status == cf.PASS, detail
+    assert "not declared in the header" not in detail
+
+
+def test_a_changed_ggml_struct_is_a_difference_named_by_its_ggml_header(cf, binding, bound):
+    def edit(header, structs):
+        if header == "ggml-backend.h":
+            structs["ggml_backend_dev_props"].append(("int", "added_by_ggml"))
+    routes = header_routes(cf, binding, bound, ggml_edit=edit)
+    status, detail = cf.header_check(NEW_COMMIT, _routes_opener(routes), binding)
+    assert status == cf.FAIL
+    assert "ggml-backend.h: ggml_backend_dev_props: header adds ['added_by_ggml']" in detail
+
+
+def test_a_ggml_struct_missing_from_its_header_is_a_difference(cf, binding, bound):
+    def edit(header, structs):
+        structs.pop("ggml_init_params", None)
+    routes = header_routes(cf, binding, bound, ggml_edit=edit)
+    status, detail = cf.header_check(NEW_COMMIT, _routes_opener(routes), binding)
+    assert status == cf.FAIL and "ggml.h: ggml_init_params: not declared" in detail
+
+
+@pytest.mark.parametrize("lookup", [
+    {"type": "dir", "sha": GGML_COMMIT, "submodule_git_url": "https://github.com/leejet/ggml.git"},
+    {"type": "submodule", "sha": "short", "submodule_git_url": "https://github.com/leejet/ggml"},
+    {"type": "submodule", "sha": GGML_COMMIT, "submodule_git_url": "https://evil.example/ggml.git"},
+    {"type": "submodule", "sha": GGML_COMMIT},
+    [],
+])
+def test_a_ggml_submodule_lookup_that_names_no_github_commit_is_skip(cf, binding, bound, lookup):
+    routes = header_routes(cf, binding, bound, submodule=lookup)
+    status, detail = cf.header_check(NEW_COMMIT, _routes_opener(routes), binding)
+    assert status == cf.SKIP and "ggml" in detail
+
+
+def test_an_unreadable_ggml_header_is_skip(cf, binding, bound):
+    routes = header_routes(cf, binding, bound)
+    del routes[cf.GGML_HEADER_URL % (GGML_REPO, GGML_COMMIT, "ggml-backend.h")]
+    status, detail = cf.header_check(NEW_COMMIT, _routes_opener(routes), binding)
+    assert status == cf.SKIP and "ggml-backend.h" in detail
+
+
+def test_ggml_header_spelling_parses_to_the_binding_kinds(cf):
+    src = textwrap.dedent("""
+        struct ggml_backend_dev_caps {
+            // asynchronous operations
+            bool async;
+        };
+        struct ggml_backend_dev_props {
+            const char * name;
+            void * mem_buffer;
+            enum ggml_backend_dev_type type;
+            struct ggml_backend_dev_caps caps;
+        };
+        struct ggml_tensor;
+        typedef struct ggml_backend_device * ggml_backend_dev_t;
+    """)
+    assert cf.parse_header_structs(src) == {
+        "ggml_backend_dev_caps": [("bool", "async")],
+        "ggml_backend_dev_props": [("str", "name"), ("voidp", "mem_buffer"), ("int", "type"),
+                                   ("struct:ggml_backend_dev_caps", "caps")]}
+
+
+def test_the_binding_declares_the_functions_this_check_covers(cf, binding):
+    fns = cf.binding_functions(binding)
+    for name in ("generate_image", "generate_video", "upscale", "new_sd_ctx",
+                 "free_sd_image_generation_result", "free_sd_video_generation_result"):
+        assert name in fns
+    assert fns["generate_image"] == (
+        "bool", ["voidp", "ptr:struct:sd_img_gen_params_t",
+                 "ptr:ptr:struct:sd_image_generation_result_t"])
+    assert fns["sd_set_log_callback"] == ("void", ["cb:sd_log_cb_t", "voidp"])
+    assert fns["sd_preview_cb_t"] == (
+        "void", ["int", "int", "ptr:struct:sd_image_t", "bool", "voidp"])
+
+
+@pytest.mark.parametrize("label,edit,expect", [
+    ("an argument added",
+     lambda f: f["generate_image"][1].append("ptr:int"),
+     "generate_image(): takes 4 argument(s) in the header, 3 in the binding"),
+    ("an argument retyped",
+     lambda f: f["upscale"][1].__setitem__(3, "ptr:ptr:struct:sd_image_t"),
+     "upscale(): argument 4 is ptr:ptr:struct:sd_image_t in the header, "
+     "ptr:ptr:struct:sd_image_generation_result_t in the binding"),
+    ("a return type changed",
+     lambda f: f.__setitem__("sd_commit", ("int", [])),
+     "sd_commit(): returns int in the header, str in the binding"),
+    ("a function removed",
+     lambda f: f.pop("free_sd_video_generation_result"),
+     "free_sd_video_generation_result(): not declared in the header"),
+    ("a callback typedef gains an argument",
+     lambda f: f["sd_progress_cb_t"][1].insert(3, "int"),
+     "sd_progress_cb_t(): takes 5 argument(s) in the header, 4 in the binding"),
+    ("a callback typedef argument retyped",
+     lambda f: f["sd_preview_cb_t"][1].__setitem__(2, "ptr:float"),
+     "sd_preview_cb_t(): argument 3 is ptr:float in the header"),
+    ("a function takes another callback type",
+     lambda f: f["sd_set_log_callback"][1].__setitem__(0, "cb:sd_progress_cb_t"),
+     "sd_set_log_callback(): argument 1 is cb:sd_progress_cb_t in the header, "
+     "cb:sd_log_cb_t in the binding"),
+])
+def test_any_change_to_a_bound_function_is_a_difference(cf, binding, bound, label, edit,
+                                                         expect):
+    routes = header_routes(cf, binding, bound, fn_edit=edit)
+    status, detail = cf.header_check(NEW_COMMIT, _routes_opener(routes), binding)
+    assert status == cf.FAIL and expect in detail, detail
+
+
+def test_a_void_pointer_argument_fits_any_typed_pointer_and_nothing_else(cf):
+    assert cf._kind_fits("voidp", "ptr:struct:sd_ctx_t")
+    assert cf._kind_fits("voidp", "voidp")
+    assert not cf._kind_fits("voidp", "int")
+    assert not cf._kind_fits("voidp", "str")
+    assert not cf._kind_fits("voidp", "ptr:ptr:struct:sd_ctx_t")
+    assert not cf._kind_fits("ptr:struct:sd_ctx_t", "voidp")
+
+
+def test_header_function_declarations_parse_over_lines_and_comments(cf):
+    src = textwrap.dedent("""
+        #if defined(_WIN32)
+        #define SD_API __declspec(dllexport)
+        #else
+        #define SD_API __attribute__((visibility("default")))
+        #endif
+        typedef void (*sd_log_cb_t)(enum sd_log_level_t level, const char* text, void* data);
+        SD_API void sd_set_log_callback(sd_log_cb_t sd_log_cb, void* data);
+        // Returns the number of bytes (excluding the null terminator); call(s) are ok.
+        SD_API size_t sd_list_devices(char* buffer, size_t buffer_size);
+        SD_API const char* sd_commit(void);
+        SD_API enum scheduler_t sd_get_default_scheduler(const sd_ctx_t* sd_ctx,
+                                                         enum sample_method_t m);
+        SD_API bool upscale(upscaler_ctx_t* upscaler_ctx,
+                            sd_image_t input_image,
+                            uint32_t upscale_factor,
+                            sd_image_generation_result_t** result_out);
+        SD_API sd_preview_info_t sd_get_preview_info();
+    """)
+    assert cf.parse_header_functions(src) == {
+        "sd_log_cb_t": ("void", ["int", "str", "voidp"]),
+        "sd_set_log_callback": ("void", ["cb:sd_log_cb_t", "voidp"]),
+        "sd_list_devices": ("u64", ["str", "u64"]),
+        "sd_commit": ("str", []),
+        "sd_get_default_scheduler": ("int", ["ptr:struct:sd_ctx_t", "int"]),
+        "upscale": ("bool", ["ptr:struct:upscaler_ctx_t", "struct:sd_image_t", "u32",
+                             "ptr:ptr:struct:sd_image_generation_result_t"]),
+        "sd_get_preview_info": ("struct:sd_preview_info_t", []),
+    }
+
+
+def test_a_python_keyword_field_compares_under_its_c_name(cf, bound):
+    assert bound["_GgmlDevCaps"][0] == ("bool", "async")
 
 
 def test_header_check_fails_with_the_binding_needs_a_code_update_reason(cf, binding, bound):
-    text = render_header(bound, edit=lambda s: s[_first_struct(s)].append(("int", "extra")))
-    status, detail = cf.header_check(NEW_COMMIT, _opener_for(text), binding)
+    routes = header_routes(
+        cf, binding, bound, edit=lambda s: s[_first_struct(s)].append(("int", "extra")))
+    status, detail = cf.header_check(NEW_COMMIT, _routes_opener(routes), binding)
     assert status == cf.FAIL
     assert "binding needs a code update, not an automatic bump" in detail
+
+
+@pytest.mark.integration
+def test_the_binding_matches_the_real_headers_at_the_pinned_commit(cf, binding):
+    from localm.media.sdcpp import pins
+    status, detail = cf.header_check(pins.COMMIT, None, binding)
+    assert status == cf.PASS, detail
 
 
 def test_header_check_is_skip_when_the_header_cannot_be_read(cf, binding):
@@ -704,7 +968,8 @@ class _Api:
         if tamper:
             tamper(listing)
         self.release = {"tag_name": NEW_TAG, "target_commitish": NEW_COMMIT, "assets": listing}
-        self.header = render_header(binding_structs_, edit=header_edit)
+        from localm.media.sdcpp import _binding
+        self.header_routes = header_routes(_CF, _binding, binding_structs_, edit=header_edit)
         self.pins = pins
 
     def cpu_asset(self):
@@ -730,7 +995,7 @@ class _Api:
 
         routes = {bump.RELEASE_URL % (bump.UPSTREAM_REPO, NEW_TAG): self.release,
                   bump.COMMIT_URL % (bump.UPSTREAM_REPO, NEW_TAG): {"sha": NEW_COMMIT},
-                  self.header_url % NEW_COMMIT: self.header.encode()}
+                  **self.header_routes}
 
         def opener(req, timeout=30):
             return Resp(routes[req.full_url])
