@@ -428,6 +428,20 @@ update`, or the GUI "Update now" button). The client is signature-verifying:
   with an error naming it rather than falling back to the built-in keys.
 - **No downgrades.** A validly signed but older, equal, or version-less build is
   refused: a signature proves authenticity, not freshness.
+- **Installing a version you choose.** `localm update --to <version>` (and Settings >
+  Updates > Choose a version) installs the exact release you name, older ones
+  included. Both points above still apply to the plain update; for a chosen version
+  they work like this. The build's VERSION must be the one you asked for, or it is
+  refused. The signature is checked the same way, and when it does not verify
+  (unsigned, signed by a retired or unknown key, or altered after signing) localm
+  tells you why and installs it only if you confirm, and only the exact build you
+  confirmed (matched by its SHA-256). A build that does not verify never changes the
+  keys in use. Over HTTP this needs the `admin` scope. Before a downgrade, localm
+  copies your settings, model registry, coder sessions, memory and plugins to
+  `updates/data-before-<version>-<time>/` in the data directory. An older build
+  installed this way keeps the keys in use: a release from before 0.3.0 gets this
+  build's signature check alongside it, so it can still verify and install newer
+  releases.
 - **HTTPS only.** The download endpoint must be HTTPS and a redirect that would
   downgrade to plain HTTP is blocked.
 - **Your data is never in the swap.** The updater never touches the venv, `.git`,
@@ -446,7 +460,9 @@ build's code and the keys it pins, so a data directory other than the one that
 applied the update trusts the previous keys again until the update is reapplied.
 Builds signed for localm 0.2.0 and earlier use a single-key format that 0.3.0 and
 later refuse. 0.2.0 updates to 0.3.0 as before; an install still on 0.2.0 when a
-later release is published cannot verify that release and needs a fresh install. The GUI "Update now" button's restart (the only
+later release is published cannot verify that release and needs a fresh install
+(an install that went back to 0.2.0 through `localm update --to` is the exception
+described above). The GUI "Update now" button's restart (the only
 transition that happens with nobody watching) is followed by a detached watchdog
 that polls the relaunched build's `/whoami` for the expected version and
 auto-rolls-back if it does not come up healthy within 90 seconds. `localm update`

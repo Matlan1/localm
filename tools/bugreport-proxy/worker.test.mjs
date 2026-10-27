@@ -473,3 +473,182 @@ test("update/download: missing asset id -> 400", async () => {
     req(undefined, { method: "GET", path: "/update/download", headers: { "X-Localm-Token": "s3cret" } }), ENV_UP);
   assert.equal(r.status, 400);
 });
+
+// ------------------- update: choose a release by version -----------------
+
+const RELEASES = [
+  { tag_name: "v0.3.0", name: "0.3.0", body: "old notes", published_at: "2026-10-15T06:29:13Z",
+    draft: false, prerelease: false,
+    assets: [
+      { id: 30, name: "localm-0.3.0.zip", size: 100 },
+      { id: 31, name: "localm-0.3.0.zip.sig", size: 88 },
+      { id: 32, name: "localm-0.3.0.zip.envelope", size: 221 },
+    ] },
+  { tag_name: "llama-cuda-linux-b9870", name: "cuda", draft: false, prerelease: false,
+    published_at: "2026-10-30T00:00:00Z", assets: [{ id: 90, name: "x.tar.gz", size: 1 }] },
+  { tag_name: "v0.4.0rc1", name: "0.4.0rc1", body: "rc", published_at: "2026-10-28T00:00:00Z",
+    draft: false, prerelease: true,
+    assets: [{ id: 50, name: "localm-0.4.0rc1.zip", size: 1 }, { id: 51, name: "localm-0.4.0rc1.zip.sig", size: 221 }] },
+  { tag_name: "v0.5.0", name: "draft", draft: true, prerelease: false,
+    published_at: "2026-10-29T00:00:00Z", assets: [{ id: 60, name: "localm-0.5.0.zip", size: 1 }] },
+  { tag_name: "v0.3.1", name: "0.3.1", body: "new notes", published_at: "2026-10-22T22:06:00Z",
+    draft: false, prerelease: false,
+    assets: [{ id: 40, name: "localm-0.3.1.zip", size: 100 }, { id: 41, name: "localm-0.3.1.zip.sig", size: 221 }] },
+  { tag_name: "v0.1.0", name: "v0.1.0", body: "", published_at: "2026-07-04T17:03:04Z",
+    draft: false, prerelease: false, assets: [{ id: 10, name: "localm-0.1.0.zip", size: 1 }] },
+];
+
+function releasesFetch(seen = {}) {
+  return async (url, opts) => {
+    (seen.urls = seen.urls || []).push(url);
+    if (url.includes("/releases?")) {
+      seen.auth = opts.headers.Authorization;
+      return new Response(JSON.stringify(RELEASES), { status: 200 });
+    }
+    const m = url.match(/\/releases\/assets\/(\d+)$/);
+    if (m) {
+      return { status: 302, ok: false, headers: { get: (k) =>
+        k.toLowerCase() === "location" ? `https://objects.githubusercontent.com/a${m[1]}` : null } };
+    }
+    const a = url.match(/^https:\/\/objects\.githubusercontent\.com\/a(\d+)$/);
+    if (a) return new Response(`sig-of-${a[1]}\n`, { status: 200 });
+    return new Response("{}", { status: 404 });
+  };
+}
+
+const UP_HDR = { "X-Localm-Token": "s3cret" };
+
+test("update/releases: app releases only, newest first, no drafts, no prereleases by default", async () => {
+  const seen = {};
+  const restore = stubFetch(releasesFetch(seen));
+  try {
+    const r = await worker.fetch(
+      req(undefined, { method: "GET", path: "/update/releases", headers: UP_HDR }), ENV_UP);
+    assert.equal(r.status, 200);
+    const out = await r.json();
+    assert.deepEqual(out.releases.map((x) => x.version), ["v0.3.1", "v0.3.0", "v0.1.0"]);
+    assert.equal(seen.auth, "Bearer ght_update");
+    assert.equal(seen.urls.length, 1, "the list fetches no signature assets");
+    const [r031, r030, r010] = out.releases;
+    assert.equal(r031.asset.id, 40);
+    assert.equal(r031.signed, true);
+    assert.equal(r030.signed, true);
+    assert.equal(r010.signed, false, "a release with no signature asset is reported unsigned");
+    assert.equal(r031.notes, "new notes");
+    assert.equal(r031.prerelease, false);
+  } finally { restore(); }
+});
+
+test("update/releases: channel=prerelease includes prereleases, still never a draft", async () => {
+  const restore = stubFetch(releasesFetch());
+  try {
+    const r = await worker.fetch(req(undefined,
+      { method: "GET", path: "/update/releases?channel=prerelease", headers: UP_HDR }), ENV_UP);
+    const out = await r.json();
+    assert.deepEqual(out.releases.map((x) => x.version), ["v0.4.0rc1", "v0.3.1", "v0.3.0", "v0.1.0"]);
+    assert.equal(out.releases[0].prerelease, true);
+  } finally { restore(); }
+});
+
+test("update/releases: wrong secret -> 401 and no GitHub call; no secret -> 503", async () => {
+  let called = false;
+  const restore = stubFetch(async () => { called = true; return new Response("[]"); });
+  try {
+    const r = await worker.fetch(req(undefined,
+      { method: "GET", path: "/update/releases", headers: { "X-Localm-Token": "nope" } }), ENV_UP);
+    assert.equal(r.status, 401);
+    const r2 = await worker.fetch(req(undefined, { method: "GET", path: "/update/releases" }),
+      { ...ENV, UPDATE_GITHUB_TOKEN: "ght_update" });
+    assert.equal(r2.status, 503);
+    assert.equal(called, false);
+  } finally { restore(); }
+});
+
+test("update/releases: a GitHub list failure is a 502", async () => {
+  const restore = stubFetch(async () => new Response("boom", { status: 500 }));
+  try {
+    const r = await worker.fetch(
+      req(undefined, { method: "GET", path: "/update/releases", headers: UP_HDR }), ENV_UP);
+    assert.equal(r.status, 502);
+  } finally { restore(); }
+});
+
+test("update/release: serves the chosen release, preferring the .envelope over a bare .sig", async () => {
+  const seen = {};
+  const restore = stubFetch(releasesFetch(seen));
+  try {
+    const r = await worker.fetch(req(undefined,
+      { method: "GET", path: "/update/release?version=0.3.0", headers: UP_HDR }), ENV_UP);
+    assert.equal(r.status, 200);
+    const out = await r.json();
+    assert.equal(out.found, true);
+    assert.equal(out.version, "v0.3.0");
+    assert.equal(out.asset.id, 30);
+    assert.equal(out.signature, "sig-of-32", "the envelope asset, not the 0.2.0-format .sig");
+    assert.ok(!seen.urls.some((u) => u.endsWith("/assets/31")), "the bare .sig is never fetched");
+  } finally { restore(); }
+});
+
+test("update/release: a release with only a .sig serves that .sig", async () => {
+  const restore = stubFetch(releasesFetch());
+  try {
+    const r = await worker.fetch(req(undefined,
+      { method: "GET", path: "/update/release?version=v0.3.1", headers: UP_HDR }), ENV_UP);
+    const out = await r.json();
+    assert.equal(out.version, "v0.3.1");
+    assert.equal(out.signature, "sig-of-41");
+  } finally { restore(); }
+});
+
+test("update/release: unknown, draft, non-app or (without the channel) prerelease tags are not found", async () => {
+  const restore = stubFetch(releasesFetch());
+  try {
+    for (const v of ["0.9.9", "0.5.0", "0.4.0rc1"]) {
+      const r = await worker.fetch(req(undefined,
+        { method: "GET", path: `/update/release?version=${v}`, headers: UP_HDR }), ENV_UP);
+      assert.equal(r.status, 200, v);
+      const out = await r.json();
+      assert.equal(out.found, false, v);
+      assert.equal(out.version, null, v);
+    }
+    const r = await worker.fetch(req(undefined, { method: "GET",
+      path: "/update/release?version=0.4.0rc1&channel=prerelease", headers: UP_HDR }), ENV_UP);
+    assert.equal((await r.json()).version, "v0.4.0rc1");
+  } finally { restore(); }
+});
+
+test("update/release: a missing or malformed version is a 400 with no GitHub call", async () => {
+  let called = false;
+  const restore = stubFetch(async () => { called = true; return new Response("[]"); });
+  try {
+    for (const q of ["", "?version=", "?version=llama-cuda-linux-b9870", "?version=../x",
+      `?version=1.2.3${"a".repeat(40)}`]) {
+      const r = await worker.fetch(req(undefined,
+        { method: "GET", path: `/update/release${q}`, headers: UP_HDR }), ENV_UP);
+      assert.equal(r.status, 400, q);
+    }
+    assert.equal(called, false);
+  } finally { restore(); }
+});
+
+test("update/release: wrong secret -> 401 and no GitHub call", async () => {
+  let called = false;
+  const restore = stubFetch(async () => { called = true; return new Response("[]"); });
+  try {
+    const r = await worker.fetch(req(undefined, { method: "GET",
+      path: "/update/release?version=0.3.0", headers: { "X-Localm-Token": "nope" } }), ENV_UP);
+    assert.equal(r.status, 401);
+    assert.equal(called, false);
+  } finally { restore(); }
+});
+
+test("update: /update is unchanged by the new routes (latest stable, .sig only)", async () => {
+  const restore = stubFetch(releasesFetch());
+  try {
+    const r = await worker.fetch(
+      req(undefined, { method: "GET", path: "/update", headers: UP_HDR }), ENV_UP);
+    const out = await r.json();
+    assert.equal(out.version, "v0.3.1");
+    assert.equal(out.signature, "sig-of-41");
+  } finally { restore(); }
+});

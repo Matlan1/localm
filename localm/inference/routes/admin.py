@@ -299,6 +299,102 @@ def register(app: FastAPI, ctx) -> None:
         return {"available": True, "version": localm.__version__,
                 "markdown": _strip_unreleased(markdown)}
 
+    @app.get("/api/update/releases", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
+    async def update_releases_ep():
+        """The releases a user can choose to install (``updater.list_versions``).
+        Read-only. Returns ``{available, current, releases}``, ``{available:false}``
+        when the updater is not configured, or ``{available:true, error}``."""
+        from localm import updater
+        from localm.bugreport import LocalmError
+        if not updater.available():
+            return {"available": False}
+        try:
+            info = await asyncio.to_thread(updater.list_versions)
+        except LocalmError as e:
+            return {"available": True, "error": format_localm_error(e)}
+        info["available"] = True
+        return info
+
+    def _restart_after_apply(res: dict) -> None:
+        """Restart in place after a successful apply so the swapped code loads,
+        except for a setup-class update, which needs setup.bat re-run by the user.
+        Sets ``res["restarting"]`` when it restarts."""
+        if res.get("klass") == "setup":
+            return
+        # This is the only restart trigger that transitions automatically with no
+        # user watching, so it carries a post-restart health watchdog. Built from
+        # app.state (set by advertise()); with no instance_port the watchdog stays
+        # None and the restart proceeds unwatched.
+        watchdog = None
+        port = getattr(app.state, "instance_port", None)
+        new_version = res.get("version")
+        if port and new_version:
+            watchdog = {
+                "host": _watchdog_probe_host(getattr(app.state, "bind_host", None)),
+                "port": port,
+                "scheme": getattr(app.state, "instance_scheme", None) or "http",
+                "expect_version": new_version,
+            }
+        else:
+            from localm.debuglog import logger
+            logger.warning(
+                "update applied but the instance has no bind port/version to "
+                "probe (never fully advertised); restarting WITHOUT a health "
+                "watchdog")
+        # Pin the port we are bound to into the re-exec, so the new process comes
+        # back on the same port the watchdog probes. Without it the restart re-runs
+        # pick_port() and can bind a different one.
+        _request_restart(update_watchdog=watchdog, port=port,
+                         instance_id=getattr(app.state, "instance_id", None))
+        res["restarting"] = True
+
+    async def _apply_selected(request: Request, body: dict):
+        """Install the release ``body["version"]``, OWNER only. Its asset and
+        signature come from the proxy, never from the client. A build whose
+        signature does not verify answers ``{applied: false, needs_confirmation:
+        "unverified", version, reason, sha256}`` without installing anything; the
+        client installs it by repeating the request with ``allow_unverified: true``
+        and that ``sha256``. Only an owner reaches the install, so its reply is
+        never path-scrubbed."""
+        from localm import updater
+        from localm.bugreport import LocalmError
+        if not _hs.caller_is_operator(request):
+            raise HTTPException(
+                403, "Installing a chosen version requires an owner (admin) key: it can "
+                "replace the running code with an earlier version.")
+        version = body.get("version")
+        allow_unverified = body.get("allow_unverified") is True
+        sha256 = body.get("sha256")
+        if not isinstance(version, str) or not version.strip() or len(version) > 64:
+            raise HTTPException(400, "version must be a release version string.")
+        if sha256 is not None and not (
+                isinstance(sha256, str) and len(sha256) == 64
+                and all(c in "0123456789abcdefABCDEF" for c in sha256)):
+            raise HTTPException(400, "sha256 must be a 64-character hex string.")
+        if allow_unverified and sha256 is None:
+            raise HTTPException(400, "allow_unverified needs the sha256 of the build "
+                                     "you confirmed.")
+        try:
+            rel = await asyncio.to_thread(updater.fetch_release, version.strip())
+        except LocalmError as e:
+            raise HTTPException(502, format_localm_error(e)) from e
+        asset = rel.get("asset") or {}
+        if not asset.get("id"):
+            raise HTTPException(400, "This release has no downloadable build attached.")
+        try:
+            res = await asyncio.to_thread(
+                updater.apply, asset["id"], signature=rel.get("signature"),
+                target_version=rel["version"], allow_unverified=allow_unverified,
+                expect_sha256=sha256)
+        except updater.UnverifiedBuild as e:
+            return {"applied": False, "needs_confirmation": "unverified",
+                    "version": rel["version"], "reason": e.reason, "sha256": e.sha256}
+        except LocalmError as e:
+            return {"applied": False, "error": format_localm_error(e)}
+        res["available"] = True
+        _restart_after_apply(res)
+        return res
+
     @app.post("/api/update/apply", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
     async def update_apply_ep(request: Request):
         """Apply the latest update (download + swap + class step), then restart in
@@ -307,11 +403,27 @@ def register(app: FastAPI, ctx) -> None:
         never as success. The asset is re-derived from the latest release server-side
         (not taken from the client). The ``backup`` field and an ``error`` text are
         path-scrubbed (``http_server.path_formatter``) for a caller other than the
-        local operator."""
+        local operator.
+
+        A JSON body ``{"version": V}`` installs release V instead, older ones
+        included; see ``_apply_selected`` for that path and its optional
+        ``allow_unverified`` and ``sha256`` fields."""
+        import json as _json
+
         from localm import updater
         from localm.bugreport import LocalmError
         if not updater.available():
             raise HTTPException(400, "The updater is not configured.")
+        raw = await request.body()
+        if raw.strip():
+            try:
+                body = _json.loads(raw)
+            except ValueError:
+                raise HTTPException(400, "The request body is not valid JSON.") from None
+            if not isinstance(body, dict):
+                raise HTTPException(400, "The request body must be a JSON object.")
+            if "version" in body:
+                return await _apply_selected(request, body)
         try:
             info = await asyncio.to_thread(updater.check)
         except LocalmError as e:
@@ -337,35 +449,7 @@ def register(app: FastAPI, ctx) -> None:
         if res.get("backup") is not None:
             res["backup"] = _hs.path_formatter(request)(res["backup"])
         res["available"] = True
-        # Restart in place so the swapped (editable) code loads - except a setup-class
-        # update, which needs setup.bat re-run by the user.
-        if res.get("klass") != "setup":
-            # This is the only restart trigger that transitions automatically with no
-            # user watching, so it carries a post-restart health watchdog. Built from
-            # app.state (set by advertise()); with no instance_port the watchdog stays
-            # None and the restart proceeds unwatched.
-            watchdog = None
-            port = getattr(app.state, "instance_port", None)
-            new_version = res.get("version")
-            if port and new_version:
-                watchdog = {
-                    "host": _watchdog_probe_host(getattr(app.state, "bind_host", None)),
-                    "port": port,
-                    "scheme": getattr(app.state, "instance_scheme", None) or "http",
-                    "expect_version": new_version,
-                }
-            else:
-                from localm.debuglog import logger
-                logger.warning(
-                    "update applied but the instance has no bind port/version to "
-                    "probe (never fully advertised); restarting WITHOUT a health "
-                    "watchdog")
-            # Pin the port we are bound to into the re-exec, so the new process comes
-            # back on the same port the watchdog probes. Without it the restart re-runs
-            # pick_port() and can bind a different one.
-            _request_restart(update_watchdog=watchdog, port=port,
-                             instance_id=getattr(app.state, "instance_id", None))
-            res["restarting"] = True
+        _restart_after_apply(res)
         return res
 
     # -----------------------------------------------------------------------

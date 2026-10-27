@@ -327,6 +327,127 @@ def verify_signature(data: bytes, signature, *, trusted: Optional[dict] = None):
     return accepted
 
 
+# Release keys that signed earlier releases and are not in any key set this
+# install trusts. A selected install names one in its warning when it signed the
+# build; these keys never make a build verified.
+_RETIRED_RELEASE_KEYS = (
+    "3501b23eb1ab6ec245b5e9d9c6a70b522ca89d6250d13060a9642ce1c8868ecf",
+    "3fbfccffd49975ef1d70459be2def339da85be20a1c40cea4ec93726e257123b",
+)
+
+# The oldest release signed by the current release key. Releases before it carry
+# only signatures by a retired key, so their own updater cannot verify any later
+# release.
+_CURRENT_KEY_FLOOR = "0.3.0"
+
+
+class UnverifiedBuild(Exception):
+    """A selected build whose signature does not verify against the trusted key
+    set, raised by :func:`apply` before anything is extracted when the caller has
+    not passed ``allow_unverified``. Carries the requested *version*, a
+    user-facing *reason*, and the build's *sha256*, which the caller passes back as
+    ``expect_sha256`` to install exactly that build after the user agreed."""
+
+    def __init__(self, version: str, reason: str, sha256: str):
+        super().__init__(f"the build of {version} is not verified: {reason}")
+        self.version = version
+        self.reason = reason
+        self.sha256 = sha256
+
+
+def _signature_pairs(signature) -> list:
+    """The ``(key, sig)`` pairs a signature text carries: the entries of a
+    localm-update-sig/2 envelope, or ``(None, sig)`` for a bare base64 signature.
+    [] when it carries none that parse."""
+    if not isinstance(signature, str) or not signature.strip():
+        return []
+    try:
+        env = _strict_json(signature)
+    except _BadSignature:
+        return []
+    except (ValueError, RecursionError):
+        return [(None, signature.strip())]
+    if not isinstance(env, dict):
+        return []
+    try:
+        return [(e["key"], e["sig"]) for e in _parse_signatures(env.get("signatures"),
+                                                                "the build signatures")]
+    except _BadSignature:
+        return []
+
+
+def _retired_signer(data: bytes, signature):
+    """The retired release key (see ``_RETIRED_RELEASE_KEYS``) that validly signed
+    *data* in *signature*, or None."""
+    import base64
+
+    from cryptography.exceptions import InvalidSignature
+    for key, sig in _signature_pairs(signature):
+        candidates = [key] if key is not None else list(_RETIRED_RELEASE_KEYS)
+        for k in candidates:
+            if k not in _RETIRED_RELEASE_KEYS:
+                continue
+            try:
+                raw = base64.b64decode(sig, validate=True)
+                _public_key(k).verify(raw, data)
+            except (ValueError, InvalidSignature):
+                continue
+            return k
+    return None
+
+
+def assess_signature(data: bytes, signature) -> dict:
+    """Verify *signature* over *data* like :func:`verify_signature`, but report a
+    failure instead of raising it.
+
+    Returns ``{"verified": True, "reason": None, "keyset": <replacement key set or
+    None>}`` when it verifies, else ``{"verified": False, "reason": <user-facing
+    text>, "keyset": None}``. The reason names a retired release key when one of
+    them signed the build, and otherwise says the build is unsigned, or that the
+    signature does not verify (an unknown key, or a build altered after signing),
+    or why the check could not run. Never raises for the signature itself."""
+    from localm.bugreport import LocalmError
+    if not isinstance(signature, str) or not signature.strip():
+        return {"verified": False, "keyset": None,
+                "reason": "the release has no signature, so nothing shows who built it"}
+    try:
+        return {"verified": True, "reason": None,
+                "keyset": verify_signature(data, signature)}
+    except ImportError:
+        return {"verified": False, "keyset": None,
+                "reason": "the signature could not be checked: the cryptography "
+                          "package is not installed"}
+    except LocalmError as e:
+        failure = f"{e.summary} ({e.reason})" if e.reason else e.summary
+    try:
+        retired = _retired_signer(data, signature)
+    except ImportError:
+        retired = None
+    if retired is not None:
+        return {"verified": False, "keyset": None,
+                "reason": f"it is signed with a retired localm release key "
+                          f"({retired[:16]}...) that this install no longer trusts. "
+                          "The signature matches the build"}
+    return {"verified": False, "keyset": None,
+            "reason": f"{failure}. It may be signed with an unknown key, or altered "
+                      "after it was signed"}
+
+
+def _check_selected_version(new_version: str, requested: str) -> None:
+    """Raise unless the build's VERSION *new_version* is the *requested* release.
+
+    A selected install may go to any version, older ones included, but only the
+    one asked for: a build carrying a different VERSION is refused."""
+    from localm.bugreport import LocalmError
+    if not new_version:
+        raise LocalmError(f"refusing to install {requested}: the build has no VERSION",
+                          reason="cannot confirm it is the version you chose")
+    if _version.normalize(new_version) != _version.normalize(requested):
+        raise LocalmError(
+            f"refusing to install the build served for {requested}: it is {new_version}",
+            reason="the update server sent a different version than the one you chose")
+
+
 def _refuse_downgrade(new_version: str) -> None:
     """Raise unless *new_version* is strictly newer than the running version.
 
@@ -471,6 +592,132 @@ def check(*, opener=None) -> dict:
         # The proxy serves the release's signature envelope text alongside the
         # asset; apply() verifies the downloaded build with verify_signature().
         "signature": data.get("signature") if isinstance(data, dict) else None,
+    }
+
+
+# ---------------------- choosing a version to install ---------------------
+
+def _selection_request(path: str, params: dict, *, opener=None) -> dict:
+    """GET *path* with *params* on the update proxy, under the same configuration,
+    network-policy and prerelease-channel rules as :func:`check`. A 404 means the
+    proxy predates version selection and raises a LocalmError saying so."""
+    import urllib.parse
+
+    from localm import _proxy
+    from localm.bugreport import LocalmError
+    base, token = endpoint()
+    if not base:
+        raise LocalmError("the updater is not configured",
+                          reason="set bugreport_upload_url (or update_url) to enable it")
+    if not _net_policy_allows_update_check():
+        raise LocalmError(
+            "update checks are off because network access is set to off",
+            reason='turn on "Check for updates even when network access is off" '
+                   "in Settings, or set network access to ask or allow")
+    query = dict(params)
+    if _prerelease_channel_enabled():
+        query["channel"] = "prerelease"
+    qs = urllib.parse.urlencode(query)
+    try:
+        data = _proxy.request(base, path + (f"?{qs}" if qs else ""), token=token,
+                              opener=opener)
+    except LocalmError as e:
+        if str(e.reason).startswith("HTTP 404"):
+            raise LocalmError(
+                "the update server does not offer a choice of versions yet",
+                reason="it needs the proxy version that serves /update/releases") from None
+        raise
+    if not isinstance(data, dict):
+        raise LocalmError("the update server sent an unexpected reply", reason=str(data)[:200])
+    return data
+
+
+def _direction(version: str, current: str) -> str:
+    """``"newer"``, ``"older"``, ``"same"`` or ``"unknown"`` (not comparable) for
+    *version* relative to the running *current* version."""
+    if not _version.comparable(version, current):
+        return "unknown"
+    if _version.is_newer(version, current):
+        return "newer"
+    if _version.is_newer(current, version):
+        return "older"
+    return "same"
+
+
+def list_versions(*, opener=None) -> dict:
+    """The releases a user can choose to install, newest first.
+
+    Returns ``{current, releases}``; each release is ``{version, name,
+    published_at, prerelease, notes, asset, signed, direction, installable,
+    reason, warnings}``. ``direction`` is from :func:`_direction`. ``installable``
+    is False only when the release has no build attached (``reason`` says so).
+    ``warnings`` lists what the user should know before choosing it: a downgrade,
+    a reinstall of the running version, an unrecognised version format, a release
+    with no signature, or one from before ``_CURRENT_KEY_FLOOR`` (signed only by a
+    retired key). The signature itself is checked when the build is installed, not
+    here.
+
+    Raises :class:`~localm.bugreport.LocalmError` like :func:`check`, and when the
+    proxy has no version list."""
+    data = _selection_request("/update/releases", {}, opener=opener)
+    current = _version.read_version()
+    out = []
+    for rel in data.get("releases") or []:
+        if not isinstance(rel, dict) or not isinstance(rel.get("version"), str):
+            continue
+        version = rel["version"]
+        asset = rel.get("asset") if isinstance(rel.get("asset"), dict) else None
+        signed = rel.get("signed") is True
+        direction = _direction(version, current)
+        warnings = []
+        if direction == "older":
+            warnings.append(f"older than the installed {current}: this is a downgrade")
+        elif direction == "same":
+            warnings.append("this is the installed version: it would be reinstalled")
+        elif direction == "unknown":
+            warnings.append("its version format is not recognised, so it cannot be "
+                            "ordered against the installed one")
+        if not signed:
+            warnings.append("the release has no signature")
+        elif (_version.comparable(version, _CURRENT_KEY_FLOOR)
+              and _version.is_newer(_CURRENT_KEY_FLOOR, version)):
+            warnings.append(f"released before {_CURRENT_KEY_FLOOR}: it is signed only with "
+                            "a retired key, so its signature will not verify")
+        installable = bool(asset and asset.get("id"))
+        out.append({
+            "version": version, "name": rel.get("name"),
+            "published_at": rel.get("published_at"),
+            "prerelease": rel.get("prerelease") is True,
+            "notes": str(rel.get("notes") or "")[:500],
+            "asset": asset, "signed": signed, "direction": direction,
+            "installable": installable,
+            "reason": None if installable else "the release has no build attached",
+            "warnings": warnings,
+        })
+    return {"current": current, "releases": out}
+
+
+def fetch_release(version: str, *, opener=None) -> dict:
+    """The proxy's meta for the release tagged *version* (with or without a leading
+    ``v``): ``{version, notes, published_at, prerelease, asset, signature}``, the
+    signature being the release's localm-update-sig/2 envelope when it has one.
+    Raises :class:`~localm.bugreport.LocalmError` when there is no such release, and
+    like :func:`list_versions` otherwise."""
+    from localm.bugreport import LocalmError
+    want = str(version or "").strip()
+    if not want:
+        raise LocalmError("no version given", reason="name the version to install")
+    data = _selection_request("/update/release", {"version": want}, opener=opener)
+    if not data.get("found") or not data.get("version"):
+        raise LocalmError(f"there is no release {want}",
+                          reason="localm update --list shows the releases you can install")
+    return {
+        "version": data["version"],
+        "notes": str(data.get("notes") or ""),
+        "published_at": data.get("published_at"),
+        "prerelease": data.get("prerelease") is True,
+        "asset": data.get("asset") if isinstance(data.get("asset"), dict) else None,
+        "signature": data.get("signature"),
     }
 
 
@@ -744,11 +991,161 @@ def _promote_backup(run_backup_dir: Path, backup_dir: Path) -> None:
                     run_backup_dir, backup_dir, e)
 
 
-def apply(asset_id, *, signature=None, installed=None, download_opener=None,
+# Data dir entries an older build may read without the fields a newer one added,
+# and write back without them.
+_DOWNGRADE_DATA = ("config.json", "registry.json", "checkpoints", "memory", "plugins",
+                   "coder-hook-trust.json")
+
+
+def _backup_data_for_downgrade(new_version: str) -> Path:
+    """Copy the data dir entries in ``_DOWNGRADE_DATA`` that exist to
+    ``<data dir>/updates/data-before-<new_version>-<stamp>/`` and return that
+    directory. Raises :class:`~localm.bugreport.LocalmError` when a copy fails, so
+    the downgrade does not go ahead without it."""
+    from localm.bugreport import LocalmError
+    from localm.config import home_dir
+    home = home_dir()
+    safe = "".join(c if c.isalnum() or c in ".-_" else "_" for c in new_version)[:40]
+    dest = _updates_dir() / f"data-before-{safe}-{time.strftime('%Y%m%d-%H%M%S')}"
+    try:
+        dest.mkdir(parents=True)
+        for name in _DOWNGRADE_DATA:
+            src = home / name
+            if src.is_dir():
+                shutil.copytree(src, dest / name, symlinks=True)
+            elif src.is_file():
+                shutil.copy2(src, dest / name)
+    except OSError as e:
+        shutil.rmtree(dest, ignore_errors=True)
+        raise LocalmError("could not back up your data before the downgrade",
+                          reason=f"{dest}: {e}") from None
+    return dest
+
+
+def _carry_trust_forward() -> None:
+    """Save the key set this install trusts to the data dir's trust file when the
+    file holds an older one (or none) and the trusted set is past the first, so an
+    older build installed next reads it and can verify the releases this one can."""
+    trusted = _load_trusted()
+    if trusted["seq"] <= 1:
+        return
+    try:
+        saved = _parse_keyset(_strict_json(_trust_path().read_text(encoding="utf-8")),
+                              signed=True)
+    except FileNotFoundError:
+        saved = None
+    if saved is not None and saved["seq"] >= trusted["seq"]:
+        return
+    _save_keyset({**{k: trusted[k] for k in ("seq", "release", "recovery")},
+                  "signatures": trusted.get("signatures", [])})
+
+
+_BRIDGE_MODULE = "_update_trust_bridge.py"
+
+
+def _needs_trust_bridge(root: Path) -> bool:
+    """True when the build at *root* has an updater that cannot verify a
+    localm-update-sig/2 envelope (localm before 0.3.0)."""
+    try:
+        text = (root / "localm" / "updater.py").read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return _SIG_FORMAT not in text
+
+
+def _install_trust_bridge(root: Path) -> None:
+    """Make the staged build at *root* verify its updates the way this build does.
+
+    Writes this module's source to ``localm/_update_trust_bridge.py`` in *root*
+    with ``_PINNED_KEYSET`` set to the key set trusted now, and appends to the
+    staged ``localm/updater.py`` a rebinding of its ``verify_signature`` to the
+    bridge's, which also saves a replacement key set an update carries. Raises
+    :class:`~localm.bugreport.LocalmError` when a write fails."""
+    from localm.bugreport import LocalmError
+    trusted = _load_trusted()
+    pinned = {k: trusted[k] for k in ("seq", "release", "recovery")}
+    bridge = (Path(__file__).read_text(encoding="utf-8").rstrip("\n")
+              + "\n\n\n_PINNED_KEYSET = " + _json.dumps(pinned, sort_keys=True) + "\n")
+    stanza = (
+        "\n\n# Verifies updates with the update signing keys of the localm build that\n"
+        "# installed this version (localm/_update_trust_bridge.py).\n"
+        "def _localm_bridged_verify_signature(data, signature_b64=None):\n"
+        "    from localm import _update_trust_bridge as bridge\n"
+        "    accepted = bridge.verify_signature(data, signature_b64)\n"
+        "    if accepted is not None:\n"
+        "        bridge._save_keyset(accepted)\n"
+        "\n\n"
+        "verify_signature = _localm_bridged_verify_signature\n")
+    try:
+        (root / "localm" / _BRIDGE_MODULE).write_text(bridge, encoding="utf-8")
+        with open(root / "localm" / "updater.py", "a", encoding="utf-8") as f:
+            f.write(stanza)
+    except OSError as e:
+        raise LocalmError("could not prepare the older version to verify later updates",
+                          reason=str(e)) from None
+
+
+def _pinned_llama_tag(root: Path):
+    """The llama.cpp release tag the build at *root* provisions (its
+    ``_PINNED_TAG``), or None when it pins none."""
+    import re
+    for rel in ("localm/setup_llama/pins.py", "localm/setup_llama/__init__.py",
+                "localm/setup_llama.py"):
+        try:
+            text = (root / rel).read_text(encoding="utf-8")
+        except OSError:
+            continue
+        m = re.search(r'^_PINNED_TAG\s*=\s*"([^"]+)"', text, re.MULTILINE)
+        if m:
+            return m.group(1)
+    return None
+
+
+def _selected_post_swap_command(klass: str, root: Path, uv=None):
+    """``_apply_update.post_swap_command`` (with *uv* for the deps class) for a
+    selected build at *root*, without the ``--keep-choice`` flag when that build's
+    setup-llama lacks it."""
+    from localm import _apply_update as au
+    cmd = au.post_swap_command(klass, backend=_installed_backend(), uv=uv)
+    if cmd and "--keep-choice" in cmd:
+        staged = ""
+        for rel in ("localm/setup_llama/cli.py", "localm/setup_llama.py"):
+            try:
+                staged += (root / rel).read_text(encoding="utf-8")
+            except OSError:
+                continue
+        if '"--keep-choice"' not in staged:
+            cmd = [c for c in cmd if c != "--keep-choice"]
+    return cmd
+
+
+def apply(asset_id, *, signature=None, target_version=None, allow_unverified=False,
+          expect_sha256=None, installed=None, download_opener=None,
           runner=None) -> dict:
     """Download, VERIFY (signature + anti-rollback), and swap a build into the
     install, then run the class's deps/runtime step. Returns
-    ``{applied, version, klass, backup, restart_needed}``.
+    ``{applied, version, klass, backup, restart_needed, verified, verify_reason,
+    downgrade, data_backup}``.
+
+    *target_version* selects a release by version (``localm update --to``): the
+    anti-rollback check is replaced by :func:`_check_selected_version`, so an
+    older release installs, but only when the build's VERSION is the requested
+    one. Its signature is checked with :func:`assess_signature`; a build that does
+    not verify raises :class:`UnverifiedBuild` before it is extracted, unless
+    *allow_unverified* is True, which requires *expect_sha256* (the sha256 the
+    UnverifiedBuild named) so only the build the user agreed to is installed. An
+    unverified build never changes the trusted key set. Before a selected
+    downgrade is swapped in, the data dir files an older build may not read are
+    copied aside (:func:`_backup_data_for_downgrade`; ``data_backup`` is that
+    directory or None). A selected install also saves the trusted key set for
+    the build it installs (:func:`_carry_trust_forward`), gives a build from
+    before 0.3.0 this build's signature check (:func:`_install_trust_bridge`) so
+    it can verify and install later releases, and re-provisions the native
+    runtime when the build pins a different llama.cpp release. Without
+    *target_version* nothing of this applies: the signature must verify and the
+    build must be newer.
+
+    *expect_sha256*, when given, must equal the downloaded build's sha256.
 
     *signature* is the signature envelope text from :func:`check` (the proxy serves
     it with the release). :func:`verify_signature` checks it BEFORE the build is
@@ -782,6 +1179,9 @@ def apply(asset_id, *, signature=None, installed=None, download_opener=None,
             "would overwrite unrelated packages in site-packages and leave "
             "pip unaware of what is installed",
             reason="run 'pip install --upgrade localm' instead")
+    if allow_unverified and not expect_sha256:
+        raise LocalmError("refusing to install an unverified build without its sha256",
+                          reason="pass the sha256 the verification warning named")
     updir = _updates_dir()
     backup_dir = _backup_dir(create=True)   # the STABLE location rollback_last() reads
 
@@ -791,21 +1191,53 @@ def apply(asset_id, *, signature=None, installed=None, download_opener=None,
             run_dir / "build.zip", run_dir / "staging", run_dir / "backup")
 
         try:
+            import hashlib
             download(asset_id, zip_path, opener=download_opener)
+            data = zip_path.read_bytes()
+            digest = hashlib.sha256(data).hexdigest()
+            if expect_sha256 is not None and digest != str(expect_sha256).strip().lower():
+                raise LocalmError(
+                    "refusing to install: the build differs from the one you confirmed",
+                    reason="the update server sent different bytes this time; "
+                           "choose the version again")
             # SIGNATURE GATE - runs before verify_zip/extract/swap, i.e. before any
             # of the downloaded build's code can be extracted or executed.
-            new_keyset = verify_signature(zip_path.read_bytes(), signature)
+            if target_version is None:
+                new_keyset = verify_signature(data, signature)
+                verified, verify_reason = True, None
+            else:
+                assessed = assess_signature(data, signature)
+                new_keyset = assessed["keyset"]
+                verified, verify_reason = assessed["verified"], assessed["reason"]
+                if not verified and not allow_unverified:
+                    raise UnverifiedBuild(str(target_version), verify_reason, digest)
             au.verify_zip(zip_path)
             root = au.extract(zip_path, staging)
             vf = root / "VERSION"
             new_version = vf.read_text(encoding="utf-8").strip() if vf.exists() else ""
-            # ANTI-ROLLBACK - a validly SIGNED but OLDER build must not be installable.
-            _refuse_downgrade(new_version)
+            if target_version is None:
+                # ANTI-ROLLBACK - a validly SIGNED but OLDER build must not be installable.
+                _refuse_downgrade(new_version)
+            else:
+                _check_selected_version(new_version, str(target_version))
+            downgrade = _version.is_newer(_version.read_version(), new_version)
             klass = classify(root, target, read_manifest(root))
+            if target_version is not None and _pinned_llama_tag(root) != _pinned_llama_tag(target):
+                klass = _max_class(klass, "runtime")
             uv_exe = _uv_for_deps(target) if klass == "deps" else None
+            post_cmd = (au.post_swap_command(klass, backend=_installed_backend(), uv=uv_exe)
+                        if target_version is None
+                        else _selected_post_swap_command(klass, root, uv_exe))
             # The update has verified: save a key set it replaced, before the swap.
             if new_keyset is not None:
                 _save_keyset(new_keyset)
+            data_backup = None
+            if target_version is not None:
+                _carry_trust_forward()
+                if _needs_trust_bridge(root):
+                    _install_trust_bridge(root)
+                if downgrade:
+                    data_backup = _backup_data_for_downgrade(new_version)
         except Exception:
             # No backup exists for this run yet, so the scratch dir can go.
             shutil.rmtree(run_dir, ignore_errors=True)
@@ -846,7 +1278,7 @@ def apply(asset_id, *, signature=None, installed=None, download_opener=None,
                         "`update --rollback` will fall back to the backup listing and cannot "
                         "remove brand-new top-level entries this update added", manifest_path, e)
 
-        cmd = au.post_swap_command(klass, backend=_installed_backend(), uv=uv_exe)
+        cmd = post_cmd
         if cmd:
             run = runner or (lambda c: subprocess.run(
                 c, cwd=str(target), env=_deps_env(target)).returncode)
@@ -872,7 +1304,10 @@ def apply(asset_id, *, signature=None, installed=None, download_opener=None,
                 raise LocalmError("the post-update step failed; rolled back",
                                   reason=f"{cmd[0]} exited {rc}")
         return {"applied": True, "version": new_version, "klass": klass,
-                "backup": str(backup_dir), "restart_needed": True}
+                "backup": str(backup_dir), "restart_needed": True,
+                "verified": verified, "verify_reason": verify_reason,
+                "downgrade": downgrade,
+                "data_backup": str(data_backup) if data_backup else None}
 
 
 def _uv_for_deps(target: Path) -> str:

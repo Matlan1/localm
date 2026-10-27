@@ -12,6 +12,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Install a release of your choice, older or newer.** `localm update --list` shows every release, `localm update --to <version>` installs the one you name, and Settings > Updates has a "Choose a version" picker that does the same. A downgrade is announced and confirmed first, your settings, model registry, coder sessions, memory and plugins are copied aside before it, and `localm update --rollback` takes you back. When a release's signature does not verify (for example one from before 0.3.0), localm tells you why and installs it only if you confirm. A version you go back to can still update to newer releases.
 - **Segment Anything (SAM) checkpoints are recognised as `segmentation` models.** A SAM or SAM 2 `.pth` file found by a ComfyUI or StabilityMatrix scan, or sitting in a `sam`, `sams` or `segmentation` folder, is now listed as a segmentation model instead of `unknown`, and `localm set-type MODEL segmentation` and the Models page type menu offer it. localm does not run segmentation models yet, so naming one for chat is refused with a clear message.
 - **More upscalers are recognised.** ESRGAN files in the original key layout (such as 4x-UltraSharp) and Real-ESRGAN compact (SRVGGNet) files are now typed `upscaler` when pulled, added or scanned, instead of `unknown`.
 

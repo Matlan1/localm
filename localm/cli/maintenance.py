@@ -408,22 +408,162 @@ def bug_report_cmd(message: str, expected: str, happened: str,
 
 
 
+def _update_list(updater) -> None:
+    """Print the releases ``localm update --to`` can install."""
+    from localm.bugreport import LocalmError
+    from rich.markup import escape
+    try:
+        info = updater.list_versions()
+    except LocalmError as e:
+        console.print(f"[yellow]Could not list releases:[/yellow] {escape(e.summary)} "
+                      f"({escape(e.reason)}).")
+        sys.exit(1)
+    rels = info["releases"]
+    if not rels:
+        console.print(f"[dim]No releases published yet. You are on "
+                      f"{escape(info['current'])}.[/dim]")
+        return
+    console.print(f"[bold]Releases[/bold] [dim](you have {escape(info['current'])})[/dim]")
+    for rel in rels:
+        mark = {"same": "installed", "older": "older", "newer": "newer"}.get(
+            rel["direction"], "?")
+        date = str(rel.get("published_at") or "")[:10]
+        pre = " prerelease" if rel["prerelease"] else ""
+        line = f"  {escape(rel['version']):<14} {date}  [dim]{mark}{pre}[/dim]"
+        if not rel["installable"]:
+            line += f"  [yellow]not installable: {escape(rel['reason'])}[/yellow]"
+        console.print(line)
+        for w in rel["warnings"]:
+            if rel["direction"] == "same" or w.startswith("older than"):
+                continue
+            console.print(f"      [yellow]{escape(w)}[/yellow]")
+    console.print("[dim]Install one with: localm update --to <version>[/dim]")
+
+
+def _update_to(updater, version: str, *, yes: bool, allow_unverified: bool) -> None:
+    """Install the release *version* (``localm update --to``)."""
+    from localm import _version
+    from localm.bugreport import LocalmError
+    from rich.markup import escape
+    try:
+        rel = updater.fetch_release(version)
+    except LocalmError as e:
+        console.print(f"[yellow]Could not find {escape(version)}:[/yellow] "
+                      f"{escape(e.summary)} ({escape(e.reason)}).")
+        sys.exit(1)
+    asset = rel.get("asset") or {}
+    if not asset.get("id"):
+        console.print(f"[yellow]{escape(rel['version'])} has no downloadable build "
+                      "attached.[/yellow]")
+        sys.exit(1)
+    cur = _version.read_version()
+    direction = updater._direction(rel["version"], cur)
+    if direction == "older":
+        console.print(f"[bold yellow]{escape(rel['version'])} is OLDER than the installed "
+                      f"{escape(cur)}: this is a downgrade.[/bold yellow] It can bring back "
+                      "problems that later releases fixed. Your settings, model registry, "
+                      "coder sessions, memory and plugins are copied aside first, and "
+                      "`localm update --rollback` returns to this version.")
+    elif direction == "same":
+        console.print(f"[yellow]{escape(rel['version'])} is the installed version; it will "
+                      "be reinstalled.[/yellow]")
+    elif direction == "unknown":
+        console.print(f"[yellow]Could not tell whether {escape(rel['version'])} is older or "
+                      f"newer than {escape(cur)}.[/yellow]")
+    if not yes and not click.confirm(f"  Install {rel['version']}?", default=False):
+        console.print("[dim]Not installed.[/dim]")
+        return
+
+    console.print(f"[dim]Downloading and checking {escape(rel['version'])} ...[/dim]")
+    expect = None
+    accept = False
+    while True:
+        try:
+            res = updater.apply(asset["id"], signature=rel.get("signature"),
+                                target_version=rel["version"], allow_unverified=accept,
+                                expect_sha256=expect)
+            break
+        except updater.UnverifiedBuild as e:
+            console.print(f"[bold yellow]Warning: the signature of {escape(rel['version'])} "
+                          f"does not verify:[/bold yellow] {escape(e.reason)}.")
+            console.print("[yellow]Nothing shows that this build is the one localm "
+                          "published. Install it only if you trust where it came "
+                          "from.[/yellow]")
+            if accept:
+                console.print("[red]Not installed:[/red] the build did not verify again.")
+                sys.exit(1)
+            if yes:
+                if not allow_unverified:
+                    console.print("[dim]Not installed. Run it again with --allow-unverified "
+                                  "to install it anyway.[/dim]")
+                    sys.exit(1)
+            elif not click.confirm("  Install it anyway?", default=False):
+                console.print("[dim]Not installed.[/dim]")
+                return
+            expect, accept = e.sha256, True
+        except LocalmError as e:
+            console.print(f"[red]Install failed:[/red] {escape(e.summary)} "
+                          f"({escape(e.reason)}).")
+            sys.exit(1)
+    console.print(f"[green]Installed {escape(res['version'])}[/green] "
+                  f"({updater.class_summary(res['klass'])}).")
+    if not res.get("verified", True):
+        console.print("[yellow]Installed without a verified signature.[/yellow]")
+    if res.get("data_backup"):
+        console.print(f"[dim]Your data from before the downgrade: "
+                      f"{escape(res['data_backup'])}[/dim]")
+    if res["klass"] == "setup":
+        console.print("[yellow]This version needs setup.bat re-run (a Python/venv change) "
+                      "before it will start.[/yellow]")
+    else:
+        console.print("[bold]Restart localm to load it.[/bold]  "
+                      "[dim](undo: localm update --rollback)[/dim]")
+
+
 @main.command("update")
 @click.option("--check", "check_only", is_flag=True,
               help="Only report whether an update is available; do not apply.")
 @click.option("-y", "--yes", is_flag=True, help="Apply without the confirmation prompt.")
 @click.option("--rollback", "do_rollback", is_flag=True,
               help="Restore the previous build from the last update backup.")
-def update_cmd(check_only: bool, yes: bool, do_rollback: bool) -> None:
+@click.option("--list", "list_only", is_flag=True,
+              help="List the releases you can install with --to.")
+@click.option("--to", "to_version", metavar="VERSION", default=None,
+              help="Install this release, older or newer than the installed one.")
+@click.option("--allow-unverified", is_flag=True,
+              help="With --to and --yes: install the release even when its signature "
+                   "does not verify.")
+def update_cmd(check_only: bool, yes: bool, do_rollback: bool, list_only: bool,
+               to_version, allow_unverified: bool) -> None:
     """Check for a newer localm build and apply it. You always initiate it - localm
     never updates itself automatically.
 
     Most updates apply with just a restart (the install is editable); localm tells you
     what an update entails before applying. Requires the update channel to be
-    configured (the bug-report proxy with an update token)."""
+    configured (the bug-report proxy with an update token).
+
+    --list shows every release, and --to VERSION installs the one you choose,
+    including an older one (a downgrade). Before a downgrade localm copies your
+    settings, model registry, coder sessions, memory and plugins to a dated folder
+    under the data dir's updates/. A release whose signature does not verify is
+    installed only after you confirm a warning that says why."""
     from localm import updater
     from localm.bugreport import LocalmError
     from rich.markup import escape
+
+    if sum(map(bool, (do_rollback, list_only, to_version))) > 1:
+        console.print("[yellow]Use only one of --rollback, --list and --to.[/yellow]")
+        sys.exit(2)
+    if list_only or to_version:
+        if not updater.available():
+            console.print("[yellow]The updater is not configured.[/yellow] Set the update "
+                          "endpoint in config to list or install releases.")
+            sys.exit(1)
+        if list_only:
+            _update_list(updater)
+        else:
+            _update_to(updater, to_version, yes=yes, allow_unverified=allow_unverified)
+        return
 
     if do_rollback:
         try:

@@ -7,6 +7,8 @@
 //   GET  /issues                 list open/closed issues[GitHub App or GITHUB_TOKEN, Issues:read]
 //   GET  /issues?number=N        one issue's state      [GitHub App or GITHUB_TOKEN]
 //   GET  /update                 latest release meta    [UPDATE_GITHUB_TOKEN, Contents:read]
+//   GET  /update/releases        installable app releases[UPDATE_GITHUB_TOKEN]
+//   GET  /update/release?version=V  one release's meta  [UPDATE_GITHUB_TOKEN]
 //   GET  /update/download?id=N   stream a build asset   [UPDATE_GITHUB_TOKEN]
 //
 // No token ships in the app. The issue token cannot read code; the SEPARATE update
@@ -29,6 +31,12 @@ export default {
       }
       if (request.method === "GET" && path === "/update") {
         return await latestRelease(request, env, url);
+      }
+      if (request.method === "GET" && path === "/update/releases") {
+        return await listAppReleases(request, env, url);
+      }
+      if (request.method === "GET" && path === "/update/release") {
+        return await oneAppRelease(request, env, url);
       }
       if (request.method === "GET" && path === "/update/download") {
         return await downloadBuild(request, env, url);
@@ -283,24 +291,88 @@ async function latestRelease(request, env, url) {
   const rel = await latestAppRelease(env, wantsPrerelease);
   if (rel === null) return json({ ok: true, version: null, note: "no releases yet" });
   if (rel === undefined) return json({ error: "release lookup failed", status: 502 }, 502);
-  const assets = (rel.assets || []).map((a) => ({ id: a.id, name: a.name, size: a.size }));
-  // Prefer a .zip asset (the build); else the first asset; else none.
-  const asset = assets.find((a) => /\.zip$/i.test(a.name)) || assets[0] || null;
   // Serve the signature: the text of the first *.sig asset, verbatim (trimmed). From
   // 0.3.1 on that is a JSON signature envelope the client verifies against the key
   // set it trusts (updater.verify_signature); the 0.3.0 .sig is a bare base64
   // signature for 0.2.0 clients. Absent -> null: the client refuses the unsigned build.
+  return json({ ok: true, ...(await releaseMeta(env, rel, [/\.sig$/i])) });
+}
+
+// The build asset and signature text of *rel*. *sigPatterns* are tried in order;
+// the first asset name matching one of them is the signature, served as its text
+// (trimmed), or null when there is none or it cannot be read.
+async function releaseMeta(env, rel, sigPatterns) {
+  const assets = (rel.assets || []).map((a) => ({ id: a.id, name: a.name, size: a.size }));
+  // Prefer a .zip asset (the build); else the first asset; else none.
+  const asset = assets.find((a) => /\.zip$/i.test(a.name)) || assets[0] || null;
   let signature = null;
-  const sigAsset = assets.find((a) => /\.sig$/i.test(a.name));
+  const sigAsset = signatureAsset(assets, sigPatterns);
   if (sigAsset) {
     const txt = await fetchAssetText(env, sigAsset.id);
     if (txt != null) signature = txt.trim();
   }
-  return json({
-    ok: true, version: rel.tag_name, name: rel.name,
+  return {
+    version: rel.tag_name, name: rel.name,
     notes: String(rel.body || "").slice(0, 8000), published_at: rel.published_at,
-    asset, signature,
+    prerelease: rel.prerelease === true, asset, signature,
+  };
+}
+
+function signatureAsset(assets, sigPatterns) {
+  for (const re of sigPatterns) {
+    const hit = assets.find((a) => re.test(a.name));
+    if (hit) return hit;
+  }
+  return null;
+}
+
+// Signature assets for a chosen release, in preference order: the 0.3.0 release
+// carries its localm-update-sig/2 envelope as *.envelope and a 0.2.0-format bare
+// signature as *.sig; every later release carries the envelope as *.sig.
+const SELECT_SIG_PATTERNS = [/\.envelope$/i, /\.sig$/i];
+
+// ------------------- update: choose a release by version ----------------
+
+// Every app release (non-draft, APP_TAG_RE, prereleases only with
+// ?channel=prerelease), newest first by published_at. Signatures are not fetched
+// here; each entry says whether it has a build and a signature asset.
+async function listAppReleases(request, env, url) {
+  const gate = updateGateOrError(request, env);
+  if (gate) return gate;
+  const wantsPrerelease = url.searchParams.get("channel") === "prerelease";
+  const all = await appReleases(env, wantsPrerelease);
+  if (all === undefined) return json({ error: "release lookup failed", status: 502 }, 502);
+  const releases = all.map((rel) => {
+    const assets = (rel.assets || []).map((a) => ({ id: a.id, name: a.name, size: a.size }));
+    const asset = assets.find((a) => /\.zip$/i.test(a.name)) || null;
+    return {
+      version: rel.tag_name, name: rel.name, published_at: rel.published_at,
+      prerelease: rel.prerelease === true,
+      notes: String(rel.body || "").slice(0, 500),
+      asset, signed: signatureAsset(assets, SELECT_SIG_PATTERNS) !== null,
+    };
   });
+  return json({ ok: true, releases });
+}
+
+// Release tags a client may ask for: an app tag of at most 40 characters.
+const VERSION_PARAM_RE = /^v?\d+\.\d+\.\d+[0-9A-Za-z.-]{0,30}$/;
+
+// The meta of the app release whose tag is ?version= (with or without the leading
+// "v"), in the same shape as /update. A tag that names no qualifying release
+// answers 200 { ok, found: false }, so a 404 always means the route is absent.
+async function oneAppRelease(request, env, url) {
+  const gate = updateGateOrError(request, env);
+  if (gate) return gate;
+  const want = url.searchParams.get("version") || "";
+  if (!VERSION_PARAM_RE.test(want)) return json({ error: "missing or bad version" }, 400);
+  const wantsPrerelease = url.searchParams.get("channel") === "prerelease";
+  const all = await appReleases(env, wantsPrerelease);
+  if (all === undefined) return json({ error: "release lookup failed", status: 502 }, 502);
+  const bare = want.replace(/^v/, "");
+  const rel = all.find((r) => String(r.tag_name).replace(/^v/, "") === bare);
+  if (!rel) return json({ ok: true, found: false, version: null });
+  return json({ ok: true, found: true, ...(await releaseMeta(env, rel, SELECT_SIG_PATTERNS)) });
 }
 
 // Matches an app release tag (v1.2.3, v1.2.3rc1, v1.2.3-beta, ...) and nothing
@@ -337,19 +409,25 @@ const APP_TAG_RE = /^v\d+\.\d+\.\d+/;
 //     draft === true explicitly rather than relying on that token-permission
 //     behavior holding.
 async function latestAppRelease(env, includePrerelease) {
+  const candidates = await appReleases(env, includePrerelease);
+  if (candidates === undefined) return undefined;
+  return candidates.length ? candidates[0] : null;
+}
+
+// The qualifying releases (see latestAppRelease), newest first by published_at, or
+// undefined when the GitHub call failed.
+async function appReleases(env, includePrerelease) {
   const gh = await ghFetch(env.UPDATE_GITHUB_TOKEN, `/repos/${env.TARGET_REPO}/releases?per_page=30`);
   if (!gh.ok) return undefined;
   const all = await gh.json();
-  const candidates = (Array.isArray(all) ? all : [])
+  const when = (r) => Date.parse(r.published_at || r.created_at || 0) || 0;
+  return (Array.isArray(all) ? all : [])
     .filter((r) => r.draft !== true)
     .filter((r) => includePrerelease || r.prerelease !== true)
-    .filter((r) => APP_TAG_RE.test(String(r.tag_name || "")));
-  if (!candidates.length) return null;
-  return candidates.reduce((best, r) => {
-    const rt = Date.parse(r.published_at || r.created_at || 0) || 0;
-    const bt = Date.parse(best.published_at || best.created_at || 0) || 0;
-    return rt > bt ? r : best;
-  });
+    .filter((r) => APP_TAG_RE.test(String(r.tag_name || "")))
+    .map((r, i) => ({ r, i, t: when(r) }))
+    .sort((a, b) => (b.t - a.t) || (a.i - b.i))
+    .map((x) => x.r);
 }
 
 // Read a small release asset (the .sig) as text, following GitHub's signed-URL
