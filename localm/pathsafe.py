@@ -373,6 +373,32 @@ def is_mapped_network_drive(raw: str) -> bool:
         return False
 
 
+def resolve_keeping_mapped_drive(path) -> Path:
+    r"""``Path(path).expanduser().resolve()``, except that a path on a mapped
+    network drive keeps its drive letter.
+
+    Resolving ``Y:\docs`` on Windows follows the mapping to its UNC target
+    (``\\host\share\docs``). When *path* names a drive letter that
+    :func:`is_mapped_network_drive` reports as mapped and the resolved path is
+    UNC, the result is the resolved path re-rooted on that drive letter, so the
+    drive check and every later syscall see the form the user typed. Symlinks
+    inside the share are still followed. A resolved path that does not stay under
+    the drive's own root is returned as resolved. Never raises beyond what
+    ``Path.resolve`` raises."""
+    rp = Path(path).expanduser()
+    resolved = rp.resolve()
+    if os.name != "nt" or not is_unc_or_device_path(str(resolved)):
+        return resolved
+    drive = ntpath.splitdrive(os.path.abspath(str(rp)))[0]
+    if not (len(drive) == 2 and drive[1] == ":" and is_mapped_network_drive(drive + "\\")):
+        return resolved
+    root = Path(drive + "\\")
+    try:
+        return root / resolved.relative_to(root.resolve())
+    except ValueError:
+        return resolved
+
+
 def reject_unsafe_path_string(raw: str, *, require_absolute: bool = False,
                                reject_network_drives: bool = False) -> None:
     """Reject a caller-supplied path string LEXICALLY, before any filesystem call.

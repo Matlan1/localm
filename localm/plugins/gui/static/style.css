@@ -1800,6 +1800,12 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
 }
 .job-head { display: flex; align-items: center; gap: 10px; }
 .job-name { font-weight: 600; }
+/* Interrupted downloads (app/interrupted-pulls.js). */
+.interrupted-list { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.interrupted-row .job-name { overflow-wrap: anywhere; }
+.interrupted-url { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.interrupted-row .actions { margin-top: 8px; }
+.interrupted-toggle { align-self: flex-start; }
 .job-state {
   font-size: 11px;
   padding: 1px 8px;

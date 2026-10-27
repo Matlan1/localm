@@ -645,7 +645,7 @@ class TestSyncModelsDirBackfillsExistingEntry:
 
         import localm.model_manager.pull as pull_mod
         monkeypatch.setattr(pull_mod, "backfill_mmproj_for_entry",
-                            lambda entry, path: outside)
+                            lambda entry, path, reg=None: outside)
 
         result = mm.sync_models_dir()
 

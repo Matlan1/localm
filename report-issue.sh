@@ -67,7 +67,6 @@ scrub() {
     { my $h = eval { hostname() }; push @hn, $h if defined $h; }
     push @hn, $ENV{COMPUTERNAME} if defined $ENV{COMPUTERNAME};
     my %names;
-    my %skip = map { $_ => 1 } qw(admin archlinux build builder client cloud computer container debian default desktop dev devbox docker fedora gpu home host kali laptop linux localhost localm macbook machine main node notebook office prod production raspberrypi redacted root runner server staging system test ubuntu user windows work worker workstation);
     for my $n (@hn) {
       $n =~ s/^\s+|\s+\z//g;
       $n =~ s/\.+\z//;
@@ -77,8 +76,9 @@ scrub() {
       $names{$first} = 1;
     }
     my @keep = sort { length($b) <=> length($a) || $a cmp $b }
-               grep { length($_) >= 3 && !$skip{lc $_} } keys %names;
-    my $own = join('|', map { quotemeta } @keep);
+               grep { length($_) >= 3 && lc($_) ne 'localhost' } keys %names;
+    my $own = join('|', map { quotemeta } grep { !/\A[A-Za-z]+\z/ } @keep);
+    my $word = join('|', map { quotemeta } @keep);
     sub email_repl {
       my $tok = shift;
       (my $core = $tok) =~ s/^'+//;
@@ -107,6 +107,11 @@ scrub() {
       $t =~ s~(?:(?<![^\s\x22\x27(\[{=,;|\x60<*])|(?<=[A-Za-z0-9_]{2}:))(\\{1,2}\\{1,2}(?:\?\\{1,2}UNC\\{1,2})?)(?!(?:wsl\$|wsl\.localhost|localhost)(?![A-Za-z0-9._\$-]))[A-Za-z0-9][A-Za-z0-9._\$-]*~$1<host>~gi;
       $t =~ s~(?<![A-Za-z0-9._-])(?!(?:localm\.local|(?:host|gateway|kubernetes)\.docker\.internal)(?![A-Za-z0-9-]|\.[A-Za-z0-9]))[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.(local|lan|home\.arpa|internal|localdomain)(?![A-Za-z0-9(-]|\.[A-Za-z0-9])~<host>.$1~gi;
       $t =~ s~(?<![A-Za-z0-9_./\\-])(?:$own)(?![A-Za-z0-9_-]|[./\\][A-Za-z0-9_])~<host>~gi if $own ne '';
+      if ($word ne '') {
+        $t =~ s~(?:(?<=//)|(?<=\@))(?:$word)(?![A-Za-z0-9_-]|\.[A-Za-z0-9])~<host>~gi;
+        $t =~ s~(?<![A-Za-z0-9_./\\\@<-])(?:$word)(?=:\d)~<host>~gi;
+        $t =~ s~(?<![A-Za-z0-9_])((?:host|computer|machine|node|device|pc)(?:[ _-]?name)?["']?[ \t]*[:=][ \t]*["']?)(?:$word)(?![A-Za-z0-9_-]|\.[A-Za-z0-9])~$1<host>~gi;
+      }
       print $t . $nl;
     }
 PERL

@@ -351,6 +351,37 @@ def register(app, jobs):
 #  3. THE HEURISTIC STAYS MARKED                                               #
 # --------------------------------------------------------------------------- #
 
+def test_a_call_through_a_parameter_is_not_bound_to_a_same_named_function(tmp_path):
+    """A parameter called as ``fn()`` has no static target. The one function in
+    the tree that happens to be named ``fn`` (here it takes the load lock) is
+    not what the handler runs."""
+    mod = _load()
+    root = _tree(tmp_path, {
+        "helpers.py": _HELPERS + '''
+
+def submit():
+    def fn(job):
+        return get_embedder()
+    return fn
+''',
+        "routes.py": '''
+def _probe(what, fn):
+    return bool(fn())
+
+
+def _cheap():
+    return True
+
+
+def register(app):
+    @app.get("/api/caps")
+    async def caps():
+        return {"x": _probe("x", _cheap)}
+''',
+    })
+    assert "GET /api/caps" not in _routes(mod, root)
+
+
 def test_an_unknown_receiver_is_reported_as_unconfirmed_and_never_gates(tmp_path):
     """`x.fetch(...)` where x is a local of unknown type. Resolved by unique
     method name, because dropping that lost a real finding - and marked, because

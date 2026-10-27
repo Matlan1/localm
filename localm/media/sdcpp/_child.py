@@ -436,7 +436,6 @@ def _do_load(payload):
         "desc": _State.model_desc,
         "image": bool(lib.sd_ctx_supports_image_generation(ctx)),
         "video": bool(lib.sd_ctx_supports_video_generation(ctx)),
-        "ref_images": _supports_ref_images(lib, ctx),
         "default_sample_method": (lib.sd_sample_method_name(method) or b"").decode(),
         "default_scheduler": (lib.sd_scheduler_name(scheduler) or b"").decode(),
         "devices": b.list_devices(lib),
@@ -648,13 +647,6 @@ def _set_image_inputs(b, p, payload):
     return keep
 
 
-def _supports_ref_images(lib, ctx) -> Optional[bool]:
-    """Whether the model loaded in *ctx* takes reference images, or None when
-    the library cannot say."""
-    fn = getattr(lib, "sd_ctx_supports_ref_image_conditioning", None)
-    return None if fn is None else bool(fn(ctx))
-
-
 def _enum_from_name(lib, kind: str, name):
     from . import _binding as b
     if not name:
@@ -778,8 +770,7 @@ def _do_generate_image(payload, cancel_event):
         if payload.get("strength") is not None:
             p.strength = float(payload["strength"])
 
-    out = ctypes.POINTER(b.sd_image_t)()
-    count = ctypes.c_int(0)
+    out = ctypes.POINTER(b.sd_image_generation_result_t)()
     lib.sd_cancel_generation(ctx, b.SD_CANCEL_RESET)
     _reset_generation_state()
     _State.sample_steps = int(p.sample_params.sample_steps)
@@ -788,7 +779,7 @@ def _do_generate_image(payload, cancel_event):
     previewing = _arm_preview(lib, payload, _State.sample_steps)
     _State.generating = True
     try:
-        ok = lib.generate_image(ctx, ctypes.byref(p), ctypes.byref(out), ctypes.byref(count))
+        ok = lib.generate_image(ctx, ctypes.byref(p), ctypes.byref(out))
     finally:
         _State.generating = False
         if previewing:
@@ -797,11 +788,11 @@ def _do_generate_image(payload, cancel_event):
         del keep, lora_refs, hires_refs, input_refs
     cancelled = cancel_event.is_set()
     try:
-        if not ok or count.value < 1 or not out:
+        if not ok or not out or out.contents.count < 1 or not out.contents.items:
             if cancelled:
                 return "cancelled", "Generation cancelled."
             raise _generation_failed("stable-diffusion.cpp generation failed")
-        img = out[0]
+        img = out.contents.items[0].image
         if not img.data:
             if cancelled:
                 return "cancelled", "Generation cancelled."
@@ -812,7 +803,7 @@ def _do_generate_image(payload, cancel_event):
                   "channel": int(img.channel), "data": data, "seed": int(p.seed)}
     finally:
         if out:
-            lib.free_sd_images(out, count.value)
+            lib.free_sd_image_generation_result(out)
     if cancelled:
         return "cancelled", "Generation cancelled."
     return "ok", result
@@ -848,28 +839,28 @@ def _do_upscale_image(payload):
                                 int(payload.get("tile_size") or 128), None, None)
     if not uctx:
         raise RuntimeError(_error_with_native("stable-diffusion.cpp could not load the upscaler"))
-    out = ctypes.POINTER(b.sd_image_t)()
-    count = ctypes.c_int(0)
+    out = ctypes.POINTER(b.sd_image_generation_result_t)()
     _State.generating = True
     _State.upscaling = True
     try:
-        ok = lib.upscale(uctx, src, scale, ctypes.byref(out), ctypes.byref(count))
+        ok = lib.upscale(uctx, src, scale, ctypes.byref(out))
     finally:
         _State.upscaling = False
         _State.generating = False
         lib.free_upscaler_ctx(uctx)
         del keep
     try:
-        if not ok or count.value < 1 or not out or not out[0].data:
+        if (not ok or not out or out.contents.count < 1 or not out.contents.items
+                or not out.contents.items[0].image.data):
             raise RuntimeError(_error_with_native("stable-diffusion.cpp upscaling failed"))
-        res = out[0]
+        res = out.contents.items[0].image
         size = int(res.width) * int(res.height) * int(res.channel)
         return {"width": int(res.width), "height": int(res.height),
                 "channel": int(res.channel), "data": ctypes.string_at(res.data, size),
                 "scale": scale}
     finally:
         if out:
-            lib.free_sd_images(out, count.value)
+            lib.free_sd_image_generation_result(out)
 
 
 def _do_generate_video(payload, cancel_event):
@@ -911,10 +902,7 @@ def _do_generate_video(payload, cancel_event):
             raise ValueError("init image buffer does not match its size")
         keep = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
         p.init_image = b.sd_image_t(w, h, c, ctypes.cast(keep, ctypes.POINTER(ctypes.c_uint8)))
-    frames = ctypes.POINTER(b.sd_image_t)()
-    count = ctypes.c_int(0)
-    audio = ctypes.POINTER(b.sd_audio_t)()
-    fps_out = ctypes.c_int(0)
+    out = ctypes.POINTER(b.sd_video_generation_result_t)()
     lib.sd_cancel_generation(ctx, b.SD_CANCEL_RESET)
     _reset_generation_state()
     _State.sample_steps = int(p.sample_params.sample_steps)
@@ -923,8 +911,7 @@ def _do_generate_video(payload, cancel_event):
     previewing = _arm_preview(lib, payload, _State.sample_steps)
     _State.generating = True
     try:
-        ok = lib.generate_video(ctx, ctypes.byref(p), ctypes.byref(frames), ctypes.byref(count),
-                                ctypes.byref(audio), ctypes.byref(fps_out))
+        ok = lib.generate_video(ctx, ctypes.byref(p), ctypes.byref(out))
     finally:
         _State.generating = False
         if previewing:
@@ -933,14 +920,16 @@ def _do_generate_video(payload, cancel_event):
         del keep, lora_refs
     cancelled = cancel_event.is_set()
     try:
-        if not ok or count.value < 1 or not frames:
+        res = out.contents if out else None
+        if not ok or res is None or res.frame_count < 1 or not res.frames:
             if cancelled:
                 return "cancelled", "Generation cancelled."
             raise _generation_failed("stable-diffusion.cpp video generation failed")
+        frames, audio = res.frames, res.audio
         first = frames[0]
         w, h, c = int(first.width), int(first.height), int(first.channel)
         out_frames = []
-        for i in range(count.value):
+        for i in range(res.frame_count):
             img = frames[i]
             if not img.data or (int(img.width), int(img.height), int(img.channel)) != (w, h, c):
                 raise RuntimeError("stable-diffusion.cpp returned an incomplete frame")
@@ -953,13 +942,11 @@ def _do_generate_video(payload, cancel_event):
                          "sample_count": int(a.sample_count),
                          "data": ctypes.string_at(a.data, n * 4)}
         result = {"width": w, "height": h, "channel": c, "frames": out_frames,
-                  "fps": int(fps_out.value) or int(p.fps), "audio": out_audio,
+                  "fps": int(res.fps) or int(p.fps), "audio": out_audio,
                   "seed": int(p.seed)}
     finally:
-        if frames:
-            lib.free_sd_images(frames, count.value)
-        if audio:
-            lib.free_sd_audio(audio)
+        if out:
+            lib.free_sd_video_generation_result(out)
     if cancelled:
         return "cancelled", "Generation cancelled."
     return "ok", result

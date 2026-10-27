@@ -186,7 +186,10 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
                 job.push({"type": "line", "outcome": True, "text": refused})
                 return False
             s = apply_choice(s, native_choice or {})
-            refused = native.input_refusal(s, input_image=input_image, **extras)
+            refused = (native.input_refusal(s, input_image=input_image, **extras)
+                       or native.lora_refusal(
+                           s, ([{"name": lora_name}] if lora_name else [])
+                           + list(native_loras or [])))
             if refused:
                 job.push({"type": "line", "outcome": True, "text": refused})
                 return False

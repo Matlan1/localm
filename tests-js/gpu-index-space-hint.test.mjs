@@ -132,3 +132,35 @@ test("a refresh after switching away from native removes the stale hint", async 
   assert.equal(hintVisible(doc), false,
                "stale hint hidden once the source is no longer native");
 });
+
+test("index_space nvidia-smi: the GPU choices are locked and the hint says why", async () => {
+  const calls = [];
+  const gpus = [
+    { index: 0, name: "RTX 3090", total: 24 * GIB, free: 20 * GIB },
+    { index: 1, name: "RTX 3090", total: 24 * GIB, free: 20 * GIB },
+  ];
+  const { window } = loadApp({ fetchImpl: makeFetch(calls, { gpus, indexSpace: "nvidia-smi" }) });
+  const doc = window.document;
+  const list = doc.getElementById("perf-gpu-split-list");
+  assert.ok(await waitFor(() => doc.getElementById("perf-gpu-select-row").hidden === false));
+  assert.ok(await waitFor(() => list.querySelectorAll("input[type=checkbox]").length === 2));
+  assert.equal(doc.getElementById("perf-main-gpu").disabled, true, "Main GPU is locked");
+  assert.ok([...list.querySelectorAll("input[type=checkbox]")].every((cb) => cb.disabled),
+            "every split checkbox is locked");
+  assert.ok(await waitFor(() => hintVisible(doc)), "the shared hint is visible");
+  assert.match(hint(doc).textContent, /torch did not answer/);
+});
+
+test("no index_space: the GPU choices are not locked", async () => {
+  const calls = [];
+  const gpus = [
+    { index: 0, name: "RTX 3090", total: 24 * GIB, free: 20 * GIB },
+    { index: 1, name: "RTX 3090", total: 24 * GIB, free: 20 * GIB },
+  ];
+  const { window } = loadApp({ fetchImpl: makeFetch(calls, { gpus }) });
+  const doc = window.document;
+  const list = doc.getElementById("perf-gpu-split-list");
+  assert.ok(await waitFor(() => list.querySelectorAll("input[type=checkbox]").length === 2));
+  assert.equal(doc.getElementById("perf-main-gpu").disabled, false);
+  assert.ok([...list.querySelectorAll("input[type=checkbox]")].every((cb) => !cb.disabled));
+});
