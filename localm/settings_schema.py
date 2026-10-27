@@ -1570,6 +1570,12 @@ def _validate_one(key: str, val, field: SettingField, default):
             raise ValueError(f"{key}: {val!r} is not one of {LANGUAGE_IDS}")
         if key == "key_presets":
             return _validate_key_presets(val)
+        if key == "gpu_numbering":
+            # Set by localm itself (discover.renumber_saved_gpu_selection): only
+            # its one value, or blank.
+            if val in (None, "", "pci_bus"):
+                return val or None
+            raise ValueError(f"{key}: {val!r} is not 'pci_bus'")
         if key == "main_gpu_index":
             # A HIDDEN NUMBER-shaped field (the dedicated GPU selector renders it,
             # not the generic number box - see its schema comment). val may arrive
