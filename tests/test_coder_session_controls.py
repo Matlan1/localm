@@ -1029,6 +1029,49 @@ def test_the_repl_cd_refuses_the_same_move(tmp_path, monkeypatch):
     assert agent.moved_to == ordinary
 
 
+@pytest.mark.parametrize("target", [
+    r"\\localhost\c$",
+    r"\\?\UNC\localhost\c$",
+    r"\??\UNC\localhost\c$",
+    "//localhost/c$",
+    r"\\.\PhysicalDrive0",
+])
+def test_the_repl_cd_refuses_unc_and_device_paths(tmp_path, monkeypatch, target):
+    """The REPL refuses what the web cwd route refuses, before any filesystem
+    call on the requested path."""
+    from pathlib import Path as _P
+
+    from localm.plugins.coder.cli import repl as _repl
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+
+    class _Agent:
+        def __init__(self):
+            from localm.audit import SessionMode
+            self.cwd = proj
+            self.mode = SessionMode.FULL
+            self.moved_to = None
+
+        def set_cwd(self, d):
+            self.moved_to = d
+
+    touched: list = []
+    real_is_dir, real_resolve = _P.is_dir, _P.resolve
+    monkeypatch.setattr(_P, "is_dir", lambda self: touched.append(str(self)) or real_is_dir(self))
+    monkeypatch.setattr(_P, "resolve",
+                        lambda self, *a, **k: touched.append(str(self)) or real_resolve(self, *a, **k))
+    agent = _Agent()
+    warned: list = []
+    monkeypatch.setattr(_repl, "print_warning", lambda m: warned.append(m))
+    monkeypatch.setattr(_repl, "print_info", lambda m: None)
+
+    assert _repl._handle_command(f"/cd {target}", agent) is False, "the REPL exited"
+    assert agent.moved_to is None, "the REPL moved onto a UNC or device path"
+    assert warned and "UNC or device path" in warned[-1], warned
+    assert not [t for t in touched if "localhost" in t or "PhysicalDrive" in t], touched
+
+
 # --------------------------------------------------------------------------- #
 #  /model and model switching on running / resumed coder sessions             #
 # --------------------------------------------------------------------------- #

@@ -899,7 +899,16 @@ class _ExecutionMixin:
         return result
 
     def _cancel_check(self) -> bool:
-        return self.cancelled
+        """True once this run is cancelled, or a stop was requested on this
+        agent or any ancestor, so a running tool's child process is killed."""
+        if self.cancelled:
+            return True
+        agent = self
+        while agent is not None:
+            if getattr(agent, "_stop_requested", False):
+                return True
+            agent = getattr(agent, "parent", None)
+        return False
 
     def _hooks_for(self, event: str, tool: str):
         """The session's ToolHooks when they apply to *event* for *tool*, else

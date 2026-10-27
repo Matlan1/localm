@@ -1210,8 +1210,11 @@ class _LoopMixin:
     def _unfinished_work_gate(self, response, request, interactive, st):
         """Hold back a final answer that leaves the requested work undone.
 
-        Two cases:
+        Three cases:
 
+        * the reply to the self-verification request is empty (or only the
+          ``[no tool needed]`` marker) while changed code files are still
+          unverified: the run ends as not finished, naming those files;
         * a change the request asked for is still owed (see
           :meth:`_change_still_owed`) and the reply is not a short clarifying
           question: the agent is told so once (worded for a
@@ -1256,6 +1259,12 @@ class _LoopMixin:
                 print_info("(nothing written: asking the agent to make the change)")
             self._emit("info", text=info)
             return (False, "")
+        if st.verify_nudged and self._unverified_writes and (
+                not response.strip() or _RE_NO_TOOL_NEEDED.fullmatch(response.strip())):
+            files = ", ".join(sorted(self._unverified_writes))
+            return (f"\n\n[not verified: the reply to the request to verify the "
+                    f"changed code files ({files}) was empty, so they were not "
+                    "checked]")
         announced = _announced_step(response)
         if st.announce_nudged and not announced and (
                 not response.strip() or _RE_NO_TOOL_NEEDED.fullmatch(response.strip())):

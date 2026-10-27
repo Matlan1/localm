@@ -15,10 +15,17 @@ from .base import (
     run_subprocess,
 )
 
+class CommandNotRunnable(ValueError):
+    """A command line the platform shell cannot run as written."""
+
+
 def _needs_shell(command: str) -> bool:
-    """Return True when the command uses shell operators that require a real shell."""
+    """Return True when the command uses shell operators that require a real shell.
+
+    A line break outside quotes counts: it separates two commands."""
     # Characters that only mean something inside a shell
-    shell_chars = {"&", "|", ";", "<", ">", "$", "`", "~", "(", ")", "{", "}", "!", "\\", "*", "?"}
+    shell_chars = {"&", "|", ";", "<", ">", "$", "`", "~", "(", ")", "{", "}", "!", "\\", "*", "?",
+                   "\n", "\r"}
     in_single = False
     in_double = False
     for ch in command:
@@ -77,15 +84,19 @@ def _shell_argv(command: str) -> list[str] | str:
     This is the ONE place that decision is made, so the blocking ``run_shell``
     and the background ``run_shell_background`` cannot drift into different
     security postures.
+
+    A command of several lines always goes through the shell, so every line
+    runs; on Windows its lines are joined for cmd.exe (:func:`_cmd_join_lines`).
+    Raises :class:`CommandNotRunnable` when cmd.exe cannot run it as written.
     """
-    if _needs_shell(command):
+    if _needs_shell(command.strip()):
         # Complex command - must go through a shell
-        return platform_shell(command)
+        return _shell_form(command)
     try:
         argv = _split_command(command)
     except ValueError:
         # Malformed quoting - fall back to shell
-        return platform_shell(command)
+        return _shell_form(command)
     # Shell builtins (echo, dir, type, …) have no executable on disk, so
     # argument-list mode would fail with "file not found". They are resolved via
     # resolve_runner() and unresolvable names are routed through the shell.
@@ -97,11 +108,85 @@ def _shell_argv(command: str) -> list[str] | str:
     # CreateProcess, which cannot start a bare "npm" even though which() finds
     # npm.CMD on PATH. Only the resolved path, with its extension, launches.
     if not argv:
-        return platform_shell(command)
+        return _shell_form(command)
     resolved = resolve_runner(argv[0])
     if resolved is None:
-        return platform_shell(command)
+        return _shell_form(command)
     return [resolved, *argv[1:]]
+
+
+def _shell_form(command: str) -> list[str] | str:
+    """:func:`base.platform_shell` of *command*, with its lines joined for
+    ``cmd.exe`` on Windows (see :func:`_cmd_join_lines`). Raises
+    :class:`CommandNotRunnable` when cmd cannot run it as written."""
+    if sys.platform == "win32" and ("\n" in command or "\r" in command):
+        command = _cmd_join_lines(command)
+    return platform_shell(command)
+
+
+def _cmd_join_lines(command: str) -> str:
+    """*command* as one ``cmd.exe`` line that runs every one of its lines.
+
+    ``cmd /S /C`` ends the command at the first line break, so every later line
+    would be dropped. Lines are joined with `` & ``, which runs each in turn
+    whatever the previous one returned, as ``sh`` does with separate lines; the
+    exit code is the last line's. A line ending in ``(``, ``&`` or ``|``, a line
+    starting with ``)``, ``&`` or ``|``, and a line ending in a ``^``
+    continuation are joined with a space instead (the caret is removed). Blank
+    lines are dropped. Quoting follows cmd: only ``"`` quotes, and ``^`` escapes
+    the next character outside quotes.
+
+    Raises :class:`CommandNotRunnable` when a line break sits inside double
+    quotes: cmd cannot pass one on."""
+    lines: list[str] = []
+    current: list[str] = []
+    in_quotes = False
+    escaped = False
+    text = command.replace("\r\n", "\n").replace("\r", "\n")
+    for ch in text:
+        if ch == "\n":
+            if in_quotes:
+                raise CommandNotRunnable(
+                    "This command has a line break inside double quotes. On "
+                    "Windows the command runs through cmd.exe, which ends a "
+                    "command at a line break, so it cannot run as written. Put "
+                    "the quoted text on one line, or run each line as its own "
+                    "command.")
+            lines.append("".join(current))
+            current = []
+            escaped = False
+            continue
+        current.append(ch)
+        if escaped:
+            escaped = False
+        elif ch == "^" and not in_quotes:
+            escaped = True
+        elif ch == '"':
+            in_quotes = not in_quotes
+    lines.append("".join(current))
+
+    joined = ""
+    glue = None
+    for line in lines:
+        piece = line.strip()
+        if not piece:
+            continue
+        if glue is not None:
+            if glue == " " or piece[0] in ")&|":
+                joined += " " + piece
+            else:
+                joined += " & " + piece
+        else:
+            joined = piece
+        carets = len(piece) - len(piece.rstrip("^"))
+        if carets % 2 == 1:
+            joined = joined[:-1].rstrip()
+            glue = " "
+        elif piece[-1] in "(&|":
+            glue = " "
+        else:
+            glue = "&"
+    return joined
 
 
 def _privacy_env(_privacy: bool) -> dict | None:
@@ -128,7 +213,10 @@ def tool_run_shell(
     shell-history variables zeroed. ``_cancel`` is the run's cancel check: once
     it answers True the command is killed and reported as cancelled.
     """
-    shell_cmd = _shell_argv(command)
+    try:
+        shell_cmd = _shell_argv(command)
+    except CommandNotRunnable as e:
+        return ToolResult.error(str(e))
     env = _privacy_env(_privacy)
 
     result = run_subprocess(shell_cmd, cwd, timeout=timeout, env=env,
@@ -136,7 +224,7 @@ def tool_run_shell(
 
     if result.cancelled:
         return ToolResult.error(
-            f"Command killed: the run was cancelled{_partial_on_timeout(result)}")
+            f"Command killed: the run was stopped or cancelled{_partial_on_timeout(result)}")
     if result.timed_out:
         return ToolResult.error(
             f"Command timed out after {timeout}s{_partial_on_timeout(result)}")
@@ -246,7 +334,10 @@ def tool_run_shell_background(
     """
     from ..background import JobCapacityError, ShellJob, get_registry
 
-    argv = _shell_argv(command)
+    try:
+        argv = _shell_argv(command)
+    except CommandNotRunnable as e:
+        return ToolResult.error(str(e))
     env = _privacy_env(_privacy)
     registry = get_registry()
 
@@ -548,7 +639,7 @@ def tool_run_tests(
         )
     if result.cancelled:
         return ToolResult.error(
-            f"Test run killed: the run was cancelled{_partial_on_timeout(result)}")
+            f"Test run killed: the run was stopped or cancelled{_partial_on_timeout(result)}")
     if result.timed_out:
         return ToolResult.error(
             f"Test run timed out after 120s{_partial_on_timeout(result)}")

@@ -20,9 +20,10 @@ sweep tools (grep, search_replace) skip such files.
 
 The agent requires an explicit approval of the exact call for a hit, under
 ``auto_approve`` too, and denies it when no one can be asked. A best-effort
-lexical check (plus ``os.path.realpath`` for file-tool paths), not a sandbox:
-other variables, ``eval``, interpreter one-liners and encodings defeat the shell
-half.
+lexical check (plus ``os.path.realpath`` for file-tool paths and for the path
+operands and redirect targets of a shell command, except UNC paths), not a
+sandbox: other variables, ``eval``, interpreter one-liners and encodings defeat
+the shell half.
 """
 
 from __future__ import annotations
@@ -241,17 +242,47 @@ def _check_segments(segments, cwd: Optional[Path], targets: Targets, home: Path,
         tree = name in _TREE_VERBS
         for tok in _operands(args):
             tok = _expand_home_vars(tok, home)
-            label = _match(_sg._norm_target(tok, current), targets, tree=tree)
+            label = _match_shell_path(_sg._norm_target(tok, current), targets, tree=tree)
             if label:
                 return label
         for _op, target in seg.redirects:
             target = _expand_home_vars(target, home)
-            label = _match(_sg._norm_target(target, current), targets, tree=False)
+            label = _match_shell_path(_sg._norm_target(target, current), targets, tree=False)
             if label:
                 return label
         if name == "cd":
             current = _sg._cd_destination(args, current)
     return None
+
+
+def _resolved_form(norm_path: Optional[str]) -> Optional[str]:
+    """The symlink- and junction-resolved canonical form of the canonical path
+    *norm_path*, or None when it is not a local absolute path (relative, UNC)
+    or cannot be resolved. A ``<home>`` form is resolved under the user's home
+    directory. Never touches a UNC path."""
+    if not norm_path or norm_path.startswith("//"):
+        return None
+    if norm_path == _sg._HOME or norm_path.startswith(_sg._HOME + "/"):
+        try:
+            norm_path = Path.home().as_posix().rstrip("/") + norm_path[len(_sg._HOME):]
+        except (RuntimeError, OSError):
+            return None
+    if _sg._canon(norm_path) is None:
+        return None
+    try:
+        return _sg._canon(os.path.realpath(norm_path))
+    except (OSError, ValueError):
+        return None
+
+
+def _match_shell_path(norm_path: Optional[str], targets: Targets, *,
+                      tree: bool) -> Optional[str]:
+    """:func:`_match` of a shell operand, as written and then resolved through
+    symlinks and junctions (see :func:`_resolved_form`)."""
+    label = _match(norm_path, targets, tree=tree)
+    if label:
+        return label
+    return _match(_resolved_form(norm_path), targets, tree=tree)
 
 
 def _patch_paths(diff: str) -> list[str]:
