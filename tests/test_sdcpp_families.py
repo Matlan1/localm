@@ -400,9 +400,9 @@ def test_loras_resolve_by_registry_name_and_by_file_name(flux_set):
     assert notes == []
 
 
-def test_a_lora_for_another_family_is_used_and_noted(flux_set):
-    out, notes = pairing.resolve_loras([{"name": "sdxl-style"}], "flux")
-    assert len(out) == 1 and "SDXL" in notes[0]
+def test_a_lora_for_another_family_is_refused(flux_set):
+    with pytest.raises(ModelFileError, match="made for SDXL, not FLUX.1, so it is not applied"):
+        pairing.resolve_loras([{"name": "sdxl-style"}], "flux")
 
 
 def test_a_flux_style_lora_is_not_noted_on_chroma_nor_a_chroma_lora_on_flux(flux_set):
@@ -410,8 +410,8 @@ def test_a_flux_style_lora_is_not_noted_on_chroma_nor_a_chroma_lora_on_flux(flux
     assert len(out) == 1 and notes == []
     out, notes = pairing.resolve_loras([{"name": "aidma-flux"}], "flux")
     assert notes == []
-    out, notes = pairing.resolve_loras([{"name": "aidma-flux"}], "qwen-image")
-    assert len(notes) == 1
+    with pytest.raises(ModelFileError, match="made for FLUX.1, not Qwen-Image,"):
+        pairing.resolve_loras([{"name": "aidma-flux"}], "qwen-image")
 
 
 @pytest.mark.parametrize("name", ["not-registered", "fluxunchained", "../x.safetensors"])

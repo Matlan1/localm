@@ -16,7 +16,8 @@ companion files a diffusion model needs.
   file) or ``unknown``.
 * ``family``: the model family a diffusion model, checkpoint, VAE or LoRA
   belongs to (``flux``, ``chroma``, ``sd3``, ``sd1``, ``sd2``, ``sdxl``,
-  ``wan2.1``, ``wan2.2``, ``qwen-image``, ``z-image``, ``flux2``, ...), or
+  ``wan2.1``, ``wan2.2``, ``qwen-image``, ``qwen-image-2.1``, ``z-image``, ``flux2``,
+  ...), or
   None when the header does not say.
 
 The diffusion-model rules follow ``ModelLoader::get_sd_version`` in
@@ -74,7 +75,7 @@ class Requirement:
 # Image families stable-diffusion.cpp generates still images with.
 IMAGE_FAMILIES = frozenset({
     "sd1", "sd2", "sdxl", "sd3", "flux", "chroma", "flux2", "qwen-image",
-    "z-image", "ovis-image", "anima", "ernie-image",
+    "qwen-image-2.1", "z-image", "ovis-image", "anima", "ernie-image",
 })
 # Video families.
 VIDEO_FAMILIES = frozenset({"wan2.1", "wan2.2", "hunyuan-video"})
@@ -82,7 +83,7 @@ VIDEO_FAMILIES = frozenset({"wan2.1", "wan2.2", "hunyuan-video"})
 FAMILY_LABELS = {
     "sd1": "Stable Diffusion 1.x", "sd2": "Stable Diffusion 2.x", "sdxl": "SDXL",
     "sd3": "SD3", "flux": "FLUX.1", "chroma": "Chroma", "flux2": "FLUX.2",
-    "qwen-image": "Qwen-Image", "z-image": "Z-Image", "ovis-image": "Ovis-Image",
+    "qwen-image": "Qwen-Image", "qwen-image-2.1": "Qwen-Image 2.1", "z-image": "Z-Image", "ovis-image": "Ovis-Image",
     "anima": "Anima", "ernie-image": "ERNIE-Image", "wan2.1": "Wan 2.1",
     "wan2.2": "Wan 2.2", "hunyuan-video": "HunyuanVideo",
 }
@@ -98,6 +99,7 @@ _FAMILY_SLOTS: dict[str, tuple[str, ...]] = {
     "chroma": ("t5xxl", "vae"),
     "flux2": ("llm", "vae"),
     "qwen-image": ("llm", "vae"),
+    "qwen-image-2.1": ("llm", "vae"),
     "z-image": ("llm", "vae"),
     "ovis-image": ("llm", "vae"),
     "anima": ("llm", "vae"),
@@ -109,7 +111,8 @@ _FAMILY_SLOTS: dict[str, tuple[str, ...]] = {
 
 # Optional companion slots: filled when a fitting file is registered, never
 # reported missing.
-_FAMILY_OPTIONAL_SLOTS: dict[str, tuple[str, ...]] = {"qwen-image": ("llm_vision",)}
+_FAMILY_OPTIONAL_SLOTS: dict[str, tuple[str, ...]] = {"qwen-image": ("llm_vision",),
+                                                       "qwen-image-2.1": ("llm_vision",)}
 
 # The VAE latent layout each family decodes: ("2d", channels) or ("3d", z_dim).
 _FAMILY_VAE = {
@@ -118,6 +121,7 @@ _FAMILY_VAE = {
     "z-image": ("2d", 16), "ovis-image": ("2d", 16),
     "flux2": ("2d", 32), "ernie-image": ("2d", 32),
     "qwen-image": ("3d", 16), "anima": ("3d", 16), "wan2.1": ("3d", 16),
+    "qwen-image-2.1": ("3d", 64),
 }
 
 # The T5 variant each family's t5xxl slot takes.
@@ -127,6 +131,7 @@ _FAMILY_T5 = {"sd3": "t5xxl", "flux": "t5xxl", "chroma": "t5xxl",
 # GGUF general.architecture values of LLM text encoders, per family.
 _FAMILY_LLM_ARCH = {
     "qwen-image": ("qwen2vl", "qwen25vl", "qwen2"),
+    "qwen-image-2.1": ("qwen3vl",),
     "z-image": ("qwen3",),
     "flux2": ("mistral3", "llama", "qwen3"),
     "ovis-image": ("qwen3",),
@@ -136,22 +141,29 @@ _FAMILY_LLM_ARCH = {
 }
 
 # Hidden sizes of the LLM text encoders a family's models were trained with
-# (Qwen2.5-VL-7B: 3584, Qwen3-4B: 2560).
-_FAMILY_LLM_HIDDEN = {"qwen-image": (3584,), "z-image": (2560,), "hunyuan-video": (3584,)}
+# (Qwen2.5-VL-7B: 3584, Qwen3-VL-8B: 4096, Qwen3-4B: 2560).
+_FAMILY_LLM_HIDDEN = {"qwen-image": (3584,), "qwen-image-2.1": (4096,), "z-image": (2560,),
+                      "hunyuan-video": (3584,)}
+
+# Families whose LLM vision encoder must be a Qwen3-VL one: a llama.cpp mmproj
+# with DeepStack tensors (``v.deepstack.``) and a known projection width.
+_FAMILY_VISION_DEEPSTACK = frozenset({"qwen-image-2.1"})
 
 # UNet families stable-diffusion.cpp runs a ControlNet and textual-inversion
 # embeddings with.
 UNET_FAMILIES = frozenset({"sd1", "sd2", "sdxl"})
 
 # Families stable-diffusion.cpp passes reference images to (FLUX.1 Kontext,
-# FLUX.2, Qwen-Image-Edit, Z-Image Omni, Anima edit LoRAs).
-REFERENCE_FAMILIES = frozenset({"flux", "flux2", "qwen-image", "z-image", "anima"})
+# FLUX.2, Qwen-Image-Edit, Qwen-Image 2.1, Z-Image Omni, Anima edit LoRAs).
+REFERENCE_FAMILIES = frozenset({"flux", "flux2", "qwen-image", "qwen-image-2.1", "z-image",
+                                "anima"})
 
 _GGUF_DIFFUSION_ARCH = {"flux": "flux", "sd3": "sd3", "wan": None, "lumina2": "z-image",
-                        "sdxl": "sdxl", "sd1": "sd1", "hyvid": "hunyuan-video"}
+                        "sdxl": "sdxl", "sd1": "sd1", "hyvid": "hunyuan-video",
+                        "qwen_image": "qwen-image", "qwen_image21": "qwen-image-2.1"}
 
 _LLM_GGUF_ARCHS = frozenset({
-    "qwen2", "qwen2vl", "qwen25vl", "qwen3", "llama", "mistral3", "gemma3", "glm4",
+    "qwen2", "qwen2vl", "qwen25vl", "qwen3", "qwen3vl", "llama", "mistral3", "gemma3", "glm4",
 })
 
 
@@ -170,6 +182,7 @@ _FAMILY_DEFAULTS = {
     "sdxl": Defaults(25, 6.0, 1024, 1024), "sd3": Defaults(28, 4.5, 1024, 1024),
     "flux": Defaults(20, 1.0, 1024, 1024), "chroma": Defaults(26, 4.0, 1024, 1024),
     "flux2": Defaults(28, 1.0, 1024, 1024), "qwen-image": Defaults(20, 2.5, 1024, 1024),
+    "qwen-image-2.1": Defaults(40, 6.0, 2048, 2048),
     "z-image": Defaults(9, 1.0, 1024, 1024), "ovis-image": Defaults(20, 5.0, 1024, 1024),
     "anima": Defaults(30, 4.0, 1024, 1024), "ernie-image": Defaults(20, 4.0, 1024, 1024),
     "wan2.1": Defaults(30, 6.0, 832, 480, 3.0), "wan2.2": Defaults(30, 5.0, 1280, 704, 5.0),
@@ -218,6 +231,8 @@ def accepts(slot: str, family: Optional[str], cand: FileInfo,
             return False
         hidden = _FAMILY_LLM_HIDDEN.get(family or "")
         got = cand.detail.get("hidden")
+        if family in _FAMILY_VISION_DEEPSTACK:
+            return bool(cand.detail.get("deepstack")) and got in (hidden or ())
         return hidden is None or got is None or got in hidden
     if slot == "t5xxl":
         if family == "hunyuan-video":
@@ -431,6 +446,9 @@ def _diffusion_family(t: dict) -> Optional[tuple[str, dict]]:
         if len(img_in) == 2 and img_in[1] == 384:
             detail["inpaint"] = True
         return "flux", detail
+    if _has(names, p + "txt_in.text_norm.weight"):
+        img_in = t.get(p + "img_in.weight") or ()
+        return "qwen-image-2.1", {"latent": img_in[1]} if len(img_in) == 2 else {}
     if _has(names, p + "transformer_blocks.0.img_mod.1.weight"):
         return "qwen-image", {"edit": True} if _has(names, "__index_timestep_zero__") else {}
     if _has(names, p + "cap_embedder.0.weight"):
@@ -518,7 +536,7 @@ def _vae_info(t: dict) -> Optional[FileInfo]:
     if _has(names, "decoder.head.", "decoder.upsamples.") and _has(names, "encoder.downsamples."):
         w = t.get("conv2.weight") or t.get("decoder.conv1.weight") or ()
         z = w[1] if len(w) == 5 else None
-        fam = "wan2.2" if z == 48 else "wan2.1"
+        fam = {48: "wan2.2", 64: "qwen-image-2.1"}.get(z, "wan2.1")
         return FileInfo("vae", fam, {"vae_dims": "3d", "latent": z})
     return None
 
@@ -526,6 +544,14 @@ def _vae_info(t: dict) -> Optional[FileInfo]:
 _LORA_MARKERS = (".lora_down.", ".lora_up.", ".lora_A.", ".lora_B.", "lora_unet_",
                  "lora_te", ".hada_w1", ".lokr_w1", ".oft_blocks", ".diff_b",
                  "_lora1.down.", "_lora1.up.", "_lora2.down.", "_lora2.up.")
+
+
+# Qwen-Image 2.1 layer names a Qwen-Image LoRA never has: its single-stream MLP
+# (``img_mlp.gate_up``, ``gate_layer``, ``proj``, ``out``) and text input
+# (``txt_in.in_layer``, ``txt_in.text_norm``), in the underscore form of
+# ``_lora_info``.
+_QWEN21_LORA_MARKERS = ("img_mlp_gate_up", "img_mlp_gate_layer", "img_mlp_proj_", "img_mlp_out_",
+                        "txt_in_in_layer", "txt_in_text_norm")
 
 
 def _lora_info(t: dict) -> Optional[FileInfo]:
@@ -543,6 +569,8 @@ def _lora_info(t: dict) -> Optional[FileInfo]:
         fam = "flux"
     elif "joint_blocks" in flat:
         fam = "sd3"
+    elif "transformer_blocks" in flat and any(m in flat for m in _QWEN21_LORA_MARKERS):
+        fam = "qwen-image-2.1"
     elif ("img_mod" in flat or "img_mlp" in flat) and "transformer_blocks" in flat:
         fam = "qwen-image"
     elif ("layers_0_attention_to_" in flat and "feed_forward_w1" in flat
@@ -587,7 +615,8 @@ def _text_encoder_info(t: dict, arch: Optional[str]) -> Optional[FileInfo]:
         return FileInfo("llm", detail={"arch": arch, "hidden": tok[1] if len(tok) > 1 else None})
     if arch == "clip" and _has(names, "v.blk."):
         proj = _shape(t, "mm.2.weight") or ()
-        return FileInfo("llm_vision", detail={"hidden": proj[0] if proj else None})
+        return FileInfo("llm_vision", detail={"hidden": proj[0] if proj else None,
+                                              "deepstack": _has(names, "v.deepstack.")})
     for pre in ("", "text_encoders.t5xxl.transformer.", "t5xxl.transformer."):
         shared = _shape(t, pre + "shared.weight", pre + "encoder.embed_tokens.weight")
         if shared and _has(names, pre + "encoder.block."):
@@ -770,8 +799,42 @@ def classify_tensors(tensors: dict, arch: Optional[str] = None) -> FileInfo:
     if found is not None:
         return FileInfo("diffusion", found[0], found[1])
     if arch in _GGUF_DIFFUSION_ARCH:
-        return FileInfo("diffusion", _GGUF_DIFFUSION_ARCH[arch])
-    return UNKNOWN
+        fam = _GGUF_DIFFUSION_ARCH[arch]
+        return FileInfo("diffusion", fam, {} if fam else {"arch": arch})
+    detail = {k: v for k, v in (("arch", arch), ("latent", _input_channels(tensors)))
+              if v is not None}
+    return FileInfo("unknown", detail=detail) if detail else UNKNOWN
+
+
+_INPUT_LAYERS = ("img_in.weight", "x_embedder.proj.weight", "x_embedder.weight",
+                 "patch_embedding.weight", "conv_in.weight", "input_blocks.0.0.weight")
+
+
+def _input_channels(tensors: dict) -> Optional[int]:
+    """The channels the first layer of a diffusion model in *tensors* reads (its
+    latent channels times the patch area), or None when no known input layer is
+    there."""
+    view = _diffusion_view(tensors)
+    for name in _INPUT_LAYERS:
+        shape = view.get(DIFFUSION_PREFIX + name)
+        if shape and len(shape) >= 2:
+            return shape[1]
+    return None
+
+
+def unknown_reason(info: FileInfo) -> str:
+    """What the header of an unidentified model file *info* shows, as a phrase
+    for a user-facing sentence: its GGUF architecture and input channels, or
+    that it names neither."""
+    detail = info.detail or {}
+    parts = []
+    if detail.get("arch"):
+        parts.append(f"GGUF architecture '{detail['arch']}'")
+    if detail.get("latent"):
+        parts.append(f"{detail['latent']} input channels")
+    if not parts:
+        return "its header shows no model layers localm knows"
+    return "its header shows " + " and ".join(parts)
 
 
 _CACHE: dict = {}

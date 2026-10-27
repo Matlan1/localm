@@ -731,7 +731,8 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
                     "backend": "native", "model": models["label"],
                     "components": {k: v["name"] for k, v in
                                    (models.get("components") or {}).items()} or None,
-                    "loras": [{"name": x["name"], "strength": x["multiplier"]}
+                    "loras": [{"name": x["name"], "strength": x["multiplier"],
+                               **({} if x.get("checked", True) else {"family_checked": False})}
                               for x in lora_files] or None,
                     "runtime": f"stable-diffusion.cpp {sd_runtime.pins.TAG} ({rt.backend})",
                     "elapsed_seconds": round(elapsed, 1),

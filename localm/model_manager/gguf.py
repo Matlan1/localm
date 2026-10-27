@@ -786,7 +786,7 @@ _GGUF_ENCODER_DECODER_ARCHITECTURES = frozenset({"t5"})
 # video generation checkpoints; none is a llama.cpp architecture.
 _GGUF_IMAGE_ARCHITECTURES = frozenset({
     "flux", "sd3", "aura", "hidream", "cosmos", "hyvid", "wan", "ltxv",
-    "sdxl", "sd1", "lumina2",
+    "sdxl", "sd1", "lumina2", "qwen_image", "qwen_image21",
 })
 _GGUF_NON_CHAT_ARCHITECTURES.update(
     {arch: "an image or video generation model" for arch in _GGUF_IMAGE_ARCHITECTURES})

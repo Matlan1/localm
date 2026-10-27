@@ -122,6 +122,17 @@ _QWEN25_VL = Download("unsloth/Qwen2.5-VL-7B-Instruct-GGUF", "Qwen2.5-VL-7B-Inst
                       4_683_072_384,
                       "d16776dcd9a28d42758c2958ed3a752aabf20a305252cd64ff2be72b4a78c503",
                       "text-encoder")
+_QWEN21_VAE = Download("Comfy-Org/Qwen-Image-2.1", "vae/qwen_image_2.1_vae_bf16.safetensors",
+                       675_509_688,
+                       "bb21f7473051e1ac368515dd3f2e15cd44d7a11748ee8823e1ddca3e4876b7c9", "vae")
+_QWEN3_VL_8B = Download("Qwen/Qwen3-VL-8B-Instruct-GGUF", "Qwen3VL-8B-Instruct-Q4_K_M.gguf",
+                        5_027_784_800,
+                        "67d1659bfe71b89d50b45a4ad1a9e5b997e5bb16ce5da66a6a6167abd569e9e2",
+                        "text-encoder")
+QWEN3_VL_8B_MMPROJ = Download("Qwen/Qwen3-VL-8B-Instruct-GGUF",
+                              "mmproj-Qwen3VL-8B-Instruct-F16.gguf", 1_159_029_824,
+                              "ca524100ebf825c9a870db1c580d03879e0da0ab2541697e2458e64891cf9d38",
+                              "mmproj")
 _QWEN3_4B = Download("Comfy-Org/z_image_turbo", "split_files/text_encoders/qwen_3_4b.safetensors",
                      8_044_982_048,
                      "6c671498573ac2f7a5501502ccce8d2b08ea6ca2f661c458e708f36b36edfc5a",
@@ -150,6 +161,12 @@ _DOWNLOADS: dict[tuple[str, str], Download] = {
     ("vae", "sd2"): _SD_VAE,
     ("clip_vision", "wan2.1"): _CLIP_VISION_H,
     ("llm", "qwen-image"): _QWEN25_VL, ("llm", "z-image"): _QWEN3_4B,
+    ("vae", "qwen-image-2.1"): _QWEN21_VAE, ("llm", "qwen-image-2.1"): _QWEN3_VL_8B,
+}
+
+# Optional components offered beside the required ones.
+_OPTIONAL_DOWNLOADS: dict[tuple[str, str], Download] = {
+    ("llm_vision", "qwen-image-2.1"): QWEN3_VL_8B_MMPROJ,
 }
 
 # Substrings that make a registered file the preferred fit, per (slot, family).
@@ -164,6 +181,8 @@ _NAME_HINTS: dict[tuple[str, Optional[str]], tuple[str, ...]] = {
     ("vae", "wan2.1"): ("wan_2.1", "wan2.1", "wan21", "wan"),
     ("vae", "wan2.2"): ("wan2.2", "wan_2.2", "wan22", "wan"),
     ("vae", "qwen-image"): ("qwen",), ("vae", "flux2"): ("flux2",),
+    ("vae", "qwen-image-2.1"): ("qwen_image_2.1", "qwen-image-2.1", "qwen2.1", "2.1"),
+    ("llm", "qwen-image-2.1"): ("qwen3vl", "qwen3-vl", "qwen3_vl"),
     ("llm", "qwen-image"): ("qwen2.5", "qwen_2.5", "qwen25"),
     ("llm", "z-image"): ("qwen3", "qwen_3"), ("llm", "flux2"): ("mistral", "qwen"),
     ("clip_vision", None): ("clip_vision_h", "clip_vision", "vision"),
@@ -172,12 +191,14 @@ _NAME_HINTS: dict[tuple[str, Optional[str]], tuple[str, ...]] = {
 
 def suggested_download(slot: str, family: Optional[str]) -> Optional[Download]:
     """A public file that fills *slot* for a *family* model, or None."""
-    return _DOWNLOADS.get((slot, family or ""))
+    key = (slot, family or "")
+    return _DOWNLOADS.get(key) or _OPTIONAL_DOWNLOADS.get(key)
 
 
 def all_downloads() -> list[Download]:
-    """Every distinct public component download, in table order."""
-    return list(dict.fromkeys(_DOWNLOADS.values()))
+    """Every distinct public component download, in table order, the optional
+    ones last."""
+    return list(dict.fromkeys([*_DOWNLOADS.values(), *_OPTIONAL_DOWNLOADS.values()]))
 
 
 def registry_candidates(reg: Optional[dict] = None) -> list[Candidate]:
@@ -341,6 +362,21 @@ class MissingComponents(ModelFileError):
         self.family = family
 
 
+READABLE_SUFFIXES = (".gguf", ".safetensors", ".sft")
+
+
+def unknown_family_message(label: str, info: FileInfo, media: str) -> str:
+    """The user-facing reason the model file *label* (classified as *info*) is
+    not loaded: localm cannot tell which family it is, with what its header
+    shows (``families.unknown_reason``) and what to do."""
+    art = "an" if media[:1] in "aeiou" else "a"
+    return (f"'{label}' is not {art} {media} model localm can identify "
+            f"({families.unknown_reason(info)}), so it is not passed to "
+            "stable-diffusion.cpp: choose a model of a supported family (see the native "
+            f"{media} docs), update localm if this is a newer family, or use the ComfyUI "
+            "backend.")
+
+
 def build_context(main: Path, label: str, explicit: dict, *, where: str, media: str,
                   cands: Optional[list] = None) -> dict:
     """The sd.cpp load context for model file *main* plus its companions.
@@ -350,11 +386,13 @@ def build_context(main: Path, label: str, explicit: dict, *, where: str, media: 
     to ``{"name", "auto"}``; ``notes`` are user-facing remarks about explicit
     choices that do not look right. A diffusion model gets its missing slots
     from the registry (``pair_components``); a full checkpoint loads as
-    ``model_path`` with only the explicit slots; a file the header does not
-    identify keeps the earlier rule (``diffusion_model_path`` when any text
-    encoder is set). Raises ``MissingComponents`` when a needed slot has no
+    ``model_path`` with only the explicit slots; a file in a format localm does
+    not read (not ``READABLE_SUFFIXES``, a ``.ckpt`` say) loads as
+    ``diffusion_model_path`` when any text encoder is set, else as
+    ``model_path``. Raises ``MissingComponents`` when a needed slot has no
     file, and ``ModelFileError`` when *main* is a component or a music model
-    file, not an image or video model.
+    file, not an image or video model, or when it is a ``READABLE_SUFFIXES``
+    file of a family localm does not know (``unknown_family_message``).
     *media* (``"image"``/``"video"``) and *where* (the settings page) word the
     messages."""
     info = families.inspect_file(main)
@@ -373,6 +411,9 @@ def build_context(main: Path, label: str, explicit: dict, *, where: str, media: 
         raise ModelFileError(f"'{label}' is {KIND_WORDS[info.kind]}, not {art} {media} model. "
                              f"Choose it as a component in {where}, and {art} {media} model "
                              "as the model.")
+    if (main.suffix.lower() in READABLE_SUFFIXES
+            and not families.known_family(info.family)):
+        raise ModelFileError(unknown_family_message(label, info, media))
     if info.kind == "diffusion":
         pairing = pair_components(info, explicit,
                                   registry_candidates() if cands is None else cands)
@@ -419,14 +460,24 @@ def _lora_fits(lora_family: Optional[str], family: Optional[str]) -> bool:
     return lora_family == family
 
 
+_LORA_FAMILY_LABELS = {"wan": "Wan", "llm": "a text model (LLM)"}
+
+
+def _family_label(family: Optional[str]) -> str:
+    return (families.FAMILY_LABELS.get(family or "") or _LORA_FAMILY_LABELS.get(family or "")
+            or str(family))
+
+
 def resolve_loras(entries: list, family: Optional[str],
                   reg: Optional[dict] = None) -> tuple[list, list]:
     """``(loras, notes)`` for *entries* (``[{"name", "strength"}]``): each
-    LoRA as ``{"name", "path", "multiplier"}`` for the sd.cpp worker, and
-    user-facing notes for a LoRA made for another family than *family*. A name
-    matches a registered ``lora`` entry by registry name, else by file name.
-    Raises ``ModelFileError`` for a name that matches none, or whose file is
-    missing or a network/device path."""
+    LoRA as ``{"name", "path", "multiplier", "checked"}`` for the sd.cpp worker
+    (``checked`` False when the LoRA's family or *family* is unknown, so the
+    fit was not checked), and a user-facing note for each LoRA not checked. A
+    name matches a registered ``lora`` entry by registry name, else by file
+    name. Raises ``ModelFileError`` for a name that matches none, whose file is
+    missing or a network/device path, or whose file reads as made for another
+    family than *family*."""
     from localm.model_manager import is_gguf_adapter_entry, load_registry
     from localm.model_manager.registry import _entry_path
     from localm.pathsafe import is_unc_or_device_path
@@ -459,14 +510,20 @@ def resolve_loras(entries: list, family: Optional[str],
         if not ok:
             raise ModelFileError(f"The LoRA '{want}' is registered, but its file is missing.")
         info = families.inspect_file(path)
-        if not _lora_fits(info.family, family):
-            notes.append(f"The LoRA '{want}' looks made for "
-                         f"{families.FAMILY_LABELS.get(info.family or '', info.family)}, not "
-                         f"{families.FAMILY_LABELS.get(family or '', family)}; it may have no "
-                         "effect.")
+        checked = bool(info.family and family)
+        if checked and not _lora_fits(info.family, family):
+            raise ModelFileError(f"The LoRA '{want}' is made for {_family_label(info.family)}, "
+                                 f"not {_family_label(family)}, so it is not applied. Remove "
+                                 f"it, or choose a {_family_label(family)} LoRA.")
+        if not checked:
+            what = (f"suits {_family_label(family)}" if family
+                    else "suits this model")
+            notes.append(f"The LoRA '{want}' could not be checked: localm cannot tell from "
+                         f"its file whether it {what}.")
         strength = item.get("strength")
         out.append({"name": want, "path": str(path),
-                    "multiplier": 1.0 if strength is None else float(strength)})
+                    "multiplier": 1.0 if strength is None else float(strength),
+                    "checked": checked})
     return out, notes
 
 

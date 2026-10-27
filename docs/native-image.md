@@ -54,15 +54,38 @@ the chat `/generate-image` command, the coder agent's image tool and the MCP
    ```
 
    Any model stable-diffusion.cpp supports works: SD 1.x/2.x and SDXL checkpoints,
-   SD3, FLUX, Z-Image, Qwen Image and more, as GGUF, safetensors or ckpt. Pick it in
+   SD3, FLUX, Z-Image, Qwen Image, Qwen-Image 2.1 and more, as GGUF, safetensors or ckpt. Pick it in
    the **Model** dropdown on the Images page (for the next generation) or set
    **Native model** in Settings (a registered model or a file path). A model that comes
-   as separate parts (a FLUX, Chroma, SD3, SDXL, Qwen-Image or Z-Image diffusion model)
+   as separate parts (a FLUX, Chroma, SD3, SDXL, Qwen-Image, Qwen-Image 2.1 or Z-Image diffusion model)
    is recognised from the file, and its text encoders and VAE are taken from your
    registered models: the CLIP-L, T5 or LLM encoder and the VAE that fit that family.
    Choose a component yourself (on the page or in Settings) to override the pick; a
    missing one is offered as a download before generating. A full checkpoint (SD 1.x,
    2.x, SDXL) loads on its own.
+
+   A `.gguf` or `.safetensors` image model whose family localm cannot tell from its
+   header is refused before anything loads, with what the header shows (its GGUF
+   architecture and input channels): stable-diffusion.cpp cannot load it without the
+   right parts. Choose a model of a family listed here, update localm, or use the
+   ComfyUI backend.
+
+### Qwen-Image 2.1
+
+Qwen-Image 2.1 (for example `leejet/Qwen-Image-2.1-GGUF`) is its own family, recognised
+from the file's tensors whatever the file is called. It needs:
+
+| Part | Download |
+|---|---|
+| LLM text encoder: Qwen3-VL-8B | `localm pull Qwen/Qwen3-VL-8B-Instruct-GGUF:Qwen3VL-8B-Instruct-Q4_K_M.gguf --type text-encoder --sha256 67d1659bfe71b89d50b45a4ad1a9e5b997e5bb16ce5da66a6a6167abd569e9e2` |
+| VAE: the Qwen-Image 2.1 VAE | `localm pull Comfy-Org/Qwen-Image-2.1:vae/qwen_image_2.1_vae_bf16.safetensors --type vae --sha256 bb21f7473051e1ac368515dd3f2e15cd44d7a11748ee8823e1ddca3e4876b7c9` |
+| LLM vision encoder (editing only): the Qwen3-VL-8B mmproj | `localm pull Qwen/Qwen3-VL-8B-Instruct-GGUF:mmproj-Qwen3VL-8B-Instruct-F16.gguf --type mmproj --sha256 ca524100ebf825c9a870db1c580d03879e0da0ab2541697e2458e64891cf9d38` |
+
+The Qwen-Image parts (the Qwen2.5-VL encoder and the 16-channel Qwen-Image VAE) do not
+fit and are never picked for it. Reference images (editing) need the vision encoder; a
+job with reference images and no vision encoder is refused with the download. Defaults:
+40 steps, CFG 6. The model can output transparent images when the prompt asks for one
+(the PNG keeps the alpha channel).
 
 ## Settings
 
@@ -125,8 +148,10 @@ set nor read them, and the Images page and job log show only a model's file name
   when the server stops.
 - The PNG carries no embedded metadata. A `.json` sidecar with the prompt and
   settings is written next to it except in privacy mode.
-- LoRAs: the Images page takes one or more registered LoRAs with a strength each (a
-  LoRA made for another family is applied with a note). ComfyUI workflow model picks
+- LoRAs: the Images page takes one or more registered LoRAs with a strength each. A
+  LoRA made for another family than the model's (a FLUX LoRA on Qwen-Image 2.1, say) is
+  refused before anything loads; a LoRA whose family localm cannot tell from its file is
+  applied, and the job log and the sidecar say it could not be checked. ComfyUI workflow model picks
   are refused with a reason rather than ignored. Per-component GPU placement applies to ComfyUI only; with
   it turned on, a native job says so and loads each model on one GPU.
 
@@ -192,7 +217,7 @@ saved anywhere else.
   fields: `input_image_data` (the base image as a data URL, instead of the `input_image`
   path) and `mask` (white repaints, black keeps; resized to the base image).
 - **Reference images** (up to 4) feed edit models: FLUX.1 Kontext, FLUX.2, Qwen-Image-Edit,
-  and other Qwen-Image, Z-Image and Anima models, or an instruct-pix2pix model. Describe the
+  Qwen-Image 2.1, and other Qwen-Image, Z-Image and Anima models, or an instruct-pix2pix model. Describe the
   change in the prompt. A model that does not take them is refused with a reason. Request
   field: `ref_images` (data URLs). Qwen-Image-Edit reads them through its Qwen2.5-VL text
   encoder's vision tower: a GGUF text encoder needs the matching mmproj file registered (type

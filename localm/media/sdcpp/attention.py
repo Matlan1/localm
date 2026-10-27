@@ -152,6 +152,7 @@ _IMAGE_SHAPES = {
     "ovis-image": ImageAttention(24, 128, 16, text_tokens=512, refs=True),
     "flux2": ImageAttention(48, 128, 16, text_tokens=512, refs=True),
     "qwen-image": ImageAttention(24, 128, 16, text_tokens=512, refs=True, ref_extra=400),
+    "qwen-image-2.1": ImageAttention(32, 128, 16, text_tokens=512, refs=True),
     "z-image": ImageAttention(30, 128, 16, text_tokens=512, refs=True),
     "anima": ImageAttention(16, 128, 16, refs=True),
     "ernie-image": ImageAttention(32, 128, 16, text_tokens=512),
