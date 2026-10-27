@@ -1056,11 +1056,24 @@ def test_the_repl_cd_refuses_unc_and_device_paths(tmp_path, monkeypatch, target)
         def set_cwd(self, d):
             self.moved_to = d
 
+    from localm.pathsafe import is_unc_or_device_path
     touched: list = []
     real_is_dir, real_resolve = _P.is_dir, _P.resolve
-    monkeypatch.setattr(_P, "is_dir", lambda self: touched.append(str(self)) or real_is_dir(self))
-    monkeypatch.setattr(_P, "resolve",
-                        lambda self, *a, **k: touched.append(str(self)) or real_resolve(self, *a, **k))
+
+    def _is_dir(self):
+        if is_unc_or_device_path(str(self)):
+            touched.append(str(self))
+            return True
+        return real_is_dir(self)
+
+    def _resolve(self, *a, **k):
+        if is_unc_or_device_path(str(self)):
+            touched.append(str(self))
+            return self
+        return real_resolve(self, *a, **k)
+
+    monkeypatch.setattr(_P, "is_dir", _is_dir)
+    monkeypatch.setattr(_P, "resolve", _resolve)
     agent = _Agent()
     warned: list = []
     monkeypatch.setattr(_repl, "print_warning", lambda m: warned.append(m))
@@ -1069,7 +1082,7 @@ def test_the_repl_cd_refuses_unc_and_device_paths(tmp_path, monkeypatch, target)
     assert _repl._handle_command(f"/cd {target}", agent) is False, "the REPL exited"
     assert agent.moved_to is None, "the REPL moved onto a UNC or device path"
     assert warned and "UNC or device path" in warned[-1], warned
-    assert not [t for t in touched if "localhost" in t or "PhysicalDrive" in t], touched
+    assert touched == [], touched
 
 
 # --------------------------------------------------------------------------- #
