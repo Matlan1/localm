@@ -364,11 +364,11 @@ test("a 413 context overflow keeps the clips from earlier turns", async () => {
   assert.doesNotMatch(toastText(window), /audio clip was not accepted/i);
 });
 
-test("a 501 for a missing audio decoder keeps every clip, earlier turns included", async () => {
+test("a 501 for a missing audio decoder drops only the clip just sent, earlier clips stay", async () => {
   const detail = "Reading this audio format needs the voice extra.";
-  const { window, ctl } = setup({ rejectWith: detail });
+  const { window, fetchCalls, ctl } = setup({ rejectWith: detail });
   ctl.rejectStatus = 501;
-  ctl.refusal = "audio";
+  ctl.refusal = null;
   const conv = { id: "c1", title: "t", messages: [
     audioMsg("transcribe", [], "EEEE"),
     { role: "assistant", content: "a transcript" },
@@ -376,13 +376,22 @@ test("a 501 for a missing audio decoder keeps every clip, earlier turns included
   ] };
   activate(window, conv);
   await window.runCompletion(conv);
-  for (const m of [conv.messages[0], conv.messages[2]]) {
-    assert.ok(Array.isArray(m.content), "the message keeps its parts");
-    assert.equal(m.content.some((p) => p.type === "input_audio"), true, "the clip is kept");
-  }
-  assert.doesNotMatch(JSON.stringify(conv.messages), /Audio removed/);
+  assert.ok(Array.isArray(conv.messages[0].content), "the earlier message keeps its parts");
+  assert.equal(conv.messages[0].content.some((p) => p.type === "input_audio"), true,
+    "the earlier clip is kept");
+  assert.equal(typeof conv.messages[2].content, "string");
+  assert.match(conv.messages[2].content, /and this mp3/);
+  assert.match(conv.messages[2].content, /\[Audio removed/);
+  assert.equal(conv.messages.length, 3, "no blank assistant turn is saved");
   assert.ok(toastText(window).includes(detail), "the server's message reaches the user");
   assert.equal(window.document.getElementById("toast").className.includes("error"), true);
+
+  ctl.rejectWith = null;
+  const before = streamed(fetchCalls).length;
+  await window.runCompletion(conv);
+  const next = streamed(fetchCalls)[before];
+  assert.equal(JSON.stringify(next.body.messages).includes("FFFF"), false,
+    "the refused clip is not sent again");
 });
 
 test("an image refusal keeps the clips from earlier turns", async () => {

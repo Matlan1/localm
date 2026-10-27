@@ -34,6 +34,8 @@
   "chat.audio.readError": "{name} konnte nicht gelesen werden.",
   "chat.audio.rejected": "Der Audioclip wurde nicht akzeptiert ({detail}) und aus dem Chat entfernt. Sie können weiterchatten (nur Text).",
   "chat.audio.rejectedSuggest": "{model} kann kein Audio hören - der Clip wurde entfernt. Mit der Schaltfläche unten antwortet {suggest}, oder chatten Sie weiter (nur Text).",
+  "chat.audio.imagesSkipped": "Das Modell, das Audio hört, kann keine Bilder lesen; frühere Bilder bleiben im Chat, wurden für diese Antwort aber weggelassen.",
+  "chat.image.rejectedServer": "Das Bild wurde nicht akzeptiert ({detail}) und aus dem Chat entfernt. Sie können weiterchatten.",
   "chat.audio.unplayable": "Dieser Audioclip kann nicht abgespielt werden.",
   "chat.audio.tooLarge": "{name} ist {size} MB groß; ein Audioclip darf höchstens {max} MB haben.",
   "chat.audio.tooLong": "{name} ist etwa {minutes} Min. lang; ein Audioclip darf höchstens {max} Min. lang sein.",

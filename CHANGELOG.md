@@ -29,6 +29,13 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **The message for a vision projector that no model records no longer claims every model in its folder owns it.** It says that no model records it and lists the chat models in the same folder.
 - **The VRAM confirmation for a mixture-of-experts model says what will happen.** It now says the experts stay in system RAM (and layers move to the CPU only if that is still too large) instead of "partial CPU offload".
 - **A vision projector that llama.cpp places on the CPU, or that it advises needs more image tokens, is reported.** localm warns when the projector loads on the CPU although the GPU was requested (image encoding is then much slower), and relays the advice to raise the minimum image tokens for Qwen-VL projectors.
+- **A rejected image or audio clip no longer breaks the rest of the chat.** An image the server could not read (or one over a limit), and an MP3 on a build without the audio decoder, used to stay in the conversation and fail every later message until that turn was deleted. The one just sent is now removed, with the server's reason in a message, and earlier images and clips are kept.
+- **Adding an audio clip after an image no longer deletes the image.** The clip is answered by a model that hears audio with the earlier images left out of that request only; the images stay in the chat.
+- **Math with a thin space, a row break or an underscore (`\,`, `\\`, `x_1`) now shows correctly** in replies instead of losing the escape to the text formatter.
+- **Qwen3-ASR replies show just the transcript**, without the leading `language English` text.
+- **Compaction keeps early facts better and names attachments.** A later compaction continues from the earlier summary instead of summarising it again as one more turn, and the summariser is told about each image and audio clip (with its file name).
+- **The web lookup limit and the Web access toggle follow Settings without a page reload.** A change to the lookup limit applies to the next message, and the toggle is hidden while network access is off.
+- **A T5 model in Chat answers your message** instead of the web-access note the Chat page sends with every request.
 
 ## [0.3.1] - 2026-10-22
 
