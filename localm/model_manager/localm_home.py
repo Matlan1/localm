@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 _REGISTRY_MAX_BYTES = 64 * 1024 * 1024
-_SHA256_RE = re.compile(r"[0-9a-fA-F]{64}")
+_HEX_DIGEST_RE = re.compile(r"[0-9a-fA-F]{64}")
 
 
 def _digest_key(path: Path) -> Optional[str]:
@@ -120,7 +120,7 @@ def recorded_digests(home: Path, entry_path: Callable[..., Optional[str]]
     for entry in data.values():
         stored = entry_path(entry)
         sha = entry.get("sha256") if isinstance(entry, dict) else None
-        if stored is None or not isinstance(sha, str) or not _SHA256_RE.fullmatch(sha):
+        if stored is None or not isinstance(sha, str) or not _HEX_DIGEST_RE.fullmatch(sha):
             continue
         key = _stored_key(stored)
         if key is None:
