@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The nightly and weekly crons of .github/workflows/ci.yml.
 
-The nightly cron runs exactly test, gui-tests and optional-stacks; the weekly
-cron keeps every job it ran before. Each job's `if:` is evaluated here, from
+The nightly cron runs exactly test, gui-tests, optional-stacks, lint and
+voice-stack; the weekly cron keeps every job it ran before. A pull request
+without a label runs no pin-currency check. Each job's `if:` is evaluated here, from
 the real workflow text, under each trigger, by a small evaluator for the
 GitHub Actions expression subset the file uses.
 """
@@ -21,7 +22,7 @@ _CI = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 NIGHTLY = "23 3 * * *"
 WEEKLY = "37 6 * * 1"
 
-NIGHTLY_JOBS = {"test-shard", "test", "gui-tests", "optional-stacks", "lint"}
+NIGHTLY_JOBS = {"test-shard", "test", "gui-tests", "optional-stacks", "lint", "voice-stack"}
 WEEKLY_JOBS = NIGHTLY_JOBS | {
     "abi-check", "comfyui-pin-check", "llama-rocm-pin-check",
     "mutation-scope", "mutation-run", "mutation-test", "web-search-canary", "voice-stack",
@@ -209,7 +210,8 @@ def test_the_push_trigger_runs_the_same_jobs_as_before_the_split():
 
 
 @pytest.mark.parametrize("labels,expected_present,expected_absent", [
-    ((), {"lint", "python-pr-gate", "voice-stack", "merge-policy"}, {"test", "optional-stacks"}),
+    ((), {"lint", "python-pr-gate", "voice-stack", "merge-policy"},
+     {"test", "optional-stacks", "comfyui-pin-check", "llama-rocm-pin-check"}),
     (("full-ci",), {"lint", "test", "gui-tests", "optional-stacks", "merge-policy"}, {"python-pr-gate"}),
 ])
 def test_pull_request_behaviour_is_unchanged_by_the_schedule_split(labels, expected_present, expected_absent):
@@ -229,3 +231,15 @@ def test_the_evaluator_fires_a_job_that_runs_on_every_schedule():
     assert _Eval("github.event_name == 'schedule'", ctx).run()
     assert not _Eval(
         "github.event_name == 'schedule' && github.event.schedule == '37 6 * * 1'", ctx).run()
+
+
+def test_the_voice_stack_runs_its_steps_on_a_pull_request_only_for_voice_changes():
+    steps = _load()["jobs"]["voice-stack"]["steps"]
+    scope = next(s for s in steps if s.get("id") == "scope")
+    assert steps[0]["with"]["fetch-depth"] == 2
+    assert "git diff --name-only HEAD^1 HEAD" in scope["run"]
+    for path in (r"localm/voice\.py", "localm/plugins/builtin/voice/", r"pyproject\.toml", r"uv\.lock"):
+        assert path in scope["run"], path
+    after = steps[steps.index(scope) + 1:]
+    gated = [s for s in after if s.get("if") == "steps.scope.outputs.run == 'true'"]
+    assert len(gated) == len(after) - 1, "every step after the scope check is gated, except the whisper smoke"
