@@ -223,9 +223,14 @@ nothing when `perl`, which it needs to remove personal details, is missing.
   (`\\FILESERVER01\share`, also in its doubled-backslash and `\\?\UNC\` forms),
   a host name ending in a local-network suffix (`nas.local`, `pc.lan`,
   `printer.home.arpa`, `.internal`, `.localdomain`; the suffix is kept), and this
-  computer's own name wherever it appears as a whole word (not inside a dotted
-  name or a path, and not when it is a distribution's default name such as
-  `ubuntu`). `\\wsl$`, `\\wsl.localhost`, `localhost`, localm's own
+  computer's own name. A name with a digit, hyphen or other non-letter (such as
+  `DESKTOP-4F2K9` or `node01`) is replaced wherever it appears as a whole word
+  (not inside a dotted name or a path). A name made only of letters can be an
+  ordinary word (`server`, `ubuntu`), so it is replaced only where it stands as
+  a machine name: in a URL (`http://server:8080`), after `@` (`me@server`),
+  before a port (`server:5000`), or as the value of a `host`, `hostname`,
+  `computer`, `computername`, `machine` or `machinename` setting; elsewhere in
+  the text it is kept. `\\wsl$`, `\\wsl.localhost`, `localhost`, localm's own
   `localm.local`, Docker's `host.docker.internal` and public domain names are
   kept.
 - Config values are sent only from a small allowlist of operational keys

@@ -4,7 +4,7 @@
 
 // --- ES module imports ---
 import { pickDirectory, pickFile } from "../app/picker.js";
-import { $, applyChatBackground, authHeaders, clearImageProxyCache, confirmDanger, confirmDangerAsync, el, fileToAvatarDataUri, fileToBackgroundDataUri, openModal, promptText, safeAvatarImageSrc, streamJob, toast, whileBusy } from "../app/helpers.js";
+import { $, applyChatBackground, authHeaders, clearImageProxyCache, confirmDanger, confirmDangerAsync, el, fileToAvatarDataUri, fileToBackgroundDataUri, openModal, promptText, refreshCsrf, safeAvatarImageSrc, SHELL_TOKEN, streamJob, toast, whileBusy } from "../app/helpers.js";
 import { refreshCtxLimit } from "../app/chat.js";
 import { t, tn, tOr, tOrFirst } from "../app/i18n.js";
 import { emptyState } from "../app/icons.js";
@@ -1015,6 +1015,10 @@ export async function refreshKeysPanel() {
       toast(e.detail || t("settings.keys.createFailedToast")); return;
     }
     const made = await r.json();
+    // The first key on an open-mode server turns authentication on: the shell
+    // token stops working and the reply set an owner session cookie, so switch
+    // this page to that session before anything else is fetched.
+    if (!window.__LOCALM_CSRF__ && SHELL_TOKEN) await refreshCsrf();
     const box = $("key-secret");
     box.replaceChildren();
     box.appendChild(el("div", "sub",

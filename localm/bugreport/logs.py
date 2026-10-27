@@ -95,15 +95,19 @@ def _recent_log_tail_result(home=None, pid=None, max_chars: int = 6000) -> tuple
         if chosen is None:
             return "", _LOG_UNAVAILABLE_NO_FILE
         raw = chosen.read_text(encoding="utf-8", errors="replace")
+        from localm._log_digest import build_digest, latest_header_epoch
         truncated = len(raw) > _br._LOG_TAIL_READ_BYTES
+        floor = None
         if truncated:
+            floor = latest_header_epoch(raw[:-_br._LOG_TAIL_READ_BYTES])
             raw = raw[-_br._LOG_TAIL_READ_BYTES:]
-        from localm._log_digest import build_digest
         # start_tainted=truncated: a truncated tail can start mid-way through a
         # debug_content_enabled() write with no header of its own, so
-        # build_digest must not trust whatever it finds first.
+        # build_digest must not trust whatever it finds first; floor is the
+        # latest header timestamp of the part cut off.
         return _br._scrub_secrets(
-            build_digest(raw, max_chars=max_chars, start_tainted=truncated)), ""
+            build_digest(raw, max_chars=max_chars, start_tainted=truncated,
+                         start_floor=floor)), ""
     except Exception as e:
         # Swallowed: collecting a log must never break the report it is attached
         # to. The caller is TOLD instead, so an unreadable log stays

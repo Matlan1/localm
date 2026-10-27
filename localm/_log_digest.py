@@ -210,6 +210,23 @@ def _record_epoch(rec: LogRecord) -> Optional[float]:
         return None
 
 
+def latest_header_epoch(text: str) -> Optional[float]:
+    """The latest timestamp (seconds since the epoch, naive local time, as
+    logged) among the lines of *text* shaped like a record header, or None
+    when no such line has a parseable one."""
+    latest: Optional[float] = None
+    for line in text.splitlines():
+        if not line[:4].isdigit() or not _LOG_LINE_RE.match(line):
+            continue
+        try:
+            ts = datetime.strptime(line[:23], "%Y-%m-%d %H:%M:%S,%f").timestamp()
+        except (ValueError, OverflowError, OSError):
+            continue
+        if latest is None or ts > latest:
+            latest = ts
+    return latest
+
+
 def _collapse_line_runs(lines: list[str]) -> list[str]:
     """The line-level twin of collapse_records' record-level collapsing,
     applied WITHIN a single (already-grouped) benign record's own lines: a run
@@ -282,7 +299,8 @@ def collapse_records(records: list[LogRecord]) -> list[str]:
 
 
 def _drop_content_records(
-        records: list[LogRecord], *, start_tainted: bool = False
+        records: list[LogRecord], *, start_tainted: bool = False,
+        start_floor: Optional[float] = None,
 ) -> tuple[list[LogRecord], int]:
     """Remove every content record (is_content_record) AND everything that
     follows one until we are confident we have resynchronized to genuine
@@ -304,19 +322,22 @@ def _drop_content_records(
     _TIMESTAMP_SKEW_S. A log pasted into the content was written before the
     content record, so its lines can never start a resync. Content that
     forges 3 back-to-back near-duplicate header lines stamped at or after the
-    marker, with nothing else in between, is the residual, accepted risk; a
-    tainted start (*start_tainted*) has no content timestamp and resyncs on the
-    run alone.
+    marker, with nothing else in between, is the residual, accepted risk.
 
     *start_tainted* applies the SAME distrust to the very first record, for
     text that may itself start mid-way through a content write with no header
     at all (parse_records' "starts mid-record" branch gives it level=="").
+    *start_floor* is then the timestamp a tainted start's resync run must reach
+    (minus _TIMESTAMP_SKEW_S): the latest header timestamp in the text cut off
+    before *records* (``latest_header_epoch``). Without it a tainted start
+    resyncs on the run alone.
 
     Returns (kept, count_dropped)."""
     kept: list[LogRecord] = []
     dropped = 0
     tainted = start_tainted
-    floor: Optional[float] = None
+    floor: Optional[float] = (start_floor - _TIMESTAMP_SKEW_S
+                              if start_tainted and start_floor is not None else None)
     i, n = 0, len(records)
 
     def _stamped_after_floor(r: LogRecord) -> bool:
@@ -366,19 +387,22 @@ def _content_withheld_notice(n: int) -> str:
             "included in a bug report) ...")
 
 
-def build_digest(text: str, *, max_chars: int = 6000, start_tainted: bool = False) -> str:
+def build_digest(text: str, *, max_chars: int = 6000, start_tainted: bool = False,
+                 start_floor: Optional[float] = None) -> str:
     """The full pipeline: parse -> drop chat-content records (and everything
     until resync, see _drop_content_records) -> collapse near-duplicate
     benign runs -> keep every error in full -> fit *max_chars*, trimming
     benign content first and never silently dropping an error. Never raises
     (returns "" on any unexpected failure, matching the caller's existing
-    best-effort contract). *start_tainted*: see _drop_content_records - pass
-    True when *text* may itself start mid-record (a truncated tail)."""
+    best-effort contract). *start_tainted* and *start_floor*: see
+    _drop_content_records - pass True when *text* may itself start mid-record
+    (a truncated tail), with the latest header timestamp of the cut-off part."""
     try:
         records = parse_records(text)
         if not records:
             return ""
-        records, withheld = _drop_content_records(records, start_tainted=start_tainted)
+        records, withheld = _drop_content_records(
+            records, start_tainted=start_tainted, start_floor=start_floor)
         notice = _content_withheld_notice(withheld) if withheld else ""
         if not records:
             return notice

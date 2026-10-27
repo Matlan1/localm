@@ -5373,18 +5373,16 @@ def _build_usage(prompt_tokens: Optional[int], completion_tokens: int = 0, *,
 
 
 def _last_user_text(messages: list) -> str:
-    """Text of the most recent user message (for the audit trail). A row the
-    client marked with an ``origin`` (a GUI web tool event sent as user-role
-    text, or a prompt the client wrote itself such as the compaction summarise
-    request) is skipped: the audit line, and the session log memory
-    consolidation learns from, record only what the user wrote."""
+    """The words the user wrote in the most recent user message they wrote
+    (for the audit trail and the session log memory consolidation learns
+    from): ``protocol.user_written_text`` of the last message
+    ``protocol.is_user_written`` accepts, so a row marked with an ``origin``
+    is skipped and a merged row with ``user_spans`` gives only those ranges.
+    "" when there is none."""
+    from localm.inference.protocol import is_user_written, user_written_text
     for m in reversed(messages):
-        if m.get("role") == "user" and not m.get("origin"):
-            content = m.get("content")
-            if isinstance(content, str):
-                return content
-            return " ".join(p.get("text", "") for p in (content or [])
-                            if isinstance(p, dict) and p.get("type") == "text")
+        if is_user_written(m):
+            return user_written_text(m)
     return ""
 
 
@@ -7351,8 +7349,9 @@ def _reply_logprobs(generated: str, records: list, top_n: int, answer: str, *,
 
 def _protocol_messages_to_dicts(messages: list[Message]) -> list:
     """Convert Pydantic Message objects to plain dicts for backends. A message's
-    ``origin`` marker, when set, is kept as an ``"origin"`` key; an unmarked
-    message has no such key."""
+    ``origin`` marker, when set, is kept as an ``"origin"`` key, and a string
+    message's ``user_spans`` as a ``"user_spans"`` key; a message without them
+    has no such key."""
     result = []
     for msg in messages:
         if isinstance(msg.content, str):
@@ -7385,6 +7384,9 @@ def _protocol_messages_to_dicts(messages: list[Message]) -> list:
         origin = getattr(msg, "origin", None)
         if origin:
             result[-1]["origin"] = origin
+        user_spans = getattr(msg, "user_spans", None)
+        if user_spans is not None and isinstance(msg.content, str):
+            result[-1]["user_spans"] = [list(s) for s in user_spans]
         if msg.tool_calls:
             result[-1]["tool_calls"] = msg.tool_calls
     return result

@@ -8,7 +8,7 @@ from __future__ import annotations
 import string
 import threading
 from pathlib import Path
-from typing import Optional, TypeGuard
+from typing import Callable, Optional, TypeGuard
 
 from localm.bugreport.logs import _recent_hang_traces, _recent_log_tail_result
 from localm.bugreport.assembly import build_report, report_title
@@ -109,7 +109,8 @@ def save_user_report(description: str = "", *, summary: str = "",
                      what_i_expected: str = "", what_happened: str = "",
                      include_log: bool = False,
                      client: Optional[dict] = None,
-                     extra_hang_trace: str = "") -> Optional[Path]:
+                     extra_hang_trace: str = "",
+                     scrub: Optional[Callable[[str], str]] = None) -> Optional[Path]:
     """Build and save a USER-initiated bug report and return its path.
 
     The shared backend for the GUI "Report a bug" control and the
@@ -133,7 +134,9 @@ def save_user_report(description: str = "", *, summary: str = "",
     rather than reporting a false success). Serialized on
     ``_SAVE_REPORT_LOCK`` (see the comment above that lock) so two GUI-triggered
     calls running on different worker threads at once cannot race the shared
-    pre_restart.log read+delete or collide on the same-second report filename."""
+    pre_restart.log read+delete or collide on the same-second report filename.
+    *scrub*, when given, is applied to the whole report text before it is
+    saved, so the saved file holds exactly the scrubbed text."""
     with _SAVE_REPORT_LOCK:
         description = (description or "").strip()
         what_i_expected = (what_i_expected or "").strip()
@@ -174,4 +177,6 @@ def save_user_report(description: str = "", *, summary: str = "",
         if isinstance(client, dict) and client:
             context["client"] = client
         text = build_report(summary, context=context)
+        if scrub is not None:
+            text = scrub(text)
         return _br.save_report(text)

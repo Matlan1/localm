@@ -5,6 +5,8 @@ pathscrub.scrub_paths, so the data dir, home and account name never reach a
 scoped key."""
 
 import json
+import os
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -146,6 +148,69 @@ def test_bug_report_path(home, tmp_path):
     _assert_scrubbed(mine["path"], home, tmp_path)
     assert mine["path"].endswith(mine["filename"])
     assert Path(full["path"]).is_file()
+
+
+def test_bug_report_text_has_no_host_path_for_a_scoped_key(home, tmp_path):
+    import localm
+    from localm import bugreport
+    from localm.inference.http_server import create_app
+    install_file = str(Path(localm.__file__).resolve().parent / "plugins" / "engine.py")
+    data_file = str(home / "plugins" / "probe" / "plug.py")
+    note = f"failed in {install_file} and {data_file}"
+    engine = MagicMock()
+    engine.display_name = "m"
+    engine.loaded = True
+    writer, admin = _key(["config:write"]), _key(["admin"])
+    app = create_app(engine)
+    with TestClient(app) as c:
+        mine = c.post("/api/bug-report", headers=_h(writer), json={"message": note}).json()
+        full = c.post("/api/bug-report", headers=_h(admin), json={"message": note}).json()
+    text = mine["report_markdown"]
+    assert install_file not in text
+    assert str(home) not in text and str(tmp_path) not in text
+    assert "<install>" in text and DATA_DIR_LABEL in text
+    saved = (home / "bug-reports" / mine["filename"]).read_text(encoding="utf-8")
+    assert saved == text
+    assert mine["report_sha256"] == bugreport.report_digest(saved)
+    assert install_file in full["report_markdown"]
+
+
+def _stream_lines(client, job_id, key):
+    body = client.get(f"/api/jobs/{job_id}/events", headers=_h(key)).text
+    return [json.loads(line[len("data: "):]) for line in body.splitlines()
+            if line.startswith("data: ")]
+
+
+def test_job_events_and_activity_have_no_host_path_for_a_scoped_key(home, tmp_path):
+    from localm import auth
+    app = _gui_app(tmp_path)
+    scoped, admin = _key(["music"]), _key(["admin"])
+    track = home / "gui_music" / "t.wav"
+    done = threading.Event()
+
+    def work(job):
+        job.push({"type": "line", "text": f"Track saved to {track} (10s)"})
+        job.result = track.name
+        done.set()
+        return True
+
+    with TestClient(app) as c:
+        job = app.state.jobs.start_fn("music", work, owner=auth._hash_key(scoped),
+                                      label=f"Music into {track.parent}")
+        assert done.wait(10)
+        mine = _stream_lines(c, job.id, scoped)
+        full = _stream_lines(c, job.id, admin)
+        rows_mine = c.get("/api/activity", headers=_h(scoped)).json()["operations"]
+        rows_full = c.get("/api/activity", headers=_h(admin)).json()["operations"]
+    line_mine = [e["text"] for e in mine if e.get("type") == "line"]
+    assert line_mine == [f"Track saved to {DATA_DIR_LABEL}{os.sep}gui_music{os.sep}t.wav (10s)"]
+    assert mine[-1]["type"] == "end"
+    assert [e["text"] for e in full if e.get("type") == "line"] == [
+        f"Track saved to {track} (10s)"]
+    row_mine = next(r for r in rows_mine if r["id"] == job.id)
+    _assert_scrubbed(row_mine["label"][len("Music into "):], home, tmp_path)
+    row_full = next(r for r in rows_full if r["id"] == job.id)
+    assert row_full["label"] == f"Music into {track.parent}"
 
 
 def test_doctor_report_strings(home, tmp_path):

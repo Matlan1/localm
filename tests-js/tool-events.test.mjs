@@ -367,6 +367,60 @@ test("runCompletion: a merged row keeps origin \"tool\" only when every part of 
   assert.ok(!("origin" in sent[2]), "a user row merged after two tool events clears the mark");
 });
 
+// The server records only what the user wrote: a merged user row whose text
+// is not all the user's carries user_spans over exactly the user's ranges.
+test("runCompletion: a merged row carries user_spans over the user's own text only", async () => {
+  const kb = { role: "user", tag: "kb", content: "[Excerpts from the \"docs\" collection relevant to: q]\n\n[1] a.md:1\nEXCERPT", id: "m0" };
+  const doc = { role: "user", tag: "doc", content: "[Attached document: d.txt]\nDOC TEXT", id: "m1" };
+  let { completions } = await assemble([
+    doc,
+    { role: "user", content: "what does it say", id: "m2" },
+    kb,
+    searchEvent("q", [{ title: "T", url: "https://t.example/", snippet: "s" }], { id: "m3" }),
+  ]);
+  let sent = completions[0].body.messages.filter((m) => m.role !== "system");
+  assert.equal(sent.length, 1);
+  const spans = sent[0].user_spans;
+  assert.ok(Array.isArray(spans), "a merged row with added text carries user_spans");
+  assert.deepEqual(spans.map(([a, b]) => sent[0].content.slice(a, b)), ["what does it say"]);
+  assert.ok(!("own" in sent[0]), "the internal marker never reaches the wire");
+
+  // Only the user's text: no field at all, as before.
+  ({ completions } = await assemble([{ role: "user", content: "just me", id: "m1" }]));
+  sent = completions[0].body.messages.filter((m) => m.role !== "system");
+  assert.ok(!("user_spans" in sent[0]) && !("own" in sent[0]));
+
+  // A continue turn: the continue note is not the user's.
+  ({ completions } = await assemble([
+    { role: "user", content: "u1", id: "m1" },
+    { role: "assistant", content: "a1", id: "m2" },
+    { role: "user", content: "go on", continues: true, id: "m3" },
+  ]));
+  sent = completions[0].body.messages.filter((m) => m.role !== "system");
+  assert.deepEqual(sent[2].user_spans.map(([a, b]) => sent[2].content.slice(a, b)), ["go on"]);
+
+  // Only added text (a knowledge row then a tool event): no user words at all.
+  ({ completions } = await assemble([
+    { role: "user", content: "u1", id: "m1" },
+    { role: "assistant", content: "a1", id: "m2" },
+    kb,
+    { kind: "tool", tool: "note", status: "done", reason: "pending", note: "[pending action] do it.", id: "m4" },
+  ]));
+  sent = completions[0].body.messages.filter((m) => m.role !== "system");
+  assert.deepEqual(sent[2].user_spans, []);
+
+  // A tool-only merge keeps origin "tool" and no user_spans.
+  ({ completions } = await assemble([
+    { role: "user", content: "u1", id: "m1" },
+    { role: "assistant", content: "a1", id: "m2" },
+    searchEvent("q", [{ title: "T", url: "https://t.example/", snippet: "s" }], { id: "m3" }),
+    { kind: "tool", tool: "note", status: "done", reason: "format", note: "[tool-call format] fix it.", id: "m4" },
+  ]));
+  sent = completions[0].body.messages.filter((m) => m.role !== "system");
+  assert.equal(sent[2].origin, "tool");
+  assert.ok(!("user_spans" in sent[2]));
+});
+
 test("lastTurnHasWebResults: only a completed search or read counts, and a migrated row by its text", () => {
   const { window } = loadApp();
   const f = window.lastTurnHasWebResults;

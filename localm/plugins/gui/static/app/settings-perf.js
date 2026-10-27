@@ -2557,7 +2557,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   const mapped = conv.messages.map((m, i) => {
     if (isToolEvent(m)) {
       const { content, untrusted_spans } = toolEventPrompt(m);
-      return { role: "user", content, origin: "tool",
+      return { role: "user", content, origin: "tool", own: [],
                untrusted_spans: untrusted_spans.length ? untrusted_spans : undefined };
     }
     if (Array.isArray(m.content) &&
@@ -2579,11 +2579,13 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
       return { role: m.role, content: text };
     }
     if (m.role === "user" && m.continues && typeof m.content === "string") {
-      return { role: m.role, content: m.content + "\n\n[" + CONTINUE_PROMPT + "]" };
+      return { role: m.role, content: m.content + "\n\n[" + CONTINUE_PROMPT + "]",
+               own: [[0, m.content.length]] };
     }
     return {
       role: m.role, content: wireParts(m.content),
       untrusted_spans: m.untrusted_spans ? m.untrusted_spans.slice() : undefined,
+      own: m.role === "user" && (m.tag === "kb" || m.tag === "doc") ? [] : undefined,
     };
   });
   // Attached documents and knowledge excerpts are stored as separate user
@@ -2592,24 +2594,38 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   // merged message's untrusted_spans (LM-DA-014, web/plug.py) are shifted by
   // the length of what now precedes them and folded into the surviving entry.
   // A merged message keeps origin "tool" only while every part of it is a tool
-  // event: one that holds any text the user wrote is theirs.
+  // event: one that holds any text the user wrote is theirs. A user message
+  // whose text is not all the user's (a merged web result, knowledge excerpt or
+  // attached document, a continue note) carries user_spans: the ranges the user
+  // wrote, which is all the server records as the user's words.
+  const ownOf = (x) => (x.own === undefined ? [[0, x.content.length]] : x.own);
   for (const m of mapped) {
     const prev = messages[messages.length - 1];
     if (prev && prev.role === m.role && prev.role !== "system" &&
         typeof prev.content === "string" && typeof m.content === "string") {
+      const shift = prev.content.length + 2;   // "\n\n" separator
       if (m.untrusted_spans && m.untrusted_spans.length) {
-        const shift = prev.content.length + 2;   // "\n\n" separator
         (prev.untrusted_spans || (prev.untrusted_spans = []))
           .push(...m.untrusted_spans.map(([a, b]) => [a + shift, b + shift]));
       }
+      prev.own = [...ownOf(prev), ...ownOf(m).map(([a, b]) => [a + shift, b + shift])];
       prev.content += "\n\n" + m.content;
       if (prev.origin !== m.origin) delete prev.origin;
     } else {
       const entry = { role: m.role, content: m.content };
       if (m.untrusted_spans && m.untrusted_spans.length) entry.untrusted_spans = m.untrusted_spans;
       if (m.origin) entry.origin = m.origin;
+      if (m.own !== undefined) entry.own = m.own;
       messages.push(entry);
     }
+  }
+  for (const m of messages) {
+    if (m.own === undefined) continue;
+    const own = m.own;
+    delete m.own;
+    if (m.role !== "user" || m.origin || typeof m.content !== "string") continue;
+    const whole = own.length === 1 && own[0][0] === 0 && own[0][1] === m.content.length;
+    if (!whole) m.user_spans = own;
   }
 
   // The <select> can desync from what the server actually has loaded (e.g. an

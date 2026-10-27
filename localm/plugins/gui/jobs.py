@@ -442,8 +442,10 @@ class _HostAnnouncer:
 # several localm servers can share one data dir.
 #
 # The row holds no session content, no prompts and no argv, and the TTL sweep
-# drops it an hour after the operation finishes. It is written in every session
-# mode, privacy included.
+# drops it an hour after the operation finishes. When automatic diagnostic
+# traces are off (privacy mode without keep_diagnostics, see
+# audit.diagnostics_allowed) only RUNNING rows are written, without their
+# result, so a finished operation leaves no record on disk.
 _ACTIVITY_VERSION = 1
 
 # Serialises every activity-store operation IN THIS PROCESS. Lock order in this
@@ -465,6 +467,16 @@ _OWNER_DIGEST_RE = re.compile(r'("owner"\s*:\s*)"[0-9a-fA-F]{64}"')
 # to NOBODY and fails CLOSED: unreachable to a scoped key, still reachable to an
 # admin/owner key.
 _REDACTED_OWNER = "redacted-on-quarantine"
+
+
+def _keeps_finished_records() -> bool:
+    """Whether the activity record may keep finished operations and their
+    results: ``audit.diagnostics_allowed()``. False when that check raises."""
+    try:
+        from localm.audit import diagnostics_allowed
+        return diagnostics_allowed()
+    except Exception:
+        return False
 
 
 def activity_dir() -> Path:
@@ -925,10 +937,14 @@ class JobManager:
     def _persist_locked(self) -> None:
         """Mirror the registry to disk. Caller holds _lock.
 
-        Best-effort: _ActivityStore.write reports its own failures and returns
-        False instead of raising. An EMPTY registry removes the file instead of
-        writing an empty one."""
+        When ``audit.diagnostics_allowed()`` is False only running jobs are
+        written, each with ``result`` set to None. Best-effort:
+        _ActivityStore.write reports its own failures and returns False instead
+        of raising. An EMPTY set of rows removes the file instead of writing an
+        empty one."""
         rows = [j.to_record() for j in self._jobs.values()]
+        if not _keeps_finished_records():
+            rows = [{**r, "result": None} for r in rows if r["status"] == "running"]
         if rows:
             self._store.write(rows)
         else:

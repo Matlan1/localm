@@ -82,6 +82,14 @@ class Message(BaseModel):
     # Optional and additive: a client that omits it gets exactly the previous
     # behaviour. Request-only, so a response message never carries it.
     origin: Optional[Literal["tool", "client"]] = Field(default=None, exclude=True)
+    # Character ranges of a string ``content`` the user wrote, as
+    # ``[[start, end], ...]``, on a user message the client merged from the
+    # user's text and text it added (web results, knowledge excerpts, an
+    # attached document, a continue note). The server then treats only those
+    # ranges as the user's own words (``user_written_text``); an empty list
+    # means none of it. Request-only and optional: a message without it is the
+    # user's words in full.
+    user_spans: Optional[list[list[int]]] = Field(default=None, exclude=True)
 
     @field_validator("role", mode="before")
     @classmethod
@@ -511,6 +519,47 @@ class ChatResponse(BaseModel):
     model: str
     choices: list[FullChoice]
     usage: Optional[UsageInfo] = None
+
+
+def is_user_written(message: dict) -> bool:
+    """True for a plain-dict chat *message* that holds words the user wrote:
+    role ``user``, no ``origin`` marker, and ``user_spans`` not an empty
+    list."""
+    if message.get("role") != "user" or message.get("origin"):
+        return False
+    spans = message.get("user_spans")
+    return not (isinstance(spans, list) and not spans)
+
+
+def user_written_text(message: dict) -> str:
+    """The words the user wrote in a plain-dict user *message*.
+
+    A string ``content`` with ``user_spans`` gives only those ranges, clamped to
+    the content, in order, joined by a blank line; a malformed range is
+    skipped. Otherwise a string content is returned whole and a list content
+    gives its text parts joined by a space. "" when ``is_user_written`` is
+    False."""
+    if not is_user_written(message):
+        return ""
+    content = message.get("content")
+    if isinstance(content, str):
+        spans = message.get("user_spans")
+        if not isinstance(spans, list):
+            return content
+        n = len(content)
+        parts = []
+        for span in sorted((s for s in spans
+                            if isinstance(s, (list, tuple)) and len(s) >= 2
+                            and all(isinstance(v, int) for v in s[:2])),
+                           key=lambda s: s[0]):
+            start, end = max(0, min(span[0], n)), max(0, min(span[1], n))
+            if end > start:
+                parts.append(str(content[start:end]))
+        return "\n\n".join(parts)
+    if isinstance(content, list):
+        return " ".join(p.get("text", "") for p in content
+                        if isinstance(p, dict) and p.get("type") == "text")
+    return ""
 
 
 def make_chunk_id() -> str:
