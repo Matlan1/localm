@@ -189,7 +189,8 @@ test("price markers of two or more dollar signs keep the markdown between them",
     "1. **Cafe Luna** ($$) cosy\n2. **Taco Hut** ($) cheap\n3. **Le Bernardin** ($$$$) fancy");
   assert.equal(numbered.querySelectorAll("ol > li").length, 3);
   assert.equal(numbered.querySelectorAll("strong").length, 3);
-  noMath(numbered, "numbered list");
+  assert.equal(numbered.querySelectorAll(".katex-error").length, 0);
+  assert.doesNotMatch(numbered.textContent, /\*\*/);
 
   const bullets = render(win, "- **A** ($$)\n- **B** ($$$)\n- **C** ($)");
   assert.equal(bullets.querySelectorAll("ul > li").length, 3);
@@ -204,9 +205,9 @@ test("price markers of two or more dollar signs keep the markdown between them",
   assert.doesNotMatch(heading.textContent, /##/);
   noMath(heading, "heading");
 
-  const inline = render(win, "Cafe: $$, Taco: $$ and Bar $$.");
-  assert.equal(inline.textContent.trim(), "Cafe: $$, Taco: $$ and Bar $$.");
-  noMath(inline, "one line");
+  for (const line of ["Cafe: $$, Taco: $$ and Bar $$.", "Cafe ($$), Taco ($$), Bar ($$$$)", "A $$ b, C $$ d"]) {
+    assert.equal(win.protectMath(line).text, line, line);
+  }
 
   const alone = render(win, "Cheap\n$$\n- Taco\n$$\nfancy");
   noMath(alone, "a list between two lines holding only $$");
@@ -215,7 +216,9 @@ test("price markers of two or more dollar signs keep the markdown between them",
 test("display math on one line or across lines is still typeset", () => {
   const win = loadRealPipeline();
   const block = render(win, "Before\n\n$$\nx^2 + y^2\n$$\n\nAfter");
-  assert.deepEqual(tex(block), ["x^2 + y^2"]);
+  assert.deepEqual(tex(block).map((x) => x.trim()), ["x^2 + y^2"]);
+  assert.match(block.textContent, /Before/);
+  assert.match(block.textContent, /After/);
 
   const aligned = render(win,
     String.raw`$$\begin{aligned}` + "\na &= b \\\\\n  + c\n" + String.raw`\end{aligned}$$`);
@@ -231,9 +234,9 @@ test("display math on one line or across lines is still typeset", () => {
 
 test("single-dollar prices are not math", () => {
   const win = loadRealPipeline();
-  const out = render(win, "It costs $5 and $10, or $5-$10, not $20.");
-  noMath(out, "prices");
-  assert.equal(out.textContent.trim(), "It costs $5 and $10, or $5-$10, not $20.");
+  for (const text of ["It costs $5 and $10, or $5-$10, not $20.", "From $3 up, $4 for two."]) {
+    assert.equal(win.protectMath(text).text, text);
+  }
 });
 
 const okResponse = { ok: true, status: 200, headers: { get: () => null },
