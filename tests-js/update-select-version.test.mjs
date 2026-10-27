@@ -66,7 +66,7 @@ test("Choose a version: a downgrade confirms, then an unverified build warns wit
   const posts = [];
   const { window } = loadAppWithPages({ fetchImpl: makeFetch([
     { applied: false, needs_confirmation: "unverified", version: "v0.2.0",
-      reason: "it is signed with a retired localm release key", sha256: "b".repeat(64) },
+      reason: "the build is not signed by a trusted release key", sha256: "b".repeat(64) },
     { applied: true, version: "0.2.0", klass: "reboot", restarting: true },
   ], posts) });
   const doc = window.document;
@@ -83,7 +83,7 @@ test("Choose a version: a downgrade confirms, then an unverified build warns wit
   await flush();
   assert.deepEqual(posts[0], { version: "v0.2.0" });
 
-  assert.match(doc.getElementById("modal-body").textContent, /retired localm release key/,
+  assert.match(doc.getElementById("modal-body").textContent, /not signed by a trusted release key/,
     "the warning names why the signature does not verify");
   doc.querySelector("#modal-body .btn-danger").click();
   await flush();

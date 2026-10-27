@@ -18,7 +18,7 @@ import localm
 from localm import _version, updater
 from localm.bugreport import LocalmError
 from tests._net_config import set_config
-from tests._update_signing import envelope, keyset, pub_hex
+from tests._update_signing import envelope, keyset
 
 _PRIV = Ed25519PrivateKey.generate()
 _RECOVERY = [Ed25519PrivateKey.generate() for _ in range(3)]
@@ -95,7 +95,9 @@ def test_list_versions_marks_direction_and_warnings(env, monkeypatch):
     assert by["v0.3.0"]["direction"] == "same"
     assert by["v0.2.0"]["direction"] == "older" and by["v0.2.0"]["installable"] is True
     assert any("downgrade" in w for w in by["v0.2.0"]["warnings"])
-    assert any("retired key" in w for w in by["v0.2.0"]["warnings"])
+    assert any("does not accept" in w for w in by["v0.2.0"]["warnings"])
+    assert any("uv from PATH" in w for w in by["v0.2.0"]["warnings"])
+    assert not any("uv from PATH" in w for w in by["v0.4.0"]["warnings"])
     assert by["v0.1.9"]["installable"] is False
     assert "no build" in by["v0.1.9"]["reason"]
     assert any("no signature" in w for w in by["v0.1.9"]["warnings"])
@@ -278,19 +280,17 @@ def test_unsigned_build_reason(env):
     assert "no signature" in ei.value.reason
 
 
-def test_retired_key_is_named_and_never_trusted(env, monkeypatch):
+def test_a_legacy_bare_signature_is_reported_and_never_trusted(env):
     _home, inst = env
-    retired = Ed25519PrivateKey.generate()
-    monkeypatch.setattr(updater, "_RETIRED_RELEASE_KEYS", (pub_hex(retired),))
     data = _zip("0.2.0")
-    bare = base64.b64encode(retired.sign(data)).decode("ascii")
+    bare = base64.b64encode(Ed25519PrivateKey.generate().sign(data)).decode("ascii")
     with pytest.raises(updater.UnverifiedBuild) as ei:
         updater.apply(2, signature=bare, target_version="0.2.0", installed=inst,
                       download_opener=_download(data))
-    assert "retired localm release key" in ei.value.reason
-    assert pub_hex(retired)[:16] in ei.value.reason
+    assert "0.2.0 or earlier" in ei.value.reason
     with pytest.raises(LocalmError):
         updater.verify_signature(data, bare)
+    assert _installed(inst) == "0.3.0"
 
 
 def test_selected_install_never_moves_the_key_set_back(env):

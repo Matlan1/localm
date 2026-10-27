@@ -327,17 +327,8 @@ def verify_signature(data: bytes, signature, *, trusted: Optional[dict] = None):
     return accepted
 
 
-# Release keys that signed earlier releases and are not in any key set this
-# install trusts. A selected install names one in its warning when it signed the
-# build; these keys never make a build verified.
-_RETIRED_RELEASE_KEYS = (
-    "3501b23eb1ab6ec245b5e9d9c6a70b522ca89d6250d13060a9642ce1c8868ecf",
-    "3fbfccffd49975ef1d70459be2def339da85be20a1c40cea4ec93726e257123b",
-)
-
 # The oldest release signed by the current release key. Releases before it carry
-# only signatures by a retired key, so their own updater cannot verify any later
-# release.
+# only signatures in a format this install does not accept.
 _CURRENT_KEY_FLOOR = "0.3.0"
 
 
@@ -355,57 +346,15 @@ class UnverifiedBuild(Exception):
         self.sha256 = sha256
 
 
-def _signature_pairs(signature) -> list:
-    """The ``(key, sig)`` pairs a signature text carries: the entries of a
-    localm-update-sig/2 envelope, or ``(None, sig)`` for a bare base64 signature.
-    [] when it carries none that parse."""
-    if not isinstance(signature, str) or not signature.strip():
-        return []
-    try:
-        env = _strict_json(signature)
-    except _BadSignature:
-        return []
-    except (ValueError, RecursionError):
-        return [(None, signature.strip())]
-    if not isinstance(env, dict):
-        return []
-    try:
-        return [(e["key"], e["sig"]) for e in _parse_signatures(env.get("signatures"),
-                                                                "the build signatures")]
-    except _BadSignature:
-        return []
-
-
-def _retired_signer(data: bytes, signature):
-    """The retired release key (see ``_RETIRED_RELEASE_KEYS``) that validly signed
-    *data* in *signature*, or None."""
-    import base64
-
-    from cryptography.exceptions import InvalidSignature
-    for key, sig in _signature_pairs(signature):
-        candidates = [key] if key is not None else list(_RETIRED_RELEASE_KEYS)
-        for k in candidates:
-            if k not in _RETIRED_RELEASE_KEYS:
-                continue
-            try:
-                raw = base64.b64decode(sig, validate=True)
-                _public_key(k).verify(raw, data)
-            except (ValueError, InvalidSignature):
-                continue
-            return k
-    return None
-
-
 def assess_signature(data: bytes, signature) -> dict:
-    """Verify *signature* over *data* like :func:`verify_signature`, but report a
+    """Verify *signature* over *data* with :func:`verify_signature`, but report a
     failure instead of raising it.
 
     Returns ``{"verified": True, "reason": None, "keyset": <replacement key set or
     None>}`` when it verifies, else ``{"verified": False, "reason": <user-facing
-    text>, "keyset": None}``. The reason names a retired release key when one of
-    them signed the build, and otherwise says the build is unsigned, or that the
-    signature does not verify (an unknown key, or a build altered after signing),
-    or why the check could not run. Never raises for the signature itself."""
+    text>, "keyset": None}``. The reason says the build is unsigned, or why its
+    signature does not verify, or why the check could not run. Never raises for
+    the signature itself."""
     from localm.bugreport import LocalmError
     if not isinstance(signature, str) or not signature.strip():
         return {"verified": False, "keyset": None,
@@ -418,19 +367,9 @@ def assess_signature(data: bytes, signature) -> dict:
                 "reason": "the signature could not be checked: the cryptography "
                           "package is not installed"}
     except LocalmError as e:
-        failure = f"{e.summary} ({e.reason})" if e.reason else e.summary
-    try:
-        retired = _retired_signer(data, signature)
-    except ImportError:
-        retired = None
-    if retired is not None:
         return {"verified": False, "keyset": None,
-                "reason": f"it is signed with a retired localm release key "
-                          f"({retired[:16]}...) that this install no longer trusts. "
-                          "The signature matches the build"}
-    return {"verified": False, "keyset": None,
-            "reason": f"{failure}. It may be signed with an unknown key, or altered "
-                      "after it was signed"}
+                "reason": f"{e.reason or e.summary}. It may be signed with an unknown "
+                          "or retired key, or altered after it was signed"}
 
 
 def _check_selected_version(new_version: str, requested: str) -> None:
@@ -653,8 +592,9 @@ def list_versions(*, opener=None) -> dict:
     is False only when the release has no build attached (``reason`` says so).
     ``warnings`` lists what the user should know before choosing it: a downgrade,
     a reinstall of the running version, an unrecognised version format, a release
-    with no signature, or one from before ``_CURRENT_KEY_FLOOR`` (signed only by a
-    retired key). The signature itself is checked when the build is installed, not
+    with no signature, or one from before ``_CURRENT_KEY_FLOOR`` (a signature
+    format this version does not accept, and an updater that runs uv from PATH).
+    The signature itself is checked when the build is installed, not
     here.
 
     Raises :class:`~localm.bugreport.LocalmError` like :func:`check`, and when the
@@ -677,12 +617,17 @@ def list_versions(*, opener=None) -> dict:
         elif direction == "unknown":
             warnings.append("its version format is not recognised, so it cannot be "
                             "ordered against the installed one")
+        pre_floor = (_version.comparable(version, _CURRENT_KEY_FLOOR)
+                     and _version.is_newer(_CURRENT_KEY_FLOOR, version))
         if not signed:
             warnings.append("the release has no signature")
-        elif (_version.comparable(version, _CURRENT_KEY_FLOOR)
-              and _version.is_newer(_CURRENT_KEY_FLOOR, version)):
-            warnings.append(f"released before {_CURRENT_KEY_FLOOR}: it is signed only with "
-                            "a retired key, so its signature will not verify")
+        elif pre_floor:
+            warnings.append(f"released before {_CURRENT_KEY_FLOOR}: its signature is in a "
+                            "format this version does not accept, so it will not verify")
+        if pre_floor:
+            warnings.append("once installed, its own updater runs uv from PATH for an "
+                            "update that changes dependencies; if that update fails, "
+                            "localm update --rollback returns to the version you have now")
         installable = bool(asset and asset.get("id"))
         out.append({
             "version": version, "name": rel.get("name"),
