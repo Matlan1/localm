@@ -365,7 +365,7 @@ export function openAdapterAttachModal(m) {
       try {
         const { ok: good, data } = await postAdapterAttach(m.name, baseSel.value, scale);
         if (!good) {
-          err.textContent = data.detail || t("models.adapter.attachFailed");
+          showInlineError(err, data.detail || t("models.adapter.attachFailed"));
           err.hidden = false;
           return;
         }
