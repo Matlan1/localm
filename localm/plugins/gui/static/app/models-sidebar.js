@@ -1190,11 +1190,17 @@ export async function reloadModel(model) {
 // model that may not fit in available RAM and runs from disk-backed memory,
 // res.mmap_cpu_from_disk one whose CPU layers read it from disk on every token.
 // res.mmap_ram_short marks a use_mmap off load larger than available RAM; its
-// warning is res.mmap_note.
+// warning is res.mmap_note. A res.mmap_cpu_from_disk load with
+// res.mmap_cpu_read_bytes and res.mmap_ram_available_bytes names both sizes.
 export function toastLoadResult(res, model) {
   const fromDisk = !!(res && res.mmap_from_disk);
-  const diskNote = t(res && res.mmap_cpu_from_disk
-    ? "models.switch.mmapCpuFromDisk" : "models.switch.mmapFromDisk");
+  const cpuFromDisk = !!(res && res.mmap_cpu_from_disk);
+  const gib = (n) => (n / 1024 ** 3).toFixed(1);
+  const sized = cpuFromDisk && res.mmap_cpu_read_bytes > 0 && res.mmap_ram_available_bytes >= 0;
+  const diskNote = sized
+    ? t("models.switch.mmapCpuFromDiskSized", {
+      read: gib(res.mmap_cpu_read_bytes), avail: gib(res.mmap_ram_available_bytes) })
+    : t(cpuFromDisk ? "models.switch.mmapCpuFromDisk" : "models.switch.mmapFromDisk");
   if (res && res.degraded) {
     const parts = [];
     if (res.gpu_layers_offloaded < res.gpu_layers_total) {
