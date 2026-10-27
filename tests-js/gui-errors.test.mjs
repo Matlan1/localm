@@ -260,4 +260,6 @@ test("a status-pill error is recorded when it appears, not on every repeat", asy
   assert.deepEqual(guiPosts(log).map((p) => [p.source, p.message]), [["status", "Server unreachable"]]);
   const items = [...window.document.querySelectorAll("#recent-errors-list li")];
   assert.equal(items.length, 1);
+  assert.doesNotMatch(items[0].querySelector(".recent-error-meta").textContent, /\(x\d/,
+    "a repeat of the shown status error is not counted again");
 });
