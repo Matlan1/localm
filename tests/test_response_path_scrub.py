@@ -164,12 +164,14 @@ def test_bug_report_text_has_no_host_path_for_a_scoped_key(home, tmp_path):
     app = create_app(engine)
     with TestClient(app) as c:
         mine = c.post("/api/bug-report", headers=_h(writer), json={"message": note}).json()
+        saved = (home / "bug-reports" / mine["filename"]).read_text(encoding="utf-8")
         full = c.post("/api/bug-report", headers=_h(admin), json={"message": note}).json()
     text = mine["report_markdown"]
     assert install_file not in text
     assert str(home) not in text and str(tmp_path) not in text
-    assert "<install>" in text and DATA_DIR_LABEL in text
-    saved = (home / "bug-reports" / mine["filename"]).read_text(encoding="utf-8")
+    assert "<install>" in text
+    assert data_file[:15] not in text, "no cut-off host path, the title included"
+    assert str(Path("plugins") / "probe" / "plug.py") in text
     assert saved == text
     assert mine["report_sha256"] == bugreport.report_digest(saved)
     assert install_file in full["report_markdown"]

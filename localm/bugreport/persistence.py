@@ -135,12 +135,18 @@ def save_user_report(description: str = "", *, summary: str = "",
     ``_SAVE_REPORT_LOCK`` (see the comment above that lock) so two GUI-triggered
     calls running on different worker threads at once cannot race the shared
     pre_restart.log read+delete or collide on the same-second report filename.
-    *scrub*, when given, is applied to the whole report text before it is
-    saved, so the saved file holds exactly the scrubbed text."""
+    *scrub*, when given, is applied to the summary and the three user fields
+    before the report is built (so a title cut from them holds no partial
+    path) and to the whole report text before it is saved, so the saved file
+    holds exactly the scrubbed text."""
     with _SAVE_REPORT_LOCK:
         description = (description or "").strip()
         what_i_expected = (what_i_expected or "").strip()
         what_happened = (what_happened or "").strip()
+        if scrub is not None:
+            summary, description, what_i_expected, what_happened = (
+                scrub(summary or ""), scrub(description), scrub(what_i_expected),
+                scrub(what_happened))
         summary = report_title(summary, what_happened, description)
         context: dict = {"operation": "gui-bug-report"}
         if description:
