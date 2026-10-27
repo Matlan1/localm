@@ -189,7 +189,21 @@ def test_no_file_outside_the_five_pins_uv_from_a_release_download(bump):
             continue
         if "astral-sh/uv/releases/download" in text:
             pinning.append(rel)
+    assert "localm/uv_tool.py" in pinning, "the updater's uv download moved"
+    pinning.remove("localm/uv_tool.py")
     assert sorted(pinning) == sorted(SITE_PATHS)
+
+
+def test_the_updaters_uv_download_reads_its_pin_from_the_setup_scripts():
+    """localm/uv_tool.py builds the download URL but carries no version or digest:
+    both come from the setup script shipped in the install, so a bump that moves
+    the five places moves it too."""
+    from localm import uv_tool
+    version, sha = uv_tool.read_pin(_ROOT)
+    texts = _texts(_ROOT)
+    script = "setup.bat" if uv_tool.IS_WINDOWS else "setup.sh"
+    assert f"UV_INSTALLER_VERSION={version}" in texts[script].replace('"', "")
+    assert f"UV_INSTALLER_SHA256={sha}" in texts[script].replace('"', "")
 
 
 # --------------------------------------------------------------------------- #

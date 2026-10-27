@@ -45,26 +45,48 @@ echo "  LocaLM graphical setup"
 echo
 
 # ---- locate uv --------------------------------------------------------------
+# A uv already inside this folder (setup.sh's Portable option puts one there) is
+# used as is. A uv found elsewhere on this computer is used only when the user
+# says so: the same Portable / Shared question setup.sh asks, because Portable
+# means uv itself lives in this folder.
 UVEXE=""
+SYSUV=""
 if [ -x "./.uv/uv" ]; then
     UVEXE="$PWD/.uv/uv"
 elif command -v uv >/dev/null 2>&1; then
-    UVEXE="uv"
+    SYSUV=1
+    echo "  A uv is already installed on this computer."
+    echo
+    echo "  Keep LocaLM's Python tooling (uv itself, its runtime, and downloads) inside this folder?"
+    echo "    [1] Portable - everything in this folder (self-contained; re-downloads per clone)"
+    echo "    [2] Shared   - use the uv already installed on this computer"
+    STOREPICK=""
+    read -r -p "  Pick 1 or 2 [1]: " STOREPICK || STOREPICK=""
+    case "${STOREPICK:-1}" in
+        2*)
+            UVEXE="$(command -v uv)"
+            export LOCALM_GUI_STORE=shared
+            echo "  Using $UVEXE"
+            ;;
+    esac
+    echo
 fi
 
 if [ -z "$UVEXE" ]; then
-    echo "  uv (the Python package manager LocaLM builds on) is not installed yet."
-    echo "  It is a small download and is needed before any window can open."
-    echo
-    read -r -p "  Install it now? [Y/n]: " GETUV
-    case "${GETUV:-Y}" in
-        [Nn]*)
-            echo
-            echo "  Nothing was installed. Run ./setup.sh for the console installer."
-            exit 1
-            ;;
-    esac
-    echo "  Installing uv ..."
+    if [ -z "$SYSUV" ]; then
+        echo "  uv (the Python package manager LocaLM builds on) is not installed yet."
+        echo "  It is a small download and is needed before any window can open."
+        echo
+        read -r -p "  Install it now? [Y/n]: " GETUV
+        case "${GETUV:-Y}" in
+            [Nn]*)
+                echo
+                echo "  Nothing was installed. Run ./setup.sh for the console installer."
+                exit 1
+                ;;
+        esac
+    fi
+    echo "  Installing uv into this folder ..."
     # UV_UNMANAGED_INSTALL keeps it in ./.uv without editing shell startup
     # files or writing an install receipt under ~/.config/uv.
     export UV_INSTALL_DIR="$PWD/.uv"
@@ -84,8 +106,8 @@ if [ -z "$UVEXE" ]; then
     export PATH="$PWD/.uv:$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
     if [ -x "./.uv/uv" ]; then
         UVEXE="$PWD/.uv/uv"
-    elif command -v uv >/dev/null 2>&1; then
-        UVEXE="uv"
+    elif [ -z "$SYSUV" ] && command -v uv >/dev/null 2>&1; then
+        UVEXE="$(command -v uv)"
     fi
 fi
 

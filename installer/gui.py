@@ -49,6 +49,10 @@ _SRC = Path(__file__).resolve().parents[1]
 APP_NAME = "LocaLM"
 PYVER = "3.12"
 
+# Set by setup-gui.bat / setup-gui.sh to "shared" when the user chose to keep using
+# their own uv, so the window's tooling question starts on that answer.
+STORE_ENV = "LOCALM_GUI_STORE"
+
 # Exit codes telling setup-gui.bat / setup-gui.sh how an uninstall in the window
 # ended. 42 and 43: the Python runtime folders named in
 # .localm-uninstall-pending are theirs to remove now that the window has closed;
@@ -116,32 +120,25 @@ def venv_python(root: Path) -> Path:
     return venv_bin(root) / ("python.exe" if IS_WINDOWS else "python")
 
 
-def uv_dirs(root: Path) -> list[Path]:
-    """Every directory uv may live in, most preferred first: the portable copy
-    the launcher puts inside the clone, then Astral's own default install
-    locations, which a shell started before the installer ran does not
-    necessarily have on PATH yet."""
-    home = Path.home()
-    return [root / ".uv", root / ".uv" / "bin",
-            home / ".local" / "bin", home / ".cargo" / "bin"]
+def uv_tool():
+    """localm.uv_tool from this source tree (stdlib only, so it imports on the
+    window's own interpreter)."""
+    if str(_SRC) not in sys.path:
+        sys.path.insert(0, str(_SRC))
+    from localm import uv_tool as module
+    return module
 
 
 def find_uv(root: Path) -> Optional[str]:
-    """The uv to run, or None if there is none. Returns a full path for a
-    portable uv and a bare name for one resolved on PATH.
+    """The full path of the uv to run, or None if there is none.
 
-    The launcher scripts put the uv they used on PATH for this process, so a
-    uv that is not in one of the directories above is still reachable here.
-
-    Every uv invocation and the entry check below both go through this, so a
-    uv that starts the installer is always a uv the steps can run. See
-    tests/test_installer_gui.py TestUvResolution."""
-    exe = "uv.exe" if IS_WINDOWS else "uv"
-    for d in uv_dirs(root):
-        candidate = d / exe
-        if candidate.is_file():
-            return str(candidate)
-    return shutil.which("uv")
+    The same lookup the updater uses (localm.uv_tool.find_uv): the contained
+    copy in the folder, the shared uv the install record names, a uv on PATH,
+    then Astral's default install directories. Every uv invocation and the
+    entry check below both go through this, so a uv that starts the installer
+    is always a uv the steps can run. See tests/test_installer_gui.py
+    TestUvResolution."""
+    return uv_tool().find_uv(root)
 
 
 def install_manifest():
@@ -236,8 +233,8 @@ def uv_argv(*args: str) -> list[str]:
     exe = find_uv(ROOT)
     if exe is None:
         raise StepFailed(
-            "uv was not found in this folder or on PATH. Close this window "
-            "and run setup.bat / setup.sh instead.")
+            "uv was not found. Looked in: " + uv_tool().describe_search(ROOT)
+            + ". Close this window and run setup.bat / setup.sh instead.")
     return [exe, *args]
 
 
@@ -392,6 +389,41 @@ def run_steps(steps: list[Step], emit: Callable[[str], None],
                 journal(emit, "done", step.key)
     journal(emit, "complete")
     return failures, None
+
+
+def shared_uv() -> Optional[str]:
+    """The uv in use when it is not the contained copy in the folder (the user's
+    own), or None. Recorded so the updater finds it later."""
+    exe = find_uv(ROOT)
+    if exe is None or not os.path.isabs(exe) or uv_tool().is_inside(exe, ROOT):
+        return None
+    return exe
+
+
+def contained_uv_step(plan: Plan) -> Optional[Step]:
+    """The step that puts uv itself inside the folder when the Portable choice
+    was made and the uv found is not already there; None when there is nothing
+    to do. setup.bat's Portable option does the same ("uv, Python, and
+    downloads all under this folder")."""
+    if not plan.portable_store or uv_tool().contained_uv(ROOT) is not None:
+        return None
+
+    def install(emit):
+        tool = uv_tool()
+        try:
+            exe = tool.bootstrap_uv(ROOT, emit=emit)
+        except tool.UvBootstrapError as e:
+            raise StepFailed(str(e)) from None
+        emit(f"uv is installed in the folder: {exe}")
+    return Step("Installing uv into this folder", install, key="uv-portable")
+
+
+def all_steps(plan: Plan, resume: Optional[dict] = None) -> list[Step]:
+    """What the window runs: the install, preceded by the contained-uv step when
+    the Portable choice needs it."""
+    steps = build_steps(plan, resume)
+    first = contained_uv_step(plan)
+    return [first, *steps] if first else steps
 
 
 def build_steps(plan: Plan, resume: Optional[dict] = None) -> list[Step]:
@@ -557,6 +589,9 @@ def build_steps(plan: Plan, resume: Optional[dict] = None) -> list[Step]:
             args.append("--runtime-contained")
             for flag, d in present:
                 args += [flag, str(d)]
+        own_uv = shared_uv()
+        if own_uv:
+            args += ["--uv-exe", own_uv]
         _run(args, emit, plan)
         emit("Recorded what this install created, so uninstall removes only that.")
     steps.append(Step("Writing the install record", manifest, fatal=False, key="record"))
@@ -946,7 +981,7 @@ class Wizard:
                 self.portable_var.set(False)
                 if not exists:
                     self.missing_data = current
-        self.store_var = tk.BooleanVar(value=True)
+        self.store_var = tk.BooleanVar(value=os.environ.get(STORE_ENV) != "shared")
         self.appwin_var = tk.BooleanVar(value=False)
         self.path_cmd_var = tk.BooleanVar(value=False)
         self.shortcut_var = tk.StringVar(value="launcher")
@@ -1263,7 +1298,7 @@ class Wizard:
 
         self.lines = queue.Queue()
         resume = begin_journal(self._emit)
-        steps = build_steps(plan, resume)
+        steps = all_steps(plan, resume)
         threading.Thread(target=self._worker, args=(steps,), daemon=True).start()
         self.root.after(80, self._pump)
 

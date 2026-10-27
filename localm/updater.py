@@ -802,6 +802,7 @@ def apply(asset_id, *, signature=None, installed=None, download_opener=None,
             # ANTI-ROLLBACK - a validly SIGNED but OLDER build must not be installable.
             _refuse_downgrade(new_version)
             klass = classify(root, target, read_manifest(root))
+            uv_exe = _uv_for_deps(target) if klass == "deps" else None
             # The update has verified: save a key set it replaced, before the swap.
             if new_keyset is not None:
                 _save_keyset(new_keyset)
@@ -845,9 +846,10 @@ def apply(asset_id, *, signature=None, installed=None, download_opener=None,
                         "`update --rollback` will fall back to the backup listing and cannot "
                         "remove brand-new top-level entries this update added", manifest_path, e)
 
-        cmd = au.post_swap_command(klass, backend=_installed_backend())
+        cmd = au.post_swap_command(klass, backend=_installed_backend(), uv=uv_exe)
         if cmd:
-            run = runner or (lambda c: subprocess.run(c, cwd=str(target)).returncode)
+            run = runner or (lambda c: subprocess.run(
+                c, cwd=str(target), env=_deps_env(target)).returncode)
 
             def _rollback_or_raise(why):
                 # A failure of the recovery ITSELF raises rather than reporting a
@@ -862,14 +864,55 @@ def apply(asset_id, *, signature=None, installed=None, download_opener=None,
             try:
                 rc = int(run(cmd))
             except Exception as e:
-                _rollback_or_raise(f"post-update step crashed: {e}")
-                raise LocalmError("the post-update step crashed; rolled back", reason=str(e)) from None
+                what = f"could not start {cmd[0]}: {e}" if isinstance(e, OSError) else str(e)
+                _rollback_or_raise(f"post-update step crashed: {what}")
+                raise LocalmError("the post-update step crashed; rolled back", reason=what) from None
             if rc != 0:
                 _rollback_or_raise(f"{cmd[0]} exited {rc}")
                 raise LocalmError("the post-update step failed; rolled back",
                                   reason=f"{cmd[0]} exited {rc}")
         return {"applied": True, "version": new_version, "klass": klass,
                 "backup": str(backup_dir), "restart_needed": True}
+
+
+def _uv_for_deps(target: Path) -> str:
+    """The uv that reinstalls the dependencies of the install at *target*.
+
+    Finds the install's own uv (:func:`localm.uv_tool.find_uv`); when there is
+    none, installs the pinned uv into ``<target>/.uv``. Raises LocalmError,
+    naming every place looked at and why the install failed, when neither
+    works. Called before the swap, so a refusal changes nothing."""
+    from localm import uv_tool
+    from localm.bugreport import LocalmError
+    found = uv_tool.find_uv(target)
+    if found:
+        return found
+    searched = uv_tool.describe_search(target)
+    try:
+        return str(uv_tool.bootstrap_uv(target))
+    except uv_tool.UvBootstrapError as e:
+        raise LocalmError(
+            "this update needs uv to reinstall the dependencies, and uv could not be found or installed",
+            reason=f"looked for uv in: {searched}. Installing the pinned uv into "
+                   f"{target / uv_tool.CONTAINED_DIR} failed: {e}") from None
+
+
+def _deps_env(target: Path) -> dict:
+    """The environment for the dependency step: the current one, with uv's cache
+    and Python folders pointed at the install's own when it recorded them as
+    contained and the caller has not set them."""
+    import os
+    env = dict(os.environ)
+    try:
+        from localm import install_manifest
+        m = install_manifest.load(target) or {}
+    except Exception:
+        m = {}
+    if m.get("runtime_contained"):
+        for var, key in (("UV_CACHE_DIR", "cache_dir"), ("UV_PYTHON_INSTALL_DIR", "python_dir")):
+            if m.get(key) and var not in env:
+                env[var] = str(m[key])
+    return env
 
 
 def _installed_backend() -> str:

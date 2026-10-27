@@ -19,6 +19,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ### Fixed
 - **Importing a folder of models into an install that already has some no longer fails.** With the move or copy option, a model already in the models folder under the same name and with the same content is now used as it is (the original is left where it was) and the rest of the folder imports. A different file under the same name is skipped with a message instead of aborting the whole import.
+- **The graphical setup keeps uv in the folder, and updating no longer fails when uv is not on PATH.** `setup-gui` used to open on any uv it found on the computer and only offered to install its own when there was none. It now asks the same Portable or Shared question as `setup.bat` and, for Portable, installs uv into the install's `.uv` folder even when another uv exists; choosing Shared uses and records your own uv. An update that has to reinstall dependencies now runs the uv the install actually uses (the one in `.uv`, the recorded one, or one on PATH), and installs a contained copy first when the install has none; before, it ran a bare `uv` and rolled back with "[Errno 2] ... 'uv'" when uv was not on PATH. If uv cannot be found or installed, the update stops before changing anything and the message lists where it looked.
 
 ## [0.3.1] - 2026-10-22
 
