@@ -4440,6 +4440,10 @@ def gguf_split_devices(config: Optional[dict] = None, *, gpus: Optional[list] = 
                         except (TypeError, ValueError):
                             entry["ratio"] = None
                     picked.append(entry)
+            if ratios and picked and any(e["ratio"] is None for e in picked):
+                logger.warning("gpu_split_ratios %r does not give a positive ratio "
+                               "for each of gpu_split_indices %r; the shares are "
+                               "chosen automatically", ratios, chosen)
             if picked and any(e["ratio"] is None for e in picked):
                 for e in picked:
                     e["ratio"] = None
