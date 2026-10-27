@@ -400,9 +400,9 @@ def test_loras_resolve_by_registry_name_and_by_file_name(flux_set):
     assert notes == []
 
 
-def test_a_lora_for_another_family_is_used_and_noted(flux_set):
-    out, notes = pairing.resolve_loras([{"name": "sdxl-style"}], "flux")
-    assert len(out) == 1 and "SDXL" in notes[0]
+def test_a_lora_for_another_family_is_refused(flux_set):
+    with pytest.raises(ModelFileError, match="made for SDXL, not FLUX.1, so it is not applied"):
+        pairing.resolve_loras([{"name": "sdxl-style"}], "flux")
 
 
 def test_a_flux_style_lora_is_not_noted_on_chroma_nor_a_chroma_lora_on_flux(flux_set):
@@ -410,8 +410,8 @@ def test_a_flux_style_lora_is_not_noted_on_chroma_nor_a_chroma_lora_on_flux(flux
     assert len(out) == 1 and notes == []
     out, notes = pairing.resolve_loras([{"name": "aidma-flux"}], "flux")
     assert notes == []
-    out, notes = pairing.resolve_loras([{"name": "aidma-flux"}], "qwen-image")
-    assert len(notes) == 1
+    with pytest.raises(ModelFileError, match="made for FLUX.1, not Qwen-Image,"):
+        pairing.resolve_loras([{"name": "aidma-flux"}], "qwen-image")
 
 
 @pytest.mark.parametrize("name", ["not-registered", "fluxunchained", "../x.safetensors"])
@@ -604,7 +604,7 @@ def test_malformed_shapes_never_raise(tmp_path, shape):
     raw = json.dumps({"a": {"dtype": "F16", "shape": shape, "data_offsets": [0, 0]}})
     raw = raw.replace("Infinity", "1e400")
     f.write_bytes(struct.pack("<Q", len(raw)) + raw.encode() + b"\0" * 8)
-    assert families.inspect_file(f) is families.UNKNOWN
+    assert families.inspect_file(f) == families.UNKNOWN
 
 
 def test_a_chat_model_is_never_picked_automatically_as_an_llm_encoder(tmp_path):

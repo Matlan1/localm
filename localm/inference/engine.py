@@ -623,8 +623,12 @@ class Engine:
         when those weights are read by CPU layers on every token). ``mmap_note``
         is the one-line description
         (``mmap_setting.describe_mmap``), present only when there is something
-        to say. A ``use_mmap`` off load whose weights did not fit available RAM
-        also carries ``mmap_ram_short`` True, and its warning as ``mmap_note``."""
+        to say; for ``mmap_cpu_from_disk`` it is the backend's disk-speed
+        warning (``mmap_disk_note``) when it has one, and
+        ``mmap_cpu_read_bytes`` / ``mmap_ram_available_bytes`` carry its sizes
+        when the load's mmap decision knew them. A ``use_mmap`` off load
+        whose weights did not fit available RAM also carries
+        ``mmap_ram_short`` True, and its warning as ``mmap_note``."""
         effective = getattr(self._backend, "effective_use_mmap", None)
         if effective is None:
             return None
@@ -635,6 +639,17 @@ class Engine:
         state = {"use_mmap": setting, "mmap": bool(effective),
                  "mmap_from_disk": forced, "mmap_cpu_from_disk": cpu}
         note = describe_mmap(setting, bool(effective), forced, cpu)
+        disk = getattr(self._backend, "mmap_disk_note", "")
+        if cpu and isinstance(disk, str) and disk:
+            note = disk
+            decision = getattr(self._backend, "last_mmap_decision", None)
+            read = getattr(decision, "cpu_read_bytes", None)
+            if read is None:
+                read = getattr(decision, "host_bytes", None)
+            avail = getattr(decision, "ram_available", None)
+            if isinstance(read, int) and isinstance(avail, int):
+                state["mmap_cpu_read_bytes"] = read
+                state["mmap_ram_available_bytes"] = avail
         short = getattr(self._backend, "mmap_ram_short_note", "")
         if setting == "off" and isinstance(short, str) and short:
             state["mmap_ram_short"] = True
