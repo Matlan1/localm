@@ -849,7 +849,7 @@ class TestOwnerlessPartialResume:
         assert checked == [4]
         assert "Resuming" in capsys.readouterr().out
 
-    def test_preflight_ignores_it_while_another_download_holds_the_file_lock(
+    def test_preflight_ignores_it_and_the_pull_is_refused_while_another_download_holds_the_file_lock(
             self, hf_env, monkeypatch, capsys):
         from filelock import FileLock
         from huggingface_hub._local_folder import get_local_download_paths
@@ -857,11 +857,13 @@ class TestOwnerlessPartialResume:
         holder = FileLock(str(get_local_download_paths(models, "test.gguf").lock_path))
         holder.acquire()
         try:
-            assert mm._pull_gguf_file("owner/repo:test.gguf", name="test") is True
+            assert mm._pull_gguf_file("owner/repo:test.gguf", name="test") is False
         finally:
             holder.release()
         assert checked == [10], "a partial a live download holds was charged as reusable"
-        assert "Resuming" not in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "Resuming" not in out and "already in progress" in out
+        assert not (models / "test.gguf").exists()
 
     def test_the_lock_probe_sees_a_held_lock_and_a_free_one(self, tmp_path):
         from filelock import FileLock
