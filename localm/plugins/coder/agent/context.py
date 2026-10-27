@@ -465,6 +465,8 @@ class _ContextMixin:
         # Set by Agent (core.py), which this class is mixed into.
         cwd: Path
         backend: Any
+        @property
+        def stop_pending(self) -> bool: ...
         confirm_handler: Any
         server_side: bool
         _episode_store: Any

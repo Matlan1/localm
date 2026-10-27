@@ -118,6 +118,8 @@ class _ExecutionMixin:
         cwd: Path
         restricted: bool
         @property
+        def stop_pending(self) -> bool: ...
+        @property
         def plan_mode(self) -> bool: ...
         _audit: AuditLogT
         always_confirm: set
