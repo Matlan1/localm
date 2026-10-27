@@ -251,6 +251,17 @@ def test_an_unknown_family_with_chosen_encoders_is_passed_through_with_a_notice(
     assert len(infos) == 1
 
 
+def test_a_video_model_of_unknown_family_follows_the_same_rule(tmp_path):
+    path = write_gguf(tmp_path / "mystery.gguf", UNKNOWN_DIT, "qwen_image99")
+    clip = write_gguf(tmp_path / "te.gguf", QWEN3_VL, "qwen3vl")
+    with pytest.raises(ModelFileError, match="is not a video model localm can identify"):
+        pairing.build_context(path, "mystery", {}, where="Settings > Video", media="video")
+    built = pairing.build_context(path, "mystery", {"llm": ("te", clip)},
+                                  where="Settings > Video", media="video")
+    assert built["ctx"] == {"diffusion_model_path": str(path), "llm_path": str(clip)}
+    assert len(built["notes"]) == 1 and "is a video model whose family" in built["notes"][0]
+
+
 def test_a_known_family_never_gets_the_unknown_family_notice(qwen_sets):
     models = image_native.resolve_models(_settings(llm="Qwen2.5-VL-7B-Instruct-Q4_K_M"))
     assert not any("does not recognise" in n for n in models["notes"])
