@@ -261,10 +261,10 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                 raise HTTPException(409, path_formatter(request)(e)) from e
             except pending_pulls.UnknownPull:
                 pass
-            except OSError as e:
-                raise HTTPException(500, path_formatter(request)(e)) from e
             except ThreadCallTimeout as e:
                 raise HTTPException(504, f"Deleting the partial download timed out: {e}") from e
+            except OSError as e:
+                raise HTTPException(500, path_formatter(request)(e)) from e
         else:
             try:
                 check = await run_in_threadpool_bounded(
@@ -311,10 +311,10 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             raise HTTPException(500, path_formatter(request)(e)) from e
         except PullInFlight as e:
             raise HTTPException(409, path_formatter(request)(e)) from e
-        except OSError as e:
-            raise HTTPException(500, path_formatter(request)(e)) from e
         except ThreadCallTimeout as e:
             raise HTTPException(504, f"Deleting the partial download timed out: {e}") from e
+        except OSError as e:
+            raise HTTPException(500, path_formatter(request)(e)) from e
         return {"removed_bytes": removed}
 
     @app.post("/api/models/pulls/interrupted/{pull_id}/dismiss",
@@ -349,10 +349,10 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             raise HTTPException(500, path_formatter(request)(e)) from e
         except PullInFlight as e:
             raise HTTPException(409, path_formatter(request)(e)) from e
-        except OSError as e:
-            raise HTTPException(500, path_formatter(request)(e)) from e
         except ThreadCallTimeout as e:
             raise HTTPException(504, f"Deleting the partial file timed out: {e}") from e
+        except OSError as e:
+            raise HTTPException(500, path_formatter(request)(e)) from e
         return {"removed_bytes": removed}
 
     # --------------- ComfyUI missing-model pre-check + curated pull -------- #

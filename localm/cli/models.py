@@ -771,7 +771,6 @@ def pull(model_spec, name, sha256, redownload, mmproj, type, store,
 
     Models are stored in <data dir>/models/ and registered automatically.
     """
-    from ..model_manager import pending_pulls
     if list_interrupted:
         _print_interrupted(include_dismissed=True)
         return

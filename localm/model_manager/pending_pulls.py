@@ -73,9 +73,9 @@ class _Active:
         }
 
 
-_CURRENT: "contextvars.ContextVar[_Active | None]" = contextvars.ContextVar(
+_CURRENT: contextvars.ContextVar[_Active | None] = contextvars.ContextVar(
     "localm_pending_pull", default=None)
-_LIVE_IDS: "set[str]" = set()
+_LIVE_IDS: set[str] = set()
 _LIVE_LOCK = threading.Lock()
 _WRITE_LOCK = threading.Lock()
 
@@ -145,7 +145,7 @@ def _save_current(act: _Active) -> None:
     with _WRITE_LOCK:
         first = not act.written
         if first:
-            for path, old in _iter_records():
+            for _path, old in _iter_records():
                 if old["id"] == act.id or old["request"] != act.rec["request"]:
                     continue
                 if _is_running(old):
@@ -243,7 +243,7 @@ def note_source(**fields: Any) -> None:
         _save_current(act)
 
 
-def note_hf_files(base: Path, files: "list[dict]") -> None:
+def note_hf_files(base: Path, files: list[dict]) -> None:
     """Record that the Hugging Face files *files* (each ``rel``, ``url``,
     ``check_url``, ``size``, ``etag``) are about to download into *base* (a
     huggingface_hub local dir) and write the record. ``url`` is the address
@@ -295,7 +295,7 @@ def note_part(part_file: Path, lock_name: str, size: Optional[int],
 #  Reading, liveness, sizes                                            #
 # ------------------------------------------------------------------ #
 
-def _iter_records() -> "Iterator[tuple[Path, dict]]":
+def _iter_records() -> Iterator[tuple[Path, dict]]:
     d = records_dir()
     try:
         paths = sorted(d.glob("*.json"))
@@ -346,7 +346,7 @@ def _hf_layout(base: Path, rel: str):
         return None
 
 
-def _hf_temp_files(base: Path, rel: str, etag: Optional[str] = None) -> "list[Path]":
+def _hf_temp_files(base: Path, rel: str, etag: Optional[str] = None) -> list[Path]:
     """The temp files of the downloads of *rel* under *base*: those of
     *etag* only, or of every etag when *etag* is None."""
     paths = _hf_layout(base, rel)
@@ -411,7 +411,7 @@ def _expected_size(rec: dict) -> Optional[int]:
     return sum(known) if known else None
 
 
-def _source_urls(rec: dict) -> "list[str]":
+def _source_urls(rec: dict) -> list[str]:
     urls = [f.get("url") for f in rec.get("files") or [] if isinstance(f, dict)]
     if rec.get("url"):
         urls.append(rec["url"])
@@ -455,7 +455,7 @@ def describe(rec: dict) -> dict:
     }
 
 
-def list_interrupted(include_dismissed: bool = False) -> "list[dict]":
+def list_interrupted(include_dismissed: bool = False) -> list[dict]:
     """Records of pulls that are not running, oldest first, as
     :func:`describe` views. Dismissed ones only with *include_dismissed*."""
     out = []
@@ -505,7 +505,7 @@ def set_dismissed(pull_id: str, dismissed: bool = True) -> dict:
     return describe(rec)
 
 
-def resume_args(rec: dict) -> "list[str]":
+def resume_args(rec: dict) -> list[str]:
     """The ``localm pull`` arguments that repeat the recorded request."""
     req = rec["request"]
     args: list[str] = []
@@ -530,7 +530,7 @@ def resume_args(rec: dict) -> "list[str]":
 #  Deleting                                                            #
 # ------------------------------------------------------------------ #
 
-def _allowed_bases(rec: dict) -> "set[Path]":
+def _allowed_bases(rec: dict) -> set[Path]:
     from .pull import _REPO_FOLDER_STAGING
     bases = {_mm.MODELS_DIR, _mm.MODELS_DIR / _REPO_FOLDER_STAGING}
     dest = rec["request"].get("dest_dir")
@@ -585,7 +585,7 @@ def _etag(f: dict) -> Optional[str]:
     return e if isinstance(e, str) and _ETAG_RE.match(e) else None
 
 
-def _unlink_checked(path: Path, left: "list[Path]") -> int:
+def _unlink_checked(path: Path, left: list[Path]) -> int:
     """Delete *path* (and an owner sidecar beside it); returns its size, or 0
     with *path* appended to *left* when it is still there afterwards."""
     from .pull import _partial_owner_path
@@ -604,7 +604,7 @@ def _unlink_checked(path: Path, left: "list[Path]") -> int:
     return size
 
 
-def _delete_partials(rec: dict) -> "tuple[int, list[Path]]":
+def _delete_partials(rec: dict) -> tuple[int, list[Path]]:
     """Delete the partial data of *rec* under the locks its pull takes.
     Raises ``pull.PullInFlight`` when a download holds one of those locks.
     Returns ``(bytes freed, files that could not be
@@ -712,7 +712,7 @@ def forget(pull_id: str) -> None:
         _remove(pull_id)
 
 
-def records_for_request(spec: str, name: Optional[str]) -> "list[dict]":
+def records_for_request(spec: str, name: Optional[str]) -> list[dict]:
     """Interrupted records whose spec and name equal *spec* and *name*."""
     return [r for _p, r in _iter_records()
             if not _is_running(r) and r["request"].get("spec") == spec
@@ -806,7 +806,7 @@ def _orphan_id(path: Path) -> str:
     return "orphan-" + hashlib.sha256(str(path).encode("utf-8")).hexdigest()[:24]
 
 
-def _claimed_paths() -> "tuple[set[Path], set[Path]]":
+def _claimed_paths() -> tuple[set[Path], set[Path]]:
     """Files and folders named by any record (running or not)."""
     files: set[Path] = set()
     folders: set[Path] = set()
@@ -846,7 +846,7 @@ def _temp_is_unowned(f: Path) -> bool:
     return lock is not None and _lock_file_is_free(lock)
 
 
-def _temp_roots() -> "list[Path]":
+def _temp_roots() -> list[Path]:
     from .pull import _REPO_FOLDER_STAGING
     roots = [_mm.MODELS_DIR, _mm.MODELS_DIR / _REPO_FOLDER_STAGING]
     try:
@@ -867,7 +867,7 @@ def _is_url_partial(p: Path) -> bool:
     return isinstance(ident, dict) and ident.get("source") in ("url", "civitai")
 
 
-def _scan_orphans() -> "list[dict]":
+def _scan_orphans() -> list[dict]:
     files, folders = _claimed_paths()
     out: list[dict] = []
     for root in _temp_roots():
@@ -896,7 +896,7 @@ def _scan_orphans() -> "list[dict]":
     return out
 
 
-def list_orphans() -> "list[dict]":
+def list_orphans() -> list[dict]:
     """Partial download files no record names and no running download is
     writing, as ``{"id", "file", "size"}`` (file relative to the models
     folder)."""
