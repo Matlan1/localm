@@ -882,6 +882,14 @@ if "%RUNTIME_OK%"=="0" echo.
 if "%RUNTIME_OK%"=="0" echo  [^^!] No model can load yet - the native llama.cpp runtime did not finish
 if "%RUNTIME_OK%"=="0" echo      provisioning. Finish it any time with:
 if "%RUNTIME_OK%"=="0" echo        !PFHINT!
+rem  The backend setup-llama recorded as installed, when it differs from the pick.
+set "INSTALLEDBK="
+if exist "runtime\localm_llama_runtime\lib\.localm-backend" for /f "usebackq tokens=1" %%a in ("runtime\localm_llama_runtime\lib\.localm-backend") do if not defined INSTALLEDBK set "INSTALLEDBK=%%a"
+set "BKSWAP=0"
+if "%RUNTIME_OK%"=="1" if /i not "%BACKEND%"=="own" if defined INSTALLEDBK if /i not "!INSTALLEDBK!"=="%BACKEND%" set "BKSWAP=1"
+if "%BKSWAP%"=="1" echo.
+if "%BKSWAP%"=="1" echo  [^^!] The %BACKEND% runtime did not load here; !INSTALLEDBK! is installed and in use.
+if "%BKSWAP%"=="1" echo      Retry %BACKEND% any time with:  .venv\Scripts\localm setup-llama --backend %BACKEND% --force
 rem  Tell them how to start the way THEY chose - SCPICK 1/2 created a desktop
 rem  shortcut, so name that; only the "no shortcut" case falls back to the bat.
 if defined SCMADE if "%SCPICK%"=="1" echo  Start it from the LocaLM shortcut on your desktop.

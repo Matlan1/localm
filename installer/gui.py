@@ -636,6 +636,17 @@ def create_venv(plan: Plan, emit: Callable[[str], None]) -> None:
         attrib_tried = wait_tried = False
 
 
+def installed_backend(root: Path) -> str:
+    """The backend setup-llama recorded as installed in root's runtime, or
+    empty when none is recorded."""
+    marker = root / "runtime" / "localm_llama_runtime" / "lib" / ".localm-backend"
+    try:
+        words = marker.read_text(encoding="utf-8").split()
+    except OSError:
+        return ""
+    return words[0] if words else ""
+
+
 def runtime_failed(emit: Callable[[str], None], retry: str, detail: str) -> None:
     """After a failed setup-llama: say so with the exact retry command, then ask
     whether to continue without a working runtime (setup.sh's question). Raises
@@ -752,6 +763,12 @@ def build_steps(plan: Plan, resume: Optional[dict] = None) -> list[Step]:
                     emit, f'"{localm_exe}" setup-llama --backend {plan.backend} --force',
                     f"Provisioning the native llama.cpp runtime (--backend "
                     f"{plan.backend}) failed during setup.")
+            installed = installed_backend(ROOT)
+            if installed and installed != plan.backend:
+                raise StepFailed(
+                    f"the {plan.backend} runtime did not load here; {installed} is "
+                    f"installed and in use. Retry: \"{localm_exe}\" setup-llama "
+                    f"--backend {plan.backend} --force")
         steps.append(Step(f"Provisioning the {plan.backend} inference runtime", provision,
                           fatal=False, key="native-runtime"))
     elif plan.own_build_dir:

@@ -1187,6 +1187,15 @@ if [ "$LOCALM_BIN_OK" = 1 ]; then
     say "      provisioning. Finish it any time with:"
     say "        ${RETRY_HINT:-.venv/bin/localm setup-llama --backend $SL_BACKENDS}"
   fi
+  # The backend setup-llama recorded as installed, when it differs from the pick.
+  INSTALLED_BACKEND="$(cut -d' ' -f1 runtime/localm_llama_runtime/lib/.localm-backend 2>/dev/null || true)"
+  INSTALLED_BACKEND="${INSTALLED_BACKEND%$'\r'}"
+  if [ "$RUNTIME_OK" = 1 ] && [ "$BACKEND" != own ] && [ -n "$INSTALLED_BACKEND" ] \
+      && [ "$INSTALLED_BACKEND" != "$BACKEND" ]; then
+    say ""
+    say "  [!] The $BACKEND runtime did not load here; $INSTALLED_BACKEND is installed and in use."
+    say "      Retry $BACKEND any time with:  .venv/bin/localm setup-llama --backend $BACKEND --force"
+  fi
 else
   say "  Done, with one open issue: .venv/bin/localm never got installed (see the"
   say "  warning above), so the CLI is not usable yet:"

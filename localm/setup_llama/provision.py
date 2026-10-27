@@ -442,13 +442,53 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
                       "(an explicit --sha256 was set).")
         sys.exit(1)
 
-    # A self-contained backend the user pinned: do not silently swap to another.
+    if chosen == "vulkan" and provisioned and not _is_abi_rejection(detail):
+        swapped = _vulkan_falls_back_to_cpu(detail, assume_yes, _try, used_tag, explicit)
+        if swapped is not None:
+            if failure is not None:
+                failure.append(detail or "it did not load")
+            return swapped
     if chosen in ("vulkan", "cpu"):
         return _universal_backend_failed(chosen, with_cudart, assume_yes, provisioned,
                                          detail, _try, used_tag)
     if failure is not None:
         failure.append(detail or "it did not load")
     return _fall_back_to_universal(chosen, detail, assume_yes, _try, used_tag, explicit)
+
+
+def _vulkan_falls_back_to_cpu(detail: str, assume_yes: bool, try_fn, used_tag: list,
+                              explicit: bool = True) -> Optional[tuple]:
+    """After a provisioned vulkan build did not load: interactively ask whether
+    to install the CPU build instead (default yes); non-interactively install it
+    with a warning. Returns ``("cpu", tag)`` when the CPU build loads, None when
+    the user declines or it does not load either (the caller then reports the
+    vulkan failure)."""
+    missing = _name_missing_shared_lib(detail)
+    console.print(f"[yellow]'vulkan' was provisioned but did not load: "
+                  f"{missing or detail}[/yellow]")
+    console.print("[dim]To retry later: localm setup-llama --backend vulkan --force[/dim]")
+    kept = "your 'vulkan' pick is kept; " if explicit else ""
+    if (not assume_yes) and _sl._interactive():
+        _sl._flush_stdin()
+        if not _sl._confirm(f"  Install the CPU build now so localm works? ({kept}decline "
+                            "to retry or stop and fix it yourself)", default=True):
+            return None
+    else:
+        console.print("[yellow][!] Non-interactive: installing the CPU build so localm "
+                      "works; no GPU acceleration until vulkan loads.[/yellow]")
+    console.print("[yellow]Trying cpu...[/yellow]")
+    try:
+        try_fn("cpu", False)
+    except Exception as e:
+        console.print(f"[red]cpu provisioning failed:[/red] {e}")
+        return None
+    ok, cpu_detail = _sl._native_loads_ok()
+    if ok:
+        console.print("[green]OK - cpu runtime loads.[/green] [yellow]Installed cpu "
+                      "instead of vulkan: no GPU acceleration.[/yellow]")
+        return "cpu", used_tag[0]
+    console.print(f"[red]cpu provisioned but failed to load:[/red] {cpu_detail or 'unknown'}")
+    return None
 
 
 def _universal_backend_failed(chosen: str, with_cudart: bool, assume_yes: bool,

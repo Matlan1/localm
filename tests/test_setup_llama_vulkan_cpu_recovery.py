@@ -65,14 +65,18 @@ _LIBGOMP_DETAIL = ("RuntimeError: Failed to load libllama.so from /x/libllama.so
 @pytest.mark.parametrize("chosen", ["vulkan", "cpu"])
 def test_non_interactive_failure_names_the_library_and_never_retries(
         monkeypatch, tmp_path, chosen, capsys):
-    provisioned = _wire(monkeypatch, tmp_path, loads=[(False, _LIBGOMP_DETAIL)])
+    """cpu that does not load stops; vulkan that does not load, with cpu not
+    loading either, stops the same way after the one cpu attempt."""
+    loads = [(False, _LIBGOMP_DETAIL)] + ([(False, _LIBGOMP_DETAIL)] if chosen == "vulkan" else [])
+    provisioned = _wire(monkeypatch, tmp_path, loads=loads)
     monkeypatch.setattr(sl.sys.stdin, "isatty", lambda: False)
 
     with pytest.raises(SystemExit) as exc:
         sl._provision_with_fallback(chosen, tmp_path, None, False, assume_yes=True)
 
     assert exc.value.code == 1
-    assert provisioned == [chosen], "no retry without an interactive tty"
+    expected = ["vulkan", "cpu"] if chosen == "vulkan" else [chosen]
+    assert provisioned == expected, "no retry of the same build without an interactive tty"
     out = _flat(capsys)
     assert "libgomp.so.1" in out
     assert "libgomp1" in out
@@ -120,7 +124,8 @@ def test_interactive_accepted_retry_that_succeeds_returns_normally(
                         loads=[(False, _LIBGOMP_DETAIL), (True, "")])
     monkeypatch.setattr(sl.sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sl, "_flush_stdin", lambda: None)
-    monkeypatch.setattr(sl.click, "confirm", lambda *a, **k: True)   # accept the retry
+    answers = iter([False, True])   # decline cpu, accept the retry
+    monkeypatch.setattr(sl.click, "confirm", lambda *a, **k: next(answers))
 
     backend, tag = sl._provision_with_fallback("vulkan", tmp_path, None, False,
                                                 assume_yes=False)
@@ -155,7 +160,7 @@ def test_interactive_retry_that_fails_again_then_declined(monkeypatch, tmp_path,
                               (False, "libvulkan.so.1: cannot open shared object file")])
     monkeypatch.setattr(sl.sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sl, "_flush_stdin", lambda: None)
-    answers = iter([True, False])   # retry once, then decline
+    answers = iter([False, True, False])   # decline cpu, retry once, then decline
     monkeypatch.setattr(sl.click, "confirm", lambda *a, **k: next(answers))
 
     with pytest.raises(SystemExit):
@@ -216,3 +221,71 @@ def test_download_failure_still_exits_without_the_retry_prompt(monkeypatch, tmp_
     with pytest.raises(SystemExit) as exc:
         sl._provision_with_fallback("vulkan", tmp_path, None, False, assume_yes=False)
     assert exc.value.code == 1
+
+
+# --------------------------------------------------------------------------- #
+#  A vulkan build that does not load falls back to cpu                         #
+# --------------------------------------------------------------------------- #
+
+_NO_VULKAN = "libvulkan.so.1: cannot open shared object file: No such file or directory"
+
+
+def test_non_interactive_vulkan_that_does_not_load_installs_cpu(monkeypatch, tmp_path, capsys):
+    provisioned = _wire(monkeypatch, tmp_path, loads=[(False, _NO_VULKAN), (True, "")])
+    monkeypatch.setattr(sl.sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr(sl.click, "confirm",
+                        lambda *a, **k: pytest.fail("no question without a tty"))
+    failure: list = []
+    backend, _tag = sl._provision_with_fallback("vulkan", tmp_path, None, False,
+                                                 assume_yes=True, failure=failure)
+    assert backend == "cpu"
+    assert provisioned == ["vulkan", "cpu"]
+    assert failure and "libvulkan" in failure[0]
+    out = _flat(capsys)
+    assert "Installed cpu instead of vulkan" in out
+    assert "--backend vulkan --force" in out
+
+
+def test_interactive_vulkan_failure_asks_with_cpu_as_the_default(monkeypatch, tmp_path):
+    provisioned = _wire(monkeypatch, tmp_path, loads=[(False, _NO_VULKAN), (True, "")])
+    monkeypatch.setattr(sl.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sl, "_flush_stdin", lambda: None)
+    asked = []
+    monkeypatch.setattr(sl.click, "confirm",
+                        lambda text, default=None, **k: asked.append((text, default)) or default)
+    backend, _tag = sl._provision_with_fallback("vulkan", tmp_path, None, False,
+                                                 assume_yes=False)
+    assert backend == "cpu" and provisioned == ["vulkan", "cpu"]
+    assert asked and "CPU build" in asked[0][0] and asked[0][1] is True
+
+
+def test_interactive_vulkan_failure_declining_cpu_installs_nothing_else(monkeypatch, tmp_path):
+    provisioned = _wire(monkeypatch, tmp_path, loads=[(False, _NO_VULKAN)])
+    monkeypatch.setattr(sl.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sl, "_flush_stdin", lambda: None)
+    monkeypatch.setattr(sl.click, "confirm", lambda *a, **k: False)
+    with pytest.raises(SystemExit) as exc:
+        sl._provision_with_fallback("vulkan", tmp_path, None, False, assume_yes=False)
+    assert exc.value.code == 1 and provisioned == ["vulkan"]
+
+
+def test_the_window_gets_the_cpu_question_over_stdio(monkeypatch, tmp_path):
+    provisioned = _wire(monkeypatch, tmp_path, loads=[(False, _NO_VULKAN), (True, "")])
+    monkeypatch.setenv("LOCALM_SETUP_ASK", "stdio")
+    asked = []
+    monkeypatch.setattr(sl._common, "_ask_stdio", lambda q: asked.append(q) or "")
+    backend, _tag = sl._provision_with_fallback("vulkan", tmp_path, None, False,
+                                                 assume_yes=False)
+    assert backend == "cpu" and provisioned == ["vulkan", "cpu"]
+    assert asked[0]["kind"] == "confirm" and asked[0]["default"] == "y"
+
+
+def test_cpu_that_does_not_load_either_reports_the_vulkan_failure(monkeypatch, tmp_path, capsys):
+    provisioned = _wire(monkeypatch, tmp_path,
+                        loads=[(False, _NO_VULKAN), (False, "no compute backends are loaded")])
+    monkeypatch.setattr(sl.sys.stdin, "isatty", lambda: False)
+    with pytest.raises(SystemExit) as exc:
+        sl._provision_with_fallback("vulkan", tmp_path, None, False, assume_yes=True)
+    assert exc.value.code == 1 and provisioned == ["vulkan", "cpu"]
+    out = _flat(capsys)
+    assert "no compute backends are loaded" in out and "libvulkan" in out
