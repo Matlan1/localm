@@ -134,6 +134,8 @@ export const I18N_EN = {
   "chat.audio.readError": "Could not read {name}.",
   "chat.audio.rejected": "The audio clip was not accepted ({detail}) and was removed from the chat. You can keep chatting (text only).",
   "chat.audio.rejectedSuggest": "{model} cannot hear audio - removed the clip. Use the button below to answer with {suggest}, or keep chatting (text only).",
+  "chat.audio.imagesSkipped": "The model that hears audio cannot read images, so earlier images stay in the chat but were left out of this reply.",
+  "chat.image.rejectedServer": "The image was not accepted ({detail}) and was removed from the chat. You can keep chatting.",
   "chat.audio.unplayable": "This audio clip cannot be played.",
   "chat.audio.tooLarge": "{name} is {size} MB; an audio clip can be at most {max} MB.",
   "chat.audio.tooLong": "{name} is about {minutes} min long; an audio clip can be at most {max} min.",
