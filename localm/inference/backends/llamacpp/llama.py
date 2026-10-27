@@ -234,16 +234,17 @@ def _apply_projector_notices(mt, notices: dict) -> None:
     """Act on what llama.cpp reported while loading the projector *mt*
     (``_CapturedStderr.projector_notices``): a warning when it encodes images on
     the CPU although the GPU was requested (*mt* is then marked as not on the
-    GPU), and the minimum image tokens it advised, which *mt* is rebuilt with
+    GPU; the warning is skipped when the runtime has no GPU backend), and the minimum image tokens it advised, which *mt* is rebuilt with
     (:meth:`MtmdContext.apply_min_image_tokens`); a warning when the runtime's
     params layout does not allow that."""
     from localm.debuglog import logger
     if notices.get("cpu") and getattr(mt, "on_gpu", False):
         mt.on_gpu = False
-        logger.warning(
-            "mtmd: llama.cpp placed the vision projector on the CPU (CLIP using CPU "
-            "backend) although the GPU was requested, so image encoding is much "
-            "slower on large images.")
+        if api.llama_supports_gpu_offload():
+            logger.warning(
+                "mtmd: llama.cpp placed the vision projector on the CPU (CLIP using CPU "
+                "backend) although the GPU was requested, so image encoding is much "
+                "slower on large images.")
     tokens = notices.get("min_tokens")
     if not tokens:
         return

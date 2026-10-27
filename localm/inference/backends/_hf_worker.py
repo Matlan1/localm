@@ -47,6 +47,58 @@ def _invalid_config_errors() -> tuple:
     return (ValueError, StrictDataclassError)
 
 
+def _load_text_tokenizer(tr, model_path, trust_remote_code: bool):
+    """Load the plain tokenizer of *model_path* with transformers module *tr*.
+
+    Raises ``ModelRefusedError`` when that fails with a ``ValueError`` or a
+    ``StrictDataclassError``. The headline says the configuration is not valid
+    only when ``AutoConfig`` itself rejects the model's ``config.json``; any
+    other such failure (no tokenizer files, an unresolvable tokenizer class, a
+    SentencePiece or tiktoken file whose package is missing) is headlined as a
+    tokenizer failure. Both carry the original error text."""
+    from localm.inference.backends.base import ModelRefusedError
+    from localm.inference.backends.llamacpp._runner import shorten_long_digits
+
+    def _flat(err: BaseException) -> str:
+        return " ".join(shorten_long_digits(str(err)).split())
+
+    name = Path(model_path).name
+    try:
+        with _filter_docstring_leak():
+            return tr.AutoTokenizer.from_pretrained(
+                model_path, trust_remote_code=trust_remote_code)
+    except _invalid_config_errors() as tok_err:
+        config_err: BaseException | None = None
+        if _is_strict_dataclass_error(tok_err):
+            config_err = tok_err
+        else:
+            try:
+                tr.AutoConfig.from_pretrained(
+                    model_path, trust_remote_code=trust_remote_code)
+            except _invalid_config_errors() as e:
+                config_err = e
+            except Exception as e:
+                logger.debug("hf load: config probe after a tokenizer failure raised "
+                             "%s: %s", type(e).__name__, e)
+        if config_err is not None:
+            raise ModelRefusedError(
+                f"{name} cannot be loaded: its configuration is not valid. "
+                + _flat(config_err)) from tok_err
+        raise ModelRefusedError(
+            f"{name} cannot be loaded: its tokenizer could not be loaded. "
+            + _flat(tok_err)) from tok_err
+
+
+def _is_strict_dataclass_error(err: BaseException) -> bool:
+    """True for huggingface_hub's ``StrictDataclassError`` (a validation failure
+    of a strict dataclass such as a model config)."""
+    try:
+        from huggingface_hub.errors import StrictDataclassError
+    except ImportError:
+        return False
+    return isinstance(err, StrictDataclassError)
+
+
 def _require_torch():
     try:
         import torch
@@ -1589,17 +1641,7 @@ class HFWorker:
                 "processor load failed (%s); falling back to text-only tokenizer", shown)
             self._processor = None
             self.processor_error = shown
-            try:
-                with _filter_docstring_leak():
-                    self._tokenizer = tr.AutoTokenizer.from_pretrained(
-                        self.model_path, trust_remote_code=trust_remote_code
-                    )
-            except _invalid_config_errors() as tok_err:
-                from localm.inference.backends.base import ModelRefusedError
-                raise ModelRefusedError(
-                    f"{Path(self.model_path).name} cannot be loaded: its configuration "
-                    f"is not valid. "
-                    + " ".join(shorten_long_digits(str(tok_err)).split())) from tok_err
+            self._tokenizer = _load_text_tokenizer(tr, self.model_path, trust_remote_code)
 
         # --- Model ---
         logger.debug("hf load: loading weights")

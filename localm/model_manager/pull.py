@@ -1778,7 +1778,9 @@ def _mmproj_download_dest(base_dir: Path, candidate: str, repo_id: str,
     recorded projector. When the occupied file differs from the digest the repo
     publishes and the origin recorded beside it says it came from *repo_id* as
     *candidate*, it is that repo's own damaged or outdated copy: it is deleted and the plain name is
-    returned for a fresh download. Returns ``(None, False)`` when every
+    returned for a fresh download. A numbered name that already holds this
+    repo's own *candidate* (origin recorded, digest confirmed) is returned with
+    the download skipped. Returns ``(None, False)`` when every
     numbered name up to ``_MAX_MMPROJ_COLLISION_SUFFIX`` is also taken."""
     dest = base_dir / candidate
     if not dest.exists():
@@ -1802,6 +1804,9 @@ def _mmproj_download_dest(base_dir: Path, candidate: str, repo_id: str,
         free = base_dir / f"{stem}-{n}{suffix}"
         if not free.exists():
             return free, False
+        if (_mmproj_origin_is(free, repo_id, candidate)
+                and _mmproj_reuse_confirmed(free, repo_id, candidate, model_path) is True):
+            return free, True
     return None, False
 
 
@@ -1854,7 +1859,8 @@ def _download_mmproj_file(repo_id: str, remote_name: str, dest: Path, base_dir: 
     _record_mmproj_origin(dest, repo_id, remote_name, actual)
 
 
-def _repoint_unrecorded_projector(model_path: Path, plain: Path, fetched: Path) -> None:
+def _repoint_unrecorded_projector(model_path: Path, plain: Path, fetched: Path,
+                                  reg: "dict | None" = None) -> None:
     """Point the registry entry of *model_path* at *fetched*, the projector
     just verified against the digest its repo publishes, when the entry records
     *plain* (the same-named copy that differs from that digest) and *plain* has
@@ -1862,7 +1868,12 @@ def _repoint_unrecorded_projector(model_path: Path, plain: Path, fetched: Path) 
     cannot be told from another repo's projector). No-op when *fetched* is
     *plain*, when *plain* has an origin record, or when no entry holds this
     model with *plain* as its projector. Entries of other models are left alone.
-    Prints the change."""
+    Prints the change.
+
+    *reg* is the registry dict a caller is already mutating inside
+    ``update_registry``: the repoint is applied to it directly, because the
+    registry lock is not re-entrant and a nested ``update_registry`` raises.
+    Without *reg* the registry is read and updated here."""
     if fetched == plain or _mmproj_origin_path(plain).exists():
         return
     try:
@@ -1870,7 +1881,7 @@ def _repoint_unrecorded_projector(model_path: Path, plain: Path, fetched: Path) 
         want_old = logical_model_path(plain)
         new_value = str(logical_model_path(fetched))
         names: list[str] = []
-        for name, entry in _mm.load_registry().items():
+        for name, entry in (_mm.load_registry() if reg is None else reg).items():
             if (isinstance(entry, dict) and entry.get("path") and entry.get("mmproj")
                     and logical_model_path(Path(entry["path"])) == want_model
                     and logical_model_path(Path(entry["mmproj"])) == want_old):
@@ -1881,13 +1892,16 @@ def _repoint_unrecorded_projector(model_path: Path, plain: Path, fetched: Path) 
     if not names:
         return
 
-    def _swap(reg: dict) -> None:
+    def _swap(target: dict) -> None:
         for name in names:
-            entry = reg.get(name)
+            entry = target.get(name)
             if isinstance(entry, dict):
                 entry["mmproj"] = new_value
 
-    _mm.update_registry(_swap)
+    if reg is None:
+        _mm.update_registry(_swap)
+    else:
+        _swap(reg)
     from rich.markup import escape
     console.print(
         f"[yellow]{escape(plain.name)} does not match the digest its repo publishes; "
@@ -1895,7 +1909,8 @@ def _repoint_unrecorded_projector(model_path: Path, plain: Path, fetched: Path) 
 
 
 def _maybe_fetch_repo_mmproj(repo_id: str, filename: str, base_dir: Path, *,
-                             speech: bool = False) -> Optional[Path]:
+                             speech: bool = False,
+                             reg: "dict | None" = None) -> Optional[Path]:
     """Auto-attach companion: look for a vision projector shipped in the SAME
     HF repo as *filename* and fetch it too.
 
@@ -1904,6 +1919,9 @@ def _maybe_fetch_repo_mmproj(repo_id: str, filename: str, base_dir: Path, *,
     stays silent (see ``_hf_repo_files``); it prints an informational note only
     when the listing WAS read, *filename* looks like a vision-language release
     by name, and no usable projector is among the files.
+
+    *reg*, when given, is the registry dict the caller is mutating inside
+    ``update_registry``; see ``_repoint_unrecorded_projector``.
     """
     # repo_id/filename/candidate/e all come from a REMOTE repo and none is
     # charset-restricted, so all are escaped. `candidate` sits directly inside
@@ -1954,7 +1972,7 @@ def _maybe_fetch_repo_mmproj(repo_id: str, filename: str, base_dir: Path, *,
             "projector (GGUF metadata check failed) - not attaching it.[/yellow]"
         )
         return None
-    _repoint_unrecorded_projector(base_dir / filename, base_dir / candidate, dest)
+    _repoint_unrecorded_projector(base_dir / filename, base_dir / candidate, dest, reg)
     return dest
 
 
@@ -1980,7 +1998,8 @@ def mmproj_backfill_candidate(entry: dict, path: Path) -> bool:
     return True
 
 
-def backfill_mmproj_for_entry(entry: dict, path: Path) -> Optional[Path]:
+def backfill_mmproj_for_entry(entry: dict, path: Path,
+                              reg: "dict | None" = None) -> Optional[Path]:
     """Retroactively attach a vision projector to an already-pulled LLM entry.
 
     Runs the same-repo lookup a fresh pull does (``_maybe_fetch_repo_mmproj``),
@@ -1992,6 +2011,9 @@ def backfill_mmproj_for_entry(entry: dict, path: Path) -> Optional[Path]:
     or None when *entry* is not a candidate, is blocked by policy, or nothing
     was found. NEVER RAISES, matching ``_maybe_fetch_repo_mmproj``'s contract,
     so one bad entry cannot take down a sync pass.
+
+    *reg* is the registry dict of a caller running inside ``update_registry``
+    (``sync_models_dir``'s reconcile); see ``_repoint_unrecorded_projector``.
 
     Network policy: gated on ``network_mode() != "off"`` (or
     ``downloads_allowed_when_off()``), the same bar ``pull_model``'s net_mode
@@ -2010,7 +2032,7 @@ def backfill_mmproj_for_entry(entry: dict, path: Path) -> Optional[Path]:
     from localm.model_manager.gguf import gguf_architecture, gguf_is_tts_architecture
     return _maybe_fetch_repo_mmproj(
         repo_id, path.name, path.parent,
-        speech=gguf_is_tts_architecture(gguf_architecture(path)))
+        speech=gguf_is_tts_architecture(gguf_architecture(path)), reg=reg)
 
 
 def _fetch_explicit_mmproj(mmproj_spec: str, base_dir: Path,
