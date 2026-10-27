@@ -1689,6 +1689,10 @@ def test_unregister_failure_is_logged_and_the_plugin_still_unloads(env, caplog):
     assert "teardown broke" in state["errors"].get("tear", "")
     row = next(p for p in state["plugins"] if p["name"] == "tear")
     assert "teardown broke" in (row["error"] or "")
+    assert "tear" not in mgr._errors, "the loader's retry gate must not see it"
+
+    mgr.enable("tear")
+    assert "tear" not in mgr.api_state()["errors"]
 
 
 @pytest.mark.parametrize("delete_data", [True, False])

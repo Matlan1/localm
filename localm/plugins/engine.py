@@ -688,6 +688,7 @@ class PluginManager:
         self._discover_errors: dict[str, str] = {}   # bad manifests (reset each discover)
         self._provision_errors: dict[str, str] = {}  # first-run copy / upgrade refresh
         self._store_errors: dict[str, str] = {}      # unparsable bundled manifests
+        self._unload_errors: dict[str, str] = {}     # unregister() failures; cleared by a later load
         self.last_refresh_failures: dict[str, str] = {}
         self._dep_tasks: dict = {}                   # name -> DepInstallTask (GUI installs)
         self._dep_tasks_lock = threading.Lock()
@@ -1059,6 +1060,7 @@ class PluginManager:
             raise
         self._loaded[spec.name] = (spec, module, host, uniq)
         self._errors.pop(spec.name, None)       # a successful load clears prior error
+        self._unload_errors.pop(spec.name, None)
         self._maybe_fire_first_use(spec.name)
 
     def _maybe_fire_first_use(self, name: str) -> None:
@@ -1098,7 +1100,7 @@ class PluginManager:
             if callable(unreg):
                 unreg()
         except Exception as e:
-            self._errors[name] = f"unregister failed during unload: {e}"
+            self._unload_errors[name] = f"unregister failed during unload: {e}"
             _log.warning("plugin %s: unregister failed during unload: %s", name, e,
                          exc_info=True)
         host.unmount()
@@ -1894,7 +1896,8 @@ class PluginManager:
                 "loaded": name in self._loaded,
                 "error": (self._errors.get(name) or self._discover_errors.get(name)
                           or self._provision_errors.get(name)
-                          or self._store_errors.get(name)),
+                          or self._store_errors.get(name)
+                          or self._unload_errors.get(name)),
             }
 
         for name, spec in sorted(self._specs.items()):       # installed
@@ -1908,7 +1911,8 @@ class PluginManager:
         _cfg = load_config()
         return {"plugins": plugins,
                 "errors": {**self._store_errors, **self._provision_errors,
-                           **self._discover_errors, **self._errors},
+                           **self._unload_errors, **self._discover_errors,
+                           **self._errors},
                 "suggest_plugins": bool(_cfg.get("suggest_plugins", True)),
                 "auto_install_plugin_deps": bool(
                     _cfg.get("auto_install_plugin_deps", True))}
