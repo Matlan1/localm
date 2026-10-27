@@ -7,7 +7,7 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { iconEl } from "./icons.js";
-import { COMPACT_KEEP, addMessageRow, audioPart, chat, chatBusy, chatParams, compactConversation, currentConv, elideAudioForWire, elideImagesForWire, isToolEvent, latestTurnHasAudio, latestTurnIsAudioOnly, lsSetScoped, maybeCompactConversation, mountStatusIndicator, msgAudioClips, msgImages, msgText, newConversation, newToolEvent, noteLabel, refreshWebPolicy, removeStatusIndicator, renderAttachChips, renderChat, renderConvList, saveConversations, scopedKeyPrivate, setConversationPin, stripUserAudio, stripUserImages, syncPinModelToggle, updateStatusIndicator, wireHasImageAndAudio, wireParts } from "./chat.js";
+import { COMPACT_KEEP, addMessageRow, audioPart, chat, chatBusy, chatParams, compactConversation, currentConv, elideAudioForWire, elideImagesForWire, isToolEvent, latestTurnHasAudio, latestTurnIsAudioOnly, lsSetScoped, maybeCompactConversation, modelCannotHearAudio, mountStatusIndicator, msgAudioClips, msgImages, msgText, newConversation, newToolEvent, noteLabel, refreshWebPolicy, removeStatusIndicator, renderAttachChips, renderChat, renderConvList, saveConversations, scopedKeyPrivate, setConversationPin, stripUserAudio, stripUserImages, syncPinModelToggle, updateStatusIndicator, wireHasImageAndAudio, wireParts } from "./chat.js";
 import { $, CHAT_SURFACE_HEADERS, GIB, TOOL_CALL_DELIM, authHeaders, autoGrow, confirmDanger, el, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setPreviewAllowed, splitThink, streamJob, stripAsrPrefix, stripThink, toast } from "./helpers.js";
 import { t } from "./i18n.js";
 import { modelCache, modelSelect, reloadModel, toastLoadResult } from "./models-sidebar.js";
@@ -2698,9 +2698,11 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   }
 
   // A turn that carries no clip of its own is sent without the clips of earlier
-  // turns when the chat also holds an image: no model reads both. The
-  // conversation keeps the clips.
-  if (!latestTurnHasAudio(conv) && wireHasImageAndAudio(messages)) elideAudioForWire(messages);
+  // turns when the chat also holds an image and the answering model is recorded
+  // as unable to hear audio. The conversation keeps the clips.
+  if (!latestTurnHasAudio(conv) && wireHasImageAndAudio(messages) && modelCannotHearAudio(modelName)) {
+    elideAudioForWire(messages);
+  }
 
   // VIS-1: did this request carry a user-attached image? If a text-only model
   // rejects it (400), we must drop the image so the chat is not wedged.
