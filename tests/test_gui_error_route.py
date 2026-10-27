@@ -220,3 +220,37 @@ def test_the_record_reaches_the_status_window_log_source(app):
     c.post("/api/gui-error", headers=_shell(app), json={"message": "visible in the window"})
     from localm.debuglog import recent_activity
     assert any(ln.endswith("gui: [gui] visible in the window") for ln in recent_activity())
+
+
+def test_a_5xx_refusal_is_logged_at_warning_on_one_line_and_throttled(app, monkeypatch):
+    from fastapi import HTTPException
+
+    from localm.inference.app_assembly import errors
+
+    @app.get("/api/test-boom")
+    async def _boom():
+        raise HTTPException(500, "Could not save x\r\n2026-01-01 ERROR forged")
+
+    @app.get("/api/test-missing")
+    async def _missing():
+        raise HTTPException(404, "no such thing")
+
+    # Ahead of attach_gui's catch-all static mount.
+    app.router.routes.insert(0, app.router.routes.pop())
+    app.router.routes.insert(0, app.router.routes.pop())
+
+    clock = [500.0]
+    monkeypatch.setattr(errors.time, "monotonic", lambda: clock[0])
+    from localm.debuglog import recent_activity
+    c = TestClient(app)
+    for _ in range(3):
+        assert c.get("/api/test-boom", headers=_shell(app)).status_code == 500
+    assert c.get("/api/test-missing", headers=_shell(app)).status_code == 404
+    lines = [ln for ln in recent_activity() if "/api/test-" in ln]
+    assert len(lines) == 1, lines
+    assert "WARNING" in lines[0]
+    assert "GET /api/test-boom failed 500: Could not save x 2026-01-01 ERROR forged" in lines[0]
+    clock[0] += errors.SERVER_ERROR_LOG_INTERVAL_S
+    c.get("/api/test-boom", headers=_shell(app))
+    lines = [ln for ln in recent_activity() if "/api/test-" in ln]
+    assert len(lines) == 2 and lines[1].endswith("(2 more like this not logged)")

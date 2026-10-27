@@ -5,10 +5,16 @@ handler, and a 422 formatter that stays serializable and bounded for any body.""
 
 from __future__ import annotations
 
+import re
+import threading
+import time
+
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 SERVER_ERROR_LOG_INTERVAL_S = 30.0
+# Control characters (CR/LF included), DEL, C1 and the Unicode line separators.
+_ONE_LINE_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]+")
 
 
 def register_exception_handlers(app: FastAPI) -> None:
@@ -61,9 +67,6 @@ def register_exception_handlers(app: FastAPI) -> None:
     # A 5xx refusal is logged at WARNING in every mode, at most once per
     # (method, path, status) per SERVER_ERROR_LOG_INTERVAL_S; the next line for
     # that key counts the ones held back. A 4xx stays a debug-mode DEBUG line.
-    import threading
-    import time
-
     _5xx_lock = threading.Lock()
     _5xx_seen: dict = {}
 
@@ -107,7 +110,8 @@ def register_exception_handlers(app: FastAPI) -> None:
                     (request.method, request.url.path, exc.status_code))
                 if held >= 0:
                     _dbg.warning("%s %s failed %d: %s%s", request.method,
-                                 request.url.path, exc.status_code, detail,
+                                 request.url.path, exc.status_code,
+                                 _ONE_LINE_RE.sub(" ", detail),
                                  f" ({held} more like this not logged)" if held else "")
         return await http_exception_handler(request, exc)
 
