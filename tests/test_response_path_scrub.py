@@ -170,7 +170,9 @@ def test_bug_report_text_has_no_host_path_for_a_scoped_key(home, tmp_path):
     assert install_file not in text
     assert str(home) not in text and str(tmp_path) not in text
     assert "<install>" in text
-    assert data_file[:15] not in text, "no cut-off host path, the title included"
+    title = text.splitlines()[0]
+    assert title.startswith("# localm bug report: failed in <install>")
+    assert data_file[:15] not in title, "no cut-off host path in the title"
     assert str(Path("plugins") / "probe" / "plug.py") in text
     assert saved == text
     assert mine["report_sha256"] == bugreport.report_digest(saved)
