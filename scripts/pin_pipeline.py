@@ -553,7 +553,8 @@ def ci_red_summary(title: str, candidate: str, pr_number, receipt_path: Path | N
 
 def append_fail_issue(candidate: str, reason: str, receipt_path: Path | None,
                       issues_path: Path | None = None, *, pin: str = "llama",
-                      summary: str | None = None, kind: str = "CONFIRM-FAILED") -> bool:
+                      summary: str | None = None, kind: str = "CONFIRM-FAILED",
+                      retried: bool = False) -> bool:
     """Append a new OPEN entry to the issue backlog for a genuine FAIL (never
     for an ordinary INCONCLUSIVE - that is not evidence of anything; a
     repeated-INCONCLUSIVE streak past INCONCLUSIVE_ISSUE_THRESHOLD and an
@@ -603,11 +604,18 @@ def append_fail_issue(candidate: str, reason: str, receipt_path: Path | None,
             f"    {candidate} for real (cpu + vulkan) and it did not pass: {reason}{receipt_note}.")
     elif summary is None:
         summary = f"the {pin} pin could not be moved to {candidate}: {reason}{receipt_note}."
+    if retried:
+        retry_text = (
+            "    The pin was NOT advanced. The pipeline retries this candidate automatically\n"
+            f"    after a {INCONCLUSIVE_COOLDOWN_HOURS}h cooldown; this entry stays until the "
+            "cause is fixed.\n\n")
+    else:
+        retry_text = (
+            "    The pin was NOT advanced. This candidate will not be retried automatically unless\n"
+            "    a newer upstream release appears.\n\n")
     entry = (
         f"{title} [OPEN - filed {today}] bug/setup - the automated pin pipeline confirmed "
-        f"{summary}\n"
-        "    The pin was NOT advanced. This candidate will not be retried automatically unless\n"
-        "    a newer upstream release appears.\n\n"
+        f"{summary}\n" + retry_text
     )
     updated = text[:m.end()] + entry + text[m.end():]
     staged = issues_path.with_name(issues_path.name + ".pin-write.tmp")
@@ -659,11 +667,11 @@ def _record_inconclusive(candidate: str, receipt_path: Path | None, *, pin: str 
     save_state(state, pin=pin)
     if force_issue:
         append_fail_issue(candidate, reason or "unexpected error", receipt_path, pin=pin,
-                          summary=issue_summary)
+                          summary=issue_summary, retried=True)
     elif streak == INCONCLUSIVE_ISSUE_THRESHOLD:
         append_fail_issue(
             candidate, reason or "repeated INCONCLUSIVE results", receipt_path, pin=pin,
-            kind="STUCK-INCONCLUSIVE",
+            kind="STUCK-INCONCLUSIVE", retried=True,
             summary=issue_summary or (
                 f"{pin} pin pipeline: {candidate} has been INCONCLUSIVE for {streak} runs "
                 f"in a row\n    scripts/pin_pipeline.py --pin {pin} could not reach a "
@@ -758,9 +766,12 @@ def ensure_pipeline_worktree(repo: Path = REPO) -> Path:
     _verify_main_checkout(repo)
     worktree_path = pipeline_worktree_path(repo)
     existing = _run_git(["worktree", "list", "--porcelain"], cwd=repo).stdout
-    if str(worktree_path) not in existing and str(worktree_path).replace("\\", "/") not in existing:
+    registered = (str(worktree_path) in existing
+                  or str(worktree_path).replace("\\", "/") in existing)
+    if not registered or not worktree_path.is_dir():
         _run_git(["fetch", "origin"], cwd=repo, check=False)
-        result = _run_git(["worktree", "add", "--detach", str(worktree_path),
+        # --force re-attaches this one path when git still lists it but the folder is gone.
+        result = _run_git(["worktree", "add", "--force", "--detach", str(worktree_path),
                           "origin/master"], cwd=repo)
         if result.returncode != 0:
             raise InfraError(f"could not create the pipeline worktree: {result.stderr}")
