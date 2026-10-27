@@ -10,7 +10,7 @@ import { onServerUnreachable } from "../app/init.js";
 import { emptyState, iconEl } from "../app/icons.js";
 import { refreshModels, showKeyGate, switchModel, toastLoadResult } from "../app/models-sidebar.js";
 import { deleteInterrupted, findInterrupted, interruptedState, loadInterrupted, onInterruptedChange, renderInterrupted, setResumeHandler, startResume } from "../app/interrupted-pulls.js";
-import { backendOverrideNote, refreshBackendInfo, refreshPerfEstimate } from "../app/settings-perf.js";
+import { PLAIN_RELOAD_KEYS, backendOverrideNote, refreshBackendInfo, refreshPerfEstimate, reloadWithToasts } from "../app/settings-perf.js";
 
 /* ================================================================ */
 /*  Models page                                                      */
@@ -696,6 +696,24 @@ export async function refreshModelsPage() {
           } finally { use.disabled = false; use.textContent = prevLabel; }
         };
         actions.appendChild(use);
+      }
+      if (m.loaded && (m.active || adapterLoadState(m) === "pending")) {
+        const reload = el("button", "primary", t("models.action.reload"));
+        reload.title = t("models.reload.title");
+        reload.onclick = async () => {
+          const prevLabel = reload.textContent;
+          reload.disabled = true;
+          reload.textContent = t("models.reload.loading");
+          try {
+            const res = await reloadWithToasts(m.name, PLAIN_RELOAD_KEYS);
+            if (res.status !== "failed") refreshPerfEstimate();
+          } finally {
+            reload.disabled = false;
+            reload.textContent = prevLabel;
+            refreshModelsPage();
+          }
+        };
+        actions.appendChild(reload);
       }
       const aliasBtn = el("button", "secondary", t("models.action.alias"));
       aliasBtn.onclick = async () => {

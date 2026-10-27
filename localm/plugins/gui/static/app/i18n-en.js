@@ -1140,6 +1140,13 @@ export const I18N_EN = {
   "models.action.rename": "rename",
   "models.action.unload": "unload",
   "models.action.use": "use",
+  "models.action.reload": "reload",
+  "models.reload.loading": "reloading…",
+  "models.reload.title": "Unload this model and load it again, so it picks up saved settings and adapter changes",
+  "models.reload.reloadingToast": "Reloading {model}…",
+  "models.reload.busyToast": "{model} is busy - not reloaded",
+  "models.reload.cancelledToast": "Reload of {model} cancelled",
+  "models.reload.failedToast": "Reloading {model} failed: {message}",
   "models.adapter.attach": "attach",
   "models.adapter.attachConfirm": "Attach",
   "models.adapter.attachFailed": "Attach failed",
@@ -2259,6 +2266,12 @@ export const I18N_EN = {
     "Names that are never evicted to make room for another model. Protects an already-loaded model; it never loads one. Saves immediately.",
   "settings.perf.pinsClearedToast": "Pins cleared",
   "settings.perf.applyButton": "Apply",
+  "settings.perf.reloadButton": "Reload model",
+  "settings.perf.reloadHelp":
+    "Reload model loads the running model again with the saved values, for the settings above that apply on the next model load.",
+  "settings.saveReload.button": "Save and reload model",
+  "settings.saveReload.working": "Saving and reloading…",
+  "settings.saveReload.title": "Save this section, then load the running model again so it picks the values up",
 
   // ---- Settings > Companion app ----
   "settings.companion.title": "Companion app",
