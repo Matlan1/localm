@@ -4,6 +4,7 @@ privacy-env hook) and ``run_tests`` (test-runner autodetection)."""
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -112,7 +113,37 @@ def _shell_argv(command: str) -> list[str] | str:
     resolved = resolve_runner(argv[0])
     if resolved is None:
         return _shell_form(command)
+    if sys.platform == "win32" and resolved.lower().endswith((".cmd", ".bat")):
+        return platform_shell(_batch_command_line(resolved, argv[1:]))
     return [resolved, *argv[1:]]
+
+
+# Characters cmd.exe reads as syntax or as an argument separator outside quotes.
+_CMD_SPECIAL = frozenset(" \t&|<>^(),;=!")
+
+
+def _batch_command_line(program: str, args: list[str]) -> str:
+    """The cmd.exe line that runs the ``.cmd``/``.bat`` *program* with *args*
+    as literal arguments.
+
+    Windows runs a batch file through cmd.exe, which reads ``&``, ``|``, ``<``,
+    ``>`` and ``^`` in an unquoted argument as command syntax, so every argument
+    holding one of :data:`_CMD_SPECIAL` (or nothing) is double-quoted, and the
+    program path always is. Raises :class:`CommandNotRunnable` for an argument
+    holding ``"``, ``%`` or a line break, which cmd.exe cannot be given
+    literally."""
+    parts = ['"' + program + '"']
+    for arg in args:
+        if any(c in arg for c in '"%\r\n'):
+            raise CommandNotRunnable(
+                f"This command runs {Path(program).name}, a batch program that "
+                "Windows starts through cmd.exe, and one of its arguments holds "
+                "a double quote, a % sign or a line break, which cmd.exe cannot "
+                "pass on literally. Rewrite the arguments without them.")
+        if not arg or any(c in _CMD_SPECIAL for c in arg):
+            arg = '"' + arg + '"'
+        parts.append(arg)
+    return " ".join(parts)
 
 
 def executed_forms(command: str) -> list[str]:
@@ -149,12 +180,16 @@ def _cmd_join_lines(command: str) -> str:
     exit code is the last line's. A line ending in ``(``, ``&`` or ``|``, a line
     starting with ``)``, ``&`` or ``|``, and a line ending in a ``^``
     continuation are joined with a space instead (the caret is removed). Blank
-    lines are dropped. Quoting follows cmd: only ``"`` quotes, and ``^`` escapes
+    lines are dropped. When several statements result, each ``if`` or ``for``
+    statement is wrapped in parentheses, so the statements after it run
+    unconditionally. Quoting follows cmd: only ``"`` quotes, and ``^`` escapes
     the next character outside quotes.
 
     Raises :class:`CommandNotRunnable` when a line break sits inside double
     quotes (cmd cannot pass one on) or inside a ``'...'`` span (a POSIX-style
-    quoted text, which cmd would run line by line as commands)."""
+    quoted text, which cmd would run line by line as commands). A span opens
+    only at a ``'`` that starts a word, so an apostrophe inside a word
+    (``it's``) opens none."""
     lines: list[str] = []
     current: list[str] = []
     in_quotes = False
@@ -182,32 +217,38 @@ def _cmd_join_lines(command: str) -> str:
             escaped = True
         elif ch == '"':
             in_quotes = not in_quotes
-        elif ch == "'" and not in_quotes:
+        elif ch == "'" and not in_quotes and (
+                in_single or not current[:-1] or current[-2] in " \t=("):
             in_single = not in_single
     lines.append("".join(current))
 
-    joined = ""
-    glue = None
+    statements: list[str] = []
+    glue = "&"
     for line in lines:
         piece = line.strip()
         if not piece:
             continue
-        if glue is not None:
-            if glue == " " or piece[0] in ")&|":
-                joined += " " + piece
-            else:
-                joined += " & " + piece
+        if statements and (glue == " " or piece[0] in ")&|"):
+            statements[-1] += " " + piece
         else:
-            joined = piece
+            statements.append(piece)
         carets = len(piece) - len(piece.rstrip("^"))
         if carets % 2 == 1:
-            joined = joined[:-1].rstrip()
+            statements[-1] = statements[-1][:-1].rstrip()
             glue = " "
         elif piece[-1] in "(&|":
             glue = " "
         else:
             glue = "&"
-    return joined
+    if len(statements) > 1:
+        statements = [f"({s})" if _RE_CMD_COMPOUND.match(s) else s
+                      for s in statements]
+    return " & ".join(statements)
+
+
+# An ``if`` or ``for`` statement; _cmd_join_lines parenthesises it when other
+# statements follow it.
+_RE_CMD_COMPOUND = re.compile(r"@?\s*(?:if|for)\b", re.IGNORECASE)
 
 
 def _privacy_env(_privacy: bool) -> dict | None:

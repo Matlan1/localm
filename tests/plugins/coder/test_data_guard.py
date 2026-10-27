@@ -8,6 +8,7 @@ explicit approval of that exact call, and is denied when no one can be asked.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -464,7 +465,7 @@ def linked(tmp_path):
 @pytest.mark.parametrize("cmd, label", [
     (r"type dl\auth.key", "owner API key"),
     ("cat dl/auth.json", "API key store"),
-    ("cd dl && type auth.key", "owner API key"),
+    ("cd dl && type auth.key", "data folder"),
     (r"echo x > dl\config.json", "settings"),
     ("rmdir /s /q dl", "data folder"),
     ("rm -rf dl", "data folder"),
@@ -480,6 +481,11 @@ def test_ordinary_shell_commands_beside_a_link_are_not_flagged(linked):
     project, home = linked
     for cmd in ("type notes.txt", "echo hello", "git status", "dir"):
         assert _shell(cmd, project, home) is None, cmd
+
+
+def _network(path: str) -> bool:
+    from localm.pathsafe import is_unc_or_device_path
+    return is_unc_or_device_path(path) or is_unc_or_device_path(os.path.abspath(path))
 
 
 def test_a_unc_operand_is_never_resolved(tmp_path, monkeypatch):
@@ -503,9 +509,86 @@ def test_a_unc_operand_is_never_resolved(tmp_path, monkeypatch):
                  r"\\?\UNC\fileserver\share\x", r"\\fileserver\share\x"):
         assert data_guard.check("read_file", {"path": path}, tmp_path,
                                 path_args=("path",), home=home) is None
-    assert not [s for s in seen if "fileserver" in s.replace("\\", "/")], seen
+    assert not [s for s in seen if _network(s)], seen
     assert _shell("type notes.txt", tmp_path, home) is None
     assert seen, "the spy never fired, so it proves nothing"
+
+
+def _realpath_spy(monkeypatch):
+    seen: list = []
+    real = data_guard.os.path.realpath
+
+    def spy(p, *a, **kw):
+        seen.append(str(p))
+        return real(p, *a, **kw)
+
+    monkeypatch.setattr(data_guard.os.path, "realpath", spy)
+    return seen
+
+
+def test_a_link_to_a_network_path_is_never_followed(tmp_path, monkeypatch):
+    """A link inside the project whose target is a UNC path is read, not
+    followed: no realpath runs on it, for the shell and the file tools."""
+    home = tmp_path / "home"
+    home.mkdir()
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    link = proj / "lnk"
+    unc = "\\\\fileserver\\share"
+    real_is_link = data_guard._is_link
+    monkeypatch.setattr(data_guard, "_is_link",
+                        lambda p: os.path.normcase(p) == os.path.normcase(str(link))
+                        or real_is_link(p))
+    monkeypatch.setattr(data_guard.os.path, "lexists",
+                        lambda p: os.path.normcase(p) == os.path.normcase(str(link))
+                        or os.path.exists(p))
+    monkeypatch.setattr(data_guard.os, "readlink", lambda p: unc)
+    seen = _realpath_spy(monkeypatch)
+    assert _shell(r"type lnk\x.txt", proj, home) is None
+    assert data_guard.check("read_file", {"path": "lnk/x.txt"}, proj,
+                            path_args=("path",), home=home) is None
+    assert not [s for s in seen if _network(s) or "lnk" in Path(s).parts], seen
+    assert data_guard._local_realpath(str(link / "x.txt")) is None
+
+
+def test_a_real_symlink_to_a_unc_path_is_never_followed(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    try:
+        (proj / "lnk").symlink_to("\\\\localhost\\nonexistentshare", target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are not available to this account")
+    seen = _realpath_spy(monkeypatch)
+    assert _shell(r"type lnk\x.txt", proj, home) is None
+    assert not [s for s in seen if _network(s) or "lnk" in Path(s).parts], seen
+
+
+def test_a_mapped_network_drive_is_never_resolved(tmp_path, monkeypatch):
+    import localm.pathsafe as pathsafe
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(pathsafe, "is_mapped_network_drive",
+                        lambda raw: str(raw)[:2].lower() == "z:")
+    seen = _realpath_spy(monkeypatch)
+    assert _shell("type z:/share/x", tmp_path, home) is None
+    assert data_guard.check("read_file", {"path": "z:/share/x"}, tmp_path,
+                            path_args=("path",), home=home) is None
+    assert not [s for s in seen if s[:2].lower() == "z:"], seen
+    assert _shell("type notes.txt", tmp_path, home) is None
+    assert seen, "the spy never fired, so it proves nothing"
+
+
+def test_a_junction_chain_into_the_data_folder_is_still_resolved(linked):
+    """A link to a local folder holding another link into the data folder."""
+    project, home = linked
+    hop = project.parent / "hop"
+    hop.mkdir()
+    _link_dir(hop / "inner", home)
+    _link_dir(project / "outer", hop)
+    hit = _shell(r"type outer\inner\auth.key", project, home)
+    assert hit and "owner API key" in hit, hit
 
 
 def test_auto_approved_shell_through_a_link_is_denied(keyed, tmp_path):

@@ -126,8 +126,56 @@ def _match(norm_path: Optional[str], targets: Targets, *, tree: bool) -> Optiona
     return None
 
 
+_MAX_LINK_HOPS = 32
+
+
+def _is_link(path: str) -> bool:
+    isjunction = getattr(os.path, "isjunction", None)
+    return os.path.islink(path) or bool(isjunction and isjunction(path))
+
+
+def _first_link_target(path: str) -> Optional[str]:
+    """*path* with its first symlink or junction component replaced by that
+    link's target (read with ``os.readlink``, which does not open the target),
+    or None when no existing component is a link."""
+    parts = Path(path).parts
+    if not parts:
+        return None
+    current = parts[0]
+    for i, part in enumerate(parts[1:], start=1):
+        current = os.path.join(current, part)
+        if not os.path.lexists(current):
+            return None
+        if _is_link(current):
+            target = os.readlink(current)
+            if target.startswith("\\\\?\\") and target[5:6] == ":":
+                target = target[4:]
+            if not os.path.isabs(target):
+                target = os.path.join(os.path.dirname(current), target)
+            return os.path.abspath(os.path.join(target, *parts[i + 1:]))
+    return None
+
+
+def _local_realpath(path: str) -> Optional[str]:
+    """``os.path.realpath`` of *path* when *path* and every link on the way to
+    its target are local, else None: a UNC or device path, a mapped network
+    drive, a link whose target is one of those, or more than
+    :data:`_MAX_LINK_HOPS` links. Never opens a network path."""
+    from localm.pathsafe import is_mapped_network_drive, is_unc_or_device_path
+    pending = os.path.abspath(path)
+    for _ in range(_MAX_LINK_HOPS):
+        if is_unc_or_device_path(pending) or is_mapped_network_drive(pending):
+            return None
+        target = _first_link_target(pending)
+        if target is None:
+            return os.path.realpath(pending)
+        pending = target
+    return None
+
+
 def _file_forms(value: str, cwd: Optional[Path]) -> list[str]:
-    """Canonical forms of a file-tool path: lexical, then symlink-resolved."""
+    """Canonical forms of a file-tool path: lexical, then symlink-resolved
+    (:func:`_local_realpath`, so never through a network path)."""
     raw = os.path.expanduser(str(value).strip())
     if not raw:
         return []
@@ -136,11 +184,13 @@ def _file_forms(value: str, cwd: Optional[Path]) -> list[str]:
         p = Path(cwd) / p
     forms = [os.path.abspath(p)]
     from localm.pathsafe import is_unc_or_device_path
-    if not (is_unc_or_device_path(raw) or is_unc_or_device_path(forms[0])):
+    if not is_unc_or_device_path(raw):
         try:
-            forms.append(os.path.realpath(p))
+            real = _local_realpath(forms[0])
         except (OSError, ValueError):
-            pass
+            real = None
+        if real:
+            forms.append(real)
     return [f for f in (_sg._canon(x) for x in forms) if f]
 
 
@@ -274,9 +324,10 @@ def _resolved_form(norm_path: Optional[str]) -> Optional[str]:
     if _sg._canon(norm_path) is None:
         return None
     try:
-        return _sg._canon(os.path.realpath(norm_path))
+        real = _local_realpath(norm_path)
     except (OSError, ValueError):
         return None
+    return _sg._canon(real) if real else None
 
 
 def _match_shell_path(norm_path: Optional[str], targets: Targets, *,

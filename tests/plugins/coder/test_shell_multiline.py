@@ -7,6 +7,7 @@ writes are what is asserted, not the routing decision alone.
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -104,7 +105,7 @@ def test_a_quoted_line_break_through_cmd_is_refused_and_nothing_runs(tmp_path):
 def test_a_background_quoted_line_break_is_refused(tmp_path):
     reset_registry()
     try:
-        result = tool_run_shell_background(tmp_path, 'echo "a\nb"')
+        result = tool_run_shell_background(tmp_path, 'echo "a\nb" > out.txt')
         assert not result.ok
         assert "line break inside quotes" in result.output
         assert get_registry().ids(kind="shell") == []
@@ -132,6 +133,9 @@ def test_a_multi_line_cmd_block_runs(tmp_path):
     ("a\nb", "a & b"),
     ("a\r\n\r\nb\n", "a & b"),
     ("if x (\n echo y\n)", "if x ( echo y )"),
+    ("if x (\n a\n)\nb", "(if x ( a )) & b"),
+    ("a\nfor %i in (1) do echo %i\nb", "a & (for %i in (1) do echo %i) & b"),
+    ("ifconfig\nb", "ifconfig & b"),
     (") else (\nz\n)", ") else ( z )"),
     ("a &&\nb", "a && b"),
     ("a\n|| b", "a || b"),
@@ -278,3 +282,86 @@ def test_cmd_join_lines_refuses_a_single_quoted_line_break():
         _cmd_join_lines("echo 'a\nb'")
     with pytest.raises(CommandNotRunnable):
         _cmd_join_lines("echo 'a\"b'\necho c")
+
+
+@pytest.mark.parametrize("command, joined", [
+    ("echo it's done\necho ok", "echo it's done & echo ok"),
+    ("cd O'Brien-notes\ndir", "cd O'Brien-notes & dir"),
+    ("echo don't> a.txt\necho won't> b.txt", "echo don't> a.txt & echo won't> b.txt"),
+])
+def test_an_apostrophe_inside_a_word_opens_no_quote(command, joined):
+    assert _cmd_join_lines(command) == joined
+
+
+@pytest.mark.skipif(not _WIN, reason="cmd.exe line join")
+def test_multi_line_commands_with_apostrophes_run(tmp_path):
+    cmd = "echo don't> a.txt\necho won't> b.txt"
+    result = tool_run_shell(tmp_path, cmd, timeout=30)
+    assert result.ok, result.output
+    assert (tmp_path / "a.txt").read_text().strip() == "don't"
+    assert (tmp_path / "b.txt").read_text().strip() == "won't"
+
+
+# --------------------------------------------------------------------------- #
+#  A .cmd/.bat program's arguments reach it literally                         #
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def batch_shim(tmp_path, monkeypatch):
+    """A ``probe.cmd`` on PATH that records the arguments it received."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    record = tmp_path / "argv.txt"
+    script = bindir / "record.py"
+    script.write_text(
+        "import sys, pathlib\n"
+        f"pathlib.Path({str(record)!r}).write_text(repr(sys.argv[1:]))\n",
+        encoding="utf-8")
+    (bindir / "probe.cmd").write_text(
+        f'@"{sys.executable}" "{script}" %*\r\n', encoding="utf-8")
+    monkeypatch.setenv("PATH", str(bindir) + os.pathsep + os.environ.get("PATH", ""))
+    return record
+
+
+def _repo_with_uncommitted_change(path):
+    import subprocess
+    path.mkdir()
+    for args in (["init", "-q"], ["config", "user.email", "t@example.invalid"],
+                 ["config", "user.name", "T"]):
+        subprocess.run(["git", *args], cwd=path, check=True)
+    (path / "f.txt").write_text("committed\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=path, check=True)
+    subprocess.run(["git", "commit", "-qm", "c"], cwd=path, check=True)
+    (path / "f.txt").write_text("UNCOMMITTED WORK\n", encoding="utf-8")
+
+
+@pytest.mark.skipif(not _WIN, reason="batch programs run through cmd.exe on Windows")
+@pytest.mark.parametrize("command, received", [
+    ("probe 'x&git' reset --hard", ["x&git", "reset", "--hard"]),
+    ('probe x"&"git reset --hard', ["x&git", "reset", "--hard"]),
+    ("probe 'a|b' 'c<d' 'e>f'", ["a|b", "c<d", "e>f"]),
+    ("probe lodash@^4 plain", ["lodash@^4", "plain"]),
+])
+def test_batch_program_arguments_are_not_run_as_commands(
+        tmp_path, batch_shim, command, received):
+    repo = tmp_path / "repo"
+    _repo_with_uncommitted_change(repo)
+    result = tool_run_shell(repo, command, timeout=30)
+    assert result.ok, result.output
+    assert (repo / "f.txt").read_text(encoding="utf-8") == "UNCOMMITTED WORK\n", \
+        "text after & ran as a command"
+    assert batch_shim.read_text() == repr(received)
+
+
+@pytest.mark.skipif(not _WIN, reason="batch programs run through cmd.exe on Windows")
+@pytest.mark.parametrize("command", ["probe 'x\r&git' reset --hard",
+                                     "probe '50%' done"])
+def test_a_batch_argument_cmd_cannot_take_literally_is_refused(
+        tmp_path, batch_shim, command):
+    repo = tmp_path / "repo"
+    _repo_with_uncommitted_change(repo)
+    result = tool_run_shell(repo, command, timeout=30)
+    assert not result.ok
+    assert "batch program" in result.output, result.output
+    assert not batch_shim.exists(), "the batch program ran"
+    assert (repo / "f.txt").read_text(encoding="utf-8") == "UNCOMMITTED WORK\n"
