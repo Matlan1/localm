@@ -2098,7 +2098,7 @@ export async function buildMediaSection(form, fields) {
   const placementField = (fields || []).find(f => f.key === "comfy_gpu_placement");
   if (placementField) {
     const box = el("div", "media-comfy-box");
-    box.appendChild(subCardHead("Experimental", "warning", "cat-teal"));
+    box.appendChild(subCardHead(t("settings.media.experimentalHead"), "warning", "cat-teal"));
     const ctrl = buildSettingControl(placementField);
     if (ctrl) {
       box.appendChild(ctrl.node);
