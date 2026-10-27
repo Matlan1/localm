@@ -309,8 +309,10 @@ test("an inline error (a failed update check) reaches the log and the Recent err
   window.showInlineError(out, out.textContent);
   await flush();
   assert.equal(guiPosts(log).length, 1, "the same text already shown is not recorded again");
-  const items = [...window.document.querySelectorAll("#recent-errors-list .recent-error-text")];
-  assert.equal(items[0].textContent, out.textContent);
+  const items = [...window.document.querySelectorAll("#recent-errors-list .recent-error")];
+  assert.equal(items[0].querySelector(".recent-error-text").textContent, out.textContent);
+  assert.doesNotMatch(items[0].querySelector(".recent-error-meta").textContent, /\(x\d/,
+    "the same text already shown is not counted again");
 });
 
 test("Report this error appends to text already typed and leaves an open review open", async () => {

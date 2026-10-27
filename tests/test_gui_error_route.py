@@ -313,7 +313,7 @@ def test_a_5xx_line_carries_the_path_on_one_line(app):
     app.router.routes.insert(0, app.router.routes.pop())
     c = TestClient(app)
     esc, ls = chr(27), chr(0x2028)
-    r = c.get(f"/api/test-path/a%0D%0Aforged{esc}[31m{ls}b", headers=_shell(app))
+    r = c.get("/api/test-path/a%0D%0Aforged%1B[31m%E2%80%A8b", headers=_shell(app))
     assert r.status_code == 500
     lines = [ln for ln in recent_activity() if "/api/test-path/" in ln]
     assert len(lines) == 1
