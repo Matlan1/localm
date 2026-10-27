@@ -6,11 +6,20 @@ rebuilding the projector with them."""
 
 from __future__ import annotations
 
+import json
 import os
+import subprocess
+import sys
+from pathlib import Path
 
+import pytest
+
+from localm.inference.backends.llamacpp import _loader
 from localm.inference.backends.llamacpp import llama as llama_mod
 from localm.inference.backends.llamacpp import mtmd as mtmd_mod
 from tests._bare_llama import make_bare_llama
+from tests._real_gguf import require_native_runtime
+from tests._real_gguf import require_native_runtime
 
 ADVICE = ("clip_ctx: Qwen-VL models require at minimum 1024 image tokens to function "
           "correctly on grounding tasks\n"
@@ -49,8 +58,13 @@ def _records(caplog, level):
     return [r.getMessage() for r in caplog.records if r.levelname == level]
 
 
+def _runtime_devices(monkeypatch, devices, *, offload_flag=True):
+    monkeypatch.setattr(_loader, "compute_devices", lambda: list(devices))
+    monkeypatch.setattr(llama_mod.api, "llama_supports_gpu_offload", lambda: offload_flag)
+
+
 def test_a_projector_clip_places_on_the_cpu_is_marked_and_reported(monkeypatch, caplog):
-    monkeypatch.setattr(llama_mod.api, "llama_supports_gpu_offload", lambda: True)
+    _runtime_devices(monkeypatch, [("ROCm0", _loader.GGML_DEV_TYPE_GPU), ("CPU", 0)])
     with caplog.at_level("INFO", logger="localm"):
         inst = _load(monkeypatch, "clip_ctx: CLIP using CPU backend\n")
     assert inst._mtmd.on_gpu is False
@@ -59,11 +73,65 @@ def test_a_projector_clip_places_on_the_cpu_is_marked_and_reported(monkeypatch, 
 
 def test_a_projector_on_the_cpu_of_a_cpu_only_runtime_is_marked_but_not_warned(
         monkeypatch, caplog):
-    monkeypatch.setattr(llama_mod.api, "llama_supports_gpu_offload", lambda: False)
+    _runtime_devices(monkeypatch, [("CPU", 0)], offload_flag=False)
     with caplog.at_level("INFO", logger="localm"):
         inst = _load(monkeypatch, "clip_ctx: CLIP using CPU backend\n")
     assert inst._mtmd.on_gpu is False
     assert not _records(caplog, "WARNING")
+
+
+def test_a_cpu_only_machine_with_the_rpc_backend_registered_is_not_warned(
+        monkeypatch, caplog):
+    _runtime_devices(monkeypatch, [("CPU", 0)], offload_flag=True)
+    with caplog.at_level("INFO", logger="localm"):
+        inst = _load(monkeypatch, "clip_ctx: CLIP using CPU backend\n")
+    assert inst._mtmd.on_gpu is False
+    assert not _records(caplog, "WARNING")
+
+
+def test_an_unreadable_device_registry_falls_back_to_the_offload_flag(
+        monkeypatch, caplog):
+    _runtime_devices(monkeypatch, [], offload_flag=True)
+    with caplog.at_level("INFO", logger="localm"):
+        _load(monkeypatch, "clip_ctx: CLIP using CPU backend\n")
+    assert any("placed the vision projector on the CPU" in m
+               for m in _records(caplog, "WARNING"))
+    caplog.clear()
+    _runtime_devices(monkeypatch, [], offload_flag=False)
+    with caplog.at_level("INFO", logger="localm"):
+        _load(monkeypatch, "clip_ctx: CLIP using CPU backend\n")
+    assert not _records(caplog, "WARNING")
+
+
+_PROBE = """
+import json
+from localm.inference.backends.llamacpp import _api, _loader
+print(json.dumps({"devices": _loader.compute_devices(),
+                  "offload": _api.llama_supports_gpu_offload(),
+                  "gpu": _loader.has_gpu_device()}))
+"""
+
+
+def _probe_native_runtime(extra_env):
+    env = {**os.environ, **extra_env,
+           "PYTHONPATH": os.pathsep.join(
+               [str(Path(llama_mod.__file__).parents[4]), os.environ.get("PYTHONPATH", "")])}
+    out = subprocess.run([sys.executable, "-c", _PROBE], env=env, capture_output=True,
+                         text=True, timeout=180)
+    assert out.returncode == 0, out.stderr[-2000:]
+    return json.loads(out.stdout.strip().splitlines()[-1])
+
+
+def test_the_gate_reads_the_native_devices_not_the_offload_flag():
+    require_native_runtime()
+    hidden = {"HIP_VISIBLE_DEVICES": "-1", "CUDA_VISIBLE_DEVICES": "-1",
+              "ROCR_VISIBLE_DEVICES": "-1", "GGML_VK_VISIBLE_DEVICES": "-1"}
+    for env in ({}, hidden):
+        got = _probe_native_runtime(env)
+        if not got["devices"]:
+            pytest.skip("runtime lacks the ggml_backend_dev_* registry symbols")
+        has_non_cpu = any(t != _loader.GGML_DEV_TYPE_CPU for _, t in got["devices"])
+        assert got["gpu"] is has_non_cpu, got
 
 
 def test_a_projector_clip_places_on_the_gpu_is_not_reported(monkeypatch, caplog):
