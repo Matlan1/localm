@@ -96,8 +96,7 @@ def test_list_versions_marks_direction_and_warnings(env, monkeypatch):
     assert by["v0.2.0"]["direction"] == "older" and by["v0.2.0"]["installable"] is True
     assert any("downgrade" in w for w in by["v0.2.0"]["warnings"])
     assert any("does not accept" in w for w in by["v0.2.0"]["warnings"])
-    assert any("uv from PATH" in w for w in by["v0.2.0"]["warnings"])
-    assert not any("uv from PATH" in w for w in by["v0.4.0"]["warnings"])
+
     assert by["v0.1.9"]["installable"] is False
     assert "no build" in by["v0.1.9"]["reason"]
     assert any("no signature" in w for w in by["v0.1.9"]["warnings"])
@@ -373,6 +372,52 @@ def test_older_build_gets_a_trust_bridge_and_verifies_newer_releases(env, monkey
     old.check_build(newer, envelope(newer, [_PRIV], keyset=rotated))
     saved = json.loads((home / "updates" / "trust.json").read_text(encoding="utf-8"))
     assert saved["seq"] == 2, "a key rotation the older build accepts is kept"
+
+
+_OLD_APPLY_UPDATE = '''
+def post_swap_command(klass, backend=None):
+    if klass == "deps":
+        return ["uv", "pip", "install", "-p", ".venv", "-e", ".[coder,voice,monitor]"]
+    return None
+'''
+
+
+def test_older_build_runs_its_dependency_step_with_the_found_uv(env, monkeypatch):
+    import subprocess
+    import sys
+    _home, inst = env
+    contained = inst / ".uv" / "uv.exe"
+    contained.parent.mkdir()
+    contained.write_bytes(b"")
+    found = []
+    monkeypatch.setattr(updater, "_uv_for_deps", lambda t: found.append(t) or str(contained))
+    data = _zip("0.2.0", files={"localm/updater.py": _OLD_UPDATER,
+                                "localm/_apply_update.py": _OLD_APPLY_UPDATE})
+    sig = envelope(data, [_PRIV])
+    updater.apply(2, signature=sig, target_version="0.2.0", installed=inst,
+                  download_opener=_download(data))
+    assert found == [inst]
+    probe = ("import sys; sys.path.insert(0, sys.argv[1]); import localm.updater; "
+             "from localm import _apply_update as a; "
+             "print(a.post_swap_command('deps')[0]); print(a.post_swap_command('reboot'))")
+    out = subprocess.run([sys.executable, "-I", "-c", probe, str(inst)],
+                         capture_output=True, text=True, check=True).stdout.splitlines()
+    from pathlib import Path
+    assert Path(out[0]).resolve() == contained.resolve(), out
+    assert out[1] == "None"
+
+
+def test_a_build_that_needs_no_uv_bridge_gets_none(env, monkeypatch):
+    _home, inst = env
+    monkeypatch.setattr(updater, "_uv_for_deps",
+                        lambda t: pytest.fail("no uv lookup for a build that needs none"))
+    current = "def post_swap_command(klass, backend=None, uv=None):\n    return [uv]\n"
+    data = _zip("0.2.0", files={"localm/_apply_update.py": current,
+                                "localm/updater.py": _OLD_UPDATER})
+    updater.apply(2, signature=envelope(data, [_PRIV]), target_version="0.2.0",
+                  installed=inst, download_opener=_download(data))
+    assert "_localm_bridged_post_swap_command" not in (
+        inst / "localm" / "updater.py").read_text(encoding="utf-8")
 
 
 def test_a_build_that_already_verifies_envelopes_gets_no_bridge(env):

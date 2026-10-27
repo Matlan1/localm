@@ -441,7 +441,8 @@ update`, or the GUI "Update now" button). The client is signature-verifying:
   `updates/data-before-<version>-<time>/` in the data directory. An older build
   installed this way keeps the keys in use: a release from before 0.3.0 gets this
   build's signature check alongside it, so it can still verify and install newer
-  releases.
+  releases, and a release that would look `uv` up on PATH for a dependency update
+  uses the `uv` this install found instead.
 - **HTTPS only.** The download endpoint must be HTTPS and a redirect that would
   downgrade to plain HTTP is blocked.
 - **Your data is never in the swap.** The updater never touches the venv, `.git`,

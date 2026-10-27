@@ -593,8 +593,7 @@ def list_versions(*, opener=None) -> dict:
     ``warnings`` lists what the user should know before choosing it: a downgrade,
     a reinstall of the running version, an unrecognised version format, a release
     with no signature, or one from before ``_CURRENT_KEY_FLOOR`` (a signature
-    format this version does not accept, and an updater that runs uv from PATH).
-    The signature itself is checked when the build is installed, not
+    format this version does not accept). The signature itself is checked when the build is installed, not
     here.
 
     Raises :class:`~localm.bugreport.LocalmError` like :func:`check`, and when the
@@ -624,10 +623,6 @@ def list_versions(*, opener=None) -> dict:
         elif pre_floor:
             warnings.append(f"released before {_CURRENT_KEY_FLOOR}: its signature is in a "
                             "format this version does not accept, so it will not verify")
-        if pre_floor:
-            warnings.append("once installed, its own updater runs uv from PATH for an "
-                            "update that changes dependencies; if that update fails, "
-                            "localm update --rollback returns to the version you have now")
         installable = bool(asset and asset.get("id"))
         out.append({
             "version": version, "name": rel.get("name"),
@@ -1045,6 +1040,57 @@ def _install_trust_bridge(root: Path) -> None:
                           reason=str(e)) from None
 
 
+def _needs_uv_bridge(root: Path) -> bool:
+    """True when the build at *root* runs its dependency step with a ``uv``
+    looked up on PATH (localm 0.3.1 and earlier)."""
+    try:
+        text = (root / "localm" / "_apply_update.py").read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return 'return ["uv", "pip"' in text
+
+
+def _install_uv_bridge(root: Path, uv: str, target: Path) -> None:
+    """Make the staged build at *root* run the dependency step of its later
+    updates with *uv* instead of a ``uv`` looked up on PATH.
+
+    Appends to the staged ``localm/updater.py`` a rebinding of
+    ``_apply_update.post_swap_command`` that replaces a bare ``uv`` first argument
+    with *uv*: relative to the install root when *uv* is inside the install
+    *target*, else the absolute path. Raises :class:`~localm.bugreport.LocalmError`
+    when the write fails."""
+    import os
+
+    from localm.bugreport import LocalmError
+    uv_path = Path(uv)
+    try:
+        rel = uv_path.resolve().relative_to(Path(target).resolve())
+        uv_expr = ("_localm_os.path.join(_localm_os.path.dirname(_localm_os.path.dirname("
+                   "_localm_os.path.abspath(__file__))), " + repr(str(rel)) + ")")
+    except ValueError:
+        uv_expr = repr(os.path.abspath(str(uv_path)))
+    stanza = (
+        "\n\n# Runs the dependency step of later updates with the uv the localm build\n"
+        "# that installed this version found, instead of a uv looked up on PATH.\n"
+        "import os as _localm_os\n"
+        "from localm import _apply_update as _localm_apply_update\n"
+        "_localm_unbridged_post_swap_command = _localm_apply_update.post_swap_command\n"
+        "\n\n"
+        "def _localm_bridged_post_swap_command(*args, **kwargs):\n"
+        "    cmd = _localm_unbridged_post_swap_command(*args, **kwargs)\n"
+        "    if cmd and cmd[0] == \"uv\":\n"
+        f"        cmd = [{uv_expr}] + list(cmd[1:])\n"
+        "    return cmd\n"
+        "\n\n"
+        "_localm_apply_update.post_swap_command = _localm_bridged_post_swap_command\n")
+    try:
+        with open(root / "localm" / "updater.py", "a", encoding="utf-8") as f:
+            f.write(stanza)
+    except OSError as e:
+        raise LocalmError("could not prepare the older version to install later updates",
+                          reason=str(e)) from None
+
+
 def _pinned_llama_tag(root: Path):
     """The llama.cpp release tag the build at *root* provisions (its
     ``_PINNED_TAG``), or None when it pins none."""
@@ -1196,6 +1242,8 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
                 _carry_trust_forward()
                 if _needs_trust_bridge(root):
                     _install_trust_bridge(root)
+                if _needs_uv_bridge(root):
+                    _install_uv_bridge(root, uv_exe or _uv_for_deps(target), target)
                 if downgrade:
                     data_backup = _backup_data_for_downgrade(new_version)
         except Exception:
