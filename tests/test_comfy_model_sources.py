@@ -52,7 +52,7 @@ class TestResolveComfyModelSource:
 
     def test_flux_vae_sourced_from_ungated_repo(self):
         source = resolve_comfy_model_source("ae.safetensors")
-        assert source.spec == "Comfy-Org/z_image_turbo:split_files/vae/ae.safetensors"
+        assert source.spec == "Comfy-Org/Z-Image-Turbo:split_files/vae/ae.safetensors"
         assert source.sha256 == "afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38"
         assert "FLUX.1" not in source.spec
         assert source.model_type == "vae"

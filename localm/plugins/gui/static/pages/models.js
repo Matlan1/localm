@@ -9,6 +9,7 @@ import { t, tn } from "../app/i18n.js";
 import { onServerUnreachable } from "../app/init.js";
 import { emptyState, iconEl } from "../app/icons.js";
 import { refreshModels, showKeyGate, switchModel, toastLoadResult } from "../app/models-sidebar.js";
+import { deleteInterrupted, findInterrupted, interruptedState, loadInterrupted, onInterruptedChange, renderInterrupted, setResumeHandler, startResume } from "../app/interrupted-pulls.js";
 import { backendOverrideNote, refreshBackendInfo, refreshPerfEstimate } from "../app/settings-perf.js";
 
 /* ================================================================ */
@@ -158,6 +159,11 @@ function _syncViewOptControls() {
 // still matches exactly what was prefilled.
 let pendingPullTypeHint = null;
 
+// The source as pulled: "hf:owner/repo", followed by "@revision" when the model was pulled at a named branch, tag or commit.
+function modelSourceText(m) {
+  const source = (m && m.source) || "";
+  return source && m.revision ? source + "@" + m.revision : source;
+}
 // Registered-models table columns: label, how to read/compare a row, and
 // whether it is sortable (the actions column is not). "kind" picks the
 // comparator - "number" (size_bytes/mtime, both nullable) vs "string"
@@ -166,7 +172,7 @@ let pendingPullTypeHint = null;
 const MODEL_COLUMNS = [
   { key: "name", label: "models.col.name", sortable: true, kind: "string", get: (m) => m.name || "" },
   { key: "model_type", label: "models.col.role", sortable: true, kind: "string", get: (m) => m.model_type || "llm" },
-  { key: "source", label: "models.col.source", sortable: true, kind: "string", get: (m) => m.source || "" },
+  { key: "source", label: "models.col.source", sortable: true, kind: "string", get: (m) => modelSourceText(m) },
   { key: "size_bytes", label: "models.col.size", sortable: true, kind: "number", get: (m) => m.size_bytes },
   { key: "mtime", label: "models.col.modified", sortable: true, kind: "number", get: (m) => m.mtime },
   { key: "actions", label: "", sortable: false },
@@ -399,6 +405,7 @@ export async function refreshModelsPage() {
     _loadPullShortcuts().then((ok) => { if (!ok) _pullShortcutsLoaded = false; });
   }
   await refreshModels();
+  loadInterrupted();
 
   const box = $("models-table");
   if (myGen !== _modelsRenderGen) return;
@@ -616,8 +623,9 @@ export async function refreshModelsPage() {
     tr.appendChild(roleTd);
 
     // The source clips to an ellipsis, with the full value on hover.
-    const sourceTd = el("td", "mono clip-cell", m.source || "");
-    if (m.source) sourceTd.title = m.source;
+    const sourceText = modelSourceText(m);
+    const sourceTd = el("td", "mono clip-cell", sourceText);
+    if (sourceText) sourceTd.title = sourceText;
     tr.appendChild(sourceTd);
     tr.appendChild(el("td", "mono shrink-cell", fmtSize(m.size_bytes)));
     tr.appendChild(el("td", "mono shrink-cell", fmtModelDate(m.mtime)));
@@ -825,7 +833,7 @@ export async function showModelDetail(name) {
     const rows = [
       ["path", t("models.detail.path"), data.path],
       ["type", t("models.detail.type"), null],
-      ["source", t("models.detail.source"), data.source],
+      ["source", t("models.detail.source"), modelSourceText(data)],
       ["size", t("models.detail.size"), fmtSize(data.size_bytes)],
       ["sha256", t("models.detail.sha256"), data.sha256 || t("models.detail.sha256Pending")],
       ["aliases", t("models.detail.aliases"),
@@ -922,6 +930,7 @@ async function _gpuInfo() {
     return {
       gpus: Array.isArray(data.gpus) ? data.gpus : [],
       gpu_split_indices: Array.isArray(data.gpu_split_indices) ? data.gpu_split_indices : [],
+      main_gpu_index: Number.isInteger(data.main_gpu_index) ? data.main_gpu_index : null,
     };
   } catch { return { gpus: [], gpu_split_indices: [] }; }
 }
@@ -930,11 +939,13 @@ async function _gpuInfo() {
 async function _splitGpus() { return (await _gpuInfo()).gpus; }
 
 /** Caption naming what the fit-badge VRAM number is. Mirrors
- *  discover.vram_capacity: the number is COMBINED only when 2+ configured split
- *  indices map to detected devices; a 1-entry gpu_split_indices naming a
- *  detected device makes it that GPU's (discover.resolve_load_gpu_index);
- *  otherwise it is the single main GPU's.
- *  `gpuInfo` is {gpus, gpu_split_indices} from _gpuInfo(). */
+ *  discover.vram_capacity: the number is COMBINED when 2+ configured split
+ *  indices map to detected devices, or when neither a split nor a main GPU is
+ *  configured and 2+ discrete GPUs are detected (a load then spreads over all
+ *  of them); a 1-entry gpu_split_indices naming a detected device makes it that
+ *  GPU's (discover.resolve_load_gpu_index); a chosen main GPU, or a split
+ *  naming GPUs that are not present, makes it the main GPU's.
+ *  `gpuInfo` is {gpus, gpu_split_indices, main_gpu_index} from _gpuInfo(). */
 export function vramBasisCaption(totalBytes, gpuInfo) {
   const gib = (totalBytes / GIB).toFixed(0);
   const gpus = Array.isArray(gpuInfo?.gpus) ? gpuInfo.gpus : [];
@@ -947,6 +958,11 @@ export function vramBasisCaption(totalBytes, gpuInfo) {
   }
   if (rawSplit.length === 1 && split.length === 1 && gpus.length > 1) {
     return t("models.vramBasis.oneGpu", { gib, index: split[0] });
+  }
+  const discrete = gpus.filter((g) => g.integrated !== true);
+  const mainChosen = Number.isInteger(gpuInfo?.main_gpu_index);
+  if (rawSplit.length === 0 && !mainChosen && discrete.length >= 2) {
+    return t("models.vramBasis.combined", { gib, count: discrete.length });
   }
   if (gpus.length > 1) {
     return t("models.vramBasis.mainGpu", { gib, count: gpus.length });
@@ -2029,6 +2045,136 @@ export async function updateApply() {
 if ($("update-check")) $("update-check").onclick = updateCheck;
 if ($("update-apply")) $("update-apply").onclick = updateApply;
 
+// Choose a version: the GUI form of `localm update --list` / `--to <version>`.
+// The server re-derives the build and signature from the proxy; a build whose
+// signature does not verify comes back as needs_confirmation, and is installed
+// only when the user confirms a warning that names the reason.
+let _updateReleases = [];
+let _updateCurrent = "";
+
+function _selectedRelease() {
+  const sel = $("update-version-select");
+  return sel ? _updateReleases.find((r) => r.version === sel.value) || null : null;
+}
+
+function _renderVersionInfo() {
+  const info = $("update-version-info"), btn = $("update-install-version");
+  const rel = _selectedRelease();
+  if (btn) btn.disabled = !(rel && rel.installable);
+  if (!info) return;
+  if (!rel) { info.textContent = ""; return; }
+  const lines = [];
+  if (rel.published_at) lines.push(t("settings.update.versionPublished", { date: String(rel.published_at).slice(0, 10) }));
+  if (!rel.installable) lines.push(t("settings.update.versionNotInstallable", { reason: rel.reason || "" }));
+  for (const w of rel.warnings || []) lines.push(w);
+  info.textContent = lines.join(" · ");
+}
+
+export async function updateListVersions() {
+  const picker = $("update-version-picker"), sel = $("update-version-select");
+  const out = $("update-version-status"), btn = $("update-versions");
+  if (btn) btn.disabled = true;
+  if (out) { out.hidden = false; out.textContent = t("settings.update.versionsLoading"); }
+  try {
+    const r = await fetch("/api/update/releases", { headers: authHeaders() });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.detail || r.statusText);
+    if (!d.available) { if (out) out.textContent = t("settings.update.notConfigured"); return; }
+    if (d.error) { if (out) out.textContent = t("settings.update.versionsFailed", { message: d.error }); return; }
+    _updateReleases = Array.isArray(d.releases) ? d.releases : [];
+    _updateCurrent = d.current || "";
+    if (!_updateReleases.length) {
+      if (picker) picker.hidden = true;
+      if (out) out.textContent = t("settings.update.versionsNone", { current: d.current || "" });
+      return;
+    }
+    if (sel) {
+      sel.textContent = "";
+      for (const rel of _updateReleases) {
+        const tag = t(`settings.update.direction.${rel.direction}`);
+        const label = rel.version + "  (" + tag + (rel.prerelease ? ", " + t("settings.update.prerelease") : "") + ")";
+        const opt = el("option", "", label);
+        opt.value = rel.version;
+        opt.disabled = !rel.installable;
+        sel.appendChild(opt);
+      }
+      const first = _updateReleases.find((x) => x.installable && x.direction !== "same");
+      if (first) sel.value = first.version;
+      sel.onchange = _renderVersionInfo;
+    }
+    if (picker) picker.hidden = false;
+    if (out) out.textContent = t("settings.update.versionsCurrent", { current: d.current || "" });
+    _renderVersionInfo();
+  } catch (e) {
+    if (out) { out.hidden = false; out.textContent = t("settings.update.versionsFailed", { message: e.message }); }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function _postSelectedVersion(rel, extra) {
+  const out = $("update-version-status"), btn = $("update-install-version");
+  if (btn) btn.disabled = true;
+  if (out) { out.hidden = false; out.textContent = t("settings.update.installing", { version: rel.version }); }
+  try {
+    const r = await fetch("/api/update/apply", {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ version: rel.version, ...extra }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.detail || r.statusText);
+    if (d.needs_confirmation === "unverified" && !extra.allow_unverified) {
+      if (out) out.textContent = t("settings.update.unverifiedStatus", { version: rel.version, reason: d.reason || "" });
+      const ok = await confirmDangerAsync(
+        t("settings.update.unverifiedTitle", { version: rel.version }),
+        t("settings.update.unverifiedBody", { reason: d.reason || "" }),
+        t("settings.update.unverifiedConfirm"));
+      if (!ok) { if (out) out.textContent = t("settings.update.notInstalled"); return; }
+      return await _postSelectedVersion(rel, { allow_unverified: true, sha256: d.sha256 });
+    }
+    if (d.applied) {
+      const version = d.version || rel.version;
+      if (out) {
+        out.textContent = (d.restarting
+          ? t("settings.update.installedRestarting", { version })
+          : (d.klass === "setup"
+            ? t("settings.update.updatedSetup", { version })
+            : t("settings.update.updatedPlain", { version })))
+          + (d.data_backup ? "  " + t("settings.update.dataBackup", { path: d.data_backup }) : "");
+      }
+      if (btn) btn.hidden = true;
+      if (d.restarting && window.onServerUnreachable) {
+        setTimeout(() => onServerUnreachable(), d.data_backup ? 6000 : 800);
+      }
+    } else if (d.error) {
+      if (out) out.textContent = t("settings.update.failedRolledBack", { error: d.error });
+    } else {
+      if (out) out.textContent = d.reason || t("settings.update.nothingToApply");
+    }
+  } catch (e) {
+    if (out) out.textContent = t("settings.update.applyFailed", { message: e.message });
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+export async function updateInstallVersion() {
+  const rel = _selectedRelease();
+  if (!rel || !rel.installable) return;
+  const current = _updateCurrent;
+  const key = rel.direction === "older" ? "downgrade" : (rel.direction === "same" ? "reinstall" : "install");
+  const ok = await confirmDangerAsync(
+    t(`settings.update.${key}Title`, { version: rel.version }),
+    t(`settings.update.${key}Body`, { version: rel.version, current }),
+    t(`settings.update.${key}Confirm`));
+  if (!ok) return;
+  await _postSelectedVersion(rel, {});
+}
+
+if ($("update-versions")) $("update-versions").onclick = updateListVersions;
+if ($("update-install-version")) $("update-install-version").onclick = updateInstallVersion;
+
 // Roll back: the GUI form of `localm update --rollback`. Probes first - the GET
 // is read-only and never performs the rollback - so the control appears only
 // when a backup exists. The server owner-gates the POST and restarts itself
@@ -2624,6 +2770,12 @@ function setPullButtons(state) {
 }
 
 async function discardPartialPull(payload) {
+  if (payload.fromInterrupted) {
+    const view = await findInterrupted(payload.spec, payload.name);
+    if (!view) return { ok: true, removed: 0, kept: null };
+    const res = await deleteInterrupted(view.id);
+    return { ...res, kept: null };
+  }
   try {
     const r = await fetch("/api/models/pull/discard", {
       method: "POST", headers: authHeaders(),
@@ -2652,7 +2804,20 @@ function cancelledStatusText(discard) {
                                : "models.pull.cancelledNothingStatus");
 }
 
-async function runPull(payload) {
+async function postPull(payload) {
+  const r = await fetch("/api/models/pull", {
+    method: "POST", headers: authHeaders(),
+    body: JSON.stringify(payload),
+  });
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.detail || r.statusText);
+  return data;
+}
+
+// Runs a pull and shows its progress. *start* posts the request and resolves to
+// {job_id}, or to null when nothing was started; it defaults to POST
+// /api/models/pull with *payload*.
+async function runPull(payload, start = () => postPull(payload)) {
   const sha256Input = $("pull-sha256");
   const storeInput = $("pull-store");
   pausedPull = null;
@@ -2675,12 +2840,13 @@ async function runPull(payload) {
   const samples = [];   // rolling {t, downloaded} window, used when the server sends no rate
   let last = { downloaded: 0, total: 0, pct: null };
   try {
-    const r = await fetch("/api/models/pull", {
-      method: "POST", headers: authHeaders(),
-      body: JSON.stringify(payload),
-    });
-    const data = await r.json();
-    if (!r.ok) throw new Error(data.detail || r.statusText);
+    const data = await start();
+    if (!data) {
+      prog.style.display = "none";
+      log.style.display = "none";
+      setPullButtons("idle");
+      return;
+    }
     const mine = { id: data.job_id, payload, intent: null };
     activePull = mine;
     const end = await streamJob(data.job_id, (line) => {
@@ -2819,8 +2985,28 @@ async function runPull(payload) {
     toast(t("models.pull.failedException", { message: e.message }), true);
   } finally {
     $("pull-start").disabled = false;
+    loadInterrupted();
   }
 }
+
+function renderInterruptedCard() {
+  const card = $("interrupted-card");
+  if (!card) return;
+  const rows = renderInterrupted($("interrupted-list"));
+  const dismissed = interruptedState().downloads.some((d) => d.dismissed);
+  card.hidden = rows === 0 && !dismissed;
+  const intro = card.querySelector(".sub");
+  if (intro) intro.hidden = rows === 0;
+}
+onInterruptedChange(renderInterruptedCard);
+
+// Resume from the interrupted-downloads list runs in this card's progress
+// display, with its Pause and Cancel.
+setResumeHandler(async (view, start) => {
+  if (activePull) throw new Error(t("models.interrupted.busy"));
+  const payload = { spec: view.spec, name: view.name || null, fromInterrupted: true };
+  await runPull(payload, start);
+});
 
 $("pull-start").onclick = async () => {
   const spec = $("pull-spec").value.trim();
@@ -2875,7 +3061,17 @@ $("pull-cancel").onclick = async () => {
 
 $("pull-resume").onclick = async () => {
   if (!pausedPull) return;
-  await runPull(pausedPull);
+  const payload = pausedPull;
+  if (payload.fromInterrupted) {
+    const view = await findInterrupted(payload.spec, payload.name);
+    if (view) {
+      await runPull(payload, () => startResume(view));
+      return;
+    }
+    toast(t("models.interrupted.recordGone"), true);
+    return;
+  }
+  await runPull(payload);
 };
 
 

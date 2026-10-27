@@ -78,7 +78,7 @@ DIFFUSION_LM_ARCHITECTURES = ["dream", "llada", "llada-moe", "rnd1"]
 
 IMAGE_ARCHITECTURES = [
     "flux", "sd3", "aura", "hidream", "cosmos", "hyvid", "wan", "ltxv", "sdxl", "sd1",
-    "lumina2",
+    "lumina2", "qwen_image", "qwen_image21",
 ]
 
 MUSIC_ARCHITECTURES = [

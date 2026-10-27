@@ -43,6 +43,7 @@ from ._transfer import meter_tqdm_class
 from .gguf import _safe_models_filename
 from .gguf import first_split_part
 from .gguf import gguf_n_embd
+from .gguf import logical_model_path
 from .gguf import split_gguf_parts
 from .registry import _detect_local_model_type, _media_component_type, _sanitize_name
 from .registry import alias_model
@@ -301,6 +302,20 @@ def _reap_stale_etag_partials(incomplete_path: Path) -> None:
         _unlink_quiet(_partial_owner_path(p))
 
 
+def _check_xet_endpoint(xet_file_data: Any, headers: dict) -> None:
+    """Raise ``netpolicy.NetworkPolicyError`` when the network policy refuses
+    the Xet storage endpoint a transfer of *xet_file_data* would connect to.
+
+    The endpoint comes from huggingface_hub's Xet connection info (the token
+    answer's ``casUrl``), which huggingface_hub caches per repo revision, so
+    the transfer reuses this lookup. Lookup errors propagate."""
+    from huggingface_hub.utils._xet import refresh_xet_connection_info
+    from localm import netpolicy
+    info = refresh_xet_connection_info(file_data=xet_file_data, headers=headers)
+    netpolicy.check_url(info.endpoint,
+                        allow_when_off=netpolicy.downloads_allowed_when_off())
+
+
 def _resumable_download_to_tmp_and_move(
     incomplete_path: Path,
     destination_path: Path,
@@ -356,6 +371,7 @@ def _resumable_download_to_tmp_and_move(
         if (resume_size == 0 and xet_file_data is not None and expected_size
                 and expected_size > fd.constants.MAX_HTTP_DOWNLOAD_SIZE
                 and fd.is_xet_available()):
+            _check_xet_endpoint(xet_file_data, headers)
             fd.xet_get(
                 incomplete_path=tmp_path,
                 xet_file_data=xet_file_data,
@@ -1063,6 +1079,25 @@ def pull_model(
         local_type = None if model_type == "auto" else model_type
         return _mm.add_local(str(local), name=name, model_type=local_type, store=store)
 
+    from . import pending_pulls
+    with pending_pulls.tracking({
+            "spec": model_spec, "name": name, "sha256": expected_sha256,
+            "mmproj": mmproj_spec, "type": model_type, "redownload": redownload,
+            "dest_dir": str(dest_dir) if dest_dir is not None else None,
+            "register": register}) as outcome:
+        res = _pull_remote(model_spec, spec, name, expected_sha256, redownload,
+                           mmproj_spec, model_type, dest_dir, register, type_is_auto)
+        outcome["ok"] = bool(res)
+    return res
+
+
+def _pull_remote(model_spec: str, spec: str, name: Optional[str],
+                 expected_sha256: Optional[str], redownload: bool,
+                 mmproj_spec: Optional[str], model_type: str,
+                 dest_dir: Optional[Path], register: bool, type_is_auto: bool) -> bool:
+    """The remote half of :func:`pull_model`: *spec* is *model_spec* resolved
+    by ``resolve_spec`` and is not a local path."""
+    from rich.markup import escape
     # owner/repo@revision[:file] names a branch, tag or commit of a HuggingFace
     # repo; the revision is split off here so every later step sees a plain spec.
     ref: Optional[str] = None
@@ -1743,7 +1778,9 @@ def _mmproj_download_dest(base_dir: Path, candidate: str, repo_id: str,
     recorded projector. When the occupied file differs from the digest the repo
     publishes and the origin recorded beside it says it came from *repo_id* as
     *candidate*, it is that repo's own damaged or outdated copy: it is deleted and the plain name is
-    returned for a fresh download. Returns ``(None, False)`` when every
+    returned for a fresh download. A numbered name that already holds this
+    repo's own *candidate* (origin recorded, digest confirmed) is returned with
+    the download skipped. Returns ``(None, False)`` when every
     numbered name up to ``_MAX_MMPROJ_COLLISION_SUFFIX`` is also taken."""
     dest = base_dir / candidate
     if not dest.exists():
@@ -1767,6 +1804,9 @@ def _mmproj_download_dest(base_dir: Path, candidate: str, repo_id: str,
         free = base_dir / f"{stem}-{n}{suffix}"
         if not free.exists():
             return free, False
+        if (_mmproj_origin_is(free, repo_id, candidate)
+                and _mmproj_reuse_confirmed(free, repo_id, candidate, model_path) is True):
+            return free, True
     return None, False
 
 
@@ -1819,8 +1859,58 @@ def _download_mmproj_file(repo_id: str, remote_name: str, dest: Path, base_dir: 
     _record_mmproj_origin(dest, repo_id, remote_name, actual)
 
 
+def _repoint_unrecorded_projector(model_path: Path, plain: Path, fetched: Path,
+                                  reg: "dict | None" = None) -> None:
+    """Point the registry entry of *model_path* at *fetched*, the projector
+    just verified against the digest its repo publishes, when the entry records
+    *plain* (the same-named copy that differs from that digest) and *plain* has
+    no origin record beside it (a copy from before origins were recorded, which
+    cannot be told from another repo's projector). No-op when *fetched* is
+    *plain*, when *plain* has an origin record, or when no entry holds this
+    model with *plain* as its projector. Entries of other models are left alone.
+    Prints the change.
+
+    *reg* is the registry dict a caller is already mutating inside
+    ``update_registry``: the repoint is applied to it directly, because the
+    registry lock is not re-entrant and a nested ``update_registry`` raises.
+    Without *reg* the registry is read and updated here."""
+    if fetched == plain or _mmproj_origin_path(plain).exists():
+        return
+    try:
+        want_model = logical_model_path(model_path)
+        want_old = logical_model_path(plain)
+        new_value = str(logical_model_path(fetched))
+        names: list[str] = []
+        for name, entry in (_mm.load_registry() if reg is None else reg).items():
+            if (isinstance(entry, dict) and entry.get("path") and entry.get("mmproj")
+                    and logical_model_path(Path(entry["path"])) == want_model
+                    and logical_model_path(Path(entry["mmproj"])) == want_old):
+                names.append(name)
+    except OSError as e:
+        logger.warning("could not check which model uses %s: %s", plain, e)
+        return
+    if not names:
+        return
+
+    def _swap(target: dict) -> None:
+        for name in names:
+            entry = target.get(name)
+            if isinstance(entry, dict):
+                entry["mmproj"] = new_value
+
+    if reg is None:
+        _mm.update_registry(_swap)
+    else:
+        _swap(reg)
+    from rich.markup import escape
+    console.print(
+        f"[yellow]{escape(plain.name)} does not match the digest its repo publishes; "
+        f"{escape(', '.join(names))} now uses {escape(fetched.name)}.[/yellow]")
+
+
 def _maybe_fetch_repo_mmproj(repo_id: str, filename: str, base_dir: Path, *,
-                             speech: bool = False) -> Optional[Path]:
+                             speech: bool = False,
+                             reg: "dict | None" = None) -> Optional[Path]:
     """Auto-attach companion: look for a vision projector shipped in the SAME
     HF repo as *filename* and fetch it too.
 
@@ -1829,6 +1919,9 @@ def _maybe_fetch_repo_mmproj(repo_id: str, filename: str, base_dir: Path, *,
     stays silent (see ``_hf_repo_files``); it prints an informational note only
     when the listing WAS read, *filename* looks like a vision-language release
     by name, and no usable projector is among the files.
+
+    *reg*, when given, is the registry dict the caller is mutating inside
+    ``update_registry``; see ``_repoint_unrecorded_projector``.
     """
     # repo_id/filename/candidate/e all come from a REMOTE repo and none is
     # charset-restricted, so all are escaped. `candidate` sits directly inside
@@ -1879,6 +1972,7 @@ def _maybe_fetch_repo_mmproj(repo_id: str, filename: str, base_dir: Path, *,
             "projector (GGUF metadata check failed) - not attaching it.[/yellow]"
         )
         return None
+    _repoint_unrecorded_projector(base_dir / filename, base_dir / candidate, dest, reg)
     return dest
 
 
@@ -1904,7 +1998,8 @@ def mmproj_backfill_candidate(entry: dict, path: Path) -> bool:
     return True
 
 
-def backfill_mmproj_for_entry(entry: dict, path: Path) -> Optional[Path]:
+def backfill_mmproj_for_entry(entry: dict, path: Path,
+                              reg: "dict | None" = None) -> Optional[Path]:
     """Retroactively attach a vision projector to an already-pulled LLM entry.
 
     Runs the same-repo lookup a fresh pull does (``_maybe_fetch_repo_mmproj``),
@@ -1916,6 +2011,9 @@ def backfill_mmproj_for_entry(entry: dict, path: Path) -> Optional[Path]:
     or None when *entry* is not a candidate, is blocked by policy, or nothing
     was found. NEVER RAISES, matching ``_maybe_fetch_repo_mmproj``'s contract,
     so one bad entry cannot take down a sync pass.
+
+    *reg* is the registry dict of a caller running inside ``update_registry``
+    (``sync_models_dir``'s reconcile); see ``_repoint_unrecorded_projector``.
 
     Network policy: gated on ``network_mode() != "off"`` (or
     ``downloads_allowed_when_off()``), the same bar ``pull_model``'s net_mode
@@ -1934,7 +2032,7 @@ def backfill_mmproj_for_entry(entry: dict, path: Path) -> Optional[Path]:
     from localm.model_manager.gguf import gguf_architecture, gguf_is_tts_architecture
     return _maybe_fetch_repo_mmproj(
         repo_id, path.name, path.parent,
-        speech=gguf_is_tts_architecture(gguf_architecture(path)))
+        speech=gguf_is_tts_architecture(gguf_architecture(path)), reg=reg)
 
 
 def _fetch_explicit_mmproj(mmproj_spec: str, base_dir: Path,
@@ -2077,6 +2175,16 @@ def _mmproj_for_registration(
     if pinned_revision:
         return None
     return _maybe_fetch_repo_mmproj(repo_id, filename, base_dir, speech=reg_type == "tts")
+
+
+def _record_url(hf_hub_url, repo_id: str, rel: str, **kw) -> Optional[str]:
+    """``hf_hub_url`` for the download record, or None (logged) when the hub
+    library rejects the repo id or path; the download itself reports that."""
+    try:
+        return hf_hub_url(repo_id, rel, endpoint=_HF_ENDPOINT, **kw)
+    except Exception as e:
+        logger.debug("no source URL recorded for %s / %s: %s", repo_id, rel, e)
+        return None
 
 
 def _pull_gguf_file(
@@ -2457,6 +2565,19 @@ def _pull_gguf_file(
                       + (f"@[bold]{escape(revision.ref)}[/bold]" if revision else "")
                       + f" / [bold]{escape(filename)}[/bold]")
 
+    from . import pending_pulls
+    pending_pulls.note_source(source="hf-file", repo=repo_id,
+                              revision=revision.ref if revision else None,
+                              commit=revision.commit if revision else None,
+                              sha256=verify_digest)
+    pending_pulls.note_hf_files(stage_dir, [{
+        "rel": _remote(p),
+        "url": _record_url(hf_hub_url, repo_id, _remote(p),
+                           **_file_revision(published.get(p), revision)),
+        "check_url": _record_url(hf_hub_url, repo_id, _remote(p),
+                                 **({"revision": revision.ref} if revision else {})),
+        "size": part_sizes.get(p), "etag": etags.get(p)} for p in missing])
+
     with _download_progress([base_dir / p for p in missing], total_size,
                             base_dir=stage_dir,
                             rel_parts=[_remote(p) for p in missing],
@@ -2596,6 +2717,26 @@ def _snapshot_files_failing_digest(dest: Path, repo_siblings, repo_id: str) -> l
     return failing
 
 
+_WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt", ".pth", ".ckpt", ".gguf", ".onnx",
+                    ".h5", ".msgpack", ".npz")
+
+
+def _snapshot_weight_files_without_digest(repo_siblings) -> list[str]:
+    """Names of the weight files (by extension, :data:`_WEIGHT_SUFFIXES`) in
+    *repo_siblings* that carry no published LFS sha256, so a download of them
+    cannot be checked against one."""
+    names = []
+    for sib in repo_siblings:
+        name = str(sib.rfilename)
+        if not name.lower().endswith(_WEIGHT_SUFFIXES):
+            continue
+        lfs = getattr(sib, "lfs", None)
+        published = (lfs.get("sha256") if isinstance(lfs, dict) else getattr(lfs, "sha256", None)) if lfs else None
+        if not published:
+            names.append(name)
+    return names
+
+
 def _snapshot_files_damaged(dest: Path, repo_siblings, repo_id: str) -> list[str]:
     """Names of the files of the snapshot at *dest* that are present but do not
     have the size, or the LFS sha256, *repo_siblings* gives them. A file that is
@@ -2610,11 +2751,12 @@ def _snapshot_files_damaged(dest: Path, repo_siblings, repo_id: str) -> list[str
             continue
         if not fp.is_file():
             continue
+        lfs = getattr(sib, "lfs", None)
         size = getattr(sib, "size", None)
         if size is not None and fp.stat().st_size != size:
-            damaged.append(name)
-            continue
-        lfs = getattr(sib, "lfs", None)
+            if lfs or not _is_crlf_copy_of_blob(fp, getattr(sib, "blob_id", None)):
+                damaged.append(name)
+                continue
         published = (lfs.get("sha256") if isinstance(lfs, dict) else getattr(lfs, "sha256", None)) if lfs else None
         if published and _verify_digest(fp, purpose=f"to check {name}").lower() != str(published).lower():
             damaged.append(name)
@@ -2630,6 +2772,29 @@ def _git_blob_id(path: Path) -> str:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+_CRLF_CHECK_LIMIT = 16 * 1024 * 1024
+
+
+def _is_crlf_copy_of_blob(path: Path, blob_id) -> bool:
+    """True when *path* holds the file whose git blob id is *blob_id* with its
+    line endings changed to CRLF, as a git checkout with ``core.autocrlf`` writes
+    a text file: the content with every CRLF turned back into LF has that id.
+    False for no *blob_id*, a file over :data:`_CRLF_CHECK_LIMIT` (files stored
+    outside LFS are small), a file without a CRLF, or an unreadable file."""
+    if not blob_id:
+        return False
+    try:
+        if path.stat().st_size > _CRLF_CHECK_LIMIT:
+            return False
+        data = path.read_bytes()
+    except OSError:
+        return False
+    if b"\r\n" not in data:
+        return False
+    data = data.replace(b"\r\n", b"\n")
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest() == str(blob_id).lower()
 
 
 _SNAPSHOT_SIDE_FILES = frozenset({".ds_store", "thumbs.db", "desktop.ini"})
@@ -2653,16 +2818,17 @@ def _snapshot_matches_listing(dest: Path, repo_siblings) -> bool:
             if not fp.is_file():
                 return False
             size = getattr(sib, "size", None)
-            if size is not None and fp.stat().st_size != size:
-                return False
             lfs = getattr(sib, "lfs", None)
+            blob = getattr(sib, "blob_id", None)
+            if size is not None and fp.stat().st_size != size:
+                if lfs or not _is_crlf_copy_of_blob(fp, blob):
+                    return False
+            elif not lfs and (not blob or _git_blob_id(fp) != str(blob).lower()
+                              and not _is_crlf_copy_of_blob(fp, blob)):
+                return False
             if lfs:
                 sha = lfs.get("sha256") if isinstance(lfs, dict) else getattr(lfs, "sha256", None)
                 if not sha:
-                    return False
-            else:
-                blob = getattr(sib, "blob_id", None)
-                if not blob or _git_blob_id(fp) != str(blob).lower():
                     return False
             listed.add(name.replace("\\", "/"))
         def _unreadable(error: OSError) -> None:
@@ -3104,6 +3270,11 @@ def _pull_hf_snapshot_locked(
                and _snapshot_matches_listing(dest, repo_siblings))
     if adopted:
         claimed = None
+    if claimed == ("", None) and redownload:
+        console.print(
+            f"[yellow]--redownload:[/yellow] fetching into {escape(str(dest))}, which holds "
+            "files localm cannot match to a repo or revision.")
+        claimed = None
     if claimed is not None:
         claim_repo, claim_revision = claimed
         what = ("files localm cannot match to a repo or revision" if not claim_repo
@@ -3238,6 +3409,7 @@ def _pull_hf_snapshot_locked(
 
     _mm.ensure_dirs()
     from ..storekit import atomic_write
+    created = not dest.exists()
     dest.mkdir(parents=True, exist_ok=True)
     try:
         atomic_write(dest / _SNAPSHOT_CLAIM,
@@ -3257,6 +3429,11 @@ def _pull_hf_snapshot_locked(
     )
     console.print("[dim]This may take a while for large models...[/dim]")
 
+    from . import pending_pulls
+    pending_pulls.note_source(source="hf-repo", repo=repo_id,
+                              revision=revision.ref if revision else None,
+                              commit=commit)
+    pending_pulls.note_snapshot(dest, model_name, created, total_size)
     try:
         _ensure_hf_resumable_download()
         with _snapshot_progress(_disk_bytes, total_size, label=repo_id) as _prog:
@@ -3289,6 +3466,9 @@ def _pull_hf_snapshot_locked(
                 f"{escape(repo_id)} do not match the digests Hugging Face publishes "
                 f"({shown}) - deleted. Pull again to fetch them; the model was not registered.")
             return False
+        unchecked = _snapshot_weight_files_without_digest(repo_siblings)
+        if unchecked:
+            _note_unverified(repo_id, unchecked)
 
     _warn_if_repo_ships_code(dest, repo_id)
     # _register_with_dedup, the same dedup-aware registration _pull_gguf_file
@@ -4002,9 +4182,11 @@ def _pull_url_locked(
     # HEAD the final URL for the total file size the disk-space check needs.
     # Pinned to the validated IP like the GET below. A connect error here is
     # non-fatal; the GET still fails closed.
+    head_etag = None
     try:
         head  = netpolicy.pinned_request("HEAD", dl_url, allow_redirects=False, timeout=10)
         total = int(head.headers.get("content-length", 0))
+        head_etag = head.headers.get("etag")
     except NetworkPolicyError as e:
         # A policy refusal is not the benign case: it is surfaced and fails
         # closed, like the GET below, rather than collapsing into total=0.
@@ -4024,6 +4206,11 @@ def _pull_url_locked(
     remaining = max(0, total - already_have)
     if not _mm._check_disk_space(_mm.MODELS_DIR, remaining):
         return False
+
+    from . import pending_pulls
+    pending_pulls.note_source(source="url", url=url,
+                              sha256=expected_sha256.lower() if expected_sha256 else None)
+    pending_pulls.note_part(part_file, filename, total or None, etag=head_etag)
 
     # Build request - try to resume from where we left off
     headers: dict = {}
@@ -4306,6 +4493,11 @@ def _pull_civitai_file_locked(
     remaining = max(0, (resolved.size_bytes or 0) - already_have)
     if not _mm._check_disk_space(dest_dir, remaining):
         return False
+
+    from . import pending_pulls
+    pending_pulls.note_source(source="civitai", repo=f"civitai:{version_id}",
+                              sha256=verify_digest.lower() if verify_digest else None)
+    pending_pulls.note_part(part_file, filename, resolved.size_bytes or None)
 
     try:
         dl_url = _ssrf_resolve_final_url(resolved.url)

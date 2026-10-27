@@ -299,16 +299,23 @@ def split_shortfall_refusal(name: str, shortfall: Iterable[Mapping]) -> str:
             f"device(s) to load '{name}' ({detail}).")
 
 
-def degraded_load_confirm(name: str, vram_required: int, free: int) -> dict:
-    """The confirm_required result asking before a partial-offload load."""
+def degraded_load_confirm(name: str, vram_required: int, free: int,
+                          *, moe: bool = False) -> dict:
+    """The confirm_required result asking before a partial-offload load. *moe*
+    is True for a mixture-of-experts model, whose experts the backend moves to
+    system RAM before it moves any layer off the GPU."""
+    plan = (
+        "keep the experts in system RAM (and move layers to the CPU too if "
+        "that is still too large)" if moe
+        else "fall back to partial CPU offload")
     return {
         "status": "confirm_required", "model": name,
         "detail": (
             f"'{name}' does not fit the estimated free VRAM "
             f"(need ~{vram_required // _MB} MB, "
             f"{free // _MB} MB free) even after "
-            "eviction; loading it anyway will let the backend "
-            "fall back to partial CPU offload, which is slower"),
+            f"eviction; loading it anyway will let the backend {plan}, "
+            "which is slower"),
     }
 
 

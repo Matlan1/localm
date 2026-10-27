@@ -796,7 +796,7 @@ class AgentJob(BackgroundJob):
         # Isolation facts produced by finalize(), carried through verbatim. The
         # diff is NOT neutralised; the parent renders it in a labelled block.
         for key in ("branch", "base", "file_count", "diff", "worktree",
-                    "cleanup_warning"):
+                    "cleanup_warning", "branch_deleted", "branch_kept"):
             if key in poll_value:
                 payload[key] = poll_value[key]
         return payload

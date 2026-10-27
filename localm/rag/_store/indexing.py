@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 from localm.debuglog import logger as _log
+from localm.pathsafe import resolve_keeping_mapped_drive
 from localm.rag import store as _st
 
 from ..chunk import chunk_text
@@ -110,7 +111,7 @@ class _CollectionIndexing:
         for p in paths:
             p = Path(p).expanduser()
             if p.is_file():
-                out.append(p.resolve())
+                out.append(resolve_keeping_mapped_drive(p))
             elif p.is_dir():
                 # _walk_files (NOT rglob): it bounds directory-link loops, branches
                 # on the resolved type of a link, and prunes _SKIP_DIRS during
@@ -119,7 +120,7 @@ class _CollectionIndexing:
                     if (f.suffix.lower() not in BLACKLISTED_SUFFIXES
                             and not is_secret_index_name(f.name)
                             and not any(part in _SKIP_DIRS for part in f.parts)):
-                        out.append(f.resolve())
+                        out.append(resolve_keeping_mapped_drive(f))
         # de-dup, keep order
         seen: set = set()
         deduped = [p for p in out if not (p in seen or seen.add(p))]
@@ -159,7 +160,7 @@ class _CollectionIndexing:
                 rp = Path(p).expanduser()
                 if not rp.is_dir():
                     continue
-                key = str(rp.resolve())
+                key = str(resolve_keeping_mapped_drive(rp))
             except (OSError, ValueError) as e:
                 # Already skipped by _expand; logged rather than dropped silently.
                 _log.debug("rag: could not record %s as an index root: %s", p, e)

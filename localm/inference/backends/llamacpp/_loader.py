@@ -779,6 +779,67 @@ def compute_devices() -> list[tuple]:
     return devices
 
 
+_NON_GPU_BACKENDS = frozenset(
+    {"cpu", "blas", "amx", "rpc", "accelerate", "kleidiai"})
+
+
+def classify_gpu_devices(devices: list[tuple]) -> Optional[bool]:
+    """Whether *devices*, a list of ``(ggml_backend_dev_type, backend_name)``
+    with ``backend_name`` None when unreadable, holds a GPU: True for a device of
+    type :data:`GGML_DEV_TYPE_GPU`, or of any type past it whose backend is not
+    in :data:`_NON_GPU_BACKENDS`. False when no device qualifies, None when a
+    device past GPU has no readable backend name and no other device qualifies."""
+    undecided = False
+    for dev_type, backend in devices:
+        if dev_type == GGML_DEV_TYPE_CPU:
+            continue
+        if dev_type == GGML_DEV_TYPE_GPU:
+            return True
+        if backend is None:
+            undecided = True
+        elif backend.lower() not in _NON_GPU_BACKENDS:
+            return True
+    return None if undecided else False
+
+
+def has_gpu_device() -> Optional[bool]:
+    """True when the loaded runtime registers a GPU device, False when it
+    registers none, None when the device registry cannot be read. See
+    :func:`classify_gpu_devices`. Loads the native library."""
+    load_lib()
+    handles = _ggml_dev_handles()
+    cnt = _ggml_sym(handles, "ggml_backend_dev_count")
+    get = _ggml_sym(handles, "ggml_backend_dev_get")
+    type_fn = _ggml_sym(handles, "ggml_backend_dev_type")
+    if not (cnt and get and type_fn):
+        return None
+    reg_fn = _ggml_sym(handles, "ggml_backend_dev_backend_reg")
+    reg_name_fn = _ggml_sym(handles, "ggml_backend_reg_name")
+    cnt.restype = ctypes.c_size_t
+    get.restype = ctypes.c_void_p
+    get.argtypes = [ctypes.c_size_t]
+    type_fn.restype = ctypes.c_int
+    type_fn.argtypes = [ctypes.c_void_p]
+    if reg_fn is not None and reg_name_fn is not None:
+        reg_fn.restype = ctypes.c_void_p
+        reg_fn.argtypes = [ctypes.c_void_p]
+        reg_name_fn.restype = ctypes.c_char_p
+        reg_name_fn.argtypes = [ctypes.c_void_p]
+    devices: list[tuple] = []
+    try:
+        for i in range(int(cnt())):
+            dev = get(i)
+            dev_type = int(type_fn(dev))
+            backend = None
+            if reg_fn is not None and reg_name_fn is not None:
+                raw = reg_name_fn(reg_fn(dev))
+                backend = raw.decode("utf-8", "replace") if raw else None
+            devices.append((dev_type, backend))
+    except Exception:
+        return None
+    return classify_gpu_devices(devices)
+
+
 def native_device_inventory() -> Optional[list]:
     """``[{"index", "name", "description", "type", "free", "total"}, ...]`` for
     every NON-CPU compute device the ACTIVE ggml runtime registers, or ``None``
@@ -814,7 +875,10 @@ def native_device_inventory() -> Optional[list]:
     ``description`` is the human device name when the build exposes
     ``ggml_backend_dev_description`` (ggml-vulkan's terse ``name`` is
     "Vulkan<n>"), else "". ``free``/``total`` are ``ggml_backend_dev_memory``'s
-    live bytes, 0 when that call fails for a device.
+    live bytes, 0 when that call fails for a device. ``device_id`` is the
+    lower-case PCI bus id ``ggml_backend_dev_get_props`` reports
+    (``"0000:2d:00.0"``), present only when the build exports that call and
+    the backend knows the id.
 
     Calls ``load_lib()`` and per-device native queries IN-PROCESS: the memory
     query shares ``gpu_memory()``'s abort risk (see its RISK docstring), so
@@ -875,12 +939,85 @@ def native_device_inventory() -> Optional[list]:
                     free, total = int(f.value), int(t.value)
                 except Exception:
                     free = total = 0   # memory unreadable; the device itself still counts
-            out.append({"index": len(out), "name": name, "description": desc,
-                        "type": dev_type, "free": free, "total": total})
+            entry = {"index": len(out), "name": name, "description": desc,
+                     "type": dev_type, "free": free, "total": total}
+            device_id = _device_pci_id(handles, dev)
+            if device_id:
+                entry["device_id"] = device_id
+            out.append(entry)
         except Exception:
             # One unreadable device must not lose the others.
             continue
     return out
+
+
+class _GgmlDevCaps(ctypes.Structure):
+    _fields_ = [("async_", ctypes.c_bool), ("host_buffer", ctypes.c_bool),
+                ("buffer_from_host_ptr", ctypes.c_bool), ("events", ctypes.c_bool),
+                ("mmap_support", ctypes.c_bool)]
+
+
+class _GgmlDevProps(ctypes.Structure):
+    """``struct ggml_backend_dev_props``, with trailing room for fields a newer
+    build appends."""
+    _fields_ = [("name", ctypes.c_char_p), ("description", ctypes.c_char_p),
+                ("memory_free", ctypes.c_size_t), ("memory_total", ctypes.c_size_t),
+                ("type", ctypes.c_int), ("device_id", ctypes.c_char_p),
+                ("caps", _GgmlDevCaps), ("_room", ctypes.c_char * 256)]
+
+
+def _device_pci_id(handles, dev) -> Optional[str]:
+    """The lower-case PCI bus id of ggml device *dev*
+    (``ggml_backend_dev_get_props``' ``device_id``), or None when the build
+    does not export the call or the backend does not know the id."""
+    props_fn = _ggml_sym(handles, "ggml_backend_dev_get_props")
+    if props_fn is None:
+        return None
+    try:
+        props_fn.restype = None
+        props_fn.argtypes = [ctypes.c_void_p, ctypes.POINTER(_GgmlDevProps)]
+        props = _GgmlDevProps()
+        props_fn(dev, ctypes.byref(props))
+        raw = props.device_id
+        return raw.decode("ascii", "replace").strip().lower() if raw else None
+    except Exception as e:
+        logger.debug("ggml_backend_dev_get_props failed (%s)", type(e).__name__)
+        return None
+
+
+def gpu_device_handles() -> list:
+    """The ``ggml_backend_dev_t`` handles of the GPU-type
+    (:data:`GGML_DEV_TYPE_GPU`) devices of the native registry, in registry
+    order: llama.cpp's own device list on a box with a discrete GPU, the
+    numbering ``discover.native_gpu_devices`` and the GPU readings are mapped
+    to. Reads only each device's type, which initialises no device. Loads the
+    native library. Call only in a process whose crash is acceptable (the
+    model worker)."""
+    load_lib()
+    handles = _ggml_dev_handles()
+    cnt = _ggml_sym(handles, "ggml_backend_dev_count")
+    get = _ggml_sym(handles, "ggml_backend_dev_get")
+    type_fn = _ggml_sym(handles, "ggml_backend_dev_type")
+    if not (cnt and get and type_fn):
+        return []
+    cnt.restype = ctypes.c_size_t
+    get.restype = ctypes.c_void_p
+    get.argtypes = [ctypes.c_size_t]
+    type_fn.restype = ctypes.c_int
+    type_fn.argtypes = [ctypes.c_void_p]
+    out = []
+    for i in range(int(cnt())):
+        dev = get(i)
+        if int(type_fn(dev)) == GGML_DEV_TYPE_GPU:
+            out.append(dev)
+    return out
+
+
+def device_pci_id(dev) -> Optional[str]:
+    """The lower-case PCI bus id of native device handle *dev*, or None (see
+    :func:`_device_pci_id`). On a CUDA or HIP build this initialises the
+    device (its properties include a memory reading)."""
+    return _device_pci_id(_ggml_dev_handles(), dev)
 
 
 # Cache of (gpu_device_handle, bound ggml_backend_dev_memory) once resolved, or

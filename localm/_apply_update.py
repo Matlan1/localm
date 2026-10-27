@@ -371,12 +371,17 @@ def swap_with_backup(staged_root, installed, backup_dir) -> list:
     return names
 
 
-def post_swap_command(klass: str, backend: Optional[str] = None) -> Optional[list]:
+def post_swap_command(klass: str, backend: Optional[str] = None,
+                      uv: Optional[str] = None) -> Optional[list]:
     """The extra command (argv list) an update class needs after the file swap, or
-    None for a pure ``reboot``. ``deps`` reinstalls editable; ``runtime`` re-provisions
-    the native binaries; ``setup`` is handled by the user (no in-process command)."""
+    None for a pure ``reboot``. ``deps`` reinstalls editable with the uv at *uv*
+    (required for that class; see :func:`localm.uv_tool.find_uv`); ``runtime``
+    re-provisions the native binaries; ``setup`` is handled by the user (no
+    in-process command)."""
     if klass == "deps":
-        return ["uv", "pip", "install", "-p", ".venv", "-e", ".[coder,voice,monitor]"]
+        if not uv:
+            raise ValueError("the deps update class needs the path of the uv to run")
+        return [uv, "pip", "install", "-p", ".venv", "-e", ".[coder,voice,monitor]"]
     if klass == "runtime":
         # Re-invoke through the current interpreter: a bare "localm" argv[0]
         # resolves back to the LocaLM.exe launcher itself on Windows.

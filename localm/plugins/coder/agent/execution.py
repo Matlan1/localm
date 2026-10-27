@@ -60,6 +60,16 @@ if TYPE_CHECKING:
     from localm.audit import AuditLogT
 
 
+def _executed_forms(tool: str, command: str) -> list[str]:
+    """*command* plus the text the platform shell actually runs for it, for
+    the shell tools (``tools.shell.executed_forms``); *command* alone for any
+    other tool."""
+    if tool not in _SHELL_EXEC_TOOLS:
+        return [command]
+    from ..tools.shell import executed_forms
+    return executed_forms(command)
+
+
 def _looks_like_drive_path(tok: str) -> bool:
     """True for a Windows drive-qualified token: ``C:``, ``C:\\x``, ``d:/x``.
 
@@ -107,6 +117,8 @@ class _ExecutionMixin:
         # Set by Agent (core.py), which this class is mixed into.
         cwd: Path
         restricted: bool
+        @property
+        def stop_pending(self) -> bool: ...
         @property
         def plan_mode(self) -> bool: ...
         _audit: AuditLogT
@@ -356,9 +368,10 @@ class _ExecutionMixin:
                 command = str(call.args.get(arg_name) or "")
                 if not command.strip():
                     continue
-                refusal = shell_guard.classify(command, self.cwd)
-                if refusal is not None:
-                    return refusal, False
+                for form in _executed_forms(call.name, command):
+                    refusal = shell_guard.classify(form, self.cwd)
+                    if refusal is not None:
+                        return refusal, False
         except Exception as exc:
             msg = (f"{call.name}: the shell safety check could not run "
                    f"({type(exc).__name__}: {exc}), so this call now "
@@ -390,9 +403,22 @@ class _ExecutionMixin:
         if call.name == "run_tests" and isinstance(args.get("extra_args"), str):
             args["extra_args"] = "pytest " + args["extra_args"]
         try:
-            return data_guard.check(
+            label = data_guard.check(
                 call.name, args, self.cwd, shell_args=shell_args,
                 path_args=path_args, paths=_call_target_paths(call.name, args))
+            if label:
+                return label
+            for arg_name in shell_args:
+                command = args.get(arg_name)
+                if not isinstance(command, str):
+                    continue
+                for form in _executed_forms(call.name, command)[1:]:
+                    label = data_guard.check(
+                        call.name, {**args, arg_name: form}, self.cwd,
+                        shell_args=(arg_name,))
+                    if label:
+                        return label
+            return None
         except Exception as exc:
             msg = (f"{call.name}: the localm data-folder check could not run "
                    f"({type(exc).__name__}: {exc}), so this call now requires "
@@ -413,6 +439,16 @@ class _ExecutionMixin:
                 print_tool_error(call.name, result.output)
             self._emit("tool_result", tool=call.name, ok=False,
                        summary="not run: the run was cancelled")
+            return result
+
+        # A stopped run executes nothing further; the loop ends at its next check.
+        if self.stop_pending:
+            result = ToolResult.error(
+                f"{call.name} was not run: the run was stopped.")
+            if interactive:
+                print_tool_error(call.name, result.output)
+            self._emit("tool_result", tool=call.name, ok=False,
+                       summary="not run: the run was stopped")
             return result
 
         # Hard gate: a tool disabled for this session (e.g. run_shell for a
@@ -899,7 +935,9 @@ class _ExecutionMixin:
         return result
 
     def _cancel_check(self) -> bool:
-        return self.cancelled
+        """True once this run should stop (see ``stop_pending``), so a running
+        tool's child process is killed."""
+        return self.stop_pending
 
     def _hooks_for(self, event: str, tool: str):
         """The session's ToolHooks when they apply to *event* for *tool*, else
@@ -1276,7 +1314,9 @@ class _ExecutionMixin:
         the project has not turned the shortcut off
         (auto_allow_read_only_shell = false in .localcoder/config.toml)."""
         command = call.args.get("command") if isinstance(call.args, dict) else None
-        if not isinstance(command, str) or not shell_guard.is_read_only(command, self.cwd):
+        if not isinstance(command, str) or not all(
+                shell_guard.is_read_only(form, self.cwd)
+                for form in _executed_forms("run_shell", command)):
             return False
         from ..project_config import load_project_config
         try:

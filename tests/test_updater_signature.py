@@ -582,3 +582,58 @@ def test_sign_release_refuses_a_malformed_keyset_file(tmp_path, monkeypatch):
     bad.write_text(json.dumps({"seq": 2}), encoding="utf-8")
     assert mod.main(["sign", str(build), "--key", str(r), "--keyset", str(bad)]) == 2
     assert not (tmp_path / "build.zip.sig").exists()
+
+
+# ------------------------------- revoked keys -------------------------------
+
+_OLD_RELEASE_KEY = "3501b23eb1ab6ec245b5e9d9c6a70b522ca89d6250d13060a9642ce1c8868ecf"
+
+
+def test_the_old_release_key_is_revoked_and_not_pinned():
+    assert _OLD_RELEASE_KEY in updater._REVOKED_KEYS
+    ks = updater._parse_keyset(updater._PINNED_KEYSET, signed=False)
+    assert not (set(ks["release"]["keys"]) | set(ks["recovery"]["keys"])) & updater._REVOKED_KEYS
+
+
+def test_the_old_release_key_is_refused_in_any_key_set():
+    _priv, other = keypair()
+    recovery = [keypair()[1] for _ in range(3)]
+    for release, rec in (([_OLD_RELEASE_KEY], recovery), ([other], [_OLD_RELEASE_KEY] + recovery[:2])):
+        with pytest.raises(ValueError, match="revoked key 3501b23e"):
+            updater._parse_keyset({"seq": 5, "release": {"threshold": 1, "keys": release},
+                                   "recovery": {"threshold": 2, "keys": rec}}, signed=False)
+
+
+def test_recovery_signed_keyset_with_a_revoked_release_key_is_refused(trust, monkeypatch):
+    a, b, _c = trust.recovery
+    revoked = Ed25519PrivateKey.generate()
+    monkeypatch.setattr(updater, "_REVOKED_KEYS", frozenset({pub_hex(revoked)}))
+    ks = keyset(2, [revoked], trust.recovery, signers=[a, b])
+    e = _refused(DATA, envelope(DATA, [revoked], keyset=ks))
+    assert "revoked key" in e.reason
+
+
+def test_recovery_signed_keyset_with_a_revoked_recovery_key_is_refused(trust, monkeypatch):
+    a, b, _c = trust.recovery
+    revoked, r2 = Ed25519PrivateKey.generate(), Ed25519PrivateKey.generate()
+    monkeypatch.setattr(updater, "_REVOKED_KEYS", frozenset({pub_hex(revoked)}))
+    ks = keyset(2, [r2], [a, b, revoked], signers=[a, b])
+    assert "revoked key" in _refused(DATA, envelope(DATA, [r2], keyset=ks)).reason
+
+
+def test_build_signed_by_a_pinned_key_revoked_later_is_refused(trust, monkeypatch):
+    monkeypatch.setattr(updater, "_REVOKED_KEYS", frozenset({pub_hex(trust.r)}))
+    with pytest.raises(ValueError, match="revoked key"):
+        updater.verify_signature(DATA, envelope(DATA, [trust.r]))
+
+
+def test_saved_trust_file_with_a_revoked_key_is_refused(trust, home, monkeypatch):
+    a, b, _c = trust.recovery
+    r2 = Ed25519PrivateKey.generate()
+    saved = keyset(2, [r2], trust.recovery, signers=[a, b])
+    _trust_file(home).parent.mkdir(parents=True)
+    _trust_file(home).write_text(json.dumps(saved), encoding="utf-8")
+    assert updater.verify_signature(DATA, envelope(DATA, [r2])) is None
+    monkeypatch.setattr(updater, "_REVOKED_KEYS", frozenset({pub_hex(r2)}))
+    e = _refused(DATA, envelope(DATA, [r2]))
+    assert "revoked key" in e.reason

@@ -11,6 +11,8 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.routing import APIRoute
 
+from localm.inference.errors import json_invalid_text
+
 
 class EndpointMissing(LookupError):
     """The endpoint is not mounted on this app."""
@@ -63,6 +65,8 @@ def validation_text(errors: Sequence[Any]) -> str:
     if not errors:
         return "request is invalid"
     first = errors[0]
+    if first.get("type") == "json_invalid":
+        return json_invalid_text(first)
     loc = ".".join(str(p) for p in first.get("loc", ()) if p != "body")
     msg = first.get("msg", "is invalid")
     return f"{loc}: {msg}" if loc else msg

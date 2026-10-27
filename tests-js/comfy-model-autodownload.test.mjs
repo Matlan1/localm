@@ -199,7 +199,7 @@ test("searchable miss: nothing is sent until Search is clicked, then a found fil
   const lookups = [];
   const lookup = {
     status: "found", reason: "", detail: "", dest_dir: "D:\\comfy\\models\\unet",
-    source: { repo: "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
+    source: { repo: "Comfy-Org/Wan-2.1",
               file: "split_files/diffusion_models/wan2.1_t2v_1.3B_fp16.safetensors",
               size_bytes: 2838303560, model_type: "diffusion-unet", origin: "huggingface" },
   };
@@ -220,7 +220,7 @@ test("searchable miss: nothing is sent until Search is clicked, then a found fil
   const text = win.document.querySelector("#modal-body").textContent;
   assert.equal(win.document.querySelector("#modal").style.display, "flex",
     "the found file is offered in a second dialog");
-  assert.ok(text.includes("Comfy-Org/Wan_2.1_ComfyUI_repackaged"), "shows the repository");
+  assert.ok(text.includes("Comfy-Org/Wan-2.1"), "shows the repository");
   assert.ok(text.includes("split_files/diffusion_models/"), "shows the path in the repository");
   assert.ok(text.includes("not from localm's own catalog"), "says it is a search result");
   assert.deepEqual(pulls, [], "finding a file does not download it");
@@ -230,7 +230,7 @@ test("searchable miss: nothing is sent until Search is clicked, then a found fil
   assert.equal(await proceedPromise, true);
   assert.deepEqual(pulls, [{ filename: "wan2.1_t2v_1.3B_fp16.safetensors", plugin: "image",
                              class_type: "CheckpointLoaderSimple", input_name: "ckpt_name",
-                             repo: "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
+                             repo: "Comfy-Org/Wan-2.1",
                              file: "split_files/diffusion_models/wan2.1_t2v_1.3B_fp16.safetensors" }]);
 });
 
@@ -304,7 +304,7 @@ test("a source with no known size says so instead of printing a blank size", asy
   const pulls = [];
   const missing = [{
     class_type: "VAELoader", input_name: "vae_name", filename: "qwen_image_vae.safetensors",
-    source: { repo: "Comfy-Org/Qwen-Image_ComfyUI", file: "split_files/vae/qwen_image_vae.safetensors",
+    source: { repo: "Comfy-Org/Qwen-Image", file: "split_files/vae/qwen_image_vae.safetensors",
               size_bytes: null, model_type: "vae", origin: "huggingface" },
     dest_dir: "D:\\comfy\\models\\vae",
   }];
@@ -322,7 +322,7 @@ test("a source with no known size says so instead of printing a blank size", asy
 
 const FOUND = {
   status: "found", reason: "", detail: "", dest_dir: "D:\\comfy\\models\\unet",
-  source: { repo: "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
+  source: { repo: "Comfy-Org/Wan-2.1",
             file: "split_files/diffusion_models/wan2.1_t2v_1.3B_fp16.safetensors",
             size_bytes: 2838303560, model_type: "diffusion-unet", origin: "huggingface" },
 };

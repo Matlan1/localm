@@ -40,6 +40,7 @@ from .gguf import _has_gguf_magic
 from .gguf import gguf_unusable_reason
 from .unsupported import explain_unsupported_model, hf_folder_refusal
 from .jan_store import find_jan_models_root, scan_jan_models
+from .localm_home import RecordedDigests, find_localm_home, recorded_digests
 from .gguf import gguf_n_embd
 from .gguf import _gguf_recently_written
 from .gguf import first_split_part
@@ -192,21 +193,30 @@ def projector_owners(name: str, registry: dict) -> list[str]:
     file; failing that, when it is a chat model whose file sits in the
     projector's folder. Reads the registry only: no file is opened. Empty when
     *name* is not a projector entry or nothing claims it."""
+    recorded, in_folder = _projector_claims(name, registry)
+    return recorded or in_folder
+
+
+def _projector_claims(name: str, registry: dict) -> "tuple[list[str], list[str]]":
+    """``(recorded, in_folder)`` for the projector registered as *name*: the
+    sorted chat models whose ``mmproj`` is its file, and the sorted chat models
+    whose file sits in its folder (empty when *recorded* is not, as they are
+    only the fallback). Both empty when *name* is not a projector entry."""
     entry = registry.get(name)
     if not is_projector_entry(entry):
-        return []
+        return [], []
     mmproj_path = _entry_path(entry)
     if mmproj_path is None:
-        return []
+        return [], []
     chat = {n: e for n, e in registry.items()
             if n != name and isinstance(e, dict) and e.get("model_type", "llm") == "llm"}
     recorded = sorted(n for n, e in chat.items() if _same_file(e.get("mmproj"), mmproj_path))
     if recorded:
-        return recorded
+        return recorded, []
     folder = os.path.dirname(os.path.normpath(mmproj_path))
-    return sorted(n for n, e in chat.items()
-                  if (p := _entry_path(e)) is not None
-                  and _same_file(os.path.dirname(os.path.normpath(p)), folder))
+    return [], sorted(n for n, e in chat.items()
+                      if (p := _entry_path(e)) is not None
+                      and _same_file(os.path.dirname(os.path.normpath(p)), folder))
 
 
 def projector_refusal(name: str, registry: dict) -> Optional[str]:
@@ -215,11 +225,15 @@ def projector_refusal(name: str, registry: dict) -> Optional[str]:
     models that use the projector when the registry identifies any."""
     if not is_projector_entry(registry.get(name)):
         return None
-    owners = projector_owners(name, registry)
+    recorded, in_folder = _projector_claims(name, registry)
     msg = f"'{name}' is a vision projector, not a model that can be loaded or chatted with."
-    if owners:
-        msg += (" It belongs to " + ", ".join(f"'{o}'" for o in owners)
+    if recorded:
+        msg += (" It belongs to " + ", ".join(f"'{o}'" for o in recorded)
                 + "; name that model instead and the projector is attached automatically.")
+    elif in_folder:
+        msg += (" No model records it as its projector; the chat models in the same folder are "
+                + ", ".join(f"'{o}'" for o in in_folder)
+                + ". A projector is attached only to a model that records it.")
     return msg
 
 
@@ -279,6 +293,18 @@ def chat_load_refusal(name: str, registry: dict) -> Optional[str]:
         return msg + (" Use it with 'localm speak' or POST /v1/audio/speech."
                       if _speech_route_available() else " Use it with 'localm speak'.")
     return msg + " It is a component of image, video or music generation."
+
+
+async def chat_load_refusal_off_loop(name: str, registry: dict) -> Optional[str]:
+    """:func:`chat_load_refusal`, run on a worker thread when the check reads
+    the file system (an 'unknown' entry), inline otherwise. For callers on the
+    event loop."""
+    entry = registry.get(name)
+    if isinstance(entry, dict) and entry.get("model_type") == "unknown":
+        import asyncio
+        return await asyncio.get_running_loop().run_in_executor(
+            None, chat_load_refusal, name, registry)
+    return chat_load_refusal(name, registry)
 
 
 def models_of_type(model_type: str, registry: Optional[dict] = None) -> dict:
@@ -630,25 +656,25 @@ COMFY_MODEL_SOURCES: dict[str, ComfySource] = {
         "text-encoder", "clip", 4_893_934_904,
         "7d330da4816157540d6bb7838bf63a0f02f573fc48ca4d8de34bb0cbfd514f09"),
     "ae.safetensors": ComfySource(
-        "Comfy-Org/z_image_turbo:split_files/vae/ae.safetensors",
+        "Comfy-Org/Z-Image-Turbo:split_files/vae/ae.safetensors",
         "vae", "vae", 335_304_388,
         "afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38"),
     "ace_step_v1_3.5b.safetensors": ComfySource(
-        "Comfy-Org/ACE-Step_ComfyUI_repackaged:all_in_one/ace_step_v1_3.5b.safetensors",
+        "Comfy-Org/ACE-Step:all_in_one/ace_step_v1_3.5b.safetensors",
         "diffusion-unet", "checkpoints", 7_699_743_341,
         "f07cad74c4adce52ca14ca1bdf74cf3c14cbafb0823b95eca4459467fa369f40"),
     "wan2.2_ti2v_5B_fp16.safetensors": ComfySource(
-        "Comfy-Org/Wan_2.2_ComfyUI_Repackaged:"
+        "Comfy-Org/Wan-2.2:"
         "split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors",
         "diffusion-unet", "diffusion_models", 9_999_658_848,
         "456f901338bd9eadbded3828b819109a9b68e8a525ca5cf8d0049a69fcfeca1e"),
     "umt5_xxl_fp8_e4m3fn_scaled.safetensors": ComfySource(
-        "Comfy-Org/Wan_2.2_ComfyUI_Repackaged:"
+        "Comfy-Org/Wan-2.2:"
         "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
         "text-encoder", "text_encoders", 6_735_906_897,
         "c3355d30191f1f066b26d93fba017ae9809dce6c627dda5f6a66eaa651204f68"),
     "wan2.2_vae.safetensors": ComfySource(
-        "Comfy-Org/Wan_2.2_ComfyUI_Repackaged:split_files/vae/wan2.2_vae.safetensors",
+        "Comfy-Org/Wan-2.2:split_files/vae/wan2.2_vae.safetensors",
         "vae", "vae", 1_409_400_960,
         "e40321bd36b9709991dae2530eb4ac303dd168276980d3e9bc4b6e2b75fed156"),
 }
@@ -2748,7 +2774,7 @@ def sync_models_dir(prune: Optional[bool] = None, *,
                             net_blocked_mmproj.append(name)
                         else:
                             mmproj_attempts += 1
-                            found = backfill_mmproj_for_entry(entry, path)
+                            found = backfill_mmproj_for_entry(entry, path, reg)
                             if found is not None:
                                 # found's own path already passed
                                 # _safe_models_filename inside
@@ -4123,7 +4149,8 @@ def _store_standalone_projector(src: Path, action: str) -> Path:
 
 
 def _store_loose_gguf_dir(first_parts: list[Path], store: str,
-                          mmprojs: Optional[dict] = None) -> Optional[list[Path]]:
+                          mmprojs: Optional[dict] = None,
+                          skipped: Optional[list] = None) -> Optional[list[Path]]:
     """Bring every model in a directory-of-loose-ggufs import into MODELS_DIR
     before ``_add_local_gguf_dir`` registers them (mirrors its per-file loop).
 
@@ -4167,6 +4194,13 @@ def _store_loose_gguf_dir(first_parts: list[Path], store: str,
     model's move already carried, that projector at its new location. Only a
     projector :func:`gguf_is_mmproj` accepts is recorded.
 
+    A model whose name is held by a DIFFERENT file already in MODELS_DIR is
+    left out of the result (it is reported on the console and its source stays
+    where it is); when *skipped* is given, those entries of *first_parts* are
+    appended to it, so the result pairs one-to-one with *first_parts* minus
+    *skipped*, in order. A model whose identical copy is already in MODELS_DIR
+    is kept in the result, pointing at that copy.
+
     Returns the new first_parts list (paths now under MODELS_DIR), or None if
     a genuine collision, a disk-space shortfall, or a copy that verified
     corrupt means some transfer failed - the caller reports the printed error
@@ -4175,7 +4209,7 @@ def _store_loose_gguf_dir(first_parts: list[Path], store: str,
     from rich.markup import escape
 
     present: dict = {}   # resolved source path -> its identical copy already in MODELS_DIR
-    skipped: set = set()
+    conflicting: set = set()
     projectors = {s.resolve() for s in map(find_sibling_mmproj, first_parts) if s is not None}
     for gguf in first_parts:
         if (not _mm.is_external_path(gguf) or gguf.resolve() in projectors
@@ -4190,20 +4224,22 @@ def _store_loose_gguf_dir(first_parts: list[Path], store: str,
                           "with the same content; using that copy and leaving the "
                           "original where it is.[/dim]")
         else:
-            skipped.add(gguf.resolve())
+            conflicting.add(gguf.resolve())
             console.print(f"[yellow]Skipping {escape(str(gguf))}: a different file "
                           f"named {escape(gguf.name)} is already in the models "
                           "folder.[/yellow]")
-    if present or skipped:
+    if present or conflicting:
         rest = [g for g in first_parts
-                if g.resolve() not in present and g.resolve() not in skipped]
+                if g.resolve() not in present and g.resolve() not in conflicting]
         moved = _store_loose_gguf_dir(rest, store, mmprojs=mmprojs) if rest else []
         if moved is None:
             return None
         landed_rest = iter(moved)
         out: list[Path] = []
         for g in first_parts:
-            if g.resolve() in skipped:
+            if g.resolve() in conflicting:
+                if skipped is not None:
+                    skipped.append(g)
                 continue
             out.append(present[g.resolve()] if g.resolve() in present else next(landed_rest))
         return out
@@ -4348,12 +4384,18 @@ def _skip_unusable_ggufs(first_parts: list[Path]) -> list[Path]:
 
 
 def _digest_for_add(gguf: Path, reg: dict, no_hash: bool,
-                    fast: bool, label: Optional[str] = None
+                    fast: bool, label: Optional[str] = None,
+                    recorded: Optional[RecordedDigests] = None
                     ) -> "tuple[Optional[str], Optional[int]]":
     """``(sha256, size)`` to register *gguf* with: neither under *no_hash*; only
     the size under *fast* (dedup on size alone); otherwise the hash, computed only
     when it can change the outcome (an unknown path or a registered alias with no
-    digest)."""
+    digest).
+
+    *recorded* holds the sha256 digests another localm install stored. When it
+    holds a usable digest for *gguf* (``RecordedDigests.lookup``), that digest is
+    returned without reading the file; the recorded value is trusted as the
+    file's hash."""
     if no_hash:
         return None, None
     if fast:
@@ -4363,9 +4405,15 @@ def _digest_for_add(gguf: Path, reg: dict, no_hash: bool,
             return None, None
     already_known = find_aliases_by_path(gguf, reg)
     needs_backfill = any(not reg[n].get("sha256") for n in already_known)
-    digest = _mm._hash_with_progress(gguf, label=label) \
-        if (not already_known or needs_backfill) else None
-    return digest, None
+    if already_known and not needs_backfill:
+        return None, None
+    stored = recorded.lookup(gguf) if recorded is not None else None
+    if stored is not None:
+        _mm._import_status(
+            f"Using the hash recorded by the other install for {gguf.name}"
+            + (f" ({label})" if label else ""))
+        return stored, None
+    return _mm._hash_with_progress(gguf, label=label), None
 
 
 def _add_local_gguf_dir(
@@ -4380,6 +4428,7 @@ def _add_local_gguf_dir(
     stats: Optional[dict] = None,
     total: Optional[int] = None,
     first_index: int = 1,
+    recorded: Optional[RecordedDigests] = None,
 ) -> bool:
     """Register every loose .gguf model in a folder (the *first_parts* list).
 
@@ -4403,7 +4452,8 @@ def _add_local_gguf_dir(
 
     Each model is announced as ``k of total`` (*first_index* is the first k,
     *total* defaults to the list length). *stats*, when given, counts the
-    models left unregistered under ``declined``.
+    models left unregistered under ``declined``. *recorded* is passed to
+    :func:`_digest_for_add`.
     """
     from rich.markup import escape
 
@@ -4424,11 +4474,14 @@ def _add_local_gguf_dir(
         reg = _mm.load_registry()
         wanted = _sanitize_name(name) if use_given_name else (
             (names or {}).get(gguf) or base)
-        model_name = _unique_registry_name(reg, wanted)
+        would_skip = on_duplicate == "skip" or (on_duplicate == "ask" and not can_prompt())
+        model_name = ((_registered_name_for_file(reg, gguf, wanted) if would_skip else None)
+                      or _unique_registry_name(reg, wanted))
 
         position = f"{k} of {total}"
         _mm._import_status(f"Registering {gguf.name} ({position})", log=False)
-        digest, size = _digest_for_add(gguf, reg, no_hash, fast, label=position)
+        digest, size = _digest_for_add(gguf, reg, no_hash, fast, label=position,
+                                       recorded=recorded)
 
         detected_type, gmeta = _detect_local_model_type(gguf, is_gguf=True, is_hf=False)
         final_type = model_type if model_type is not None else detected_type
@@ -4454,6 +4507,21 @@ def _add_local_gguf_dir(
             if len(landed) == 1:
                 carried_to[sib.resolve()] = _mm.MODELS_DIR / landed[0]
     return True
+
+
+def _registered_name_for_file(reg: dict, gguf: Path, wanted: str) -> Optional[str]:
+    """The name *gguf* is already registered under. Prefers the name an import
+    of it would have chosen: *wanted* itself, or *wanted* with the ``-N``
+    suffix :func:`_unique_registry_name` adds; otherwise any other name
+    registered for the same path (a model the user renamed). None when the path
+    is not registered. Used when a duplicate would only be skipped, so the file
+    is reported as already registered instead of declined."""
+    base = _sanitize_name(wanted)
+    aliases = find_aliases_by_path(gguf, reg)
+    for alias in aliases:
+        if alias == base or re.fullmatch(re.escape(base) + r"-\d+", alias):
+            return alias
+    return aliases[0] if aliases else None
 
 
 def _gguf_names_in(folder: Path) -> set:
@@ -5051,12 +5119,17 @@ def _add_local_hub_cache(
         names = {models[0]: repo_name} if len(models) == 1 else None
         mmprojs: dict = {}
         if store:
-            stored = _mm._store_loose_gguf_dir(first_parts, store, mmprojs=mmprojs)
+            conflicts: list = []
+            stored = _mm._store_loose_gguf_dir(
+                first_parts, store, mmprojs=mmprojs, skipped=conflicts)
             if stored is None:
                 return False
-            names = {new: names[old] for old, new in zip(first_parts, stored, strict=True)
+            kept = [g for g in first_parts if g not in conflicts]
+            names = {new: names[old] for old, new in zip(kept, stored, strict=True)
                      if names and old in names}
             first_parts = stored
+            if not first_parts:
+                continue
         registered_any = _add_local_gguf_dir(
             first_parts, None, on_duplicate, no_hash, fast,
             model_type=model_type, names=names, mmprojs=mmprojs,
@@ -5213,6 +5286,19 @@ def add_local(
             if outcome is not None:
                 return outcome
 
+    recorded: Optional[RecordedDigests] = None
+    if p.is_dir() and not is_hf and not store and not no_hash and not fast:
+        other_home = find_localm_home(p)
+        if other_home is not None:
+            recorded, problem = recorded_digests(other_home, _entry_path)
+            if problem is not None:
+                console.print(f"[yellow]Found another localm install in {escape(str(other_home))} "
+                              f"but {escape(problem)}; hashing its files instead.[/yellow]")
+            else:
+                _mm._import_status(
+                    f"Found another localm install in {other_home}: reusing the hashes "
+                    f"it recorded for {len(recorded)} file(s)")
+
     max_depth = _import_max_depth()
     if p.is_dir() and not is_hf:
         first_parts, hf_dirs = _find_model_units(p, max_depth=max_depth)
@@ -5226,27 +5312,34 @@ def add_local(
             registered_any = False
             names_before = set(_mm.load_registry())
             stats: dict = {}
+            conflicts: list = []
+            mmprojs: dict = {}
+            if first_parts and store:
+                verb = "Moving" if store == "move" else "Copying"
+                _mm._import_status(
+                    f"{verb} {len(first_parts)} GGUF file(s) into the models folder")
+                stored = _mm._store_loose_gguf_dir(
+                    first_parts, store, mmprojs=mmprojs, skipped=conflicts)
+                if stored is None:
+                    return False
+                first_parts = stored
             units = len(first_parts) + len(hf_dirs)
             if first_parts:
-                mmprojs: dict = {}
-                if store:
-                    verb = "Moving" if store == "move" else "Copying"
-                    _mm._import_status(
-                        f"{verb} {len(first_parts)} GGUF file(s) into the models folder")
-                    stored = _mm._store_loose_gguf_dir(first_parts, store, mmprojs=mmprojs)
-                    if stored is None:
-                        return False
-                    first_parts = stored
                 registered_any = _add_local_gguf_dir(
                     first_parts, name if only_one else None, on_duplicate, no_hash,
                     fast, model_type=model_type, mmprojs=mmprojs,
-                    stats=stats, total=units,
+                    stats=stats, total=units, recorded=recorded,
                 )
             for k, hf_dir in enumerate(hf_dirs, len(first_parts) + 1):
                 _mm._import_status(f"Registering {hf_dir.name} ({k} of {units})")
                 wanted = _sanitize_name(name) if (name and only_one) else hf_dir.name
+                reg = _mm.load_registry()
+                would_skip = on_duplicate == "skip" or (on_duplicate == "ask" and not can_prompt())
+                reuse = would_skip and not (store and _mm.is_external_path(hf_dir))
+                hf_name = ((_registered_name_for_file(reg, hf_dir, wanted) if reuse else None)
+                           or _unique_registry_name(reg, wanted))
                 done = add_local(
-                    str(hf_dir), _unique_registry_name(_mm.load_registry(), wanted),
+                    str(hf_dir), hf_name,
                     on_duplicate=on_duplicate, no_hash=no_hash, fast=fast,
                     model_type=model_type, store=store,
                 )
@@ -5255,9 +5348,13 @@ def add_local(
                 registered_any = done or registered_any
             added = len(set(_mm.load_registry()) - names_before)
             declined = stats.get("declined", 0)
+            already = max(units - added - declined, 0)
+            declined += len(conflicts)
+            because = (f" ({len(conflicts)} because a different file with the same name "
+                       "is already in the models folder)" if conflicts else "")
             _mm._import_status(
-                f"Done: {added} registered, {max(units - added - declined, 0)} already "
-                f"registered, {declined} skipped or refused, {refused} not usable")
+                f"Done: {added} registered, {already} already registered, "
+                f"{declined} skipped or refused{because}, {refused} not usable")
             return registered_any
 
     if not (is_gguf or is_hf or is_blob or media_type):

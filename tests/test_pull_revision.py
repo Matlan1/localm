@@ -644,6 +644,80 @@ class TestAnUnfinishedRevisionIsNotMergedWithAnother(_InterruptedAfterTheFirstFi
             _FakeApi.model_info = real_info
         assert "files localm cannot match" in " ".join(capsys.readouterr().out.split())
 
+    def _publish_lfs_digest(self, monkeypatch, sha: str):
+        real_info = _FakeApi.model_info
+
+        def info(api, repo, **kw):
+            got = real_info(api, repo, **kw)
+            for sib in got.siblings:
+                if sib.rfilename == "w.safetensors":
+                    sib.lfs = {"size": sib.size, "sha256": sha}
+                    sib.blob_id = None
+            return got
+        monkeypatch.setattr(_FakeApi, "model_info", info)
+
+    def test_an_lfs_file_with_a_published_digest_is_adopted_when_it_matches(
+            self, hub, monkeypatch, capsys):
+        self._copy(hub, hub.repo_files[COMMIT])
+        self._publish_lfs_digest(monkeypatch, hashlib.sha256(BODY).hexdigest())
+        capsys.readouterr()
+        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is True
+        assert "Already downloaded" in capsys.readouterr().out
+        assert hub.snapshots == []
+
+    def test_an_lfs_file_of_the_right_size_but_another_digest_blocks_the_adoption(
+            self, hub, monkeypatch, capsys):
+        self._copy(hub, dict(hub.repo_files[COMMIT], **{"w.safetensors": b"X" * len(BODY)}))
+        self._publish_lfs_digest(monkeypatch, hashlib.sha256(BODY).hexdigest())
+        capsys.readouterr()
+        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is False
+        assert "files localm cannot match" in " ".join(capsys.readouterr().out.split())
+        assert hub.snapshots == []
+
+    def test_a_clone_checked_out_with_crlf_line_endings_is_adopted(self, hub, capsys):
+        text = b'{\n  "bits": 4\n}\n'
+        hub.repo_files[COMMIT] = {"config.json": text, "w.safetensors": BODY}
+        self._copy(hub, {"config.json": text.replace(b"\n", b"\r\n"), "w.safetensors": BODY})
+        capsys.readouterr()
+        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is True
+        assert "Already downloaded" in capsys.readouterr().out
+        assert hub.snapshots == []
+
+    def test_a_text_file_with_crlf_and_other_content_is_not_adopted(self, hub, capsys):
+        text = b'{\n  "bits": 4\n}\n'
+        hub.repo_files[COMMIT] = {"config.json": text, "w.safetensors": BODY}
+        self._copy(hub, {"config.json": text.replace(b"4", b"8").replace(b"\n", b"\r\n"),
+                         "w.safetensors": BODY})
+        capsys.readouterr()
+        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is False
+        assert hub.snapshots == []
+
+    def test_redownload_fetches_into_a_folder_without_a_marker(self, hub, capsys):
+        self._unfinished_without_a_marker(hub)
+        hub.snapshots.clear()
+        capsys.readouterr()
+        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm", redownload=True) is True
+        assert hub.snapshots == [("o/r", COMMIT)]
+        assert mm.load_registry()["q"]["revision"] == "4.0bpw"
+
+    def test_redownload_does_not_override_a_folder_marked_for_another_repo(self, hub, capsys):
+        self.stop(hub, "o/r@2.0bpw")
+        capsys.readouterr()
+        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm", redownload=True) is False
+
+    def test_a_weight_file_without_a_published_digest_is_noted(self, hub, capsys):
+        capsys.readouterr()
+        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is True
+        out = " ".join(capsys.readouterr().out.split())
+        assert "no sha256 could be read for w.safetensors" in out
+        assert "config.json" not in out.split("no sha256 could be read for")[1].split(")")[0]
+
+    def test_a_weight_file_with_a_published_digest_is_not_noted(self, hub, monkeypatch, capsys):
+        self._publish_lfs_digest(monkeypatch, hashlib.sha256(BODY).hexdigest())
+        capsys.readouterr()
+        assert mm.pull_model("o/r@4.0bpw", name="q", model_type="llm") is True
+        assert "no sha256 could be read" not in capsys.readouterr().out
+
     def test_a_subfolder_that_cannot_be_listed_blocks_the_adoption(self, hub, monkeypatch):
         self._copy(hub, hub.repo_files[COMMIT])
         (hub.models_dir / "q" / "locked").mkdir()

@@ -115,7 +115,7 @@ _ALL_KEYS = ("venv", "lib_dir", "lib_entries", "home_cfg", "data_dir",
              "data_created", "data_preexisting", "data_parents_created",
              "previous_data_dirs",
              "shortcut", "files", "runtime_contained", "python_dir", "cache_dir",
-             "uv_dir", "uv_shared_installed", "path_dir", "command_shim",
+             "uv_dir", "uv_exe", "uv_shared_installed", "path_dir", "command_shim",
              "path_modified")
 
 
@@ -394,7 +394,7 @@ def record(root, *, venv="", lib_dir="", home_cfg="", data_dir="",
            data_created=False, shortcut="", stamp="",
            runtime_contained=False, python_dir="", cache_dir="", uv_dir="",
            path_dir="", command_shim="", path_modified=False,
-           files: Iterable[str] = (), uv_shared_installed=False,
+           files: Iterable[str] = (), uv_shared_installed=False, uv_exe="",
            data_preexisting: Optional[list[str]] = None,
            data_parents_created: Iterable[str] = ()) -> Path:
     """Merge what a setup step created into the manifest under *root*.
@@ -428,6 +428,8 @@ def record(root, *, venv="", lib_dir="", home_cfg="", data_dir="",
             data[key] = _abs(value)
     if command_shim:
         data["command_shim"] = _plain_abs(command_shim)
+    if uv_exe:
+        data["uv_exe"] = _plain_abs(uv_exe)
     for key, value in (("runtime_contained", runtime_contained),
                        ("path_modified", path_modified),
                        ("uv_shared_installed", uv_shared_installed)):
@@ -1428,6 +1430,9 @@ def _plan(root: Path, m: Optional[dict], *, purge_data: bool,
         where = shutil.which("uv") or "your user profile"
         items.append(_Item(where, "report", "keep",
                            "uv was installed by LocaLM setup; other programs may use it"))
+    if m and m.get("uv_exe") and not m.get("uv_shared_installed"):
+        items.append(_Item(m["uv_exe"], "report", "keep",
+                           "your own uv, which LocaLM setup used but did not install"))
     if m and m.get("venv") and not m.get("runtime_contained"):
         items.append(_Item("uv's Python and download cache in your user profile",
                            "report", "keep",
@@ -2118,6 +2123,7 @@ def main(argv=None) -> int:
     r.add_argument("--cache-dir", default="")
     r.add_argument("--uv-dir", default="")
     r.add_argument("--uv-shared-installed", action="store_true")
+    r.add_argument("--uv-exe", default="")
     r.add_argument("--path-dir", default="")
     r.add_argument("--command-shim", default="")
     r.add_argument("--path-modified", action="store_true")
@@ -2191,6 +2197,7 @@ def main(argv=None) -> int:
                        stamp=args.stamp, runtime_contained=args.runtime_contained,
                        python_dir=args.python_dir, cache_dir=args.cache_dir,
                        uv_dir=args.uv_dir, uv_shared_installed=args.uv_shared_installed,
+                       uv_exe=args.uv_exe,
                        path_dir=args.path_dir, command_shim=args.command_shim,
                        path_modified=args.path_modified, files=args.file)
         except (OSError, ValueError) as e:

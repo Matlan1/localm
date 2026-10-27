@@ -85,6 +85,10 @@ INCONCLUSIVE_ISSUE_THRESHOLD = 5
 CI_WAIT_TIMEOUT_SECONDS = 75 * 60
 CI_POLL_INTERVAL_SECONDS = 20
 
+# Minimum time between two pull requests this pipeline opens, across runs and pins.
+PR_OPEN_SPACING_SECONDS = 20 * 60
+PR_OPENED_PATH = STATE_DIR / "last-pr-opened.json"
+
 REQUIRE_BACKENDS = ("cpu", "vulkan")
 ALSO_MEASURE_BACKENDS = ("cuda", "sycl", "hip", "metal")
 
@@ -553,7 +557,8 @@ def ci_red_summary(title: str, candidate: str, pr_number, receipt_path: Path | N
 
 def append_fail_issue(candidate: str, reason: str, receipt_path: Path | None,
                       issues_path: Path | None = None, *, pin: str = "llama",
-                      summary: str | None = None, kind: str = "CONFIRM-FAILED") -> bool:
+                      summary: str | None = None, kind: str = "CONFIRM-FAILED",
+                      retried: bool = False) -> bool:
     """Append a new OPEN entry to the issue backlog for a genuine FAIL (never
     for an ordinary INCONCLUSIVE - that is not evidence of anything; a
     repeated-INCONCLUSIVE streak past INCONCLUSIVE_ISSUE_THRESHOLD and an
@@ -603,11 +608,18 @@ def append_fail_issue(candidate: str, reason: str, receipt_path: Path | None,
             f"    {candidate} for real (cpu + vulkan) and it did not pass: {reason}{receipt_note}.")
     elif summary is None:
         summary = f"the {pin} pin could not be moved to {candidate}: {reason}{receipt_note}."
+    if retried:
+        retry_text = (
+            "    The pin was NOT advanced. The pipeline retries this candidate automatically\n"
+            f"    after a {INCONCLUSIVE_COOLDOWN_HOURS}h cooldown; this entry stays until the "
+            "cause is fixed.\n\n")
+    else:
+        retry_text = (
+            "    The pin was NOT advanced. This candidate will not be retried automatically unless\n"
+            "    a newer upstream release appears.\n\n")
     entry = (
         f"{title} [OPEN - filed {today}] bug/setup - the automated pin pipeline confirmed "
-        f"{summary}\n"
-        "    The pin was NOT advanced. This candidate will not be retried automatically unless\n"
-        "    a newer upstream release appears.\n\n"
+        f"{summary}\n" + retry_text
     )
     updated = text[:m.end()] + entry + text[m.end():]
     staged = issues_path.with_name(issues_path.name + ".pin-write.tmp")
@@ -659,11 +671,11 @@ def _record_inconclusive(candidate: str, receipt_path: Path | None, *, pin: str 
     save_state(state, pin=pin)
     if force_issue:
         append_fail_issue(candidate, reason or "unexpected error", receipt_path, pin=pin,
-                          summary=issue_summary)
+                          summary=issue_summary, retried=True)
     elif streak == INCONCLUSIVE_ISSUE_THRESHOLD:
         append_fail_issue(
             candidate, reason or "repeated INCONCLUSIVE results", receipt_path, pin=pin,
-            kind="STUCK-INCONCLUSIVE",
+            kind="STUCK-INCONCLUSIVE", retried=True,
             summary=issue_summary or (
                 f"{pin} pin pipeline: {candidate} has been INCONCLUSIVE for {streak} runs "
                 f"in a row\n    scripts/pin_pipeline.py --pin {pin} could not reach a "
@@ -758,9 +770,12 @@ def ensure_pipeline_worktree(repo: Path = REPO) -> Path:
     _verify_main_checkout(repo)
     worktree_path = pipeline_worktree_path(repo)
     existing = _run_git(["worktree", "list", "--porcelain"], cwd=repo).stdout
-    if str(worktree_path) not in existing and str(worktree_path).replace("\\", "/") not in existing:
+    registered = (str(worktree_path) in existing
+                  or str(worktree_path).replace("\\", "/") in existing)
+    if not registered or not worktree_path.is_dir():
         _run_git(["fetch", "origin"], cwd=repo, check=False)
-        result = _run_git(["worktree", "add", "--detach", str(worktree_path),
+        # --force re-attaches this one path when git still lists it but the folder is gone.
+        result = _run_git(["worktree", "add", "--force", "--detach", str(worktree_path),
                           "origin/master"], cwd=repo)
         if result.returncode != 0:
             raise InfraError(f"could not create the pipeline worktree: {result.stderr}")
@@ -889,19 +904,54 @@ def commit_and_push(worktree: Path, branch: str, candidate: str, old_tag: str,
         raise InfraError(f"push failed: {result.stderr}")
 
 
+def seconds_until_next_pr(now: float | None = None) -> float:
+    """Seconds to wait before this pipeline may open another pull request: what is
+    left of PR_OPEN_SPACING_SECONDS since the last one recorded in PR_OPENED_PATH,
+    never more than PR_OPEN_SPACING_SECONDS. 0 when no record exists. An unreadable
+    record prints a warning and counts as a full spacing."""
+    now = time.time() if now is None else now
+    try:
+        last = float(json.loads(PR_OPENED_PATH.read_text(encoding="utf-8"))["epoch"])
+    except FileNotFoundError:
+        return 0.0
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        print(f"WARNING: {PR_OPENED_PATH} is unreadable ({e}); waiting the full spacing")
+        return float(PR_OPEN_SPACING_SECONDS)
+    return max(0.0, min(float(PR_OPEN_SPACING_SECONDS), last + PR_OPEN_SPACING_SECONDS - now))
+
+
+def record_pr_opened(now: float | None = None) -> None:
+    """Write the time a pull request was opened to PR_OPENED_PATH. Never raises: a
+    failed write prints a warning, and the next PR is then not held back."""
+    try:
+        PR_OPENED_PATH.parent.mkdir(parents=True, exist_ok=True)
+        PR_OPENED_PATH.write_text(json.dumps({"epoch": time.time() if now is None else now}) + "\n",
+                                  encoding="utf-8")
+    except OSError as e:
+        print(f"WARNING: could not record the PR just opened in {PR_OPENED_PATH} ({e}); "
+              "the next PR will not wait for the spacing")
+
+
 def open_pr(worktree: Path, branch: str, candidate: str, old_tag: str,
            *, title: str | None = None, body: str | None = None) -> int:
     """*title*/*body* override the default llama-specific text; the defaults
     reproduce the exact original text so the llama call site needs no
-    change."""
+    change.
+
+    Waits seconds_until_next_pr() first and records the time once the PR exists."""
     title = title or f"chore(llamacpp): advance the pinned build to {candidate}"
     body = body or (
         f"Moves the bundled llama.cpp build from {old_tag} to {candidate}. "
         "The bundled-runtime CHANGELOG bullet is included in this diff.\n\n"
         "🤖 Generated with [Claude Code](https://claude.com/claude-code)\n")
+    wait = seconds_until_next_pr()
+    if wait:
+        print(f"waiting {int(wait)} s before opening the next pull request")
+        time.sleep(wait)
     result = _run_gh(["pr", "create", "--title", title, "--body", body, "--head", branch], worktree)
     if result.returncode != 0:
         raise InfraError(f"gh pr create failed: {result.stderr}")
+    record_pr_opened()
     m = re.search(r"/pull/(\d+)", result.stdout)
     if not m:
         raise InfraError(f"could not parse a PR number out of: {result.stdout!r}")
