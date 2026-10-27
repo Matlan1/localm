@@ -83,6 +83,11 @@ yourself - and are written in every session mode, privacy included:
   defaults) is written to `prompts.json`.
 - **GUI uploads.** A file you upload for a model or tool to read is written
   to `<home>/uploads/`.
+- **Download records.** A model download in progress is recorded in
+  `<data dir>/pending-pulls/` (the model spec, its source URLs and sizes) so an
+  interrupted one can be resumed; the record is removed when it finishes or you
+  delete or resume it. Like the model registry, it holds model source details
+  only, never conversation content.
 
 None of this is silent: each is something you explicitly asked localm to
 keep, not a trace of a conversation. But if you are relying on privacy mode

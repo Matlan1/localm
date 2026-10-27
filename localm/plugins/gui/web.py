@@ -394,6 +394,18 @@ class PullDiscardRequest(BaseModel):
     name: str | None = None
 
 
+class InterruptedResumeRequest(BaseModel):
+    """Body for POST /api/models/pulls/interrupted/{id}/resume. *fresh* True
+    deletes the partial data first and downloads from the start."""
+    fresh: bool = False
+
+
+class InterruptedDismissRequest(BaseModel):
+    """Body for POST /api/models/pulls/interrupted/{id}/dismiss: False shows a
+    dismissed download again."""
+    dismissed: bool = True
+
+
 class PullTokenRedeemRequest(BaseModel):
     spec: str
     token: str
