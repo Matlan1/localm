@@ -160,6 +160,17 @@ test("markup inside a math span is shown as text, never parsed", () => {
   assert.equal(win.__xss, undefined);
 });
 
+test("math source is never restored into a link or image attribute", () => {
+  const win = loadRealPipeline();
+  const out = render(win,
+    "[click]($javascript:window.__xss=1$) and ![x]($javascript:window.__xss=1$)");
+  for (const node of out.querySelectorAll("*")) {
+    for (const attr of node.attributes) {
+      assert.doesNotMatch(attr.value, /javascript:/i, `${node.tagName}[${attr.name}]`);
+    }
+  }
+});
+
 test("a Qwen3-ASR reply shows the transcript without the language prefix", () => {
   const win = loadRealPipeline();
   const out = render(win, "language English<asr_text>Please remember the meeting.");

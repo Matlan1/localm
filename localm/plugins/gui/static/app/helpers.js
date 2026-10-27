@@ -663,8 +663,10 @@ const _MATH_SPAN = new RegExp([
 
 /** Swap each math span of *text* that lies outside code for an inert token, so
  *  the markdown pass cannot consume its escapes (`\,`, `\\`, `\{`) or emphasis
- *  marks. Returns `{ text, restore }`; `restore(html)` puts the original source
- *  back, HTML-escaped, into the rendered *html*. */
+ *  marks. Returns `{ text, restore }`; `restore(root)` puts the original source
+ *  back into the TEXT NODES of the sanitised, rendered *root*. A token that
+ *  ended up in an attribute (a link target, an image source) is left as the
+ *  inert token, so math source never reaches an attribute after sanitising. */
 export function protectMath(text) {
   const spans = [];
   const tag = "ZZLMATH" + Math.random().toString(36).slice(2, 8);
@@ -673,11 +675,18 @@ export function protectMath(text) {
       spans.push(src);
       return `${tag}${spans.length - 1}ZZ`;
     })).join("");
-  const escapeHtml = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-  const restore = (html) => spans.length
-    ? html.replace(new RegExp(`${tag}(\\d+)ZZ`, "g"), (_m, n) => escapeHtml(spans[Number(n)]))
-    : html;
+  const restore = (root) => {
+    if (!spans.length) return;
+    const re = new RegExp(`${tag}(\\d+)ZZ`, "g");
+    const walker = document.createTreeWalker(root, 4);
+    const nodes = [];
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) nodes.push(n);
+    for (const node of nodes) {
+      if (node.nodeValue.includes(tag)) {
+        node.nodeValue = node.nodeValue.replace(re, (_m, i) => spans[Number(i)]);
+      }
+    }
+  };
   return { text: protectedText, restore };
 }
 
@@ -713,8 +722,9 @@ export function renderMarkdown(target, text, opts = {}) {
     }
     det.querySelector("summary").textContent = open ? t("common.reasoning.thinking") : t("common.reasoning.thoughts");
     const thinkMath = protectMath(think);
-    det.querySelector("div").innerHTML = thinkMath.restore(
-      DOMPurify.sanitize(marked.parse(thinkMath.text)));
+    const thinkBody = det.querySelector("div");
+    thinkBody.innerHTML = DOMPurify.sanitize(marked.parse(thinkMath.text));
+    thinkMath.restore(thinkBody);
     if (!det.dataset.userset) det.open = open;
   } else if (det) {
     det.remove();
@@ -729,7 +739,8 @@ export function renderMarkdown(target, text, opts = {}) {
     target.appendChild(main);
   }
   const restMath = protectMath(rest || "");
-  main.innerHTML = restMath.restore(DOMPurify.sanitize(marked.parse(restMath.text)));
+  main.innerHTML = DOMPurify.sanitize(marked.parse(restMath.text));
+  restMath.restore(main);
   // On `target`, not `main`, so the think block's sink is covered by the same
   // call. Idempotent across a streaming re-render: an already-proxied src is
   // same-origin, so the second pass leaves it alone.
