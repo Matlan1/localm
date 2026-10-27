@@ -134,6 +134,23 @@ class TestNonBlocking:
         assert "still running" not in poll.output, poll.output
         assert "finished" in poll.output and "child done" in poll.output
 
+    def test_a_parent_stop_reaches_a_foreground_child_but_not_a_background_one(self, repo):
+        parent = _parent(repo)
+        seen: dict = {}
+
+        def _run_task(self, task):
+            parent.request_stop()
+            seen[self.name] = self.stop_pending
+            return "child done"
+
+        with patch.object(Agent, "run_task", _run_task):
+            assert tool_spawn_agent(repo, "work", name="fg", _parent_agent=parent).ok
+            parent._stop_requested = False
+            res = tool_spawn_agent_background(repo, "work", name="bg", _parent_agent=parent)
+            assert res.ok, res.output
+            _drain_all()
+        assert seen == {"fg": True, "bg": False}, seen
+
     def test_SIBLING_synchronous_spawn_does_NOT_return_early(self, repo):
         """The live detector for the ordering assertion above: the same child,
         on the synchronous path, MUST block the caller until it returns."""

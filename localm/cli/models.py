@@ -2051,11 +2051,13 @@ def gpus_cmd():
                 "initialize on first use). Run [cyan]localm gpus[/cyan] again - "
                 "the driver is usually warm on a second try.")
         return
+    # In nvidia-smi's own numbering the saved numbers cannot be paired with a card.
+    unmatched = any(g.get("numbering") == discover.GPU_NUMBERING_NVIDIA_SMI for g in gpus)
     for g in gpus:
         markers = []
-        if g["index"] == configured:
+        if not unmatched and g["index"] == configured:
             markers.append("[green](configured)[/green]")
-        if g["index"] in split:
+        if not unmatched and g["index"] in split:
             markers.append("[cyan](split)[/cyan]")
         marker = "  " + " ".join(markers) if markers else ""
         free = g.get("free")
@@ -2089,11 +2091,18 @@ def gpus_cmd():
         console.print(
             f"  [cyan]{g['index']}[/cyan]  {name_s:<30} "
             f"{free_s}{g['total'] / 1024**3:.1f} GB total{marker}{note}")
-    if configured is not None and not any(g["index"] == configured for g in gpus):
+    if unmatched:
+        console.print(
+            "[yellow]![/yellow]  these GPU numbers are nvidia-smi's: torch did not "
+            "answer, so they may not be the numbers main_gpu_index and "
+            "gpu_split_indices use. Run [cyan]localm gpus[/cyan] again before "
+            "choosing a GPU.")
+    elif configured is not None and not any(g["index"] == configured for g in gpus):
         console.print(
             f"[yellow]![/yellow]  configured main_gpu_index={configured} does not "
             "match any GPU detected right now; loads fall back to device 0.")
-    if split and not all(any(g["index"] == idx for g in gpus) for idx in split):
+    if not unmatched and split and not all(any(g["index"] == idx for g in gpus)
+                                           for idx in split):
         console.print(
             f"[yellow]![/yellow]  configured gpu_split_indices={split} references a "
             "GPU not detected right now; that device is dropped from the split.")
