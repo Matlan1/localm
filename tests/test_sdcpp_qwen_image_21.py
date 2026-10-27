@@ -202,23 +202,88 @@ UNKNOWN_DIT = {"img_in.weight": (3072, 128), "blocks.0.attn.qkv.weight": (9216, 
     ("wan", {"foo.weight": (8, 8)}, "GGUF architecture 'wan'"),
     (None, {"foo.weight": (8, 8)}, "no model layers localm knows"),
 ])
-def test_an_image_model_of_unknown_family_is_refused_before_any_load(
+def test_an_image_model_of_unknown_family_without_chosen_encoders_is_refused_before_any_load(
         tmp_path, runner, arch, shapes, shown):
     path = write_gguf(tmp_path / "mystery.gguf", shapes, arch)
     _register("mystery", path, "diffusion-unet")
-    clip = write_gguf(tmp_path / "te.gguf", QWEN3_VL, "qwen3vl")
-    _register("te", clip, "text-encoder")
-    for settings in ({"model": "mystery"}, {"model": "mystery", "llm": "te"}):
+    vae = write_safetensors(tmp_path / "v.safetensors", QWEN21_VAE)
+    _register("v", vae, "vae")
+    for settings in ({"model": "mystery"}, {"model": "mystery", "vae": "v"}):
         ok, msg = image_native.generate({"backend": "native", "native": settings}, "a cat",
                                         tmp_path / "o.png", width=64, height=64)
         assert not ok
         assert msg.startswith("'mystery' is not an image model localm can identify (")
         assert shown in msg and "is not passed to stable-diffusion.cpp" in msg
-        assert msg.count(". ") == 0 and msg.endswith("backend.")
+        assert msg.count(". ") == 0 and msg.endswith("detects the family.")
     assert runner.loads == [] and runner.generates == []
     ok, msg = image_native.ensure_available({"backend": "native",
                                              "native": {"model": "mystery"}})
     assert not ok and "localm can identify" in msg
+
+
+@pytest.mark.parametrize("arch, shapes", [
+    ("qwen_image99", UNKNOWN_DIT),
+    (None, UNKNOWN_DIT),
+    ("wan", {"foo.weight": (8, 8)}),
+    (None, {"foo.weight": (8, 8)}),
+])
+def test_an_unknown_family_with_chosen_encoders_is_passed_through_with_a_notice(
+        tmp_path, runner, caplog, arch, shapes):
+    path = write_gguf(tmp_path / "mystery.gguf", shapes, arch)
+    _register("mystery", path, "diffusion-unet")
+    clip = write_gguf(tmp_path / "te.gguf", QWEN3_VL, "qwen3vl")
+    _register("te", clip, "text-encoder")
+    lines = []
+    with caplog.at_level("INFO", logger="localm"):
+        ok, msg = image_native.generate(
+            {"backend": "native", "native": {"model": "mystery", "llm": "te"}}, "a cat",
+            tmp_path / "o.png", width=64, height=64, on_progress=lines.append)
+    assert ok, msg
+    assert runner.loads[0]["diffusion_model_path"] == str(path)
+    assert runner.loads[0]["llm_path"] == str(clip)
+    assert "model_path" not in runner.loads[0]
+    notice = [ln for ln in lines if "does not recognise" in ln]
+    assert len(notice) == 1
+    assert "stable-diffusion.cpp will detect" in notice[0] and "'mystery'" in notice[0]
+    assert notice[0].count(". ") == 0
+    infos = [r for r in caplog.records
+             if r.levelname == "INFO" and "does not recognise" in r.getMessage()]
+    assert len(infos) == 1
+
+
+def test_a_video_model_of_unknown_family_follows_the_same_rule(tmp_path):
+    path = write_gguf(tmp_path / "mystery.gguf", UNKNOWN_DIT, "qwen_image99")
+    clip = write_gguf(tmp_path / "te.gguf", QWEN3_VL, "qwen3vl")
+    with pytest.raises(ModelFileError, match="is not a video model localm can identify"):
+        pairing.build_context(path, "mystery", {}, where="Settings > Video", media="video")
+    built = pairing.build_context(path, "mystery", {"llm": ("te", clip)},
+                                  where="Settings > Video", media="video")
+    assert built["ctx"] == {"diffusion_model_path": str(path), "llm_path": str(clip)}
+    assert len(built["notes"]) == 1 and "is a video model whose family" in built["notes"][0]
+
+
+def test_a_known_family_never_gets_the_unknown_family_notice(qwen_sets):
+    models = image_native.resolve_models(_settings(llm="Qwen2.5-VL-7B-Instruct-Q4_K_M"))
+    assert not any("does not recognise" in n for n in models["notes"])
+
+
+@pytest.mark.parametrize("shapes, fmt, arch, family", [
+    (_base.SD1_UNET, "st", None, "sd1"),
+    (_base.SD1_UNET_DIFFUSERS, "st", None, "sd1"),
+    (_base.SDXL_CKPT, "st", None, "sdxl"),
+    (_base.FLUX_DEV, "gguf", "flux", "flux"),
+    (_base.SD3, "gguf", "sd3", "sd3"),
+    (_base.WAN21_T2V, "gguf", "wan", "wan2.1"),
+    (QWEN_IMAGE, "gguf", "qwen_image", "qwen-image"),
+    (QWEN21, "gguf", "qwen_image21", "qwen-image-2.1"),
+])
+def test_mainstream_layouts_still_classify_to_their_family(tmp_path, shapes, fmt, arch, family):
+    if fmt == "gguf":
+        f = write_gguf(tmp_path / "m.gguf", shapes, arch)
+    else:
+        f = write_safetensors(tmp_path / "m.safetensors", shapes)
+    info = families.inspect_file(f)
+    assert info.family == family and families.known_family(info.family)
 
 
 @pytest.mark.parametrize("name, data", [("v1-5.ckpt", b"PK\x03\x04" + b"\0" * 64),
