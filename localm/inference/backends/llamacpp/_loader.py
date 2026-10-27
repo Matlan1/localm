@@ -779,21 +779,67 @@ def compute_devices() -> list[tuple]:
     return devices
 
 
-def has_gpu_device() -> Optional[bool]:
-    """True when the ggml registry holds a device that is not the CPU, False when
-    it holds only the CPU, None when the registry cannot be read (see
-    :func:`compute_devices`).
+_NON_GPU_BACKENDS = frozenset(
+    {"cpu", "blas", "amx", "rpc", "accelerate", "kleidiai"})
 
-    This is the question "can this machine run anything on a GPU", which
-    ``llama_supports_gpu_offload`` does not answer: llama.cpp reports True there
-    whenever the RPC backend is registered, and localm ships ggml-rpc, so a
-    machine with no GPU at all still gets True. An RPC backend with no server
-    added registers no device, so it does not count here. Any non-CPU type
-    counts (GPU, IGPU, ACCEL): the enum values past GPU move between runtimes."""
-    devices = compute_devices()
-    if not devices:
+
+def classify_gpu_devices(devices: list[tuple]) -> Optional[bool]:
+    """Whether *devices*, a list of ``(ggml_backend_dev_type, backend_name)``
+    with ``backend_name`` None when unreadable, holds a GPU: True for a device of
+    type :data:`GGML_DEV_TYPE_GPU`, or of any type past it whose backend is not
+    in :data:`_NON_GPU_BACKENDS` (an integrated GPU and an accelerator share the
+    values 2 and 3 across runtimes, so the backend name decides). False when no
+    device qualifies, None when a device past GPU has no readable backend name
+    and no other device qualifies."""
+    undecided = False
+    for dev_type, backend in devices:
+        if dev_type == GGML_DEV_TYPE_CPU:
+            continue
+        if dev_type == GGML_DEV_TYPE_GPU:
+            return True
+        if backend is None:
+            undecided = True
+        elif backend.lower() not in _NON_GPU_BACKENDS:
+            return True
+    return None if undecided else False
+
+
+def has_gpu_device() -> Optional[bool]:
+    """True when the loaded runtime registers a GPU device, False when it
+    registers none, None when the device registry cannot be read. See
+    :func:`classify_gpu_devices`. Loads the native library."""
+    load_lib()
+    handles = _ggml_dev_handles()
+    cnt = _ggml_sym(handles, "ggml_backend_dev_count")
+    get = _ggml_sym(handles, "ggml_backend_dev_get")
+    type_fn = _ggml_sym(handles, "ggml_backend_dev_type")
+    if not (cnt and get and type_fn):
         return None
-    return any(dev_type != GGML_DEV_TYPE_CPU for _name, dev_type in devices)
+    reg_fn = _ggml_sym(handles, "ggml_backend_dev_backend_reg")
+    reg_name_fn = _ggml_sym(handles, "ggml_backend_reg_name")
+    cnt.restype = ctypes.c_size_t
+    get.restype = ctypes.c_void_p
+    get.argtypes = [ctypes.c_size_t]
+    type_fn.restype = ctypes.c_int
+    type_fn.argtypes = [ctypes.c_void_p]
+    if reg_fn is not None and reg_name_fn is not None:
+        reg_fn.restype = ctypes.c_void_p
+        reg_fn.argtypes = [ctypes.c_void_p]
+        reg_name_fn.restype = ctypes.c_char_p
+        reg_name_fn.argtypes = [ctypes.c_void_p]
+    devices: list[tuple] = []
+    try:
+        for i in range(int(cnt())):
+            dev = get(i)
+            dev_type = int(type_fn(dev))
+            backend = None
+            if reg_fn is not None and reg_name_fn is not None:
+                raw = reg_name_fn(reg_fn(dev))
+                backend = raw.decode("utf-8", "replace") if raw else None
+            devices.append((dev_type, backend))
+    except Exception:
+        return None
+    return classify_gpu_devices(devices)
 
 
 def native_device_inventory() -> Optional[list]:

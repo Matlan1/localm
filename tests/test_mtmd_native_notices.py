@@ -57,31 +57,27 @@ def _records(caplog, level):
     return [r.getMessage() for r in caplog.records if r.levelname == level]
 
 
-def _runtime_devices(monkeypatch, devices, *, offload_flag=True):
-    monkeypatch.setattr(_loader, "compute_devices", lambda: list(devices))
+def _runtime_gpu(monkeypatch, has_gpu, *, offload_flag=True):
+    monkeypatch.setattr(_loader, "has_gpu_device", lambda: has_gpu)
     monkeypatch.setattr(llama_mod.api, "llama_supports_gpu_offload", lambda: offload_flag)
 
 
+def _warned(caplog):
+    return any("placed the vision projector on the CPU" in m
+               for m in _records(caplog, "WARNING"))
+
+
 def test_a_projector_clip_places_on_the_cpu_is_marked_and_reported(monkeypatch, caplog):
-    _runtime_devices(monkeypatch, [("ROCm0", _loader.GGML_DEV_TYPE_GPU), ("CPU", 0)])
+    _runtime_gpu(monkeypatch, True)
     with caplog.at_level("INFO", logger="localm"):
         inst = _load(monkeypatch, "clip_ctx: CLIP using CPU backend\n")
     assert inst._mtmd.on_gpu is False
-    assert any("placed the vision projector on the CPU" in m for m in _records(caplog, "WARNING"))
+    assert _warned(caplog)
 
 
-def test_a_projector_on_the_cpu_of_a_cpu_only_runtime_is_marked_but_not_warned(
+def test_a_cpu_only_machine_with_the_offload_flag_set_is_marked_but_not_warned(
         monkeypatch, caplog):
-    _runtime_devices(monkeypatch, [("CPU", 0)], offload_flag=False)
-    with caplog.at_level("INFO", logger="localm"):
-        inst = _load(monkeypatch, "clip_ctx: CLIP using CPU backend\n")
-    assert inst._mtmd.on_gpu is False
-    assert not _records(caplog, "WARNING")
-
-
-def test_a_cpu_only_machine_with_the_rpc_backend_registered_is_not_warned(
-        monkeypatch, caplog):
-    _runtime_devices(monkeypatch, [("CPU", 0)], offload_flag=True)
+    _runtime_gpu(monkeypatch, False, offload_flag=True)
     with caplog.at_level("INFO", logger="localm"):
         inst = _load(monkeypatch, "clip_ctx: CLIP using CPU backend\n")
     assert inst._mtmd.on_gpu is False
@@ -90,16 +86,38 @@ def test_a_cpu_only_machine_with_the_rpc_backend_registered_is_not_warned(
 
 def test_an_unreadable_device_registry_falls_back_to_the_offload_flag(
         monkeypatch, caplog):
-    _runtime_devices(monkeypatch, [], offload_flag=True)
+    _runtime_gpu(monkeypatch, None, offload_flag=True)
     with caplog.at_level("INFO", logger="localm"):
         _load(monkeypatch, "clip_ctx: CLIP using CPU backend\n")
-    assert any("placed the vision projector on the CPU" in m
-               for m in _records(caplog, "WARNING"))
+    assert _warned(caplog)
     caplog.clear()
-    _runtime_devices(monkeypatch, [], offload_flag=False)
+    _runtime_gpu(monkeypatch, None, offload_flag=False)
     with caplog.at_level("INFO", logger="localm"):
         _load(monkeypatch, "clip_ctx: CLIP using CPU backend\n")
     assert not _records(caplog, "WARNING")
+
+
+GPU, CPU = _loader.GGML_DEV_TYPE_GPU, _loader.GGML_DEV_TYPE_CPU
+
+
+@pytest.mark.parametrize("devices, expected", [
+    ([(CPU, "CPU")], False),
+    ([(CPU, "CPU"), (CPU, None)], False),
+    ([(GPU, "ROCm"), (CPU, "CPU")], True),
+    ([(GPU, None), (CPU, "CPU")], True),
+    ([(2, "BLAS"), (CPU, "CPU")], False),
+    ([(3, "BLAS"), (CPU, "CPU")], False),
+    ([(2, "AMX"), (3, "KleidiAI"), (CPU, "CPU")], False),
+    ([(2, "RPC")], False),
+    ([(2, "Vulkan"), (CPU, "CPU")], True),
+    ([(3, "Vulkan"), (CPU, "CPU")], True),
+    ([(2, "BLAS"), (3, "Vulkan"), (CPU, "CPU")], True),
+    ([(2, None), (CPU, "CPU")], None),
+    ([(2, None), (GPU, "CUDA")], True),
+    ([], False),
+])
+def test_only_a_gpu_or_an_integrated_gpu_counts_as_a_gpu_device(devices, expected):
+    assert _loader.classify_gpu_devices(devices) is expected
 
 
 _PROBE = """
@@ -129,8 +147,10 @@ def test_the_gate_reads_the_native_devices_not_the_offload_flag():
         got = _probe_native_runtime(env)
         if not got["devices"]:
             pytest.skip("runtime lacks the ggml_backend_dev_* registry symbols")
-        has_non_cpu = any(t != _loader.GGML_DEV_TYPE_CPU for _, t in got["devices"])
-        assert got["gpu"] is has_non_cpu, got
+        if all(t == CPU for _, t in got["devices"]):
+            assert got["gpu"] is False, got
+        if any(t == GPU for _, t in got["devices"]):
+            assert got["gpu"] is True, got
 
 
 def test_a_projector_clip_places_on_the_gpu_is_not_reported(monkeypatch, caplog):
