@@ -95,7 +95,7 @@ class RecordedDigests:
 
 
 def recorded_digests(home: Path, entry_path: Callable[..., Optional[str]]
-                     ) -> "tuple[RecordedDigests, Optional[str]]":
+                     ) -> tuple[RecordedDigests, Optional[str]]:
     """``(recorded, problem)`` for the registry of the localm *home*.
 
     The registry is a hand-editable file, so an entry is used only when
