@@ -323,34 +323,34 @@ class TestHfFileRecord:
 # ------------------------------------------------------------------ #
 
 class TestSnapshotRecord:
-    def _stopped(self, home: Path, created: bool) -> Path:
+    def _stopped(self, home: Path, created: bool, dead_pid) -> Path:
         folder = home / "Repo"
         (folder / ".cache" / "huggingface" / "download").mkdir(parents=True)
         (folder / "config.json").write_text("{}", encoding="utf-8")
-        (folder / ".cache" / "huggingface" / "download" / "x.e.incomplete").write_bytes(b"p" * 30)
+        _hf_temp(folder, "model.safetensors", "e1", b"p" * 30, *dead_pid)
         with pending_pulls.tracking({"spec": "o/Repo"}):
             pending_pulls.note_source(source="hf-repo", repo="o/Repo", commit="a" * 40)
             pending_pulls.note_snapshot(folder, "Repo", created, 1000)
         return folder
 
-    def test_delete_removes_a_folder_this_pull_created(self, home, monkeypatch):
+    def test_delete_removes_a_folder_this_pull_created(self, home, monkeypatch, dead_pid):
         monkeypatch.setattr(mm, "load_registry", lambda: {})
-        folder = self._stopped(home, created=True)
+        folder = self._stopped(home, True, dead_pid)
         [view] = pending_pulls.list_interrupted()
         assert pending_pulls.delete_interrupted(view["id"]) > 0
         assert not folder.exists()
 
-    def test_delete_keeps_a_folder_a_registered_model_uses(self, home, monkeypatch):
-        folder = self._stopped(home, created=True)
+    def test_delete_keeps_a_folder_a_registered_model_uses(self, home, monkeypatch, dead_pid):
+        folder = self._stopped(home, True, dead_pid)
         monkeypatch.setattr(mm, "load_registry",
                             lambda: {"repo": {"path": str(folder), "source": "hf:o/Repo"}})
         [view] = pending_pulls.list_interrupted()
         assert pending_pulls.delete_interrupted(view["id"]) == 30
         assert (folder / "config.json").exists()
 
-    def test_delete_keeps_a_folder_that_existed_before(self, home, monkeypatch):
+    def test_delete_keeps_a_folder_that_existed_before(self, home, monkeypatch, dead_pid):
         monkeypatch.setattr(mm, "load_registry", lambda: {})
-        folder = self._stopped(home, created=False)
+        folder = self._stopped(home, False, dead_pid)
         [view] = pending_pulls.list_interrupted()
         assert pending_pulls.delete_interrupted(view["id"]) == 30
         assert (folder / "config.json").exists()
@@ -359,6 +359,20 @@ class TestSnapshotRecord:
 # ------------------------------------------------------------------ #
 #  Liveness: a running pull is never offered or deleted                #
 # ------------------------------------------------------------------ #
+
+def _kill_owner(pid: int) -> None:
+    """Terminate *pid* (the interpreter that owns the record, not a venv
+    launcher in front of it) and wait until it is gone."""
+    import os
+    import signal
+    import time
+    from localm.instances import pid_alive
+    os.kill(pid, signal.SIGTERM)
+    deadline = time.monotonic() + 15
+    while pid_alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not pid_alive(pid)
+
 
 HOLD_A_PULL = '''
     import sys
@@ -394,6 +408,7 @@ class TestLiveness:
                 pending_pulls.delete_interrupted(rec["id"])
             assert (models / "held.gguf.part").stat().st_size == 64
             assert pending_pulls.list_orphans() == []
+            _kill_owner(rec["owner"]["pid"])
         finally:
             child.kill()
             child.wait()
@@ -583,7 +598,9 @@ class TestGuiRoutes:
 
         r = c.post(f"/api/models/pulls/interrupted/{d['id']}/dismiss", json={"dismissed": True})
         assert r.status_code == 200 and r.json()["dismissed"] is True
-        assert c.get("/api/models/pulls/interrupted").json()["downloads"][0]["dismissed"]
+        assert c.get("/api/models/pulls/interrupted").json()["downloads"] == []
+        listed = c.get("/api/models/pulls/interrupted?include_dismissed=true").json()
+        assert listed["downloads"][0]["dismissed"] is True
 
         r = c.post(f"/api/models/pulls/interrupted/{d['id']}/delete")
         assert r.status_code == 200 and r.json()["removed_bytes"] == 1500
@@ -654,6 +671,8 @@ class TestDeleteScope:
 
     def test_a_hidden_part_of_an_import_is_not_an_orphan(self, home):
         (home / ".model.gguf.part").write_bytes(b"i" * 9)
+        (home / ".model.gguf.part.json").write_text(json.dumps({"source": "url"}),
+                                                    encoding="utf-8")
         (home / "nojson.gguf.part").write_bytes(b"n" * 9)
         assert pending_pulls.list_orphans() == []
 
@@ -705,7 +724,7 @@ class TestRecordHygiene:
         assert check["changed"] is True and "no size or etag" in check["detail"]
 
     def test_the_view_does_not_name_a_comfyui_folder(self, home):
-        with pending_pulls.tracking({"spec": "o/r:x.gguf", "dest_dir": "\\server\share\comfy"}):
+        with pending_pulls.tracking({"spec": "o/r:x.gguf", "dest_dir": r"\\server\share\comfy"}):
             part = home / "x.gguf.part"
             part.write_bytes(b"x")
             pending_pulls.note_part(part, "x.gguf", 2)
