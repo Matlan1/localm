@@ -3378,7 +3378,7 @@ def resolve_auto_split_ratios(config: Optional[dict] = None, *,
             if status != GPU_PROBE_OK:
                 return _fallback(
                     f"no fresh per-device VRAM reading (probe status {status})")
-        if any(g.get("numbering") == GPU_NUMBERING_NVIDIA_SMI for g in gpus):
+        if any(g.get("numbering") == GPU_NUMBERING_NVIDIA_SMI for g in gpus or []):
             return _fallback("torch did not answer, and nvidia-smi numbers the GPUs "
                              "its own way")
         by_index = {g.get("index"): g for g in gpus}
