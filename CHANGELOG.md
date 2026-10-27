@@ -16,6 +16,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **More upscalers are recognised.** ESRGAN files in the original key layout (such as 4x-UltraSharp) and Real-ESRGAN compact (SRVGGNet) files are now typed `upscaler` when pulled, added or scanned, instead of `unknown`.
 
 ### Changed
+- **The bundled llama.cpp runtime moved from b11757 to b11928.** An existing install picks it up with `localm setup-llama --force`.
 - **The bundled AMD ROCm llama.cpp runtime moved from b1349 to b1355.** An existing install picks it up with `localm setup-llama --force`.
 - **localm's managed ComfyUI now installs v0.43.0, up from v0.42.1.** An existing install picks it up with `localm comfy update --reinstall-requirements` (this release's Python requirements changed).
 - **Importing another localm install's folder no longer hashes every model again.** When the folder you add (or its `models` folder) belongs to another localm install, the hash that install recorded for each model is reused instead of reading the whole file, so a large library registers in seconds. A file that is missing from that install's registry, was changed after the registry was written, or has no recorded hash is hashed as before, and so is everything when the registry cannot be read.
