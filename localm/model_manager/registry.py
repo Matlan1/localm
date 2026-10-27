@@ -281,6 +281,18 @@ def chat_load_refusal(name: str, registry: dict) -> Optional[str]:
     return msg + " It is a component of image, video or music generation."
 
 
+async def chat_load_refusal_off_loop(name: str, registry: dict) -> Optional[str]:
+    """:func:`chat_load_refusal`, run on a worker thread when the check reads
+    the file system (an 'unknown' entry), inline otherwise. For callers on the
+    event loop."""
+    entry = registry.get(name)
+    if isinstance(entry, dict) and entry.get("model_type") == "unknown":
+        import asyncio
+        return await asyncio.get_running_loop().run_in_executor(
+            None, chat_load_refusal, name, registry)
+    return chat_load_refusal(name, registry)
+
+
 def models_of_type(model_type: str, registry: Optional[dict] = None) -> dict:
     """Every registry entry whose ``model_type`` is *model_type*, as
     ``{name: entry}``.

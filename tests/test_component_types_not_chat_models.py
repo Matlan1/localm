@@ -267,3 +267,56 @@ def test_an_unknown_typed_folder_no_backend_runs_is_refused(tmp_path):
 def test_an_unknown_typed_path_that_does_not_exist_is_not_refused(tmp_path):
     reg = {"u": {"path": str(tmp_path / "gone.safetensors"), "model_type": "unknown"}}
     assert chat_load_refusal("u", reg) is None
+
+
+@pytest.fixture
+def refusal_probe(monkeypatch):
+    """Records, per call of the file-system check, whether an event loop was
+    running on the calling thread."""
+    from localm.model_manager import registry as R
+    real = R._no_backend_runs_file
+    on_loop: list[bool] = []
+
+    def spy(path):
+        try:
+            asyncio.get_running_loop()
+            on_loop.append(True)
+        except RuntimeError:
+            on_loop.append(False)
+        return real(path)
+
+    monkeypatch.setattr(R, "_no_backend_runs_file", spy)
+    return on_loop
+
+
+def test_get_engine_checks_an_unknown_entry_off_the_event_loop(served, refusal_probe):
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(hs.get_engine("zz-unknown-file", load=False))
+    assert exc.value.status_code == 422
+    assert refusal_probe == [False]
+
+
+def test_switch_engine_checks_an_unknown_entry_off_the_event_loop(served, refusal_probe):
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(hs.switch_engine("zz-unknown-file", hs._engine_factory))
+    assert exc.value.status_code == 422
+    assert refusal_probe == [False]
+
+
+def test_gui_load_route_checks_an_unknown_entry_off_the_event_loop(served, refusal_probe):
+    async def switch_model(name, **kw):
+        return {"status": "loaded", "model": name}
+
+    app = FastAPI()
+    attach_gui(app, self_url="http://127.0.0.1:9/v1",
+               switch_model=switch_model, active_model=lambda: "aaa-working")
+    with TestClient(app) as client:
+        r = client.post("/api/models/load", json={"model": "zz-unknown-file"})
+    assert r.status_code == 422
+    assert refusal_probe == [False]
+
+
+def test_a_component_type_needs_no_worker_thread(served, refusal_probe):
+    with pytest.raises(HTTPException):
+        asyncio.run(hs.get_engine(_name("vae"), load=False))
+    assert refusal_probe == []

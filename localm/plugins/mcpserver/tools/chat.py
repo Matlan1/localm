@@ -125,6 +125,33 @@ def answer_with(engines: EngineCache, decision, run):
     raise RuntimeError("no model could answer: " + "; ".join(errors))
 
 
+def _named_embedding_path(model: Optional[str]) -> Optional[str]:
+    """The GGUF file to embed with when *model* names a registered embedding
+    GGUF other than the configured ``embedding_model``, else None (no name, an
+    unregistered or non-embedding name, a model folder, or the configured
+    embedder, all served by the engine path). Raises
+    ``reranker.RerankerModelError`` for a reranker or a broken entry. Blocking."""
+    name = (model or "").strip()
+    if not name:
+        return None
+    from localm.config import load_config, load_registry
+    from localm.inference import reranker
+    from localm.model_manager.registry import entry_is_reranker
+    entry = load_registry().get(name)
+    if not isinstance(entry, dict) or entry.get("model_type") != "embedding":
+        return None
+    if name == str(load_config().get("embedding_model") or "").strip():
+        return None
+    raw = str(entry.get("path") or "")
+    if raw and Path(raw).is_dir():
+        return None
+    if entry_is_reranker(name, entry):
+        raise reranker.RerankerModelError(
+            f"Model {name!r} is a reranker, not an embedding model: it scores "
+            "query and document pairs (use the rerank tool).", 422)
+    return reranker.named_embedding_path(name, entry)
+
+
 def build(engines: EngineCache) -> dict[str, dict]:
     """``chat`` and ``embed``, both served from *engines*, and ``rerank``,
     served by the reranker model."""
@@ -174,6 +201,22 @@ def build(engines: EngineCache) -> dict[str, dict]:
             texts = [texts]
         if not texts:
             return _text_result("'texts' is required (string or list)", is_error=True)
+        from localm.inference import reranker
+        from localm.inference.backends.base import PretokenizerUnsafeInputError
+        try:
+            with _quiet_stdout():
+                named_path = _named_embedding_path(args.get("model"))
+        except reranker.RerankerModelError as e:
+            return _text_result(str(e), is_error=True)
+        if named_path is not None:
+            try:
+                with _quiet_stdout():
+                    vecs = reranker.embed(named_path, texts)
+            except (reranker.RerankerUnavailableError, PretokenizerUnsafeInputError,
+                    RuntimeError) as e:
+                return _text_result(f"Embedding failed: {e}", is_error=True)
+            return _text_result(json.dumps(vecs))
+
         def _embed_once():
             # A fresh embedder load can print to stdout too, like chat() above.
             with _quiet_stdout():
