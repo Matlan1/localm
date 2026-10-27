@@ -930,6 +930,7 @@ async function _gpuInfo() {
     return {
       gpus: Array.isArray(data.gpus) ? data.gpus : [],
       gpu_split_indices: Array.isArray(data.gpu_split_indices) ? data.gpu_split_indices : [],
+      main_gpu_index: Number.isInteger(data.main_gpu_index) ? data.main_gpu_index : null,
     };
   } catch { return { gpus: [], gpu_split_indices: [] }; }
 }
@@ -938,11 +939,13 @@ async function _gpuInfo() {
 async function _splitGpus() { return (await _gpuInfo()).gpus; }
 
 /** Caption naming what the fit-badge VRAM number is. Mirrors
- *  discover.vram_capacity: the number is COMBINED only when 2+ configured split
- *  indices map to detected devices; a 1-entry gpu_split_indices naming a
- *  detected device makes it that GPU's (discover.resolve_load_gpu_index);
- *  otherwise it is the single main GPU's.
- *  `gpuInfo` is {gpus, gpu_split_indices} from _gpuInfo(). */
+ *  discover.vram_capacity: the number is COMBINED when 2+ configured split
+ *  indices map to detected devices, or when neither a split nor a main GPU is
+ *  configured and 2+ discrete GPUs are detected (a load then spreads over all
+ *  of them); a 1-entry gpu_split_indices naming a detected device makes it that
+ *  GPU's (discover.resolve_load_gpu_index); a chosen main GPU, or a split
+ *  naming GPUs that are not present, makes it the main GPU's.
+ *  `gpuInfo` is {gpus, gpu_split_indices, main_gpu_index} from _gpuInfo(). */
 export function vramBasisCaption(totalBytes, gpuInfo) {
   const gib = (totalBytes / GIB).toFixed(0);
   const gpus = Array.isArray(gpuInfo?.gpus) ? gpuInfo.gpus : [];
@@ -955,6 +958,11 @@ export function vramBasisCaption(totalBytes, gpuInfo) {
   }
   if (rawSplit.length === 1 && split.length === 1 && gpus.length > 1) {
     return t("models.vramBasis.oneGpu", { gib, index: split[0] });
+  }
+  const discrete = gpus.filter((g) => g.integrated !== true);
+  const mainChosen = Number.isInteger(gpuInfo?.main_gpu_index);
+  if (rawSplit.length === 0 && !mainChosen && discrete.length >= 2) {
+    return t("models.vramBasis.combined", { gib, count: discrete.length });
   }
   if (gpus.length > 1) {
     return t("models.vramBasis.mainGpu", { gib, count: gpus.length });

@@ -312,7 +312,17 @@ class TestJobAndPrivacy:
         return "".join(p.read_text(encoding="utf-8", errors="replace")
                        for p in (home / "activity").glob("*.json"))
 
-    def test_only_the_contentless_activity_record_is_written(self, client, home):
+    def test_privacy_mode_leaves_no_record_of_the_finished_speech(self, client, home,
+                                                                  monkeypatch):
+        monkeypatch.delenv("LOCALM_KEEP_DIAGNOSTICS", raising=False)
+        before = self._files_outside_the_activity_record(home)
+        assert _post(client, {"input": "Speak the marker phrase zebra quartz."}).status_code == 200
+        assert self._files_outside_the_activity_record(home) == before
+        assert self._activity_text(home) == ""
+
+    def test_with_keep_diagnostics_only_the_contentless_activity_record_is_written(
+            self, client, home, monkeypatch):
+        monkeypatch.setenv("LOCALM_KEEP_DIAGNOSTICS", "1")
         before = self._files_outside_the_activity_record(home)
         assert _post(client, {"input": "Speak the marker phrase zebra quartz."}).status_code == 200
         assert self._files_outside_the_activity_record(home) == before

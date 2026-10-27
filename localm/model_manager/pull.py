@@ -302,6 +302,20 @@ def _reap_stale_etag_partials(incomplete_path: Path) -> None:
         _unlink_quiet(_partial_owner_path(p))
 
 
+def _check_xet_endpoint(xet_file_data: Any, headers: dict) -> None:
+    """Raise ``netpolicy.NetworkPolicyError`` when the network policy refuses
+    the Xet storage endpoint a transfer of *xet_file_data* would connect to.
+
+    The endpoint comes from huggingface_hub's Xet connection info (the token
+    answer's ``casUrl``), which huggingface_hub caches per repo revision, so
+    the transfer reuses this lookup. Lookup errors propagate."""
+    from huggingface_hub.utils._xet import refresh_xet_connection_info
+    from localm import netpolicy
+    info = refresh_xet_connection_info(file_data=xet_file_data, headers=headers)
+    netpolicy.check_url(info.endpoint,
+                        allow_when_off=netpolicy.downloads_allowed_when_off())
+
+
 def _resumable_download_to_tmp_and_move(
     incomplete_path: Path,
     destination_path: Path,
@@ -357,6 +371,7 @@ def _resumable_download_to_tmp_and_move(
         if (resume_size == 0 and xet_file_data is not None and expected_size
                 and expected_size > fd.constants.MAX_HTTP_DOWNLOAD_SIZE
                 and fd.is_xet_available()):
+            _check_xet_endpoint(xet_file_data, headers)
             fd.xet_get(
                 incomplete_path=tmp_path,
                 xet_file_data=xet_file_data,

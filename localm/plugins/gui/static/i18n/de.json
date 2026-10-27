@@ -1344,7 +1344,7 @@
   "models.view.showOther": "andere Typen hier anzeigen",
   "models.view.showOtherTitle": "Vision-Projektoren und alles, was localm nicht einordnen konnte, befinden sich im Tab Andere. Aktivieren Sie dies, um sie auch hier aufzulisten.",
   "models.vramBasis.combined": "Badges vergleichen jede Datei mit Ihren {gib} GB VRAM, kombiniert über {count} GPUs (Gewichte + ~1,5 GB Overhead).",
-  "models.vramBasis.mainGpu": "Badges vergleichen jede Datei mit den {gib} GB Ihrer Haupt-GPU (legen Sie in den Einstellungen eine Aufteilung fest, um alle {count} zu nutzen) (Gewichte + ~1,5 GB Overhead).",
+  "models.vramBasis.mainGpu": "Badges vergleichen jede Datei mit den {gib} GB Ihrer Haupt-GPU (Gewichte + ~1,5 GB Overhead).",
   "models.vramBasis.oneGpu": "Badges vergleichen jede Datei mit den {gib} GB von GPU {index}, der einen in den Einstellungen gewählten GPU (Gewichte + ~1,5 GB Overhead).",
   "models.vramBasis.single": "Badges vergleichen jede Datei mit Ihren {gib} GB VRAM (Gewichte + ~1,5 GB Overhead).",
   "music.advancedHint": "Seed, Schritte, CFG",

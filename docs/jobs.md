@@ -167,7 +167,14 @@ reported as **`interrupted`** rather than `failed`, since whether the work
 actually finished is genuinely unknown, and stopping or restarting the server
 also terminates the background child processes it started instead of
 abandoning them. Progress (`pct`/`phase`) is not mirrored and does not survive
-a restart.
+a restart. In privacy mode (unless "Keep diagnostics" is on) only operations
+still running are mirrored, without their result, so a finished operation, such
+as a generated image, leaves nothing under `activity/` and is not listed after a
+restart.
+
+For a caller using a key without the owner scope, every text in an operation's
+row and event stream has local paths replaced (`<data>`, `<install>`, `~`), as
+in the other routes such a key reaches.
 
 What it does not promise beyond that: a finished operation is dropped about an
 hour after it finishes, and only when some new operation starts, so an idle

@@ -88,36 +88,57 @@ def test_own_host_name_is_redacted_wherever_it_stands_alone(scrub, monkeypatch):
 
 @pytest.mark.parametrize("scrub", _SCRUBBERS)
 def test_own_host_name_inside_a_dotted_or_path_name_is_kept(scrub, monkeypatch):
-    monkeypatch.setattr(socket, "gethostname", lambda: "zqbox")
+    monkeypatch.setattr(socket, "gethostname", lambda: "zqbox7")
     monkeypatch.delenv("COMPUTERNAME", raising=False)
-    text = "zqbox.inference.http_server, src/zqbox/x.py, C:" + BS + "zqbox" + BS + "y; on zqbox."
-    assert scrub(text) == ("zqbox.inference.http_server, src/zqbox/x.py, C:" + BS + "zqbox"
+    text = "zqbox7.inference.http_server, src/zqbox7/x.py, C:" + BS + "zqbox7" + BS + "y; on zqbox7."
+    assert scrub(text) == ("zqbox7.inference.http_server, src/zqbox7/x.py, C:" + BS + "zqbox7"
                            + BS + "y; on <host>.")
 
 
+# A host name of letters only can be an ordinary word, so it is replaced only
+# where it stands as a machine name. No list of words decides this.
+_WORD_NAMES = ["ubuntu", "Fedora", "localm", "host", "redacted", "user", "server",
+               "Desktop", "workstation", "gpu", "main", "build", "zqbox", "thomas"]
+
+
 @pytest.mark.parametrize("scrub", _SCRUBBERS)
-@pytest.mark.parametrize("name", ["ubuntu", "Fedora", "localm", "host", "redacted", "user",
-                                  "server", "Desktop", "workstation", "gpu", "main", "build"])
-def test_default_and_placeholder_host_names_are_not_used(scrub, monkeypatch, name):
+@pytest.mark.parametrize("name", _WORD_NAMES)
+def test_a_letters_only_host_name_is_kept_in_prose(scrub, monkeypatch, name):
     monkeypatch.setattr(socket, "gethostname", lambda: name)
-    monkeypatch.delenv("COMPUTERNAME", raising=False)
-    text = f"{name} 24.04 and <host> and <redacted>"
+    monkeypatch.setenv("COMPUTERNAME", name.upper())
+    text = (f"{name} 24.04 and <host> and <redacted>; the {name} crashed; "
+            f"{name}.example.com and src/{name}/x.py")
     assert scrub(text) == text
 
 
-def test_python_reporters_skip_the_same_names():
-    assert ri._OWN_NAME_SKIP == br_scrub._OWN_NAME_SKIP
+@pytest.mark.parametrize("scrub", _SCRUBBERS)
+@pytest.mark.parametrize("name", _WORD_NAMES)
+def test_a_letters_only_host_name_is_replaced_where_it_names_a_machine(scrub, monkeypatch, name):
+    monkeypatch.setattr(socket, "gethostname", lambda: name)
+    monkeypatch.setenv("COMPUTERNAME", name.upper())
+    text = (f"http://{name}:8080/v1, ssh me@{name.upper()}, {name}:5000 up, "
+            f"hostname={name}, Host: {name}, \"computername\": \"{name}\", "
+            f"Host Name:      {name.upper()}, node: {name}, Device_Name={name}")
+    assert scrub(text) == ("http://<host>:8080/v1, ssh me@<host>, <host>:5000 up, "
+                           "hostname=<host>, Host: <host>, \"computername\": \"<host>\", "
+                           "Host Name:      <host>, node: <host>, Device_Name=<host>")
+    assert scrub(scrub(text)) == scrub(text)
 
 
-def test_every_reporter_skips_the_same_names():
-    import re
-    sh = re.search(r"%skip = map \{ \$_ => 1 \} qw\(([^)]*)\)",
-                   _SH_PATH.read_text(encoding="utf-8")).group(1).split()
-    ps = re.search(r"@\(('[a-z]+'(?:, '[a-z]+')+)\) -notcontains",
-                   _PS1_PATH.read_text(encoding="utf-8")).group(1)
-    ps_names = re.findall(r"'([^']+)'", ps)
-    assert set(sh) == br_scrub._OWN_NAME_SKIP
-    assert set(ps_names) == br_scrub._OWN_NAME_SKIP
+@pytest.mark.parametrize("scrub", _SCRUBBERS)
+def test_a_name_with_a_non_letter_is_replaced_in_a_url_too(scrub, monkeypatch):
+    monkeypatch.setattr(socket, "gethostname", lambda: "zq-ws1")
+    monkeypatch.delenv("COMPUTERNAME", raising=False)
+    text = "http://zq-ws1:8080/v1 and //zq-ws1/share and on zq-ws1"
+    assert scrub(text) == "http://<host>:8080/v1 and //<host>/share and on <host>"
+
+
+def test_python_reporters_share_the_own_name_rules():
+    import inspect
+    for name in ("_own_host_names", "_scrub_own_names"):
+        assert inspect.getsource(getattr(ri, name)) == inspect.getsource(getattr(br_scrub, name)), name
+    assert ri._WORD_NAME_RE.pattern == br_scrub._WORD_NAME_RE.pattern
+    assert ri._HOST_KEY == br_scrub._HOST_KEY
 
 
 def test_a_report_title_keeps_a_common_word_host_name(monkeypatch):
@@ -153,12 +174,18 @@ def test_unreadable_host_name_still_runs_the_other_rules(scrub, monkeypatch):
 
 
 def test_the_real_host_name_is_redacted_in_a_report():
+    import re
     name = socket.gethostname().strip().rstrip(".")
     if len(name) < 3 or name.lower() == "localhost":
         pytest.skip("this machine's name is too short to be redacted")
-    out = br_scrub._scrub_secrets("crash on " + name + " at boot")
-    assert name.lower() not in out.lower()
-    assert ri.scrub("crash on " + name + " at boot") == out
+    line = _real_name_line()
+    out = br_scrub._scrub_secrets(line)
+    if re.fullmatch(r"[A-Za-z]+", name.split(".")[0]):
+        assert out.startswith("crash on " + name.split(".")[0])
+        assert "http://<host>:8080" in out
+    else:
+        assert name.lower() not in out.lower()
+    assert ri.scrub(line) == out
 
 
 _PS_DRIVER = (
@@ -183,17 +210,24 @@ _PS_DRIVER = (
 
 
 def _real_name_line() -> str:
-    name = socket.gethostname().strip().rstrip(".")
-    return "crash on " + name + " at boot"
+    name = socket.gethostname().strip().rstrip(".").split(".")[0]
+    return "crash on " + name + " at boot, served at http://" + name + ":8080"
+
+
+# Lines for COMPUTERNAME=SERVER: a letters-only name in prose and as a machine name.
+_WORD_LINES = ["localm server crashed while stopping",
+               "http://server:8080/v1 and me@SERVER and server:5000 up",
+               "hostname=server, Host: server, Host Name:   SERVER, node: server"]
 
 
 @pytest.mark.skipif(os.name != "nt",
                     reason="the PowerShell fallback reporter only runs on Windows")
-def test_powershell_reporter_redacts_machine_names(tmp_path):
+def test_powershell_reporter_redacts_machine_names(tmp_path, monkeypatch):
     pwsh = shutil.which("powershell") or shutil.which("pwsh")
     if not pwsh:
         pytest.skip("no PowerShell interpreter on PATH")
-    lines = [text for text, _ in _CASES] + [_real_name_line()]
+    lines = [text for text, _ in _CASES] + [_real_name_line()] + _WORD_LINES
+    monkeypatch.setenv("COMPUTERNAME", "SERVER")
     driver = tmp_path / "drive_scrub.ps1"
     driver.write_text(_PS_DRIVER, encoding="utf-8")
     infile = tmp_path / "in.txt"
@@ -201,7 +235,7 @@ def test_powershell_reporter_redacts_machine_names(tmp_path):
     proc = subprocess.run(
         [pwsh, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
          "-File", str(driver), "-Target", str(_PS1_PATH), "-InFile", str(infile)],
-        capture_output=True, text=True, timeout=120)
+        capture_output=True, text=True, timeout=120, env=dict(os.environ))
     out = (proc.stdout or "") + (proc.stderr or "")
     assert "SCRUB-NOT-FOUND" not in out, out
     assert proc.returncode == 0, f"driver failed ({proc.returncode}): {out}"
@@ -216,11 +250,12 @@ def _sh_scrub_function() -> str:
     return text[start:end]
 
 
-def test_shell_reporter_redacts_machine_names(tmp_path):
+def test_shell_reporter_redacts_machine_names(tmp_path, monkeypatch):
     bash = shutil.which("bash")
     if not bash or "system32" in bash.lower() or not shutil.which("perl"):
         pytest.skip("no bash with perl on PATH")
-    lines = [text for text, _ in _CASES] + [_real_name_line()]
+    lines = [text for text, _ in _CASES] + [_real_name_line()] + _WORD_LINES
+    monkeypatch.setenv("COMPUTERNAME", "SERVER")
     driver = tmp_path / "drive_sh_scrub.sh"
     driver.write_text(_sh_scrub_function() + 'scrub < "$1" > "$2"\n',
                       encoding="utf-8", newline="\n")

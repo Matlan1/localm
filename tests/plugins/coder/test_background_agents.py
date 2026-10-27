@@ -1182,3 +1182,79 @@ def test_the_synchronous_spawn_also_range_marks_the_child_reply(repo):
     spans = untrusted_spans_of(res.output)
     assert spans, "the synchronous spawn dropped the child's range"
     assert str(res.output)[spans[0][0]:spans[0][1]] == "CHILD " + _EXOTIC
+
+
+# --------------------------------------------------------------------------- #
+#  A child's branch is deleted when it carries no work                         #
+# --------------------------------------------------------------------------- #
+
+def _coder_branches(repo):
+    out = _git(repo, "branch", "--list", "coder/*").stdout
+    return [ln.strip(" *+") for ln in out.splitlines() if ln.strip()]
+
+
+def _job_id(res) -> str:
+    return res.output.split("as ")[1].split(",")[0]
+
+
+class TestChildBranchCleanup:
+    def test_a_child_with_no_work_leaves_no_branch(self, repo):
+        def _no_work(self, task):
+            return "nothing to do"
+
+        parent = _parent(repo)
+        with patch.object(Agent, "run_task", _no_work):
+            res = tool_spawn_agent_background(repo, "t", name="idle",
+                                              _parent_agent=parent)
+            assert res.ok
+            _drain_all()
+            polled = tool_check_agent_job(repo, _job_id(res))
+            parent._drain_background_agents()
+        assert _coder_branches(repo) == [], "an empty child branch was left behind"
+        assert "had no commits and was deleted" in polled.output, polled.output
+        assert not getattr(parent, "_delegated", []), "a pointer to a deleted branch"
+
+    def test_a_stopped_child_with_no_work_leaves_no_branch(self, repo):
+        """The reported case: a child stopped before it wrote anything."""
+        def _cancelled(self, task):
+            self.cancel("stopped")
+            return "[stopped]"
+
+        parent = _parent(repo)
+        with patch.object(Agent, "run_task", _cancelled):
+            assert tool_spawn_agent_background(
+                repo, "t", name="stopped", _parent_agent=parent).ok
+            _drain_all()
+        assert _coder_branches(repo) == []
+
+    def test_a_child_with_work_keeps_its_branch_and_says_so(self, repo):
+        def _child_edits(self, task):
+            (self.cwd / "kept.txt").write_text("work\n", encoding="utf-8")
+            return "edited"
+
+        parent = _parent(repo)
+        with patch.object(Agent, "run_task", _child_edits):
+            res = tool_spawn_agent_background(repo, "t", name="busy",
+                                              _parent_agent=parent)
+            _drain_all()
+            polled = tool_check_agent_job(repo, _job_id(res))
+        branches = _coder_branches(repo)
+        assert len(branches) == 1 and branches[0].startswith("coder/busy-"), branches
+        assert "which was kept" in polled.output, polled.output
+        assert branches[0] in polled.output
+
+    def test_a_branch_that_moved_is_not_deleted(self, repo):
+        """The ref is removed only while it still points at the base."""
+        from localm.plugins.coder.tools.agents import _drop_empty_child_branch
+        base = _git(repo, "rev-parse", "HEAD").stdout.strip()
+        _git(repo, "branch", "coder/x-1", base)
+        _git(repo, "switch", "-q", "coder/x-1")
+        (repo / "m.txt").write_text("m", encoding="utf-8")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "moved")
+        _git(repo, "switch", "-q", "-")
+        out: dict = {"branch": "coder/x-1"}
+        _drop_empty_child_branch(repo, "coder/x-1", base, out)
+        assert out.get("branch_kept") is True
+        assert out["branch"] == "coder/x-1"
+        assert "coder/x-1" in _coder_branches(repo)

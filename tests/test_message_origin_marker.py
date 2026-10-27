@@ -258,5 +258,85 @@ def test_route_recalls_for_the_user_s_question_not_the_gui_note(isolated_home):
         assert "Rust and cargo" in _system_text()
 
 
+# --------------------------------------------------------------------------- #
+#  user_spans: a merged row records only what the user wrote                    #
+# --------------------------------------------------------------------------- #
+
+KB = ('[Excerpts from the "docs" collection relevant to: oslo]\n\n'
+      "[1] towers.md:3\nThe Oslo tower is 117 m.")
+
+
+def _merged(*parts, own):
+    """One user row merged as the GUI merges rows: *parts* joined by a blank
+    line, with user_spans covering the parts whose index is in *own*."""
+    text, spans, at = "", [], 0
+    for i, part in enumerate(parts):
+        if i:
+            text += "\n\n"
+            at += 2
+        if i in own:
+            spans.append([at, at + len(part)])
+        text += part
+        at += len(part)
+    return {"role": "user", "content": text, "user_spans": spans}
+
+
+def test_a_merged_row_logs_only_the_user_s_words():
+    row = _merged(KB, QUESTION, RESULTS, own={1})
+    assert _last_user_text([row]) == QUESTION
+    assert _recall_query([row]) == QUESTION
+    audit, transcript = MagicMock(), MagicMock()
+    _audit_exchange(audit, transcript, [row], "117 m.")
+    audit.user.assert_called_once_with(QUESTION)
+    transcript.exchange.assert_called_once_with(QUESTION, "117 m.")
+    # Without the field the whole merged text is the user line, as before.
+    plain = {"role": "user", "content": row["content"]}
+    assert _last_user_text([plain]) == row["content"]
+
+
+def test_user_spans_survive_the_request_model():
+    row = _merged(QUESTION, RESULTS, own={0})
+    back = _protocol_messages_to_dicts(
+        ChatRequest(model="m", messages=[row]).messages)
+    assert back[0]["user_spans"] == [[0, len(QUESTION)]]
+    assert _last_user_text(back) == QUESTION
+    assert "user_spans" not in Message(role="assistant", content="x").model_dump()
+
+
+def test_a_row_with_no_user_words_is_skipped_like_a_marked_one():
+    rows = [{"role": "user", "content": QUESTION},
+            {"role": "assistant", "content": "a"},
+            _merged(KB, RESULTS, own=set())]
+    assert rows[2]["user_spans"] == []
+    assert _last_user_text(rows) == QUESTION
+    assert _recall_query(rows) == QUESTION
+
+
+def test_malformed_spans_are_clamped_or_skipped():
+    from localm.inference.protocol import user_written_text
+    row = {"role": "user", "content": "abcdef",
+           "user_spans": [[4, 99], [-5, 2], [3, 3], ["x", 1], [2]]}
+    assert user_written_text(row) == "ab\n\nef"
+
+
+def test_route_audits_only_the_user_s_part_of_a_merged_row(isolated_home, monkeypatch):
+    import localm.inference.http_server as hs
+    recorded = []
+    real = hs._audit_exchange
+
+    def _spy(audit, transcript, messages, reply, outcome="success"):
+        spy = types.SimpleNamespace(user=recorded.append, llm=lambda *_: None,
+                                    notice=lambda *_: None)
+        real(spy, None, messages, reply, outcome=outcome)
+
+    monkeypatch.setattr(hs, "_audit_exchange", _spy)
+    app = hs.create_app(_engine({}))
+    row = _merged(KB, QUESTION, RESULTS, own={1})
+    with TestClient(app) as c:
+        assert c.post("/v1/chat/completions", json={
+            "model": "m", "stream": False, "messages": [row]}).status_code == 200
+    assert recorded == [QUESTION]
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

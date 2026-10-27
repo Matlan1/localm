@@ -114,9 +114,10 @@ def register(app: FastAPI, ctx) -> None:
         ``path``, ``report_markdown`` (the saved text) and ``report_sha256``
         (its digest). Sending is ``POST /api/bug-report/send`` with that
         filename and digest. A body carrying ``upload`` is refused with 400
-        before anything is saved. The ``path`` field is scrubbed
-        (``http_server.path_formatter``) for a caller other than the local
-        operator.
+        before anything is saved. For a caller other than the local operator
+        the ``path`` field and the saved report text are scrubbed
+        (``http_server.path_formatter``): the report is saved scrubbed, so
+        ``report_markdown`` and what a later send uploads hold no host path.
         Owner / config-write scoped and same-origin gated like the other management
         routes (a report can carry local diagnostics)."""
         from localm import bugreport
@@ -140,12 +141,14 @@ def register(app: FastAPI, ctx) -> None:
         # taken, coerced to strings and size-capped. Rendered as plain text in a
         # markdown code fence, never executed.
         client = _sanitize_client_context(body.get("client"))
+        show = _hs.path_formatter(request)
         # Off the event loop and bounded: a synchronous log read, scrub and file write
         # on the loop stalls every concurrent request. See _BUG_REPORT_SAVE_TIMEOUT_S.
         def _save():
             return bugreport.save_user_report(
                 description, what_i_expected=what_i_expected, what_happened=what_happened,
-                include_log=bool(body.get("include_log")), client=client)
+                include_log=bool(body.get("include_log")), client=client,
+                scrub=None if show is str else show)
 
         try:
             path = await run_in_threadpool_bounded(
@@ -156,7 +159,7 @@ def register(app: FastAPI, ctx) -> None:
             # A failed save must not report success.
             raise HTTPException(500, "Could not save the bug report to disk.")
         result = {"saved": True, "filename": path.name,
-                  "path": _hs.path_formatter(request)(path),
+                  "path": show(path),
                   "maintainer": bugreport.MAINTAINER_EMAIL}
         # The saved text for review and download, with the digest the send route
         # checks. When it cannot be read back, neither is returned: the file is on

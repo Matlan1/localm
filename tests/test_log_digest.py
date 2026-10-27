@@ -594,3 +594,60 @@ class TestPastedLogLinesDoNotResync:
         digest = ld.build_digest(text, start_tainted=True)
         assert "chat text continues" not in digest
         assert "GET /api/stats" in digest
+
+
+def _epoch(stamp: str) -> float:
+    from datetime import datetime
+    return datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S,%f").timestamp()
+
+
+class TestTaintedStartFloor:
+    """A truncated tail that starts inside a content record gets the latest
+    header timestamp of the cut-off part as its floor, so log lines pasted into
+    the content (older than the content record) cannot end the withholding."""
+
+    def _tail(self):
+        pasted = "\n".join(
+            f"2026-07-13 09:00:{i:02d},000 DEBUG   localm: " + _PASTED.format(n=100 + i)
+            for i in range(4))
+        real = "\n".join(_polling_line(f"2026-07-13 15:24:{51 + i:02d}", 7, 0.2)
+                         for i in range(4))
+        return "chat text continues\n" + pasted + "\nSECRET-CHAT-TEXT\n" + real + "\n"
+
+    def test_pasted_lines_do_not_resync_a_tainted_start_with_a_floor(self):
+        digest = ld.build_digest(self._tail(), start_tainted=True,
+                                 start_floor=_epoch("2026-07-13 15:24:50,000"))
+        assert "SECRET-CHAT-TEXT" not in digest
+        assert "chat text continues" not in digest
+        assert "prefill starting" not in digest
+        assert "GET /api/stats" in digest, "real traffic after the content still resyncs"
+
+    def test_without_a_floor_the_pasted_lines_resync(self):
+        digest = ld.build_digest(self._tail(), start_tainted=True)
+        assert "SECRET-CHAT-TEXT" in digest
+
+    def test_latest_header_epoch_takes_the_latest_header_only(self):
+        text = ("2026-07-13 15:24:50,000 DEBUG   localm: memory consolidate prompt:\n"
+                "2026-07-13 09:00:00,000 DEBUG   localm: pasted\n"
+                "2026-07-13 99:99:99,000 DEBUG   localm: unparseable\n"
+                "2026-07-14 00:00:00,000 not a header\n"
+                "plain chat text\n")
+        assert ld.latest_header_epoch(text) == _epoch("2026-07-13 15:24:50,000")
+        assert ld.latest_header_epoch("no header here\n") is None
+        assert ld.latest_header_epoch("") is None
+
+    def test_a_truncated_run_log_gets_the_floor_of_its_cut_off_part(self, tmp_path, monkeypatch):
+        import localm.bugreport as br
+        from localm.bugreport import logs
+        head = ("2026-07-13 15:24:49,000 INFO    localm: server started\n"
+                "2026-07-13 15:24:50,000 DEBUG   localm: memory consolidate prompt:\n"
+                "chat line before the cut\n")
+        tail = self._tail()
+        log = tmp_path / "localm_20260713_152449_4242.log"
+        log.write_text(head + tail, encoding="utf-8")
+        monkeypatch.setattr(br, "_LOG_TAIL_READ_BYTES", len(tail))
+        monkeypatch.setattr(logs, "_find_run_log", lambda home, pid: log)
+        digest, reason = logs._recent_log_tail_result(pid=4242)
+        assert reason == ""
+        assert "SECRET-CHAT-TEXT" not in digest
+        assert "GET /api/stats" in digest

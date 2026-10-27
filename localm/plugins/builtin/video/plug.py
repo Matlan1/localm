@@ -152,6 +152,10 @@ async def video(req: VideoRequest, request: Request):
                 job.push({"type": "line", "text": refused})
                 return False
             s = apply_choice(s, native_choice)
+            refused = native.lora_refusal(s, list(native_loras or []))
+            if refused:
+                job.push({"type": "line", "text": refused})
+                return False
             if req.flow_shift is not None:
                 s = dict(s)
                 s["native"] = dict(s.get("native") or {}, flow_shift=req.flow_shift)

@@ -19,7 +19,7 @@ from localm.media import native_models as nm
 from localm.media.sdcpp import families, pairing
 from localm.plugins.builtin.image.backends import native as image_native
 from tests.test_sdcpp_families import (  # noqa: F401
-    FLUX_DEV, QWEN_IMAGE, SD1_UNET, SDXL_UNET, _finish, _register, flux_set, media_app, runner,
+    FLUX_DEV, QWEN_IMAGE, SD1_UNET, SDXL_UNET, Z_IMAGE, _finish, _register, flux_set, media_app, runner,
     write_gguf, write_safetensors,
 )
 
@@ -48,6 +48,9 @@ SD1_CKPT = {P + "input_blocks.0.0.weight": (320, 4, 3, 3),
 SD1_INPAINT_CKPT = dict(SD1_CKPT, **{P + "input_blocks.0.0.weight": (320, 9, 3, 3)})
 SD1_PIX2PIX = dict(SD1_UNET, **{P + "input_blocks.0.0.weight": (320, 8, 3, 3)})
 FLUX_FILL = dict(FLUX_DEV, **{"img_in.weight": (3072, 384)})
+FLUX_CONTROLS = dict(FLUX_DEV, **{"img_in.weight": (3072, 128)})
+FLEX_2 = dict(FLUX_DEV, **{"img_in.weight": (3072, 196)})
+Z_IMAGE_L2P = dict(Z_IMAGE, **{"local_decoder.out_conv.weight": (3, 64, 3, 3)})
 QWEN_EDIT_2511 = dict(QWEN_IMAGE, **{"transformer_blocks.0.__index_timestep_zero__": (1,)})
 
 
@@ -129,6 +132,14 @@ def test_other_small_files_are_not_embeddings(tmp_path, shapes):
                        "inpaint": False, "edit": False}),
     (FLUX_FILL, "st", {"references": False, "controlnet": False, "embeddings": False,
                        "inpaint": True, "edit": False}),
+    (FLUX_CONTROLS, "st", {"references": False, "controlnet": False, "embeddings": False,
+                           "inpaint": False, "edit": False}),
+    (FLEX_2, "gguf", {"references": False, "controlnet": False, "embeddings": False,
+                      "inpaint": False, "edit": False}),
+    (Z_IMAGE, "st", {"references": True, "controlnet": False, "embeddings": False,
+                     "inpaint": False, "edit": False}),
+    (Z_IMAGE_L2P, "st", {"references": False, "controlnet": False, "embeddings": False,
+                         "inpaint": False, "edit": False}),
     (QWEN_IMAGE, "st", {"references": True, "controlnet": False, "embeddings": False,
                         "inpaint": False, "edit": False}),
     (QWEN_EDIT_2511, "st", {"references": True, "controlnet": False, "embeddings": False,
@@ -242,6 +253,8 @@ def addon_set(flux_set, tmp_path):  # noqa: F811
         "sd15": (write_safetensors(d / "sd15.safetensors", SD1_CKPT), "diffusion-unet"),
         "sd15-inpaint": (write_safetensors(d / "sd15_inpaint.safetensors", SD1_INPAINT_CKPT),
                          "diffusion-unet"),
+        "flux-canny": (write_gguf(d / "flux1-canny-dev-q8_0.gguf", FLUX_CONTROLS, "flux"),
+                       "diffusion-unet"),
         "canny15": (write_safetensors(d / "control_v11p_sd15_canny.safetensors", CN_SD1),
                     "controlnet"),
         "canny-xl": (write_safetensors(d / "canny_xl.safetensors", CN_SDXL), "controlnet"),
@@ -459,9 +472,6 @@ class _FakeLib:
     def sd_ctx_supports_video_generation(self, ctx):
         return False
 
-    def sd_ctx_supports_ref_image_conditioning(self, ctx):
-        return True
-
     def sd_sample_method_name(self, v):
         return b"euler"
 
@@ -478,7 +488,7 @@ def test_the_worker_load_passes_the_controlnet_and_embeddings(monkeypatch):
         "model_path": "D:/m/sd15.safetensors", "control_net_path": "D:/m/cn.safetensors",
         "embeddings": (("EasyNegative", "D:/m/EasyNegative.safetensors"),
                        ("Other", "D:/m/o.safetensors"))}})
-    assert out["image"] is True and out["ref_images"] is True
+    assert out["image"] is True and "ref_images" not in out
     assert lib.seen == {"control_net_path": b"D:/m/cn.safetensors",
                         "model_path": b"D:/m/sd15.safetensors",
                         "embeddings": [(b"EasyNegative", b"D:/m/EasyNegative.safetensors"),
@@ -713,57 +723,15 @@ def test_qwen_reference_images_without_a_vision_encoder_say_so(qwen_set, runner,
     assert runner.loads[-1]["llm_vision_path"].endswith("mm.gguf")
 
 
-def test_the_worker_load_reports_unknown_reference_support_on_an_older_library(monkeypatch):
-    from localm.media.sdcpp import _child
-
-    class _Old(_FakeLib):
-        pass
-    del _FakeLib.sd_ctx_supports_ref_image_conditioning
-    try:
-        lib = _Old()
-        monkeypatch.setattr(_child._State, "lib", lib)
-        monkeypatch.setattr(_child._State, "ctx", None)
-        out = _child._do_load({"runtime_dir": "x", "ctx": {"model_path": "D:/m/a.safetensors"}})
-        assert out["ref_images"] is None
-    finally:
-        _FakeLib.sd_ctx_supports_ref_image_conditioning = lambda self, ctx: True
-        monkeypatch.setattr(_child._State, "ctx", None)
-
-
-def test_binding_declares_the_reference_query_only_when_the_library_has_it():
-    from localm.media.sdcpp import _binding as b
-
-    class _Fn:
-        restype = argtypes = None
-
-    class _Lib:
-        def __init__(self, has_ref_query):
-            self.has = has_ref_query
-
-        def __getattr__(self, name):
-            if name == "sd_ctx_supports_ref_image_conditioning" and not self.has:
-                raise AttributeError(name)
-            fn = _Fn()
-            object.__setattr__(self, name, fn)
-            return fn
-    old, new = _Lib(False), _Lib(True)
-    b._declare(old)
-    b._declare(new)
-    assert "sd_ctx_supports_ref_image_conditioning" not in vars(old)
-    assert new.sd_ctx_supports_ref_image_conditioning.restype is b.c_bool
-
-
-def test_a_loaded_model_that_takes_no_reference_images_is_refused_after_the_load(
-        addon_set, runner, tmp_path, monkeypatch):  # noqa: F811
-    real = runner.ensure_loaded
-
-    def ensure_loaded(key, runtime_dir, ctx, **kw):
-        return dict(real(key, runtime_dir, ctx, **kw), ref_images=False, version="FLUX Fill")
-    monkeypatch.setattr(runner, "ensure_loaded", ensure_loaded)
-    ok, msg, _, _ = _gen(runner, tmp_path, {"model": "fluxunchained"}, width=64, height=64,
+def test_a_flux_structural_control_model_is_refused_reference_images_before_the_load(
+        addon_set, runner, tmp_path):  # noqa: F811
+    ok, msg, _, _ = _gen(runner, tmp_path, {"model": "flux-canny"}, width=64, height=64,
                          ref_images=[_png()])
-    assert not ok and "does not take reference images" in msg and "FLUX Fill" in msg
-    assert runner.generates == []
+    assert not ok and "does not take reference images" in msg
+    assert runner.loads == [] and runner.generates == []
+    ok, msg, _, _ = _gen(runner, tmp_path, {"model": "flux-canny"}, width=64, height=64)
+    assert ok, msg
+
 
 
 def test_clip_only_models_get_non_ascii_letters_lowercased_like_clip(addon_set, runner,  # noqa: F811
