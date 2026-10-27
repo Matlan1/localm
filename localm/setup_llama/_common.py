@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Console output and the stdin helper shared by ``localm setup-llama``.
+"""Console output and the stdin helpers shared by ``localm setup-llama``.
 """
 
 from __future__ import annotations
 
+import json
+import os
 import sys
 
 from localm.console import SafeConsole as Console
@@ -57,3 +59,56 @@ def _flush_stdin() -> None:
             termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
     except Exception:
         pass
+
+
+ASK_ENV = "LOCALM_SETUP_ASK"
+ASK_PREFIX = "@@localm-ask "
+
+
+def _asks_over_stdio() -> bool:
+    """Whether questions go over stdio: ``LOCALM_SETUP_ASK=stdio``, set by the
+    graphical installer, which shows each question in its window."""
+    return os.environ.get(ASK_ENV, "").strip().lower() == "stdio"
+
+
+def _interactive() -> bool:
+    """Whether a question can be answered: stdin is a terminal, or questions go
+    over stdio."""
+    if _asks_over_stdio():
+        return True
+    return bool(sys.stdin) and sys.stdin.isatty()
+
+
+def _ask_stdio(question: dict) -> str:
+    """Write *question* as one ``ASK_PREFIX`` + JSON line to stdout and return
+    the answer line read from stdin, stripped; empty at end of input."""
+    sys.stdout.write(ASK_PREFIX + json.dumps(question) + "\n")
+    sys.stdout.flush()
+    line = sys.stdin.readline() if sys.stdin else ""
+    return (line or "").strip()
+
+
+def _confirm(text: str, default: bool) -> bool:
+    """A yes/no question: in the window over stdio, else ``click.confirm``.
+    Over stdio, an empty or unrecognised answer is *default*."""
+    if not _asks_over_stdio():
+        import click
+        return click.confirm(text, default=default)
+    answer = _ask_stdio({"kind": "confirm", "text": text.strip(),
+                         "default": "y" if default else "n"}).lower()
+    if answer[:1] in ("y", "n"):
+        return answer[:1] == "y"
+    return default
+
+
+def _choose(text: str, choices: list, default: str) -> str:
+    """A pick from *choices*, ``(answer, label)`` pairs: in the window over
+    stdio, else ``click.prompt``. Returns an answer from *choices*; over stdio
+    an empty or unknown answer is *default*."""
+    keys = [k for k, _ in choices]
+    if not _asks_over_stdio():
+        import click
+        return click.prompt(text, type=click.Choice(keys), default=default)
+    answer = _ask_stdio({"kind": "choose", "text": text.strip(),
+                         "choices": [list(c) for c in choices], "default": default})
+    return answer if answer in keys else default

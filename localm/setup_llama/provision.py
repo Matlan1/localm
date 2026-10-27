@@ -475,7 +475,7 @@ def _universal_backend_failed(chosen: str, with_cudart: bool, assume_yes: bool,
     # backend to fall back to. Name the missing piece, offer a retry once
     # the user has had a chance to fix it, and only then give up.
     missing = _name_missing_shared_lib(detail)
-    interactive = (not assume_yes) and sys.stdin.isatty()
+    interactive = (not assume_yes) and _sl._interactive()
     if interactive:
         while True:
             console.print(f"[red]You picked '{chosen}' and it was provisioned, "
@@ -485,7 +485,7 @@ def _universal_backend_failed(chosen: str, with_cudart: bool, assume_yes: bool,
             else:
                 console.print(f"[yellow]Cause:[/yellow] {detail}")
             _sl._flush_stdin()
-            if not click.confirm(
+            if not _sl._confirm(
                     f"  Retry the same '{chosen}' build now (after fixing the "
                     "cause above)?", default=bool(missing)):
                 break
@@ -538,11 +538,11 @@ def _fall_back_to_universal(chosen: str, detail: str, assume_yes: bool, try_fn,
     attempts = [(chosen, why)]
     console.print(f"[yellow]'{chosen}' backend provisioned but failed to load: {why}[/yellow]")
     console.print(f"[dim]To retry later: localm setup-llama --backend {chosen} --force[/dim]")
-    interactive = (not assume_yes) and sys.stdin.isatty()
+    interactive = (not assume_yes) and _sl._interactive()
     if interactive:
         _sl._flush_stdin()
         kept = f"your '{chosen}' pick is kept, not changed; " if explicit else ""
-        if not click.confirm(
+        if not _sl._confirm(
                 f"  Install the universal Vulkan build now so you have a working "
                 f"setup? ({kept}decline to stop and fix it yourself)", default=True):
             stop = f"Keeping your '{chosen}' choice and stopping." if explicit else "Stopping."

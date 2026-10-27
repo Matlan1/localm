@@ -72,6 +72,7 @@ units = [
     "auth", "audit", "tls", "http_ssl", "netpolicy", "netpin", "netname", "portmux",
     "peer_routing", "selfclient", "instances", "listeners", "gpu_usage", "hwdetect",
     "cpu_backend_select", "_torch_gpu_probe", "vram", "appface", "install_manifest", "uv_tool",
+    "setup_spec",
     "globalcmd", "winconsole", "settings_schema", "model_source_credentials", "model_meta", "rag",
     "bugreport", "_log_digest",
 ]
