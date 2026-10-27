@@ -664,7 +664,8 @@ const _CODE_SPAN = /(```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)|`[^`\n]+`)/;
 const _DISPLAY_LINE = String.raw`(?![ \t]*$)(?![ \t]*(?:[-*]|\d+[.)]|#{1,6})[ \t])[^\n]{0,2000}\n`;
 const _MATH_SPAN = new RegExp([
   String.raw`(?<![\\($\w*~"'\[])\$\$(?![\s$])[^\n]{0,500}?(?<![\s$])\$\$(?!\$)`,
-  String.raw`(?<=^[ \t]*)\$\$(?:[ \t]*\n|(?=[^\s$]))(?:${_DISPLAY_LINE}){1,40}?(?:[ \t]*|[^\n]{0,2000}[^\s$])\$\$[ \t]*$`,
+  // The line-start check follows the literal $$ so it runs only at candidate openers. See "protectMath stays linear on long runs of spaces and tabs".
+  String.raw`\$\$(?<=^[ \t]*\$\$)(?:[ \t]*\n|(?=[^\s$]))(?:${_DISPLAY_LINE}){1,40}?(?:[ \t]*|[^\n]{0,2000}[^\s$])\$\$[ \t]*$`,
   String.raw`\\\[[\s\S]+?\\\]`,
   String.raw`\\\([\s\S]+?\\\)`,
   String.raw`(?<![\\$])\$(?![\s\d)\]},.;:!?])[^$\n]*[^$\s\n(\[{]\$(?!\d)`,
