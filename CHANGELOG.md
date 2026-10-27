@@ -30,6 +30,17 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **The "vision projector on the CPU" warning no longer appears on a machine without a GPU.** A runtime with no GPU device could still report that it can offload to the GPU, which made the warning show on CPU-only machines; localm now looks at the devices the runtime actually has.
 - **Adding a folder again with `--store move` or `--store copy` registers a Hugging Face model folder inside it right away, and a model you renamed counts as already registered.** A moved folder keeps its registry name and now points at its new location.
 - **A model folder that fails to copy or move no longer stops the import or blocks the retry.** If a Hugging Face folder cannot be copied or moved (a full disk, a locked file), localm reports it, removes the half-copied folder, and carries on with the rest. A copied folder is now checked against the original before it is registered.
+- **The graphical setup installs what the console setup installs.** It no longer offers the ExLlama plugin, which the console setup withholds; it keeps an existing `.venv` unless you choose to replace it; it asks for the folder of your own llama.cpp build and copies it in; it retries with uv's own certificates after a certificate error and recovers a locked `.venv` on Windows the way `setup.bat` does; and the questions `localm setup-llama` asks (for example whether to fall back to Vulkan) are shown in the window instead of being answered for you.
+- **The graphical setup asks Portable or Shared once, before the window opens, with the console's choices.** Shared now installs uv at its normal per-user location when none is found, a uv already inside the folder is no longer used for a Shared install, and the window shows the answer instead of asking again.
+- **On Linux, `setup.sh` recommends the same backend as `setup.bat` and the graphical setup.** A GPU its own quick check missed (for example an AMD card without ROCm tools) no longer makes CPU the default, and the GPU question is asked whenever a GPU backend is recommended.
+- **`setup.bat` offers the ROCm/HIP backend on Windows x64**, like the graphical setup.
+- **A failed llama.cpp runtime download no longer ends `setup.bat` or the graphical setup.** Every setup asks whether to continue without a runtime (the default), and prints the exact command to retry.
+- **One Linux menu entry.** `setup.sh` and the graphical setup both write `localm.desktop` and both offer the launcher, straight to the GUI (the LocaLM binary), or no entry; an older `LocaLM.desktop` the graphical setup made for the same folder is replaced.
+
+### Changed
+
+- **Every setup preselects the coder, rag, web and tts plugins.** Pressing Enter at the console plugin question (or Next in the window) installs that set; type `none` to skip. `setup.sh --yes` installs it too. The graphical setup saves your plugin-dependencies answer as a setting, like the console.
+- **The backend menu is the same in every setup**: one order, numbered from 1 with the recommendation first, listing only the backends with a build for your computer.
 
 ## [0.3.2rc1] - 2026-10-27
 
