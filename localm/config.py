@@ -2194,6 +2194,21 @@ def save_registry(reg: dict) -> None:
         _atomic_write_json(REGISTRY_FILE, reg)
 
 
+def registry_lock_busy(wait: float = 0.5) -> bool:
+    """True when another localm process holds the registry's cross-process lock
+    for longer than *wait* seconds. Takes and at once releases the lock and
+    writes nothing. A lock that cannot be attempted at all (an OSError other
+    than contention) reads as not busy, so the caller's own registry access
+    reports the real error."""
+    try:
+        with _cross_process_lock(REGISTRY_FILE, timeout=wait):
+            return False
+    except ConfigLockTimeout:
+        return True
+    except OSError:
+        return False
+
+
 def update_registry(mutator: Callable[[dict], None]) -> dict:
     """Atomically read-modify-write the registry.
 

@@ -568,3 +568,73 @@ class TestExecutorPoolReclaim:
                 pool.shutdown(wait=False)
 
         asyncio.run(scenario())
+
+
+# --------------------------------------------------------------------------- #
+#  The caller's native-console pause reaches the child that generates          #
+# --------------------------------------------------------------------------- #
+
+class _PauseSpyWorker:
+    """A worker whose chat_stream records the pause state and the payload it got."""
+
+    last_finish_reason = "stop"
+    grammar_unsupported_this_call = False
+    chatml_fallback_reason = None
+    mtp_status = None
+    mtp_active_this_call = False
+    mtp_call_status = None
+    mtp_drafted = mtp_accepted = mtp_steps = mtp_paused_steps = mtp_skipped = 0
+    spec_report = None
+
+    def __init__(self):
+        self.paused = []
+        self.payloads = []
+
+    def chat_stream(self, **payload):
+        from localm import debuglog
+        self.paused.append(debuglog.native_console_is_paused())
+        self.payloads.append(payload)
+        yield "tok"
+
+
+def _serve(payload):
+    import threading
+    worker = _PauseSpyWorker()
+    sent = []
+    runner_mod._serve_stream(worker, payload, sent.append, threading.Event())
+    return worker, sent
+
+
+def test_a_forwarded_pause_is_applied_in_the_child_for_that_stream_only():
+    from localm import debuglog
+
+    worker, sent = _serve({"messages": [], "native_console_paused": True})
+
+    assert worker.paused == [True]
+    assert "native_console_paused" not in worker.payloads[0]
+    assert ("chunk", "tok") in sent
+    assert not debuglog.native_console_is_paused()
+
+
+def test_a_stream_without_the_forwarded_pause_runs_unpaused():
+    worker, _ = _serve({"messages": []})
+
+    assert worker.paused == [False]
+
+
+def test_the_parent_forwards_its_pause_with_the_request():
+    from localm import debuglog
+
+    plain = runner_mod._forward_native_console_pause({"messages": []})
+    with debuglog.native_console_paused():
+        paused = runner_mod._forward_native_console_pause({"messages": []})
+
+    assert "native_console_paused" not in plain
+    assert paused == {"messages": [], "native_console_paused": True}
+
+
+def test_both_stream_request_paths_forward_the_pause():
+    import inspect
+
+    assert "_forward_native_console_pause(" in inspect.getsource(ModelRunner.chat_stream)
+    assert "_forward_native_console_pause(" in inspect.getsource(ModelRunner._chat_stream_mux)

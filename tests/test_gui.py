@@ -1890,6 +1890,19 @@ class TestModelEndpoints:
         # null, so an older client sees the exact pre-existing payload shape.
         assert "resumable" not in data
 
+    def test_models_list_reports_the_pulled_revision(self, gui_app):
+        app, _ = gui_app
+        registry = {
+            "pinned": {"path": "Z:/nonexistent/a.gguf", "source": "hf:owner/repo",
+                       "revision": "refs/pr/3"},
+            "plain": {"path": "Z:/nonexistent/b.gguf", "source": "hf:owner/repo"},
+        }
+        with patch("localm.config.load_registry", return_value=registry):
+            with TestClient(app) as client:
+                rows = {m["name"]: m for m in client.get("/api/models").json()["models"]}
+        assert rows["pinned"]["revision"] == "refs/pr/3"
+        assert "revision" not in rows["plain"]
+
     @staticmethod
     def _app_with_no_active_model():
         """A GUI app whose active_model() reports nothing resident - the state an

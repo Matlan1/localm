@@ -7,7 +7,7 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { iconEl } from "./icons.js";
-import { COMPACT_KEEP, addMessageRow, audioPart, chat, chatBusy, chatParams, compactConversation, currentConv, isToolEvent, lsSetScoped, maybeCompactConversation, mountStatusIndicator, msgAudioClips, msgImages, msgText, newConversation, newToolEvent, noteLabel, removeStatusIndicator, renderAttachChips, renderChat, renderConvList, saveConversations, scopedKeyPrivate, setConversationPin, stripUserAudio, stripUserImages, syncPinModelToggle, updateStatusIndicator, wireParts } from "./chat.js";
+import { COMPACT_KEEP, addMessageRow, audioPart, chat, chatBusy, chatParams, compactConversation, currentConv, elideImagesForWire, isToolEvent, latestTurnIsAudioOnly, lsSetScoped, maybeCompactConversation, mountStatusIndicator, msgAudioClips, msgImages, msgText, newConversation, newToolEvent, noteLabel, refreshWebPolicy, removeStatusIndicator, renderAttachChips, renderChat, renderConvList, saveConversations, scopedKeyPrivate, setConversationPin, stripUserAudio, stripUserImages, syncPinModelToggle, updateStatusIndicator, wireParts } from "./chat.js";
 import { $, CHAT_SURFACE_HEADERS, GIB, TOOL_CALL_DELIM, authHeaders, autoGrow, confirmDanger, el, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setPreviewAllowed, splitThink, streamJob, stripThink, toast } from "./helpers.js";
 import { t } from "./i18n.js";
 import { modelCache, modelSelect, reloadModel, toastLoadResult } from "./models-sidebar.js";
@@ -2517,6 +2517,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   // `repaired` whether the pending-action repair ran, and `final` that the next
   // completion is the tool-free last one of this send.
   if (!web) {
+    if ($("p-web").checked) await refreshWebPolicy();
     web = { seen: new Set(), found: new Set(), lookups: 0, stale: 0,
             formatRepairs: 0, ask: null, repaired: false, final: false,
             evidence: false, max: webMaxLookups() };
@@ -2524,7 +2525,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   const contextRouting = await maybeCompactConversation(conv, signal);
   if (signal.aborted) return { stopped: true, liveRow: null };
   const params = chatParams();
-  const webEnabled = $("p-web").checked;
+  const webEnabled = $("p-web").checked && !chat.netOff;
   const messages = [];
   // Per-chat System prompt (the drawer) OVERRIDES; a blank drawer inherits the
   // Settings "Default system prompt" (chat.systemDefault, from /v1/config).
@@ -2810,6 +2811,17 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
         renderMarkdown(liveBody, "");
         mountStatusIndicator(liveBody, t("chat.status.processing"));
         await postAndRead(body);
+      } else if (e.status === 400 && e.refusal === "image" && sentAudio && sentImage &&
+                 !full.trim() && latestTurnIsAudioOnly(conv)) {
+        // The clip just sent went to a model that hears audio but cannot read the
+        // images of earlier turns: answer the clip with those images left out of
+        // this request only. The conversation keeps them.
+        elideImagesForWire(messages);
+        finishReason = null;
+        renderMarkdown(liveBody, "");
+        mountStatusIndicator(liveBody, t("chat.status.encodingAudio"));
+        toast(t("chat.audio.imagesSkipped"));
+        await postAndRead(body);
       } else {
         throw e;
       }
@@ -2837,6 +2849,25 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
           ? t("chat.audio.rejected", { detail: e.detail || e.message })
           : "Chat request failed: " + e.message, true);
       }
+    } else if (sentAudio && e.status === 501 && e.refusal !== "image" && !full.trim()) {
+      // The server cannot read this clip (no decoder for its format): drop the
+      // clip just sent so later turns are not refused for it.
+      audioRejected = true;
+      const n = stripUserAudio(conv, true);
+      saveConversations(conv);
+      toast(n
+        ? t("chat.audio.rejected", { detail: e.detail || e.message })
+        : "Chat request failed: " + e.message, true);
+    } else if (sentImage && (e.status === 413 || e.status === 501) && e.refusal === "image" && !full.trim()) {
+      // The server could not use the image just sent (unreadable, too large, a
+      // format it does not decode, over a request limit): drop that image so
+      // later turns are not refused for it. Earlier turns' images stay.
+      visionRejected = true;
+      const n = stripUserImages(conv, true, "[Image removed: the server did not accept it.]");
+      saveConversations(conv);
+      toast(n
+        ? t("chat.image.rejectedServer", { detail: e.detail || e.message })
+        : "Chat request failed: " + e.message, true);
     } else if (sentImage && e.status === 400 && e.refusal === "image" && !full.trim()) {
       // VIS-1: a text-only model rejected the image. Drop it from history so the
       // next turn is text-only and the chat stays usable, instead of re-sending
