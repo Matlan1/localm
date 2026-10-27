@@ -118,6 +118,19 @@ def raw_entry(home, name, path):
     reg_file.write_text(json.dumps(reg))
 
 
+def _spy_is_dir(monkeypatch):
+    """Record every path ``Path.is_dir`` is asked about; returns the list."""
+    from pathlib import Path
+    seen: list[str] = []
+    real_is_dir = Path.is_dir
+
+    def spy(self, *a, **kw):
+        seen.append(str(self))
+        return real_is_dir(self, *a, **kw)
+    monkeypatch.setattr(Path, "is_dir", spy)
+    return seen
+
+
 @pytest.fixture
 def client(home):
     from localm.inference.http_server import create_app
@@ -295,6 +308,18 @@ class TestABrokenEntryIsRefusedByName:
         assert "network or device path" in r.json()["detail"]
         assert configured == [] and worker.instances == []
 
+    def test_a_dotdot_path_is_refused_without_being_stat_ed(
+            self, client, worker, configured, home, tmp_path, monkeypatch):
+        real = register(tmp_path, "nomic-real")
+        dotdot = str(tmp_path / "sub" / ".." / real.name)
+        raw_entry(home, "nomic-dotdot", dotdot)
+        stat_ed = _spy_is_dir(monkeypatch)
+        r = embed(client, "nomic-dotdot")
+        assert r.status_code == 422, r.text
+        assert "nomic-dotdot" in r.json()["detail"]
+        assert not [p for p in stat_ed if ".." in p], stat_ed
+        assert configured == [] and worker.instances == []
+
     def test_ollama_embed_reports_the_same_refusal(self, client, worker, configured, home, tmp_path):
         raw_entry(home, "nomic-gone", str(tmp_path / "nowhere.gguf"))
         r = client.post("/api/embed", json={"model": "nomic-gone", "input": "hi"})
@@ -393,6 +418,18 @@ class TestMcpEmbedTool:
         result = self._call(server, "nomic-gone")
         assert result["isError"] is True
         assert "nomic-gone" in result["content"][0]["text"]
+        assert configured == [] and worker.instances == []
+
+    def test_a_dotdot_path_is_refused_without_being_stat_ed(
+            self, home, worker, configured, tmp_path, monkeypatch):
+        real = register(tmp_path, "nomic-real")
+        raw_entry(home, "nomic-dotdot", str(tmp_path / "sub" / ".." / real.name))
+        stat_ed = _spy_is_dir(monkeypatch)
+        server, _ = self._mcp()
+        result = self._call(server, "nomic-dotdot")
+        assert result["isError"] is True
+        assert "nomic-dotdot" in result["content"][0]["text"]
+        assert not [p for p in stat_ed if ".." in p], stat_ed
         assert configured == [] and worker.instances == []
 
     def test_a_worker_failure_is_a_tool_error(self, home, worker, configured, tmp_path, monkeypatch):

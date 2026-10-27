@@ -232,9 +232,9 @@ def _field_size(decl: str) -> int:
     return 8
 
 
-def _parse_fields(body: str):
-    """[(name, size)] for each ';'-terminated field declaration in *body*."""
-    fields = []
+def _parse_field_decls(body: str):
+    """[(name, type text)] for each ';'-terminated field declaration in *body*."""
+    decls = []
     for raw in _strip_comments(body).split(";"):
         decl = raw.strip()
         if not decl:
@@ -243,9 +243,13 @@ def _parse_fields(body: str):
         if not names:
             continue
         name = names[-1]
-        type_part = decl[: decl.rfind(name)]
-        fields.append((name, _field_size(type_part)))
-    return fields
+        decls.append((name, decl[: decl.rfind(name)]))
+    return decls
+
+
+def _parse_fields(body: str):
+    """[(name, size)] for each ';'-terminated field declaration in *body*."""
+    return [(name, _field_size(type_part)) for name, type_part in _parse_field_decls(body)]
 
 
 def _layout(fields):
@@ -638,10 +642,11 @@ def _localm_speech_binding(interface: str):
     return structs, signatures
 
 
-def _check_speech_struct(name: str, text: str, cls) -> int:
-    """Every upstream field of struct *name* at localm's offset and size, and
-    the same total size: localm allocates these structs, so a trailing field
-    is a failure too."""
+def _check_speech_struct(name: str, text: str, cls, structs) -> int:
+    """Every upstream field of struct *name* at localm's offset and size and of
+    a ctypes type that can stand for its C type (see :func:`_ctype_mismatch`;
+    an enum is an int), and the same total size: localm allocates these
+    structs, so a trailing field is a failure too."""
     import ctypes
 
     body = _extract_block_body(text, "struct", name)
@@ -657,12 +662,23 @@ def _check_speech_struct(name: str, text: str, cls) -> int:
               f"{[f[0] for f in localm]}")
         problems += 1
     lm = {f: (o, s) for f, o, s in localm}
+    decls = dict(_parse_field_decls(body))
+    bound_types = dict(cls._fields_)
     for fname, off, size in upstream:
         if fname not in lm:
             continue
         if lm[fname] != (off, size):
             print(f"  FAIL  {fname}: upstream offset {off} size {size} != localm "
                   f"offset {lm[fname][0]} size {lm[fname][1]}")
+            problems += 1
+            continue
+        base, stars = _c_type(decls[fname], named=False)
+        if re.search(r"\benum\b", decls[fname]):
+            base = "int"
+        why = _ctype_mismatch(base, stars, bound_types[fname], structs)
+        if why:
+            print(f"  FAIL  {name}.{fname}: upstream {decls[fname].strip()!r} is bound "
+                  f"wrongly: {why}")
             problems += 1
         else:
             print(f"  ok    {fname:30s} offset {off:3d} size {size}")
@@ -714,7 +730,7 @@ def check_speech(mtmd_text: str, label: str, seen: set) -> int:
     structs, signatures = _localm_speech_binding(interface)
     problems = 0
     for cname, cls in structs.items():
-        problems += _check_speech_struct(cname, text, cls)
+        problems += _check_speech_struct(cname, text, cls, structs)
     print("\n=== speech generation prototypes ===")
     for fname, (restype, argtypes) in signatures.items():
         problems += _check_speech_function(fname, text, restype, argtypes, structs)
