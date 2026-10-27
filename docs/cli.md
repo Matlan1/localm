@@ -683,10 +683,14 @@ Reads then come from disk until the pages are cached, which is why the first
 tokens are slower. A model split between GPU and CPU, a load on a machine with
 no GPU, and a load where available RAM cannot be read use llama.cpp's own
 default instead, which memory-maps the file wherever the device supports it.
-When the weights such a load keeps in system RAM (its CPU layers, plus a draft
-model placed on the CPU) do not fit available RAM with 2 GiB to spare, the load
-output says the CPU layers read them from disk-backed memory and every token is
-slower. `on` and `off` are used as given and the load output names
+Such a load stays memory-mapped whatever the RAM. When the weights the CPU reads
+while generating (its CPU layers, plus a draft model placed on the CPU; the
+embedding tables, of which a token reads one row, are not counted, except the
+token embeddings when the output layer runs on the CPU and shares them) do not
+fit available RAM with 2 GiB to spare, a warning before the load names both sizes
+and says the CPU reads them from disk, so generation speed is limited by the
+disk, and how to avoid it: free more RAM, use a smaller quant, or put more of the
+model on the GPU if VRAM allows. Nothing is said when they fit. `on` and `off` are used as given and the load output names
 them (`mmap on` / `mmap off`); with `off`, a load whose weights do not fit
 available RAM warns before it starts that it may fail or swap. The setting applies to the loaded model on its
 next load; the Settings page has the same field ("Memory-map model files").

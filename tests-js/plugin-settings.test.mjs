@@ -98,6 +98,23 @@ test("one section per plugin, each in the Plugins nav group", async () => {
   assert.ok(ctrl(sec2, "mode"));
 });
 
+test("a plugin field named like a core field keeps the plugin's own label and help", async () => {
+  const payload = pluginsPayload({ plugins: [
+    { plugin: "other", label: "Other Plugin", fields: [
+      pluginField("mode", { widget: "select", label: "Plugin mode label", help: "Plugin mode help text",
+                           value: "fast", options: ["fast", "accurate"], default: "fast" }),
+    ] },
+  ] });
+  const { window: win } = loadAppWithPages({ fetchImpl: makeFetch({ plugins: payload }) });
+  await render(win);
+  const wrap = ctrl(section(win, "other"), "mode");
+  assert.ok(wrap, "the mode control rendered");
+  assert.match(wrap.textContent, /Plugin mode label/);
+  assert.match(wrap.textContent, /Plugin mode help text/);
+  assert.doesNotMatch(wrap.textContent, /Session persistence/,
+    "the core 'mode' field's catalog label must not replace the plugin's own");
+});
+
 test("a HIDDEN field never renders a control", async () => {
   const payload = pluginsPayload({ plugins: [
     { plugin: "myplug", label: "My Plugin", fields: [
@@ -197,6 +214,36 @@ test("saving POSTs only the fields the user actually changed, to that plugin's o
   assert.equal(posts[0].name, "myplug");
   assert.deepEqual(posts[0].body, { greeting: "hello there" },
     "the untouched count field must not be sent (it would pin an override)");
+});
+
+test("the Save button shows a disabled working state until a slow save settles", async () => {
+  const payload = pluginsPayload({ plugins: [
+    { plugin: "myplug", label: "My Plugin", fields: [
+      pluginField("greeting", { value: "hi", default: "hi" }),
+    ] },
+  ] });
+  const inner = makeFetch({ plugins: payload });
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const slow = async (url, opts = {}) => {
+    if (String(url).endsWith("/settings") && (opts.method || "GET") === "POST") await gate;
+    return inner(url, opts);
+  };
+  const { window: win } = loadAppWithPages({ fetchImpl: slow });
+  await render(win);
+  const sec = section(win, "myplug");
+  const btn = sec.querySelector(".settings-section-save");
+  const idle = btn.textContent;
+  ctrl(sec, "greeting").querySelector("input").value = "hello";
+  btn.click();
+  for (let i = 0; i < 8; i++) await new Promise((r) => setTimeout(r, 0));
+  assert.equal(btn.disabled, true, "the button is disabled while the save runs");
+  assert.equal(btn.textContent, "Saving...");
+  release();
+  for (let i = 0; i < 24; i++) await new Promise((r) => setTimeout(r, 0));
+  const after = section(win, "myplug").querySelector(".settings-section-save");
+  assert.equal(after.disabled, false);
+  assert.equal(after.textContent, idle);
 });
 
 test("saving nothing does not POST", async () => {

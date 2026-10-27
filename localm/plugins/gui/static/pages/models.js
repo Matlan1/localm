@@ -158,6 +158,11 @@ function _syncViewOptControls() {
 // still matches exactly what was prefilled.
 let pendingPullTypeHint = null;
 
+// The source as pulled: "hf:owner/repo", followed by "@revision" when the model was pulled at a named branch, tag or commit.
+function modelSourceText(m) {
+  const source = (m && m.source) || "";
+  return source && m.revision ? source + "@" + m.revision : source;
+}
 // Registered-models table columns: label, how to read/compare a row, and
 // whether it is sortable (the actions column is not). "kind" picks the
 // comparator - "number" (size_bytes/mtime, both nullable) vs "string"
@@ -166,7 +171,7 @@ let pendingPullTypeHint = null;
 const MODEL_COLUMNS = [
   { key: "name", label: "models.col.name", sortable: true, kind: "string", get: (m) => m.name || "" },
   { key: "model_type", label: "models.col.role", sortable: true, kind: "string", get: (m) => m.model_type || "llm" },
-  { key: "source", label: "models.col.source", sortable: true, kind: "string", get: (m) => m.source || "" },
+  { key: "source", label: "models.col.source", sortable: true, kind: "string", get: (m) => modelSourceText(m) },
   { key: "size_bytes", label: "models.col.size", sortable: true, kind: "number", get: (m) => m.size_bytes },
   { key: "mtime", label: "models.col.modified", sortable: true, kind: "number", get: (m) => m.mtime },
   { key: "actions", label: "", sortable: false },
@@ -616,8 +621,9 @@ export async function refreshModelsPage() {
     tr.appendChild(roleTd);
 
     // The source clips to an ellipsis, with the full value on hover.
-    const sourceTd = el("td", "mono clip-cell", m.source || "");
-    if (m.source) sourceTd.title = m.source;
+    const sourceText = modelSourceText(m);
+    const sourceTd = el("td", "mono clip-cell", sourceText);
+    if (sourceText) sourceTd.title = sourceText;
     tr.appendChild(sourceTd);
     tr.appendChild(el("td", "mono shrink-cell", fmtSize(m.size_bytes)));
     tr.appendChild(el("td", "mono shrink-cell", fmtModelDate(m.mtime)));
@@ -825,7 +831,7 @@ export async function showModelDetail(name) {
     const rows = [
       ["path", t("models.detail.path"), data.path],
       ["type", t("models.detail.type"), null],
-      ["source", t("models.detail.source"), data.source],
+      ["source", t("models.detail.source"), modelSourceText(data)],
       ["size", t("models.detail.size"), fmtSize(data.size_bytes)],
       ["sha256", t("models.detail.sha256"), data.sha256 || t("models.detail.sha256Pending")],
       ["aliases", t("models.detail.aliases"),

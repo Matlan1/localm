@@ -397,7 +397,8 @@ def bug_report_cmd(message: str, expected: str, happened: str,
         include_log=not no_log, extra_hang_trace=hang)
     if path is not None:
         console.print(
-            f"[dim]A bug report was saved (edit it before sending):[/dim] {escape(str(path))}")
+            f"[dim]A bug report was saved (edit it before sending):[/dim] {escape(str(path))}",
+            soft_wrap=True)
     else:
         console.print("[yellow]Could not save a report file; you can still copy the "
                       "details above.[/yellow]")

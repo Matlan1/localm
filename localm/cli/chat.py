@@ -11,6 +11,7 @@ from rich.panel import Panel
 from ..config import load_config
 from ..model_manager.registry import get_operator_model_info
 from ..console import show_url
+from ..debuglog import native_console_paused
 from ._core import console, err_console, main, _complete_model_name
 
 
@@ -786,6 +787,14 @@ def _perf_line(n_tokens: int, t0: float, first_at: Optional[float],
     return f"{n_tokens} tokens  {rate}({gen:.1f}s)"
 
 
+def _collect_summary(engine, messages: list, max_tokens: int) -> str:
+    """The text of a compaction-summary generation, with native log lines kept
+    off the terminal."""
+    with native_console_paused():
+        return "".join(engine.chat_stream(messages, max_tokens=max_tokens,
+                                          temperature=0.3, thinking=False))
+
+
 def _stream_once(engine, messages: list, **kwargs) -> str:
     """Stream response to stdout, print tok/s on completion, and return the full text."""
     import time as _time
@@ -805,12 +814,13 @@ def _stream_once(engine, messages: list, **kwargs) -> str:
     if "on_status" not in stream_kwargs:
         stream_kwargs["on_status"] = status_lines.status
     try:
-        for token in engine.chat_stream(messages, **stream_kwargs):
-            if first_at is None:
-                first_at = _time.monotonic()
-                status_lines.first_token()
-            parts.append(token)
-            printer.feed(token)
+        with native_console_paused():
+            for token in engine.chat_stream(messages, **stream_kwargs):
+                if first_at is None:
+                    first_at = _time.monotonic()
+                    status_lines.first_token()
+                parts.append(token)
+                printer.feed(token)
         printer.flush()
     except ImageDecodeUnavailable as e:
         # BEFORE the UnsupportedInputError arm below, which DISCARDS the message
@@ -959,9 +969,8 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
                 count_tokens=engine.count_tokens,
                 on_compact=lambda: console.print(
                     "[dim]Compacting the conversation to free context...[/dim]"),
-                generate=lambda m, max_tok, engine=engine: "".join(
-                    engine.chat_stream(m, max_tokens=max_tok, temperature=0.3,
-                                       thinking=False)),
+                generate=lambda m, max_tok, engine=engine: _collect_summary(
+                    engine, m, max_tok),
             )
         if did_compact:
             messages[:] = compacted_msgs
@@ -982,12 +991,13 @@ def _interactive(engine, system_prompt: Optional[str], gen_opts: dict,
         if "on_status" not in interactive_opts:
             interactive_opts["on_status"] = status_lines.status
         try:
-            for token in engine.chat_stream(messages, **interactive_opts):
-                if first_at is None:
-                    first_at = _time.monotonic()
-                    status_lines.first_token()
-                parts.append(token)
-                printer.feed(token)
+            with native_console_paused():
+                for token in engine.chat_stream(messages, **interactive_opts):
+                    if first_at is None:
+                        first_at = _time.monotonic()
+                        status_lines.first_token()
+                    parts.append(token)
+                    printer.feed(token)
             printer.flush()
         except KeyboardInterrupt:
             printer.flush()
@@ -1252,9 +1262,7 @@ def _handle_command(
                 console.print("[dim]Compacting the conversation...[/dim]")
             new_messages, changed = compact_messages(
                 messages,
-                generate=lambda m, max_tok: "".join(
-                    engine.chat_stream(m, max_tokens=max_tok, temperature=0.3,
-                                       thinking=False)),
+                generate=lambda m, max_tok: _collect_summary(engine, m, max_tok),
                 limit_tokens=engine.context_capacity() or 0,
                 count_tokens=engine.count_tokens,
             )
@@ -1377,5 +1385,9 @@ def _save_chat(messages: list, filepath: str) -> None:
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(messages, f, indent=2, ensure_ascii=False)
         console.print(f"[green]✓[/green] Saved: {escape(filepath)}", soft_wrap=True)
+    except OSError as e:
+        reason = e.strerror or type(e).__name__
+        console.print(f"[red]Save failed: {escape(reason)}: {escape(filepath)}[/red]",
+                      soft_wrap=True)
     except Exception as e:
         console.print(f"[red]Save failed: {escape(str(e))}[/red]", soft_wrap=True)

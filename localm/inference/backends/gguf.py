@@ -241,9 +241,9 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # layers in system RAM (llama.cpp's --n-cpu-moe). 0 = off, the default.
         self.n_cpu_moe = n_cpu_moe
         # The use_mmap mode (auto, on, off). effective_use_mmap,
-        # mmap_forced_by_ram, mmap_cpu_from_disk and mmap_ram_short_note are
-        # what the last load did with it: None / False / "" until a load
-        # reports them.
+        # mmap_forced_by_ram, mmap_cpu_from_disk, mmap_ram_short_note and
+        # mmap_disk_note are what the last load did with it: None / False / ""
+        # until a load reports them.
         from localm.inference.mmap_setting import coerce_use_mmap
         mode = coerce_use_mmap(use_mmap)
         if mode is None:
@@ -253,6 +253,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         self.mmap_forced_by_ram = False
         self.mmap_cpu_from_disk = False
         self.mmap_ram_short_note = ""
+        self.mmap_disk_note = ""
         # Element type of the KV cache (localm.kv_cache.KV_CACHE_TYPES).
         from localm.kv_cache import KV_CACHE_TYPES, coerce_kv_cache_type
         kv_type = coerce_kv_cache_type(kv_cache_type)
@@ -885,6 +886,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # _resolve_use_mmap): forced on, forced off, or the build's default.
         mmap_decision = self._resolve_use_mmap(gpu_layers, vram_before)
         self.mmap_ram_short_note = self._warn_unmapped_weights_exceed_ram(mmap_decision)
+        self.mmap_disk_note = self._warn_cpu_reads_from_disk(mmap_decision)
 
         # Record what this load applies, for the GUI's loaded-model status: the
         # auto override when computed, else the config ratios, else equal, through
@@ -1185,12 +1187,44 @@ class GgufBackend(VramSizingMixin, BaseBackend):
 
     def _print_mmap_note(self) -> None:
         """Print the one-line mmap note for the load just finished (see
-        ``mmap_setting.describe_mmap``), or nothing when there is none."""
+        ``mmap_setting.describe_mmap``), or nothing when there is none or when
+        ``mmap_disk_note`` already said it before the load. When the load
+        warned about disk speed and the worker reports the model unmapped, say
+        the warning does not apply."""
         from localm.inference.mmap_setting import describe_mmap
+        if self.mmap_cpu_from_disk and self.mmap_disk_note:
+            return
+        if self.mmap_disk_note and self.effective_use_mmap is False:
+            console.print("[dim]  mmap off: the runtime read the model into memory "
+                          "instead of memory-mapping it, so the disk-speed warning "
+                          "above does not apply[/dim]")
+            return
         note = describe_mmap(self.use_mmap, self.effective_use_mmap,
                              self.mmap_forced_by_ram, self.mmap_cpu_from_disk)
         if note:
             console.print(f"[dim]  {note}[/dim]")
+
+    @staticmethod
+    def _warn_cpu_reads_from_disk(decision) -> str:
+        """Before a load whose mmap *decision* is ``cpu_exceeds_ram`` and keeps
+        the model mapped: print the disk-speed warning
+        (``mmap_setting.cpu_reads_from_disk_note``), log it at WARNING and
+        return it. "" otherwise."""
+        if (decision.reason != "cpu_exceeds_ram" or decision.use_mmap is False
+                or decision.ram_available is None):
+            return ""
+        read = (decision.cpu_read_bytes if decision.cpu_read_bytes is not None
+                else decision.host_bytes)
+        if read is None:
+            return ""
+        from localm.inference.mmap_setting import cpu_reads_from_disk_note
+        from .llamacpp._sizing import HOST_RAM_HEADROOM_BYTES
+        note = cpu_reads_from_disk_note(read, decision.ram_available,
+                                        HOST_RAM_HEADROOM_BYTES)
+        console.print(f"[yellow]  mmap on:[/yellow] {note}")
+        from localm.debuglog import logger as _dbg
+        _dbg.warning("mmap on: %s", note)
+        return "mmap on: " + note
 
     @staticmethod
     def _warn_unmapped_weights_exceed_ram(decision) -> str:
