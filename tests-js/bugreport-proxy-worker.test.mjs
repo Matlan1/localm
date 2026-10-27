@@ -314,7 +314,7 @@ async function updateFor(worker, query, releases, { listed = releases, tagStatus
 
 const rel = (tag, day, extra = {}) => ({
   tag_name: tag, name: tag, draft: false, prerelease: false,
-  published_at: `2026-11-${String(day).padStart(2, "0")}T00:00:00Z`, assets: [], ...extra,
+  published_at: new Date(Date.UTC(2026, 10, 1) + day * 3600e3).toISOString(), assets: [], ...extra,
 });
 const RELEASES = [rel("v0.3.1", 1), rel("v0.3.2", 2), rel("v0.3.3", 3), rel("v0.4.0", 4),
   rel("llama-cuda-linux-b9999", 5, { prerelease: true }), rel("v0.4.1rc1", 6, { prerelease: true })];
