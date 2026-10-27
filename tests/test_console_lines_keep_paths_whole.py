@@ -13,9 +13,6 @@ from pathlib import Path
 import pytest
 from rich.console import Console
 
-LONG = "D:" + "\\very-long-folder-name" * 6 + "\\bug-report-20261022-154950.md"
-
-
 def _narrow(width=40):
     buf = io.StringIO()
     return Console(file=buf, width=width, force_terminal=False, color_system=None), buf
@@ -43,34 +40,46 @@ def test_repl_save_failure_for_a_non_os_error_keeps_its_message(tmp_path, capsys
     assert "not JSON serializable" in out
 
 
-def test_report_failure_prints_the_saved_path_in_one_piece(monkeypatch):
+def _long_report(tmp_path):
+    report = (tmp_path / "a-long-folder-name-for-wrapping" / "another-long-folder-name"
+              / "bug-report-20261022-154950.md")
+    report.parent.mkdir(parents=True)
+    report.write_text("# report", encoding="utf-8")
+    return report
+
+
+def test_report_failure_prints_the_saved_path_in_one_piece(tmp_path, monkeypatch):
     import localm.bugreport as br
     from localm.bugreport import consent
+    report = _long_report(tmp_path)
     console, buf = _narrow()
     monkeypatch.setattr(consent, "console", console)
-    monkeypatch.setattr(br, "save_report", lambda text: Path(LONG))
+    monkeypatch.setattr(br, "_diagnostics_allowed", lambda: True)
+    monkeypatch.setattr(br, "save_report", lambda text: report)
     monkeypatch.setattr(consent, "build_report", lambda *a, **k: "text")
     monkeypatch.setattr(consent, "offer_to_send", lambda *a, **k: None)
 
     consent.report_failure(summary="boom", interactive=False, assume_yes=True)
 
-    assert LONG in buf.getvalue().replace("\r", "")
+    assert str(report) in buf.getvalue()
 
 
-def test_bug_report_command_prints_the_saved_path_in_one_piece(cli_runner, monkeypatch):
+def test_bug_report_command_prints_the_saved_path_in_one_piece(cli_runner, tmp_path,
+                                                               monkeypatch):
     from localm import bugreport
     from localm.cli import maintenance
+    report = _long_report(tmp_path)
     console, buf = _narrow()
     monkeypatch.setattr(maintenance, "console", console)
     monkeypatch.setattr(bugreport, "stdin_is_interactive", lambda: False)
     monkeypatch.setattr(bugreport, "live_server_hang_trace", lambda *a, **k: "")
-    monkeypatch.setattr(bugreport, "save_user_report", lambda *a, **k: Path(LONG))
+    monkeypatch.setattr(bugreport, "save_user_report", lambda *a, **k: report)
     monkeypatch.setattr(bugreport, "offer_to_send", lambda *a, **k: None)
 
     result = cli_runner.invoke(maintenance.bug_report_cmd, ["-w", "it crashed"])
 
     assert result.exit_code == 0, result.output
-    assert LONG in buf.getvalue()
+    assert str(report) in buf.getvalue()
 
 
 @pytest.mark.parametrize("width", [60, 80, 100, 120])
