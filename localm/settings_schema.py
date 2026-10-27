@@ -236,9 +236,8 @@ CORE_FIELDS: list = [
                  group="Engine", applies=Applies.NEXT_LOAD, min=0, max=262144),
     SettingField("use_mmap", Widget.SELECT, "Memory-map model files",
                  "auto runs from disk-backed memory when the model may not fit in "
-                 "available RAM. A model split between GPU and CPU always stays mapped, "
-                 "with a warning when its CPU layers do not fit available RAM and run at "
-                 "disk speed. on forces it; off reads the whole model into memory first.",
+                 "available RAM, and warns when CPU layers will run at disk speed. on "
+                 "forces it; off reads the whole model into memory first.",
                  group="Engine", applies=Applies.NEXT_LOAD,
                  options=["auto", "on", "off"]),
     SettingField("kv_cache_type", Widget.SELECT, "KV cache type",
