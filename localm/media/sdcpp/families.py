@@ -145,8 +145,10 @@ _FAMILY_LLM_ARCH = {
 _FAMILY_LLM_HIDDEN = {"qwen-image": (3584,), "qwen-image-2.1": (4096,), "z-image": (2560,),
                       "hunyuan-video": (3584,)}
 
-# Families whose LLM vision encoder must be a Qwen3-VL one: a llama.cpp mmproj
-# with DeepStack tensors (``v.deepstack.``) and a known projection width.
+# Families whose text encoder must be Qwen3-VL: a GGUF of a ``_FAMILY_LLM_ARCH``
+# architecture or a safetensors file with DeepStack vision tensors
+# (``visual.deepstack_merger``), and as vision encoder a llama.cpp mmproj with
+# DeepStack tensors (``v.deepstack.``) and a known projection width.
 _FAMILY_VISION_DEEPSTACK = frozenset({"qwen-image-2.1"})
 
 # UNet families stable-diffusion.cpp runs a ControlNet and textual-inversion
@@ -246,6 +248,9 @@ def accepts(slot: str, family: Optional[str], cand: FileInfo,
             return False
         archs = _FAMILY_LLM_ARCH.get(family or "")
         arch = cand.detail.get("arch")
+        if family in _FAMILY_VISION_DEEPSTACK and not (
+                arch in (archs or ()) or (arch is None and cand.detail.get("deepstack"))):
+            return False
         if archs is not None and arch is not None and arch not in archs:
             return False
         hidden = _FAMILY_LLM_HIDDEN.get(family or "")
@@ -578,13 +583,16 @@ def _lora_info(t: dict) -> Optional[FileInfo]:
         fam = "z-image"
     elif "cross_attn" in flat and "blocks_" in flat and "ffn" in flat:
         fam = "wan"
-    elif "lora_te2" in flat or "lora_te1" in flat or _unet_lora_is_sdxl(t):
+    elif "lora_te2" in flat or "lora_te1" in flat or (
+            any(m in flat for m in _UNET_LORA_MARKERS) and _unet_lora_is_sdxl(t)):
         fam = "sdxl"
     elif "input_blocks" in flat or "down_blocks" in flat or "lora_te_" in flat:
         fam = "sd1"
     return FileInfo("lora", fam)
 
 
+_UNET_LORA_MARKERS = ("input_blocks", "output_blocks", "middle_block", "down_blocks",
+                      "up_blocks", "mid_block")
 _SDXL_TRANSFORMER_DEPTH = re.compile(r"transformer_blocks[._](?:[2-9]|[1-9]\d)[._]")
 
 
@@ -644,7 +652,8 @@ def _text_encoder_info(t: dict, arch: Optional[str]) -> Optional[FileInfo]:
                      "model.language_model.embed_tokens.weight") or ()
         return FileInfo("llm", detail={"arch": None,
                                        "hidden": emb[1] if len(emb) > 1 else None,
-                                       "vision": _has(names, "visual.")})
+                                       "vision": _has(names, "visual."),
+                                       "deepstack": _has(names, "visual.deepstack_merger")})
     return None
 
 
@@ -762,7 +771,10 @@ def _upscaler_info(t: dict) -> Optional[FileInfo]:
 
 
 def classify_tensors(tensors: dict, arch: Optional[str] = None) -> FileInfo:
-    """Classify a file from its tensor names/shapes and GGUF architecture."""
+    """Classify a file from its tensor names/shapes and GGUF architecture. A
+    file of tensors none of the rules knows is ``unknown`` with ``read`` True
+    in its detail, plus its ``arch`` and input ``latent`` channels when
+    known; no tensors at all is ``UNKNOWN``."""
     if not tensors:
         return UNKNOWN
     from localm.model_manager.gguf import gguf_is_music_architecture
@@ -803,7 +815,7 @@ def classify_tensors(tensors: dict, arch: Optional[str] = None) -> FileInfo:
         return FileInfo("diffusion", fam, {} if fam else {"arch": arch})
     detail = {k: v for k, v in (("arch", arch), ("latent", _input_channels(tensors)))
               if v is not None}
-    return FileInfo("unknown", detail=detail) if detail else UNKNOWN
+    return FileInfo("unknown", detail={**detail, "read": True})
 
 
 _INPUT_LAYERS = ("img_in.weight", "x_embedder.proj.weight", "x_embedder.weight",

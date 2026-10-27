@@ -451,6 +451,24 @@ def input_refusal(s: dict, *, input_image=None, ref_images=None, control_image=N
     return _input_refusal(models, ref_images=ref_images, control_image=control_image)
 
 
+def lora_refusal(s: dict, loras: list) -> Optional[str]:
+    """Why the LoRAs *loras* (``[{"name", "strength"}]``) cannot be applied to
+    the model the settings *s* resolve to (``pairing.resolve_loras``), or
+    None. A model set that does not resolve is left to ``ensure_available``,
+    which reports it. Checked before any VRAM handover."""
+    if not loras:
+        return None
+    try:
+        models = resolve_models(s)
+    except _ModelError:
+        return None
+    try:
+        pairing.resolve_loras(list(loras), models.get("family"))
+    except _ModelError as e:
+        return str(e)
+    return None
+
+
 def _input_refusal(models: dict, *, ref_images, control_image) -> Optional[str]:
     """Why the resolved model set *models* cannot take these inputs, or None."""
     caps = models.get("capabilities") or {}

@@ -14,6 +14,7 @@ import json
 import pytest
 
 from localm.media.sdcpp import families, pairing
+from localm.media.sdcpp.files import ModelFileError
 from localm.plugins.builtin.image.backends import native as image_native
 from tests import test_sdcpp_families as _base
 from tests.test_sdcpp_families import (FLUX_LORA, QWEN_IMAGE, QWEN_IMAGE_LORA, WAN21_VAE,
@@ -220,12 +221,15 @@ def test_an_image_model_of_unknown_family_is_refused_before_any_load(
     assert not ok and "localm can identify" in msg
 
 
-def test_an_unidentified_file_of_a_format_localm_does_not_read_keeps_the_old_rule(tmp_path):
-    ckpt = tmp_path / "v1-5.ckpt"
-    ckpt.write_bytes(b"PK\x03\x04" + b"\0" * 64)
-    built = pairing.build_context(ckpt, "v1-5.ckpt", {}, where="Settings > Images",
-                                  media="image")
-    assert built["ctx"] == {"model_path": str(ckpt)}
+@pytest.mark.parametrize("name, data", [("v1-5.ckpt", b"PK\x03\x04" + b"\0" * 64),
+                                        ("cut.gguf", b"GGUF\x03\0"),
+                                        ("cut.safetensors", b"\xff" * 16)])
+def test_a_file_whose_header_localm_does_not_read_keeps_the_old_rule(tmp_path, name, data):
+    f = tmp_path / name
+    f.write_bytes(data)
+    assert families.inspect_file(f) is families.UNKNOWN
+    built = pairing.build_context(f, name, {}, where="Settings > Images", media="image")
+    assert built["ctx"] == {"model_path": str(f)}
 
 
 def test_the_preview_shows_the_unknown_family_reason(tmp_path):
@@ -304,3 +308,56 @@ def test_reference_images_need_the_qwen3_vl_vision_encoder(qwen_sets, runner, tm
     assert ok, msg
     assert runner.loads[-1]["llm_vision_path"] == str(mm)
     assert len(runner.generates[-1]["ref_images"]) == 1
+
+
+QWEN_ATTN_ONLY_LORA_DEEP = {
+    "diffusion_model.transformer_blocks.5.attn.to_q.lora_down.weight": (16, 3072),
+    "diffusion_model.transformer_blocks.5.attn.to_q.lora_up.weight": (3072, 16),
+}
+FLUX_LAYOUT_LORA = {"lora_unet_double_blocks_0_img_attn_qkv.lora_down.weight": (16, 3072),
+                    "lora_unet_single_blocks_0_linear1.lora_down.weight": (16, 3072)}
+LLAMA_8B_ST = {"model.layers.0.self_attn.q_proj.weight": (4096, 4096),
+               "model.embed_tokens.weight": (128256, 4096)}
+QWEN3_VL_ST = {"model.layers.0.self_attn.q_proj.weight": (4096, 4096),
+               "model.embed_tokens.weight": (151936, 4096),
+               "model.visual.blocks.0.attn.qkv.weight": (3456, 1152),
+               "model.visual.deepstack_merger_list.0.linear_fc1.weight": (4608, 4608)}
+
+
+def test_an_attention_only_dit_lora_with_deep_block_indices_is_not_read_as_sdxl(tmp_path):
+    f = write_safetensors(tmp_path / "attn5.safetensors", QWEN_ATTN_ONLY_LORA_DEEP)
+    assert families.inspect_file(f).family is None
+
+
+@pytest.mark.parametrize("model_family", ["flux2", "ovis-image", "hunyuan-video"])
+def test_a_flux_layout_lora_is_applied_unchecked_on_families_sharing_its_names(
+        tmp_path, model_family):
+    f = write_safetensors(tmp_path / "dbl.safetensors", FLUX_LAYOUT_LORA)
+    _register("dbl", f, "lora")
+    out, notes = pairing.resolve_loras([{"name": "dbl"}], model_family)
+    assert out[0]["checked"] is False and len(notes) == 1 and "could not be checked" in notes[0]
+    with pytest.raises(ModelFileError, match="made for FLUX.1, not Qwen-Image 2.1"):
+        pairing.resolve_loras([{"name": "dbl"}], "qwen-image-2.1")
+
+
+def test_only_a_qwen3_vl_text_encoder_fits_qwen_image_21(tmp_path):
+    llama = families.inspect_file(write_safetensors(tmp_path / "l.safetensors", LLAMA_8B_ST))
+    qwen3vl = families.inspect_file(write_safetensors(tmp_path / "q.safetensors", QWEN3_VL_ST))
+    assert llama.detail["hidden"] == 4096 and qwen3vl.detail["deepstack"] is True
+    assert not families.accepts("llm", "qwen-image-2.1", llama)
+    assert families.accepts("llm", "qwen-image-2.1", qwen3vl)
+    qwen3_gguf = families.FileInfo("llm", detail={"arch": "qwen3", "hidden": 4096})
+    assert not families.accepts("llm", "qwen-image-2.1", qwen3_gguf)
+
+
+def test_a_wrong_family_lora_is_refused_before_any_vram_handover(qwen_sets):
+    from localm.plugins.builtin.video.backends import native as video_native
+    s = _settings()
+    assert image_native.lora_refusal(s, [{"name": "aidma-flux"}]).startswith(
+        "The LoRA 'aidma-flux' is made for FLUX.1, not Qwen-Image 2.1")
+    assert image_native.lora_refusal(s, [{"name": "qwen21-turbo"}]) is None
+    assert image_native.lora_refusal(s, []) is None
+    assert image_native.lora_refusal({"native": {"model": "not-there"}},
+                                     [{"name": "aidma-flux"}]) is None
+    assert video_native.lora_refusal({"native": {"model": "not-there"}},
+                                     [{"name": "aidma-flux"}]) is None

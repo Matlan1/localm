@@ -386,13 +386,14 @@ def build_context(main: Path, label: str, explicit: dict, *, where: str, media: 
     to ``{"name", "auto"}``; ``notes`` are user-facing remarks about explicit
     choices that do not look right. A diffusion model gets its missing slots
     from the registry (``pair_components``); a full checkpoint loads as
-    ``model_path`` with only the explicit slots; a file in a format localm does
-    not read (not ``READABLE_SUFFIXES``, a ``.ckpt`` say) loads as
-    ``diffusion_model_path`` when any text encoder is set, else as
-    ``model_path``. Raises ``MissingComponents`` when a needed slot has no
-    file, and ``ModelFileError`` when *main* is a component or a music model
-    file, not an image or video model, or when it is a ``READABLE_SUFFIXES``
-    file of a family localm does not know (``unknown_family_message``).
+    ``model_path`` with only the explicit slots; a file whose header localm
+    does not read (a format other than ``READABLE_SUFFIXES``, a ``.ckpt`` say,
+    or a header that does not parse) loads as ``diffusion_model_path`` when
+    any text encoder is set, else as ``model_path``. Raises
+    ``MissingComponents`` when a needed slot has no file, and
+    ``ModelFileError`` when *main* is a component or a music model file, not
+    an image or video model, or when localm read its header and it is of no
+    family localm knows (``unknown_family_message``).
     *media* (``"image"``/``"video"``) and *where* (the settings page) word the
     messages."""
     info = families.inspect_file(main)
@@ -412,6 +413,7 @@ def build_context(main: Path, label: str, explicit: dict, *, where: str, media: 
                              f"Choose it as a component in {where}, and {art} {media} model "
                              "as the model.")
     if (main.suffix.lower() in READABLE_SUFFIXES
+            and (info.kind != "unknown" or info.detail.get("read"))
             and not families.known_family(info.family)):
         raise ModelFileError(unknown_family_message(label, info, media))
     if info.kind == "diffusion":
@@ -462,6 +464,12 @@ def _lora_fits(lora_family: Optional[str], family: Optional[str]) -> bool:
 
 _LORA_FAMILY_LABELS = {"wan": "Wan", "llm": "a text model (LLM)"}
 
+# Model families whose LoRAs share the layer names of a LoRA family label, so a
+# LoRA of that label cannot be told from one made for them: double and single
+# stream blocks are FLUX.1's names and also FLUX.2's, Ovis-Image's and
+# HunyuanVideo's.
+_LORA_LAYOUT_SHARED = {"flux": ("flux2", "ovis-image", "hunyuan-video")}
+
 
 def _family_label(family: Optional[str]) -> str:
     return (families.FAMILY_LABELS.get(family or "") or _LORA_FAMILY_LABELS.get(family or "")
@@ -472,8 +480,9 @@ def resolve_loras(entries: list, family: Optional[str],
                   reg: Optional[dict] = None) -> tuple[list, list]:
     """``(loras, notes)`` for *entries* (``[{"name", "strength"}]``): each
     LoRA as ``{"name", "path", "multiplier", "checked"}`` for the sd.cpp worker
-    (``checked`` False when the LoRA's family or *family* is unknown, so the
-    fit was not checked), and a user-facing note for each LoRA not checked. A
+    (``checked`` False when the LoRA's family or *family* is unknown, or the
+    LoRA's layer names are shared with *family* (``_LORA_LAYOUT_SHARED``), so
+    the fit was not checked), and a user-facing note for each LoRA not checked. A
     name matches a registered ``lora`` entry by registry name, else by file
     name. Raises ``ModelFileError`` for a name that matches none, whose file is
     missing or a network/device path, or whose file reads as made for another
@@ -510,7 +519,8 @@ def resolve_loras(entries: list, family: Optional[str],
         if not ok:
             raise ModelFileError(f"The LoRA '{want}' is registered, but its file is missing.")
         info = families.inspect_file(path)
-        checked = bool(info.family and family)
+        checked = (bool(info.family and family)
+                   and family not in _LORA_LAYOUT_SHARED.get(info.family or "", ()))
         if checked and not _lora_fits(info.family, family):
             raise ModelFileError(f"The LoRA '{want}' is made for {_family_label(info.family)}, "
                                  f"not {_family_label(family)}, so it is not applied. Remove "
