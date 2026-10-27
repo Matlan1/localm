@@ -11,6 +11,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+## [0.3.2rc1] - 2026-10-27
+
 ### Security
 - **Updates refuse the retired signing key everywhere.** An update signed by the release key that was replaced in 0.3.0, or one that tries to bring that key back in a new key set, is refused, even when the new key set carries valid recovery signatures.
 
