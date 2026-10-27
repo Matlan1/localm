@@ -174,7 +174,7 @@ def test_bug_report_text_has_no_host_path_for_a_scoped_key(home, tmp_path):
     assert str(Path("plugins") / "probe" / "plug.py") in text
     assert saved == text
     assert mine["report_sha256"] == bugreport.report_digest(saved)
-    assert install_file in full["report_markdown"]
+    assert "<install>" not in full["report_markdown"], "the owner's report keeps the install path"
 
 
 def _stream_lines(client, job_id, key):
