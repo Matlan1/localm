@@ -308,6 +308,11 @@ class TestDeviceMatching:
         assert reg.call_count == 1
 
 
+def _warnings(caplog):
+    """The text of the WARNING records caplog holds."""
+    return " | ".join(r.getMessage() for r in caplog.records if r.levelname == "WARNING")
+
+
 class TestHfGpuOrder:
     """discover.hf_gpu_order: the GPUs an HF load must see, in the listed order."""
 
@@ -334,25 +339,25 @@ class TestHfGpuOrder:
         readings = [dict(g, numbering=discover.GPU_NUMBERING_NVIDIA_SMI)
                     for g in _torch_reading(_IDLE)]
         assert discover.hf_gpu_order({"gpu_split_indices": [3, 1]}, gpus=readings) is None
-        assert "nvidia-smi numbers the GPUs its own way" in caplog.text
-        assert "[3, 1]" in caplog.text
+        assert "nvidia-smi numbers the GPUs its own way" in _warnings(caplog)
+        assert "[3, 1]" in _warnings(caplog)
 
     def test_a_vulkan_or_sycl_build_gives_no_order_and_says_so(self, caplog):
         with mock.patch.object(discover, "_native_gpu_index_space_is_opaque",
                                return_value=True):
             assert discover.hf_gpu_order({"gpu_split_indices": [3, 1]},
                                          gpus=_torch_reading(_IDLE)) is None
-        assert "numbers the GPUs its own way" in caplog.text
+        assert "numbers the GPUs its own way" in _warnings(caplog)
 
     def test_a_stale_reading_or_a_missing_gpu_says_so(self, caplog):
         with mock.patch.object(discover, "list_gpus",
                                return_value=([], discover.GPU_PROBE_TIMEOUT)):
             assert discover.hf_gpu_order({"gpu_split_indices": [3, 1]}) is None
-        assert "no fresh GPU reading" in caplog.text
+        assert "no fresh GPU reading" in _warnings(caplog)
         caplog.clear()
         assert discover.hf_gpu_order({"gpu_split_indices": [9, 3]},
                                      gpus=_torch_reading(_IDLE)) is None
-        assert "[9] are not detected" in caplog.text
+        assert "[9] are not detected" in _warnings(caplog)
 
     @pytest.mark.parametrize("listed", [[1, 3], [3], None])
     def test_a_list_by_number_or_none_says_nothing(self, caplog, listed):
