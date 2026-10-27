@@ -18,6 +18,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Adding a folder of models says what it is doing, and starts much faster.** The Add a model card, the Activity list and the terminal now show each step: scanning the folder, how many models were found, which file is being checked, hashed (with a progress bar and speed) or registered and its place in the batch, which files were skipped and why, and a final summary. Before registering anything, localm also read every file in the folder in full to look for an Ollama manifest; on a folder of large models that was most of the wait (about 2 minutes of 3.5 on a 42 GB folder) and is now gone.
 
 ### Fixed
+- **A wrong API key in a GUI coder session now fails the turn with a clear message.** When the remote backend answered 401 or 403, the session used to wait for a key typed at the console the server was started from, which nobody watches. The turn now ends with an error naming the backend and saying to start a new session with a valid key. The terminal coder still asks for the key.
 - **Importing a folder of models into an install that already has some no longer fails.** With the move or copy option, a model already in the models folder under the same name and with the same content is now used as it is (the original is left where it was) and the rest of the folder imports. A different file under the same name is skipped with a message instead of aborting the whole import.
 
 ## [0.3.1] - 2026-10-22

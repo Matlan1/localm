@@ -465,6 +465,7 @@ class _ContextMixin:
         # Set by Agent (core.py), which this class is mixed into.
         cwd: Path
         backend: Any
+        confirm_handler: Any
         _episode_store: Any
         _system_prompt: str
 
@@ -1870,6 +1871,14 @@ ws     ::= [ \t\n\r]*
                 import os
                 from ..display import print_error
                 import getpass
+
+                if self.confirm_handler is not None:
+                    raise CoderAuthError(
+                        f"The coder backend at {getattr(self.backend, '_base_url', 'its server')} "
+                        f"(model {getattr(self.backend, 'model_id', '?')}) rejected the API key. "
+                        "Start a new coder session with a valid key for that backend, or "
+                        "correct the key in its settings."
+                    ) from e
 
                 # Cannot prompt for a key if there's no TTY or we are in CI
                 if not sys.stdin.isatty() or os.environ.get("CI"):
