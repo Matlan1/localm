@@ -85,6 +85,10 @@ INCONCLUSIVE_ISSUE_THRESHOLD = 5
 CI_WAIT_TIMEOUT_SECONDS = 75 * 60
 CI_POLL_INTERVAL_SECONDS = 20
 
+# Minimum time between two pull requests this pipeline opens, across runs and pins.
+PR_OPEN_SPACING_SECONDS = 20 * 60
+PR_OPENED_PATH = STATE_DIR / "last-pr-opened.json"
+
 REQUIRE_BACKENDS = ("cpu", "vulkan")
 ALSO_MEASURE_BACKENDS = ("cuda", "sycl", "hip", "metal")
 
@@ -900,19 +904,48 @@ def commit_and_push(worktree: Path, branch: str, candidate: str, old_tag: str,
         raise InfraError(f"push failed: {result.stderr}")
 
 
+def seconds_until_next_pr(now: float | None = None) -> float:
+    """Seconds to wait before this pipeline may open another pull request: what is
+    left of PR_OPEN_SPACING_SECONDS since the last one recorded in PR_OPENED_PATH,
+    never more than PR_OPEN_SPACING_SECONDS. 0 when no record exists. An unreadable
+    record prints a warning and counts as a full spacing."""
+    now = time.time() if now is None else now
+    try:
+        last = float(json.loads(PR_OPENED_PATH.read_text(encoding="utf-8"))["epoch"])
+    except FileNotFoundError:
+        return 0.0
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        print(f"WARNING: {PR_OPENED_PATH} is unreadable ({e}); waiting the full spacing")
+        return float(PR_OPEN_SPACING_SECONDS)
+    return max(0.0, min(float(PR_OPEN_SPACING_SECONDS), last + PR_OPEN_SPACING_SECONDS - now))
+
+
+def record_pr_opened(now: float | None = None) -> None:
+    PR_OPENED_PATH.parent.mkdir(parents=True, exist_ok=True)
+    PR_OPENED_PATH.write_text(json.dumps({"epoch": time.time() if now is None else now}) + "\n",
+                              encoding="utf-8")
+
+
 def open_pr(worktree: Path, branch: str, candidate: str, old_tag: str,
            *, title: str | None = None, body: str | None = None) -> int:
     """*title*/*body* override the default llama-specific text; the defaults
     reproduce the exact original text so the llama call site needs no
-    change."""
+    change.
+
+    Waits seconds_until_next_pr() first and records the time once the PR exists."""
     title = title or f"chore(llamacpp): advance the pinned build to {candidate}"
     body = body or (
         f"Moves the bundled llama.cpp build from {old_tag} to {candidate}. "
         "The bundled-runtime CHANGELOG bullet is included in this diff.\n\n"
         "🤖 Generated with [Claude Code](https://claude.com/claude-code)\n")
+    wait = seconds_until_next_pr()
+    if wait:
+        print(f"waiting {int(wait)} s before opening the next pull request")
+        time.sleep(wait)
     result = _run_gh(["pr", "create", "--title", title, "--body", body, "--head", branch], worktree)
     if result.returncode != 0:
         raise InfraError(f"gh pr create failed: {result.stderr}")
+    record_pr_opened()
     m = re.search(r"/pull/(\d+)", result.stdout)
     if not m:
         raise InfraError(f"could not parse a PR number out of: {result.stdout!r}")

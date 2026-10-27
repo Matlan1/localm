@@ -45,6 +45,8 @@ def _never_write_the_real_issues_file(monkeypatch, tmp_path_factory):
     repository's real issues file."""
     monkeypatch.setattr(pipeline, "ISSUES_PATH",
                         tmp_path_factory.mktemp("issues-guard") / "issues.txt")
+    monkeypatch.setattr(pipeline, "PR_OPENED_PATH",
+                        tmp_path_factory.mktemp("pr-opened-guard") / "last-pr-opened.json")
 
 
 def _day(n: int) -> dt.datetime:
@@ -881,6 +883,59 @@ def test_reset_empties_the_worktree_temp_dir(monkeypatch, tmp_path):
     monkeypatch.setattr(pipeline, "_run_git", lambda args, cwd, **k: _FakeCompleted(stdout=""))
     pipeline.reset_pipeline_worktree(worktree)
     assert not temp.exists()
+
+
+def _open_pr_with_fake_gh(monkeypatch, tmp_path, returncode=0):
+    sleeps, calls = [], []
+    monkeypatch.setattr(pipeline.time, "sleep", lambda s: sleeps.append(s))
+    monkeypatch.setattr(pipeline.subprocess, "run",
+                        lambda cmd, **k: calls.append(cmd) or _FakeCompleted(
+                            returncode=returncode, stdout="https://x/pull/7", stderr="refused"))
+    return sleeps, calls
+
+
+def test_open_pr_waits_out_the_spacing_since_the_last_pr(monkeypatch, tmp_path):
+    pipeline.record_pr_opened(now=pipeline.time.time() - 60)
+    sleeps, calls = _open_pr_with_fake_gh(monkeypatch, tmp_path)
+    assert pipeline.open_pr(tmp_path, "b", "b999", "b998") == 7
+    assert len(sleeps) == 1
+    assert pipeline.PR_OPEN_SPACING_SECONDS - 70 < sleeps[0] <= pipeline.PR_OPEN_SPACING_SECONDS - 60
+    assert len(calls) == 1
+    assert pipeline.seconds_until_next_pr() > pipeline.PR_OPEN_SPACING_SECONDS - 10
+
+
+def test_open_pr_does_not_wait_without_a_record_and_records_the_new_pr(monkeypatch, tmp_path):
+    assert not pipeline.PR_OPENED_PATH.exists()
+    sleeps, calls = _open_pr_with_fake_gh(monkeypatch, tmp_path)
+    pipeline.open_pr(tmp_path, "b", "b999", "b998")
+    assert sleeps == []
+    assert pipeline.PR_OPENED_PATH.exists()
+
+
+def test_open_pr_does_not_wait_once_the_spacing_has_passed(monkeypatch, tmp_path):
+    pipeline.record_pr_opened(now=pipeline.time.time() - pipeline.PR_OPEN_SPACING_SECONDS - 1)
+    sleeps, _ = _open_pr_with_fake_gh(monkeypatch, tmp_path)
+    pipeline.open_pr(tmp_path, "b", "b999", "b998")
+    assert sleeps == []
+
+
+def test_a_failed_pr_create_records_nothing(monkeypatch, tmp_path):
+    sleeps, _ = _open_pr_with_fake_gh(monkeypatch, tmp_path, returncode=1)
+    with pytest.raises(pipeline.InfraError):
+        pipeline.open_pr(tmp_path, "b", "b999", "b998")
+    assert not pipeline.PR_OPENED_PATH.exists()
+
+
+def test_a_record_in_the_future_waits_at_most_one_spacing(monkeypatch, tmp_path):
+    now = pipeline.time.time()
+    pipeline.record_pr_opened(now=now + 10 * pipeline.PR_OPEN_SPACING_SECONDS)
+    assert pipeline.seconds_until_next_pr(now=now) == pipeline.PR_OPEN_SPACING_SECONDS
+
+
+def test_an_unreadable_record_warns_and_waits_one_spacing(monkeypatch, tmp_path, capsys):
+    pipeline.PR_OPENED_PATH.write_text("not json", encoding="utf-8")
+    assert pipeline.seconds_until_next_pr() == pipeline.PR_OPEN_SPACING_SECONDS
+    assert "unreadable" in capsys.readouterr().out
 
 
 _INTERNAL_WORDS = ("real hardware", "this machine", "confirm_", "bump_", "receipt", "Automated:", "GUI test suite")

@@ -24,6 +24,10 @@ concurrency:
   group: codeql-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+concurrency:
+  group: codeql-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
 # Workflow-level floor. The repo default for GITHUB_TOKEN is read-only, so the
 # one job that needs more escalates it per-job below rather than here.
 permissions:
