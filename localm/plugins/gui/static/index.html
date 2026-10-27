@@ -890,11 +890,14 @@
                 <label data-i18n="settings.perf.splitLabel">Split across GPUs</label>
                 <div id="perf-gpu-split-list"></div>
                 <div id="perf-gpu-single-hint" class="sub" hidden></div>
+                <div id="perf-gpu-split-order" class="sub" hidden></div>
                 <div class="sub" data-i18n="settings.perf.splitHelp">Check one GPU to load a model on
                 that GPU only, or 2 or more to spread a model too large for one card over
                 them (overrides Main GPU); leave all unchecked for automatic placement.
-                Each card's share follows its free VRAM at load time, unless pinned below.
-                Saves immediately; applies on the next model load.</div>
+                The checked cards are filled in the order you check them: the first one
+                gets the first layers. Each card's share follows its free VRAM at load
+                time, unless pinned below. Saves immediately; applies on the next model
+                load.</div>
                 <!-- gpu_split_ratios: rendered by setupGpuSplitCheckboxes's
                      renderGpuSplitRatioRow (settings-perf.js), not the generic
                      settings form - same reasoning as gpu_split_indices above.
@@ -1181,6 +1184,19 @@
                   <button class="btn-primary" id="update-apply" hidden data-i18n="settings.update.applyButton">Update now</button>
                 </div>
                 <div id="update-status" class="sub" hidden></div>
+                <!-- The GUI form of `localm update --list` / `--to <version>`. -->
+                <div class="actions">
+                  <button class="btn-secondary" id="update-versions" data-i18n="settings.update.versionsButton">Choose a version</button>
+                </div>
+                <div id="update-version-picker" hidden>
+                  <label class="sub" for="update-version-select" data-i18n="settings.update.versionLabel">Version to install</label>
+                  <select id="update-version-select"></select>
+                  <div id="update-version-info" class="sub"></div>
+                  <div class="actions">
+                    <button class="btn-secondary" id="update-install-version" data-i18n="settings.update.installVersionButton">Install this version</button>
+                  </div>
+                </div>
+                <div id="update-version-status" class="sub" hidden></div>
               </div>
 
               <!-- The GUI half of `localm update --rollback`. Its OWN sub-block, not

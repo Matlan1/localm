@@ -428,3 +428,227 @@ class TestGpuSplitDropsUnknownDevice:
                 config={"gpu_split_indices": [0, 99], "main_gpu_index": 0})
         assert result == {"device_map": {"": 0}}
         assert any("gpu_split_indices" in r.message for r in caplog.records)
+
+
+# The listed GPU order (gpu_split_indices [3, 1]): the worker sees only cards 3
+# and 1, as its devices 0 and 1, so accelerate (which fills GPUs by number) puts
+# the first layers on card 3. Without the order, the same cards keep their own
+# numbers and accelerate starts on card 1.
+_LISTED_ORDER_CHILD_SCRIPT = """
+from unittest.mock import MagicMock
+
+import localm.discover as discover
+from localm.inference.backends import _hf_worker
+from torch import nn
+from accelerate.utils import infer_auto_device_map
+
+model = nn.Sequential(*[nn.Linear(512, 512) for _ in range(4)])
+total = sum(p.numel() * p.element_size() for p in model.parameters())
+budget = int(total // 4 * 2.5)   # room for two blocks on each card
+
+
+def _fake_torch(mem):
+    fake = MagicMock()
+    fake.cuda.mem_get_info.side_effect = lambda i: mem[i]
+    return fake
+
+
+def _first_card(order, visible, mem):
+    _hf_worker._GPU_ORDER = order
+    discover.list_gpus = lambda: [{"index": i} for i in visible]
+    kwargs = _hf_worker._cuda_device_map(
+        _fake_torch(mem), config={"gpu_split_indices": [3, 1], "vram_overhead_mb": 0})
+    device_map = infer_auto_device_map(model, max_memory=kwargs["max_memory"])
+    return device_map["0"], device_map
+
+
+ordered, m1 = _first_card([3, 1], [0, 1], {0: (budget, 10**10), 1: (budget, 10**10)})
+by_number, m2 = _first_card(None, [1, 3], {1: (budget, 10**10), 3: (budget, 10**10)})
+assert ordered == 0, m1          # this worker's device 0 is card 3
+assert by_number == 1, m2        # card 1, the lower number, first
+print("LISTED_ORDER_OK", m1, m2)
+"""
+
+
+class TestListedGpuOrder:
+    """gpu_split_indices listed out of number order: the worker sees only those
+    GPUs in that order, and the device map numbers them by position."""
+
+    def test_the_listed_gpus_become_positions_in_their_order(self, monkeypatch):
+        from localm.inference.backends import _hf_worker
+        monkeypatch.setattr(_hf_worker, "_GPU_ORDER", [3, 1])
+        monkeypatch.setattr(
+            "localm.discover.list_gpus", lambda: [{"index": 0}, {"index": 1}])
+        mem = {0: (8_000_000_000, 16_000_000_000), 1: (4_000_000_000, 8_000_000_000)}
+        result = _cuda_device_map(_fake_torch(mem), config={"gpu_split_indices": [3, 1]})
+        assert {k for k in result["max_memory"] if isinstance(k, int)} == {0, 1}
+        assert result["max_memory"][0] == 8_000_000_000 - _SPLIT_HEADROOM, "card 3"
+        assert result["max_memory"][1] == 4_000_000_000 - _SPLIT_HEADROOM, "card 1"
+
+    def test_real_accelerate_fills_the_first_listed_gpu_first(self):
+        _skip_unless_torch_and_accelerate_available()
+        result = _run_isolated_script(_LISTED_ORDER_CHILD_SCRIPT)
+        _assert_subprocess_ok(result)
+        assert "LISTED_ORDER_OK" in result.stdout
+
+
+class TestApplyGpuOrder:
+    """_apply_gpu_order: the worker's visible GPUs, set before torch loads."""
+
+    @pytest.fixture(autouse=True)
+    def _clean(self, monkeypatch):
+        from localm.inference.backends import _hf_worker
+        monkeypatch.setattr(_hf_worker, "_GPU_ORDER", None)
+        monkeypatch.setattr(_hf_worker, "_torch_build", lambda: "cuda")
+        for var in ("CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES"):
+            monkeypatch.delenv(var, raising=False)
+        modules = dict(sys.modules)
+        modules.pop("torch", None)
+        monkeypatch.setattr(sys, "modules", modules)
+
+    def test_the_listed_gpus_are_the_visible_ones_in_their_order(self):
+        import os
+
+        from localm.inference.backends import _hf_worker
+        assert _hf_worker._apply_gpu_order([3, 1]) is True
+        assert os.environ["CUDA_VISIBLE_DEVICES"] == "3,1"
+        assert "HIP_VISIBLE_DEVICES" not in os.environ
+        assert _hf_worker._GPU_ORDER == [3, 1]
+
+    def test_an_inherited_list_is_narrowed_by_position(self, monkeypatch):
+        import os
+
+        from localm.inference.backends import _hf_worker
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "5,6,7,8")
+        assert _hf_worker._apply_gpu_order([3, 1]) is True
+        assert os.environ["CUDA_VISIBLE_DEVICES"] == "8,6"
+
+    def test_a_cuda_build_ignores_a_set_hip_list(self, monkeypatch):
+        import os
+
+        from localm.inference.backends import _hf_worker
+        monkeypatch.setenv("HIP_VISIBLE_DEVICES", "0,1,2,3")
+        assert _hf_worker._apply_gpu_order([3, 1]) is True
+        assert os.environ["CUDA_VISIBLE_DEVICES"] == "3,1"
+        assert os.environ["HIP_VISIBLE_DEVICES"] == "0,1,2,3"
+
+    @pytest.mark.parametrize("env, hip, cuda", [
+        ({}, "3,1", None),
+        ({"HIP_VISIBLE_DEVICES": "0,1,2,3"}, "3,1", None),
+        ({"HIP_VISIBLE_DEVICES": "4,5,6,7"}, "7,5", None),
+        ({"CUDA_VISIBLE_DEVICES": "5,6,7,8"}, "8,6", None),
+        ({"HIP_VISIBLE_DEVICES": "0,1,2,3", "CUDA_VISIBLE_DEVICES": "0,1,2,3"},
+         "3,1", "0,1,2,3"),
+    ])
+    def test_a_rocm_build_narrows_hip_visible_devices(self, monkeypatch, env, hip, cuda):
+        import os
+
+        from localm.inference.backends import _hf_worker
+        monkeypatch.setattr(_hf_worker, "_torch_build", lambda: "hip")
+        for var, value in env.items():
+            monkeypatch.setenv(var, value)
+        assert _hf_worker._apply_gpu_order([3, 1]) is True
+        assert os.environ["HIP_VISIBLE_DEVICES"] == hip
+        assert os.environ.get("CUDA_VISIBLE_DEVICES") == cuda
+
+    def test_an_unknown_torch_build_leaves_the_gpus_alone(self, monkeypatch, caplog):
+        import os
+
+        from localm.inference.backends import _hf_worker
+        monkeypatch.setattr(_hf_worker, "_torch_build", lambda: None)
+        assert _hf_worker._apply_gpu_order([3, 1]) is False
+        assert "CUDA_VISIBLE_DEVICES" not in os.environ
+        assert "HIP_VISIBLE_DEVICES" not in os.environ
+        assert "filled by number" in caplog.text
+
+    def test_an_inherited_list_without_a_listed_gpu_is_left_alone(self, monkeypatch, caplog):
+        import os
+
+        from localm.inference.backends import _hf_worker
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "5,6")
+        assert _hf_worker._apply_gpu_order([3, 1]) is False
+        assert os.environ["CUDA_VISIBLE_DEVICES"] == "5,6"
+        assert _hf_worker._GPU_ORDER is None
+        assert "filled by number" in caplog.text
+
+    def test_torch_already_loaded_leaves_the_gpus_alone(self, caplog):
+        import os
+
+        from localm.inference.backends import _hf_worker
+        sys.modules["torch"] = MagicMock()
+        assert _hf_worker._apply_gpu_order([3, 1]) is False
+        assert "CUDA_VISIBLE_DEVICES" not in os.environ
+        assert "filled by number" in caplog.text
+
+    def test_load_sets_the_order_before_torch_loads(self, monkeypatch, tmp_path):
+        from localm.inference.backends import _hf_worker
+        calls = []
+        monkeypatch.setattr(_hf_worker, "_apply_gpu_order", lambda o: calls.append(("order", o)))
+
+        def _torch():
+            calls.append(("torch", None))
+            raise RuntimeError("stop here")
+
+        monkeypatch.setattr(_hf_worker, "_require_torch", _torch)
+        monkeypatch.setattr(_hf_worker, "_trust_remote_code_enabled", lambda: False)
+        worker = _hf_worker.HFWorker(str(tmp_path), gpu_order=[3, 1])
+        with pytest.raises(RuntimeError, match="stop here"):
+            worker.load()
+        assert calls == [("order", [3, 1]), ("torch", None)]
+
+
+@pytest.mark.parametrize("device, expected", [(None, [3, 1]), ("cuda", [3, 1]), ("cpu", None)])
+def test_the_parent_hands_the_listed_order_to_the_worker(tmp_path, device, expected):
+    from unittest import mock
+
+    from localm.inference.backends import hf as hf_backend
+    backend = hf_backend.HFBackend.__new__(hf_backend.HFBackend)
+    backend.model_path = str(tmp_path)
+    backend._device = device
+    backend._task = "chat"
+    runner = MagicMock()
+    runner.return_value.spawn_and_load.side_effect = RuntimeError("stop here")
+    with mock.patch.object(hf_backend, "_check_custom_code_allowed", lambda *_a, **_k: None), \
+         mock.patch.object(hf_backend, "_check_format_supported", lambda *_a, **_k: None), \
+         mock.patch("localm.inference.hf_tokenizer_safety.validate_tokenizer_json",
+                    lambda *_a, **_k: None), \
+         mock.patch("localm.inference.hf_shard_index_safety.validate_shard_index",
+                    lambda *_a, **_k: None), \
+         mock.patch("localm.discover.hf_gpu_order", return_value=[3, 1]), \
+         mock.patch.object(hf_backend, "HFRunner", runner), \
+         mock.patch.object(backend, "_load_timeout_seconds", return_value=1, create=True):
+        with pytest.raises(RuntimeError, match="stop here"):
+            backend.load()
+    params = runner.return_value.spawn_and_load.call_args.args[0]
+    assert params.get("gpu_order") == expected
+
+
+@pytest.mark.parametrize("text, build", [
+    ("cuda: Optional[str] = None\nhip: Optional[str] = '7.13.99004'\n", "hip"),
+    ("cuda: Optional[str] = '12.8'\nhip: Optional[str] = None\n", "cuda"),
+    ("cuda = '11.8'\nhip = None\n", "cuda"),
+    ("cuda: Optional[str] = None\nhip: Optional[str] = None\n", None),
+    ("__version__ = '2.11.0'\n", None),
+])
+def test_the_torch_build_is_read_from_its_version_file(text, build):
+    from localm.inference.backends._hf_worker import _parse_torch_build
+    assert _parse_torch_build(text) == build
+
+
+def test_the_torch_build_is_read_without_importing_torch(tmp_path, monkeypatch):
+    import importlib.machinery
+    import importlib.util
+
+    from localm.inference.backends import _hf_worker
+    pkg = tmp_path / "torch"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("raise RuntimeError('torch was imported')\n",
+                                     encoding="utf-8")
+    (pkg / "version.py").write_text("cuda: Optional[str] = '12.8'\nhip = None\n",
+                                    encoding="utf-8")
+    spec = importlib.machinery.ModuleSpec("torch", None, is_package=True)
+    spec.submodule_search_locations = [str(pkg)]
+    real = importlib.util.find_spec
+    monkeypatch.setattr(importlib.util, "find_spec",
+                        lambda name, *a: spec if name == "torch" else real(name, *a))
+    assert _hf_worker._torch_build() == "cuda"

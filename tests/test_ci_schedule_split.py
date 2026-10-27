@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The nightly and weekly crons of .github/workflows/ci.yml.
 
-The nightly cron runs exactly test, gui-tests, optional-stacks, lint and
-voice-stack; the weekly cron keeps every job it ran before. A pull request
+The nightly cron runs exactly test, gui-tests, optional-stacks, lint,
+voice-stack and proxy-tests; the weekly cron keeps every job it ran before. A pull request
 without a label runs no pin-currency check. Each job's `if:` is evaluated here, from
 the real workflow text, under each trigger, by a small evaluator for the
 GitHub Actions expression subset the file uses.
@@ -22,7 +22,8 @@ _CI = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 NIGHTLY = "23 3 * * *"
 WEEKLY = "37 6 * * 1"
 
-NIGHTLY_JOBS = {"test-shard", "test", "gui-tests", "optional-stacks", "lint", "voice-stack"}
+NIGHTLY_JOBS = {"test-shard", "test", "gui-tests", "optional-stacks", "lint", "voice-stack",
+                "proxy-tests"}
 WEEKLY_JOBS = NIGHTLY_JOBS | {
     "abi-check", "comfyui-pin-check", "llama-rocm-pin-check",
     "mutation-scope", "mutation-run", "mutation-test", "web-search-canary", "voice-stack",
@@ -210,7 +211,7 @@ def test_the_push_trigger_runs_the_same_jobs_as_before_the_split():
 
 
 @pytest.mark.parametrize("labels,expected_present,expected_absent", [
-    ((), {"lint", "python-pr-gate", "voice-stack", "merge-policy"},
+    ((), {"lint", "python-pr-gate", "voice-stack", "proxy-tests", "gui-tests", "merge-policy"},
      {"test", "optional-stacks", "comfyui-pin-check", "llama-rocm-pin-check"}),
     (("full-ci",), {"lint", "test", "gui-tests", "optional-stacks", "merge-policy"}, {"python-pr-gate"}),
 ])
@@ -243,3 +244,26 @@ def test_the_voice_stack_runs_its_steps_on_a_pull_request_only_for_voice_changes
     after = steps[steps.index(scope) + 1:]
     gated = [s for s in after if s.get("if") == "steps.scope.outputs.run == 'true'"]
     assert len(gated) == len(after) - 1, "every step after the scope check is gated, except the whisper smoke"
+
+
+def test_the_proxy_tests_run_on_a_pull_request_only_for_proxy_changes():
+    steps = _load()["jobs"]["proxy-tests"]["steps"]
+    scope = next(s for s in steps if s.get("id") == "scope")
+    assert steps[0]["with"]["fetch-depth"] == 2
+    assert "tools/bugreport-proxy/" in scope["run"]
+    run = next(s for s in steps if s.get("name") == "Proxy tests")
+    assert run["if"] == "steps.scope.outputs.run == 'true'"
+    assert "tools/bugreport-proxy/worker.test.mjs" in run["run"]
+    assert "tests-js/bugreport-proxy-worker.test.mjs" in run["run"]
+
+def test_the_gui_tests_run_on_an_unlabelled_pull_request_only_for_gui_changes_on_linux():
+    steps = _load()["jobs"]["gui-tests"]["steps"]
+    scope = next(s for s in steps if s.get("id") == "scope")
+    assert steps[0]["with"]["fetch-depth"] == 2
+    assert "git diff --name-only HEAD^1 HEAD" in scope["run"]
+    for path in ("localm/plugins/gui/static/", "tests-js/", r"package\.json"):
+        assert path in scope["run"], path
+    assert '"$FULL_CI" = "true"' in scope["run"]
+    assert '"$HOST_OS" != "Linux"' in scope["run"]
+    after = steps[steps.index(scope) + 1:]
+    assert after and all("steps.scope.outputs.run == 'true'" in s.get("if", "") for s in after)
