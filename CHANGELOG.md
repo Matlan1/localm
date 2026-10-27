@@ -15,6 +15,8 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **The chat's Markdown and math renderers are updated (marked 18.1.2, KaTeX 0.19.1).** The marked update fixes a batch of Markdown edge cases, among them emphasis next to punctuation, block quotes with tabs or blank lines, and a `#` line inside a list item; KaTeX 0.19.1 accepts a percent sign in a raw argument.
 - **The Docker images are built on the current Ubuntu 24.04 base image.**
 - **Error messages in the GUI stay until you close them.** An error toast now has a close button (Escape closes the focused one) instead of vanishing after a few seconds, a later message no longer replaces it, up to three are shown at once with a "+N more" link, and the same error repeated shows a count instead of piling up. Settings > Recent errors lists the last five with Copy and "Report this error", which fills in the bug report form for you to review; nothing is sent until you send it. Every GUI error, including errors shown inside a page and script errors in the page, is now also written to the server log, so it shows in the status window's log and in the debug log; a burst of the same error is written as one line with a count.
+- **Every setup preselects the coder, rag, web and tts plugins.** Pressing Enter at the console plugin question (or Next in the window) installs that set; type `none` to skip. `setup.sh --yes` installs it too. The graphical setup saves your plugin-dependencies answer as a setting, like the console.
+- **The backend menu is the same in every setup**: the same entries in the same order, the recommendation first, listing only the backends with a build for your computer.
 
 ### Fixed
 - **Dollar amounts in a chat reply are no longer typeset as math.** A reply such as "$5 and $10" showed as "5and10", and "($$$$)" split the line with an empty block. A `$` now starts inline math only when it is followed by a character that is not a space or a digit and the closing `$` follows a non-space character and is not followed by a digit, so "$5", "$3.50 or $4" and "pay $5, get $10 back" stay text while `$x^2$` and `$$\int_0^1 x\,dx$$` still render as math. Write `\$` for a literal dollar sign anywhere.
@@ -36,11 +38,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **`setup.bat` offers the ROCm/HIP backend on Windows x64**, like the graphical setup.
 - **A failed llama.cpp runtime download no longer ends `setup.bat` or the graphical setup.** Every setup asks whether to continue without a runtime (the default), and prints the exact command to retry.
 - **One Linux menu entry.** `setup.sh` and the graphical setup both write `localm.desktop` and both offer the launcher, straight to the GUI (the LocaLM binary), or no entry; an older `LocaLM.desktop` the graphical setup made for the same folder is replaced.
-
-### Changed
-
-- **Every setup preselects the coder, rag, web and tts plugins.** Pressing Enter at the console plugin question (or Next in the window) installs that set; type `none` to skip. `setup.sh --yes` installs it too. The graphical setup saves your plugin-dependencies answer as a setting, like the console.
-- **The backend menu is the same in every setup**: the same entries in the same order, the recommendation first, listing only the backends with a build for your computer.
+- **Pointing setup at your own llama.cpp build replaces a runtime that is already installed.** Before, a repair kept the old runtime and reported the step as done.
 
 ## [0.3.2rc1] - 2026-10-27
 
