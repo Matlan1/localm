@@ -1038,8 +1038,9 @@ def _install_trust_bridge(root: Path) -> None:
               + "\n\n\n_PINNED_KEYSET = " + _json.dumps(pinned, sort_keys=True) + "\n")
     stanza = (
         "\n\n# Verifies updates with the update signing keys of the localm build that\n"
-        "# installed this version (localm/_update_trust_bridge.py).\n"
-        "def _localm_bridged_verify_signature(data, signature_b64=None):\n"
+        "# installed this version (localm/_update_trust_bridge.py). A trusted= key\n"
+        "# set passed in is not used: the bridge verifies against its own.\n"
+        "def _localm_bridged_verify_signature(data, signature_b64=None, **_unused):\n"
         "    from localm import _update_trust_bridge as bridge\n"
         "    accepted = bridge.verify_signature(data, signature_b64)\n"
         "    if accepted is not None:\n"
@@ -1160,8 +1161,8 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
     copied aside (:func:`_backup_data_for_downgrade`; ``data_backup`` is that
     directory or None). A selected install also saves the trusted key set for
     the build it installs (:func:`_carry_trust_forward`), gives a build from
-    before 0.3.0 this build's signature check (:func:`_install_trust_bridge`) so
-    it can verify and install later releases, and re-provisions the native
+    before 0.3.2 this build's signature check (:func:`_install_trust_bridge`) so
+    it can verify and install later releases and refuses the revoked keys, and re-provisions the native
     runtime when the build pins a different llama.cpp release. Without
     *target_version* nothing of this applies: the signature must verify and the
     build must be newer.
