@@ -541,7 +541,7 @@ def _vae_info(t: dict) -> Optional[FileInfo]:
     if _has(names, "decoder.head.", "decoder.upsamples.") and _has(names, "encoder.downsamples."):
         w = t.get("conv2.weight") or t.get("decoder.conv1.weight") or ()
         z = w[1] if len(w) == 5 else None
-        fam = {48: "wan2.2", 64: "qwen-image-2.1"}.get(z, "wan2.1")
+        fam = {48: "wan2.2", 64: "qwen-image-2.1"}.get(z, "wan2.1") if z is not None else "wan2.1"
         return FileInfo("vae", fam, {"vae_dims": "3d", "latent": z})
     return None
 
