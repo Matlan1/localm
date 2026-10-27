@@ -11,6 +11,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Fixed
+- **Stop ends a running coder sub-agent at its next step.** Pressing Stop while a sub-agent was working did nothing to it until it finished on its own, so it kept taking turns and editing files. It now takes no further turn and runs no further tool after Stop, and the session stops after it. A sub-agent running in the background is not affected.
+- **A `rem` or `::` comment, a `:label` line or a `& rem ...` comment at the end of a line in a multi-line Windows command no longer hides the lines after it.** The coder's shell tool ran nothing past the comment and still reported success; the comment is now skipped and every other line runs.
+
 ## [0.3.2rc1] - 2026-10-27
 
 ### Security
