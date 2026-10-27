@@ -214,7 +214,7 @@ def test_an_image_model_of_unknown_family_without_chosen_encoders_is_refused_bef
         assert not ok
         assert msg.startswith("'mystery' is not an image model localm can identify (")
         assert shown in msg and "is not passed to stable-diffusion.cpp" in msg
-        assert msg.count(". ") == 0 and msg.endswith("backend.")
+        assert msg.count(". ") == 0 and msg.endswith("detects the family.")
     assert runner.loads == [] and runner.generates == []
     ok, msg = image_native.ensure_available({"backend": "native",
                                              "native": {"model": "mystery"}})
