@@ -161,6 +161,16 @@ def test_posix_routes_several_lines_to_sh_unchanged(monkeypatch):
     assert _shell_argv(cmd) == ["/bin/sh", "-c", cmd]
 
 
+def test_posix_runs_crlf_lines_as_lf(monkeypatch):
+    """sh would keep the CR in the last word of each line."""
+    monkeypatch.setattr(shell_mod.sys, "platform", "linux")
+    from localm.plugins.coder.tools import base
+    monkeypatch.setattr(base.sys, "platform", "linux")
+    cmd = "echo a > one.txt\r\necho b > two.txt"
+    assert _shell_argv(cmd) == ["/bin/sh", "-c", "echo a > one.txt\necho b > two.txt"]
+    assert shell_mod.executed_forms(cmd) == [cmd, "echo a > one.txt\necho b > two.txt"]
+
+
 def test_a_quoted_line_break_in_an_argument_list_is_kept(tmp_path):
     """A line break inside quotes in a command with no shell characters stays
     one argument of one process (the argument-list route)."""
@@ -229,6 +239,8 @@ def test_executed_forms_carry_the_joined_text(command):
     assert forms[0] == command
     if _WIN:
         assert len(forms) == 2 and "\n" not in forms[1] and "\r" not in forms[1]
+    elif "\r\n" in command:
+        assert forms == [command, command.replace("\r\n", "\n")]
     else:
         assert forms == [command]
 

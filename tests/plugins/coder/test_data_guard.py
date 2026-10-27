@@ -526,6 +526,7 @@ def _realpath_spy(monkeypatch):
     return seen
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="UNC link targets exist only on Windows")
 def test_a_link_to_a_network_path_is_never_followed(tmp_path, monkeypatch):
     """A link inside the project whose target is a UNC path is read, not
     followed: no realpath runs on it, for the shell and the file tools."""

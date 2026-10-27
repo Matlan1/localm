@@ -725,7 +725,8 @@ def _remember_owner_key_job(job: Job) -> None:
 def _project_mode_error(cwd: Path) -> Optional[str]:
     """A refusal message when the ``.localcoder/config.toml`` nearest *cwd*
     sets a ``mode`` that is not privacy, log or full, else None. A config that
-    cannot be read is left to ``effective_unattended_mode`` (privacy)."""
+    cannot be read or found (an unsearchable project folder) is left to
+    ``effective_unattended_mode``, which resolves it to privacy and warns."""
     from localm.audit import parse_mode
     from localm.plugins.coder.project_config import (
         ProjectConfigUnreadable,
@@ -734,7 +735,7 @@ def _project_mode_error(cwd: Path) -> Optional[str]:
     )
     try:
         pmode = load_project_config(cwd).get("mode")
-    except ProjectConfigUnreadable:
+    except (ProjectConfigUnreadable, OSError):
         return None
     if pmode is None:
         return None

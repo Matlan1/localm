@@ -147,28 +147,36 @@ def _batch_command_line(program: str, args: list[str]) -> str:
 
 
 def executed_forms(command: str) -> list[str]:
-    """*command* and, when the platform shell runs a different text, that text
-    too: on Windows a command of several lines runs as its cmd.exe join
-    (:func:`_cmd_join_lines`). Every form must pass the shell and data guards.
-    A command cmd.exe cannot run is returned alone (the tool refuses it)."""
+    """*command* and, when the platform shell runs a different text
+    (:func:`_shell_text`), that text too. Every form must pass the shell and
+    data guards. A command cmd.exe cannot run is returned alone (the tool
+    refuses it)."""
     forms = [command]
-    if sys.platform == "win32" and ("\n" in command or "\r" in command):
-        try:
-            joined = _cmd_join_lines(command)
-        except CommandNotRunnable:
-            return forms
-        if joined != command:
-            forms.append(joined)
+    try:
+        text = _shell_text(command)
+    except CommandNotRunnable:
+        return forms
+    if text != command:
+        forms.append(text)
     return forms
 
 
+def _shell_text(command: str) -> str:
+    """The text the platform shell runs for *command*: on Windows a command of
+    several lines is joined for cmd.exe (:func:`_cmd_join_lines`); elsewhere a
+    CRLF line break becomes LF, so ``sh`` does not keep the CR in a word.
+    Raises :class:`CommandNotRunnable` when cmd cannot run it as written."""
+    if sys.platform == "win32":
+        if "\n" in command or "\r" in command:
+            return _cmd_join_lines(command)
+        return command
+    return command.replace("\r\n", "\n")
+
+
 def _shell_form(command: str) -> list[str] | str:
-    """:func:`base.platform_shell` of *command*, with its lines joined for
-    ``cmd.exe`` on Windows (see :func:`_cmd_join_lines`). Raises
+    """:func:`base.platform_shell` of :func:`_shell_text` of *command*. Raises
     :class:`CommandNotRunnable` when cmd cannot run it as written."""
-    if sys.platform == "win32" and ("\n" in command or "\r" in command):
-        command = _cmd_join_lines(command)
-    return platform_shell(command)
+    return platform_shell(_shell_text(command))
 
 
 def _cmd_join_lines(command: str) -> str:
