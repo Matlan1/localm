@@ -271,6 +271,9 @@ export function syncIndexSpaceHint(indexSpace) {
   if (anyVisible && _gpuIndexSpace === "native") {
     hint.textContent = t("settings.perf.indexSpaceHint");
     hint.hidden = false;
+  } else if (anyVisible && _gpuIndexSpace === "nvidia-smi") {
+    hint.textContent = t("settings.perf.numberingUnknownHint");
+    hint.hidden = false;
   } else {
     hint.hidden = true;
   }
@@ -307,6 +310,7 @@ export async function refreshMainGpuSelector() {
     }
     const current = typeof data.main_gpu_index === "number" ? data.main_gpu_index : 0;
     sel.value = String(current);
+    sel.disabled = data.index_space === "nvidia-smi";
     row.hidden = false;
     syncIndexSpaceHint(data.index_space ?? null);   // after row.hidden - it reads it
   } catch {
@@ -446,6 +450,7 @@ export async function refreshGpuSplitCheckboxes() {
       cb.type = "checkbox";
       cb.value = String(g.index);
       cb.checked = current.has(g.index);
+      cb.disabled = data.index_space === "nvidia-smi";
       cb.onchange = onGpuSplitCheckboxChange;
       label.appendChild(cb);
       const gb = typeof g.total === "number" ? ` (${_perfGiB(g.total)} GB)` : "";

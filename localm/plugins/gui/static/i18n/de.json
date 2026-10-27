@@ -2086,6 +2086,7 @@
   "settings.perf.pinnedLabel": "Angeheftete Modelle",
   "settings.perf.pinnedPlaceholder": "kommagetrennte Modellnamen (leer heftet nichts an)",
   "settings.perf.pinsClearedToast": "Anheftungen entfernt",
+  "settings.perf.numberingUnknownHint": "GPU-Nummern sind gerade nicht verfügbar: Die GPU-Abfrage über torch hat nicht geantwortet, und nvidia-smi nummeriert die Karten auf eigene Weise. Die GPU-Auswahl ist gesperrt, bis torch antwortet.",
   "settings.perf.ratioHint": "Optionale relative Gewichtung pro angekreuztem Gerät (z. B. ergeben 3 und 1, dass die erste Karte den dreifachen Anteil der zweiten erhält). Lassen Sie jede Gewichtung leer, um die automatische Bemessung nach freiem VRAM oben beizubehalten.",
   "settings.perf.saveFailedToast": "Speichern nicht möglich: {message}",
   "settings.perf.reloadBusyToast": "Gespeichert, aber {model} ist beschäftigt - die neuen Werte gelten beim nächsten Laden",

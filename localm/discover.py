@@ -792,10 +792,12 @@ def _reset_gpu_probe_cache() -> None:
     global _gpu_last_good, _gpu_probe_inflight, _gpu_probe_epoch
     global _gpu_probe_done, _gpu_probe_result, _isolated_torch_unavailable
     global _isolated_torch_broken_warned, _child_stderr_cap_reported
-    global _isolated_torch_unanswered
+    global _isolated_torch_unanswered, _torch_round_unanswered
     global _isolated_torch_retry_wait, _isolated_torch_retry_at
     _LLAMA_SLOTS_CACHE.clear()
     with _gpu_probe_lock:
+        _TORCH_INDEX_OF_BUS.clear()
+        _torch_round_unanswered = False
         _gpu_last_good = None
         _gpu_probe_inflight = False
         _isolated_torch_unanswered = False
@@ -1771,6 +1773,8 @@ def _torch_gpus_isolated() -> Optional[list]:
                      "(%s)%s; falling through to nvidia-smi", e,
                      f"; child said: {said}" if said else "")
         return None
+    if proc.returncode:
+        _note_torch_round_unanswered()
     if err:
         # The child prints its own failure cause here before answering [], so it
         # must not die with the discarded stream. Latched: this line carries
@@ -1958,10 +1962,12 @@ def _torch_gpus_resident_bounded(timeout: float = _TORCH_RESIDENT_READ_TIMEOUT) 
         threading.Thread(target=_read, name="localm-torch-gpus-resident",
                          daemon=True).start()
     except Exception:
+        _note_torch_round_unanswered()
         return []
-    if not done.wait(timeout):
+    if not done.wait(timeout) or "value" not in result:
+        _note_torch_round_unanswered()
         return []
-    return result.get("value", [])
+    return result["value"]
 
 
 def _list_gpus_probe() -> list:
@@ -1970,9 +1976,10 @@ def _list_gpus_probe() -> list:
     # Whether torch was actually asked this round, as opposed to being
     # skipped outright because it is known-doomed. Read by the AMD/Windows
     # fallback at the end of this function.
-    global _isolated_torch_unanswered
+    global _isolated_torch_unanswered, _torch_round_unanswered
     with _gpu_probe_lock:
         _isolated_torch_unanswered = False
+        _torch_round_unanswered = False
     torch_asked = not _torch_gpu_probe_known_doomed()
     skipped_for_sycl = not torch_asked and _torch_gpu_probe_doomed_reason() == "sycl"
     if torch_asked:
@@ -1981,6 +1988,7 @@ def _list_gpus_probe() -> list:
                 else _torch_gpus_isolated_once()
             if out:
                 _apply_device_global_free(out)
+                _note_torch_numbering(out)
                 return out
         except Exception:
             pass
@@ -2029,7 +2037,7 @@ def _list_gpus_probe() -> list:
                 except ValueError:
                     continue   # a malformed line never hides the rest
             if out:
-                return out
+                return _nvidia_smi_numbering(out, torch_asked)
     except Exception:
         pass
 
@@ -2059,8 +2067,67 @@ FREE_SCOPE_DEVICE = "device"    # every process's VRAM is counted - the number i
 FREE_SCOPE_PROCESS = "process"  # ONLY this process's own allocations are counted (see below)
 
 # ``source`` tag on a list_gpus() entry read from nvidia-smi rather than torch.
-# Its ``index`` is nvidia-smi's own numbering, not a CUDA device ordinal.
+# Its ``index`` is nvidia-smi's own numbering, not a CUDA device ordinal, unless
+# the entry carries ``"numbering": GPU_NUMBERING_TORCH`` (_nvidia_smi_numbering).
 GPU_SOURCE_NVIDIA_SMI = "nvidia-smi"
+
+# ``numbering`` of an nvidia-smi entry on a box where torch numbers the GPUs:
+# renumbered to torch's device numbers, or left in nvidia-smi's own order.
+GPU_NUMBERING_TORCH = "torch"
+GPU_NUMBERING_NVIDIA_SMI = "nvidia-smi"
+
+# torch's device number of each PCI bus, from the last torch reading in which
+# every GPU reported a distinct bus. Guarded by _gpu_probe_lock.
+_TORCH_INDEX_OF_BUS: dict = {}
+
+# True for a probe round in which torch failed (the isolated probe exited
+# non-zero, or the resident read failed or overran). Guarded by _gpu_probe_lock.
+_torch_round_unanswered = False
+
+
+def _note_torch_round_unanswered() -> None:
+    """Record that torch failed to answer this probe round."""
+    global _torch_round_unanswered
+    with _gpu_probe_lock:
+        _torch_round_unanswered = True
+
+
+def _note_torch_numbering(out: list) -> None:
+    """Remember torch's device number of each GPU's PCI bus from torch reading
+    *out*, when every entry reports a distinct bus."""
+    buses = [d.get("pci_bus_id") for d in out]
+    if buses and all(isinstance(b, int) for b in buses) and len(set(buses)) == len(buses):
+        with _gpu_probe_lock:
+            _TORCH_INDEX_OF_BUS.clear()
+            _TORCH_INDEX_OF_BUS.update({b: d.get("index")
+                                        for b, d in zip(buses, out, strict=True)})
+
+
+def _nvidia_smi_numbering(out: list, torch_asked: bool) -> list:
+    """nvidia-smi reading *out* in the GPU numbering ``localm gpus`` and the
+    GUI show.
+
+    With *torch_asked* false *out* is returned unchanged. When the last torch
+    reading (:func:`_note_torch_numbering`) covered exactly *out*'s PCI buses,
+    each entry takes torch's number for its bus and ``"numbering":
+    GPU_NUMBERING_TORCH``, sorted by that number. Otherwise, when torch could
+    not answer (``_isolated_torch_unavailable``, ``_isolated_torch_unanswered``
+    or ``_torch_round_unanswered``), each entry keeps nvidia-smi's number and
+    carries ``"numbering": GPU_NUMBERING_NVIDIA_SMI``; when torch answered with
+    no GPU, *out* is returned unchanged (nvidia-smi's numbers are the only
+    ones)."""
+    if not torch_asked:
+        return out
+    with _gpu_probe_lock:
+        index_of_bus = dict(_TORCH_INDEX_OF_BUS)
+    buses = [d.get("pci_bus_id") for d in out]
+    if index_of_bus and len(set(buses)) == len(buses) and set(buses) == set(index_of_bus):
+        return sorted((dict(d, index=index_of_bus[d["pci_bus_id"]],
+                            numbering=GPU_NUMBERING_TORCH) for d in out),
+                      key=lambda d: d["index"])
+    if _isolated_torch_unavailable or _isolated_torch_unanswered or _torch_round_unanswered:
+        return [dict(d, numbering=GPU_NUMBERING_NVIDIA_SMI) for d in out]
+    return out
 
 # Probe budget below which a COLD (not-yet-opened) device-global source is skipped
 # rather than risk overrunning the probe deadline. The cold open costs about
@@ -3206,6 +3273,9 @@ def resolve_auto_split_ratios(config: Optional[dict] = None, *,
     - (``list_gpus()`` path only) any configured device's reading is not
       device-global (``free_scope != FREE_SCOPE_DEVICE``) - see the
       TRUSTWORTHINESS section below.
+    - (``list_gpus()`` path only) the reading is in nvidia-smi's own
+      numbering on a box where torch numbers the GPUs
+      (``"numbering": GPU_NUMBERING_NVIDIA_SMI``, :func:`_nvidia_smi_numbering`).
 
     On a build whose GPU index space is opaque to list_gpus() (vulkan or
     sycl - see :func:`_native_gpu_index_space_is_opaque`) the reading comes
@@ -3308,6 +3378,9 @@ def resolve_auto_split_ratios(config: Optional[dict] = None, *,
             if status != GPU_PROBE_OK:
                 return _fallback(
                     f"no fresh per-device VRAM reading (probe status {status})")
+        if any(g.get("numbering") == GPU_NUMBERING_NVIDIA_SMI for g in gpus or []):
+            return _fallback("torch did not answer, and nvidia-smi numbers the GPUs "
+                             "its own way")
         by_index = {g.get("index"): g for g in gpus}
         for i in idx_list:
             g = by_index.get(i)
@@ -4398,7 +4471,10 @@ def gguf_split_devices(config: Optional[dict] = None, *, gpus: Optional[list] = 
     The reading is *gpus*, else a probe (*wait_for_inflight* joins one in
     flight). On a vulkan or sycl build the devices are the runtime's own
     (:func:`native_gpu_devices`). Otherwise the reading is matched to the
-    runtime's device list (:func:`_llama_slots`). Raises
+    runtime's device list (:func:`_llama_slots`); a reading in nvidia-smi's own
+    numbering on a box where torch numbers the GPUs
+    (:func:`_nvidia_smi_numbering`) answers None when ``gpu_split_indices`` or
+    ``main_gpu_index`` is set. Raises
     :class:`GpuSplitConfigError` when a configured index names an integrated
     GPU the runtime leaves out. Never raises otherwise."""
     from localm.config import load_config
@@ -4436,6 +4512,12 @@ def gguf_split_devices(config: Optional[dict] = None, *, gpus: Optional[list] = 
                                                  wait_for_inflight=wait_for_inflight)
             if status != GPU_PROBE_OK or not readings:
                 return None, f"no fresh GPU reading (probe status {status})"
+            if ((chosen or cfg.get("main_gpu_index") is not None)
+                    and any(g.get("numbering") == GPU_NUMBERING_NVIDIA_SMI
+                            for g in readings)):
+                return None, ("the GPU numbers in the settings cannot be matched to "
+                              "the cards right now: torch did not answer, and "
+                              "nvidia-smi numbers the GPUs its own way")
             kept = _llama_visible_torch_devices(readings)
             if chosen:
                 by_index = {g.get("index"): g for g in readings}
@@ -4493,109 +4575,6 @@ def gguf_split_devices(config: Optional[dict] = None, *, gpus: Optional[list] = 
     except Exception as e:
         logger.debug("GPU split devices unavailable (%s: %s)", type(e).__name__, e)
         return None, f"the GPU list could not be built ({type(e).__name__})"
-
-
-_renumber_lock = threading.Lock()
-_renumber_attempted = False
-
-
-def _torch_reading_fastest_first() -> Optional[list]:
-    """The isolated torch probe's reading with ``CUDA_DEVICE_ORDER`` set to
-    ``FASTEST_FIRST`` (the CUDA default, the numbering localm used before it
-    set ``PCI_BUS_ID``), or None when the probe cannot answer."""
-    import json
-    import os
-    import subprocess
-    from localm._mp_spawn import interpreter_for_localm_children
-    env = dict(os.environ, CUDA_DEVICE_ORDER="FASTEST_FIRST")
-    try:
-        out = subprocess.run(
-            [interpreter_for_localm_children(), "-u", "-m", "localm._torch_gpu_probe"],
-            env=env, capture_output=True, text=True,
-            timeout=_ISOLATED_TORCH_PROBE_TIMEOUT)
-        lines = [ln for ln in out.stdout.splitlines() if ln.strip()]
-        reading = json.loads(lines[-1]) if lines else None
-    except Exception as e:
-        logger.debug("GPU renumbering: the FASTEST_FIRST probe failed (%s: %s)",
-                     type(e).__name__, e)
-        return None
-    return reading if isinstance(reading, list) else None
-
-
-def renumber_saved_gpu_selection() -> None:
-    """Move a saved ``main_gpu_index`` / ``gpu_split_indices`` from CUDA's
-    FASTEST_FIRST numbering to the PCI-bus numbering localm now uses, once.
-
-    Runs at most once per process and only while ``gpu_numbering`` is unset.
-    Records ``gpu_numbering`` = ``"pci_bus"`` without renumbering when nothing
-    is saved, when the user set ``CUDA_DEVICE_ORDER`` themself (both numberings
-    were the same then), on a vulkan or sycl build (those numbers are the
-    runtime's own), or when the two orders agree. Otherwise maps each saved
-    number to the same card's new number by PCI bus, saves it and logs a
-    WARNING naming the change. A probe that cannot answer leaves the settings
-    and the marker untouched (the next process tries again); GPUs that report
-    no PCI bus are left as saved, with a WARNING. Never raises."""
-    global _renumber_attempted
-    with _renumber_lock:
-        if _renumber_attempted:
-            return
-        _renumber_attempted = True
-    try:
-        import localm
-        from localm.config import load_config, update_config
-        cfg = load_config()
-        if cfg.get("gpu_numbering") == "pci_bus":
-            return
-
-        def _mark(remap: Optional[dict] = None) -> None:
-            def _apply(c: dict) -> None:
-                if remap:
-                    if isinstance(c.get("gpu_split_indices"), list):
-                        c["gpu_split_indices"] = [remap.get(i, i)
-                                                  for i in c["gpu_split_indices"]]
-                    if isinstance(c.get("main_gpu_index"), int):
-                        c["main_gpu_index"] = remap.get(c["main_gpu_index"],
-                                                        c["main_gpu_index"])
-                c["gpu_numbering"] = "pci_bus"
-            update_config(_apply)
-
-        split = cfg.get("gpu_split_indices")
-        main = cfg.get("main_gpu_index")
-        if ((not split and main is None)
-                or not getattr(localm, "CUDA_ORDER_SET_BY_LOCALM", False)
-                or _native_gpu_index_space_is_opaque()):
-            _mark()
-            return
-        old = _torch_reading_fastest_first()
-        if old is None:
-            return
-        if len(old) < 2:
-            _mark()
-            return
-        buses = [d.get("pci_bus_id") for d in old]
-        if (not all(isinstance(b, int) for b in buses) or len(set(buses)) != len(buses)
-                or not all(isinstance(d.get("index"), int) for d in old)):
-            logger.warning("GPU numbering: localm now numbers NVIDIA GPUs by PCI bus, "
-                           "but the GPUs did not report one, so the saved GPU choice "
-                           "(main GPU %r, split %r) is kept as it is; check it under "
-                           "Settings > Split across GPUs", main, split)
-            _mark()
-            return
-        by_bus = sorted(old, key=lambda d: d["pci_bus_id"])
-        remap = {d["index"]: pos for pos, d in enumerate(by_bus)}
-        if all(old_i == new_i for old_i, new_i in remap.items()):
-            _mark()
-            return
-        _mark(remap)
-        logger.warning("GPU numbering: localm now numbers NVIDIA GPUs by PCI bus, so "
-                       "the saved GPU choice was renumbered to name the same cards: "
-                       "main GPU %r -> %r, split %r -> %r", main,
-                       remap.get(main, main) if isinstance(main, int) else main,
-                       split, [remap.get(i, i) for i in split]
-                       if isinstance(split, list) else split)
-    except Exception as e:
-        logger.warning("GPU numbering: the saved GPU choice could not be checked "
-                       "(%s: %s)", type(e).__name__, e)
 
 
 def split_device_count(config: Optional[dict] = None) -> int:

@@ -930,12 +930,8 @@ class VramSizingMixin:
         from localm.inference.backends.llamacpp import _loader
         if _loader.native_lib_loaded():
             return None
-        import sys
-
         from localm.debuglog import logger as _dbg
-        from localm.discover import gguf_split_devices, renumber_saved_gpu_selection
-        if "pytest" not in sys.modules:
-            renumber_saved_gpu_selection()
+        from localm.discover import gguf_split_devices
         devices, reason = gguf_split_devices(
             gpus=getattr(self, "_sizing_gpus", None) or None, wait_for_inflight=True)
         if not devices:
