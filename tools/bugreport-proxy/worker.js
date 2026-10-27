@@ -280,7 +280,10 @@ async function latestRelease(request, env, url) {
   // Opt-in prerelease channel (localm's update_allow_prerelease setting, admin_only,
   // default off).
   const wantsPrerelease = url.searchParams.get("channel") === "prerelease";
-  const rel = await latestAppRelease(env, wantsPrerelease);
+  // A request without "client" comes from localm 0.3.1 or earlier; it is offered
+  // nothing newer than LEGACY_CLIENT_CEILING.
+  const legacy = !url.searchParams.get("client");
+  const rel = await latestAppRelease(env, wantsPrerelease, legacy ? LEGACY_CLIENT_CEILING : null);
   if (rel === null) return json({ ok: true, version: null, note: "no releases yet" });
   if (rel === undefined) return json({ error: "release lookup failed", status: 502 }, 502);
   const assets = (rel.assets || []).map((a) => ({ id: a.id, name: a.name, size: a.size }));
@@ -317,6 +320,31 @@ async function latestRelease(request, env, url) {
 // remembering the flag correctly.
 const APP_TAG_RE = /^v\d+\.\d+\.\d+/;
 
+// The newest release offered to a client that does not send "client" (localm 0.3.1
+// and earlier). Those clients run a bare "uv" for an update that changes Python
+// dependencies, so this release must not change them relative to v0.3.0 or v0.3.1;
+// the release tooling reads this constant and refuses such a build.
+const LEGACY_CLIENT_CEILING = "v0.3.2";
+
+// [major, minor, patch, final (1) or prerelease (0), prerelease suffix] for an app
+// tag, or null when the tag does not start with vX.Y.Z.
+function tagKey(tag) {
+  const m = /^v(\d+)\.(\d+)\.(\d+)(.*)$/.exec(String(tag || ""));
+  if (!m) return null;
+  const suffix = m[4].replace(/^[-.]/, "");
+  return [Number(m[1]), Number(m[2]), Number(m[3]), suffix ? 0 : 1, suffix];
+}
+
+// True when app tag *a* orders at or below app tag *b*.
+function tagAtMost(a, b) {
+  const ka = tagKey(a), kb = tagKey(b);
+  if (!ka || !kb) return false;
+  for (let i = 0; i < 4; i++) {
+    if (ka[i] !== kb[i]) return ka[i] < kb[i];
+  }
+  return ka[4] <= kb[4];
+}
+
 // The single most recent NON-DRAFT release matching APP_TAG_RE, optionally
 // including prereleases. Returns the release object, null (no qualifying
 // release - the /update route reports this the same as a 404), or undefined
@@ -336,14 +364,16 @@ const APP_TAG_RE = /^v\d+\.\d+\.\d+/;
 //     but a draft must never be offered to ANYONE, so this filters
 //     draft === true explicitly rather than relying on that token-permission
 //     behavior holding.
-async function latestAppRelease(env, includePrerelease) {
+// *maxTag*, when set, also drops every release whose tag orders above it.
+async function latestAppRelease(env, includePrerelease, maxTag = null) {
   const gh = await ghFetch(env.UPDATE_GITHUB_TOKEN, `/repos/${env.TARGET_REPO}/releases?per_page=30`);
   if (!gh.ok) return undefined;
   const all = await gh.json();
   const candidates = (Array.isArray(all) ? all : [])
     .filter((r) => r.draft !== true)
     .filter((r) => includePrerelease || r.prerelease !== true)
-    .filter((r) => APP_TAG_RE.test(String(r.tag_name || "")));
+    .filter((r) => APP_TAG_RE.test(String(r.tag_name || "")))
+    .filter((r) => maxTag === null || tagAtMost(r.tag_name, maxTag));
   if (!candidates.length) return null;
   return candidates.reduce((best, r) => {
     const rt = Date.parse(r.published_at || r.created_at || 0) || 0;

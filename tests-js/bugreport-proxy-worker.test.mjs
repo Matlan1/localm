@@ -279,3 +279,53 @@ test("without the app secrets the owner token is used, as before", async () => {
   assert.equal(res.status, 201);
   assert.deepEqual(upstream.map((c) => c.auth), ["Bearer owner-token"]);
 });
+
+// /update with a stubbed GitHub release list (no .sig assets, so no asset fetch).
+async function updateFor(worker, query, releases) {
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (u) => {
+    assert.match(String(u), /\/repos\/a\/b\/releases\?per_page=30$/);
+    return new Response(JSON.stringify(releases), { status: 200 });
+  };
+  try {
+    const res = await worker.fetch(new Request(`https://proxy.example/update${query}`,
+      { method: "GET", headers: { "X-Localm-Token": "s3cret" } }), SECRET_ENV);
+    assert.equal(res.status, 200);
+    return (await res.json()).version;
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+const rel = (tag, day, extra = {}) => ({
+  tag_name: tag, name: tag, draft: false, prerelease: false,
+  published_at: `2026-11-${String(day).padStart(2, "0")}T00:00:00Z`, assets: [], ...extra,
+});
+const RELEASES = [rel("v0.3.1", 1), rel("v0.3.2", 2), rel("v0.3.3", 3), rel("v0.4.0", 4),
+  rel("llama-cuda-linux-b9999", 5, { prerelease: true }), rel("v0.4.1rc1", 6, { prerelease: true })];
+
+test("a client that names its version gets the newest release", async () => {
+  const worker = await loadWorker();
+  assert.equal(await updateFor(worker, "?client=0.3.2", RELEASES), "v0.4.0");
+  assert.equal(await updateFor(worker, "?client=unknown", RELEASES), "v0.4.0");
+  assert.equal(await updateFor(worker, "?client=0.3.2&channel=prerelease", RELEASES), "v0.4.1rc1");
+});
+
+test("a legacy client (no client parameter) never gets a release above the ceiling", async () => {
+  const worker = await loadWorker();
+  assert.equal(await updateFor(worker, "", RELEASES), "v0.3.2");
+  assert.equal(await updateFor(worker, "?client=", RELEASES), "v0.3.2");
+  assert.equal(await updateFor(worker, "?channel=prerelease", RELEASES), "v0.3.2");
+});
+
+test("before the ceiling release exists a legacy client gets the newest below it", async () => {
+  const worker = await loadWorker();
+  const early = [rel("v0.3.0", 1), rel("v0.3.1", 2), rel("v0.3.2rc1", 3, { prerelease: true })];
+  assert.equal(await updateFor(worker, "", early), "v0.3.1");
+  assert.equal(await updateFor(worker, "?channel=prerelease", early), "v0.3.2rc1");
+  assert.equal(await updateFor(worker, "", [rel("v0.3.3", 1), rel("v0.3.10", 2)]), null);
+});
+
+test("the legacy ceiling is v0.3.2", () => {
+  assert.match(readFileSync(WORKER, "utf8"), /^const LEGACY_CLIENT_CEILING = "v0\.3\.2";$/m);
+});
