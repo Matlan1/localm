@@ -4393,6 +4393,8 @@ def gguf_split_devices(config: Optional[dict] = None, *, gpus: Optional[list] = 
                  "free": d.get("free"), "total": d.get("total"),
                  "device_id": d.get("device_id")}
                 for d in native if d.get("type") == GGML_DEV_TYPE_GPU]
+            if len(candidates) < 2:
+                return None, "fewer than two discrete GPUs"
         else:
             if gpus:
                 readings, status = list(gpus), GPU_PROBE_OK

@@ -856,6 +856,10 @@ class VramSizingMixin:
                        type(e).__name__, e)
             return None
 
+    # gguf_split_devices reasons that mean a load on one GPU, not a failure.
+    _ONE_GPU_REASONS = frozenset({"one GPU is chosen", "fewer than two discrete GPUs",
+                                  "no discrete GPU was read"})
+
     def _plan_gpu_placement(self):
         """Plan this load over two or more GPUs, as a
         :class:`~localm.inference.backends.llamacpp._gpu_plan.Placement`
@@ -885,7 +889,12 @@ class VramSizingMixin:
         devices, reason = gguf_split_devices(
             gpus=getattr(self, "_sizing_gpus", None) or None, wait_for_inflight=True)
         if not devices:
-            _dbg.debug("GPU placement: not spread over GPUs (%s)", reason)
+            if reason in self._ONE_GPU_REASONS or reason.startswith("no fresh GPU reading"):
+                _dbg.debug("GPU placement: not spread over GPUs (%s)", reason)
+            else:
+                _dbg.warning("GPU placement: the GPUs could not be matched to "
+                             "llama.cpp's device list (%s); llama.cpp places the "
+                             "layers by its own default", reason)
             return None
         units = self._placement_units()
         if units is None:
