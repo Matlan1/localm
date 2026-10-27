@@ -302,10 +302,9 @@ def _scrub_lan_hosts(text: str) -> str:
     return _LAN_TOKEN_RE.sub(replace, text)
 
 
-# Host names never treated as this machine's own: placeholders and default
-# names that are also ordinary words in a report.
+# A host name of letters only, and the setting names whose value is a host name.
 _WORD_NAME_RE = re.compile(r"[A-Za-z]+")
-_HOST_KEY = r"(?:host|hostname|computer|computername|machine|machinename)"
+_HOST_KEY = r"(?:host|computer|machine|node|device|pc)(?:[ _-]?name)?"
 
 
 def _own_host_names() -> list:
@@ -329,23 +328,23 @@ def _own_host_names() -> list:
 
 
 def _scrub_own_names(text: str, names: list) -> str:
-    """Replace this machine's *names* with ``<host>``, case-insensitively. A
-    name holding anything but letters is replaced wherever it stands as a whole
-    word (not inside a dotted name or a path). A name of letters only, which
-    can be an ordinary word, is replaced only where it stands as a machine
-    name: right after ``//`` or ``@``, right before ``:<digit>``, or as the
-    value of a host, hostname, computer, computername, machine or machinename
-    key (``key=name``, ``key: name``)."""
+    """Replace this machine's *names* with ``<host>``, case-insensitively.
+    Every name is replaced where it stands as a machine name: right after
+    ``//`` or ``@``, right before ``:<digit>``, or as the value of a host,
+    computer, machine, node, device or pc key, each optionally followed by
+    ``name`` (``key=name``, ``Key Name: name``). A name holding anything but
+    letters is also replaced wherever else it stands as a whole word (not
+    inside a dotted name or a path); a name of letters only, which can be an
+    ordinary word, is not."""
     marked = [n for n in names if not _WORD_NAME_RE.fullmatch(n)]
-    words = [n for n in names if _WORD_NAME_RE.fullmatch(n)]
     if marked:
         own = re.compile(r"(?<![A-Za-z0-9_./\\-])(?:"
                          + "|".join(re.escape(n) for n in marked)
                          + r")(?![A-Za-z0-9_-]|[./\\][A-Za-z0-9_])",
                          re.IGNORECASE)
         text = own.sub("<host>", text)
-    if words:
-        alt = "(?:" + "|".join(re.escape(n) for n in words) + ")"
+    if names:
+        alt = "(?:" + "|".join(re.escape(n) for n in names) + ")"
         end = r"(?![A-Za-z0-9_-]|\.[A-Za-z0-9])"
         text = re.sub(r"(?:(?<=//)|(?<=@))" + alt + end, "<host>", text,
                       flags=re.IGNORECASE)

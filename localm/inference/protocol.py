@@ -82,8 +82,8 @@ class Message(BaseModel):
     # Optional and additive: a client that omits it gets exactly the previous
     # behaviour. Request-only, so a response message never carries it.
     origin: Optional[Literal["tool", "client"]] = Field(default=None, exclude=True)
-    # Character ranges of a string ``content`` the user wrote, as
-    # ``[[start, end], ...]``, on a user message the client merged from the
+    # Ranges of a string ``content`` the user wrote, as ``[[start, end], ...]``
+    # in Unicode code points, on a user message the client merged from the
     # user's text and text it added (web results, knowledge excerpts, an
     # attached document, a continue note). The server then treats only those
     # ranges as the user's own words (``user_written_text``); an empty list

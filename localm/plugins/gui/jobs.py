@@ -911,7 +911,8 @@ class JobManager:
         self._jobs: dict[str, Job] = {}
         # An RLock: persisting happens while holding it, and the persist path is
         # reached both directly and through Job._notify. Lock order in this module
-        # is _lock OUTER, Job._sub_lock INNER.
+        # is _lock OUTER, Job._sub_lock INNER. _persist_locked reads the config
+        # (config._io_lock, a leaf lock) while holding _lock.
         self._lock = threading.RLock()
         self._store = store if store is not None else _ActivityStore()
         _MANAGERS.add(self)

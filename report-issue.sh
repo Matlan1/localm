@@ -78,7 +78,7 @@ scrub() {
     my @keep = sort { length($b) <=> length($a) || $a cmp $b }
                grep { length($_) >= 3 && lc($_) ne 'localhost' } keys %names;
     my $own = join('|', map { quotemeta } grep { !/\A[A-Za-z]+\z/ } @keep);
-    my $word = join('|', map { quotemeta } grep { /\A[A-Za-z]+\z/ } @keep);
+    my $word = join('|', map { quotemeta } @keep);
     sub email_repl {
       my $tok = shift;
       (my $core = $tok) =~ s/^'+//;
@@ -110,7 +110,7 @@ scrub() {
       if ($word ne '') {
         $t =~ s~(?:(?<=//)|(?<=\@))(?:$word)(?![A-Za-z0-9_-]|\.[A-Za-z0-9])~<host>~gi;
         $t =~ s~(?<![A-Za-z0-9_./\\\@<-])(?:$word)(?=:\d)~<host>~gi;
-        $t =~ s~(?<![A-Za-z0-9_])((?:host|hostname|computer|computername|machine|machinename)["']?[ \t]*[:=][ \t]*["']?)(?:$word)(?![A-Za-z0-9_-]|\.[A-Za-z0-9])~$1<host>~gi;
+        $t =~ s~(?<![A-Za-z0-9_])((?:host|computer|machine|node|device|pc)(?:[ _-]?name)?["']?[ \t]*[:=][ \t]*["']?)(?:$word)(?![A-Za-z0-9_-]|\.[A-Za-z0-9])~$1<host>~gi;
       }
       print $t . $nl;
     }

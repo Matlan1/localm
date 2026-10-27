@@ -117,10 +117,20 @@ def test_a_letters_only_host_name_is_replaced_where_it_names_a_machine(scrub, mo
     monkeypatch.setattr(socket, "gethostname", lambda: name)
     monkeypatch.setenv("COMPUTERNAME", name.upper())
     text = (f"http://{name}:8080/v1, ssh me@{name.upper()}, {name}:5000 up, "
-            f"hostname={name}, Host: {name}, \"computername\": \"{name}\"")
+            f"hostname={name}, Host: {name}, \"computername\": \"{name}\", "
+            f"Host Name:      {name.upper()}, node: {name}, Device_Name={name}")
     assert scrub(text) == ("http://<host>:8080/v1, ssh me@<host>, <host>:5000 up, "
-                           "hostname=<host>, Host: <host>, \"computername\": \"<host>\"")
+                           "hostname=<host>, Host: <host>, \"computername\": \"<host>\", "
+                           "Host Name:      <host>, node: <host>, Device_Name=<host>")
     assert scrub(scrub(text)) == scrub(text)
+
+
+@pytest.mark.parametrize("scrub", _SCRUBBERS)
+def test_a_name_with_a_non_letter_is_replaced_in_a_url_too(scrub, monkeypatch):
+    monkeypatch.setattr(socket, "gethostname", lambda: "zq-ws1")
+    monkeypatch.delenv("COMPUTERNAME", raising=False)
+    text = "http://zq-ws1:8080/v1 and //zq-ws1/share and on zq-ws1"
+    assert scrub(text) == "http://<host>:8080/v1 and //<host>/share and on <host>"
 
 
 def test_python_reporters_share_the_own_name_rules():
@@ -207,7 +217,7 @@ def _real_name_line() -> str:
 # Lines for COMPUTERNAME=SERVER: a letters-only name in prose and as a machine name.
 _WORD_LINES = ["localm server crashed while stopping",
                "http://server:8080/v1 and me@SERVER and server:5000 up",
-               "hostname=server, Host: server"]
+               "hostname=server, Host: server, Host Name:   SERVER, node: server"]
 
 
 @pytest.mark.skipif(os.name != "nt",

@@ -409,6 +409,18 @@ test("runCompletion: a merged row carries user_spans over the user's own text on
   sent = completions[0].body.messages.filter((m) => m.role !== "system");
   assert.deepEqual(sent[2].user_spans, []);
 
+  // Offsets count code points, as the server slices: an emoji is one, not two.
+  const words = "tell me \u{1F600}\u{1F600} about X";
+  ({ completions } = await assemble([
+    { role: "user", content: "\u{1F600} before", id: "m0" },
+    { role: "assistant", content: "a0", id: "m1" },
+    { role: "user", content: words, id: "m2" },
+    searchEvent("q", [{ title: "T", url: "https://t.example/", snippet: "s" }], { id: "m3" }),
+  ]));
+  sent = completions[0].body.messages.filter((m) => m.role !== "system");
+  const points = [...sent[2].content];
+  assert.deepEqual(sent[2].user_spans.map(([a, b]) => points.slice(a, b).join("")), [words]);
+
   // A tool-only merge keeps origin "tool" and no user_spans.
   ({ completions } = await assemble([
     { role: "user", content: "u1", id: "m1" },

@@ -210,21 +210,23 @@ def _record_epoch(rec: LogRecord) -> Optional[float]:
         return None
 
 
+# The header timestamp of every line shaped like _LOG_LINE_RE, in one pass.
+_HEADER_STAMP_RE = re.compile(
+    r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}) \w+[^\S\n]+[^:\s][^:\n]*: ",
+    re.MULTILINE)
+
+
 def latest_header_epoch(text: str) -> Optional[float]:
     """The latest timestamp (seconds since the epoch, naive local time, as
     logged) among the lines of *text* shaped like a record header, or None
-    when no such line has a parseable one."""
-    latest: Optional[float] = None
-    for line in text.splitlines():
-        if not line[:4].isdigit() or not _LOG_LINE_RE.match(line):
-            continue
+    when no such line has a parseable one. The stamps compare as strings in
+    time order, so only the latest parseable one is converted."""
+    for stamp in sorted(set(_HEADER_STAMP_RE.findall(text)), reverse=True):
         try:
-            ts = datetime.strptime(line[:23], "%Y-%m-%d %H:%M:%S,%f").timestamp()
+            return datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S,%f").timestamp()
         except (ValueError, OverflowError, OSError):
             continue
-        if latest is None or ts > latest:
-            latest = ts
-    return latest
+    return None
 
 
 def _collapse_line_runs(lines: list[str]) -> list[str]:

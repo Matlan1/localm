@@ -2625,7 +2625,9 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
     delete m.own;
     if (m.role !== "user" || m.origin || typeof m.content !== "string") continue;
     const whole = own.length === 1 && own[0][0] === 0 && own[0][1] === m.content.length;
-    if (!whole) m.user_spans = own;
+    // The server counts Unicode code points, not UTF-16 units.
+    const points = (i) => [...m.content.slice(0, i)].length;
+    if (!whole) m.user_spans = own.map(([a, b]) => [points(a), points(b)]);
   }
 
   // The <select> can desync from what the server actually has loaded (e.g. an

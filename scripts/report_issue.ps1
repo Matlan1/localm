@@ -84,11 +84,11 @@ function Scrub([string]$t) {
     $n = "$n".Trim().TrimEnd('.')
     if ($n) { $own[$n] = 1; $own[$n.Split('.')[0]] = 1 }
   }
-  # A name of letters only can be an ordinary word: it is replaced only where it stands as a machine
-  # name (after // or @, before :<digit>, or as the value of a host-like key), as _scrub_own_names does.
+  # Every name is replaced where it stands as a machine name (after // or @, before :<digit>, or as the
+  # value of a host-like key); a name with a non-letter also everywhere else, as _scrub_own_names does.
   $keep = @($own.Keys | Where-Object { $_.Length -ge 3 -and $_.ToLower() -ne 'localhost' } | Sort-Object -Property @{ Expression = { $_.Length }; Descending = $true }, @{ Expression = { $_ } })
   $marked = @($keep | Where-Object { $_ -cnotmatch '^[A-Za-z]+$' })
-  $words = @($keep | Where-Object { $_ -cmatch '^[A-Za-z]+$' })
+  $words = $keep
   if ($marked.Count -gt 0) {
     $alt = ($marked | ForEach-Object { [regex]::Escape($_) }) -join '|'
     $t = [regex]::Replace($t, '(?<![A-Za-z0-9_./\\-])(?:' + $alt + ')(?![A-Za-z0-9_-]|[./\\][A-Za-z0-9_])', '<host>', $ic)
@@ -98,7 +98,7 @@ function Scrub([string]$t) {
     $end = '(?![A-Za-z0-9_-]|\.[A-Za-z0-9])'
     $t = [regex]::Replace($t, '(?:(?<=//)|(?<=@))' + $alt + $end, '<host>', $ic)
     $t = [regex]::Replace($t, '(?<![A-Za-z0-9_./\\@<-])' + $alt + '(?=:\d)', '<host>', $ic)
-    $t = [regex]::Replace($t, '(?<![A-Za-z0-9_])((?:host|hostname|computer|computername|machine|machinename)["'']?[ \t]*[:=][ \t]*["'']?)' + $alt + $end, '${1}<host>', $ic)
+    $t = [regex]::Replace($t, '(?<![A-Za-z0-9_])((?:host|computer|machine|node|device|pc)(?:[ _-]?name)?["'']?[ \t]*[:=][ \t]*["'']?)' + $alt + $end, '${1}<host>', $ic)
   }
   return $t
 }
