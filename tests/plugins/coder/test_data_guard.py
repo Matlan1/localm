@@ -496,6 +496,13 @@ def test_a_unc_operand_is_never_resolved(tmp_path, monkeypatch):
     monkeypatch.setattr(data_guard.os.path, "realpath", spy)
     assert _shell(r"type \\fileserver\share\auth.key", tmp_path, home) is None
     assert _shell("type //fileserver/share/auth.key", tmp_path, home) is None
+    assert _shell("echo /??/UNC/fileserver/share/x", tmp_path, home) is None
+    assert _shell(r"type \??\UNC\fileserver\share\x", tmp_path, home) is None
+    assert _shell(r"type \\?\UNC\fileserver\share\x", tmp_path, home) is None
+    for path in (r"\??\UNC\fileserver\share\x", "/??/UNC/fileserver/share/x",
+                 r"\\?\UNC\fileserver\share\x", r"\\fileserver\share\x"):
+        assert data_guard.check("read_file", {"path": path}, tmp_path,
+                                path_args=("path",), home=home) is None
     assert not [s for s in seen if "fileserver" in s.replace("\\", "/")], seen
     assert _shell("type notes.txt", tmp_path, home) is None
     assert seen, "the spy never fired, so it proves nothing"

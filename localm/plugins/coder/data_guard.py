@@ -21,7 +21,8 @@ sweep tools (grep, search_replace) skip such files.
 The agent requires an explicit approval of the exact call for a hit, under
 ``auto_approve`` too, and denies it when no one can be asked. A best-effort
 lexical check (plus ``os.path.realpath`` for file-tool paths and for the path
-operands and redirect targets of a shell command, except UNC paths), not a
+operands and redirect targets of a shell command, never for a UNC or device
+path), not a
 sandbox: other variables, ``eval``, interpreter one-liners and encodings defeat
 the shell half.
 """
@@ -134,10 +135,12 @@ def _file_forms(value: str, cwd: Optional[Path]) -> list[str]:
     if not p.is_absolute() and cwd is not None:
         p = Path(cwd) / p
     forms = [os.path.abspath(p)]
-    try:
-        forms.append(os.path.realpath(p))
-    except (OSError, ValueError):
-        pass
+    from localm.pathsafe import is_unc_or_device_path
+    if not (is_unc_or_device_path(raw) or is_unc_or_device_path(forms[0])):
+        try:
+            forms.append(os.path.realpath(p))
+        except (OSError, ValueError):
+            pass
     return [f for f in (_sg._canon(x) for x in forms) if f]
 
 
@@ -259,8 +262,9 @@ def _resolved_form(norm_path: Optional[str]) -> Optional[str]:
     """The symlink- and junction-resolved canonical form of the canonical path
     *norm_path*, or None when it is not a local absolute path (relative, UNC)
     or cannot be resolved. A ``<home>`` form is resolved under the user's home
-    directory. Never touches a UNC path."""
-    if not norm_path or norm_path.startswith("//"):
+    directory. Never touches a UNC or device path (``pathsafe.is_unc_or_device_path``)."""
+    from localm.pathsafe import is_unc_or_device_path
+    if not norm_path or is_unc_or_device_path(norm_path):
         return None
     if norm_path == _sg._HOME or norm_path.startswith(_sg._HOME + "/"):
         try:

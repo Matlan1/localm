@@ -115,6 +115,22 @@ def _shell_argv(command: str) -> list[str] | str:
     return [resolved, *argv[1:]]
 
 
+def executed_forms(command: str) -> list[str]:
+    """*command* and, when the platform shell runs a different text, that text
+    too: on Windows a command of several lines runs as its cmd.exe join
+    (:func:`_cmd_join_lines`). Every form must pass the shell and data guards.
+    A command cmd.exe cannot run is returned alone (the tool refuses it)."""
+    forms = [command]
+    if sys.platform == "win32" and ("\n" in command or "\r" in command):
+        try:
+            joined = _cmd_join_lines(command)
+        except CommandNotRunnable:
+            return forms
+        if joined != command:
+            forms.append(joined)
+    return forms
+
+
 def _shell_form(command: str) -> list[str] | str:
     """:func:`base.platform_shell` of *command*, with its lines joined for
     ``cmd.exe`` on Windows (see :func:`_cmd_join_lines`). Raises
@@ -137,21 +153,24 @@ def _cmd_join_lines(command: str) -> str:
     the next character outside quotes.
 
     Raises :class:`CommandNotRunnable` when a line break sits inside double
-    quotes: cmd cannot pass one on."""
+    quotes (cmd cannot pass one on) or inside a ``'...'`` span (a POSIX-style
+    quoted text, which cmd would run line by line as commands)."""
     lines: list[str] = []
     current: list[str] = []
     in_quotes = False
+    in_single = False
     escaped = False
     text = command.replace("\r\n", "\n").replace("\r", "\n")
     for ch in text:
         if ch == "\n":
-            if in_quotes:
+            if in_quotes or in_single:
                 raise CommandNotRunnable(
-                    "This command has a line break inside double quotes. On "
-                    "Windows the command runs through cmd.exe, which ends a "
-                    "command at a line break, so it cannot run as written. Put "
-                    "the quoted text on one line, or run each line as its own "
-                    "command.")
+                    "This command has a line break inside quotes. On Windows "
+                    "the command runs through cmd.exe, which ends a command at "
+                    "a line break and does not treat single quotes as quotes, "
+                    "so it cannot run as written. Put the quoted text on one "
+                    "line, write it to a file first, or run each line as its "
+                    "own command.")
             lines.append("".join(current))
             current = []
             escaped = False
@@ -163,6 +182,8 @@ def _cmd_join_lines(command: str) -> str:
             escaped = True
         elif ch == '"':
             in_quotes = not in_quotes
+        elif ch == "'" and not in_quotes:
+            in_single = not in_single
     lines.append("".join(current))
 
     joined = ""

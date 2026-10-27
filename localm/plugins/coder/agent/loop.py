@@ -372,8 +372,9 @@ def _may_write_files(call, cwd) -> bool:
     if _RE_TEST_COMMAND.match(command):
         return False
     from ..shell_guard import is_read_only
+    from ..tools.shell import executed_forms
     try:
-        return not is_read_only(command, cwd)
+        return not all(is_read_only(form, cwd) for form in executed_forms(command))
     except Exception:
         return True
 
