@@ -235,6 +235,31 @@ class TestFallsBackToHashing:
         assert "Foundanotherlocalminstall" in said
         assert "hashingitsfilesinstead" in said
 
+    def test_oversized_registry_falls_back(self, tmp_path, isolated_home, hash_calls, monkeypatch):
+        import localm.model_manager.localm_home as lh
+        home, paths = _other_home(tmp_path, "alpha")
+        monkeypatch.setattr(lh, "_REGISTRY_MAX_BYTES", 10)
+        assert add_local(str(home)) is True
+        assert hash_calls == ["alpha.gguf"]
+
+    def test_deeply_nested_registry_falls_back(self, tmp_path, isolated_home, hash_calls):
+        home, paths = _other_home(tmp_path, "alpha")
+        (home / "registry.json").write_text("[" * 200000 + "]" * 200000, encoding="utf-8")
+        assert add_local(str(home)) is True
+        assert hash_calls == ["alpha.gguf"]
+
+    def test_nul_and_relative_stored_paths_are_ignored(self, tmp_path):
+        home = tmp_path / "h"
+        (home / "models").mkdir(parents=True)
+        (home / "registry.json").write_text(json.dumps({
+            "a": {"path": "/x/a\u0000.gguf", "sha256": "ab" * 32},
+            "b": {"path": "models/b.gguf", "sha256": "ab" * 32},
+            "c": {"path": "b.gguf", "sha256": "ab" * 32},
+        }))
+        recorded, problem = recorded_digests(home, _entry_path)
+        assert problem is None
+        assert len(recorded) == 0
+
     def test_registry_that_is_a_directory_falls_back(self, tmp_path, isolated_home, hash_calls):
         home = tmp_path / "other"
         (home / "models").mkdir(parents=True)

@@ -107,11 +107,12 @@ def recorded_digests(home: Path, entry_path: Callable[..., Optional[str]]
     registry = home / "registry.json"
     try:
         st = registry.stat()
-        if st.st_size > _REGISTRY_MAX_BYTES:
-            return RecordedDigests(), "its registry.json is too large to read"
         with open(registry, "rb") as fh:
-            data = json.loads(fh.read().decode("utf-8-sig"))
-    except (OSError, ValueError, RecursionError) as exc:
+            raw = fh.read(_REGISTRY_MAX_BYTES + 1)
+        if len(raw) > _REGISTRY_MAX_BYTES:
+            return RecordedDigests(), "its registry.json is too large to read"
+        data = json.loads(raw.decode("utf-8-sig"))
+    except (OSError, ValueError, RecursionError, MemoryError) as exc:
         return RecordedDigests(), f"its registry.json could not be read ({type(exc).__name__})"
     if not isinstance(data, dict):
         return RecordedDigests(), "its registry.json is not a model table"
