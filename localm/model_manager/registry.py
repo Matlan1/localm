@@ -2762,7 +2762,7 @@ def sync_models_dir(prune: Optional[bool] = None, *,
                             net_blocked_mmproj.append(name)
                         else:
                             mmproj_attempts += 1
-                            found = backfill_mmproj_for_entry(entry, path)
+                            found = backfill_mmproj_for_entry(entry, path, reg)
                             if found is not None:
                                 # found's own path already passed
                                 # _safe_models_filename inside
