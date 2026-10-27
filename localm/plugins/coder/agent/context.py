@@ -465,6 +465,7 @@ class _ContextMixin:
         # Set by Agent (core.py), which this class is mixed into.
         cwd: Path
         backend: Any
+        confirm_handler: Any
         _episode_store: Any
         _system_prompt: str
 
