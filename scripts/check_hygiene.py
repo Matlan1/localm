@@ -1215,13 +1215,17 @@ _CHILD_PROCESS_MODULES: tuple[str, ...] = (
 # _sizing.py's VramSizingMixin is inherited by both a parent-side proxy
 # (GgufBackend/IsolatedEmbedder, which call these before Process.start()) and the
 # child-side GgufWorker; GgufWorker only reaches _check_context_fit, which logs
-# instead of printing. localm/inference/backends/gguf.py is the sole caller of all
-# three, always before that function's ModelRunner().spawn_and_load(...).
+# instead of printing. localm/inference/backends/gguf.py is the sole caller of
+# each (_placement_gpu_layers through _effective_gpu_layers, _placement_ctx_max
+# from _load_native), always before that
+# function's ModelRunner().spawn_and_load(...).
 _CHILD_PROCESS_CONSOLE_PRINT_ALLOWLIST: dict[str, frozenset[str]] = {
     "localm/inference/backends/llamacpp/_sizing.py": frozenset({
         "VramSizingMixin._check_vram",
         "VramSizingMixin._effective_ctx_max",
         "VramSizingMixin._effective_gpu_layers",
+        "VramSizingMixin._placement_gpu_layers",
+        "VramSizingMixin._placement_ctx_max",
     }),
 }
 

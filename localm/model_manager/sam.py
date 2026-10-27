@@ -17,7 +17,8 @@ def is_sam_checkpoint(path: Path) -> bool:
     are the Segment Anything layout (image encoder, prompt encoder and mask
     decoder). Reads only the archive's ``data.pkl`` member (at most 8 MiB) as
     bytes and never unpickles it. False for any other file and for a file that
-    cannot be read."""
+    cannot be read or decompressed (the failure is logged at debug level); never
+    raises."""
     if path.suffix.lower() not in _SUFFIXES:
         return False
     try:
@@ -26,7 +27,8 @@ def is_sam_checkpoint(path: Path) -> bool:
             if member is None or member.file_size > _PICKLE_MAX_BYTES:
                 return False
             blob = zf.read(member)
-    except (OSError, zipfile.BadZipFile) as e:
-        logger.debug("SAM checkpoint probe could not read %s: %s", path, e)
+    except Exception as e:
+        logger.debug("SAM checkpoint probe could not read %s: %s: %s",
+                     path, type(e).__name__, e)
         return False
     return all(k in blob for k in _SAM1_KEYS) or all(k in blob for k in _SAM2_KEYS)

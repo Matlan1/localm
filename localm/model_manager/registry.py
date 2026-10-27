@@ -295,6 +295,18 @@ def chat_load_refusal(name: str, registry: dict) -> Optional[str]:
     return msg + " It is a component of image, video or music generation."
 
 
+async def chat_load_refusal_off_loop(name: str, registry: dict) -> Optional[str]:
+    """:func:`chat_load_refusal`, run on a worker thread when the check reads
+    the file system (an 'unknown' entry), inline otherwise. For callers on the
+    event loop."""
+    entry = registry.get(name)
+    if isinstance(entry, dict) and entry.get("model_type") == "unknown":
+        import asyncio
+        return await asyncio.get_running_loop().run_in_executor(
+            None, chat_load_refusal, name, registry)
+    return chat_load_refusal(name, registry)
+
+
 def models_of_type(model_type: str, registry: Optional[dict] = None) -> dict:
     """Every registry entry whose ``model_type`` is *model_type*, as
     ``{name: entry}``.
@@ -2762,7 +2774,7 @@ def sync_models_dir(prune: Optional[bool] = None, *,
                             net_blocked_mmproj.append(name)
                         else:
                             mmproj_attempts += 1
-                            found = backfill_mmproj_for_entry(entry, path)
+                            found = backfill_mmproj_for_entry(entry, path, reg)
                             if found is not None:
                                 # found's own path already passed
                                 # _safe_models_filename inside
@@ -4137,7 +4149,8 @@ def _store_standalone_projector(src: Path, action: str) -> Path:
 
 
 def _store_loose_gguf_dir(first_parts: list[Path], store: str,
-                          mmprojs: Optional[dict] = None) -> Optional[list[Path]]:
+                          mmprojs: Optional[dict] = None,
+                          skipped: Optional[list] = None) -> Optional[list[Path]]:
     """Bring every model in a directory-of-loose-ggufs import into MODELS_DIR
     before ``_add_local_gguf_dir`` registers them (mirrors its per-file loop).
 
@@ -4181,6 +4194,13 @@ def _store_loose_gguf_dir(first_parts: list[Path], store: str,
     model's move already carried, that projector at its new location. Only a
     projector :func:`gguf_is_mmproj` accepts is recorded.
 
+    A model whose name is held by a DIFFERENT file already in MODELS_DIR is
+    left out of the result (it is reported on the console and its source stays
+    where it is); when *skipped* is given, those entries of *first_parts* are
+    appended to it, so the result pairs one-to-one with *first_parts* minus
+    *skipped*, in order. A model whose identical copy is already in MODELS_DIR
+    is kept in the result, pointing at that copy.
+
     Returns the new first_parts list (paths now under MODELS_DIR), or None if
     a genuine collision, a disk-space shortfall, or a copy that verified
     corrupt means some transfer failed - the caller reports the printed error
@@ -4189,7 +4209,7 @@ def _store_loose_gguf_dir(first_parts: list[Path], store: str,
     from rich.markup import escape
 
     present: dict = {}   # resolved source path -> its identical copy already in MODELS_DIR
-    skipped: set = set()
+    conflicting: set = set()
     projectors = {s.resolve() for s in map(find_sibling_mmproj, first_parts) if s is not None}
     for gguf in first_parts:
         if (not _mm.is_external_path(gguf) or gguf.resolve() in projectors
@@ -4204,20 +4224,22 @@ def _store_loose_gguf_dir(first_parts: list[Path], store: str,
                           "with the same content; using that copy and leaving the "
                           "original where it is.[/dim]")
         else:
-            skipped.add(gguf.resolve())
+            conflicting.add(gguf.resolve())
             console.print(f"[yellow]Skipping {escape(str(gguf))}: a different file "
                           f"named {escape(gguf.name)} is already in the models "
                           "folder.[/yellow]")
-    if present or skipped:
+    if present or conflicting:
         rest = [g for g in first_parts
-                if g.resolve() not in present and g.resolve() not in skipped]
+                if g.resolve() not in present and g.resolve() not in conflicting]
         moved = _store_loose_gguf_dir(rest, store, mmprojs=mmprojs) if rest else []
         if moved is None:
             return None
         landed_rest = iter(moved)
         out: list[Path] = []
         for g in first_parts:
-            if g.resolve() in skipped:
+            if g.resolve() in conflicting:
+                if skipped is not None:
+                    skipped.append(g)
                 continue
             out.append(present[g.resolve()] if g.resolve() in present else next(landed_rest))
         return out
@@ -4452,7 +4474,9 @@ def _add_local_gguf_dir(
         reg = _mm.load_registry()
         wanted = _sanitize_name(name) if use_given_name else (
             (names or {}).get(gguf) or base)
-        model_name = _unique_registry_name(reg, wanted)
+        would_skip = on_duplicate == "skip" or (on_duplicate == "ask" and not can_prompt())
+        model_name = ((_registered_name_for_file(reg, gguf, wanted) if would_skip else None)
+                      or _unique_registry_name(reg, wanted))
 
         position = f"{k} of {total}"
         _mm._import_status(f"Registering {gguf.name} ({position})", log=False)
@@ -4483,6 +4507,21 @@ def _add_local_gguf_dir(
             if len(landed) == 1:
                 carried_to[sib.resolve()] = _mm.MODELS_DIR / landed[0]
     return True
+
+
+def _registered_name_for_file(reg: dict, gguf: Path, wanted: str) -> Optional[str]:
+    """The name *gguf* is already registered under. Prefers the name an import
+    of it would have chosen: *wanted* itself, or *wanted* with the ``-N``
+    suffix :func:`_unique_registry_name` adds; otherwise any other name
+    registered for the same path (a model the user renamed). None when the path
+    is not registered. Used when a duplicate would only be skipped, so the file
+    is reported as already registered instead of declined."""
+    base = _sanitize_name(wanted)
+    aliases = find_aliases_by_path(gguf, reg)
+    for alias in aliases:
+        if alias == base or re.fullmatch(re.escape(base) + r"-\d+", alias):
+            return alias
+    return aliases[0] if aliases else None
 
 
 def _gguf_names_in(folder: Path) -> set:
@@ -5080,12 +5119,17 @@ def _add_local_hub_cache(
         names = {models[0]: repo_name} if len(models) == 1 else None
         mmprojs: dict = {}
         if store:
-            stored = _mm._store_loose_gguf_dir(first_parts, store, mmprojs=mmprojs)
+            conflicts: list = []
+            stored = _mm._store_loose_gguf_dir(
+                first_parts, store, mmprojs=mmprojs, skipped=conflicts)
             if stored is None:
                 return False
-            names = {new: names[old] for old, new in zip(first_parts, stored, strict=True)
+            kept = [g for g in first_parts if g not in conflicts]
+            names = {new: names[old] for old, new in zip(kept, stored, strict=True)
                      if names and old in names}
             first_parts = stored
+            if not first_parts:
+                continue
         registered_any = _add_local_gguf_dir(
             first_parts, None, on_duplicate, no_hash, fast,
             model_type=model_type, names=names, mmprojs=mmprojs,
@@ -5268,17 +5312,19 @@ def add_local(
             registered_any = False
             names_before = set(_mm.load_registry())
             stats: dict = {}
+            conflicts: list = []
+            mmprojs: dict = {}
+            if first_parts and store:
+                verb = "Moving" if store == "move" else "Copying"
+                _mm._import_status(
+                    f"{verb} {len(first_parts)} GGUF file(s) into the models folder")
+                stored = _mm._store_loose_gguf_dir(
+                    first_parts, store, mmprojs=mmprojs, skipped=conflicts)
+                if stored is None:
+                    return False
+                first_parts = stored
             units = len(first_parts) + len(hf_dirs)
             if first_parts:
-                mmprojs: dict = {}
-                if store:
-                    verb = "Moving" if store == "move" else "Copying"
-                    _mm._import_status(
-                        f"{verb} {len(first_parts)} GGUF file(s) into the models folder")
-                    stored = _mm._store_loose_gguf_dir(first_parts, store, mmprojs=mmprojs)
-                    if stored is None:
-                        return False
-                    first_parts = stored
                 registered_any = _add_local_gguf_dir(
                     first_parts, name if only_one else None, on_duplicate, no_hash,
                     fast, model_type=model_type, mmprojs=mmprojs,
@@ -5287,8 +5333,13 @@ def add_local(
             for k, hf_dir in enumerate(hf_dirs, len(first_parts) + 1):
                 _mm._import_status(f"Registering {hf_dir.name} ({k} of {units})")
                 wanted = _sanitize_name(name) if (name and only_one) else hf_dir.name
+                reg = _mm.load_registry()
+                would_skip = on_duplicate == "skip" or (on_duplicate == "ask" and not can_prompt())
+                reuse = would_skip and not (store and _mm.is_external_path(hf_dir))
+                hf_name = ((_registered_name_for_file(reg, hf_dir, wanted) if reuse else None)
+                           or _unique_registry_name(reg, wanted))
                 done = add_local(
-                    str(hf_dir), _unique_registry_name(_mm.load_registry(), wanted),
+                    str(hf_dir), hf_name,
                     on_duplicate=on_duplicate, no_hash=no_hash, fast=fast,
                     model_type=model_type, store=store,
                 )
@@ -5297,9 +5348,13 @@ def add_local(
                 registered_any = done or registered_any
             added = len(set(_mm.load_registry()) - names_before)
             declined = stats.get("declined", 0)
+            already = max(units - added - declined, 0)
+            declined += len(conflicts)
+            because = (f" ({len(conflicts)} because a different file with the same name "
+                       "is already in the models folder)" if conflicts else "")
             _mm._import_status(
-                f"Done: {added} registered, {max(units - added - declined, 0)} already "
-                f"registered, {declined} skipped or refused, {refused} not usable")
+                f"Done: {added} registered, {already} already registered, "
+                f"{declined} skipped or refused{because}, {refused} not usable")
             return registered_any
 
     if not (is_gguf or is_hf or is_blob or media_type):

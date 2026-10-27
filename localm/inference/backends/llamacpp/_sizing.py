@@ -826,6 +826,276 @@ class VramSizingMixin:
                 return True, n
         return True, None
 
+    def _placement_units(self):
+        """The :class:`~localm.inference.backends.llamacpp._gpu_plan.ModelUnits`
+        of this load, read from the GGUF header: each block's weights and
+        routed-expert bytes, its KV cache for ``self.n_ctx`` tokens and per
+        token, the recurrent state of the blocks that keep one, the output
+        layer and the logits of one batch, ``_VRAM_OVERHEAD_BYTES`` per device
+        and a draft model or MoE cache shared among the devices. MTP / nextn
+        blocks are charged only with MTP enabled, as their draft context. None
+        when the header cannot be read. Never raises."""
+        try:
+            from localm.inference.backends.llamacpp._gpu_plan import ModelUnits
+            from localm.inference.backends.llamacpp._split_fit import logits_buffer_bytes
+            from localm.model_manager.gguf import (
+                _MOE_EXPERT_TENSOR_RE, _RECURRENT_LAYER_TENSOR_RE,
+                gguf_nextn_predict_layers, gguf_split_layout)
+            path = Path(self.model_path)
+            layout = gguf_split_layout(path)
+            if layout is None:
+                return None
+            n_layer = int(layout["block_count"])
+            if n_layer <= 0:
+                return None
+            sizes = layout["tensor_bytes"]
+            arch, nextn = gguf_nextn_predict_layers(path)
+            nextn = max(0, min(int(nextn), n_layer))
+            mtp_on = bool(getattr(self, "mtp_enabled", False)) and nextn > 0
+            if mtp_on:
+                from localm.inference.backends.llamacpp._api import MTP_GRAPH_ARCHITECTURES
+                mtp_on = arch in MTP_GRAPH_ARCHITECTURES
+            layer_bytes = [0] * n_layer
+            expert_bytes = [0] * n_layer
+            recurrent = set()
+            for name, size in sizes.items():
+                if (m := _RECURRENT_LAYER_TENSOR_RE.match(name)) is not None:
+                    recurrent.add(int(m.group(1)))
+                key = name[4:] if name.startswith(("enc.blk.", "dec.blk.")) else name
+                if not key.startswith("blk."):
+                    continue
+                head = key[4:].partition(".")[0]
+                if not head.isdigit() or int(head) >= n_layer:
+                    continue
+                il = int(head)
+                layer_bytes[il] += int(size)
+                if _MOE_EXPERT_TENSOR_RE.search(key) is not None:
+                    expert_bytes[il] += int(size)
+            repeating = max(1, n_layer - nextn)
+            per_token = self._kv_bytes_per_token() // repeating
+            state = (-(-self._recurrent_state_vram_bytes() // len(recurrent))
+                     if recurrent else 0)
+            draft = (-(-self._mtp_draft_context_vram_bytes() // nextn) if mtp_on else 0)
+            layer_kv, kv_per_token = [], []
+            for il in range(n_layer):
+                trunk = il < n_layer - nextn
+                if not trunk and not mtp_on:
+                    layer_bytes[il] = expert_bytes[il] = 0
+                layer_kv.append((self.n_ctx * per_token if trunk else draft)
+                                + (state if il in recurrent else 0))
+                kv_per_token.append(per_token if trunk else 0)
+            output = (sizes.get("output.weight") or sizes.get("token_embd.weight") or 0)
+            output += sizes.get("output_norm.weight", 0)
+            logits = logits_buffer_bytes(layout["n_vocab"], self.n_ctx,
+                                         max_batch=self._MAX_BATCH,
+                                         contexts=2 if mtp_on else 1)
+            return ModelUnits(
+                layer_bytes=layer_bytes, expert_bytes=expert_bytes,
+                layer_kv=layer_kv, kv_per_token=kv_per_token,
+                output_bytes=int(output), logits_bytes=int(logits),
+                reserve_bytes=int(self._VRAM_OVERHEAD_BYTES),
+                spread_bytes=int(self._draft_model_vram_bytes()) + self._moe_cache_charge())
+        except Exception as e:
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("GPU placement: model layout unreadable (%s: %s)",
+                       type(e).__name__, e)
+            return None
+
+    # gguf_split_devices reasons that mean a load on one GPU, not a failure.
+    _ONE_GPU_REASONS = frozenset({"one GPU is chosen", "fewer than two discrete GPUs",
+                                  "no discrete GPU was read",
+                                  "fewer than two of the chosen GPUs are present"})
+
+    def _plan_gpu_placement(self):
+        """Plan this load over two or more GPUs, as a
+        :class:`~localm.inference.backends.llamacpp._gpu_plan.Placement`
+        stored in ``self._gpu_placement`` (with the GPU list in
+        ``self._gpu_placement_devices``), or None when the load does not spread
+        over 2+ GPUs (one GPU, a CPU-only load, no fresh reading, devices that
+        cannot be matched to llama.cpp's, an unreadable model header) or this is
+        the worker process.
+
+        The GPUs are :func:`localm.discover.gguf_split_devices`, read from
+        ``self._sizing_gpus`` when the caller already holds a fresh reading. With
+        ``n_gpu_layers_auto`` on and ``n_gpu_layers`` left at 99 the planner
+        chooses how many layers go on the GPUs and, unless ``n_cpu_moe`` is
+        set, how many blocks keep their routed experts in system RAM;
+        otherwise both are the configured values. Must run off the event loop
+        (it probes). Raises :class:`localm.discover.GpuSplitConfigError` for a
+        configured split naming an integrated GPU llama.cpp leaves out."""
+        self._gpu_placement = None
+        self._gpu_placement_devices = []
+        if self.n_gpu_layers == 0:
+            return None
+        from localm.inference.backends.llamacpp import _loader
+        if _loader.native_lib_loaded():
+            return None
+        from localm.debuglog import logger as _dbg
+        from localm.discover import gguf_split_devices
+        devices, reason = gguf_split_devices(
+            gpus=getattr(self, "_sizing_gpus", None) or None, wait_for_inflight=True)
+        from localm.discover import listed_gpu_order
+        order = listed_gpu_order()
+        unordered = (f", not in the listed order {order}" if order else "")
+        if not devices:
+            if reason in self._ONE_GPU_REASONS or (
+                    reason.startswith("no fresh GPU reading") and not order):
+                _dbg.debug("GPU placement: not spread over GPUs (%s)", reason)
+            else:
+                _dbg.warning("GPU placement: the GPUs could not be matched to "
+                             "llama.cpp's device list (%s); llama.cpp places the "
+                             "layers by its own default%s", reason, unordered)
+            return None
+        units = self._placement_units()
+        if units is None:
+            _dbg.warning("GPU placement: the layer sizes of %s could not be read; "
+                         "llama.cpp splits it by free memory%s",
+                         Path(self.model_path).name, unordered)
+            return None
+        from localm.inference.backends.llamacpp._gpu_plan import PlanDevice, plan_placement
+        plan_devices = [PlanDevice(slot=d["slot"], index=d["index"], name=d["name"],
+                                   free=d["free"], total=d["total"],
+                                   device_id=d.get("device_id"), ratio=d.get("ratio"))
+                        for d in devices]
+        auto = (bool(getattr(self, "n_gpu_layers_auto", False))
+                and self.n_gpu_layers == self._DEFAULT_GPU_LAYERS)
+        if auto:
+            want_layers = None
+        elif self.n_gpu_layers < 0 or self.n_gpu_layers >= self._DEFAULT_GPU_LAYERS:
+            want_layers = units.n_layer + 1
+        else:
+            want_layers = int(self.n_gpu_layers)
+        configured_moe = int(getattr(self, "n_cpu_moe", 0) or 0)
+        want_moe = configured_moe if (configured_moe > 0 or not auto) else None
+        placement = plan_placement(plan_devices, units, n_gpu_layers=want_layers,
+                                   n_cpu_moe=want_moe)
+        self._gpu_placement = placement
+        self._gpu_placement_devices = plan_devices
+        _dbg.info("GPU placement for %s: %s", Path(self.model_path).name,
+                  self._placement_summary(placement))
+        return placement
+
+    def _placement_gpu_layers(self, placement) -> int:
+        """The n_gpu_layers for *placement* (99, or the model's unit count when
+        larger, for every layer; else its unit count), with
+        ``effective_n_cpu_moe`` set to its n_cpu_moe. Records the decision in
+        ``last_gpu_sizing`` and prints the plan, with a notice when weights
+        stay off the GPUs."""
+        self.effective_n_cpu_moe = int(placement.n_cpu_moe)
+        auto = (bool(getattr(self, "n_gpu_layers_auto", False))
+                and self.n_gpu_layers == self._DEFAULT_GPU_LAYERS)
+        layers = (max(self._DEFAULT_GPU_LAYERS, placement.n_layer + 1)
+                  if placement.full_offload else int(placement.n_gpu_layers))
+        free = sum(d.device.free for d in placement.loads)
+        total = sum(d.device.total for d in placement.loads)
+        record = {"mode": "auto" if auto else "configured", "layers": layers,
+                  "n_ctx": self.n_ctx, "n_cpu_moe": int(placement.n_cpu_moe),
+                  "n_cpu_moe_auto": bool(auto and placement.n_cpu_moe > 0
+                                         and not int(getattr(self, "n_cpu_moe", 0) or 0)),
+                  "free_bytes": free, "total_bytes": total,
+                  "devices": [{"index": d.device.index, "layers": len(d.layers),
+                               "output": d.output, "need_bytes": d.need,
+                               "free_bytes": d.device.free}
+                              for d in placement.loads]}
+        from rich.markup import escape
+        summary = self._placement_summary(placement)
+        if not placement.fits:
+            short = [d for d in placement.loads if not d.fits]
+            cause = "; ".join(
+                f"GPU {d.device.index} needs {d.need / 1024 ** 3:.1f} GB but has "
+                f"{d.device.free / 1024 ** 3:.1f} GB free" for d in short)
+            record["cause"] = cause
+            console.print(f"[yellow]  gpu split:[/yellow] {escape(summary)} - "
+                          f"[yellow]does not fit: {escape(cause)}[/yellow]")
+        elif placement.full_offload and placement.n_cpu_moe == 0:
+            console.print(f"[dim]  gpu split: {escape(summary)}[/dim]")
+        else:
+            cause = ("the model does not fit the free memory of the GPUs it uses"
+                     if auto else "set by n_gpu_layers / n_cpu_moe")
+            record["cause"] = cause
+            console.print(f"[yellow]  gpu split:[/yellow] {escape(summary)} - "
+                          f"{escape(cause)}. Set n_gpu_layers or n_cpu_moe to override.")
+        self.last_gpu_sizing = record
+        return layers
+
+    def _placement_full_offload_need(self) -> Optional[int]:
+        """The summed per-GPU charge of every layer on the GPUs (with the
+        configured n_cpu_moe) for a load that spreads over two or more GPUs,
+        or None when it does not (see :meth:`_plan_gpu_placement`) or this is
+        the worker process. Must run off the event loop. Never raises."""
+        try:
+            from localm.inference.backends.llamacpp import _loader
+            if _loader.native_lib_loaded():
+                return None
+            from localm.discover import gguf_split_devices
+            devices, _reason = gguf_split_devices(wait_for_inflight=True)
+            if not devices:
+                return None
+            units = self._placement_units()
+            if units is None:
+                return None
+            from localm.inference.backends.llamacpp._gpu_plan import (
+                PlanDevice, plan_placement)
+            plan = plan_placement(
+                [PlanDevice(slot=d["slot"], index=d["index"], name=d["name"],
+                            free=d["free"], total=d["total"],
+                            device_id=d.get("device_id"), ratio=d.get("ratio"))
+                 for d in devices],
+                units, n_gpu_layers=units.n_layer + 1,
+                n_cpu_moe=int(getattr(self, "n_cpu_moe", 0) or 0))
+            return int(plan.need)
+        except Exception as e:
+            from localm.debuglog import logger as _dbg
+            _dbg.debug("full-offload need over the GPUs unavailable (%s: %s)",
+                       type(e).__name__, e)
+            return None
+
+    def _placement_ctx_max(self, placement) -> Optional[int]:
+        """The context ceiling of a load placed by *placement*: with ctx_auto,
+        the largest window every device still holds once the configured
+        embedder's expected footprint is shared among them
+        (``Placement.max_ctx``), clamped to ``_AUTO_CTX_MAX`` unless
+        n_ctx_max is 0, floored at ``_AUTO_CTX_MIN`` and rounded down to whole
+        KiB of tokens; without ctx_auto, n_ctx_max as configured. None for a
+        model that keeps no KV cache."""
+        if self._keeps_no_kv_cache():
+            return None
+        n_ctx_max = getattr(self, "n_ctx_max", None)
+        if not getattr(self, "ctx_auto", False):
+            return n_ctx_max
+        unlimited = n_ctx_max == 0
+        share = -(-embedder_ctx_reservation_bytes() // max(1, len(placement.loads)))
+        tokens = placement.max_ctx(self.n_ctx, reserve_each=share)
+        if tokens is None:
+            tokens = self._AUTO_CTX_FALLBACK
+        tokens = (tokens // 1024) * 1024
+        if not unlimited:
+            tokens = min(self._AUTO_CTX_MAX, tokens)
+        tokens = int(max(self._AUTO_CTX_MIN, tokens))
+        extra = "; no max (n_ctx_max=0)" if unlimited else ""
+        console.print(f"[dim]  ctx auto : window may grow to {tokens:,} tokens "
+                      f"(from the free VRAM of each GPU{extra})[/dim]")
+        return tokens
+
+    @staticmethod
+    def _placement_summary(placement) -> str:
+        """One line naming each GPU of *placement*, its layers and its charge
+        against its free memory, and the output layer's GPU."""
+        gb = 1024 ** 3
+        parts = []
+        for d in placement.loads:
+            extra = " + output" if d.output else ""
+            parts.append(f"GPU {d.device.index} ({d.device.name}): "
+                         f"{len(d.layers)} layers{extra}, {d.need / gb:.1f} of "
+                         f"{d.device.free / gb:.1f} GB free")
+        if not parts:
+            return "every layer on the CPU"
+        cpu = placement.n_layer + 1 - placement.n_gpu_layers
+        tail = f"; {cpu} layers on the CPU" if cpu > 0 else ""
+        moe = (f"; routed experts of {placement.n_cpu_moe} blocks in system RAM"
+               if placement.n_cpu_moe > 0 else "")
+        return "; ".join(parts) + tail + moe
+
     @staticmethod
     def _gpu_split_configured() -> bool:
         """Whether ``gpu_split_indices`` is set in the config. False when the
@@ -1424,6 +1694,8 @@ class VramSizingMixin:
                       else self.n_gpu_layers)
         if gpu_layers == 0:
             return  # CPU-only run, VRAM is irrelevant
+        if getattr(self, "_gpu_placement", None) is not None:
+            return  # checked per GPU by the placement (_placement_gpu_layers)
         planned = self._planned_vram(gpu_layers)
         if planned is None:
             return  # can't measure (no torch / no GPU) - nothing useful to say
@@ -1857,6 +2129,9 @@ class VramSizingMixin:
         reading, so it must not run on an event loop thread."""
         if self.n_gpu_layers < self._DEFAULT_GPU_LAYERS or self._model_bytes() <= 0:
             return None
+        spread = self._placement_full_offload_need()
+        if spread is not None:
+            return spread
         _free, _total, split_devices = self._split_free_total_bytes()
         model, kv, overhead = self._full_offload_parts(split_devices or 1)
         return model + kv + overhead
@@ -2245,9 +2520,15 @@ class VramSizingMixin:
         WARNING. When VRAM is unmeasurable it says so and attempts the
         configured value.
 
+        A load that spreads over two or more GPUs is sized by its placement
+        (:meth:`_plan_gpu_placement`), which decides both counts per device.
+
         Records the decision in ``last_gpu_sizing`` (see
         :meth:`_record_gpu_sizing`)."""
         self.effective_n_cpu_moe = int(getattr(self, "n_cpu_moe", 0) or 0)
+        placement = self._plan_gpu_placement()
+        if placement is not None:
+            return self._placement_gpu_layers(placement)
         if not self.n_gpu_layers_auto or self.n_gpu_layers != self._DEFAULT_GPU_LAYERS:
             # Auto off, or an explicit choice: respected as-is.
             self._record_gpu_sizing("configured", self.n_gpu_layers)

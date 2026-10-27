@@ -96,6 +96,42 @@ test("keys panel: create posts {name, scopes} and shows the secret once", async 
   assert.equal(window.document.querySelector(".key-secret-value").value, "secret-xyz");
 });
 
+// The first key on an open-mode server turns authentication on: the shell
+// token is refused from then on, and the create reply set an owner session.
+test("keys panel: the first key on an open-mode server still shows its secret", async () => {
+  let authOn = false;
+  const shellRefused = (opts) => {
+    const h = opts.headers || {};
+    return authOn && !h["X-CSRF-Token"];
+  };
+  const { window } = loadAppWithPages({
+    shellToken: "shell-tok",
+    fetchImpl: router({
+      "GET /v1/keys": (_p, opts) => (shellRefused(opts)
+        ? { status: 401, body: { detail: "Invalid API key" } }
+        : { status: 200, body: { keys: authOn ? [{ id: "new1", name: "phone", scopes: [] }] : [] } }),
+      "POST /v1/keys": () => {
+        authOn = true;
+        return { status: 200, body: { id: "new1", name: "phone", scopes: [], key: "first-secret" } };
+      },
+      "GET /api/session": () => ({ status: 200, body: authOn ? { csrf: "csrf-1" } : {} }),
+    }),
+  });
+  await bootSettled(window);
+  await window.refreshKeysPanel();
+  window.document.getElementById("key-name").value = "phone";
+  const cb = [...window.document.querySelectorAll(".key-scope-cb")].find((c) => c.value === "coder");
+  cb.checked = true;
+  await window.document.getElementById("key-create").onclick();
+  assert.equal(window.__LOCALM_CSRF__, "csrf-1", "the page switched to the owner session");
+  assert.ok(await waitFor(() => /phone/.test(window.document.getElementById("keys-list").textContent)));
+  const card = window.document.getElementById("keys-card");
+  assert.ok(!card.classList.contains("sec-hidden"), "the keys card stays visible");
+  const box = window.document.getElementById("key-secret");
+  assert.notEqual(box.style.display, "none");
+  assert.equal(window.document.querySelector(".key-secret-value").value, "first-secret");
+});
+
 test("keys panel: create with no scope checked does not POST", async () => {
   let posts = 0;
   const { window } = loadAppWithPages({

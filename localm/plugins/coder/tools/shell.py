@@ -4,6 +4,7 @@ privacy-env hook) and ``run_tests`` (test-runner autodetection)."""
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -15,10 +16,17 @@ from .base import (
     run_subprocess,
 )
 
+class CommandNotRunnable(ValueError):
+    """A command line the platform shell cannot run as written."""
+
+
 def _needs_shell(command: str) -> bool:
-    """Return True when the command uses shell operators that require a real shell."""
+    """Return True when the command uses shell operators that require a real shell.
+
+    A line break outside quotes counts: it separates two commands."""
     # Characters that only mean something inside a shell
-    shell_chars = {"&", "|", ";", "<", ">", "$", "`", "~", "(", ")", "{", "}", "!", "\\", "*", "?"}
+    shell_chars = {"&", "|", ";", "<", ">", "$", "`", "~", "(", ")", "{", "}", "!", "\\", "*", "?",
+                   "\n", "\r"}
     in_single = False
     in_double = False
     for ch in command:
@@ -77,15 +85,19 @@ def _shell_argv(command: str) -> list[str] | str:
     This is the ONE place that decision is made, so the blocking ``run_shell``
     and the background ``run_shell_background`` cannot drift into different
     security postures.
+
+    A command of several lines always goes through the shell, so every line
+    runs; on Windows its lines are joined for cmd.exe (:func:`_cmd_join_lines`).
+    Raises :class:`CommandNotRunnable` when cmd.exe cannot run it as written.
     """
-    if _needs_shell(command):
+    if _needs_shell(command.strip()):
         # Complex command - must go through a shell
-        return platform_shell(command)
+        return _shell_form(command)
     try:
         argv = _split_command(command)
     except ValueError:
         # Malformed quoting - fall back to shell
-        return platform_shell(command)
+        return _shell_form(command)
     # Shell builtins (echo, dir, type, …) have no executable on disk, so
     # argument-list mode would fail with "file not found". They are resolved via
     # resolve_runner() and unresolvable names are routed through the shell.
@@ -97,11 +109,191 @@ def _shell_argv(command: str) -> list[str] | str:
     # CreateProcess, which cannot start a bare "npm" even though which() finds
     # npm.CMD on PATH. Only the resolved path, with its extension, launches.
     if not argv:
-        return platform_shell(command)
+        return _shell_form(command)
     resolved = resolve_runner(argv[0])
     if resolved is None:
-        return platform_shell(command)
+        return _shell_form(command)
+    if sys.platform == "win32" and resolved.lower().endswith((".cmd", ".bat")):
+        return platform_shell(_batch_command_line(resolved, argv[1:]))
     return [resolved, *argv[1:]]
+
+
+# Characters cmd.exe reads as syntax or as an argument separator outside quotes.
+_CMD_SPECIAL = frozenset(" \t&|<>^(),;=!")
+
+
+def _batch_command_line(program: str, args: list[str]) -> str:
+    """The cmd.exe line that runs the ``.cmd``/``.bat`` *program* with *args*
+    as literal arguments.
+
+    Windows runs a batch file through cmd.exe, which reads ``&``, ``|``, ``<``,
+    ``>`` and ``^`` in an unquoted argument as command syntax, so every argument
+    holding one of :data:`_CMD_SPECIAL` (or nothing) is double-quoted, and the
+    program path always is. Raises :class:`CommandNotRunnable` for an argument
+    holding ``"``, ``%`` or a line break, which cmd.exe cannot be given
+    literally."""
+    parts = ['"' + program + '"']
+    for arg in args:
+        if any(c in arg for c in '"%\r\n'):
+            raise CommandNotRunnable(
+                f"This command runs {Path(program).name}, a batch program that "
+                "Windows starts through cmd.exe, and one of its arguments holds "
+                "a double quote, a % sign or a line break, which cmd.exe cannot "
+                "pass on literally. Rewrite the arguments without them.")
+        if not arg or any(c in _CMD_SPECIAL for c in arg):
+            arg = '"' + arg + '"'
+        parts.append(arg)
+    return " ".join(parts)
+
+
+def executed_forms(command: str) -> list[str]:
+    """*command* and, when the platform shell runs a different text
+    (:func:`_shell_text`), that text too. Every form must pass the shell and
+    data guards. A command cmd.exe cannot run is returned alone (the tool
+    refuses it)."""
+    forms = [command]
+    try:
+        text = _shell_text(command)
+    except CommandNotRunnable:
+        return forms
+    if text != command:
+        forms.append(text)
+    return forms
+
+
+def _shell_text(command: str) -> str:
+    """The text the platform shell runs for *command*: on Windows a command of
+    several lines is joined for cmd.exe (:func:`_cmd_join_lines`); elsewhere a
+    CRLF line break becomes LF, so ``sh`` does not keep the CR in a word.
+    Raises :class:`CommandNotRunnable` when cmd cannot run it as written."""
+    if sys.platform == "win32":
+        if "\n" in command or "\r" in command:
+            return _cmd_join_lines(command)
+        return command
+    return command.replace("\r\n", "\n")
+
+
+def _shell_form(command: str) -> list[str] | str:
+    """:func:`base.platform_shell` of :func:`_shell_text` of *command*. Raises
+    :class:`CommandNotRunnable` when cmd cannot run it as written."""
+    return platform_shell(_shell_text(command))
+
+
+def _cmd_join_lines(command: str) -> str:
+    """*command* as one ``cmd.exe`` line that runs every one of its lines.
+
+    ``cmd /S /C`` ends the command at the first line break, so every later line
+    would be dropped. Lines are joined with `` & ``, which runs each in turn
+    whatever the previous one returned, as ``sh`` does with separate lines; the
+    exit code is the last line's. A line that is only a ``rem`` comment or
+    starts with ``:`` (a ``::`` comment or a label) is dropped, and so is an
+    unquoted ``& rem ...`` or ``& :: ...`` tail of a line (a comment line right
+    after a ``^`` continuation stays, as part of that command). A line ending in ``(``, ``&`` or
+    ``|``, a line starting with ``)``, ``&`` or ``|``, and a line ending in a ``^``
+    continuation are joined with a space instead (the caret is removed). Blank
+    lines are dropped. When several statements result, each ``if`` or ``for``
+    statement is wrapped in parentheses, so the statements after it run
+    unconditionally. Quoting follows cmd: only ``"`` quotes, and ``^`` escapes
+    the next character outside quotes.
+
+    Raises :class:`CommandNotRunnable` when a line break sits inside double
+    quotes (cmd cannot pass one on) or inside a ``'...'`` span (a POSIX-style
+    quoted text, which cmd would run line by line as commands). A span opens
+    only at a ``'`` that starts a word, so an apostrophe inside a word
+    (``it's``) opens none."""
+    lines: list[str] = []
+    current: list[str] = []
+    in_quotes = False
+    in_single = False
+    escaped = False
+    text = command.replace("\r\n", "\n").replace("\r", "\n")
+    for ch in text:
+        if ch == "\n":
+            if in_quotes or in_single:
+                raise CommandNotRunnable(
+                    "This command has a line break inside quotes. On Windows "
+                    "the command runs through cmd.exe, which ends a command at "
+                    "a line break and does not treat single quotes as quotes, "
+                    "so it cannot run as written. Put the quoted text on one "
+                    "line, write it to a file first, or run each line as its "
+                    "own command.")
+            lines.append("".join(current))
+            current = []
+            escaped = False
+            continue
+        current.append(ch)
+        if escaped:
+            escaped = False
+        elif ch == "^" and not in_quotes:
+            escaped = True
+        elif ch == '"':
+            in_quotes = not in_quotes
+        elif ch == "'" and not in_quotes and (
+                in_single or not current[:-1] or current[-2] in " \t=("):
+            in_single = not in_single
+    lines.append("".join(current))
+
+    statements: list[str] = []
+    glue = "&"
+    continued = False
+    for line in lines:
+        piece = line.strip()
+        if not piece:
+            continue
+        if not continued and _RE_CMD_COMMENT.match(piece):
+            continue
+        piece = _cmd_strip_comment_tail(piece)
+        if not piece:
+            continue
+        if statements and (glue == " " or piece[0] in ")&|"):
+            statements[-1] += " " + piece
+        else:
+            statements.append(piece)
+        carets = len(piece) - len(piece.rstrip("^"))
+        continued = carets % 2 == 1
+        if continued:
+            statements[-1] = statements[-1][:-1].rstrip()
+            glue = " "
+        elif piece[-1] in "(&|":
+            glue = " "
+        else:
+            glue = "&"
+    if len(statements) > 1:
+        statements = [f"({s})" if _RE_CMD_COMPOUND.match(s) else s
+                      for s in statements]
+    return " & ".join(statements)
+
+
+# A whole-line ``rem`` comment, ``::`` comment or ``:`` label; _cmd_join_lines
+# drops it.
+_RE_CMD_COMMENT = re.compile(r"@?\s*(?:rem(?:\s|$)|:)", re.IGNORECASE)
+
+# What follows an ``&``, ``&&`` or ``||`` when the rest of the line is a comment.
+_RE_CMD_COMMENT_TAIL = re.compile(r"[&|]*\s*@?\s*(?:rem(?:\s|$)|::)", re.IGNORECASE)
+
+
+def _cmd_strip_comment_tail(line: str) -> str:
+    """*line* without an unquoted, uncaret-escaped ``&``, ``&&`` or ``||``
+    followed by a ``rem`` or ``::`` comment to its end."""
+    in_quotes = False
+    escaped = False
+    for i, ch in enumerate(line):
+        if escaped:
+            escaped = False
+        elif ch == "^" and not in_quotes:
+            escaped = True
+        elif ch == '"':
+            in_quotes = not in_quotes
+        elif not in_quotes and ch in "&|" and (i == 0 or line[i - 1] not in "&|"):
+            if ch == "|" and line[i + 1:i + 2] != "|":
+                continue
+            if _RE_CMD_COMMENT_TAIL.match(line, i):
+                return line[:i].rstrip()
+    return line
+
+# An ``if`` or ``for`` statement; _cmd_join_lines parenthesises it when other
+# statements follow it.
+_RE_CMD_COMPOUND = re.compile(r"@?\s*(?:if|for)\b", re.IGNORECASE)
 
 
 def _privacy_env(_privacy: bool) -> dict | None:
@@ -128,7 +320,10 @@ def tool_run_shell(
     shell-history variables zeroed. ``_cancel`` is the run's cancel check: once
     it answers True the command is killed and reported as cancelled.
     """
-    shell_cmd = _shell_argv(command)
+    try:
+        shell_cmd = _shell_argv(command)
+    except CommandNotRunnable as e:
+        return ToolResult.error(str(e))
     env = _privacy_env(_privacy)
 
     result = run_subprocess(shell_cmd, cwd, timeout=timeout, env=env,
@@ -136,7 +331,7 @@ def tool_run_shell(
 
     if result.cancelled:
         return ToolResult.error(
-            f"Command killed: the run was cancelled{_partial_on_timeout(result)}")
+            f"Command killed: the run was stopped or cancelled{_partial_on_timeout(result)}")
     if result.timed_out:
         return ToolResult.error(
             f"Command timed out after {timeout}s{_partial_on_timeout(result)}")
@@ -246,7 +441,10 @@ def tool_run_shell_background(
     """
     from ..background import JobCapacityError, ShellJob, get_registry
 
-    argv = _shell_argv(command)
+    try:
+        argv = _shell_argv(command)
+    except CommandNotRunnable as e:
+        return ToolResult.error(str(e))
     env = _privacy_env(_privacy)
     registry = get_registry()
 
@@ -548,7 +746,7 @@ def tool_run_tests(
         )
     if result.cancelled:
         return ToolResult.error(
-            f"Test run killed: the run was cancelled{_partial_on_timeout(result)}")
+            f"Test run killed: the run was stopped or cancelled{_partial_on_timeout(result)}")
     if result.timed_out:
         return ToolResult.error(
             f"Test run timed out after 120s{_partial_on_timeout(result)}")

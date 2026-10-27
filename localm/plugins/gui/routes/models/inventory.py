@@ -261,6 +261,10 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             models.append(row_out)
         out = {"models": models, "active": current}
         loading = _hs._switch_loading
+        if not loading and current:
+            engine_now = _hs._engines.get(current)
+            if getattr(engine_now, "loading", False) is True:
+                loading = current
         if loading:
             out["loading"] = loading
         # Models this instance answers through a peer instance on the same
@@ -384,8 +388,9 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
 
     @app.post("/api/models/load", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def gui_load_model(req: LoadModelRequest):
-        from localm.model_manager.registry import chat_load_refusal
-        refusal = chat_load_refusal(req.model, _require_registered(req.model))
+        from localm.model_manager.registry import chat_load_refusal_off_loop
+        refusal = await chat_load_refusal_off_loop(
+            req.model, _require_registered(req.model))
         if refusal is not None:
             raise HTTPException(422, refusal)
         # Route every switch through the coordinator so a new selection preempts an
@@ -476,7 +481,11 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         when that is in VRAM, and the overhead), ``available`` is ``free +
         held`` and ``fits`` compares ``needed`` with ``available``: a reload at
         the new settings frees what the current load holds first. Both are
-        None when nothing is loaded for *model*, or ``free`` is unknown."""
+        None when nothing is loaded for *model*, or ``free`` is unknown.
+
+        ``loading`` is True while *model*'s load is in flight. ``held``,
+        ``available`` and ``fits`` are then None: the free reading already
+        excludes part of that load."""
         from localm.config import load_config, load_registry
         from localm.discover import vram_capacity
         from localm.model_meta import cached_n_layers
@@ -501,7 +510,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         n_cpu_moe = int(cfg.get("n_cpu_moe") or 0)
         kv_cache_type = resolve_kv_cache_type(cfg)
         running = _hs._engines.get(name) if name else None
-        if not (running is not None and getattr(running, "loaded", False)
+        loading = getattr(running, "loading", False) is True
+        if loading or not (running is not None and getattr(running, "loaded", False)
                 and getattr(running, "unloading", False) is not True):
             running = None
         held_placement = (getattr(running, "gpu_placement", None)
@@ -626,11 +636,11 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                                      kv_cache_type=held_kv_type)["needed"]
         available = (free + held) if isinstance(free, int) and held is not None else None
         budget = available if available is not None else free
-        fits = (est["needed"] <= budget) if isinstance(budget, int) else None
+        fits = (est["needed"] <= budget) if isinstance(budget, int) and not loading else None
         return {"model": name, "model_bytes": model_bytes, **est,
                 "free": free, "held": held if isinstance(free, int) else None,
                 "available": available, "total": total, "fits": fits,
-                "approximate": True}
+                "loading": loading, "approximate": True}
 
     @app.get("/api/gpus", dependencies=[Depends(require_scope(scopes.MODELS_READ))])
     async def gui_gpus():
@@ -645,10 +655,14 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         ``gpus`` is a frozen last-known-good or []), so a timed-out probe is
         distinguishable from a GPU-less box.
 
-        ``index_space`` (present only as ``"native"``) says the ``gpus``
-        indices are the ones a MODEL LOAD consumes rather than list_gpus()'s
-        torch/nvidia-smi numbering - see the opaque-index-space branch below
-        (vulkan or sycl); the client labels the numbering accordingly. That
+        ``index_space`` is ``"native"`` when the ``gpus`` indices are the ones
+        a MODEL LOAD consumes rather than list_gpus()'s torch/nvidia-smi
+        numbering - see the opaque-index-space branch below (vulkan or sycl);
+        the client labels the numbering accordingly. It is ``"nvidia-smi"``
+        when the reading is in nvidia-smi's own numbering on a box where torch
+        numbers the GPUs (discover._nvidia_smi_numbering), so the indices are
+        not the ones main_gpu_index / gpu_split_indices use; the client locks
+        its GPU choices then. Absent otherwise. That
         is llama.cpp's own device list,
         NOT the raw ggml registry order: integrated GPUs and accelerators are
         dropped and the rest renumbered before they get here
@@ -683,6 +697,10 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
 
         gpus, probe_status, index_space = await loop.run_in_executor(
             get_plugin_executor(), _read_devices)
+        from localm.discover import GPU_NUMBERING_NVIDIA_SMI
+        if index_space is None and any(isinstance(g, dict) and g.get("numbering")
+                                       == GPU_NUMBERING_NVIDIA_SMI for g in gpus):
+            index_space = "nvidia-smi"
         out = {"gpus": gpus,
                "probe_status": probe_status,
                "main_gpu_index": cfg.get("main_gpu_index"),

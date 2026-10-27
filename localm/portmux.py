@@ -231,6 +231,30 @@ def route_stop_signals(names=STOP_SIGNALS, *, serving_elsewhere: bool = False):
                 pass
 
 
+def argv_with_port(args: list, port: Optional[int]) -> list:
+    """*args* (the command-line arguments after ``localm``) for a relaunch on
+    *port*: every ``-p`` / ``--port`` option (``-p 8642``, ``-p8642``,
+    ``--port 8642``, ``--port=8642``) is removed and a single ``-p <port>`` is
+    appended, so a process that is relaunched repeatedly does not accumulate
+    one more ``-p`` each time. With a falsy *port*, a copy of *args* is
+    returned unchanged."""
+    if not port:
+        return list(args)
+    kept: list = []
+    skip_value = False
+    for arg in args:
+        if skip_value:
+            skip_value = False
+            continue
+        if arg in ("-p", "--port"):
+            skip_value = True
+            continue
+        if arg.startswith("--port=") or (arg.startswith("-p") and arg[2:].isdigit()):
+            continue
+        kept.append(arg)
+    return kept + ["-p", str(port)]
+
+
 def _crash_watchdog_disabled() -> bool:
     import os
     return os.environ.get("LOCALM_CRASH_WATCHDOG", "").strip().lower() in (
@@ -259,9 +283,8 @@ def _spawn_crash_recovery_watchdog(*, host: str, port: int, tls: bool,
         if not script.is_file():
             return
         crash_dir = bugreport._crash_dir(home=None)
-        relaunch_argv = [sys.executable, "-m", "localm", *sys.argv[1:]]
-        if port:
-            relaunch_argv += ["-p", str(port)]
+        relaunch_argv = [sys.executable, "-m", "localm",
+                         *argv_with_port(sys.argv[1:], port)]
         argv = [sys.executable, str(script),
                "--pid", str(os.getpid()),
                "--host", self_connect_host(host),

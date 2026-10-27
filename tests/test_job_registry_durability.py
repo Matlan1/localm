@@ -46,11 +46,17 @@ from localm.plugins.gui import jobs as J
 #  helpers
 # --------------------------------------------------------------------------- #
 
+_REAL_KEEPS_FINISHED = J._keeps_finished_records
+
+
 @pytest.fixture
 def store_root(tmp_path, monkeypatch):
-    """An activity dir under tmp_path, pinned so nothing touches a real one."""
+    """An activity dir under tmp_path, pinned so nothing touches a real one.
+    Finished rows are kept, as in log/full mode (TestPrivacyMode covers the
+    other arm)."""
     root = tmp_path / "activity"
     monkeypatch.setattr(J, "activity_dir", lambda: root)
+    monkeypatch.setattr(J, "_keeps_finished_records", lambda: True)
     return root
 
 
@@ -111,6 +117,63 @@ def _row(**over) -> dict:
 
 
 DEAD_PID = 999_997          # never a live process; asserted below
+
+
+# --------------------------------------------------------------------------- #
+#  privacy mode: nothing about a finished operation stays on disk
+# --------------------------------------------------------------------------- #
+
+class TestPrivacyMode:
+
+    @pytest.fixture
+    def privacy_root(self, store_root, monkeypatch):
+        """The real diagnostics gate, in the test home's default privacy mode."""
+        monkeypatch.setattr(J, "_keeps_finished_records", _REAL_KEEPS_FINISHED)
+        monkeypatch.delenv("LOCALM_KEEP_DIAGNOSTICS", raising=False)
+        from localm.audit import diagnostics_allowed
+        assert diagnostics_allowed() is False, "precondition: privacy mode, no opt-in"
+        return store_root
+
+    def _image_job(self, m, gate):
+        def work(job):
+            assert gate.wait(10)
+            job.result = "20261022_165615_2a1e8a.png"
+            return True
+        return m.start_fn("imagine", work, label="Image generation")
+
+    def test_a_finished_image_job_leaves_no_activity_record(self, privacy_root):
+        import threading
+        gate = threading.Event()
+        m = J.JobManager()
+        job = self._image_job(m, gate)
+        row = _wait_for_row(m._store, job.id, status="running")
+        assert row["result"] is None
+        gate.set()
+        assert _wait_done(job) == "done"
+        deadline = time.time() + 10
+        while m._store.path.exists() and time.time() < deadline:
+            time.sleep(0.02)
+        assert not m._store.path.exists()
+        assert not any(privacy_root.glob("*.json"))
+        assert job.result == "20261022_165615_2a1e8a.png", "the live job keeps its result"
+
+    def test_keep_diagnostics_keeps_the_finished_record(self, privacy_root, monkeypatch):
+        import threading
+        monkeypatch.setenv("LOCALM_KEEP_DIAGNOSTICS", "1")
+        gate = threading.Event()
+        gate.set()
+        m = J.JobManager()
+        job = self._image_job(m, gate)
+        assert _wait_done(job) == "done"
+        row = _wait_for_row(m._store, job.id, status="done")
+        assert row["result"] == "20261022_165615_2a1e8a.png"
+
+    def test_an_unresolvable_gate_keeps_nothing_finished(self, store_root, monkeypatch):
+        def boom():
+            raise RuntimeError("config unreadable")
+        monkeypatch.setattr("localm.audit.diagnostics_allowed", boom)
+        monkeypatch.setattr(J, "_keeps_finished_records", _REAL_KEEPS_FINISHED)
+        assert J._keeps_finished_records() is False
 
 
 # --------------------------------------------------------------------------- #

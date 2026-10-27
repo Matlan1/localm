@@ -66,6 +66,7 @@ class GgufWorker(VramSizingMixin):
         n_cpu_moe: int = 0,
         mtp_enabled: bool = False,
         main_gpu: Optional[int] = None,
+        gpu_devices: Optional[list] = None,
         mtp_draft_tokens: Optional[int] = None,
         spec_source: Optional[str] = None,
         spec_draft_tokens: Optional[int] = None,
@@ -112,6 +113,9 @@ class GgufWorker(VramSizingMixin):
         # The parent's main_gpu_index in llama.cpp's device numbering, or None
         # (LlamaCpp then reads main_gpu_index from the config).
         self.main_gpu = main_gpu
+        # The parent's placement over 2+ GPUs ({"slot", "device_id", "units"}
+        # per device, in order), or None (gpu_split_ratios/main_gpu apply).
+        self.gpu_devices = gpu_devices
         # The parent's mmap decision: True or False forces it, None keeps the
         # build's default.
         self.use_mmap = use_mmap
@@ -317,6 +321,7 @@ class GgufWorker(VramSizingMixin):
             budget_check=self._context_fits_budget,
             gpu_split_ratios=self.gpu_split_ratios,
             main_gpu=self.main_gpu,
+            gpu_devices=self.gpu_devices,
             n_cpu_moe=self.n_cpu_moe,
             mtp_enabled=self.mtp_enabled,
             use_mmap=self.use_mmap,
