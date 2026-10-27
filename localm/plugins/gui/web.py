@@ -758,6 +758,8 @@ def attach_gui(
     _routes_models.register(app, ctx)
     from .routes import system as _routes_system
     _routes_system.register(app, ctx)
+    from .routes import client_errors as _routes_client_errors
+    _routes_client_errors.register(app, ctx)
     from .routes import pairing as _routes_pairing
     _routes_pairing.register(app, ctx)
     from .routes import imgproxy as _routes_imgproxy

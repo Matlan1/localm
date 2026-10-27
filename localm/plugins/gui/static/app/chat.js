@@ -7,6 +7,7 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { $, applyChatBackground, authHeaders, autoGrow, CHAT_SURFACE_HEADERS, confirmDanger, el, fetchImageURL, INSTANCE_SCOPED_KEYS, promptText, readStoredJSON, reconcileInstanceId, renderMarkdown, safeAvatarImageSrc, scrubMarkers, stripAsrPrefix, stripThink, toast } from "./helpers.js";
+import { restoreRecentGuiErrors, setRecentGuiErrorStore } from "./client-log.js";
 import { t, tn, tOr } from "./i18n.js";
 import { emptyState, iconEl } from "./icons.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
@@ -770,6 +771,7 @@ export async function refreshCtxLimit() {
       for (const key of INSTANCE_SCOPED_KEYS) {
         if (scopedKeyPrivate(key)) localStorage.removeItem(key);
       }
+      _syncRecentErrorsStore();
       if (chat.serverPrivacy) {
         // The Coder tab's "Project directory" input was filled from
         // "localm.coderCwd" at boot; clear it once per privacy confirmation.
@@ -883,6 +885,22 @@ const CHAT_SCOPED_KEYS = Object.freeze([
 /** True when *key* must not be kept in localStorage under the confirmed mode. */
 export function scopedKeyPrivate(key) {
   return CHAT_SCOPED_KEYS.includes(key) ? chat.privacy : chat.serverPrivacy;
+}
+
+// The Settings "Recent errors" list follows the server mode: memory only in
+// privacy mode, kept in localStorage otherwise (restored once per page load).
+const RECENT_ERRORS_STORE_KEY = "localm.recentErrors";
+let _recentErrorsRestored = false;
+function _syncRecentErrorsStore() {
+  if (chat.serverPrivacy) {
+    setRecentGuiErrorStore(null);
+    return;
+  }
+  setRecentGuiErrorStore({ save: (list) => lsSetScoped(RECENT_ERRORS_STORE_KEY, JSON.stringify(list)) });
+  if (!_recentErrorsRestored) {
+    _recentErrorsRestored = true;
+    restoreRecentGuiErrors(readStoredJSON(RECENT_ERRORS_STORE_KEY, []));
+  }
 }
 
 export function lsSetScoped(key, value) {

@@ -4,7 +4,7 @@
 
 // --- ES module imports ---
 import { chat, lsSetScoped } from "../app/chat.js";
-import { $, authHeaders, confirmDanger, el, jobStatusWord, openModal, streamJob, toast } from "../app/helpers.js";
+import { $, authHeaders, confirmDanger, el, jobStatusWord, openModal, showInlineError, streamJob, toast } from "../app/helpers.js";
 import { t, tn } from "../app/i18n.js";
 import { emptyState, iconEl } from "../app/icons.js";
 import { pickPath } from "../app/picker.js";
@@ -191,7 +191,7 @@ export async function refreshEmbeddingPanel() {
     st = await r.json();
     if (!r.ok) throw new Error(st.detail || r.statusText);
   } catch (e) {
-    statusEl.textContent = t("knowledge.embed.statusLoadFailed", { message: e.message });
+    showInlineError(statusEl, t("knowledge.embed.statusLoadFailed", { message: e.message }));
     return null;
   }
   if (st.status === "ready") {
@@ -267,7 +267,7 @@ export async function refreshRerankPanel() {
     if (!r.ok) throw new Error(st.detail || r.statusText);
   } catch (e) {
     box.disabled = true;
-    statusEl.textContent = t("knowledge.rerank.statusLoadFailed", { message: e.message });
+    showInlineError(statusEl, t("knowledge.rerank.statusLoadFailed", { message: e.message }));
     statusEl.style.color = "var(--yellow)";
     return null;
   }

@@ -1098,6 +1098,17 @@
               </div>
             </section>
 
+            <section class="card settings-section" id="sec-recent-errors" data-group="system" data-sec-label="Recent errors">
+              <div class="card-head"><span class="ic cat-ic cat-slate" data-icon="warning"></span>
+                <div class="card-head-text"><h3 data-i18n="settings.recentErrors.title">Recent errors</h3></div></div>
+              <div class="sub" data-i18n="settings.recentErrors.help">The last five error messages this page showed, newest first. In privacy mode the list is kept only until the page is reloaded.</div>
+              <ol id="recent-errors-list" class="recent-errors-list"></ol>
+              <div id="recent-errors-empty" class="sub" data-i18n="settings.recentErrors.empty">No errors so far.</div>
+              <div class="actions">
+                <button class="btn-secondary" id="recent-errors-clear" data-i18n="settings.recentErrors.clear">Clear</button>
+              </div>
+            </section>
+
             <section class="card settings-section" id="sec-bugreport" data-group="system" data-sec-label="Report a bug">
               <div class="card-head"><span class="ic cat-ic cat-slate" data-icon="send"></span>
                 <div class="card-head-text"><h3 data-i18n="settings.bug.title">Report a bug</h3></div></div>
@@ -1409,7 +1420,8 @@
   </main>
 </div>
 
-<div id="toast"></div>
+<div id="toast-errors" class="toast-errors" hidden></div>
+<div id="toast" role="status" aria-live="polite"></div>
 
 <!-- Artifacts canvas: renders a self-contained HTML/SVG block from a reply in a
      hard-sandboxed iframe (no same-origin, CSP blocks all network). Opened by the

@@ -5,8 +5,16 @@ handler, and a 422 formatter that stays serializable and bounded for any body.""
 
 from __future__ import annotations
 
+import re
+import threading
+import time
+
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
+
+SERVER_ERROR_LOG_INTERVAL_S = 30.0
+# Control characters (CR/LF included), DEL, C1 and the Unicode line separators.
+_ONE_LINE_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]+")
 
 
 def register_exception_handlers(app: FastAPI) -> None:
@@ -56,6 +64,27 @@ def register_exception_handlers(app: FastAPI) -> None:
     # logging seam, not a response change.
     from starlette.exceptions import HTTPException as _StarletteHTTPException
 
+    # A 5xx refusal other than 503 is logged at WARNING in every mode, at most
+    # once per (method, path, status) per SERVER_ERROR_LOG_INTERVAL_S; the next
+    # line for that key counts the ones held back. A 4xx and a 503 (not
+    # available right now, e.g. /health with no model) stay debug-mode DEBUG lines.
+    _5xx_lock = threading.Lock()
+    _5xx_seen: dict = {}
+
+    def _server_error_due(key) -> int:
+        """-1 when a 5xx line for *key* is held back, else the number of lines
+        held back since the last one logged."""
+        now = time.monotonic()
+        with _5xx_lock:
+            last, held = _5xx_seen.get(key, (None, 0))
+            if last is not None and now - last < SERVER_ERROR_LOG_INTERVAL_S:
+                _5xx_seen[key] = (last, held + 1)
+                return -1
+            if len(_5xx_seen) >= 512 and key not in _5xx_seen:
+                _5xx_seen.pop(next(iter(_5xx_seen)))
+            _5xx_seen[key] = (now, 0)
+            return held
+
     @app.exception_handler(_StarletteHTTPException)
     async def _log_http_exception(request, exc):  # noqa: ANN001 - framework signature
         from fastapi.exception_handlers import http_exception_handler
@@ -64,7 +93,8 @@ def register_exception_handlers(app: FastAPI) -> None:
                                              is_undecodable_body)
         undecodable = is_undecodable_body(exc)
         status = 422 if undecodable else exc.status_code
-        if debug_enabled():
+        server_error = status >= 500 and status != 503
+        if server_error or debug_enabled():
             # Truncated: a detail can be long by design (the VRAM-overflow 503
             # carries a multi-line "Options:" list), and the point here is to
             # name the cause, not to mirror the whole body into the log.
@@ -72,8 +102,17 @@ def register_exception_handlers(app: FastAPI) -> None:
                       else str(getattr(exc, "detail", "") or ""))
             if len(detail) > 500:
                 detail = detail[:500] + " ...[truncated]"
-            _dbg.debug("%s %s refused %d: %s", request.method,
-                       request.url.path, status, detail)
+            if not server_error:
+                _dbg.debug("%s %s refused %d: %s", request.method,
+                           request.url.path, status, detail)
+            else:
+                path = _ONE_LINE_RE.sub(" ", request.url.path)
+                held = _server_error_due((request.method, path, status))
+                if held >= 0:
+                    _dbg.warning("%s %s failed %d: %s%s", request.method,
+                                 path, status,
+                                 _ONE_LINE_RE.sub(" ", detail),
+                                 f" ({held} more like this not logged)" if held else "")
         if undecodable:
             return JSONResponse(status_code=422,
                                 content={"detail": UNDECODABLE_BODY_MESSAGE,

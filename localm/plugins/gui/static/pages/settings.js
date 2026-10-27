@@ -4,7 +4,7 @@
 
 // --- ES module imports ---
 import { pickDirectory, pickFile } from "../app/picker.js";
-import { $, applyChatBackground, authHeaders, clearImageProxyCache, confirmDanger, confirmDangerAsync, el, fileToAvatarDataUri, fileToBackgroundDataUri, openModal, promptText, refreshCsrf, safeAvatarImageSrc, SHELL_TOKEN, streamJob, toast, whileBusy } from "../app/helpers.js";
+import { $, applyChatBackground, authHeaders, clearImageProxyCache, confirmDanger, confirmDangerAsync, el, fileToAvatarDataUri, fileToBackgroundDataUri, openModal, promptText, refreshCsrf, safeAvatarImageSrc, SHELL_TOKEN, showInlineError, streamJob, toast, whileBusy } from "../app/helpers.js";
 import { refreshCtxLimit } from "../app/chat.js";
 import { t, tn, tOr, tOrFirst } from "../app/i18n.js";
 import { emptyState } from "../app/icons.js";
@@ -1592,7 +1592,7 @@ export function buildBrowserSetupBox() {
       if (r.ok) st = await r.json();
     } catch { /* reported below */ }
     if (!st) {
-      statusLine.textContent = t("browser.setup.checkFailed");
+      showInlineError(statusLine, t("browser.setup.checkFailed"));
       return null;
     }
     if (st.ready) {
@@ -1808,7 +1808,7 @@ export async function refreshSettingsPage() {
             sttBtn.style.display = "";
           }
         } catch {
-          sttStatus.textContent = t("settings.voice.statusFailed");
+          showInlineError(sttStatus, t("settings.voice.statusFailed"));
         }
       };
       updateSttStatus();
@@ -2628,7 +2628,7 @@ export async function buildTtsSection(form) {
         setupBtn.style.display = "";
       }
     } catch (e) {
-      setupStatus.textContent = t("settings.tts.cacheCheckFailed", { message: e.message });
+      showInlineError(setupStatus, t("settings.tts.cacheCheckFailed", { message: e.message }));
       setupBtn.style.display = "";
     }
   };
@@ -3610,8 +3610,8 @@ export function renderDoctorReport(body) {
       status.textContent = t("settings.diagnostics.notRunYet");
     } else if (report.verdict === "error") {
       // The run did not happen. This must never render as a clean result.
-      status.textContent = t("settings.diagnostics.couldNotRun",
-        { error: report.error || t("settings.diagnostics.noReasonReported") });
+      showInlineError(status, t("settings.diagnostics.couldNotRun",
+        { error: report.error || t("settings.diagnostics.noReasonReported") }));
     } else {
       const checks = report.checks || [];
       const bad = checks.filter((c) => c.status === "fail" || c.status === "warn");
@@ -3689,7 +3689,7 @@ export async function runDiagnostics() {
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.detail || r.statusText);
   } catch (e) {
-    if (status) status.textContent = t("settings.diagnostics.couldNotStart", { message: e.message });
+    showInlineError(status, t("settings.diagnostics.couldNotStart", { message: e.message }));
     if (btn) btn.disabled = false;
     return;
   }

@@ -72,7 +72,8 @@ test("a partial share-inbox clear is surfaced to the user, not just to the API",
   const toastEl = win.document.getElementById("toast");
   assert.match(toastEl.textContent, /2 shared items could not be cleared/,
     "the two entries the server could not delete must reach the user");
-  assert.ok(toastEl.className.includes("show"), "and the toast is actually visible");
+  assert.match(win.document.querySelector("#toast-errors .toast-error-text").textContent,
+    /2 shared items could not be cleared/, "and the error toast is actually visible");
 });
 
 test("a fully successful share-inbox clear stays silent (no false alarm)", async () => {
