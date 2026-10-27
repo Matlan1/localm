@@ -289,8 +289,8 @@ _CUDA_RUNTIME_PIN = {
         "e4f53a8ca8c5d6e8c492d0d0a3d565ecb59a751b19cfdaa4f6da0ab2104c1702"),
     "nvidia-cuda-runtime": ("13.4.92",
         "9641f797da20ce1dd8e779b6e96d08cf9ba564cec8e8225458811ee26423f3a5"),
-    "nvidia-cublas": ("13.8.1.7",
-        "c11a27fd4379510e5b1f84b367a2514d1e52fe5cc13442117a0e0a1addee3cf2"),
+    "nvidia-cublas": ("13.8.2.12",
+        "21721774d8e7044debec3034ecc1a8cd22e173eb6dae5d7f5f8a014852382894"),
 }
 
 
