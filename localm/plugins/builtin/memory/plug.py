@@ -1394,17 +1394,6 @@ def _maybe_sweep_backfill() -> None:
 #  Chat hooks: recall injection (inlet) + consolidation/backfill outlet
 # ------------------------------------------------------------------ #
 
-def _user_msg_text(m) -> str:
-    """The text of one user message (multimodal text parts joined)."""
-    content = m.get("content")
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return " ".join(p.get("text", "") for p in content
-                        if isinstance(p, dict) and p.get("type") == "text")
-    return ""
-
-
 def _recall_query(messages, *, max_chars: int = 400, max_user_turns: int = 3) -> str:
     """The recall QUERY: the most recent user message plus a short window of prior
     user turns, so an anaphoric follow-up ("yes, do that") still carries the earlier
@@ -1414,13 +1403,15 @@ def _recall_query(messages, *, max_chars: int = 400, max_user_turns: int = 3) ->
     injection. A user-role row the client marked with an ``origin`` (a GUI web
     tool event: search results, a page read, a control note; or a prompt the
     client wrote itself, such as the compaction summarise request) is not the
-    user's words and neither enters the query nor counts toward max_user_turns.
+    user's words and neither enters the query nor counts toward max_user_turns;
+    a merged row with ``user_spans`` enters with those ranges only.
     A request holding only marked rows gets an empty query and recalls nothing."""
+    from localm.inference.protocol import is_user_written, user_written_text
     texts = []
     for m in reversed(messages):
-        if m.get("role") != "user" or m.get("origin"):
+        if not is_user_written(m):
             continue
-        t = _user_msg_text(m).strip()
+        t = user_written_text(m).strip()
         if t:
             texts.append(t)
         if len(texts) >= max_user_turns:

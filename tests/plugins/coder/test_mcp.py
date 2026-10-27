@@ -503,3 +503,63 @@ class TestPooledServers:
             assert result.ok is False and "disabled" in result.output
         finally:
             TOOL_REGISTRY.pop("mcp_late_read", None)
+
+
+class TestProjectFolderIsTheServersCwd:
+    def test_a_relative_script_path_resolves_in_the_project(
+            self, tmp_path, monkeypatch):
+        """The form the mcp.py docstring shows: args name a script in the
+        project. The server starts there wherever localm itself was started."""
+        from localm.plugins.coder import mcp as mcp_mod
+        proj = tmp_path / "proj"
+        (proj / ".localcoder").mkdir(parents=True)
+        (proj / "relsrv.py").write_text(FAKE_SERVER, encoding="utf-8")
+        (proj / ".localcoder" / "config.toml").write_text(textwrap.dedent(f"""\
+            [mcp.servers.rel]
+            command = {json.dumps(sys.executable)}
+            args = ["relsrv.py"]
+        """), encoding="utf-8")
+        _trust_project_config(proj)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
+        mcp_mod.stop_pooled_servers()
+        try:
+            names, warnings = register_mcp_tools(proj)
+            assert warnings == []
+            assert names == ["mcp_rel_add"]
+            assert TOOL_REGISTRY["mcp_rel_add"].fn(proj, a=2, b=3).output == "5"
+        finally:
+            TOOL_REGISTRY.pop("mcp_rel_add", None)
+            mcp_mod.stop_pooled_servers()
+
+    def test_two_projects_do_not_share_one_relative_server(self, tmp_path):
+        from localm.plugins.coder import mcp as mcp_mod
+        spec = {"command": sys.executable, "args": ["relsrv.py"]}
+        a = mcp_mod._spec_key("rel", spec, tmp_path / "a")
+        b = mcp_mod._spec_key("rel", spec, tmp_path / "b")
+        assert a != b
+
+    def test_a_start_failure_reaches_the_session_event_stream(self, tmp_path):
+        """A GUI session sees why a project MCP server did not start."""
+        from unittest.mock import patch
+
+        from localm.plugins.coder.agent import Agent
+        events: list = []
+        backend = MagicMock()
+        backend.model_id = "test-model"
+        backend.native_tools = False
+        with patch("localm.plugins.coder.agent.ProjectMap") as MockPM, \
+             patch("localm.plugins.coder.agent.make_audit_log"), \
+             patch("localm.plugins.coder.agent.load_memory", return_value=""):
+            MockPM.build.return_value.file_count.return_value = 0
+            MockPM.build.return_value.dirty = False
+            agent = Agent(backend=backend, cwd=tmp_path, on_event=events.append)
+        hooks = MagicMock()
+        hooks.project_dir = tmp_path
+        hooks.mcp_servers = {"gone": {"command": "no-such-mcp-server-binary-xyz",
+                                      "args": []}}
+        events.clear()
+        assert agent._register_mcp_servers(hooks) == []
+        infos = [e for e in events if e.get("type") == "info"]
+        assert infos and "no-such-mcp-server-binary-xyz" in infos[0]["text"], events

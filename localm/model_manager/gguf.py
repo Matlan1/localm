@@ -22,6 +22,7 @@ from rich.progress import DownloadColumn
 from rich.progress import Progress
 from rich.progress import TextColumn
 from rich.progress import TimeRemainingColumn
+from rich.table import Column
 from ..debuglog import logger
 from ..kv_cache import kv_bytes_for_type
 from ._shared import console
@@ -316,6 +317,25 @@ def _hash_reporting(path: Path, size: int, text: str) -> str:
     return digest
 
 
+_HASH_BAR_RESERVED_COLUMNS = 42
+
+
+def _hash_bar_label(name: str, purpose: str, width: int) -> str:
+    """The hashing bar's label, cut to fit *width* columns beside the spinner,
+    a bar, the size and the time left: the whole ``Hashing <name> <purpose>``
+    when it fits, else without *purpose*, else with *name* ending in an
+    ellipsis."""
+    budget = max(20, width - _HASH_BAR_RESERVED_COLUMNS)
+    full = f"Hashing {name} {purpose}"
+    if len(full) <= budget:
+        return full
+    short = f"Hashing {name}"
+    if len(short) <= budget:
+        return short
+    keep = max(1, budget - len("Hashing ") - 1)
+    return f"Hashing {name[:keep]}…"
+
+
 def _hash_with_progress(path: Path,
                         *, purpose: str = "for duplicate detection",
                         label: Optional[str] = None) -> Optional[str]:
@@ -359,17 +379,16 @@ def _hash_with_progress(path: Path,
 
     with Progress(
         SpinnerColumn(),
-        # {task.description} is rich's own placeholder and must survive the
-        # f-string, hence the doubled braces; only *purpose* is interpolated.
-        TextColumn(f"[dim]Hashing {{task.description}} {purpose}[/dim]"),
-        BarColumn(),
-        DownloadColumn(),
-        TimeRemainingColumn(),
+        TextColumn("[dim]{task.description}[/dim]", table_column=Column(no_wrap=True)),
+        BarColumn(bar_width=None),
+        DownloadColumn(table_column=Column(no_wrap=True)),
+        TimeRemainingColumn(table_column=Column(no_wrap=True)),
         transient=True,
         console=console,
     ) as prog:
         from rich.markup import escape
-        task = prog.add_task(escape(path.name), total=size)
+        task = prog.add_task(escape(_hash_bar_label(path.name, purpose, console.width)),
+                             total=size)
         worker = threading.Thread(
             target=_worker,
             args=(lambda done, total: prog.update(task, completed=done),),
@@ -767,7 +786,7 @@ _GGUF_ENCODER_DECODER_ARCHITECTURES = frozenset({"t5"})
 # video generation checkpoints; none is a llama.cpp architecture.
 _GGUF_IMAGE_ARCHITECTURES = frozenset({
     "flux", "sd3", "aura", "hidream", "cosmos", "hyvid", "wan", "ltxv",
-    "sdxl", "sd1", "lumina2",
+    "sdxl", "sd1", "lumina2", "qwen_image", "qwen_image21",
 })
 _GGUF_NON_CHAT_ARCHITECTURES.update(
     {arch: "an image or video generation model" for arch in _GGUF_IMAGE_ARCHITECTURES})
@@ -1846,6 +1865,45 @@ def gguf_input_layer_bytes(
         if sibling is not None:
             total += _input_layer_bytes_of(sibling)
     return total
+
+
+# Input-layer tensors llama.cpp only reads with GGML_OP_GET_ROWS (one row per
+# token), so a token touches a row of each, never the whole table.
+_ROW_LOOKUP_TENSOR_NAMES = ("token_embd", "position_embd", "token_types",
+                            "per_layer_token_embd")
+
+
+def gguf_row_lookup_bytes(path: Path, output_on_cpu: bool,
+                          *, _parsed: object = _UNSET) -> Optional[int]:
+    """Bytes of *path*'s row-lookup input tensors (``_ROW_LOOKUP_TENSOR_NAMES``),
+    summed over every part of a split GGUF.
+
+    ``token_embd.weight`` is left out when *output_on_cpu* is True and the model
+    has no ``output.weight``: llama.cpp then uses it as the output matrix, which
+    the CPU reads in full for every token.
+
+    *_parsed*, if given, is used for a single-file model instead of reading
+    *path* again (an already-computed ``_gguf_tensor_offset_entries(path)``
+    result, or its ``None`` failure).
+
+    ``None`` - never raises - when any part does not parse or a part of a
+    split model is missing."""
+    if split_gguf_parts(Path(path).name):
+        all_parts = _gguf_all_parts_entries(Path(path))
+    else:
+        parsed = _gguf_tensor_offset_entries(path) if _parsed is _UNSET else _parsed
+        all_parts = None if parsed is None else [
+            cast("tuple[list[tuple[str, int]], int, int]", parsed)]
+    if all_parts is None:
+        return None
+    sizes: dict[str, int] = {}
+    for entries, file_size, data_start in all_parts:
+        for idx, (name, offset) in enumerate(entries):
+            nxt = entries[idx + 1][1] if idx + 1 < len(entries) else (file_size - data_start)
+            sizes[name] = sizes.get(name, 0) + max(0, nxt - offset)
+    names = [n for n in _ROW_LOOKUP_TENSOR_NAMES
+             if not (n == "token_embd" and output_on_cpu and "output.weight" not in sizes)]
+    return sum(sizes.get(f"{n}.weight", 0) for n in names)
 
 
 def _input_layer_bytes_of(parsed: "tuple[list[tuple[str, int]], int, int]") -> int:

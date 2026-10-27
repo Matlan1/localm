@@ -38,3 +38,19 @@ def test_preload_failure_is_logged_with_traceback(caplog):
     records = [r for r in caplog.records if r.name == "localm"]
     assert any("background model preload failed" in r.message for r in records)
     assert any(r.exc_info for r in records)   # the traceback is attached
+
+
+def test_an_expected_refusal_is_one_warning_line_without_a_traceback(caplog):
+    from localm.inference.backends.base import ModelRefusedError
+    console = _FakeConsole()
+    try:
+        raise ModelRefusedError("This model is quantized with EXL2 and needs an NVIDIA GPU.")
+    except ModelRefusedError as e:
+        with caplog.at_level(logging.DEBUG, logger="localm"):
+            _report_preload_failure(console, e)
+
+    assert any("EXL2" in m for m in console.printed)
+    records = [r for r in caplog.records if r.name == "localm"]
+    assert [r.levelno for r in records] == [logging.WARNING]
+    assert "EXL2" in records[0].getMessage()
+    assert not records[0].exc_info

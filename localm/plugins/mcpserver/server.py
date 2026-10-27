@@ -1033,7 +1033,7 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
 
     Composes the tool families under ``localm.plugins.mcpserver.tools`` and
     then drops the gated tools whose gate is closed: ``embed`` when the backend
-    cannot embed, ``run_coder_task`` unless *enable_coder* and the coder plugin
+    cannot embed and no embedding model is registered, ``run_coder_task`` unless *enable_coder* and the coder plugin
     is active, ``generate_image`` unless *enable_images*, ``memory_recall``
     unless *enable_memory* and the memory plugin is active, and
     ``memory_append`` unless additionally *enable_memory_write*. A tool name
@@ -1054,7 +1054,7 @@ def build_tools(engines: EngineCache, enable_images: bool = True,
     # Advertisement gates; each probe runs at most once. The memory handlers
     # re-check their plugin and privacy gates on every call; the other gated
     # handlers rely on this list alone.
-    can_embed = _backend_can_embed(engines)
+    can_embed = _backend_can_embed(engines) or chat._registered_embedding_model()
     coder_on = enable_coder and _coder_available()
     memory_on = enable_memory and _memory_available()
     gates = {
@@ -1122,6 +1122,12 @@ class MCPStdioServer:
             return self._error(None, -32600, "Invalid Request: expected a JSON object")
         method = msg.get("method", "")
         mid = msg.get("id")
+
+        if not isinstance(method, str) or not method:
+            if "result" in msg or "error" in msg:
+                return None     # a client's reply to a request; this server sends none
+            return self._error(mid if isinstance(mid, (str, int)) else None, -32600,
+                               "Invalid Request: a request object needs a 'method' string")
 
         if mid is None:
             return None   # notification (e.g. notifications/initialized)

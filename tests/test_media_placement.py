@@ -505,6 +505,36 @@ def test_shortfall_none_when_probe_did_not_complete_fresh(home, monkeypatch):
     assert media_single_device_shortfall(settings, config=conf) is None
 
 
+def test_shortfall_checks_the_default_spread_over_every_gpu(home, monkeypatch):
+    """No split and no main GPU: the capacity decide_media_swap reads is the sum
+    over every discrete GPU (8 GB here), but the media model still loads whole on
+    one card. Two 12 GB cards with 4 GB free each and a 6 GB job: the per-device
+    check must ask for the swap."""
+    from localm.vram import media_single_device_shortfall, decide_media_swap
+    import localm.discover as disc
+    gpus = [{"index": i, "name": f"fake{i}", "free": 4 * GB, "total": 12 * GB,
+             "integrated": False} for i in range(2)]
+    monkeypatch.setattr(
+        disc, "list_gpus",
+        lambda **kw: (list(gpus), disc.GPU_PROBE_OK) if kw.get("return_status")
+        else list(gpus))
+    monkeypatch.setattr(disc, "_native_gpu_index_space_is_opaque", lambda: False)
+    conf = {"gpu_split_indices": None, "main_gpu_index": None}
+    settings = {"swap_policy": "auto", "vram_estimate_bytes": 6 * GB}
+    assert decide_media_swap(settings, read_free=lambda: 8 * GB) is False
+    shortfall = media_single_device_shortfall(settings, config=conf)
+    assert shortfall is not None and shortfall["free"] == 4 * GB
+
+
+def test_shortfall_none_with_a_main_gpu_and_no_split(home, monkeypatch):
+    """A chosen main GPU makes the capacity that one card's already."""
+    from localm.vram import media_single_device_shortfall
+    _fake_gpus(monkeypatch, (0, 4 * GB), (1, 4 * GB))
+    settings = {"swap_policy": "auto", "vram_estimate_bytes": 6 * GB}
+    assert media_single_device_shortfall(
+        settings, config={"gpu_split_indices": None, "main_gpu_index": 0}) is None
+
+
 def test_shortfall_none_on_single_gpu_box(home, monkeypatch):
     """NEGATIVE: no split configured (single-GPU box) -> the combined reading already IS
     the single card's, so there is nothing extra to check -> None."""

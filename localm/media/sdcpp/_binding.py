@@ -44,7 +44,7 @@ PREVIEW_VAE = 3
 _SD_TYPE_COUNT = 45
 _RNG_TYPE_COUNT = 3
 _CUDA_RNG = 1
-_PREDICTION_COUNT = 8
+_PREDICTION_COUNT = 11
 _SAMPLE_METHOD_COUNT = 21
 _SCHEDULER_COUNT = 17
 _SD_VAE_FORMAT_AUTO = -1
@@ -327,12 +327,35 @@ class sd_vid_gen_params_t(Structure):
         ("circular_x", c_bool),
         ("circular_y", c_bool),
         ("image_preprocess", sd_image_preprocess_params_t),
+        ("ref_image_args", c_char_p),
+    ]
+
+
+class sd_image_result_t(Structure):
+    _fields_ = [("image", sd_image_t), ("generation_info", c_char_p)]
+
+
+class sd_image_generation_result_t(Structure):
+    _fields_ = [("items", POINTER(sd_image_result_t)), ("count", c_int)]
+
+
+class sd_video_generation_result_t(Structure):
+    _fields_ = [
+        ("frames", POINTER(sd_image_t)),
+        ("frame_count", c_int),
+        ("audio", POINTER(sd_audio_t)),
+        ("fps", c_int),
+        ("generation_info", c_char_p),
     ]
 
 
 SD_LOG_CB = ctypes.CFUNCTYPE(None, c_int, c_char_p, c_void_p)
 SD_PROGRESS_CB = ctypes.CFUNCTYPE(None, c_int, c_int, c_float, c_void_p)
 SD_PREVIEW_CB = ctypes.CFUNCTYPE(None, c_int, c_int, POINTER(sd_image_t), c_bool, c_void_p)
+
+# The header's callback typedefs these function types bind.
+CALLBACKS = {"sd_log_cb_t": SD_LOG_CB, "sd_progress_cb_t": SD_PROGRESS_CB,
+             "sd_preview_cb_t": SD_PREVIEW_CB}
 
 # Bytes reserved past ctypes' sizeof for every struct the library initialises,
 # so a library whose struct grew writes into padding instead of past the buffer
@@ -353,53 +376,53 @@ def lib_filename() -> str:
     return "libstable-diffusion.so"
 
 
+# Every library function this module calls: (name, restype, argtypes).
+_FUNCTIONS = (
+    ("sd_set_log_callback", None, (SD_LOG_CB, c_void_p)),
+    ("sd_set_progress_callback", None, (SD_PROGRESS_CB, c_void_p)),
+    ("sd_set_preview_callback", None, (SD_PREVIEW_CB, _enum, c_int, c_bool, c_bool, c_void_p)),
+    ("sd_commit", c_char_p, ()),
+    ("sd_version", c_char_p, ()),
+    ("sd_get_system_info", c_char_p, ()),
+    ("sd_list_devices", c_size_t, (c_char_p, c_size_t)),
+    ("sd_ctx_params_init", None, (c_void_p,)),
+    ("sd_img_gen_params_init", None, (c_void_p,)),
+    ("sd_vid_gen_params_init", None, (c_void_p,)),
+    ("new_sd_ctx", c_void_p, (POINTER(sd_ctx_params_t),)),
+    ("free_sd_ctx", None, (c_void_p,)),
+    ("sd_get_model_version_name", c_char_p, (c_void_p,)),
+    ("sd_ctx_supports_image_generation", c_bool, (c_void_p,)),
+    ("sd_ctx_supports_video_generation", c_bool, (c_void_p,)),
+    ("sd_get_default_sample_method", _enum, (c_void_p,)),
+    ("sd_get_default_scheduler", _enum, (c_void_p, _enum)),
+    ("str_to_sample_method", _enum, (c_char_p,)),
+    ("str_to_scheduler", _enum, (c_char_p,)),
+    ("sd_sample_method_name", c_char_p, (_enum,)),
+    ("sd_scheduler_name", c_char_p, (_enum,)),
+    ("sd_hires_upscaler_name", c_char_p, (_enum,)),
+    ("str_to_sd_hires_upscaler", _enum, (c_char_p,)),
+    ("new_upscaler_ctx", c_void_p, (c_char_p, c_bool, c_int, c_int, c_char_p, c_char_p)),
+    ("free_upscaler_ctx", None, (c_void_p,)),
+    ("upscale", c_bool, (c_void_p, sd_image_t, c_uint32,
+                         POINTER(POINTER(sd_image_generation_result_t)))),
+    ("get_upscaler_model_scale", c_int, (c_char_p,)),
+    ("generate_image", c_bool, (c_void_p, POINTER(sd_img_gen_params_t),
+                                POINTER(POINTER(sd_image_generation_result_t)))),
+    ("generate_video", c_bool, (c_void_p, POINTER(sd_vid_gen_params_t),
+                                POINTER(POINTER(sd_video_generation_result_t)))),
+    ("sd_cancel_generation", None, (c_void_p, _enum)),
+    ("free_sd_image_generation_result", None, (POINTER(sd_image_generation_result_t),)),
+    ("free_sd_video_generation_result", None, (POINTER(sd_video_generation_result_t),)),
+)
+
+
 def _declare(lib: ctypes.CDLL) -> None:
-    """Set argtypes/restype for every function this module calls. The
-    optional ``sd_ctx_supports_ref_image_conditioning`` is declared only when
-    the library has it; every other function must exist."""
-    def fn(name, restype, *argtypes):
+    """Set argtypes/restype for every function in ``_FUNCTIONS``. Raises
+    ``AttributeError`` when the library lacks one."""
+    for name, restype, argtypes in _FUNCTIONS:
         f = getattr(lib, name)
         f.restype = restype
         f.argtypes = list(argtypes)
-
-    fn("sd_set_log_callback", None, SD_LOG_CB, c_void_p)
-    fn("sd_set_progress_callback", None, SD_PROGRESS_CB, c_void_p)
-    fn("sd_set_preview_callback", None, SD_PREVIEW_CB, _enum, c_int, c_bool, c_bool, c_void_p)
-    fn("sd_commit", c_char_p)
-    fn("sd_version", c_char_p)
-    fn("sd_get_system_info", c_char_p)
-    fn("sd_list_devices", c_size_t, c_char_p, c_size_t)
-    fn("sd_ctx_params_init", None, c_void_p)
-    fn("sd_img_gen_params_init", None, c_void_p)
-    fn("sd_vid_gen_params_init", None, c_void_p)
-    fn("new_sd_ctx", c_void_p, POINTER(sd_ctx_params_t))
-    fn("free_sd_ctx", None, c_void_p)
-    fn("sd_get_model_version_name", c_char_p, c_void_p)
-    fn("sd_ctx_supports_image_generation", c_bool, c_void_p)
-    fn("sd_ctx_supports_video_generation", c_bool, c_void_p)
-    if hasattr(lib, "sd_ctx_supports_ref_image_conditioning"):
-        fn("sd_ctx_supports_ref_image_conditioning", c_bool, c_void_p)
-    fn("sd_get_default_sample_method", _enum, c_void_p)
-    fn("sd_get_default_scheduler", _enum, c_void_p, _enum)
-    fn("str_to_sample_method", _enum, c_char_p)
-    fn("str_to_scheduler", _enum, c_char_p)
-    fn("sd_sample_method_name", c_char_p, _enum)
-    fn("sd_scheduler_name", c_char_p, _enum)
-    fn("sd_hires_upscaler_name", c_char_p, _enum)
-    fn("str_to_sd_hires_upscaler", _enum, c_char_p)
-    fn("new_upscaler_ctx", c_void_p, c_char_p, c_bool, c_int, c_int, c_char_p, c_char_p)
-    fn("free_upscaler_ctx", None, c_void_p)
-    fn("upscale", c_bool, c_void_p, sd_image_t, c_uint32,
-       POINTER(POINTER(sd_image_t)), POINTER(c_int))
-    fn("get_upscaler_model_scale", c_int, c_char_p)
-    fn("generate_image", c_bool, c_void_p, POINTER(sd_img_gen_params_t),
-       POINTER(POINTER(sd_image_t)), POINTER(c_int))
-    fn("generate_video", c_bool, c_void_p, POINTER(sd_vid_gen_params_t),
-       POINTER(POINTER(sd_image_t)), POINTER(c_int),
-       POINTER(POINTER(sd_audio_t)), POINTER(c_int))
-    fn("sd_cancel_generation", None, c_void_p, _enum)
-    fn("free_sd_images", None, POINTER(sd_image_t), c_int)
-    fn("free_sd_audio", None, POINTER(sd_audio_t))
 
 
 def _add_dll_dir(directory: Path) -> None:
@@ -459,8 +482,8 @@ def load_library(runtime_dir: Path, extra_dll_dirs: Optional[list] = None) -> ct
 
     *extra_dll_dirs*: further directories for transitive imports (the ROCm
     build's hipBLAS/rocBLAS). Raises ``OSError`` when the library or one of its
-    imports cannot be loaded, and :class:`AbiMismatch` when the layout check
-    fails."""
+    imports cannot be loaded, and :class:`AbiMismatch` when it lacks a function
+    in ``_FUNCTIONS`` or the layout check fails."""
     runtime_dir = Path(runtime_dir)
     _add_dll_dir(runtime_dir)
     for d in extra_dll_dirs or []:
@@ -468,7 +491,12 @@ def load_library(runtime_dir: Path, extra_dll_dirs: Optional[list] = None) -> ct
     mode = 0 if sys.platform == "win32" else ctypes.RTLD_GLOBAL
     lib = ctypes.CDLL(str(runtime_dir / lib_filename()), mode=mode)
     _register_backends(lib, runtime_dir)
-    _declare(lib)
+    try:
+        _declare(lib)
+    except AttributeError as e:
+        raise AbiMismatch(
+            f"stable-diffusion.cpp runtime in {runtime_dir} lacks a function localm binds "
+            f"({e}). Reinstall it with 'localm setup-sdcpp --force'.") from e
     verify_abi(lib)
     return lib
 
@@ -630,6 +658,8 @@ def check_layouts(lib) -> list[str]:
     bad += _hires_defaults_ok(vp.hires, "vid.hires")
     if not _close(vp.vae_tiling_params.target_overlap, 0.5):
         bad.append("vid.vae_tiling_params.target_overlap")
+    if not _raw_ptr(vp, "ref_image_args"):
+        bad.append("vid.ref_image_args is null")
     bad += check_names(lib)
     return bad
 
@@ -778,6 +808,15 @@ class _GgmlDevProps(Structure):
     _fields_ = [("name", c_char_p), ("description", c_char_p), ("memory_free", c_size_t),
                 ("memory_total", c_size_t), ("type", _enum), ("device_id", c_char_p),
                 ("caps", _GgmlDevCaps)]
+
+
+# The structs above that mirror ggml's headers, not stable-diffusion.h:
+# binding name -> (ggml header file, C struct name).
+GGML_STRUCTS = {
+    "_GgmlInitParams": ("ggml.h", "ggml_init_params"),
+    "_GgmlDevCaps": ("ggml-backend.h", "ggml_backend_dev_caps"),
+    "_GgmlDevProps": ("ggml-backend.h", "ggml_backend_dev_props"),
+}
 
 
 def device_props(lib, runtime_dir: Path) -> list[dict]:

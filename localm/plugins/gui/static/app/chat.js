@@ -6,7 +6,7 @@
 "use strict";
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
-import { $, applyChatBackground, authHeaders, autoGrow, CHAT_SURFACE_HEADERS, confirmDanger, el, fetchImageURL, INSTANCE_SCOPED_KEYS, promptText, readStoredJSON, reconcileInstanceId, renderMarkdown, safeAvatarImageSrc, scrubMarkers, stripThink, toast } from "./helpers.js";
+import { $, applyChatBackground, authHeaders, autoGrow, CHAT_SURFACE_HEADERS, confirmDanger, el, fetchImageURL, INSTANCE_SCOPED_KEYS, promptText, readStoredJSON, reconcileInstanceId, renderMarkdown, safeAvatarImageSrc, scrubMarkers, stripAsrPrefix, stripThink, toast } from "./helpers.js";
 import { t, tn, tOr } from "./i18n.js";
 import { emptyState, iconEl } from "./icons.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
@@ -1331,6 +1331,38 @@ export function elideImagesForWire(messages) {
   return messages;
 }
 
+/** Replace, in place, every audio clip part of the wire *messages* with a text
+ *  note, so one request leaves the clips out while the conversation keeps
+ *  them. */
+export function elideAudioForWire(messages) {
+  for (const m of messages) {
+    if (!Array.isArray(m.content)) continue;
+    m.content = m.content.map((p) => p.type === "input_audio"
+      ? { type: "text", text: "[An audio clip from an earlier message is not included in this request.]" }
+      : p);
+  }
+  return messages;
+}
+
+/** True when the wire *messages* carry both an image part and an audio clip:
+ *  no model reads both, so a request that needs only one of them must leave
+ *  the other out. */
+export function wireHasImageAndAudio(messages) {
+  const has = (type) => messages.some((m) => Array.isArray(m.content) &&
+    m.content.some((p) => p.type === type));
+  return has("image_url") && has("input_audio");
+}
+
+/** True when the newest user message of *conv* carries an audio clip. */
+export function latestTurnHasAudio(conv) {
+  for (let i = conv.messages.length - 1; i >= 0; i--) {
+    const m = conv.messages[i];
+    if (m.role !== "user" || isToolEvent(m)) continue;
+    return msgAudioClips(m).length > 0;
+  }
+  return false;
+}
+
 /** True when the newest user message of *conv* carries an audio clip and no
  *  image, so the images still in the conversation belong to earlier turns. */
 export function latestTurnIsAudioOnly(conv) {
@@ -1842,7 +1874,7 @@ export function addMessageRow(container, role, text, opts = {}) {
   const meta = el("div", "msg-meta");
   const copy = el("button", "copy-btn", t("chat.copy"));
   copy.onclick = async () => {
-    const plain = stripThink(text) || text;
+    const plain = stripAsrPrefix(stripThink(text) || text);
     const firstImg = body.querySelector(".msg-img");
     // Image-only message (e.g. a bare attachment): copy the IMAGE, not empty
     // text - the "copy copied the prompt, not the image" report (VIS-2). For a

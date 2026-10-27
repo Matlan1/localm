@@ -979,6 +979,29 @@ class TestVramEstimate:
         assert data["kv_cache"] == estimate_vram(22 * _GB, 4096, 99,
                                                  n_layers=32)["kv_cache"]
 
+    def test_a_model_whose_load_is_in_flight_gets_no_verdict(
+            self, gui_app, tmp_path, monkeypatch):
+        """Mid-load the free reading already excludes part of the load and the
+        engine holds nothing yet, so neither "fits" nor "may not fit" is right."""
+        engine = self._engine()
+        engine.loaded = False
+        engine.loading = True
+        data = self._running_estimate(gui_app, tmp_path, monkeypatch, engine,
+                                      {"n_ctx": 4096, "n_gpu_layers": 99})
+        assert data["free"] == 20 * _GB
+        assert data["needed"] > data["free"]
+        assert data["loading"] is True
+        assert data["held"] is None and data["available"] is None
+        assert data["fits"] is None
+
+    def test_a_loaded_model_is_not_reported_loading(
+            self, gui_app, tmp_path, monkeypatch):
+        engine = self._engine()
+        engine.loading = False
+        data = self._running_estimate(gui_app, tmp_path, monkeypatch, engine,
+                                      {"n_ctx": 4096, "n_gpu_layers": 99})
+        assert data["loading"] is False and data["fits"] is True
+
     def test_a_model_that_is_not_loaded_holds_nothing(
             self, gui_app, tmp_path, monkeypatch):
         data = self._running_estimate(gui_app, tmp_path, monkeypatch, None,
@@ -1445,6 +1468,23 @@ class TestGpusEndpoint:
         # JS can trust an empty/short list as a real "that is all there is".
         assert data["probe_status"] == GPU_PROBE_OK
 
+    def test_nvidia_smi_numbering_is_reported_as_the_index_space(self, gui_app):
+        app, _ = gui_app
+        fake_gpus = [
+            {"index": i, "name": f"GPU {i}", "total": 24 * 1024 ** 3,
+             "free": 20 * 1024 ** 3, "source": "nvidia-smi", "numbering": numbering}
+            for i, numbering in ((0, "nvidia-smi"), (1, "nvidia-smi"))]
+        with patch("localm.discover.list_gpus", new=probe_double(fake_gpus)), \
+             patch("localm.discover._native_gpu_index_space_is_opaque", return_value=False), \
+             patch("localm.config.load_config", return_value={"main_gpu_index": 1}):
+            with TestClient(app) as client:
+                marked = client.get("/api/gpus").json()
+                for g in fake_gpus:
+                    g["numbering"] = "torch"
+                renumbered = client.get("/api/gpus").json()
+        assert marked["index_space"] == "nvidia-smi"
+        assert "index_space" not in renumbered
+
     def test_empty_when_nothing_detected(self, gui_app):
         app, _ = gui_app
         with patch("localm.discover.list_gpus", new=probe_double([])), \
@@ -1889,6 +1929,19 @@ class TestModelEndpoints:
         # Nothing to resume while a model IS active - the key is absent, not
         # null, so an older client sees the exact pre-existing payload shape.
         assert "resumable" not in data
+
+    def test_models_list_reports_the_pulled_revision(self, gui_app):
+        app, _ = gui_app
+        registry = {
+            "pinned": {"path": "Z:/nonexistent/a.gguf", "source": "hf:owner/repo",
+                       "revision": "refs/pr/3"},
+            "plain": {"path": "Z:/nonexistent/b.gguf", "source": "hf:owner/repo"},
+        }
+        with patch("localm.config.load_registry", return_value=registry):
+            with TestClient(app) as client:
+                rows = {m["name"]: m for m in client.get("/api/models").json()["models"]}
+        assert rows["pinned"]["revision"] == "refs/pr/3"
+        assert "revision" not in rows["plain"]
 
     @staticmethod
     def _app_with_no_active_model():

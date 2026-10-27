@@ -1118,9 +1118,14 @@ class TestListGpus:
         # memory.free is the whole board's across every process, so it needs no
         # correction on any platform. source "nvidia-smi" marks an index in
         # nvidia-smi's own order rather than a CUDA device ordinal.
-        assert gpus[0] == {"index": 0, "name": "NVIDIA RTX 4090",
-                            "total": 24576 * 1024 ** 2, "free": 20000 * 1024 ** 2,
-                            "free_scope": "device", "source": "nvidia-smi"}
+        # When torch could not answer (the isolated probe got this CSV), the
+        # entries also say their numbers are nvidia-smi's own.
+        expected = {"index": 0, "name": "NVIDIA RTX 4090",
+                    "total": 24576 * 1024 ** 2, "free": 20000 * 1024 ** 2,
+                    "free_scope": "device", "source": "nvidia-smi"}
+        if discover._isolated_torch_unavailable or discover._isolated_torch_unanswered:
+            expected["numbering"] = discover.GPU_NUMBERING_NVIDIA_SMI
+        assert gpus[0] == expected
         assert gpus[1]["index"] == 1
         assert gpus[1]["name"] == "NVIDIA RTX 3060"
 
@@ -2626,10 +2631,19 @@ class TestVramCapacitySplitAware:
         {"index": 2, "name": "C", "total": 8_000_000_000, "free": 6_000_000_000},
     ]
 
-    def test_no_split_configured_falls_back_to_vram_info(self, monkeypatch):
+    def test_no_split_configured_sums_every_gpu(self, monkeypatch):
+        # A load with no split spreads over every discrete GPU.
         monkeypatch.setattr("localm.discover.list_gpus", lambda: self._GPUS)
         monkeypatch.setattr("localm.config.load_config",
                             lambda: {"gpu_split_indices": None})
+        assert vram_capacity() == {
+            "total": 24_000_000_000 + 12_000_000_000 + 8_000_000_000,
+            "free": 20_000_000_000 + 10_000_000_000 + 6_000_000_000}
+
+    def test_no_split_with_a_main_gpu_falls_back_to_vram_info(self, monkeypatch):
+        monkeypatch.setattr("localm.discover.list_gpus", lambda: self._GPUS)
+        monkeypatch.setattr("localm.config.load_config",
+                            lambda: {"gpu_split_indices": None, "main_gpu_index": 0})
         assert vram_capacity() == vram_info() == {
             "total": 24_000_000_000, "free": 20_000_000_000}
 
@@ -2876,9 +2890,17 @@ class TestVramCapacityReturnStatus:
     def test_no_split_configured_propagates_status_via_vram_info(self, monkeypatch):
         monkeypatch.setattr("localm.discover._list_gpus_probe", lambda: self._GPUS)
         monkeypatch.setattr("localm.config.load_config",
-                             lambda: {"gpu_split_indices": None})
+                             lambda: {"gpu_split_indices": None, "main_gpu_index": 0})
         info, status = vram_capacity(return_status=True)
         assert info == {"total": 24_000_000_000, "free": 20_000_000_000}
+        assert status == GPU_PROBE_OK
+
+    def test_no_split_sum_propagates_status(self, monkeypatch):
+        monkeypatch.setattr("localm.discover._list_gpus_probe", lambda: self._GPUS[:2])
+        monkeypatch.setattr("localm.config.load_config",
+                             lambda: {"gpu_split_indices": None})
+        info, status = vram_capacity(return_status=True)
+        assert info == {"total": 36_000_000_000, "free": 30_000_000_000}
         assert status == GPU_PROBE_OK
 
     @pytest.mark.usefixtures("_non_vulkan_host")

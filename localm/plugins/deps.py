@@ -20,7 +20,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Optional
 
-from localm import config
+from localm import config, uv_tool
 from localm.debuglog import logger
 
 #: Progress sink: called with one human-readable line at a time (a pip output
@@ -171,7 +171,7 @@ def _tail(text: str, limit: int = 600) -> str:
 
 def _run_pip(reqs: list, *, on_progress: ProgressCb = None):
     """Install *reqs* into the CURRENT interpreter's environment. Tries ``uv pip
-    install`` first, then ``pip``, streaming output to *on_progress*. Returns
+    install`` (the uv :func:`localm.uv_tool.find_uv` finds, run by full path) first, then ``pip``, streaming output to *on_progress*. Returns
     ``(ok, combined_output)``. ``--python sys.executable`` pins uv to this venv
     regardless of the ambient VIRTUAL_ENV.
 
@@ -180,10 +180,12 @@ def _run_pip(reqs: list, *, on_progress: ProgressCb = None):
     OUTSIDE the data dir when left to its default. See
     ``config.contained_pip_env``."""
     env = config.contained_pip_env()
-    attempts = (
-        ["uv", "pip", "install", "--python", sys.executable, *reqs],
-        [sys.executable, "-m", "pip", "install", *reqs],
-    )
+    uv = uv_tool.find_uv(uv_tool.install_root())
+    attempts = [[sys.executable, "-m", "pip", "install", *reqs]]
+    if uv:
+        attempts.insert(0, [uv, "pip", "install", "--python", sys.executable, *reqs])
+    else:
+        _emit(on_progress, "uv not found, using pip...")
     last = ""
     for cmd in attempts:
         _emit(on_progress, "$ " + " ".join(cmd))

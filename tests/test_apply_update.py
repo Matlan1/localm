@@ -248,7 +248,9 @@ def test_swap_does_not_choke_on_a_held_open_binary(tmp_path):
 
 def test_post_swap_command_per_class():
     assert au.post_swap_command("reboot") is None
-    assert au.post_swap_command("deps")[:3] == ["uv", "pip", "install"]
+    assert au.post_swap_command("deps", uv="/x/uv")[:4] == ["/x/uv", "pip", "install", "-p"]
+    with pytest.raises(ValueError):
+        au.post_swap_command("deps")
     assert au.post_swap_command("setup") is None
 
 
