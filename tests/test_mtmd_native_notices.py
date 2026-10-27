@@ -19,7 +19,6 @@ from localm.inference.backends.llamacpp import llama as llama_mod
 from localm.inference.backends.llamacpp import mtmd as mtmd_mod
 from tests._bare_llama import make_bare_llama
 from tests._real_gguf import require_native_runtime
-from tests._real_gguf import require_native_runtime
 
 ADVICE = ("clip_ctx: Qwen-VL models require at minimum 1024 image tokens to function "
           "correctly on grounding tasks\n"
