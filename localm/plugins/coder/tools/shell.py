@@ -185,8 +185,11 @@ def _cmd_join_lines(command: str) -> str:
     ``cmd /S /C`` ends the command at the first line break, so every later line
     would be dropped. Lines are joined with `` & ``, which runs each in turn
     whatever the previous one returned, as ``sh`` does with separate lines; the
-    exit code is the last line's. A line ending in ``(``, ``&`` or ``|``, a line
-    starting with ``)``, ``&`` or ``|``, and a line ending in a ``^``
+    exit code is the last line's. A line that is only a ``rem`` or ``::``
+    comment is dropped, since cmd would read the lines joined after it as part
+    of the comment (a comment line right after a ``^`` continuation stays, as
+    cmd reads it as part of that command). A line ending in ``(``, ``&`` or
+    ``|``, a line starting with ``)``, ``&`` or ``|``, and a line ending in a ``^``
     continuation are joined with a space instead (the caret is removed). Blank
     lines are dropped. When several statements result, each ``if`` or ``for``
     statement is wrapped in parentheses, so the statements after it run
@@ -232,16 +235,20 @@ def _cmd_join_lines(command: str) -> str:
 
     statements: list[str] = []
     glue = "&"
+    continued = False
     for line in lines:
         piece = line.strip()
         if not piece:
+            continue
+        if not continued and _RE_CMD_COMMENT.match(piece):
             continue
         if statements and (glue == " " or piece[0] in ")&|"):
             statements[-1] += " " + piece
         else:
             statements.append(piece)
         carets = len(piece) - len(piece.rstrip("^"))
-        if carets % 2 == 1:
+        continued = carets % 2 == 1
+        if continued:
             statements[-1] = statements[-1][:-1].rstrip()
             glue = " "
         elif piece[-1] in "(&|":
@@ -253,6 +260,9 @@ def _cmd_join_lines(command: str) -> str:
                       for s in statements]
     return " & ".join(statements)
 
+
+# A whole-line ``rem`` or ``::`` comment; _cmd_join_lines drops it.
+_RE_CMD_COMMENT = re.compile(r"@?\s*(?:rem(?:\s|$)|::)", re.IGNORECASE)
 
 # An ``if`` or ``for`` statement; _cmd_join_lines parenthesises it when other
 # statements follow it.

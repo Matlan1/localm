@@ -605,3 +605,81 @@ def test_auto_approved_shell_through_a_link_is_denied(keyed, tmp_path):
     assert STRONG_KEY not in result.output
     assert "localm's owner API key" in result.output
     assert not (keyed / "ran.txt").exists(), "the command ran"
+
+
+# --------------------------------------------------------------------------- #
+#  `..` after a link                                                            #
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def linked_subfolder(tmp_path):
+    """A project link ``dl`` to a subfolder of the data folder."""
+    home = tmp_path / "home"
+    (home / "models").mkdir(parents=True)
+    (home / "config.json").write_text("{}", encoding="utf-8")
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "notes.txt").write_text("n", encoding="utf-8")
+    (project / "config.json").write_text("{}", encoding="utf-8")
+    _link_dir(project / "dl", home / "models")
+    return project, home
+
+
+@pytest.mark.parametrize("cmd, label", [
+    ("cat dl/../config.json", "settings"),
+    ("cat dl/..", "data folder"),
+    ("cat dl/../models/../config.json", "settings"),
+    ("echo x > dl/../config.json", "settings"),
+    ("cat ./dl/.././config.json", "settings"),
+])
+def test_a_dotdot_after_a_link_into_the_data_folder_is_named(linked_subfolder, cmd, label):
+    project, home = linked_subfolder
+    hit = _shell(cmd, project, home)
+    assert hit and label in hit, (cmd, hit)
+
+
+def test_a_dotdot_after_a_link_by_absolute_path_is_named(linked_subfolder):
+    project, home = linked_subfolder
+    hit = _shell(f"cat {(project / 'dl').as_posix()}/../config.json", project, home)
+    assert hit and "settings" in hit, hit
+
+
+def test_a_dotdot_after_a_link_elsewhere_is_not_flagged(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    project = tmp_path / "proj"
+    (project / "src").mkdir(parents=True)
+    (project / "notes.txt").write_text("n", encoding="utf-8")
+    _link_dir(project / "alias", project / "src")
+    for cmd in ("cat alias/../notes.txt", "cat alias/..", "cat alias/../src/../notes.txt"):
+        assert _shell(cmd, project, home) is None, cmd
+
+
+def test_a_dotdot_through_a_unc_link_target_is_never_followed(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "l").mkdir()
+    seen = _realpath_spy(monkeypatch)
+    monkeypatch.setattr(data_guard.os, "readlink", lambda p: "\\localhost\nonexistentshare")
+    monkeypatch.setattr(data_guard, "_is_link", lambda p: os.path.basename(p) == "l")
+    assert data_guard._posix_resolve(str(project / "l" / ".." / "x")) is None
+    assert not [s for s in seen if s.startswith("\\\\")], seen
+
+
+@pytest.mark.skipif(os.name != "posix", reason="a POSIX tool applies .. to the link target")
+def test_a_file_tool_path_with_dotdot_after_a_link_is_resolved_link_first(tmp_path):
+    project = tmp_path / "proj"
+    data = project / ".localm"
+    data.mkdir(parents=True)
+    (data / "config.json").write_text("{}", encoding="utf-8")
+    (project / "other").mkdir()
+    (project / "sub").mkdir()
+    _link_dir(project / "sub" / "l", project / "other")
+    hit = data_guard.check("read_file", {"path": "sub/l/../.localm/config.json"}, project,
+                           path_args=("path",), home=data)
+    assert hit and "settings" in hit, hit
+    control = data_guard.check("read_file", {"path": "sub/l/../notes.txt"}, project,
+                               path_args=("path",), home=data)
+    assert control is None, control

@@ -143,9 +143,36 @@ def test_a_multi_line_cmd_block_runs(tmp_path):
     ("echo one ^^\ntwo", "echo one ^^ & two"),
     ('echo "x"\necho y', 'echo "x" & echo y'),
     ('echo ^"\necho y', 'echo ^" & echo y'),
+    ("rem first\necho AFTER_REM", "echo AFTER_REM"),
+    ("echo one\n:: note\necho two", "echo one & echo two"),
+    ("echo a\n  REM now\necho b", "echo a & echo b"),
+    ("echo a\n@rem now\necho b", "echo a & echo b"),
+    ("echo a\nrem\necho b", "echo a & echo b"),
+    ("if x (\n rem inside\n echo y\n)", "if x ( echo y )"),
+    ("echo remember\necho b", "echo remember & echo b"),
+    ("echo rem x\necho b", "echo rem x & echo b"),
+    ("remove x\necho b", "remove x & echo b"),
+    ("echo a ^\nrem tail", "echo a rem tail"),
 ])
 def test_cmd_join_lines(command, joined):
     assert _cmd_join_lines(command) == joined
+
+
+@pytest.mark.skipif(not _WIN, reason="cmd.exe comment lines")
+def test_comment_lines_do_not_swallow_the_later_lines(tmp_path):
+    cmd = "rem first\necho AFTER_REM\n:: note\necho AFTER_COLONS"
+    result = tool_run_shell(tmp_path, cmd, timeout=30)
+    assert result.ok, result.output
+    assert "AFTER_REM" in result.output
+    assert "AFTER_COLONS" in result.output
+
+
+@pytest.mark.skipif(not _WIN, reason="cmd.exe comment lines")
+def test_an_argument_containing_rem_still_runs(tmp_path):
+    result = tool_run_shell(tmp_path, "echo remark one\necho rem two", timeout=30)
+    assert result.ok, result.output
+    assert "remark one" in result.output
+    assert "rem two" in result.output
 
 
 def test_cmd_join_lines_refuses_a_quoted_line_break():

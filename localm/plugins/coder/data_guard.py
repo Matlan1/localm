@@ -173,6 +173,72 @@ def _local_realpath(path: str) -> Optional[str]:
     return None
 
 
+def _posix_resolve(path: str) -> Optional[str]:
+    """*path* resolved the way a POSIX tool does: each ``..`` steps back from
+    the link's target, because links are followed before the ``..`` that comes
+    after them is applied (:func:`os.path.realpath` and ``ntpath.realpath``
+    collapse ``..`` first). None when a link on the way, or its target, is a UNC
+    or device path or a mapped network drive, or more than
+    :data:`_MAX_LINK_HOPS` links are followed. Never opens a network path."""
+    from localm.pathsafe import is_mapped_network_drive, is_unc_or_device_path
+    if is_unc_or_device_path(path) or not os.path.isabs(path):
+        return None
+    drive, rest = os.path.splitdrive(path)
+    pending = [p for p in rest.replace("\\", "/").split("/") if p not in ("", ".")]
+    pending.reverse()
+    current = drive + os.sep
+    hops = 0
+    while pending:
+        part = pending.pop()
+        if part == "..":
+            current = os.path.dirname(current)
+            continue
+        candidate = os.path.join(current, part)
+        if not (os.path.lexists(candidate) and _is_link(candidate)):
+            current = candidate
+            continue
+        hops += 1
+        if hops > _MAX_LINK_HOPS:
+            return None
+        target = os.readlink(candidate)
+        if target.startswith("\\\\?\\") and target[5:6] == ":":
+            target = target[4:]
+        t_drive, t_rest = os.path.splitdrive(target)
+        if is_unc_or_device_path(target) or (
+                t_drive and is_mapped_network_drive(t_drive + os.sep)):
+            return None
+        parts = [p for p in t_rest.replace("\\", "/").split("/") if p not in ("", ".")]
+        if os.path.isabs(target):
+            current = (t_drive or drive) + os.sep
+        pending.extend(reversed(parts))
+    return _local_realpath(current)
+
+
+def _dotdot_form(token: str, current: Optional[str]) -> Optional[str]:
+    """The canonical :func:`_posix_resolve` form of the shell operand *token*
+    (relative to the canonical directory *current*) when it has a ``..`` after
+    a link, which :func:`shell_guard._norm_target` has already collapsed, else
+    None."""
+    tok = token.strip()
+    while tok.endswith("*"):
+        tok = tok[:-1]
+    if ".." not in tok.replace("\\", "/").split("/"):
+        return None
+    if _sg._canon(tok) is not None:
+        raw = tok
+    elif current:
+        raw = current.rstrip("/") + "/" + tok
+    else:
+        return None
+    try:
+        if not _sg._dotdot_after_link(raw, current or raw):
+            return None
+        resolved = _posix_resolve(raw)
+    except (OSError, ValueError):
+        return None
+    return _sg._canon(resolved) if resolved else None
+
+
 def _file_forms(value: str, cwd: Optional[Path]) -> list[str]:
     """Canonical forms of a file-tool path: lexical, then symlink-resolved
     (:func:`_local_realpath`, so never through a network path)."""
@@ -191,6 +257,13 @@ def _file_forms(value: str, cwd: Optional[Path]) -> list[str]:
             real = None
         if real:
             forms.append(real)
+        if os.name == "posix":
+            try:
+                through = _posix_resolve(str(p))
+            except (OSError, ValueError):
+                through = None
+            if through:
+                forms.append(through)
     return [f for f in (_sg._canon(x) for x in forms) if f]
 
 
@@ -298,9 +371,15 @@ def _check_segments(segments, cwd: Optional[Path], targets: Targets, home: Path,
             label = _match_shell_path(_sg._norm_target(tok, current), targets, tree=tree)
             if label:
                 return label
+            label = _match(_dotdot_form(tok, current), targets, tree=tree)
+            if label:
+                return label
         for _op, target in seg.redirects:
             target = _expand_home_vars(target, home)
             label = _match_shell_path(_sg._norm_target(target, current), targets, tree=False)
+            if label:
+                return label
+            label = _match(_dotdot_form(target, current), targets, tree=False)
             if label:
                 return label
         if name == "cd":
