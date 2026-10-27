@@ -73,12 +73,12 @@ RECOMMENDED_VIDEO_MODELS: tuple[RecommendedVideoModel, ...] = (
     RecommendedVideoModel(
         name="wan2.1-t2v-1.3b",
         parts=(
-            RecommendedPart("model", "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
+            RecommendedPart("model", "Comfy-Org/Wan-2.1",
                             "split_files/diffusion_models/wan2.1_t2v_1.3B_fp16.safetensors",
                             2_838_303_560,
                             "be531024cd9018cb5b48c40cfbb6a6191645b1c792eb8bf4f8c1c6e10f924dc5",
                             "diffusion-unet"),
-            RecommendedPart("vae", "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
+            RecommendedPart("vae", "Comfy-Org/Wan-2.1",
                             "split_files/vae/wan_2.1_vae.safetensors", 253_815_318,
                             "2fc39d31359a4b0a64f55876d8ff7fa8d780956ae2cb13463b0223e15148976b",
                             "vae"),

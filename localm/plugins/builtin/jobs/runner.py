@@ -722,6 +722,32 @@ def _remember_owner_key_job(job: Job) -> None:
                      "(%s); it will be re-derived on the next run", job.id, e)
 
 
+def _project_mode_error(cwd: Path) -> Optional[str]:
+    """A refusal message when the ``.localcoder/config.toml`` nearest *cwd*
+    sets a ``mode`` that is not privacy, log or full, else None. A config that
+    cannot be read or found (an unsearchable project folder) is left to
+    ``effective_unattended_mode``, which resolves it to privacy and warns."""
+    from localm.audit import parse_mode
+    from localm.plugins.coder.project_config import (
+        ProjectConfigUnreadable,
+        find_project_config,
+        load_project_config,
+    )
+    try:
+        pmode = load_project_config(cwd).get("mode")
+    except (ProjectConfigUnreadable, OSError):
+        return None
+    if pmode is None:
+        return None
+    try:
+        parse_mode(str(pmode))
+    except ValueError as e:
+        where = find_project_config(cwd) or cwd
+        return (f"the project config {where} sets an invalid mode: {e}. Fix it "
+                "so the job runs with the mode the project asks for.")
+    return None
+
+
 def _run_coder(job: Job, *, engine=None) -> str:
     """Run a coder Agent for the prompt in the job's cwd. Best-effort: requires
     the coder plugin and a reachable backend. Honours the current privacy mode
@@ -770,7 +796,11 @@ def _run_coder(job: Job, *, engine=None) -> str:
 
     backend = _coder_backend(job)
     # Resolved with the job's project dir, where a .localcoder/config.toml mode can
-    # only reduce what the run persists.
+    # only reduce what the run persists. An invalid project mode is refused, as
+    # the one-shot coder runner refuses it.
+    _bad_mode = _project_mode_error(cwd)
+    if _bad_mode:
+        raise RuntimeError(_bad_mode)
     mode = effective_unattended_mode("coder", cwd=cwd)
 
     # Safe-by-default: an unattended scheduled run has nobody to approve a destructive

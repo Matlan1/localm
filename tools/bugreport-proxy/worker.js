@@ -288,14 +288,18 @@ async function latestRelease(request, env, url) {
   // Opt-in prerelease channel (localm's update_allow_prerelease setting, admin_only,
   // default off).
   const wantsPrerelease = url.searchParams.get("channel") === "prerelease";
-  const rel = await latestAppRelease(env, wantsPrerelease);
-  if (rel === null) return json({ ok: true, version: null, note: "no releases yet" });
+  // A request without "client" comes from localm 0.3.1 or earlier; it is offered
+  // nothing newer than LEGACY_CLIENT_CEILING.
+  const legacy = !url.searchParams.get("client");
+  const rel = await latestAppRelease(env, wantsPrerelease, legacy ? LEGACY_CLIENT_CEILING : null);
+  const ceiling = legacy ? { legacy_ceiling: LEGACY_CLIENT_CEILING } : {};
+  if (rel === null) return json({ ok: true, version: null, note: "no releases yet", ...ceiling });
   if (rel === undefined) return json({ error: "release lookup failed", status: 502 }, 502);
   // Serve the signature: the text of the first *.sig asset, verbatim (trimmed). From
   // 0.3.1 on that is a JSON signature envelope the client verifies against the key
   // set it trusts (updater.verify_signature); the 0.3.0 .sig is a bare base64
   // signature for 0.2.0 clients. Absent -> null: the client refuses the unsigned build.
-  return json({ ok: true, ...(await releaseMeta(env, rel, [/\.sig$/i])) });
+  return json({ ok: true, ...(await releaseMeta(env, rel, [/\.sig$/i])), ...ceiling });
 }
 
 // The build asset and signature text of *rel*. *sigPatterns* are tried in order;
@@ -394,6 +398,31 @@ async function oneAppRelease(request, env, url) {
 // remembering the flag correctly.
 const APP_TAG_RE = /^v\d+\.\d+\.\d+/;
 
+// The newest release offered to a client that does not send "client" (localm 0.3.1
+// and earlier). Those clients run a bare "uv" for an update that changes Python
+// dependencies, so this release must not change them relative to v0.3.0 or v0.3.1;
+// the release tooling reads this constant and refuses such a build.
+const LEGACY_CLIENT_CEILING = "v0.3.2";
+
+// [major, minor, patch, final (1) or prerelease (0), prerelease suffix] for an app
+// tag, or null when the tag does not start with vX.Y.Z.
+function tagKey(tag) {
+  const m = /^v(\d+)\.(\d+)\.(\d+)(.*)$/.exec(String(tag || ""));
+  if (!m) return null;
+  const suffix = m[4].replace(/^[-.]/, "");
+  return [Number(m[1]), Number(m[2]), Number(m[3]), suffix ? 0 : 1, suffix];
+}
+
+// True when app tag *a* orders at or below app tag *b*.
+function tagAtMost(a, b) {
+  const ka = tagKey(a), kb = tagKey(b);
+  if (!ka || !kb) return false;
+  for (let i = 0; i < 4; i++) {
+    if (ka[i] !== kb[i]) return ka[i] < kb[i];
+  }
+  return ka[4] <= kb[4];
+}
+
 // The single most recent NON-DRAFT release matching APP_TAG_RE, optionally
 // including prereleases. Returns the release object, null (no qualifying
 // release - the /update route reports this the same as a 404), or undefined
@@ -413,8 +442,22 @@ const APP_TAG_RE = /^v\d+\.\d+\.\d+/;
 //     but a draft must never be offered to ANYONE, so this filters
 //     draft === true explicitly rather than relying on that token-permission
 //     behavior holding.
-async function latestAppRelease(env, includePrerelease) {
-  const candidates = await appReleases(env, includePrerelease);
+// *maxTag*, when set, also drops every release whose tag orders above it. The release
+// tagged *maxTag* itself is read by tag first, so it is found however many newer
+// releases exist; the list is only searched while it does not exist yet.
+async function latestAppRelease(env, includePrerelease, maxTag = null) {
+  if (maxTag !== null) {
+    const byTag = await ghFetch(env.UPDATE_GITHUB_TOKEN,
+      `/repos/${env.TARGET_REPO}/releases/tags/${encodeURIComponent(maxTag)}`);
+    if (byTag.ok) {
+      const r = await byTag.json();
+      if (r && !Array.isArray(r) && r.tag_name === maxTag && r.draft !== true
+          && (includePrerelease || r.prerelease !== true)) return r;
+    } else if (byTag.status !== 404) {
+      return undefined;
+    }
+  }
+  const candidates = await appReleases(env, includePrerelease, 1, maxTag);
   if (candidates === undefined) return undefined;
   return candidates.length ? candidates[0] : null;
 }
@@ -424,8 +467,9 @@ const RELEASE_LIST_PAGES = 10;
 
 // The qualifying releases (see latestAppRelease), newest first by published_at, or
 // undefined when a GitHub call failed. Reads up to *pages* pages of 30, stopping at
-// the first page that is not full.
-async function appReleases(env, includePrerelease, pages = 1) {
+// the first page that is not full. *maxTag*, when set, drops every release whose tag
+// orders above it.
+async function appReleases(env, includePrerelease, pages = 1, maxTag = null) {
   const all = [];
   for (let page = 1; page <= pages; page++) {
     const gh = await ghFetch(env.UPDATE_GITHUB_TOKEN,
@@ -443,6 +487,7 @@ async function appReleases(env, includePrerelease, pages = 1) {
     .filter((r) => r.draft !== true)
     .filter((r) => includePrerelease || r.prerelease !== true)
     .filter((r) => APP_TAG_RE.test(String(r.tag_name || "")))
+    .filter((r) => maxTag === null || tagAtMost(r.tag_name, maxTag))
     .map((r, i) => ({ r, i, t: when(r) }))
     .sort((a, b) => (b.t - a.t) || (a.i - b.i))
     .map((x) => x.r);

@@ -421,6 +421,35 @@ def _isolate_child(cwd: Path, name: str):
                        "base": base_sha, "run_id": run_id, "name": name}, None
 
 
+def _drop_empty_child_branch(repo: Path, branch: str, base: str, out: dict) -> None:
+    """Delete a background child's *branch* when it carries no commit beyond
+    *base*, and record the outcome in *out*: ``branch`` becomes None and
+    ``branch_deleted`` names it; a branch with commits is kept and
+    ``branch_kept`` is True. The ref is removed only while it still points at
+    *base* (``git update-ref -d <ref> <base>``), so a commit landing in between
+    keeps it. A failed check or deletion keeps the branch and adds a
+    ``cleanup_warning``. Caller must have removed the child's worktree first."""
+    from .git import _git
+
+    count, ok = _git(repo, "rev-list", "--count", f"{base}..refs/heads/{branch}")
+    if not ok or not count.strip().isdigit():
+        prior = out.get("cleanup_warning")
+        msg = f"could not check branch '{branch}' for commits: {count}"
+        out["cleanup_warning"] = f"{prior}; {msg}" if prior else msg
+        return
+    if int(count.strip()) > 0:
+        out["branch_kept"] = True
+        return
+    deleted, dok = _git(repo, "update-ref", "-d", f"refs/heads/{branch}", base)
+    if not dok:
+        prior = out.get("cleanup_warning")
+        msg = f"could not delete the empty branch '{branch}': {deleted}"
+        out["cleanup_warning"] = f"{prior}; {msg}" if prior else msg
+        return
+    out["branch"] = None
+    out["branch_deleted"] = branch
+
+
 def _finalize_isolated_child(info: dict):
     """Teardown closure: commit the child's work, capture its diff, remove its
     worktree. Runs on the JOB's worker thread; touches no parent state.
@@ -462,6 +491,8 @@ def _finalize_isolated_child(info: dict):
             # it. Report it so the operator can reap it; never --force past it.
             prior = out.get("cleanup_warning")
             out["cleanup_warning"] = f"{prior}; {removed}" if prior else removed
+        else:
+            _drop_empty_child_branch(repo, info["branch"], base, out)
         # SCOPED prune, and its outcome is reported rather than discarded. A bare
         # `git worktree prune` is repo-wide and would drop the record of a USER's
         # worktree that merely sits on an unmounted drive; and swallowing the
@@ -633,6 +664,11 @@ def tool_check_agent_job(cwd: Path, job_id: str) -> ToolResult:
 
     body = result.get("summary") or "(no output)"
     warn = ("\nwarnings: " + "; ".join(st["warnings"])) if st.get("warnings") else ""
+    if result.get("branch_deleted"):
+        warn += (f"\nIts branch '{result['branch_deleted']}' had no commits and "
+                 "was deleted.")
+    elif result.get("branch_kept") and result.get("branch"):
+        warn += f"\nIts work is committed on branch '{result['branch']}', which was kept."
     # A job reaches a terminal state whenever its thread returned, and run_task
     # RETURNS its failure message rather than raising, so "the job ended" is not
     # "the sub-agent succeeded". Report the child's OWN verdict: this is the

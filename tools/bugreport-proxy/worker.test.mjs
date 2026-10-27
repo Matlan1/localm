@@ -712,3 +712,23 @@ test("update: /update is unchanged by the new routes (latest stable, .sig only)"
     assert.equal(out.signature, "sig-of-41");
   } finally { restore(); }
 });
+
+test("update: a legacy client is never served a tag lookup answer that is not the ceiling release", async () => {
+  const restore = stubFetch(async (url) => {
+    if (url.includes("/releases/tags/")) {
+      return new Response(JSON.stringify({ tag_name: "v9.9.9", draft: false, prerelease: false,
+        published_at: "2026-12-01T00:00:00Z", assets: [{ id: 99, name: "localm-9.9.9.zip", size: 1 }] }),
+      { status: 200 });
+    }
+    return new Response(JSON.stringify([{ tag_name: "v0.3.1", draft: false, prerelease: false,
+      published_at: "2026-10-22T00:00:00Z", assets: [{ id: 31, name: "localm-0.3.1.zip", size: 1 }] }]),
+    { status: 200 });
+  });
+  try {
+    const r = await worker.fetch(
+      req(undefined, { method: "GET", path: "/update", headers: UP_HDR }), ENV_UP);
+    const out = await r.json();
+    assert.equal(out.version, "v0.3.1", "falls back to the list, filtered to the ceiling");
+    assert.equal(out.legacy_ceiling, "v0.3.2");
+  } finally { restore(); }
+});
