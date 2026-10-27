@@ -13,9 +13,9 @@
 // version floor. A test below asserts the field stays absent, so a release that
 // adds one fails the guard and gets upgraded to a floor.
 //
-// Advisory status for 18.1.1: OSV reports 0 vulns (control queries:
+// Advisory status for 18.1.2: OSV reports 0 vulns (control queries:
 // marked@18.0.1 -> 1, marked@4.0.0 -> 2) and the repository's advisory list has
-// no range containing 18.1.1 (GHSA-6v9c-7cg6-27q7 covers 18.0.0 to 18.0.1, fixed
+// no range containing 18.1.2 (GHSA-6v9c-7cg6-27q7 covers 18.0.0 to 18.0.1, fixed
 // in 18.0.2).
 //
 // The hash is taken over CRLF-normalised bytes so a Windows checkout with

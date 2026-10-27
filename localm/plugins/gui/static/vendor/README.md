@@ -67,9 +67,9 @@ upstream ever adds one the guard fails and gets upgraded to a real floor.
 
 It also pins the pipeline's actual contract: marked does NOT sanitize. It passes
 raw HTML through by design, which is why DOMPurify has to run on its OUTPUT.
-Advisory status for 18.1.1 was established from OSV (0 vulns; control queries
+Advisory status for 18.1.2 was established from OSV (0 vulns; control queries
 18.0.1 and 4.0.0 return their known advisories) and the repository's advisory
-list (no range contains 18.1.1; GHSA-6v9c-7cg6-27q7 covers 18.0.0 to 18.0.1).
+list (no range contains 18.1.2; GHSA-6v9c-7cg6-27q7 covers 18.0.0 to 18.0.1).
 
 ### Two things the KaTeX guard had to do differently
 
