@@ -207,7 +207,7 @@ def make_mtmd_context(lib: FakeMtmdLib, *, on_gpu=True, vision=True, audio_rate=
     ctx.marker = MARKER
     ctx._input_text_class = lmtmd._MtmdInputTextV2
     ctx._n_embd_inp = lib.n_embd
-    ctx._open = lambda use_gpu: 0x78
+    ctx._open = lambda use_gpu, min_image_tokens=None: 0x78
     return ctx
 
 
