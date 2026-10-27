@@ -61,7 +61,8 @@ def _run(tmp_path: Path, *, answer: str, system_uv: bool, contained_uv: bool = F
         _write_exec(system / "uv", _REPORT)
         path = str(system) + os.pathsep + path
     env = dict(os.environ, PATH=path, DISPLAY=":0", HOME=str(tmp_path / "home"))
-    env.pop("LOCALM_GUI_STORE", None)
+    for var in ("LOCALM_GUI_STORE", "UV_PYTHON_INSTALL_DIR", "UV_CACHE_DIR"):
+        env.pop(var, None)
     (tmp_path / "home").mkdir()
     out = subprocess.run([shutil.which("bash"), str(clone / "setup-gui.sh")], cwd=str(clone),
                          env=env, input=answer, capture_output=True, text=True, timeout=120)

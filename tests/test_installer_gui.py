@@ -202,6 +202,7 @@ def test_the_uv_being_used_is_on_the_path_the_steps_inherit(gui, tmp_path,
     d.mkdir()
     exe = d / ("uv.exe" if gui.IS_WINDOWS else "uv")
     exe.write_bytes(b"")
+    exe.chmod(0o755)
     monkeypatch.setenv("PATH", str(tmp_path / "nothing"))
     env = gui._env_for(gui.Plan())
     first = env["PATH"].split(os.pathsep)[0]
@@ -1800,3 +1801,33 @@ class TestContainedUv:
         with pytest.raises(gui.StepFailed) as ei:
             gui.uv_argv("venv")
         assert str(tmp_path / ".uv") in str(ei.value) and "PATH" in str(ei.value)
+
+
+class TestLauncherStorePreset:
+    """setup-gui.bat / setup-gui.sh pass the Portable or Shared answer to the window."""
+
+    @staticmethod
+    def _wizard(gui):
+        tk = pytest.importorskip("tkinter")
+        from tkinter import filedialog, ttk
+        root = build_tk_root(tk.Tk)
+        root.withdraw()
+        return root, gui.Wizard(root, tk, ttk, filedialog)
+
+    def test_the_window_starts_on_portable_by_default(self, gui, monkeypatch):
+        monkeypatch.delenv(gui.STORE_ENV, raising=False)
+        root, wizard = self._wizard(gui)
+        try:
+            assert wizard.store_var.get() is True
+            assert wizard.current_plan().portable_store is True
+        finally:
+            root.destroy()
+
+    def test_the_window_starts_on_shared_when_the_launcher_says_so(self, gui, monkeypatch):
+        monkeypatch.setenv(gui.STORE_ENV, "shared")
+        root, wizard = self._wizard(gui)
+        try:
+            assert wizard.store_var.get() is False
+            assert wizard.current_plan().portable_store is False
+        finally:
+            root.destroy()
