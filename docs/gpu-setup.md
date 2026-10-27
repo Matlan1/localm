@@ -270,9 +270,10 @@ localm config gpu_split_indices 0,1     # which devices to split across (one = a
 localm config gpu_split_ratios 3,1      # relative weight per device, same order/length
 ```
 
-Left blank, `gpu_split_indices` spreads a model over every discrete GPU; set it
-to choose which cards, and `gpu_split_ratios` to pin the relative share of each
-instead of letting localm size it. The indices are the ones `localm gpus` and the
+Left blank, `gpu_split_indices` spreads a model over every discrete GPU, by GPU
+number; set it to choose which cards and the order they are filled in (`3,1,0`
+puts the first layers on GPU 3, then GPU 1, then GPU 0), and `gpu_split_ratios`
+to pin the relative share of each instead of letting localm size it. The indices are the ones `localm gpus` and the
 GUI list. Before a GGUF load localm matches each card to llama.cpp's own device
 list by its PCI bus, so the cards you chose are the ones llama.cpp uses, even
 when llama.cpp numbers them in another order.
@@ -280,15 +281,17 @@ when llama.cpp numbers them in another order.
 For a GGUF load over two or more GPUs localm plans the placement per card: each
 card gets a run of layers that fits its free memory, counting the layers'
 weights, their share of the context (KV cache), and about 1.5 GB per card for
-llama.cpp's working buffers (`vram_overhead_mb`). The output layer goes to the
-card with the most room. A card that cannot hold anything useful, or that you did
+llama.cpp's working buffers (`vram_overhead_mb`). The cards are filled in the
+order above, and the output layer goes on the last card that holds a layer; when
+localm cannot plan the load (the log says why), llama.cpp uses its own device
+order instead. A card that cannot hold anything useful, or that you did
 not tick, is left out and llama.cpp does not touch it. When the model does not fit
 on the chosen cards, the routed experts of a Mixture-of-Experts model move to
 system RAM first, then whole layers move to the CPU. The console prints the plan,
 for example:
 
 ```
-  gpu split: GPU 0 (RTX 4060 Ti): 12 layers, 6.6 of 14.9 GB free; GPU 2 (RTX 3090): 20 layers, 10.1 of 23.1 GB free; ...; GPU 1 (RTX 3090): 16 layers + output, 10.2 of 23.1 GB free
+  gpu split: GPU 0 (RTX 4060 Ti): 12 layers, 6.6 of 14.9 GB free; GPU 1 (RTX 3090): 20 layers, 10.1 of 23.1 GB free; ...; GPU 4 (RTX 3050): 2 layers + output, 3.1 of 5.4 GB free
 ```
 
 The automatic context window grows only as far as the fullest card allows. With
@@ -304,8 +307,10 @@ own device order.
 In the GUI, the same controls live in Settings' Live Tuning card as a **Main
 GPU** selector and a "Split across GPUs" checkbox row (populated from the
 detected device list), with a ratio-weight input beside each checked device for
-`gpu_split_ratios`. Ticking one GPU loads a model on that GPU only; leaving
-every box unticked uses every discrete GPU. The Models page compares models
+`gpu_split_ratios`. Ticking one GPU loads a model on that GPU only; the ticked
+cards are filled in the order you tick them, shown as the load order under the
+boxes (untick and tick a card again to move it to the end); leaving every box
+unticked uses every discrete GPU. The Models page compares models
 against the VRAM of the GPUs a load would use.
 
 ## Mixture-of-Experts: reducing VRAM footprint
