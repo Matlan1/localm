@@ -424,7 +424,9 @@ update`, or the GUI "Update now" button). The client is signature-verifying:
   of the three current recovery keys, and is then kept in the data directory
   (`updates/trust.json`) and used from then on. A lower-numbered set is refused, so
   a replaced key cannot be brought back by replaying an old one. A refused update
-  leaves the keys in use unchanged, and a damaged `updates/trust.json` stops updates
+  leaves the keys in use unchanged (an older version installed by choice saves a
+  correctly signed new set during its signature check, before its other checks),
+  and a damaged `updates/trust.json` stops updates
   with an error naming it rather than falling back to the built-in keys.
 - **No downgrades.** A validly signed but older, equal, or version-less build is
   refused: a signature proves authenticity, not freshness.
@@ -439,9 +441,9 @@ update`, or the GUI "Update now" button). The client is signature-verifying:
   keys in use. Over HTTP this needs the `admin` scope. Before a downgrade, localm
   copies your settings, model registry, coder sessions, memory and plugins to
   `updates/data-before-<version>-<date>-<time>-<8 hex>/` in the data directory. An older build
-  installed this way keeps the keys in use: a release from before 0.3.0 gets this
+  installed this way keeps the keys in use: a release from before 0.3.2 gets this
   build's signature check alongside it, so it can still verify and install newer
-  releases, and a release that would look `uv` up on PATH for a dependency update
+  releases and refuses the retired keys, and a release that would look `uv` up on PATH for a dependency update
   uses the `uv` this install found instead.
 - **HTTPS only.** The download endpoint must be HTTPS and a redirect that would
   downgrade to plain HTTP is blocked.

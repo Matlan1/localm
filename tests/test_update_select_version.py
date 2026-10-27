@@ -460,6 +460,19 @@ def test_a_031_build_gets_the_bridge_and_refuses_the_revoked_key(env, monkeypatc
     assert "revoked" in str(ei.value.reason)
 
 
+def test_a_bridged_031_build_takes_a_trusted_argument_and_still_uses_its_own_keys(env, monkeypatch):
+    _home, inst = env
+    data = _zip("0.3.1", files={"localm/updater.py": _OLD_031_UPDATER})
+    updater.apply(2, signature=envelope(data, [_PRIV]), target_version="0.3.1",
+                  installed=inst, download_opener=_download(data))
+    old = _load_installed_old_updater(inst, monkeypatch)
+    newer = _zip("0.4.0")
+    old.verify_signature(newer, envelope(newer, [_PRIV]), trusted=updater._load_trusted())
+    claims_recovery_key = keyset(9, [_RECOVERY[0]], _RECOVERY)
+    with pytest.raises(LocalmError):
+        old.verify_signature(newer, envelope(newer, [_RECOVERY[0]]), trusted=claims_recovery_key)
+
+
 def test_a_build_that_already_verifies_envelopes_gets_no_bridge(env):
     _home, inst = env
     data = _zip("0.2.0", files={
