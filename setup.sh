@@ -21,7 +21,7 @@ export LOCALM_SETUP=1
 #  finishes. Run again after an interruption, it says where the last run stopped,
 #  reuses what finished, and redoes the step that was cut short from scratch.
 #   LOCALM_SETUP_ABORT_AFTER=<step> stops a run right after that step (a testing aid).
-YES=0; UNINSTALL=0; PURGE=0; FINISH=0; RUNTIME_OK=1
+YES=0; UNINSTALL=0; PURGE=0; FINISH=0; RUNTIME_OK=1; RETRY_HINT=""
 for arg in "$@"; do
   case "$arg" in
     --yes|-y) YES=1 ;;
@@ -32,7 +32,7 @@ for arg in "$@"; do
 done
 
 say() { printf '%s\n' "$*"; }
-ask() {  # ask "prompt" "default"  ->  echoes the answer (the default in --yes mode)
+ask() {  # ask PROMPT DEFAULT  ->  echoes the answer (the default in --yes mode)
   local prompt="$1" def="$2" ans
   if [ "$YES" = 1 ]; then echo "$def"; return; fi
   # Drop any TYPE-AHEAD before showing this question. Setup runs long steps
@@ -141,11 +141,13 @@ handle_provision_failure() {  # handle_provision_failure "retry-cmd-hint" "detai
   # its own prompt with the default (continue), via ask().
   local hint="$1" detail="$2" cont
   RUNTIME_OK=0
+  RETRY_HINT="$hint"
   say ""
   say "  [!] $detail"
   say "      No model can load until this is fixed. Retry any time with:"
   say "        $hint"
   say ""
+  # SETUP-Q: runtime-failed
   cont="$(ask "  Continue the rest of setup without a working runtime? [Y/n]: " Y)"
   case "$cont" in
     [Nn]*)
@@ -165,6 +167,7 @@ offer_report() {  # offer_report "summary" "detail"
   here="$(cd "$(dirname "$0")" && pwd)"
   [ -f "$here/report-issue.sh" ] || return 0
   [ "$YES" = 1 ] && return 0
+  # SETUP-Q: report-problem
   ans="$(ask "  Report this problem to the maintainer (no GitHub account needed)? [Y/n]: " Y)"
   case "$ans" in [Nn]*) return 0 ;; esac
   bash "$here/report-issue.sh" --summary "$1" --detail "$2" || true
@@ -228,6 +231,7 @@ do_uninstall() {
     say "      folders here can be removed: .venv .python .cache .uv"
     say "      Run the uninstall again once Python is back to remove the rest."
     if [ "$YES" != 1 ]; then
+      # SETUP-Q: uninstall-no-python
       local go; go="$(ask "  Remove those folders now? [y/N]: " N)"
       case "$go" in [Yy]*) ;; *) say "  Nothing changed."; return 0 ;; esac
     fi
@@ -246,6 +250,7 @@ do_uninstall() {
     say ""
     say "  Your saved data - chats, settings, downloaded models, generated images -"
     say "  is kept unless you choose to delete it now."
+    # SETUP-Q: uninstall-data
     local del; del="$(ask "  Also delete your saved data? [y/N]: " N)"
     case "$del" in
       [Yy]*)
@@ -259,6 +264,7 @@ do_uninstall() {
   fi
   if [ "$YES" != 1 ]; then
     say ""
+    # SETUP-Q: uninstall-confirm
     local ok; ok="$(ask "  Uninstall LocaLM now? [y/N]: " N)"
     case "$ok" in [Yy]*) ;; *) say "  Nothing changed."; return 0 ;; esac
   fi
@@ -310,6 +316,7 @@ if [ "$YES" != 1 ] && { [ -f .localm-install.json ] || [ -f .venv/.localm-venv ]
   say "    [1] Install again / repair - your chats, settings and models are kept"
   say "    [2] Uninstall              - remove LocaLM from this computer"
   say "    [3] Cancel"
+  # SETUP-Q: existing-install
   expick="$(ask "  Pick 1, 2 or 3 [1]: " 1)"
   case "$expick" in
     2) rc=0; do_uninstall || rc=$?; exit "$rc" ;;
@@ -416,6 +423,7 @@ say ""
 say "  Keep localm's Python tooling (uv itself, its runtime, and downloads) inside this folder?"
 say "    [1] Portable - everything in this folder (self-contained; re-downloads per clone)"
 say "    [2] Shared   - reuse/install uv at its normal per-user location (faster; lives in ~/.local)"
+# SETUP-Q: tooling-store
 spick="$(ask "  Pick 1 or 2 [1]: " 1)"
 CONTAINED=0; PYPREF=""; UVDIR=""
 if [ "$spick" = 1 ]; then
@@ -476,6 +484,7 @@ elif command -v uv >/dev/null 2>&1; then
 fi
 if [ "$uv_present" != 1 ]; then
   say "  [!] uv (the Python package manager localm builds on) is not installed."
+  # SETUP-Q: uv-install
   getuv="$(ask "  Install it now with Astral's official installer? [Y/n]: " Y)"
   case "$getuv" in
     [Nn]*)
@@ -535,10 +544,12 @@ if [ "$uv_present" != 1 ]; then
   step_done "$UVSTEP"
 fi
 
-# ---- detect GPU acceleration ------------------------------------------------
-# Checked in the SAME vendor priority as hwdetect.py's VENDORS ("nvidia", "amd",
-# "intel"): nvidia-smi first, so leftover ROCm tooling on an NVIDIA box (a shared
-# ML rig, a base image bundling both vendor stacks) never shadows the real GPU.
+# ---- GPU probe fallback and platform flags -----------------------------------
+# detect_gpu is used only when `python -m localm.hwdetect` (once the venv
+# exists, below) gives no backend this machine has a build of. Checked in the
+# SAME vendor priority as hwdetect.py's VENDORS ("nvidia", "amd", "intel"):
+# nvidia-smi first, so leftover ROCm tooling on an NVIDIA box never shadows the
+# real GPU.
 detect_gpu() {
   if command -v nvidia-smi >/dev/null 2>&1; then
     echo cuda
@@ -552,28 +563,12 @@ detect_gpu() {
     echo cpu
   fi
 }
-GPU="$(detect_gpu)"
-# Independent of $GPU, which the Y/n prompt below can downgrade to "cpu". See
-# test_menu_shows_metal_even_when_gpu_was_downgraded_to_cpu.
 IS_APPLE_SILICON=0
 if [ "$(uname -s 2>/dev/null)" = "Darwin" ] && [ "$(uname -m 2>/dev/null)" = "arm64" ]; then
   IS_APPLE_SILICON=1
 fi
 IS_MACOS=0
 if [ "$(uname -s 2>/dev/null)" = "Darwin" ]; then IS_MACOS=1; fi
-# NOT presented as "Detected acceleration: $GPU" here on purpose: this crude
-# pre-venv guess and the authoritative "Recommended for your hardware: $REC"
-# line further down (sourced from `python -m localm.hwdetect`, once the venv
-# exists) can legitimately disagree - leftover vendor tooling, a bare /opt/rocm
-# on a non-AMD box, or a vendor+backend vocabulary mismatch (this prints
-# "rocm", hwdetect may say "hip" or "vulkan" for the same box). Two lines
-# claiming to answer the same question, able to contradict each other, is
-# worse than one; $GPU's only remaining job is gating this Y/n prompt (and the
-# fallback below if the hwdetect probe itself fails).
-if [ "$YES" != 1 ] && [ "$GPU" != cpu ]; then
-  pick="$(ask "  GPU acceleration looks available ($GPU). Use it? [Y/n] (n = CPU only): " Y)"
-  case "$pick" in [Nn]*) GPU=cpu ;; esac
-fi
 
 # ---- create the venv --------------------------------------------------------
 # An existing .venv is reused unless the user chooses to replace it, so a
@@ -640,6 +635,7 @@ create_venv() {
       say "  Setup aborted (--yes mode cannot wait for retry). Please stop processes and try again."
       exit 1
     fi
+    # SETUP-Q: venv-retry
     retry="$(ask "  Try again? [Y/n]: " Y)"
     case "$retry" in [Nn]*) say "  Setup aborted."; exit 1 ;; esac
   done
@@ -654,11 +650,13 @@ elif [ -d .venv ]; then
   if is_our_venv; then
     say ""
     say "  An existing localm .venv was found in this folder."
+    # SETUP-Q: replace-venv
     rep="$(ask "  Replace it and reinstall from scratch? [y/N]: " N)"
   else
     say ""
     say "  [!] A .venv exists here but does not look like a localm environment."
     say "      Replacing it deletes its current contents."
+    # SETUP-Q: replace-venv
     rep="$(ask "  Replace this foreign .venv? [y/N]: " N)"
   fi
   step_begin venv
@@ -696,6 +694,7 @@ if [ "$cur_rc" = 0 ] && [ -n "$cur" ]; then
   say ""
   say "  LocaLM's data for this folder is in:"
   say "    $cur"
+  # SETUP-Q: keep-data
   keep="$(ask "  Keep using it? [Y/n]: " Y)"
   case "$keep" in
     [Nn]*) ;;
@@ -711,6 +710,7 @@ elif [ "$cur_rc" = 3 ] && [ -n "$cur" ]; then
   say "      connected, or a network folder that is offline)."
   say "    [1] Stop setup - connect it, then run setup again"
   say "    [2] Choose a different data folder now"
+  # SETUP-Q: data-offline
   mpick="$(ask "  Pick 1 or 2 [1]: " 1)"
   if [ "$mpick" != 2 ]; then
     say ""
@@ -723,6 +723,7 @@ say ""
 say "  Where should localm keep its data (models, config, logs, images)?"
 say "    [1] Portable (./home) - self-contained; delete this folder and it is all gone"
 say "    [2] Custom path       - a folder you choose (e.g. a shared models drive)"
+# SETUP-Q: data-folder
 dpick="$(ask "  Pick 1 or 2 [1]: " 1)"
 if [ "$dpick" = 2 ]; then
   # Custom path: ask, then confirm (re-ask until confirmed, or until prepare-data
@@ -731,8 +732,10 @@ if [ "$dpick" = 2 ]; then
   CUSTOMHOME=""
   if [ "$YES" != 1 ]; then
     while : ; do
+      # SETUP-Q: data-folder
       CUSTOMHOME="$(ask "  Enter the data directory path (blank = portable ./home): " "")"
       if [ -z "$CUSTOMHOME" ]; then break; fi
+      # SETUP-Q: custom-path-confirm
       ok="$(ask "  Use '$CUSTOMHOME'? [Y/n]: " Y)"
       case "$ok" in [Nn]*) continue ;; esac
       if .venv/bin/python -m localm.install_manifest prepare-data --root . \
@@ -770,10 +773,25 @@ say ""
 say "  Open localm's GUI as its own app window, or in your browser?"
 say "    [1] Browser    - opens in your default browser (no extra install)"
 say "    [2] App window - its own window, no browser tab (installs localm[desktop])"
+# SETUP-Q: window-mode
 wpick="$(ask "  Pick 1 or 2 [1]: " 1)"
-EXTRAS="coder,voice,monitor"
+# WINMODE is that answer in words, for the menu entry question below.
+WINMODE="in your browser"
+XWIN=""
 if [ "$wpick" = 2 ]; then
-  EXTRAS="${EXTRAS},desktop"
+  WINMODE="in its own app window"
+  XWIN="app-window"
+fi
+# The pip extras come from localm.setup_spec, the list every setup variant installs.
+# shellcheck disable=SC2086
+EXTRAS="$(.venv/bin/python -m localm.setup_spec extras $XWIN 2>/dev/null || true)"
+EXTRAS="${EXTRAS//$'\r'/}"
+if [ -z "$EXTRAS" ]; then
+  say "  [!] Could not read the list of features to install (python -m localm.setup_spec extras)."
+  offer_report "localm setup could not read its install list" "python -m localm.setup_spec extras gave no answer in the new .venv."
+  exit 1
+fi
+if [ "$wpick" = 2 ]; then
   if [ "$(uname -s)" = "Linux" ]; then
     # No apt/dnf/pacman step needed here on purpose - verified live (a real,
     # fully isolated venv, zero system packages, zero sudo) that pip alone
@@ -870,117 +888,86 @@ uv pip install -p .venv -e ./runtime >/dev/null 2>&1 || true
 # Windows (self-contained) or vulkan on Linux (sycl there needs a separate
 # oneAPI install), Apple Silicon -> metal, no GPU -> cpu.
 # setup-llama fetches the matching upstream build, so a tester never compiles by hand.
-REC="$(.venv/bin/python -m localm.hwdetect 2>/dev/null | awk '{print $2}' || true)"
-case "$REC" in
-  vulkan|cuda|hip|sycl|cpu|metal|amd-rocm) ;;   # a known backend from the policy
-  *) case "$GPU" in                        # fallback if the probe failed
-       cpu)   REC=cpu ;;
-       metal) REC=metal ;;   # see test_probe_failed_fallback_metal_gpu_stays_metal
-       *)     if [ "${IS_MACOS:-0}" = 1 ]; then REC=cpu; else REC=vulkan; fi ;;
-     esac ;;
-esac
-# The prompt above promises "n = CPU only", so honour it: hwdetect answers what
-# this HARDWARE could use, which is a different question from what the user just
-# said they WANT. Without this the next screen recommends a GPU backend and makes
-# it the default, so pressing Enter downloads and load-tests a ~195 MB GPU
-# runtime the user declined one question earlier. The menu still lists the
-# same backends, so this changes the DEFAULT, never the available choice.
-if [ "$GPU" = cpu ]; then REC=cpu; fi
-# The backends setup-llama has a build of for this machine's OS and CPU
-# architecture; the menu and the "provision later" hints list only these. The
-# fallback list is used only when the probe does not answer.
-AVAIL="$(.venv/bin/python -m localm.hwdetect backends 2>/dev/null || true)"
-if [ -z "$AVAIL" ]; then
-  if [ "$IS_APPLE_SILICON" = 1 ]; then AVAIL="cpu metal"
-  elif [ "$IS_MACOS" = 1 ]; then AVAIL="cpu"
-  else
-    case "$(uname -m 2>/dev/null || true)" in
-      x86_64|amd64)  AVAIL="vulkan cuda hip sycl cpu" ;;
-      aarch64|arm64) AVAIL="vulkan cuda cpu" ;;
-      s390x)         AVAIL="cpu" ;;
-      *)             AVAIL="none" ;;
-    esac
-  fi
+# BACKEND_HINT: the backends setup-llama has a build of for this machine, as
+# "a|b|c" (localm.setup_spec, the list every setup variant offers).
+BACKEND_HINT="$(.venv/bin/python -m localm.setup_spec backend-hint 2>/dev/null || true)"
+BACKEND_HINT="${BACKEND_HINT//$'\r'/}"
+HWLINE="$(.venv/bin/python -m localm.hwdetect 2>/dev/null || true)"
+HWLINE="${HWLINE//$'\r'/}"
+VENDOR=""; REC=""
+read -r VENDOR REC _ <<< "$HWLINE" || true
+rec_offered() {  # true when $REC is one of the backends in $BACKEND_HINT
+  [ -n "$REC" ] || return 1
+  case "|$BACKEND_HINT|" in *"|$REC|"*) return 0 ;; esac
+  return 1
+}
+if ! rec_offered; then
+  # The probe gave no backend with a build here: fall back to the shell probe.
+  GPU="$(detect_gpu)"
+  VENDOR="$GPU"
+  case "$GPU" in
+    cpu)   REC=cpu ;;
+    metal) REC=metal ;;   # see test_probe_failed_fallback_metal_gpu_stays_metal
+    *)     if [ "${IS_MACOS:-0}" = 1 ]; then REC=cpu; else REC=vulkan; fi ;;
+  esac
 fi
-offered() { case " $AVAIL " in *" $1 "*) return 0 ;; esac; return 1; }
-SL_BACKENDS=""
-for _b in vulkan cuda hip sycl metal cpu; do
-  if offered "$_b"; then SL_BACKENDS="${SL_BACKENDS:+$SL_BACKENDS|}$_b"; fi
-done
-case "$SL_BACKENDS" in
-  *"|"*) SL_BACKENDS="<$SL_BACKENDS>" ;;
-  "")    SL_BACKENDS="<backend>" ;;
+# Plain-language opt-out before the numbered menu below: on Enter that menu
+# defaults to REC, so a GPU box would otherwise fetch and load-test a GPU
+# runtime by default even for someone who wants CPU only. Changes the DEFAULT
+# the menu offers; cpu is still in the menu regardless.
+if [ "$YES" != 1 ] && [ "$REC" != cpu ]; then
+  # SETUP-Q: gpu-use
+  pick="$(ask "  GPU acceleration looks available ($VENDOR). Use it? [Y/n] (n = CPU only): " Y)"
+  case "$pick" in [Nn]*) REC=cpu ;; esac
+fi
+# The "provision later" hint.
+case "$BACKEND_HINT" in
+  *"|"*) SL_BACKENDS="<$BACKEND_HINT>" ;;
+  ""|backend) SL_BACKENDS="<backend>" ;;
+  *)     SL_BACKENDS="$BACKEND_HINT" ;;
 esac
-# [1] is a shortcut for whichever backend the policy recommended, so it is ALWAYS
-# the same choice as one of the numbered entries below (vulkan on most GPUs, cpu
-# with none, metal on Apple Silicon). Listing it twice with no relation shown
-# reads as two different options that happen to share a name. Mark the twin
-# instead of removing it: the numbering has to stay stable.
-_same="   (same as [1])"
-_m2=""; _m3=""; _m4=""; _m5=""; _m6=""; _m8=""
-case "$REC" in
-  vulkan) _m2="$_same" ;;
-  cuda)   _m3="$_same" ;;
-  hip)    _m4="$_same" ;;
-  sycl)   _m5="$_same" ;;
-  cpu)    _m6="$_same" ;;
-  metal)  _m8="$_same" ;;
-esac
+# The menu: `python -m localm.setup_spec backend-menu REC` prints one
+# "number<TAB>key<TAB>label" row per entry: [1] is REC, then each backend
+# setup-llama has a build of for this OS and CPU architecture, then "own".
+BACKEND_MENU="$(.venv/bin/python -m localm.setup_spec backend-menu "$REC" 2>/dev/null || true)"
+BACKEND_MENU="${BACKEND_MENU//$'\r'/}"
 say ""
 say "  Native inference runtime (llama.cpp). Recommended for your hardware: $REC"
-say "    [1] $REC  (recommended)"
-# Numbers stay fixed; an entry is listed only when offered. See
-# test_macos_menu_lists_only_backends_with_a_macos_build.
-_picks="1"
-if offered vulkan; then
-  say "    [2] vulkan   - any GPU, no vendor toolkit$_m2"; _picks="$_picks 2"
+BACKEND=""
+_last=""
+while IFS=$'\t' read -r _n _k _l; do
+  [ -n "$_n" ] || continue
+  say "    [$_n] $_l"
+  _last="$_n"
+done <<< "$BACKEND_MENU"
+if [ -z "$_last" ]; then
+  say "  [!] Could not list the llama.cpp backends for this machine; using $REC."
+  BACKEND="$REC"
+else
+  say "    (your pick is load-tested; on failure you can retry after fixing the"
+  say "     cause, or continue setup and provision a runtime later - never a"
+  say "     silent swap to a different backend)"
+  # SETUP-Q: backend
+  bpick="$(ask "  Pick 1-$_last [1]: " 1)"
+  while IFS=$'\t' read -r _n _k _l; do
+    if [ -n "$_n" ] && [ "$_n" = "$bpick" ]; then BACKEND="$_k"; fi
+  done <<< "$BACKEND_MENU"
+  # A number the menu did not list on this machine falls back to the recommendation.
+  if [ -z "$BACKEND" ]; then
+    case "$bpick" in
+      ''|*[!0-9]*) ;;
+      *) say "  [$bpick] is not offered on this machine; using $REC." ;;
+    esac
+    BACKEND="$REC"
+  fi
 fi
-if offered cuda; then
-  say "    [3] cuda     - NVIDIA, peak performance (fetches the CUDA runtime for you)$_m3"; _picks="$_picks 3"
-fi
-if offered hip; then
-  say "    [4] hip      - AMD ROCm, peak performance (needs the ROCm runtime)$_m4"; _picks="$_picks 4"
-fi
-if offered sycl; then
-  say "    [5] sycl     - Intel GPU (incl. integrated), often faster than Vulkan (needs a system oneAPI install)$_m5"; _picks="$_picks 5"
-fi
-if offered cpu; then
-  say "    [6] cpu      - no GPU$_m6"; _picks="$_picks 6"
-fi
-say "    [7] I will build / provide my own (skip the download)"; _picks="$_picks 7"
-# See test_menu_shows_metal_line_only_on_apple_silicon.
-if offered metal; then
-  say "    [8] metal    - Apple Silicon, native GPU acceleration$_m8"; _picks="$_picks 8"
-fi
-case "$_picks" in
-  "1 2 3 4 5 6 7")   _pick_range="1-7" ;;
-  "1 2 3 4 5 6 7 8") _pick_range="1-8" ;;
-  *) _pick_range=""
-     for _p in $_picks; do _pick_range="${_pick_range:+$_pick_range, }$_p"; done
-     _pick_range="$(printf '%s' "$_pick_range" | sed 's/, \([0-9]*\)$/ or \1/')" ;;
-esac
-say "    (your pick is load-tested; on failure you can retry after fixing the"
-say "     cause, or continue setup and provision a runtime later - never a"
-say "     silent swap to a different backend)"
-bpick="$(ask "  Pick $_pick_range [1]: " 1)"
-case "$bpick" in
-  2) BACKEND=vulkan ;; 3) BACKEND=cuda ;; 4) BACKEND=hip ;; 5) BACKEND=sycl ;;
-  6) BACKEND=cpu ;;    7) BACKEND=own ;;  8) BACKEND=metal ;; *) BACKEND="$REC" ;;
-esac
-# A number the menu did not list on this machine falls back to the recommendation.
-case "$bpick" in
-  [2-8]) case " $_picks " in
-           *" $bpick "*) ;;
-           *) say "  [$bpick] is not offered on this machine; using $REC."
-              BACKEND="$REC" ;;
-         esac ;;
-esac
 if [ "$LOCALM_BIN_OK" != 1 ]; then
   # .venv/bin/localm never got installed (warned above) - it is what setup-llama
   # runs through, so calling it here would just fail again, less clearly.
   say "  Skipped - .venv/bin/localm is missing (see the warning above)."
   say "  Provision later:  .venv/bin/localm setup-llama --backend $SL_BACKENDS"
 elif [ "$BACKEND" = own ]; then
+  # SETUP-Q: own-build-dir
   buildpath="$(ask "  Path to a llama.cpp build dir to copy now (blank = skip): " "")"
   if [ -n "$buildpath" ]; then
     .venv/bin/localm setup-llama --from "$buildpath" || handle_provision_failure \
@@ -1068,13 +1055,24 @@ step_done launcher
 SHORTCUT=""
 mk=skip
 if [ "$IS_MACOS" != 1 ]; then
-  mk="$(ask "  Create an application menu entry? [Y/n]: " Y)"
+  say ""
+  say "  Create an application menu entry?"
+  say "    [1] LocaLM launcher - choose GUI / chat / server / coder each time you start"
+  say "    [2] Straight to the GUI - skips that menu, opens $WINMODE"
+  say "    [3] No menu entry"
+  # SETUP-Q: shortcut
+  mk="$(ask "  Pick 1, 2 or 3 [1]: " 1)"
 fi
 case "$mk" in
   skip) ;;
-  [Nn]*) say "  No desktop entry created." ;;
-  *)
+  1|2)
     apps="$HOME/.local/share/applications"
+    # An entry the graphical installer wrote for this folder is replaced by this one.
+    old_entry="$apps/LocaLM.desktop"
+    if [ -f "$old_entry" ] && grep -qF -- "$(pwd)" "$old_entry" 2>/dev/null; then
+      rm -f -- "$old_entry"
+      say "  Removed the older menu entry $old_entry for this folder."
+    fi
     jr intend shortcut "$apps/localm.desktop"
     step_begin menu-entry
     mkdir -p "$apps"
@@ -1082,10 +1080,14 @@ case "$mk" in
     # Prefer the scalable SVG (the freedesktop-friendly format); fall back to
     # the .ico that ships for the Windows shortcut if it is ever missing.
     icon="$(pwd)/assets/localm.svg"; [ -f "$icon" ] || icon="$(pwd)/assets/localm.ico"
-    # Launch the GUI directly as the branded LocaLM binary when it built and runs;
-    # otherwise open the graphical launcher (the venv python).
-    if [ -x "$(pwd)/.venv/bin/LocaLM" ]; then
-      launch_exec="$(pwd)/.venv/bin/LocaLM -m localm gui"
+    # [2] opens the GUI as the branded LocaLM binary when it built, else through
+    # the venv's localm; [1] (and any other answer) opens the graphical launcher.
+    if [ "$mk" = 2 ]; then
+      if [ -x "$(pwd)/.venv/bin/LocaLM" ]; then
+        launch_exec="$(pwd)/.venv/bin/LocaLM -m localm gui"
+      else
+        launch_exec="$(pwd)/.venv/bin/localm gui"
+      fi
     else
       launch_exec="$(pwd)/localm-launcher.sh"
     fi
@@ -1095,6 +1097,7 @@ Type=Application
 Name=LocaLM
 Comment=Local LLM - chat, coder, models, images
 Exec=$launch_exec
+Path=$(pwd)
 Icon=$icon
 Terminal=false
 Categories=Utility;Development;Science;
@@ -1104,6 +1107,7 @@ EOF
       >/dev/null 2>&1 || true
     step_done menu-entry
     ;;
+  *) say "  No menu entry created." ;;
 esac
 
 # ---- optional: make `localm` runnable from any terminal --------------------
@@ -1112,6 +1116,7 @@ esac
 # by the uninstaller. Default No: the CLI already works via ./localm.sh or
 # .venv/bin/localm.
 PATH_DIR=""; CMD_SHIM=""; PATH_MOD=""
+# SETUP-Q: global-command
 gmk="$(ask "  Make 'localm' runnable from any terminal? (symlink into ~/.local/bin) [y/N]: " N)"
 case "$gmk" in
   [Yy]*)
@@ -1138,9 +1143,12 @@ say ""
 # this is just a section divider - do not repeat that line here.
 say "  Optional features (plugins):"
 if [ "$LOCALM_BIN_OK" = 1 ] && [ "$YES" = 1 ]; then
-  # --yes takes the picker's own default, which is to install none.
-  say "  Skipped (--yes) - choose later with:  .venv/bin/localm plugin setup"
+  # --yes takes the picker's own default, the recommended set.
+  .venv/bin/localm plugin setup --defaults \
+    || say "  [!] Skipped - choose later with:  .venv/bin/localm plugin setup"
 elif [ "$LOCALM_BIN_OK" = 1 ]; then
+  # SETUP-Q: plugins
+  # SETUP-Q: plugin-deps
   .venv/bin/localm plugin setup \
     || say "  [!] Skipped - choose later with:  .venv/bin/localm plugin setup"
 else
@@ -1174,7 +1182,7 @@ if [ "$LOCALM_BIN_OK" = 1 ]; then
     say ""
     say "  [!] No model can load yet - the native llama.cpp runtime did not finish"
     say "      provisioning. Finish it any time with:"
-    say "        .venv/bin/localm setup-llama --backend $SL_BACKENDS"
+    say "        ${RETRY_HINT:-.venv/bin/localm setup-llama --backend $SL_BACKENDS}"
   fi
 else
   say "  Done, with one open issue: .venv/bin/localm never got installed (see the"
