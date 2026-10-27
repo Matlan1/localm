@@ -205,7 +205,7 @@ test("price markers of two or more dollar signs keep the markdown between them",
   assert.doesNotMatch(heading.textContent, /##/);
   noMath(heading, "heading");
 
-  for (const line of ["Cafe: $$, Taco: $$ and Bar $$.", "Cafe ($$), Taco ($$), Bar ($$$$)", "A $$ b, C $$ d"]) {
+  for (const line of ["Cafe: $$, Taco: $$ and Bar $$.", "Cafe ($$), Taco ($$), Bar ($$)", "A $$ b, C $$ d"]) {
     assert.equal(win.protectMath(line).text, line, line);
   }
 
@@ -235,7 +235,146 @@ test("display math on one line or across lines is still typeset", () => {
 test("single-dollar prices are not math", () => {
   const win = loadRealPipeline();
   for (const text of ["It costs $5 and $10, or $5-$10, not $20.", "From $3 up, $4 for two."]) {
-    assert.equal(win.protectMath(text).text, text);
+    const out = render(win, text);
+    noMath(out, text);
+    assert.equal(out.textContent.trim(), text);
+  }
+});
+
+test("dollar amounts stay text wherever they sit", () => {
+  const win = loadRealPipeline();
+  for (const src of [
+    "$5 and $10", "between $3.50 and $4", "($$$$)", "a ($$ $$) b",
+    "pay $5, get $10 back", "costs $3.50 or $4", "cheap ($) and fancy ($$$)",
+  ]) {
+    const out = render(win, src);
+    noMath(out, src);
+    assert.equal(out.textContent.trim(), src, src);
+    assert.equal(out.querySelectorAll("p").length, 1, `${src} stays one paragraph`);
+  }
+  const list = render(win, "- pay $5 and $10\n- from $3 to $4");
+  noMath(list, "list");
+  assert.deepEqual([...list.querySelectorAll("li")].map((li) => li.textContent),
+    ["pay $5 and $10", "from $3 to $4"]);
+  const table = render(win, "| item | price |\n|---|---|\n| tea | $5 and $10 |\n| cake | $3.50 |");
+  noMath(table, "table");
+  assert.deepEqual([...table.querySelectorAll("td")].map((td) => td.textContent),
+    ["tea", "$5 and $10", "cake", "$3.50"]);
+  const bold = render(win, "**$5** and *$10*");
+  noMath(bold, "emphasis");
+  assert.equal(bold.querySelector("strong").textContent, "$5");
+  assert.equal(bold.querySelector("em").textContent, "$10");
+});
+
+test("price markers wrapped in bold, italic, quotes or brackets on one line stay text", () => {
+  const win = loadRealPipeline();
+  const bold = render(win, "Cafe Luna is **$$** and Taco Hut is also **$$** here.");
+  noMath(bold, "bold");
+  assert.deepEqual([...bold.querySelectorAll("strong")].map((e) => e.textContent), ["$$", "$$"]);
+  assert.equal(bold.textContent.trim(), "Cafe Luna is $$ and Taco Hut is also $$ here.");
+  for (const src of ["A is *$$* and B is *$$* ok", 'A is "$$" and B is "$$" ok', "A is [$$] and B is [$$] ok",
+                     "A is ~~$$~~ and B is ~~$$~~ ok"]) {
+    const out = render(win, src);
+    noMath(out, src);
+    assert.equal(out.textContent.trim().replace(/\s+/g, " "), src.replace(/[*~]/g, "").replace(/\s+/g, " "), src);
+  }
+});
+
+test("protectMath stays linear on long runs of spaces and tabs", () => {
+  const { window } = loadApp();
+  const time = (s) => {
+    let best = Infinity;
+    for (let i = 0; i < 3; i++) {
+      const t = process.hrtime.bigint();
+      window.protectMath(s);
+      best = Math.min(best, Number(process.hrtime.bigint() - t) / 1e6);
+    }
+    return best;
+  };
+  for (const ch of [" ", "\t"]) {
+    for (const tail of ["y $$ z", "$$ z", "$ $ $", "\n$$"]) {
+      const small = time("x\n" + ch.repeat(20000) + tail);
+      const big = time("x\n" + ch.repeat(80000) + tail);
+      assert.ok(big < 250 + 8 * small, `${JSON.stringify(ch)} + ${JSON.stringify(tail)}: ${small}ms -> ${big}ms`);
+    }
+  }
+});
+
+test("price markers wrapped in bold, italic, quotes or brackets on one line stay text", () => {
+  const win = loadRealPipeline();
+  const bold = render(win, "Cafe Luna is **$$** and Taco Hut is also **$$** here.");
+  noMath(bold, "bold");
+  assert.deepEqual([...bold.querySelectorAll("strong")].map((e) => e.textContent), ["$$", "$$"]);
+  assert.equal(bold.textContent.trim(), "Cafe Luna is $$ and Taco Hut is also $$ here.");
+  for (const src of ["A is *$$* and B is *$$* ok", 'A is "$$" and B is "$$" ok', "A is [$$] and B is [$$] ok",
+                     "A is ~~$$~~ and B is ~~$$~~ ok"]) {
+    const out = render(win, src);
+    noMath(out, src);
+    assert.equal(out.textContent.trim().replace(/\s+/g, " "), src.replace(/[*~]/g, "").replace(/\s+/g, " "), src);
+  }
+});
+
+test("protectMath stays linear on long runs of spaces and tabs", () => {
+  const { window } = loadApp();
+  const time = (s) => {
+    let best = Infinity;
+    for (let i = 0; i < 3; i++) {
+      const t = process.hrtime.bigint();
+      window.protectMath(s);
+      best = Math.min(best, Number(process.hrtime.bigint() - t) / 1e6);
+    }
+    return best;
+  };
+  for (const ch of [" ", "\t"]) {
+    for (const tail of ["y $$ z", "$$ z", "$ $ $", "\n$$"]) {
+      const small = time("x\n" + ch.repeat(20000) + tail);
+      const big = time("x\n" + ch.repeat(80000) + tail);
+      assert.ok(big < 250 + 8 * small, `${JSON.stringify(ch)} + ${JSON.stringify(tail)}: ${small}ms -> ${big}ms`);
+    }
+  }
+});
+
+test("a backslash-escaped dollar is a literal dollar", () => {
+  const win = loadRealPipeline();
+  const out = render(win, String.raw`\$5 and \$x\$ and \$10`);
+  noMath(out, "escaped");
+  assert.equal(out.textContent.trim(), "$5 and $x$ and $10");
+  const mixed = render(win, String.raw`Cost \$5 but $x^2$ is math`);
+  assert.equal(tex(mixed).length, 1);
+  assert.match(mixed.textContent, /Cost \$5 but/);
+});
+
+test("dollar signs in code stay literal and math beside prices still typesets", () => {
+  const win = loadRealPipeline();
+  const code = render(win, "Run `echo $5 and $10` or\n\n```\necho $5 $$\n```");
+  noMath(code, "code");
+  assert.equal(code.querySelector("p code").textContent, "echo $5 and $10");
+  assert.equal(code.querySelector("pre").textContent.trim(), "echo $5 $$");
+
+  const both = render(win,
+    String.raw`It costs $5 and $10 while $x^2$ and $\alpha + \beta$ and $$\int_0^1 x\,dx$$ are math.`);
+  assert.deepEqual(tex(both), ["x^2", String.raw`\alpha + \beta`, String.raw`\int_0^1 x\,dx`]);
+  assert.match(both.textContent, /It costs \$5 and \$10 while/);
+});
+
+test("a price in a streamed reply never turns into math and back", () => {
+  const win = loadRealPipeline();
+  const full = "It costs $5 and $10 each, so $3.50 or $4 is fine ($$$$).";
+  const target = win.document.createElement("div");
+  win.document.body.appendChild(target);
+  for (let i = 1; i <= full.length; i++) {
+    win.renderMarkdown(target, full.slice(0, i), {});
+    assert.equal(target.querySelectorAll(".katex, .katex-error").length, 0, full.slice(0, i));
+  }
+  assert.equal(target.textContent.trim(), full);
+});
+
+test("an empty or blank display block is literal text", () => {
+  const win = loadRealPipeline();
+  for (const src of ["$$$$", "x $$   $$ y"]) {
+    const out = render(win, src);
+    noMath(out, src);
+    assert.equal(out.textContent.trim(), src);
   }
 });
 
@@ -302,10 +441,16 @@ const imageThenClip = () => [
   { role: "assistant", content: "hello there" },
 ];
 
+const setModelRow = (window, row) => {
+  window.__row = row;
+  runScript(window, "modelCache.models = window.__row ? [window.__row] : [];");
+};
+
 test("a text turn after an audio turn leaves the clip out of the request and keeps both attachments", async () => {
   const calls = [];
   const { window } = loadApp({ fetchImpl: refuseImageWithAudio(calls, true) });
   stubStream(window);
+  setModelRow(window, { name: "test-model", vision: true, audio_input: false });
   const conv = { id: "c1", title: "t",
     messages: [...imageThenClip(), { role: "user", content: "thanks, and in one word?" }] };
   await window.runCompletion(conv);
@@ -332,6 +477,33 @@ test("a text turn in a chat with clips and no image still sends the clips", asyn
   assert.equal(posts.length, 1);
   assert.equal(JSON.stringify(posts[0].body.messages).includes("input_audio"), true);
 });
+
+for (const [label, row] of [
+  ["a model that reads images and hears audio", { name: "test-model", vision: true, audio_input: true }],
+  ["a model whose audio support is not recorded", { name: "test-model", vision: true }],
+  ["a model with no registry row", null],
+]) {
+  test(`a text turn after an audio turn still sends the earlier clip to ${label}`, async () => {
+    const calls = [];
+    const { window } = loadApp({ fetchImpl: async (url, opts = {}) => {
+      let body = null;
+      try { body = opts.body ? JSON.parse(opts.body) : null; } catch { body = null; }
+      calls.push({ url: String(url), body });
+      return okResponse;
+    } });
+    stubStream(window);
+    setModelRow(window, row);
+    const conv = { id: "c1", title: "t",
+      messages: [...imageThenClip(), { role: "user", content: "what did the clip say?" }] };
+    await window.runCompletion(conv);
+    const posts = chatCalls(calls);
+    assert.equal(posts.length, 1);
+    const sent = JSON.stringify(posts[0].body.messages);
+    assert.equal(sent.includes("input_audio"), true, "the clip is on the wire");
+    assert.equal(sent.includes("image_url"), true, "the image is on the wire");
+    assert.equal(sent.includes("not included in this request"), false);
+  });
+}
 
 test("the elided repeat of an audio turn tells the user the images were left out", async () => {
   const calls = [];

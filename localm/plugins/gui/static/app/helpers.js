@@ -663,12 +663,15 @@ function mainHasVisibleContent(main) {
 const _CODE_SPAN = /(```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)|`[^`\n]+`)/;
 const _DISPLAY_LINE = String.raw`(?![ \t]*$)(?![ \t]*(?:[-*]|\d+[.)]|#{1,6})[ \t])[^\n]{0,2000}\n`;
 const _MATH_SPAN = new RegExp([
-  String.raw`(?<![\\($\w])\$\$(?![\s$])[^\n]{0,500}?(?<![\s$])\$\$(?!\$)`,
+  String.raw`(?<![\\($\w*~"'\[])\$\$(?![\s$])[^\n]{0,500}?(?<![\s$])\$\$(?!\$)`,
   String.raw`(?<=^[ \t]*)\$\$(?:[ \t]*\n|(?=[^\s$]))(?:${_DISPLAY_LINE}){1,40}?(?:[ \t]*|[^\n]{0,2000}[^\s$])\$\$[ \t]*$`,
   String.raw`\\\[[\s\S]+?\\\]`,
   String.raw`\\\([\s\S]+?\\\)`,
-  String.raw`(?<![\\$])\$(?!\s)[^$\n]*[^$\s\n]\$(?!\d)`,
+  String.raw`(?<![\\$])\$(?![\s\d])[^$\n]*[^$\s\n]\$(?!\d)`,
 ].join("|"), "gm");
+
+const _LITERAL_DOLLAR = String.raw`\\\$|\${3,}|\$\$[ \t]+\$\$|(?<!\$)\$(?!\$)`;
+const _MATH_OR_DOLLAR = new RegExp(`${_MATH_SPAN.source}|(?<lit>${_LITERAL_DOLLAR})`, "gm");
 
 /** Swap each math span of *text* that lies outside code for an inert token, so
  *  the markdown pass cannot consume its escapes (`\,`, `\\`, `\{`) or emphasis
@@ -678,37 +681,48 @@ const _MATH_SPAN = new RegExp([
  *  inert token, so math source never reaches an attribute after sanitising.
  *
  *  `$$` display math is protected in two shapes only, so a price marker such as
- *  `($$)`, `$$$$` or `Price: $$ for A` never pairs across the text between two
- *  of them:
- *   - one line: `$$` not preceded by `(`, a word character or `$`, followed by a
+ *  `($$)`, `**$$**`, `$$$$` or `Price: $$ for A` never pairs across the text between
+ *  two of them:
+ *   - one line: `$$` not preceded by `(`, `*`, `~`, a quote, `[`, a word character or `$`, followed by a
  *     character that is neither whitespace nor `$`, closed on the same line (at
  *     most 500 characters later) by `$$` that follows neither whitespace nor `$`
  *     and is not followed by `$`;
  *   - several lines: `$$` opens a line (alone or followed at once by TeX) and a
  *     later line (at most 40 lines on) ends with `$$`; no line in between may be
  *     blank or start a markdown list item (`-`, `*`, `1.`) or heading (`#`).
- *  Any other `$$` is left to the markdown pass and KaTeX's own auto-render. */
+ *  Any other pair of `$$` is left to the markdown pass and KaTeX's own auto-render.
+ *
+ *  Inline `$...$` is math only when the opening `$` is followed by a character
+ *  that is neither whitespace nor a digit and the closing `$` follows a
+ *  non-space character and is not followed by a digit. Every other dollar sign
+ *  outside code (a lone `$`, a run of three or more, an empty `$$ $$`, an escaped
+ *  `\$`) is swapped for an inert token so KaTeX's auto-render never pairs it.
+ *  `restore(root)` puts the math source back and runs before the auto-render
+ *  pass; `finish(root)` puts the literal `$` back and runs after it. */
 export function protectMath(text) {
   const spans = [];
   const tag = "ZZLMATH" + Math.random().toString(36).slice(2, 8);
+  const dollar = `${tag}DZZ`;
   const protectedText = String(text || "").split(_CODE_SPAN).map((part, i) =>
-    i % 2 === 1 ? part : part.replace(_MATH_SPAN, (src) => {
+    i % 2 === 1 ? part : part.replace(_MATH_OR_DOLLAR, (src, ...rest) => {
+      if (rest[rest.length - 1].lit !== undefined) return src.replace(/^\\/, "").replace(/\$/g, dollar);
       spans.push(src);
       return `${tag}${spans.length - 1}ZZ`;
     })).join("");
-  const restore = (root) => {
-    if (!spans.length) return;
-    const re = new RegExp(`${tag}(\\d+)ZZ`, "g");
+  const rewrite = (root, from, to) => {
     const walker = document.createTreeWalker(root, 4);
     const nodes = [];
     for (let n = walker.nextNode(); n; n = walker.nextNode()) nodes.push(n);
     for (const node of nodes) {
-      if (node.nodeValue.includes(tag)) {
-        node.nodeValue = node.nodeValue.replace(re, (_m, i) => spans[Number(i)]);
-      }
+      if (node.nodeValue.includes(tag)) node.nodeValue = node.nodeValue.replace(from, to);
     }
   };
-  return { text: protectedText, restore };
+  const restore = (root) => {
+    if (!spans.length) return;
+    rewrite(root, new RegExp(`${tag}(\\d+)ZZ`, "g"), (_m, i) => spans[Number(i)]);
+  };
+  const finish = (root) => rewrite(root, new RegExp(dollar, "g"), () => "$");
+  return { text: protectedText, restore, finish };
 }
 
 /** Render one model reply into *target*.
@@ -731,6 +745,7 @@ export function renderMarkdown(target, text, opts = {}) {
   // user toggle stick. Default: open while thinking, collapse once done - until
   // the user clicks it (data-userset), after which their choice is left alone.
   let det = target.querySelector("details.think-block");
+  let thinkFinish = null;
   if (think) {
     if (!det) {
       det = document.createElement("details");
@@ -746,6 +761,7 @@ export function renderMarkdown(target, text, opts = {}) {
     const thinkBody = det.querySelector("div");
     thinkBody.innerHTML = DOMPurify.sanitize(marked.parse(thinkMath.text));
     thinkMath.restore(thinkBody);
+    thinkFinish = () => thinkMath.finish(thinkBody);
     if (!det.dataset.userset) det.open = open;
   } else if (det) {
     det.remove();
@@ -796,6 +812,8 @@ export function renderMarkdown(target, text, opts = {}) {
       });
     } catch { /* malformed TeX mid-stream - final render fixes it */ }
   }
+  restMath.finish(main);
+  if (thinkFinish) thinkFinish();
   target.querySelectorAll("pre code").forEach((block) => {
     // Record the source language BEFORE hljs rewrites the class list, so the
     // artifact detector still knows this block was ```html / ```svg.
