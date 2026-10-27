@@ -26,6 +26,13 @@ The two enum outcomes are DISTINCT:
   * a CHANGED VALUE for a member localm already binds is the corrupting class.
     Hard fail.
 
+IT ALSO CHECKS THE LIBMTMD SPEECH GENERATION BINDING (``mtmd_gen.py``) against
+``tools/mtmd/mtmd.h`` and ``tools/mtmd/mtmd-helper.h`` at the same ref: the
+interface is read from the headers (``mtmd_gen_state_init`` declared = state,
+else legacy), every struct localm allocates must match field for field with the
+same total size, and every function localm binds must take as many arguments as
+localm declares, with the same structs passed or returned by value.
+
 It complements the runtime guard ``_abi.verify_abi`` (which validates whatever DLL
 is actually loaded on a user's machine) and the CI load test: this one catches
 header-level drift before a build is even shipped.
@@ -58,6 +65,14 @@ LLAMA_ABI_REFS = {
 }
 LLAMA_ABI_REF = LLAMA_ABI_REFS["v3"]
 _REPO = "ggml-org/llama.cpp"
+
+# One upstream ref per libmtmd speech generation interface localm binds
+# (localm.inference.backends.llamacpp.mtmd_gen). The default run checks both.
+MTMD_SPEECH_REFS = {
+    "legacy": "b11757",  # stateless: seed and state_data in mtmd_gen_inp/out
+    "state": "b11908",   # mtmd_gen_state, 4-argument mtmd_gen_audio_process
+}
+_MTMD_HEADERS = ("tools/mtmd/mtmd.h", "tools/mtmd/mtmd-helper.h")
 
 # Structs passed by value or read field-by-field.
 _STRUCTS = ("llama_model_params", "llama_context_params", "llama_batch")
@@ -201,6 +216,8 @@ def _field_size(decl: str) -> int:
     # Function-pointer typedefs are declared without a '*' but are 8 bytes.
     if "callback" in d:
         return 8
+    if re.search(r"\b(llama_seq_id|llama_token|llama_pos)\b", d):
+        return 4
     if re.search(r"\b(int64_t|uint64_t|size_t)\b", d):
         return 8
     if re.search(r"\b(bool|int8_t|uint8_t|char)\b", d):
@@ -514,6 +531,163 @@ def _localm_last_named(localm) -> int:
     return end
 
 
+# --------------------------------------------------------------------------- #
+#  libmtmd speech generation (structs localm allocates, prototypes it binds)
+# --------------------------------------------------------------------------- #
+
+def _fetch_mtmd_headers(ref: str) -> str:
+    """mtmd.h followed by mtmd-helper.h at *ref*."""
+    parts = []
+    for path in _MTMD_HEADERS:
+        url = f"https://raw.githubusercontent.com/{_REPO}/{ref}/{path}"
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "localm-abi-check"})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                parts.append(r.read().decode("utf-8", errors="replace"))
+        except Exception as e:  # noqa: BLE001
+            raise SystemExit(f"could not fetch {path} for ref {ref!r}: {e}") from e
+    return "\n".join(parts)
+
+
+def _header_speech_interface(mtmd_text: str):
+    """Which speech generation interface mtmd headers declare: 'state' when
+    they declare ``mtmd_gen_state_init``, 'legacy' when they declare
+    ``mtmd_gen_inp_default`` only, None when they declare neither."""
+    text = _strip_comments(mtmd_text)
+    if _prototype(text, "mtmd_gen_state_init") is not None:
+        return "state"
+    if _prototype(text, "mtmd_gen_inp_default") is not None:
+        return "legacy"
+    return None
+
+
+def _prototype(text: str, name: str):
+    """(return type, [parameter declarations]) of the ``MTMD_API`` prototype
+    of *name* in comment-stripped *text*, or None when it is not declared."""
+    m = re.search(r"MTMD_API\s+([^;{}()]*?)\b" + re.escape(name) + r"\s*\(", text)
+    if not m:
+        return None
+    i = m.end()
+    depth = 1
+    start = i
+    while i < len(text) and depth:
+        if text[i] == "(":
+            depth += 1
+        elif text[i] == ")":
+            depth -= 1
+        i += 1
+    params = [p.strip() for p in text[start:i - 1].split(",")]
+    if params in ([""], ["void"]):
+        params = []
+    return m.group(1).strip(), params
+
+
+def _by_value_struct(decl: str):
+    """The C struct name *decl* passes or returns by value, else None."""
+    if "*" in decl:
+        return None
+    m = re.search(r"\bstruct\s+(\w+)", decl)
+    if m:
+        return m.group(1)
+    m = re.match(r"\s*(?:const\s+)?(mtmd_\w+)\b", decl)
+    return m.group(1) if m else None
+
+
+def _localm_speech_binding(interface: str):
+    """(C struct name -> ctypes class, function name -> (restype, argtypes))
+    localm binds for the speech *interface*."""
+    _ensure_localm_importable()
+    from localm.inference.backends.llamacpp import mtmd_gen as G
+
+    structs = G._INTERFACE_STRUCTS[interface]
+    signatures = {**G._SIGNATURES, **G._INTERFACE_SIGNATURES[interface]}
+    return structs, signatures
+
+
+def _check_speech_struct(name: str, text: str, cls) -> int:
+    """Every upstream field of struct *name* at localm's offset and size, and
+    the same total size: localm allocates these structs, so a trailing field
+    is a failure too."""
+    import ctypes
+
+    body = _extract_block_body(text, "struct", name)
+    print(f"\n=== {name} ===")
+    if body is None:
+        print(f"  FAIL  struct {name} not found in the mtmd headers")
+        return 1
+    upstream, up_size = _layout(_parse_fields(body))
+    localm = [(f, getattr(cls, f).offset, ctypes.sizeof(t)) for f, t in cls._fields_]
+    problems = 0
+    if [u[0] for u in upstream] != [f[0] for f in localm]:
+        print(f"  FAIL  fields differ: upstream {[u[0] for u in upstream]} != localm "
+              f"{[f[0] for f in localm]}")
+        problems += 1
+    lm = {f: (o, s) for f, o, s in localm}
+    for fname, off, size in upstream:
+        if fname not in lm:
+            continue
+        if lm[fname] != (off, size):
+            print(f"  FAIL  {fname}: upstream offset {off} size {size} != localm "
+                  f"offset {lm[fname][0]} size {lm[fname][1]}")
+            problems += 1
+        else:
+            print(f"  ok    {fname:30s} offset {off:3d} size {size}")
+    if ctypes.sizeof(cls) != up_size:
+        print(f"  FAIL  size: upstream {up_size} != localm {ctypes.sizeof(cls)}")
+        problems += 1
+    return problems
+
+
+def _check_speech_function(name: str, text: str, restype, argtypes, by_class) -> int:
+    """The prototype of *name* has as many parameters as localm's *argtypes*,
+    and every struct it passes or returns by value is the one localm binds."""
+    proto = _prototype(text, name)
+    if proto is None:
+        print(f"  FAIL  {name}: not declared in the mtmd headers")
+        return 1
+    ret, params = proto
+    problems = 0
+    if len(params) != len(argtypes):
+        print(f"  FAIL  {name}: upstream takes {len(params)} argument(s) "
+              f"({', '.join(params) or 'void'}), localm declares {len(argtypes)}")
+        problems += 1
+    pairs = [(ret, restype)] + list(zip(params, argtypes, strict=False))
+    for decl, bound in pairs:
+        want = _by_value_struct(decl)
+        have = by_class.get(bound)
+        if want != have and (want is not None or have is not None):
+            print(f"  FAIL  {name}: upstream {decl!r} is bound as "
+                  f"{getattr(bound, '__name__', bound)}")
+            problems += 1
+    if not problems:
+        print(f"  ok    {name}({len(params)})")
+    return problems
+
+
+def check_speech(mtmd_text: str, label: str, seen: set) -> int:
+    """Diff localm's speech generation binding against mtmd headers; the
+    interface is read from the headers. Adds the interface to *seen*."""
+    interface = _header_speech_interface(mtmd_text)
+    print(f"\n############ Checking localm's speech binding against {label} "
+          f"[interface: {interface}] ############")
+    if interface is None:
+        print("  FAIL  no speech generation interface localm binds is declared "
+              "(neither mtmd_gen_state_init nor mtmd_gen_inp_default); speech "
+              "is refused on this runtime")
+        return 1
+    seen.add(interface)
+    text = _strip_comments(mtmd_text)
+    structs, signatures = _localm_speech_binding(interface)
+    by_class = {cls: cname for cname, cls in structs.items()}
+    problems = 0
+    for cname, cls in structs.items():
+        problems += _check_speech_struct(cname, text, cls)
+    print("\n=== speech generation prototypes ===")
+    for fname, (restype, argtypes) in signatures.items():
+        problems += _check_speech_function(fname, text, restype, argtypes, by_class)
+    return problems
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -528,6 +702,10 @@ def main() -> int:
                          "three layouts of each params struct.")
     ap.add_argument("--header", default=None,
                     help="path to a local llama.h instead of fetching")
+    ap.add_argument("--mtmd-header", action="append", default=None,
+                    help="path to a local mtmd.h or mtmd-helper.h (give both); "
+                         "with --header, the speech binding is checked only "
+                         "when these are given")
     args = ap.parse_args()
 
     headers = []   # (label, header text)
@@ -558,6 +736,29 @@ def main() -> int:
         print("\n=== enum domains ===")
         for binding in _ENUM_BINDINGS:
             total += _check_enum(binding, header, additive)
+
+    speech = []   # (label, mtmd.h + mtmd-helper.h text)
+    if args.mtmd_header:
+        speech.append((", ".join(args.mtmd_header), "\n".join(
+            Path(h).read_text(encoding="utf-8", errors="replace")
+            for h in args.mtmd_header)))
+    elif args.header:
+        pass
+    elif args.ref:
+        ref = _resolve_ref(args.ref)
+        speech.append((f"{_REPO}@{ref}", _fetch_mtmd_headers(ref)))
+    else:
+        for want, ref in MTMD_SPEECH_REFS.items():
+            speech.append((f"{_REPO}@{ref} (expect {want})", _fetch_mtmd_headers(ref)))
+    seen_speech = set()
+    for label, text in speech:
+        total += check_speech(text, label, seen_speech)
+    if (not args.header and not args.ref and not args.mtmd_header
+            and seen_speech != set(MTMD_SPEECH_REFS)):
+        print(f"\nFAIL: expected to check every speech generation interface, only "
+              f"saw {sorted(seen_speech)} - the refs in MTMD_SPEECH_REFS no longer "
+              "cover both.")
+        total += 1
 
     # Both layout axes must have been exercised.
     if not args.header and not args.ref and seen_layouts != {"v1", "v2", "v3"}:
@@ -590,8 +791,8 @@ def main() -> int:
     if total:
         print(f"ABI CHECK FAILED: {total} mismatch(es). A mid-struct reorder/insert "
               "corrupts memory, and a changed enum value silently redefines what a "
-              "field means - update _structs.py (and _abi anchors) to match, then "
-              "re-probe a real build.")
+              "field means - update _structs.py (and _abi anchors) or the speech "
+              "binding in mtmd_gen.py to match, then re-probe a real build.")
         return 1
     print(f"ABI check passed: localm's named fields match upstream offsets "
           f"for layout(s) {sorted(seen_layouts)}, and every enum member localm "
