@@ -5025,22 +5025,6 @@
                 "code": "reportAttributeAccessIssue",
                 "range": {
                     "startColumn": 24,
-                    "endColumn": 39,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportAttributeAccessIssue",
-                "range": {
-                    "startColumn": 48,
-                    "endColumn": 57,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportAttributeAccessIssue",
-                "range": {
-                    "startColumn": 24,
                     "endColumn": 32,
                     "lineCount": 1
                 }
@@ -5356,14 +5340,6 @@
             {
                 "code": "reportAttributeAccessIssue",
                 "range": {
-                    "startColumn": 20,
-                    "endColumn": 29,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportAttributeAccessIssue",
-                "range": {
                     "startColumn": 17,
                     "endColumn": 30,
                     "lineCount": 1
@@ -5590,14 +5566,6 @@
             {
                 "code": "reportAttributeAccessIssue",
                 "range": {
-                    "startColumn": 48,
-                    "endColumn": 57,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportAttributeAccessIssue",
-                "range": {
                     "startColumn": 35,
                     "endColumn": 48,
                     "lineCount": 1
@@ -5688,14 +5656,6 @@
                 "range": {
                     "startColumn": 32,
                     "endColumn": 41,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportAttributeAccessIssue",
-                "range": {
-                    "startColumn": 48,
-                    "endColumn": 57,
                     "lineCount": 1
                 }
             },
