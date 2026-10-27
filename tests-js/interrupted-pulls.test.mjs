@@ -109,3 +109,30 @@ test("Resume of a changed source that is declined starts nothing", async () => {
   assert.equal(await started, null);
   assert.equal(posts.length, 1);
 });
+
+test("a paused resumed download resumes and cancels through its record, not a plain pull", async () => {
+  const { fetchImpl, posts } = makeFetch(
+    () => ({ downloads: [DL], orphans: [] }),
+    (u) => (u.endsWith("/delete")
+      ? { ok: true, body: { removed_bytes: 1500 } }
+      : { ok: true, body: { status: "started", job_id: "j9", spec: DL.spec, note: "" } }));
+  const plain = [];
+  const wrapped = async (url, opts = {}) => {
+    if (String(url) === "/api/models/pull" || String(url) === "/api/models/pull/discard") {
+      plain.push(String(url));
+    }
+    return fetchImpl(url, opts);
+  };
+  const { window: win } = loadAppWithPages({ fetchImpl: wrapped });
+  const paused = { spec: DL.spec, name: DL.name, fromInterrupted: true };
+  win.eval("pausedPull = " + JSON.stringify(paused));
+  win.document.getElementById("pull-resume").click();
+  for (let i = 0; i < 10; i++) await tick();
+  assert.deepEqual(posts.map((p) => p.url), [`/api/models/pulls/interrupted/${DL.id}/resume`]);
+
+  const res = await win.discardPartialPull(paused);
+  assert.equal(res.ok, true);
+  assert.equal(res.removed, 1500);
+  assert.equal(posts.at(-1).url, `/api/models/pulls/interrupted/${DL.id}/delete`);
+  assert.deepEqual(plain, []);
+});
