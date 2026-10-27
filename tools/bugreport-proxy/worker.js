@@ -284,7 +284,8 @@ async function latestRelease(request, env, url) {
   // nothing newer than LEGACY_CLIENT_CEILING.
   const legacy = !url.searchParams.get("client");
   const rel = await latestAppRelease(env, wantsPrerelease, legacy ? LEGACY_CLIENT_CEILING : null);
-  if (rel === null) return json({ ok: true, version: null, note: "no releases yet" });
+  const ceiling = legacy ? { legacy_ceiling: LEGACY_CLIENT_CEILING } : {};
+  if (rel === null) return json({ ok: true, version: null, note: "no releases yet", ...ceiling });
   if (rel === undefined) return json({ error: "release lookup failed", status: 502 }, 502);
   const assets = (rel.assets || []).map((a) => ({ id: a.id, name: a.name, size: a.size }));
   // Prefer a .zip asset (the build); else the first asset; else none.
@@ -302,7 +303,7 @@ async function latestRelease(request, env, url) {
   return json({
     ok: true, version: rel.tag_name, name: rel.name,
     notes: String(rel.body || "").slice(0, 8000), published_at: rel.published_at,
-    asset, signature,
+    asset, signature, ...ceiling,
   });
 }
 
@@ -364,8 +365,20 @@ function tagAtMost(a, b) {
 //     but a draft must never be offered to ANYONE, so this filters
 //     draft === true explicitly rather than relying on that token-permission
 //     behavior holding.
-// *maxTag*, when set, also drops every release whose tag orders above it.
+// *maxTag*, when set, also drops every release whose tag orders above it. The release
+// tagged *maxTag* itself is read by tag first, so it is found however many newer
+// releases exist; the list is only searched while it does not exist yet.
 async function latestAppRelease(env, includePrerelease, maxTag = null) {
+  if (maxTag !== null) {
+    const byTag = await ghFetch(env.UPDATE_GITHUB_TOKEN,
+      `/repos/${env.TARGET_REPO}/releases/tags/${encodeURIComponent(maxTag)}`);
+    if (byTag.ok) {
+      const r = await byTag.json();
+      if (r && r.draft !== true && (includePrerelease || r.prerelease !== true)) return r;
+    } else if (byTag.status !== 404) {
+      return undefined;
+    }
+  }
   const gh = await ghFetch(env.UPDATE_GITHUB_TOKEN, `/repos/${env.TARGET_REPO}/releases?per_page=30`);
   if (!gh.ok) return undefined;
   const all = await gh.json();

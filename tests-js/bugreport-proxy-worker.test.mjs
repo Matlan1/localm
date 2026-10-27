@@ -281,17 +281,32 @@ test("without the app secrets the owner token is used, as before", async () => {
 });
 
 // /update with a stubbed GitHub release list (no .sig assets, so no asset fetch).
-async function updateFor(worker, query, releases) {
+// *listed* is the first page of the release list (default: all of *releases*); a tag
+// lookup searches every release. *tagStatus* forces the tag lookup's status.
+async function updateFor(worker, query, releases, { listed = releases, tagStatus = null,
+  expect = 200 } = {}) {
   const realFetch = globalThis.fetch;
   globalThis.fetch = async (u) => {
+    const tag = /\/repos\/a\/b\/releases\/tags\/([^/?]+)$/.exec(String(u));
+    if (tag) {
+      if (tagStatus) return new Response("{}", { status: tagStatus });
+      const r = releases.find((x) => x.tag_name === decodeURIComponent(tag[1]));
+      return r ? new Response(JSON.stringify(r), { status: 200 })
+        : new Response('{"message":"Not Found"}', { status: 404 });
+    }
     assert.match(String(u), /\/repos\/a\/b\/releases\?per_page=30$/);
-    return new Response(JSON.stringify(releases), { status: 200 });
+    return new Response(JSON.stringify(listed), { status: 200 });
   };
   try {
     const res = await worker.fetch(new Request(`https://proxy.example/update${query}`,
       { method: "GET", headers: { "X-Localm-Token": "s3cret" } }), SECRET_ENV);
-    assert.equal(res.status, 200);
-    return (await res.json()).version;
+    assert.equal(res.status, expect);
+    const body = await res.json();
+    if (expect === 200) {
+      const legacy = !new URLSearchParams(query.replace(/^\?/, "")).get("client");
+      assert.equal(body.legacy_ceiling, legacy ? "v0.3.2" : undefined);
+    }
+    return body.version;
   } finally {
     globalThis.fetch = realFetch;
   }
@@ -328,4 +343,23 @@ test("before the ceiling release exists a legacy client gets the newest below it
 
 test("the legacy ceiling is v0.3.2", () => {
   assert.match(readFileSync(WORKER, "utf8"), /^const LEGACY_CLIENT_CEILING = "v0\.3\.2";$/m);
+});
+
+test("a legacy client still gets the ceiling release when 30 newer releases hide it", async () => {
+  const worker = await loadWorker();
+  const newer = Array.from({ length: 30 }, (_, i) => rel(`v0.4.${i}`, i + 3));
+  const all = [rel("v0.3.1", 1), rel("v0.3.2", 2), ...newer];
+  assert.equal(await updateFor(worker, "", all, { listed: newer }), "v0.3.2");
+  assert.equal(await updateFor(worker, "?client=0.3.2", all, { listed: newer }), "v0.4.29");
+});
+
+test("a draft ceiling release is never offered", async () => {
+  const worker = await loadWorker();
+  const rs = [rel("v0.3.1", 1), rel("v0.3.2", 2, { draft: true })];
+  assert.equal(await updateFor(worker, "", rs), "v0.3.1");
+});
+
+test("a failed tag lookup is a 502, not a silent fall-through", async () => {
+  const worker = await loadWorker();
+  await updateFor(worker, "", RELEASES, { tagStatus: 500, expect: 502 });
 });
