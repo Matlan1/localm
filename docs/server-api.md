@@ -836,7 +836,10 @@ count landed on the GPU, so a caller can tell that apart from a full GPU
 load. `parallel_slots` appears when the loaded model answers more than one
 request at once, and says how many. A load that reports its memory-mapping also
 carries `use_mmap`, `mmap`, `mmap_from_disk` and `mmap_cpu_from_disk`, with
-`mmap_note` and `mmap_ram_short` when there is something to say, and `adapters`
+`mmap_note` and `mmap_ram_short` when there is something to say; a
+`mmap_cpu_from_disk` load that warned about disk speed also carries
+`mmap_cpu_read_bytes` (the weights the CPU reads while generating) and
+`mmap_ram_available_bytes`, and `adapters`
 lists the LoRA adapters applied. Without `model` and with nothing active,
 loaded or configured to fall back to, the load is a 503; an unregistered name is a
 404.

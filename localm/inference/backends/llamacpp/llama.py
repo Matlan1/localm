@@ -197,10 +197,13 @@ class _CapturedStderr:
     def projector_notices(self) -> dict:
         """What the captured native projector load reported about itself:
         ``cpu`` (True when mtmd logged ``CLIP using CPU backend``) and
-        ``min_tokens`` (True when it advised ``--image-min-tokens``)."""
+        ``min_tokens`` (the number from an ``--image-min-tokens N`` advice with
+        N from 1 to 16384, else None)."""
         text = self._read()
+        advised = _IMAGE_MIN_TOKENS_ADVICE.search(text)
+        tokens = int(advised.group(1)) if advised else 0
         return {"cpu": "CLIP using CPU backend" in text,
-                "min_tokens": "--image-min-tokens" in text}
+                "min_tokens": tokens if 1 <= tokens <= 16384 else None}
 
     def mapped(self) -> Optional[bool]:
         """Whether the captured native load memory-mapped the model file: False
@@ -224,11 +227,16 @@ class _CapturedStderr:
         return None
 
 
-def _warn_projector_notices(mt, notices: dict) -> None:
-    """Warn about what llama.cpp reported while loading the projector *mt*
-    (``_CapturedStderr.projector_notices``): that it encodes images on the CPU
-    although the GPU was requested (*mt* is then marked as not on the GPU), and
-    its advice to raise the minimum image tokens, which localm does not set."""
+_IMAGE_MIN_TOKENS_ADVICE = re.compile(r"--image-min-tokens (\d{1,6})\b")
+
+
+def _apply_projector_notices(mt, notices: dict) -> None:
+    """Act on what llama.cpp reported while loading the projector *mt*
+    (``_CapturedStderr.projector_notices``): a warning when it encodes images on
+    the CPU although the GPU was requested (*mt* is then marked as not on the
+    GPU), and the minimum image tokens it advised, which *mt* is rebuilt with
+    (:meth:`MtmdContext.apply_min_image_tokens`); a warning when the runtime's
+    params layout does not allow that."""
     from localm.debuglog import logger
     if notices.get("cpu") and getattr(mt, "on_gpu", False):
         mt.on_gpu = False
@@ -236,11 +244,17 @@ def _warn_projector_notices(mt, notices: dict) -> None:
             "mtmd: llama.cpp placed the vision projector on the CPU (CLIP using CPU "
             "backend) although the GPU was requested, so image encoding is much "
             "slower on large images.")
-    if notices.get("min_tokens"):
+    tokens = notices.get("min_tokens")
+    if not tokens:
+        return
+    if mt.apply_min_image_tokens(tokens):
+        logger.info("mtmd: the vision projector now uses at least %d image tokens, as "
+                    "llama.cpp requires for it", tokens)
+    else:
         logger.warning(
-            "mtmd: llama.cpp advises this projector needs at least 1024 image tokens "
-            "for accurate grounding answers (--image-min-tokens 1024); localm does not "
-            "set that option, so locating things in images may be less accurate.")
+            "mtmd: llama.cpp requires at least %d image tokens for this projector, but "
+            "this runtime's parameter layout is not recognised, so localm could not "
+            "apply it; locating things in images may be less accurate.", tokens)
 
 
 _ADAPTER_LOG_LINE = re.compile(r"lora|adapter|fail|error|incorrect|mismatch", re.I)
@@ -2039,7 +2053,7 @@ class LlamaCpp:
                         compatible_mmproj_path(mmproj_path), self._model_ptr,
                         gpu_index=getattr(self, "_main_gpu_index", 0))
                     if captured is not None:
-                        _warn_projector_notices(mt, captured.projector_notices())
+                        _apply_projector_notices(mt, captured.projector_notices())
                 except Exception:
                     if captured is not None:
                         _mtmd_detail = captured.tail()

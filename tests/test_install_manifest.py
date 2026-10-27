@@ -1656,3 +1656,16 @@ def test_the_record_and_the_pending_file_are_ignored_by_git():
     lines = {line.strip() for line in
              (LOCALM.parent / ".gitignore").read_text(encoding="utf-8").splitlines()}
     assert im.MANIFEST_NAME in lines and im.PENDING_NAME in lines
+
+
+def test_a_shared_uv_is_recorded_and_survives_a_later_record(tmp_path):
+    uv = tmp_path / "elsewhere" / ("uv.exe" if os.name == "nt" else "uv")
+    im.record(tmp_path, venv=str(tmp_path / ".venv"), uv_exe=str(uv))
+    assert Path(im.load(tmp_path)["uv_exe"]) == uv
+    im.record(tmp_path, venv=str(tmp_path / ".venv"))
+    assert Path(im.load(tmp_path)["uv_exe"]) == uv
+
+
+def test_a_record_without_a_shared_uv_has_an_empty_one(tmp_path):
+    im.record(tmp_path, venv=str(tmp_path / ".venv"))
+    assert im.load(tmp_path)["uv_exe"] == ""

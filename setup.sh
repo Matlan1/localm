@@ -57,8 +57,8 @@ uv_manual_hint() {  # the manual uv-install command; used from two call sites be
 }
 # The uv release this setup installs; its installer script runs only when its
 # sha256 matches UV_INSTALLER_SHA256.
-UV_INSTALLER_VERSION="0.13.4"
-UV_INSTALLER_SHA256="1f5390d273b0158bd5eaa3527ae049f3667baa881abb1e7c883dd637d84432f9"
+UV_INSTALLER_VERSION="0.13.6"
+UV_INSTALLER_SHA256="f7a56e7afaec49a3bcbc3ac3cdbe917e7c6ce30e0d815308a12e531aa5ef23b7"
 file_sha256() {  # file_sha256 FILE  ->  prints the hex sha256, or nothing when no hashing tool exists
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
   elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d' ' -f1

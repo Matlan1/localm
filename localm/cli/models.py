@@ -6,7 +6,8 @@ from typing import Any, Optional
 
 import click
 
-from ..config import HOME_DIR, find_binary_dir, load_config, update_config
+from ..config import (ConfigLockTimeout, HOME_DIR, find_binary_dir, load_config,
+                      registry_lock_busy, update_config)
 from ..model_manager import (
     list_models, MODEL_TYPES, pull_model, relocate_model,
     remove_model, set_model_type, show_shortcuts, sync_models_dir,
@@ -1206,14 +1207,26 @@ def _search_civitai(console, text, limit, list_files, nsfw, legacy_formats):
 
 
 
+def _list_unsynced_notice() -> None:
+    console.print("[yellow]Another localm process is writing the model registry; "
+                  "listing without syncing the models folder.[/yellow]")
+
+
 @main.command("list")
 @click.option("--type", default=None,
               type=click.Choice(sorted(MODEL_TYPES), case_sensitive=False),
               help="Filter models by type.")
 def list_cmd(type):
     """List registered models (auto-detecting changes in the models folder)."""
-    result = sync_models_dir()
-    if result.changed:
+    result = None
+    if registry_lock_busy():
+        _list_unsynced_notice()
+    else:
+        try:
+            result = sync_models_dir()
+        except ConfigLockTimeout:
+            _list_unsynced_notice()
+    if result is not None and result.changed:
         bits = []
         if result.added:
             bits.append(f"{result.added} new")
@@ -1226,7 +1239,7 @@ def list_cmd(type):
         if result.retyped:
             bits.append(f"{result.retyped} retyped")
         console.print(f"[dim]Models folder synced: {', '.join(bits)}.[/dim]")
-    if result.note:
+    if result is not None and result.note:
         # note is built from registry model names plus fixed counts and
         # literal text, and is escaped.
         from rich.markup import escape
