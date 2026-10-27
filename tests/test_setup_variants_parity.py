@@ -359,10 +359,18 @@ def test_the_plugin_list_is_the_catalog_filtered_by_offered(tmp_path, monkeypatc
     assert [n for n, _ in gui.plugin_choices()] == expected
 
 
-def test_the_window_backend_menu_is_the_console_menu(tmp_path, monkeypatch):
+@pytest.mark.parametrize("rec", [k for k in BACKEND_NAMES] + [""])
+def test_the_window_backend_menu_is_the_console_menu(tmp_path, monkeypatch, rec):
+    """The window lists the console menu's entries once each, recommendation first."""
     gui = _gui_module(tmp_path, monkeypatch)
-    rows = spec.backend_menu("cpu")[1:]
-    assert [k for k, _ in gui.backend_choices()] == [k for _, k, _ in rows]
+    console = []
+    for _, k, _ in spec.backend_menu(rec):
+        if k not in console:
+            console.append(k)
+    if rec and rec not in spec.offered_backends():
+        console.remove(rec)
+        console.insert(0, rec)
+    assert [k for k, _ in gui.backend_choices(rec or None)] == [k for k in console if k]
 
 
 # --------------------------------------------------------------------------- #

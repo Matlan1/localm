@@ -123,7 +123,7 @@ rem  install reuses it rather than downloading a second copy.
 if "%LOCALM_GUI_STORE%"=="portable" set "UV_PYTHON_INSTALL_DIR=%CD%\.python"
 if "%LOCALM_GUI_STORE%"=="portable" set "UV_CACHE_DIR=%CD%\.cache"
 set "UV_SYSTEM_CERTS=1"
-"%UVEXE%" run --no-project --python 3.12 python "installer\gui.py"
+"%UVEXE%" run --no-project --isolated --python 3.12 python "installer\gui.py"
 set "RC=%errorlevel%"
 
 rem  42 and 43: an uninstall finished in the window; the Python runtime it ran

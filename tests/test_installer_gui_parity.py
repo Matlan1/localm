@@ -232,7 +232,7 @@ class TestRuntime:
         _step(gui, gui.Plan(backend="own", own_build_dir="D:/llama/build"),
               "Copying in your own llama.cpp build").run(lambda s: None)
         argv, kw, _ = calls[0]
-        assert argv[1:] == ["setup-llama", "--from", "D:/llama/build"]
+        assert argv[1:] == ["setup-llama", "--from", "D:/llama/build", "--force"]
         assert kw.get("answers") is True
 
     def test_no_build_folder_skips_and_says_how_to_provision_later(self, gui):
@@ -463,3 +463,90 @@ class TestLinuxMenuEntry:
         old.write_text("[Desktop Entry]\nPath=/somewhere/else\n", encoding="utf-8")
         gui.make_shortcut(gui.Plan(), lambda s: None)
         assert old.exists()
+
+
+# --------------------------------------------------------------------------- #
+#  Review fixes                                                                #
+# --------------------------------------------------------------------------- #
+
+class _Done:
+    def __init__(self, stdout):
+        self.stdout = stdout
+
+
+def test_the_window_never_lists_itself(gui, tmp_path, monkeypatch):
+    """Stopping a process that holds .venv must never stop the window."""
+    monkeypatch.setattr(gui, "IS_WINDOWS", True)
+    me, parent = os.getpid(), os.getppid()
+
+    def fake_run(argv, **kw):
+        if "LOCALM_OWN_PID" in kw.get("env", {}):
+            raise OSError("no process list")
+        return _Done(f"{me}|python.exe\n{parent}|uv.exe\n4242|LocaLM.exe\n")
+    monkeypatch.setattr(gui.subprocess, "run", fake_run)
+    assert gui.find_venv_lockers(tmp_path) == [(4242, "LocaLM.exe")]
+
+
+def test_the_windows_launcher_chain_is_left_out_too(gui, tmp_path, monkeypatch):
+    monkeypatch.setattr(gui, "IS_WINDOWS", True)
+
+    def fake_run(argv, **kw):
+        if "LOCALM_OWN_PID" in kw.get("env", {}):
+            return _Done("100 200 300")
+        return _Done("300|uv.exe\n4242|LocaLM.exe\n")
+    monkeypatch.setattr(gui.subprocess, "run", fake_run)
+    assert gui.find_venv_lockers(tmp_path) == [(4242, "LocaLM.exe")]
+
+
+def test_the_launchers_run_the_window_outside_the_venv():
+    root = _GUI_PATH.parents[1]
+    for name in ("setup-gui.bat", "setup-gui.sh"):
+        text = (root / name).read_text(encoding="utf-8")
+        assert "run --no-project --isolated --python 3.12" in text, name
+
+
+def test_the_own_build_replaces_an_installed_runtime(gui, tmp_path, monkeypatch):
+    fake, calls = _recorder(gui, tmp_path)
+    monkeypatch.setattr(gui, "_run", fake)
+    _step(gui, gui.Plan(backend="own", own_build_dir="D:/b"),
+          "Copying in your own llama.cpp build").run(lambda s: None)
+    assert "--force" in calls[0][0]
+
+
+def test_the_retry_command_survives_a_space_in_the_folder(gui, tmp_path, monkeypatch):
+    spaced = tmp_path / "John Smith" / "localm"
+    spaced.mkdir(parents=True)
+    monkeypatch.setattr(gui, "ROOT", spaced)
+    fake, _ = _recorder(gui, spaced, [(1, [])])
+    monkeypatch.setattr(gui, "_run", fake)
+    logged = []
+    step = _step(gui, gui.Plan(backend="vulkan"), "Provisioning the vulkan")
+    gui.run_steps([step], logged.append)
+    retry = [line.strip() for line in logged if "setup-llama --backend vulkan" in line][0]
+    assert retry.startswith('"') and str(gui.venv_bin(spaced) / "localm") in retry
+
+
+def test_an_entry_whose_folder_only_shares_a_prefix_is_left_alone(gui, tmp_path, monkeypatch):
+    home = tmp_path / "userhome"
+    apps = home / ".local" / "share" / "applications"
+    apps.mkdir(parents=True)
+    (apps / "Probe").write_bytes(b"")
+    if (apps / "probe").exists():
+        pytest.skip("the two names are one file on a case-insensitive filesystem")
+    root = tmp_path / "localm"
+    root.mkdir()
+    monkeypatch.setattr(gui, "ROOT", root)
+    monkeypatch.setattr(gui, "IS_WINDOWS", False)
+    monkeypatch.setattr(gui.Path, "home", classmethod(lambda cls: home))
+    old = apps / "LocaLM.desktop"
+    old.write_text(f"[Desktop Entry]\nPath={root}-dev\n", encoding="utf-8")
+    gui.make_shortcut(gui.Plan(), lambda s: None)
+    assert old.exists()
+
+
+def test_the_window_lists_the_recommendation_first(gui):
+    offered = [k for _, k, _ in gui.spec.backend_menu("x")[1:-1]]
+    rec = offered[-1]
+    keys = [k for k, _ in gui.backend_choices(rec)]
+    assert keys[0] == rec and keys.count(rec) == 1
+    assert sorted(keys[:-1]) == sorted(offered) and keys[-1] == "own"

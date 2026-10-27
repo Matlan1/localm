@@ -973,8 +973,8 @@ elif [ "$BACKEND" = own ]; then
   # SETUP-Q: own-build-dir
   buildpath="$(ask "  Path to a llama.cpp build dir to copy now (blank = skip): " "")"
   if [ -n "$buildpath" ]; then
-    .venv/bin/localm setup-llama --from "$buildpath" || handle_provision_failure \
-      ".venv/bin/localm setup-llama --from <dir>" \
+    .venv/bin/localm setup-llama --from "$buildpath" --force || handle_provision_failure \
+      ".venv/bin/localm setup-llama --from <dir> --force" \
       "Provisioning the native llama.cpp runtime with --from failed during setup."
   else
     say "  Skipped. Provision later:  .venv/bin/localm setup-llama --backend $SL_BACKENDS"
@@ -1072,7 +1072,7 @@ case "$mk" in
     apps="$HOME/.local/share/applications"
     # An entry the graphical installer wrote for this folder is replaced by this one.
     old_entry="$apps/LocaLM.desktop"
-    if [ -f "$old_entry" ] && grep -qF -- "$(pwd)" "$old_entry" 2>/dev/null; then
+    if [ -f "$old_entry" ] && grep -qxF -- "Path=$(pwd)" "$old_entry" 2>/dev/null; then
       rm -f -- "$old_entry"
       say "  Removed the older menu entry $old_entry for this folder."
     fi

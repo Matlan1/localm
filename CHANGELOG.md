@@ -40,7 +40,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ### Changed
 
 - **Every setup preselects the coder, rag, web and tts plugins.** Pressing Enter at the console plugin question (or Next in the window) installs that set; type `none` to skip. `setup.sh --yes` installs it too. The graphical setup saves your plugin-dependencies answer as a setting, like the console.
-- **The backend menu is the same in every setup**: one order, numbered from 1 with the recommendation first, listing only the backends with a build for your computer.
+- **The backend menu is the same in every setup**: the same entries in the same order, the recommendation first, listing only the backends with a build for your computer.
 
 ## [0.3.2rc1] - 2026-10-27
 

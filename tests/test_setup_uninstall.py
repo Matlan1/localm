@@ -208,7 +208,7 @@ def test_finish_uninstall_removes_only_allowlisted_pending_names(tmp_path):
     assert not (clone / im.MANIFEST_NAME).exists()
 
 
-_UV_RUN = '"%UVEXE%" run --no-project --python 3.12 python "installer\\gui.py"'
+_UV_RUN = '"%UVEXE%" run --no-project --isolated --python 3.12 python "installer\\gui.py"'
 
 
 def _gui_finish(clone: Path, tmp_path: Path, *, cwd: Path = None, code: int = 42):

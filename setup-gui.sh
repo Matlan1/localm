@@ -162,7 +162,7 @@ if [ "$LOCALM_GUI_STORE" = portable ]; then
 fi
 export UV_SYSTEM_CERTS=1
 rc=0
-"$UVEXE" run --no-project --python 3.12 python installer/gui.py || rc=$?
+"$UVEXE" run --no-project --isolated --python 3.12 python installer/gui.py || rc=$?
 # 42 and 43: an uninstall finished in the window; the Python runtime it ran on
 # is removed now that it has closed. 43 and 44: something asked for was kept.
 # 45: the uninstall did not finish.

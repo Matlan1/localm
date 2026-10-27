@@ -247,8 +247,8 @@ def test_an_entry_the_window_wrote_for_this_folder_is_replaced(tmp_path):
     apps = home / ".local" / "share" / "applications"
     apps.mkdir(parents=True)
     old = apps / "LocaLM.desktop"
-    old.write_text(f"[Desktop Entry]\nExec={_here(tmp_path)}/.venv/bin/localm gui\n",
-                   encoding="utf-8")
+    old.write_text(f"[Desktop Entry]\nExec={_here(tmp_path)}/.venv/bin/localm gui\n"
+                   f"Path={_here(tmp_path)}\n", encoding="utf-8")
     result, apps = _run_menu_entry(tmp_path, answer="1")
     assert (f"  Removed the older menu entry {apps.as_posix()}/LocaLM.desktop for this folder."
             in result.stdout.splitlines())
@@ -286,3 +286,16 @@ def test_yes_is_passed_on_to_setup_llama(tmp_path, yes, expected):
     _run(f'handle_provision_failure() {{ :; }}\nYES={yes}\nBACKEND=vulkan\nSL_FORCE=""\n'
          + _setup_llama_call_block(), tmp_path)
     assert calls.read_text(encoding="utf-8").strip() == expected
+
+
+def test_an_entry_for_a_folder_that_only_shares_the_prefix_is_left_alone(tmp_path):
+    home = tmp_path / "home"
+    apps = home / ".local" / "share" / "applications"
+    apps.mkdir(parents=True)
+    if not _case_sensitive(apps):
+        pytest.skip("LocaLM.desktop and localm.desktop are one file on this filesystem")
+    other = apps / "LocaLM.desktop"
+    other.write_text(f"[Desktop Entry]\nPath={_here(tmp_path)}-dev\n", encoding="utf-8")
+    result, apps = _run_menu_entry(tmp_path, answer="1")
+    assert "Removed the older menu entry" not in result.stdout
+    assert other.exists()

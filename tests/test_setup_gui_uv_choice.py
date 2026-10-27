@@ -27,7 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 pytestmark = pytest.mark.skipif(os.name != "nt", reason="setup-gui.bat runs only on Windows")
 
-_UV_RUN = '"%UVEXE%" run --no-project --python 3.12 python "installer\\gui.py"'
+_UV_RUN = '"%UVEXE%" run --no-project --isolated --python 3.12 python "installer\\gui.py"'
 _PS_PREFIX = "powershell -NoProfile -ExecutionPolicy Bypass -Command"
 _WINDOW = ("echo WINDOW-UV=%UVEXE%& echo WINDOW-STORE=%LOCALM_GUI_STORE%& "
            "echo WINDOW-PYDIR=%UV_PYTHON_INSTALL_DIR%& echo WINDOW-GUIUV=%LOCALM_GUI_UV%& "

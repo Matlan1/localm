@@ -4,7 +4,7 @@
 
 Run by `setup-gui.bat` (Windows) or `setup-gui.sh` via:
 
-    uv run --no-project --python 3.12 python installer/gui.py
+    uv run --no-project --isolated --python 3.12 python installer/gui.py
 
 SEPARATE FROM THE INSTALL IT CREATES. This script is not part of the `localm`
 package and never imports the installed distribution: it runs on a managed
@@ -82,12 +82,14 @@ EXIT_UNINSTALL_FAILED = 45
 BASE_EXTRAS = spec.BASE_EXTRAS
 
 
-def backend_choices() -> list[tuple]:
-    """The runtime menu for this machine, from localm.setup_spec: every backend
-    setup-llama has a prebuilt build of for this platform and CPU architecture,
-    in the console menu's order, then "own"."""
-    return ([(key, f"{key} - {spec.backend_label(key)}")
-             for key in spec.offered_backends()]
+def backend_choices(recommended: Optional[str] = None) -> list[tuple]:
+    """The runtime menu for this machine, from localm.setup_spec: the console
+    menu's entries in its order (*recommended* first, when given), each listed
+    once, then "own"."""
+    keys = [k for _, k, _ in spec.backend_menu(recommended or "")[1:-1]]
+    if recommended and recommended in dict(spec.BACKENDS):
+        keys = [recommended] + [k for k in keys if k != recommended]
+    return ([(key, f"{key} - {spec.backend_label(key)}") for key in keys]
             + [(spec.OWN, spec.OWN_LABEL)])
 
 
@@ -509,7 +511,8 @@ def venv_is_ours(root: Path) -> bool:
 
 def find_venv_lockers(root: Path) -> list[tuple]:
     """(pid, name) of every process whose executable lies inside root/.venv, on
-    Windows; empty elsewhere or when the process list cannot be read."""
+    Windows, except this process and its parents; empty elsewhere or when the
+    process list cannot be read."""
     if not IS_WINDOWS:
         return []
     prefix = str(root / ".venv").rstrip("\\") + "\\"
@@ -524,11 +527,31 @@ def find_venv_lockers(root: Path) -> list[tuple]:
     except (OSError, subprocess.SubprocessError):
         return []
     found = []
+    own = _own_process_tree()
     for line in (out.stdout or "").splitlines():
         pid, _, name = line.strip().partition("|")
-        if pid.isdigit():
+        if pid.isdigit() and int(pid) not in own:
             found.append((int(pid), name))
     return found
+
+
+def _own_process_tree() -> set:
+    """This process and its parents (up to the launcher), which are never
+    reported as holding .venv."""
+    own = {os.getpid(), os.getppid()}
+    ps = ("$p = $env:LOCALM_OWN_PID; $seen = @();"
+          "while ($p -and $seen.Count -lt 16) { $seen += $p;"
+          "$p = (Get-CimInstance Win32_Process -Filter \"ProcessId=$p\").ParentProcessId };"
+          "$seen -join ' '")
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                             capture_output=True, text=True, timeout=60,
+                             env={**os.environ, "LOCALM_OWN_PID": str(os.getpid())})
+        own.update(int(t) for t in (out.stdout or "").split() if t.isdigit())
+    except (OSError, subprocess.SubprocessError):
+        # This process and its parent stay excluded. See test_the_window_never_lists_itself.
+        pass
+    return own
 
 
 def onedrive_root(root: Path) -> str:
@@ -726,18 +749,18 @@ def build_steps(plan: Plan, resume: Optional[dict] = None) -> list[Step]:
                         emit, plan, allow_fail=True, answers=True)
             if code != 0:
                 runtime_failed(
-                    emit, f"{localm_exe} setup-llama --backend {plan.backend} --force",
+                    emit, f'"{localm_exe}" setup-llama --backend {plan.backend} --force',
                     f"Provisioning the native llama.cpp runtime (--backend "
                     f"{plan.backend}) failed during setup.")
         steps.append(Step(f"Provisioning the {plan.backend} inference runtime", provision,
                           fatal=False, key="native-runtime"))
     elif plan.own_build_dir:
         def provision_own(emit):
-            code = _run([localm_exe, "setup-llama", "--from", plan.own_build_dir],
-                        emit, plan, allow_fail=True, answers=True)
+            code = _run([localm_exe, "setup-llama", "--from", plan.own_build_dir,
+                         "--force"], emit, plan, allow_fail=True, answers=True)
             if code != 0:
                 runtime_failed(
-                    emit, f'{localm_exe} setup-llama --from "{plan.own_build_dir}"',
+                    emit, f'"{localm_exe}" setup-llama --from "{plan.own_build_dir}" --force',
                     "Provisioning the native llama.cpp runtime with --from failed "
                     "during setup.")
         steps.append(Step("Copying in your own llama.cpp build", provision_own,
@@ -745,7 +768,7 @@ def build_steps(plan: Plan, resume: Optional[dict] = None) -> list[Step]:
     else:
         def skip_runtime(emit):
             emit("Skipped. Provision later:  "
-                 f"{localm_exe} setup-llama --backend <{spec.backend_hint()}>")
+                 f'"{localm_exe}" setup-llama --backend <{spec.backend_hint()}>')
         steps.append(Step("Skipping the inference runtime download", skip_runtime,
                           fatal=False))
 
@@ -922,7 +945,8 @@ def make_shortcut(plan: Plan, emit: Callable[[str], None]) -> str:
     d = Path.home() / ".local/share/applications"
     old = d / OLD_MENU_ENTRY
     try:
-        if old.is_file() and str(ROOT) in old.read_text(encoding="utf-8", errors="replace"):
+        if old.is_file() and f"Path={ROOT}" in old.read_text(
+                encoding="utf-8", errors="replace").splitlines():
             old.unlink()
             emit(f"Removed the older menu entry {old}")
     except OSError as e:
@@ -1299,7 +1323,7 @@ class Wizard:
                       "can click through this.")
         ttk.Label(page, text="Which inference runtime should LocaLM use?",
                   font=("Segoe UI", 10, "bold")).pack(anchor="w")
-        for key, desc in backend_choices():
+        for key, desc in backend_choices(self.recommended):
             suffix = (f"   {spec.RECOMMENDED_SUFFIX}"
                       if key == self.recommended else "")
             ttk.Radiobutton(page, text=desc + suffix, value=key,

@@ -724,9 +724,9 @@ if /i "%BACKEND%"=="own" (
     rem SETUP-Q: own-build-dir
     set /p "LLAMABUILD=  Path to your llama.cpp build dir with llama.dll (blank = skip): "
     if not "!LLAMABUILD!"=="" (
-        .venv\Scripts\localm setup-llama --from "!LLAMABUILD!"
+        .venv\Scripts\localm setup-llama --from "!LLAMABUILD!" --force
         if errorlevel 1 (
-            set "PFHINT=.venv\Scripts\localm setup-llama --from "!LLAMABUILD!""
+            set "PFHINT=.venv\Scripts\localm setup-llama --from "!LLAMABUILD!" --force"
             set "PFDETAIL=Provisioning the native llama.cpp runtime with --from failed during setup."
             call :provision_failed || exit /b 1
         )
