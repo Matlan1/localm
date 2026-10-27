@@ -22,6 +22,8 @@ localm gui --pull bartowski/Qwen2.5-7B-Instruct-GGUF:Qwen2.5-7B-Instruct-Q4_K_M.
 
 **Starting with no models.** On a fresh install, `localm gui` still opens and lands on the Models page so you can pull or import a first model from the browser. The engine starts once you load one.
 
+**Interrupted downloads.** A model download that stopped before it finished (localm was closed, the server stopped or crashed, or a download was paused) is shown on the Models page in an **Interrupted downloads** card, and counted in the Activity indicator, with the model, the address it came from and how much is saved. **Resume** continues it from the saved data with the options it was started with, in the Add a model card's progress display; if the model changed at its source since, you are asked whether to download it again from the start. **Delete** removes its saved data after confirming the size. **Dismiss** hides it and keeps its data; a link on the card shows dismissed downloads again. Partial files left by older versions, which have no record, are listed for deleting. The same list is available at a terminal with `localm pull --list-interrupted` (see [cli.md](cli.md#interrupted-downloads)).
+
 ## Chat
 
 Ask questions and have conversations with the model. The model can access documents, search the web, and remember facts across sessions (with the memory plugin - see [memory.md](memory.md)).

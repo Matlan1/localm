@@ -397,7 +397,7 @@ def image_data_refusal(*, init_image_data=None, mask_image=None, ref_images=None
 
 
 NO_REFERENCES = ("{model} ({family}) does not take reference images. They work with edit "
-                 "models: FLUX.1 Kontext, FLUX.2, Qwen-Image-Edit, and other Qwen-Image, "
+                 "models: FLUX.1 Kontext, FLUX.2, Qwen-Image-Edit, Qwen-Image 2.1, and other Qwen-Image, "
                  "Z-Image and Anima models, or an instruct-pix2pix model.")
 
 
@@ -409,12 +409,19 @@ NO_LLM_VISION = ("The Qwen text encoder has no vision encoder, so the reference 
                  "encoder.")
 
 
+NO_LLM_VISION_21 = ("Qwen-Image 2.1 takes reference images only with the Qwen3-VL vision "
+                    "encoder. Download it with 'localm pull "
+                    + pairing.QWEN3_VL_8B_MMPROJ.pull_args + "'; it is used automatically "
+                    "once registered, or pick it as the LLM vision encoder in Settings > Images.")
+
+
 def _lacks_llm_vision(models: dict) -> bool:
-    """Whether the Qwen-Image model set *models* has no vision encoder for its
-    LLM text encoder: no ``llm_vision`` file and an LLM file without vision
-    weights."""
+    """Whether the Qwen-Image or Qwen-Image 2.1 model set *models* has no
+    vision encoder for its LLM text encoder: no ``llm_vision`` file and an LLM
+    file without vision weights."""
     ctx = models.get("ctx") or {}
-    if models.get("family") != "qwen-image" or ctx.get("llm_vision_path"):
+    if (models.get("family") not in ("qwen-image", "qwen-image-2.1")
+            or ctx.get("llm_vision_path")):
         return False
     llm = ctx.get("llm_path")
     return bool(llm) and not families.inspect_file(llm).detail.get("vision")
@@ -444,6 +451,24 @@ def input_refusal(s: dict, *, input_image=None, ref_images=None, control_image=N
     return _input_refusal(models, ref_images=ref_images, control_image=control_image)
 
 
+def lora_refusal(s: dict, loras: list) -> Optional[str]:
+    """Why the LoRAs *loras* (``[{"name", "strength"}]``) cannot be applied to
+    the model the settings *s* resolve to (``pairing.resolve_loras``), or
+    None. A model set that does not resolve is left to ``ensure_available``,
+    which reports it. Checked before any VRAM handover."""
+    if not loras:
+        return None
+    try:
+        models = resolve_models(s)
+    except _ModelError:
+        return None
+    try:
+        pairing.resolve_loras(list(loras), models.get("family"))
+    except _ModelError as e:
+        return str(e)
+    return None
+
+
 def _input_refusal(models: dict, *, ref_images, control_image) -> Optional[str]:
     """Why the resolved model set *models* cannot take these inputs, or None."""
     caps = models.get("capabilities") or {}
@@ -451,6 +476,8 @@ def _input_refusal(models: dict, *, ref_images, control_image) -> Optional[str]:
                                         or "unknown family")
     if ref_images and not caps.get("references"):
         return NO_REFERENCES.format(model=models["label"], family=family)
+    if ref_images and models.get("family") == "qwen-image-2.1" and _lacks_llm_vision(models):
+        return NO_LLM_VISION_21
     if control_image is not None and not models.get("control_net"):
         return "A control image needs a ControlNet: pick one."
     if models.get("control_net") and control_image is None:
@@ -922,9 +949,6 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
                 runner.shutdown()
                 return False, (f"{models['label']} ({info.get('version') or 'unknown'}) is not "
                                "an image generation model.")
-            if ref_images and info.get("ref_images") is False:
-                return False, NO_REFERENCES.format(model=models["label"],
-                                                   family=info.get("version") or "unknown")
             init = None
             source = init_image_data if init_image_data is not None else (
                 Path(input_image) if input_image is not None else None)
@@ -1047,7 +1071,8 @@ def _generate(s: dict, prompt: str, out_path: Path, *,
                     "batch": {"index": index + 1, "count": batch} if batch > 1 else None,
                     "backend": "native", "model": models["label"],
                     "components": components,
-                    "loras": [{"name": x["name"], "strength": x["multiplier"]}
+                    "loras": [{"name": x["name"], "strength": x["multiplier"],
+                               **({} if x.get("checked", True) else {"family_checked": False})}
                               for x in lora_files] or None,
                     "runtime": f"stable-diffusion.cpp {sd_runtime.pins.TAG} ({rt.backend})",
                 }

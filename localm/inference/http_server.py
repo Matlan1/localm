@@ -572,16 +572,18 @@ _BUSY_VICTIM_IDLE_WAIT_S = 30.0
 _VICTIM_RELEASE_EXTRA_WAIT_S = 25.0
 
 
-def _refuse_non_chat_model(name: str, registry: dict | None = None) -> None:
+async def _refuse_non_chat_model(name: str, registry: dict | None = None) -> None:
     """Raise HTTPException 422 when *name* is a registered entry the chat engine
     can never load (a vision projector, an image or video component, a
-    text-to-speech model). Runs before any eviction or cancellation, so the
-    resident model stays loaded. *registry* defaults to the current registry."""
-    from localm.model_manager.registry import chat_load_refusal
+    text-to-speech model, an unknown-typed file no backend runs). Runs before
+    any eviction or cancellation, so the resident model stays loaded. The check
+    of an unknown-typed entry reads the file system on a worker thread.
+    *registry* defaults to the current registry."""
+    from localm.model_manager.registry import chat_load_refusal_off_loop
     if registry is None:
         from localm.config import load_registry
         registry = load_registry()
-    msg = chat_load_refusal(name, registry)
+    msg = await chat_load_refusal_off_loop(name, registry)
     if msg is not None:
         raise HTTPException(422, msg)
 
@@ -706,7 +708,7 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
     """
     global _engine_factory, _switch_desired
 
-    _refuse_non_chat_model(name)
+    await _refuse_non_chat_model(name)
 
     if preempt:
         _switch_desired = name
@@ -1913,7 +1915,7 @@ async def get_engine(model_name: str | None, *, load: bool = True,
         raise HTTPException(503, "No model is loaded and none was specified. "
                             "Load a model first or name one explicitly.")
 
-    _refuse_non_chat_model(name, registry)
+    await _refuse_non_chat_model(name, registry)
 
     # `not unloading`: never hand back (and let the caller pin) an engine that an
     # eviction/unload path is mid-freeing - that is the pin-arrives-during-the-
@@ -4342,16 +4344,14 @@ def _restart_argv(port: Optional[int] = None) -> list:
     making the post-update watchdog poll the old port until it times out and
     auto-rolls back a perfectly healthy build.
 
-    Appending is safe against a user-supplied -p: click takes the LAST occurrence
-    of an option, and *port* is the port that value already resolved to, so the
-    two agree. Only serve/gui reach a restart, and both accept -p; a caller with
-    no known port (a bare create_app() that never advertised) passes None and gets
-    the untouched command line."""
+    Any -p / --port already on the command line is replaced by the one appended,
+    so repeated restarts keep a single -p. Only serve/gui reach a restart, and
+    both accept -p; a caller with no known port (a bare create_app() that never
+    advertised) passes None and gets the untouched command line."""
     import sys
-    argv = [sys.executable, "-m", "localm", *sys.argv[1:]]
-    if port:
-        argv += ["-p", str(port)]
-    return argv
+
+    from localm.portmux import argv_with_port
+    return [sys.executable, "-m", "localm", *argv_with_port(sys.argv[1:], port)]
 
 
 def _execv_argv(argv: list) -> list:
@@ -5373,18 +5373,16 @@ def _build_usage(prompt_tokens: Optional[int], completion_tokens: int = 0, *,
 
 
 def _last_user_text(messages: list) -> str:
-    """Text of the most recent user message (for the audit trail). A row the
-    client marked with an ``origin`` (a GUI web tool event sent as user-role
-    text, or a prompt the client wrote itself such as the compaction summarise
-    request) is skipped: the audit line, and the session log memory
-    consolidation learns from, record only what the user wrote."""
+    """The words the user wrote in the most recent user message they wrote
+    (for the audit trail and the session log memory consolidation learns
+    from): ``protocol.user_written_text`` of the last message
+    ``protocol.is_user_written`` accepts, so a row marked with an ``origin``
+    is skipped and a merged row with ``user_spans`` gives only those ranges.
+    "" when there is none."""
+    from localm.inference.protocol import is_user_written, user_written_text
     for m in reversed(messages):
-        if m.get("role") == "user" and not m.get("origin"):
-            content = m.get("content")
-            if isinstance(content, str):
-                return content
-            return " ".join(p.get("text", "") for p in (content or [])
-                            if isinstance(p, dict) and p.get("type") == "text")
+        if is_user_written(m):
+            return user_written_text(m)
     return ""
 
 
@@ -7351,8 +7349,9 @@ def _reply_logprobs(generated: str, records: list, top_n: int, answer: str, *,
 
 def _protocol_messages_to_dicts(messages: list[Message]) -> list:
     """Convert Pydantic Message objects to plain dicts for backends. A message's
-    ``origin`` marker, when set, is kept as an ``"origin"`` key; an unmarked
-    message has no such key."""
+    ``origin`` marker, when set, is kept as an ``"origin"`` key, and a string
+    message's ``user_spans`` as a ``"user_spans"`` key; a message without them
+    has no such key."""
     result = []
     for msg in messages:
         if isinstance(msg.content, str):
@@ -7385,6 +7384,9 @@ def _protocol_messages_to_dicts(messages: list[Message]) -> list:
         origin = getattr(msg, "origin", None)
         if origin:
             result[-1]["origin"] = origin
+        user_spans = getattr(msg, "user_spans", None)
+        if user_spans is not None and isinstance(msg.content, str):
+            result[-1]["user_spans"] = [list(s) for s in user_spans]
         if msg.tool_calls:
             result[-1]["tool_calls"] = msg.tool_calls
     return result

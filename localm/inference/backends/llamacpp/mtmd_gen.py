@@ -10,9 +10,12 @@ codebook-0 token for every frame with the sampler chain llama.cpp's
 ``llama-tts`` uses, and drives the helper one frame at a time so a caller can
 report progress and stop between frames.
 
-The helper's input struct and ``step_gen`` signature are bound for the mtmd
-builds that export ``mtmd_gen_inp_default``; an mtmd without that export lays
-the input struct out differently and is refused with :class:`SpeechUnavailable`.
+Two generation interfaces are bound: the legacy one (builds exporting
+``mtmd_gen_inp_default`` but not ``mtmd_gen_state_init``) and the state one
+(builds exporting ``mtmd_gen_state_init``, whose helper input starts with a
+``stream`` flag and whose ``mtmd_gen_audio_process`` takes a generation state).
+An mtmd exporting neither lays the input struct out differently and is refused
+with :class:`SpeechUnavailable`.
 
 Runs inside the isolated speech worker (``localm/inference/_speech_runner.py``),
 never in the server process.
@@ -147,21 +150,29 @@ class _GenAudioInfo(ctypes.Structure):
                 ("model_variant", ctypes.c_char_p)]
 
 
+_HELPER_INPUT_FIELDS = [("seq_id", ctypes.c_int32),
+                        ("prompt", ctypes.c_char_p),
+                        ("prompt_len", ctypes.c_size_t),
+                        ("speaker_ref", ctypes.c_void_p),
+                        ("lang", ctypes.c_char_p),
+                        ("top_k", ctypes.c_int32),
+                        ("top_p", ctypes.c_float),
+                        ("seed", ctypes.c_uint32),
+                        ("out_type", ctypes.c_int)]
+
+
+class _HelperInputLegacy(ctypes.Structure):
+    """``mtmd_helper_gen_audio_inp`` of the stateless interface."""
+    _fields_ = _HELPER_INPUT_FIELDS
+
+
 class _HelperInput(ctypes.Structure):
-    """``mtmd_helper_gen_audio_inp``."""
-    _fields_ = [("seq_id", ctypes.c_int32),
-                ("prompt", ctypes.c_char_p),
-                ("prompt_len", ctypes.c_size_t),
-                ("speaker_ref", ctypes.c_void_p),
-                ("lang", ctypes.c_char_p),
-                ("top_k", ctypes.c_int32),
-                ("top_p", ctypes.c_float),
-                ("seed", ctypes.c_uint32),
-                ("out_type", ctypes.c_int)]
+    """``mtmd_helper_gen_audio_inp`` of the state interface."""
+    _fields_ = [("stream", ctypes.c_bool)] + _HELPER_INPUT_FIELDS
 
 
-class _GenInp(ctypes.Structure):
-    """``mtmd_gen_inp``."""
+class _GenInpLegacy(ctypes.Structure):
+    """``mtmd_gen_inp`` of the stateless interface."""
     _fields_ = [("type", ctypes.c_int),
                 ("code0", ctypes.c_int32),
                 ("embd", ctypes.POINTER(ctypes.c_float)),
@@ -177,8 +188,8 @@ class _GenInp(ctypes.Structure):
                 ("state_size", ctypes.c_size_t)]
 
 
-class _GenOut(ctypes.Structure):
-    """``mtmd_gen_out``."""
+class _GenOutLegacy(ctypes.Structure):
+    """``mtmd_gen_out`` of the stateless interface."""
     _fields_ = [("codes", ctypes.POINTER(ctypes.c_int32)),
                 ("n_codes", ctypes.c_size_t),
                 ("feats", ctypes.POINTER(ctypes.c_float)),
@@ -191,6 +202,37 @@ class _GenOut(ctypes.Structure):
                 ("state_size", ctypes.c_size_t)]
 
 
+class _GenInp(ctypes.Structure):
+    """``mtmd_gen_inp`` of the state interface."""
+    _fields_ = [("type", ctypes.c_int),
+                ("code0", ctypes.c_int32),
+                ("embd", ctypes.POINTER(ctypes.c_float)),
+                ("top_k", ctypes.c_int32),
+                ("top_p", ctypes.c_float),
+                ("temp", ctypes.c_float),
+                ("codes", ctypes.POINTER(ctypes.c_int32)),
+                ("n_codes", ctypes.c_size_t),
+                ("feats", ctypes.POINTER(ctypes.c_float)),
+                ("n_feats", ctypes.c_size_t)]
+
+
+class _GenOut(ctypes.Structure):
+    """``mtmd_gen_out`` of the state interface."""
+    _fields_ = [("codes", ctypes.POINTER(ctypes.c_int32)),
+                ("n_codes", ctypes.c_size_t),
+                ("feats", ctypes.POINTER(ctypes.c_float)),
+                ("n_feats", ctypes.c_size_t),
+                ("embd", ctypes.POINTER(ctypes.c_float)),
+                ("is_eos", ctypes.c_bool),
+                ("audio", ctypes.POINTER(ctypes.c_float)),
+                ("n_samples", ctypes.c_size_t)]
+
+
+class _GenStateParams(ctypes.Structure):
+    """``mtmd_gen_state_params``."""
+    _fields_ = [("seed", ctypes.c_uint32)]
+
+
 # mtmd_gen_process_type: hidden state to codes.
 _GEN_PROCESS_CODE = 0
 
@@ -201,11 +243,57 @@ class _LogitBias(ctypes.Structure):
 
 _FloatPtr = ctypes.POINTER(ctypes.c_float)
 
+# The two speech generation interfaces: "legacy" (stateless, the projector
+# keeps the RNG across calls and reseeds when the seed changes) and "state"
+# (each generation runs on an mtmd_gen_state the helper creates per request
+# from its seed). A library exporting the state marker has the state interface;
+# one exporting only the legacy marker has the legacy one.
+INTERFACE_LEGACY = "legacy"
+INTERFACE_STATE = "state"
+_STATE_MARKER = "mtmd_gen_state_init"
+_LEGACY_MARKER = "mtmd_gen_inp_default"
+
+_INTERFACE_STRUCTS = {
+    INTERFACE_LEGACY: {
+        "mtmd_gen_audio_info": _GenAudioInfo,
+        "mtmd_helper_gen_audio_inp": _HelperInputLegacy,
+        "mtmd_gen_inp": _GenInpLegacy,
+        "mtmd_gen_out": _GenOutLegacy,
+    },
+    INTERFACE_STATE: {
+        "mtmd_gen_audio_info": _GenAudioInfo,
+        "mtmd_helper_gen_audio_inp": _HelperInput,
+        "mtmd_gen_inp": _GenInp,
+        "mtmd_gen_out": _GenOut,
+        "mtmd_gen_state_params": _GenStateParams,
+    },
+}
+
+_INTERFACE_SIGNATURES = {
+    INTERFACE_LEGACY: {
+        "mtmd_gen_inp_default": (_GenInpLegacy, [ctypes.c_void_p]),
+        "mtmd_gen_audio_process": (ctypes.c_int32, [
+            ctypes.c_void_p, ctypes.POINTER(_GenInpLegacy),
+            ctypes.POINTER(_GenOutLegacy)]),
+        "mtmd_helper_gen_audio_set_input": (ctypes.c_int32, [
+            ctypes.c_void_p, ctypes.POINTER(_HelperInputLegacy)]),
+    },
+    INTERFACE_STATE: {
+        "mtmd_gen_inp_default": (_GenInp, [ctypes.c_void_p]),
+        "mtmd_gen_audio_process": (ctypes.c_int32, [
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(_GenInp),
+            ctypes.POINTER(_GenOut)]),
+        "mtmd_gen_state_params_default": (_GenStateParams, []),
+        "mtmd_gen_state_init": (ctypes.c_void_p, [ctypes.c_void_p, _GenStateParams]),
+        "mtmd_gen_state_free": (None, [ctypes.c_void_p]),
+        "mtmd_gen_state_reset": (None, [ctypes.c_void_p]),
+        "mtmd_helper_gen_audio_set_input": (ctypes.c_int32, [
+            ctypes.c_void_p, ctypes.POINTER(_HelperInput)]),
+    },
+}
+
 _SIGNATURES = {
     "mtmd_gen_audio_get_info": (_GenAudioInfo, [ctypes.c_void_p]),
-    "mtmd_gen_inp_default": (_GenInp, [ctypes.c_void_p]),
-    "mtmd_gen_audio_process": (ctypes.c_int32, [
-        ctypes.c_void_p, ctypes.POINTER(_GenInp), ctypes.POINTER(_GenOut)]),
     "mtmd_support_audio": (ctypes.c_bool, [ctypes.c_void_p]),
     "mtmd_get_audio_sample_rate": (ctypes.c_int, [ctypes.c_void_p]),
     "mtmd_bitmap_init_from_audio": (ctypes.c_void_p, [ctypes.c_size_t, _FloatPtr]),
@@ -213,8 +301,6 @@ _SIGNATURES = {
     "mtmd_helper_gen_audio_init": (ctypes.c_void_p, [ctypes.c_void_p, ctypes.c_void_p]),
     "mtmd_helper_gen_audio_free": (None, [ctypes.c_void_p]),
     "mtmd_helper_gen_audio_reset": (None, [ctypes.c_void_p]),
-    "mtmd_helper_gen_audio_set_input": (ctypes.c_int32,
-                                        [ctypes.c_void_p, ctypes.POINTER(_HelperInput)]),
     "mtmd_helper_gen_audio_step_prompt": (ctypes.c_int32, [ctypes.c_void_p, ctypes.c_int32]),
     "mtmd_helper_gen_audio_step_gen": (ctypes.c_int32, [
         ctypes.c_void_p, ctypes.c_int32, _FloatPtr,
@@ -229,11 +315,22 @@ _SIGNATURES = {
 class GenerationApi:
     """The speech generation functions of one loaded mtmd library, each its own
     function object: the signatures declared here never change, or depend on,
-    the library's shared attributes that other bindings set."""
+    the library's shared attributes that other bindings set.
 
+    :attr:`interface` is :data:`INTERFACE_LEGACY` or :data:`INTERFACE_STATE`;
+    :attr:`helper_input` is the ``mtmd_helper_gen_audio_inp`` structure of that
+    interface. The ``mtmd_gen_state_*`` functions are bound on the state
+    interface only."""
+
+    interface: str
+    helper_input: type
     mtmd_gen_audio_get_info: Any
     mtmd_gen_inp_default: Any
     mtmd_gen_audio_process: Any
+    mtmd_gen_state_params_default: Any
+    mtmd_gen_state_init: Any
+    mtmd_gen_state_free: Any
+    mtmd_gen_state_reset: Any
     mtmd_support_audio: Any
     mtmd_get_audio_sample_rate: Any
     mtmd_bitmap_init_from_audio: Any
@@ -252,24 +349,37 @@ _bound: dict[int, tuple] = {}
 
 
 def bind_generation_api(m) -> GenerationApi:
-    """The speech generation functions of the loaded mtmd library *m*.
+    """The speech generation functions of the loaded mtmd library *m*, bound
+    for the interface it exports: the state interface when it exports
+    ``mtmd_gen_state_init``, else the legacy one when it exports
+    ``mtmd_gen_inp_default``.
 
-    Raises :class:`SpeechUnavailable` when *m* lacks a required function or
-    predates the supported helper layout (no ``mtmd_gen_inp_default``)."""
+    Raises :class:`SpeechUnavailable` when *m* exports neither marker or lacks
+    a function of its interface."""
     with _bind_lock:
         cached = _bound.get(id(m))
         if cached is not None and cached[0] is m:
             return cached[1]
-        try:
-            m["mtmd_gen_inp_default"]
-        except (AttributeError, KeyError) as e:
+        interface = None
+        for marker, candidate in ((_STATE_MARKER, INTERFACE_STATE),
+                                  (_LEGACY_MARKER, INTERFACE_LEGACY)):
+            try:
+                m[marker]
+            except (AttributeError, KeyError):
+                continue
+            interface = candidate
+            break
+        if interface is None:
             raise SpeechUnavailable(
                 "The installed llama.cpp runtime predates the speech generation "
                 "interface localm supports. Install the runtime localm pins with "
-                "'localm setup-llama'.") from e
+                "'localm setup-llama'.")
         ns = GenerationApi()
+        ns.interface = interface
+        ns.helper_input = _INTERFACE_STRUCTS[interface]["mtmd_helper_gen_audio_inp"]
+        signatures = {**_SIGNATURES, **_INTERFACE_SIGNATURES[interface]}
         try:
-            for name, (restype, argtypes) in _SIGNATURES.items():
+            for name, (restype, argtypes) in signatures.items():
                 fn = m[name]
                 fn.restype = restype
                 fn.argtypes = argtypes
@@ -605,10 +715,12 @@ class SpeechSynthesizer:
 
     def _reseed_generation_rng(self, seed: int) -> None:
         """Make the projector's generation RNG start from *seed* on the next
-        generation call. The projector reseeds only when the seed differs from
-        the one its previous call used, so a request that repeats the previous
-        request's seed first runs one code-generation call with another seed."""
-        if self._last_gen_seed != seed:
+        generation call. On the legacy interface the projector reseeds only
+        when the seed differs from the one its previous call used, so a request
+        that repeats the previous request's seed first runs one code-generation
+        call with another seed. On the state interface the helper seeds a new
+        generation state for every request, and this does nothing."""
+        if self._m.interface != INTERFACE_LEGACY or self._last_gen_seed != seed:
             return
         m = self._m
         inp = m.mtmd_gen_inp_default(self._mtmd._ctx)
@@ -617,7 +729,7 @@ class SpeechSynthesizer:
         zeros = (ctypes.c_float * self._n_embd)()
         inp.embd = ctypes.cast(zeros, ctypes.POINTER(ctypes.c_float))
         inp.seed = (seed ^ 1) & _UINT32_MAX
-        out = _GenOut()
+        out = _GenOutLegacy()
         self._last_gen_seed = None
         if m.mtmd_gen_audio_process(self._mtmd._ctx, ctypes.byref(inp), ctypes.byref(out)) != 0:
             raise SpeechStageFailed("the speech generator could not be reset")
@@ -649,10 +761,11 @@ class SpeechSynthesizer:
                     raise SpeechInputError("The reference voice could not be prepared.")
             raw = text.encode("utf-8")
             sp = self._sampling
-            inp = _HelperInput(0, raw, len(raw), bitmap,
-                               (lang or "").encode("ascii"), sp.top_k,
-                               projector_top_p(sp.top_p),
-                               seed, _OUTTYPE_WAV)
+            inp = m.helper_input(seq_id=0, prompt=raw, prompt_len=len(raw),
+                                 speaker_ref=bitmap,
+                                 lang=(lang or "").encode("ascii"), top_k=sp.top_k,
+                                 top_p=projector_top_p(sp.top_p),
+                                 seed=seed, out_type=_OUTTYPE_WAV)
             if m.mtmd_helper_gen_audio_set_input(helper, ctypes.byref(inp)) != 0:
                 raise SpeechStageFailed("the speech prompt could not be prepared")
             if bitmap is not None:

@@ -66,11 +66,13 @@ class MCPServer:
     """One running MCP server process and its JSON-RPC session."""
 
     def __init__(self, name: str, command: str, args: Optional[list[str]] = None,
-                 env: Optional[dict[str, str]] = None, trusted: bool = False) -> None:
+                 env: Optional[dict[str, str]] = None, trusted: bool = False,
+                 cwd: Optional[Path] = None) -> None:
         self.name = name
         self.command = command
         self.args = args or []
         self.env = env
+        self.cwd = cwd
         self.trusted = trusted
         self.tools: list[dict] = []
         self._proc: Optional[subprocess.Popen] = None
@@ -84,7 +86,9 @@ class MCPServer:
     # ------------------------------------------------------------------ #
 
     def start(self) -> None:
-        """Spawn the server, run the MCP handshake, and fetch its tool list."""
+        """Spawn the server in ``cwd`` (the project folder, so a relative script
+        path in its args resolves there; None = this process's working folder),
+        run the MCP handshake, and fetch its tool list."""
         import os
         from localm.config import user_command_env
         full_env = user_command_env({**os.environ, **self.env} if self.env else None)
@@ -97,6 +101,7 @@ class MCPServer:
                 text=True,
                 encoding="utf-8",
                 env=full_env,
+                cwd=str(self.cwd) if self.cwd is not None else None,
             )
         except FileNotFoundError as e:
             raise MCPError(f"MCP server '{self.name}': command not found: {self.command}") from e
@@ -279,20 +284,22 @@ def _make_tool_fn(server: MCPServer, tool_name: str):
     return _fn
 
 
-def _spec_key(name: str, spec: dict) -> tuple:
+def _spec_key(name: str, spec: dict, cwd: Optional[Path] = None) -> tuple:
     env = spec.get("env") or {}
     env_items: tuple = ()
     if isinstance(env, dict):
         env_items = tuple(sorted((str(k), str(v)) for k, v in env.items()))
     return (name, spec["command"], tuple(str(a) for a in spec.get("args", [])),
-            env_items, bool(spec.get("trusted", False)))
+            env_items, bool(spec.get("trusted", False)),
+            str(cwd) if cwd is not None else None)
 
 
-def pooled_server(name: str, spec: dict) -> MCPServer:
-    """The live server for *spec*, started on first use and reused after.
-    Raises MCPError (or the start failure) when a fresh start fails; nothing
-    is pooled then. The pool is process-wide and its entries stop at exit."""
-    key = _spec_key(name, spec)
+def pooled_server(name: str, spec: dict, cwd: Optional[Path] = None) -> MCPServer:
+    """The live server for *spec* started in *cwd*, started on first use and
+    reused after. Raises MCPError (or the start failure) when a fresh start
+    fails; nothing is pooled then. The pool is process-wide and its entries
+    stop at exit."""
+    key = _spec_key(name, spec, cwd)
     with _POOL_LOCK:
         server = _POOL.get(key)
         if server is not None and server.alive:
@@ -305,6 +312,7 @@ def pooled_server(name: str, spec: dict) -> MCPServer:
             args=spec.get("args", []),
             env=spec.get("env"),
             trusted=bool(spec.get("trusted", False)),
+            cwd=cwd,
         )
         try:
             server.start()
@@ -419,7 +427,7 @@ def register_mcp_tools(cwd: Path, servers: Optional[dict[str, dict]] = None,
 
     for name, spec in configured.items():
         try:
-            server = pooled_server(name, spec)
+            server = pooled_server(name, spec, cwd)
         except MCPError as e:
             warnings.append(str(e))
             continue

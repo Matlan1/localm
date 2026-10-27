@@ -25,7 +25,10 @@ import time
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import StreamingResponse
 
-from localm.inference.http_server import _require_auth, job_owner_ok, require_owner
+from localm.inference.http_server import (
+    _require_auth, job_owner_ok, path_formatter, require_owner,
+)
+from localm.pathscrub import map_strings
 
 
 def register(app: FastAPI, jobs) -> None:
@@ -80,13 +83,23 @@ def register(app: FastAPI, jobs) -> None:
         and finished_at are server epoch seconds; a client computing an age
         against its OWN clock is wrong by whatever the two clocks disagree by.
         Compute ages as ``now - created_at``, never against a local clock.
+
+        For a caller other than the local operator every string in a row is
+        path-scrubbed (``path_formatter``).
         """
-        return {"now": time.time(),
-                "operations": jobs.snapshot(
-                    visible=lambda owner: job_owner_ok(request, owner))}
+        rows = jobs.snapshot(visible=lambda owner: job_owner_ok(request, owner))
+        show = path_formatter(request)
+        if show is not str:
+            rows = map_strings(rows, show)
+        return {"now": time.time(), "operations": rows}
 
     @app.get("/api/jobs/{job_id}/events", dependencies=[Depends(_require_auth)])
-    async def job_events(job=Depends(owned_job)):
+    async def job_events(request: Request, job=Depends(owned_job)):
+        """Stream one job's events as SSE. For a caller other than the local
+        operator every string in an event is path-scrubbed
+        (``path_formatter``)."""
+        show = path_formatter(request)
+
         async def _stream():
             # Each connection gets its own subscriber queue (fed the full history
             # plus every event pushed from here on) so concurrent viewers of the
@@ -104,7 +117,8 @@ def register(app: FastAPI, jobs) -> None:
                     except TimeoutError:
                         yield ": keepalive\n\n"
                         continue
-                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                    shown = event if show is str else map_strings(event, show)
+                    yield f"data: {json.dumps(shown, ensure_ascii=False)}\n\n"
                     if event.get("type") == "end":
                         return
             finally:

@@ -760,9 +760,18 @@ class TestTorchNumberingMatchesLlamaCpp:
             assert discover.implicit_split_devices({}) is not None
         reg.assert_called_once()
         stop.assert_called_once()
-        with _torch_box(gpus, _registry(gpus), daemon_running=True) as (reg, stop):
-            assert discover.implicit_split_devices({}) is not None
+        one = _torch_readings((20.0, False))
+        with _torch_box(one, _registry(one), daemon_running=True) as (reg, stop):
+            assert discover._runtime_device_registry() is not None
         stop.assert_not_called()
+
+    def test_a_registry_read_of_several_gpus_stops_a_running_daemon(self):
+        # The read opened a driver context on each GPU in the daemon, which a
+        # long-lived daemon would keep.
+        gpus = _torch_readings((20.0, False), (10.0, False))
+        with _torch_box(gpus, _registry(gpus), daemon_running=True) as (reg, stop):
+            assert discover._runtime_device_registry() is not None
+        stop.assert_called_once()
 
     def test_two_discrete_gpus_that_fit_keep_the_default_split(self, tmp_path):
         gpus = _torch_readings((20.0, False), (20.0, False))

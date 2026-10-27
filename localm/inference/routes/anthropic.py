@@ -27,6 +27,7 @@ import localm.inference.http_server as _hs
 from localm import peer_routing
 from localm.inference import anthropic_protocol as A
 from localm.inference.ollama_protocol import iter_sse_json
+from localm.inference.errors import UNDECODABLE_BODY_MESSAGE, is_undecodable_body
 from localm.inference.protocol import ChatRequest
 from localm.inference.backends.base import PretokenizerUnsafeInputError
 from localm.inference.routes._chat_bridge import (
@@ -51,6 +52,8 @@ class AnthropicRoute(APIRoute):
             except A.AnthropicError as exc:
                 return _error(exc.status, exc.message)
             except StarletteHTTPException as exc:
+                if is_undecodable_body(exc):
+                    return _error(400, UNDECODABLE_BODY_MESSAGE)
                 detail = exc.detail if isinstance(exc.detail, str) else json.dumps(exc.detail)
                 return _error(exc.status_code, detail, exc.headers)
             except RequestValidationError as exc:

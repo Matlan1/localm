@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import contextlib
 import sys
+from pathlib import Path
 
 import click
 
@@ -118,9 +119,18 @@ def rag_add(collection, paths, force, embed, url):
     from localm.console import SafeConsole as Console
     from rich.markup import escape
 
+    from ..pathsafe import is_unc_or_device_path
     from ..rag import Collection
     from .errors import _report_add_paths_result, run_or_die
     console = Console()
+    missing = [p for p in paths
+               if not is_unc_or_device_path(str(Path(p).expanduser()))
+               and not Path(p).expanduser().exists()]
+    if missing:
+        for p in missing:
+            console.print(f"[red]Path does not exist: {escape(p)}[/red]")
+        console.print("[red]Nothing was added.[/red]")
+        sys.exit(1)
     coll = run_or_die(Collection, collection)
     embed_fn = _cli_rag_embed_fn(url) if embed else None
     # The configured embedding model's name, so a fresh collection ends up with

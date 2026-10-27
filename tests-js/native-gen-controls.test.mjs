@@ -191,6 +191,29 @@ test("the selected model's hires suggestion is shown as the default option and p
   assert.equal($("img-hires-denoise").placeholder, "0.35");
 });
 
+test("a language switch keeps the model's hires suggestion in the placeholders and the default option", async () => {
+  const { win, $ } = setup({ preview: { model: "sd-turbo", family: "sd2", defaults: { steps: 2 },
+                                        hires: HIRES_SUGGESTION } });
+  await settle(win, "await refreshImageBackend();");
+  await tick(); await tick();
+  assert.equal($("img-hires-scale").placeholder, "1.5");
+  await settle(win, 'await applyLanguage("en");');
+  assert.equal($("img-hires-scale").placeholder, "1.5",
+    "applyI18n resets the placeholder to the generic text; the suggestion must be re-applied");
+  assert.equal($("img-hires-denoise").placeholder, "0.35");
+  assert.equal($("img-hires-upscaler").options[0].textContent, "Suggested: Lanczos");
+});
+
+test("a suggestion that arrives before the upscaler labels shows the generic option, never the raw id", async () => {
+  const { win, $ } = setup();
+  await settle(win, "await refreshImageBackend();");
+  await tick(); await tick();
+  runScript(win, `window.__ngc = createNativeGenControls({ prefix: "img" });
+    window.__ngc.suggest({ upscaler: "lanczos", scale: 1.5, denoise: 0.35, latent_denoise: 0.55 });`);
+  assert.equal($("img-hires-upscaler").options[0].textContent, "Suggested for the model",
+    "the id 'lanczos' must not stand in for the label before the labels are known");
+});
+
 test("a new suggestion never changes entered hires values; the button replaces them", async () => {
   const { win, $, calls } = setup({ preview: { model: "sd-turbo", family: "sd2",
                                                defaults: { steps: 2 }, hires: HIRES_SUGGESTION } });

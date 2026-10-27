@@ -283,7 +283,7 @@ class TestEffectiveGpuLayers:
         assert n < 99
         out = self._flat(capsys)
         assert "16.0 gb total" in out
-        assert "the model needs" in out
+        assert "every layer on the gpu needs" in out
         assert "kv cache" not in out
 
     def test_partial_offload_cause_other_process_holding_vram(self, tmp_path, capsys):
@@ -355,7 +355,7 @@ class TestEffectiveGpuLayers:
         assert n < 99
         out = self._flat(capsys)
         assert "16.0 gb total" in out
-        assert "the model needs" in out
+        assert "every layer on the gpu needs" in out
         assert "kv cache" not in out
 
 

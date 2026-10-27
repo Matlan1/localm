@@ -386,8 +386,20 @@ def _handle_command(raw: str, agent: Agent) -> bool:
         if not arg:
             print_info("Usage: /cd <path>")
         else:
-            new_dir = (agent.cwd / arg).resolve()
-            if not new_dir.is_dir():
+            # Checked on the expanded string, before is_dir() or resolve()
+            # touches the path.
+            from localm.pathsafe import is_unc_or_device_path
+            requested = agent.cwd / Path(arg).expanduser()
+            new_dir = None
+            if not (is_unc_or_device_path(arg)
+                    or is_unc_or_device_path(str(requested))):
+                new_dir = requested.resolve()
+                if is_unc_or_device_path(str(new_dir)):
+                    new_dir = None
+            if new_dir is None:
+                print_warning(
+                    "/cd needs a local directory path, not a UNC or device path.")
+            elif not new_dir.is_dir():
                 print_warning(f"Not a directory: {new_dir}")
             else:
                 # A project that marked itself private must not receive this

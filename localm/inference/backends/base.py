@@ -195,6 +195,12 @@ class ModelRefusedError(RuntimeError):
     the CLI prints it as a refusal and exits 1 without offering a bug report."""
 
 
+class WorkerDiedError(RuntimeError):
+    """The model worker process exited during a reply. The runner has already
+    logged the phase it died in, so callers that drop the model instance do not
+    log the same failure again at error level."""
+
+
 class ModelFileDamagedError(ModelRefusedError):
     """Raised by a load when llama.cpp refused to read the model file itself
     because its contents are malformed or incomplete. The message names the

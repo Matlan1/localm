@@ -236,7 +236,8 @@ CORE_FIELDS: list = [
                  group="Engine", applies=Applies.NEXT_LOAD, min=0, max=262144),
     SettingField("use_mmap", Widget.SELECT, "Memory-map model files",
                  "auto runs from disk-backed memory when the model may not fit in "
-                 "available RAM. on forces it; off reads the whole model into memory first.",
+                 "available RAM, and warns when CPU layers will run at disk speed. on "
+                 "forces it; off reads the whole model into memory first.",
                  group="Engine", applies=Applies.NEXT_LOAD,
                  options=["auto", "on", "off"]),
     SettingField("kv_cache_type", Widget.SELECT, "KV cache type",
@@ -331,8 +332,8 @@ CORE_FIELDS: list = [
     # gpu_split_ratios 3,1` like any other field.
     SettingField("gpu_split_ratios", Widget.HIDDEN, "GPU split ratios",
                  "Optional relative weight per device in Split across GPUs "
-                 "(same order/length). Blank distributes by each card's free "
-                 "VRAM at load time (evenly when that cannot be measured).",
+                 "(same order/length). Blank sizes each card's share from its "
+                 "free VRAM at load time.",
                  group="Engine", applies=Applies.NEXT_LOAD),
     # HIDDEN, like the GPU knobs above: rendered by a dedicated "Max resident
     # models" number input in the Live Tuning card (settings-perf.js
