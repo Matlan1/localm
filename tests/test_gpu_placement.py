@@ -136,6 +136,18 @@ class TestPlanner:
         tight = min((d.device.free - d.need) // d.kv_per_token for d in p.loads)
         assert ctx == 4096 + tight
 
+    def test_a_tight_box_still_gets_every_layer(self):
+        # 10 units of 1 GiB (9 layers + the output layer) over cards with 4.0
+        # and 9.6 GiB free: every unit fits only when each card keeps its 1.5 GB
+        # reserve free, which leaves room for 2 and 8 units.
+        units = ModelUnits(layer_bytes=[GiB] * 9, expert_bytes=[0] * 9,
+                           layer_kv=[0] * 9, kv_per_token=[1] * 9,
+                           output_bytes=GiB, logits_bytes=0,
+                           reserve_bytes=int(1.5e9))
+        p = plan_placement(_devices([4.0, 9.6]), units)
+        assert p.fits and p.full_offload
+        assert [d.units for d in p.loads] == [2, 8]
+
     def test_random_boxes_never_overfill_a_card(self):
         rng = random.Random(20261027)
         checked = 0
