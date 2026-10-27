@@ -685,3 +685,49 @@ def test_three_scopes_closing_middle_then_outer_then_inner(capfd, monkeypatch):
     finally:
         os.dup2(original, 2)
         os.close(original)
+
+
+# --------------------------------------------------------------------------- #
+#  native_console_paused(): the grouped lines stay off the terminal
+# --------------------------------------------------------------------------- #
+
+def test_paused_scope_keeps_native_lines_off_the_console_but_in_the_ring(monkeypatch):
+    console = _Console()
+    monkeypatch.setattr(debuglog, "_stable_console_stream", lambda: console)
+    before = len(debuglog.recent_activity())
+
+    with debuglog.native_console_paused():
+        with debuglog.dedup_native_stderr():
+            for _ in range(4):
+                os.write(2, b"ggml_backend_cuda_graph_compute: CUDA graph warmup reset\n")
+
+    assert console.lines() == []
+    joined = "\n".join(debuglog.recent_activity()[before:])
+    assert "CUDA graph warmup reset(4)" in joined
+
+
+def test_unpaused_scope_still_shows_native_lines_on_the_console(monkeypatch):
+    console = _Console()
+    monkeypatch.setattr(debuglog, "_stable_console_stream", lambda: console)
+
+    with debuglog.dedup_native_stderr():
+        os.write(2, b"a native line\n")
+
+    assert any("a native line" in line for line in console.lines())
+
+
+def test_the_pause_ends_with_its_block_even_when_it_raises():
+    with pytest.raises(RuntimeError):
+        with debuglog.native_console_paused():
+            assert debuglog._native_console_is_paused()
+            raise RuntimeError("boom")
+
+    assert not debuglog._native_console_is_paused()
+
+
+def test_nested_pauses_release_only_when_the_outer_one_ends():
+    with debuglog.native_console_paused():
+        with debuglog.native_console_paused():
+            pass
+        assert debuglog._native_console_is_paused()
+    assert not debuglog._native_console_is_paused()
