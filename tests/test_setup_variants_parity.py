@@ -203,6 +203,48 @@ def test_every_console_prompt_shows_the_spec_default(name):
     assert not wrong, f"{name}: (line, question, shown, spec): {wrong}"
 
 
+def _effective_default(name: str, i: int, prompt: str):
+    """The default the script applies after the prompt at line *i*: the value of
+    ``if not defined VAR set "VAR=..."`` (.bat) or ``VAR="${VAR:-...}"`` (read in
+    .sh), lowercased first character; "" when the prompt sets none; None when the
+    prompt does not name a variable (setup.sh ask(), checked by its argument)."""
+    lines = _lines(name)
+    if name.endswith(".bat"):
+        m = re.search(r'set /p "([A-Za-z_]+)=', prompt, re.I)
+        if not m:
+            return None
+        var = m.group(1)
+        pat = re.compile(rf'if not defined {var} set "{var}=([^"]*)"', re.I)
+    else:
+        m = re.search(r'read -r -p "[^"]*"\s+([A-Za-z_]+)', prompt)
+        if not m:
+            return None
+        var = m.group(1)
+        pat = re.compile(rf'\$\{{{var}:-([^}}]*)\}}')
+    for j in range(i, min(i + 5, len(lines))):
+        found = pat.search(lines[j])
+        if found:
+            return found.group(1)[:1].lower()
+    return ""
+
+
+@pytest.mark.parametrize("name", SCRIPTS)
+def test_every_console_prompt_applies_the_spec_default(name):
+    """What Enter actually gives, not only what the prompt text shows."""
+    wrong = []
+    for fname, i, qid, line in _tagged_prompts():
+        if fname != name:
+            continue
+        applied = _effective_default(name, i, line)
+        if applied is None:
+            continue
+        shown = _shown_default(line)
+        expected = spec.question(qid).default[:1] if shown else ""
+        if applied != expected:
+            wrong.append((i + 1, qid, applied, expected))
+    assert not wrong, f"{name}: (line, question, applied, spec): {wrong}"
+
+
 def test_each_question_shows_its_default_somewhere_it_is_asked():
     """A question asked with a visible default shows the spec's default in at
     least one place, so a marker on an unrelated line cannot hide a change."""
@@ -301,6 +343,71 @@ def test_the_window_starts_on_the_spec_defaults(tmp_path, monkeypatch):
     assert set(plan.plugins) == set(spec.question("plugins").default.split(","))
     assert w.choice_var.get() == spec.default_choice("existing-install")
     assert w.purge_var.get() is spec.default_yes("uninstall-data")
+
+
+# The Wizard variable that answers each spec question the window asks.
+WINDOW_CONTROLS = {
+    "existing-install": ("choice_var",),
+    "uninstall-data": ("purge_var",),
+    "replace-venv": ("replace_venv_var",),
+    "data-folder": ("portable_var", "path_var"),
+    "window-mode": ("appwin_var",),
+    "backend": ("backend_var",),
+    "own-build-dir": ("own_dir_var",),
+    "shortcut": ("shortcut_var",),
+    "global-command": ("path_cmd_var",),
+    "plugins": ("plugin_vars",),
+    "plugin-deps": ("deps_var",),
+}
+# Window questions asked by a dialog or a step, not by a control on a page.
+WINDOW_DIALOGS = {"uninstall-confirm", "venv-lockers", "venv-retry", "runtime-failed",
+                  "keep-data", "data-offline"}
+# Questions the launcher asks before the window opens.
+LAUNCHER_QUESTIONS = {"tooling-store", "uv-install"}
+
+
+def test_every_window_control_answers_a_spec_question(tmp_path, monkeypatch):
+    """Walk every page of a repair-mode window (so the .venv question shows) and
+    match each control's bound variable against the spec's questions: an extra
+    control or a lost one fails."""
+    tk = pytest.importorskip("tkinter")
+    from tkinter import filedialog, ttk
+    gui = _gui_module(tmp_path, monkeypatch)
+    (tmp_path / ".venv").mkdir()
+    monkeypatch.setattr(gui.sys, "platform", "win32")
+    root = build_tk_root(tk.Tk)
+    root.withdraw()
+    try:
+        w = gui.Wizard(root, tk, ttk, filedialog, existing=True)
+        names = {}
+        for attr, value in vars(w).items():
+            if isinstance(value, tk.Variable):
+                names[str(value)] = attr
+            elif attr == "plugin_vars":
+                for v in value.values():
+                    names[str(v)] = "plugin_vars"
+        bound = set()
+        stack = [w.container]
+        while stack:
+            widget = stack.pop()
+            stack.extend(widget.winfo_children())
+            for option in ("variable", "textvariable"):
+                try:
+                    v = str(widget.cget(option))
+                except Exception:
+                    continue
+                if v:
+                    bound.add(names.get(v, f"<unknown {v}>"))
+    finally:
+        root.destroy()
+    expected = {a for attrs in WINDOW_CONTROLS.values() for a in attrs}
+    assert bound == expected, (sorted(bound - expected), sorted(expected - bound))
+
+
+def test_the_window_question_table_covers_the_spec():
+    asked = {q.id for q in spec.QUESTIONS if spec.GUI in q.variants}
+    covered = set(WINDOW_CONTROLS) | WINDOW_DIALOGS | LAUNCHER_QUESTIONS
+    assert asked == covered, (sorted(asked - covered), sorted(covered - asked))
 
 
 # --------------------------------------------------------------------------- #
