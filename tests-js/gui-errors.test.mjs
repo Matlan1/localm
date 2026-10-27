@@ -79,6 +79,16 @@ test("the close button dismisses an error, and Escape dismisses the focused one"
   assert.equal(doc.getElementById("toast-errors").hidden, true);
 });
 
+test("only the error just added is announced, and focus stays on a close button across a new error", async () => {
+  const { window, doc } = await boot();
+  window.toast("first", true);
+  doc.querySelector("#toast-errors .toast-error-close").focus();
+  window.toast("second", true);
+  const alerts = [...doc.querySelectorAll("#toast-errors [role=alert] .toast-error-text")].map((n) => n.textContent);
+  assert.deepEqual(alerts, ["second"]);
+  assert.equal(doc.activeElement.closest(".toast-error").dataset.text, "first");
+});
+
 test("an identical repeated error collapses into one toast with a count", async () => {
   const { window, doc } = await boot();
   window.toast("same failure", true);
@@ -163,6 +173,10 @@ test("outside privacy mode the list persists, and turning privacy on wipes the s
   assert.equal(window.localStorage.getItem("localm.recentErrors"), null);
   window.toast("private one", true);
   assert.equal(window.localStorage.getItem("localm.recentErrors"), null);
+  mode = "full";
+  await window.refreshCtxLimit();
+  window.toast("after privacy", true);
+  assert.equal(JSON.parse(window.localStorage.getItem("localm.recentErrors"))[0].text, "after privacy");
 });
 
 test("a stored list is restored once the server mode is known (not privacy)", async () => {

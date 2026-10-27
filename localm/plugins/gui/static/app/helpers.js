@@ -226,6 +226,8 @@ export async function whileBusy(btn, label, work) {
 export const TOAST_ERROR_STACK_MAX = 3;
 // Undismissed error toasts, oldest first: { text, count }.
 let _toastErrors = [];
+// The error toast to announce on the next render (the one just added or raised).
+let _toastErrorAnnounce = null;
 
 /** Show *msg* as a toast. An info toast replaces the previous info toast and
  *  hides after 3.5 s. An error toast (isError true) stays until dismissed: it
@@ -260,6 +262,7 @@ export function showErrorToast(text) {
   } else {
     _toastErrors.push({ text, count: 1 });
   }
+  _toastErrorAnnounce = text;
   renderErrorToasts();
 }
 
@@ -289,6 +292,10 @@ function _focusNextErrorClose(box) {
 export function renderErrorToasts() {
   const box = $("toast-errors");
   if (!box) return;
+  const focused = box.contains(document.activeElement)
+    ? document.activeElement.closest(".toast-error")?.dataset.text : undefined;
+  const announce = _toastErrorAnnounce;
+  _toastErrorAnnounce = null;
   box.replaceChildren();
   const shown = _toastErrors.slice(-TOAST_ERROR_STACK_MAX);
   const hidden = _toastErrors.length - shown.length;
@@ -305,7 +312,8 @@ export function renderErrorToasts() {
   }
   for (const entry of shown) {
     const item = el("div", "toast-error");
-    item.setAttribute("role", "alert");
+    item.dataset.text = entry.text;
+    if (entry.text === announce) item.setAttribute("role", "alert");
     const text = el("span", "toast-error-text", entry.text);
     item.appendChild(text);
     if (entry.count > 1) item.appendChild(el("span", "toast-error-count", t("toast.repeatCount", { count: entry.count })));
@@ -323,6 +331,7 @@ export function renderErrorToasts() {
       _focusNextErrorClose(box);
     });
     box.appendChild(item);
+    if (focused === entry.text) close.focus();
   }
   box.hidden = _toastErrors.length === 0;
 }
