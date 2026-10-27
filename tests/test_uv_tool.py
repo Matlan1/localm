@@ -45,7 +45,8 @@ class TestFindUv:
 
     def test_the_contained_copy(self, machine):
         root, _ = machine
-        assert uv_tool.find_uv(root) == str(_uv(root / ".uv"))
+        exe = _uv(root / ".uv")
+        assert uv_tool.find_uv(root) == str(exe)
 
     def test_the_contained_copy_in_a_bin_subfolder(self, machine):
         root, _ = machine
@@ -62,11 +63,13 @@ class TestFindUv:
     def test_the_contained_copy_beats_one_on_path(self, machine, tmp_path, monkeypatch):
         root, _ = machine
         monkeypatch.setenv("PATH", str(_uv(tmp_path / "bin").parent))
-        assert uv_tool.find_uv(root) == str(_uv(root / ".uv"))
+        exe = _uv(root / ".uv")
+        assert uv_tool.find_uv(root) == str(exe)
 
     def test_astral_default_directories_when_path_lacks_uv(self, machine):
         root, home = machine
-        assert uv_tool.find_uv(root) == str(_uv(home / ".local" / "bin"))
+        exe = _uv(home / ".local" / "bin")
+        assert uv_tool.find_uv(root) == str(exe)
 
     def test_path_beats_the_default_directories(self, machine, tmp_path, monkeypatch):
         root, home = machine
@@ -87,12 +90,14 @@ class TestFindUv:
         root, _ = machine
         _record(root, uv_exe=str(tmp_path / "deleted" / UV), uv_dir=str(root / ".uv"))
         assert uv_tool.find_uv(root) is None
-        assert uv_tool.find_uv(root) == str(_uv(root / ".uv"))
+        exe = _uv(root / ".uv")
+        assert uv_tool.find_uv(root) == str(exe)
 
     def test_a_damaged_record_is_ignored(self, machine):
         root, _ = machine
         (root / ".localm-install.json").write_text("{not json", encoding="utf-8")
-        assert uv_tool.find_uv(root) == str(_uv(root / ".uv"))
+        exe = _uv(root / ".uv")
+        assert uv_tool.find_uv(root) == str(exe)
 
     @pytest.mark.skipif(uv_tool.IS_WINDOWS, reason="POSIX execute bit")
     def test_a_file_that_cannot_be_executed_is_not_a_uv(self, machine):

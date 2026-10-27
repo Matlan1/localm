@@ -1753,6 +1753,7 @@ class TestContainedUv:
             raise tool.UvBootstrapError("offline")
 
         monkeypatch.setattr(tool, "bootstrap_uv", failing)
+        shutil.rmtree(tmp_path / ".uv")
         with pytest.raises(gui.StepFailed, match="offline"):
             gui.all_steps(gui.Plan(portable_store=True))[0].run(lambda s: None)
 
@@ -1766,12 +1767,19 @@ class TestContainedUv:
         assert [s.label for s in gui.all_steps(gui.Plan(portable_store=False))] == [
             s.label for s in gui.build_steps(gui.Plan(portable_store=False))]
 
-    def test_a_shared_uv_is_recorded_by_its_full_path(self, gui, tmp_path, monkeypatch):
-        own = self._uv(tmp_path / "sysbin", gui)
+    def test_a_uv_outside_the_folder_is_reported_as_shared(self, gui, tmp_path, monkeypatch):
+        own = self._uv(tmp_path.parent / (tmp_path.name + "-outside") / "sysbin", gui)
         monkeypatch.setenv("PATH", str(own.parent))
+        assert Path(gui.shared_uv()).samefile(own)
+        self._uv(tmp_path / ".uv", gui)
+        assert gui.shared_uv() is None, "a contained uv wins and is not a shared one"
+
+    def test_a_shared_uv_is_recorded_by_its_full_path(self, gui, tmp_path, monkeypatch):
+        own = tmp_path / "sysbin" / "uv"
+        monkeypatch.setattr(gui, "shared_uv", lambda: str(own))
         cmds = _commands_for(gui, monkeypatch, gui.Plan(backend="own", portable_store=False))
         rec = [c for c in cmds if "localm.install_manifest" in c][0]
-        assert Path(rec[rec.index("--uv-exe") + 1]).samefile(own)
+        assert rec[rec.index("--uv-exe") + 1] == str(own)
 
     def test_a_contained_uv_is_recorded_as_uv_dir_and_not_as_a_shared_one(
             self, gui, tmp_path, monkeypatch):
