@@ -9,6 +9,7 @@ import { t, tn } from "../app/i18n.js";
 import { onServerUnreachable } from "../app/init.js";
 import { emptyState, iconEl } from "../app/icons.js";
 import { refreshModels, showKeyGate, switchModel, toastLoadResult } from "../app/models-sidebar.js";
+import { interruptedState, loadInterrupted, onInterruptedChange, renderInterrupted, setResumeHandler } from "../app/interrupted-pulls.js";
 import { backendOverrideNote, refreshBackendInfo, refreshPerfEstimate } from "../app/settings-perf.js";
 
 /* ================================================================ */
@@ -399,6 +400,7 @@ export async function refreshModelsPage() {
     _loadPullShortcuts().then((ok) => { if (!ok) _pullShortcutsLoaded = false; });
   }
   await refreshModels();
+  loadInterrupted();
 
   const box = $("models-table");
   if (myGen !== _modelsRenderGen) return;
@@ -2652,7 +2654,20 @@ function cancelledStatusText(discard) {
                                : "models.pull.cancelledNothingStatus");
 }
 
-async function runPull(payload) {
+async function postPull(payload) {
+  const r = await fetch("/api/models/pull", {
+    method: "POST", headers: authHeaders(),
+    body: JSON.stringify(payload),
+  });
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.detail || r.statusText);
+  return data;
+}
+
+// Runs a pull and shows its progress. *start* posts the request and resolves to
+// {job_id}, or to null when nothing was started; it defaults to POST
+// /api/models/pull with *payload*.
+async function runPull(payload, start = () => postPull(payload)) {
   const sha256Input = $("pull-sha256");
   const storeInput = $("pull-store");
   pausedPull = null;
@@ -2675,12 +2690,13 @@ async function runPull(payload) {
   const samples = [];   // rolling {t, downloaded} window, used when the server sends no rate
   let last = { downloaded: 0, total: 0, pct: null };
   try {
-    const r = await fetch("/api/models/pull", {
-      method: "POST", headers: authHeaders(),
-      body: JSON.stringify(payload),
-    });
-    const data = await r.json();
-    if (!r.ok) throw new Error(data.detail || r.statusText);
+    const data = await start();
+    if (!data) {
+      prog.style.display = "none";
+      log.style.display = "none";
+      setPullButtons("idle");
+      return;
+    }
     const mine = { id: data.job_id, payload, intent: null };
     activePull = mine;
     const end = await streamJob(data.job_id, (line) => {
@@ -2819,8 +2835,28 @@ async function runPull(payload) {
     toast(t("models.pull.failedException", { message: e.message }), true);
   } finally {
     $("pull-start").disabled = false;
+    loadInterrupted();
   }
 }
+
+function renderInterruptedCard() {
+  const card = $("interrupted-card");
+  if (!card) return;
+  const rows = renderInterrupted($("interrupted-list"));
+  const dismissed = interruptedState().downloads.some((d) => d.dismissed);
+  card.hidden = rows === 0 && !dismissed;
+  const intro = card.querySelector(".sub");
+  if (intro) intro.hidden = rows === 0;
+}
+onInterruptedChange(renderInterruptedCard);
+
+// Resume from the interrupted-downloads list runs in this card's progress
+// display, with its Pause and Cancel.
+setResumeHandler(async (view, start) => {
+  if (activePull) throw new Error(t("models.interrupted.busy"));
+  const payload = { spec: view.spec, name: view.name || null };
+  await runPull(payload, start);
+});
 
 $("pull-start").onclick = async () => {
   const spec = $("pull-spec").value.trim();

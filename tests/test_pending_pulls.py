@@ -1,0 +1,617 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""Records of model downloads that did not finish (model_manager.pending_pulls):
+written when a transfer starts, removed on success, kept after a stop with
+partial data on disk, detected after a restart, and resumed, deleted or
+dismissed from the CLI and the GUI routes.
+
+The direct-URL and Hugging Face pulls run through the real ``pull_model`` with
+the network doubled at the transport seam; the liveness checks use real child
+processes.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import sys
+from pathlib import Path
+from unittest.mock import MagicMock
+
+import pytest
+import requests
+
+from localm import model_manager as mm
+from localm.model_manager import pending_pulls
+from localm.model_manager.pull import PullInFlight, _partial_owner_path
+from tests._process_identity import spawn_on_this_tree, this_pid_space
+
+URL = "http://host1.example/tiny.gguf"
+BODY = b"G" * 4000
+
+
+# ------------------------------------------------------------------ #
+#  Fixtures                                                            #
+# ------------------------------------------------------------------ #
+
+@pytest.fixture()
+def home(tmp_path, monkeypatch):
+    """A data folder whose models folder the pull code uses."""
+    models = tmp_path / "home" / "models"
+    models.mkdir(parents=True)
+    monkeypatch.setattr(mm, "MODELS_DIR", models)
+    monkeypatch.setattr(mm, "ensure_dirs", lambda: None)
+    monkeypatch.setattr(mm, "_check_disk_space", lambda *a, **k: True)
+    monkeypatch.setattr(mm, "find_by_sha256", lambda *a, **k: [])
+    monkeypatch.setattr(mm, "_register", MagicMock())
+    monkeypatch.setattr(mm, "_register_with_dedup", MagicMock(return_value=True))
+    monkeypatch.setattr(mm, "gguf_unusable_reason", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "socket.getaddrinfo", lambda *a, **k: [(2, 1, 6, "", ("93.184.216.34", 0))])
+    monkeypatch.setenv("LOCALM_NET_MODE", "allow")
+    return models
+
+
+def _resp(status, body: bytes, total=None):
+    r = MagicMock()
+    r.status_code = status
+    r.raise_for_status = MagicMock()
+    r.headers = {"content-length": str(len(body) if total is None else total)}
+
+    def _iter(chunk_size):
+        for i in range(0, len(body), chunk_size):
+            yield body[i:i + chunk_size]
+    r.iter_content = _iter
+    return r
+
+
+class _Server:
+    """A fake ``pinned_request`` serving *body* with Range support. With
+    *stop_after*, a GET body stops after that many bytes by raising *stop*
+    (a dropped connection by default)."""
+
+    def __init__(self, body: bytes, stop_after=None, stop=None, etag='"v1"'):
+        self.body = body
+        self.stop_after = stop_after
+        self.stop = stop or requests.ConnectionError("connection dropped")
+        self.etag = etag
+        self.gets: list[dict] = []
+
+    def __call__(self, method, url, **kw):
+        if method == "HEAD":
+            h = MagicMock()
+            h.status_code = 200
+            h.headers = {"content-length": str(len(self.body)), "etag": self.etag}
+            return h
+        headers = dict(kw.get("headers") or {})
+        self.gets.append(headers)
+        rng = headers.get("Range")
+        start = int(rng.removeprefix("bytes=").removesuffix("-")) if rng else 0
+        r = _resp(206 if rng else 200, self.body[start:])
+        if self.stop_after is not None:
+            keep, err = self.body[start:start + self.stop_after], self.stop
+
+            def _iter(chunk_size):
+                for i in range(0, len(keep), chunk_size):
+                    yield keep[i:i + chunk_size]
+                raise err
+            r.iter_content = _iter
+        return r
+
+
+def _records(models: Path) -> list[dict]:
+    d = models.parent / pending_pulls.RECORDS_DIR_NAME
+    return [json.loads(p.read_text(encoding="utf-8")) for p in sorted(d.glob("*.json"))]
+
+
+# ------------------------------------------------------------------ #
+#  Direct URL: record lifecycle, resume                                #
+# ------------------------------------------------------------------ #
+
+class TestUrlPullRecord:
+    def test_a_finished_pull_leaves_no_record(self, home, monkeypatch):
+        monkeypatch.setattr("localm.netpolicy.pinned_request", _Server(BODY))
+        assert mm.pull_model(URL, name="tiny") is True
+        assert _records(home) == []
+
+    def test_a_dropped_transfer_keeps_an_ended_record_with_its_source(self, home, monkeypatch):
+        monkeypatch.setattr("localm.netpolicy.pinned_request",
+                            _Server(BODY, stop_after=1500))
+        assert mm.pull_model(URL, name="tiny") is False
+        [rec] = _records(home)
+        assert rec["ended"] is True
+        assert rec["source"] == "url" and rec["url"] == URL
+        assert rec["request"]["spec"] == URL and rec["request"]["name"] == "tiny"
+        [view] = pending_pulls.list_interrupted()
+        assert view["urls"] == [URL]
+        assert view["bytes_on_disk"] == 1500
+        assert view["expected_size"] == len(BODY)
+        assert view["resumable"] is True
+
+    def test_ctrl_c_mid_transfer_keeps_the_record(self, home, monkeypatch):
+        monkeypatch.setattr("localm.netpolicy.pinned_request",
+                            _Server(BODY, stop_after=700, stop=KeyboardInterrupt()))
+        with pytest.raises(KeyboardInterrupt):
+            mm.pull_model(URL, name="tiny")
+        [rec] = _records(home)
+        assert rec["ended"] is True
+        assert pending_pulls.bytes_on_disk(rec) == 700
+
+    def test_a_failure_before_any_byte_leaves_no_record(self, home, monkeypatch):
+        server = _Server(BODY)
+
+        def refuse(method, url, **kw):
+            if method == "GET":
+                raise requests.ConnectionError("refused")
+            return server(method, url, **kw)
+        monkeypatch.setattr("localm.netpolicy.pinned_request", refuse)
+        assert mm.pull_model(URL, name="tiny") is False
+        assert _records(home) == []
+
+    def test_resume_continues_from_the_partial_and_removes_the_record(self, home, monkeypatch):
+        monkeypatch.setattr("localm.netpolicy.pinned_request",
+                            _Server(BODY, stop_after=1500))
+        assert mm.pull_model(URL, name="tiny") is False
+        [view] = pending_pulls.list_interrupted()
+
+        server = _Server(BODY)
+        monkeypatch.setattr("localm.netpolicy.pinned_request", server)
+        from localm.cli.models import _resume_interrupted
+        assert _resume_interrupted(view) == 0
+        assert [g.get("Range") for g in server.gets] == ["bytes=1500-"]
+        assert (home / "tiny.gguf").read_bytes() == BODY
+        assert _records(home) == []
+
+    def test_a_second_attempt_replaces_the_first_record(self, home, monkeypatch):
+        monkeypatch.setattr("localm.netpolicy.pinned_request",
+                            _Server(BODY, stop_after=1000))
+        assert mm.pull_model(URL, name="tiny") is False
+        first = _records(home)[0]["id"]
+        monkeypatch.setattr("localm.netpolicy.pinned_request",
+                            _Server(BODY, stop_after=1000))
+        assert mm.pull_model(URL, name="tiny") is False
+        [rec] = _records(home)
+        assert rec["id"] != first
+        assert pending_pulls.bytes_on_disk(rec) == 2000
+
+    def test_delete_removes_the_part_its_identity_and_the_record(self, home, monkeypatch):
+        monkeypatch.setattr("localm.netpolicy.pinned_request",
+                            _Server(BODY, stop_after=1500))
+        assert mm.pull_model(URL, name="tiny") is False
+        other = home / "other.gguf"
+        other.write_bytes(b"keep me")
+        [view] = pending_pulls.list_interrupted()
+        assert pending_pulls.delete_interrupted(view["id"]) == 1500
+        assert not (home / "tiny.gguf.part").exists()
+        assert not (home / "tiny.gguf.part.json").exists()
+        assert other.read_bytes() == b"keep me"
+        assert _records(home) == []
+
+    def test_changed_size_at_the_source_refuses_resume(self, home, monkeypatch):
+        monkeypatch.setattr("localm.netpolicy.pinned_request",
+                            _Server(BODY, stop_after=1500))
+        assert mm.pull_model(URL, name="tiny") is False
+        [view] = pending_pulls.list_interrupted()
+        monkeypatch.setattr("localm.netpolicy.pinned_request", _Server(BODY + b"x"))
+        rec = pending_pulls.get_interrupted(view["id"])
+        assert pending_pulls.check_upstream(rec)["changed"] is True
+        called = []
+        monkeypatch.setattr("localm.cli.models.pull_model",
+                            lambda *a, **k: called.append(a) or True)
+        from localm.cli.models import _resume_interrupted
+        assert _resume_interrupted(view) == 1
+        assert called == []
+        assert (home / "tiny.gguf.part").stat().st_size == 1500
+
+    def test_changed_etag_at_the_source_is_detected(self, home, monkeypatch):
+        monkeypatch.setattr("localm.netpolicy.pinned_request",
+                            _Server(BODY, stop_after=1500, etag='"v1"'))
+        assert mm.pull_model(URL, name="tiny") is False
+        rec = pending_pulls.get_interrupted(pending_pulls.list_interrupted()[0]["id"])
+        monkeypatch.setattr("localm.netpolicy.pinned_request", _Server(BODY, etag='"v1"'))
+        assert pending_pulls.check_upstream(rec)["changed"] is False
+        monkeypatch.setattr("localm.netpolicy.pinned_request", _Server(BODY, etag='"v2"'))
+        assert pending_pulls.check_upstream(rec)["changed"] is True
+
+    def test_dismiss_hides_it_and_keeps_its_data(self, home, monkeypatch):
+        monkeypatch.setattr("localm.netpolicy.pinned_request",
+                            _Server(BODY, stop_after=1500))
+        assert mm.pull_model(URL, name="tiny") is False
+        [view] = pending_pulls.list_interrupted()
+        pending_pulls.set_dismissed(view["id"], True)
+        assert pending_pulls.list_interrupted() == []
+        [hidden] = pending_pulls.list_interrupted(include_dismissed=True)
+        assert hidden["dismissed"] is True
+        assert (home / "tiny.gguf.part").stat().st_size == 1500
+        pending_pulls.set_dismissed(view["id"], False)
+        assert [v["id"] for v in pending_pulls.list_interrupted()] == [view["id"]]
+
+
+# ------------------------------------------------------------------ #
+#  Hugging Face single file                                            #
+# ------------------------------------------------------------------ #
+
+def _fake_hf_head(monkeypatch, size: int, etag: str):
+    first = MagicMock()
+    first.headers = {"X-Linked-Etag": f'"{etag}"'}
+    head = MagicMock(status_code=200, headers={"content-length": str(size)})
+    head.history = [first]
+    monkeypatch.setattr("localm.model_manager.pull._policy_head", lambda *a, **kw: head)
+
+
+def _hf_temp(base: Path, rel: str, etag: str, data: bytes, owner_pid: int, start) -> Path:
+    from huggingface_hub._local_folder import get_local_download_paths
+    paths = get_local_download_paths(base, rel)
+    inc = paths.incomplete_path(etag)
+    t = inc.with_name(f"{inc.stem}.deadbeef.incomplete")
+    t.write_bytes(data)
+    _partial_owner_path(t).write_text(json.dumps(
+        {"pid": owner_pid, "space": this_pid_space(), "start": start}), encoding="utf-8")
+    return t
+
+
+@pytest.fixture()
+def dead_pid():
+    import subprocess
+    from localm.instances import process_start_identity
+    p = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"],
+                         stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+    start = process_start_identity(p.pid)
+    p.stdin.close()
+    p.wait()
+    return p.pid, start
+
+
+class TestHfFileRecord:
+    def test_a_stopped_hf_pull_records_repo_file_url_size_and_etag(
+            self, home, monkeypatch, dead_pid):
+        monkeypatch.setattr(mm, "_hf_file_sha256", lambda *a: None)
+        monkeypatch.setattr("localm.model_manager.pull._published_digest", lambda *a: None)
+        _fake_hf_head(monkeypatch, 5000, "etag1")
+
+        def stopped_download(repo_id, filename, local_dir, **kw):
+            _hf_temp(Path(local_dir), filename, "etag1", b"x" * 1234, *dead_pid)
+            raise requests.ConnectionError("connection dropped")
+        monkeypatch.setattr("huggingface_hub.hf_hub_download", stopped_download)
+
+        assert mm.pull_model("owner/repo:tiny-Q4.gguf", name="tiny") is False
+        [rec] = _records(home)
+        assert rec["ended"] is True
+        assert rec["source"] == "hf-file" and rec["repo"] == "owner/repo"
+        [f] = rec["files"]
+        assert f["rel"] == "tiny-Q4.gguf" and f["size"] == 5000 and f["etag"] == "etag1"
+        assert f["url"].startswith("https://huggingface.co/owner/repo/resolve/")
+        assert f["url"].endswith("/tiny-Q4.gguf")
+        [view] = pending_pulls.list_interrupted()
+        assert view["bytes_on_disk"] == 1234 and view["expected_size"] == 5000
+
+    def test_delete_removes_only_this_pulls_temp_files(self, home, dead_pid):
+        mine = _hf_temp(home, "a.gguf", "e1", b"a" * 10, *dead_pid)
+        other = _hf_temp(home, "b.gguf", "e1", b"b" * 20, *dead_pid)
+        with pending_pulls.tracking({"spec": "o/r:a.gguf"}):
+            pending_pulls.note_source(source="hf-file", repo="o/r")
+            pending_pulls.note_hf_files(home, [{"rel": "a.gguf", "url": "u", "size": 50,
+                                                "etag": "e1"}])
+        [view] = pending_pulls.list_interrupted()
+        assert pending_pulls.delete_interrupted(view["id"]) == 10
+        assert not mine.exists() and not _partial_owner_path(mine).exists()
+        assert other.read_bytes() == b"b" * 20
+
+    def test_a_record_naming_a_folder_outside_the_models_folder_deletes_nothing(
+            self, home, tmp_path, dead_pid):
+        outside = tmp_path / "elsewhere"
+        outside.mkdir()
+        victim = _hf_temp(outside, "a.gguf", "e1", b"v" * 10, *dead_pid)
+        with pending_pulls.tracking({"spec": "o/r:a.gguf"}):
+            pending_pulls.note_source(source="hf-file")
+            pending_pulls.note_hf_files(outside, [{"rel": "a.gguf"}])
+        [view] = pending_pulls.list_interrupted()
+        assert pending_pulls.delete_interrupted(view["id"]) == 0
+        assert victim.read_bytes() == b"v" * 10
+
+    def test_changed_etag_at_the_hub_is_detected(self, home, monkeypatch):
+        rec = {"files": [{"rel": "a.gguf", "url": "https://huggingface.co/o/r/resolve/main/a.gguf",
+                          "size": 10, "etag": "old"}]}
+        _fake_hf_head(monkeypatch, 10, "new")
+        assert pending_pulls.check_upstream(rec)["changed"] is True
+        _fake_hf_head(monkeypatch, 10, "old")
+        assert pending_pulls.check_upstream(rec)["changed"] is False
+
+
+# ------------------------------------------------------------------ #
+#  Full repo                                                           #
+# ------------------------------------------------------------------ #
+
+class TestSnapshotRecord:
+    def _stopped(self, home: Path, created: bool) -> Path:
+        folder = home / "Repo"
+        (folder / ".cache" / "huggingface" / "download").mkdir(parents=True)
+        (folder / "config.json").write_text("{}", encoding="utf-8")
+        (folder / ".cache" / "huggingface" / "download" / "x.e.incomplete").write_bytes(b"p" * 30)
+        with pending_pulls.tracking({"spec": "o/Repo"}):
+            pending_pulls.note_source(source="hf-repo", repo="o/Repo", commit="a" * 40)
+            pending_pulls.note_snapshot(folder, "Repo", created, 1000)
+        return folder
+
+    def test_delete_removes_a_folder_this_pull_created(self, home, monkeypatch):
+        monkeypatch.setattr(mm, "load_registry", lambda: {})
+        folder = self._stopped(home, created=True)
+        [view] = pending_pulls.list_interrupted()
+        assert pending_pulls.delete_interrupted(view["id"]) > 0
+        assert not folder.exists()
+
+    def test_delete_keeps_a_folder_a_registered_model_uses(self, home, monkeypatch):
+        folder = self._stopped(home, created=True)
+        monkeypatch.setattr(mm, "load_registry",
+                            lambda: {"repo": {"path": str(folder), "source": "hf:o/Repo"}})
+        [view] = pending_pulls.list_interrupted()
+        assert pending_pulls.delete_interrupted(view["id"]) == 30
+        assert (folder / "config.json").exists()
+
+    def test_delete_keeps_a_folder_that_existed_before(self, home, monkeypatch):
+        monkeypatch.setattr(mm, "load_registry", lambda: {})
+        folder = self._stopped(home, created=False)
+        [view] = pending_pulls.list_interrupted()
+        assert pending_pulls.delete_interrupted(view["id"]) == 30
+        assert (folder / "config.json").exists()
+
+
+# ------------------------------------------------------------------ #
+#  Liveness: a running pull is never offered or deleted                #
+# ------------------------------------------------------------------ #
+
+HOLD_A_PULL = '''
+    import sys
+    from pathlib import Path
+    import localm.model_manager as mm
+    from localm.model_manager import pending_pulls
+    part = mm.MODELS_DIR / "held.gguf.part"
+    mm.MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    with pending_pulls.tracking({"spec": "http://h.example/held.gguf", "name": "held"}):
+        pending_pulls.note_source(source="url", url="http://h.example/held.gguf")
+        part.write_bytes(b"z" * 64)
+        pending_pulls.note_part(part, "held.gguf", 128)
+        print("HOLDING", flush=True)
+        sys.stdin.read()
+'''
+
+
+class TestLiveness:
+    def test_a_live_pull_is_not_offered_and_a_killed_one_is(self, tmp_path, monkeypatch):
+        import subprocess
+        home_dir = tmp_path / "home"
+        models = home_dir / "models"
+        models.mkdir(parents=True)
+        monkeypatch.setattr(mm, "MODELS_DIR", models)
+        child = spawn_on_this_tree(HOLD_A_PULL, home_dir, stdin=subprocess.PIPE)
+        try:
+            line = child.stdout.readline()
+            assert line.strip() == "HOLDING", child.stderr.read()
+            [rec] = _records(models)
+            assert rec["ended"] is False
+            assert pending_pulls.list_interrupted() == []
+            with pytest.raises(PullInFlight):
+                pending_pulls.delete_interrupted(rec["id"])
+            assert (models / "held.gguf.part").stat().st_size == 64
+            assert pending_pulls.list_orphans() == []
+        finally:
+            child.kill()
+            child.wait()
+        [view] = pending_pulls.list_interrupted()
+        assert view["spec"] == "http://h.example/held.gguf"
+        assert view["bytes_on_disk"] == 64
+        assert pending_pulls.delete_interrupted(view["id"]) == 64
+        assert not (models / "held.gguf.part").exists()
+
+
+# ------------------------------------------------------------------ #
+#  Orphans                                                             #
+# ------------------------------------------------------------------ #
+
+class TestOrphans:
+    def test_an_unclaimed_temp_file_of_a_dead_owner_is_offered_and_deleted(self, home, dead_pid):
+        orphan = _hf_temp(home, "old.gguf", "e9", b"o" * 77, *dead_pid)
+        [o] = pending_pulls.list_orphans()
+        assert o["size"] == 77 and o["file"].endswith(".incomplete")
+        assert pending_pulls.delete_orphan(o["id"]) == 77
+        assert not orphan.exists()
+        assert pending_pulls.list_orphans() == []
+
+    def test_a_temp_file_of_a_live_owner_is_not_offered(self, home):
+        import subprocess
+        from localm.instances import process_start_identity
+        p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        try:
+            _hf_temp(home, "live.gguf", "e9", b"l" * 5, p.pid, process_start_identity(p.pid))
+            assert pending_pulls.list_orphans() == []
+        finally:
+            p.kill()
+            p.wait()
+
+    def test_a_temp_file_a_record_names_is_not_an_orphan(self, home, dead_pid):
+        _hf_temp(home, "a.gguf", "e1", b"a" * 10, *dead_pid)
+        with pending_pulls.tracking({"spec": "o/r:a.gguf"}):
+            pending_pulls.note_hf_files(home, [{"rel": "a.gguf"}])
+        assert pending_pulls.list_orphans() == []
+
+    def test_an_unknown_orphan_id_deletes_nothing(self, home, dead_pid):
+        f = _hf_temp(home, "old.gguf", "e9", b"o" * 7, *dead_pid)
+        bogus = "orphan-" + hashlib.sha256(b"x").hexdigest()[:24]
+        with pytest.raises(pending_pulls.UnknownPull):
+            pending_pulls.delete_orphan(bogus)
+        with pytest.raises(pending_pulls.UnknownPull):
+            pending_pulls.delete_orphan("../../etc")
+        assert f.exists()
+
+
+# ------------------------------------------------------------------ #
+#  Bad records                                                         #
+# ------------------------------------------------------------------ #
+
+def test_a_malformed_record_is_ignored_and_reported(home, caplog):
+    d = home.parent / pending_pulls.RECORDS_DIR_NAME
+    d.mkdir()
+    (d / ("0" * 32 + ".json")).write_text("{not json", encoding="utf-8")
+    with caplog.at_level("WARNING"):
+        assert pending_pulls.list_interrupted() == []
+    assert "unreadable download record" in caplog.text
+    with pytest.raises(pending_pulls.UnknownPull):
+        pending_pulls.get_interrupted("0" * 32)
+    with pytest.raises(pending_pulls.UnknownPull):
+        pending_pulls.get_interrupted("../x")
+
+
+def test_resume_args_repeat_the_request():
+    rec = {"request": {"spec": "o/r:f.gguf", "name": "n", "sha256": "ab", "mmproj": None,
+                       "type": "llm", "redownload": False, "dest_dir": "D:/c",
+                       "register": False}}
+    assert pending_pulls.resume_args(rec) == [
+        "--name", "n", "--sha256", "ab", "--type", "llm", "--comfy-dest-dir", "D:/c",
+        "--no-register", "--", "o/r:f.gguf"]
+
+
+# ------------------------------------------------------------------ #
+#  CLI                                                                 #
+# ------------------------------------------------------------------ #
+
+class TestCli:
+    def _interrupt(self, home, monkeypatch):
+        monkeypatch.setattr("localm.netpolicy.pinned_request",
+                            _Server(BODY, stop_after=1500))
+        assert mm.pull_model(URL, name="tiny") is False
+        return pending_pulls.list_interrupted()[0]
+
+    def test_list_interrupted_shows_spec_and_url(self, home, monkeypatch):
+        from click.testing import CliRunner
+        from localm.cli import main
+        view = self._interrupt(home, monkeypatch)
+        out = CliRunner().invoke(main, ["pull", "--list-interrupted"])
+        assert out.exit_code == 0, out.output
+        assert view["id"][:8] in out.output and URL in out.output
+
+    def test_resume_by_id_runs_the_recorded_pull(self, home, monkeypatch):
+        from click.testing import CliRunner
+        from localm.cli import main
+        view = self._interrupt(home, monkeypatch)
+        server = _Server(BODY)
+        monkeypatch.setattr("localm.netpolicy.pinned_request", server)
+        out = CliRunner().invoke(main, ["pull", "--resume", view["id"][:8]])
+        assert out.exit_code == 0, out.output
+        assert [g.get("Range") for g in server.gets] == ["bytes=1500-"]
+        assert _records(home) == []
+
+    def test_resume_is_refused_with_the_network_off(self, home, monkeypatch):
+        from click.testing import CliRunner
+        from localm.cli import main
+        view = self._interrupt(home, monkeypatch)
+        monkeypatch.setenv("LOCALM_NET_MODE", "off")
+        monkeypatch.setattr("localm.netpolicy.downloads_allowed_when_off", lambda: False)
+        out = CliRunner().invoke(main, ["pull", "--resume", view["id"][:8]])
+        assert out.exit_code == 1
+        assert "net_mode=off" in out.output
+        assert len(_records(home)) == 1
+
+    def test_delete_and_dismiss_flags(self, home, monkeypatch):
+        from click.testing import CliRunner
+        from localm.cli import main
+        view = self._interrupt(home, monkeypatch)
+        out = CliRunner().invoke(main, ["pull", "--dismiss-interrupted", view["id"][:8]])
+        assert out.exit_code == 0, out.output
+        assert pending_pulls.list_interrupted() == []
+        out = CliRunner().invoke(main, ["pull", "--delete-interrupted", view["id"][:8]])
+        assert out.exit_code == 0, out.output
+        assert not (home / "tiny.gguf.part").exists() and _records(home) == []
+
+    def test_a_non_interactive_pull_names_interrupted_downloads_in_one_line(
+            self, home, monkeypatch):
+        from localm.cli.models import _offer_interrupted
+        self._interrupt(home, monkeypatch)
+        monkeypatch.setattr("localm.model_manager.registry.can_prompt", lambda: False)
+        printed = []
+        monkeypatch.setattr("localm.cli.models.console.print",
+                            lambda *a, **k: printed.append(str(a[0])))
+        _offer_interrupted("owner/other:x.gguf", None)
+        assert len(printed) == 1 and "--list-interrupted" in printed[0]
+
+
+# ------------------------------------------------------------------ #
+#  GUI routes                                                          #
+# ------------------------------------------------------------------ #
+
+class _FakeJob:
+    id = "job-stub"
+
+
+class TestGuiRoutes:
+    @pytest.fixture()
+    def client(self, home, monkeypatch, tmp_path):
+        from fastapi.testclient import TestClient
+
+        from fastapi import FastAPI
+
+        from localm.plugins.gui.web import attach_gui
+        app = FastAPI()
+
+        async def switch_model(name):
+            return {"status": "loaded", "model": name}
+        attach_gui(app, self_url="http://127.0.0.1:9/v1", switch_model=switch_model,
+                   active_model=lambda: "m")
+        started = []
+
+        def fake_start_cli(self, kind, cli_args, **kw):
+            started.append((kind, list(cli_args), kw.get("host_label")))
+            return _FakeJob()
+        monkeypatch.setattr("localm.plugins.gui.jobs.JobManager.start_cli", fake_start_cli)
+        monkeypatch.setattr("localm.netpolicy.pinned_request",
+                            _Server(BODY, stop_after=1500))
+        assert mm.pull_model(URL, name="tiny") is False
+        return TestClient(app), started
+
+    def test_list_resume_dismiss_delete(self, client, home, monkeypatch):
+        c, started = client
+        r = c.get("/api/models/pulls/interrupted")
+        assert r.status_code == 200, r.text
+        [d] = r.json()["downloads"]
+        assert d["spec"] == URL and d["bytes_on_disk"] == 1500
+
+        monkeypatch.setattr("localm.netpolicy.pinned_request", _Server(BODY))
+        r = c.post(f"/api/models/pulls/interrupted/{d['id']}/resume", json={})
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "started"
+        assert started == [("pull", ["pull", "--name", "tiny", "--", URL],
+                            f"Model pull {URL}")]
+
+        r = c.post(f"/api/models/pulls/interrupted/{d['id']}/dismiss", json={"dismissed": True})
+        assert r.status_code == 200 and r.json()["dismissed"] is True
+        assert c.get("/api/models/pulls/interrupted").json()["downloads"][0]["dismissed"]
+
+        r = c.post(f"/api/models/pulls/interrupted/{d['id']}/delete")
+        assert r.status_code == 200 and r.json()["removed_bytes"] == 1500
+        assert c.get("/api/models/pulls/interrupted").json()["downloads"] == []
+
+    def test_resume_of_a_changed_source_starts_nothing(self, client, monkeypatch):
+        c, started = client
+        [d] = c.get("/api/models/pulls/interrupted").json()["downloads"]
+        monkeypatch.setattr("localm.netpolicy.pinned_request", _Server(BODY + b"more"))
+        r = c.post(f"/api/models/pulls/interrupted/{d['id']}/resume", json={})
+        assert r.status_code == 200 and r.json()["status"] == "changed"
+        assert started == []
+        r = c.post(f"/api/models/pulls/interrupted/{d['id']}/resume", json={"fresh": True})
+        assert r.json()["status"] == "started"
+        assert len(started) == 1
+        assert not (mm.MODELS_DIR / "tiny.gguf.part").exists()
+
+    def test_resume_with_the_network_off_is_refused(self, client, monkeypatch):
+        c, started = client
+        [d] = c.get("/api/models/pulls/interrupted").json()["downloads"]
+        monkeypatch.setenv("LOCALM_NET_MODE", "off")
+        monkeypatch.setattr("localm.netpolicy.downloads_allowed_when_off", lambda: False)
+        r = c.post(f"/api/models/pulls/interrupted/{d['id']}/resume", json={})
+        assert r.status_code == 403
+        assert started == []
+
+    def test_unknown_ids_are_404(self, client):
+        c, _ = client
+        assert c.post("/api/models/pulls/interrupted/" + "f" * 32 + "/delete").status_code == 404
+        assert c.post("/api/models/pulls/interrupted/nope/resume", json={}).status_code == 404
+        assert c.post("/api/models/pulls/orphans/orphan-zz/delete").status_code == 404

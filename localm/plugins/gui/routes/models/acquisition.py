@@ -20,6 +20,8 @@ from localm.inference.http_server import (path_formatter, principal_id,
 from localm.executor import get_plugin_executor
 from localm.plugins.gui.routes.models._context import ModelRouteContext
 from localm.plugins.gui.web import (ComfyPullRequest, ComfySourceLookupRequest,
+                                    InterruptedDismissRequest,
+                                    InterruptedResumeRequest,
                                     MediaPreflightRequest, PullDiscardRequest,
                                     PullRequest, PullTokenRedeemRequest,
                                     consume_pull_grant)
@@ -170,7 +172,11 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         )
 
         def _discard() -> int:
-            return discard_partial_download(spec, req.name)
+            from localm.model_manager import pending_pulls
+            removed = discard_partial_download(spec, req.name)
+            for rec in pending_pulls.records_for_request(spec, req.name):
+                pending_pulls.forget(rec["id"])
+            return removed
 
         try:
             removed = await run_in_threadpool_bounded(_discard, timeout=60.0)
@@ -181,6 +187,153 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         except ThreadCallTimeout as e:
             raise HTTPException(504, f"Deleting the partial download timed out: {e}") from e
         return {"removed_bytes": removed, "kept": partial_download_kept(spec)}
+
+    # --------------- Interrupted downloads ---------------------------------- #
+
+    def _pull_running(spec: str) -> bool:
+        label = f"Model pull {spec}"
+        return any(j.get("kind") == "pull" and j.get("status") == "running"
+                   and j.get("label") == label for j in jobs.snapshot())
+
+    @app.get("/api/models/pulls/interrupted",
+             dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
+    async def interrupted_pulls(include_dismissed: bool = False):
+        """Downloads that stopped before finishing and are not running, and
+        partial files no download claims. Returns {"downloads": [...],
+        "orphans": [...]}; see pending_pulls.describe / list_orphans."""
+        from localm.model_manager import pending_pulls
+
+        def _list():
+            return {"downloads": pending_pulls.list_interrupted(include_dismissed),
+                    "orphans": pending_pulls.list_orphans()}
+
+        try:
+            out = await run_in_threadpool_bounded(_list, timeout=30.0)
+        except ThreadCallTimeout as e:
+            raise HTTPException(504, f"Listing interrupted downloads timed out: {e}") from e
+        running = {j.get("label") for j in jobs.snapshot()
+                   if j.get("kind") == "pull" and j.get("status") == "running"}
+        out["downloads"] = [d for d in out["downloads"]
+                            if f"Model pull {d['spec']}" not in running]
+        return out
+
+    @app.post("/api/models/pulls/interrupted/{pull_id}/resume",
+              dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
+    async def interrupted_pull_resume(pull_id: str, req: InterruptedResumeRequest,
+                                      request: Request):
+        """Start the recorded pull again with its options as a job. Unless
+        *fresh*, the source is checked first: {"status": "changed", "detail"}
+        when it changed (nothing is started), else {"status": "started",
+        "job_id", "spec", "note"}. *fresh* deletes the partial data first."""
+        from localm.model_manager import pending_pulls
+        from localm.model_manager.pull import PullInFlight, PullLockUnavailable
+        from localm.netpolicy import (NetworkPolicyError, downloads_allowed_when_off,
+                                      network_mode)
+        try:
+            rec = await run_in_threadpool_bounded(
+                pending_pulls.get_interrupted, pull_id, timeout=20.0)
+        except pending_pulls.UnknownPull as e:
+            raise HTTPException(404, "No such interrupted download.") from e
+        except PullInFlight as e:
+            raise HTTPException(409, str(e)) from e
+        except ThreadCallTimeout as e:
+            raise HTTPException(504, f"Reading the download record timed out: {e}") from e
+        if not pending_pulls.resumable(rec):
+            raise HTTPException(400, "This download cannot be resumed; delete or dismiss it.")
+        spec = str(rec["request"]["spec"])
+        if rec["request"].get("dest_dir") or _spec_names_a_host_path(spec):
+            require_fs_host(request)
+        if network_mode() == "off" and not downloads_allowed_when_off():
+            raise HTTPException(
+                403, "Network access is off. Resuming is a download: set Network "
+                     "access to Ask or Allow in Settings, or allow model downloads.")
+        if _pull_running(spec):
+            raise HTTPException(409, f"Already downloading {spec}.")
+        note = ""
+        if req.fresh:
+            try:
+                await run_in_threadpool_bounded(
+                    pending_pulls.delete_interrupted, pull_id, timeout=60.0)
+            except PullLockUnavailable as e:
+                raise HTTPException(500, path_formatter(request)(e)) from e
+            except PullInFlight as e:
+                raise HTTPException(409, path_formatter(request)(e)) from e
+            except pending_pulls.UnknownPull:
+                pass
+            except ThreadCallTimeout as e:
+                raise HTTPException(504, f"Deleting the partial download timed out: {e}") from e
+        else:
+            try:
+                check = await run_in_threadpool_bounded(
+                    pending_pulls.check_upstream, rec, timeout=120.0)
+            except NetworkPolicyError as e:
+                raise HTTPException(403, f"Network policy refused the check: {e}") from e
+            except ThreadCallTimeout as e:
+                raise HTTPException(504, f"Checking the download source timed out: {e}") from e
+            if check["changed"]:
+                return {"status": "changed", "detail": check["detail"], "spec": spec}
+            note = check["detail"]
+        job = jobs.start_cli("pull", ["pull", *pending_pulls.resume_args(rec)], extra_env={
+            "LOCALM_PROGRESS_JSON": "1",
+            "HF_HUB_DISABLE_PROGRESS_BARS": "1",
+        }, host_label=f"Model pull {spec}", owner=principal_id(request))
+        return {"status": "started", "job_id": job.id, "spec": spec, "note": note}
+
+    @app.post("/api/models/pulls/interrupted/{pull_id}/delete",
+              dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
+    async def interrupted_pull_delete(pull_id: str, request: Request):
+        """Delete the partial data of an interrupted download and its record.
+        Returns {"removed_bytes": n}; 409 while a download of it runs."""
+        from localm.model_manager import pending_pulls
+        from localm.model_manager.pull import PullInFlight, PullLockUnavailable
+        try:
+            removed = await run_in_threadpool_bounded(
+                pending_pulls.delete_interrupted, pull_id, timeout=60.0)
+        except pending_pulls.UnknownPull as e:
+            raise HTTPException(404, "No such interrupted download.") from e
+        except PullLockUnavailable as e:
+            raise HTTPException(500, path_formatter(request)(e)) from e
+        except PullInFlight as e:
+            raise HTTPException(409, path_formatter(request)(e)) from e
+        except ThreadCallTimeout as e:
+            raise HTTPException(504, f"Deleting the partial download timed out: {e}") from e
+        return {"removed_bytes": removed}
+
+    @app.post("/api/models/pulls/interrupted/{pull_id}/dismiss",
+              dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
+    async def interrupted_pull_dismiss(pull_id: str, req: InterruptedDismissRequest):
+        """Hide (dismissed true) or show again an interrupted download; its
+        files and record stay. Returns the download's view."""
+        from localm.model_manager import pending_pulls
+        from localm.model_manager.pull import PullInFlight
+        try:
+            return await run_in_threadpool_bounded(
+                pending_pulls.set_dismissed, pull_id, req.dismissed, timeout=20.0)
+        except pending_pulls.UnknownPull as e:
+            raise HTTPException(404, "No such interrupted download.") from e
+        except PullInFlight as e:
+            raise HTTPException(409, str(e)) from e
+        except ThreadCallTimeout as e:
+            raise HTTPException(504, f"Updating the download record timed out: {e}") from e
+
+    @app.post("/api/models/pulls/orphans/{orphan_id}/delete",
+              dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
+    async def orphan_partial_delete(orphan_id: str, request: Request):
+        """Delete a partial file no download claims. Returns {"removed_bytes"}."""
+        from localm.model_manager import pending_pulls
+        from localm.model_manager.pull import PullInFlight, PullLockUnavailable
+        try:
+            removed = await run_in_threadpool_bounded(
+                pending_pulls.delete_orphan, orphan_id, timeout=60.0)
+        except pending_pulls.UnknownPull as e:
+            raise HTTPException(404, "No such partial file.") from e
+        except PullLockUnavailable as e:
+            raise HTTPException(500, path_formatter(request)(e)) from e
+        except PullInFlight as e:
+            raise HTTPException(409, path_formatter(request)(e)) from e
+        except ThreadCallTimeout as e:
+            raise HTTPException(504, f"Deleting the partial file timed out: {e}") from e
+        return {"removed_bytes": removed}
 
     # --------------- ComfyUI missing-model pre-check + curated pull -------- #
     # Read-only pre-check the frontend calls before submitting a generate job: does
