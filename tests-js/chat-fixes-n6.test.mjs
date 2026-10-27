@@ -243,10 +243,12 @@ test("the web access toggle is hidden when network access is off and shown again
   assert.equal(row.style.display, "none");
   assert.equal(evalIn(window, "chat.netOff"), true);
   assert.equal(evalIn(window, "webMaxLookups()"), 3);
-  window.applyWebPolicy({ net_mode: "ask" });
+  window.applyWebPolicy({ net_mode: "ask", chat_web_max_lookups: null });
   assert.equal(row.style.display, "");
   assert.equal(evalIn(window, "chat.netOff"), false);
-  assert.equal(evalIn(window, "webMaxLookups()"), 20, "an absent limit means the default");
+  assert.equal(evalIn(window, "webMaxLookups()"), 20, "a null limit means the default");
+  window.applyWebPolicy({});
+  assert.equal(evalIn(window, "webMaxLookups()"), 20, "a payload without the fields changes nothing");
 });
 
 test("a send with web access on reads the lookup limit from the server, not the page-load copy", async () => {

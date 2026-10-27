@@ -659,11 +659,15 @@ function markInstanceUnknown(why) {
  *  per-message lookup ceiling, and whether network access is off, in which case
  *  the chat's Web access toggle is hidden. */
 export function applyWebPolicy(cfg) {
-  chat.webMaxLookups = Number.isInteger(cfg.chat_web_max_lookups)
-    ? cfg.chat_web_max_lookups : null;
-  chat.netOff = cfg.net_mode === "off";
-  const row = $("p-web") && $("p-web").closest(".check-row");
-  if (row) row.style.display = chat.netOff ? "none" : "";
+  if ("chat_web_max_lookups" in cfg) {
+    chat.webMaxLookups = Number.isInteger(cfg.chat_web_max_lookups)
+      ? cfg.chat_web_max_lookups : null;
+  }
+  if ("net_mode" in cfg) {
+    chat.netOff = cfg.net_mode === "off";
+    const row = $("p-web") && $("p-web").closest(".check-row");
+    if (row) row.style.display = chat.netOff ? "none" : "";
+  }
 }
 
 /** Re-reads the web settings from the server. Best effort: an unreachable
