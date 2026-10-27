@@ -355,7 +355,7 @@ class TestGenerateImageFreesThePrompt:
         rig = _Rig()
         rig.api.llama_sampler_free = lambda s: None
 
-        def _reopen_on_cpu(use_gpu):
+        def _reopen_on_cpu(use_gpu, min_image_tokens=None):
             rig.lib.fail_decode = False
             return 0x78
 

@@ -688,6 +688,43 @@ def test_a_field_appended_upstream_fails(capsys):
     assert "size: upstream 64 != localm 56" in out
 
 
+@pytest.mark.parametrize("text", [_MTMD_STATE, _MTMD_LEGACY])
+def test_a_same_width_field_type_change_in_the_helper_input_fails(text, capsys):
+    retyped = text.replace("    int32_t  top_k;\n", "    float    top_k;\n")
+    assert retyped != text
+    assert abichk.check_speech(retyped, "fixture", set()) == 1
+    out = capsys.readouterr().out
+    assert "FAIL  mtmd_helper_gen_audio_inp.top_k: upstream" in out
+    assert "float-ness differs" in out
+
+
+@pytest.mark.parametrize("text", [_MTMD_STATE, _MTMD_LEGACY])
+def test_a_same_width_field_type_change_in_the_gen_input_fails(text, capsys):
+    retyped = text.replace("    int32_t top_k;\n", "    float   top_k;\n")
+    assert retyped != text
+    assert abichk.check_speech(retyped, "fixture", set()) == 1
+    out = capsys.readouterr().out
+    assert "FAIL  mtmd_gen_inp.top_k: upstream" in out
+    assert "float-ness differs" in out
+
+
+def test_a_pointer_field_retargeted_upstream_fails(capsys):
+    retyped = _MTMD_STATE.replace(
+        "    const float * feats;\n    size_t        n_feats;\n};\nstruct mtmd_gen_out",
+        "    const int32_t * feats;\n    size_t        n_feats;\n};\nstruct mtmd_gen_out")
+    assert retyped != _MTMD_STATE
+    assert abichk.check_speech(retyped, "fixture", set()) == 1
+    assert "FAIL  mtmd_gen_inp.feats: upstream" in capsys.readouterr().out
+
+
+def test_a_scalar_field_bound_as_a_pointer_fails(capsys):
+    retyped = _MTMD_STATE.replace("    size_t       prompt_len;\n",
+                                  "    size_t *     prompt_len;\n")
+    assert retyped != _MTMD_STATE
+    assert abichk.check_speech(retyped, "fixture", set()) == 1
+    assert "FAIL  mtmd_helper_gen_audio_inp.prompt_len: upstream" in capsys.readouterr().out
+
+
 def test_a_struct_passed_by_value_must_be_the_bound_one(monkeypatch, capsys):
     import ctypes
     structs, signatures = abichk._localm_speech_binding("state")
