@@ -787,10 +787,8 @@ def classify_gpu_devices(devices: list[tuple]) -> Optional[bool]:
     """Whether *devices*, a list of ``(ggml_backend_dev_type, backend_name)``
     with ``backend_name`` None when unreadable, holds a GPU: True for a device of
     type :data:`GGML_DEV_TYPE_GPU`, or of any type past it whose backend is not
-    in :data:`_NON_GPU_BACKENDS` (an integrated GPU and an accelerator share the
-    values 2 and 3 across runtimes, so the backend name decides). False when no
-    device qualifies, None when a device past GPU has no readable backend name
-    and no other device qualifies."""
+    in :data:`_NON_GPU_BACKENDS`. False when no device qualifies, None when a
+    device past GPU has no readable backend name and no other device qualifies."""
     undecided = False
     for dev_type, backend in devices:
         if dev_type == GGML_DEV_TYPE_CPU:
