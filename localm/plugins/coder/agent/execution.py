@@ -118,6 +118,8 @@ class _ExecutionMixin:
         cwd: Path
         restricted: bool
         @property
+        def stop_pending(self) -> bool: ...
+        @property
         def plan_mode(self) -> bool: ...
         _audit: AuditLogT
         always_confirm: set
@@ -437,6 +439,16 @@ class _ExecutionMixin:
                 print_tool_error(call.name, result.output)
             self._emit("tool_result", tool=call.name, ok=False,
                        summary="not run: the run was cancelled")
+            return result
+
+        # A stopped run executes nothing further; the loop ends at its next check.
+        if self.stop_pending:
+            result = ToolResult.error(
+                f"{call.name} was not run: the run was stopped.")
+            if interactive:
+                print_tool_error(call.name, result.output)
+            self._emit("tool_result", tool=call.name, ok=False,
+                       summary="not run: the run was stopped")
             return result
 
         # Hard gate: a tool disabled for this session (e.g. run_shell for a
@@ -923,14 +935,9 @@ class _ExecutionMixin:
         return result
 
     def _cancel_check(self) -> bool:
-        """True once this run is cancelled, or a stop was requested on this
-        agent or any ancestor, so a running tool's child process is killed."""
-        agent = self
-        while agent is not None:
-            if getattr(agent, "_stop_requested", False):
-                return True
-            agent = getattr(agent, "parent", None)
-        return self.cancelled
+        """True once this run should stop (see ``stop_pending``), so a running
+        tool's child process is killed."""
+        return self.stop_pending
 
     def _hooks_for(self, event: str, tool: str):
         """The session's ToolHooks when they apply to *event* for *tool*, else

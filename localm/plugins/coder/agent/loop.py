@@ -457,6 +457,8 @@ class _LoopMixin:
 
         # Set by Agent (core.py).
         parent: Any
+        @property
+        def stop_pending(self) -> bool: ...
 
         def start_deferred_mcp(self) -> list: ...
 
@@ -655,7 +657,7 @@ class _LoopMixin:
 
         try:
             while self._turns < self.max_turns:
-                if self._stop_requested or self.cancelled:
+                if self.stop_pending:
                     self._stop_requested = False
                     final_response = self._stopped_text()
                     self._last_run_ok = False
@@ -743,7 +745,7 @@ class _LoopMixin:
                 # consumes it, so no later path inherits a constrained sampler.
                 self._force_tool_grammar = False
 
-                if self._stop_requested or self.cancelled:
+                if self.stop_pending:
                     # Stopped mid-generation: keep the partial text, run nothing
                     self._stop_requested = False
                     self._add_assistant(response)
