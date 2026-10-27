@@ -60,9 +60,11 @@ from localm.inference.protocol import (
 
 def _entry_path_is_folder(entry: dict) -> bool:
     """True when registry *entry*'s ``path`` names an existing folder; False
-    for an empty or missing path without touching the filesystem. Blocking:
+    for an empty, missing, malformed or ``..`` path without touching the
+    filesystem. Blocking:
     call it off the event loop."""
-    raw = str(entry.get("path") or "")
+    from localm.model_manager.registry import _entry_path
+    raw = _entry_path(entry)
     return bool(raw) and Path(raw).is_dir()
 
 

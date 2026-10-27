@@ -62,19 +62,22 @@ def register_exception_handlers(app: FastAPI) -> None:
         from localm.debuglog import debug_enabled, logger as _dbg
         from localm.inference.errors import (UNDECODABLE_BODY_MESSAGE,
                                              is_undecodable_body)
-        if is_undecodable_body(exc):
-            return JSONResponse(status_code=422,
-                                content={"detail": UNDECODABLE_BODY_MESSAGE,
-                                         "errors": []})
+        undecodable = is_undecodable_body(exc)
+        status = 422 if undecodable else exc.status_code
         if debug_enabled():
             # Truncated: a detail can be long by design (the VRAM-overflow 503
             # carries a multi-line "Options:" list), and the point here is to
             # name the cause, not to mirror the whole body into the log.
-            detail = str(getattr(exc, "detail", "") or "")
+            detail = (UNDECODABLE_BODY_MESSAGE if undecodable
+                      else str(getattr(exc, "detail", "") or ""))
             if len(detail) > 500:
                 detail = detail[:500] + " ...[truncated]"
             _dbg.debug("%s %s refused %d: %s", request.method,
-                       request.url.path, exc.status_code, detail)
+                       request.url.path, status, detail)
+        if undecodable:
+            return JSONResponse(status_code=422,
+                                content={"detail": UNDECODABLE_BODY_MESSAGE,
+                                         "errors": []})
         return await http_exception_handler(request, exc)
 
     from fastapi.exceptions import RequestValidationError
