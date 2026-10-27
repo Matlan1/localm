@@ -84,6 +84,7 @@ QUESTIONS: tuple = (
              platforms=("win32", "linux")),
     Question("global-command", "n"),
     Question("plugins", ",".join(RECOMMENDED_PLUGINS)),
+    Question("plugin-deps", "y"),
     Question("report-problem", "y", variants=(CONSOLE,)),
 )
 
