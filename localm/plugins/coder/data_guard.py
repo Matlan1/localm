@@ -20,9 +20,11 @@ sweep tools (grep, search_replace) skip such files.
 
 The agent requires an explicit approval of the exact call for a hit, under
 ``auto_approve`` too, and denies it when no one can be asked. A best-effort
-lexical check (plus ``os.path.realpath`` for file-tool paths), not a sandbox:
-other variables, ``eval``, interpreter one-liners and encodings defeat the shell
-half.
+lexical check (plus ``os.path.realpath`` for file-tool paths and for the path
+operands and redirect targets of a shell command, never for a UNC or device
+path), not a
+sandbox: other variables, ``eval``, interpreter one-liners and encodings defeat
+the shell half.
 """
 
 from __future__ import annotations
@@ -124,8 +126,56 @@ def _match(norm_path: Optional[str], targets: Targets, *, tree: bool) -> Optiona
     return None
 
 
+_MAX_LINK_HOPS = 32
+
+
+def _is_link(path: str) -> bool:
+    isjunction = getattr(os.path, "isjunction", None)
+    return os.path.islink(path) or bool(isjunction and isjunction(path))
+
+
+def _first_link_target(path: str) -> Optional[str]:
+    """*path* with its first symlink or junction component replaced by that
+    link's target (read with ``os.readlink``, which does not open the target),
+    or None when no existing component is a link."""
+    parts = Path(path).parts
+    if not parts:
+        return None
+    current = parts[0]
+    for i, part in enumerate(parts[1:], start=1):
+        current = os.path.join(current, part)
+        if not os.path.lexists(current):
+            return None
+        if _is_link(current):
+            target = os.readlink(current)
+            if target.startswith("\\\\?\\") and target[5:6] == ":":
+                target = target[4:]
+            if not os.path.isabs(target):
+                target = os.path.join(os.path.dirname(current), target)
+            return os.path.abspath(os.path.join(target, *parts[i + 1:]))
+    return None
+
+
+def _local_realpath(path: str) -> Optional[str]:
+    """``os.path.realpath`` of *path* when *path* and every link on the way to
+    its target are local, else None: a UNC or device path, a mapped network
+    drive, a link whose target is one of those, or more than
+    :data:`_MAX_LINK_HOPS` links. Never opens a network path."""
+    from localm.pathsafe import is_mapped_network_drive, is_unc_or_device_path
+    pending = os.path.abspath(path)
+    for _ in range(_MAX_LINK_HOPS):
+        if is_unc_or_device_path(pending) or is_mapped_network_drive(pending):
+            return None
+        target = _first_link_target(pending)
+        if target is None:
+            return os.path.realpath(pending)
+        pending = target
+    return None
+
+
 def _file_forms(value: str, cwd: Optional[Path]) -> list[str]:
-    """Canonical forms of a file-tool path: lexical, then symlink-resolved."""
+    """Canonical forms of a file-tool path: lexical, then symlink-resolved
+    (:func:`_local_realpath`, so never through a network path)."""
     raw = os.path.expanduser(str(value).strip())
     if not raw:
         return []
@@ -133,10 +183,14 @@ def _file_forms(value: str, cwd: Optional[Path]) -> list[str]:
     if not p.is_absolute() and cwd is not None:
         p = Path(cwd) / p
     forms = [os.path.abspath(p)]
-    try:
-        forms.append(os.path.realpath(p))
-    except (OSError, ValueError):
-        pass
+    from localm.pathsafe import is_unc_or_device_path
+    if not is_unc_or_device_path(raw):
+        try:
+            real = _local_realpath(forms[0])
+        except (OSError, ValueError):
+            real = None
+        if real:
+            forms.append(real)
     return [f for f in (_sg._canon(x) for x in forms) if f]
 
 
@@ -241,17 +295,49 @@ def _check_segments(segments, cwd: Optional[Path], targets: Targets, home: Path,
         tree = name in _TREE_VERBS
         for tok in _operands(args):
             tok = _expand_home_vars(tok, home)
-            label = _match(_sg._norm_target(tok, current), targets, tree=tree)
+            label = _match_shell_path(_sg._norm_target(tok, current), targets, tree=tree)
             if label:
                 return label
         for _op, target in seg.redirects:
             target = _expand_home_vars(target, home)
-            label = _match(_sg._norm_target(target, current), targets, tree=False)
+            label = _match_shell_path(_sg._norm_target(target, current), targets, tree=False)
             if label:
                 return label
         if name == "cd":
             current = _sg._cd_destination(args, current)
     return None
+
+
+def _resolved_form(norm_path: Optional[str]) -> Optional[str]:
+    """The symlink- and junction-resolved canonical form of the canonical path
+    *norm_path*, or None when it is not a local absolute path (relative, UNC)
+    or cannot be resolved. A ``<home>`` form is resolved under the user's home
+    directory. Never touches a UNC or device path (``pathsafe.is_unc_or_device_path``)."""
+    from localm.pathsafe import is_unc_or_device_path
+    if not norm_path or is_unc_or_device_path(norm_path):
+        return None
+    if norm_path == _sg._HOME or norm_path.startswith(_sg._HOME + "/"):
+        try:
+            norm_path = Path.home().as_posix().rstrip("/") + norm_path[len(_sg._HOME):]
+        except (RuntimeError, OSError):
+            return None
+    if _sg._canon(norm_path) is None:
+        return None
+    try:
+        real = _local_realpath(norm_path)
+    except (OSError, ValueError):
+        return None
+    return _sg._canon(real) if real else None
+
+
+def _match_shell_path(norm_path: Optional[str], targets: Targets, *,
+                      tree: bool) -> Optional[str]:
+    """:func:`_match` of a shell operand, as written and then resolved through
+    symlinks and junctions (see :func:`_resolved_form`)."""
+    label = _match(norm_path, targets, tree=tree)
+    if label:
+        return label
+    return _match(_resolved_form(norm_path), targets, tree=tree)
 
 
 def _patch_paths(diff: str) -> list[str]:

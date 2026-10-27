@@ -59,6 +59,16 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Compaction keeps early facts better and names attachments.** A later compaction continues from the earlier summary instead of summarising it again as one more turn, and the summariser is told about each image and audio clip (with its file name).
 - **The web lookup limit and the Web access toggle follow Settings without a page reload.** A change to the lookup limit applies to the next message, and the toggle is hidden while network access is off.
 - **A T5 model in Chat answers your message** instead of the web-access note the Chat page sends with every request.
+- **A coder shell command of several lines runs every line.** On Windows only the first line ran and the result still reported success; every line now runs in turn, and the shell safety checks judge the command exactly as cmd.exe runs it. A line break inside quotes, which cmd.exe cannot run as written, is refused with a message instead.
+- **On Windows, an argument the coder passes to a `.cmd` or `.bat` program (such as npm, npx or yarn) can no longer run as a second command.** A `&` or `|` inside a quoted argument reached cmd.exe unquoted; such arguments are now quoted, so `npm install lodash@^4` also keeps its `^`, and an argument with a `"`, `%` or line break is refused.
+- **Stop in a GUI coder session ends a running shell command at once.** The command used to run on until it finished or timed out, keeping the session busy after Stop.
+- **The coder asks before a shell command reaches localm's keys or settings through a link.** A command such as `type link\auth.key`, where `link` is a junction or symbolic link into localm's data folder, ran without asking under auto-approve; it is now treated like the same path written out.
+- **The terminal coder's `/cd` refuses UNC and device paths**, as the GUI and API already did, so a session cannot be moved onto a network share.
+- **Project MCP servers start in the project folder,** so a script named by a relative path is found, and a server that fails to start now says why in the GUI coder session.
+- **The coder banner shows the session mode as `privacy`, `log` or `full`** instead of `SessionMode.PRIVACY`.
+- **A coder run that answers the request to verify its code changes with an empty reply is reported as not finished**, naming the unchecked files, instead of as a success.
+- **A scheduled coder job refuses a project config with an invalid `mode`** (a typo such as `privcy`) and says so in the job result, instead of quietly running with the global mode.
+- **A background coder sub-agent that made no commits no longer leaves its `coder/...` branch in your repository.** A sub-agent that did commit work keeps its branch, and its result says so.
 
 ## [0.3.1] - 2026-10-22
 
