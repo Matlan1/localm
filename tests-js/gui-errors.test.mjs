@@ -141,7 +141,6 @@ test("privacy mode keeps the list in memory only: nothing reaches any browser st
   const lsKeys = () => Object.keys({ ...window.localStorage });
   for (let i = 0; i < 6; i++) window.toast(`private error ${i}`, true);
   window.dispatchEvent(new window.ErrorEvent("error", { message: "thrown in privacy" }));
-  await window.refreshCtxLimit();
   assert.equal(doc.querySelectorAll("#recent-errors-list li").length, 5, "shown in memory");
   assert.equal(window.localStorage.getItem("localm.recentErrors"), null);
   assert.ok(!lsKeys().some((k) => /error/i.test(k)), `no error key in localStorage: ${lsKeys()}`);
