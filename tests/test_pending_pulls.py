@@ -625,6 +625,7 @@ class TestGuiRoutes:
         monkeypatch.setattr("localm.netpolicy.downloads_allowed_when_off", lambda: False)
         r = c.post(f"/api/models/pulls/interrupted/{d['id']}/resume", json={})
         assert r.status_code == 403
+        assert "Network access is off" in r.json()["detail"]
         assert started == []
 
     def test_unknown_ids_are_404(self, client):
