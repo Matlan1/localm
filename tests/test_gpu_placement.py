@@ -12,11 +12,7 @@ exactly those devices and layer counts. The reported box: five NVIDIA cards of
 
 import contextlib
 import ctypes
-import os
 import random
-import subprocess
-import sys
-from pathlib import Path
 from unittest import mock
 
 import pytest
@@ -393,103 +389,99 @@ class TestCapacity:
         assert info["total"] == int(_TOTALS[1] * GiB)
 
 
-class TestRenumberSavedGpuSelection:
-    """A GPU choice saved in CUDA's FASTEST_FIRST numbering is moved, once, to
-    the PCI-bus numbering, by matching each card's PCI bus."""
-
-    @contextlib.contextmanager
-    def _world(self, saved, old_order=None, set_by_localm=True):
-        import localm
-        store = {"gpu_split_indices": None, "main_gpu_index": None,
-                 "gpu_numbering": None}
-        store.update(saved)
-
-        def _update(mutator):
-            mutator(store)
-            return store
-        probe = mock.Mock(return_value=old_order)
-        discover._renumber_attempted = False
-        with mock.patch("localm.config.load_config", side_effect=lambda: dict(store)), \
-                mock.patch("localm.config.update_config", side_effect=_update), \
-                mock.patch.object(discover, "_torch_reading_fastest_first", probe), \
-                mock.patch.object(discover, "_native_gpu_index_space_is_opaque",
-                                  return_value=False), \
-                mock.patch.object(localm, "CUDA_ORDER_SET_BY_LOCALM", set_by_localm):
-            yield store, probe
-        discover._renumber_attempted = False
-
-    @staticmethod
-    def _old(buses):
-        return [{"index": i, "name": f"g{i}", "pci_bus_id": b} for i, b in enumerate(buses)]
-
-    def test_a_saved_choice_is_moved_to_the_same_cards(self, caplog):
-        # FASTEST_FIRST listed the cards on buses 20, 10, 30, 50, 40.
-        old = self._old([0x20, 0x10, 0x30, 0x50, 0x40])
-        with caplog.at_level("WARNING", logger="localm"), \
-                self._world({"gpu_split_indices": [1, 2, 3, 4],
-                             "gpu_split_ratios": [1, 2, 3, 4],
-                             "main_gpu_index": 3}, old) as (store, _probe):
-            discover.renumber_saved_gpu_selection()
-        assert store["gpu_split_indices"] == [0, 2, 4, 3]
-        assert store["gpu_split_ratios"] == [1, 2, 3, 4], "ratios keep their positions"
-        assert store["main_gpu_index"] == 4
-        assert store["gpu_numbering"] == "pci_bus"
-        assert any("renumbered" in r.getMessage() for r in caplog.records)
-
-    def test_the_same_order_only_records_the_marker(self):
-        old = self._old([0x10, 0x20, 0x30])
-        with self._world({"gpu_split_indices": [0, 2]}, old) as (store, _probe):
-            discover.renumber_saved_gpu_selection()
-        assert store["gpu_split_indices"] == [0, 2] and store["gpu_numbering"] == "pci_bus"
-
-    def test_nothing_saved_needs_no_probe(self):
-        with self._world({}, None) as (store, probe):
-            discover.renumber_saved_gpu_selection()
-        probe.assert_not_called()
-        assert store["gpu_numbering"] == "pci_bus"
-
-    def test_a_user_chosen_order_was_never_fastest_first(self):
-        with self._world({"main_gpu_index": 1}, None, set_by_localm=False) as (store, probe):
-            discover.renumber_saved_gpu_selection()
-        probe.assert_not_called()
-        assert store["main_gpu_index"] == 1 and store["gpu_numbering"] == "pci_bus"
-
-    def test_a_probe_that_cannot_answer_changes_nothing(self):
-        with self._world({"gpu_split_indices": [1, 2]}, None) as (store, _probe):
-            discover.renumber_saved_gpu_selection()
-        assert store["gpu_split_indices"] == [1, 2] and store["gpu_numbering"] is None
-
-    def test_a_marked_install_is_left_alone(self):
-        old = self._old([0x20, 0x10])
-        with self._world({"gpu_split_indices": [0, 1], "gpu_numbering": "pci_bus"},
-                         old) as (store, probe):
-            discover.renumber_saved_gpu_selection()
-        probe.assert_not_called()
-        assert store["gpu_split_indices"] == [0, 1]
-
-    def test_it_runs_once_per_process(self):
-        old = self._old([0x20, 0x10])
-        with self._world({"main_gpu_index": 0}, old) as (store, probe):
-            discover.renumber_saved_gpu_selection()
-            store["gpu_numbering"] = None
-            discover.renumber_saved_gpu_selection()
-        assert probe.call_count == 1 and store["main_gpu_index"] == 1
+# Three cards on PCI buses 0x10, 0x20 and 0x30. torch (fastest first) numbers
+# them 0x30, 0x10, 0x20; nvidia-smi numbers them in bus order; llama.cpp lists
+# them 0x20, 0x30, 0x10. The selector shows torch's numbers.
+_TORCH_BUSES = [0x30, 0x10, 0x20]
+_LLAMA_BUSES = [0x20, 0x30, 0x10]
 
 
-def test_cuda_device_order_is_pci_bus_id():
-    """Every localm process and its children number NVIDIA cards by PCI bus,
-    unless the user chose an order."""
-    code = "import os, localm; print(os.environ.get('CUDA_DEVICE_ORDER'))"
-    root = Path(__file__).resolve().parents[1]
-    env = {k: v for k, v in os.environ.items() if k != "CUDA_DEVICE_ORDER"}
-    env["PYTHONPATH"] = str(root)
-    out = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True,
-                         text=True, check=True, cwd=root).stdout.strip().splitlines()[-1]
-    assert out == "PCI_BUS_ID"
-    env["CUDA_DEVICE_ORDER"] = "FASTEST_FIRST"
-    out = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True,
-                         text=True, check=True, cwd=root).stdout.strip().splitlines()[-1]
-    assert out == "FASTEST_FIRST"
+def _torch_cards():
+    return [{"index": i, "name": f"card{b:02x}", "total": 24 * GiB, "free": 20 * GiB,
+             "free_scope": discover.FREE_SCOPE_DEVICE, "integrated": False,
+             "pci_bus_id": b} for i, b in enumerate(_TORCH_BUSES)]
+
+
+def _llama_cards():
+    return [{"index": k, "name": f"CUDA{k}", "description": "",
+             "type": _loader.GGML_DEV_TYPE_GPU, "free": 20 * GiB, "total": 24 * GiB,
+             "device_id": f"0000:{b:02x}:00.0"} for k, b in enumerate(_LLAMA_BUSES)]
+
+
+class _SmiProc:
+    returncode = 0
+
+    def __init__(self, text):
+        self._text = text
+
+    def communicate(self, timeout=None):
+        return self._text, ""
+
+    def kill(self):
+        pass
+
+
+def _probe(torch_out, *, torch_present=True):
+    """discover._list_gpus_probe on the three-card box, torch answering
+    *torch_out* (an empty list: torch did not answer) and nvidia-smi answering
+    in bus order."""
+    smi = "".join(f"{i}, card{b:02x}, 24576, 20480, 00000000:{b:02X}:00.0\n"
+                  for i, b in enumerate(sorted(_TORCH_BUSES)))
+    with mock.patch.object(discover, "_torch_gpu_probe_known_doomed",
+                           return_value=not torch_present), \
+            mock.patch.object(discover, "_torch_is_resident", return_value=False), \
+            mock.patch.object(discover, "_torch_gpus_isolated_once",
+                              return_value=torch_out), \
+            mock.patch.object(discover, "_apply_device_global_free"), \
+            mock.patch("subprocess.Popen", return_value=_SmiProc(smi)):
+        return discover._list_gpus_probe()
+
+
+@pytest.fixture
+def _fresh_probe_state():
+    discover._reset_gpu_probe_cache()
+    yield
+    discover._reset_gpu_probe_cache()
+
+
+@pytest.mark.usefixtures("_fresh_probe_state")
+class TestSelectorNumbering:
+    """A GPU number the user saved is the one the selector showed (torch's),
+    whichever tool answered the reading a load is planned from."""
+
+    def test_nvidia_smi_takes_torchs_numbers_after_a_torch_reading(self):
+        first = _probe(_torch_cards())
+        assert [(d["index"], d["pci_bus_id"]) for d in first] == \
+            [(0, 0x30), (1, 0x10), (2, 0x20)]
+        second = _probe([])
+        assert [d["source"] for d in second] == [discover.GPU_SOURCE_NVIDIA_SMI] * 3
+        assert [(d["index"], d["pci_bus_id"]) for d in second] == \
+            [(0, 0x30), (1, 0x10), (2, 0x20)]
+        assert {d["numbering"] for d in second} == {discover.GPU_NUMBERING_TORCH}
+
+    def test_nvidia_smi_alone_on_a_torch_box_cannot_name_the_chosen_cards(self):
+        readings = _probe([])
+        assert [(d["index"], d["pci_bus_id"]) for d in readings] == \
+            [(0, 0x10), (1, 0x20), (2, 0x30)]
+        with _box(readings, _llama_cards()):
+            for cfg in ({"gpu_split_indices": [1, 2]},
+                        {"gpu_split_indices": None, "main_gpu_index": 1}):
+                devices, reason = discover.gguf_split_devices(cfg, gpus=readings)
+                assert devices is None and reason.startswith("no fresh GPU reading"), cfg
+            devices, reason = discover.gguf_split_devices(
+                {"gpu_split_indices": None}, gpus=readings)
+        assert reason == "" and sorted(d["slot"] for d in devices) == [0, 1, 2]
+
+    def test_a_box_without_torch_keeps_nvidia_smis_numbers(self):
+        readings = _probe([], torch_present=False)
+        assert [(d["index"], d["pci_bus_id"]) for d in readings] == \
+            [(0, 0x10), (1, 0x20), (2, 0x30)]
+        assert all("numbering" not in d for d in readings)
+        with _box(readings, _llama_cards()):
+            devices, reason = discover.gguf_split_devices(
+                {"gpu_split_indices": [1, 2]}, gpus=readings)
+        assert reason == ""
+        assert [(d["index"], d["slot"]) for d in devices] == [(1, 0), (2, 1)]
 
 
 class TestBackendLoad:
@@ -563,3 +555,24 @@ class TestBackendLoad:
         units = sum(d["units"] for d in params["gpu_devices"])
         assert 0 < units < 9 and params["n_gpu_layers"] == units
         assert b.last_gpu_sizing["layers"] == units
+
+    @pytest.mark.usefixtures("_fresh_probe_state")
+    @pytest.mark.parametrize("answered_by", ["torch", "nvidia-smi"])
+    def test_a_saved_gpu_number_reaches_the_card_the_selector_shows(
+            self, tmp_path, answered_by):
+        from localm.config import load_config
+        readings = _probe(_torch_cards())
+        if answered_by == "nvidia-smi":
+            readings = _probe([])
+        assert next(d for d in readings if d["index"] == 1)["pci_bus_id"] == 0x10
+        cfg = dict(load_config(), gpu_split_indices=None, gpu_split_ratios=None,
+                   main_gpu_index=1, ctx_auto=False)
+        params = self._load(self._backend(tmp_path), readings, _llama_cards(), cfg)
+        assert len(params["gpu_devices"]) == 3
+        assert params["main_gpu"] == _LLAMA_BUSES.index(0x10)
+        cfg = dict(cfg, gpu_split_indices=[1, 2], main_gpu_index=None)
+        params = self._load(self._backend(tmp_path), readings, _llama_cards(), cfg)
+        assert {d["device_id"] for d in params["gpu_devices"]} == \
+            {"0000:10:00.0", "0000:20:00.0"}
+        assert {d["slot"] for d in params["gpu_devices"]} == \
+            {_LLAMA_BUSES.index(0x10), _LLAMA_BUSES.index(0x20)}

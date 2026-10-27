@@ -273,10 +273,9 @@ localm config gpu_split_ratios 3,1      # relative weight per device, same order
 Left blank, `gpu_split_indices` spreads a model over every discrete GPU; set it
 to choose which cards, and `gpu_split_ratios` to pin the relative share of each
 instead of letting localm size it. The indices are the ones `localm gpus` and the
-GUI list. NVIDIA cards are numbered by PCI bus (localm sets `CUDA_DEVICE_ORDER`
-to `PCI_BUS_ID` unless you set it yourself), and localm matches each card to
-llama.cpp's own device list by its PCI bus before it loads, so GPU N is the same
-card everywhere.
+GUI list. Before a GGUF load localm matches each card to llama.cpp's own device
+list by its PCI bus, so the cards you chose are the ones llama.cpp uses, even
+when llama.cpp numbers them in another order.
 
 For a GGUF load over two or more GPUs localm plans the placement per card: each
 card gets a run of layers that fits its free memory, counting the layers'
@@ -296,10 +295,6 @@ The automatic context window grows only as far as the fullest card allows. With
 `gpu_split_ratios` set, the layers follow your ratios: with automatic GPU layers,
 fewer layers go on the GPUs when a card would be over its free memory; with a
 fixed `n_gpu_layers`, the plan says which card is short.
-
-NVIDIA cards used to be numbered fastest first. A GPU choice saved before this
-numbering changed is renumbered once, so it still names the same cards, and the
-log says what changed.
 
 A computer with an integrated GPU alongside a discrete one lists the integrated
 GPU too, and llama.cpp does not use it then: a split that names it is refused with
