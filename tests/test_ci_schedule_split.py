@@ -211,7 +211,7 @@ def test_the_push_trigger_runs_the_same_jobs_as_before_the_split():
 
 
 @pytest.mark.parametrize("labels,expected_present,expected_absent", [
-    ((), {"lint", "python-pr-gate", "voice-stack", "proxy-tests", "merge-policy"},
+    ((), {"lint", "python-pr-gate", "voice-stack", "proxy-tests", "gui-tests", "merge-policy"},
      {"test", "optional-stacks", "comfyui-pin-check", "llama-rocm-pin-check"}),
     (("full-ci",), {"lint", "test", "gui-tests", "optional-stacks", "merge-policy"}, {"python-pr-gate"}),
 ])
@@ -255,3 +255,15 @@ def test_the_proxy_tests_run_on_a_pull_request_only_for_proxy_changes():
     assert run["if"] == "steps.scope.outputs.run == 'true'"
     assert "tools/bugreport-proxy/worker.test.mjs" in run["run"]
     assert "tests-js/bugreport-proxy-worker.test.mjs" in run["run"]
+
+def test_the_gui_tests_run_on_an_unlabelled_pull_request_only_for_gui_changes_on_linux():
+    steps = _load()["jobs"]["gui-tests"]["steps"]
+    scope = next(s for s in steps if s.get("id") == "scope")
+    assert steps[0]["with"]["fetch-depth"] == 2
+    assert "git diff --name-only HEAD^1 HEAD" in scope["run"]
+    for path in ("localm/plugins/gui/static/", "tests-js/", r"package\.json"):
+        assert path in scope["run"], path
+    assert '"$FULL_CI" = "true"' in scope["run"]
+    assert '"$HOST_OS" != "Linux"' in scope["run"]
+    after = steps[steps.index(scope) + 1:]
+    assert after and all(s.get("if") == "steps.scope.outputs.run == 'true'" for s in after)

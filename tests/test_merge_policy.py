@@ -234,10 +234,17 @@ def test_the_labelled_arm_fails_on_red_gui_tests(mp):
     assert v.reasons == ["gui-tests: failure"]
 
 
-def test_an_unlabelled_pr_passes_with_gui_tests_skipped_by_its_label_gate(mp):
-    v = mp.decide(False, GREEN_UNLABELLED, mp.classify(["localm/plugins/gui/static/app/chat.js"]))
+@pytest.mark.parametrize("gui", ["skipped", "success"])
+def test_an_unlabelled_pr_passes_with_gui_tests_skipped_or_green(mp, gui):
+    v = mp.decide(False, {**GREEN_UNLABELLED, "gui-tests": gui},
+                  mp.classify(["localm/plugins/gui/static/app/chat.js"]))
     assert v.ok, v.reasons
-    assert GREEN_UNLABELLED["gui-tests"] == "skipped"
+
+
+def test_an_unlabelled_pr_fails_when_its_gui_tests_failed(mp):
+    v = mp.decide(False, {**GREEN_UNLABELLED, "gui-tests": "failure"}, {})
+    assert not v.ok
+    assert v.reasons == ["gui-tests: failure"]
 
 
 def test_the_unlabelled_arm_fails_when_the_gate_was_skipped_rather_than_passing_silently(mp):
@@ -546,9 +553,9 @@ def test_the_jobs_the_policy_needs_still_exist_with_their_gating():
     assert "full-ci" in ci["jobs"]["test"]["if"]
     assert "full-ci" in ci["jobs"]["python-pr-gate"]["if"]
     assert ci["jobs"]["lint"]["if"] == "github.event_name != 'push'"
-    assert "full-ci" in ci["jobs"]["gui-tests"]["if"]
-    assert _norm(ci["jobs"]["gui-tests"]["if"]) == _norm(ci["jobs"]["test-shard"]["if"]), (
-        "gui-tests runs under exactly the matrix's label gate")
+    assert ci["jobs"]["gui-tests"]["if"] == "github.event_name != 'push'"
+    scope = next(s for s in ci["jobs"]["gui-tests"]["steps"] if s.get("id") == "scope")
+    assert "full-ci" in scope["env"]["FULL_CI"], "a labelled PR runs the GUI tests on both hosts"
     assert _norm(ci["jobs"]["test"]["if"]) == "!cancelled() && " + _norm(ci["jobs"]["test-shard"]["if"])
     # merge-policy requires mutation-scope on both arms: it runs on every pull_request.
     assert "github.event_name == 'pull_request'" in _norm(ci["jobs"]["mutation-scope"]["if"])
