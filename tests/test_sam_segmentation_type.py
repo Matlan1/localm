@@ -131,3 +131,56 @@ def test_gui_import_labels_exist_in_english_and_german():
     assert de[key] and de[key] != "Segmentation models (SAM)"
     js = (REPO / "localm/plugins/gui/static/pages/models.js").read_text(encoding="utf-8")
     assert f'segmentation: "{key}"' in js
+
+
+def _patch_zip_member(path: Path, *, compress_type: int | None = None,
+                      set_flag: int = 0) -> None:
+    """Rewrite the first member's local and central headers in place."""
+    raw = bytearray(path.read_bytes())
+    local = raw.index(b"PK\x03\x04")
+    central = raw.index(b"PK\x01\x02")
+    if set_flag:
+        for at in (local + 6, central + 8):
+            raw[at:at + 2] = (int.from_bytes(raw[at:at + 2], "little") | set_flag).to_bytes(2, "little")
+    if compress_type is not None:
+        for at in (local + 8, central + 10):
+            raw[at:at + 2] = compress_type.to_bytes(2, "little")
+    path.write_bytes(bytes(raw))
+
+
+def _damaged_checkpoints(root: Path) -> dict[str, Path]:
+    root.mkdir(parents=True, exist_ok=True)
+    deflated = root / "deflate_corrupt.pth"
+    with zipfile.ZipFile(deflated, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("archive/data.pkl", pickle.dumps({k: 0 for k in SAM1}, protocol=2))
+    raw = bytearray(deflated.read_bytes())
+    start = raw.index(b"data.pkl") + len(b"data.pkl")
+    raw[start:start + 24] = b"\xff" * 24
+    deflated.write_bytes(bytes(raw))
+    unsupported = write_pth(root / "unsupported_compression.pth", SAM1)
+    _patch_zip_member(unsupported, compress_type=99)
+    encrypted = write_pth(root / "encrypted.pth", SAM1)
+    _patch_zip_member(encrypted, set_flag=0x1)
+    return {"deflate_corrupt": deflated, "unsupported": unsupported, "encrypted": encrypted}
+
+
+@pytest.mark.parametrize("kind", ["deflate_corrupt", "unsupported", "encrypted"])
+def test_a_damaged_checkpoint_zip_is_not_sam_and_is_logged(tmp_path, kind, caplog):
+    path = _damaged_checkpoints(tmp_path)[kind]
+    with caplog.at_level("DEBUG", logger="localm"):
+        assert is_sam_checkpoint(path) is False
+    assert any(path.name in r.getMessage() and "could not read" in r.getMessage()
+               for r in caplog.records), [r.getMessage() for r in caplog.records]
+
+
+def test_scan_survives_damaged_checkpoints_and_still_finds_the_rest(tmp_path):
+    models = tmp_path / "models"
+    for kind, damaged in _damaged_checkpoints(tmp_path / "damaged").items():
+        target = models / "other" / f"{kind}.pth"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(damaged.read_bytes())
+    write_pth(models / "checkpoints" / "sam_vit_b.pth", SAM1)
+    found = _discover(models)
+    assert found["checkpoints/sam_vit_b.pth"] == "segmentation"
+    assert {found[f"other/{k}.pth"] for k in
+            ("deflate_corrupt", "unsupported", "encrypted")} == {"unknown"}
