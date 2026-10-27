@@ -2207,6 +2207,8 @@ export const I18N_EN = {
   "settings.perf.singleGpuToast": "Saved - a model loads on GPU {index} only, from the next model load",
   "settings.perf.ratioHint":
     "Optional relative weight per checked device (e.g. 3 and 1 gives the first card three times the second's share). Leave every weight blank to keep the automatic free-VRAM sizing above.",
+  "settings.perf.numberingUnknownHint":
+    "GPU numbers are not available right now: the GPU check through torch did not answer, and nvidia-smi numbers the cards its own way. The GPU choices are locked until torch answers.",
   "settings.perf.indexSpaceHint":
     "Device numbers are the installed GPU backend's own order (what a model load uses); other tools may number GPUs differently.",
   "settings.perf.splitPartialWarningToast":

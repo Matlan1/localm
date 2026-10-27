@@ -13,6 +13,7 @@ exactly those devices and layer counts. The reported box: five NVIDIA cards of
 import contextlib
 import ctypes
 import random
+import time
 from unittest import mock
 
 import pytest
@@ -438,6 +439,31 @@ def _probe(torch_out, *, torch_present=True, torch_unanswered=False):
         return discover._list_gpus_probe()
 
 
+class _ProbeProc(_SmiProc):
+    def __init__(self, text, returncode):
+        super().__init__(text)
+        self.returncode = returncode
+
+
+def _probe_with_child(torch_reply, torch_rc):
+    """discover._list_gpus_probe on the three-card box with the real isolated
+    torch probe path: its child answers *torch_reply* with exit code
+    *torch_rc*, and nvidia-smi answers in bus order."""
+    smi = "".join(f"{i}, card{b:02x}, 24576, 20480, 00000000:{b:02X}:00.0\n"
+                  for i, b in enumerate(sorted(_TORCH_BUSES)))
+
+    def _popen(args, *a, **k):
+        if "nvidia-smi" in str(args[0]):
+            return _ProbeProc(smi, 0)
+        return _ProbeProc(torch_reply, torch_rc)
+
+    with mock.patch.object(discover, "_torch_gpu_probe_known_doomed", return_value=False), \
+            mock.patch.object(discover, "_torch_is_resident", return_value=False), \
+            mock.patch.object(discover, "_apply_device_global_free"), \
+            mock.patch("subprocess.Popen", side_effect=_popen):
+        return discover._list_gpus_probe()
+
+
 @pytest.fixture
 def _fresh_probe_state():
     discover._reset_gpu_probe_cache()
@@ -468,10 +494,46 @@ class TestSelectorNumbering:
             for cfg in ({"gpu_split_indices": [1, 2]},
                         {"gpu_split_indices": None, "main_gpu_index": 1}):
                 devices, reason = discover.gguf_split_devices(cfg, gpus=readings)
-                assert devices is None and reason.startswith("no fresh GPU reading"), cfg
+                assert devices is None and "cannot be matched" in reason, cfg
             devices, reason = discover.gguf_split_devices(
                 {"gpu_split_indices": None}, gpus=readings)
         assert reason == "" and sorted(d["slot"] for d in devices) == [0, 1, 2]
+
+    def test_a_failed_torch_child_marks_the_nvidia_smi_numbers(self):
+        readings = _probe_with_child("[]", 1)
+        assert [d.get("numbering") for d in readings] == \
+            [discover.GPU_NUMBERING_NVIDIA_SMI] * 3
+        with _box(readings, _llama_cards()):
+            devices, reason = discover.gguf_split_devices(
+                {"gpu_split_indices": [1, 2]}, gpus=readings)
+        assert devices is None and "cannot be matched" in reason
+
+    def test_torch_answering_no_gpu_leaves_the_nvidia_smi_numbers_unmarked(self):
+        readings = _probe_with_child("[]", 0)
+        assert [(d["index"], d["pci_bus_id"]) for d in readings] == \
+            [(0, 0x10), (1, 0x20), (2, 0x30)]
+        assert all("numbering" not in d for d in readings)
+
+    @pytest.mark.parametrize("hang", [True, False])
+    def test_a_resident_torch_read_that_fails_marks_the_round(self, hang):
+        def _read():
+            if hang:
+                time.sleep(0.5)
+                return []
+            raise RuntimeError("driver gone")
+
+        with mock.patch.object(discover, "_torch_gpus_resident", side_effect=_read):
+            assert discover._torch_gpus_resident_bounded(timeout=0.05) == []
+        assert discover._torch_round_unanswered is True
+
+    def test_auto_ratios_are_equal_on_nvidia_smi_numbers(self):
+        readings = _probe([], torch_unanswered=True)
+        cfg = {"gpu_split_indices": [1, 2], "gpu_split_ratios": None}
+        with mock.patch.object(discover, "_native_gpu_index_space_is_opaque",
+                               return_value=False):
+            assert discover.resolve_auto_split_ratios(cfg, gpus=readings) is None
+            first = _probe(_torch_cards())
+            assert discover.resolve_auto_split_ratios(cfg, gpus=first) is not None
 
     @pytest.mark.parametrize("torch_present", [True, False])
     def test_a_box_without_torch_keeps_nvidia_smis_numbers(self, torch_present):
@@ -578,3 +640,17 @@ class TestBackendLoad:
             {"0000:10:00.0", "0000:20:00.0"}
         assert {d["slot"] for d in params["gpu_devices"]} == \
             {_LLAMA_BUSES.index(0x10), _LLAMA_BUSES.index(0x20)}
+
+    @pytest.mark.usefixtures("_fresh_probe_state")
+    def test_a_split_on_nvidia_smi_numbers_is_refused_with_a_warning(self, tmp_path, caplog):
+        import logging
+
+        from localm.config import load_config
+        readings = _probe([], torch_unanswered=True)
+        cfg = dict(load_config(), gpu_split_indices=[1, 2], gpu_split_ratios=None,
+                   ctx_auto=False)
+        with caplog.at_level(logging.WARNING, logger="localm"):
+            params = self._load(self._backend(tmp_path), readings, _llama_cards(), cfg)
+        assert "gpu_devices" not in params or params["gpu_devices"] is None
+        assert any(r.levelno == logging.WARNING and "cannot be matched" in r.getMessage()
+                   for r in caplog.records)

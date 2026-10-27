@@ -792,11 +792,12 @@ def _reset_gpu_probe_cache() -> None:
     global _gpu_last_good, _gpu_probe_inflight, _gpu_probe_epoch
     global _gpu_probe_done, _gpu_probe_result, _isolated_torch_unavailable
     global _isolated_torch_broken_warned, _child_stderr_cap_reported
-    global _isolated_torch_unanswered
+    global _isolated_torch_unanswered, _torch_round_unanswered
     global _isolated_torch_retry_wait, _isolated_torch_retry_at
     _LLAMA_SLOTS_CACHE.clear()
     with _gpu_probe_lock:
         _TORCH_INDEX_OF_BUS.clear()
+        _torch_round_unanswered = False
         _gpu_last_good = None
         _gpu_probe_inflight = False
         _isolated_torch_unanswered = False
@@ -1772,6 +1773,8 @@ def _torch_gpus_isolated() -> Optional[list]:
                      "(%s)%s; falling through to nvidia-smi", e,
                      f"; child said: {said}" if said else "")
         return None
+    if proc.returncode:
+        _note_torch_round_unanswered()
     if err:
         # The child prints its own failure cause here before answering [], so it
         # must not die with the discarded stream. Latched: this line carries
@@ -1959,10 +1962,12 @@ def _torch_gpus_resident_bounded(timeout: float = _TORCH_RESIDENT_READ_TIMEOUT) 
         threading.Thread(target=_read, name="localm-torch-gpus-resident",
                          daemon=True).start()
     except Exception:
+        _note_torch_round_unanswered()
         return []
-    if not done.wait(timeout):
+    if not done.wait(timeout) or "value" not in result:
+        _note_torch_round_unanswered()
         return []
-    return result.get("value", [])
+    return result["value"]
 
 
 def _list_gpus_probe() -> list:
@@ -1971,9 +1976,10 @@ def _list_gpus_probe() -> list:
     # Whether torch was actually asked this round, as opposed to being
     # skipped outright because it is known-doomed. Read by the AMD/Windows
     # fallback at the end of this function.
-    global _isolated_torch_unanswered
+    global _isolated_torch_unanswered, _torch_round_unanswered
     with _gpu_probe_lock:
         _isolated_torch_unanswered = False
+        _torch_round_unanswered = False
     torch_asked = not _torch_gpu_probe_known_doomed()
     skipped_for_sycl = not torch_asked and _torch_gpu_probe_doomed_reason() == "sycl"
     if torch_asked:
@@ -2074,6 +2080,17 @@ GPU_NUMBERING_NVIDIA_SMI = "nvidia-smi"
 # every GPU reported a distinct bus. Guarded by _gpu_probe_lock.
 _TORCH_INDEX_OF_BUS: dict = {}
 
+# True for a probe round in which torch failed (the isolated probe exited
+# non-zero, or the resident read failed or overran). Guarded by _gpu_probe_lock.
+_torch_round_unanswered = False
+
+
+def _note_torch_round_unanswered() -> None:
+    """Record that torch failed to answer this probe round."""
+    global _torch_round_unanswered
+    with _gpu_probe_lock:
+        _torch_round_unanswered = True
+
 
 def _note_torch_numbering(out: list) -> None:
     """Remember torch's device number of each GPU's PCI bus from torch reading
@@ -2094,8 +2111,8 @@ def _nvidia_smi_numbering(out: list, torch_asked: bool) -> list:
     reading (:func:`_note_torch_numbering`) covered exactly *out*'s PCI buses,
     each entry takes torch's number for its bus and ``"numbering":
     GPU_NUMBERING_TORCH``, sorted by that number. Otherwise, when torch could
-    not answer (``_isolated_torch_unavailable`` or
-    ``_isolated_torch_unanswered``), each entry keeps nvidia-smi's number and
+    not answer (``_isolated_torch_unavailable``, ``_isolated_torch_unanswered``
+    or ``_torch_round_unanswered``), each entry keeps nvidia-smi's number and
     carries ``"numbering": GPU_NUMBERING_NVIDIA_SMI``; when torch answered with
     no GPU, *out* is returned unchanged (nvidia-smi's numbers are the only
     ones)."""
@@ -2108,7 +2125,7 @@ def _nvidia_smi_numbering(out: list, torch_asked: bool) -> list:
         return sorted((dict(d, index=index_of_bus[d["pci_bus_id"]],
                             numbering=GPU_NUMBERING_TORCH) for d in out),
                       key=lambda d: d["index"])
-    if _isolated_torch_unavailable or _isolated_torch_unanswered:
+    if _isolated_torch_unavailable or _isolated_torch_unanswered or _torch_round_unanswered:
         return [dict(d, numbering=GPU_NUMBERING_NVIDIA_SMI) for d in out]
     return out
 
@@ -3256,6 +3273,9 @@ def resolve_auto_split_ratios(config: Optional[dict] = None, *,
     - (``list_gpus()`` path only) any configured device's reading is not
       device-global (``free_scope != FREE_SCOPE_DEVICE``) - see the
       TRUSTWORTHINESS section below.
+    - (``list_gpus()`` path only) the reading is in nvidia-smi's own
+      numbering on a box where torch numbers the GPUs
+      (``"numbering": GPU_NUMBERING_NVIDIA_SMI``, :func:`_nvidia_smi_numbering`).
 
     On a build whose GPU index space is opaque to list_gpus() (vulkan or
     sycl - see :func:`_native_gpu_index_space_is_opaque`) the reading comes
@@ -3358,6 +3378,9 @@ def resolve_auto_split_ratios(config: Optional[dict] = None, *,
             if status != GPU_PROBE_OK:
                 return _fallback(
                     f"no fresh per-device VRAM reading (probe status {status})")
+        if any(g.get("numbering") == GPU_NUMBERING_NVIDIA_SMI for g in gpus):
+            return _fallback("torch did not answer, and nvidia-smi numbers the GPUs "
+                             "its own way")
         by_index = {g.get("index"): g for g in gpus}
         for i in idx_list:
             g = by_index.get(i)
@@ -4492,9 +4515,9 @@ def gguf_split_devices(config: Optional[dict] = None, *, gpus: Optional[list] = 
             if ((chosen or cfg.get("main_gpu_index") is not None)
                     and any(g.get("numbering") == GPU_NUMBERING_NVIDIA_SMI
                             for g in readings)):
-                return None, ("no fresh GPU reading in the GPU numbering the settings "
-                              "use (torch did not answer and nvidia-smi numbers the "
-                              "GPUs its own way)")
+                return None, ("the GPU numbers in the settings cannot be matched to "
+                              "the cards right now: torch did not answer, and "
+                              "nvidia-smi numbers the GPUs its own way")
             kept = _llama_visible_torch_devices(readings)
             if chosen:
                 by_index = {g.get("index"): g for g in readings}
