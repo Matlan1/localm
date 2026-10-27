@@ -117,9 +117,8 @@ def register(app: FastAPI, jobs) -> None:
                     except TimeoutError:
                         yield ": keepalive\n\n"
                         continue
-                    if show is not str:
-                        event = map_strings(event, show)
-                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                    shown = event if show is str else map_strings(event, show)
+                    yield f"data: {json.dumps(shown, ensure_ascii=False)}\n\n"
                     if event.get("type") == "end":
                         return
             finally:
