@@ -719,15 +719,15 @@ def test_unpaused_scope_still_shows_native_lines_on_the_console(monkeypatch):
 def test_the_pause_ends_with_its_block_even_when_it_raises():
     with pytest.raises(RuntimeError):
         with debuglog.native_console_paused():
-            assert debuglog._native_console_is_paused()
+            assert debuglog.native_console_is_paused()
             raise RuntimeError("boom")
 
-    assert not debuglog._native_console_is_paused()
+    assert not debuglog.native_console_is_paused()
 
 
 def test_nested_pauses_release_only_when_the_outer_one_ends():
     with debuglog.native_console_paused():
         with debuglog.native_console_paused():
             pass
-        assert debuglog._native_console_is_paused()
-    assert not debuglog._native_console_is_paused()
+        assert debuglog.native_console_is_paused()
+    assert not debuglog.native_console_is_paused()

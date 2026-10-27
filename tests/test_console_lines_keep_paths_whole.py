@@ -150,7 +150,7 @@ class _SpyEngine:
 
     def chat_stream(self, messages, **kwargs):
         from localm import debuglog
-        self.paused_during.append(debuglog._native_console_is_paused())
+        self.paused_during.append(debuglog.native_console_is_paused())
         yield "hello"
 
     def count_tokens(self, text):
@@ -166,7 +166,7 @@ def test_repl_reply_stream_runs_with_native_console_output_paused():
 
     assert reply == "hello"
     assert engine.paused_during == [True]
-    assert not debuglog._native_console_is_paused()
+    assert not debuglog.native_console_is_paused()
 
 
 def test_repl_compaction_summary_runs_with_native_console_output_paused():
@@ -176,7 +176,7 @@ def test_repl_compaction_summary_runs_with_native_console_output_paused():
 
     assert _collect_summary(engine, [], 64) == "hello"
     assert engine.paused_during == [True]
-    assert not debuglog._native_console_is_paused()
+    assert not debuglog.native_console_is_paused()
 
 
 def test_every_chat_stream_call_in_the_repl_is_inside_a_native_console_pause():

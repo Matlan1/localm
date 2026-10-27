@@ -976,7 +976,7 @@ def native_console_paused():
             _native_console_pauses -= 1
 
 
-def _native_console_is_paused() -> bool:
+def native_console_is_paused() -> bool:
     with _native_console_pauses_lock:
         return _native_console_pauses > 0
 
@@ -1035,7 +1035,7 @@ def dedup_native_stderr(swap_lock=None):
     # CPU-spinning infinite loop with no forward progress.
     guard = swap_lock if swap_lock is not None else contextlib.nullcontext()
     with guard:
-        console = None if _native_console_is_paused() else _stable_console_stream()
+        console = None if native_console_is_paused() else _stable_console_stream()
         console_fd = (console.fileno()
                       if console is not None and _stderr_fileno() == 2 else None)
 
