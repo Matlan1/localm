@@ -2415,7 +2415,7 @@ export const I18N_EN = {
   "settings.update.reinstallConfirm": "Reinstall",
   "settings.update.downgradeTitle": "Downgrade to {version}?",
   "settings.update.downgradeBody":
-    "{version} is older than the {current} you are running. Problems fixed since then come back. Your settings, model registry, coder sessions, memory and plugins are copied aside first, and Roll back returns you to {current}.",
+    "{version} is older than the {current} you are running. Problems fixed since then come back. Your settings, model registry, coder sessions, memory and plugins are first copied to updates/data-before-<version>-<date>-<time>-<id> in your data folder (to restore them, copy those files back while LocaLM is stopped), and Roll back returns you to {current}.",
   "settings.update.downgradeConfirm": "Downgrade",
   "settings.update.installing": "Downloading and checking {version}…",
   "settings.update.unverifiedStatus": "The signature of {version} does not verify: {reason}",

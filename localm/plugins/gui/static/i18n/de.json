@@ -2350,7 +2350,7 @@
   "settings.update.reinstallBody": "{version} ist die Version, die gerade läuft. Dies lädt sie erneut herunter, ersetzt den laufenden Code damit und startet den Server dann neu.",
   "settings.update.reinstallConfirm": "Neu installieren",
   "settings.update.downgradeTitle": "Auf {version} zurückgehen?",
-  "settings.update.downgradeBody": "{version} ist älter als Ihr laufendes {current}. Seitdem behobene Probleme kommen zurück. Ihre Einstellungen, die Modellliste, Coder-Sitzungen, das Gedächtnis und Plugins werden vorher gesichert, und Zurücksetzen bringt Sie wieder auf {current}.",
+  "settings.update.downgradeBody": "{version} ist älter als Ihr laufendes {current}. Seitdem behobene Probleme kommen zurück. Ihre Einstellungen, die Modellliste, Coder-Sitzungen, das Gedächtnis und Plugins werden vorher nach updates/data-before-<Version>-<Datum>-<Uhrzeit>-<ID> in Ihrem Datenordner kopiert (zum Wiederherstellen kopieren Sie diese Dateien bei beendetem LocaLM zurück), und Zurücksetzen bringt Sie wieder auf {current}.",
   "settings.update.downgradeConfirm": "Zurückgehen",
   "settings.update.installing": "{version} wird heruntergeladen und geprüft…",
   "settings.update.unverifiedStatus": "Die Signatur von {version} lässt sich nicht bestätigen: {reason}",

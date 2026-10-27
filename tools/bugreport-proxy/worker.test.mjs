@@ -732,3 +732,40 @@ test("update: a legacy client is never served a tag lookup answer that is not th
     assert.equal(out.legacy_ceiling, "v0.3.2");
   } finally { restore(); }
 });
+
+test("update: a legacy client never gets a tag that only looks like the ceiling (v0.3.2.1, -hotfix, +b, a)", async () => {
+  for (const tag of ["v0.3.2.1", "v0.3.2-hotfix", "v0.3.2+b", "v0.3.2a"]) {
+    const restore = stubFetch(async (url) => {
+      if (url.includes("/releases/tags/")) return new Response("{}", { status: 404 });
+      return new Response(JSON.stringify([
+        { tag_name: tag, draft: false, prerelease: false, published_at: "2026-11-01T00:00:00Z",
+          assets: [{ id: 9, name: "localm-x.zip", size: 1 }] },
+        { tag_name: "v0.3.1", draft: false, prerelease: false, published_at: "2026-10-22T00:00:00Z",
+          assets: [{ id: 31, name: "localm-0.3.1.zip", size: 1 }] },
+      ]), { status: 200 });
+    });
+    try {
+      const r = await worker.fetch(
+        req(undefined, { method: "GET", path: "/update", headers: UP_HDR }), ENV_UP);
+      const out = await r.json();
+      assert.equal(out.version, "v0.3.1", tag);
+    } finally { restore(); }
+  }
+});
+
+test("update: a legacy client still gets a numbered prerelease of the ceiling on the prerelease channel", async () => {
+  const restore = stubFetch(async (url) => {
+    if (url.includes("/releases/tags/")) return new Response("{}", { status: 404 });
+    return new Response(JSON.stringify([
+      { tag_name: "v0.3.2rc1", draft: false, prerelease: true, published_at: "2026-11-01T00:00:00Z",
+        assets: [{ id: 9, name: "localm-0.3.2rc1.zip", size: 1 }] },
+      { tag_name: "v0.3.1", draft: false, prerelease: false, published_at: "2026-10-22T00:00:00Z",
+        assets: [{ id: 31, name: "localm-0.3.1.zip", size: 1 }] },
+    ]), { status: 200 });
+  });
+  try {
+    const r = await worker.fetch(req(undefined,
+      { method: "GET", path: "/update?channel=prerelease", headers: UP_HDR }), ENV_UP);
+    assert.equal((await r.json()).version, "v0.3.2rc1");
+  } finally { restore(); }
+});

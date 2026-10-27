@@ -438,7 +438,7 @@ update`, or the GUI "Update now" button). The client is signature-verifying:
   confirmed (matched by its SHA-256). A build that does not verify never changes the
   keys in use. Over HTTP this needs the `admin` scope. Before a downgrade, localm
   copies your settings, model registry, coder sessions, memory and plugins to
-  `updates/data-before-<version>-<time>/` in the data directory. An older build
+  `updates/data-before-<version>-<date>-<time>-<8 hex>/` in the data directory. An older build
   installed this way keeps the keys in use: a release from before 0.3.0 gets this
   build's signature check alongside it, so it can still verify and install newer
   releases, and a release that would look `uv` up on PATH for a dependency update

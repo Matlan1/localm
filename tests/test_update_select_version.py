@@ -18,7 +18,7 @@ import localm
 from localm import _version, updater
 from localm.bugreport import LocalmError
 from tests._net_config import set_config
-from tests._update_signing import envelope, keyset
+from tests._update_signing import envelope, keyset, pub_hex
 
 _PRIV = Ed25519PrivateKey.generate()
 _RECOVERY = [Ed25519PrivateKey.generate() for _ in range(3)]
@@ -420,10 +420,50 @@ def test_a_build_that_needs_no_uv_bridge_gets_none(env, monkeypatch):
         inst / "localm" / "updater.py").read_text(encoding="utf-8")
 
 
+_OLD_031_UPDATER = '''
+_SIG_FORMAT = "localm-update-sig/2"
+
+
+def verify_signature(data, signature):
+    return None
+
+
+def check_build(data, signature):
+    return verify_signature(data, signature)
+'''
+
+
+def test_a_031_build_gets_the_bridge_and_refuses_the_revoked_key(env, monkeypatch):
+    home, inst = env
+    data = _zip("0.3.1", files={"localm/updater.py": _OLD_031_UPDATER})
+    updater.apply(2, signature=envelope(data, [_PRIV]), target_version="0.3.1",
+                  installed=inst, download_opener=_download(data))
+    assert (inst / "localm" / "_update_trust_bridge.py").is_file()
+    old = _load_installed_old_updater(inst, monkeypatch)
+    revoked = sorted(updater._REVOKED_KEYS)[0]
+    newer = _zip("0.4.0")
+    rotation = keyset(2, [_PRIV], _RECOVERY, signers=_RECOVERY[:2])
+    rotation["release"]["keys"].append(revoked)
+    body = updater.canonical_keyset_bytes(rotation)
+    rotation["signatures"] = [{"key": pub_hex(k), "sig": base64.b64encode(k.sign(body)).decode()}
+                              for k in _RECOVERY[:2]]
+    with pytest.raises(LocalmError) as ei:
+        old.check_build(newer, envelope(newer, [_PRIV], keyset=rotation))
+    assert "revoked" in str(ei.value.reason)
+    assert old.check_build(newer, envelope(newer, [_PRIV])) is None
+    saved = keyset(2, [_PRIV], _RECOVERY)
+    saved["release"]["keys"].append(revoked)
+    saved["signatures"] = []
+    (home / "updates" / "trust.json").write_text(json.dumps(saved), encoding="utf-8")
+    with pytest.raises(LocalmError) as ei:
+        old.check_build(newer, envelope(newer, [_PRIV]))
+    assert "revoked" in str(ei.value.reason)
+
+
 def test_a_build_that_already_verifies_envelopes_gets_no_bridge(env):
     _home, inst = env
     data = _zip("0.2.0", files={
-        "localm/updater.py": '_SIG_FORMAT = "localm-update-sig/2"\n'})
+        "localm/updater.py": '_SIG_FORMAT = "localm-update-sig/2"\n_REVOKED_KEYS = frozenset()\n'})
     updater.apply(2, signature=envelope(data, [_PRIV]), target_version="0.2.0",
                   installed=inst, download_opener=_download(data))
     assert not (inst / "localm" / "_update_trust_bridge.py").exists()

@@ -1009,12 +1009,13 @@ _BRIDGE_MODULE = "_update_trust_bridge.py"
 
 def _needs_trust_bridge(root: Path) -> bool:
     """True when the build at *root* has an updater that cannot verify a
-    localm-update-sig/2 envelope (localm before 0.3.0)."""
+    localm-update-sig/2 envelope (localm before 0.3.0) or does not refuse the
+    revoked keys (localm before 0.3.2)."""
     try:
         text = (root / "localm" / "updater.py").read_text(encoding="utf-8")
     except OSError:
         return False
-    return _SIG_FORMAT not in text
+    return _SIG_FORMAT not in text or "_REVOKED_KEYS" not in text
 
 
 def _install_trust_bridge(root: Path) -> None:

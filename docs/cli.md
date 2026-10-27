@@ -1241,7 +1241,7 @@ has an "Update now" button for the same flow.
 
 `--to VERSION` installs the release you name, including an older one. It says when
 that is a downgrade and asks first; before a downgrade it copies your settings, model
-registry, coder sessions, memory and plugins to `updates/data-before-<version>-<time>/`
+registry, coder sessions, memory and plugins to `updates/data-before-<version>-<date>-<time>-<8 hex>/`
 in the data directory, and `localm update --rollback` returns to the version you had.
 That copy is not restored automatically; to restore it, stop localm and copy its files
 back into the data directory.
