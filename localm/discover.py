@@ -3476,12 +3476,13 @@ def apply_gpu_devices(mp, devices: list) -> tuple:
     non-negative weight).
 
     Each entry is ``{"slot", "device_id"?, "units"}`` as the parent planned it
-    (:func:`gguf_split_devices`, ``_gpu_plan.Placement``). A device is found
-    in this process's native registry by its PCI ``device_id`` when the entry
-    carries one, else by ``slot`` among the registry's GPU-type devices.
-    ``mp.devices`` becomes the NULL-terminated list of those devices, so
-    llama.cpp creates no backend on any other GPU; ``split_mode`` is LAYER and
-    ``main_gpu`` 0.
+    (:func:`gguf_split_devices`, ``_gpu_plan.Placement``). A device is the
+    ``slot``-th GPU-type device of this process's native registry; when the
+    entry carries a PCI ``device_id``, that device's own id must match it.
+    Only the planned devices are asked for their id, so no other GPU is
+    initialised in this process. ``mp.devices`` becomes the NULL-terminated
+    list of those devices, so llama.cpp creates no backend on any other GPU;
+    ``split_mode`` is LAYER and ``main_gpu`` 0.
 
     Returns ``(devices array, tensor_split array)``: the CALLER MUST keep it
     referenced until the ``llama_model_load_from_file`` call that reads *mp*
@@ -3489,21 +3490,23 @@ def apply_gpu_devices(mp, devices: list) -> tuple:
     is never placed on a GPU other than the one planned."""
     from localm.inference.backends.llamacpp import _loader
     handles = _loader.gpu_device_handles()
-    by_id = {pid: h for h, pid in handles if pid}
     arr = (ctypes.c_void_p * (len(devices) + 1))()
     used = set()
     for k, d in enumerate(devices):
         pid = d.get("device_id")
-        handle = by_id.get(pid) if pid else None
-        if handle is None and not pid:
-            slot = d.get("slot")
-            if isinstance(slot, int) and 0 <= slot < len(handles):
-                handle = handles[slot][0]
-        if handle is None or handle in used:
+        slot = d.get("slot")
+        if (not isinstance(slot, int) or not 0 <= slot < len(handles)
+                or handles[slot] in used):
             raise RuntimeError(
-                f"GPU placement: llama.cpp device {d.get('slot')} "
-                f"({pid or 'no PCI id'}) is not among this runtime's "
-                f"{len(handles)} GPU(s)")
+                f"GPU placement: llama.cpp device {slot} ({pid or 'no PCI id'}) "
+                f"is not among this runtime's {len(handles)} GPU(s)")
+        handle = handles[slot]
+        if pid:
+            actual = _loader.device_pci_id(handle)
+            if actual != pid:
+                raise RuntimeError(
+                    f"GPU placement: llama.cpp device {slot} is PCI {actual}, "
+                    f"not the planned {pid}")
         used.add(handle)
         arr[k] = handle
     arr[len(devices)] = None
@@ -3705,7 +3708,9 @@ def vram_capacity(config: Optional[dict] = None, *, return_status: bool = False,
     With no ``gpu_split_indices`` and no ``main_gpu_index``, sums every
     discrete GPU of one reading when there are two or more
     (:func:`_discrete_gpus_sum`): a GGUF load and the HF backend's automatic
-    device map both spread a model over all of them. With ``main_gpu_index``
+    device map both spread a model over all of them. On a vulkan or sycl
+    build whose GPUs that reading cannot see, the runtime's own GPU-type
+    devices are summed instead (:func:`_native_gpus_sum`). With ``main_gpu_index``
     set (the HF backend then loads on that GPU), or one GPU, it answers as
     :func:`vram_info` would.
 
@@ -3780,8 +3785,11 @@ def vram_capacity(config: Optional[dict] = None, *, return_status: bool = False,
         single = _vi()
         gpus = getattr(_vram_info_reading, "gpus", None)
         _vram_info_reading.gpus = None
-        summed = (_discrete_gpus_sum(gpus) if cfg.get("main_gpu_index") is None
-                  else None)
+        summed = None
+        if cfg.get("main_gpu_index") is None and gpus is not None:
+            summed = _discrete_gpus_sum(gpus)
+            if summed is None and _native_gpu_index_space_is_opaque():
+                summed = _native_gpus_sum()
         if summed is None:
             return single
         summed.pop("devices", None)
@@ -3859,6 +3867,23 @@ def _discrete_gpus_sum(gpus) -> Optional[dict]:
                                  if len(scopes) == len(kept)
                                  and all(sc == FREE_SCOPE_DEVICE for sc in scopes)
                                  else FREE_SCOPE_PROCESS)
+    return out
+
+
+def _native_gpus_sum() -> Optional[dict]:
+    """``{"total", "free"?}`` summed over the GPU-type devices of the native
+    runtime's own list (:func:`native_gpu_devices`) when there are two or
+    more and each reports a total, else None. ``free`` is present only when
+    every one reports it."""
+    from localm.inference.backends.llamacpp._loader import GGML_DEV_TYPE_GPU
+    native = [d for d in (native_gpu_devices() or [])
+              if d.get("type") == GGML_DEV_TYPE_GPU]
+    if len(native) < 2 or not all(isinstance(d.get("total"), int) for d in native):
+        return None
+    out: dict = {"total": sum(d["total"] for d in native)}
+    frees = [d.get("free") for d in native]
+    if all(isinstance(f, int) for f in frees):
+        out["free"] = sum(frees)
     return out
 
 
@@ -4092,14 +4117,19 @@ _SPLIT_TOTAL_MATCH_MIN_BYTES = 64 * 1024 ** 2
 def _runtime_device_registry() -> Optional[list]:
     """The active native runtime's own non-CPU device inventory, in registry
     order (``_loader.gpu_devices_isolated``), or ``None`` when it cannot be
-    read. Stops the probe daemon afterwards when this call started it. See
-    test_the_registry_read_stops_a_probe_daemon_it_started."""
+    read. Stops the probe daemon afterwards when this call started it, and
+    when the inventory lists two or more GPUs: reading it opened a driver
+    context on every GPU in the daemon. See
+    test_the_registry_read_stops_a_probe_daemon_it_started and
+    test_a_registry_read_of_several_gpus_stops_a_running_daemon."""
     from localm.inference.backends.llamacpp import _loader
     started = not _loader.probe_daemon_running()
+    registry = None
     try:
-        return _loader.gpu_devices_isolated()
+        registry = _loader.gpu_devices_isolated()
+        return registry
     finally:
-        if started:
+        if started or len(_registry_gpus(registry or [])) >= 2:
             _loader.stop_probe_daemon()
 
 
@@ -4461,6 +4491,109 @@ def gguf_split_devices(config: Optional[dict] = None, *, gpus: Optional[list] = 
     except Exception as e:
         logger.debug("GPU split devices unavailable (%s: %s)", type(e).__name__, e)
         return None, f"the GPU list could not be built ({type(e).__name__})"
+
+
+_renumber_lock = threading.Lock()
+_renumber_attempted = False
+
+
+def _torch_reading_fastest_first() -> Optional[list]:
+    """The isolated torch probe's reading with ``CUDA_DEVICE_ORDER`` set to
+    ``FASTEST_FIRST`` (the CUDA default, the numbering localm used before it
+    set ``PCI_BUS_ID``), or None when the probe cannot answer."""
+    import json
+    import os
+    import subprocess
+    from localm._mp_spawn import interpreter_for_localm_children
+    env = dict(os.environ, CUDA_DEVICE_ORDER="FASTEST_FIRST")
+    try:
+        out = subprocess.run(
+            [interpreter_for_localm_children(), "-u", "-m", "localm._torch_gpu_probe"],
+            env=env, capture_output=True, text=True,
+            timeout=_ISOLATED_TORCH_PROBE_TIMEOUT)
+        lines = [ln for ln in out.stdout.splitlines() if ln.strip()]
+        reading = json.loads(lines[-1]) if lines else None
+    except Exception as e:
+        logger.debug("GPU renumbering: the FASTEST_FIRST probe failed (%s: %s)",
+                     type(e).__name__, e)
+        return None
+    return reading if isinstance(reading, list) else None
+
+
+def renumber_saved_gpu_selection() -> None:
+    """Move a saved ``main_gpu_index`` / ``gpu_split_indices`` from CUDA's
+    FASTEST_FIRST numbering to the PCI-bus numbering localm now uses, once.
+
+    Runs at most once per process and only while ``gpu_numbering`` is unset.
+    Records ``gpu_numbering`` = ``"pci_bus"`` without renumbering when nothing
+    is saved, when the user set ``CUDA_DEVICE_ORDER`` themself (both numberings
+    were the same then), on a vulkan or sycl build (those numbers are the
+    runtime's own), or when the two orders agree. Otherwise maps each saved
+    number to the same card's new number by PCI bus, saves it and logs a
+    WARNING naming the change. A probe that cannot answer leaves the settings
+    and the marker untouched (the next process tries again); GPUs that report
+    no PCI bus are left as saved, with a WARNING. Never raises."""
+    global _renumber_attempted
+    with _renumber_lock:
+        if _renumber_attempted:
+            return
+        _renumber_attempted = True
+    try:
+        import localm
+        from localm.config import load_config, update_config
+        cfg = load_config()
+        if cfg.get("gpu_numbering") == "pci_bus":
+            return
+
+        def _mark(remap: Optional[dict] = None) -> None:
+            def _apply(c: dict) -> None:
+                if remap:
+                    if isinstance(c.get("gpu_split_indices"), list):
+                        c["gpu_split_indices"] = [remap.get(i, i)
+                                                  for i in c["gpu_split_indices"]]
+                    if isinstance(c.get("main_gpu_index"), int):
+                        c["main_gpu_index"] = remap.get(c["main_gpu_index"],
+                                                        c["main_gpu_index"])
+                c["gpu_numbering"] = "pci_bus"
+            update_config(_apply)
+
+        split = cfg.get("gpu_split_indices")
+        main = cfg.get("main_gpu_index")
+        if ((not split and main is None)
+                or not getattr(localm, "CUDA_ORDER_SET_BY_LOCALM", False)
+                or _native_gpu_index_space_is_opaque()):
+            _mark()
+            return
+        old = _torch_reading_fastest_first()
+        if old is None:
+            return
+        if len(old) < 2:
+            _mark()
+            return
+        buses = [d.get("pci_bus_id") for d in old]
+        if (not all(isinstance(b, int) for b in buses) or len(set(buses)) != len(buses)
+                or not all(isinstance(d.get("index"), int) for d in old)):
+            logger.warning("GPU numbering: localm now numbers NVIDIA GPUs by PCI bus, "
+                           "but the GPUs did not report one, so the saved GPU choice "
+                           "(main GPU %r, split %r) is kept as it is; check it under "
+                           "Settings > Split across GPUs", main, split)
+            _mark()
+            return
+        by_bus = sorted(old, key=lambda d: d["pci_bus_id"])
+        remap = {d["index"]: pos for pos, d in enumerate(by_bus)}
+        if all(old_i == new_i for old_i, new_i in remap.items()):
+            _mark()
+            return
+        _mark(remap)
+        logger.warning("GPU numbering: localm now numbers NVIDIA GPUs by PCI bus, so "
+                       "the saved GPU choice was renumbered to name the same cards: "
+                       "main GPU %r -> %r, split %r -> %r", main,
+                       remap.get(main, main) if isinstance(main, int) else main,
+                       split, [remap.get(i, i) for i in split]
+                       if isinstance(split, list) else split)
+    except Exception as e:
+        logger.warning("GPU numbering: the saved GPU choice could not be checked "
+                       "(%s: %s)", type(e).__name__, e)
 
 
 def split_device_count(config: Optional[dict] = None) -> int:

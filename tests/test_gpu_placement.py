@@ -283,35 +283,63 @@ class _MP:
 
 
 class TestApplyGpuDevices:
-    def test_devices_are_found_by_pci_id_in_the_planned_order(self):
-        handles = [(101, "0000:20:00.0"), (102, "0000:30:00.0"), (103, "0000:10:00.0")]
-        mp = _MP()
-        with mock.patch.object(_loader, "gpu_device_handles", return_value=handles), \
+    @staticmethod
+    @contextlib.contextmanager
+    def _runtime(ids):
+        """A runtime whose GPU-type devices are handles 101.. with PCI *ids*;
+        yields the list of handles asked for their id."""
+        asked = []
+
+        def _pci(handle):
+            asked.append(handle)
+            return ids[handle - 101]
+        with mock.patch.object(_loader, "gpu_device_handles",
+                               return_value=[101 + k for k in range(len(ids))]), \
+                mock.patch.object(_loader, "device_pci_id", side_effect=_pci), \
                 mock.patch.object(discover, "_tensor_split_capacity", return_value=16):
+            yield asked
+
+    def test_planned_devices_in_the_planned_order(self):
+        mp = _MP()
+        with self._runtime(["0000:20:00.0", "0000:30:00.0", "0000:10:00.0"]):
             arr, split = discover.apply_gpu_devices(mp, [
-                {"slot": 9, "device_id": "0000:10:00.0", "units": 12},
-                {"slot": 9, "device_id": "0000:30:00.0", "units": 53}])
+                {"slot": 2, "device_id": "0000:10:00.0", "units": 12},
+                {"slot": 1, "device_id": "0000:30:00.0", "units": 53}])
         assert [arr[0], arr[1], arr[2]] == [103, 102, None]
         assert mp.devices == ctypes.cast(arr, ctypes.c_void_p).value
         assert [split[0], split[1], split[2]] == [12.0, 53.0, 0.0]
         assert mp.split_mode == discover._LLAMA_SPLIT_MODE_LAYER and mp.main_gpu == 0
 
+    def test_only_the_planned_devices_are_asked_for_their_id(self):
+        # Asking a CUDA device for its id initialises it; a card outside the
+        # plan must not be touched.
+        with self._runtime(["0000:10:00.0", "0000:20:00.0", "0000:30:00.0",
+                            "0000:40:00.0", "0000:50:00.0"]) as asked:
+            discover.apply_gpu_devices(_MP(), [
+                {"slot": 1, "device_id": "0000:20:00.0", "units": 3},
+                {"slot": 3, "device_id": "0000:40:00.0", "units": 4}])
+        assert sorted(asked) == [102, 104]
+
     def test_without_pci_ids_devices_are_found_by_slot(self):
-        handles = [(101, None), (102, None)]
-        with mock.patch.object(_loader, "gpu_device_handles", return_value=handles), \
-                mock.patch.object(discover, "_tensor_split_capacity", return_value=16):
+        with self._runtime([None, None]) as asked:
             arr, _ = discover.apply_gpu_devices(_MP(), [
                 {"slot": 1, "device_id": None, "units": 3},
                 {"slot": 0, "device_id": None, "units": 4}])
-        assert [arr[0], arr[1]] == [102, 101]
+        assert [arr[0], arr[1]] == [102, 101] and asked == []
 
-    def test_a_device_this_runtime_does_not_have_fails_the_load(self):
-        with mock.patch.object(_loader, "gpu_device_handles",
-                               return_value=[(101, "0000:20:00.0")]), \
-                pytest.raises(RuntimeError, match="not among"):
+    def test_a_device_with_another_pci_id_fails_the_load(self):
+        with self._runtime(["0000:20:00.0", "0000:10:00.0"]), \
+                pytest.raises(RuntimeError, match="not the planned"):
             discover.apply_gpu_devices(_MP(), [
                 {"slot": 0, "device_id": "0000:10:00.0", "units": 3},
                 {"slot": 1, "device_id": "0000:20:00.0", "units": 4}])
+
+    def test_a_device_this_runtime_does_not_have_fails_the_load(self):
+        with self._runtime(["0000:20:00.0"]), \
+                pytest.raises(RuntimeError, match="not among"):
+            discover.apply_gpu_devices(_MP(), [
+                {"slot": 0, "device_id": "0000:20:00.0", "units": 3},
+                {"slot": 1, "device_id": "0000:10:00.0", "units": 4}])
 
 
 class TestCapacity:
@@ -342,12 +370,110 @@ class TestCapacity:
             discover.vram_capacity({"gpu_split_indices": None, "main_gpu_index": None})
         assert probe.call_count == 1
 
+    def test_a_vulkan_build_sums_the_runtimes_own_gpus(self):
+        # torch cannot see the cards of a vulkan build; the runtime can.
+        native = [{"index": i, "name": f"Vulkan{i}", "total": 20 * GiB,
+                   "free": 18 * GiB, "type": _loader.GGML_DEV_TYPE_GPU}
+                  for i in range(2)]
+        with mock.patch.object(discover, "_list_gpus_kw", return_value=[]), \
+                mock.patch.object(discover, "_windows_largest_adapter_registry_entry",
+                                  return_value=None), \
+                mock.patch.object(discover, "_native_gpu_index_space_is_opaque",
+                                  return_value=True), \
+                mock.patch.object(discover, "native_gpu_devices", return_value=native):
+            info = discover.vram_capacity({"gpu_split_indices": None,
+                                           "main_gpu_index": None})
+        assert info == {"total": 40 * GiB, "free": 36 * GiB}
+
     def test_a_chosen_main_gpu_is_that_gpu_alone(self):
         readings = _torch_reading(_IDLE)
         cfg = {"gpu_split_indices": None, "main_gpu_index": 1}
         with mock.patch.object(discover, "_list_gpus_kw", return_value=readings),                 mock.patch("localm.config.load_config", return_value=cfg):
             info = discover.vram_capacity(cfg)
         assert info["total"] == int(_TOTALS[1] * GiB)
+
+
+class TestRenumberSavedGpuSelection:
+    """A GPU choice saved in CUDA's FASTEST_FIRST numbering is moved, once, to
+    the PCI-bus numbering, by matching each card's PCI bus."""
+
+    @contextlib.contextmanager
+    def _world(self, saved, old_order=None, set_by_localm=True):
+        import localm
+        store = {"gpu_split_indices": None, "main_gpu_index": None,
+                 "gpu_numbering": None}
+        store.update(saved)
+
+        def _update(mutator):
+            mutator(store)
+            return store
+        probe = mock.Mock(return_value=old_order)
+        discover._renumber_attempted = False
+        with mock.patch("localm.config.load_config", side_effect=lambda: dict(store)), \
+                mock.patch("localm.config.update_config", side_effect=_update), \
+                mock.patch.object(discover, "_torch_reading_fastest_first", probe), \
+                mock.patch.object(discover, "_native_gpu_index_space_is_opaque",
+                                  return_value=False), \
+                mock.patch.object(localm, "CUDA_ORDER_SET_BY_LOCALM", set_by_localm):
+            yield store, probe
+        discover._renumber_attempted = False
+
+    @staticmethod
+    def _old(buses):
+        return [{"index": i, "name": f"g{i}", "pci_bus_id": b} for i, b in enumerate(buses)]
+
+    def test_a_saved_choice_is_moved_to_the_same_cards(self, caplog):
+        # FASTEST_FIRST listed the cards on buses 20, 10, 30, 50, 40.
+        old = self._old([0x20, 0x10, 0x30, 0x50, 0x40])
+        with caplog.at_level("WARNING", logger="localm"), \
+                self._world({"gpu_split_indices": [1, 2, 3, 4],
+                             "gpu_split_ratios": [1, 2, 3, 4],
+                             "main_gpu_index": 3}, old) as (store, _probe):
+            discover.renumber_saved_gpu_selection()
+        assert store["gpu_split_indices"] == [0, 2, 4, 3]
+        assert store["gpu_split_ratios"] == [1, 2, 3, 4], "ratios keep their positions"
+        assert store["main_gpu_index"] == 4
+        assert store["gpu_numbering"] == "pci_bus"
+        assert any("renumbered" in r.getMessage() for r in caplog.records)
+
+    def test_the_same_order_only_records_the_marker(self):
+        old = self._old([0x10, 0x20, 0x30])
+        with self._world({"gpu_split_indices": [0, 2]}, old) as (store, _probe):
+            discover.renumber_saved_gpu_selection()
+        assert store["gpu_split_indices"] == [0, 2] and store["gpu_numbering"] == "pci_bus"
+
+    def test_nothing_saved_needs_no_probe(self):
+        with self._world({}, None) as (store, probe):
+            discover.renumber_saved_gpu_selection()
+        probe.assert_not_called()
+        assert store["gpu_numbering"] == "pci_bus"
+
+    def test_a_user_chosen_order_was_never_fastest_first(self):
+        with self._world({"main_gpu_index": 1}, None, set_by_localm=False) as (store, probe):
+            discover.renumber_saved_gpu_selection()
+        probe.assert_not_called()
+        assert store["main_gpu_index"] == 1 and store["gpu_numbering"] == "pci_bus"
+
+    def test_a_probe_that_cannot_answer_changes_nothing(self):
+        with self._world({"gpu_split_indices": [1, 2]}, None) as (store, _probe):
+            discover.renumber_saved_gpu_selection()
+        assert store["gpu_split_indices"] == [1, 2] and store["gpu_numbering"] is None
+
+    def test_a_marked_install_is_left_alone(self):
+        old = self._old([0x20, 0x10])
+        with self._world({"gpu_split_indices": [0, 1], "gpu_numbering": "pci_bus"},
+                         old) as (store, probe):
+            discover.renumber_saved_gpu_selection()
+        probe.assert_not_called()
+        assert store["gpu_split_indices"] == [0, 1]
+
+    def test_it_runs_once_per_process(self):
+        old = self._old([0x20, 0x10])
+        with self._world({"main_gpu_index": 0}, old) as (store, probe):
+            discover.renumber_saved_gpu_selection()
+            store["gpu_numbering"] = None
+            discover.renumber_saved_gpu_selection()
+        assert probe.call_count == 1 and store["main_gpu_index"] == 1
 
 
 def test_cuda_device_order_is_pci_bus_id():

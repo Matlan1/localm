@@ -4805,6 +4805,12 @@ def _make_lifespan():
         _pm = getattr(app.state, "plugin_manager", None)
         if _pm is not None:
             _pm.run_startup_callbacks()
+        # A GPU choice saved in the numbering localm used before it numbered
+        # NVIDIA GPUs by PCI bus is renumbered once, off the loop (it may probe).
+        if "pytest" not in sys.modules:
+            from localm.discover import renumber_saved_gpu_selection
+            threading.Thread(target=renumber_saved_gpu_selection,
+                             name="localm-gpu-renumber", daemon=True).start()
         # Optional idle-unload background task (config "idle_unload_seconds"); it
         # is a cheap no-op while disabled. Cancelled on shutdown so it never
         # outlives the app.

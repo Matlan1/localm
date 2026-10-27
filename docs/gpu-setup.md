@@ -293,8 +293,13 @@ for example:
 ```
 
 The automatic context window grows only as far as the fullest card allows. With
-`gpu_split_ratios` set, the layers follow your ratios even when a card ends up
-over its free memory, and the plan says which card is short.
+`gpu_split_ratios` set, the layers follow your ratios: with automatic GPU layers,
+fewer layers go on the GPUs when a card would be over its free memory; with a
+fixed `n_gpu_layers`, the plan says which card is short.
+
+NVIDIA cards used to be numbered fastest first. A GPU choice saved before this
+numbering changed is renumbered once, so it still names the same cards, and the
+log says what changed.
 
 A computer with an integrated GPU alongside a discrete one lists the integrated
 GPU too, and llama.cpp does not use it then: a split that names it is refused with

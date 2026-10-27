@@ -858,7 +858,8 @@ class VramSizingMixin:
 
     # gguf_split_devices reasons that mean a load on one GPU, not a failure.
     _ONE_GPU_REASONS = frozenset({"one GPU is chosen", "fewer than two discrete GPUs",
-                                  "no discrete GPU was read"})
+                                  "no discrete GPU was read",
+                                  "fewer than two of the chosen GPUs are present"})
 
     def _plan_gpu_placement(self):
         """Plan this load over two or more GPUs, as a
@@ -884,8 +885,12 @@ class VramSizingMixin:
         from localm.inference.backends.llamacpp import _loader
         if _loader.native_lib_loaded():
             return None
+        import sys
+
         from localm.debuglog import logger as _dbg
-        from localm.discover import gguf_split_devices
+        from localm.discover import gguf_split_devices, renumber_saved_gpu_selection
+        if "pytest" not in sys.modules:
+            renumber_saved_gpu_selection()
         devices, reason = gguf_split_devices(
             gpus=getattr(self, "_sizing_gpus", None) or None, wait_for_inflight=True)
         if not devices:

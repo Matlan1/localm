@@ -331,8 +331,13 @@ CORE_FIELDS: list = [
     # gpu_split_ratios 3,1` like any other field.
     SettingField("gpu_split_ratios", Widget.HIDDEN, "GPU split ratios",
                  "Optional relative weight per device in Split across GPUs "
-                 "(same order/length). Blank distributes by each card's free "
-                 "VRAM at load time (evenly when that cannot be measured).",
+                 "(same order/length). Blank sizes each card's share from its "
+                 "free VRAM at load time.",
+                 group="Engine", applies=Applies.NEXT_LOAD),
+    # HIDDEN: set by localm itself once the saved GPU numbers follow the PCI
+    # bus (discover.renumber_saved_gpu_selection), not by the user.
+    SettingField("gpu_numbering", Widget.HIDDEN, "GPU numbering",
+                 "How the saved GPU numbers are counted; localm sets it.",
                  group="Engine", applies=Applies.NEXT_LOAD),
     # HIDDEN, like the GPU knobs above: rendered by a dedicated "Max resident
     # models" number input in the Live Tuning card (settings-perf.js

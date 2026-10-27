@@ -925,12 +925,13 @@ def _device_pci_id(handles, dev) -> Optional[str]:
 
 
 def gpu_device_handles() -> list:
-    """``[(handle, device_id or None), ...]`` for the GPU-type
+    """The ``ggml_backend_dev_t`` handles of the GPU-type
     (:data:`GGML_DEV_TYPE_GPU`) devices of the native registry, in registry
     order: llama.cpp's own device list on a box with a discrete GPU, the
     numbering ``discover.native_gpu_devices`` and the GPU readings are mapped
-    to. Loads the native library. Call only in a process whose crash is
-    acceptable (the model worker)."""
+    to. Reads only each device's type, which initialises no device. Loads the
+    native library. Call only in a process whose crash is acceptable (the
+    model worker)."""
     load_lib()
     handles = _ggml_dev_handles()
     cnt = _ggml_sym(handles, "ggml_backend_dev_count")
@@ -947,8 +948,15 @@ def gpu_device_handles() -> list:
     for i in range(int(cnt())):
         dev = get(i)
         if int(type_fn(dev)) == GGML_DEV_TYPE_GPU:
-            out.append((dev, _device_pci_id(handles, dev)))
+            out.append(dev)
     return out
+
+
+def device_pci_id(dev) -> Optional[str]:
+    """The lower-case PCI bus id of native device handle *dev*, or None (see
+    :func:`_device_pci_id`). On a CUDA or HIP build this initialises the
+    device (its properties include a memory reading)."""
+    return _device_pci_id(_ggml_dev_handles(), dev)
 
 
 # Cache of (gpu_device_handle, bound ggml_backend_dev_memory) once resolved, or
