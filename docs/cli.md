@@ -178,6 +178,20 @@ localm pull owner/repo:model-Q4_K_M.gguf --type llm
 
 A pull at a revision downloads every file at the commit the revision pointed at when the pull started, records the revision and that commit on the registry entry (`localm list` shows `hf:owner/repo@revision`), and names a full-repo folder `<repo>-<revision>` unless you pass `--name`, so two revisions of one repo are two models. Its vision projector is not looked up automatically (the default branch's may not match); name one with `--mmproj owner/repo:file.gguf`. A single file keeps its repo file name, so two revisions of the same file cannot both sit in the models folder: a pull refuses to replace a file that another pull registered (another repo, or another revision of this one), so remove that one first. A folder that holds an unfinished download of one revision is likewise never completed with another; pull with a different `--name`, or delete the folder. Duplicate downloads are detected by path and SHA256. When you add or pull something already registered, localm offers alias / copy / move / register / skip instead of silently duplicating gigabytes. Two downloads to the same destination (from the CLI, the GUI, or both) are serialised rather than allowed to interleave their bytes into one file; starting a download that is already running is refused up front, and one interrupted by a crash resumes instead of restarting.
 
+### Interrupted downloads
+
+Every download (Hugging Face file or repo, direct URL, CivitAI) is recorded under `<data dir>/pending-pulls/` while it runs: the model spec and options, the repository and revision, the source URLs, the expected size and digest, and where its partial data is. The record is removed when the download finishes. A download that stops before it finishes (Ctrl+C, a closed window, a crash, a stopped server) keeps its record while partial data is on disk, so it can be continued later with its original options:
+
+```bash
+localm pull --list-interrupted               # what stopped, from where, how much is saved
+localm pull --resume                         # continue the only one (or pick one at a prompt)
+localm pull --resume <id>                    # continue a specific one
+localm pull --delete-interrupted <id>        # delete its partial data and record
+localm pull --dismiss-interrupted <id>       # stop offering it; its data is kept
+```
+
+At a terminal, `localm pull <spec>` first offers each other interrupted download (resume it now, delete its data, hide it, or skip); without a terminal it prints one line, and `localm list` names how many there are. A download still running in another process is never offered or deleted; one counts as stopped only when its process is gone. Resuming is a download, so it follows `net_mode` like any pull. Before resuming, the source is checked: if the file changed (another etag or size, or a repo at another commit), the saved data cannot be continued, nothing is downloaded, and you are told to delete it and pull again. `--list-interrupted` also lists partial files from older versions that no record claims, with an id `--delete-interrupted` accepts. The records hold model source details only, never chat content, and are written in every session mode, privacy included.
+
 ### Search HuggingFace
 
 ```bash

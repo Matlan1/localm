@@ -63,3 +63,24 @@ def format_localm_error(e) -> str:
     ``inference/routes/admin.py`` (APP-LIFECYCLE-3): trims the trailing colon
     when *e.reason* is empty."""
     return f"{e.summary}: {e.reason}".strip().strip(":").strip()
+
+
+UNDECODABLE_BODY_MESSAGE = (
+    "The request body is labelled JSON but is not valid UTF-8 text, so it cannot "
+    "be JSON. Send a JSON document, or the right Content-Type for other data.")
+
+
+def is_undecodable_body(exc: Exception) -> bool:
+    """True for the HTTP 400 FastAPI raises when a body labelled JSON cannot be
+    decoded as text (its cause is the ``UnicodeDecodeError``)."""
+    return (getattr(exc, "status_code", None) == 400
+            and isinstance(exc.__cause__, UnicodeDecodeError))
+
+
+def json_invalid_text(error: dict) -> str:
+    """One sentence for a pydantic ``json_invalid`` validation *error*: the
+    decoder's reason and the character position."""
+    reason = (error.get("ctx") or {}).get("error") or "it could not be parsed"
+    position = next((p for p in error.get("loc", ()) if isinstance(p, int)), None)
+    where = f" (at character {position})" if position is not None else ""
+    return f"The request body is not valid JSON: {reason}{where}."

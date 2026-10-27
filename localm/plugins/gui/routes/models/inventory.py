@@ -261,6 +261,10 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             models.append(row_out)
         out = {"models": models, "active": current}
         loading = _hs._switch_loading
+        if not loading and current:
+            engine_now = _hs._engines.get(current)
+            if getattr(engine_now, "loading", False) is True:
+                loading = current
         if loading:
             out["loading"] = loading
         # Models this instance answers through a peer instance on the same
@@ -384,8 +388,9 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
 
     @app.post("/api/models/load", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def gui_load_model(req: LoadModelRequest):
-        from localm.model_manager.registry import chat_load_refusal
-        refusal = chat_load_refusal(req.model, _require_registered(req.model))
+        from localm.model_manager.registry import chat_load_refusal_off_loop
+        refusal = await chat_load_refusal_off_loop(
+            req.model, _require_registered(req.model))
         if refusal is not None:
             raise HTTPException(422, refusal)
         # Route every switch through the coordinator so a new selection preempts an

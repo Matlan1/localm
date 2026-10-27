@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+import os
 import sys
 from pathlib import Path
 from typing import Any, Optional
@@ -687,7 +688,7 @@ def spec_drafts(model):
 # ------------------------------------------------------------------ #
 
 @main.command()
-@click.argument("model_spec")
+@click.argument("model_spec", required=False)
 @click.option("-n", "--name", default=None, help="Alias for the downloaded model.")
 @click.option("--sha256", default=None, metavar="HASH",
               help="Expected SHA256 hex digest (direct-URL and HF single-GGUF pulls; "
@@ -713,8 +714,21 @@ def spec_drafts(model):
               help="Internal: whether to add the download to localm's own "
                    "model registry (off for a file routed to --comfy-dest-dir, "
                    "which belongs to ComfyUI, not localm's chat-model catalog).")
+@click.option("--list-interrupted", "list_interrupted", is_flag=True,
+              help="List downloads that stopped before finishing (and partial "
+                   "files no download claims), then exit.")
+@click.option("--resume", "resume", is_flag=True,
+              help="Continue an interrupted download with its original options. "
+                   "MODEL_SPEC is then the download's id from --list-interrupted "
+                   "(omit it when there is only one).")
+@click.option("--delete-interrupted", "delete_id", default=None, metavar="ID",
+              help="Delete the partial data of the interrupted download (or "
+                   "orphan partial file) ID, then exit.")
+@click.option("--dismiss-interrupted", "dismiss_id", default=None, metavar="ID",
+              help="Stop offering the interrupted download ID; its files are "
+                   "kept and --list-interrupted still shows it.")
 def pull(model_spec, name, sha256, redownload, mmproj, type, store,
-         comfy_dest_dir, register):
+         comfy_dest_dir, register, list_interrupted, resume, delete_id, dismiss_id):
     """Download a model from HuggingFace, CivitAI, or a URL.
 
     \b
@@ -747,8 +761,42 @@ def pull(model_spec, name, sha256, redownload, mmproj, type, store,
     A local path already on disk (--store brings it into <data dir>/models):
       localm pull D:\\models\\mymodel.gguf --store copy
 
+    \b
+    A download that stopped before finishing (Ctrl+C, a closed window, a
+    crash, a restart) is remembered with its exact source and options:
+      localm pull --list-interrupted
+      localm pull --resume [ID]
+      localm pull --delete-interrupted ID
+      localm pull --dismiss-interrupted ID
+
     Models are stored in <data dir>/models/ and registered automatically.
     """
+    if list_interrupted:
+        _print_interrupted(include_dismissed=True)
+        return
+    if delete_id or dismiss_id:
+        _act_on_interrupted(delete_id, dismiss_id)
+        return
+    if resume:
+        rec = _pick_interrupted(model_spec)
+        if rec is None:
+            sys.exit(1)
+        rc = _resume_interrupted(rec)
+    else:
+        if not model_spec:
+            raise click.UsageError("Missing argument 'MODEL_SPEC'.")
+        if os.environ.get("LOCALM_PROGRESS_JSON") != "1":
+            _offer_interrupted(model_spec, name)
+        rc = _run_pull(model_spec, name, sha256, redownload, mmproj, type, store,
+                       comfy_dest_dir, register)
+    if rc:
+        sys.exit(rc)
+
+
+def _run_pull(model_spec, name, sha256, redownload, mmproj, type, store,
+              comfy_dest_dir, register) -> int:
+    """Run one pull as ``localm pull`` does; returns its exit code (0, 1, or
+    130 when Ctrl+C stopped it)."""
     from ..model_manager.pull import forget_stopped_download
     forget_stopped_download()
     try:
@@ -757,9 +805,241 @@ def pull(model_spec, name, sha256, redownload, mmproj, type, store,
                         dest_dir=comfy_dest_dir, register=register)
     except KeyboardInterrupt:
         click.echo("\n" + _stopped_pull_message(), err=True)
-        sys.exit(130)
+        return 130
+    return 0 if ok else 1
+
+
+def _interrupted_line(r: dict) -> str:
+    """One escaped console line describing the interrupted download view *r*."""
+    from rich.markup import escape
+
+    from ..model_manager._transfer import format_size
+    have = format_size(r["bytes_on_disk"])
+    of = f" of {format_size(r['expected_size'])}" if r.get("expected_size") else ""
+    name = f" as {escape(str(r['name']))}" if r.get("name") else ""
+    hidden = " [dim](dismissed)[/dim]" if r.get("dismissed") else ""
+    return (f"[cyan]{r['id'][:8]}[/cyan]  [bold]{escape(str(r['spec']))}[/bold]{name}"
+            f"  {have}{of} on disk{hidden}")
+
+
+def _print_interrupted(include_dismissed: bool) -> None:
+    """Print the interrupted downloads and orphan partial files."""
+    from rich.markup import escape
+
+    from ..model_manager import pending_pulls
+    from ..model_manager._transfer import format_size
+    recs = pending_pulls.list_interrupted(include_dismissed=include_dismissed)
+    orphans = pending_pulls.list_orphans()
+    if not recs and not orphans:
+        console.print("No interrupted downloads.")
+        return
+    for r in recs:
+        console.print(_interrupted_line(r))
+        for u in r["urls"]:
+            console.print(f"          [dim]{escape(u)}[/dim]")
+        if not r["resumable"]:
+            console.print("          [yellow]cannot be resumed; delete or dismiss it[/yellow]")
+    if recs:
+        console.print("[dim]localm pull --resume <id> | --delete-interrupted <id> | "
+                      "--dismiss-interrupted <id>[/dim]")
+    if orphans:
+        console.print("Partial files no download claims:")
+        for o in orphans:
+            console.print(f"[cyan]{o['id']}[/cyan]  {escape(o['file'])}  "
+                          f"{format_size(o['size'])}")
+        console.print("[dim]localm pull --delete-interrupted <id>[/dim]")
+
+
+def _find_interrupted(key: str, include_dismissed: bool = True) -> Optional[dict]:
+    """The interrupted download whose id is or starts with *key* (at least 4
+    characters), or None with the reason printed."""
+    from rich.markup import escape
+
+    from ..model_manager import pending_pulls
+    recs = pending_pulls.list_interrupted(include_dismissed=include_dismissed)
+    hits = [r for r in recs if len(key) >= 4 and r["id"].startswith(key.lower())]
+    if len(hits) == 1:
+        return hits[0]
+    if not hits:
+        console.print(f"[red]No interrupted download with id {escape(key)}.[/red] "
+                      "See localm pull --list-interrupted.")
+    else:
+        console.print(f"[red]{escape(key)} matches {len(hits)} downloads;[/red] "
+                      "give more of the id.")
+    return None
+
+
+def _pick_interrupted(key: Optional[str]) -> Optional[dict]:
+    """The download --resume names: by id, the only one, or one the user
+    picks at a terminal."""
+    from ..model_manager import pending_pulls
+    from ..model_manager.registry import can_prompt
+    if key:
+        return _find_interrupted(key)
+    recs = pending_pulls.list_interrupted()
+    if not recs:
+        console.print("No interrupted downloads to resume.")
+        return None
+    if len(recs) == 1:
+        return recs[0]
+    for i, r in enumerate(recs, 1):
+        console.print(f"{i}. " + _interrupted_line(r))
+    if not can_prompt():
+        console.print("[red]Several interrupted downloads;[/red] name one: "
+                      "localm pull --resume <id>")
+        return None
+    n = click.prompt("Resume which", type=click.IntRange(1, len(recs)))
+    return recs[n - 1]
+
+
+def _resume_interrupted(r: dict) -> int:
+    """Check the source of the interrupted download view *r* and run it
+    again with its options; returns the exit code."""
+    from rich.markup import escape
+
+    from localm.netpolicy import NetworkPolicyError
+
+    from ..model_manager import pending_pulls
+    try:
+        rec = pending_pulls.get_interrupted(r["id"])
+    except pending_pulls.UnknownPull:
+        console.print("[red]That download is no longer recorded.[/red]")
+        return 1
+    except Exception as e:
+        console.print(f"[red]Cannot resume:[/red] {escape(str(e))}")
+        return 1
+    if not pending_pulls.resumable(rec):
+        console.print("[red]This download cannot be resumed;[/red] delete or "
+                      "dismiss it, or pull it again.")
+        return 1
+    from localm.netpolicy import downloads_allowed_when_off, network_mode
+    if network_mode() == "off" and not downloads_allowed_when_off():
+        console.print(
+            "[red]Network access is disabled (net_mode=off).[/red] Resuming is a "
+            "download; enable it with: localm config net_mode ask - or allow just "
+            "downloads: localm config net_allow_model_downloads true")
+        return 1
+    try:
+        check = pending_pulls.check_upstream(rec)
+    except NetworkPolicyError as e:
+        console.print(f"[red]Network policy refused the check:[/red] {escape(str(e))}")
+        return 1
+    if check["changed"]:
+        console.print(f"[red]Cannot resume {escape(str(rec['request']['spec']))}:[/red] "
+                      f"{escape(check['detail'])}. Delete its saved data with "
+                      f"localm pull --delete-interrupted {rec['id'][:8]} and pull "
+                      "the model again to download the current version.")
+        return 1
+    if check["changed"] is None:
+        console.print(f"[yellow]Note:[/yellow] {escape(check['detail'])}; the "
+                      "download checks each file again before continuing.")
+    req = rec["request"]
+    console.print(f"Resuming [bold]{escape(str(req['spec']))}[/bold]")
+    return _run_pull(req["spec"], req.get("name"), req.get("sha256"),
+                     bool(req.get("redownload")), req.get("mmproj"),
+                     req.get("type") or "auto", None,
+                     Path(req["dest_dir"]) if req.get("dest_dir") else None,
+                     req.get("register") is not False)
+
+
+def _delete_one(key: str) -> bool:
+    """Delete the interrupted download (or orphan partial file) *key*,
+    printing the outcome; False when nothing was deleted."""
+    from rich.markup import escape
+
+    from ..model_manager import pending_pulls
+    from ..model_manager._transfer import format_size
+    from ..model_manager.pull import PullInFlight
+    try:
+        if key.startswith("orphan-"):
+            freed = pending_pulls.delete_orphan(key)
+            what = "the partial file"
+        else:
+            r = _find_interrupted(key)
+            if r is None:
+                return False
+            freed = pending_pulls.delete_interrupted(r["id"])
+            what = escape(str(r["spec"]))
+    except pending_pulls.UnknownPull:
+        console.print(f"[red]Nothing to delete for {escape(key)}.[/red]")
+        return False
+    except PullInFlight as e:
+        console.print(f"[red]Not deleted:[/red] {escape(str(e))}")
+        return False
+    except OSError as e:
+        console.print(f"[red]Not fully deleted:[/red] {escape(str(e))}")
+        return False
+    console.print(f"Deleted the partial data of {what} ({format_size(freed)} freed).")
+    return True
+
+
+def _dismiss_one(key: str) -> bool:
+    """Dismiss the interrupted download *key*; False when it was not."""
+    from rich.markup import escape
+
+    from ..model_manager import pending_pulls
+    from ..model_manager.pull import PullInFlight
+    r = _find_interrupted(key)
+    if r is None:
+        return False
+    try:
+        pending_pulls.set_dismissed(r["id"], True)
+    except (pending_pulls.UnknownPull, PullInFlight, OSError) as e:
+        console.print(f"[red]Not dismissed:[/red] {escape(str(e))}")
+        return False
+    console.print(f"Dismissed {escape(str(r['spec']))}; its files are kept.")
+    return True
+
+
+def _act_on_interrupted(delete_id: Optional[str], dismiss_id: Optional[str]) -> None:
+    """Handle --delete-interrupted / --dismiss-interrupted; exits 1 when one
+    of them did nothing."""
+    ok = True
+    if dismiss_id:
+        ok = _dismiss_one(dismiss_id) and ok
+    if delete_id:
+        ok = _delete_one(delete_id) and ok
     if not ok:
         sys.exit(1)
+
+
+def _offer_interrupted(model_spec: str, name: Optional[str]) -> None:
+    """At a terminal, offer each interrupted download other than *model_spec*
+    for resuming, deleting or dismissing; elsewhere print one line. Exits 130
+    when Ctrl+C stops a prompt or a resumed download."""
+    from ..model_manager import pending_pulls
+    from ..model_manager._transfer import format_size
+    from ..model_manager.registry import can_prompt
+    try:
+        recs = [r for r in pending_pulls.list_interrupted()
+                if not (r["spec"] == model_spec and (r["name"] or None) == (name or None))]
+    except Exception as e:
+        logger.warning("could not read the interrupted downloads: %s", e)
+        return
+    if not recs:
+        return
+    if not can_prompt():
+        console.print(f"[dim]{len(recs)} interrupted download(s): "
+                      "localm pull --list-interrupted[/dim]")
+        return
+    for r in recs:
+        console.print("Interrupted download: " + _interrupted_line(r))
+        choices = ["r", "d", "h", "s"] if r["resumable"] else ["d", "h", "s"]
+        label = (("[r]esume it now  " if r["resumable"] else "")
+                 + f"[d]elete its data ({format_size(r['bytes_on_disk'])})  [h]ide it  [s]kip")
+        try:
+            choice = click.prompt(f"  {label}", type=click.Choice(choices, case_sensitive=False),
+                                  default="s", show_choices=False).lower()
+        except (click.exceptions.Abort, KeyboardInterrupt):
+            click.echo("", err=True)
+            sys.exit(130)
+        if choice == "r":
+            if _resume_interrupted(r) == 130:
+                sys.exit(130)
+        elif choice == "d":
+            _delete_one(r["id"])
+        elif choice == "h":
+            _dismiss_one(r["id"])
 
 
 
@@ -964,6 +1244,15 @@ def list_cmd(type):
         from rich.markup import escape
         console.print(f"[yellow]{escape(result.note)}[/yellow]")
     list_models(type_filter=type)
+    from ..model_manager import pending_pulls
+    try:
+        n = len(pending_pulls.list_interrupted())
+    except Exception as e:
+        logger.warning("could not read the interrupted downloads: %s", e)
+        n = 0
+    if n:
+        console.print(f"[yellow]{n} interrupted download(s)[/yellow] - see: "
+                      "localm pull --list-interrupted")
 
 
 @main.command("relocate")

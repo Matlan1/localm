@@ -43,6 +43,11 @@ EXPECTED_ROUTES = {
     ("POST", "/api/models/pull-token/redeem"): S.MODELS_WRITE,
     ("POST", "/api/models/pull"): S.MODELS_WRITE,
     ("POST", "/api/models/pull/discard"): S.MODELS_WRITE,
+    ("GET", "/api/models/pulls/interrupted"): S.MODELS_WRITE,
+    ("POST", "/api/models/pulls/interrupted/{pull_id}/resume"): S.MODELS_WRITE,
+    ("POST", "/api/models/pulls/interrupted/{pull_id}/delete"): S.MODELS_WRITE,
+    ("POST", "/api/models/pulls/interrupted/{pull_id}/dismiss"): S.MODELS_WRITE,
+    ("POST", "/api/models/pulls/orphans/{orphan_id}/delete"): S.MODELS_WRITE,
     ("POST", "/api/media/{kind}/preflight"): S.MODELS_WRITE,
     ("POST", "/api/models/pull-comfy-source"): S.MODELS_WRITE,
     ("POST", "/api/models/comfy-source/lookup"): S.MODELS_WRITE,
@@ -238,6 +243,11 @@ def _requests_for(app):
         ("POST", "/api/models/pull-token/redeem", {"spec": "owner/repo", "token": token}),
         ("POST", "/api/models/pull", {"spec": "owner/repo"}),
         ("POST", "/api/models/pull/discard", {"spec": "owner/repo"}),
+        ("GET", "/api/models/pulls/interrupted", None),
+        ("POST", "/api/models/pulls/interrupted/" + "0" * 32 + "/resume", {}),
+        ("POST", "/api/models/pulls/interrupted/" + "0" * 32 + "/delete", None),
+        ("POST", "/api/models/pulls/interrupted/" + "0" * 32 + "/dismiss", {}),
+        ("POST", "/api/models/pulls/orphans/orphan-" + "0" * 24 + "/delete", None),
         ("POST", "/api/media/image/preflight", {}),
         ("POST", "/api/models/pull-comfy-source", {"filename": "not-curated.gguf"}),
         ("POST", "/api/models/comfy-source/lookup",
@@ -262,7 +272,9 @@ def _send(client, method, path, body, key):
 
 
 def _route_key(method, path):
-    return (method, path.split("?", 1)[0].replace("/image/", "/{kind}/"))
+    path = path.split("?", 1)[0].replace("/image/", "/{kind}/")
+    path = path.replace("/interrupted/" + "0" * 32 + "/", "/interrupted/{pull_id}/")
+    return (method, path.replace("/orphans/orphan-" + "0" * 24 + "/", "/orphans/{orphan_id}/"))
 
 
 class TestScopeEnforcement:
@@ -459,6 +471,22 @@ class TestModelsList:
         rows = {row["name"]: row for row in data["models"]}
         assert rows["m-a"]["loaded"] is True and rows["m-b"]["loaded"] is False
         assert data["active_gpu_split"] == [0.75, 0.25]
+
+    def test_active_engine_mid_load_is_reported_as_loading(self, harness, engines, monkeypatch):
+        monkeypatch.setattr(_hs, "_switch_loading", "")
+        engines["m-a"] = FakeEngine(loaded=False)
+        engines["m-a"].loading = True
+        with TestClient(harness.app) as c:
+            assert c.get("/api/models").json()["loading"] == "m-a"
+            engines["m-a"].loading = False
+            assert "loading" not in c.get("/api/models").json()
+
+    def test_a_switch_load_name_wins_over_the_active_engine(self, harness, engines, monkeypatch):
+        monkeypatch.setattr(_hs, "_switch_loading", "m-b")
+        engines["m-a"] = FakeEngine(loaded=False)
+        engines["m-a"].loading = True
+        with TestClient(harness.app) as c:
+            assert c.get("/api/models").json()["loading"] == "m-b"
 
     def test_resumable_is_reported_only_without_an_active_model(self, harness, monkeypatch):
         monkeypatch.setattr(_hs, "_resolve_unnamed_model_name", lambda: "m-b")
