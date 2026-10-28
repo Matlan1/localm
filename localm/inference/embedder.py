@@ -1986,6 +1986,13 @@ def last_error() -> Optional[str]:
     return pathscrub.scrub_paths(raw) if raw else raw
 
 
+def _in_flight(model) -> bool:
+    """Whether *model* has requests in flight: an int ``active_requests``
+    above 0 (anything else, such as a bare test double, reads as idle)."""
+    active = getattr(model, "active_requests", 0)
+    return isinstance(active, int) and active > 0
+
+
 def reset_embedder(*, force: bool = True) -> bool:
     """Drop the cached embedder and its negative caches (tests / a model
     change). Returns True if an embedder was actually cleared, False if none
@@ -2014,7 +2021,7 @@ def reset_embedder(*, force: bool = True) -> bool:
     load FAILURE was latched, so the next ``get_embedder()`` retries fresh."""
     global _EMBEDDER, _LOAD_FAILED_SPEC, _TRIED_DOWNLOAD, _LAST_ERROR, _LAST_RESOLVE_WARNED
     with _LOCK:
-        busy = _EMBEDDER is not None and _EMBEDDER.active_requests > 0
+        busy = _EMBEDDER is not None and _in_flight(_EMBEDDER)
         if not force and busy:
             return False
         current = _EMBEDDER

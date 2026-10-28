@@ -527,6 +527,13 @@ def active_requests() -> int:
         return _ENGINE.active_requests if _ENGINE is not None else 0
 
 
+def _in_flight(model) -> bool:
+    """Whether *model* has requests in flight: an int ``active_requests``
+    above 0 (anything else, such as a bare test double, reads as idle)."""
+    active = getattr(model, "active_requests", 0)
+    return isinstance(active, int) and active > 0
+
+
 def reset_speech(*, force: bool = True) -> bool:
     """Release the resident speech model and clear the failed-load memory.
     Returns True when a model was released; with ``force=False`` a model with a
@@ -536,7 +543,7 @@ def reset_speech(*, force: bool = True) -> bool:
     (:meth:`SpeechEngine.stop`)."""
     global _ENGINE, _ENGINE_KEY
     with _LOCK:
-        busy = _ENGINE is not None and _ENGINE.active_requests > 0
+        busy = _ENGINE is not None and _in_flight(_ENGINE)
         if not force and busy:
             return False
         current = _ENGINE

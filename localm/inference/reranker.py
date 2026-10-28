@@ -407,9 +407,12 @@ class HFReranker:
 
 
 def _busy(model) -> bool:
-    """Whether *model*, the resident one, has a request in flight. Call with
-    _LOCK held."""
-    return model.active_requests > 0 or _RESIDENT_REQUESTS > 0
+    """Whether *model*, the resident one, has a request in flight: an int
+    ``active_requests`` above 0 (anything else, such as a bare test double,
+    reads as idle) or a request counted by :func:`_pin`. Call with _LOCK
+    held."""
+    active = getattr(model, "active_requests", 0)
+    return (isinstance(active, int) and active > 0) or _RESIDENT_REQUESTS > 0
 
 
 def _release_failed(failed, reason: str) -> None:
