@@ -269,18 +269,18 @@ def dists(site: Path) -> dict:
 def _packaging():
     try:
         from packaging.requirements import Requirement
-        from packaging.version import InvalidVersion, Version
+        from packaging.version import InvalidVersion
     except ImportError:
         from pip._vendor.packaging.requirements import Requirement  # type: ignore
-        from pip._vendor.packaging.version import InvalidVersion, Version  # type: ignore
-    return Requirement, Version, InvalidVersion
+        from pip._vendor.packaging.version import InvalidVersion  # type: ignore
+    return Requirement, InvalidVersion
 
 
 def unsatisfied(reqs, installed: dict) -> list:
     """The requirement strings of *reqs* (markers evaluated for this machine)
     the distributions *installed* (from :func:`dists`) do not satisfy, each as
     ``"name have (wants spec)"``."""
-    Requirement, Version, InvalidVersion = _packaging()
+    Requirement, InvalidVersion = _packaging()
     out = []
     for s in reqs:
         try:
@@ -296,7 +296,7 @@ def unsatisfied(reqs, installed: dict) -> list:
         if not r.specifier:
             continue
         try:
-            ok = r.specifier.contains(Version(have), prereleases=True)
+            ok = r.specifier.contains(have, prereleases=True)
         except InvalidVersion:
             ok = False
         if not ok:
