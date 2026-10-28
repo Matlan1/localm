@@ -11,6 +11,10 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-10-28
+
+Everything in 0.3.2rc1 and 0.3.2rc2 below; nothing else changed since 0.3.2rc2.
+
 ## [0.3.2rc2] - 2026-10-28
 
 ### Changed
