@@ -23,6 +23,7 @@ from __future__ import annotations
 import contextlib
 import json as _json
 import shutil
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -1250,6 +1251,7 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
             post_cmd = (au.post_swap_command(klass, backend=_installed_backend(), uv=uv_exe)
                         if target_version is None
                         else _selected_post_swap_command(klass, root, uv_exe))
+            _require_runnable(post_cmd, klass)
             # The update has verified: save a key set it replaced, before the swap.
             if new_keyset is not None:
                 _save_keyset(new_keyset)
@@ -1334,16 +1336,37 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
                 "data_backup": str(data_backup) if data_backup else None}
 
 
+def _require_runnable(cmd, klass: str) -> None:
+    """Refuse, before anything is swapped, a post-swap command whose program is
+    not a full path to a file that can run. Raises LocalmError naming the
+    program and how to repair the install."""
+    if not cmd:
+        return
+    from localm import uv_tool
+    from localm.bugreport import LocalmError
+    program = str(cmd[0] or "")
+    if Path(program).is_absolute() and uv_tool.usable(program):
+        return
+    what = "is not a full path" if program and not Path(program).is_absolute() else "was not found"
+    setup = "setup.bat" if sys.platform == "win32" else "setup.sh"
+    raise LocalmError(
+        f"this update cannot run its {klass} step, so nothing was changed",
+        reason=f"the program it needs ({program or 'none'}) {what}. Run {setup} in the "
+               f"localm folder to repair the install, then update again")
+
+
 def _uv_for_deps(target: Path) -> str:
     """The uv that reinstalls the dependencies of the install at *target*.
 
-    Finds the install's own uv (:func:`localm.uv_tool.find_uv`); when there is
-    none, installs the pinned uv into ``<target>/.uv``. Raises LocalmError,
-    naming every place looked at and why the install failed, when neither
-    works. Called before the swap, so a refusal changes nothing."""
+    Takes the uv the ``uv`` package installed into this environment
+    (:func:`localm.uv_tool.bundled_uv`), else the install's own uv
+    (:func:`localm.uv_tool.find_uv`); when there is neither, installs the pinned
+    uv into ``<target>/.uv``. Raises LocalmError, naming every place looked at
+    and why the install failed, when nothing works. Called before the swap, so
+    a refusal changes nothing."""
     from localm import uv_tool
     from localm.bugreport import LocalmError
-    found = uv_tool.find_uv(target)
+    found = uv_tool.bundled_uv() or uv_tool.find_uv(target)
     if found:
         return found
     searched = uv_tool.describe_search(target)

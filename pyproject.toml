@@ -43,6 +43,9 @@ dependencies = [
     # directly, so it is declared directly: never rely on a transitive package
     # staying present. See localm/http_ssl.py.
     "certifi>=2026.7.22",
+    # The updater's dependency step runs the uv this package installs into the
+    # venv (localm.uv_tool.bundled_uv), found without PATH.
+    "uv>=0.13.6",
     # The coder's `grep` and `search_replace` tools compile a regex the MODEL
     # supplies, so the pattern is attacker-influenced and a nested quantifier
     # costs time that doubles per input character. stdlib `re` cannot be

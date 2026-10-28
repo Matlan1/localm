@@ -93,10 +93,23 @@ def find_uv(root) -> Optional[str]:
     return None
 
 
+def bundled_uv() -> Optional[str]:
+    """Full path of the uv the ``uv`` Python package installed into the running
+    interpreter's environment, or None when that package or its binary is absent.
+    Found by the package's own lookup, which never searches PATH."""
+    try:
+        from uv import find_uv_bin
+        path = find_uv_bin()
+    except (ImportError, OSError):
+        return None
+    return path if os.path.isabs(path) and usable(path) else None
+
+
 def describe_search(root) -> str:
-    """What find_uv looked at, for an error message."""
+    """What the updater and find_uv looked at, for an error message."""
     before, after = search_places(root)
-    places = [str(p) for p in before] + ["every folder on PATH"] + [str(p) for p in after]
+    places = (["the uv Python package in this environment"] + [str(p) for p in before]
+              + ["every folder on PATH"] + [str(p) for p in after])
     return "; ".join(places)
 
 
@@ -148,11 +161,16 @@ def _download(url: str, dest: Path, timeout: float = 120.0) -> None:
 
 
 def _run_installer(script: Path, env: dict) -> int:
+    from localm import sysprog
+    shell = sysprog.find("powershell" if IS_WINDOWS else "sh")
+    if not shell:
+        raise FileNotFoundError(
+            f"{'powershell' if IS_WINDOWS else 'sh'} was not found in the system folders or on PATH")
     if IS_WINDOWS:
         env = {k: v for k, v in env.items() if k.upper() != "PSMODULEPATH"}
-        argv = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)]
+        argv = [shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)]
     else:
-        argv = ["sh", str(script)]
+        argv = [shell, str(script)]
     return subprocess.run(argv, env=env, stdin=subprocess.DEVNULL).returncode
 
 
