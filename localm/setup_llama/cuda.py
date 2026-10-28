@@ -350,6 +350,31 @@ def _fetch_pypi_runtime_lib(package: str, target: Path) -> int:
         return n
 
 
+# The record, in a runtime dir, of the PyPI CUDA libraries fetched into it.
+CUDA_RUNTIME_RECORD = ".localm-cuda-runtime.json"
+
+
+def record_cuda_runtime(target: Path, cuda_line: str) -> None:
+    """Record in *target* the CUDA line and the version of each PyPI CUDA library
+    :func:`_fetch_cuda_runtime_libs` fetched into it. Raises ``OSError``."""
+    packages = {p: _CUDA_RUNTIME_PIN[p][0]
+                for p in _CUDA_RUNTIME_PYPI_PACKAGES.get(cuda_line, ()) if p in _CUDA_RUNTIME_PIN}
+    (target / CUDA_RUNTIME_RECORD).write_text(
+        json.dumps({"line": cuda_line, "packages": packages}), encoding="utf-8")
+
+
+def read_cuda_runtime(target: Path) -> Optional[dict]:
+    """``{"line", "packages"}`` recorded by :func:`record_cuda_runtime` in
+    *target*, or None when there is no readable record."""
+    try:
+        data = json.loads((target / CUDA_RUNTIME_RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("packages"), dict):
+        return None
+    return data
+
+
 def _fetch_cuda_runtime_libs(cuda_line: str, target: Path) -> int:
     """Fetch every PyPI-hosted CUDA runtime library for *cuda_line* ('cuda-12'
     or 'cuda-13') into *target*. Returns the total files copied. Raises
@@ -361,6 +386,11 @@ def _fetch_cuda_runtime_libs(cuda_line: str, target: Path) -> int:
     for pkg in packages:
         console.print(f"[dim]Fetching CUDA runtime library:[/dim] {pkg}")
         total += _sl._fetch_pypi_runtime_lib(pkg, target)
+    try:
+        record_cuda_runtime(target, cuda_line)
+    except OSError as e:
+        logger.warning("could not record the CUDA runtime libraries fetched into %s: %s",
+                       target, e)
     return total
 
 
