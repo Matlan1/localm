@@ -225,14 +225,14 @@ def _setup_gui_bat_installs_uv(tmp_path, clone_name, pick, uv_exe, fails):
     script = clone / "setup-gui.bat"
     text = script.read_bytes().decode("utf-8")
     assert text.count(_GUI_UV_RUN) == 1, "the window launch line moved"
-    script.write_bytes(text.replace(_GUI_UV_RUN, "echo WINDOW-UV=%UVEXE%& cmd /c exit 0")
+    script.write_bytes(text.replace(_GUI_UV_RUN, "set UVEXE& cmd /c exit 0")
                        .encode("utf-8"))
     rc, out = _cmd(script, clone, _windows_env(scratch, home, log, fails), f"{pick}\nY\n\n\n")
     installed = clone / uv_exe if uv_exe else home / ".local" / "bin" / "uv.exe"
     if fails:
         assert rc == 1 and "uv still is not callable" in out, out
     else:
-        assert f"WINDOW-UV={installed}" in out, out
+        assert f"UVEXE={installed}" in out, out
     _assert_nothing_left(scratch, log)
     assert not (clone / ".localm-setup-tmp").exists()
 
