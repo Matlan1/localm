@@ -3942,6 +3942,7 @@ class TestGpuUsageSourceRobustness:
                             lambda: False)
         from localm.inference.backends.llamacpp import _loader
         monkeypatch.setattr(_loader, "native_lib_loaded", lambda: False)
+        monkeypatch.setattr(_discover, "native_backend_has_hip", lambda: False)
 
         _real_import = builtins.__import__
         attempted = []
@@ -3974,6 +3975,7 @@ class TestGpuUsageSourceRobustness:
         monkeypatch.setattr(_discover, "_gpu_probe_inflight", True)
         monkeypatch.setattr(_discover, "_torch_gpu_probe_known_doomed", lambda: False)
         monkeypatch.setattr(_discover, "native_hip_runtime_resident", lambda: False)
+        monkeypatch.setattr(_discover, "native_backend_has_hip", lambda: False)
         monkeypatch.setattr(_loader, "native_lib_loaded", lambda: False)
         monkeypatch.setattr(gu, "torch_build_is_hip", lambda: hip)
 
@@ -4019,6 +4021,7 @@ class TestGpuUsageSourceRobustness:
                             lambda: True)
         monkeypatch.setattr(_discover, "native_hip_runtime_resident",
                             lambda: False)
+        monkeypatch.setattr(_discover, "native_backend_has_hip", lambda: False)
 
         _real_import = builtins.__import__
         attempted = []
@@ -4102,6 +4105,8 @@ class TestScopeGateAnswersWithoutTorch:
                             lambda: known_doomed)
         monkeypatch.setattr(_discover, "native_hip_runtime_resident",
                             lambda: hip_resident)
+        monkeypatch.setattr(_discover, "native_backend_has_hip",
+                            lambda: hip_resident)
         from localm.inference.backends.llamacpp import _loader
         monkeypatch.setattr(_loader, "native_lib_loaded", lambda: False)
 
@@ -4131,7 +4136,7 @@ class TestScopeGateAnswersWithoutTorch:
             result = gu.raw_reading_is_process_scoped()
         assert result is True
         assert "torch" not in attempted
-        assert "torch is not consultable" in caplog.text
+        assert "torch does not supply them" in caplog.text
 
     def test_inflight_probe_with_resident_hip_answers_true_without_import(
             self, monkeypatch):

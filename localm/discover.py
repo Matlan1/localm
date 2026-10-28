@@ -2366,6 +2366,15 @@ def native_backend_has_gpu() -> Optional[bool]:
     return any(m in n for n in names for m in _GPU_BACKEND_MARKERS)
 
 
+def native_backend_has_hip() -> bool:
+    """True when the currently-resolved native runtime directory ships the HIP
+    ggml backend (a ``ggml-hip.*`` file), whether or not the runtime is loaded
+    in this process. That directory is the one the isolated VRAM probe daemon
+    loads. Same shipped-file-set authority as :func:`_native_backend_has_vulkan`;
+    False when the directory is unresolved or on any error."""
+    return any("hip" in n for n in _native_backend_ggml_names())
+
+
 def _native_backend_has_sycl() -> bool:
     """True when the currently-resolved native runtime directory ships the
     SYCL ggml backend (a ``ggml-sycl.*`` file) - i.e. the active install is
