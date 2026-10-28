@@ -284,6 +284,11 @@ def main(
                     verify_cmd, output_format)
         return
 
+    # Native log lines of models this process loads itself (the embedding model
+    # episodic recall uses) go to the debug log, not into the session.
+    from localm.debuglog import native_console_paused
+    click.get_current_context().with_resource(native_console_paused())
+
     if output_format == "jsonl" and not task:
         click.echo("--output-format jsonl needs a TASK to run.", err=True)
         sys.exit(2 if ci else 1)
