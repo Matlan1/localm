@@ -31,7 +31,7 @@ _WINDOWS_RELATIVE = {
 def windows_system_dir() -> Optional[str]:
     """The Windows system directory, as Windows reports it; None elsewhere or
     when Windows does not answer."""
-    if not IS_WINDOWS:
+    if sys.platform != "win32":
         return None
     import ctypes
     buf = ctypes.create_unicode_buffer(520)
