@@ -474,6 +474,7 @@ class _LoopMixin:
         def disabled_tools(self) -> frozenset: ...
 
         max_turns: int
+        _task_start_turns: int
         patch_mode: bool
         cwd: Path
         _unverified_writes: set
@@ -635,6 +636,7 @@ class _LoopMixin:
                                            # its own gate says otherwise
         self._denied_unconfirmed = []      # per-run: see Agent.denied_unconfirmed
         start_turns = self._turns          # turns used by *this* task only
+        self._task_start_turns = start_turns
         budget_escalated = False           # uncertainty escalation fires at most once per task
         # Per-task one-shot flags for the no-tool-calls handler: self-verification
         # and pre-done review fire once each, repair re-prompts are capped. Held on
@@ -656,7 +658,7 @@ class _LoopMixin:
                              unfounded_checked=False)
 
         try:
-            while self._turns < self.max_turns:
+            while self._task_turns_left():
                 if self.stop_pending:
                     self._stop_requested = False
                     final_response = self._stopped_text()
@@ -955,6 +957,13 @@ class _LoopMixin:
 
         return final_response
 
+    def _task_turns_left(self) -> bool:
+        """True while the running task has used fewer than ``max_turns`` turns.
+
+        Counts from ``_task_start_turns``, the session turn count when the task
+        started, so turns earlier tasks in the session used do not count."""
+        return self._turns - self._task_start_turns < self.max_turns
+
     def _handle_no_tool_calls(self, response, interactive, st) -> tuple[bool, str]:
         """Handle a turn that produced no tool calls (split out of _loop).
 
@@ -988,7 +997,7 @@ class _LoopMixin:
             and not st.verify_nudged
             and self._unverified_writes
             and not self.plan_mode
-            and self._turns < self.max_turns
+            and self._task_turns_left()
         ):
             st.verify_nudged = True
             files = ", ".join(sorted(self._unverified_writes))
@@ -1019,7 +1028,7 @@ class _LoopMixin:
         # recover). Re-prompt once with the exact format.
         if (
             st.repair_count < _MAX_TOOL_REPAIRS
-            and self._turns < self.max_turns
+            and self._task_turns_left()
             and looks_like_tool_attempt(response, tool_names)
         ):
             st.repair_count += 1
@@ -1104,7 +1113,7 @@ class _LoopMixin:
         unfounded = unfounded_code(response, self.cwd)
         where = "; ".join(f"{', '.join(names)} not found in {path}"
                           for path, names in unfounded)
-        if unfounded and not st.unfounded_checked and self._turns < self.max_turns:
+        if unfounded and not st.unfounded_checked and self._task_turns_left():
             st.unfounded_checked = True
             self._audit.notice("unfounded_code", where)
             self._add_assistant(response)
@@ -1131,7 +1140,7 @@ class _LoopMixin:
             self._reviewer is not None
             and not st.review_done
             and not self.plan_mode
-            and self._turns < self.max_turns
+            and self._task_turns_left()
         ):
             st.review_done = True
             diff = self.session_diff()
@@ -1231,7 +1240,7 @@ class _LoopMixin:
         Returns ``(False, "")`` after a nudge (the loop continues), a note for
         the final answer when the run ends with the case still open (it is then
         reported as not finished), or ``""``."""
-        turns_left = self._turns < self.max_turns and not self.plan_mode
+        turns_left = self._task_turns_left() and not self.plan_mode
         if self._change_still_owed(request, st) and not _asks_a_question(response):
             if st.code_nudged or st.nocall_escalation or not turns_left:
                 return ("\n\n[not finished: nothing was written to any file in this "
@@ -1379,7 +1388,7 @@ class _LoopMixin:
         demanded = demands_action(request)
         if _asks_a_question(response):
             return None                      # a clarifying question is the answer
-        if self._turns >= self.max_turns:
+        if not self._task_turns_left():
             return None                      # no turns left to escalate into
         if st.nocall_escalation >= _MAX_NOCALL_ESCALATIONS:
             return None                      # ladder exhausted; caller reports below
@@ -1612,7 +1621,7 @@ class _LoopMixin:
             _agent.print_warning(msg)
             return None
 
-        if st.verify_retries < self.verify_max_retries and self._turns < self.max_turns:
+        if st.verify_retries < self.verify_max_retries and self._task_turns_left():
             st.verify_retries += 1
             self._add_assistant(response)
             self._add_user(_verify.verify_feedback(cmd, code, output))
