@@ -813,7 +813,7 @@ def raw_reading_is_process_scoped() -> bool:
     either resident in this process (``discover.native_hip_runtime_resident()``,
     the GGUF worker deciding a context grow) or, when it is not loaded here, the
     one the isolated VRAM probe daemon loads (``discover.native_backend_has_hip()``,
-    the server, coder and embedder sizing a load). False for a vulkan, cpu or
+    the parent process sizing a GGUF load). False for a vulkan, cpu or
     CUDA runtime.
 
     NEVER imports torch: a cold ROCm import holds the Windows OS loader lock,
