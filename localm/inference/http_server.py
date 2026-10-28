@@ -665,8 +665,9 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
     engine for a name not registered in ``_engines``. *on_active* is called
     with *name* when it becomes the active model. *preempt* marks an explicit
     user switch: it supersedes an earlier explicit switch that is still
-    loading, and may cancel a busy resident model or ask before a degraded
-    load. *force* skips those confirmations. With *activate* False the model
+    loading, and asks before evicting a busy resident model or loading
+    degraded. *force* skips those confirmations and cancels the busy model's
+    generations before evicting it. With *activate* False the model
     becomes active only when nothing else would answer an unnamed request.
     With *skip_if_latched* (a load that capability routing chose, not one the
     user asked for) a model that is not resident is not loaded when its last
@@ -1073,8 +1074,8 @@ async def _switch_exhaustion_ladder(loop, probe: switch_admission.VramProbe,
     """Find room once no idle chat model is evictable, in this order: free the
     idle shared embedder; act on the probe verdict (load best-effort when the
     box cannot measure, retry or refuse when the probe was inconclusive); ask
-    a sibling localm instance to free its VRAM; cancel and claim a busy
-    resident model (explicit switch) or wait for it to go idle
+    a sibling localm instance to free its VRAM; claim a busy resident model
+    (explicit switch, ``_switch_claim_busy_victim``) or wait for it to go idle
     (``_switch_wait_for_busy_victim``, any other load); then refuse, ask, or
     defer to the backend's own sizing
     (``switch_admission.final_exhaustion_verdict``).
@@ -1118,14 +1119,14 @@ async def _switch_exhaustion_ladder(loop, probe: switch_admission.VramProbe,
     if final == switch_admission.CONFIRM_DEGRADED_LOAD:
         return step(switch_admission.RETURN_RESULT,
                     result=switch_admission.degraded_load_confirm(
-                        budget.name, budget.whole_model_bytes, probe.free,
+                        budget.name, budget.needed_bytes, probe.free,
                         moe=_registered_as_moe(budget.name)))
     from localm.debuglog import logger as _dbg
     _dbg.info(
-        "switch_engine: '%s' exceeds the whole-model VRAM estimate "
-        "(need ~%s MB, %s MB free) after eviction - deferring to the "
-        "backend's own load-time sizing instead of refusing",
-        budget.name, budget.whole_model_bytes // 1024 ** 2, probe.free // 1024 ** 2)
+        "switch_engine: '%s' does not fit the free VRAM after eviction "
+        "(needs ~%s MB free including the safety margin, %s MB free) - deferring "
+        "to the backend's own load-time sizing instead of refusing",
+        budget.name, budget.needed_bytes // 1024 ** 2, probe.free // 1024 ** 2)
     attempt.deferred_to_backend = True
     return step(switch_admission.PROCEED_TO_LOAD)
 
@@ -1233,14 +1234,18 @@ async def _switch_claim_busy_victim(budget: switch_admission.LoadBudget,
                                     attempt: switch_admission.EvictionAttempt,
                                     *, preempt: bool, force: bool
                                     ) -> switch_admission.EvictionStep | None:
-    """Cancel every generation on a busy resident model and claim it as the
-    eviction victim, for an explicit switch only and once per load attempt
+    """Claim a busy resident model as the eviction victim, for an explicit
+    switch only and once per load attempt
     (``switch_admission.busy_victim_candidate``).
 
-    Returns None when there is no candidate. Without *force*, waits for its
-    pins to clear (``_wait_for_pin_clear``) and returns a ``confirm_required``
-    result step when they do not. Otherwise returns an EVICT step whose
-    ``force_busy`` is *force*: evicted even if a pin is still held."""
+    Returns None when there is no candidate. Without *force*, nothing is
+    cancelled: waits for its requests to finish on their own
+    (``_wait_for_pin_clear``) and returns an EVICT step when they do, else a
+    ``confirm_required`` result step, leaving the model loaded and its
+    generations running. With *force*, cancels every generation on it
+    (``residency.cancel_all``) and returns an EVICT step with ``force_busy``:
+    evicted even if a pin is still held. See
+    TestBusyVictim.test_explicit_switch_never_cancels_a_busy_model_before_asking."""
     busy_name = switch_admission.busy_victim_candidate(
         budget, _engines_lru, _engines, preempt=preempt,
         already_attempted=attempt.busy_attempted)
@@ -1248,14 +1253,16 @@ async def _switch_claim_busy_victim(budget: switch_admission.LoadBudget,
         return None
     attempt.busy_attempted = True
     busy_engine = _engines[busy_name]
+    if not force:
+        if not await _wait_for_pin_clear(busy_engine):
+            return switch_admission.EvictionStep(
+                switch_admission.RETURN_RESULT,
+                result=switch_admission.busy_victim_confirm(
+                    budget.name, busy_name, _in_use_description(busy_name, busy_engine)))
+        return switch_admission.EvictionStep(switch_admission.EVICT, victim=busy_name)
     residency.cancel_all(busy_name)
-    if not force and not await _wait_for_pin_clear(busy_engine):
-        return switch_admission.EvictionStep(
-            switch_admission.RETURN_RESULT,
-            result=switch_admission.busy_victim_confirm(
-                budget.name, busy_name, _in_use_description(busy_name, busy_engine)))
     return switch_admission.EvictionStep(
-        switch_admission.EVICT, victim=busy_name, force_busy=force)
+        switch_admission.EVICT, victim=busy_name, force_busy=True)
 
 
 async def _switch_wait_for_busy_victim(budget: switch_admission.LoadBudget,
@@ -2065,12 +2072,9 @@ async def _unload_engine_off_loop(loop, engine, on_unloaded) -> None:
 
 async def _wait_for_pin_clear(engine, *, timeout: float = 2.0,
                               poll_interval: float = 0.05) -> bool:
-    """Poll ``engine.active_requests`` until it reads 0, or *timeout* elapses.
-    Meant to run right after ``residency.cancel_all()``: a generation that
-    was only still running because nobody had told it to stop (the caller's
-    own just-cancelled request, most commonly) clears within a token or two,
-    so this resolves the common "still generating" complaint without ever
-    surfacing a confirm box for it. Returns whether the pin is clear."""
+    """Poll ``engine.active_requests`` every *poll_interval* seconds until it
+    reads 0, or *timeout* seconds elapse. Cancels nothing. Returns whether the
+    pin is clear."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     while loop.time() < deadline:
