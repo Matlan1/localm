@@ -4662,6 +4662,11 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
     _execv_restart(port, instance_id)
 
 
+# Seconds the restart waits for its stopped model workers to release the runtime
+# files before it leaves a pending runtime update for the next start.
+_RUNTIME_RELEASE_WAIT_S = 20.0
+
+
 def _finish_pending_runtime_update() -> None:
     """Carry out the native runtime re-provision an applied update left pending
     (``updater_runtime.finish_pending``), once this server's models, workers and
@@ -4678,7 +4683,7 @@ def _finish_pending_runtime_update() -> None:
         except Exception:
             _dbg_swallow("stopping the runtime probe daemon before the runtime update failed",
                          level="warning")
-        status = updater_runtime.finish_pending()
+        status = updater_runtime.finish_pending(wait=_RUNTIME_RELEASE_WAIT_S)
         if status is not None:
             from localm.debuglog import logger as _dbg
             log = _dbg.info if status["state"] in ("updated", "current") else _dbg.warning

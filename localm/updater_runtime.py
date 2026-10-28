@@ -352,9 +352,11 @@ def _command(root: Path, backend: str) -> list:
 
 
 def finish_pending(*, root=None, runner: Optional[Callable] = None,
-                   env: Optional[dict] = None) -> Optional[dict]:
+                   env: Optional[dict] = None, wait: float = 0.0) -> Optional[dict]:
     """Carry out the pending re-provision, if there is one for the install at
-    *root* (default the running install).
+    *root* (default the running install). A pending re-provision recorded for
+    another version than the one installed at *root* (the update was rolled
+    back or replaced since) is dropped and None returned.
 
     Returns None when nothing is pending, else a status ``{"state", "backend",
     "from", "to", "holders", "error", "note"}`` (also recorded for ``localm
@@ -369,7 +371,9 @@ def finish_pending(*, root=None, runner: Optional[Callable] = None,
       failed, including a restore that failed).
 
     *runner* runs the setup-llama argv and returns its exit code (tests);
-    *env* is its environment."""
+    *env* is its environment. *wait* is how many seconds a held runtime is
+    re-checked before the answer is ``"waiting"`` (a process that is exiting
+    still holds its files for a moment)."""
     import subprocess
 
     from localm import setup_llama as sl
@@ -380,6 +384,13 @@ def finish_pending(*, root=None, runner: Optional[Callable] = None,
         return None
     root = Path(root) if root else updater.repo_root()
     if Path(pending.get("root") or "").resolve() != root.resolve():
+        return None
+    try:
+        installed_version = (root / "VERSION").read_text(encoding="utf-8").strip()
+    except OSError:
+        installed_version = None
+    if pending.get("version") and installed_version and pending["version"] != installed_version:
+        clear_pending()
         return None
     lib = runtime_lib(root)
     backend, target, pins = pending["backend"], pending["target"], pending.get("pins") or {}
@@ -398,7 +409,12 @@ def finish_pending(*, root=None, runner: Optional[Callable] = None,
         _write_status(status)
         return status
 
+    import time
+    deadline = time.monotonic() + max(0.0, wait)
     found = holders(lib)
+    while found and time.monotonic() < deadline:
+        time.sleep(0.5)
+        found = holders(lib)
     if found:
         who = describe_holders(found)
         status.update(state="waiting", holders=found, note=(
