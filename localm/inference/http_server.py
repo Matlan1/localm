@@ -4593,6 +4593,8 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
         except Exception:
             _dbg_swallow("VRAM-release wait before restart failed (non-fatal)")
 
+    _finish_pending_runtime_update()
+
     try:
         from localm import bugreport
         bugreport.disarm_crash_guard(instance_id=instance_id)
@@ -4658,6 +4660,32 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
 
     _set_restart_env()
     _execv_restart(port, instance_id)
+
+
+def _finish_pending_runtime_update() -> None:
+    """Carry out the native runtime re-provision an applied update left pending
+    (``updater_runtime.finish_pending``), once this server's models, workers and
+    jobs are stopped: stops the runtime probe daemon first, then provisions in a
+    child process. Logs the outcome; never raises, so the restart always
+    proceeds."""
+    try:
+        from localm import updater_runtime
+        if updater_runtime.read_pending() is None:
+            return
+        try:
+            from localm.inference.backends.llamacpp._loader import stop_probe_daemon
+            stop_probe_daemon()
+        except Exception:
+            _dbg_swallow("stopping the runtime probe daemon before the runtime update failed",
+                         level="warning")
+        status = updater_runtime.finish_pending()
+        if status is not None:
+            from localm.debuglog import logger as _dbg
+            log = _dbg.info if status["state"] in ("updated", "current") else _dbg.warning
+            log("runtime update during restart: %s", status["note"])
+    except Exception:
+        _dbg_swallow("the pending runtime update could not be carried out during the restart; "
+                     "it stays pending for the next start", level="warning")
 
 
 def _execv_restart(port: Optional[int], instance_id: Optional[str]) -> None:

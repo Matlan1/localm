@@ -2141,6 +2141,16 @@ export async function updateCheck() {
 }
 window.__localmUpdateCheck = updateCheck;
 
+// What an applied update did to the native runtime, and which parts of the
+// current version an older one keeps, as text appended to the status line.
+function _updateExtras(d) {
+  let text = "";
+  if (d.runtime_note) text += "  " + t("settings.update.runtimeNote", { note: d.runtime_note });
+  const kept = Array.isArray(d.kept_for_updates) ? d.kept_for_updates : [];
+  if (kept.length) text += "  " + t("settings.update.keptForUpdates", { parts: kept.join("; ") });
+  return text;
+}
+
 export async function updateApply() {
   const out = $("update-status"), btn = $("update-apply");
   if (btn) btn.disabled = true;
@@ -2152,11 +2162,11 @@ export async function updateApply() {
     if (d.applied) {
       const version = d.version || "";
       if (out) {
-        out.textContent = d.restarting
+        out.textContent = (d.restarting
           ? t("settings.update.updatedRestarting", { version })
           : (d.klass === "setup"
             ? t("settings.update.updatedSetup", { version })
-            : t("settings.update.updatedPlain", { version }));
+            : t("settings.update.updatedPlain", { version }))) + _updateExtras(d);
       }
       if (btn) btn.hidden = true;
     } else if (d.error) {
@@ -2267,7 +2277,8 @@ async function _postSelectedVersion(rel, extra) {
           : (d.klass === "setup"
             ? t("settings.update.updatedSetup", { version })
             : t("settings.update.updatedPlain", { version })))
-          + (d.data_backup ? "  " + t("settings.update.dataBackup", { path: d.data_backup }) : "");
+          + (d.data_backup ? "  " + t("settings.update.dataBackup", { path: d.data_backup }) : "")
+          + _updateExtras(d);
       }
       if (btn) btn.hidden = true;
       if (d.restarting && window.onServerUnreachable) {

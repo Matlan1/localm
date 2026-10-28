@@ -509,6 +509,7 @@ def _update_to(updater, version: str, *, yes: bool, allow_unverified: bool) -> N
                   f"({updater.class_summary(res['klass'])}).")
     if not res.get("verified", True):
         console.print("[yellow]Installed without a verified signature.[/yellow]")
+    _print_update_extras(res)
     if res.get("data_backup"):
         console.print(f"[dim]Your data from before the downgrade: "
                       f"{escape(res['data_backup'])} (to restore it, copy those files back "
@@ -519,6 +520,21 @@ def _update_to(updater, version: str, *, yes: bool, allow_unverified: bool) -> N
     else:
         console.print("[bold]Restart localm to load it.[/bold]  "
                       "[dim](undo: localm update --rollback)[/dim]")
+
+
+def _print_update_extras(res: dict) -> None:
+    """Print what an applied update did to the native runtime, and on a selected
+    install which parts of the current version the installed one keeps."""
+    from rich.markup import escape
+    note = res.get("runtime_note")
+    status = res.get("runtime") or {}
+    if note:
+        failed = status.get("state") in ("failed", "waiting") or " NOT " in note
+        style = "yellow" if failed else "dim"
+        console.print(f"[{style}]Native runtime: {escape(note)}[/{style}]")
+    for part in res.get("kept_for_updates") or []:
+        console.print(f"[dim]Kept from the version you had, so this one can update "
+                      f"again: {escape(part)}[/dim]")
 
 
 @main.command("update")
@@ -628,6 +644,7 @@ def update_cmd(check_only: bool, yes: bool, do_rollback: bool, list_only: bool,
         sys.exit(1)
     console.print(f"[green]Updated to {escape(res['version'])}[/green] "
                   f"({updater.class_summary(res['klass'])}).")
+    _print_update_extras(res)
     if res["klass"] == "setup":
         console.print("[yellow]This update needs setup.bat re-run (a Python/venv change) "
                       "before it will start.[/yellow]")

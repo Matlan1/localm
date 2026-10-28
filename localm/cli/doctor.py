@@ -370,6 +370,40 @@ def _check_runtime_build(find_binary_dir) -> None:
     elif pin:
         console.print(f"     [dim]pinned to {escape(pin)}; 'localm setup-llama "
                       "--tag latest' resumes tracking upstream[/dim]")
+    _check_runtime_matches_release(build)
+
+
+def _check_runtime_matches_release(build) -> None:
+    """Warn when the provisioned llama.cpp build is not the one this release
+    ships for its backend (and the user chose neither a pin nor "latest"), and
+    report a runtime update the last localm update left pending or failed."""
+    from rich.markup import escape
+    try:
+        from localm import setup_llama, updater_runtime
+        from localm.setup_llama.versions import runtime_target
+        backend = setup_llama.installed_backend()
+        pending = updater_runtime.read_pending()
+        last = updater_runtime.last_status()
+        target, source = (runtime_target(backend, pin=setup_llama.pinned_tag(),
+                                          tracking=setup_llama.tracks_latest())
+                          if backend else (None, None))
+        current = (bool(build) and backend == "amd-rocm" and setup_llama.rocm_build_is_current(
+            setup_llama._repo_runtime_lib(), build)) or build == target
+    except Exception as e:
+        console.print(f"  {_WARN_SYM}  could not compare the llama.cpp build with this "
+                      f"release [dim]({escape(str(e))})[/dim]")
+        return
+    fix = f"localm setup-llama --backend {backend} --force"
+    if pending is not None:
+        console.print(f"  {_WARN_SYM}  the last localm update left the {escape(str(backend))} "
+                      f"runtime update to {escape(str(pending.get('target')))} pending; it "
+                      f"finishes on the next start of localm, or run '{escape(fix)}'")
+    elif source == "release" and build and not current:
+        console.print(f"  {_WARN_SYM}  this localm release ships llama.cpp build "
+                      f"{escape(str(target))} for {escape(backend)}, but {escape(build)} is "
+                      f"installed - run '{escape(fix)}'")
+    if last and last.get("state") == "failed" and not current:
+        console.print(f"     [dim]last runtime update: {escape(str(last.get('note')))}[/dim]")
 
 
 def _check_backend_choice() -> None:
