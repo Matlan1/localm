@@ -3,12 +3,13 @@
 
 Starting from every function in ``localm/updater.py`` and
 ``localm/_apply_update.py``, the scan follows calls and function references into
-other ``localm`` modules and fails on a process start whose program is a bare
-name (``"uv"``, ``"powershell"``, ``shutil.which(...)``) instead of
-``sys.executable`` or a full path a resolver returned. A command counts when it
-is handed to a process-starting call (directly, or through a function that
-passes one of its parameters on as the program), returned as a list, or bound
-to a command-like name (``cmd``, ``argv``, ...).
+other ``localm`` modules, and follows a ``[sys.executable, "-m", "localm", <command>]``
+the update path starts into that command's module. It fails on a process start
+whose program is a bare name (``"uv"``, ``"powershell"``, ``shutil.which(...)``)
+instead of ``sys.executable`` or a full path a resolver returned. A command
+counts when it is handed to a process-starting call (directly, or through a
+function that passes one of its parameters on as the program), returned as a
+list, or bound to a command-like name (``cmd``, ``argv``, ...).
 """
 
 from __future__ import annotations
@@ -21,6 +22,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 START_MODULES = ("localm.updater", "localm._apply_update")
+# The module behind each ``localm <command>`` the update path starts as a subprocess.
+SUBCOMMAND_MODULES = {"setup-llama": "localm.setup_llama.cli"}
 
 _EXEC_CALLS = {"run", "call", "check_call", "check_output", "Popen", "system", "popen",
                "create_subprocess_exec", "create_subprocess_shell", "startfile",
@@ -162,10 +165,24 @@ class _Graph:
         return out
 
 
-def _reach(root: Path):
+def localm_subcommands(fn) -> set:
+    """The ``localm <command>`` names *fn* builds as ``[sys.executable, "-m", "localm", <command>, ...]``."""
+    out = set()
+    for node in ast.walk(fn):
+        if isinstance(node, ast.List) and len(node.elts) >= 4 and _dotted(node.elts[0]) == "sys.executable":
+            words = node.elts[1:4]
+            if all(isinstance(w, ast.Constant) and isinstance(w.value, str) for w in words) \
+                    and [w.value for w in words[:2]] == ["-m", "localm"]:
+                out.add(words[2].value)
+    return out
+
+
+def _reach(root: Path, subcommand_modules=None):
+    """(graph, reached functions, subcommands the update path starts that have no module listed)."""
+    subcommand_modules = SUBCOMMAND_MODULES if subcommand_modules is None else subcommand_modules
     graph = _Graph(root)
     todo = [(m, q) for m in START_MODULES for q in graph.module(m).functions]
-    seen = {}
+    seen, started, unmapped = {}, set(), set()
     while todo:
         key = todo.pop()
         if key in seen:
@@ -173,12 +190,23 @@ def _reach(root: Path):
         mod = graph.module(key[0])
         seen[key] = mod.functions[key[1]]
         todo.extend(k for k in graph.references(mod, key[1]) if k not in seen)
-    return graph, seen
+        for sub in localm_subcommands(seen[key]):
+            name = subcommand_modules.get(sub)
+            if name is None:
+                unmapped.add(sub)
+            elif name not in started and graph.module(name) is not None:
+                started.add(name)
+                todo.extend((name, q) for q in graph.module(name).functions)
+    return graph, seen, unmapped
 
 
 def reachable_functions(root: Path = ROOT) -> dict:
     """Every (module, qualname) reached from the update modules, mapped to its AST."""
     return _reach(root)[1]
+
+
+def unmapped_subcommands(root: Path = ROOT) -> set:
+    return _reach(root)[2]
 
 
 def _call_name(func) -> str:
@@ -313,7 +341,7 @@ def bare_program_lines(fn, call_sinks=None) -> list:
                 cands = [_sink_argument(node, s) for s in (call_sinks or {}).get(node, ())]
             if any(c is not None and _bare_command(c, assigned) for c in cands):
                 hits.add(node.lineno)
-        elif isinstance(node, ast.Return) and isinstance(node.value, (ast.List, ast.Tuple)):
+        elif isinstance(node, ast.Return) and isinstance(node.value, ast.List):
             if _bare_command(node.value, assigned):
                 hits.add(node.lineno)
         elif isinstance(node, ast.Assign) and isinstance(node.value, (ast.List, ast.Tuple)):
@@ -325,7 +353,7 @@ def bare_program_lines(fn, call_sinks=None) -> list:
 
 def bare_program_sites(root: Path = ROOT) -> list:
     """``module:qualname:line`` for every bare-program command the update path reaches."""
-    graph, reached = _reach(root)
+    graph, reached, _ = _reach(root)
     sinks = _sinks(graph, reached)
     sites = []
     for (mod_name, qual), fn in sorted(reached.items(), key=lambda kv: kv[0]):
@@ -356,6 +384,7 @@ def _lines(source: str) -> list:
     ('def f():\n    subprocess.run(["/bin/sh", s])', []),
     ('def f():\n    subprocess.run([r"C:\\\\Windows\\\\System32\\\\x.exe"])', []),
     ('def f():\n    return [p, "pip"]', []),
+    ('def f():\n    return "vulkan", False, reason', []),
     ('def f():\n    wanted = ("VERSION", "pyproject.toml")', []),
     ('def f():\n    msg = "run uv pip install -e .[gpu] to add it"', []),
     ('def f():\n    subprocess.run(c, cwd=d)', []),
@@ -399,7 +428,25 @@ def test_the_graph_follows_calls_and_wrappers_into_other_modules(tmp_path):
 def test_the_scan_reaches_the_modules_the_update_path_calls():
     reached = {mod for mod, _ in reachable_functions()}
     assert {"localm.updater", "localm._apply_update", "localm.uv_tool",
-            "localm.install_manifest", "localm.hwdetect"} <= reached
+            "localm.install_manifest", "localm.hwdetect",
+            "localm.setup_llama.cli", "localm.setup_llama.cuda"} <= reached
+
+
+def test_the_graph_follows_a_localm_subcommand_into_its_module(tmp_path):
+    root = _fake_tree(tmp_path, {
+        "localm/__init__.py": "",
+        "localm/updater.py": "",
+        "localm/_apply_update.py": ("import sys\n"
+                                    "def post():\n    return [sys.executable, '-m', 'localm', 'fix-it']\n"),
+        "localm/fixer.py": "import subprocess\ndef main():\n    subprocess.run(['git', 'pull'])\n",
+    })
+    assert _reach(root, {})[2] == {"fix-it"}
+    graph, reached, unmapped = _reach(root, {"fix-it": "localm.fixer"})
+    assert unmapped == set() and ("localm.fixer", "main") in reached
+
+
+def test_every_localm_subcommand_the_update_path_starts_is_scanned():
+    assert unmapped_subcommands() == set()
 
 
 def test_nothing_the_update_path_starts_is_looked_up_on_path():
