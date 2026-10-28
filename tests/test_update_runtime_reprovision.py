@@ -649,9 +649,14 @@ def test_a_runtime_released_while_waiting_is_reprovisioned(install):
 
 # ------------------- this install's own processes are stopped -----------------
 
+# The worker holds the library the way _hold does: loaded on Windows, mapped
+# elsewhere.
 _SERVER = (
     "import os, subprocess, sys\n"
-    "worker = ('import ctypes, os, sys, time; ctypes.CDLL(sys.argv[1]); '\n"
+    "load = ('ctypes.CDLL(sys.argv[1])' if sys.platform == 'win32' else\n"
+    "        'f = open(sys.argv[1], \"rb\"); '\n"
+    "        'm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)')\n"
+    "worker = ('import ctypes, mmap, os, sys, time; ' + load + '; '\n"
     "          'print(os.getpid(), flush=True)\\nwhile True: time.sleep(1)')\n"
     "w = subprocess.Popen([sys.executable, '-I', '-c', worker, sys.argv[1]],\n"
     "                     stdout=subprocess.PIPE, text=True)\n"
@@ -667,6 +672,7 @@ def _background_server(install, home: Path):
     from datetime import datetime, UTC
     from localm import instances
     p = _detached(_SERVER, str(_lib(install) / "llama.dll"))
+    assert len(p.words) == 3, f"the stand-in's worker did not start: {p.words}"
     server_pid, worker_pid = p.holder_pid, int(p.words[2])
     p.pids = [worker_pid, server_pid]
     iid = instances.new_instance_id()
