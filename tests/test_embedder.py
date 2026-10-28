@@ -1211,6 +1211,72 @@ def test_isolated_embedder_gpu_crash_falls_back_to_cpu_inline(monkeypatch):
     assert e._runner is None
 
 
+def _crash_runner(runner):
+    def _boom(texts, timeout=None):
+        runner.alive = False
+        raise RuntimeError("The embedding worker process crashed (exit code 0xC0000409)")
+    runner.embed = _boom
+
+
+def test_recovered_gpu_crash_logs_one_warning_and_no_traceback(monkeypatch, caplog):
+    """A GPU crash the CPU retry recovers from shows ONE plain WARNING line (no
+    traceback) that names the crash and says the CPU took over; the traceback
+    goes to DEBUG only."""
+    e = _isolated_embedder(monkeypatch, n_gpu_layers=99)
+    _crash_runner(_StubRunner.instances[-1])
+
+    with caplog.at_level(logging.DEBUG, logger="localm"):
+        assert e.embed(["hello"]) == [[1.0] * 5]
+
+    shown = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(shown) == 1, [r.getMessage() for r in shown]
+    assert shown[0].levelno == logging.WARNING
+    assert shown[0].exc_info is None and shown[0].exc_text is None
+    msg = shown[0].getMessage()
+    assert "GPU embedding failed" in msg and "CPU took over" in msg
+    assert "0xC0000409" in msg and "\n" not in msg
+    traced = [r for r in caplog.records if r.exc_info]
+    assert traced and all(r.levelno == logging.DEBUG for r in traced)
+
+
+def test_unrecovered_worker_fault_logs_one_error_line_and_no_traceback(monkeypatch, caplog):
+    """A worker crash with no CPU retry left still raises and shows ONE ERROR
+    line carrying the crash message; the traceback goes to DEBUG only."""
+    e = _isolated_embedder(monkeypatch, n_gpu_layers=0)
+    _crash_runner(_StubRunner.instances[-1])
+
+    with caplog.at_level(logging.DEBUG, logger="localm"):
+        with pytest.raises(RuntimeError, match="crashed"):
+            e.embed(["hello"])
+
+    shown = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert [r.levelno for r in shown] == [logging.ERROR]
+    assert shown[0].exc_info is None and "0xC0000409" in shown[0].getMessage()
+    assert any(r.exc_info and r.levelno == logging.DEBUG for r in caplog.records)
+
+
+def test_failed_cpu_retry_after_gpu_crash_logs_one_error_and_raises(monkeypatch, caplog):
+    """When the CPU retry after a GPU crash fails as well, the caller gets the
+    retry's error and ONE ERROR line names both failures; no traceback is shown."""
+    e = _isolated_embedder(monkeypatch, n_gpu_layers=99)
+    _crash_runner(_StubRunner.instances[-1])
+    real_reload = emb.IsolatedEmbedder._reload
+
+    def _reload_then_crash(self):
+        real_reload(self)
+        _crash_runner(_StubRunner.instances[-1])
+    monkeypatch.setattr(emb.IsolatedEmbedder, "_reload", _reload_then_crash)
+
+    with caplog.at_level(logging.DEBUG, logger="localm"):
+        with pytest.raises(RuntimeError, match="crashed"):
+            e.embed(["hello"])
+
+    shown = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert [r.levelno for r in shown] == [logging.ERROR]
+    assert shown[0].exc_info is None
+    assert "CPU retry failed" in shown[0].getMessage()
+
+
 def test_isolated_embedder_close_shuts_down_runner(monkeypatch):
     e = _isolated_embedder(monkeypatch)
     runner = _StubRunner.instances[-1]
