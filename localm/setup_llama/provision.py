@@ -351,15 +351,21 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
     used_tag: list = [None]
 
     def _try(backend: str, cudart: bool, tag: Optional[str] = None) -> None:
-        _sl._clear_target_or_refuse(target)
         # Cleared FIRST, so a failed attempt can never leave the previous
         # attempt's tag standing to be recorded against this backend.
         used_tag[0] = None
-        used_tag[0] = _sl._provision_backend(
-            backend, target, sha256 if backend == chosen else None,
-            cudart, cuda_line, tag=tag)
-        if not (target / lib_name).exists():
-            raise ArtifactError(f"the archive did not contain {lib_name}")
+
+        def _fill(staging: Path) -> Optional[str]:
+            got = _sl._provision_backend(
+                backend, staging, sha256 if backend == chosen else None,
+                cudart, cuda_line, tag=tag)
+            if not (staging / lib_name).exists():
+                raise ArtifactError(f"the archive did not contain {lib_name}")
+            return got
+
+        # Downloaded and verified into staging first: a failed attempt leaves the
+        # installed runtime as it was. See test_failed_download_keeps_the_runtime.
+        used_tag[0] = _sl._replace_target(target, _fill)
         _sl._bundle_missing_native_deps(target)
         _sl._install_runtime_wheel(_sl._runtime_pkg_dir())
 

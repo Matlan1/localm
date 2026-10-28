@@ -1219,7 +1219,7 @@ def _download_failure(world, **kw):
     r = world.invoke("--backend", "vulkan")
     assert r.exit_code == 1
     assert world.probe_calls == 0
-    assert world.files() == [".gitignore"]
+    assert world.files() == [".gitignore", "stale-old.dll"], "a refused download keeps the runtime"
     assert world.marker() is None and world.history() == []
     return r, url, body
 

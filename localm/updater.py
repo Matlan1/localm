@@ -938,8 +938,12 @@ def _promote_backup(run_backup_dir: Path, backup_dir: Path) -> None:
     *run_backup_dir* is a complete, self-contained COPY of the pre-update install
     (``_apply_update.backup`` copies, never moves, the live tree).
 
+    The native runtime snapshot of the update whose backup this replaces
+    (``_apply_update.runtime_snapshot_dir``) is removed with it.
+
     Best-effort: a failure does not undo the update but IS surfaced as a warning,
     since it degrades a later ``update --rollback``."""
+    from localm import _apply_update as au
     try:
         if backup_dir.exists():
             shutil.rmtree(backup_dir)
@@ -948,6 +952,14 @@ def _promote_backup(run_backup_dir: Path, backup_dir: Path) -> None:
         _apply_warn("update applied, but could not move this run's backup from %s "
                     "to %s: %s; a later `update --rollback` may not find it",
                     run_backup_dir, backup_dir, e)
+    snapshot = au.runtime_snapshot_dir(backup_dir)
+    try:
+        if snapshot.exists():
+            shutil.rmtree(snapshot)
+    except OSError as e:
+        _apply_warn("update applied, but could not remove the native runtime kept by the "
+                    "previous update at %s: %s; a later `update --rollback` may put that "
+                    "older runtime back", snapshot, e)
 
 
 # Data dir entries an older build may read without the fields a newer one added,
@@ -1107,47 +1119,30 @@ def _install_uv_bridge(root: Path, uv: str, target: Path) -> None:
                           reason=str(e)) from None
 
 
-def _pinned_llama_tag(root: Path):
-    """The llama.cpp release tag the build at *root* provisions (its
-    ``_PINNED_TAG``), or None when it pins none."""
-    import re
-    for rel in ("localm/setup_llama/pins.py", "localm/setup_llama/__init__.py",
-                "localm/setup_llama.py"):
-        try:
-            text = (root / rel).read_text(encoding="utf-8")
-        except OSError:
-            continue
-        m = re.search(r'^_PINNED_TAG\s*=\s*"([^"]+)"', text, re.MULTILINE)
-        if m:
-            return m.group(1)
-    return None
-
-
-def _selected_post_swap_command(klass: str, root: Path, uv=None):
-    """``_apply_update.post_swap_command`` (with *uv* for the deps class) for a
-    selected build at *root*, without the ``--keep-choice`` flag when that build's
-    setup-llama lacks it."""
-    from localm import _apply_update as au
-    cmd = au.post_swap_command(klass, backend=_installed_backend(), uv=uv)
-    if cmd and "--keep-choice" in cmd:
-        staged = ""
-        for rel in ("localm/setup_llama/cli.py", "localm/setup_llama.py"):
-            try:
-                staged += (root / rel).read_text(encoding="utf-8")
-            except OSError:
-                continue
-        if '"--keep-choice"' not in staged:
-            cmd = [c for c in cmd if c != "--keep-choice"]
-    return cmd
-
-
 def apply(asset_id, *, signature=None, target_version=None, allow_unverified=False,
           expect_sha256=None, installed=None, download_opener=None,
-          runner=None) -> dict:
+          runner=None, defer_runtime=False, say=None) -> dict:
     """Download, VERIFY (signature + anti-rollback), and swap a build into the
     install, then run the class's deps/runtime step. Returns
     ``{applied, version, klass, backup, restart_needed, verified, verify_reason,
-    downgrade, data_backup}``.
+    downgrade, data_backup, runtime, runtime_note, kept_for_updates}``.
+
+    THE NATIVE RUNTIME. When the build pins a different llama.cpp build for the
+    installed backend than the one installed (``updater_runtime.plan``), the
+    class is ``runtime`` and a pending re-provision is recorded. The code and
+    the runtime are updated both or neither: before the swap, this install's own
+    processes that hold the runtime are stopped
+    (``updater_runtime.stop_own_holders``; with *defer_runtime* only checked),
+    and a holder that is not this install's refuses the update with nothing
+    changed. Without *defer_runtime* the re-provision is carried out right after
+    the swap (``updater_runtime.finish_pending``); when it fails, the previous
+    runtime is put back, the code swap is rolled back and LocalmError is
+    raised. With it (the server, which still runs its models) the caller's
+    restart carries it out once its models are unloaded. ``runtime`` is that
+    status (None when nothing was attempted) and ``runtime_note`` a one-line
+    summary for the user (None when there is nothing to say). *say* receives
+    each step of stopping processes and replacing the runtime as one line of
+    text.
 
     *target_version* selects a release by version (``localm update --to``): the
     anti-rollback check is replaced by :func:`_check_selected_version`, so an
@@ -1160,10 +1155,11 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
     downgrade is swapped in, the data dir files an older build may not read are
     copied aside (:func:`_backup_data_for_downgrade`; ``data_backup`` is that
     directory or None). A selected install also saves the trusted key set for
-    the build it installs (:func:`_carry_trust_forward`), gives a build from
+    the build it installs (:func:`_carry_trust_forward`), and gives a build from
     before 0.3.2 this build's signature check (:func:`_install_trust_bridge`) so
-    it can verify and install later releases and refuses the revoked keys, and re-provisions the native
-    runtime when the build pins a different llama.cpp release. Without
+    it can verify and install later releases and refuses the revoked keys;
+    ``kept_for_updates`` names each such part, the only parts of this build an
+    older one keeps (an empty list otherwise). Without
     *target_version* nothing of this applies: the signature must verify and the
     build must be newer.
 
@@ -1244,22 +1240,37 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
                 _check_selected_version(new_version, str(target_version))
             downgrade = _version.is_newer(_version.read_version(), new_version)
             klass = classify(root, target, read_manifest(root))
-            if target_version is not None and _pinned_llama_tag(root) != _pinned_llama_tag(target):
+            from localm import updater_runtime
+            rt_plan = updater_runtime.plan(root, target)
+            if (klass == "runtime" and rt_plan["source"] == "release" and rt_plan["target"]
+                    and rt_plan["current"] is not None):
+                rt_plan["reprovision"] = True
+            if rt_plan["reprovision"]:
                 klass = _max_class(klass, "runtime")
-            uv_exe = _uv_for_deps(target) if klass == "deps" else None
-            post_cmd = (au.post_swap_command(klass, backend=_installed_backend(), uv=uv_exe)
-                        if target_version is None
-                        else _selected_post_swap_command(klass, root, uv_exe))
+            if rt_plan["reprovision"] and klass != "setup":
+                left = updater_runtime.stop_own_holders(
+                    updater_runtime.runtime_lib(target), target, say=say,
+                    stop=not defer_runtime)
+                if left:
+                    raise LocalmError(
+                        "the native llama.cpp runtime is in use, so nothing was updated",
+                        reason=updater_runtime.in_use_message(left, "run the update again"))
+            deps_changed = klass != "setup" and _deps_set(root) != _deps_set(target)
+            uv_exe = _uv_for_deps(target) if deps_changed else None
+            post_cmd = au.post_swap_command("deps", uv=uv_exe) if deps_changed else None
             # The update has verified: save a key set it replaced, before the swap.
             if new_keyset is not None:
                 _save_keyset(new_keyset)
             data_backup = None
+            kept = []
             if target_version is not None:
                 _carry_trust_forward()
                 if _needs_trust_bridge(root):
                     _install_trust_bridge(root)
+                    kept.append("this version's update signature check and trusted keys")
                 if _needs_uv_bridge(root):
                     _install_uv_bridge(root, uv_exe or _uv_for_deps(target), target)
+                    kept.append("the uv this version uses to apply later updates")
                 if downgrade:
                     data_backup = _backup_data_for_downgrade(new_version)
         except Exception:
@@ -1327,11 +1338,55 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
                 _rollback_or_raise(f"{cmd[0]} exited {rc}")
                 raise LocalmError("the post-update step failed; rolled back",
                                   reason=f"{cmd[0]} exited {rc}")
+        runtime_status, runtime_note = None, rt_plan["note"]
+        if not rt_plan["reprovision"]:
+            try:
+                updater_runtime.clear_pending()
+            except OSError as e:
+                _apply_warn("could not clear an earlier pending runtime update: %s", e)
+        else:
+            try:
+                updater_runtime.write_pending(rt_plan, root=target, version=new_version)
+            except OSError as e:
+                _apply_warn("could not record the pending runtime update: %s", e)
+                runtime_note = (f"the {rt_plan['backend']} runtime was NOT updated to "
+                                f"{rt_plan['target']} (could not record it: {e}); to update it: "
+                                f"localm setup-llama --backend {rt_plan['backend']} --force")
+            else:
+                if klass == "setup":
+                    runtime_note = f"{rt_plan['note']} on the first start after setup"
+                elif defer_runtime:
+                    runtime_note = f"{rt_plan['note']} while localm restarts"
+                else:
+                    try:
+                        runtime_status = updater_runtime.finish_pending(
+                            root=target, runner=runner, env=_deps_env(target), say=say)
+                    except Exception as e:
+                        runtime_status = {"state": "failed", "note": str(e)}
+                    if runtime_status is not None and runtime_status["state"] in (
+                            "failed", "waiting"):
+                        updater_runtime.clear_pending()
+                        why = runtime_status["note"]
+                        try:
+                            au.rollback(backup_dir, target, names)
+                        except Exception as rb:
+                            raise LocalmError(
+                                "the native runtime update failed AND rolling the code "
+                                "back failed - manual recovery needed",
+                                reason=f"{why}; rollback: {rb}; restore from {backup_dir}"
+                            ) from None
+                        raise LocalmError(
+                            "the native runtime could not be updated, so the update was "
+                            "rolled back", reason=why)
+                    if runtime_status is not None:
+                        runtime_note = runtime_status["note"]
         return {"applied": True, "version": new_version, "klass": klass,
                 "backup": str(backup_dir), "restart_needed": True,
                 "verified": verified, "verify_reason": verify_reason,
                 "downgrade": downgrade,
-                "data_backup": str(data_backup) if data_backup else None}
+                "data_backup": str(data_backup) if data_backup else None,
+                "runtime": runtime_status, "runtime_note": runtime_note,
+                "kept_for_updates": kept}
 
 
 def _uv_for_deps(target: Path) -> str:
@@ -1541,9 +1596,18 @@ def rollback_info() -> dict:
             "current": _version.read_version()}
 
 
-def rollback_last(*, installed=None) -> dict:
+def rollback_last(*, installed=None, say=None) -> dict:
     """Restore the install from the most recent update backup. Returns
     ``{rolled_back, backup}``. Raises LocalmError when there is no backup.
+
+    The code and the native runtime the update replaced are restored both or
+    neither. When the runtime differs from the one the update kept
+    (``_apply_update.runtime_snapshot_dir``), this install's own processes that
+    hold it are stopped first (``updater_runtime.stop_own_holders``); a holder
+    that is not this install's, or a runtime that cannot be restored, raises
+    LocalmError with nothing changed. The runtime is restored before the code,
+    and put back as it was when the code restore fails. *say* receives each
+    step as one line of text.
 
     NOT signature- or freshness-checked; the owner gate on its HTTP callers
     (``inference/routes/admin.py``) is the control on this operation. Use
@@ -1584,5 +1648,49 @@ def rollback_last(*, installed=None) -> dict:
                             "added by the update will not be removed by this rollback", manifest)
         if names is None:
             names = [p.name for p in backup_dir.iterdir()]
-        au.rollback(backup_dir, target, names)
+        from localm import updater_runtime
+        lib = target / au.RUNTIME_LIB
+        snapshot = au.runtime_snapshot_dir(backup_dir)
+        keep = None
+        if snapshot.is_dir() and au.runtime_differs(lib, snapshot):
+            left = updater_runtime.stop_own_holders(lib, target, say=say)
+            if left:
+                raise LocalmError(
+                    "the native llama.cpp runtime is in use, so nothing was rolled back",
+                    reason=updater_runtime.in_use_message(left, "run the rollback again"))
+            keep = snapshot.with_name(snapshot.name + "-current")
+            try:
+                au.snapshot_runtime(lib, keep)
+            except OSError as e:
+                raise LocalmError("could not keep a copy of the current native runtime, so "
+                                  "nothing was rolled back", reason=str(e)) from None
+            if say:
+                say("Restoring the native runtime the update replaced...")
+            errors = au.restore_runtime(snapshot, lib)
+            if errors:
+                back = au.restore_runtime(keep, lib)
+                shutil.rmtree(keep, ignore_errors=True)
+                if back:
+                    raise RuntimeError("rollback incomplete: the native runtime could not be "
+                                       "restored nor put back: " + "; ".join(errors + back))
+                raise LocalmError("the native runtime could not be restored, so nothing was "
+                                  "rolled back", reason="; ".join(errors))
+        if say:
+            say("Restoring the previous localm code...")
+        try:
+            au.rollback(backup_dir, target, names)
+        except Exception as e:
+            if keep is not None:
+                back = au.restore_runtime(keep, lib)
+                if back:
+                    raise RuntimeError(f"{e}; putting the native runtime back failed too: "
+                                       + "; ".join(back)) from None
+            raise
+        finally:
+            if keep is not None:
+                shutil.rmtree(keep, ignore_errors=True)
+        try:
+            updater_runtime.clear_pending()
+        except OSError as e:
+            _apply_warn("could not clear a pending runtime update after the rollback: %s", e)
         return {"rolled_back": True, "backup": str(backup_dir)}
