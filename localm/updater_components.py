@@ -1277,18 +1277,19 @@ def _tree_text(root: Path, rel: str) -> str:
 
 def _commands(p: dict, root: Path) -> list:
     """The argv lists that update component *p* with the localm tree at *root*."""
-    py = [sys.executable, "-m", "localm"]
     if p["name"] == "pytorch":
         from localm import updater
         uv = updater._uv_for_deps(root)
         return [[uv, *c] for c in p["items"]]
     if p["name"] == "sdcpp":
-        return [py + ["setup-sdcpp", "--backend", b] for b in p["items"]]
+        return [[sys.executable, "-m", "localm", "setup-sdcpp", "--backend", b]
+                for b in p["items"]]
     if p["name"] == "koboldcpp":
-        return [py + ["setup-music", "--backend", _KOBOLD_BUILD_BACKEND.get(b, b),
-                      "--no-models", "--no-test"] for b in p["items"]]
+        return [[sys.executable, "-m", "localm", "setup-music", "--backend",
+                 _KOBOLD_BUILD_BACKEND.get(b, b), "--no-models", "--no-test"]
+                for b in p["items"]]
     if p["name"] == "comfyui":
-        cmd = py + ["comfy", "update"]
+        cmd = [sys.executable, "-m", "localm", "comfy", "update"]
         if '"--reinstall-requirements"' in _tree_text(root, "localm/cli/comfy.py"):
             cmd.append("--reinstall-requirements")
         return [cmd]
