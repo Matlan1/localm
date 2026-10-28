@@ -117,6 +117,8 @@ def _literals(path: Path, names) -> dict:
             targets, value = node.targets, node.value
         elif isinstance(node, ast.AnnAssign) and node.value is not None:
             targets, value = [node.target], node.value
+        if value is None:
+            continue
         for t in targets:
             if isinstance(t, ast.Name) and t.id in names:
                 try:
@@ -423,10 +425,15 @@ def _plan_tagged(name: str, staged: Optional[dict], installed_pin: Optional[dict
     return out
 
 
-def _git(root: Path, *args, timeout: float = _GIT_TIMEOUT_S, text: bool = True):
-    kw = {"encoding": "utf-8", "errors": "replace"} if text else {}
-    return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=text,
-                          timeout=timeout, stdin=subprocess.DEVNULL, **kw)
+def _git(root: Path, *args, timeout: float = _GIT_TIMEOUT_S) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", timeout=timeout,
+                          stdin=subprocess.DEVNULL)
+
+
+def _git_bytes(root: Path, *args) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(["git", "-C", str(root), *args], capture_output=True,
+                          timeout=_GIT_TIMEOUT_S, stdin=subprocess.DEVNULL)
 
 
 def _git_head(root: Path) -> Optional[str]:
@@ -1012,7 +1019,7 @@ def _snapshot_comfy(root: Path, dest: Path) -> dict:
     if head is None:
         raise OSError(f"could not read the commit of the managed ComfyUI at {root}")
     try:
-        r = _git(root, "diff", "--binary", "HEAD", text=False)
+        r = _git_bytes(root, "diff", "--binary", "HEAD")
     except (OSError, subprocess.SubprocessError) as e:
         raise OSError(f"could not read the edits of the managed ComfyUI: {e}") from None
     if r.returncode != 0:
@@ -1149,7 +1156,8 @@ def _drop_one(src: Path, name: str, info: Optional[dict]) -> None:
         except OSError as e:
             _warn("update: could not remove the kept venv copy %s: %s", copy, e)
     elif (info or {}).get("venv_copy"):
-        _warn("update: not removing %s: it is not a venv copy of %s", info["venv_copy"], src)
+        _warn("update: not removing %s: it is not a venv copy of %s",
+              (info or {}).get("venv_copy"), src)
     extra = {"uv": ["uv"], "comfyui": ["comfy.patch", "comfy-marker.json"]}.get(name, [])
     for rel in extra:
         p = src / rel
@@ -1172,11 +1180,13 @@ def snapshot(names, dest, *, root, home=None, add: bool = False) -> dict:
     snapshot cannot be completed."""
     dest = Path(dest)
     root = Path(root)
-    state = _read_json(dest / STATE_FILE) if add else None
-    fresh = not state or not isinstance(state.get("components"), dict)
+    loaded = _read_json(dest / STATE_FILE) if add else None
+    fresh = not loaded or not isinstance(loaded.get("components"), dict)
+    state: dict = {"root": str(root.resolve()), "components": {}}
     if fresh:
         discard(dest)
-        state = {"root": str(root.resolve()), "components": {}}
+    elif loaded is not None:
+        state = loaded
     dest.mkdir(parents=True, exist_ok=True)
     added: list = []
     try:
