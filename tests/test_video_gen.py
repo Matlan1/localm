@@ -64,10 +64,11 @@ class TestFailFast:
         assert ok is False and "not found" in msg
 
 
-def _fake_comfy(captured, *, output_key="images", history_outputs=None):
+def _fake_comfy(captured, *, output_key="images", history_outputs=None,
+                system_stats=None):
     """urlopen stub that records the queued workflow and plays a ComfyUI
     happy path: /prompt -> prompt_id, /history -> one finished output,
-    /view -> fake video bytes."""
+    /view -> fake video bytes, /system_stats -> *system_stats* (else ``{}``)."""
     outputs = history_outputs if history_outputs is not None else {
         "11": {output_key: [
             {"filename": "clip.mp4", "subfolder": "", "type": "output"}
@@ -86,6 +87,8 @@ def _fake_comfy(captured, *, output_key="images", history_outputs=None):
             m.read.return_value = json.dumps({"p1": {"outputs": outputs}}).encode()
         elif "/view" in url:
             m.read.return_value = b"FAKE-MP4-BYTES"
+        elif "/system_stats" in url and system_stats is not None:
+            m.read.return_value = json.dumps(system_stats).encode()
         else:
             m.read.return_value = b"{}"
         return m
@@ -249,3 +252,106 @@ class TestWorkflowTemplate:
         assert (wf["6"]["inputs"]["length"] - 1) % 4 == 0
         assert wf["6"]["inputs"]["width"] % 16 == 0
         assert wf["6"]["inputs"]["height"] % 16 == 0
+
+
+_AMD_STATS = {
+    "system": {"os": "win32", "pytorch_version": "2.9.1+rocm7.13.0"},
+    "devices": [{"name": "cuda:0 AMD Radeon RX 6900 XT : native", "type": "cuda", "index": 0}],
+}
+_NVIDIA_STATS = {
+    "system": {"os": "win32", "pytorch_version": "2.9.1+cu128"},
+    "devices": [{"name": "cuda:0 NVIDIA GeForce RTX 4090 : cudaMallocAsync", "type": "cuda",
+                 "index": 0}],
+}
+
+
+class TestAmdTiledDecode:
+    """The shipped Wan workflow decodes in spatial tiles on an AMD GPU and keeps
+    its plain VAEDecode everywhere else."""
+
+    def _run(self, tmp_path, stats, **kwargs):
+        captured = {}
+        said = []
+        fake = _fake_comfy(captured, system_stats=stats)
+        with patch.object(comfy, "workflow_path", return_value=comfy._WORKFLOW_PATH), \
+             patch.object(comfy, "ensure_comfy", return_value=(True, "ComfyUI is running.")), \
+             patch.object(comfy, "_localm_unload"), \
+             patch.object(comfy_client, "_comfy_urlopen", fake), \
+             patch.object(comfy.time, "sleep"), \
+             patch.dict(os.environ, {"COMFY_OUTPUT_DIR": str(tmp_path / "comfy_out")}):
+            ok, msg = comfy.generate_video("a red fox running", tmp_path / "out.mp4",
+                                           on_progress=said.append, **kwargs)
+        assert ok, msg
+        return captured["workflow"], said
+
+    def test_shipped_workflow_decode_is_tiled_on_amd(self, tmp_path):
+        shipped = json.loads(comfy._WORKFLOW_PATH.read_text(encoding="utf-8"))
+        decode_id = next(k for k, n in shipped.items() if n["class_type"] == "VAEDecode")
+        wf, said = self._run(tmp_path, _AMD_STATS, seconds=5.0, fps=24)
+        node = wf[decode_id]
+        assert node["class_type"] == "VAEDecodeTiled"
+        assert node["inputs"]["samples"] == shipped[decode_id]["inputs"]["samples"]
+        assert node["inputs"]["vae"] == shipped[decode_id]["inputs"]["vae"]
+        assert node["inputs"]["tile_size"] == comfy.AMD_VAE_DECODE_TILE_PX
+        assert node["inputs"]["overlap"] == comfy.AMD_VAE_DECODE_OVERLAP_PX
+        assert node["inputs"]["temporal_size"] >= 121
+        assert node["inputs"]["temporal_size"] % 4 == 0
+        assert not any(n["class_type"] == "VAEDecode" for n in wf.values())
+        create = next(n for n in wf.values() if n["class_type"] == "CreateVideo")
+        assert create["inputs"]["images"] == [decode_id, 0]
+        assert any("px tiles" in line for line in said)
+
+    def test_tiled_inputs_are_within_comfy_bounds(self, tmp_path):
+        wf, _ = self._run(tmp_path, _AMD_STATS, seconds=0.2, fps=24, width=640, height=352)
+        node = next(n for n in wf.values() if n["class_type"] == "VAEDecodeTiled")
+        inputs = node["inputs"]
+        assert 64 <= inputs["tile_size"] <= 4096 and inputs["tile_size"] % 32 == 0
+        assert 0 <= inputs["overlap"] <= 4096 and inputs["overlap"] % 32 == 0
+        assert inputs["tile_size"] >= inputs["overlap"] * 4
+        assert 8 <= inputs["temporal_size"] <= 4096
+        assert 4 <= inputs["temporal_overlap"] <= 4096
+
+    def test_shipped_workflow_decode_untouched_on_nvidia(self, tmp_path):
+        shipped = json.loads(comfy._WORKFLOW_PATH.read_text(encoding="utf-8"))
+        wf, said = self._run(tmp_path, _NVIDIA_STATS)
+        for node_id, node in shipped.items():
+            if node["class_type"] == "VAEDecode":
+                assert wf[node_id] == node
+        assert not any(n["class_type"] == "VAEDecodeTiled" for n in wf.values())
+        assert not any("px tiles" in line for line in said)
+
+    def test_unreadable_stats_keep_the_plain_decode(self, tmp_path):
+        wf, _ = self._run(tmp_path, None)
+        assert any(n["class_type"] == "VAEDecode" for n in wf.values())
+        assert not any(n["class_type"] == "VAEDecodeTiled" for n in wf.values())
+
+
+class TestComfyRunsOnAmd:
+    def _ask(self, payload):
+        def fake(url, timeout=None):
+            if isinstance(payload, Exception):
+                raise payload
+            m = MagicMock()
+            m.__enter__ = lambda s=m: s
+            m.__exit__ = MagicMock(return_value=False)
+            m.read.return_value = json.dumps(payload).encode()
+            return m
+        with patch.object(comfy_client, "_comfy_urlopen", fake):
+            return comfy_client.comfy_runs_on_amd("http://127.0.0.1:8189")
+
+    def test_rocm_torch_is_amd(self):
+        assert self._ask(_AMD_STATS) is True
+
+    def test_zluda_device_name_is_amd(self):
+        stats = {"system": {"pytorch_version": "2.7.0+cu118"},
+                 "devices": [{"name": "cuda:0 AMD Radeon RX 6800 [ZLUDA] : native"}]}
+        assert self._ask(stats) is True
+
+    def test_nvidia_is_not_amd(self):
+        assert self._ask(_NVIDIA_STATS) is False
+
+    def test_no_devices_is_unknown(self):
+        assert self._ask({"system": {"pytorch_version": "2.9.1+cu128"}}) is None
+
+    def test_unreachable_is_unknown(self):
+        assert self._ask(OSError("refused")) is None

@@ -926,6 +926,34 @@ def _comfy_alive(api_url: str, timeout: float = 3.0) -> bool:
         return False
 
 
+def comfy_runs_on_amd(api_url: str, timeout: float = 5.0) -> Optional[bool]:
+    """Whether the ComfyUI at *api_url* runs on an AMD GPU, read from its
+    ``/system_stats``: True when a reported device name names AMD or Radeon, or
+    the reported torch is a ROCm build; False when it reports devices and none is
+    AMD; None when the stats cannot be fetched or carry no device list."""
+    try:
+        with _comfy_urlopen(f"{api_url}/system_stats", timeout=timeout) as resp:
+            stats = json.loads(resp.read().decode("utf-8", "replace"))
+    except Exception as e:
+        from localm.debuglog import logger
+        logger.debug("could not read ComfyUI /system_stats at %s: %s", api_url, e)
+        return None
+    if not isinstance(stats, dict):
+        return None
+    system = stats.get("system")
+    torch_version = system.get("pytorch_version") if isinstance(system, dict) else None
+    if isinstance(torch_version, str) and "rocm" in torch_version.lower():
+        return True
+    devices = stats.get("devices")
+    if not isinstance(devices, list) or not devices:
+        return None
+    for dev in devices:
+        name = dev.get("name") if isinstance(dev, dict) else None
+        if isinstance(name, str) and ("amd" in name.lower().split() or "radeon" in name.lower()):
+            return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 #  Readiness cache - de-duplicate back-to-back reachability probes
 #

@@ -49,6 +49,7 @@ from localm.media.comfy_client import (
     comfy_fetch_output,
     comfy_http_error_detail,
     comfy_poll_until_done,
+    comfy_runs_on_amd,
     comfy_wait_heartbeat,
     comfy_submit_prompt,
     contain_comfy_artifacts,
@@ -100,6 +101,38 @@ def _snap_frames(seconds: float, fps: int) -> int:
     nearest valid count (minimum 5 frames)."""
     frames = round(seconds * fps)
     return max(5, 4 * round((frames - 1) / 4) + 1)
+
+
+# VAE decode tile side and overlap, in output pixels, on an AMD GPU. Every GPU
+# kernel of a tile's decode stays far below the Windows driver timeout.
+# See test_amd_vae_tile_bounds_the_largest_decode_conv.
+AMD_VAE_DECODE_TILE_PX = 256
+AMD_VAE_DECODE_OVERLAP_PX = 64
+
+
+def tile_vae_decode(workflow: dict, frames: int, *, tile_px: int = AMD_VAE_DECODE_TILE_PX,
+                    overlap_px: int = AMD_VAE_DECODE_OVERLAP_PX) -> int:
+    """Turn every plain ``VAEDecode`` node of *workflow* into a ``VAEDecodeTiled``
+    node, in place, under the same node id with the same ``samples`` and ``vae``
+    inputs: spatial tiles of *tile_px* with *overlap_px* overlap, and one temporal
+    tile spanning all *frames*. Returns the number of nodes changed."""
+    temporal = max(8, -(-int(frames) // 4) * 4)
+    changed = 0
+    for node in workflow.values():
+        if not isinstance(node, dict) or node.get("class_type") != "VAEDecode":
+            continue
+        inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+        node["class_type"] = "VAEDecodeTiled"
+        node["inputs"] = {
+            "samples": inputs.get("samples"),
+            "vae": inputs.get("vae"),
+            "tile_size": int(tile_px),
+            "overlap": int(overlap_px),
+            "temporal_size": temporal,
+            "temporal_overlap": 8,
+        }
+        changed += 1
+    return changed
 
 
 # Output keys that ComfyUI save nodes use in /history, by node family:
@@ -405,6 +438,11 @@ def generate_video(
     )
     if not ok:
         return False, msg
+
+    # Decode in spatial tiles on an AMD GPU.
+    if comfy_runs_on_amd(api_url) and tile_vae_decode(workflow, frames):
+        _say(f"Decoding in {AMD_VAE_DECODE_TILE_PX} px tiles to keep each GPU step short "
+             "on this AMD GPU.")
 
     # Pre-submit model validation: confirm the Wan model files exist (substituting
     # an unambiguous precision variant), failing EARLY with the exact missing file
