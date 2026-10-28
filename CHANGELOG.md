@@ -11,6 +11,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Fixed
+- **An update no longer depends on what is on your PATH.** An update that reinstalls dependencies now runs the uv installed inside localm's own environment (the `uv` package is now one of localm's dependencies), then the install's own uv; the hardware checks an update runs use the system's own programs by full path. If a program an update needs cannot be found, the update is refused before anything is changed, with a message naming the program and saying to re-run setup.
+
 ## [0.3.2rc2] - 2026-10-28
 
 ### Changed
