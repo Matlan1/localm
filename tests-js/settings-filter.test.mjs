@@ -221,10 +221,9 @@ test("gate-hidden sub-content never matches, but the card's always-shown content
   const { doc, type, activeIds } = await setup();
 
   // The app-update sub-block is [hidden] unless the updater proxy is
-  // configured; the "Updates" card ITSELF is never gated - the runtime-update
-  // block and the update-behavior toggles it also holds must stay findable
-  // regardless (see index.html's #sec-updates comment; S1 merged what used to
-  // be three separate panels into this one card).
+  // configured (the update-behavior toggles live inside it); the "Updates" card
+  // ITSELF is never gated - the runtime-update block it also holds must stay
+  // findable regardless (see index.html's #sec-updates comment).
   assert.equal(doc.getElementById("sec-updates").hidden, false,
     "the Updates card itself is never gated");
   assert.ok(doc.getElementById("app-update-block").hidden,

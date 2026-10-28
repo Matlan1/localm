@@ -1720,15 +1720,24 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
 }
 .chat-bg-preview.empty { border-style: dashed; }
 .chat-bg-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-/* The Settings "Updates" card: three sub-blocks (app update, runtime update,
-   the update-behavior toggles) stacked in one card, same bordered-box language
-   as .media-comfy-box so they read as distinct pieces without being separate
-   cards. */
+/* The Settings "Updates" card: its sub-blocks (app update with its
+   update-behavior toggles, app launcher, runtime update) stacked in one card,
+   same bordered-box language as .media-comfy-box so they read as distinct
+   pieces without being separate cards. */
 .update-subsection {
   border: 1px solid var(--border); border-radius: 8px;
   padding: 10px 12px; margin-top: 12px;
 }
 .update-sub-head { margin: 0 0 6px; font-size: 14px; }
+/* The offered release's notes under "Update available"; .collapsed caps the
+   height until "Show all". */
+.update-notes { margin-top: 6px; font-size: 13px; line-height: 1.45; overflow-wrap: anywhere; }
+.update-notes.collapsed { max-height: 9.5em; overflow: hidden; }
+.update-notes p { margin: 0 0 6px; }
+.update-notes ul, .update-notes ol { margin: 0 0 6px; padding-left: 20px; }
+.update-notes h1, .update-notes h2, .update-notes h3,
+.update-notes h4, .update-notes h5, .update-notes h6 { font-size: 13px; margin: 8px 0 4px; }
+#update-toggles-block { margin-top: 10px; }
 /* Settings "Diagnostics" card: one row per active self-check, each a name plus a
    .job-state pill (docs/gui-design.md rule 6) with the check's own sentence
    underneath. Reuses .job-head / .job-name so a status row reads the same here
