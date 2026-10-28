@@ -120,6 +120,12 @@ def plan(staged_root, installed_root) -> dict:
         current = sl._provisioned_build(lib)
         pins = staged_pins(staged_root)
         release_build = pins["rocm_build"] if backend == "amd-rocm" else pins["pinned_tag"]
+        if backend == "custom":
+            out.update(backend=backend, pins=pins)
+            if release_build:
+                out["note"] = ("kept the llama.cpp build you installed yourself (--from or "
+                               f"--url); this release ships {release_build}")
+            return out
         pin = sl.pinned_tag()
         target, source = runtime_target(backend, pin=pin, tracking=sl.tracks_latest(),
                                         pinned_tag=pins["pinned_tag"],
@@ -281,6 +287,25 @@ def read_pending() -> Optional[dict]:
     if not isinstance(data, dict) or not data.get("backend") or not data.get("target"):
         return None
     return data
+
+
+def catch_up(root=None) -> Optional[dict]:
+    """Record a pending re-provision when none is pending and the runtime
+    installed at *root* (default the running install) is not the build that
+    install's own release pins for its backend, the user having chosen neither
+    a pin nor "latest" (:func:`plan` of the install against itself). Covers an
+    install updated by an updater from before this check, setup re-run over an
+    older runtime, and a copied install. Returns the plan when it recorded one,
+    else None. Raises OSError when the marker cannot be written."""
+    from localm import _version, updater
+    root = Path(root) if root else updater.repo_root()
+    if read_pending() is not None:
+        return None
+    p = plan(root, root)
+    if not p["reprovision"]:
+        return None
+    write_pending(p, root=root, version=_version.read_version())
+    return p
 
 
 def clear_pending() -> None:

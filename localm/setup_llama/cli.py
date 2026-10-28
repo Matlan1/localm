@@ -213,8 +213,9 @@ def _provision_staged_cuda(cuda_line: str, target: Path, lib_name: str,
     _pin_note_for_backend("cuda")
     used_tag: Optional[str] = None
     try:
-        _sl._clear_target_or_refuse(target)
-        used_tag = _sl._provision_backend("cuda", target, sha256, True, cuda_line)
+        used_tag = _sl._replace_target(
+            target, lambda staging: _sl._provision_backend("cuda", staging, sha256, True,
+                                                           cuda_line))
     except RuntimeInUseError as e:
         _exit_runtime_in_use(e)
     except click.ClickException as e:
@@ -349,10 +350,9 @@ def _provision_from_dir(from_dir: str, target: Path, lib_name: str) -> None:
     src = Path(from_dir)
     console.print(f"Copying binaries from [bold]{src}[/bold] ...")
     try:
-        _sl._clear_target_or_refuse(target)
+        n = _sl._replace_target(target, lambda staging: _sl._copy_binaries(src, staging))
     except RuntimeInUseError as e:
         _exit_runtime_in_use(e)
-    n = _sl._copy_binaries(src, target)
     if not (target / lib_name).exists():
         console.print(f"[red]No {lib_name} found in the source directory.[/red] "
                       f"Point --from at the build output containing {lib_name}.")
@@ -381,8 +381,7 @@ def _provision_from_url(url: str, target: Path, lib_name: str,
         console.print("[yellow]Warning: Custom URL download is unverified (no --sha256 provided).[/yellow]")
     console.print(f"[dim]Fetching:[/dim] {url}")
     try:
-        _sl._clear_target_or_refuse(target)
-        _sl._fetch_and_place(url, target, sha256)
+        _sl._replace_target(target, lambda staging: _sl._fetch_and_place(url, staging, sha256))
     except RuntimeInUseError as e:
         # Ahead of the broad handlers below, which would otherwise report a
         # locked file as "Download failed" - a cause the user would go and

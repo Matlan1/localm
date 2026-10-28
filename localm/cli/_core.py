@@ -523,23 +523,33 @@ def main() -> None:
 
 def _finish_pending_runtime_update(command) -> None:
     """Before *command* (the subcommand name) loads the native runtime, carry out
-    the runtime re-provision the last update left pending
-    (``updater_runtime.finish_pending``) and print its outcome. Skipped for every
-    other command and in a process a restart re-executed (the restart attempted
-    it already). A failure is printed and the command still runs."""
+    the runtime re-provision the last update left pending, or one
+    ``updater_runtime.catch_up`` finds needed because the installed runtime is
+    not the build this release pins (``updater_runtime.finish_pending``), and
+    print its outcome. Skipped for every other command and in a process a
+    restart re-executed (the restart attempted it already). A failure is
+    printed, the previous runtime stays in use, the command still runs, and the
+    next start tries again."""
     import os
     from localm import updater_runtime
     if command not in updater_runtime.RUNTIME_COMMANDS or os.environ.get(
             "LOCALM_RESTART_IN_PROGRESS"):
         return
     try:
-        pending = updater_runtime.read_pending()
-        if pending is None:
-            return
         from rich.markup import escape
-        console.print(f"[dim]Finishing the native runtime update from the last localm "
-                      f"update ({escape(str(pending.get('backend')))} "
-                      f"{escape(str(pending.get('target')))}) ...[/dim]")
+        pending = updater_runtime.read_pending()
+        if pending is not None:
+            console.print(f"[dim]Finishing the native runtime update from the last localm "
+                          f"update ({escape(str(pending.get('backend')))} "
+                          f"{escape(str(pending.get('target')))}) ...[/dim]")
+        else:
+            found = updater_runtime.catch_up()
+            if found is None:
+                return
+            console.print(f"[dim]This localm release uses the {escape(str(found['backend']))} "
+                          f"runtime {escape(str(found['target']))}, but "
+                          f"{escape(str(found['current']))} is installed; updating it "
+                          "...[/dim]")
         status = updater_runtime.finish_pending()
     except Exception as e:
         console.print(f"[yellow]The pending native runtime update could not be carried out "

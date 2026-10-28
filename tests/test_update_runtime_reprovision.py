@@ -516,3 +516,75 @@ def test_pending_marker_round_trip(tmp_path, cfg):
                       .read_text(encoding="utf-8"))["version"] == "9"
     updater_runtime.clear_pending()
     assert updater_runtime.read_pending() is None
+
+
+# ------------------------------- first-start catch-up --------------------------
+
+def _start(install, monkeypatch, command="gui", rc=0, calls=None, build="b1355-cpu-b11908"):
+    """Run the CLI start hook for *command* on *install*, with `setup-llama` as
+    the fake child (exit *rc*)."""
+    from localm.cli import _core
+    fake = _fake_setup_llama(install, build, rc=rc, calls=calls)
+    monkeypatch.setattr(updater, "repo_root", lambda: install)
+    monkeypatch.delenv("LOCALM_RESTART_IN_PROGRESS", raising=False)
+    monkeypatch.setattr(subprocess, "run",
+                        lambda cmd, **kw: subprocess.CompletedProcess(cmd, fake(cmd)))
+    _core._finish_pending_runtime_update(command)
+
+
+@pytest.fixture
+def updated_by_an_old_updater(tmp_path, cfg, monkeypatch):
+    """An install whose code is this release (pins b1355) but whose runtime is
+    still the b1349 build an older updater left in place: no pending marker."""
+    monkeypatch.setattr(_version, "read_version", lambda: "0.3.2")
+    inst = _tree(tmp_path / "inst", _PINS_032, "0.3.2")
+    _provision(inst, "amd-rocm", "b1349-cpu-b11719")
+    return inst
+
+
+def test_first_start_brings_a_runtime_an_old_updater_left_behind_to_the_pin(
+        updated_by_an_old_updater, monkeypatch):
+    inst = updated_by_an_old_updater
+    calls = []
+    _start(inst, monkeypatch, calls=calls)
+    assert [c for c in calls if "setup-llama" in c], calls
+    assert _marker(inst) == "amd-rocm b1355-cpu-b11908"
+    assert updater_runtime.read_pending() is None
+    calls.clear()
+    _start(inst, monkeypatch, calls=calls)
+    assert calls == [], "a current runtime is left alone"
+
+
+def test_first_start_retries_after_a_failure_and_keeps_the_old_runtime(
+        updated_by_an_old_updater, monkeypatch):
+    inst = updated_by_an_old_updater
+    before = au._tree_signature(_lib(inst))
+    _start(inst, monkeypatch, rc=1)
+    assert au._tree_signature(_lib(inst)) == before
+    assert updater_runtime.last_status()["state"] == "failed"
+    calls = []
+    _start(inst, monkeypatch, calls=calls)
+    assert [c for c in calls if "setup-llama" in c], "the next start tries again"
+    assert _marker(inst) == "amd-rocm b1355-cpu-b11908"
+
+
+def test_first_start_leaves_a_user_pin_and_a_custom_build(updated_by_an_old_updater, cfg,
+                                                         monkeypatch):
+    inst = updated_by_an_old_updater
+    _provision(inst, "vulkan", "b11600")
+    cfg["llama_runtime_pin"] = "b11600"
+    _start(inst, monkeypatch, calls=[])
+    assert _marker(inst) == "vulkan b11600"
+    cfg.pop("llama_runtime_pin")
+    _provision(inst, "custom", None)
+    calls = []
+    _start(inst, monkeypatch, calls=calls)
+    assert calls == [] and _marker(inst) == "custom"
+
+
+def test_first_start_only_for_commands_that_load_the_runtime(updated_by_an_old_updater,
+                                                             monkeypatch):
+    calls = []
+    _start(updated_by_an_old_updater, monkeypatch, command="ps", calls=calls)
+    assert calls == []
+    assert updater_runtime.read_pending() is None
