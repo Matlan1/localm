@@ -23,6 +23,7 @@ from localm.inference.backends.llamacpp import _loader
 from localm.inference.backends.llamacpp._gpu_plan import (ModelUnits, PlanDevice,
                                                          plan_placement)
 from localm.inference.backends.llamacpp._split_fit import layer_devices
+from tests._sysprog_fakes import _nvidia_smi_found  # noqa: F401
 
 GiB = 1024 ** 3
 MiB = 1024 ** 2

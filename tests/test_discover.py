@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from localm import discover
+from tests._sysprog_fakes import _nvidia_smi_found  # noqa: F401
 # Imported at collection time so TestListGpus's patch.dict(sys.modules, {"torch":
 # ...}) has nothing to evict. discover imports gpu_usage lazily (inside
 # _apply_device_global_free); an eviction would leave a stale module object bound
@@ -36,16 +37,6 @@ from localm.discover import (
 def _online(monkeypatch):
     """Deterministic policy: discovery only checks the off switch."""
     monkeypatch.setenv("LOCALM_NET_MODE", "ask")
-
-
-@pytest.fixture(autouse=True)
-def _nvidia_smi_found(monkeypatch):
-    """nvidia-smi resolves to a full path; whether it runs is up to each test's
-    subprocess.Popen."""
-    from localm import sysprog
-    real = sysprog.find
-    monkeypatch.setattr(sysprog, "find",
-                        lambda name: "/usr/bin/nvidia-smi" if name == "nvidia-smi" else real(name))
 
 
 def _mock_fetch(monkeypatch, payload, seen=None):

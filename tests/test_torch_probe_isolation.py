@@ -21,6 +21,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from localm import discover
+from tests._sysprog_fakes import _nvidia_smi_found  # noqa: F401
 
 
 class TestColdProbeStaysOutOfProcess:
