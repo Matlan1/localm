@@ -41,8 +41,8 @@ def _bash() -> str | None:
     Bash, never the WSL launcher in System32."""
     found = shutil.which("bash")
     if found and os.name == "nt":
-        system_root = Path(os.environ.get("SystemRoot", r"C:\Windows")).resolve()
-        if Path(found).resolve().is_relative_to(system_root):
+        system_root = os.path.normcase(os.environ.get("SystemRoot", r"C:\Windows")).rstrip("\\/")
+        if os.path.normcase(os.path.abspath(found)).startswith(system_root + os.sep):
             return None
     return found
 
