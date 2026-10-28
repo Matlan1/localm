@@ -499,12 +499,20 @@ def test_a_different_llama_pin_reprovisions_the_runtime(env, monkeypatch):
     (inst / "localm" / "setup_llama").mkdir()
     (inst / "localm" / "setup_llama" / "pins.py").write_text(
         '_PINNED_TAG = "b11757"\n', encoding="utf-8")
+    lib = inst / "runtime" / "localm_llama_runtime" / "lib"
+    lib.mkdir(parents=True)
+    (lib / ".localm-backend").write_text("vulkan b11757", encoding="utf-8")
     data = _zip("0.2.0", files={"localm/setup_llama/pins.py": '_PINNED_TAG = "b11541"\n'})
     ran = []
+
+    def setup_llama(cmd):
+        ran.append(cmd)
+        (lib / ".localm-backend").write_text("vulkan b11541", encoding="utf-8")
+        return 0
     res = updater.apply(2, signature=envelope(data, [_PRIV]), target_version="0.2.0",
-                        installed=inst, download_opener=_download(data),
-                        runner=lambda c: ran.append(c) or 0)
+                        installed=inst, download_opener=_download(data), runner=setup_llama)
     assert res["klass"] == "runtime"
+    assert res["runtime"]["state"] == "updated"
     assert ran and "setup-llama" in ran[0]
     assert "--keep-choice" not in ran[0], "that build's setup-llama has no such flag"
 

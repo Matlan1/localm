@@ -494,6 +494,44 @@ def _clear_target_or_refuse(target: Path) -> None:
         raise RuntimeInUseError(left, partial=True)
 
 
+def _staging_path(target: Path) -> Path:
+    """Where a new build is assembled before it replaces *target*: a sibling
+    ``<target>.incoming``, on the same volume so the swap is a rename."""
+    return target.parent / (target.name + ".incoming")
+
+
+def _replace_target(target: Path, fill):
+    """Replace the runtime in *target* with what *fill* puts into an empty
+    staging directory, and return what *fill* returns.
+
+    Order: refuse when the runtime is in use (RuntimeInUseError, nothing
+    touched); call ``fill(staging)``; only when it returns, clear *target*
+    (:func:`_clear_target_or_refuse`, which keeps the choice record and the git
+    sentinels) and move the staged files in. When *fill* raises (a failed or
+    refused download, an archive that does not verify), the exception
+    propagates and *target* is exactly as it was. The staging directory is
+    removed in every case."""
+    in_use = _sl._files_in_use(target)
+    if in_use:
+        raise RuntimeInUseError(in_use, partial=False)
+    staging = _staging_path(target)
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True)
+    try:
+        result = fill(staging)
+        _sl._clear_target_or_refuse(target)
+        target.mkdir(parents=True, exist_ok=True)
+        for entry in sorted(staging.iterdir()):
+            dest = target / entry.name
+            if dest.is_dir() and entry.is_dir():
+                shutil.rmtree(dest)
+            os.replace(entry, dest)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    return result
+
+
 def _exit_runtime_in_use(e: RuntimeInUseError) -> None:
     """Report a refused provision and exit non-zero. Never falls back to another
     backend: the user's chosen backend is not the problem, so silently installing

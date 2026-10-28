@@ -19,6 +19,11 @@ Protocol (two ``multiprocessing.Queue``s, tagged tuples):
     ("rerank", [(query, document), ...])
     ("shutdown", None)
 
+A "load" payload carrying ``"native_console_paused": True``, and an "embed" or
+"rerank" command carrying a third element ``True``, run with the child's native
+log lines kept off the terminal. The parent adds them while its own
+:func:`~localm.debuglog.native_console_paused` is active.
+
 ``resp_q`` (child -> parent):
     ("ok", value)      - success (a {"dim": N} dict for load, a list of
                           vectors for embed, a list of
@@ -32,10 +37,12 @@ produces NO envelope - the parent detects the dead child via
 
 from __future__ import annotations
 
+import contextlib
 import multiprocessing as mp
 import os
 import queue as _queue
 import time
+from typing import Any, cast
 
 from localm.inference.backends.base import (
     PretokenizerUnsafeInputError, RerankInputError)
@@ -64,6 +71,38 @@ def _simulate_fault(mode: str) -> None:
 # server between bursts flushes within this bound instead of holding output
 # until the next embed() or process shutdown.
 _EMBED_STDERR_IDLE_CLOSE_SECS = 5.0
+
+_NATIVE_CONSOLE_PAUSED_KEY = "native_console_paused"
+
+
+def _parent_console_paused() -> bool:
+    from localm.debuglog import native_console_is_paused
+    return native_console_is_paused()
+
+
+def _native_console_pause(paused: bool):
+    """:func:`~localm.debuglog.native_console_paused` when *paused*, else a
+    no-op context."""
+    if not paused:
+        return contextlib.nullcontext()
+    from localm.debuglog import native_console_paused
+    return native_console_paused()
+
+
+@contextlib.contextmanager
+def _paused_load_scope(paused: bool):
+    """Child side of a "load": when *paused*, the whole load (the native
+    library's own start-up lines included) runs inside one
+    :func:`~localm.debuglog.dedup_native_stderr` scope entered under
+    :func:`~localm.debuglog.native_console_paused`, so its native lines reach
+    the debug log and not the terminal. Otherwise does nothing."""
+    if not paused:
+        yield
+        return
+    from localm.debuglog import dedup_native_stderr
+    with _native_console_pause(True):
+        with dedup_native_stderr():
+            yield
 
 
 # --------------------------------------------------------------------------- #
@@ -147,10 +186,11 @@ def _runner_main(req_q, resp_q, crash_trace_path=None) -> None:
     # "decode: cannot decode batches with this context (calling encode()
     # instead)" to raw stderr, and dedup_native_stderr's grouper only collapses
     # lines seen WITHIN one open scope, so a per-call scope collapses nothing.
-    # "load" is excluded: GGUFEmbedder.__init__ already wraps the model load in
-    # its own dedup_native_stderr scope, and nesting two scopes would dup2 fd 2
-    # onto the OUTER scope's pipe instead of the real stderr.
+    # "load" does not use this scope: GGUFEmbedder.__init__ wraps the model load
+    # in its own dedup_native_stderr scope, and a paused load runs inside
+    # _paused_load_scope.
     embed_stderr_ctx = None
+    embed_stderr_paused = False
 
     def _close_embed_stderr_ctx() -> None:
         nonlocal embed_stderr_ctx
@@ -186,7 +226,7 @@ def _runner_main(req_q, resp_q, crash_trace_path=None) -> None:
             return
 
         if name == "load":
-            payload = dict(payload)
+            load_params: dict[str, Any] = dict(cast("dict[str, Any]", payload))
             # cpu_only: n_gpu_layers=0 alone only controls WEIGHT placement -
             # ggml's scheduler still considers a REGISTERED GPU backend for
             # individual ops, so a large enough matmul dispatches to vendor BLAS
@@ -197,7 +237,7 @@ def _runner_main(req_q, resp_q, crash_trace_path=None) -> None:
             # CPU to dispatch to, independent of model size. Set in THIS child
             # process only - never touches the parent's environment or a
             # concurrently-loading chat model.
-            if payload.pop("cpu_only", False):
+            if load_params.pop("cpu_only", False):
                 # "-1", not "": Windows' CRT putenv("VAR=") with nothing after
                 # '=' REMOVES the variable instead of setting it empty. "-1" is
                 # the standard CUDA/HIP convention for "no valid device index",
@@ -205,26 +245,31 @@ def _runner_main(req_q, resp_q, crash_trace_path=None) -> None:
                 os.environ["HIP_VISIBLE_DEVICES"] = "-1"
                 os.environ["ROCR_VISIBLE_DEVICES"] = "-1"
                 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
-            from localm.inference.embedder import _POOLING_RANK, GGUFEmbedder
-            try:
-                embedder = GGUFEmbedder(**payload)
-                # The pooling facts (and, when n_ctx was None/"auto", the
-                # actual window size resolved from the model's own native
-                # training context) travel back with the load so the PARENT
-                # can warn about a mis-pooled model / report the real window:
-                # only the child ever holds the model handle either is read
-                # from.
-                meta = {
-                    "dim": embedder.dim,
-                    "declared_pooling": embedder.declared_pooling,
-                    "effective_pooling": embedder.pooling_type,
-                    "n_ctx": embedder.n_ctx,
-                }
-                if embedder.pooling_type == _POOLING_RANK:
-                    meta.update(embedder.rank_head_meta())
-                resp_q.put(("ok", meta))
-            except Exception as e:
-                resp_q.put(("error", str(e)))
+            paused = bool(load_params.pop(_NATIVE_CONSOLE_PAUSED_KEY, False))
+            # The reply is sent after the paused scope has closed, so its native
+            # lines are written out before the parent can stop this worker.
+            with _paused_load_scope(paused):
+                from localm.inference.embedder import _POOLING_RANK, GGUFEmbedder
+                try:
+                    embedder = GGUFEmbedder(**load_params)
+                    # The pooling facts (and, when n_ctx was None/"auto", the
+                    # actual window size resolved from the model's own native
+                    # training context) travel back with the load so the PARENT
+                    # can warn about a mis-pooled model / report the real window:
+                    # only the child ever holds the model handle either is read
+                    # from.
+                    meta = {
+                        "dim": embedder.dim,
+                        "declared_pooling": embedder.declared_pooling,
+                        "effective_pooling": embedder.pooling_type,
+                        "n_ctx": embedder.n_ctx,
+                    }
+                    if embedder.pooling_type == _POOLING_RANK:
+                        meta.update(embedder.rank_head_meta())
+                    reply = ("ok", meta)
+                except Exception as e:
+                    reply = ("error", str(e))
+            resp_q.put(reply)
             # A hard native abort during GGUFEmbedder(...) is NOT caught here -
             # the process dies, and the parent detects that via is_alive().
             continue
@@ -234,9 +279,16 @@ def _runner_main(req_q, resp_q, crash_trace_path=None) -> None:
                 resp_q.put(("error", f"the embedder worker got '{name}' before a model "
                                      "was loaded"))
                 continue
+            paused = len(cmd) > 2 and bool(cmd[2])
+            # An open scope entered with the other pause state is closed first,
+            # so this command's native lines go where its pause state says.
+            if embed_stderr_ctx is not None and embed_stderr_paused != paused:
+                _close_embed_stderr_ctx()
             if embed_stderr_ctx is None:
                 embed_stderr_ctx = dedup_native_stderr()
-                embed_stderr_ctx.__enter__()
+                with _native_console_pause(paused):
+                    embed_stderr_ctx.__enter__()
+                embed_stderr_paused = paused
             try:
                 if name == "embed":
                     resp_q.put(("ok", embedder.embed(payload)))
@@ -392,8 +444,11 @@ class EmbedderRunner:
         success. Raises RuntimeError on a genuine load failure (the worker is
         shut down first), a child crash (native abort - detected via
         is_alive(), never an exception this process had to catch), or a
-        timeout (the child is killed)."""
+        timeout (the child is killed). The load carries this process's
+        native-console pause when one is active."""
         self._spawn()
+        if _parent_console_paused():
+            params = {**params, _NATIVE_CONSOLE_PAUSED_KEY: True}
         self._req_q.put(("load", params))
         return self._wait(timeout, "load", shutdown_on_error=True)
 
@@ -415,10 +470,15 @@ class EmbedderRunner:
         return self._request("rerank", pairs, timeout)
 
     def _request(self, command: str, payload, timeout: float):
-        """Send one command to the worker and wait for its response."""
+        """Send one command to the worker and wait for its response. The
+        command carries this process's native-console pause when one is
+        active."""
         if self._req_q is None:
             raise RuntimeError("The embedding worker is not running.")
-        self._req_q.put((command, payload))
+        if _parent_console_paused():
+            self._req_q.put((command, payload, True))
+        else:
+            self._req_q.put((command, payload))
         return self._wait(timeout, command)
 
     def _wait(self, timeout: float, label: str, *, shutdown_on_error: bool = False):

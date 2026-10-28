@@ -71,24 +71,31 @@ def rocm_build(target: Path) -> str:
     return _ROCM_TAG
 
 
-def cpu_overlay_failed(target: Path) -> bool:
-    """True when installing the SIMD CPU backend for the current
-    ``_ROCM_CPU_TAG`` was attempted in *target* and did not succeed. Never
-    raises."""
+def cpu_overlay_failed(target: Path, cpu_tag: Optional[str] = None) -> bool:
+    """True when installing the SIMD CPU backend for *cpu_tag* (default the
+    current ``_ROCM_CPU_TAG``) was attempted in *target* and did not succeed.
+    Never raises."""
     try:
         data = json.loads((target / CPU_OVERLAY_FAILED_MARKER).read_text(encoding="utf-8"))
     except (OSError, ValueError, RecursionError):
         return False
-    return isinstance(data, dict) and data.get("tag") == _ROCM_CPU_TAG
+    return isinstance(data, dict) and data.get("tag") == (cpu_tag or _ROCM_CPU_TAG)
 
 
-def rocm_build_is_current(target: Path, build: Optional[str]) -> bool:
+def rocm_build_is_current(target: Path, build: Optional[str], *,
+                          rocm_tag: Optional[str] = None,
+                          rocm_build_id: Optional[str] = None,
+                          cpu_tag: Optional[str] = None) -> bool:
     """Whether *build* (the amd-rocm build recorded in *target*) is what a
-    provision there would record now: ``_ROCM_BUILD``, or ``_ROCM_TAG`` once the
-    overlay for ``_ROCM_CPU_TAG`` has been attempted there and did not install."""
-    if build == _ROCM_BUILD:
+    provision there would record: *rocm_build_id*, or *rocm_tag* once the overlay
+    for *cpu_tag* has been attempted there and did not install. Each defaults to
+    this release's ``_ROCM_BUILD``, ``_ROCM_TAG`` and ``_ROCM_CPU_TAG``; the
+    updater passes the values a staged release pins."""
+    if build is None:
+        return False
+    if build == (rocm_build_id or _ROCM_BUILD):
         return True
-    return build == _ROCM_TAG and cpu_overlay_failed(target)
+    return build == (rocm_tag or _ROCM_TAG) and cpu_overlay_failed(target, cpu_tag)
 
 
 def _record_overlay_attempt(target: Path, installed: bool) -> None:

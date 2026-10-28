@@ -1742,12 +1742,11 @@ export async function refreshSettingsPage() {
 
   form.replaceChildren();
   // The two update-behavior toggles (update_allow_prerelease,
-  // update_ignore_net_policy, both admin_only) render INTO the static
-  // "Updates" card (index.html's #update-toggles-block) rather than getting
-  // their own section below - that second panel headed "Updates" is exactly
-  // the duplication S1's card merge removes. Reset to hidden first so a caller
-  // without those fields (or a schema fetch that dropped them) leaves it
-  // empty rather than showing a stale render from an earlier refresh.
+  // update_ignore_net_policy, both admin_only) render into the static "App
+  // update" sub-block (index.html's #update-toggles-block, inside
+  // #app-update-block) instead of a section of their own. Reset to hidden first
+  // so a caller without those fields (or a schema fetch that dropped them)
+  // leaves it empty rather than showing a stale render from an earlier refresh.
   const updateToggleBlock = $("update-toggles-block");
   if (updateToggleBlock) updateToggleBlock.hidden = true;
   for (const sec of ordered) {

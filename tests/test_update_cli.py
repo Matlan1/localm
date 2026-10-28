@@ -110,7 +110,7 @@ def test_update_setup_class_warns_to_run_setup(monkeypatch):
 
 
 def test_update_rollback(monkeypatch):
-    monkeypatch.setattr(updater, "rollback_last", lambda: {"rolled_back": True, "backup": "b"})
+    monkeypatch.setattr(updater, "rollback_last", lambda **kw: {"rolled_back": True, "backup": "b"})
     r = CliRunner().invoke(main, ["update", "--rollback"])
     assert "Rolled back" in r.output
 

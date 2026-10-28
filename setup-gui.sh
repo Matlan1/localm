@@ -77,15 +77,20 @@ ask_install_uv() {  # setup.sh's uv-install question; exits when the user declin
     esac
 }
 run_uv_installer() {  # the pinned, checksum-verified Astral installer; exits on failure
-    UVTMP="$(mktemp -d 2>/dev/null)" || { UVTMP="$(pwd)/.uv-installer-tmp"; mkdir -p "$UVTMP"; }
-    if ! { fetch_uv_installer "$UVTMP/uv-installer.sh" && sh "$UVTMP/uv-installer.sh"; }; then
+    # The installer script and everything Astral's installer downloads (TMPDIR)
+    # stay in ./.localm-setup-tmp, which is removed again when it is empty.
+    UVTMP="$(pwd)/.localm-setup-tmp/uv-installer.$$"
+    if ! { mkdir -p "$UVTMP/tmp" && fetch_uv_installer "$UVTMP/uv-installer.sh" \
+            && TMPDIR="$UVTMP/tmp" sh "$UVTMP/uv-installer.sh"; }; then
         rm -rf "$UVTMP"
+        rmdir ./.localm-setup-tmp 2>/dev/null || true
         echo
         echo "  [!] Could not download or run Astral's uv installer."
         echo "      Use the console installer instead:  ./setup.sh"
         exit 1
     fi
     rm -rf "$UVTMP"
+    rmdir ./.localm-setup-tmp 2>/dev/null || true
 }
 
 echo "  Keep localm's Python tooling (uv itself, its runtime, and downloads) inside this folder?"

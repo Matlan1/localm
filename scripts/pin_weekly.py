@@ -219,7 +219,8 @@ def run_cmd(cmd: list[str], *, cwd: Path, timeout: float, env: dict | None = Non
 
 
 def scratch_dir(key: str) -> Path:
-    return REPO.parent / f"{REPO.name}-pin-pipeline-{key}-scratch"
+    """The scratch directory of runtime *key*: `<main checkout>/scratch/pin-pipeline/<key>`."""
+    return pp.pipeline_scratch_dir(key, REPO)
 
 
 def _gpu_wrap(cmd: list[str], purpose: str) -> list[str]:
@@ -1058,9 +1059,9 @@ def run_weekly(advancers: list[Advancer], *, dry_run: bool, verify: bool = True)
 
 
 def run_temp_dir() -> Path:
-    """The temp directory every process of a weekly run uses, beside the checkout so it is
-    on the checkout's drive."""
-    return REPO.parent / f"{REPO.name}-pin-weekly-tmp"
+    """The temp directory every process of a weekly run uses:
+    `<main checkout>/scratch/pin-pipeline/weekly-tmp`."""
+    return pp.pipeline_scratch_dir("weekly-tmp", REPO)
 
 
 def redirect_temp() -> Path:

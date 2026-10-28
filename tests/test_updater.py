@@ -681,64 +681,45 @@ def test_apply_refuses_before_swapping_when_the_deps_program_cannot_run(
     assert (inst / "VERSION").read_text().strip() == "0.1.0"
 
 
-def test_apply_refuses_before_swapping_when_the_runtime_interpreter_is_missing(
+def _plan_a_runtime_reprovision(monkeypatch):
+    """Make apply() plan a runtime re-provision; returns the list of stop calls."""
+    from localm import updater_runtime
+    stopped = []
+    monkeypatch.setattr(updater_runtime, "plan", lambda staged, installed: {
+        "reprovision": True, "source": "release", "backend": "cpu", "current": "b1",
+        "target": "b2", "pins": {}, "note": "the cpu runtime is re-provisioned (b1 -> b2)"})
+    monkeypatch.setattr(updater_runtime, "stop_own_holders",
+                        lambda *a, **k: stopped.append(a) or [])
+    return stopped
+
+
+def test_apply_refuses_before_stopping_or_swapping_when_the_runtime_interpreter_is_missing(
         tmp_path, monkeypatch, sig_env):
     """The runtime step runs this interpreter again; when it is gone the update is
-    refused before the swap."""
-    import io
-    import zipfile
+    refused before any process is stopped and before the swap."""
     _config(monkeypatch, tmp_path)
     inst = _fake_install(tmp_path, deps=("click",))
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w") as z:
-        z.writestr("VERSION", "0.2.0")
-        z.writestr("pyproject.toml", _pyproject_str(["click"]))
-        z.writestr("update.json", json.dumps({"needs": "runtime"}))
-        z.writestr("localm/__init__.py", "# 0.2.0")
-    data = buf.getvalue()
-
-    def op(url, headers, timeout, dest):
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(data)
-
-    monkeypatch.setattr(updater, "_installed_backend", lambda: "cpu")
+    stopped = _plan_a_runtime_reprovision(monkeypatch)
     gone = str(tmp_path / "no-python" / "python.exe")
     monkeypatch.setattr(sys, "executable", gone)
     swaps = _counting_swaps(monkeypatch)
     from localm.bugreport import LocalmError
-    ran = []
+    op, sig = _signed_build("0.2.0", ["click"])
     with pytest.raises(LocalmError) as ei:
-        updater.apply(5, installed=inst, signature=envelope(data, [_TEST_PRIV]),
-                      download_opener=op, runner=lambda c: ran.append(c) or 0)
-    assert swaps == [] and ran == []
+        updater.apply(5, installed=inst, signature=sig, download_opener=op, defer_runtime=True)
+    assert swaps == [] and stopped == []
     assert "runtime" in ei.value.summary and gone in ei.value.reason
     assert (inst / "VERSION").read_text().strip() == "0.1.0"
 
 
-def test_apply_runs_the_runtime_step_with_this_interpreter(tmp_path, monkeypatch, sig_env):
-    """Control for the refusal above: with the interpreter present the same build
-    applies and its step starts this interpreter by full path."""
-    import io
-    import zipfile
+def test_apply_with_the_interpreter_present_goes_on_to_the_runtime_step(tmp_path, monkeypatch, sig_env):
+    """Control for the refusal above: the same planned re-provision applies."""
     _config(monkeypatch, tmp_path)
     inst = _fake_install(tmp_path, deps=("click",))
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w") as z:
-        z.writestr("VERSION", "0.2.0")
-        z.writestr("pyproject.toml", _pyproject_str(["click"]))
-        z.writestr("update.json", json.dumps({"needs": "runtime"}))
-        z.writestr("localm/__init__.py", "# 0.2.0")
-    data = buf.getvalue()
-
-    def op(url, headers, timeout, dest):
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(data)
-
-    monkeypatch.setattr(updater, "_installed_backend", lambda: "cpu")
-    ran = []
-    res = updater.apply(5, installed=inst, signature=envelope(data, [_TEST_PRIV]),
-                        download_opener=op, runner=lambda c: ran.append(c) or 0)
-    assert res["klass"] == "runtime" and ran[0][0] == sys.executable
+    stopped = _plan_a_runtime_reprovision(monkeypatch)
+    op, sig = _signed_build("0.2.0", ["click"])
+    res = updater.apply(5, installed=inst, signature=sig, download_opener=op, defer_runtime=True)
+    assert res["applied"] is True and res["klass"] == "runtime" and len(stopped) == 1
 
 
 def test_deps_env_points_a_contained_install_at_its_own_cache(tmp_path, monkeypatch):

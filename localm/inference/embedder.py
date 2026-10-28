@@ -1460,7 +1460,7 @@ class IsolatedEmbedder(VramSizingMixin):
         crash as described on :meth:`embed`. Caller must hold ``_rpc_lock``."""
         try:
             return call(self._runner)
-        except RuntimeError:
+        except RuntimeError as exc:
             # Discard the worker ONLY if it is actually gone. The child's
             # dispatch loop answers an ordinary embed failure with a
             # clean (error, msg) envelope and keeps serving, and the
@@ -1468,13 +1468,16 @@ class IsolatedEmbedder(VramSizingMixin):
             # Dropping the reference unconditionally would orphan a LIVE
             # child that no close(), reset_embedder() or
             # release_for_exit() can reach.
+            # A generic name on an instance without model_path. See
+            # test_fault_logging_without_model_path_keeps_the_original_error.
+            name = Path(getattr(self, "model_path", "") or "embedding model").name
             if self._runner is not None and self._runner.is_alive():
-                logger.exception(
-                    "embedding failed; the worker is healthy and will "
-                    "serve the next call")
+                logger.error(
+                    "embedder %s: embedding failed (%s); the worker is healthy "
+                    "and will serve the next call", name, exc)
+                logger.debug("embedder %s: embedding failure", name, exc_info=True)
                 raise
-            logger.exception(
-                "embedding worker fault; it will reload on the next call")
+            logger.debug("embedder %s: embedding worker fault", name, exc_info=True)
             runner, self._runner = self._runner, None
             if runner is not None:
                 # Release its queues/handles. Safe and idempotent when
@@ -1492,12 +1495,24 @@ class IsolatedEmbedder(VramSizingMixin):
                     "are unaffected. Run 'localm setup-llama --force' "
                     "to reprovision the GPU runtime and restore "
                     "GPU-accelerated embedding.")
-                logger.warning("embedder %s: %s",
-                               Path(self.model_path).name,
-                               self.gpu_fallback_reason)
                 self.n_gpu_layers = 0
-                self._reload()
-                return call(self._runner)
+                try:
+                    self._reload()
+                    result = call(self._runner)
+                except Exception as retry_exc:
+                    logger.error(
+                        "embedder %s: GPU embedding failed (%s) and the CPU "
+                        "retry failed too (%s)", name, exc, retry_exc)
+                    logger.debug("embedder %s: CPU retry failure", name,
+                                 exc_info=True)
+                    raise
+                logger.warning(
+                    "embedder %s: GPU embedding failed (%s); the CPU took over. "
+                    "Chat-model GPU settings are unaffected.", name, exc)
+                return result
+            logger.error(
+                "embedder %s: embedding worker fault (%s); it will reload on "
+                "the next call", name, exc)
             raise
 
     def close(self) -> None:

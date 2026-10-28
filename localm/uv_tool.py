@@ -187,14 +187,34 @@ def bootstrap_uv(root, *, download: Optional[Callable[[str, Path], None]] = None
 
     The installer script is downloaded from the pinned release and runs only if
     its sha256 equals the pin in the setup script; it is told to keep uv in
-    ``.uv`` and to leave PATH and the user profile alone. Raises
+    ``.uv`` and to leave PATH and the user profile alone. The installer script
+    and every temporary file the installer writes (TEMP, TMP and TMPDIR point
+    there) stay in a scratch folder under ``<root>/.localm-setup-tmp``, which
+    is removed afterwards, together with ``.localm-setup-tmp`` when this call
+    created it and it is empty. On Windows, when that scratch path contains
+    ``[`` or ``]``, the installer's temporary files go to a fresh folder in the
+    system temp folder instead, also removed afterwards: Astral's PowerShell
+    installer cannot unpack under a path holding wildcard characters (see
+    test_bootstrap_uv_avoids_a_bracketed_temp_folder_on_windows). Raises
     UvBootstrapError, naming the step that failed, and installs nothing on a
     failed download or a checksum mismatch."""
+    from localm.install_manifest import SETUP_TMP_NAME
     root = Path(root)
     version, expected = read_pin(root)
     target = root / CONTAINED_DIR
     url = f"https://github.com/astral-sh/uv/releases/download/{version}/{_INSTALLER_NAME}"
-    scratch = Path(tempfile.mkdtemp(prefix="uv-installer-"))
+    parent = root / SETUP_TMP_NAME
+    made_parent = not parent.exists()
+    try:
+        parent.mkdir(exist_ok=True)
+        scratch = Path(tempfile.mkdtemp(prefix="uv-installer-", dir=parent))
+        installer_tmp = scratch / "tmp"
+        if IS_WINDOWS and ("[" in str(installer_tmp) or "]" in str(installer_tmp)):
+            installer_tmp = Path(tempfile.mkdtemp(prefix="localm-uv-tmp-"))
+        else:
+            installer_tmp.mkdir()
+    except OSError as e:
+        raise UvBootstrapError(f"could not create a temporary folder in {parent}: {e}") from None
     try:
         script = scratch / _INSTALLER_NAME
         emit(f"Downloading the uv {version} installer ...")
@@ -208,7 +228,8 @@ def bootstrap_uv(root, *, download: Optional[Callable[[str, Path], None]] = None
             raise UvBootstrapError(
                 f"the downloaded uv {version} installer did not match its expected "
                 "checksum and was not run")
-        env = dict(os.environ, UV_INSTALL_DIR=str(target), UV_UNMANAGED_INSTALL=str(target))
+        env = dict(os.environ, UV_INSTALL_DIR=str(target), UV_UNMANAGED_INSTALL=str(target),
+                   TEMP=str(installer_tmp), TMP=str(installer_tmp), TMPDIR=str(installer_tmp))
         emit(f"Installing uv {version} into {target} ...")
         try:
             rc = (run_installer or _run_installer)(script, env)
@@ -218,6 +239,9 @@ def bootstrap_uv(root, *, download: Optional[Callable[[str, Path], None]] = None
             raise UvBootstrapError(f"the uv installer exited {rc}")
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
+        shutil.rmtree(installer_tmp, ignore_errors=True)
+        if made_parent and parent.is_dir() and not any(parent.iterdir()):
+            parent.rmdir()
     found = contained_uv(root)
     if found is None:
         raise UvBootstrapError(f"the uv installer finished but no {UV_NAME} appeared in {target}")
