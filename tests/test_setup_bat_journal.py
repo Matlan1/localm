@@ -301,7 +301,8 @@ class TestTheScriptItself:
 
     def test_no_scratch_file_goes_to_the_system_temp_folder(self):
         assert "%TEMP%" not in self.text and "%TMP%" not in self.text
-        assert "$env:TEMP" not in self.text and "$env:TMP" not in self.text
+        reads = self.text.replace("$env:TEMP=$t", "").replace("$env:TMP=$t", "")
+        assert "$env:TEMP" not in reads and "$env:TMP" not in reads
         assert "$d=$env:STMP" in self.text
 
     def test_every_step_that_begins_also_finishes(self):

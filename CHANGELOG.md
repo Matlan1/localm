@@ -18,6 +18,7 @@ Everything in 0.3.2rc1 and 0.3.2rc2 below, plus the fixes listed here.
 ### Fixed
 - **`localm coder` no longer warns about an unreadable saved session in a project that has none.** In log or full mode, every interactive start in a project without a saved session printed "A saved session was found for this project but could not be read"; the project index the coder keeps beside its saved sessions was mistaken for a damaged one. A saved session that really is damaged is still reported.
 - **`localm coder` shows the task list the model writes as one line per task.** When the model wrote its tasks in the `[ ] task` / `[x] task` form, only the count ("todos: 0/3 done") was shown, without the checklist.
+- **Installing uv during setup no longer leaves its download behind in your system temp folder.** Astral's uv installer left its archive (about 15 MB on Windows) in the system temp folder, even with a Portable install, which keeps everything inside the install folder. Every setup, console or graphical, now gives the installer its own temporary folder inside the install folder and removes it when the install finishes or fails.
 
 ## [0.3.2rc2] - 2026-10-28
 
