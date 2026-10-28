@@ -248,8 +248,9 @@ class TestMessages:
     def test_degraded_load_confirm(self):
         assert sa.degraded_load_confirm("m", 4800 * MB, 3000 * MB) == {
             "status": "confirm_required", "model": "m",
-            "detail": ("'m' does not fit the estimated free VRAM (need ~4800 MB, "
-                       "3000 MB free) even after eviction; loading it anyway will "
+            "detail": ("'m' does not fit the estimated free VRAM (needs ~4800 MB "
+                       "free including a safety margin, 3000 MB free) even after "
+                       "eviction; loading it anyway will "
                        "let the backend fall back to partial CPU offload, which "
                        "is slower")}
 
@@ -261,7 +262,9 @@ class TestMessages:
     def test_busy_victim_confirm(self):
         assert sa.busy_victim_confirm("m", "v", "still in use") == {
             "status": "confirm_required", "model": "m",
-            "detail": "loading 'm' needs to free 'v', which is still in use"}
+            "detail": ("loading 'm' needs to free 'v', which is still in use; "
+                       "loading it anyway stops 'v' and cuts off the reply it "
+                       "is writing")}
 
     def test_inconclusive_texts(self):
         assert sa.inconclusive_restart_reason("m", 3) == (

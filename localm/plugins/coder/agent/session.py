@@ -42,6 +42,7 @@ class _SessionMixin:
         if store is not None:
             store.clear()
         self._turns = 0
+        self._task_start_turns = 0
         self._total_tokens = 0
         self._last_turn_tokens = 0
         self._compact_warned = False

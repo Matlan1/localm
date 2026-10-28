@@ -222,7 +222,7 @@ class TestUpdateApplyMarkupEscaping:
         })
         monkeypatch.setattr(
             updater, "apply",
-            lambda asset_id, *, signature=None: {
+            lambda asset_id, *, signature=None, say=None: {
                 "version": BRACKET_DROP, "klass": "reboot"})
 
         r = cli_runner.invoke(update_cmd, ["--yes"])

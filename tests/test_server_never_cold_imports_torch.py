@@ -132,6 +132,7 @@ class TestScopeGateNeverImports:
         monkeypatch.setattr(discover, "_gpu_probe_inflight", False)
         monkeypatch.setattr(discover, "_torch_gpu_probe_known_doomed", lambda: False)
         monkeypatch.setattr(_loader, "native_lib_loaded", lambda: False)
+        monkeypatch.setattr(discover, "native_backend_has_hip", lambda: False)
 
     def test_hip_build_answers_true_and_torch_stays_unimported(self, torch_pkg):
         marker = torch_pkg(HIP_VERSION_PY)
@@ -144,12 +145,12 @@ class TestScopeGateNeverImports:
         assert gpu_usage.raw_reading_is_process_scoped() is False
         assert not marker.exists()
 
-    def test_unreadable_build_falls_back_to_the_resident_runtime_signal(
+    def test_unreadable_build_falls_back_to_the_probe_runtime_signal(
             self, torch_pkg, monkeypatch):
         marker = torch_pkg(None)
-        monkeypatch.setattr(discover, "native_hip_runtime_resident", lambda: True)
+        monkeypatch.setattr(discover, "native_backend_has_hip", lambda: True)
         assert gpu_usage.raw_reading_is_process_scoped() is True
-        monkeypatch.setattr(discover, "native_hip_runtime_resident", lambda: False)
+        monkeypatch.setattr(discover, "native_backend_has_hip", lambda: False)
         assert gpu_usage.raw_reading_is_process_scoped() is False
         assert not marker.exists()
 

@@ -331,26 +331,21 @@ def print_tool_result(
     console.print(line)
 
     if tool_name == "set_todos" and result.ok and isinstance(args, dict):
-        items = args.get("items")
-        if isinstance(items, list):
-            for item in items[:20]:
-                if not isinstance(item, dict):
-                    continue
-                status = str(item.get("status", "pending")).lower()
-                task_text = str(item.get("task", item.get("content", ""))).strip()
-                if not task_text:
-                    continue
-                todo_line = Text("      ")
-                if status in ("done", "completed"):
-                    todo_line.append("[✓] ", style="green")
-                    todo_line.append(_strip_esc(task_text), style="dim strike")
-                elif status == "in_progress":
-                    todo_line.append("[▸] ", style="bold cyan")
-                    todo_line.append(_strip_esc(task_text), style="bold")
-                else:
-                    todo_line.append("[ ] ", style="dim")
-                    todo_line.append(_strip_esc(task_text), style="dim")
-                console.print(todo_line)
+        from .tools.tasks import DONE, IN_PROGRESS, normalize_todos
+        # Renders the items as set_todos parsed and recorded them.
+        for todo in normalize_todos(args.get("items"))[:20]:
+            status, task_text = todo["status"], todo["text"]
+            todo_line = Text("      ")
+            if status == DONE:
+                todo_line.append("[✓] ", style="green")
+                todo_line.append(_strip_esc(task_text), style="dim strike")
+            elif status == IN_PROGRESS:
+                todo_line.append("[▸] ", style="bold cyan")
+                todo_line.append(_strip_esc(task_text), style="bold")
+            else:
+                todo_line.append("[ ] ", style="dim")
+                todo_line.append(_strip_esc(task_text), style="dim")
+            console.print(todo_line)
 
     raw_output = getattr(result, "output", "")
     if not isinstance(raw_output, str) or not raw_output.strip():

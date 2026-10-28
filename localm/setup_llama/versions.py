@@ -200,6 +200,32 @@ def previous_tag(backend: str) -> Optional[str]:
     return None
 
 
+def runtime_target(backend: str, *, pin: Optional[str] = None, tracking: bool = False,
+                   release_tag: Optional[str] = None, rocm_build_id: Optional[str] = None,
+                   latest=None) -> tuple:
+    """The build ``setup-llama`` installs for *backend*, and who chose it.
+
+    Returns ``(target, source)``. *source* is ``"release"`` when the release's
+    own pin decides it (``rocm_build_id`` for amd-rocm, whatever the user pinned,
+    since a pin does not apply to that backend; else *release_tag*), ``"pin"``
+    for the user's exact *pin*, or ``"latest"`` when the user tracks upstream's
+    newest (*tracking*). For ``"latest"`` the target is ``latest()``, or None
+    when *latest* is None, so a caller that only needs the source makes no
+    network call.
+
+    *release_tag* and *rocm_build_id* default to this release's ``_PINNED_TAG``
+    and ``_ROCM_BUILD``; the updater passes the values a staged release pins.
+    The one place that maps the user's choice to a target, shared by
+    :func:`check_runtime_update` and the updater."""
+    if backend == "amd-rocm":
+        return (rocm_build_id or _ROCM_BUILD), "release"
+    if pin:
+        return pin, "pin"
+    if tracking:
+        return (latest() if latest is not None else None), "latest"
+    return (release_tag or _PINNED_TAG), "release"
+
+
 def check_runtime_update() -> dict:
     """Compare the installed llama.cpp runtime against what ``setup-llama``
     would install right now, without provisioning anything: the read-only
@@ -244,14 +270,8 @@ def check_runtime_update() -> dict:
                 "target": None, "newer": False, "pinned": None, "previous": None}
     current = _sl.installed_build()
     pin = _sl.pinned_tag()
-    if backend == "amd-rocm":
-        target = _ROCM_BUILD
-    elif pin:
-        target = pin
-    elif tracks_latest():
-        target = _sl._latest_tag()
-    else:
-        target = _PINNED_TAG
+    target, _source = runtime_target(backend, pin=pin, tracking=tracks_latest(),
+                                     latest=_sl._latest_tag)
     newer = bool(target) and target != current
     if backend == "amd-rocm" and _sl.rocm_build_is_current(_sl._repo_runtime_lib(), current):
         newer = False

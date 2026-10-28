@@ -423,6 +423,18 @@ class TestUnderDelayedExpansion:
 
 @_needs_windows
 @pytest.mark.parametrize("name", BATS)
+def test_an_installer_temp_folder_that_cannot_be_made_is_refused_and_never_run(tmp_path, name):
+    r, ran, leftovers = _run_bat_block(
+        tmp_path, name, release_files=_STUB_FILES, expected_sha=_STUB_SHA,
+        inject=("('uv-tmp-'+[guid]::NewGuid())", "('uv-tmp-'+[guid]::NewGuid()+'\\bad:name')"))
+    assert "rc=63" in r.stdout, r.stdout + r.stderr
+    assert "Could not create a temporary folder" in r.stdout
+    assert not ran
+    assert leftovers == []
+
+
+@_needs_windows
+@pytest.mark.parametrize("name", BATS)
 def test_an_installer_that_cannot_be_read_is_refused_and_never_run(tmp_path, name):
     r, ran, leftovers = _run_bat_block(
         tmp_path, name, release_files=_STUB_FILES, expected_sha=_STUB_SHA,

@@ -1112,46 +1112,6 @@
         ],
         "./localm/inference/_embedder_runner.py": [
             {
-                "code": "reportCallIssue",
-                "range": {
-                    "startColumn": 22,
-                    "endColumn": 35,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportArgumentType",
-                "range": {
-                    "startColumn": 27,
-                    "endColumn": 34,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportCallIssue",
-                "range": {
-                    "startColumn": 15,
-                    "endColumn": 45,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportArgumentType",
-                "range": {
-                    "startColumn": 27,
-                    "endColumn": 37,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportCallIssue",
-                "range": {
-                    "startColumn": 42,
-                    "endColumn": 49,
-                    "lineCount": 1
-                }
-            },
-            {
                 "code": "reportOptionalMemberAccess",
                 "range": {
                     "startColumn": 20,
@@ -3254,16 +3214,16 @@
             {
                 "code": "reportArgumentType",
                 "range": {
-                    "startColumn": 63,
-                    "endColumn": 73,
+                    "startColumn": 58,
+                    "endColumn": 68,
                     "lineCount": 1
                 }
             },
             {
                 "code": "reportOptionalOperand",
                 "range": {
-                    "startColumn": 60,
-                    "endColumn": 70,
+                    "startColumn": 55,
+                    "endColumn": 65,
                     "lineCount": 1
                 }
             },

@@ -312,6 +312,7 @@ class Agent(
 
         self._messages: list[dict] = []
         self._turns: int = 0
+        self._task_start_turns: int = 0   # session turn count when the current task started
         self._total_tokens: int = 0
         self._last_turn_tokens: int = 0   # tokens used in the most recently completed turn
         self._consecutive_errors: dict[str, int] = {}  # tool_name -> failure streak
