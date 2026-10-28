@@ -47,6 +47,7 @@ def _wire(monkeypatch, tmp_path, *, loads, retry_ok: bool = True):
     monkeypatch.setattr(sl, "_bundle_missing_native_deps", lambda t: None)
     seq = iter(loads)
     monkeypatch.setattr(sl, "_native_loads_ok", lambda: next(seq))
+    monkeypatch.setattr(sl, "_native_gpu_loads_ok", lambda: (True, ""))
     return provisioned
 
 
@@ -289,3 +290,17 @@ def test_cpu_that_does_not_load_either_reports_the_vulkan_failure(monkeypatch, t
     assert exc.value.code == 1 and provisioned == ["vulkan", "cpu"]
     out = _flat(capsys)
     assert "no compute backends are loaded" in out and "libvulkan" in out
+
+
+@pytest.mark.parametrize("gpu,noted", [((True, ""), False),
+                                       ((False, "the runtime loaded but registered no GPU "
+                                                "device (registered: CPU)"), True)])
+def test_a_vulkan_build_without_a_gpu_device_says_models_run_on_the_cpu(
+        monkeypatch, tmp_path, capsys, gpu, noted):
+    _wire(monkeypatch, tmp_path, loads=[(True, "")])
+    monkeypatch.setattr(sl, "_native_gpu_loads_ok", lambda: gpu)
+    backend, _tag = sl._provision_with_fallback("vulkan", tmp_path, None, False, assume_yes=True)
+    assert backend == "vulkan"
+    out = _flat(capsys)
+    assert "OK - vulkan runtime loads" in out
+    assert ("models run on the CPU until a Vulkan driver is present" in out) is noted

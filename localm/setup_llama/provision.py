@@ -401,6 +401,8 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
         loaded, detail = _chosen_backend_loads(chosen)
     if loaded:
         console.print(f"[green]OK - {chosen} runtime loads on this machine.[/green]")
+        if chosen == "vulkan":
+            _note_vulkan_without_gpu()
         return chosen, used_tag[0]
 
     # ---- The installer must never hand the user a runtime our OWN gate rejects.
@@ -454,6 +456,17 @@ def _provision_with_fallback(chosen: str, target: Path, sha256: Optional[str],
     if failure is not None:
         failure.append(detail or "it did not load")
     return _fall_back_to_universal(chosen, detail, assume_yes, _try, used_tag, explicit)
+
+
+def _note_vulkan_without_gpu() -> None:
+    """After a vulkan build loaded: when it registered no GPU device, say that
+    models run on the CPU until a Vulkan driver is present."""
+    gpu_ok, detail = _sl._native_gpu_loads_ok()
+    if gpu_ok or _is_abi_rejection(detail):
+        return
+    console.print(f"[yellow]No Vulkan GPU device was found ({detail or 'none'}); models "
+                  "run on the CPU until a Vulkan driver is present. Check with: "
+                  "localm doctor[/yellow]")
 
 
 def _vulkan_falls_back_to_cpu(detail: str, assume_yes: bool, try_fn, used_tag: list,

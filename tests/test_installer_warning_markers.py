@@ -57,6 +57,7 @@ def test_every_known_site_uses_the_double_caret_escape(bat):
         'uv pip install -p .venv -e ".[hf,audio]" || echo  [^^!] transformers install failed.',
         'echo  [^^!] !PFDETAIL!',
         'if "%RUNTIME_OK%"=="0" echo  [^^!] No model can load yet - the native llama.cpp runtime did not finish',
+        'if "%BKSWAP%"=="1" echo  [^^!] The %BACKEND% runtime did not load here;',
         'echo  [^^!] Could not list the llama.cpp backends for this machine; using !REC!.',
         'echo  [^^!] Could not read the list of features to install ^(python -m localm.setup_spec extras^).',
         "if errorlevel 1 echo  [^^!] Could not build LocaLM.exe",

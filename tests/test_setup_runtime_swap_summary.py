@@ -79,6 +79,7 @@ def test_setup_bat_reports_a_swapped_runtime(tmp_path, picked, installed, ok, sw
     line = f"The {picked} runtime did not load here; {installed} is installed and in use."
     assert (line in out.stdout) is swapped, out.stdout
     if swapped:
+        assert f"[!] {line}" in out.stdout, out.stdout
         assert f"setup-llama --backend {picked} --force" in out.stdout
 
 
