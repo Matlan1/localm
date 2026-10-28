@@ -39,6 +39,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **A failed llama.cpp runtime download no longer ends `setup.bat` or the graphical setup.** Every setup asks whether to continue without a runtime (the default), and prints the exact command to retry.
 - **One Linux menu entry.** `setup.sh` and the graphical setup both write `localm.desktop` and both offer the launcher, straight to the GUI (the LocaLM binary), or no entry; an older `LocaLM.desktop` the graphical setup made for the same folder is replaced.
 - **Pointing setup at your own llama.cpp build replaces a runtime that is already installed.** Before, a repair kept the old runtime and reported the step as done.
+- **If the Vulkan build cannot load on your computer, setup installs the CPU build instead of finishing with no runtime.** It asks first when it can (CPU is the default answer), the summary says which runtime is installed, and your Vulkan choice is kept so `localm setup-llama --backend vulkan --force` can retry it.
 
 ## [0.3.2rc1] - 2026-10-27
 
