@@ -357,8 +357,9 @@ CUDA_RUNTIME_RECORD = ".localm-cuda-runtime.json"
 def record_cuda_runtime(target: Path, cuda_line: str) -> None:
     """Record in *target* the CUDA line and the version of each PyPI CUDA library
     :func:`_fetch_cuda_runtime_libs` fetched into it. Raises ``OSError``."""
-    packages = {p: _CUDA_RUNTIME_PIN[p][0]
-                for p in _CUDA_RUNTIME_PYPI_PACKAGES.get(cuda_line, ()) if p in _CUDA_RUNTIME_PIN}
+    pin = _sl._CUDA_RUNTIME_PIN
+    packages = {p: pin[p][0] for p in _CUDA_RUNTIME_PYPI_PACKAGES.get(cuda_line, ())
+                if p in pin}
     (target / CUDA_RUNTIME_RECORD).write_text(
         json.dumps({"line": cuda_line, "packages": packages}), encoding="utf-8")
 

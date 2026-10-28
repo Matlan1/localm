@@ -151,14 +151,14 @@ def _fake_children(home: Path, *, rc=0, calls=None, also=None):
             be = cmd[cmd.index("--backend") + 1]
             _kobold_runtime(home, run.kobold_tag, {"cpu": "nocuda"}.get(be, be))
         return 0
-    run.sd_tag, run.kobold_tag = "master-1017-be48649", "v1.123.1"
+    run.sd_tag, run.kobold_tag = "master-2000-aaaaaaa", "v1.123.1"
     return run
 
 
 @pytest.fixture
 def install(tmp_path, home):
     """An install at 0.3.1 pinning sd.cpp master-982 and KoboldCpp v1.123."""
-    inst = _write_tree(tmp_path / "inst", _files("0.3.1", sd="master-982-0518b34",
+    inst = _write_tree(tmp_path / "inst", _files("0.3.1", sd="master-1999-bbbbbbb",
                                                  kobold="v1.123"))
     return inst
 
@@ -170,11 +170,11 @@ def _v(root):
 # ---------------------------------- reading pins ------------------------------
 
 def test_staged_pins_read_every_component_as_text(tmp_path):
-    root = _write_tree(tmp_path / "s", _files("0.3.2", sd="master-1017-be48649",
+    root = _write_tree(tmp_path / "s", _files("0.3.2", sd="master-2000-aaaaaaa",
                                               kobold="v1.123.1", comfy=("abc", "v0.43.0"),
                                               uv="0.13.6"))
     pins = uc.staged_pins(root)
-    assert pins["sdcpp"]["tag"] == "master-1017-be48649"
+    assert pins["sdcpp"]["tag"] == "master-2000-aaaaaaa"
     assert (_PLAT, "vulkan") in pins["sdcpp"]["assets"]
     assert pins["koboldcpp"]["tag"] == "v1.123.1" and pins["koboldcpp"]["version"] == "1.123.1"
     assert pins["comfyui"] == {"commit": "abc", "version": "v0.43.0"}
@@ -210,16 +210,16 @@ def _plans(staged, inst, **kw):
 
 
 def test_an_installed_sdcpp_backend_is_installed_at_the_new_tag(tmp_path, install, home):
-    _sd_runtime(home, "master-982-0518b34", "vulkan")
-    staged = _write_tree(tmp_path / "s", _files("0.3.2", sd="master-1017-be48649"))
+    _sd_runtime(home, "master-1999-bbbbbbb", "vulkan")
+    staged = _write_tree(tmp_path / "s", _files("0.3.2", sd="master-2000-aaaaaaa"))
     p = _plans(staged, install)["sdcpp"]
     assert (p["update"], p["items"], p["current"], p["target"]) == (
-        True, ["vulkan"], "master-982-0518b34", "master-1017-be48649")
-    assert "from master-982-0518b34 to master-1017-be48649" in p["note"]
+        True, ["vulkan"], "master-1999-bbbbbbb", "master-2000-aaaaaaa")
+    assert "from master-1999-bbbbbbb to master-2000-aaaaaaa" in p["note"]
 
 
 def test_a_component_that_is_not_installed_is_never_installed(tmp_path, install):
-    staged = _write_tree(tmp_path / "s", _files("0.3.2", sd="master-1017-be48649",
+    staged = _write_tree(tmp_path / "s", _files("0.3.2", sd="master-2000-aaaaaaa",
                                                 kobold="v1.123.1", comfy=("abc", "v1"),
                                                 uv="0.13.6"))
     plans = uc.plan(staged, install)
@@ -228,18 +228,18 @@ def test_a_component_that_is_not_installed_is_never_installed(tmp_path, install)
 
 
 def test_a_backend_already_at_the_new_tag_needs_nothing(tmp_path, install, home):
-    _sd_runtime(home, "master-982-0518b34", "vulkan")
-    _sd_runtime(home, "master-1017-be48649", "vulkan")
-    staged = _write_tree(tmp_path / "s", _files("0.3.2", sd="master-1017-be48649"))
+    _sd_runtime(home, "master-1999-bbbbbbb", "vulkan")
+    _sd_runtime(home, "master-2000-aaaaaaa", "vulkan")
+    staged = _write_tree(tmp_path / "s", _files("0.3.2", sd="master-2000-aaaaaaa"))
     assert _plans(staged, install)["sdcpp"]["update"] is False
 
 
 def test_a_backend_that_failed_at_the_new_tag_or_has_no_build_is_named_not_installed(
         tmp_path, install, home):
-    _sd_runtime(home, "master-982-0518b34", "vulkan")
-    _sd_runtime(home, "master-982-0518b34", "cuda")
-    _sd_runtime(home, "master-1017-be48649", "vulkan", failed=True)
-    staged = _write_tree(tmp_path / "s", _files("0.3.2", sd="master-1017-be48649"))
+    _sd_runtime(home, "master-1999-bbbbbbb", "vulkan")
+    _sd_runtime(home, "master-1999-bbbbbbb", "cuda")
+    _sd_runtime(home, "master-2000-aaaaaaa", "vulkan", failed=True)
+    staged = _write_tree(tmp_path / "s", _files("0.3.2", sd="master-2000-aaaaaaa"))
     p = _plans(staged, install)["sdcpp"]
     assert p["update"] is False
     assert "vulkan: it did not load on this machine before" in p["note"]
@@ -248,22 +248,22 @@ def test_a_backend_that_failed_at_the_new_tag_or_has_no_build_is_named_not_insta
 
 def test_a_marker_that_does_not_match_its_directory_counts_as_not_installed(
         tmp_path, install, home):
-    d = _sd_runtime(home, "master-982-0518b34", "vulkan")
+    d = _sd_runtime(home, "master-1999-bbbbbbb", "vulkan")
     d.rename(d.with_name("copy-of-it"))
     (home / "runtimes" / "sdcpp" / "broken-cpu").mkdir()
     (home / "runtimes" / "sdcpp" / "broken-cpu" / "localm-sdcpp.json").write_text(
         "{not json", encoding="utf-8")
-    staged = _write_tree(tmp_path / "s", _files("0.3.2", sd="master-1017-be48649"))
+    staged = _write_tree(tmp_path / "s", _files("0.3.2", sd="master-2000-aaaaaaa"))
     assert _plans(staged, install)["sdcpp"]["installed"] is False
 
 
 def test_the_tag_in_use_is_the_installed_trees_pin_not_an_older_leftover(
         tmp_path, install, home):
-    _sd_runtime(home, "master-964-1d0a58a", "cpu")
-    _sd_runtime(home, "master-982-0518b34", "vulkan")
-    os.utime(home / "runtimes" / "sdcpp" / "master-964-1d0a58a-cpu" / "localm-sdcpp.json",
+    _sd_runtime(home, "master-1998-ccccccc", "cpu")
+    _sd_runtime(home, "master-1999-bbbbbbb", "vulkan")
+    os.utime(home / "runtimes" / "sdcpp" / "master-1998-ccccccc-cpu" / "localm-sdcpp.json",
              (2e9, 2e9))
-    staged = _write_tree(tmp_path / "s", _files("0.3.2", sd="master-1017-be48649"))
+    staged = _write_tree(tmp_path / "s", _files("0.3.2", sd="master-2000-aaaaaaa"))
     assert _plans(staged, install)["sdcpp"]["items"] == ["vulkan"]
 
 
@@ -279,18 +279,18 @@ def test_kobold_installs_each_installed_build_with_its_setup_backend(tmp_path, i
 # --------------------------------- apply end to end ---------------------------
 
 def test_update_installs_sdcpp_and_kobold_at_the_new_pins(tmp_path, install, home):
-    old_sd = _sd_runtime(home, "master-982-0518b34", "vulkan")
+    old_sd = _sd_runtime(home, "master-1999-bbbbbbb", "vulkan")
     _kobold_runtime(home, "v1.123", "nocuda")
-    data, sig = _release(_files("0.3.2", sd="master-1017-be48649", kobold="v1.123.1"))
+    data, sig = _release(_files("0.3.2", sd="master-2000-aaaaaaa", kobold="v1.123.1"))
     calls = []
     res = updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
                         runner=_fake_children(home, calls=calls))
     assert [c[3] for c in calls] == ["setup-sdcpp", "setup-music"]
     assert calls[0] == [sys.executable, "-m", "localm", "setup-sdcpp", "--backend", "vulkan"]
     assert res["components"]["state"] == "updated"
-    assert "stable-diffusion.cpp image runtime: master-982-0518b34 -> master-1017-be48649" \
+    assert "stable-diffusion.cpp image runtime: master-1999-bbbbbbb -> master-2000-aaaaaaa" \
         in res["components_note"]
-    assert (home / "runtimes" / "sdcpp" / "master-1017-be48649-vulkan").is_dir()
+    assert (home / "runtimes" / "sdcpp" / "master-2000-aaaaaaa-vulkan").is_dir()
     assert old_sd.is_dir(), "the old runtime directory stays for a rollback"
     assert uc.read_pending() is None
     updater.rollback_last(installed=install)
@@ -299,8 +299,8 @@ def test_update_installs_sdcpp_and_kobold_at_the_new_pins(tmp_path, install, hom
 
 def test_a_failed_component_rolls_back_the_code_and_removes_what_it_created(
         tmp_path, install, home):
-    old_sd = _sd_runtime(home, "master-982-0518b34", "vulkan")
-    data, sig = _release(_files("0.3.2", sd="master-1017-be48649"))
+    old_sd = _sd_runtime(home, "master-1999-bbbbbbb", "vulkan")
+    data, sig = _release(_files("0.3.2", sd="master-2000-aaaaaaa"))
     with pytest.raises(LocalmError) as ei:
         updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
                       runner=_fake_children(home, rc=1))
@@ -308,31 +308,31 @@ def test_a_failed_component_rolls_back_the_code_and_removes_what_it_created(
     assert "setup-sdcpp" in ei.value.reason and "put back" in ei.value.reason
     assert _v(install) == "0.3.1"
     assert old_sd.is_dir()
-    assert not (home / "runtimes" / "sdcpp" / "master-1017-be48649-vulkan").exists(), \
+    assert not (home / "runtimes" / "sdcpp" / "master-2000-aaaaaaa-vulkan").exists(), \
         "a failed attempt leaves nothing that would mark the backend as failed here"
     assert uc.last_status()["state"] == "failed"
     assert uc.read_pending() is None
 
 
 def test_a_child_that_exits_0_but_installs_nothing_counts_as_failed(tmp_path, install, home):
-    _sd_runtime(home, "master-982-0518b34", "vulkan")
-    data, sig = _release(_files("0.3.2", sd="master-1017-be48649"))
+    _sd_runtime(home, "master-1999-bbbbbbb", "vulkan")
+    data, sig = _release(_files("0.3.2", sd="master-2000-aaaaaaa"))
     with pytest.raises(LocalmError) as ei:
         updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
                       runner=lambda c: 0)
-    assert "vulkan not installed at master-1017-be48649" in ei.value.reason
+    assert "vulkan not installed at master-2000-aaaaaaa" in ei.value.reason
     assert _v(install) == "0.3.1"
 
 
 def test_the_runtime_and_the_components_are_rolled_back_together(tmp_path, home):
-    inst = _write_tree(tmp_path / "inst", _files("0.3.1", sd="master-982-0518b34") | {
+    inst = _write_tree(tmp_path / "inst", _files("0.3.1", sd="master-1999-bbbbbbb") | {
         "localm/setup_llama/pins.py": '_ROCM_TAG = "b1"\n_PINNED_TAG = "b11757"\n'})
     lib = inst / au.RUNTIME_LIB
     lib.mkdir(parents=True)
     (lib / "llama.dll").write_bytes(b"old" * 30000)
     (lib / ".localm-backend").write_text("vulkan b11757", encoding="utf-8")
-    _sd_runtime(home, "master-982-0518b34", "vulkan")
-    data, sig = _release(_files("0.3.2", sd="master-1017-be48649"))
+    _sd_runtime(home, "master-1999-bbbbbbb", "vulkan")
+    data, sig = _release(_files("0.3.2", sd="master-2000-aaaaaaa"))
     children = _fake_children(home, rc=0)
 
     def run(cmd):
@@ -354,8 +354,8 @@ def test_the_runtime_and_the_components_are_rolled_back_together(tmp_path, home)
 
 def test_the_server_defers_the_components_to_its_restart(tmp_path, install, home,
                                                          monkeypatch):
-    _sd_runtime(home, "master-982-0518b34", "vulkan")
-    data, sig = _release(_files("0.3.2", sd="master-1017-be48649"))
+    _sd_runtime(home, "master-1999-bbbbbbb", "vulkan")
+    data, sig = _release(_files("0.3.2", sd="master-2000-aaaaaaa"))
     res = updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
                         runner=lambda c: pytest.fail(f"nothing runs before the restart: {c}"),
                         defer_runtime=True)
@@ -368,13 +368,13 @@ def test_the_server_defers_the_components_to_its_restart(tmp_path, install, home
                         lambda cmd, **kw: subprocess.CompletedProcess(cmd, fake(cmd)))
     hs._finish_pending_runtime_update()
     assert uc.last_status()["state"] == "updated"
-    assert (home / "runtimes" / "sdcpp" / "master-1017-be48649-vulkan").is_dir()
+    assert (home / "runtimes" / "sdcpp" / "master-2000-aaaaaaa-vulkan").is_dir()
 
 
 def test_a_failure_during_the_restart_rolls_the_update_back(tmp_path, install, home,
                                                             monkeypatch):
-    _sd_runtime(home, "master-982-0518b34", "vulkan")
-    data, sig = _release(_files("0.3.2", sd="master-1017-be48649"))
+    _sd_runtime(home, "master-1999-bbbbbbb", "vulkan")
+    data, sig = _release(_files("0.3.2", sd="master-2000-aaaaaaa"))
     updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
                   defer_runtime=True)
     import localm.inference.http_server as hs
@@ -393,8 +393,8 @@ def test_a_failure_during_the_restart_rolls_the_update_back(tmp_path, install, h
 def test_first_start_catches_up_a_component_an_old_updater_left_behind(tmp_path, home,
                                                                        monkeypatch):
     monkeypatch.setattr(_version, "read_version", lambda: "0.3.2")
-    inst = _write_tree(tmp_path / "inst", _files("0.3.2", sd="master-1017-be48649"))
-    _sd_runtime(home, "master-982-0518b34", "vulkan")
+    inst = _write_tree(tmp_path / "inst", _files("0.3.2", sd="master-2000-aaaaaaa"))
+    _sd_runtime(home, "master-1999-bbbbbbb", "vulkan")
     from localm.cli import _core
     monkeypatch.setattr(updater, "repo_root", lambda: inst)
     monkeypatch.delenv("LOCALM_RESTART_IN_PROGRESS", raising=False)
@@ -412,8 +412,8 @@ def test_first_start_catches_up_a_component_an_old_updater_left_behind(tmp_path,
 
 
 def test_a_pending_update_of_a_rolled_back_version_is_dropped(tmp_path, install, home):
-    _sd_runtime(home, "master-982-0518b34", "vulkan")
-    data, sig = _release(_files("0.3.2", sd="master-1017-be48649"))
+    _sd_runtime(home, "master-1999-bbbbbbb", "vulkan")
+    data, sig = _release(_files("0.3.2", sd="master-2000-aaaaaaa"))
     updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
                   defer_runtime=True)
     updater.rollback_last(installed=install)
@@ -891,17 +891,17 @@ def test_the_cuda_record_is_written_with_the_fetched_libraries(tmp_path, monkeyp
 
 def test_doctor_shows_each_component_against_the_pin(tmp_path, home, monkeypatch, capsys):
     monkeypatch.setattr(_version, "read_version", lambda: "0.3.2")
-    inst = _write_tree(tmp_path / "inst", _files("0.3.2", sd="master-1017-be48649",
+    inst = _write_tree(tmp_path / "inst", _files("0.3.2", sd="master-2000-aaaaaaa",
                                                  kobold="v1.123.1"))
-    _sd_runtime(home, "master-982-0518b34", "vulkan")
+    _sd_runtime(home, "master-1999-bbbbbbb", "vulkan")
     _kobold_runtime(home, "v1.123.1", "nocuda")
     monkeypatch.setattr(updater, "repo_root", lambda: inst)
     import importlib
     d = importlib.import_module("localm.cli.doctor")
     d._check_components()
     out = " ".join(capsys.readouterr().out.split())
-    assert ("stable-diffusion.cpp image runtime: this release pins master-1017-be48649, but "
-            "master-982-0518b34 is installed") in out
+    assert ("stable-diffusion.cpp image runtime: this release pins master-2000-aaaaaaa, but "
+            "master-1999-bbbbbbb is installed") in out
     assert "KoboldCpp music runtime: v1.123.1 (this release's pin)" in out
 
 
@@ -971,7 +971,7 @@ def test_a_later_snapshot_adds_to_the_updates_own_and_keeps_it(tmp_path, home,
     (inst / ".uv" / uv_tool.UV_NAME).write_text("0.13.6", encoding="utf-8")
     state = uc.snapshot(["uv", "pytorch"], snap, root=inst, add=True)
     assert set(state["components"]) == {"uv", "pytorch"}
-    assert (snap / "uv" / uv_tool.UV_NAME).read_text(encoding="utf-8") == "0.13.4", \
+    assert (snap / uc._KEPT_UV / uv_tool.UV_NAME).read_text(encoding="utf-8") == "0.13.4", \
         "the older copy, the one a rollback needs, is kept"
 
 
@@ -989,8 +989,8 @@ def _start_components(inst, home, monkeypatch, command="gui", rc=0, calls=None):
 
 def test_a_failed_first_start_waits_before_trying_again(tmp_path, home, monkeypatch):
     monkeypatch.setattr(_version, "read_version", lambda: "0.3.2")
-    inst = _write_tree(tmp_path / "inst", _files("0.3.2", sd="master-1017-be48649"))
-    _sd_runtime(home, "master-982-0518b34", "vulkan")
+    inst = _write_tree(tmp_path / "inst", _files("0.3.2", sd="master-2000-aaaaaaa"))
+    _sd_runtime(home, "master-1999-bbbbbbb", "vulkan")
     calls = []
     _start_components(inst, home, monkeypatch, rc=1, calls=calls)
     assert len(calls) == 1 and uc.last_status()["state"] == "failed"
@@ -1006,8 +1006,8 @@ def test_a_failed_first_start_waits_before_trying_again(tmp_path, home, monkeypa
 def test_a_pending_update_of_another_install_is_dropped_and_this_one_checked(
         tmp_path, home, monkeypatch):
     monkeypatch.setattr(_version, "read_version", lambda: "0.3.2")
-    inst = _write_tree(tmp_path / "inst", _files("0.3.2", sd="master-1017-be48649"))
-    _sd_runtime(home, "master-982-0518b34", "vulkan")
+    inst = _write_tree(tmp_path / "inst", _files("0.3.2", sd="master-2000-aaaaaaa"))
+    _sd_runtime(home, "master-1999-bbbbbbb", "vulkan")
     uc.write_pending([{"name": "sdcpp", "update": True}], root=tmp_path / "elsewhere",
                      version="0.3.2")
     calls = []

@@ -55,6 +55,8 @@ RETRY_AFTER_S = 3600.0
 STATE_FILE = "state.json"
 # Marks a venv copy a snapshot made; holds that snapshot folder's path.
 COPY_MARKER = ".localm-venv-copy"
+# The folder, in a snapshot, that keeps the uv folder of the install.
+_KEPT_UV = "kept-uv"
 
 # Commands that use a provisioned component, and so finish a pending update of
 # one before they start.
@@ -69,9 +71,9 @@ LABELS = {"pytorch": "PyTorch stack",
           "comfyui": "managed ComfyUI",
           "uv": "uv"}
 
-_SDCPP_PINS = "localm/media/sdcpp/pins.py"
-_KOBOLD_PINS = "localm/media/koboldcpp/pins.py"
-_COMFY_PINS = "localm/media/managed_comfy_fresh.py"
+_SDCPP_SOURCE = "localm/media/sdcpp/pins.py"
+_KOBOLD_SOURCE = "localm/media/koboldcpp/pins.py"
+_COMFY_SOURCE = "localm/media/managed_comfy_fresh.py"
 _SDCPP_MARKER = "localm-sdcpp.json"
 _SDCPP_FAILED = "localm-sdcpp-failed.json"
 _KOBOLD_MARKER = "localm-koboldcpp.json"
@@ -145,14 +147,14 @@ def staged_pins(root) -> dict:
     the tree itself (:func:`_ask_tree`)."""
     root = Path(root)
     out: dict = {"sdcpp": None, "koboldcpp": None, "comfyui": None, "uv": _uv_pin(root)}
-    sd = _literals(root / _SDCPP_PINS, {"TAG", "ASSETS"})
+    sd = _literals(root / _SDCPP_SOURCE, {"TAG", "ASSETS"})
     if isinstance(sd.get("TAG"), str):
         out["sdcpp"] = {"tag": sd["TAG"], "assets": set((sd.get("ASSETS") or {}).keys())}
-    kb = _literals(root / _KOBOLD_PINS, {"TAG", "VERSION", "ASSETS"})
+    kb = _literals(root / _KOBOLD_SOURCE, {"TAG", "VERSION", "ASSETS"})
     if isinstance(kb.get("TAG"), str):
         out["koboldcpp"] = {"tag": kb["TAG"], "version": kb.get("VERSION"),
                             "assets": set((kb.get("ASSETS") or {}).keys())}
-    cf = _literals(root / _COMFY_PINS, {"COMFYUI_PINNED_COMMIT", "COMFYUI_PINNED_VERSION"})
+    cf = _literals(root / _COMFY_SOURCE, {"COMFYUI_PINNED_COMMIT", "COMFYUI_PINNED_VERSION"})
     if isinstance(cf.get("COMFYUI_PINNED_COMMIT"), str):
         out["comfyui"] = {"commit": cf["COMFYUI_PINNED_COMMIT"],
                           "version": cf.get("COMFYUI_PINNED_VERSION")}
@@ -219,7 +221,7 @@ def comfy_info(root: Path) -> Optional[dict]:
         return None
     try:
         data = json.loads(out.strip().splitlines()[-1])
-    except (ValueError, IndexError):
+    except (ValueError, IndexError, RecursionError):
         return None
     return data if isinstance(data, dict) else None
 
@@ -1109,13 +1111,13 @@ def _restore_torch(installed_root: Path, src: Path, info: dict, say: Callable) -
 
 
 def _snapshot_uv(installed_root: Path, dest: Path) -> dict:
-    shutil.copytree(installed_root / ".uv", dest / "uv")
+    shutil.copytree(installed_root / ".uv", dest / _KEPT_UV)
     return {}
 
 
 def _restore_uv(installed_root: Path, src: Path, say: Callable) -> list:
     live = installed_root / ".uv"
-    kept = src / "uv"
+    kept = src / _KEPT_UV
     if not kept.is_dir():
         return [f"uv: the kept copy {kept} is missing"]
     running = _running_in(live)
@@ -1158,7 +1160,7 @@ def _drop_one(src: Path, name: str, info: Optional[dict]) -> None:
     elif (info or {}).get("venv_copy"):
         _warn("update: not removing %s: it is not a venv copy of %s",
               (info or {}).get("venv_copy"), src)
-    extra = {"uv": ["uv"], "comfyui": ["comfy.patch", "comfy-marker.json"]}.get(name, [])
+    extra = {"uv": [_KEPT_UV], "comfyui": ["comfy.patch", "comfy-marker.json"]}.get(name, [])
     for rel in extra:
         p = src / rel
         try:
