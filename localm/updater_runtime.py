@@ -58,7 +58,8 @@ def staged_pins(root) -> dict:
     None when that tree does not pin it. ``rocm_build`` is the build identity
     that tree's setup-llama records for amd-rocm: its ``_ROCM_BUILD``, or its
     ``_ROCM_TAG`` for a tree from before the SIMD CPU backend."""
-    pins = {"pinned_tag": None, "rocm_tag": None, "rocm_cpu_tag": None, "rocm_build": None}
+    pins: dict[str, Optional[str]] = {"pinned_tag": None, "rocm_tag": None,
+                                      "rocm_cpu_tag": None, "rocm_build": None}
     for rel in _PIN_FILES:
         try:
             text = (Path(root) / rel).read_text(encoding="utf-8")
@@ -161,6 +162,8 @@ def plan(staged_root, installed_root) -> dict:
 def _rm_holders(files: list) -> list:
     """Processes holding *files*, from the Windows Restart Manager:
     ``[{"pid", "name"}]``. Empty when it names none or cannot be asked."""
+    if sys.platform != "win32":
+        return []
     import ctypes
     from ctypes import wintypes
     rm = ctypes.WinDLL("rstrtmgr")
