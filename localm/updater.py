@@ -1257,6 +1257,15 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
             klass = classify(root, target, read_manifest(root))
             from localm import updater_runtime
             rt_plan = updater_runtime.plan(root, target)
+            from localm import updater_components
+            comp_plans = updater_components.plan(root, target, deep=False)
+            comp_update = updater_components.needs_finish(comp_plans)
+            if comp_update and klass != "setup":
+                held = updater_components.blockers(comp_plans, target)
+                if held:
+                    raise LocalmError(
+                        "a component this update replaces is in use, so nothing was updated",
+                        reason=updater_runtime.in_use_message(held, "run the update again"))
             if (klass == "runtime" and rt_plan["source"] == "release" and rt_plan["target"]
                     and rt_plan["current"] is not None):
                 rt_plan["reprovision"] = True
@@ -1270,15 +1279,6 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
                     raise LocalmError(
                         "the native llama.cpp runtime is in use, so nothing was updated",
                         reason=updater_runtime.in_use_message(left, "run the update again"))
-            from localm import updater_components
-            comp_plans = updater_components.plan(root, target, deep=False)
-            comp_update = updater_components.needs_finish(comp_plans)
-            if comp_update and klass != "setup":
-                held = updater_components.blockers(comp_plans, target)
-                if held:
-                    raise LocalmError(
-                        "a component this update replaces is in use, so nothing was updated",
-                        reason=updater_runtime.in_use_message(held, "run the update again"))
             deps_changed = klass != "setup" and _deps_set(root) != _deps_set(target)
             uv_exe = _uv_for_deps(target) if deps_changed else None
             post_cmd = au.post_swap_command("deps", uv=uv_exe) if deps_changed else None
