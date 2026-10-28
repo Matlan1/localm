@@ -907,21 +907,32 @@ def test_doctor_shows_each_component_against_the_pin(tmp_path, home, monkeypatch
 
 # ------------------------------ snapshot safety ---------------------------------
 
-def test_discard_and_restore_refuse_a_venv_copy_the_snapshot_did_not_make(tmp_path, home):
+def _foreign_copy_snapshot(tmp_path):
     inst = _write_tree(tmp_path / "inst", _files("0.3.1"))
     _venv(inst)
     victim = tmp_path / ".victim-backup-components"
-    victim.mkdir()
+    (victim / "Lib" / "site-packages").mkdir(parents=True)
     (victim / "keep.txt").write_text("x", encoding="utf-8")
     snap = tmp_path / "updates" / "backup-components"
     snap.mkdir(parents=True)
     (snap / uc.STATE_FILE).write_text(json.dumps(
         {"root": str(inst), "components": {"pytorch": {"venv_copy": str(victim)}}}),
         encoding="utf-8")
+    return inst, victim, snap
+
+
+def test_restore_refuses_a_venv_copy_the_snapshot_did_not_make(tmp_path, home):
+    inst, _victim, snap = _foreign_copy_snapshot(tmp_path)
+    before = sorted(p.name for p in (inst / ".venv" / "Lib" / "site-packages").iterdir())
     errors = uc.restore(snap, root=inst)
     assert errors and "is not a venv copy" in errors[0]
+    assert sorted(p.name for p in (inst / ".venv" / "Lib" / "site-packages").iterdir()) == before
+
+
+def test_discard_never_removes_a_folder_the_snapshot_did_not_make(tmp_path, home):
+    _inst, victim, snap = _foreign_copy_snapshot(tmp_path)
     uc.discard(snap)
-    assert (victim / "keep.txt").is_file(), "a folder the snapshot did not make is never removed"
+    assert (victim / "keep.txt").is_file()
     assert not snap.exists()
 
 
