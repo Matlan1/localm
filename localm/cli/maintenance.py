@@ -529,8 +529,9 @@ def _say_step(text: str) -> None:
 
 
 def _print_update_extras(res: dict) -> None:
-    """Print what an applied update did to the native runtime, and on a selected
-    install which parts of the current version the installed one keeps."""
+    """Print what an applied update did to the native runtime and the other
+    components, and on a selected install which parts of the current version
+    the installed one keeps."""
     from rich.markup import escape
     note = res.get("runtime_note")
     status = res.get("runtime") or {}
@@ -538,6 +539,11 @@ def _print_update_extras(res: dict) -> None:
         failed = status.get("state") in ("failed", "waiting") or " NOT " in note
         style = "yellow" if failed else "dim"
         console.print(f"[{style}]Native runtime: {escape(note)}[/{style}]")
+    cnote = res.get("components_note")
+    if cnote:
+        cstate = (res.get("components") or {}).get("state")
+        style = "yellow" if cstate in ("failed", "waiting") or "NOT done" in cnote else "dim"
+        console.print(f"[{style}]Components: {escape(cnote)}[/{style}]")
     for part in res.get("kept_for_updates") or []:
         console.print(f"[dim]Kept from the version you had, so this one can update "
                       f"again: {escape(part)}[/dim]")

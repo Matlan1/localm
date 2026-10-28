@@ -770,6 +770,53 @@ def _check_managed_comfy() -> None:
         )
 
 
+def _check_components() -> None:
+    """For every provisioned component that is installed (the PyTorch stack,
+    the sd.cpp and KoboldCpp runtimes, the managed ComfyUI, the uv inside
+    localm), show its installed version against the one this release pins,
+    flag one that differs, and report a component update the last localm
+    update left pending or failed."""
+    from rich.markup import escape
+    try:
+        from localm import updater, updater_components
+        root = updater.repo_root()
+        plans = updater_components.plan(root, root)
+        pending = updater_components.read_pending()
+        last = updater_components.last_status()
+    except Exception as e:  # noqa: BLE001 - a check must not fail doctor; surface why.
+        console.print(f"  {_WARN_SYM}  could not compare the installed components with this "
+                      f"release [dim]({escape(str(e))})[/dim]")
+        return
+    for p in plans:
+        if not p["installed"] and not p["kept"]:
+            continue
+        label = escape(p["label"])
+        current = escape(str(p["current"] or "an unrecorded version"))
+        if p["update"]:
+            target = escape(str(p["target"]))
+            if p["name"] == "pytorch":
+                console.print(f"  {_WARN_SYM}  {label}: this release installs {target}, but "
+                              f"{current} is installed - {escape(p['note'] or '')}; it updates "
+                              "on the next start of localm")
+            else:
+                console.print(f"  {_WARN_SYM}  {label}: this release pins {target}, but "
+                              f"{current} is installed; it updates on the next start of "
+                              "localm")
+        elif p["kept"]:
+            console.print(f"  {_OK_SYM}  {label}: {escape(p['note'] or '')}")
+        else:
+            console.print(f"  {_OK_SYM}  {label}: {current} (this release's pin)")
+        if p["note"] and not p["update"] and not p["kept"]:
+            console.print(f"     [dim]{escape(p['note'])}[/dim]")
+    if pending is not None:
+        console.print(f"  {_WARN_SYM}  the last localm update left a component update pending "
+                      f"({escape(', '.join(pending.get('components') or []))}); it finishes on "
+                      "the next start of localm")
+    if last and last.get("state") in ("failed", "waiting"):
+        console.print(f"     [dim]last component update: "
+                      f"{escape(str(last.get('note')))}[/dim]")
+
+
 @main.command()
 def doctor():
     """Check system requirements and report any issues.
@@ -822,3 +869,4 @@ def doctor():
     _check_plugin_deps()
     _check_voice_decode()
     _check_managed_comfy()
+    _check_components()
