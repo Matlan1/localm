@@ -653,6 +653,7 @@ def reset_reranker(*, force: bool = True) -> bool:
             return False
         current = _RERANKER
         if current is not None and not busy:
+            current._stopped = True
             current.close()
         _RERANKER = None
         _RERANKER_KEY = None

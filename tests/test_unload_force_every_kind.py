@@ -280,6 +280,27 @@ def test_a_call_queued_behind_a_stopped_embedder_never_respawns_it(isolated, mon
     assert e.active_requests == 0
 
 
+def test_a_call_arriving_after_an_idle_embedder_was_released_never_respawns_it(monkeypatch):
+    e = emb.IsolatedEmbedder.__new__(emb.IsolatedEmbedder)
+    e.model_path = "Z:/models/embed.gguf"
+    e.n_gpu_layers = 99
+    e.gpu_fallback_reason = None
+    e.effective_pooling = None
+    e.active_requests = 0
+    e._rpc_lock = threading.RLock()
+    reloads = []
+    e._reload = lambda: reloads.append(1)
+    shutdowns = []
+    e._runner = SimpleNamespace(shutdown=lambda grace=5.0: shutdowns.append(grace),
+                                is_alive=lambda: True)
+    monkeypatch.setattr(emb, "_EMBEDDER", e)
+    assert emb.reset_embedder(force=False) is True
+    assert shutdowns == [5.0] and e._runner is None
+    with pytest.raises(RuntimeError, match="was unloaded"):
+        e.embed(["late"])
+    assert reloads == []
+
+
 def test_forced_unload_all_stops_a_busy_gguf_reranker_and_counts_it(isolated, monkeypatch):
     e, runner, reloads = _hung_isolated_embedder(monkeypatch)
     e.effective_pooling = emb._POOLING_RANK

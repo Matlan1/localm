@@ -2315,9 +2315,10 @@ async def _unload_engines_and_embedder(loop, _embedder_mod, unloaded_models,
             return
         skipped_in_use.append(kind)
         active = await loop.run_in_executor(None, active_fn)
-        confirm_required[kind] = (
-            f"{active} active request{'s' if active != 1 else ''}" if active > 0
-            else "still in use")
+        detail = (f"{active} active request{'s' if active != 1 else ''}" if active > 0
+                  else "still in use")
+        confirm_required[kind] = (f"{confirm_required[kind]} and {detail}"
+                                  if kind in confirm_required else detail)
 
     # reset_embedder(force=False) checks active_requests()==0 and clears the
     # embedder in ONE locked step: IsolatedEmbedder.embed() pins

@@ -1466,6 +1466,7 @@ class IsolatedEmbedder(VramSizingMixin):
                     logger.warning("embedder worker is not running; reloading %s",
                                    self.model_path)
                     self._reload()
+                    self._close_if_stopped()
 
     def _call_locked(self, call: Callable):
         """Run ``call(runner)`` on the current worker, recovering from a GPU
@@ -1514,6 +1515,7 @@ class IsolatedEmbedder(VramSizingMixin):
                 self.n_gpu_layers = 0
                 try:
                     self._reload()
+                    self._close_if_stopped()
                     result = call(self._runner)
                 except Exception as retry_exc:
                     logger.error(
@@ -1535,6 +1537,13 @@ class IsolatedEmbedder(VramSizingMixin):
         if self._runner is not None:
             self._runner.shutdown()
             self._runner = None
+
+    def _close_if_stopped(self) -> None:
+        """After a reload: when :meth:`stop` ran meanwhile, shut the new
+        worker down and raise RuntimeError. Caller must hold ``_rpc_lock``."""
+        if self._stopped:
+            self.close()
+            raise RuntimeError(self._stopped_message())
 
     def _stopped_message(self) -> str:
         name = Path(getattr(self, "model_path", "") or "embedding model").name
@@ -2026,6 +2035,7 @@ def reset_embedder(*, force: bool = True) -> bool:
             return False
         current = _EMBEDDER
         if current is not None and not busy:
+            current._stopped = True
             current.close()
         _EMBEDDER = None
         _LOAD_FAILED_SPEC = None
