@@ -131,13 +131,15 @@ def _evict_shared_engine_for_media(live) -> str:
         path can hand the being-freed engine back and pin it (the gguf backend
         clears ``.loaded`` only AFTER ``_llm.close()``, so the engine still reads
         loaded mid-free).
-    ``unload_one_model`` closes both: it SKIPS a pinned engine (``active_requests``
-    > 0 -> ``"in_use"``) and, run ON the loop, serializes with ``get_engine`` and
+    ``unload_one_model`` closes both: without force it never cancels or unloads a
+    pinned engine (``active_requests`` > 0 after its wait -> ``"confirm_required"``)
+    and, run ON the loop, serializes with ``get_engine`` and
     the synchronous ``_pin``. So it is submitted to the server loop via
     ``run_coroutine_threadsafe`` and this thread blocks on the result. It also does
     its own VRAM-release wait on the loop, so no separate wait here.
 
-    Returns the unload status (``"unloaded"`` / ``"in_use"`` / ``"already_unloaded"``),
+    Returns the unload status (``"unloaded"`` / ``"confirm_required"`` /
+    ``"already_unloaded"``),
     or ``"skipped"`` when the server loop is unreachable - in which case the shared
     engine is NOT raw-unloaded and is left resident: the job model loads alongside
     it. Every degrade is logged, not silent."""
@@ -162,7 +164,7 @@ def _evict_shared_engine_for_media(live) -> str:
                    "loading the job model without evicting the live engine", e)
         return "error"
     status = res.get("status", "unloaded") if isinstance(res, dict) else "unloaded"
-    if status == "in_use":
+    if status in ("in_use", "confirm_required"):
         _dbg.debug("jobs: the shared chat engine is serving a request (pinned), so "
                    "it was not evicted for this job; loading the job model alongside it")
     return status
