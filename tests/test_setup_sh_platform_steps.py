@@ -91,11 +91,11 @@ def test_platform_flags_follow_uname(tmp_path, os_name, arch, is_macos, is_apple
     _make_uname_stub(bin_dir, os_name=os_name, arch=arch)
     env = dict(os.environ)
     env["PATH"] = str(bin_dir)
-    block = _block("IS_APPLE_SILICON=0\n", 'if [ "$(uname -s 2>/dev/null)" = "Darwin" ]; '
+    block = _block("IS_MACOS=0\n", 'if [ "$(uname -s 2>/dev/null)" = "Darwin" ]; '
                    'then IS_MACOS=1; fi\n')
-    out = _run(block + 'printf "%s|%s\\n" "$IS_MACOS" "$IS_APPLE_SILICON"\n',
-               tmp_path, env).stdout.strip()
-    assert out == f"{is_macos}|{is_apple}"
+    out = _run(block + 'printf "%s\\n" "$IS_MACOS"\n', tmp_path, env).stdout.strip()
+    assert out == is_macos
+    assert "IS_APPLE_SILICON" not in SRC
 
 
 def test_every_provision_later_hint_uses_the_offered_list():
@@ -299,3 +299,10 @@ def test_an_entry_for_a_folder_that_only_shares_the_prefix_is_left_alone(tmp_pat
     result, apps = _run_menu_entry(tmp_path, answer="1")
     assert "Removed the older menu entry" not in result.stdout
     assert other.exists()
+
+
+@pytest.mark.parametrize("answer", ["y", "Y", "yes"])
+def test_a_habitual_yes_at_the_menu_entry_question_takes_the_default(tmp_path, answer):
+    result, apps = _run_menu_entry(tmp_path, answer=answer)
+    assert "  (y taken as [1])" in result.stdout.splitlines()
+    assert _exec_line(apps).endswith("/localm-launcher.sh")

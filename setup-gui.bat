@@ -75,7 +75,7 @@ if "%UVRC%"=="62" goto uv_refused
 if "%LOCALM_GUI_STORE%"=="portable" goto portable_installed
 set "LOCALM_GUI_UV_INSTALLED=1"
 rem  Prepend every directory the per-user install may have used, in setup.bat's
-rem  own order, so the uv just installed is callable in this shell right now.
+rem  own order.
 set "PATH=%USERPROFILE%\.local\bin;%USERPROFILE%\.cargo\bin;%HOMEDRIVE%%HOMEPATH%\.local\bin;%PATH%"
 call :find_shared_uv
 if defined UVEXE goto have_uv

@@ -12,8 +12,7 @@ before localm is installed into it, and installer/gui.py imports it on uv's
 managed Python.
 
 Every prompt in a variant carries a ``SETUP-Q: <id>`` marker naming its
-question here; tests/test_setup_variants_parity.py checks each variant against
-QUESTIONS.
+question here.
 
 CLI (one answer per line on stdout, exit 0; exit 2 on a usage error):
 

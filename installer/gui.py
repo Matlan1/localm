@@ -477,7 +477,7 @@ def run_steps(steps: list[Step], emit: Callable[[str], None],
 
 def shared_uv() -> Optional[str]:
     """The uv in use when it is not the contained copy in the folder (the user's
-    own), or None. Recorded so the updater finds it later."""
+    own), or None. The install record stores it."""
     exe = find_uv(ROOT)
     if exe is None or not os.path.isabs(exe) or uv_tool().is_inside(exe, ROOT):
         return None
@@ -1544,6 +1544,10 @@ class Wizard:
 
     def _problem(self) -> str:
         """Why the current page cannot be left, or empty."""
+        if (self.pages[self.index][0] == "Inference runtime"
+                and self.own_dir_var.get().strip() and self.backend_var.get() != spec.OWN):
+            return ("A build folder is set: choose 'I will build / provide my own', "
+                    "or clear the folder.")
         if self.pages[self.index][0] == "Where things live":
             if not self.portable_var.get() and not self.path_var.get().strip():
                 return "Choose a data folder, or pick the one inside this folder."

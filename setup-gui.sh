@@ -121,9 +121,8 @@ else
         unset UV_INSTALL_DIR UV_UNMANAGED_INSTALL
         run_uv_installer
         export LOCALM_GUI_UV_INSTALLED=1
-        # The installer updates the shell profile, which this already running
-        # shell does not see. Prepend both directories it may have used, in
-        # setup.sh's own order, so the uv just installed is callable right now.
+        # Prepend both directories the installer may have used, in setup.sh's
+        # own order.
         export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
         UVEXE="$(shared_uv)"
     fi

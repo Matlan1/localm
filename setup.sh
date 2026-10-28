@@ -543,7 +543,7 @@ if [ "$uv_present" != 1 ]; then
   fi
   step_done "$UVSTEP"
 fi
-# Shared: the uv in use, recorded so the updater finds it later.
+# Shared: the uv in use, for the install record.
 UVEXE=""
 if [ "$CONTAINED" != 1 ]; then UVEXE="$(command -v uv || true)"; fi
 
@@ -566,10 +566,6 @@ detect_gpu() {
     echo cpu
   fi
 }
-IS_APPLE_SILICON=0
-if [ "$(uname -s 2>/dev/null)" = "Darwin" ] && [ "$(uname -m 2>/dev/null)" = "arm64" ]; then
-  IS_APPLE_SILICON=1
-fi
 IS_MACOS=0
 if [ "$(uname -s 2>/dev/null)" = "Darwin" ]; then IS_MACOS=1; fi
 
@@ -1065,6 +1061,9 @@ if [ "$IS_MACOS" != 1 ]; then
   say "    [3] No menu entry"
   # SETUP-Q: shortcut
   mk="$(ask "  Pick 1, 2 or 3 [1]: " 1)"
+  case "$mk" in
+    [Yy]*) mk=1; say "  (y taken as [1])" ;;
+  esac
 fi
 case "$mk" in
   skip) ;;
@@ -1072,7 +1071,7 @@ case "$mk" in
     apps="$HOME/.local/share/applications"
     # An entry the graphical installer wrote for this folder is replaced by this one.
     old_entry="$apps/LocaLM.desktop"
-    if [ -f "$old_entry" ] && grep -qxF -- "Path=$(pwd)" "$old_entry" 2>/dev/null; then
+    if [ -f "$old_entry" ] && grep -qxF -- "Path=$(pwd -P)" "$old_entry" 2>/dev/null; then
       rm -f -- "$old_entry"
       say "  Removed the older menu entry $old_entry for this folder."
     fi

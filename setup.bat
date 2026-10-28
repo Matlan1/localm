@@ -268,9 +268,6 @@ exit /b 1
 
 :uv_ready
 if defined UVSTEP call :step_done %UVSTEP% || exit /b 99
-rem  Shared: the uv in use, recorded so the updater finds it later.
-set "UVEXE="
-if not "%CONTAINED%"=="1" for /f "delims=" %%u in ('where uv 2^>nul') do if not defined UVEXE set "UVEXE=%%u"
 
 rem ---- create the venv in the repo root -------------------------------------
 rem  An existing .venv is reused unless the user opts to replace it, so a
@@ -453,8 +450,9 @@ echo  Environment ready.
 type nul > ".venv\.localm-venv"
 rem  Record the environment now; the record at the end of setup repeats it.
 setlocal DisableDelayedExpansion
-.venv\Scripts\python -m localm.install_manifest record --root . --venv "%CD%\.venv" %RCFLAG% --python-dir "%PYDIR%" --cache-dir "%CACHEDIR%" --uv-dir "%UVDIR%" --uv-exe "%UVEXE%" %UVSHARED% >nul 2>nul
+.venv\Scripts\python -m localm.install_manifest record --root . --venv "%CD%\.venv" %RCFLAG% --python-dir "%PYDIR%" --cache-dir "%CACHEDIR%" --uv-dir "%UVDIR%" %UVSHARED% >nul 2>nul
 endlocal
+call :record_shared_uv
 :venv_done
 call :step_done venv || exit /b 99
 
@@ -768,6 +766,7 @@ call :flush
 rem SETUP-Q: shortcut
 set /p "SCPICK=  Pick 1, 2 or 3 [1]: "
 if not defined SCPICK set "SCPICK=1"
+if /i "%SCPICK:~0,1%"=="Y" set "SCPICK=1" & echo  ^(y taken as [1]^)
 set "SCPATH="
 set "SCSTEP="
 if "%SCPICK%"=="1" call :intend_shortcut
@@ -868,9 +867,10 @@ rem ---- record what we installed (uninstall removes ONLY what we created) -----
 rem  The data folder was recorded when it was chosen (prepare-data).
 call :jr begin record
 setlocal DisableDelayedExpansion
-.venv\Scripts\python -m localm.install_manifest record --root . --venv "%CD%\.venv" --lib-dir "%CD%\runtime\localm_llama_runtime\lib" --shortcut "%SCPATH%" %RCFLAG% --python-dir "%PYDIR%" --cache-dir "%CACHEDIR%" --uv-dir "%UVDIR%" --uv-exe "%UVEXE%" %UVSHARED% --path-dir "%PATHDIR%" --command-shim "%CMDSHIM%" %PATHMOD% >nul 2>nul
+.venv\Scripts\python -m localm.install_manifest record --root . --venv "%CD%\.venv" --lib-dir "%CD%\runtime\localm_llama_runtime\lib" --shortcut "%SCPATH%" %RCFLAG% --python-dir "%PYDIR%" --cache-dir "%CACHEDIR%" --uv-dir "%UVDIR%" %UVSHARED% --path-dir "%PATHDIR%" --command-shim "%CMDSHIM%" %PATHMOD% >nul 2>nul
 endlocal
 if errorlevel 1 echo  [^^!] Could not record the install manifest (uninstall will be conservative).
+call :record_shared_uv
 call :step_done record || exit /b 99
 call :jr complete
 if exist ".localm-setup-tmp" rmdir /s /q ".localm-setup-tmp" >nul 2>nul
@@ -1146,6 +1146,20 @@ goto venv_create
 echo.
 echo  The previous setup stopped while installing uv here; starting that over.
 rmdir /s /q ".uv" >nul 2>nul
+goto :eof
+
+rem ===========================================================================
+rem  :record_shared_uv - Shared only: records the first uv on PATH as the
+rem  install's uv (--uv-exe). Runs with delayed expansion off, so a "!" in the
+rem  path is kept.
+rem ===========================================================================
+:record_shared_uv
+if "%CONTAINED%"=="1" goto :eof
+setlocal DisableDelayedExpansion
+set "UVEXE="
+for /f "delims=" %%u in ('where uv 2^>nul') do if not defined UVEXE set "UVEXE=%%u"
+if defined UVEXE .venv\Scripts\python -m localm.install_manifest record --root . --uv-exe "%UVEXE%" >nul 2>nul
+endlocal
 goto :eof
 
 :intend_shortcut

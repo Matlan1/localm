@@ -559,3 +559,21 @@ def test_a_launcher_that_was_not_built_reaches_the_summary(gui, tmp_path, monkey
     step = _step(gui, gui.Plan(backend="own"), "Building the launcher")
     failures, stopped = gui.run_steps([step], lambda s: None)
     assert stopped is None and failures and "launcher was not built" in failures[0]
+
+
+def test_a_build_folder_with_another_backend_is_not_ignored(gui):
+    tk = pytest.importorskip("tkinter")
+    from tkinter import filedialog, ttk
+    root = build_tk_root(tk.Tk)
+    root.withdraw()
+    try:
+        w = gui.Wizard(root, tk, ttk, filedialog)
+        w.backend_var.set("cpu")
+        w.own_dir_var.set("D:/llama/build")
+        w.next_page()
+        assert w.index == 0 and "build folder" in w.status.cget("text")
+        w.backend_var.set("own")
+        w.next_page()
+        assert w.index == 1
+    finally:
+        root.destroy()
