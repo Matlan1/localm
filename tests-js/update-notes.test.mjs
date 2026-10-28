@@ -10,11 +10,17 @@ import { loadAppWithPages } from "./harness.mjs";
 
 const VENDOR = new URL("../localm/plugins/gui/static/vendor/", import.meta.url);
 
+const DE = JSON.parse(fs.readFileSync(
+  new URL("../localm/plugins/gui/static/i18n/de.json", import.meta.url), "utf8"));
+
 function makeFetch(check) {
   return async (url) => {
     const u = String(url);
     if (u.includes("/api/update/check")) {
       return { ok: true, status: 200, text: async () => "", json: async () => check };
+    }
+    if (u.includes("/i18n/de.json")) {
+      return { ok: true, status: 200, text: async () => "", json: async () => DE };
     }
     return { ok: true, status: 200, text: async () => "",
       json: async () => ({ models: [], active: "", conversations: [], plugins: [] }) };
@@ -105,6 +111,24 @@ test("long notes start collapsed behind 'Show all' and expand on click", async (
   assert.equal(more.textContent, "Show less");
   more.click();
   assert.ok(notes.classList.contains("collapsed"), "Show less collapses again");
+});
+
+test("a language change keeps the Show all / Show less label matching the notes' state", async () => {
+  const long = Array.from({ length: 12 }, (_, i) => `- change number ${i + 1}`).join("\n");
+  const window = setup({ available: true, newer: true, current: "0.3.1",
+    latest: "v0.3.2", notes: long, asset: { id: 7 } });
+  const doc = window.document;
+  doc.getElementById("update-check").click();
+  await flush();
+  const more = doc.getElementById("update-notes-more");
+  more.click();
+  assert.equal(more.textContent, "Show less", "precondition: expanded");
+
+  await window.applyLanguage("de");
+  await flush();
+  assert.equal(doc.documentElement.lang, "de", "precondition: German applied");
+  assert.equal(more.textContent, DE["settings.update.notesShowLess"],
+    "the expanded notes keep the 'Show less' label, in German");
 });
 
 test("short notes show in full with no 'Show all', and no notes hide the box", async () => {

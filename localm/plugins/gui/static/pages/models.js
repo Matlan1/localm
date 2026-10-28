@@ -2087,6 +2087,14 @@ export function renderUpdateNotes(notes) {
   }
 }
 
+// Repaint the Show all / Show less label for the current state in the new language.
+document.addEventListener("localm:language", () => {
+  const box = $("update-notes"), more = $("update-notes-more"), moreRow = $("update-notes-actions");
+  if (box && more && moreRow && !moreRow.hidden) {
+    _setUpdateNotesCollapsed(box, more, box.classList.contains("collapsed"));
+  }
+});
+
 // Updates: a check-only auto-surface (a throttled startup check in app.js calls
 // __localmUpdateCheck) plus an explicit "Update now". The apply runs only on
 // that click; the server rolls back and reports on failure.
