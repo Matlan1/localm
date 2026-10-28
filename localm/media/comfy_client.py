@@ -1279,6 +1279,34 @@ def discover_launch_cmd(folder: Path) -> Optional[str]:
     return None
 
 
+def comfy_runs_on_amd(api_url: str, timeout: float = 5.0) -> Optional[bool]:
+    """Whether the ComfyUI at *api_url* runs on an AMD GPU, read from its
+    ``/system_stats``: True when a reported device name names AMD or Radeon, or
+    the reported torch is a ROCm build; False when it reports devices and none is
+    AMD; None when the stats cannot be fetched or carry no device list."""
+    try:
+        with _comfy_urlopen(f"{api_url}/system_stats", timeout=timeout) as resp:
+            stats = json.loads(resp.read().decode("utf-8", "replace"))
+    except Exception as e:
+        from localm.debuglog import logger
+        logger.debug("could not read ComfyUI /system_stats at %s: %s", api_url, e)
+        return None
+    if not isinstance(stats, dict):
+        return None
+    system = stats.get("system")
+    torch_version = system.get("pytorch_version") if isinstance(system, dict) else None
+    if isinstance(torch_version, str) and "rocm" in torch_version.lower():
+        return True
+    devices = stats.get("devices")
+    if not isinstance(devices, list) or not devices:
+        return None
+    for dev in devices:
+        name = dev.get("name") if isinstance(dev, dict) else None
+        if isinstance(name, str) and ("amd" in name.lower().split() or "radeon" in name.lower()):
+            return True
+    return False
+
+
 def _amd_rocm_launch_env() -> Optional[dict]:
     """Child env for the ComfyUI launch with ROCm's bin on PATH, or None to inherit.
 
@@ -1354,10 +1382,18 @@ def func_shim_enabled(cfg: Optional[dict] = None) -> bool:
         return False
 
 
-def comfy_child_env(cfg: Optional[dict] = None) -> Optional[dict]:
-    """The environment for a ComfyUI process localm SPAWNS. Starts from the AMD/ROCm
-    launch env (or the inherited env), and layers on two things when they apply:
+# MIOpen convolution find mode for a ComfyUI localm spawns: a convolution shape
+# missing from MIOpen's find-db gets a solver without benchmarking every
+# candidate. See test_child_env_sets_fast_miopen_find_mode.
+COMFY_MIOPEN_FIND_MODE = "FAST"
 
+
+def comfy_child_env(cfg: Optional[dict] = None) -> dict:
+    """The environment for a ComfyUI process localm SPAWNS. Starts from the AMD/ROCm
+    launch env (or the inherited env), and layers on three things when they apply:
+
+    - ``MIOPEN_FIND_MODE`` set to ``COMFY_MIOPEN_FIND_MODE``, unless the inherited env
+      already sets it. A CUDA (NVIDIA) torch build ignores it.
     - ONLY when the shim is enabled, PREPENDS the localm-owned shim dir to PYTHONPATH
       (preserving any pre-existing PYTHONPATH).
     - ONLY for a USER'S OWN ComfyUI, ORDERS ``CUDA_VISIBLE_DEVICES``/
@@ -1382,9 +1418,9 @@ def comfy_child_env(cfg: Optional[dict] = None) -> Optional[dict]:
     CUDA is emulated over HIP. NOT set for the managed instance, so its device has
     exactly ONE source of truth (the argv).
 
-    Nothing is set when the user configured no split and no main GPU, or when no
+    No device order is set when the user configured no split and no main GPU, or when no
     torch-visible device can be named honestly: ``visible_device_order()`` returns None
-    and a plain box spawns unchanged, rather than being pinned to an invented card
+    rather than the launch being pinned to an invented card
     (which would also hide a second GPU the user later adds). Never writes anything
     to disk."""
     base = _amd_rocm_launch_env()
@@ -1406,9 +1442,9 @@ def comfy_child_env(cfg: Optional[dict] = None) -> Optional[dict]:
                        "check may not match the card ComfyUI uses.", e)
 
     shim_on = func_shim_enabled(cfg)
-    if not shim_on and not order:
-        return base          # unchanged: the launch env with no additions
     env = base if base is not None else dict(os.environ)
+    if "MIOPEN_FIND_MODE" not in env:
+        env["MIOPEN_FIND_MODE"] = COMFY_MIOPEN_FIND_MODE
     if shim_on:
         shim = str(comfy_shim_dir())
         prev = env.get("PYTHONPATH", "")
