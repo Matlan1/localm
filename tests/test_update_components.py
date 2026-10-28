@@ -621,24 +621,55 @@ def test_no_pytorch_is_ever_installed_where_there_was_none(tmp_path, home, monke
     assert _plans(staged, inst)["pytorch"]["installed"] is False
 
 
-def test_pytorch_wheel_line_moves_within_its_family_but_another_build_is_kept(
-        tmp_path, home, monkeypatch):
-    inst = _write_tree(tmp_path / "inst", _files("0.3.1", pyproject=_PYPROJECT_032))
+_HWDETECT = ('_TORCH_BACKEND = {"cuda": "cu126", "cuda-blackwell": "cu130", '
+             '"rocm-linux": "rocm6.2", "cpu": "cpu"}\n'
+             '_AMD_ROCM_WIN_TORCH = "torch==2.9.1+rocm7.2.1"\n')
+
+
+def _cuda_torch_install(tmp_path, torch_version):
+    files = _files("0.3.1", pyproject=_PYPROJECT_032) | {"localm/hwdetect.py": _HWDETECT}
+    inst = _write_tree(tmp_path / "inst", files)
     lib = inst / au.RUNTIME_LIB
     lib.mkdir(parents=True)
     (lib / ".localm-backend").write_text("cuda b11928", encoding="utf-8")
-    _venv(inst, torch="2.9.0+cu126", transformers="5.20.2")
-    staged = _write_tree(tmp_path / "s", _files("0.3.2", pyproject=_PYPROJECT_032))
+    _venv(inst, torch=torch_version, transformers="5.20.2")
+    staged = _write_tree(tmp_path / "s", _files("0.3.2", pyproject=_PYPROJECT_032)
+                         | {"localm/hwdetect.py": _HWDETECT})
+    return inst, staged
+
+
+def test_pytorch_wheel_line_setup_installs_is_moved_to_the_releases_line(
+        tmp_path, home, monkeypatch):
+    inst, staged = _cuda_torch_install(tmp_path, "2.9.0+cu126")
     monkeypatch.setattr(uc, "torch_args",
                         lambda root, backend: "torch torchvision --torch-backend=cu130")
     p = _plans(staged, inst)["pytorch"]
     assert p["update"] and "wants the cu130 build" in p["note"]
     assert p["items"][0] == ["pip", "install", "-p", ".venv", "torch", "torchvision",
                              "--torch-backend=cu130"]
-    monkeypatch.setattr(uc, "torch_args",
-                        lambda root, backend: "torch torchvision --torch-backend=rocm6.2")
+
+
+@pytest.mark.parametrize("have,spec", [
+    ("2.9.0+cu128", "torch torchvision --torch-backend=cu126"),
+    ("2.9.0+cu126", "torch torchvision --torch-backend=rocm6.2"),
+    ("2.9.0", "torch torchvision --torch-backend=cu126"),
+    ("2.9.0+cpu", "torch==2.9.1+rocm7.2.1 torchvision==0.24.1+rocm7.2.1 --find-links https://x/"),
+])
+def test_a_pytorch_build_setup_does_not_install_is_the_users_and_kept(tmp_path, home,
+                                                                      monkeypatch, have, spec):
+    inst, staged = _cuda_torch_install(tmp_path, have)
+    monkeypatch.setattr(uc, "torch_args", lambda root, backend: spec)
     p = _plans(staged, inst)["pytorch"]
-    assert p["update"] is False and p["kept"] and "kept your PyTorch 2.9.0+cu126" in p["note"]
+    assert p["update"] is False and p["kept"] is True
+    assert f"kept your PyTorch {have}" in p["note"]
+
+
+def test_an_older_exact_pin_of_the_same_build_family_is_updated(tmp_path, home, monkeypatch):
+    inst, staged = _cuda_torch_install(tmp_path, "2.9.0+rocm7.1.0")
+    monkeypatch.setattr(uc, "torch_args", lambda root, backend: (
+        "torch==2.9.1+rocm7.2.1 torchvision==0.24.1+rocm7.2.1 --find-links https://x/"))
+    p = _plans(staged, inst)["pytorch"]
+    assert p["update"] is True and "torch 2.9.0+rocm7.1.0 (wants ==2.9.1+rocm7.2.1)" in p["note"]
 
 
 def test_torch_args_asks_the_staged_tree_itself(tmp_path):
@@ -872,3 +903,103 @@ def test_doctor_shows_each_component_against_the_pin(tmp_path, home, monkeypatch
     assert ("stable-diffusion.cpp image runtime: this release pins master-1017-be48649, but "
             "master-982-0518b34 is installed") in out
     assert "KoboldCpp music runtime: v1.123.1 (this release's pin)" in out
+
+
+# ------------------------------ snapshot safety ---------------------------------
+
+def test_discard_and_restore_refuse_a_venv_copy_the_snapshot_did_not_make(tmp_path, home):
+    inst = _write_tree(tmp_path / "inst", _files("0.3.1"))
+    _venv(inst)
+    victim = tmp_path / ".victim-backup-components"
+    victim.mkdir()
+    (victim / "keep.txt").write_text("x", encoding="utf-8")
+    snap = tmp_path / "updates" / "backup-components"
+    snap.mkdir(parents=True)
+    (snap / uc.STATE_FILE).write_text(json.dumps(
+        {"root": str(inst), "components": {"pytorch": {"venv_copy": str(victim)}}}),
+        encoding="utf-8")
+    errors = uc.restore(snap, root=inst)
+    assert errors and "is not a venv copy" in errors[0]
+    uc.discard(snap)
+    assert (victim / "keep.txt").is_file(), "a folder the snapshot did not make is never removed"
+    assert not snap.exists()
+
+
+def test_a_snapshot_venv_copy_is_marked_and_removed_with_its_snapshot(tmp_path, home):
+    inst = _write_tree(tmp_path / "inst", _files("0.3.1"))
+    _venv(inst)
+    snap = tmp_path / "updates" / "backup-components"
+    state = uc.snapshot(["pytorch"], snap, root=inst)
+    copy = Path(state["components"]["pytorch"]["venv_copy"])
+    assert uc._copy_owner(copy) == str(snap.resolve())
+    uc.discard(snap)
+    assert not copy.exists() and not snap.exists()
+
+
+def test_a_restore_keeps_a_file_two_distributions_share(tmp_path, home):
+    inst = _write_tree(tmp_path / "inst", _files("0.3.1"))
+    site = _venv(inst)
+    _dist(site, "opencv-python", "4.9.0", {"cv2/__init__.py": b"cv2 full"})
+    snap = tmp_path / "updates" / "backup-components"
+    uc.snapshot(["pytorch"], snap, root=inst)
+    _uninstall(site, "opencv-python")
+    _dist(site, "opencv-python-headless", "4.10.0", {"cv2/__init__.py": b"cv2 headless"})
+    assert uc.restore(snap, root=inst) == []
+    assert (site / "cv2" / "__init__.py").read_bytes() == b"cv2 full"
+    assert "opencv-python-headless" not in uc.dists(site)
+
+
+def test_a_later_snapshot_adds_to_the_updates_own_and_keeps_it(tmp_path, home,
+                                                               fake_uv_version):
+    inst = _write_tree(tmp_path / "inst", _files("0.3.1"))
+    _venv(inst)
+    _contained_uv(inst, "0.13.4")
+    snap = tmp_path / "updates" / "backup-components"
+    uc.snapshot(["uv"], snap, root=inst)
+    (inst / ".uv" / uv_tool.UV_NAME).unlink()
+    (inst / ".uv" / uv_tool.UV_NAME).write_text("0.13.6", encoding="utf-8")
+    state = uc.snapshot(["uv", "pytorch"], snap, root=inst, add=True)
+    assert set(state["components"]) == {"uv", "pytorch"}
+    assert (snap / "uv" / uv_tool.UV_NAME).read_text(encoding="utf-8") == "0.13.4", \
+        "the older copy, the one a rollback needs, is kept"
+
+
+# --------------------------- first-start check cadence --------------------------
+
+def _start_components(inst, home, monkeypatch, command="gui", rc=0, calls=None):
+    from localm.cli import _core
+    monkeypatch.setattr(updater, "repo_root", lambda: inst)
+    monkeypatch.delenv("LOCALM_RESTART_IN_PROGRESS", raising=False)
+    fake = _fake_children(home, rc=rc, calls=calls)
+    monkeypatch.setattr(subprocess, "run",
+                        lambda cmd, **kw: subprocess.CompletedProcess(cmd, fake(cmd)))
+    _core._finish_pending_component_update(command)
+
+
+def test_a_failed_first_start_waits_before_trying_again(tmp_path, home, monkeypatch):
+    monkeypatch.setattr(_version, "read_version", lambda: "0.3.2")
+    inst = _write_tree(tmp_path / "inst", _files("0.3.2", sd="master-1017-be48649"))
+    _sd_runtime(home, "master-982-0518b34", "vulkan")
+    calls = []
+    _start_components(inst, home, monkeypatch, rc=1, calls=calls)
+    assert len(calls) == 1 and uc.last_status()["state"] == "failed"
+    _start_components(inst, home, monkeypatch, calls=calls)
+    assert len(calls) == 1, "the next start does not retry at once"
+    status = uc.last_status()
+    status["at"] -= uc.RETRY_AFTER_S + 1
+    (updater._updates_dir() / uc.STATUS_FILE).write_text(json.dumps(status), encoding="utf-8")
+    _start_components(inst, home, monkeypatch, calls=calls)
+    assert len(calls) == 2 and uc.last_status()["state"] == "updated"
+
+
+def test_a_pending_update_of_another_install_is_dropped_and_this_one_checked(
+        tmp_path, home, monkeypatch):
+    monkeypatch.setattr(_version, "read_version", lambda: "0.3.2")
+    inst = _write_tree(tmp_path / "inst", _files("0.3.2", sd="master-1017-be48649"))
+    _sd_runtime(home, "master-982-0518b34", "vulkan")
+    uc.write_pending([{"name": "sdcpp", "update": True}], root=tmp_path / "elsewhere",
+                     version="0.3.2")
+    calls = []
+    _start_components(inst, home, monkeypatch, calls=calls)
+    assert [c[3] for c in calls] == ["setup-sdcpp"]
+    assert uc.read_pending() is None

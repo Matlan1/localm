@@ -48,7 +48,13 @@ from typing import Callable, Optional
 
 PENDING_FILE = "pending-components.json"
 STATUS_FILE = "components-update.json"
+# The install root and version whose components were last found at its pins.
+CHECKED_FILE = "components-checked.json"
+# Seconds a failed first-start update waits before the next start tries again.
+RETRY_AFTER_S = 3600.0
 STATE_FILE = "state.json"
+# Marks a venv copy a snapshot made; holds that snapshot folder's path.
+COPY_MARKER = ".localm-venv-copy"
 
 # Commands that use a provisioned component, and so finish a pending update of
 # one before they start.
@@ -546,6 +552,28 @@ def _family(label: Optional[str]) -> Optional[str]:
     return m.group(0) if m else None
 
 
+def _torch_req_label(reqs) -> Optional[str]:
+    """The local version label of an exact ``torch==`` requirement in *reqs*."""
+    for r in reqs:
+        m = re.match(r"\s*torch\s*==\s*([^\s;]+)", r)
+        if m:
+            return _local_label(m.group(1))
+    return None
+
+
+def torch_labels(tree: Path) -> set:
+    """The local version labels (``cu126``, ``rocm7.13.0``, ...) of the PyTorch
+    builds the setup of the tree at *tree* installs from any of its wheel
+    sources, read as text."""
+    hw = _literals(tree / "localm" / "hwdetect.py", {"_TORCH_BACKEND", "_AMD_ROCM_WIN_TORCH"})
+    out = {str(v) for v in (hw.get("_TORCH_BACKEND") or {}).values()}
+    for req in [str(hw.get("_AMD_ROCM_WIN_TORCH") or "")] + _extras(tree, ["gpu"]):
+        label = _torch_req_label([req])
+        if label:
+            out.add(label)
+    return out
+
+
 def _describe_torch(installed: dict) -> str:
     parts = [f"{n} {installed[n]['version']}" for n in ("torch", "transformers")
              if n in installed]
@@ -553,6 +581,10 @@ def _describe_torch(installed: dict) -> str:
 
 
 def _plan_torch(tree: Path, installed_root: Path, deep: bool) -> dict:
+    """The PyTorch stack's plan. The installed torch counts as the one setup
+    installed when its build label is one either tree's setup installs from
+    its wheel sources (:func:`torch_labels`), or, against an exact pin, a build
+    of the pin's family; any other build is the user's and is kept."""
     out = _new("pytorch")
     site = site_packages(Path(installed_root) / ".venv")
     if site is None:
@@ -575,17 +607,21 @@ def _plan_torch(tree: Path, installed_root: Path, deep: bool) -> dict:
     if not spec:
         return out
     reqs, commands, line = torch_step(tree, spec)
-    problems = unsatisfied(reqs, installed)
-    label = _local_label(installed["torch"]["version"])
-    if line and label != line:
-        if label and _family(label) == _family(line):
-            problems.append(f"torch {installed['torch']['version']} (wants the {line} "
-                            "build)")
-        else:
+    have = installed["torch"]["version"]
+    label = _local_label(have)
+    wanted = line or _torch_req_label(reqs)
+    known = torch_labels(tree) | torch_labels(Path(installed_root))
+    ours = label is not None and (label in known or (
+        line is None and wanted is not None and _family(label) == _family(wanted)))
+    if not ours or (wanted and _family(label) != _family(wanted)):
+        if wanted and label != wanted:
             out["kept"] = True
-            out["note"] = (f"kept your PyTorch {installed['torch']['version']}; this release "
-                           f"installs the {line} build for the {backend} runtime")
-            return out
+            out["note"] = (f"kept your PyTorch {have}; this release installs the "
+                           f"{wanted} build for the {backend} runtime")
+        return out
+    problems = unsatisfied(reqs, installed)
+    if line and label != line:
+        problems.append(f"torch {have} (wants the {line} build)")
     if not problems:
         return out
     out.update(update=True, target=spec, items=commands)
@@ -778,11 +814,31 @@ def clear_pending() -> None:
         pass
 
 
-def _write_status(status: dict) -> None:
+def _write_status(status: dict, root: Optional[Path] = None,
+                  version: Optional[str] = None) -> None:
+    import time
+    status = dict(status, root=str(Path(root).resolve()) if root else None, version=version,
+                  at=time.time())
     try:
         (_updates_dir() / STATUS_FILE).write_text(json.dumps(status), encoding="utf-8")
     except OSError as e:
         _warn("update: could not record the component update result: %s", e)
+
+
+def _mark_checked(root: Path, version: Optional[str]) -> None:
+    """Record that every component of the install at *root*, at *version*, is
+    at its pins (or kept by the user's choice)."""
+    try:
+        (_updates_dir() / CHECKED_FILE).write_text(json.dumps(
+            {"root": str(Path(root).resolve()), "version": version}), encoding="utf-8")
+    except OSError as e:
+        _warn("update: could not record the component check: %s", e)
+
+
+def _is_checked(root: Path, version: Optional[str]) -> bool:
+    data = _read_json(_updates_dir(create=False) / CHECKED_FILE) or {}
+    return bool(version) and data.get("version") == version and data.get("root") == str(
+        Path(root).resolve())
 
 
 def last_status() -> Optional[dict]:
@@ -796,15 +852,31 @@ def catch_up(root=None) -> Optional[list]:
     installed for the install at *root* (default the running install) is not
     at the pin that install's own release ships (:func:`plan` of the install
     against itself). Returns the plans when it recorded one, else None. Raises
-    OSError when the marker cannot be written."""
+    OSError when the marker cannot be written.
+
+    Checks once per install root and version: after the components were found
+    at their pins (:func:`finish_pending` or this check) it returns None at
+    once. After a failed attempt it waits :data:`RETRY_AFTER_S` seconds before
+    trying again."""
+    import time
+
     from localm import _version, updater
     root = Path(root) if root else updater.repo_root()
     if read_pending() is not None:
         return None
+    version = _version.read_version()
+    if _is_checked(root, version):
+        return None
+    last = last_status() or {}
+    if (last.get("state") in ("failed", "waiting") and last.get("version") == version
+            and last.get("root") == str(root.resolve())
+            and time.time() - float(last.get("at") or 0) < RETRY_AFTER_S):
+        return None
     plans = plan(root, root)
     if not any(p["update"] for p in plans):
+        _mark_checked(root, version)
         return None
-    write_pending(plans, root=root, version=_version.read_version())
+    write_pending(plans, root=root, version=version)
     return plans
 
 
@@ -830,12 +902,40 @@ def _link(src: Path, dst: Path) -> None:
         shutil.copy2(src, dst)
 
 
-def _clone_venv(venv: Path, copy: Path) -> None:
+def _copy_owner(copy: Path) -> Optional[str]:
+    """The snapshot folder a venv copy at *copy* belongs to (from its
+    ``COPY_MARKER``), or None when *copy* is not a venv copy this module made."""
+    try:
+        return (copy / COPY_MARKER).read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
+
+
+def _own_copy(info: Optional[dict], src: Path) -> Optional[Path]:
+    """The venv copy named by the snapshot entry *info* of the snapshot *src*,
+    only when that folder is one :func:`_clone_venv` made for *src*: its name is
+    ``.<venv>-<src name>`` and its marker names *src*. None otherwise."""
+    raw = (info or {}).get("venv_copy")
+    if not raw:
+        return None
+    copy = Path(str(raw))
+    if not copy.name.startswith(".") or not copy.name.endswith(f"-{src.name}"):
+        return None
+    try:
+        owner = _copy_owner(copy)
+        return copy if owner and Path(owner).resolve() == src.resolve() else None
+    except OSError:
+        return None
+
+
+def _clone_venv(venv: Path, copy: Path, owner: Path) -> None:
     """Recreate every file of *venv* in *copy* (replaced first) as a hard link,
-    or a copy where a link cannot be made. Raises OSError."""
+    or a copy where a link cannot be made, and mark *copy* as belonging to the
+    snapshot *owner*. Raises OSError."""
     if copy.exists():
         shutil.rmtree(copy)
     copy.mkdir(parents=True)
+    (copy / COPY_MARKER).write_text(str(owner.resolve()), encoding="utf-8")
     for dirpath, _dirnames, filenames in os.walk(venv):
         rel = os.path.relpath(dirpath, venv)
         target = copy / rel if rel != "." else copy
@@ -865,16 +965,19 @@ def _inside(path: Path, root: Path) -> bool:
 def _restore_venv(copy: Path, venv: Path) -> list:
     """Put back, in *venv*, every distribution whose installed version differs
     from the one kept in *copy* (by :func:`_clone_venv`), removing ones added
-    since. The install's own package is left alone. Returns the failures."""
+    since: first every changed distribution's files are removed, then every
+    kept one's files are put back, so a file two distributions share ends up
+    restored. The install's own package is left alone, and nothing outside
+    *venv* is removed. Returns the failures."""
     site_now, site_was = site_packages(venv), site_packages(copy)
     if site_now is None or site_was is None:
         return [f"could not find the packages of {venv} or of its copy {copy}"]
     now, was = dists(site_now), dists(site_was)
     errors = []
-    for name in sorted(set(now) | set(was)):
-        if name in _OWN_DISTS or (now.get(name) or {}).get("dir") == (
-                was.get(name) or {}).get("dir"):
-            continue
+    changed = [name for name in sorted(set(now) | set(was))
+               if name not in _OWN_DISTS
+               and (now.get(name) or {}).get("dir") != (was.get(name) or {}).get("dir")]
+    for name in changed:
         if name in now:
             for rel in _record(site_now, now[name]["dir"]):
                 p = (site_now / rel)
@@ -884,6 +987,7 @@ def _restore_venv(copy: Path, venv: Path) -> list:
                     except OSError as e:
                         errors.append(f"remove {rel}: {e}")
             shutil.rmtree(site_now / now[name]["dir"], ignore_errors=True)
+    for name in changed:
         if name in was:
             for rel in _record(site_was, was[name]["dir"]):
                 src = (site_was / rel)
@@ -926,7 +1030,7 @@ def _snapshot_comfy(root: Path, dest: Path) -> dict:
                     nodes[d.name] = h
     venv = _comfy_venv(root)
     copy = _venv_copy_path(venv, dest)
-    _clone_venv(venv, copy)
+    _clone_venv(venv, copy, dest)
     return {"commit": head, "nodes": nodes, "venv_copy": str(copy)}
 
 
@@ -969,7 +1073,9 @@ def _restore_comfy(root: Path, src: Path, info: dict, say: Callable) -> list:
         except OSError as e:
             errors.append(f"managed ComfyUI: could not restore its marker: {e}")
         if info.get("venv_copy"):
-            errors += _restore_venv(Path(info["venv_copy"]), _comfy_venv(root))
+            copy = _own_copy(info, src)
+            errors += (_restore_venv(copy, _comfy_venv(root)) if copy is not None else
+                       [f"managed ComfyUI: {info['venv_copy']} is not a venv copy of {src}"])
     finally:
         mc._release_update_lock()
     return errors
@@ -978,18 +1084,21 @@ def _restore_comfy(root: Path, src: Path, info: dict, say: Callable) -> list:
 def _snapshot_torch(installed_root: Path, dest: Path) -> dict:
     venv = installed_root / ".venv"
     copy = _venv_copy_path(venv, dest)
-    _clone_venv(venv, copy)
+    _clone_venv(venv, copy, dest)
     return {"venv_copy": str(copy)}
 
 
-def _restore_torch(installed_root: Path, info: dict, say: Callable) -> list:
+def _restore_torch(installed_root: Path, src: Path, info: dict, say: Callable) -> list:
     left = _stop_torch_holders(installed_root, say)
     if left:
         from localm import updater_runtime
         return ["the PyTorch stack is in use, so it was not restored: "
                 + updater_runtime.describe_holders(left)]
     say("Restoring the PyTorch stack...")
-    return _restore_venv(Path(info["venv_copy"]), installed_root / ".venv")
+    copy = _own_copy(info, src)
+    if copy is None:
+        return [f"PyTorch stack: {info.get('venv_copy')} is not a venv copy of {src}"]
+    return _restore_venv(copy, installed_root / ".venv")
 
 
 def _snapshot_uv(installed_root: Path, dest: Path) -> dict:
@@ -1020,13 +1129,8 @@ def discard(src) -> None:
     folder that cannot be removed is reported in the log."""
     src = Path(src)
     state = _read_json(src / STATE_FILE) or {}
-    for info in (state.get("components") or {}).values():
-        copy = (info or {}).get("venv_copy")
-        if copy and Path(copy).exists():
-            try:
-                shutil.rmtree(copy)
-            except OSError as e:
-                _warn("update: could not remove the kept venv copy %s: %s", copy, e)
+    for name, info in (state.get("components") or {}).items():
+        _drop_one(src, name, info)
     if src.exists():
         try:
             shutil.rmtree(src)
@@ -1034,18 +1138,52 @@ def discard(src) -> None:
             _warn("update: could not remove the kept components %s: %s", src, e)
 
 
-def snapshot(names, dest, *, root, home=None) -> dict:
-    """Keep the components *names* of the install at *root* in *dest* (an
-    earlier snapshot there is discarded first) and return the state
-    :func:`restore` reads, also written to ``<dest>/state.json``. Raises
-    OSError; nothing is kept when the snapshot cannot be completed."""
+def _drop_one(src: Path, name: str, info: Optional[dict]) -> None:
+    """Remove what the snapshot *src* keeps for component *name* (entry *info*)
+    outside its own state file: a venv copy it made, the kept uv folder, the
+    kept ComfyUI files. A venv copy that is not one it made is left alone."""
+    copy = _own_copy(info, src)
+    if copy is not None:
+        try:
+            shutil.rmtree(copy)
+        except OSError as e:
+            _warn("update: could not remove the kept venv copy %s: %s", copy, e)
+    elif (info or {}).get("venv_copy"):
+        _warn("update: not removing %s: it is not a venv copy of %s", info["venv_copy"], src)
+    extra = {"uv": ["uv"], "comfyui": ["comfy.patch", "comfy-marker.json"]}.get(name, [])
+    for rel in extra:
+        p = src / rel
+        try:
+            if p.is_dir():
+                shutil.rmtree(p)
+            elif p.exists():
+                p.unlink()
+        except OSError as e:
+            _warn("update: could not remove the kept %s: %s", p, e)
+
+
+def snapshot(names, dest, *, root, home=None, add: bool = False) -> dict:
+    """Keep the components *names* of the install at *root* in *dest* and
+    return the state :func:`restore` reads, also written to
+    ``<dest>/state.json``. An earlier snapshot in *dest* is discarded first;
+    with *add* it is kept instead and only the components it does not hold yet
+    are added (what it already holds is the older state, the one a rollback
+    needs). Raises OSError; what this call kept is removed again when the
+    snapshot cannot be completed."""
     dest = Path(dest)
     root = Path(root)
-    discard(dest)
-    dest.mkdir(parents=True)
-    state: dict = {"root": str(root.resolve()), "components": {}}
+    state = _read_json(dest / STATE_FILE) if add else None
+    fresh = not state or not isinstance(state.get("components"), dict)
+    if fresh:
+        discard(dest)
+        state = {"root": str(root.resolve()), "components": {}}
+    dest.mkdir(parents=True, exist_ok=True)
+    added: list = []
     try:
         for name in names:
+            if name in state["components"]:
+                continue
+            added.append(name)
             if name == "comfyui":
                 state["components"][name] = _snapshot_comfy(comfy_root(home), dest)
             elif name == "pytorch":
@@ -1056,7 +1194,18 @@ def snapshot(names, dest, *, root, home=None) -> dict:
                 state["components"][name] = {}
             (dest / STATE_FILE).write_text(json.dumps(state), encoding="utf-8")
     except (OSError, shutil.Error) as e:
-        discard(dest)
+        if fresh:
+            discard(dest)
+        else:
+            for name in added:
+                _drop_one(dest, name, state["components"].pop(name, None)
+                          or {"venv_copy": str(_venv_copy_path(
+                              (comfy_root(home) / "venv") if name == "comfyui"
+                              else root / ".venv", dest))})
+            try:
+                (dest / STATE_FILE).write_text(json.dumps(state), encoding="utf-8")
+            except OSError as w:
+                _warn("update: could not rewrite the kept components state %s: %s", dest, w)
         raise OSError(str(e)) from None
     return state
 
@@ -1077,7 +1226,7 @@ def restore(src, *, root, home=None, say: Optional[Callable] = None,
     comps = {k: v for k, v in (state.get("components") or {}).items()
              if names is None or k in names}
     if "pytorch" in comps:
-        errors += _restore_torch(Path(root), comps["pytorch"], say)
+        errors += _restore_torch(Path(root), src, comps["pytorch"], say)
     if "comfyui" in comps:
         errors += _restore_comfy(comfy_root(home), src, comps["comfyui"], say)
     if "uv" in comps:
@@ -1215,8 +1364,9 @@ def finish_pending(*, root=None, home=None, runner: Optional[Callable] = None,
                    env: Optional[dict] = None, say: Optional[Callable] = None,
                    bootstrap: Optional[Callable] = None) -> Optional[dict]:
     """Carry out the pending component update, if there is one for the install
-    at *root* (default the running install). One recorded for another version
-    than the one installed at *root* is dropped and None returned.
+    at *root* (default the running install). One recorded for another install
+    root, or for another version than the one installed at *root*, is dropped
+    and None returned.
 
     The components are compared with *root*'s own pins again (:func:`plan`), so
     one the user changed since is left as it is. Returns None when nothing is
@@ -1245,6 +1395,7 @@ def finish_pending(*, root=None, home=None, runner: Optional[Callable] = None,
         return None
     root = Path(root) if root else updater.repo_root()
     if Path(pending.get("root") or "").resolve() != root.resolve():
+        clear_pending()
         return None
     try:
         installed_version = (root / "VERSION").read_text(encoding="utf-8").strip()
@@ -1261,6 +1412,7 @@ def finish_pending(*, root=None, home=None, runner: Optional[Callable] = None,
     if not todo:
         clear_pending()
         status["state"] = "current"
+        _mark_checked(root, installed_version)
         return status
 
     held = blockers(todo, root)
@@ -1273,18 +1425,18 @@ def finish_pending(*, root=None, home=None, runner: Optional[Callable] = None,
         status.update(state="waiting", note=(
             "the components were not updated: "
             + updater_runtime.in_use_message(held, "start localm again")))
-        _write_status(status)
+        _write_status(status, root, installed_version)
         return status
 
     snap = snapshot_dir(updater._backup_dir(create=True))
     try:
-        snapshot(names, snap, root=root, home=home)
+        snapshot(names, snap, root=root, home=home, add=True)
     except OSError as e:
         clear_pending()
         status.update(state="failed", error=f"could not keep a copy of the components: {e}",
                       note=(f"the components were not updated because a copy of the current "
                             f"ones could not be kept ({e})"))
-        _write_status(status)
+        _write_status(status, root, installed_version)
         return status
 
     if env is None:
@@ -1328,15 +1480,16 @@ def finish_pending(*, root=None, home=None, runner: Optional[Callable] = None,
                                            if p["name"] in ("sdcpp", "koboldcpp", "uv")
                                            else "")
             for p in todo) + (f"; {rest}" if rest else ""))
-        _write_status(status)
+        _write_status(status, root, installed_version)
+        _mark_checked(root, installed_version)
         return status
     for p in done:
         _remove_created(p, home, existed)
-    errors = restore(snap, root=root, home=home, say=say)
+    errors = restore(snap, root=root, home=home, say=say, names=names)
     kept = ("the previous versions were put back" if not errors
             else "putting the previous versions back FAILED: " + "; ".join(errors))
     status.update(state="failed", error=problem + ("; " + "; ".join(errors) if errors else ""),
                   note=f"{problem}; {kept}")
     _warn("update: component update failed: %s", status["error"])
-    _write_status(status)
+    _write_status(status, root, installed_version)
     return status

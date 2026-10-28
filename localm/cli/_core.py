@@ -594,6 +594,9 @@ def _finish_pending_component_update(command) -> None:
                           " ...[/dim]")
         status = updater_components.finish_pending(
             say=lambda m: console.print(f"[dim]{escape(m)}[/dim]"))
+        if status is None and updater_components.catch_up() is not None:
+            status = updater_components.finish_pending(
+                say=lambda m: console.print(f"[dim]{escape(m)}[/dim]"))
     except Exception as e:
         console.print(f"[yellow]The pending component update could not be carried out "
                       f"({escape(str(e))}); it is retried on the next start.[/yellow]")
