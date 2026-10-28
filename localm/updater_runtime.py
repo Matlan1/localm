@@ -83,13 +83,86 @@ def staged_pins(root) -> dict:
     return pins
 
 
-def _is_current(lib: Path, backend: str, build: Optional[str], target: str, pins: dict) -> bool:
+_CUDA_FILES = ("localm/setup_llama/cuda.py", "localm/setup_llama.py")
+
+
+def cuda_pins(root) -> dict:
+    """``{line: {package: version}}``: the PyPI CUDA libraries the tree at
+    *root* fetches into a Linux cuda runtime, per CUDA line, read as text.
+    Empty when the tree pins none."""
+    import ast
+    for rel in _CUDA_FILES:
+        try:
+            tree = ast.parse((Path(root) / rel).read_text(encoding="utf-8"))
+        except (OSError, ValueError, SyntaxError, RecursionError):
+            continue
+        found: dict = {}
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(
+                    node.targets[0], ast.Name) and node.targets[0].id in (
+                    "_CUDA_RUNTIME_PIN", "_CUDA_RUNTIME_PYPI_PACKAGES"):
+                try:
+                    found[node.targets[0].id] = ast.literal_eval(node.value)
+                except (ValueError, TypeError, SyntaxError, RecursionError):
+                    continue
+        pin, lines = found.get("_CUDA_RUNTIME_PIN"), found.get("_CUDA_RUNTIME_PYPI_PACKAGES")
+        if isinstance(pin, dict) and isinstance(lines, dict):
+            return {line: {p: pin[p][0] for p in pkgs if p in pin}
+                    for line, pkgs in lines.items()}
+    return {}
+
+
+def _cuda_line_of(lib: Path) -> Optional[str]:
+    """The CUDA line of the PyPI CUDA libraries in *lib* (``cuda-12`` or
+    ``cuda-13``, from the cuBLAS file name), or None when it holds none."""
+    for f in sorted(lib.glob("libcublas.so.*")):
+        major = f.name.split(".so.", 1)[1].split(".", 1)[0]
+        if major in ("12", "13"):
+            return f"cuda-{major}"
+    return None
+
+
+def _cuda_state(lib: Path, staged_root, installed_root) -> Optional[tuple]:
+    """``(installed, wanted)`` package versions of the PyPI CUDA libraries of the
+    cuda runtime at *lib*: the installed ones from its record, or, without one,
+    the ones the install at *installed_root* pins; the wanted ones those the
+    tree at *staged_root* pins. None when the runtime holds no PyPI CUDA
+    libraries."""
+    from localm.setup_llama.cuda import read_cuda_runtime
+    rec = read_cuda_runtime(lib)
+    line = (rec or {}).get("line") or _cuda_line_of(lib)
+    if not line:
+        return None
+    have = (rec or {}).get("packages")
+    if have is None:
+        have = cuda_pins(installed_root).get(line, {})
+    want = cuda_pins(staged_root).get(line)
+    if not want:
+        return None
+    return dict(have), dict(want)
+
+
+def _is_current(lib: Path, backend: str, build: Optional[str], target: str, pins: dict,
+                *, after: bool = False) -> bool:
+    """Whether the runtime at *lib* is the build *target* (and, for a cuda
+    runtime whose pins name its PyPI CUDA libraries, holds those versions).
+    With *after* (checking a re-provision just made) a cuda runtime without a
+    record of its CUDA libraries counts as current: a tree from before the
+    record does not write it."""
     if backend == "amd-rocm":
         from localm import setup_llama as sl
         return sl.rocm_build_is_current(lib, build, rocm_tag=pins.get("rocm_tag"),
                                         rocm_build_id=target,
                                         cpu_tag=pins.get("rocm_cpu_tag"))
-    return build == target
+    if build != target:
+        return False
+    if backend == "cuda" and pins.get("cuda"):
+        from localm.setup_llama.cuda import read_cuda_runtime
+        rec = read_cuda_runtime(lib)
+        if rec is None:
+            return after or pins.get("cuda_have") == pins["cuda"]
+        return rec.get("packages") == pins["cuda"]
+    return True
 
 
 def _manual_command(backend: str) -> str:
@@ -149,10 +222,20 @@ def plan(staged_root, installed_root) -> dict:
                            f"was left as it is; this release ships {target} (to install it: "
                            f"{_manual_command(backend)})")
             return out
+        cuda = _cuda_state(lib, staged_root, installed_root) if backend == "cuda" else None
+        if cuda is not None:
+            pins["cuda_have"], pins["cuda"] = cuda
         if _is_current(lib, backend, current, target, pins):
             return out
         out["reprovision"] = True
-        out["note"] = f"re-provisions the {backend} runtime from {current} to {target}"
+        if current == target and cuda is not None:
+            out["note"] = (f"re-provisions the {backend} runtime {target} to update its CUDA "
+                           "libraries ("
+                           + ", ".join(f"{p} {cuda[0].get(p, '?')} -> {v}"
+                                       for p, v in sorted(cuda[1].items())
+                                       if cuda[0].get(p) != v) + ")")
+        else:
+            out["note"] = f"re-provisions the {backend} runtime from {current} to {target}"
         return out
     except Exception as e:
         from localm.debuglog import logger
@@ -681,7 +764,8 @@ def finish_pending(*, root=None, runner: Optional[Callable] = None,
     now_backend, now_build = sl._provisioned_backend(lib), sl._provisioned_build(lib)
     if problem is None and now_backend != backend:
         problem = f"setup-llama installed the {now_backend} runtime instead of {backend}"
-    if problem is None and not _is_current(lib, backend, now_build, target, pins):
+    if problem is None and not _is_current(lib, backend, now_build, target, pins,
+                                           after=True):
         problem = f"setup-llama installed {now_build or 'an unrecorded build'}, not {target}"
     clear_pending()
     if problem is None:

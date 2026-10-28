@@ -299,11 +299,13 @@ def split_shortfall_refusal(name: str, shortfall: Iterable[Mapping]) -> str:
             f"device(s) to load '{name}' ({detail}).")
 
 
-def degraded_load_confirm(name: str, vram_required: int, free: int,
+def degraded_load_confirm(name: str, needed: int, free: int,
                           *, moe: bool = False) -> dict:
-    """The confirm_required result asking before a partial-offload load. *moe*
-    is True for a mixture-of-experts model, whose experts the backend moves to
-    system RAM before it moves any layer off the GPU."""
+    """The confirm_required result asking before a partial-offload load.
+    *needed* is the free VRAM the load was admitted against
+    (``LoadBudget.needed_bytes``, safety margin included). *moe* is True for a
+    mixture-of-experts model, whose experts the backend moves to system RAM
+    before it moves any layer off the GPU."""
     plan = (
         "keep the experts in system RAM (and move layers to the CPU too if "
         "that is still too large)" if moe
@@ -312,7 +314,7 @@ def degraded_load_confirm(name: str, vram_required: int, free: int,
         "status": "confirm_required", "model": name,
         "detail": (
             f"'{name}' does not fit the estimated free VRAM "
-            f"(need ~{vram_required // _MB} MB, "
+            f"(needs ~{needed // _MB} MB free including a safety margin, "
             f"{free // _MB} MB free) even after "
             f"eviction; loading it anyway will let the backend {plan}, "
             "which is slower"),
@@ -326,7 +328,8 @@ def busy_victim_confirm(name: str, victim: str, in_use: str) -> dict:
         "status": "confirm_required", "model": name,
         "detail": (
             f"loading '{name}' needs to free "
-            f"'{victim}', which is {in_use}"),
+            f"'{victim}', which is {in_use}; loading it anyway stops "
+            f"'{victim}' and cuts off the reply it is writing"),
     }
 
 

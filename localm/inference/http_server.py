@@ -665,8 +665,9 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
     engine for a name not registered in ``_engines``. *on_active* is called
     with *name* when it becomes the active model. *preempt* marks an explicit
     user switch: it supersedes an earlier explicit switch that is still
-    loading, and may cancel a busy resident model or ask before a degraded
-    load. *force* skips those confirmations. With *activate* False the model
+    loading, and asks before evicting a busy resident model or loading
+    degraded. *force* skips those confirmations and cancels the busy model's
+    generations before evicting it. With *activate* False the model
     becomes active only when nothing else would answer an unnamed request.
     With *skip_if_latched* (a load that capability routing chose, not one the
     user asked for) a model that is not resident is not loaded when its last
@@ -1073,8 +1074,8 @@ async def _switch_exhaustion_ladder(loop, probe: switch_admission.VramProbe,
     """Find room once no idle chat model is evictable, in this order: free the
     idle shared embedder; act on the probe verdict (load best-effort when the
     box cannot measure, retry or refuse when the probe was inconclusive); ask
-    a sibling localm instance to free its VRAM; cancel and claim a busy
-    resident model (explicit switch) or wait for it to go idle
+    a sibling localm instance to free its VRAM; claim a busy resident model
+    (explicit switch, ``_switch_claim_busy_victim``) or wait for it to go idle
     (``_switch_wait_for_busy_victim``, any other load); then refuse, ask, or
     defer to the backend's own sizing
     (``switch_admission.final_exhaustion_verdict``).
@@ -1118,14 +1119,14 @@ async def _switch_exhaustion_ladder(loop, probe: switch_admission.VramProbe,
     if final == switch_admission.CONFIRM_DEGRADED_LOAD:
         return step(switch_admission.RETURN_RESULT,
                     result=switch_admission.degraded_load_confirm(
-                        budget.name, budget.whole_model_bytes, probe.free,
+                        budget.name, budget.needed_bytes, probe.free,
                         moe=_registered_as_moe(budget.name)))
     from localm.debuglog import logger as _dbg
     _dbg.info(
-        "switch_engine: '%s' exceeds the whole-model VRAM estimate "
-        "(need ~%s MB, %s MB free) after eviction - deferring to the "
-        "backend's own load-time sizing instead of refusing",
-        budget.name, budget.whole_model_bytes // 1024 ** 2, probe.free // 1024 ** 2)
+        "switch_engine: '%s' does not fit the free VRAM after eviction "
+        "(needs ~%s MB free including the safety margin, %s MB free) - deferring "
+        "to the backend's own load-time sizing instead of refusing",
+        budget.name, budget.needed_bytes // 1024 ** 2, probe.free // 1024 ** 2)
     attempt.deferred_to_backend = True
     return step(switch_admission.PROCEED_TO_LOAD)
 
@@ -1233,14 +1234,18 @@ async def _switch_claim_busy_victim(budget: switch_admission.LoadBudget,
                                     attempt: switch_admission.EvictionAttempt,
                                     *, preempt: bool, force: bool
                                     ) -> switch_admission.EvictionStep | None:
-    """Cancel every generation on a busy resident model and claim it as the
-    eviction victim, for an explicit switch only and once per load attempt
+    """Claim a busy resident model as the eviction victim, for an explicit
+    switch only and once per load attempt
     (``switch_admission.busy_victim_candidate``).
 
-    Returns None when there is no candidate. Without *force*, waits for its
-    pins to clear (``_wait_for_pin_clear``) and returns a ``confirm_required``
-    result step when they do not. Otherwise returns an EVICT step whose
-    ``force_busy`` is *force*: evicted even if a pin is still held."""
+    Returns None when there is no candidate. Without *force*, nothing is
+    cancelled: waits for its requests to finish on their own
+    (``_wait_for_pin_clear``) and returns an EVICT step when they do, else a
+    ``confirm_required`` result step, leaving the model loaded and its
+    generations running. With *force*, cancels every generation on it
+    (``residency.cancel_all``) and returns an EVICT step with ``force_busy``:
+    evicted even if a pin is still held. See
+    TestBusyVictim.test_explicit_switch_never_cancels_a_busy_model_before_asking."""
     busy_name = switch_admission.busy_victim_candidate(
         budget, _engines_lru, _engines, preempt=preempt,
         already_attempted=attempt.busy_attempted)
@@ -1248,14 +1253,16 @@ async def _switch_claim_busy_victim(budget: switch_admission.LoadBudget,
         return None
     attempt.busy_attempted = True
     busy_engine = _engines[busy_name]
+    if not force:
+        if not await _wait_for_pin_clear(busy_engine):
+            return switch_admission.EvictionStep(
+                switch_admission.RETURN_RESULT,
+                result=switch_admission.busy_victim_confirm(
+                    budget.name, busy_name, _in_use_description(busy_name, busy_engine)))
+        return switch_admission.EvictionStep(switch_admission.EVICT, victim=busy_name)
     residency.cancel_all(busy_name)
-    if not force and not await _wait_for_pin_clear(busy_engine):
-        return switch_admission.EvictionStep(
-            switch_admission.RETURN_RESULT,
-            result=switch_admission.busy_victim_confirm(
-                budget.name, busy_name, _in_use_description(busy_name, busy_engine)))
     return switch_admission.EvictionStep(
-        switch_admission.EVICT, victim=busy_name, force_busy=force)
+        switch_admission.EVICT, victim=busy_name, force_busy=True)
 
 
 async def _switch_wait_for_busy_victim(budget: switch_admission.LoadBudget,
@@ -2065,12 +2072,9 @@ async def _unload_engine_off_loop(loop, engine, on_unloaded) -> None:
 
 async def _wait_for_pin_clear(engine, *, timeout: float = 2.0,
                               poll_interval: float = 0.05) -> bool:
-    """Poll ``engine.active_requests`` until it reads 0, or *timeout* elapses.
-    Meant to run right after ``residency.cancel_all()``: a generation that
-    was only still running because nobody had told it to stop (the caller's
-    own just-cancelled request, most commonly) clears within a token or two,
-    so this resolves the common "still generating" complaint without ever
-    surfacing a confirm box for it. Returns whether the pin is clear."""
+    """Poll ``engine.active_requests`` every *poll_interval* seconds until it
+    reads 0, or *timeout* seconds elapse. Cancels nothing. Returns whether the
+    pin is clear."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     while loop.time() < deadline:
@@ -2116,6 +2120,20 @@ def _in_use_description(name: str, engine) -> str:
     return " and ".join(parts) if parts else "still in use"
 
 
+def _has_requests_in_flight(engine) -> bool:
+    """Whether *engine* has requests in flight: an int ``active_requests``
+    above 0 (anything else, such as a bare test double, reads as idle)."""
+    active = getattr(engine, "active_requests", 0)
+    return isinstance(active, int) and active > 0
+
+
+def _unload_busy_confirm_detail(name: str, engine) -> str:
+    """The ``confirm_required`` detail for unloading model *name* while
+    *engine* still has requests in flight."""
+    return (f"'{name}' is in use ({_in_use_description(name, engine)}); "
+            "unloading it anyway stops it and cuts off the reply it is writing")
+
+
 async def unload_all_models(*, force: bool = False) -> dict:
     """Release every currently-loaded model from GPU/CPU memory and wait until
     VRAM is actually reclaimed (see ``localm.vram.wait_for_vram_release`` - the
@@ -2127,8 +2145,15 @@ async def unload_all_models(*, force: bool = False) -> dict:
     owner-scoped ``/v1/models/unload`` route (``MODELS_WRITE``), and the
     requester-vouched ``POST /v1/instances/cooperate-unload`` (a
     sibling localm instance asking THIS one to free VRAM - multi-instance GPU
-    coordination, see ``localm.gpu_registry``). Behavior is unchanged from the
-    original inline implementation."""
+    coordination, see ``localm.gpu_registry``).
+
+    Without *force*, nothing is cancelled: a chat model with requests in
+    flight gets up to ``_wait_for_pin_clear``'s timeout (one wait shared by
+    every busy model) to finish on its own, and one still in use after that
+    stays loaded with its requests running, listed in ``skipped_in_use`` and
+    described in ``confirm_required``. With *force*, every generation on a
+    busy model is cancelled (``residency.cancel_all``) and it is unloaded.
+    See test_unload_all_never_cancels_a_busy_model_before_asking."""
     global _active_model_name, _last_active_model_name, _engine, _inference_sem
     loop = asyncio.get_running_loop()
     from localm.vram import (_live_free_vram_bytes, _vram_free_reading,
@@ -2194,9 +2219,8 @@ async def unload_all_models(*, force: bool = False) -> dict:
     if skipped_in_use:
         result["skipped_in_use"] = skipped_in_use
     if confirm_required:
-        # Present only for a model that is STILL in use after cancel_all()
-        # was given its grace period - describes what to tell the caller
-        # before it retries this same call with force=True.
+        # A model still in use after the wait, described for the caller to
+        # show before it retries with force=True.
         result["confirm_required"] = confirm_required
     _add_vram_fields(result, before=before, released=released, after=after,
                      before_fresh=before_fresh, before_scope=before_scope)
@@ -2206,30 +2230,30 @@ async def unload_all_models(*, force: bool = False) -> dict:
 async def _unload_engines_and_embedder(loop, _embedder_mod, unloaded_models,
                                        skipped_in_use, *,
                                        confirm_required: dict, force: bool = False) -> bool:
-    """The releasing half of ``unload_all_models``: unload every loaded, unpinned
-    chat engine (appending to *unloaded_models* / *skipped_in_use*), then the
-    shared embedder. Returns whether the embedder was released."""
+    """The releasing half of ``unload_all_models``: unload every loaded chat
+    engine that is idle, or every one with *force* (appending to
+    *unloaded_models* / *skipped_in_use* / *confirm_required*), then the
+    shared embedder. Without *force*, cancels nothing: first waits once, for
+    every busy engine at the same time, for its requests to finish on their
+    own, then skips any engine that has requests in flight when its turn
+    comes. With *force*, cancels a busy engine's generations
+    (``residency.cancel_all``) before unloading it. Returns whether the
+    embedder was released."""
+    if not force:
+        busy = [e for e in list(_engines.values())
+                if e.loaded and _has_requests_in_flight(e)]
+        if busy:
+            await asyncio.gather(*(_wait_for_pin_clear(e) for e in busy))
     for name in list(_engines.keys()):
         engine = _engines[name]
         if not engine.loaded:
             continue
-        # Honor the in-flight-request pin, like the VRAM-eviction and
-        # idle-unload paths: a pinned engine has a request generating (or about to)
-        # against it. Unloading it would free VRAM the request immediately reloads
-        # (so the reported "freed" total is a lie) and race a use-after-unload; skip
-        # it and report it as still in use. Gate on isinstance(int) exactly like
-        # _pin/_unpin: a non-int active_requests (a bare test double) is "not pinned".
-        active = getattr(engine, "active_requests", 0)
-        if isinstance(active, int) and active > 0:
-            residency.cancel_all(name)
-            if not force and not await _wait_for_pin_clear(engine):
+        if _has_requests_in_flight(engine):
+            if not force:
                 skipped_in_use.append(name)
                 confirm_required[name] = _in_use_description(name, engine)
                 continue
-            # Either the grace period cleared it (the common case: the
-            # caller's own just-stopped generation), or force=True proceeds
-            # regardless - engine.unload() below still forcibly kills the
-            # worker if something is genuinely still running.
+            residency.cancel_all(name)
         sem = _inference_sems.setdefault(name, InferenceGate())
         # Flag BEFORE acquiring the semaphore so no request that arrives after the
         # pin check above can take get_engine's fast path and pin this engine while
@@ -2493,17 +2517,15 @@ async def unload_one_model(name: str, *, force: bool = False) -> dict:
     case), not an error - callers that need to reject an unknown model name
     outright should check the registry themselves before calling this.
 
-    A pinned engine is no longer refused outright: ``residency.cancel_all``
-    is broadcast first, and a short grace period lets a generation that was
-    only running because nobody had told it to stop (the caller's own
-    just-cancelled request, most commonly) clear on its own - the common
-    case resolves with no confirm box at all. If it is still in use after
-    that, the owner's explicit action is final: pass *force* to evict
-    immediately regardless of what is running (the underlying
-    ``engine.unload()`` forcibly kills the isolated worker if it does not
-    exit within its own grace period); without it, this returns
-    ``{"status": "confirm_required", ...}`` describing what was found using
-    it, for the caller to show a confirmation before retrying with force."""
+    An engine with requests in flight: without *force*, nothing is
+    cancelled; waits for its requests to finish on their own
+    (``_wait_for_pin_clear``) and unloads it when they do, else returns
+    ``{"status": "confirm_required", "model": name, "detail": ...}`` with the
+    model loaded and its requests running, for the caller to confirm before
+    retrying with *force*. With *force*, cancels every generation on it
+    (``residency.cancel_all``) and unloads it at once (``engine.unload()``
+    kills the isolated worker if it does not exit within its own grace
+    period). See test_unload_one_never_cancels_a_busy_model_before_asking."""
     global _active_model_name, _last_active_model_name, _engine, _inference_sem
     loop = asyncio.get_running_loop()
     from localm.vram import (_live_free_vram_bytes, _vram_free_reading,
@@ -2521,17 +2543,12 @@ async def unload_one_model(name: str, *, force: bool = False) -> dict:
         if speech_result is not None:
             return speech_result
         return {"status": "already_unloaded", "model": name}
-    # Honor the in-flight-request pin: an engine a request is
-    # generating on must not be unloaded out from under it (it would reload it
-    # anyway, making the "freed" report a lie). Report it as in use, not unloaded.
-    # isinstance(int) guard matches _pin/_unpin (a bare test double is not pinned).
-    active = getattr(engine, "active_requests", 0)
-    if isinstance(active, int) and active > 0:
-        residency.cancel_all(name)
-        if not force and not await _wait_for_pin_clear(engine):
+    if _has_requests_in_flight(engine):
+        if force:
+            residency.cancel_all(name)
+        elif not await _wait_for_pin_clear(engine):
             return {"status": "confirm_required", "model": name,
-                    "detail": _in_use_description(name, engine)}
-        # Cleared during the grace period, or force=True - proceed below.
+                    "detail": _unload_busy_confirm_detail(name, engine)}
 
     _free = _live_free_vram_bytes
 
@@ -4670,26 +4687,42 @@ def _finish_pending_runtime_update() -> None:
     the runtime cannot be updated, the update's code is rolled back
     (``updater.rollback_last``) so the restart loads the previous version with
     its own runtime. Logs each step and the outcome; never raises, so the
-    restart always proceeds."""
+    restart always proceeds.
+
+    Then the component update the applied update left pending
+    (``updater_components.finish_pending``: sd.cpp, KoboldCpp, the managed
+    ComfyUI, uv), with the same rollback when a component cannot be updated."""
     try:
-        from localm import updater_runtime
-        if updater_runtime.read_pending() is None:
-            return
-        try:
-            from localm.inference.backends.llamacpp._loader import stop_probe_daemon
-            stop_probe_daemon()
-        except Exception:
-            _dbg_swallow("stopping the runtime probe daemon before the runtime update failed",
-                         level="warning")
+        from localm import updater_components, updater_runtime
         from localm.debuglog import logger as _dbg
-        status = updater_runtime.finish_pending(
-            say=lambda m: _dbg.info("runtime update during restart: %s", m))
+        if updater_runtime.read_pending() is not None:
+            try:
+                from localm.inference.backends.llamacpp._loader import stop_probe_daemon
+                stop_probe_daemon()
+            except Exception:
+                _dbg_swallow("stopping the runtime probe daemon before the runtime update "
+                             "failed", level="warning")
+            status = updater_runtime.finish_pending(
+                say=lambda m: _dbg.info("runtime update during restart: %s", m))
+            if status is not None and status["state"] not in ("updated", "current"):
+                _dbg.warning("runtime update during restart: %s; rolling the update back",
+                             status["note"])
+                updater_components.clear_pending()
+                from localm import updater
+                updater.rollback_last()
+                return
+            if status is not None:
+                _dbg.info("runtime update during restart: %s", status["note"])
+        if updater_components.read_pending() is None:
+            return
+        status = updater_components.finish_pending(
+            say=lambda m: _dbg.info("component update during restart: %s", m))
         if status is None:
             return
         if status["state"] in ("updated", "current"):
-            _dbg.info("runtime update during restart: %s", status["note"])
+            _dbg.info("component update during restart: %s", status["note"])
             return
-        _dbg.warning("runtime update during restart: %s; rolling the update back",
+        _dbg.warning("component update during restart: %s; rolling the update back",
                      status["note"])
         from localm import updater
         updater.rollback_last()

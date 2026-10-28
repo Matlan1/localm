@@ -893,10 +893,14 @@ def test_linux_cuda_uses_the_third_party_build_and_pypi_runtime_wheels(world, mo
         f"{API}/{HYBRID}/releases/tags/{PIN}", urls[build],
         "https://pypi.org/pypi/nvidia-cuda-runtime-cu12/12.9.79/json", wheels["nvidia-cuda-runtime-cu12"],
         "https://pypi.org/pypi/nvidia-cublas-cu12/12.9.79/json", wheels["nvidia-cublas-cu12"]]
-    assert world.files() == [".localm-backend", "LICENSE.llama-cpp", "libcublas.so.12",
-                             "libcublasLt.so.12", "libcudart.so.12", "libggml-cuda.so",
-                             "libllama.so"]
+    assert world.files() == [".localm-backend", ".localm-cuda-runtime.json",
+                             "LICENSE.llama-cpp", "libcublas.so.12", "libcublasLt.so.12",
+                             "libcudart.so.12", "libggml-cuda.so", "libllama.so"]
     assert world.marker() == f"cuda {PIN}\n"
+    from localm.setup_llama import cuda as _cuda
+    rec = _cuda.read_cuda_runtime(world.lib)
+    assert rec["line"] == "cuda-12"
+    assert set(rec["packages"]) == {"nvidia-cuda-runtime-cu12", "nvidia-cublas-cu12"}
 
 
 LINUX_ARM64_CUDA = {"b/libllama.so": b"libllama@cuda", "b/libggml.so": b"ggml",

@@ -3214,16 +3214,16 @@
             {
                 "code": "reportArgumentType",
                 "range": {
-                    "startColumn": 63,
-                    "endColumn": 73,
+                    "startColumn": 58,
+                    "endColumn": 68,
                     "lineCount": 1
                 }
             },
             {
                 "code": "reportOptionalOperand",
                 "range": {
-                    "startColumn": 60,
-                    "endColumn": 70,
+                    "startColumn": 55,
+                    "endColumn": 65,
                     "lineCount": 1
                 }
             },
