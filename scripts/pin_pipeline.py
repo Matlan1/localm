@@ -139,11 +139,13 @@ class InfraError(PipelineError):
 _SCRATCH_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
-def main_checkout_root(checkout: Path = REPO) -> Path:
-    """The main checkout that *checkout* (a checkout's top level) belongs to: the parent
-    of git's common directory, the same directory `git rev-parse --git-common-dir`
-    names. Returns *checkout* itself when it holds no `.git` file (the main checkout, or
-    no git checkout at all). Raises InfraError when its `.git` file is not a gitdir link."""
+def main_checkout_root(checkout: Path | None = None) -> Path:
+    """The main checkout that *checkout* (a checkout's top level, default REPO) belongs
+    to: the parent of git's common directory, the same directory `git rev-parse
+    --git-common-dir` names. Returns *checkout* itself when it holds no `.git` file (the
+    main checkout, or no git checkout at all). Raises InfraError when its `.git` file is
+    not a gitdir link."""
+    checkout = REPO if checkout is None else checkout
     dot_git = checkout / ".git"
     if not dot_git.is_file():
         return checkout
@@ -158,10 +160,10 @@ def main_checkout_root(checkout: Path = REPO) -> Path:
     return common.parent
 
 
-def pipeline_scratch_dir(key: str, checkout: Path = REPO) -> Path:
+def pipeline_scratch_dir(key: str, checkout: Path | None = None) -> Path:
     """`<main checkout>/scratch/pin-pipeline/<key>`: the scratch directory of one pipeline
-    job, inside the gitignored `scratch/` of the main checkout *checkout* belongs to.
-    Raises ValueError when *key* is not a single plain name."""
+    job, inside the gitignored `scratch/` of the main checkout *checkout* (default REPO)
+    belongs to. Raises ValueError when *key* is not a single plain name."""
     if not _SCRATCH_KEY.fullmatch(key):
         raise ValueError(f"not a plain scratch key: {key!r}")
     return main_checkout_root(checkout) / "scratch" / "pin-pipeline" / key
@@ -794,9 +796,9 @@ def sync_main_checkout(repo: Path = REPO) -> None:
                          f"{result.stderr}")
 
 
-def pipeline_worktree_path(repo: Path = REPO) -> Path:
+def pipeline_worktree_path(repo: Path | None = None) -> Path:
     """`<main checkout>/.claude/worktrees/pin-pipeline`: where the dedicated pipeline
-    worktree for *repo* lives (it may not exist yet)."""
+    worktree for *repo* (default REPO) lives (it may not exist yet)."""
     return main_checkout_root(repo) / ".claude" / "worktrees" / "pin-pipeline"
 
 

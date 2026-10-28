@@ -27,9 +27,33 @@ def _git_common_dir_parent(checkout: Path) -> Path:
     return Path(out).resolve().parent
 
 
-def _every_pipeline_path(checkout: Path) -> dict[str, Path]:
+def _init_repo(root: Path) -> Path:
+    repo = root / "main"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "master"], cwd=repo, check=True)
+    subprocess.run(["git", "-c", "user.email=t@example.com", "-c", "user.name=T",
+                    "commit", "-q", "--allow-empty", "-m", "init"], cwd=repo, check=True)
+    return repo
+
+
+@pytest.fixture(params=["this-checkout", "main-checkout", "linked-worktree-outside-main"])
+def checkout(request, tmp_path, monkeypatch):
+    """The checkout the pipeline scripts run from, set as REPO in both modules."""
+    if request.param == "this-checkout":
+        return pw.REPO
+    repo = _init_repo(tmp_path)
+    chosen = repo
+    if request.param == "linked-worktree-outside-main":
+        chosen = tmp_path / "elsewhere" / "linked"
+        subprocess.run(["git", "worktree", "add", "-q", "--detach", str(chosen)], cwd=repo, check=True)
+    monkeypatch.setattr(pw, "REPO", chosen)
+    monkeypatch.setattr(pp, "REPO", chosen)
+    return chosen
+
+
+def _every_pipeline_path() -> dict[str, Path]:
     paths = {f"scratch_dir({a.key})": pw.scratch_dir(a.key) for a in pw.build_advancers()}
-    worktree = pp.pipeline_worktree_path(checkout)
+    worktree = pp.pipeline_worktree_path()
     paths["pipeline_worktree_path"] = worktree
     paths["worktree_temp_dir"] = pp.worktree_temp_dir(worktree)
     paths["comfyui_scratch_workdir"] = pp._comfyui_scratch_workdir()
@@ -37,20 +61,24 @@ def _every_pipeline_path(checkout: Path) -> dict[str, Path]:
     return paths
 
 
-def test_every_pin_pipeline_path_resolves_inside_the_repo_root():
-    root = _git_common_dir_parent(pw.REPO)
-    paths = _every_pipeline_path(pw.REPO)
+def test_every_pin_pipeline_path_resolves_inside_the_repo_root(checkout):
+    root = _git_common_dir_parent(checkout)
+    paths = _every_pipeline_path()
     outside = {name: str(p) for name, p in paths.items()
                if not p.resolve().is_relative_to(root) or p.resolve() == root}
     assert not outside, f"pin-pipeline paths outside {root}: {outside}"
 
 
-def test_pipeline_paths_land_in_the_gitignored_scratch_and_worktrees_dirs():
-    root = pp.main_checkout_root(pw.REPO)
-    paths = _every_pipeline_path(pw.REPO)
-    assert paths.pop("pipeline_worktree_path") == root / ".claude" / "worktrees" / "pin-pipeline"
+def test_pipeline_paths_land_in_the_scratch_and_worktrees_dirs(checkout):
+    root = _git_common_dir_parent(checkout)
+    paths = _every_pipeline_path()
+    assert paths.pop("pipeline_worktree_path").resolve() == root / ".claude" / "worktrees" / "pin-pipeline"
     for name, p in paths.items():
-        assert p.parent == root / "scratch" / "pin-pipeline", name
+        assert p.parent.resolve() == root / "scratch" / "pin-pipeline", name
+
+
+def test_the_scratch_and_worktrees_dirs_are_gitignored():
+    root = _git_common_dir_parent(pw.REPO)
     for rel in ("scratch/pin-pipeline/x", ".claude/worktrees/pin-pipeline/x"):
         ignored = subprocess.run(["git", "check-ignore", "-q", rel], cwd=root)
         assert ignored.returncode == 0, rel
@@ -66,15 +94,6 @@ def test_scratch_keys_are_distinct_per_job():
 def test_a_key_that_is_not_a_plain_name_is_refused(key, tmp_path):
     with pytest.raises(ValueError, match="not a plain scratch key"):
         pp.pipeline_scratch_dir(key, tmp_path)
-
-
-def _init_repo(root: Path) -> Path:
-    repo = root / "main"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-q", "-b", "master"], cwd=repo, check=True)
-    subprocess.run(["git", "-c", "user.email=t@example.com", "-c", "user.name=T",
-                    "commit", "-q", "--allow-empty", "-m", "init"], cwd=repo, check=True)
-    return repo
 
 
 def test_a_linked_worktree_resolves_to_its_main_checkout_like_git_does(tmp_path):
