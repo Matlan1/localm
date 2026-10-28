@@ -264,8 +264,8 @@ def _keeps_existing_install(target: Path, lib_name: str, backend: str, force: bo
             build = _sl._provisioned_build(target) if have else None
             label = f" ({have} {build})" if build else (f" ({have})" if have else "")
             console.print(f"[green]Already provisioned[/green]{label} at {target}")
-            if (not assume_yes and sys.stdin and sys.stdin.isatty() and _net_allowed()
-                    and click.confirm("Do you want to re-download/replace them?", default=False)):
+            if (not assume_yes and _sl._interactive() and _net_allowed()
+                    and _sl._confirm("Do you want to re-download/replace them?", default=False)):
                 force = True
                 console.print("[yellow]Replacing existing build...[/yellow]")
             else:

@@ -17,8 +17,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-import click
-
 from localm.debuglog import logger
 from localm.setup_llama._common import console
 from localm.setup_llama.download import _extract_archive, _validate_archive, ArtifactError
@@ -377,7 +375,7 @@ def _keep_choice_and_use_vulkan(reason: str, assume_yes: bool, explicit: bool = 
         return "vulkan", False, reason
     if not assume_yes:
         _sl._flush_stdin()
-        if not click.confirm("  Install the Vulkan build now so localm works? Your CUDA "
+        if not _sl._confirm("  Install the Vulkan build now so localm works? Your CUDA "
                              "choice is kept and shown until it can be used. "
                              "(No = stop, nothing is changed)", default=True):
             console.print("[yellow]Stopped. Nothing was changed.[/yellow] Fix the cause, "
@@ -459,7 +457,7 @@ def _cuda_setup_dialogue(info: NvidiaInfo, assume_yes: bool, det=None,
             return "cuda", True, None
         if not other_vendors:
             _sl._flush_stdin()
-            if click.confirm("  Continue with CUDA anyway? (No = use Vulkan)", default=False):
+            if _sl._confirm("  Continue with CUDA anyway? (No = use Vulkan)", default=False):
                 return "cuda", True, None
             return "vulkan", False, None
 
@@ -471,7 +469,9 @@ def _cuda_setup_dialogue(info: NvidiaInfo, assume_yes: bool, det=None,
         console.print("    [1] Continue with CUDA anyway")
         console.print(f"    [2] Switch to {recommended} (recommended for your hardware)")
         console.print("    [3] Quit")
-        pick = click.prompt("  Pick 1-3", type=click.Choice(["1", "2", "3"]), default="2")
+        pick = _sl._choose("  Pick 1-3", [("1", "Continue with CUDA anyway"),
+                                         ("2", f"Switch to {recommended}"),
+                                         ("3", "Quit")], "2")
         if pick == "1":
             return "cuda", True, None
         if pick == "3":
@@ -481,7 +481,7 @@ def _cuda_setup_dialogue(info: NvidiaInfo, assume_yes: bool, det=None,
     # Driver OK (or capability unknown but a GPU is present): offer the fetch.
     console.print("  [yellow]i[/yellow] Fetching self-contained CUDA runtime bundle. [bold]No Toolkit needed[/bold].")
     _sl._flush_stdin()
-    if assume_yes or click.confirm("  Download the CUDA build + runtime now?", default=True):
+    if assume_yes or _sl._confirm("  Download the CUDA build + runtime now?", default=True):
         return "cuda", True, None
     kept = "; your CUDA choice is kept" if explicit else ""
     console.print(f"  [dim]Using Vulkan for now (works on your driver){kept}. Retry "

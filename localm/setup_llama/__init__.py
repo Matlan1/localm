@@ -87,7 +87,7 @@ import click  # noqa: F401
 from localm import config  # noqa: F401
 from localm.http_ssl import verified_urlopen as _verified_urlopen
 from localm.setup_llama._common import (
-    console, _flush_stdin, _require_network_allowed,
+    console, _flush_stdin, _require_network_allowed, _interactive, _confirm, _choose,
 )
 from localm.setup_llama.pins import (
     DEFAULT_URL, DEFAULT_URL_SHA256, _ROCM_TAG, _ROCM_BUILD, _ROCM_CPU_ASSET, _ROCM_CPU_TAG,
@@ -189,6 +189,7 @@ __all__ = [
     "_extract_archive", "_extract_libgomp_from_deb", "_fetch_and_place",
     "_fetch_cuda_runtime_libs", "_fetch_pypi_runtime_lib", "_fetch_verified",
     "_files_in_use", "_floor_at_pinned_tag", "_FLOOR_TAG_DESCRIPTION", "_flush_stdin",
+    "_interactive", "_confirm", "_choose",
     "_has_vendor_library", "_human_mb", "_informative_error_line",
     "install_rocm_simd_cpu", "_install_runtime_wheel", "installed_backend",
     "installed_build", "installed_cpu_overlay", "installed_runtime_identity",

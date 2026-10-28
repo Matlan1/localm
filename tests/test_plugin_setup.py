@@ -140,12 +140,65 @@ def test_interactive_reprompts_on_junk_then_installs(home_env, monkeypatch):
     assert first in _installed()
 
 
-def test_interactive_blank_skips_without_reprompt(home_env, monkeypatch):
-    """A blank entry is a deliberate skip: it must NOT re-prompt and must install
-    nothing (only one prompt is consumed)."""
+def _prompt_answers(answers):
+    """A click.prompt stand-in: each answer in turn, an empty one giving the
+    prompt's default the way pressing Enter does."""
+    it = iter(answers)
+
+    def prompt(*a, **k):
+        answer = next(it)
+        return answer if answer else k.get("default", "")
+    return prompt
+
+
+def test_interactive_enter_installs_the_recommended_set(home_env, monkeypatch):
+    """Enter accepts the preselected set every setup variant offers."""
+    from localm import cli, setup_spec
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(cli.click, "prompt", _prompt_answers([""]))
+    cli.plugin_setup.callback(None, False, False, with_deps=False)
+    assert set(setup_spec.RECOMMENDED_PLUGINS) <= _installed()
+    assert "video" not in _installed()
+
+
+@pytest.mark.parametrize("answer", ["none", "NONE", "-"])
+def test_interactive_none_skips_without_reprompt(home_env, monkeypatch, answer):
+    """'none' (or '-') is a deliberate skip: no re-prompt, nothing installed."""
     from localm import cli
     monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
-    answers = iter([""])            # a single blank; a re-prompt would StopIteration
-    monkeypatch.setattr(cli.click, "prompt", lambda *a, **k: next(answers))
+    monkeypatch.setattr(cli.click, "prompt", _prompt_answers([answer]))
     cli.plugin_setup.callback(None, False, False, with_deps=False)
     assert _installed() in (set(), {"chat"})
+
+
+def test_all_installs_what_setup_spec_offers_and_nothing_withheld(home_env):
+    from localm.cli import main
+    from localm import setup_spec
+    r = CliRunner().invoke(main, ["plugin", "setup", "--no-deps", "--all"])
+    assert r.exit_code == 0, r.output
+    offered = {n for n, _ in setup_spec.setup_plugins()}
+    assert offered <= _installed()
+    assert "exllama" not in offered and "exllama" not in _installed()
+
+
+@pytest.mark.parametrize("flag,saved", [("--no-deps", False), ("--with-deps", True)])
+def test_remember_deps_saves_the_answer(home_env, monkeypatch, flag, saved):
+    """The graphical installer's deps answer is saved like the console's."""
+    from localm.cli import main
+    from localm.cli import plugins as cli_plugins
+    import localm.config as cfg
+    monkeypatch.setattr(cli_plugins, "_install_deps", lambda mgr, n: None)
+    cfg.update_config(lambda c: c.__setitem__("auto_install_plugin_deps", not saved))
+    r = CliRunner().invoke(main, ["plugin", "setup", "--plugins", "web", flag,
+                                  "--remember-deps"])
+    assert r.exit_code == 0, r.output
+    assert cfg.load_config()["auto_install_plugin_deps"] is saved
+
+
+def test_without_remember_deps_the_setting_is_untouched(home_env):
+    from localm.cli import main
+    import localm.config as cfg
+    cfg.update_config(lambda c: c.__setitem__("auto_install_plugin_deps", True))
+    r = CliRunner().invoke(main, ["plugin", "setup", "--plugins", "web", "--no-deps"])
+    assert r.exit_code == 0, r.output
+    assert cfg.load_config()["auto_install_plugin_deps"] is True

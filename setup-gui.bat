@@ -19,51 +19,51 @@ echo.
 echo   LocaLM graphical setup
 echo.
 
-rem ---- locate uv -------------------------------------------------------------
-rem  A uv already inside this folder (setup.bat's Portable option puts one
-rem  there) is used as is. A uv found elsewhere on this computer is used only
-rem  when the user says so: the same Portable / Shared question setup.bat asks,
-rem  because Portable means uv itself lives in this folder.
-set "UVEXE="
-set "SYSUV="
-if exist ".uv\uv.exe" set "UVEXE=%CD%\.uv\uv.exe"
-if defined UVEXE goto open_window
-where uv >nul 2>nul && set "SYSUV=1"
-if not defined SYSUV goto uv_missing
-
-echo   A uv is already installed on this computer.
-echo.
-echo   Keep localm's Python tooling ^(uv itself, its runtime, and downloads^) inside this folder?
-echo     [1] Portable - everything in this folder ^(self-contained; re-downloads per clone^)
-echo     [2] Shared   - reuse/install uv at its normal per-user location ^(faster; lives in your user profile^)
+rem ---- portable vs shared: where localm's Python tooling lives ---------------
+rem  The question setup.bat asks, asked once, here. The window reads the answer
+rem  from LOCALM_GUI_STORE (portable or shared), the uv in use from LOCALM_GUI_UV,
+rem  and LOCALM_GUI_UV_INSTALLED=1 when uv was installed at its per-user location
+rem  by this run. Portable uses only .\.uv\uv.exe, installing it there when it is
+rem  missing. Shared uses the uv on PATH, never .\.uv, and installs uv at its
+rem  normal per-user location when there is none.
+echo  Keep localm's Python tooling ^(uv itself, its runtime, and downloads^) inside this folder?
+echo    [1] Portable - everything in this folder (self-contained; re-downloads per clone)
+echo    [2] Shared   - reuse/install uv at its normal per-user location (faster; lives in your user profile)
 set "STOREPICK="
+rem SETUP-Q: tooling-store
 set /p "STOREPICK=  Pick 1 or 2 [1]: "
 if not defined STOREPICK set "STOREPICK=1"
-if "%STOREPICK:~0,1%"=="2" goto use_shared_uv
+set "UVEXE="
+set "LOCALM_GUI_UV_INSTALLED="
+if "%STOREPICK%"=="1" goto portable_uv
+
+set "LOCALM_GUI_STORE=shared"
+echo  Shared: reusing/installing uv and its Python + cache ^(outside this folder^).
+call :find_shared_uv
+if defined UVEXE goto have_uv
+call :ask_install_uv
+if errorlevel 1 goto uv_declined
 echo.
+echo  Installing uv ...
+set "UV_INSTALL_DIR="
+set "UV_UNMANAGED_INSTALL="
 goto install_uv
 
-:use_shared_uv
-for /f "delims=" %%i in ('where uv') do if not defined UVEXE set "UVEXE=%%i"
-set "LOCALM_GUI_STORE=shared"
-echo   Using %UVEXE%
-goto open_window
-
-:uv_missing
-echo   uv ^(the Python package manager LocaLM builds on^) is not installed yet.
-echo   It is a small download and is needed before any window can open.
+:portable_uv
+set "LOCALM_GUI_STORE=portable"
+echo  Portable: uv, Python, and downloads all under this folder
+if exist ".uv\uv.exe" goto portable_have_uv
+call :ask_install_uv
+if errorlevel 1 goto uv_declined
 echo.
-set "GETUV="
-set /p "GETUV=  Install it now? [Y/n]: "
-if not defined GETUV set "GETUV=Y"
-if /i "%GETUV:~0,1%"=="N" goto uv_declined
-
-:install_uv
-echo   Installing uv into this folder ...
+echo  Installing uv ...
 rem  UV_UNMANAGED_INSTALL keeps it in .\.uv without adding that folder to
 rem  the user PATH or writing an install receipt under %LOCALAPPDATA%\uv.
 set "UV_INSTALL_DIR=%CD%\.uv"
 set "UV_UNMANAGED_INSTALL=%CD%\.uv"
+echo  Portable: installing uv itself under .\.uv
+
+:install_uv
 set "UV_INSTALLER_VERSION=0.13.6"
 set "UV_INSTALLER_SHA256=d00580051699bee58a2e2d9b925f45788b35f7e0fff7966fd5bedfc3c547dc7d"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol=[Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; $f=$null; try { $d=$env:STMP; if ($d) { $d=(Resolve-Path -LiteralPath $d -ErrorAction Stop).ProviderPath } else { $d=[IO.Path]::GetTempPath() }; $f=Join-Path $d ('uv-installer-'+[guid]::NewGuid()+'.ps1'); try { Invoke-WebRequest -UseBasicParsing -Uri ('https://github.com/astral-sh/uv/releases/download/'+$env:UV_INSTALLER_VERSION+'/uv-installer.ps1') -OutFile $f -ErrorAction Stop } catch { exit 61 }; $h=$null; $fs=$null; try { $fs=[IO.File]::Open($f,'Open','Read','Read'); $h=[BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($fs)).Replace('-','') } catch { }; if ($h -ne $env:UV_INSTALLER_SHA256) { exit 62 }; $env:PSModulePath=$null; & powershell -NoProfile -ExecutionPolicy Bypass -File $f; exit $LASTEXITCODE } finally { if ($fs) { $fs.Dispose() }; if ($f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue } }"
@@ -72,16 +72,29 @@ if "%UVRC%"=="61" echo   [!] Could not download the uv %UV_INSTALLER_VERSION% in
 if "%UVRC%"=="62" echo   [!] The downloaded uv installer did not match its expected checksum, or could not be read to check it, and was not run.
 if "%UVRC%"=="61" goto uv_refused
 if "%UVRC%"=="62" goto uv_refused
-rem  Prepend every directory uv may have been installed to, in setup.bat's own
-rem  order, so the uv just installed is callable in this shell right now.
-set "PATH=%CD%\.uv;%USERPROFILE%\.local\bin;%USERPROFILE%\.cargo\bin;%HOMEDRIVE%%HOMEPATH%\.local\bin;%PATH%"
-if exist ".uv\uv.exe" set "UVEXE=%CD%\.uv\uv.exe"
-if not defined UVEXE if not defined SYSUV where uv >nul 2>nul && set "UVEXE=uv"
-if defined UVEXE goto open_window
+if "%LOCALM_GUI_STORE%"=="portable" goto portable_installed
+set "LOCALM_GUI_UV_INSTALLED=1"
+rem  Prepend every directory the per-user install may have used, in setup.bat's
+rem  own order.
+set "PATH=%USERPROFILE%\.local\bin;%USERPROFILE%\.cargo\bin;%HOMEDRIVE%%HOMEPATH%\.local\bin;%PATH%"
+call :find_shared_uv
+if defined UVEXE goto have_uv
+goto uv_not_callable
 
+:portable_installed
+if not exist ".uv\uv.exe" goto uv_not_callable
+:portable_have_uv
+set "UVEXE=%CD%\.uv\uv.exe"
+
+:have_uv
+set "LOCALM_GUI_UV=%UVEXE%"
+echo  Using %UVEXE%
+goto open_window
+
+:uv_not_callable
 echo.
 echo   [!] uv still is not callable, so the graphical setup cannot start.
-echo       Looked for %CD%\.uv\uv.exe ^(the installer did not leave one there^).
+if "%LOCALM_GUI_STORE%"=="portable" echo       Looked for %CD%\.uv\uv.exe ^(the installer did not leave one there^).
 echo       Open a NEW terminal and run setup.bat instead.
 pause
 exit /b 1
@@ -105,12 +118,12 @@ rem  --no-project so uv never tries to resolve this repo as its own project, and
 rem  an explicit --python so the interpreter is the managed 3.12 the install
 rem  targets rather than whatever else is on the machine.
 echo   Opening the setup window ...
-rem  Keep the interpreter this window runs on inside the folder, so a portable
+rem  Portable keeps the interpreter this window runs on inside the folder, so the
 rem  install reuses it rather than downloading a second copy.
-if not "%LOCALM_GUI_STORE%"=="shared" set "UV_PYTHON_INSTALL_DIR=%CD%\.python"
-if not "%LOCALM_GUI_STORE%"=="shared" set "UV_CACHE_DIR=%CD%\.cache"
+if "%LOCALM_GUI_STORE%"=="portable" set "UV_PYTHON_INSTALL_DIR=%CD%\.python"
+if "%LOCALM_GUI_STORE%"=="portable" set "UV_CACHE_DIR=%CD%\.cache"
 set "UV_SYSTEM_CERTS=1"
-"%UVEXE%" run --no-project --python 3.12 python "installer\gui.py"
+"%UVEXE%" run --no-project --isolated --python 3.12 python "installer\gui.py"
 set "RC=%errorlevel%"
 
 rem  42 and 43: an uninstall finished in the window; the Python runtime it ran
@@ -156,3 +169,25 @@ echo   [!] Some LocaLM folders could not be removed - close any LocaLM window
 echo       and delete them by hand, or run  setup.bat finish-uninstall  again.
 pause
 exit /b 1
+
+rem ===========================================================================
+rem  :find_shared_uv - sets UVEXE to the first uv on PATH that is not this
+rem  folder's .\.uv copy, or leaves it undefined.
+rem ===========================================================================
+:find_shared_uv
+set "UVEXE="
+for /f "delims=" %%i in ('where uv 2^>nul') do if not defined UVEXE if /i not "%%~dpi"=="%CD%\.uv\" set "UVEXE=%%i"
+goto :eof
+
+rem ===========================================================================
+rem  :ask_install_uv - setup.bat's uv-install question. Exit code 1 when the
+rem  user declines.
+rem ===========================================================================
+:ask_install_uv
+echo  [!] uv (the Python package manager localm builds on) is not installed.
+set "GETUV="
+rem SETUP-Q: uv-install
+set /p "GETUV=  Install it now with Astral's official installer? [Y/n]: "
+if not defined GETUV set "GETUV=Y"
+if /i "%GETUV:~0,1%"=="N" exit /b 1
+exit /b 0

@@ -1157,14 +1157,40 @@ def test_a_universal_backend_that_does_not_load_names_the_missing_library(world)
     r = world.invoke("--backend", "vulkan")
     assert r.exit_code == 1
     _in_order(r.text,
+              "'vulkan' was provisioned but did not load: libvulkan.so.1 - on Debian/Ubuntu: "
+              "sudo apt install libvulkan1",
+              "Trying cpu...",
               "'vulkan' was provisioned but the native library did not load.",
               "Missing OS library: libvulkan.so.1 - on Debian/Ubuntu: sudo apt install libvulkan1 "
               "(or your GPU vendor's Vulkan ICD/driver package)",
               "Fix the cause and retry with: localm setup-llama --backend vulkan --force - or "
               "provide your own build with --from <build dir>. See docs/gpu-setup.md.")
-    assert "Trying" not in r.text
     assert world.marker() is None and world.history() == []
     assert world.probe_calls == 1
+
+
+def test_a_vulkan_build_that_does_not_load_falls_back_to_cpu(world):
+    world.platform("linux")
+    world.release(UPSTREAM, PIN, [
+        (f"llama-{PIN}-bin-ubuntu-vulkan-x64.tar.gz",
+         _targz({"b/libllama.so": b"x", "b/libggml.so": b"y"}), "ok"),
+        (f"llama-{PIN}-bin-ubuntu-x64.tar.gz",
+         _targz({"b/libllama.so": b"c", "b/libggml.so": b"d"}), "ok")])
+    world.probes = [(1, "RuntimeError: Failed to load libllama.so from /x: libvulkan.so.1: "
+                        "cannot open shared object file: No such file or directory\n"),
+                    (0, "")]
+    r = world.invoke("--backend", "vulkan", "--yes")
+    assert r.exit_code == 0, r.output
+    _in_order(r.text,
+              "'vulkan' was provisioned but did not load: libvulkan.so.1",
+              "Non-interactive: installing the CPU build so localm works",
+              "Trying cpu...",
+              "Installed cpu instead of vulkan: no GPU acceleration.",
+              "Your choice 'vulkan' is kept, but 'cpu' is what is installed and in use now.")
+    assert world.marker().startswith("cpu")
+    assert world.choice()["requested"] == "vulkan"
+    assert "libvulkan.so.1" in world.choice()["reason"]
+    assert world.probe_calls == 2
 
 
 def test_a_runtime_with_no_compute_backend_is_a_failed_provision(world):
