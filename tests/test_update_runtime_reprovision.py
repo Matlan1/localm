@@ -588,3 +588,31 @@ def test_first_start_only_for_commands_that_load_the_runtime(updated_by_an_old_u
     _start(updated_by_an_old_updater, monkeypatch, command="ps", calls=calls)
     assert calls == []
     assert updater_runtime.read_pending() is None
+
+
+def test_a_pending_reprovision_of_a_rolled_back_version_is_dropped(install):
+    data, sig = _release()
+    updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
+                  defer_runtime=True)
+    assert updater_runtime.read_pending()["version"] == "0.3.2"
+    updater.rollback_last(installed=install)
+    assert updater_runtime.finish_pending(
+        root=install, runner=lambda c: pytest.fail(f"must not provision {c}")) is None
+    assert updater_runtime.read_pending() is None
+    assert _marker(install) == "amd-rocm b1349-cpu-b11719"
+
+
+@pytest.mark.skipif(not (sys.platform == "win32" or sys.platform.startswith("linux")),
+                    reason="holder detection covers Windows and Linux")
+def test_a_runtime_released_while_waiting_is_reprovisioned(install):
+    import threading
+    held = _real_library(_lib(install))
+    data, sig = _release()
+    updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
+                  defer_runtime=True)
+    holder = _hold(held)
+    threading.Timer(1.0, _release_hold, args=(holder,)).start()
+    status = updater_runtime.finish_pending(
+        root=install, runner=_fake_setup_llama(install, "b1355-cpu-b11908"), wait=30)
+    assert status["state"] == "updated", status
+    assert _marker(install) == "amd-rocm b1355-cpu-b11908"
