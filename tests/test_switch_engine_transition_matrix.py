@@ -1190,7 +1190,7 @@ class TestBusyResidentModel:
         assert hs._engines == {"model-a": a, "model-b": b}
         assert b.placement_heal == hs.PlacementHeal(frozenset({"model-a"}), False)
 
-    def test_an_explicit_switch_still_cancels_instead_of_waiting(self, monkeypatch):
+    def test_an_explicit_switch_asks_instead_of_waiting_for_idle(self, monkeypatch):
         monkeypatch.setattr(hs, "_BUSY_VICTIM_IDLE_WAIT_S", 60.0)
         a = GatedEngine("model-a")
         b = _SizedEngine("model-b")
@@ -1202,7 +1202,8 @@ class TestBusyResidentModel:
                                            on_status=statuses.append))
 
         assert res["status"] == "confirm_required"
-        assert env.cancelled == ["model-a"] and statuses == []
+        assert env.cancelled == [] and statuses == []
+        assert a.active_requests == 1 and hs._engines["model-a"] is a
 
     def test_two_loads_waiting_for_one_busy_model_both_finish(self, monkeypatch, caplog):
         monkeypatch.setattr(hs, "_BUSY_VICTIM_IDLE_WAIT_S", 5.0)
@@ -1260,37 +1261,38 @@ class TestBusyResidentModel:
         a = GatedEngine("model-a")
         b = _SizedEngine("model-b")
 
-        def _removed_elsewhere(name):
+        def _removed_elsewhere():
             hs._engines.pop("model-a", None)
             hs._engines_lru.remove("model-a")
             a.active_requests = 0
             a._loaded = False
 
-        env = _install(monkeypatch, {"model-a": a, "model-b": b},
-                       on_cancel=_removed_elsewhere)
+        env = _install(monkeypatch, {"model-a": a, "model-b": b})
         _seat("model-a", a, active=True, busy=1)
+        _flip_once_the_wait_starts(monkeypatch, _removed_elsewhere)
 
         res = asyncio.run(hs.switch_engine("model-b", env.factory))
 
         assert res == {"status": "loaded", "model": "model-b", **_FULL}
-        assert a.unload_calls == 0
+        assert a.unload_calls == 0 and env.cancelled == []
 
     def test_an_explicit_switch_does_not_unload_a_claimed_model_twice(self, monkeypatch):
         a = GatedEngine("model-a")
         b = _SizedEngine("model-b")
 
-        def _unload_begins(name):
+        def _unload_begins():
             a.unloading = True
             a.active_requests = 0
 
-        env = _install(monkeypatch, {"model-a": a, "model-b": b},
-                       on_cancel=_unload_begins)
+        env = _install(monkeypatch, {"model-a": a, "model-b": b})
         _seat("model-a", a, active=True, busy=1)
+        _flip_once_the_wait_starts(monkeypatch, _unload_begins)
 
         res = asyncio.run(hs.switch_engine("model-b", env.factory))
 
         assert a.unload_calls == 0, "only the unload already under way frees it"
         assert res["status"] == "confirm_required"
+        assert env.cancelled == []
 
     def test_get_engine_passes_the_wait_status_to_the_load(self, monkeypatch):
         from localm.inference.protocol import (LOADING_MODEL_STATUS,
@@ -1636,7 +1638,8 @@ class TestBackendSizedAdmission:
         assert result == {
             "status": "confirm_required", "model": "model-b",
             "detail": ("'model-b' does not fit the estimated free VRAM "
-                       f"(need ~{13 * 1024} MB, {12 * 1024} MB free) even after "
+                       f"(needs ~{13 * 1024} MB free including a safety margin, "
+                       f"{12 * 1024} MB free) even after "
                        "eviction; loading it anyway will let the backend "
                        "fall back to partial CPU offload, which is slower")}
 
