@@ -321,6 +321,28 @@ class TestToolResultAndCallFormatting:
         assert "[▸] Add ActivitySpinner" in out
         assert "[ ] Run pytest" in out
 
+    def test_set_todos_renders_checklist_from_status_marker_lines(self, capsys):
+        from localm.plugins.coder.tools.tasks import tool_set_todos
+
+        class _Session:
+            todos = None
+
+            def get_todos(self):
+                return self.todos
+
+            def set_todos(self, todos):
+                self.todos = todos
+
+        items = ["[x] write big.py", "[>] run it", "[ ] report"]
+        res = tool_set_todos(Path("."), items=items, _session=_Session())
+        assert res.ok
+        display.print_tool_result("set_todos", res, verbose=False, args={"items": items})
+        out = capsys.readouterr().out
+        assert "todos: 1/3 done" in out
+        assert "[✓] write big.py" in out
+        assert "[▸] run it" in out
+        assert "[ ] report" in out
+
     def test_multiline_edit_file_args_summarized_by_line_count(self):
         text = display.tool_call_text(
             "edit_file",

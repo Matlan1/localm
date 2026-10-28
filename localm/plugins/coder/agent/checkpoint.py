@@ -27,6 +27,8 @@ def _project_dir_for(cwd) -> Path:
     from localm.config import HOME_DIR
     return HOME_DIR / "checkpoints" / _project_digest(cwd)
 
+_PROJECT_MAP_NAME = "projectmap.json"
+
 def _project_map_path_for(cwd) -> Path:
     """Where the cross-session project-map cache lives for *cwd*:
     ``HOME/checkpoints/<project-digest>/projectmap.json`` - a SIBLING of this
@@ -35,7 +37,7 @@ def _project_map_path_for(cwd) -> Path:
     shares and refreshes the SAME cache file. See
     ``localm.plugins.coder.indexer.ProjectMap.load_cached_and_reconcile`` and
     ``save_cache`` for the read/write side."""
-    return _project_dir_for(cwd) / "projectmap.json"
+    return _project_dir_for(cwd) / _PROJECT_MAP_NAME
 
 _ID_OK = re.compile(r"\A[A-Za-z0-9_-]{1,64}\Z")
 
@@ -56,6 +58,18 @@ def is_valid_checkpoint_id(checkpoint_id: str) -> bool:
     construction.
     """
     return bool(_ID_OK.match(checkpoint_id or ""))
+
+
+def _is_checkpoint_file(p: Path) -> bool:
+    """Does *p* carry a per-session checkpoint's name, ``<checkpoint-id>.json``
+    with a valid id? False for the project map that shares the directory."""
+    return (p.suffix == ".json" and p.name != _PROJECT_MAP_NAME
+            and is_valid_checkpoint_id(p.stem))
+
+
+def _checkpoint_files(d: Path) -> list:
+    """Every per-session checkpoint file in the project directory *d*."""
+    return [p for p in d.glob("*.json") if _is_checkpoint_file(p)]
 
 
 def _checkpoint_path_for(cwd, checkpoint_id: str) -> Path:
@@ -146,7 +160,7 @@ def _any_checkpoint_file_present(cwd) -> bool:
     not it parses - distinguishes "never saved one" from "saved one that is now
     unreadable" for checkpoint_info's caller."""
     d = _project_dir_for(cwd)
-    if d.is_dir() and any(d.glob("*.json")):
+    if d.is_dir() and _checkpoint_files(d):
         return True
     return (_legacy_home_checkpoint_path_for(cwd).is_file()
             or _legacy_checkpoint_path_for(cwd).is_file())
@@ -166,7 +180,7 @@ def list_checkpoints(cwd) -> list:
     if not d.is_dir():
         return []
     dated = []
-    for p in d.glob("*.json"):
+    for p in _checkpoint_files(d):
         data = _read_checkpoint(p)
         if data is None:
             continue
@@ -240,7 +254,7 @@ def delete_project_checkpoints(cwd) -> int:
     d = _project_dir_for(cwd)
     if os.path.lexists(d):
         if d.is_dir():
-            removed += sum(1 for p in d.glob("*.json") if p.name != "projectmap.json")
+            removed += len(_checkpoint_files(d))
         shutil.rmtree(d)
     for p in (_legacy_home_checkpoint_path_for(cwd), _legacy_checkpoint_path_for(cwd)):
         if os.path.lexists(p):
