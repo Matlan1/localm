@@ -2151,9 +2151,23 @@ async def unload_all_models(*, force: bool = False) -> dict:
     flight gets up to ``_wait_for_pin_clear``'s timeout (one wait shared by
     every busy model) to finish on its own, and one still in use after that
     stays loaded with its requests running, listed in ``skipped_in_use`` and
-    described in ``confirm_required``. With *force*, every generation on a
-    busy model is cancelled (``residency.cancel_all``) and it is unloaded.
-    See test_unload_all_never_cancels_a_busy_model_before_asking."""
+    described in ``confirm_required``; a busy embedding, reranker or speech
+    model is skipped and described the same way, under its kind. With
+    *force*, every generation on a busy chat model is cancelled
+    (``residency.cancel_all``) and it is unloaded, and a busy embedding,
+    reranker or speech model is stopped and unloaded.
+    See test_unload_all_never_cancels_a_busy_model_before_asking.
+
+    Returns ``{"status", "model", "unloaded_models", "unloaded_other",
+    "embedder_unloaded", ...vram fields}``: *status* is ``"unloaded"``,
+    ``"in_use"`` (nothing released, something skipped) or
+    ``"already_unloaded"``; ``unloaded_models`` names the chat models
+    released, ``unloaded_other`` the kinds of the other models released
+    (``"embedding model"``, ``"reranker model"``, ``"speech model"``), and
+    ``embedder_unloaded`` is whether ``unloaded_other`` is non-empty.
+    ``skipped_in_use`` (names and kinds left loaded) and ``confirm_required``
+    (each of those mapped to what is using it) are present only when
+    something was skipped."""
     global _active_model_name, _last_active_model_name, _engine, _inference_sem
     loop = asyncio.get_running_loop()
     from localm.vram import (_live_free_vram_bytes, _vram_free_reading,
@@ -2166,6 +2180,7 @@ async def unload_all_models(*, force: bool = False) -> dict:
         None, _vram_free_reading)
     unloaded_models = []
     skipped_in_use = []
+    unloaded_other: list[str] = []
     confirm_required: dict[str, str] = {}
 
     def _reset_active_pointers():
@@ -2183,7 +2198,8 @@ async def unload_all_models(*, force: bool = False) -> dict:
     try:
         embedder_was_loaded = await _unload_engines_and_embedder(
             loop, _embedder_mod, unloaded_models, skipped_in_use,
-            confirm_required=confirm_required, force=force)
+            confirm_required=confirm_required, unloaded_other=unloaded_other,
+            force=force)
     except asyncio.CancelledError:
         # The caller stopped waiting: an engine already unloaded above still
         # gets the pointer reset the normal path does below.
@@ -2214,6 +2230,7 @@ async def unload_all_models(*, force: bool = False) -> dict:
         "status": status,
         "model": unloaded_models[0] if unloaded_models else "none",
         "unloaded_models": unloaded_models,
+        "unloaded_other": unloaded_other,
         "embedder_unloaded": embedder_was_loaded,
     }
     if skipped_in_use:
@@ -2229,16 +2246,23 @@ async def unload_all_models(*, force: bool = False) -> dict:
 
 async def _unload_engines_and_embedder(loop, _embedder_mod, unloaded_models,
                                        skipped_in_use, *,
-                                       confirm_required: dict, force: bool = False) -> bool:
+                                       confirm_required: dict,
+                                       unloaded_other: list,
+                                       force: bool = False) -> bool:
     """The releasing half of ``unload_all_models``: unload every loaded chat
     engine that is idle, or every one with *force* (appending to
     *unloaded_models* / *skipped_in_use* / *confirm_required*), then the
-    shared embedder. Without *force*, cancels nothing: first waits once, for
-    every busy engine at the same time, for its requests to finish on their
-    own, then skips any engine that has requests in flight when its turn
-    comes. With *force*, cancels a busy engine's generations
-    (``residency.cancel_all``) before unloading it. Returns whether the
-    embedder was released."""
+    shared embedding model, the resident reranker and the resident speech
+    model (appending their kinds, such as ``"embedding model"``, to
+    *unloaded_other* / *skipped_in_use* / *confirm_required*). Without
+    *force*, cancels nothing: first waits once, for every busy engine at the
+    same time, for its requests to finish on their own, then skips any engine
+    that has requests in flight when its turn comes, and skips a busy
+    embedding, reranker or speech model at once. With *force*, cancels a busy
+    engine's generations (``residency.cancel_all``) before unloading it, and
+    stops a busy embedding, reranker or speech model (``reset_*(force=True)``:
+    its worker is stopped and its requests in flight fail). Returns whether
+    anything other than a chat engine was released."""
     if not force:
         busy = [e for e in list(_engines.values())
                 if e.loaded and _has_requests_in_flight(e)]
@@ -2284,45 +2308,39 @@ async def _unload_engines_and_embedder(loop, _embedder_mod, unloaded_models,
     # request this server is serving - for that entire window, not just this
     # coroutine. Executor-offloading them, like every other blocking call in
     # this function, keeps the wait local to this one coroutine instead.
-    embedder_was_loaded = False
-    embedder_dim = await loop.run_in_executor(None, _embedder_mod.loaded_dim)
-    if embedder_dim is not None:
-        # Honor the in-flight-request pin for the embedder too, exactly like
-        # the chat-engine loop above: a request mid-embed() must not have its
-        # embedder (and the isolated worker process it is waiting on) freed out
-        # from under it. reset_embedder(force=False) checks active_requests()==0
-        # and clears the embedder in ONE locked step, never two separate
-        # executor calls, which would leave a TOCTOU window since
-        # IsolatedEmbedder.embed() pins active_requests without taking
-        # embedder._LOCK. Skip it and report it alongside the pinned chat
-        # engines instead of a lying "unloaded".
-        cleared = await loop.run_in_executor(
-            None, functools.partial(_embedder_mod.reset_embedder, force=False))
-        if cleared:
-            embedder_was_loaded = True
-        else:
-            skipped_in_use.append("embedding model")
-    # The resident reranker is the same kind of separate lifecycle, released the
-    # same way: loaded()/reset off the event loop, a request in flight pins it.
+    async def _release(kind: str, active_fn, reset_fn) -> None:
+        if await loop.run_in_executor(
+                None, functools.partial(reset_fn, force=force)):
+            unloaded_other.append(kind)
+            return
+        skipped_in_use.append(kind)
+        active = await loop.run_in_executor(None, active_fn)
+        confirm_required[kind] = (
+            f"{active} active request{'s' if active != 1 else ''}" if active > 0
+            else "still in use")
+
+    # reset_embedder(force=False) checks active_requests()==0 and clears the
+    # embedder in ONE locked step: IsolatedEmbedder.embed() pins
+    # active_requests without taking embedder._LOCK. Every embedder, reranker
+    # and speech reader runs in the executor: each blocks on its module lock,
+    # which a load holds for its whole duration.
+    if await loop.run_in_executor(None, _embedder_mod.loaded_dim) is not None:
+        await _release("embedding model", _embedder_mod.active_requests,
+                       _embedder_mod.reset_embedder)
     from localm.inference import reranker as _reranker_mod
     if await loop.run_in_executor(None, _reranker_mod.is_loaded):
-        if await loop.run_in_executor(
-                None, functools.partial(_reranker_mod.reset_reranker, force=False)):
-            embedder_was_loaded = True
-        else:
-            resident = await loop.run_in_executor(None, _reranker_mod.reranker_info)
-            skipped_in_use.append(resident["kind"] if resident else "reranker model")
+        resident = await loop.run_in_executor(None, _reranker_mod.reranker_info)
+        await _release(resident["kind"] if resident else "reranker model",
+                       _reranker_mod.active_requests, _reranker_mod.reset_reranker)
     from localm.inference import speech as _speech_mod
     if await loop.run_in_executor(None, _speech_mod.is_loaded):
-        if await loop.run_in_executor(
-                None, functools.partial(_speech_mod.reset_speech, force=False)):
-            embedder_was_loaded = True
-        else:
-            skipped_in_use.append("speech model")
-    return embedder_was_loaded
+        await _release("speech model", _speech_mod.active_requests,
+                       _speech_mod.reset_speech)
+    return bool(unloaded_other)
 
 
-async def _unload_embedder_if_matches(name: str, loop) -> Optional[dict]:
+async def _unload_embedder_if_matches(name: str, loop, *,
+                                      force: bool = False) -> Optional[dict]:
     """If *name* is a registered model whose path matches the currently-loaded
     shared embedder, release it and report the freed VRAM - the targeted-unload
     counterpart to ``unload_all_models``'s embedder release above.
@@ -2338,7 +2356,9 @@ async def _unload_embedder_if_matches(name: str, loop) -> Optional[dict]:
     path, a registered name, or a known key) - what matters is which file is
     actually resident. Returns None when *name* is not the embedder, so the
     caller falls back to its normal "already_unloaded" outcome for a genuinely
-    untracked/never-loaded chat model."""
+    untracked/never-loaded chat model; ``{"status": "in_use"}`` while an embed
+    request is in flight, unless *force*, which stops the embedder and fails
+    its requests in flight (``reset_embedder(force=True)``)."""
     from localm.inference import embedder as _embedder_mod
     # Executor-offloaded, not a direct call: get_embedder() can hold
     # embedder._LOCK for the full duration of an IsolatedEmbedder
@@ -2381,7 +2401,7 @@ async def _unload_embedder_if_matches(name: str, loop) -> Optional[dict]:
     # which get_embedder() can hold for the length of an IsolatedEmbedder load,
     # and a synchronous call here would freeze the whole event loop.
     embedder_active = await loop.run_in_executor(None, _embedder_mod.active_requests)
-    if embedder_active > 0:
+    if embedder_active > 0 and not force:
         return {"status": "in_use", "model": name, "vram_freed": 0}
 
     from localm.vram import (_live_free_vram_bytes, _vram_free_reading,
@@ -2392,7 +2412,7 @@ async def _unload_embedder_if_matches(name: str, loop) -> Optional[dict]:
     before, before_fresh, before_scope = await loop.run_in_executor(
         None, _vram_free_reading)
     cleared = await loop.run_in_executor(
-        None, functools.partial(_embedder_mod.reset_embedder, force=False))
+        None, functools.partial(_embedder_mod.reset_embedder, force=force))
     if not cleared:
         return {"status": "in_use", "model": name, "vram_freed": 0}
     if before is not None:
@@ -2406,12 +2426,14 @@ async def _unload_embedder_if_matches(name: str, loop) -> Optional[dict]:
     return result
 
 
-async def _unload_reranker_if_matches(name: str, loop) -> Optional[dict]:
+async def _unload_reranker_if_matches(name: str, loop, *,
+                                      force: bool = False) -> Optional[dict]:
     """If *name* is a registered model whose path matches the resident reranker,
     release it and report the freed VRAM - the reranker counterpart to
     ``_unload_embedder_if_matches``. Matched by resolved PATH. Returns None when
     *name* is not the resident reranker; ``{"status": "in_use"}`` while a rerank
-    request is in flight.
+    request is in flight, unless *force*, which stops it and fails its requests
+    in flight (``reset_reranker(force=True)``).
 
     Every reranker reader runs in an executor: each takes the reranker lock,
     which a load holds for its whole duration. ``active_requests()`` is checked
@@ -2433,7 +2455,7 @@ async def _unload_reranker_if_matches(name: str, loop) -> Optional[dict]:
     except OSError:
         return None
 
-    if await loop.run_in_executor(None, _reranker_mod.active_requests) > 0:
+    if not force and await loop.run_in_executor(None, _reranker_mod.active_requests) > 0:
         return {"status": "in_use", "model": name, "vram_freed": 0}
 
     from localm.vram import (_live_free_vram_bytes, _vram_free_reading,
@@ -2444,7 +2466,7 @@ async def _unload_reranker_if_matches(name: str, loop) -> Optional[dict]:
     before, before_fresh, before_scope = await loop.run_in_executor(
         None, _vram_free_reading)
     cleared = await loop.run_in_executor(
-        None, functools.partial(_reranker_mod.reset_reranker, force=False))
+        None, functools.partial(_reranker_mod.reset_reranker, force=force))
     if not cleared:
         return {"status": "in_use", "model": name, "vram_freed": 0}
     if before is not None:
@@ -2458,11 +2480,13 @@ async def _unload_reranker_if_matches(name: str, loop) -> Optional[dict]:
     return result
 
 
-async def _unload_speech_if_matches(name: str, loop) -> Optional[dict]:
+async def _unload_speech_if_matches(name: str, loop, *,
+                                    force: bool = False) -> Optional[dict]:
     """If *name* is a registered model whose path matches the resident speech
     model, release it and report the freed VRAM. Returns None when *name* is not
     the resident speech model; ``{"status": "in_use"}`` while a synthesis is in
-    flight. Every speech reader runs in an executor: each takes the speech lock,
+    flight, unless *force*, which stops it and fails its requests in flight
+    (``reset_speech(force=True)``). Every speech reader runs in an executor: each takes the speech lock,
     which a load holds for its whole duration."""
     from localm.inference import speech as _speech_mod
     info = await loop.run_in_executor(None, _speech_mod.speech_info)
@@ -2480,7 +2504,7 @@ async def _unload_speech_if_matches(name: str, loop) -> Optional[dict]:
     except OSError:
         return None
 
-    if await loop.run_in_executor(None, _speech_mod.active_requests) > 0:
+    if not force and await loop.run_in_executor(None, _speech_mod.active_requests) > 0:
         return {"status": "in_use", "model": name, "vram_freed": 0}
 
     from localm.vram import (_live_free_vram_bytes, _vram_free_reading,
@@ -2491,7 +2515,7 @@ async def _unload_speech_if_matches(name: str, loop) -> Optional[dict]:
     before, before_fresh, before_scope = await loop.run_in_executor(
         None, _vram_free_reading)
     cleared = await loop.run_in_executor(
-        None, functools.partial(_speech_mod.reset_speech, force=False))
+        None, functools.partial(_speech_mod.reset_speech, force=force))
     if not cleared:
         return {"status": "in_use", "model": name, "vram_freed": 0}
     if before is not None:
@@ -2525,7 +2549,12 @@ async def unload_one_model(name: str, *, force: bool = False) -> dict:
     retrying with *force*. With *force*, cancels every generation on it
     (``residency.cancel_all``) and unloads it at once (``engine.unload()``
     kills the isolated worker if it does not exit within its own grace
-    period). See test_unload_one_never_cancels_a_busy_model_before_asking."""
+    period). See test_unload_one_never_cancels_a_busy_model_before_asking.
+
+    A busy embedding, reranker or speech model named by *name*: without
+    *force*, returns ``{"status": "in_use", "model": name, "vram_freed": 0}``
+    with it loaded; with *force*, stops it (its requests in flight fail) and
+    unloads it."""
     global _active_model_name, _last_active_model_name, _engine, _inference_sem
     loop = asyncio.get_running_loop()
     from localm.vram import (_live_free_vram_bytes, _vram_free_reading,
@@ -2533,13 +2562,13 @@ async def unload_one_model(name: str, *, force: bool = False) -> dict:
 
     engine = _engines.get(name)
     if engine is None or not engine.loaded:
-        embedder_result = await _unload_embedder_if_matches(name, loop)
+        embedder_result = await _unload_embedder_if_matches(name, loop, force=force)
         if embedder_result is not None:
             return embedder_result
-        reranker_result = await _unload_reranker_if_matches(name, loop)
+        reranker_result = await _unload_reranker_if_matches(name, loop, force=force)
         if reranker_result is not None:
             return reranker_result
-        speech_result = await _unload_speech_if_matches(name, loop)
+        speech_result = await _unload_speech_if_matches(name, loop, force=force)
         if speech_result is not None:
             return speech_result
         return {"status": "already_unloaded", "model": name}

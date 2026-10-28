@@ -43,6 +43,7 @@ import ctypes
 import math
 import re
 import threading
+import time
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -149,6 +150,11 @@ RERANK_PAIRS_PER_CALL = 32
 # Times IsolatedEmbedder._call_worker checks the worker and respawns it when
 # dead before it calls whatever runner is there.
 _RESPAWN_ATTEMPTS = 3
+
+# IsolatedEmbedder.stop(): how long it waits for the call holding the worker to
+# leave, and how often it kills the worker again meanwhile.
+_STOP_TIMEOUT = 30.0
+_STOP_POLL = 0.5
 
 
 def configure_embed_context(cp, n_ctx: int, n_seq_max: int, pooling_type: int):
@@ -1194,6 +1200,8 @@ class IsolatedEmbedder(VramSizingMixin):
     never fit fails fast without paying a process-spawn cost."""
 
     effective_pooling: Optional[int] = None
+    # Set by stop(): no call starts, respawns or falls back to CPU afterwards.
+    _stopped: bool = False
 
     def __init__(self, model_path: str, *, n_gpu_layers: int = 99,
                  n_ctx: Optional[int] = None,
@@ -1429,6 +1437,8 @@ class IsolatedEmbedder(VramSizingMixin):
         try:
             for attempt in range(_RESPAWN_ATTEMPTS):
                 with self._rpc_lock:
+                    if self._stopped:
+                        raise RuntimeError(self._stopped_message())
                     last = attempt == _RESPAWN_ATTEMPTS - 1
                     if last or (self._runner is not None and self._runner.is_alive()):
                         if self._runner is None:
@@ -1450,6 +1460,8 @@ class IsolatedEmbedder(VramSizingMixin):
             if runner is not None and runner.is_alive():
                 return
             with self._rpc_lock:
+                if self._stopped:
+                    raise RuntimeError(self._stopped_message())
                 if self._runner is None or not self._runner.is_alive():
                     logger.warning("embedder worker is not running; reloading %s",
                                    self.model_path)
@@ -1484,6 +1496,10 @@ class IsolatedEmbedder(VramSizingMixin):
                 # the child is already dead, and _wait's own timeout path
                 # has already done it.
                 runner.shutdown(grace=0)
+            if self._stopped:
+                logger.info("embedder %s: a request in flight was stopped by an "
+                            "unload", name)
+                raise RuntimeError(self._stopped_message()) from exc
             # A crash while GPU-offloaded falls back to CPU ONCE per
             # embedder instance, retries THIS call inline, and warns.
             # In-memory only: the user's n_gpu_layers setting still
@@ -1519,6 +1535,38 @@ class IsolatedEmbedder(VramSizingMixin):
         if self._runner is not None:
             self._runner.shutdown()
             self._runner = None
+
+    def _stopped_message(self) -> str:
+        name = Path(getattr(self, "model_path", "") or "embedding model").name
+        return (f"{name} was unloaded while this request was running; retry the "
+                "request to load it again")
+
+    def stop(self, timeout: float = _STOP_TIMEOUT) -> bool:
+        """Release the worker even while calls are in flight. After this no
+        call on this embedder starts, respawns a worker or falls back to CPU:
+        the worker process is killed, the call running on it and every call
+        queued behind it raise RuntimeError, and once the running call has
+        left, the worker's queues are released. Waits up to *timeout* seconds
+        for that call to leave. Returns whether the worker was released; on
+        False its process is killed but its handles stay open."""
+        self._stopped = True
+        deadline = time.monotonic() + timeout
+        while True:
+            runner = self._runner
+            if runner is not None:
+                runner.kill()
+            if self._rpc_lock.acquire(timeout=_STOP_POLL):
+                try:
+                    self.close()
+                finally:
+                    self._rpc_lock.release()
+                return True
+            if time.monotonic() >= deadline:
+                logger.warning(
+                    "embedder %s: a request still held the worker %.0fs after it "
+                    "was stopped; its handles are released when that request ends",
+                    Path(self.model_path).name, timeout)
+                return False
 
     def __del__(self):
         try:
@@ -1952,6 +2000,10 @@ def reset_embedder(*, force: bool = True) -> bool:
 
     ``force=True`` (the default) clears unconditionally, for callers that must
     tear down regardless of a pin (e.g. an explicit model-selection change).
+    A pinned embedder is detached under ``_LOCK`` and then stopped outside it
+    (``IsolatedEmbedder.stop``): its worker is killed and every embed() in
+    flight on it raises RuntimeError. Blocks until the running call has left,
+    at most ``_STOP_TIMEOUT`` seconds.
     ``release_for_exit()`` does NOT go through this function at all - see its
     own docstring.
 
@@ -1962,17 +2014,30 @@ def reset_embedder(*, force: bool = True) -> bool:
     load FAILURE was latched, so the next ``get_embedder()`` retries fresh."""
     global _EMBEDDER, _LOAD_FAILED_SPEC, _TRIED_DOWNLOAD, _LAST_ERROR, _LAST_RESOLVE_WARNED
     with _LOCK:
-        if not force and _EMBEDDER is not None and _EMBEDDER.active_requests > 0:
+        busy = _EMBEDDER is not None and _EMBEDDER.active_requests > 0
+        if not force and busy:
             return False
-        cleared = _EMBEDDER is not None
-        if cleared:
-            _EMBEDDER.close()
+        current = _EMBEDDER
+        if current is not None and not busy:
+            current.close()
         _EMBEDDER = None
         _LOAD_FAILED_SPEC = None
         _TRIED_DOWNLOAD = False
         _LAST_ERROR = None
         _LAST_RESOLVE_WARNED = None
-        return cleared
+    if current is not None and busy:
+        _stop_busy(current)
+    return current is not None
+
+
+def _stop_busy(model) -> None:
+    """Stop *model*, detached from the module while requests were in flight
+    on it: ``model.stop()`` when it has one, else ``model.close()``."""
+    stop = getattr(model, "stop", None)
+    if callable(stop):
+        stop()
+    else:
+        model.close()
 
 
 def release_for_exit() -> bool:

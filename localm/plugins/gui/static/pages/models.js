@@ -3595,6 +3595,27 @@ if ($("models-import-comfy-btn")) {
   $("models-import-comfy-btn").onclick = () => openImportComfyModal();
 }
 
+// What an Unload all response released and left loaded: n counts the chat
+// models in unloaded_models plus the embedding, reranker and speech models in
+// unloaded_other (or 1 for embedder_unloaded from a server without that list);
+// skipped lists what stayed loaded because it was in use.
+function unloadAllCounts(data) {
+  const other = Array.isArray(data.unloaded_other)
+    ? data.unloaded_other.length : (data.embedder_unloaded ? 1 : 0);
+  const n = (data.unloaded_models || []).length + other;
+  const skipped = Array.isArray(data.skipped_in_use) ? data.skipped_in_use : [];
+  return { n, skipped };
+}
+
+function unloadAllMessage(n, skipped) {
+  if (n && skipped.length) {
+    return t("models.unloadAll.someStillGenerating", { n, skipped: skipped.length });
+  }
+  if (n) return t("models.unloadAll.allUnloaded", { n });
+  if (skipped.length) return t("models.unloadAll.stillGenerating", { skipped: skipped.length });
+  return t("models.unloadAll.nothingLoaded");
+}
+
 // Bind Unload-all button click handler
 const unloadAllBtn = $("models-unload-all-btn");
 if (unloadAllBtn) {
@@ -3606,25 +3627,8 @@ if (unloadAllBtn) {
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok) { toast(data.detail || t("models.unload.failed"), true); return; }
-      // unloaded_models lists only chat engines; the shared embedding model has
-      // its own lifecycle (localm.inference.embedder) and is reported via
-      // embedder_unloaded, so it is counted too.
-      const n = (data.unloaded_models || []).length + (data.embedder_unloaded ? 1 : 0);
-      // unload_all_models() (http_server.py) reports any pinned (mid-generation)
-      // engine in skipped_in_use rather than unloading it - loaded, but not
-      // released - so the message names it separately.
-      const skipped = Array.isArray(data.skipped_in_use) ? data.skipped_in_use : [];
-      let msg;
-      if (n && skipped.length) {
-        msg = t("models.unloadAll.someStillGenerating", { n, skipped: skipped.length });
-      } else if (n) {
-        msg = t("models.unloadAll.allUnloaded", { n });
-      } else if (skipped.length) {
-        msg = t("models.unloadAll.stillGenerating", { skipped: skipped.length });
-      } else {
-        msg = t("models.unloadAll.nothingLoaded");
-      }
-      toast(msg, skipped.length > 0);
+      const { n, skipped } = unloadAllCounts(data);
+      toast(unloadAllMessage(n, skipped), skipped.length > 0);
       refreshModelsPage();
       refreshPerfEstimate();
       // Offer to force through whatever is still in the way - the owner's
@@ -3643,8 +3647,8 @@ if (unloadAllBtn) {
           });
           const data2 = await r2.json().catch(() => ({}));
           if (!r2.ok) { toast(data2.detail || t("models.unload.failed"), true); return; }
-          const n2 = (data2.unloaded_models || []).length + (data2.embedder_unloaded ? 1 : 0);
-          toast(t("models.unloadAll.allUnloaded", { n: n2 }));
+          const after = unloadAllCounts(data2);
+          toast(unloadAllMessage(after.n, after.skipped), after.skipped.length > 0);
           refreshModelsPage();
           refreshPerfEstimate();
         }
