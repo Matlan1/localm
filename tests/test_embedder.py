@@ -1277,6 +1277,37 @@ def test_failed_cpu_retry_after_gpu_crash_logs_one_error_and_raises(monkeypatch,
     assert "CPU retry failed" in shown[0].getMessage()
 
 
+@pytest.mark.parametrize("alive", [True, False])
+def test_fault_logging_without_model_path_keeps_the_original_error(alive, caplog):
+    """On an instance with no ``model_path``, the fault path still raises the
+    worker's own error (not an AttributeError) and logs one ERROR line."""
+    import threading
+    e = emb.IsolatedEmbedder.__new__(emb.IsolatedEmbedder)
+    e.active_requests = 0
+    e._rpc_lock = threading.RLock()
+    e.n_gpu_layers = 0
+    e.gpu_fallback_reason = None
+    e.effective_pooling = None
+
+    class _Runner:
+        def is_alive(self):
+            return alive
+
+        def embed(self, texts):
+            raise RuntimeError("worker crashed")
+
+        def shutdown(self, grace=5.0):
+            pass
+
+    e._runner = _Runner()
+    with caplog.at_level(logging.DEBUG, logger="localm"):
+        with pytest.raises(RuntimeError, match="worker crashed"):
+            e._call_locked(lambda r: r.embed(["hi"]))
+    shown = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert [r.levelno for r in shown] == [logging.ERROR]
+    assert "embedding model" in shown[0].getMessage()
+
+
 def test_isolated_embedder_close_shuts_down_runner(monkeypatch):
     e = _isolated_embedder(monkeypatch)
     runner = _StubRunner.instances[-1]

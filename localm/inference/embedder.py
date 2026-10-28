@@ -1468,7 +1468,9 @@ class IsolatedEmbedder(VramSizingMixin):
             # Dropping the reference unconditionally would orphan a LIVE
             # child that no close(), reset_embedder() or
             # release_for_exit() can reach.
-            name = Path(self.model_path).name
+            # A generic name on an instance without model_path. See
+            # test_fault_logging_without_model_path_keeps_the_original_error.
+            name = Path(getattr(self, "model_path", "") or "embedding model").name
             if self._runner is not None and self._runner.is_alive():
                 logger.error(
                     "embedder %s: embedding failed (%s); the worker is healthy "
