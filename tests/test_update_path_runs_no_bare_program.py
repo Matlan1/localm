@@ -22,8 +22,11 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 START_MODULES = ("localm.updater", "localm._apply_update")
-# The module behind each ``localm <command>`` the update path starts as a subprocess.
-SUBCOMMAND_MODULES = {"setup-llama": "localm.setup_llama.cli"}
+# The code behind each ``localm <command>`` the update path starts as a subprocess:
+# a module (every function in it) or ``module:function``.
+SUBCOMMAND_MODULES = {"setup-llama": "localm.setup_llama.cli", "setup-sdcpp": "localm.media.sdcpp.cli",
+                      "setup-music": "localm.media.koboldcpp.cli", "comfy": "localm.cli.comfy",
+                      "pull": "localm.cli.models:pull"}
 
 _EXEC_CALLS = {"run", "call", "check_call", "check_output", "Popen", "system", "popen",
                "create_subprocess_exec", "create_subprocess_shell", "startfile",
@@ -169,11 +172,12 @@ def localm_subcommands(fn) -> set:
     """The ``localm <command>`` names *fn* builds as ``[sys.executable, "-m", "localm", <command>, ...]``."""
     out = set()
     for node in ast.walk(fn):
-        if isinstance(node, ast.List) and len(node.elts) >= 4 and _dotted(node.elts[0]) == "sys.executable":
-            words = node.elts[1:4]
-            if all(isinstance(w, ast.Constant) and isinstance(w.value, str) for w in words) \
-                    and [w.value for w in words[:2]] == ["-m", "localm"]:
-                out.add(words[2].value)
+        if isinstance(node, ast.List) and node.elts and _dotted(node.elts[0]) == "sys.executable":
+            words = [w.value if isinstance(w, ast.Constant) and isinstance(w.value, str) else None
+                     for w in node.elts[1:]]
+            for i in range(len(words) - 2):
+                if words[i] == "-m" and words[i + 1] == "localm" and words[i + 2]:
+                    out.add(words[i + 2])
     return out
 
 
@@ -191,12 +195,16 @@ def _reach(root: Path, subcommand_modules=None):
         seen[key] = mod.functions[key[1]]
         todo.extend(k for k in graph.references(mod, key[1]) if k not in seen)
         for sub in localm_subcommands(seen[key]):
-            name = subcommand_modules.get(sub)
-            if name is None:
+            target = subcommand_modules.get(sub)
+            if target is None:
                 unmapped.add(sub)
-            elif name not in started and graph.module(name) is not None:
-                started.add(name)
-                todo.extend((name, q) for q in graph.module(name).functions)
+                continue
+            name, _, func = target.partition(":")
+            mod = graph.module(name)
+            if target in started or mod is None:
+                continue
+            started.add(target)
+            todo.extend((name, q) for q in ([func] if func else mod.functions) if q in mod.functions)
     return graph, seen, unmapped
 
 
@@ -241,7 +249,13 @@ def _bare_program(node, assigned: dict, depth: int = 0) -> bool:
 def _bare_command(node, assigned: dict, depth: int = 0) -> bool:
     """Whether *node*, used as a command, starts with a bare program."""
     if isinstance(node, (ast.List, ast.Tuple)):
-        return bool(node.elts) and _bare_program(node.elts[0], assigned)
+        if not node.elts:
+            return False
+        first = node.elts[0]
+        if isinstance(first, ast.Constant) and isinstance(first.value, str) \
+                and len(first.value.split()) > 1:
+            return False
+        return _bare_program(first, assigned)
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
         return _bare_command(node.left, assigned, depth)
     if isinstance(node, ast.JoinedStr):
@@ -263,7 +277,7 @@ def _assignments(fn) -> dict:
             for t in node.targets:
                 if isinstance(t, ast.Name):
                     out.setdefault(t.id, []).append(node.value)
-        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)) and isinstance(node.target, ast.Name) \
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) \
                 and node.value is not None:
             out.setdefault(node.target.id, []).append(node.value)
     return out
@@ -385,6 +399,8 @@ def _lines(source: str) -> list:
     ('def f():\n    subprocess.run([r"C:\\\\Windows\\\\System32\\\\x.exe"])', []),
     ('def f():\n    return [p, "pip"]', []),
     ('def f():\n    return "vulkan", False, reason', []),
+    ('def f():\n    return ["not measured in this process"]', []),
+    ('def f():\n    argv = [sys.executable, "-m", "x"]\n    argv += ["--name", n]\n    subprocess.run(argv)', []),
     ('def f():\n    wanted = ("VERSION", "pyproject.toml")', []),
     ('def f():\n    msg = "run uv pip install -e .[gpu] to add it"', []),
     ('def f():\n    subprocess.run(c, cwd=d)', []),

@@ -51,3 +51,38 @@ def test_posix_sh_is_found_without_path(monkeypatch):
     monkeypatch.setenv("PATH", "")
     found = sysprog.find("sh")
     assert found and os.path.isabs(found) and os.path.dirname(found) in sysprog.posix_system_dirs()
+
+
+def test_comfy_git_steps_report_a_missing_git_without_starting_anything(monkeypatch):
+    import subprocess
+
+    from localm.media import managed_comfy_provision as prov
+    monkeypatch.setattr(sysprog, "find", lambda name: None)
+    started = []
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: started.append(a))
+    ok, out = prov._run(prov.git_argv("status"))
+    assert not ok and "git was not found" in out and started == []
+
+
+def test_comfy_git_steps_run_git_by_its_full_path(monkeypatch, tmp_path):
+    from localm.media import managed_comfy_provision as prov
+    git = str(tmp_path / ("git.exe" if sysprog.IS_WINDOWS else "git"))
+    monkeypatch.setattr(sysprog, "find", lambda name: git if name == "git" else None)
+    assert prov.git_argv("-C", "x", "status") == [git, "-C", "x", "status"]
+
+
+def test_component_updates_raise_file_not_found_when_git_is_missing(monkeypatch, tmp_path):
+    from localm import updater_components as uc
+    monkeypatch.setattr(sysprog, "find", lambda name: None)
+    with pytest.raises(FileNotFoundError, match="git was not found"):
+        uc._git(tmp_path, "status")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="icacls is the Windows path")
+def test_restricting_a_file_without_icacls_reports_failure(monkeypatch, tmp_path):
+    from localm import config
+    target = tmp_path / "secret.key"
+    target.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(sysprog, "find", lambda name: None)
+    monkeypatch.setenv("USERNAME", "someone")
+    assert config.restrict_file_perms(target) is False

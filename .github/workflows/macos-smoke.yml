@@ -15,9 +15,6 @@ on:
     paths:
       - "localm/hwdetect*"
       - "localm/instances.py"
-      - "localm/sysprog.py"
-      - "localm/updater.py"
-      - "localm/uv_tool.py"
       - "localm/setup_llama/**"
       - "localm/inference/backends/**"
       - "setup.sh"
@@ -56,20 +53,6 @@ jobs:
 
       - name: Dev tools for the test selection
         run: ./.uv/uv pip install -p .venv -e ".[dev,rag]"
-
-      - name: The venv's own uv runs with no uv on PATH
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/no-uv-home"
-          env -i PATH=/usr/bin:/bin HOME="$RUNNER_TEMP/no-uv-home" /bin/sh -c '
-            set -eu
-            if command -v uv; then echo "::error::uv is on the clean PATH"; exit 1; fi
-            uv_path="$(.venv/bin/python -c "from localm import uv_tool; print(uv_tool.bundled_uv() or \"\")")"
-            echo "bundled uv: $uv_path"
-            test -n "$uv_path"
-            "$uv_path" --version
-            .venv/bin/python -m uv --version'
-          .venv/bin/python -m pytest tests/test_sysprog.py tests/test_uv_tool.py -q -p no:cacheprovider
 
       - name: The auto-pick lands on Metal
         run: |

@@ -427,14 +427,24 @@ def _plan_tagged(name: str, staged: Optional[dict], installed_pin: Optional[dict
     return out
 
 
+def _git_exe() -> str:
+    """git's full path (localm.sysprog.find); raises FileNotFoundError when git is
+    not installed."""
+    from localm import sysprog
+    exe = sysprog.find("git")
+    if not exe:
+        raise FileNotFoundError(2, "git was not found in the system folders or on PATH", "git")
+    return exe
+
+
 def _git(root: Path, *args, timeout: float = _GIT_TIMEOUT_S) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True,
+    return subprocess.run([_git_exe(), "-C", str(root), *args], capture_output=True, text=True,
                           encoding="utf-8", errors="replace", timeout=timeout,
                           stdin=subprocess.DEVNULL)
 
 
 def _git_bytes(root: Path, *args) -> subprocess.CompletedProcess[bytes]:
-    return subprocess.run(["git", "-C", str(root), *args], capture_output=True,
+    return subprocess.run([_git_exe(), "-C", str(root), *args], capture_output=True,
                           timeout=_GIT_TIMEOUT_S, stdin=subprocess.DEVNULL)
 
 

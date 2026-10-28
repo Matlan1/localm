@@ -12,7 +12,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Fixed
-- **An update no longer depends on what is on your PATH.** An update that reinstalls dependencies now runs the uv installed inside localm's own environment (the `uv` package is now one of localm's dependencies), then the install's own uv; the hardware checks an update runs use the system's own programs by full path. If a program an update needs cannot be found, the update is refused before anything is changed, with a message naming the program and saying to re-run setup.
+- **An update checks it can run every step before it changes anything.** If the uv that reinstalls dependencies, or the Python that updates the native runtime, cannot be found, the update is refused before any file is replaced or any process is stopped, with a message naming the program and saying to re-run setup. The other programs an update starts (the hardware checks, git for the managed ComfyUI, `ps`, `taskkill`, `icacls`, `nvidia-smi`) are run by their full path from the system folders first, so a program of the same name in the localm folder or early on PATH is not run instead.
 
 ## [0.3.2] - 2026-10-28
 

@@ -1995,8 +1995,13 @@ def _list_gpus_probe() -> list:
 
     try:
         import subprocess
+
+        from localm import sysprog
+        smi = sysprog.find("nvidia-smi")
+        if not smi:
+            raise FileNotFoundError(2, "No such file or directory", "nvidia-smi")
         proc = subprocess.Popen(
-            ["nvidia-smi", "--query-gpu=index,name,memory.total,memory.free,pci.bus_id",
+            [smi, "--query-gpu=index,name,memory.total,memory.free,pci.bus_id",
              "--format=csv,noheader,nounits"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
