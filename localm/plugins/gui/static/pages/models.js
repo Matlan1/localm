@@ -2141,11 +2141,13 @@ export async function updateCheck() {
 }
 window.__localmUpdateCheck = updateCheck;
 
-// What an applied update did to the native runtime, and which parts of the
-// current version an older one keeps, as text appended to the status line.
+// What an applied update did to the native runtime and the other components,
+// and which parts of the current version an older one keeps, as text appended
+// to the status line.
 function _updateExtras(d) {
   let text = "";
   if (d.runtime_note) text += "  " + t("settings.update.runtimeNote", { note: d.runtime_note });
+  if (d.components_note) text += "  " + t("settings.update.componentsNote", { note: d.components_note });
   const kept = Array.isArray(d.kept_for_updates) ? d.kept_for_updates : [];
   if (kept.length) text += "  " + t("settings.update.keptForUpdates", { parts: kept.join("; ") });
   return text;

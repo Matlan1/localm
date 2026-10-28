@@ -2412,6 +2412,7 @@
   "settings.update.installedRestarting": "{version} installiert. Wird neu gestartet…",
   "settings.update.dataBackup": "Ihre Daten von vor dem Zurückgehen wurden nach {path} kopiert; kopieren Sie die Dateien bei beendetem LocaLM zurück in den Datenordner, um sie wiederherzustellen.",
   "settings.update.runtimeNote": "Native Laufzeit: {note}.",
+  "settings.update.componentsNote": "Komponenten: {note}.",
   "settings.update.keptForUpdates": "Von Ihrer bisherigen Version beibehalten, damit diese Version wieder aktualisieren kann: {parts}.",
   "settings.update.available": "Update verfügbar: {latest} (Sie haben {current}).",
   "settings.update.availableNoAsset": "Update {latest} ist verfügbar, hat aber keinen zugehörigen Build.",

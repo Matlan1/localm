@@ -938,8 +938,9 @@ def _promote_backup(run_backup_dir: Path, backup_dir: Path) -> None:
     *run_backup_dir* is a complete, self-contained COPY of the pre-update install
     (``_apply_update.backup`` copies, never moves, the live tree).
 
-    The native runtime snapshot of the update whose backup this replaces
-    (``_apply_update.runtime_snapshot_dir``) is removed with it.
+    The native runtime snapshot and the components snapshot of the update whose
+    backup this replaces (``_apply_update.runtime_snapshot_dir``,
+    ``updater_components.snapshot_dir``) are removed with it.
 
     Best-effort: a failure does not undo the update but IS surfaced as a warning,
     since it degrades a later ``update --rollback``."""
@@ -960,6 +961,8 @@ def _promote_backup(run_backup_dir: Path, backup_dir: Path) -> None:
         _apply_warn("update applied, but could not remove the native runtime kept by the "
                     "previous update at %s: %s; a later `update --rollback` may put that "
                     "older runtime back", snapshot, e)
+    from localm import updater_components
+    updater_components.discard(updater_components.snapshot_dir(backup_dir))
 
 
 # Data dir entries an older build may read without the fields a newer one added,
@@ -1119,13 +1122,65 @@ def _install_uv_bridge(root: Path, uv: str, target: Path) -> None:
                           reason=str(e)) from None
 
 
+def _apply_components(plans, needed: bool, *, klass: str, target: Path, version: str,
+                      defer: bool, runner, say, backup_dir: Path, names) -> tuple:
+    """The component half of :func:`apply`, after the swap: record the pending
+    component update (``updater_components.write_pending``) and, unless
+    *defer* or the ``setup`` class, carry it out now. When it fails, the code
+    swap is rolled back (with the native runtime it re-provisioned) and
+    LocalmError is raised. Returns ``(status, note)``: the status of the
+    component update (None when none ran) and a one-line summary (None when
+    there is nothing to say)."""
+    from localm import _apply_update as au
+    from localm import updater_components
+    from localm.bugreport import LocalmError
+    note = updater_components.summary(plans)
+    if not needed:
+        try:
+            updater_components.clear_pending()
+        except OSError as e:
+            _apply_warn("could not clear an earlier pending component update: %s", e)
+        return None, note
+    try:
+        updater_components.write_pending(plans, root=target, version=version)
+    except OSError as e:
+        _apply_warn("could not record the pending component update: %s", e)
+        return None, (f"{note}; NOT done: the component update could not be recorded ({e}); "
+                      "it is retried on the next start of localm")
+    if klass == "setup":
+        return None, (f"{note}, " if note else "checks the components ") + (
+            "on the first start after setup")
+    if defer:
+        return None, (f"{note}, " if note else "checks the components ") + (
+            "while localm restarts")
+    try:
+        status = updater_components.finish_pending(root=target, runner=runner,
+                                                   env=_deps_env(target), say=say)
+    except Exception as e:
+        status = {"state": "failed", "note": f"the component update crashed: {e}"}
+    if status is not None and status["state"] in ("failed", "waiting"):
+        updater_components.clear_pending()
+        why = status["note"]
+        try:
+            au.rollback(backup_dir, target, names)
+        except Exception as rb:
+            raise LocalmError(
+                "a component update failed AND rolling the code back failed - manual "
+                "recovery needed", reason=f"{why}; rollback: {rb}; restore from {backup_dir}"
+            ) from None
+        raise LocalmError("a component could not be updated, so the update was rolled back",
+                          reason=why)
+    return status, (status["note"] if status is not None else note)
+
+
 def apply(asset_id, *, signature=None, target_version=None, allow_unverified=False,
           expect_sha256=None, installed=None, download_opener=None,
           runner=None, defer_runtime=False, say=None) -> dict:
     """Download, VERIFY (signature + anti-rollback), and swap a build into the
     install, then run the class's deps/runtime step. Returns
     ``{applied, version, klass, backup, restart_needed, verified, verify_reason,
-    downgrade, data_backup, runtime, runtime_note, kept_for_updates}``.
+    downgrade, data_backup, runtime, runtime_note, components, components_note,
+    kept_for_updates}``.
 
     THE NATIVE RUNTIME. When the build pins a different llama.cpp build for the
     installed backend than the one installed (``updater_runtime.plan``), the
@@ -1143,6 +1198,17 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
     summary for the user (None when there is nothing to say). *say* receives
     each step of stopping processes and replacing the runtime as one line of
     text.
+
+    THE OTHER COMPONENTS. Every installed component the build pins differently
+    (``updater_components.plan``: the sd.cpp and KoboldCpp runtimes, the managed
+    ComfyUI, the uv inside the install) is brought to the build's pin after the
+    runtime, or with *defer_runtime* during the caller's restart, recorded as a
+    pending component update. A uv running from inside the install refuses the
+    update with nothing changed. When a component cannot be updated, the
+    components are put back, the code swap (and the runtime) is rolled back and
+    LocalmError is raised. ``components`` is that status (None when nothing ran)
+    and ``components_note`` a one-line summary, naming a component the user
+    chose themselves and kept (None when there is nothing to say).
 
     *target_version* selects a release by version (``localm update --to``): the
     anti-rollback check is replaced by :func:`_check_selected_version`, so an
@@ -1242,6 +1308,15 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
             klass = classify(root, target, read_manifest(root))
             from localm import updater_runtime
             rt_plan = updater_runtime.plan(root, target)
+            from localm import updater_components
+            comp_plans = updater_components.plan(root, target, deep=False)
+            comp_update = updater_components.needs_finish(comp_plans)
+            if comp_update and klass != "setup":
+                held = updater_components.blockers(comp_plans, target)
+                if held:
+                    raise LocalmError(
+                        "a component this update replaces is in use, so nothing was updated",
+                        reason=updater_runtime.in_use_message(held, "run the update again"))
             if (klass == "runtime" and rt_plan["source"] == "release" and rt_plan["target"]
                     and rt_plan["current"] is not None):
                 rt_plan["reprovision"] = True
@@ -1380,12 +1455,16 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
                             "rolled back", reason=why)
                     if runtime_status is not None:
                         runtime_note = runtime_status["note"]
+        components_status, components_note = _apply_components(
+            comp_plans, comp_update, klass=klass, target=target, version=new_version,
+            defer=defer_runtime, runner=runner, say=say, backup_dir=backup_dir, names=names)
         return {"applied": True, "version": new_version, "klass": klass,
                 "backup": str(backup_dir), "restart_needed": True,
                 "verified": verified, "verify_reason": verify_reason,
                 "downgrade": downgrade,
                 "data_backup": str(data_backup) if data_backup else None,
                 "runtime": runtime_status, "runtime_note": runtime_note,
+                "components": components_status, "components_note": components_note,
                 "kept_for_updates": kept}
 
 
@@ -1609,6 +1688,12 @@ def rollback_last(*, installed=None, say=None) -> dict:
     and put back as it was when the code restore fails. *say* receives each
     step as one line of text.
 
+    The components the update replaced (``updater_components.snapshot_dir``)
+    and that are still installed are restored first, with the same guarantee:
+    a component that cannot be restored raises LocalmError with nothing
+    changed, and a later failure of the runtime or code restore puts them back
+    as they were.
+
     NOT signature- or freshness-checked; the owner gate on its HTTP callers
     (``inference/routes/admin.py``) is the control on this operation. Use
     :func:`rollback_info` to ask whether a rollback is possible; calling this one
@@ -1648,47 +1733,84 @@ def rollback_last(*, installed=None, say=None) -> dict:
                             "added by the update will not be removed by this rollback", manifest)
         if names is None:
             names = [p.name for p in backup_dir.iterdir()]
-        from localm import updater_runtime
-        lib = target / au.RUNTIME_LIB
-        snapshot = au.runtime_snapshot_dir(backup_dir)
-        keep = None
-        if snapshot.is_dir() and au.runtime_differs(lib, snapshot):
-            left = updater_runtime.stop_own_holders(lib, target, say=say)
-            if left:
-                raise LocalmError(
-                    "the native llama.cpp runtime is in use, so nothing was rolled back",
-                    reason=updater_runtime.in_use_message(left, "run the rollback again"))
-            keep = snapshot.with_name(snapshot.name + "-current")
+        from localm import updater_components
+        comp_snap = updater_components.snapshot_dir(backup_dir)
+        comp_names = updater_components.installed_names(
+            updater_components.snapshot_names(comp_snap), target)
+        comp_keep = None
+        if comp_names:
+            comp_keep = comp_snap.with_name(comp_snap.name + "-current")
             try:
-                au.snapshot_runtime(lib, keep)
+                updater_components.snapshot(comp_names, comp_keep, root=target)
             except OSError as e:
-                raise LocalmError("could not keep a copy of the current native runtime, so "
+                raise LocalmError("could not keep a copy of the current components, so "
                                   "nothing was rolled back", reason=str(e)) from None
-            if say:
-                say("Restoring the native runtime the update replaced...")
-            errors = au.restore_runtime(snapshot, lib)
+            errors = updater_components.restore(comp_snap, root=target, say=say,
+                                                names=comp_names)
             if errors:
-                back = au.restore_runtime(keep, lib)
-                shutil.rmtree(keep, ignore_errors=True)
+                back = updater_components.restore(comp_keep, root=target, say=say)
+                updater_components.discard(comp_keep)
                 if back:
-                    raise RuntimeError("rollback incomplete: the native runtime could not be "
+                    raise RuntimeError("rollback incomplete: the components could not be "
                                        "restored nor put back: " + "; ".join(errors + back))
-                raise LocalmError("the native runtime could not be restored, so nothing was "
+                raise LocalmError("a component could not be restored, so nothing was "
                                   "rolled back", reason="; ".join(errors))
-        if say:
-            say("Restoring the previous localm code...")
         try:
-            au.rollback(backup_dir, target, names)
-        except Exception as e:
-            if keep is not None:
-                back = au.restore_runtime(keep, lib)
+            from localm import updater_runtime
+            lib = target / au.RUNTIME_LIB
+            snapshot = au.runtime_snapshot_dir(backup_dir)
+            keep = None
+            if snapshot.is_dir() and au.runtime_differs(lib, snapshot):
+                left = updater_runtime.stop_own_holders(lib, target, say=say)
+                if left:
+                    raise LocalmError(
+                        "the native llama.cpp runtime is in use, so nothing was rolled back",
+                        reason=updater_runtime.in_use_message(left, "run the rollback again"))
+                keep = snapshot.with_name(snapshot.name + "-current")
+                try:
+                    au.snapshot_runtime(lib, keep)
+                except OSError as e:
+                    raise LocalmError("could not keep a copy of the current native runtime, so "
+                                      "nothing was rolled back", reason=str(e)) from None
+                if say:
+                    say("Restoring the native runtime the update replaced...")
+                errors = au.restore_runtime(snapshot, lib)
+                if errors:
+                    back = au.restore_runtime(keep, lib)
+                    shutil.rmtree(keep, ignore_errors=True)
+                    if back:
+                        raise RuntimeError("rollback incomplete: the native runtime could not be "
+                                           "restored nor put back: " + "; ".join(errors + back))
+                    raise LocalmError("the native runtime could not be restored, so nothing was "
+                                      "rolled back", reason="; ".join(errors))
+            if say:
+                say("Restoring the previous localm code...")
+            try:
+                au.rollback(backup_dir, target, names)
+            except Exception as e:
+                if keep is not None:
+                    back = au.restore_runtime(keep, lib)
+                    if back:
+                        raise RuntimeError(f"{e}; putting the native runtime back failed too: "
+                                           + "; ".join(back)) from None
+                raise
+            finally:
+                if keep is not None:
+                    shutil.rmtree(keep, ignore_errors=True)
+        except BaseException as e:
+            if comp_keep is not None:
+                back = updater_components.restore(comp_keep, root=target, say=say)
                 if back:
-                    raise RuntimeError(f"{e}; putting the native runtime back failed too: "
+                    raise RuntimeError(f"{e}; putting the components back failed too: "
                                        + "; ".join(back)) from None
             raise
         finally:
-            if keep is not None:
-                shutil.rmtree(keep, ignore_errors=True)
+            if comp_keep is not None:
+                updater_components.discard(comp_keep)
+        try:
+            updater_components.clear_pending()
+        except OSError as e:
+            _apply_warn("could not clear a pending component update after the rollback: %s", e)
         try:
             updater_runtime.clear_pending()
         except OSError as e:

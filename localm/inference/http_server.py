@@ -4717,26 +4717,42 @@ def _finish_pending_runtime_update() -> None:
     the runtime cannot be updated, the update's code is rolled back
     (``updater.rollback_last``) so the restart loads the previous version with
     its own runtime. Logs each step and the outcome; never raises, so the
-    restart always proceeds."""
+    restart always proceeds.
+
+    Then the component update the applied update left pending
+    (``updater_components.finish_pending``: sd.cpp, KoboldCpp, the managed
+    ComfyUI, uv), with the same rollback when a component cannot be updated."""
     try:
-        from localm import updater_runtime
-        if updater_runtime.read_pending() is None:
-            return
-        try:
-            from localm.inference.backends.llamacpp._loader import stop_probe_daemon
-            stop_probe_daemon()
-        except Exception:
-            _dbg_swallow("stopping the runtime probe daemon before the runtime update failed",
-                         level="warning")
+        from localm import updater_components, updater_runtime
         from localm.debuglog import logger as _dbg
-        status = updater_runtime.finish_pending(
-            say=lambda m: _dbg.info("runtime update during restart: %s", m))
+        if updater_runtime.read_pending() is not None:
+            try:
+                from localm.inference.backends.llamacpp._loader import stop_probe_daemon
+                stop_probe_daemon()
+            except Exception:
+                _dbg_swallow("stopping the runtime probe daemon before the runtime update "
+                             "failed", level="warning")
+            status = updater_runtime.finish_pending(
+                say=lambda m: _dbg.info("runtime update during restart: %s", m))
+            if status is not None and status["state"] not in ("updated", "current"):
+                _dbg.warning("runtime update during restart: %s; rolling the update back",
+                             status["note"])
+                updater_components.clear_pending()
+                from localm import updater
+                updater.rollback_last()
+                return
+            if status is not None:
+                _dbg.info("runtime update during restart: %s", status["note"])
+        if updater_components.read_pending() is None:
+            return
+        status = updater_components.finish_pending(
+            say=lambda m: _dbg.info("component update during restart: %s", m))
         if status is None:
             return
         if status["state"] in ("updated", "current"):
-            _dbg.info("runtime update during restart: %s", status["note"])
+            _dbg.info("component update during restart: %s", status["note"])
             return
-        _dbg.warning("runtime update during restart: %s; rolling the update back",
+        _dbg.warning("component update during restart: %s; rolling the update back",
                      status["note"])
         from localm import updater
         updater.rollback_last()
