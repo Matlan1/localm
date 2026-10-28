@@ -42,6 +42,7 @@ import multiprocessing as mp
 import os
 import queue as _queue
 import time
+from typing import Any, cast
 
 from localm.inference.backends.base import (
     PretokenizerUnsafeInputError, RerankInputError)
@@ -225,7 +226,7 @@ def _runner_main(req_q, resp_q, crash_trace_path=None) -> None:
             return
 
         if name == "load":
-            payload = dict(payload)
+            load_params: dict[str, Any] = dict(cast("dict[str, Any]", payload))
             # cpu_only: n_gpu_layers=0 alone only controls WEIGHT placement -
             # ggml's scheduler still considers a REGISTERED GPU backend for
             # individual ops, so a large enough matmul dispatches to vendor BLAS
@@ -236,7 +237,7 @@ def _runner_main(req_q, resp_q, crash_trace_path=None) -> None:
             # CPU to dispatch to, independent of model size. Set in THIS child
             # process only - never touches the parent's environment or a
             # concurrently-loading chat model.
-            if payload.pop("cpu_only", False):
+            if load_params.pop("cpu_only", False):
                 # "-1", not "": Windows' CRT putenv("VAR=") with nothing after
                 # '=' REMOVES the variable instead of setting it empty. "-1" is
                 # the standard CUDA/HIP convention for "no valid device index",
@@ -244,13 +245,13 @@ def _runner_main(req_q, resp_q, crash_trace_path=None) -> None:
                 os.environ["HIP_VISIBLE_DEVICES"] = "-1"
                 os.environ["ROCR_VISIBLE_DEVICES"] = "-1"
                 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
-            paused = bool(payload.pop(_NATIVE_CONSOLE_PAUSED_KEY, False))
+            paused = bool(load_params.pop(_NATIVE_CONSOLE_PAUSED_KEY, False))
             # The reply is sent after the paused scope has closed, so its native
             # lines are written out before the parent can stop this worker.
             with _paused_load_scope(paused):
                 from localm.inference.embedder import _POOLING_RANK, GGUFEmbedder
                 try:
-                    embedder = GGUFEmbedder(**payload)
+                    embedder = GGUFEmbedder(**load_params)
                     # The pooling facts (and, when n_ctx was None/"auto", the
                     # actual window size resolved from the model's own native
                     # training context) travel back with the load so the PARENT
