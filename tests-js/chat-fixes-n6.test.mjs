@@ -300,6 +300,39 @@ test("protectMath stays linear on long runs of spaces and tabs", () => {
   }
 });
 
+test("protectMath stays linear on many unclosed bracket math openers", () => {
+  const { window } = loadApp();
+  const time = (s) => {
+    let best = Infinity;
+    for (let i = 0; i < 3; i++) {
+      const t = process.hrtime.bigint();
+      window.protectMath(s);
+      best = Math.min(best, Number(process.hrtime.bigint() - t) / 1e6);
+    }
+    return best;
+  };
+  for (const unit of [String.raw`\[ `, String.raw`\( `, String.raw`\[`, String.raw`\(`]) {
+    const small = time(unit.repeat(Math.ceil(20000 / unit.length)));
+    const big = time(unit.repeat(Math.ceil(80000 / unit.length)));
+    assert.ok(big < 100 + 8 * small, `${JSON.stringify(unit)}: ${small}ms -> ${big}ms`);
+  }
+});
+
+test("bracket math within the bound still typesets", () => {
+  const win = loadRealPipeline();
+  const out = render(win, String.raw`Display \[\int_0^1 x\,dx\] and inline \(a^2 + b^2\) here.`);
+  assert.deepEqual(tex(out), [String.raw`\int_0^1 x\,dx`, "a^2 + b^2"]);
+});
+
+test("a price far from its double dollars leaves no token in the output", () => {
+  const win = loadRealPipeline();
+  const src = "Price: $$ for A, " + "word ".repeat(900) + "costs $5, and $$ for B";
+  const out = render(win, src);
+  noMath(out, "far pair");
+  assert.doesNotMatch(out.innerHTML, /ZZLMATH/);
+  assert.match(out.textContent, /\$\$ for A, .*costs \$5, and \$\$ for B/);
+});
+
 test("a backslash-escaped dollar is a literal dollar", () => {
   const win = loadRealPipeline();
   const out = render(win, String.raw`\$5 and \$x\$ and \$10`);

@@ -802,8 +802,8 @@ const _MATH_SPAN = new RegExp([
   String.raw`(?<![\\($\w*~"'\[])\$\$(?![\s$])[^\n]{0,500}?(?<![\s$])\$\$(?!\$)`,
   // The line-start check follows the literal $$ so it runs only at candidate openers. See "protectMath stays linear on long runs of spaces and tabs".
   String.raw`\$\$(?<=^[ \t]*\$\$)(?:[ \t]*\n|(?=[^\s$]))(?:${_DISPLAY_LINE}){1,40}?(?:[ \t]*|[^\n]{0,2000}[^\s$])\$\$[ \t]*$`,
-  String.raw`\\\[[\s\S]+?\\\]`,
-  String.raw`\\\([\s\S]+?\\\)`,
+  String.raw`\\\[[\s\S]{1,4000}?\\\]`,
+  String.raw`\\\([\s\S]{1,4000}?\\\)`,
   String.raw`(?<![\\$])\$(?![\s\d)\]},.;:!?])[^$\n]*[^$\s\n(\[{]\$(?!\d)`,
 ].join("|"), "gm");
 
@@ -830,6 +830,8 @@ const _MATH_OR_DOLLAR = new RegExp(`${_MATH_SPAN.source}|(?<lit>${_LITERAL_DOLLA
  *     blank or start a markdown list item (`-`, `*`, `1.`) or heading (`#`).
  *  Any other pair of `$$` is left to the markdown pass and KaTeX's own auto-render.
  *
+ *  `\[...\]` and `\(...\)` spans are protected up to 4000 characters long.
+ *
  *  Inline `$...$` is math only when the opening `$` is followed by a character
  *  that is neither whitespace, a digit nor closing punctuation and the closing
  *  `$` follows a character that is neither whitespace nor an opening bracket and
@@ -847,14 +849,30 @@ export function protectMath(text) {
   const tag = "ZZLMATH" + Math.random().toString(36).slice(2, 8);
   const dollar = `${tag}DZZ`;
   const escaped = `${tag}EZZ`;
-  const pricePair = new RegExp(
-    `\\$\\$(?:(?!\\$\\$)[\\s\\S]){0,2000}?(?:${dollar}|${escaped})(?:(?!\\$\\$)[\\s\\S]){0,2000}?\\$\\$`, "g");
+  const dollarizePricePairs = (part) => {
+    let out = "";
+    let from = 0;
+    let open = part.indexOf("$$");
+    while (open >= 0) {
+      const close = part.indexOf("$$", open + 2);
+      if (close < 0) break;
+      const gap = part.slice(open + 2, close);
+      if (gap.includes(dollar) || gap.includes(escaped)) {
+        out += part.slice(from, open) + part.slice(open, close + 2).replace(/\$/g, dollar);
+        from = close + 2;
+        open = part.indexOf("$$", from);
+      } else {
+        open = close;
+      }
+    }
+    return out + part.slice(from);
+  };
   const protectedText = String(text || "").split(_CODE_SPAN).map((part, i) =>
-    i % 2 === 1 ? part : part.replace(_MATH_OR_DOLLAR, (src, ...rest) => {
+    i % 2 === 1 ? part : dollarizePricePairs(part.replace(_MATH_OR_DOLLAR, (src, ...rest) => {
       if (rest[rest.length - 1].lit !== undefined) return src === "\\$" ? escaped : src.replace(/\$/g, dollar);
       spans.push(src);
       return `${tag}${spans.length - 1}ZZ`;
-    }).replace(pricePair, (pair) => pair.replace(/\$/g, dollar))).join("");
+    }))).join("");
   const rewrite = (root, from, to) => {
     const walker = document.createTreeWalker(root, 4);
     const nodes = [];
