@@ -6,12 +6,14 @@ folder reports its models as already registered."""
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
 from localm import model_manager as mm
 from localm.config import load_registry
 from localm.model_manager import registry as _registry
+from localm.model_manager.gguf import TRANSFER_TEMP_PREFIX
 from tests import test_adopt_hub_cache as _hub
 from tests import test_folder_import_progress as _progress
 
@@ -214,9 +216,7 @@ class TestMovingAHfFolderAgain:
 
     def test_a_move_that_has_to_copy_first_still_repoints_and_removes_the_source(
             self, home, tmp_path, printed, monkeypatch):
-        def _no_rename(src, dst):
-            raise OSError("cross-device")
-        monkeypatch.setattr(_registry.os, "rename", _no_rename)
+        _cross_device(monkeypatch)
         pile = _hf_pile(tmp_path / "pile")
         assert mm.add_local(str(pile)) is True
         assert mm.add_local(str(pile), store="move") is True
@@ -227,12 +227,22 @@ class TestMovingAHfFolderAgain:
         assert not (pile / "hfm").exists()
 
 
+def _cross_device(monkeypatch):
+    real = os.rename
+
+    def _rename(src, dst):
+        if not Path(src).name.startswith(TRANSFER_TEMP_PREFIX):
+            raise OSError("cross-device")
+        return real(src, dst)
+    monkeypatch.setattr(_registry.os, "rename", _rename)
+
+
 def _failing_copytree(monkeypatch, name, *, corrupt=False):
     real = shutil.copytree
 
     def _copytree(src, dst, *a, **k):
         out = real(src, dst, *a, **k)
-        if Path(dst).name == name:
+        if Path(dst).name.startswith(f"{TRANSFER_TEMP_PREFIX}{name}."):
             if corrupt:
                 (Path(dst) / "model.safetensors").write_bytes(b"z" * 64)
             else:
@@ -265,9 +275,7 @@ class TestAHfFolderTransferThatFails:
 
     def test_a_failed_move_leaves_the_source_in_place(
             self, home, tmp_path, printed, monkeypatch):
-        def _no_rename(src, dst):
-            raise OSError("cross-device")
-        monkeypatch.setattr(_registry.os, "rename", _no_rename)
+        _cross_device(monkeypatch)
         pile = _two_hf_pile(tmp_path / "pile")
         _failing_copytree(monkeypatch, "hfm")
         mm.add_local(str(pile), store="move")

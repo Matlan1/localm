@@ -158,6 +158,9 @@ def test_the_gate_reads_the_native_devices_not_the_offload_flag():
         pytest.skip("the visible-devices variables do not hide every GPU on this machine, "
                     "so the all-CPU arm cannot be reached")
     assert masked["gpu"] is False, masked
+    if not masked["offload"]:
+        pytest.skip("the runtime's offload flag is already False with the devices hidden, "
+                    "so this run cannot tell the device check from the flag")
 
 
 class _Sym:
