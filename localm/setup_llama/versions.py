@@ -201,19 +201,19 @@ def previous_tag(backend: str) -> Optional[str]:
 
 
 def runtime_target(backend: str, *, pin: Optional[str] = None, tracking: bool = False,
-                   pinned_tag: Optional[str] = None, rocm_build_id: Optional[str] = None,
+                   release_tag: Optional[str] = None, rocm_build_id: Optional[str] = None,
                    latest=None) -> tuple:
     """The build ``setup-llama`` installs for *backend*, and who chose it.
 
     Returns ``(target, source)``. *source* is ``"release"`` when the release's
     own pin decides it (``rocm_build_id`` for amd-rocm, whatever the user pinned,
-    since a pin does not apply to that backend; else *pinned_tag*), ``"pin"``
+    since a pin does not apply to that backend; else *release_tag*), ``"pin"``
     for the user's exact *pin*, or ``"latest"`` when the user tracks upstream's
     newest (*tracking*). For ``"latest"`` the target is ``latest()``, or None
     when *latest* is None, so a caller that only needs the source makes no
     network call.
 
-    *pinned_tag* and *rocm_build_id* default to this release's ``_PINNED_TAG``
+    *release_tag* and *rocm_build_id* default to this release's ``_PINNED_TAG``
     and ``_ROCM_BUILD``; the updater passes the values a staged release pins.
     The one place that maps the user's choice to a target, shared by
     :func:`check_runtime_update` and the updater."""
@@ -223,7 +223,7 @@ def runtime_target(backend: str, *, pin: Optional[str] = None, tracking: bool = 
         return pin, "pin"
     if tracking:
         return (latest() if latest is not None else None), "latest"
-    return (pinned_tag or _PINNED_TAG), "release"
+    return (release_tag or _PINNED_TAG), "release"
 
 
 def check_runtime_update() -> dict:

@@ -550,7 +550,8 @@ def _finish_pending_runtime_update(command) -> None:
                           f"runtime {escape(str(found['target']))}, but "
                           f"{escape(str(found['current']))} is installed; updating it "
                           "...[/dim]")
-        status = updater_runtime.finish_pending()
+        status = updater_runtime.finish_pending(
+            say=lambda m: console.print(f"[dim]{escape(m)}[/dim]"))
     except Exception as e:
         console.print(f"[yellow]The pending native runtime update could not be carried out "
                       f"({e}); it stays pending.[/yellow]")
