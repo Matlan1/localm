@@ -3006,14 +3006,6 @@
                     "endColumn": 41,
                     "lineCount": 1
                 }
-            },
-            {
-                "code": "reportOptionalMemberAccess",
-                "range": {
-                    "startColumn": 22,
-                    "endColumn": 27,
-                    "lineCount": 1
-                }
             }
         ],
         "./localm/inference/engine.py": [
