@@ -3188,7 +3188,7 @@ def _remove_stale_transfer_folders() -> None:
                       if d.is_dir() and not d.is_symlink()
                       and (m := _TRANSFER_TEMP_RE.fullmatch(d.name)) is not None
                       and not pid_alive(int(m.group("pid")))]
-    except OSError as e:
+    except (OSError, OverflowError) as e:
         logger.debug("_remove_stale_transfer_folders: cannot list %s: %s", _mm.MODELS_DIR, e)
         return
     if not candidates:
@@ -3221,6 +3221,8 @@ def _rename_into_place(temp: Path, dest: Path, action: str, source: Path) -> Opt
     folder whose files a scanner has open)."""
     last: Optional[OSError] = None
     for attempt in range(_RENAME_ATTEMPTS):
+        if dest.exists():
+            break
         try:
             os.rename(temp, dest)
             return None
