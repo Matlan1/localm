@@ -108,7 +108,7 @@ function resolvedDisplay(el) {
   let best = null;
   RULES.forEach((rule, order) => {
     for (const sel of rule.selectors) {
-      let hit = false;
+      let hit;
       try { hit = el.matches(sel); } catch { hit = false; }
       if (!hit) continue;
       const cand = { value: rule.value, important: rule.important, spec: specificity(sel), order };
