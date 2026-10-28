@@ -152,7 +152,7 @@ def _windows_env(scratch: Path, home: Path, log: Path, fails: bool, **extra) -> 
 
 
 def _cmd(script: Path, clone: Path, env: dict, answers: str) -> tuple[int, str]:
-    r = subprocess.run([os.environ.get("COMSPEC", "cmd.exe"), "/c", str(script)], cwd=str(clone),
+    r = subprocess.run([os.environ.get("COMSPEC", "cmd.exe"), "/c", ".\\" + script.name], cwd=str(clone),
                        env=env, input=answers.replace("\n", "\r\n").encode("utf-8"),
                        capture_output=True, timeout=180, creationflags=_NO_WINDOW)
     return r.returncode, r.stdout.decode("utf-8", "replace") + r.stderr.decode("utf-8", "replace")
