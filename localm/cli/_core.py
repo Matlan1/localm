@@ -518,6 +518,47 @@ def main() -> None:
     # semantics. No-op unless the env var is set.
     honor_env_debug()
     bugreport.install_global_handlers()
+    _finish_pending_runtime_update(click.get_current_context().invoked_subcommand)
+
+
+def _finish_pending_runtime_update(command) -> None:
+    """Before *command* (the subcommand name) loads the native runtime, carry out
+    the runtime re-provision the last update left pending, or one
+    ``updater_runtime.catch_up`` finds needed because the installed runtime is
+    not the build this release pins (``updater_runtime.finish_pending``), and
+    print its outcome. Skipped for every other command and in a process a
+    restart re-executed (the restart attempted it already). A failure is
+    printed, the previous runtime stays in use, the command still runs, and the
+    next start tries again."""
+    import os
+    from localm import updater_runtime
+    if command not in updater_runtime.RUNTIME_COMMANDS or os.environ.get(
+            "LOCALM_RESTART_IN_PROGRESS"):
+        return
+    try:
+        from rich.markup import escape
+        pending = updater_runtime.read_pending()
+        if pending is not None:
+            console.print(f"[dim]Finishing the native runtime update from the last localm "
+                          f"update ({escape(str(pending.get('backend')))} "
+                          f"{escape(str(pending.get('target')))}) ...[/dim]")
+        else:
+            found = updater_runtime.catch_up()
+            if found is None:
+                return
+            console.print(f"[dim]This localm release uses the {escape(str(found['backend']))} "
+                          f"runtime {escape(str(found['target']))}, but "
+                          f"{escape(str(found['current']))} is installed; updating it "
+                          "...[/dim]")
+        status = updater_runtime.finish_pending()
+    except Exception as e:
+        console.print(f"[yellow]The pending native runtime update could not be carried out "
+                      f"({e}); it stays pending.[/yellow]")
+        return
+    if status is not None:
+        from rich.markup import escape
+        style = "green" if status["state"] in ("updated", "current") else "yellow"
+        console.print(f"[{style}]Native runtime: {escape(status['note'])}[/{style}]")
 
 
 def console_main() -> None:
