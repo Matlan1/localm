@@ -28,6 +28,13 @@ A test file is selected when any of these holds:
     or whose entry in uv.lock differs, and every package in uv.lock that
     depends on one, transitively.
 
+A version bump selects the tests that read the version instead of every test
+file: the files that spell the project version (VERSION, localm/__init__.py
+when only its __version__ string differs, the [project] version of
+pyproject.toml, the version of the project's own editable entry in uv.lock)
+select the test files that reference __version__, name the VERSION, pyproject.toml,
+uv.lock or CHANGELOG.md files, or spell the old or the new version.
+
 A change to tests/conftest.py affects every test file. So does a change to
 pyproject.toml or uv.lock outside the [project] requirement lists, the
 [tool.ruff], [tool.basedpyright], [tool.mutmut] and [tool.uv] tables (a
@@ -94,6 +101,11 @@ _TOOL_TABLE_READERS = {
     "mutmut": ("tests/test_check_mutation_floors.py", "tests/test_mutation_scope.py"),
 }
 _LOCK_FORK_KEYS = ("resolution-markers", "supported-markers")
+_VERSION_FILE = "VERSION"
+_PACKAGE_INIT = "localm/__init__.py"
+_PROJECT_LOCK_SOURCE = {"editable": "."}
+_VERSION_FILE_NAMES = ("pyproject.toml", "uv.lock", "CHANGELOG.md")
+_VERSION_FILE_WORD = re.compile(r"(?<![A-Za-z0-9_])VERSION(?![A-Za-z0-9_])")
 _DEV_EXTRA = "dev"
 _REQUIREMENT_KEYS = ("dependencies", "optional-dependencies")
 # Modules whose callers import and patch the module itself, which re-exports the
@@ -357,9 +369,11 @@ def _requirements(pyproject: dict) -> dict[str, list[tuple[str, str]]] | None:
 def _pyproject_rest(pyproject: dict) -> dict:
     """*pyproject* without the [project] requirement lists, the tool tables no
     test reads, the tool tables in _TOOL_TABLE_READERS, which
-    changed_tool_table_readers() handles, and the [tool.uv] table, whose effect on the locked packages
+    changed_tool_table_readers() handles, the [project] version, which
+    project_versions() handles, and the [tool.uv] table, whose effect on the locked packages
     dependency_change() reads from the lock instead."""
-    project = {k: v for k, v in pyproject.get("project", {}).items() if k not in _REQUIREMENT_KEYS}
+    project = {k: v for k, v in pyproject.get("project", {}).items()
+               if k not in _REQUIREMENT_KEYS and k != "version"}
     skipped = _UNREAD_TOOL_TABLES + _RESOLVER_TOOL_TABLES + tuple(_TOOL_TABLE_READERS)
     tool = {k: v for k, v in pyproject.get("tool", {}).items() if k not in skipped}
     return {**pyproject, "project": project, "tool": tool}
@@ -383,14 +397,17 @@ def changed_tool_table_readers(old_pyproject: str, new_pyproject: str) -> dict[s
 
 def _lock_packages(lock: dict, project: str) -> dict[str, list[str]]:
     """{distribution: the canonical JSON of each of its uv.lock entries}, with
-    the dependency declarations left out of *project*'s own entry."""
+    the dependency declarations left out of *project*'s own entry, and the
+    version too when that entry is the project's editable one."""
     out: dict[str, list[str]] = {}
     for entry in lock.get("package", []):
         name = dist_key(str(entry.get("name", "")))
         if name == project:
             meta = {k: v for k, v in entry.get("metadata", {}).items()
                     if k not in _ROOT_METADATA_DECLARATIONS}
-            entry = {**{k: v for k, v in entry.items() if k not in _ROOT_DECLARATIONS},
+            skipped = _ROOT_DECLARATIONS + (("version",) if entry.get("source") == _PROJECT_LOCK_SOURCE
+                                            else ())
+            entry = {**{k: v for k, v in entry.items() if k not in skipped},
                      "metadata": meta}
         out.setdefault(name, []).append(json.dumps(entry, sort_keys=True))
     return {name: sorted(entries) for name, entries in out.items()}
@@ -407,6 +424,124 @@ def _lock_dependents(lock: dict) -> dict[str, set[str]]:
             for dep in group:
                 out.setdefault(dist_key(str(dep.get("name", ""))), set()).add(
                     dist_key(str(entry.get("name", ""))))
+    return out
+
+
+def _project_version_pair(pyproject: dict, lock: dict, project: str) -> tuple[object, object, bool]:
+    """(the [project] version, the version of the project's editable entry in
+    *lock*, whether such an entry exists)."""
+    for entry in lock.get("package", []):
+        if dist_key(str(entry.get("name", ""))) == project and entry.get("source") == _PROJECT_LOCK_SOURCE:
+            return pyproject.get("project", {}).get("version"), entry.get("version"), True
+    return pyproject.get("project", {}).get("version"), None, False
+
+
+def _differing_project_versions(py_old: dict, py_new: dict, lock_old: dict, lock_new: dict,
+                                project: str) -> set[str] | None:
+    """The project version strings, old and new, of each of pyproject.toml and
+    the lock's editable entry whose version differs between the two sides; None
+    when a version is not a string on a side or the entry exists on one side
+    only."""
+    pv_old, lv_old, has_old = _project_version_pair(py_old, lock_old, project)
+    pv_new, lv_new, has_new = _project_version_pair(py_new, lock_new, project)
+    pairs = [(pv_old, pv_new)] + ([(lv_old, lv_new)] if has_old and has_new else [])
+    if has_old != has_new or not all(isinstance(v, str) for pair in pairs for v in pair):
+        return None
+    return {v for old, new in pairs if old != new for v in (old, new)}
+
+
+def project_versions(old_pyproject: str, new_pyproject: str, old_lock: str,
+                     new_lock: str) -> set[str]:
+    """The project version strings, old and new, that pyproject.toml and the
+    lock's editable entry for the project change. Empty when neither changes
+    its version, a side is empty or does not parse, or a version is not a
+    string."""
+    if not (old_pyproject and new_pyproject and old_lock and new_lock):
+        return set()
+    try:
+        py_old, py_new = tomllib.loads(old_pyproject), tomllib.loads(new_pyproject)
+        lock_old, lock_new = tomllib.loads(old_lock), tomllib.loads(new_lock)
+    except tomllib.TOMLDecodeError:
+        return set()
+    project = dist_key(str(py_new.get("project", {}).get("name", "")))
+    return _differing_project_versions(py_old, py_new, lock_old, lock_new, project) or set()
+
+
+def init_version_change(old_source: str, new_source: str) -> tuple[str, str] | None:
+    """(old, new) version when the two texts of localm/__init__.py differ only
+    in the string assigned to the module-level `__version__`; None otherwise."""
+    versions: list[str] = []
+    dumps: list[str] = []
+    for source in (old_source, new_source):
+        try:
+            tree = ast.parse(source)
+        except (SyntaxError, ValueError):
+            return None
+        found = [node for node in tree.body
+                 if isinstance(node, ast.Assign) and len(node.targets) == 1
+                 and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "__version__"
+                 and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)]
+        if len(found) != 1:
+            return None
+        versions.append(found[0].value.value)
+        found[0].value = ast.Constant("")
+        dumps.append(ast.dump(tree))
+    if versions[0] == versions[1] or dumps[0] != dumps[1]:
+        return None
+    return versions[0], versions[1]
+
+
+def version_bump(changed: list[str], base_ref: str) -> tuple[set[str], set[str]]:
+    """(the changed files that are only a version bump, the old and new project
+    versions): VERSION when its text differs from *base_ref*'s, and
+    localm/__init__.py when only its __version__ string differs."""
+    files: set[str] = set()
+    versions: set[str] = set()
+    if _VERSION_FILE in changed:
+        old, new = _read_at(base_ref, _VERSION_FILE).strip(), _read(_VERSION_FILE).strip()
+        if old and new and old != new:
+            files.add(_VERSION_FILE)
+            versions.update((old, new))
+    if _PACKAGE_INIT in changed:
+        pair = init_version_change(_read_at(base_ref, _PACKAGE_INIT), _read(_PACKAGE_INIT))
+        if pair:
+            files.add(_PACKAGE_INIT)
+            versions.update(pair)
+    return files, versions
+
+
+def _references_version(source: str) -> bool:
+    """Whether *source* reads or names `__version__`."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return False
+    return any((isinstance(n, ast.Name) and n.id == "__version__")
+               or (isinstance(n, ast.Attribute) and n.attr == "__version__")
+               or (isinstance(n, ast.ImportFrom) and any(a.name == "__version__" for a in n.names))
+               or (isinstance(n, ast.Constant) and n.value == "__version__")
+               for n in ast.walk(tree))
+
+
+def version_readers(graph: Graph, versions: set[str], test_text) -> dict[str, list[str]]:
+    """{test file: reasons} for the test files that read the project version: one
+    that references `__version__`, names the VERSION, pyproject.toml, uv.lock or
+    CHANGELOG.md file, or spells one of *versions*. *test_text* reads a test
+    file."""
+    spelled = [(v, re.compile(r"(?<![\w.])v?" + re.escape(v) + r"(?!\w|\.\d)")) for v in sorted(versions)]
+    out: dict[str, list[str]] = {}
+    for t in graph.test_files:
+        text = test_text(t)
+        why: list[str] = []
+        if _references_version(text):
+            why.append("reads __version__: the project version changed")
+        if _VERSION_FILE_WORD.search(text):
+            why.append("names VERSION: the project version changed")
+        why += [f"names {name}: the project version changed"
+                for name in _VERSION_FILE_NAMES if name in text]
+        why += [f"spells {v}: the project version changed" for v, rx in spelled if rx.search(text)]
+        if why:
+            out[t] = why
     return out
 
 
@@ -430,10 +565,12 @@ def dependency_change(old_pyproject: str, new_pyproject: str, old_lock: str,
     req_old, req_new = _requirements(py_old), _requirements(py_new)
     if req_old is None or req_new is None or _pyproject_rest(py_old) != _pyproject_rest(py_new):
         return None
+    project = dist_key(str(py_new.get("project", {}).get("name", "")))
+    if _differing_project_versions(py_old, py_new, lock_old, lock_new, project) is None:
+        return None
     if ({k: v for k, v in lock_old.items() if k != "package" and k not in _LOCK_FORK_KEYS}
             != {k: v for k, v in lock_new.items() if k != "package" and k not in _LOCK_FORK_KEYS}):
         return None
-    project = dist_key(str(py_new.get("project", {}).get("name", "")))
     pkg_old, pkg_new = _lock_packages(lock_old, project), _lock_packages(lock_new, project)
     if pkg_old.get(project) != pkg_new.get(project):
         return None
@@ -561,6 +698,15 @@ def select(changed: list[str], graph: Graph, depth: int = 0,
             add(t, f"every test file: {which} changed")
         return reasons
 
+    bump_files, versions = version_bump(changed, base_ref)
+    if listed:
+        versions |= project_versions(_read_at(base_ref, "pyproject.toml"), _read("pyproject.toml"),
+                                     _read_at(base_ref, "uv.lock"), _read("uv.lock"))
+    if versions:
+        for t, whys in version_readers(graph, versions, test_text).items():
+            for why in whys:
+                add(t, why)
+
     if "pyproject.toml" in listed:
         readers = changed_tool_table_readers(_read_at(base_ref, "pyproject.toml"),
                                              _read("pyproject.toml"))
@@ -583,6 +729,8 @@ def select(changed: list[str], graph: Graph, depth: int = 0,
     for rel in changed:
         if rel in graph.test_imports:
             add(rel, "changed")
+            continue
+        if rel in bump_files:
             continue
         if rel.endswith("/conftest.py"):
             folder = rel.rsplit("/", 1)[0] + "/"
