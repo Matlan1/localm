@@ -33,6 +33,14 @@ from localm.plugins.builtin.video import backend as video_backend
 BACKENDS = [image_backend, music_backend, video_backend]
 
 
+@pytest.fixture(autouse=True)
+def _isolated_comfy_handles(monkeypatch):
+    """A fresh ComfyUI handle registry per test, so a stub handle one test
+    leaves "running" is never stopped and replaced by another test's launch."""
+    monkeypatch.setattr(comfy_client, "_spawned_procs", {})
+    monkeypatch.setattr(comfy_client, "_device_errors", {})
+
+
 def _mock_managed_active(monkeypatch, active: bool):
     """Patch managed_comfy_active everywhere it is actually called from.
 
