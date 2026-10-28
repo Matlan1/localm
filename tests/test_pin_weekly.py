@@ -933,17 +933,18 @@ def test_the_report_lists_the_weeks_without_a_result_and_a_dry_run_counts_nothin
     assert counts["fake|advance"]["streak"] == 1 and "Weeks in a row without a result" in path.read_text(encoding="utf-8")
 
 
-def test_a_weekly_run_keeps_every_child_process_temp_beside_the_checkout(monkeypatch, tmp_path):
+def test_a_weekly_run_keeps_every_child_process_temp_in_the_checkouts_scratch(monkeypatch, tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     monkeypatch.setattr(pw, "REPO", repo)
     for name in ("TMP", "TEMP", "TMPDIR"):
         monkeypatch.setenv(name, "C:/elsewhere")
     stale = pw.run_temp_dir()
-    stale.mkdir()
+    stale.mkdir(parents=True)
     (stale / "left-over.bin").write_text("x", encoding="utf-8")
     temp = pw.redirect_temp()
-    assert temp.parent == repo.parent and temp.is_dir() and not list(temp.iterdir())
+    assert temp == repo / "scratch" / "pin-pipeline" / "weekly-tmp"
+    assert temp.is_dir() and not list(temp.iterdir())
     assert {pw.os.environ[n] for n in ("TMP", "TEMP", "TMPDIR")} == {str(temp)}
 
 
