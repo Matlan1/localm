@@ -445,10 +445,10 @@ class VramSizingMixin:
         Never raises: a correction that cannot be made degrades to None, so the
         caller uses the uncorrected reading. Only acts where
         ``gpu_usage.raw_reading_is_process_scoped()`` is True - Windows plus a
-        ROCm/HIP torch build, and the torch-less processes whose readings come
-        from the resident bundled HIP runtime (the GGUF worker deciding a
-        context grow, answered via ``discover.native_hip_runtime_resident()``).
-        NVIDIA / Linux / Vulkan reads are left unchanged.
+        ROCm/HIP torch build, and the processes whose readings come from the
+        bundled HIP runtime: resident in the process (the GGUF worker deciding a
+        context grow) or loaded by the isolated VRAM probe daemon (the parent
+        sizing a load). NVIDIA / Linux / Vulkan reads are left unchanged.
 
         The device entry carries the PCI bus id from the last completed GPU
         probe (``discover.last_known_gpus``, no new probe), which is what pairs
