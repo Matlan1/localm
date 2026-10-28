@@ -72,6 +72,7 @@ def test_every_known_site_uses_the_double_caret_escape(bat):
         'echo  [^^!] Could not set up the setup journal - if this setup is interrupted',
         'if "%UVRC%"=="61" echo  [^^!] Could not download the uv %UV_INSTALLER_VERSION% installer.',
         'if "%UVRC%"=="62" echo  [^^!] The downloaded uv installer did not match its expected checksum, or could not be read to check it, and was not run.',
+        'if "%UVRC%"=="63" echo  [^^!] Could not create a temporary folder in %STMP% for the uv installer.',
     ]
     for site in sites:
         assert site in bat, site
@@ -171,10 +172,12 @@ class TestBangSurvivesEveryStructuralShape:
     @pytest.mark.parametrize("rc, text", [
         ("61", "[!] Could not download the uv 0.13.0 installer."),
         ("62", "[!] The downloaded uv installer did not match its expected checksum, or could not be read to check it, and was not run."),
+        ("63", "[!] Could not create a temporary folder in .localm-setup-tmp for the uv installer."),
     ])
     def test_the_uv_installer_refusal_reasons(self, bat, tmp_path, rc, text):
         line = _line_containing(bat, f'if "%UVRC%"=="{rc}" echo')
-        preamble = f'set "UV_INSTALLER_VERSION=0.13.0"\r\nset "UVRC={rc}"\r\n'
+        preamble = (f'set "UV_INSTALLER_VERSION=0.13.0"\r\nset "UVRC={rc}"\r\n'
+                    'set "STMP=.localm-setup-tmp"\r\n')
         out = self._run(tmp_path, preamble, line)
         assert text in out.stdout, (out.stdout, out.stderr)
 
