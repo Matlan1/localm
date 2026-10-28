@@ -524,6 +524,15 @@ class EmbedderRunner:
             raise RuntimeError(result[1])
         raise RuntimeError(f"Unexpected response from the embedding worker: {result!r}")
 
+    def kill(self) -> None:
+        """Terminate the worker process at once, from any thread. Leaves the
+        queues and handles in place, so a call waiting on the worker sees it
+        gone and raises RuntimeError; :meth:`shutdown` releases the rest. A
+        no-op when no worker is running."""
+        proc = self._proc
+        if proc is not None and proc.is_alive():
+            proc.terminate()
+
     def shutdown(self, grace: float = 5.0) -> None:
         """Best-effort teardown: ask the worker to close cleanly, then kill it
         if it does not exit within *grace* seconds. Safe to call more than

@@ -36,6 +36,12 @@ _ENGINE: Optional[SpeechEngine] = None
 _ENGINE_KEY: Optional[tuple] = None
 _LOAD_FAILED: dict[tuple, tuple[str, float, bool]] = {}
 _LOAD_RETRY_AFTER_S = 60.0
+# SpeechEngine.stop(): how long the running synthesis gets to stop when asked,
+# how long the request holding the worker then gets to leave after the worker
+# is killed, and how often the worker is killed again meanwhile.
+_STOP_CANCEL_GRACE = 5.0
+_STOP_TIMEOUT = 30.0
+_STOP_POLL = 0.5
 
 OPENAI_MODEL_ALIASES = ("tts-1", "tts-1-hd", "gpt-4o-mini-tts")
 DEFAULT_VOICE = "default"
@@ -269,6 +275,9 @@ def _choose_gpu_layers(model: SpeechModel, n_ctx: int) -> tuple[int, Optional[st
 class SpeechEngine:
     """A loaded speech model in its isolated worker."""
 
+    # Set by stop(): no request starts on this engine afterwards.
+    _stopped: bool = False
+
     def __init__(self, model: SpeechModel, *, n_gpu_layers: int,
                  n_ctx: Optional[int] = None, n_threads: Optional[int] = None) -> None:
         from localm.inference._speech_runner import SpeechRunner
@@ -331,6 +340,9 @@ class SpeechEngine:
                     from localm.inference.backends.llamacpp.mtmd_gen import SpeechCancelled
                     raise SpeechCancelled("The speech request was cancelled while waiting.")
         try:
+            if self._stopped:
+                from localm.inference.backends.llamacpp.mtmd_gen import SpeechCancelled
+                raise SpeechCancelled(self._stopped_message())
             if on_progress is not None:
                 on_progress({"stage": "speaking", "frames": 0, "seconds": 0.0})
 
@@ -351,6 +363,49 @@ class SpeechEngine:
 
     def close(self, grace: float = 5.0) -> None:
         self._runner.shutdown(grace=grace)
+
+    def _stopped_message(self) -> str:
+        return (f"The speech model {self.model.name} was unloaded while this "
+                "request was running.")
+
+    def stop(self, cancel_grace: Optional[float] = None,
+             timeout: Optional[float] = None) -> bool:
+        """Release the worker even while a request is in flight. The synthesis
+        running is asked to stop (its request raises ``SpeechCancelled``) and
+        every request queued behind it raises ``SpeechCancelled``; a worker
+        still running after *cancel_grace* seconds is killed (its request
+        raises RuntimeError). Once the running request has left, the worker is
+        shut down. Waits up to *timeout* seconds after the kill for that
+        request to leave. Returns whether the worker was released; on False
+        its process is killed but its handles stay open. *cancel_grace* and
+        *timeout* default to ``_STOP_CANCEL_GRACE`` and ``_STOP_TIMEOUT``."""
+        if cancel_grace is None:
+            cancel_grace = _STOP_CANCEL_GRACE
+        if timeout is None:
+            timeout = _STOP_TIMEOUT
+        self._stopped = True
+        self._runner.cancel()
+        if self._rpc_lock.acquire(timeout=max(0.0, cancel_grace)):
+            try:
+                self.close()
+            finally:
+                self._rpc_lock.release()
+            return True
+        deadline = time.monotonic() + timeout
+        while True:
+            self._runner.kill()
+            if self._rpc_lock.acquire(timeout=_STOP_POLL):
+                try:
+                    self.close(grace=0)
+                finally:
+                    self._rpc_lock.release()
+                return True
+            if time.monotonic() >= deadline:
+                logger.warning(
+                    "speech model %s: a request still held the worker %.0fs after "
+                    "it was killed; the worker's handles were not released",
+                    self.model.name, timeout)
+                return False
 
 
 def get_engine(model: SpeechModel, *, on_progress: Optional[ProgressFn] = None,
@@ -472,22 +527,38 @@ def active_requests() -> int:
         return _ENGINE.active_requests if _ENGINE is not None else 0
 
 
+def _in_flight(model) -> bool:
+    """Whether *model* has requests in flight: an int ``active_requests``
+    above 0 (anything else, such as a bare test double, reads as idle)."""
+    active = getattr(model, "active_requests", 0)
+    return isinstance(active, int) and active > 0
+
+
 def reset_speech(*, force: bool = True) -> bool:
     """Release the resident speech model and clear the failed-load memory.
     Returns True when a model was released; with ``force=False`` a model with a
     request in flight is left alone (and nothing is cleared), checked and
-    released in one locked step."""
+    released in one locked step. With ``force=True`` a model with a request in
+    flight is detached under ``_LOCK`` and stopped outside it
+    (:meth:`SpeechEngine.stop`)."""
     global _ENGINE, _ENGINE_KEY
     with _LOCK:
-        if not force and _ENGINE is not None and _ENGINE.active_requests > 0:
+        busy = _ENGINE is not None and _in_flight(_ENGINE)
+        if not force and busy:
             return False
         current = _ENGINE
-        if current is not None:
+        if current is not None and not busy:
             current.close()
         _ENGINE = None
         _ENGINE_KEY = None
         _LOAD_FAILED.clear()
-        return current is not None
+    if current is not None and busy:
+        stop = getattr(current, "stop", None)
+        if callable(stop):
+            stop()
+        else:
+            current.close()
+    return current is not None
 
 
 def release_for_exit() -> bool:
