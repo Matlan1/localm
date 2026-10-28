@@ -400,7 +400,7 @@ def _check_runtime_matches_release(build) -> None:
                       f"finishes on the next start of localm, or run '{escape(fix)}'")
     elif source == "release" and build and not current:
         console.print(f"  {_WARN_SYM}  this localm release ships llama.cpp build "
-                      f"{escape(str(target))} for {escape(backend)}, but {escape(build)} is "
+                      f"{escape(str(target))} for {escape(str(backend))}, but {escape(build)} is "
                       f"installed - run '{escape(fix)}'")
     if last and last.get("state") == "failed" and not current:
         console.print(f"     [dim]last runtime update: {escape(str(last.get('note')))}[/dim]")
