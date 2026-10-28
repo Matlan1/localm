@@ -301,6 +301,39 @@ def test_a_call_arriving_after_an_idle_embedder_was_released_never_respawns_it(m
     assert reloads == []
 
 
+def test_stop_gives_up_after_its_timeout_when_the_call_never_leaves(caplog):
+    e = emb.IsolatedEmbedder.__new__(emb.IsolatedEmbedder)
+    e.model_path = "Z:/models/embed.gguf"
+    e._rpc_lock = threading.RLock()
+    kills = []
+    closes = []
+    e._runner = SimpleNamespace(kill=lambda: kills.append(1),
+                                shutdown=lambda grace=5.0: closes.append(grace))
+    held = threading.Event()
+    release = threading.Event()
+
+    def _hold():
+        with e._rpc_lock:
+            held.set()
+            release.wait(timeout=30)
+
+    holder = threading.Thread(target=_hold, daemon=True)
+    holder.start()
+    assert held.wait(timeout=5)
+    try:
+        started = time.monotonic()
+        assert e.stop(timeout=0.6) is False
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+        holder.join(timeout=5)
+    assert e._stopped is True
+    assert len(kills) >= 2, "the worker is killed again while stop waits"
+    assert closes == [], "the handles of a worker still in use were released"
+    assert 0.6 <= elapsed < 5
+    assert "still held the worker" in caplog.text
+
+
 def test_forced_unload_all_stops_a_busy_gguf_reranker_and_counts_it(isolated, monkeypatch):
     e, runner, reloads = _hung_isolated_embedder(monkeypatch)
     e.effective_pooling = emb._POOLING_RANK
