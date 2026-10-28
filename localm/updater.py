@@ -1366,7 +1366,7 @@ def _uv_for_deps(target: Path) -> str:
     a refusal changes nothing."""
     from localm import uv_tool
     from localm.bugreport import LocalmError
-    found = uv_tool.bundled_uv() or uv_tool.find_uv(target)
+    found = uv_tool.own_uv(target)
     if found:
         return found
     searched = uv_tool.describe_search(target)

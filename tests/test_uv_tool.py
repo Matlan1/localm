@@ -282,3 +282,17 @@ class TestInstallerShell:
             uv_tool.bootstrap_uv(clone, download=lambda u, d: d.write_bytes(installer))
         assert "could not run the uv installer" in str(ei.value)
         assert ("powershell" if uv_tool.IS_WINDOWS else "sh") in str(ei.value)
+
+
+class TestOwnUv:
+    def test_the_bundled_uv_comes_first(self, machine, monkeypatch):
+        root, _ = machine
+        _uv(root / ".uv")
+        monkeypatch.setattr(uv_tool, "bundled_uv", lambda: "/venv/bin/uv")
+        assert uv_tool.own_uv(root) == "/venv/bin/uv"
+
+    def test_without_a_bundled_uv_the_install_uv_is_used(self, machine, monkeypatch):
+        root, _ = machine
+        exe = _uv(root / ".uv")
+        monkeypatch.setattr(uv_tool, "bundled_uv", lambda: None)
+        assert uv_tool.own_uv(root) == str(exe)

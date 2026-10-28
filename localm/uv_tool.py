@@ -105,6 +105,12 @@ def bundled_uv() -> Optional[str]:
     return path if os.path.isabs(path) and usable(path) else None
 
 
+def own_uv(root) -> Optional[str]:
+    """Full path of the uv to run for the install at *root* from inside its own
+    environment: :func:`bundled_uv`, else :func:`find_uv`."""
+    return bundled_uv() or find_uv(root)
+
+
 def describe_search(root) -> str:
     """What the updater and find_uv looked at, for an error message."""
     before, after = search_places(root)
