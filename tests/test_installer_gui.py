@@ -798,7 +798,7 @@ class TestPosixShortcut:
             monkeypatch.setattr(gui, "IS_WINDOWS", False)
         home = tmp_path / "h"
         monkeypatch.setattr(gui.Path, "home", classmethod(lambda cls: home))
-        entry = home / ".local/share/applications" / "LocaLM.desktop"
+        entry = home / ".local/share/applications" / gui.MENU_ENTRY
         gui.make_shortcut(gui.Plan(shortcut="launcher"), lambda s: None)
         launcher = entry.read_text(encoding="utf-8")
         gui.make_shortcut(gui.Plan(shortcut="gui"), lambda s: None)
@@ -850,7 +850,7 @@ class TestPosixShortcut:
         home = tmp_path / "h"
         monkeypatch.setattr(gui.Path, "home", classmethod(lambda cls: home))
         gui.make_shortcut(gui.Plan(shortcut="gui"), lambda s: None)
-        entry = home / ".local/share/applications" / "LocaLM.desktop"
+        entry = home / ".local/share/applications" / gui.MENU_ENTRY
         text = entry.read_text(encoding="utf-8")
         assert "Categories=Utility;Development;Science;\n" in text
 
@@ -865,7 +865,7 @@ class TestPosixShortcut:
         (assets / "localm.svg").write_bytes(b"")
         (assets / "localm.ico").write_bytes(b"")
         gui.make_shortcut(gui.Plan(shortcut="gui"), lambda s: None)
-        entry = home / ".local/share/applications" / "LocaLM.desktop"
+        entry = home / ".local/share/applications" / gui.MENU_ENTRY
         text = entry.read_text(encoding="utf-8")
         assert f"Icon={assets / 'localm.svg'}\n" in text
 
@@ -879,7 +879,7 @@ class TestPosixShortcut:
         assets.mkdir()
         (assets / "localm.ico").write_bytes(b"")
         gui.make_shortcut(gui.Plan(shortcut="gui"), lambda s: None)
-        entry = home / ".local/share/applications" / "LocaLM.desktop"
+        entry = home / ".local/share/applications" / gui.MENU_ENTRY
         text = entry.read_text(encoding="utf-8")
         assert f"Icon={assets / 'localm.ico'}\n" in text
 
@@ -890,7 +890,7 @@ class TestPosixShortcut:
         home = tmp_path / "h"
         monkeypatch.setattr(gui.Path, "home", classmethod(lambda cls: home))
         gui.make_shortcut(gui.Plan(shortcut="gui"), lambda s: None)
-        entry = home / ".local/share/applications" / "LocaLM.desktop"
+        entry = home / ".local/share/applications" / gui.MENU_ENTRY
         text = entry.read_text(encoding="utf-8")
         assert "Icon=" not in text
 

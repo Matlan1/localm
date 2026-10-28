@@ -552,8 +552,8 @@ def test_the_window_lists_the_recommendation_first(gui):
     assert sorted(keys[:-1]) == sorted(offered) and keys[-1] == "own"
 
 
+@pytest.mark.skipif(sys.platform == "darwin", reason="macOS builds no launcher")
 def test_a_launcher_that_was_not_built_reaches_the_summary(gui, tmp_path, monkeypatch):
-    monkeypatch.setattr(gui.sys, "platform", "win32")
     fake, _ = _recorder(gui, tmp_path, [(1, [])])
     monkeypatch.setattr(gui, "_run", fake)
     step = _step(gui, gui.Plan(backend="own"), "Building the launcher")

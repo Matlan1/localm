@@ -374,7 +374,6 @@ def test_every_window_control_answers_a_spec_question(tmp_path, monkeypatch):
     from tkinter import filedialog, ttk
     gui = _gui_module(tmp_path, monkeypatch)
     (tmp_path / ".venv").mkdir()
-    monkeypatch.setattr(gui.sys, "platform", "win32")
     root = build_tk_root(tk.Tk)
     root.withdraw()
     try:
@@ -400,7 +399,8 @@ def test_every_window_control_answers_a_spec_question(tmp_path, monkeypatch):
                     bound.add(names.get(v, f"<unknown {v}>"))
     finally:
         root.destroy()
-    expected = {a for attrs in WINDOW_CONTROLS.values() for a in attrs}
+    expected = {a for qid, attrs in WINDOW_CONTROLS.items() for a in attrs
+                if sys.platform in spec.question(qid).platforms}
     assert bound == expected, (sorted(bound - expected), sorted(expected - bound))
 
 
