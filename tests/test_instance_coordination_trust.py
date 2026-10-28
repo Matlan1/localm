@@ -236,6 +236,51 @@ class TestCooperateUnloadEndToEnd:
             assert gpu_registry.request_cooperative_unload(peer, timeout=10) is True
         assert calls == [1]
 
+    def test_cooperate_unload_never_cuts_a_busy_reply(self, monkeypatch):
+        """A verified sibling's request leaves a model that is writing a reply
+        loaded with its reply running, and the sibling is told nothing was
+        freed."""
+        from localm.inference import residency
+
+        class _Busy:
+            display_name = "busy-model"
+            loaded = True
+            active_requests = 1
+            unload_calls = 0
+
+            def unload(self):
+                self.unload_calls += 1
+
+        monkeypatch.setattr("localm.discover.vram_info",
+                            lambda: {"free": 10 * 1024 ** 3, "total": 16 * 1024 ** 3})
+        monkeypatch.setattr("localm.vram.wait_for_vram_release",
+                            lambda free_fn, before_bytes=None: (0, before_bytes))
+        real_wait = hs._wait_for_pin_clear
+        monkeypatch.setattr(hs, "_wait_for_pin_clear",
+                            lambda engine, **kw: real_wait(engine, timeout=0.05,
+                                                           poll_interval=0.01))
+        busy = _Busy()
+        reply = residency.GenerationCancel()
+        residency.register_cancel("busy-model", reply)
+        try:
+            with _served(_coordinating_app(model="busy-model")) as port, \
+                    peer_server(localm_whoami("requester-1"),
+                                post={"/v1/instances/vouch": _deferring_vouch}) as req:
+                monkeypatch.setitem(hs._engines, "busy-model", busy)
+                monkeypatch.setattr(hs, "_engines_lru", ["busy-model"])
+                gpu_registry.set_local_status_provider(
+                    lambda: {"instance_id": "requester-1", "port": req.port,
+                             "scheme": "http"})
+                peer = {"instance_id": "self-1", "port": port, "host": "127.0.0.1",
+                        "scheme": "http"}
+                freed = gpu_registry.request_cooperative_unload(peer, timeout=10)
+        finally:
+            residency.unregister_cancel("busy-model", reply)
+        assert freed is False
+        assert not reply.is_set(), "a sibling's request cut this instance's reply"
+        assert busy.unload_calls == 0 and hs._engines["busy-model"] is busy
+        assert hs._engines_lru == ["busy-model"]
+
 
 # ------------------------------------------------------------------ #
 #  GET /v1/instances/status without a credential                     #

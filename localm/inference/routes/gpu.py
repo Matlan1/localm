@@ -206,7 +206,10 @@ def register(app: FastAPI, ctx) -> None:
         sibling instance's cooperation request can trigger. Runs only after the
         named requester confirms the request (``gpu_registry.verify_requester``);
         reuses ``unload_all_models()`` (the same VRAM-release-wait behavior as
-        ``POST /v1/models/unload``) rather than duplicating it."""
+        ``POST /v1/models/unload``) rather than duplicating it, never with
+        force: no reply on this instance is cancelled, a model still in use
+        after the wait stays loaded, and the answer is ``in_use`` when nothing
+        was freed. See test_cooperate_unload_never_cuts_a_busy_reply."""
         from localm import gpu_registry
         body = await _json_body(request)
         coord = getattr(_hs, "_gpu_coord", None)
