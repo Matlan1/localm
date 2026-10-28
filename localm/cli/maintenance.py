@@ -482,7 +482,7 @@ def _update_to(updater, version: str, *, yes: bool, allow_unverified: bool) -> N
         try:
             res = updater.apply(asset["id"], signature=rel.get("signature"),
                                 target_version=rel["version"], allow_unverified=accept,
-                                expect_sha256=expect)
+                                expect_sha256=expect, say=_say_step)
             break
         except updater.UnverifiedBuild as e:
             console.print(f"[bold yellow]Warning: the signature of {escape(rel['version'])} "
@@ -520,6 +520,12 @@ def _update_to(updater, version: str, *, yes: bool, allow_unverified: bool) -> N
     else:
         console.print("[bold]Restart localm to load it.[/bold]  "
                       "[dim](undo: localm update --rollback)[/dim]")
+
+
+def _say_step(text: str) -> None:
+    """Print one step of an update or rollback."""
+    from rich.markup import escape
+    console.print(f"[dim]{escape(text)}[/dim]")
 
 
 def _print_update_extras(res: dict) -> None:
@@ -584,7 +590,7 @@ def update_cmd(check_only: bool, yes: bool, do_rollback: bool, list_only: bool,
 
     if do_rollback:
         try:
-            updater.rollback_last()
+            updater.rollback_last(say=_say_step)
         except LocalmError as e:
             console.print(f"[yellow]{escape(e.summary)}[/yellow] ({escape(e.reason)}).")
             sys.exit(1)
@@ -637,7 +643,7 @@ def update_cmd(check_only: bool, yes: bool, do_rollback: bool, list_only: bool,
 
     console.print(f"[dim]Downloading and applying {escape(latest)} ...[/dim]")
     try:
-        res = updater.apply(asset["id"], signature=info.get("signature"))
+        res = updater.apply(asset["id"], signature=info.get("signature"), say=_say_step)
     except LocalmError as e:
         # apply() has already rolled back by this point.
         console.print(f"[red]Update failed:[/red] {escape(e.summary)} ({escape(e.reason)}).")

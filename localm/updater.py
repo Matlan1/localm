@@ -1121,7 +1121,7 @@ def _install_uv_bridge(root: Path, uv: str, target: Path) -> None:
 
 def apply(asset_id, *, signature=None, target_version=None, allow_unverified=False,
           expect_sha256=None, installed=None, download_opener=None,
-          runner=None, defer_runtime=False) -> dict:
+          runner=None, defer_runtime=False, say=None) -> dict:
     """Download, VERIFY (signature + anti-rollback), and swap a build into the
     install, then run the class's deps/runtime step. Returns
     ``{applied, version, klass, backup, restart_needed, verified, verify_reason,
@@ -1129,15 +1129,20 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
 
     THE NATIVE RUNTIME. When the build pins a different llama.cpp build for the
     installed backend than the one installed (``updater_runtime.plan``), the
-    class is ``runtime`` and a pending re-provision is recorded. Without
-    *defer_runtime* it is carried out right after the swap
-    (``updater_runtime.finish_pending``) unless a process holds the runtime; with
-    it (the server, which still runs its models) the caller's restart carries it
-    out once its models are unloaded. Either way a held runtime stays pending
-    for the next start. ``runtime`` is that status (None when nothing was
-    attempted) and ``runtime_note`` a one-line summary for the user (None when
-    there is nothing to say). A failed re-provision keeps the code update and
-    the previous runtime; it is never reported as success.
+    class is ``runtime`` and a pending re-provision is recorded. The code and
+    the runtime are updated both or neither: before the swap, this install's own
+    processes that hold the runtime are stopped
+    (``updater_runtime.stop_own_holders``; with *defer_runtime* only checked),
+    and a holder that is not this install's refuses the update with nothing
+    changed. Without *defer_runtime* the re-provision is carried out right after
+    the swap (``updater_runtime.finish_pending``); when it fails, the previous
+    runtime is put back, the code swap is rolled back and LocalmError is
+    raised. With it (the server, which still runs its models) the caller's
+    restart carries it out once its models are unloaded. ``runtime`` is that
+    status (None when nothing was attempted) and ``runtime_note`` a one-line
+    summary for the user (None when there is nothing to say). *say* receives
+    each step of stopping processes and replacing the runtime as one line of
+    text.
 
     *target_version* selects a release by version (``localm update --to``): the
     anti-rollback check is replaced by :func:`_check_selected_version`, so an
@@ -1242,6 +1247,14 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
                 rt_plan["reprovision"] = True
             if rt_plan["reprovision"]:
                 klass = _max_class(klass, "runtime")
+            if rt_plan["reprovision"] and klass != "setup":
+                left = updater_runtime.stop_own_holders(
+                    updater_runtime.runtime_lib(target), target, say=say,
+                    stop=not defer_runtime)
+                if left:
+                    raise LocalmError(
+                        "the native llama.cpp runtime is in use, so nothing was updated",
+                        reason=updater_runtime.in_use_message(left, "run the update again"))
             deps_changed = klass != "setup" and _deps_set(root) != _deps_set(target)
             uv_exe = _uv_for_deps(target) if deps_changed else None
             post_cmd = au.post_swap_command("deps", uv=uv_exe) if deps_changed else None
@@ -1347,15 +1360,26 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
                 else:
                     try:
                         runtime_status = updater_runtime.finish_pending(
-                            root=target, runner=runner, env=_deps_env(target))
+                            root=target, runner=runner, env=_deps_env(target), say=say)
                     except Exception as e:
-                        _apply_warn("the runtime update failed: %s", e)
-                        runtime_note = (f"the {rt_plan['backend']} runtime was NOT updated to "
-                                        f"{rt_plan['target']} ({e}); it stays pending for the "
-                                        "next start")
-                    else:
-                        if runtime_status is not None:
-                            runtime_note = runtime_status["note"]
+                        runtime_status = {"state": "failed", "note": str(e)}
+                    if runtime_status is not None and runtime_status["state"] in (
+                            "failed", "waiting"):
+                        updater_runtime.clear_pending()
+                        why = runtime_status["note"]
+                        try:
+                            au.rollback(backup_dir, target, names)
+                        except Exception as rb:
+                            raise LocalmError(
+                                "the native runtime update failed AND rolling the code "
+                                "back failed - manual recovery needed",
+                                reason=f"{why}; rollback: {rb}; restore from {backup_dir}"
+                            ) from None
+                        raise LocalmError(
+                            "the native runtime could not be updated, so the update was "
+                            "rolled back", reason=why)
+                    if runtime_status is not None:
+                        runtime_note = runtime_status["note"]
         return {"applied": True, "version": new_version, "klass": klass,
                 "backup": str(backup_dir), "restart_needed": True,
                 "verified": verified, "verify_reason": verify_reason,
@@ -1572,9 +1596,18 @@ def rollback_info() -> dict:
             "current": _version.read_version()}
 
 
-def rollback_last(*, installed=None) -> dict:
+def rollback_last(*, installed=None, say=None) -> dict:
     """Restore the install from the most recent update backup. Returns
     ``{rolled_back, backup}``. Raises LocalmError when there is no backup.
+
+    The code and the native runtime the update replaced are restored both or
+    neither. When the runtime differs from the one the update kept
+    (``_apply_update.runtime_snapshot_dir``), this install's own processes that
+    hold it are stopped first (``updater_runtime.stop_own_holders``); a holder
+    that is not this install's, or a runtime that cannot be restored, raises
+    LocalmError with nothing changed. The runtime is restored before the code,
+    and put back as it was when the code restore fails. *say* receives each
+    step as one line of text.
 
     NOT signature- or freshness-checked; the owner gate on its HTTP callers
     (``inference/routes/admin.py``) is the control on this operation. Use
@@ -1615,5 +1648,49 @@ def rollback_last(*, installed=None) -> dict:
                             "added by the update will not be removed by this rollback", manifest)
         if names is None:
             names = [p.name for p in backup_dir.iterdir()]
-        au.rollback(backup_dir, target, names)
+        from localm import updater_runtime
+        lib = target / au.RUNTIME_LIB
+        snapshot = au.runtime_snapshot_dir(backup_dir)
+        keep = None
+        if snapshot.is_dir() and au.runtime_differs(lib, snapshot):
+            left = updater_runtime.stop_own_holders(lib, target, say=say)
+            if left:
+                raise LocalmError(
+                    "the native llama.cpp runtime is in use, so nothing was rolled back",
+                    reason=updater_runtime.in_use_message(left, "run the rollback again"))
+            keep = snapshot.with_name(snapshot.name + "-current")
+            try:
+                au.snapshot_runtime(lib, keep)
+            except OSError as e:
+                raise LocalmError("could not keep a copy of the current native runtime, so "
+                                  "nothing was rolled back", reason=str(e)) from None
+            if say:
+                say("Restoring the native runtime the update replaced...")
+            errors = au.restore_runtime(snapshot, lib)
+            if errors:
+                back = au.restore_runtime(keep, lib)
+                shutil.rmtree(keep, ignore_errors=True)
+                if back:
+                    raise RuntimeError("rollback incomplete: the native runtime could not be "
+                                       "restored nor put back: " + "; ".join(errors + back))
+                raise LocalmError("the native runtime could not be restored, so nothing was "
+                                  "rolled back", reason="; ".join(errors))
+        if say:
+            say("Restoring the previous localm code...")
+        try:
+            au.rollback(backup_dir, target, names)
+        except Exception as e:
+            if keep is not None:
+                back = au.restore_runtime(keep, lib)
+                if back:
+                    raise RuntimeError(f"{e}; putting the native runtime back failed too: "
+                                       + "; ".join(back)) from None
+            raise
+        finally:
+            if keep is not None:
+                shutil.rmtree(keep, ignore_errors=True)
+        try:
+            updater_runtime.clear_pending()
+        except OSError as e:
+            _apply_warn("could not clear a pending runtime update after the rollback: %s", e)
         return {"rolled_back": True, "backup": str(backup_dir)}

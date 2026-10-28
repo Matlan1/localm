@@ -31,7 +31,7 @@ PENDING_FILE = "pending-runtime.json"
 STATUS_FILE = "runtime-update.json"
 
 # Files that carried the runtime pins, newest layout first.
-_PIN_FILES = ("localm/setup_llama/pins.py", "localm/setup_llama/__init__.py",
+_RELEASE_TREE_FILES = ("localm/setup_llama/pins.py", "localm/setup_llama/__init__.py",
               "localm/setup_llama.py")
 
 # Commands that load the native runtime, and so finish a pending re-provision
@@ -60,7 +60,7 @@ def staged_pins(root) -> dict:
     ``_ROCM_TAG`` for a tree from before the SIMD CPU backend."""
     pins: dict[str, Optional[str]] = {"pinned_tag": None, "rocm_tag": None,
                                       "rocm_cpu_tag": None, "rocm_build": None}
-    for rel in _PIN_FILES:
+    for rel in _RELEASE_TREE_FILES:
         try:
             text = (Path(root) / rel).read_text(encoding="utf-8")
         except OSError:
@@ -128,7 +128,7 @@ def plan(staged_root, installed_root) -> dict:
             return out
         pin = sl.pinned_tag()
         target, source = runtime_target(backend, pin=pin, tracking=sl.tracks_latest(),
-                                        pinned_tag=pins["pinned_tag"],
+                                        release_tag=pins["pinned_tag"],
                                         rocm_build_id=pins["rocm_build"])
         out.update(backend=backend, current=current, target=target, source=source, pins=pins)
         if source == "pin":
@@ -252,6 +252,241 @@ def describe_holders(found: list) -> str:
                      for h in found)
 
 
+# ----------------------- stopping this install's processes --------------------
+
+# Seconds to wait, after stopping this install's processes, for the OS to
+# release the runtime files they held.
+RELEASE_WAIT_S = 10.0
+# Seconds a single stopped process may take to exit.
+_STOP_WAIT_S = 5.0
+# Seconds a registered process may have started after its registry entry's
+# "started" time and still be the process that wrote it.
+_START_SLACK_S = 5.0
+
+
+def _start_epoch(start) -> Optional[float]:
+    """A process start from ``install_manifest.list_processes`` as epoch
+    seconds: a FILETIME on Windows, clock ticks since boot on Linux. None when
+    it cannot be converted."""
+    if start is None:
+        return None
+    try:
+        if sys.platform == "win32":
+            return (int(start) - 116444736000000000) / 1e7
+        if sys.platform.startswith("linux"):
+            with open("/proc/stat", encoding="utf-8") as fh:
+                btime = next(int(line.split()[1]) for line in fh if line.startswith("btime "))
+            return btime + int(start) / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, StopIteration):
+        return None
+    return None
+
+
+def _entry_epoch(entry: dict) -> Optional[float]:
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(str(entry.get("started"))).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def _registered(home, by_pid: dict) -> dict:
+    """``{pid: entry}`` for the localm servers in the instance registry of the
+    data dir *home* whose process is running and started no later than the
+    entry was written (a reused pid is not the server that wrote it)."""
+    from localm import instances
+    out = {}
+    for entry in instances.list_entries(Path(home)):
+        try:
+            pid = int(entry.get("pid") or -1)
+        except (TypeError, ValueError):
+            continue
+        if pid not in by_pid:
+            continue
+        started, wrote = _start_epoch(by_pid[pid][3]), _entry_epoch(entry)
+        if started is not None and wrote is not None and started > wrote + _START_SLACK_S:
+            continue
+        out[pid] = entry
+    return out
+
+
+def _parent(by_pid: dict, pid: int) -> Optional[int]:
+    """The running parent of *pid*, or None when it has exited (a pid whose
+    process started after *pid* is a reused one, not the parent)."""
+    ppid = by_pid[pid][1]
+    if not ppid or ppid == pid or ppid not in by_pid:
+        return None
+    child_start, parent_start = by_pid[pid][3], by_pid[ppid][3]
+    if child_start is not None and parent_start is not None and parent_start > child_start:
+        return None
+    return ppid
+
+
+def _subtree(by_pid: dict, top: int) -> list:
+    """*top* and every running descendant of it, deepest first."""
+    children: dict = {}
+    for pid in by_pid:
+        parent = _parent(by_pid, pid)
+        if parent is not None:
+            children.setdefault(parent, []).append(pid)
+    order, stack = [], [(top, 0)]
+    seen = set()
+    while stack:
+        pid, depth = stack.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        order.append((depth, pid))
+        stack.extend((c, depth + 1) for c in children.get(pid, ()))
+    return [pid for _d, pid in sorted(order, key=lambda x: -x[0])]
+
+
+def classify_holders(found: list, root, *, home=None, procs=None,
+                     self_pid: Optional[int] = None) -> tuple:
+    """Split the holders *found* (from :func:`holders`) of the runtime of the
+    install at *root* into this install's own localm processes and the rest.
+
+    A holder is this install's when it, or an ancestor of it below this process
+    and its ancestors, is a process whose program file is inside *root* (the
+    install's venv launcher), a localm server registered in the instance
+    registry of the data dir *home* (default the configured one), or this
+    process itself (a holder this process started). Never by process name.
+
+    Returns ``(tops, foreign)``: ``tops`` maps the pid of the highest such
+    process of each holder to ``{"pid", "label", "entries", "tree"}``
+    (``entries`` the registry entries in its tree, ``tree`` its pids deepest
+    first); ``foreign`` lists the holders that are not this install's, this
+    process and its ancestors included (they cannot be stopped from here), and
+    every holder Windows could not name."""
+    from localm import install_manifest
+    procs = install_manifest.list_processes() if procs is None else procs
+    if procs is None:
+        return {}, list(found)
+    by_pid = {p[0]: p for p in procs}
+    me = os.getpid() if self_pid is None else self_pid
+    blocked = install_manifest._ancestors(procs, me)
+    if home is None:
+        from localm.config import home_dir
+        home = home_dir()
+    reg = _registered(home, by_pid)
+    root_s = str(Path(root).resolve())
+
+    def is_localm(pid: int) -> bool:
+        p = by_pid[pid]
+        progs = [x for x in (p[2], p[4] if len(p) > 4 else None) if x and os.path.isabs(x)]
+        return pid in reg or any(install_manifest._inside(x, root_s) for x in progs)
+
+    tops: dict = {}
+    foreign = []
+    for h in found:
+        pid = h.get("pid")
+        if not pid:
+            foreign.append(h)
+            continue
+        if pid not in by_pid:
+            continue
+        if pid in blocked:
+            foreign.append(dict(h, name=f"this localm process ({h.get('name')})"))
+            continue
+        top, cur, last = None, pid, pid
+        while cur is not None and cur not in blocked:
+            if is_localm(cur):
+                top = cur
+            last, cur = cur, _parent(by_pid, cur)
+        if cur == me:
+            top = last
+        if top is None:
+            foreign.append(h)
+            continue
+        tree = _subtree(by_pid, top)
+        entries = [reg[p] for p in tree if p in reg]
+        if entries:
+            label = f"the background localm server (pid {entries[0]['pid']})"
+        else:
+            label = f"the localm process {Path(by_pid[top][2] or '?').name} (pid {top})"
+        tops[top] = {"pid": top, "label": label, "entries": entries, "tree": tree}
+    return tops, foreign
+
+
+def _stop_tree(tree: list, deadline: float) -> list:
+    """Terminate every pid of *tree* (deepest first) and wait, until *deadline*,
+    for each to exit. Returns the pids still running."""
+    import time
+
+    from localm import install_manifest
+    left = []
+    for pid in tree:
+        budget = max(0.1, min(_STOP_WAIT_S, deadline - time.monotonic()))
+        try:
+            gone = install_manifest._stop(pid, timeout=budget)
+        except Exception as e:
+            from localm.debuglog import logger
+            logger.warning("update: could not stop process %s: %s", pid, e)
+            gone = False
+        if not gone:
+            left.append(pid)
+    return left
+
+
+def stop_own_holders(lib, root, *, home=None, say: Optional[Callable] = None,
+                     wait: float = RELEASE_WAIT_S, stop: bool = True) -> list:
+    """Free the runtime at *lib* of the install at *root* by stopping this
+    install's own localm processes that hold it (:func:`classify_holders`):
+    each one's whole process tree (server, model workers, probe daemons) is
+    terminated, its registry entry removed and its crash marker cleared, then
+    this waits up to *wait* seconds for the OS to release the files.
+
+    Stops nothing when any holder is not this install's. *say* receives each
+    step as one line of text. With *stop* False nothing is stopped and only the
+    holders that are not this install's are returned.
+
+    Returns the holders left: empty when the runtime is free, else the holders
+    that are not this install's or did not exit. Never raises."""
+    import time
+    say = say or (lambda _m: None)
+    lib = Path(lib)
+    try:
+        found = holders(lib)
+        if not found:
+            return []
+        tops, foreign = classify_holders(found, root, home=home)
+        if foreign or not stop:
+            return foreign
+        deadline = time.monotonic() + max(0.5, wait)
+        for top in tops.values():
+            say(f"Stopping {top['label']}...")
+            left = _stop_tree(top["tree"], deadline)
+            if left:
+                from localm.debuglog import logger
+                logger.warning("update: processes %s of %s did not exit", left, top["label"])
+            for entry in top["entries"]:
+                if entry.get("_path"):
+                    from localm import instances
+                    instances.unregister_instance(entry["_path"])
+                try:
+                    from localm import bugreport
+                    bugreport.disarm_crash_guard(home, instance_id=entry.get("instance_id"))
+                except Exception as e:
+                    from localm.debuglog import logger
+                    logger.warning("update: could not clear the crash marker of the stopped "
+                                   "server %s: %s", entry.get("instance_id"), e)
+        found = holders(lib)
+        while found and time.monotonic() < deadline:
+            time.sleep(0.25)
+            found = holders(lib)
+        return found
+    except Exception as e:
+        from localm.debuglog import logger
+        logger.warning("update: could not stop the processes holding the runtime: %s", e)
+        return holders(lib) or [{"pid": None, "name": f"a process ({e})"}]
+
+
+def in_use_message(found: list, retry: str) -> str:
+    """The user-facing refusal for the holders *found*: which to close, then
+    *retry*."""
+    return f"close {describe_holders(found)}, then {retry}"
+
+
 # ------------------------------ pending marker -------------------------------
 
 def _updates_dir() -> Path:
@@ -352,7 +587,8 @@ def _command(root: Path, backend: str) -> list:
 
 
 def finish_pending(*, root=None, runner: Optional[Callable] = None,
-                   env: Optional[dict] = None, wait: float = 0.0) -> Optional[dict]:
+                   env: Optional[dict] = None, wait: float = RELEASE_WAIT_S,
+                   say: Optional[Callable] = None) -> Optional[dict]:
     """Carry out the pending re-provision, if there is one for the install at
     *root* (default the running install). A pending re-provision recorded for
     another version than the one installed at *root* (the update was rolled
@@ -364,16 +600,18 @@ def finish_pending(*, root=None, runner: Optional[Callable] = None,
 
     - ``"updated"``: the runtime now is the release's build;
     - ``"current"``: it already was, or the user has since chosen a build;
-    - ``"waiting"``: a process holds the runtime files; nothing was changed and
-      the re-provision stays pending for the next start;
+    - ``"waiting"``: a process that is not this install's (or did not exit)
+      holds the runtime files; nothing was changed and the re-provision stays
+      pending for the next start;
     - ``"failed"``: the re-provision did not produce the release's build for the
       same backend; the previous runtime was put back (``error`` says what
       failed, including a restore that failed).
 
-    *runner* runs the setup-llama argv and returns its exit code (tests);
-    *env* is its environment. *wait* is how many seconds a held runtime is
-    re-checked before the answer is ``"waiting"`` (a process that is exiting
-    still holds its files for a moment)."""
+    Before replacing anything, this install's own processes that hold the
+    runtime are stopped (:func:`stop_own_holders`, which waits up to *wait*
+    seconds for the OS to release their files). *say* receives each step as
+    one line of text. *runner* runs the setup-llama argv and returns its exit
+    code (tests); *env* is its environment."""
     import subprocess
 
     from localm import setup_llama as sl
@@ -398,7 +636,7 @@ def finish_pending(*, root=None, runner: Optional[Callable] = None,
               "holders": [], "error": None, "note": None}
 
     _t, source = runtime_target(backend, pin=sl.pinned_tag(), tracking=sl.tracks_latest(),
-                                pinned_tag=pins.get("pinned_tag"),
+                                release_tag=pins.get("pinned_tag"),
                                 rocm_build_id=pins.get("rocm_build"))
     installed = sl._provisioned_backend(lib)
     if source != "release" or installed != backend or _is_current(
@@ -409,20 +647,15 @@ def finish_pending(*, root=None, runner: Optional[Callable] = None,
         _write_status(status)
         return status
 
-    import time
-    deadline = time.monotonic() + max(0.0, wait)
-    found = holders(lib)
-    while found and time.monotonic() < deadline:
-        time.sleep(0.5)
-        found = holders(lib)
+    found = stop_own_holders(lib, root, say=say, wait=wait)
     if found:
-        who = describe_holders(found)
         status.update(state="waiting", holders=found, note=(
-            f"the {backend} runtime is in use by {who}, so it was not changed; the update to "
-            f"{target} finishes on the next start of localm once that process has closed "
-            f"(or run: {_manual_command(backend)})"))
+            f"the {backend} runtime is in use, so it was not changed: "
+            + in_use_message(found, f"start localm again (or run: {_manual_command(backend)})")))
         _write_status(status)
         return status
+    if say:
+        say(f"Replacing the {backend} runtime ({pending.get('from')} -> {target})...")
 
     snapshot = au.runtime_snapshot_dir(updater._backup_dir(create=True))
     try:

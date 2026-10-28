@@ -4662,17 +4662,15 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
     _execv_restart(port, instance_id)
 
 
-# Seconds the restart waits for its stopped model workers to release the runtime
-# files before it leaves a pending runtime update for the next start.
-_RUNTIME_RELEASE_WAIT_S = 20.0
-
-
 def _finish_pending_runtime_update() -> None:
     """Carry out the native runtime re-provision an applied update left pending
     (``updater_runtime.finish_pending``), once this server's models, workers and
-    jobs are stopped: stops the runtime probe daemon first, then provisions in a
-    child process. Logs the outcome; never raises, so the restart always
-    proceeds."""
+    jobs are stopped: stops the runtime probe daemon, then this install's other
+    processes that hold the runtime, then provisions in a child process. When
+    the runtime cannot be updated, the update's code is rolled back
+    (``updater.rollback_last``) so the restart loads the previous version with
+    its own runtime. Logs each step and the outcome; never raises, so the
+    restart always proceeds."""
     try:
         from localm import updater_runtime
         if updater_runtime.read_pending() is None:
@@ -4683,14 +4681,21 @@ def _finish_pending_runtime_update() -> None:
         except Exception:
             _dbg_swallow("stopping the runtime probe daemon before the runtime update failed",
                          level="warning")
-        status = updater_runtime.finish_pending(wait=_RUNTIME_RELEASE_WAIT_S)
-        if status is not None:
-            from localm.debuglog import logger as _dbg
-            log = _dbg.info if status["state"] in ("updated", "current") else _dbg.warning
-            log("runtime update during restart: %s", status["note"])
+        from localm.debuglog import logger as _dbg
+        status = updater_runtime.finish_pending(
+            say=lambda m: _dbg.info("runtime update during restart: %s", m))
+        if status is None:
+            return
+        if status["state"] in ("updated", "current"):
+            _dbg.info("runtime update during restart: %s", status["note"])
+            return
+        _dbg.warning("runtime update during restart: %s; rolling the update back",
+                     status["note"])
+        from localm import updater
+        updater.rollback_last()
     except Exception:
-        _dbg_swallow("the pending runtime update could not be carried out during the restart; "
-                     "it stays pending for the next start", level="warning")
+        _dbg_swallow("the pending runtime update or its rollback could not be carried out "
+                     "during the restart", level="warning")
 
 
 def _execv_restart(port: Optional[int], instance_id: Optional[str]) -> None:

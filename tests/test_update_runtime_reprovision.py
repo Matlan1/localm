@@ -18,6 +18,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from localm import _apply_update as au
 from localm import _version, updater, updater_runtime
+from localm.bugreport import LocalmError
 from tests._net_config import set_config
 from tests._update_signing import envelope, keyset
 
@@ -262,26 +263,29 @@ def test_deps_and_runtime_both_run_in_that_order(install, monkeypatch):
     assert res["runtime"]["state"] == "updated"
 
 
-def test_a_failed_reprovision_puts_the_old_runtime_back_and_says_so(install):
+def test_a_failed_reprovision_rolls_back_the_runtime_and_the_code(install):
     before = au._tree_signature(_lib(install))
     data, sig = _release()
-    res = updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
-                        runner=_fake_setup_llama(install, "x", rc=1))
+    with pytest.raises(LocalmError) as ei:
+        updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
+                      runner=_fake_setup_llama(install, "x", rc=1))
     assert au._tree_signature(_lib(install)) == before
-    assert res["runtime"]["state"] == "failed"
-    assert "NOT updated" in res["runtime_note"] and "put back" in res["runtime_note"]
-    assert (install / "VERSION").read_text(encoding="utf-8") == "0.3.2", "code update kept"
+    assert (install / "VERSION").read_text(encoding="utf-8") == "0.3.1", "code rolled back"
+    assert "rolled back" in ei.value.summary and "put back" in ei.value.reason
     assert updater_runtime.last_status()["state"] == "failed"
+    assert updater_runtime.read_pending() is None
 
 
 def test_a_fallback_to_another_backend_counts_as_failed(install):
     before = au._tree_signature(_lib(install))
     data, sig = _release()
-    res = updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
-                        runner=_fake_setup_llama(install, "b11928", backend="vulkan"))
-    assert res["runtime"]["state"] == "failed"
-    assert "vulkan" in res["runtime"]["error"]
+    with pytest.raises(LocalmError) as ei:
+        updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
+                      runner=_fake_setup_llama(install, "b11928", backend="vulkan"))
+    assert "vulkan" in ei.value.reason
+    assert updater_runtime.last_status()["state"] == "failed"
     assert au._tree_signature(_lib(install)) == before
+    assert (install / "VERSION").read_text(encoding="utf-8") == "0.3.1"
     assert _marker(install) == "amd-rocm b1349-cpu-b11719"
 
 
@@ -382,9 +386,46 @@ def _hold(path: Path):
     return p
 
 
+def _hold_foreign(path: Path):
+    """Like :func:`_hold`, but the holder's parent has exited, so it is not a
+    descendant of this process: a process of another program."""
+    code = ("import ctypes, os, sys; ctypes.CDLL(sys.argv[1]); "
+            "print('ready', os.getpid(), flush=True); sys.stdin.read()")
+    if sys.platform != "win32":
+        code = ("import mmap, os, sys; f = open(sys.argv[1], 'rb'); "
+                "m = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ); "
+                "print('ready', os.getpid(), flush=True); sys.stdin.read()")
+    return _detached(code, str(path))
+
+
+def _detached(code: str, *args):
+    """Run *code* in a Python whose parent has exited; it shares this test's
+    pipes. Returns the Popen of the parent, with ``holder_pid`` and ``words``
+    (the child's first line)."""
+    launch = ("import subprocess, sys; "
+              "subprocess.Popen([sys.executable, '-I', '-c'] + sys.argv[1:])")
+    p = subprocess.Popen([sys.executable, "-I", "-c", launch, code, *args],
+                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    words = p.stdout.readline().split()
+    assert words and words[0] == "ready", words
+    p.wait(timeout=30)
+    p.words = words
+    p.holder_pid = int(words[1])
+    return p
+
+
+def _alive(pid: int) -> bool:
+    from localm import install_manifest
+    return any(row[0] == pid for row in install_manifest.list_processes())
+
+
 def _release_hold(p):
     p.stdin.close()
     p.wait(timeout=30)
+    for pid in getattr(p, "pids", [getattr(p, "holder_pid", None)]):
+        if pid and _alive(pid):
+            from localm import install_manifest
+            install_manifest._stop(pid, timeout=10)
 
 
 def _real_library(lib: Path) -> Path:
@@ -401,37 +442,23 @@ def _real_library(lib: Path) -> Path:
 
 @pytest.mark.skipif(not (sys.platform == "win32" or sys.platform.startswith("linux")),
                     reason="holder detection covers Windows and Linux")
-def test_a_held_runtime_is_left_intact_and_finished_on_the_next_start(install, monkeypatch):
+def test_a_foreign_holder_refuses_the_update_with_nothing_changed(install):
     held = _real_library(_lib(install))
     before = au._tree_signature(_lib(install))
-    holder = _hold(held)
+    holder = _hold_foreign(held)
     try:
         data, sig = _release()
-        res = updater.apply(1, signature=sig, installed=install,
-                            download_opener=_download(data),
-                            runner=lambda c: pytest.fail(f"must not provision while held: {c}"))
-        assert res["runtime"]["state"] == "waiting"
-        assert au._tree_signature(_lib(install)) == before
-        assert any(h.get("pid") == holder.holder_pid for h in res["runtime"]["holders"]), \
-            res["runtime"]["holders"]
-        assert f"pid {holder.holder_pid}" in res["runtime_note"]
-        assert "next start" in res["runtime_note"]
-        assert updater_runtime.read_pending() is not None
+        with pytest.raises(LocalmError) as ei:
+            updater.apply(1, signature=sig, installed=install,
+                          download_opener=_download(data),
+                          runner=lambda c: pytest.fail(f"must not provision while held: {c}"))
+        assert _alive(holder.holder_pid), "a process of another program is never stopped"
     finally:
         _release_hold(holder)
-
-    from localm.cli import _core
-    calls = []
-    fake = _fake_setup_llama(install, "b1355-cpu-b11908", calls=calls)
-    monkeypatch.setattr(updater, "repo_root", lambda: install)
-    monkeypatch.delenv("LOCALM_RESTART_IN_PROGRESS", raising=False)
-    monkeypatch.setattr(subprocess, "run",
-                        lambda cmd, **kw: subprocess.CompletedProcess(cmd, fake(cmd)))
-    _core._finish_pending_runtime_update("ps")
-    assert calls == [], "a command that loads no model does not finish it"
-    _core._finish_pending_runtime_update("gui")
-    assert calls and "setup-llama" in calls[0]
-    assert _marker(install) == "amd-rocm b1355-cpu-b11908"
+    assert "nothing was updated" in ei.value.summary
+    assert f"pid {holder.holder_pid}" in ei.value.reason and ei.value.reason.startswith("close ")
+    assert au._tree_signature(_lib(install)) == before
+    assert (install / "VERSION").read_text(encoding="utf-8") == "0.3.1"
     assert updater_runtime.read_pending() is None
 
 
@@ -449,22 +476,24 @@ def test_the_restart_boot_does_not_start_a_download(install, monkeypatch):
 
 @pytest.mark.skipif(not (sys.platform == "win32" or sys.platform.startswith("linux")),
                     reason="holder detection covers Windows and Linux")
-def test_a_rollback_never_replaces_a_held_runtime(install):
+def test_a_foreign_holder_refuses_the_rollback_with_nothing_changed(install):
     data, sig = _release()
     updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
                   runner=_fake_setup_llama(install, "b1355-cpu-b11908"))
     held = _real_library(_lib(install))
     before = au._tree_signature(_lib(install))
-    holder = _hold(held)
+    holder = _hold_foreign(held)
     try:
-        with pytest.raises(RuntimeError) as ei:
+        with pytest.raises(LocalmError) as ei:
             updater.rollback_last(installed=install)
+        assert _alive(holder.holder_pid)
     finally:
         _release_hold(holder)
-    assert "native runtime not restored" in str(ei.value)
+    assert "nothing was rolled back" in ei.value.summary
+    assert f"pid {holder.holder_pid}" in ei.value.reason
     assert au._tree_signature(_lib(install)) == before
-    assert (install / "VERSION").read_text(encoding="utf-8") == "0.3.1", \
-        "the code was still rolled back"
+    assert (install / "VERSION").read_text(encoding="utf-8") == "0.3.2", \
+        "the code is left as it was"
 
 
 def test_the_restart_path_carries_out_a_pending_reprovision(install, monkeypatch):
@@ -616,3 +645,120 @@ def test_a_runtime_released_while_waiting_is_reprovisioned(install):
         root=install, runner=_fake_setup_llama(install, "b1355-cpu-b11908"), wait=30)
     assert status["state"] == "updated", status
     assert _marker(install) == "amd-rocm b1355-cpu-b11908"
+
+
+# ------------------- this install's own processes are stopped -----------------
+
+_SERVER = (
+    "import os, subprocess, sys\n"
+    "worker = ('import ctypes, os, sys, time; ctypes.CDLL(sys.argv[1]); '\n"
+    "          'print(os.getpid(), flush=True)\\nwhile True: time.sleep(1)')\n"
+    "w = subprocess.Popen([sys.executable, '-I', '-c', worker, sys.argv[1]],\n"
+    "                     stdout=subprocess.PIPE, text=True)\n"
+    "wpid = w.stdout.readline().strip()\n"
+    "print('ready', os.getpid(), wpid, flush=True)\n"
+    "sys.stdin.read()\n")
+
+
+def _background_server(install, home: Path):
+    """A real localm-server stand-in registered in *home*'s instance registry,
+    whose model worker (a real child process) holds the runtime's library.
+    Neither is a descendant of this test process."""
+    from datetime import datetime, UTC
+    from localm import instances
+    p = _detached(_SERVER, str(_lib(install) / "llama.dll"))
+    server_pid, worker_pid = p.holder_pid, int(p.words[2])
+    p.pids = [worker_pid, server_pid]
+    iid = instances.new_instance_id()
+    run = instances.run_dir(home)
+    run.mkdir(parents=True, exist_ok=True)
+    (run / f"{iid}.json").write_text(json.dumps({
+        "instance_id": iid, "pid": server_pid, "port": 1, "host": "127.0.0.1",
+        "root_dir": str(install), "mode": "api", "version": "0.3.1",
+        "started": datetime.now(UTC).isoformat(), "token": "t"}), encoding="utf-8")
+    assert any(h.get("pid") == worker_pid for h in updater_runtime.holders(_lib(install)))
+    return p, server_pid, worker_pid, run / f"{iid}.json"
+
+
+def _home():
+    from localm.config import home_dir
+    return home_dir()
+
+
+@pytest.mark.skipif(sys.platform != "win32" and not sys.platform.startswith("linux"),
+                    reason="holder detection covers Windows and Linux")
+def test_the_update_stops_this_installs_background_server_and_swaps(install):
+    _real_library(_lib(install))
+    server, server_pid, worker_pid, entry = _background_server(install, _home())
+    said = []
+    try:
+        data, sig = _release()
+        res = updater.apply(1, signature=sig, installed=install,
+                            download_opener=_download(data), say=said.append,
+                            runner=_fake_setup_llama(install, "b1355-cpu-b11908"))
+        assert not _alive(worker_pid) and not _alive(server_pid)
+    finally:
+        _release_hold(server)
+    assert res["runtime"]["state"] == "updated", res["runtime"]
+    assert _marker(install) == "amd-rocm b1355-cpu-b11908"
+    assert (install / "VERSION").read_text(encoding="utf-8") == "0.3.2"
+    assert not entry.exists(), "the stopped server's registry entry is removed"
+    assert f"Stopping the background localm server (pid {server_pid})..." in said
+    assert any(m.startswith("Replacing the amd-rocm runtime") for m in said), said
+
+
+@pytest.mark.skipif(sys.platform != "win32" and not sys.platform.startswith("linux"),
+                    reason="holder detection covers Windows and Linux")
+def test_the_rollback_stops_this_installs_background_server_and_restores_both(install):
+    data, sig = _release()
+    updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
+                  runner=_fake_setup_llama(install, "b1355-cpu-b11908"))
+    _real_library(_lib(install))
+    server, server_pid, worker_pid, _entry = _background_server(install, _home())
+    said = []
+    try:
+        updater.rollback_last(installed=install, say=said.append)
+        assert not _alive(worker_pid) and not _alive(server_pid)
+    finally:
+        _release_hold(server)
+    assert (install / "VERSION").read_text(encoding="utf-8") == "0.3.1"
+    assert _marker(install) == "amd-rocm b1349-cpu-b11719"
+    assert said[0] == f"Stopping the background localm server (pid {server_pid})..."
+
+
+@pytest.mark.skipif(sys.platform != "win32" and not sys.platform.startswith("linux"),
+                    reason="holder detection covers Windows and Linux")
+def test_a_rollback_from_the_half_state_brings_the_runtime_back_too(install):
+    data, sig = _release()
+    updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
+                  runner=_fake_setup_llama(install, "b1355-cpu-b11908"))
+    (install / "VERSION").write_text("0.3.1", encoding="utf-8")
+    (install / "localm" / "__init__.py").write_text("# 0.3.1", encoding="utf-8")
+    _real_library(_lib(install))
+    server, _server_pid, _worker_pid, _entry = _background_server(install, _home())
+    try:
+        updater.rollback_last(installed=install)
+    finally:
+        _release_hold(server)
+    assert (install / "VERSION").read_text(encoding="utf-8") == "0.3.1"
+    assert _marker(install) == "amd-rocm b1349-cpu-b11719"
+    assert (_lib(install) / "llama.dll").read_bytes().startswith(b"old-dll")
+
+
+def test_a_runtime_that_cannot_be_restored_leaves_the_code_too(install, monkeypatch):
+    data, sig = _release()
+    updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
+                  runner=_fake_setup_llama(install, "b1355-cpu-b11908"))
+    before = au._tree_signature(_lib(install))
+    real = au.restore_runtime
+    calls = []
+
+    def failing_first(snapshot, lib):
+        calls.append(Path(snapshot).name)
+        return ["native runtime: simulated"] if len(calls) == 1 else real(snapshot, lib)
+    monkeypatch.setattr(au, "restore_runtime", failing_first)
+    with pytest.raises(LocalmError) as ei:
+        updater.rollback_last(installed=install)
+    assert "nothing was rolled back" in ei.value.summary
+    assert au._tree_signature(_lib(install)) == before
+    assert (install / "VERSION").read_text(encoding="utf-8") == "0.3.2"
