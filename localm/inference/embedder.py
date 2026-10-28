@@ -1291,9 +1291,9 @@ class IsolatedEmbedder(VramSizingMixin):
         Used both by __init__ and by embed()'s auto-respawn after a crash;
         preflight re-runs each time because VRAM may have changed.
 
-        cpu_only is passed on EVERY reload once gpu_fallback_reason is set:
-        n_gpu_layers=0 alone does not guarantee no GPU backend involvement
-        (see _embedder_runner.py's cpu_only handling)."""
+        cpu_only is passed on EVERY reload once gpu_fallback_reason is set, and
+        whenever n_gpu_layers is 0: n_gpu_layers=0 alone does not guarantee no
+        GPU backend involvement (see _embedder_runner.py's cpu_only handling)."""
         from localm.model_manager import gguf_pretokenizer
         refusal = pretokenizer_guard.load_refusal(
             gguf_pretokenizer(Path(self.model_path)))
@@ -1309,7 +1309,7 @@ class IsolatedEmbedder(VramSizingMixin):
         from localm.discover import (configured_split_placement,
                                      default_split_main_gpu, last_gpu_reading,
                                      resolve_auto_split_ratios)
-        cpu_only = self.gpu_fallback_reason is not None
+        cpu_only = self.gpu_fallback_reason is not None or self.n_gpu_layers == 0
         auto_ratios = None
         placement = None
         main_gpu = None

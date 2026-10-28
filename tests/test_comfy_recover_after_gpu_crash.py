@@ -6,7 +6,10 @@ through ``ensure_comfy`` with the test interpreter, so the handle, the process
 tree (a venv ``python.exe`` is a launcher whose child listens on the port), the
 port, the kill and the relaunch are all real. Each stand-in records its own
 start in a state folder, and a stand-in that cannot bind its port records that
-too, so a second instance started into a held port is visible.
+too, so a second instance started into a held port is visible. The stand-in
+binds the way ComfyUI's aiohttp server does: SO_REUSEADDR on POSIX (asyncio's
+default there), exclusive use on Windows; neither lets a second listener bind
+while the first one is alive.
 """
 
 from __future__ import annotations
@@ -38,7 +41,7 @@ _STANDIN = textwrap.dedent('''
 
 
     class Server(http.server.ThreadingHTTPServer):
-        allow_reuse_address = False
+        allow_reuse_address = sys.platform != "win32"
 
         def server_bind(self):
             if sys.platform == "win32":
