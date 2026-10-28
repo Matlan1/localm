@@ -2051,6 +2051,42 @@ if ($("bug-cancel-send")) $("bug-cancel-send").onclick = () => cancelBugReview()
 if ($("bug-retry")) $("bug-retry").onclick = () => sendReviewedBugReport();
 if ($("bug-download")) $("bug-download").onclick = () => downloadBugReport();
 
+// Release notes longer than this (characters or lines) start collapsed behind
+// "Show all".
+const UPDATE_NOTES_SHORT_CHARS = 400;
+const UPDATE_NOTES_SHORT_LINES = 6;
+
+function _setUpdateNotesCollapsed(box, more, collapsed) {
+  box.classList.toggle("collapsed", collapsed);
+  more.textContent = t(collapsed ? "settings.update.notesShowAll" : "settings.update.notesShowLess");
+  more.setAttribute("aria-expanded", String(!collapsed));
+}
+
+/** Render the offered release's *notes* (remote Markdown) into #update-notes
+ *  through renderMarkdown, the DOMPurify-sanitized path chat and the changelog
+ *  use. Empty or non-string notes hide the box. Notes longer than
+ *  UPDATE_NOTES_SHORT_CHARS characters or UPDATE_NOTES_SHORT_LINES lines start
+ *  collapsed behind a "Show all" toggle. */
+export function renderUpdateNotes(notes) {
+  const box = $("update-notes");
+  if (!box) return;
+  const more = $("update-notes-more"), moreRow = $("update-notes-actions");
+  const text = typeof notes === "string" ? notes.trim() : "";
+  box.replaceChildren();
+  box.classList.remove("collapsed");
+  if (moreRow) moreRow.hidden = true;
+  if (!text) { box.hidden = true; return; }
+  renderMarkdown(box, text, { imageScope: "update-notes" });
+  box.hidden = false;
+  const long = text.length > UPDATE_NOTES_SHORT_CHARS
+    || text.split("\n").length > UPDATE_NOTES_SHORT_LINES;
+  if (long && more && moreRow) {
+    _setUpdateNotesCollapsed(box, more, true);
+    more.onclick = () => _setUpdateNotesCollapsed(box, more, !box.classList.contains("collapsed"));
+    moreRow.hidden = false;
+  }
+}
+
 // Updates: a check-only auto-surface (a throttled startup check in app.js calls
 // __localmUpdateCheck) plus an explicit "Update now". The apply runs only on
 // that click; the server rolls back and reports on failure.
@@ -2058,6 +2094,7 @@ export async function updateCheck() {
   const out = $("update-status"), applyBtn = $("update-apply");
   const checkBtn = $("update-check");
   if (out) { out.hidden = false; out.textContent = t("settings.update.checking"); }
+  renderUpdateNotes("");
   if (checkBtn) checkBtn.disabled = true;
   try {
     const r = await fetch("/api/update/check", { headers: authHeaders() });
@@ -2068,8 +2105,8 @@ export async function updateCheck() {
     if (!d.available) { if (out) out.textContent = t("settings.update.notConfigured"); return; }
     if (d.newer && d.asset && d.asset.id) {
       if (out) out.textContent = t("settings.update.available",
-        { latest: d.latest, current: d.current }) +
-        (d.notes ? "  " + String(d.notes).slice(0, 200) : "");
+        { latest: d.latest, current: d.current });
+      renderUpdateNotes(d.notes);
       if (applyBtn) applyBtn.hidden = false;
     } else if (d.newer) {
       if (out) out.textContent = t("settings.update.availableNoAsset", { latest: d.latest });

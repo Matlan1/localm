@@ -13,11 +13,15 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [0.3.2] - 2026-10-28
 
-Everything in 0.3.2rc1 and 0.3.2rc2 below, plus the fixes listed here.
+Everything in 0.3.2rc1 and 0.3.2rc2 below, plus the changes listed here.
+
+### Changed
+- **The update options sit with the app update in Settings > Updates.** "Offer prerelease updates" and "Check for updates even when network access is off" are now in the App update block next to Check for updates and Update now, instead of a separate block at the bottom of the tab.
 
 ### Fixed
 - **`localm coder` no longer warns about an unreadable saved session in a project that has none.** In log or full mode, every interactive start in a project without a saved session printed "A saved session was found for this project but could not be read"; the project index the coder keeps beside its saved sessions was mistaken for a damaged one. A saved session that really is damaged is still reported.
 - **`localm coder` shows the task list the model writes as one line per task.** When the model wrote its tasks in the `[ ] task` / `[x] task` form, only the count ("todos: 0/3 done") was shown, without the checklist.
+- **Release notes for an available update are readable.** Settings > Updates shows the notes as formatted text (bold, lists) instead of raw Markdown with literal asterisks, and long notes are collapsed behind "Show all".
 
 ## [0.3.2rc2] - 2026-10-28
 

@@ -1167,9 +1167,8 @@
             </section>
 
             <!-- Updates: one card for both ways localm can be updated (a new app
-                 build, a new llama.cpp runtime) plus the two toggles that control
-                 how the check behaves. Used to be three panels (two of them both
-                 headed "Updates").
+                 build, a new llama.cpp runtime). The two toggles that control how
+                 the app-update check behaves sit inside #app-update-block.
 
                  THE TWO SUB-BLOCKS BELOW HAVE DIFFERENT VISIBILITY RULES, and
                  they stay independent on purpose:
@@ -1180,8 +1179,8 @@
                                       reports "nothing installed yet" when
                                       setup-llama has never run
                  The CARD ITSELF is therefore never [hidden]: the runtime block
-                 and the toggles below it must stay visible even on a build with
-                 no update proxy configured. Only the app-update sub-block gates. -->
+                 stays visible even on a build with no update proxy configured.
+                 Only the app-update sub-block (and the toggles inside it) gates. -->
             <section class="card settings-section" id="sec-updates" data-group="system" data-sec-label="Updates">
               <div class="card-head"><span class="ic cat-ic cat-slate" data-icon="download"></span>
                 <div class="card-head-text"><h3 data-i18n="settings.update.title">Updates</h3></div></div>
@@ -1195,6 +1194,28 @@
                   <button class="btn-primary" id="update-apply" hidden data-i18n="settings.update.applyButton">Update now</button>
                 </div>
                 <div id="update-status" class="sub" hidden></div>
+                <!-- The offered release's notes, rendered by renderUpdateNotes
+                     (pages/models.js) through the sanitizing Markdown path. -->
+                <div id="update-notes" class="update-notes" hidden></div>
+                <div class="actions" id="update-notes-actions" hidden>
+                  <button class="btn-secondary" id="update-notes-more" data-i18n="settings.update.notesShowAll">Show all</button>
+                </div>
+                <!-- update_allow_prerelease / update_ignore_net_policy: schema-driven
+                     admin-only toggles, rendered into #settings-sec-core-Updates by
+                     refreshSettingsPage's "core-Updates" case in settings.js. Stays
+                     [hidden] for a caller without those admin-only fields, or before
+                     the schema fetch resolves.
+
+                     #update-toggles-save carries .settings-section-save:
+                     saveActiveSettingsSection() (Ctrl+S) picks a section's save
+                     button via `.settings-section-save || .actions .btn-primary`,
+                     and #update-apply is an earlier .btn-primary in this card. -->
+                <div id="update-toggles-block" hidden>
+                  <div id="settings-sec-core-Updates" class="settings-fields"></div>
+                  <div class="actions">
+                    <button class="btn-primary settings-section-save" id="update-toggles-save" data-i18n="settings.update.saveButton">Save update settings</button>
+                  </div>
+                </div>
                 <!-- The GUI form of `localm update --list` / `--to <version>`. -->
                 <div class="actions">
                   <button class="btn-secondary" id="update-versions" data-i18n="settings.update.versionsButton">Choose a version</button>
@@ -1309,30 +1330,6 @@
                 </div>
                 <div id="runtime-rollback-status" class="sub" hidden></div>
                 <pre id="runtime-update-log" class="comfy-managed-log" style="display:none"></pre>
-              </div>
-
-              <!-- update_allow_prerelease / update_ignore_net_policy: schema-driven
-                   admin-only toggles, injected here by refreshSettingsPage's
-                   "Updates" special case in settings.js instead of rendering as
-                   their own separate section - that second "Updates" panel was
-                   exactly the duplication this card merges away. Stays [hidden]
-                   (nothing to render) for a caller without those admin-only
-                   fields, or before the schema fetch resolves.
-
-                   #update-toggles-save carries .settings-section-save (not just
-                   .btn-primary): saveActiveSettingsSection()'s Ctrl+S handler
-                   picks a section's save button via `.settings-section-save ||
-                   .actions .btn-primary` - with only .btn-primary, that fallback
-                   would match #update-apply first (also .btn-primary, earlier in
-                   this same card) and Ctrl+S would silently APPLY an app update
-                   instead of saving these toggles. The more specific class must
-                   win. -->
-              <div class="update-subsection" id="update-toggles-block" hidden>
-                <h4 class="update-sub-head" data-i18n="settings.update.toggleHeading">Update behavior</h4>
-                <div id="settings-sec-core-Updates" class="settings-fields"></div>
-                <div class="actions">
-                  <button class="btn-primary settings-section-save" id="update-toggles-save" data-i18n="settings.update.saveButton">Save Updates</button>
-                </div>
               </div>
             </section>
 
