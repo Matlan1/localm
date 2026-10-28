@@ -702,32 +702,41 @@ def source_is_warm() -> bool:
 
 
 def _known_blind_without_torch(reason: str) -> bool:
-    """The no-torch answer for :func:`raw_reading_is_process_scoped`: True when
-    the bundled HIP llama.cpp runtime is resident in this process
-    (``discover.native_hip_runtime_resident()``), since every raw free-VRAM
-    reading this process can then take is HIP-sourced, which is the blind source
-    this module corrects. Where no HIP runtime is resident - including when
-    torch could not be consulted for a SYCL-related reason, which this module
-    does not correct for - False.
+    """The answer for :func:`raw_reading_is_process_scoped` when torch does not
+    supply the reading: True when the raw free-VRAM reading this process takes
+    comes from the bundled HIP llama.cpp runtime, the blind source this module
+    corrects. With the native runtime loaded in this process that is
+    ``discover.native_hip_runtime_resident()``; with it not loaded the reading
+    comes from the isolated VRAM probe daemon, which loads the resolved runtime
+    directory, so it is ``discover.native_backend_has_hip()``. False for a
+    loaded non-HIP runtime (including when torch could not be consulted for a
+    SYCL-related reason, which this module does not correct for) and for an
+    unloaded runtime that ships no HIP backend.
 
-    *reason* says why torch could not be consulted, and is surfaced at debug
-    either way, so a bug report shows the decision that was made even when it
-    resolves to False."""
+    *reason* says why torch does not supply the reading, and is surfaced at
+    debug either way, so a bug report shows the decision that was made even
+    when it resolves to False."""
     from localm import discover as _discover
-    resident = _discover.native_hip_runtime_resident()
-    if resident:
+    from localm.inference.backends.llamacpp import _loader
+    if _loader.native_lib_loaded():
+        blind = _discover.native_hip_runtime_resident()
+        where = "is resident"
+    else:
+        blind = _discover.native_backend_has_hip()
+        where = "is what the isolated VRAM probe loads"
+    if blind:
         if _notice_once("process-scoped", reason):
             logger.debug(
                 "gpu_usage: raw VRAM readings in this process are process-scoped: "
-                "torch is not consultable (%s) but the bundled HIP llama.cpp "
-                "runtime is resident, which is itself the measured-blind source",
-                reason)
+                "torch does not supply them (%s) and the bundled HIP llama.cpp "
+                "runtime %s, which is itself the measured-blind source",
+                reason, where)
     elif _notice_once("not-process-scoped", reason):
         logger.debug(
-            "gpu_usage: torch is not consultable (%s) and no HIP llama.cpp "
-            "runtime is resident, so the raw VRAM reading is not treated as "
-            "process-scoped", reason)
-    return resident
+            "gpu_usage: torch does not supply the raw VRAM reading (%s) and the "
+            "llama.cpp runtime that does is not HIP, so the reading is not "
+            "treated as process-scoped", reason)
+    return blind
 
 
 def torch_fully_imported() -> bool:
@@ -795,18 +804,17 @@ def raw_reading_is_process_scoped() -> bool:
     device-global by documentation, so the answer there is False.
 
     Detected via ``torch.version.hip`` (set on ROCm builds, None on CUDA builds)
-    when torch is fully imported in this process, else from
-    :func:`torch_build_is_hip`, which reads the same flag from the installed
-    torch's ``version.py`` without importing it. When neither can answer - torch
-    is not installed, or a resident native runtime makes the answer certain
-    first - the answer comes from
-    :func:`_known_blind_without_torch` instead, i.e. from
-    ``discover.native_hip_runtime_resident()``: a resident bundled HIP runtime
-    means every raw reading this process can take (the in-process ggml query, or
-    the isolated probe daemon loading the same runtime) is HIP-sourced. That is
-    the case inside the GGUF worker, the process that makes the mid-generation
-    context-grow sizing decision. Where no HIP runtime is resident either (a
-    vulkan or cpu build's worker, a torch-less NVIDIA box), False.
+    when torch is fully imported in this process, else True when
+    :func:`torch_build_is_hip` (the same flag read from the installed torch's
+    ``version.py`` without importing it) says HIP. Otherwise - torch not
+    installed, not a HIP build, or a resident native runtime making the answer
+    certain first - the answer comes from :func:`_known_blind_without_torch`:
+    True when the native llama.cpp runtime that supplies the reading is HIP,
+    either resident in this process (``discover.native_hip_runtime_resident()``,
+    the GGUF worker deciding a context grow) or, when it is not loaded here, the
+    one the isolated VRAM probe daemon loads (``discover.native_backend_has_hip()``,
+    the server, coder and embedder sizing a load). False for a vulkan, cpu or
+    CUDA runtime.
 
     NEVER imports torch: a cold ROCm import holds the Windows OS loader lock,
     which blocks thread creation process-wide. While a fresh import is the
@@ -833,7 +841,10 @@ def raw_reading_is_process_scoped() -> bool:
         if hip is None:
             return _known_blind_without_torch(
                 "torch is not installed or its build flavour is unreadable")
-        return hip
+        if hip:
+            return True
+        return _known_blind_without_torch(
+            "torch is not imported in this process and is not a HIP build")
     except Exception:
         return False
 
