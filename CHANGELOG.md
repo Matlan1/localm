@@ -11,7 +11,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
-## [0.3.2] - 2026-10-28
+## [0.3.2rc2] - 2026-10-28
 
 ### Changed
 - **The chat's Markdown and math renderers are updated (marked 18.1.2, KaTeX 0.19.1).** The marked update fixes a batch of Markdown edge cases, among them emphasis next to punctuation, block quotes with tabs or blank lines, and a `#` line inside a list item; KaTeX 0.19.1 accepts a percent sign in a raw argument.
