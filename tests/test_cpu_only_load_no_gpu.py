@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """A load with zero GPU layers does no GPU work: the GGUF chat model gets an
 empty llama.cpp device list (so its contexts have no GPU backend for op offload
-to send a prompt batch to), its vision projector and draft model stay on the
+to send a prompt batch to) in a worker that hides the GPU, its vision projector and draft model stay on the
 CPU, and a zero-layer embedder hides the GPU from its worker. A load with any
 GPU layers keeps the default device list and op offload."""
 
 import ctypes
+import os
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -155,3 +156,45 @@ def test_a_zero_layer_embedder_hides_the_gpu_from_its_worker(
         monkeypatch, n_gpu_layers, cpu_only):
     embedder = _isolated_embedder(monkeypatch, n_gpu_layers=n_gpu_layers)
     assert embedder._runner.loaded_params["cpu_only"] is cpu_only
+
+
+_GPU_VARS = ("HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
+
+
+@pytest.mark.parametrize("n_gpu_layers,seen_value", [(0, "-1"), (5, None), (99, None)])
+def test_the_gguf_worker_hides_the_gpu_before_a_cpu_only_load(
+        monkeypatch, n_gpu_layers, seen_value):
+    import queue
+
+    from localm.inference.backends.llamacpp import _runner
+    for name in ("install_parent_death_watchdog", "ignore_interrupt_signals",
+                 "suppress_native_error_dialogs"):
+        monkeypatch.setattr(f"localm._mp_spawn.{name}", lambda: None)
+    monkeypatch.setattr("localm.debuglog.attach_child_logging", lambda: None)
+    for var in _GPU_VARS:
+        monkeypatch.delenv(var, raising=False)
+    seen = {}
+
+    class _Worker:
+        def __init__(self, cancel_event=None, **payload):
+            seen.update({var: os.environ.get(var) for var in _GPU_VARS})
+            self.stream_cancel = None
+
+        def load(self):
+            return {}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("localm.inference.backends.llamacpp._worker.GgufWorker", _Worker)
+    req_q, resp_q, ctrl_q = queue.Queue(), queue.Queue(), queue.Queue()
+    req_q.put(("load", {"model_path": "m.gguf", "n_gpu_layers": n_gpu_layers}))
+    req_q.put(None)
+    try:
+        _runner._runner_main(req_q, resp_q, ctrl_q)
+    finally:
+        ctrl_q.put(None)
+        for var in _GPU_VARS:
+            os.environ.pop(var, None)
+    assert resp_q.get_nowait()[0] == "ok"
+    assert seen == {var: seen_value for var in _GPU_VARS}
