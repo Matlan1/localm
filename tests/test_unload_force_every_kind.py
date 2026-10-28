@@ -423,3 +423,26 @@ def test_unload_one_busy_embedder_is_in_use_without_force_and_stopped_with_it(
         forced = asyncio.run(hs.unload_one_model("embed", force=True))
     assert asked["status"] == "in_use" and resets == [True]
     assert forced["status"] == "unloaded"
+
+
+# --------------------------------------------------------------------------- #
+#  A reply cut off by a forced unload still ends with its usage block          #
+# --------------------------------------------------------------------------- #
+
+class _CutOffEngine:
+    def __init__(self, loaded):
+        self.loaded = loaded
+
+    def count_tokens(self, text):
+        raise RuntimeError("The model was unloaded while handling 'count_tokens'.")
+
+
+def test_usage_of_a_reply_cut_off_by_an_unload_is_estimated():
+    text = "x" * 40
+    assert asyncio.run(hs._count_streamed_tokens(_CutOffEngine(loaded=False), text)) == 10
+    assert asyncio.run(hs._count_streamed_tokens(_CutOffEngine(loaded=False), "")) == 0
+
+
+def test_a_count_failure_on_a_loaded_engine_still_raises():
+    with pytest.raises(RuntimeError, match="count_tokens"):
+        asyncio.run(hs._count_streamed_tokens(_CutOffEngine(loaded=True), "abc"))

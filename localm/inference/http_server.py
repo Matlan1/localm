@@ -7156,12 +7156,24 @@ async def _count_streamed_tokens(engine, streamed: str) -> int:
     content has been streamed already, so raising here would end the response
     with no terminal chunk, no usage and no ``[DONE]``. A model can emit a run
     the pre-tokenizer aborts on just as a caller can send one.
+
+    Also falls back to the estimate when the count raises RuntimeError and
+    *engine* is no longer loaded: a forced unload cut the reply off and took
+    the tokenizer with it. A RuntimeError from a loaded engine propagates.
     """
     from localm.inference.pretokenizer_guard import count_tokens_or_estimate
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        None, count_tokens_or_estimate, engine.count_tokens, streamed,
-        "the generated text")
+    try:
+        return await loop.run_in_executor(
+            None, count_tokens_or_estimate, engine.count_tokens, streamed,
+            "the generated text")
+    except RuntimeError:
+        if getattr(engine, "loaded", True):
+            raise
+        from localm.debuglog import logger as _dbg
+        _dbg.info("usage: the model was unloaded while its reply was written, so "
+                  "the reported token count is an estimate")
+        return max(1, len(streamed) // 4) if streamed else 0
 
 
 def inference_error_text(exc: BaseException) -> str:
