@@ -1122,6 +1122,57 @@ def _install_uv_bridge(root: Path, uv: str, target: Path) -> None:
                           reason=str(e)) from None
 
 
+def _apply_components(plans, needed: bool, *, klass: str, target: Path, version: str,
+                      defer: bool, runner, say, backup_dir: Path, names) -> tuple:
+    """The component half of :func:`apply`, after the swap: record the pending
+    component update (``updater_components.write_pending``) and, unless
+    *defer* or the ``setup`` class, carry it out now. When it fails, the code
+    swap is rolled back (with the native runtime it re-provisioned) and
+    LocalmError is raised. Returns ``(status, note)``: the status of the
+    component update (None when none ran) and a one-line summary (None when
+    there is nothing to say)."""
+    from localm import _apply_update as au
+    from localm import updater_components
+    from localm.bugreport import LocalmError
+    note = updater_components.summary(plans)
+    if not needed:
+        try:
+            updater_components.clear_pending()
+        except OSError as e:
+            _apply_warn("could not clear an earlier pending component update: %s", e)
+        return None, note
+    try:
+        updater_components.write_pending(plans, root=target, version=version)
+    except OSError as e:
+        _apply_warn("could not record the pending component update: %s", e)
+        return None, (f"{note}; NOT done: the component update could not be recorded ({e}); "
+                      "it is retried on the next start of localm")
+    if klass == "setup":
+        return None, (f"{note}, " if note else "checks the components ") + (
+            "on the first start after setup")
+    if defer:
+        return None, (f"{note}, " if note else "checks the components ") + (
+            "while localm restarts")
+    try:
+        status = updater_components.finish_pending(root=target, runner=runner,
+                                                   env=_deps_env(target), say=say)
+    except Exception as e:
+        status = {"state": "failed", "note": f"the component update crashed: {e}"}
+    if status is not None and status["state"] in ("failed", "waiting"):
+        updater_components.clear_pending()
+        why = status["note"]
+        try:
+            au.rollback(backup_dir, target, names)
+        except Exception as rb:
+            raise LocalmError(
+                "a component update failed AND rolling the code back failed - manual "
+                "recovery needed", reason=f"{why}; rollback: {rb}; restore from {backup_dir}"
+            ) from None
+        raise LocalmError("a component could not be updated, so the update was rolled back",
+                          reason=why)
+    return status, (status["note"] if status is not None else note)
+
+
 def apply(asset_id, *, signature=None, target_version=None, allow_unverified=False,
           expect_sha256=None, installed=None, download_opener=None,
           runner=None, defer_runtime=False, say=None) -> dict:
@@ -1415,57 +1466,6 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
                 "runtime": runtime_status, "runtime_note": runtime_note,
                 "components": components_status, "components_note": components_note,
                 "kept_for_updates": kept}
-
-
-def _apply_components(plans, needed: bool, *, klass: str, target: Path, version: str,
-                      defer: bool, runner, say, backup_dir: Path, names) -> tuple:
-    """The component half of :func:`apply`, after the swap: record the pending
-    component update (``updater_components.write_pending``) and, unless
-    *defer* or the ``setup`` class, carry it out now. When it fails, the code
-    swap is rolled back (with the native runtime it re-provisioned) and
-    LocalmError is raised. Returns ``(status, note)``: the status of the
-    component update (None when none ran) and a one-line summary (None when
-    there is nothing to say)."""
-    from localm import _apply_update as au
-    from localm import updater_components
-    from localm.bugreport import LocalmError
-    note = updater_components.summary(plans)
-    if not needed:
-        try:
-            updater_components.clear_pending()
-        except OSError as e:
-            _apply_warn("could not clear an earlier pending component update: %s", e)
-        return None, note
-    try:
-        updater_components.write_pending(plans, root=target, version=version)
-    except OSError as e:
-        _apply_warn("could not record the pending component update: %s", e)
-        return None, (f"{note}; NOT done: the component update could not be recorded ({e}); "
-                      "it is retried on the next start of localm")
-    if klass == "setup":
-        return None, (f"{note}, " if note else "checks the components ") + (
-            "on the first start after setup")
-    if defer:
-        return None, (f"{note}, " if note else "checks the components ") + (
-            "while localm restarts")
-    try:
-        status = updater_components.finish_pending(root=target, runner=runner,
-                                                   env=_deps_env(target), say=say)
-    except Exception as e:
-        status = {"state": "failed", "note": f"the component update crashed: {e}"}
-    if status is not None and status["state"] in ("failed", "waiting"):
-        updater_components.clear_pending()
-        why = status["note"]
-        try:
-            au.rollback(backup_dir, target, names)
-        except Exception as rb:
-            raise LocalmError(
-                "a component update failed AND rolling the code back failed - manual "
-                "recovery needed", reason=f"{why}; rollback: {rb}; restore from {backup_dir}"
-            ) from None
-        raise LocalmError("a component could not be updated, so the update was rolled back",
-                          reason=why)
-    return status, (status["note"] if status is not None else note)
 
 
 def _uv_for_deps(target: Path) -> str:
