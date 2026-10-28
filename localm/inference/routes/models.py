@@ -187,7 +187,7 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/v1/models/unload",
               dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
-    async def unload_model(model: str | None = None):
+    async def unload_model(model: str | None = None, force: bool = False):
         """
         Release model(s) from GPU/CPU memory.
 
@@ -197,13 +197,24 @@ def register(app: FastAPI, ctx) -> None:
         `model` set, releases only that one, leaving any other loaded models
         untouched. Either way, the next matching /v1/chat/completions call
         reloads lazily.
+
+        A model still busy with a request is not cut off unless `force` is
+        true (a query parameter, like `model`). Without it, a busy chat model
+        gets a short wait to finish, then stays loaded with its reply running:
+        a named one answers `{"status": "confirm_required", "model": ...,
+        "detail": ...}`, and an unload of everything lists it in
+        `skipped_in_use` and describes it in `confirm_required`
+        (`{name: description}`); a busy embedding, reranker or speech model
+        answers `{"status": "in_use", ...}` (named) or is skipped the same way
+        under its kind. Retrying with `force=true` stops the busy requests (the
+        reply being written is cut off) and unloads the model.
         """
         if model:
             from localm.config import load_registry
             if model not in load_registry() and model != _hs._default_model_name:
                 raise HTTPException(404, f"Model not registered: {model}")
-            return await _hs.unload_one_model(model)
-        return await _hs.unload_all_models()
+            return await _hs.unload_one_model(model, force=force)
+        return await _hs.unload_all_models(force=force)
 
     @app.post("/v1/models/rename",
               dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])

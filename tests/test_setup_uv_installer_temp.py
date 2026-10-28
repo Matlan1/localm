@@ -37,18 +37,30 @@ _needs_windows = pytest.mark.skipif(os.name != "nt", reason="the .bat setups run
 
 
 def _bash() -> str | None:
-    """A bash that shares this process's file system: on Windows that is Git
-    Bash, never the WSL launcher in System32."""
+    """A bash that shares this process's file system and keeps the PATH it is
+    given. On Windows that is Git for Windows' MSYS bash, ``<git>/usr/bin/bash.exe``:
+    never the WSL launcher, and never the ``<git>/bin/bash.exe`` shim, which puts
+    its own folders ahead of the PATH it is given. Found next to the bash on PATH, or
+    next to git when the bash on PATH is another one. None when there is none."""
     found = shutil.which("bash")
-    if found and os.name == "nt":
-        system_root = os.path.normcase(os.environ.get("SystemRoot", r"C:\Windows")).rstrip("\\/")
-        if os.path.normcase(os.path.abspath(found)).startswith(system_root + os.sep):
-            return None
-    return found
+    if os.name != "nt":
+        return found
+    system_roots = tuple(os.path.normcase(os.environ[v]).rstrip("\\") + "\\"
+                         for v in ("SystemRoot", "windir") if os.environ.get(v))
+    candidates = []
+    for exe in (found, shutil.which("git")):
+        if exe and not os.path.normcase(exe).startswith(system_roots):
+            candidates += [Path(exe).parent.parent / "usr" / "bin" / "bash.exe",
+                           Path(exe).with_name("bash.exe")]
+    for bash in candidates:
+        if bash.is_file() and (bash.parent / "msys-2.0.dll").is_file():
+            return str(bash)
+    return None
 
 
 _BASH = _bash()
-_needs_bash = pytest.mark.skipif(_BASH is None, reason="needs a bash on this file system")
+_needs_bash = pytest.mark.skipif(
+    _BASH is None, reason="needs a bash on this file system (on Windows, Git for Windows' bash)")
 
 _HOST = "https://github.com/astral-sh/uv/releases/download/"
 _PS_STUB = (
@@ -247,6 +259,7 @@ def _bash_env(tmp_path: Path, scratch: Path, home: Path, log: Path, releases: Pa
         'while [ "$#" -gt 0 ]; do\n'
         '  if [ "$1" = "-o" ]; then out="$2"; shift; fi\n'
         '  shift\ndone\n'
+        'printf "%s\\n" "$out" >> "$CURL_LOG"\n'
         f'cp "{releases.as_posix()}/uv-installer.sh" "$out"\n').encode())
     curl.chmod(0o755)
     env = dict(os.environ)
@@ -255,8 +268,17 @@ def _bash_env(tmp_path: Path, scratch: Path, home: Path, log: Path, releases: Pa
         env.pop(var, None)
     env.update(TMPDIR=scratch.as_posix(), TEMP=str(scratch), TMP=str(scratch),
                HOME=str(home), STUB_LOG=log.as_posix(), STUB_FAIL="1" if fails else "0",
-               PATH=str(stubs) + os.pathsep + env.get("PATH", ""))
+               CURL_LOG=_curl_log(tmp_path).as_posix(),
+               PATH=os.pathsep.join([str(stubs), str(Path(_BASH).parent), env.get("PATH", "")]))
     return env
+
+
+def _curl_log(tmp_path: Path) -> Path:
+    return tmp_path / "curl.log"
+
+
+def _assert_stub_curl_ran(tmp_path: Path, out: str) -> None:
+    assert _curl_log(tmp_path).is_file(), f"the script ran a curl other than the stub\n{out}"
 
 
 _SH_FOLDERS = [pytest.param("clone", id="plain"), pytest.param("clone [x]", id="brackets"),
@@ -275,6 +297,7 @@ def test_setup_sh_leaves_nothing_in_the_system_temp_folder(tmp_path, folder, fai
     r = subprocess.run([_BASH, "setup.sh", "--yes"], cwd=str(clone), env=env,
                        capture_output=True, text=True, timeout=180, creationflags=_NO_WINDOW)
     out = r.stdout + r.stderr
+    _assert_stub_curl_ran(tmp_path, out)
     if fails:
         assert r.returncode in (1, 99), out
         assert not (clone / ".uv" / "uv").exists(), out
@@ -302,6 +325,7 @@ def test_setup_gui_sh_leaves_nothing_in_the_system_temp_folder(tmp_path, folder,
     r = subprocess.run([_BASH, "-c", script], cwd=str(clone), env=env,
                        capture_output=True, text=True, timeout=180, creationflags=_NO_WINDOW)
     out = r.stdout + r.stderr
+    _assert_stub_curl_ran(tmp_path, out)
     if fails:
         assert r.returncode == 1 and "Could not download or run Astral's uv installer" in out, out
     else:

@@ -814,8 +814,9 @@ Scope: `models:write`.
 `POST /v1/models/unload?model=<name>` releases model(s) from VRAM (e.g.
 before image generation hands the GPU to ComfyUI; omit `model` to unload
 everything currently loaded); `POST /v1/models/load?model=<name>` reloads one
-(omit `model` for the active or default model). Both wait for any in-flight
-generation to finish first, and for the freed VRAM to actually be reclaimed
+(omit `model` for the active or default model). An unload never cuts off a
+request in flight unless `force=true` is passed (a query parameter, like
+`model`; see below). Both wait for the freed VRAM to actually be reclaimed
 before returning.
 
 `POST /v1/models/load` returns:
@@ -848,17 +849,33 @@ loaded or configured to fall back to, the load is a 503; an unregistered name is
 
 `POST /v1/models/unload` with no `model` returns `status` (`"unloaded"`,
 `"in_use"` when every loaded model was mid-request and none could be freed, or
-`"already_unloaded"`), `unloaded_models`, `embedder_unloaded`, and
-`skipped_in_use` when something was pinned by an in-flight request. It adds
-`confirm_required` (what is still using a model) when a model stayed loaded
-because it was still in use after a short grace period; this route has no
-`force` parameter to override that. With `?model=<name>` it returns
-`{"status": "unloaded", "model": ..., "was_active": ...}`, or
-`{"status": "already_unloaded", "model": ...}`, or
-`{"status": "confirm_required", "model": ..., "detail": ...}` when the model
-was still in use after the grace period and was left loaded. Treat anything
-other than `"unloaded"` or `"already_unloaded"` as "the model is still
-resident. An unregistered `model` is a 404. The unload routes (not the load route) add `vram_freed`,
+`"already_unloaded"`), `unloaded_models` (the chat models released),
+`unloaded_other` (the other models released, by kind: `"embedding model"`,
+`"reranker model"`, `"speech model"`), `embedder_unloaded` (whether
+`unloaded_other` is non-empty), and `skipped_in_use` (names and kinds left
+loaded) when something was still busy with a request. A busy chat model gets a
+short grace period to finish first. Whatever stayed loaded is also described in
+`confirm_required`, a map from each name or kind to what is using it:
+
+```json
+{"status": "in_use", "model": "none", "unloaded_models": [], "unloaded_other": [],
+ "embedder_unloaded": false, "skipped_in_use": ["mymodel"],
+ "confirm_required": {"mymodel": "1 other active request"}}
+```
+
+With `?model=<name>` it returns `{"status": "unloaded", "model": ...,
+"was_active": ...}`, or `{"status": "already_unloaded", "model": ...}`, or,
+for a chat model still in use after the grace period,
+`{"status": "confirm_required", "model": ..., "detail": ...}`, where `detail`
+says what is using it and that unloading anyway cuts off the reply it is
+writing; a busy embedding, reranker or speech model returns
+`{"status": "in_use", "model": ..., "vram_freed": 0}`. In each of those cases
+the model was left loaded with its requests running. Retry with `force=true`
+(`POST /v1/models/unload?model=<name>&force=true`, or `?force=true` for
+everything) to stop the busy requests and unload anyway: a chat reply in
+progress is cut off, and an embedding, reranker or speech request in flight
+fails. Treat anything other than `"unloaded"` or `"already_unloaded"` as "the
+model is still resident". An unregistered `model` is a 404. The unload routes (not the load route) add `vram_freed`,
 `vram_before_bytes`, and `vram_after_bytes` when a GPU free-memory reading is
 available, plus `vram_reading_uncertain` and a `vram_note` when that reading
 cannot be trusted (a stale probe, a driver that reports only this process's own

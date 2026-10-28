@@ -171,6 +171,20 @@ class RunnerBusy(Exception):
 # command dispatch.
 _FAULT_ENV = "LOCALM_GGUF_FAULT_FOR_TEST"
 
+# Device-visibility variables the HIP, ROCm and CUDA runtimes read when they
+# first initialise; "-1" names no valid device.
+_GPU_VISIBILITY_ENV = ("HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
+
+
+def hide_gpus_from_this_process() -> None:
+    """Set every ``_GPU_VISIBILITY_ENV`` variable to "-1" in this process, so a
+    HIP/ROCm/CUDA runtime that has not initialised yet reports no device. Only
+    the calling worker process is changed. Must run before the runtime
+    initialises (the first native llama.cpp call); afterwards it has no
+    effect."""
+    for name in _GPU_VISIBILITY_ENV:
+        os.environ[name] = "-1"
+
 
 def _simulate_fault(mode: str) -> None:
     if mode == "hang":
@@ -531,6 +545,8 @@ def _runner_main(req_q, resp_q, ctrl_q) -> None:
             try:
                 if os.environ.get(_FORCE_LOAD_CANCEL_ENV):
                     raise ModelLoadCancelled("forced cancellation (test-only)")
+                if payload.get("n_gpu_layers") == 0:
+                    hide_gpus_from_this_process()
                 worker = GgufWorker(cancel_event=load_cancel_event, **payload)
                 worker.stream_cancel = stream_cancel_event
                 meta = worker.load()

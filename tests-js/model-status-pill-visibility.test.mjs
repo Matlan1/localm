@@ -74,10 +74,10 @@ test("status pill: recovering from an error re-hides the pill", async () => {
 
 // Reads the shipped stylesheet. `#model-status` sets `display: flex`, which
 // beats the user-agent `[hidden] { display: none }`, so hiding needs an
-// explicit override. jsdom does not apply the cascade.
+// author [hidden] rule that wins over it. jsdom does not apply the cascade.
 test("status pill: style.css overrides display:flex for [hidden]", () => {
   const css = readFileSync(
     fileURLToPath(new URL("../localm/plugins/gui/static/style.css", import.meta.url)), "utf8");
-  assert.match(css, /#model-status\[hidden\]\s*\{[^}]*display:\s*none/,
-    "#model-status[hidden] must force display:none or hiding never takes effect");
+  assert.match(css, /(^|\})\s*\[hidden\]\s*\{[^}]*display:\s*none\s*!important/m,
+    "a global [hidden] { display: none !important } rule must exist or hiding never takes effect");
 });

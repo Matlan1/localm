@@ -93,6 +93,10 @@
 
 * { box-sizing: border-box; }
 
+/* The hidden attribute always hides, whatever display another rule sets.
+   See test_hidden_attribute_beats_every_display_rule. */
+[hidden] { display: none !important; }
+
 html, body {
   margin: 0;
   height: 100%;
@@ -330,11 +334,6 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
   align-items: center;
   gap: 6px;
 }
-/* Required, not defensive: the `display: flex` above BEATS the user-agent
-   `[hidden] { display: none }`, so setStatus()'s `hidden = state === "ok"`
-   would be a silent no-op without this rule and the pill would never actually
-   disappear. */
-#model-status[hidden] { display: none; }
 #status-text {
   white-space: nowrap;
   overflow: hidden;
@@ -394,7 +393,6 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
    with an orphan "· VRAM ...". A gap cannot be orphaned because it collapses at
    a line break. */
 .hw-stats > span { white-space: nowrap; }
-.hw-stats[hidden] { display: none; }
 #sidebar-unload-btn { width: 100%; margin-top: 6px; padding: 5px 8px; font-size: 12px; }
 /* Subtle VRAM-fullness tint, shown ONLY when a trustworthy used/total is known
    (renderHwStats sets .vram-usage then; a stale/blind or total-only reading gets
@@ -437,15 +435,8 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .perf-estimate { font-variant-numeric: tabular-nums; margin: 4px 0 2px; }
 .perf-estimate.perf-warn { color: var(--yellow); }
 .perf-backend-row { margin: 0 0 10px; }
-/* :not([hidden]) - an unconditional `display` here would outrank the
-   browser's own `[hidden] { display: none }` UA rule (author CSS always
-   beats user-agent CSS, regardless of selector specificity), so setting the
-   hidden PROPERTY in JS would stop actually hiding the element. Measured
-   live: the hint rendered on an AMD box with hidden correctly set to true. */
-.perf-backend-hint:not([hidden]) {
-  display: flex; align-items: center; justify-content: space-between; gap: 12px;
-}
 .perf-backend-hint {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
   margin: 0 0 14px; padding: 8px 12px; border-radius: 8px;
   background: color-mix(in srgb, var(--yellow) 14%, transparent);
   border: 1px solid color-mix(in srgb, var(--yellow) 40%, transparent);
@@ -875,7 +866,6 @@ pre:hover .canvas-btn { opacity: 1; }
   z-index: 60;
   box-shadow: -8px 0 24px rgba(0, 0, 0, 0.35);
 }
-.artifact-pane[hidden] { display: none; }
 .artifact-head {
   display: flex;
   align-items: center;
@@ -1170,9 +1160,6 @@ pre:hover .canvas-btn { opacity: 1; }
   border: 1px solid var(--border);
   border-radius: 12px;
 }
-.inline-browser-frame[hidden] {
-  display: none !important;
-}
 .inline-browser-status {
   font-family: var(--mono);
   font-size: 12px;
@@ -1327,7 +1314,6 @@ pre:hover .canvas-btn { opacity: 1; }
   gap: 8px;
   z-index: 51;
 }
-.toast-errors[hidden] { display: none; }
 .toast-error {
   display: flex;
   align-items: flex-start;
@@ -1614,12 +1600,10 @@ pre:hover .canvas-btn { opacity: 1; }
 /* A group shows all its sections stacked; each .card already carries its own
    bottom margin, so they read as separate cards without extra spacing rules. */
 .settings-section.active { display: block; }
-/* Both gate-hidden mechanisms win over .active, so a conditionally-shown card
-   (owner-only keys card via .sec-hidden; proxy-gated Updates/Issues via the
-   [hidden] attribute) stays hidden even while its group is active, and self-reveals
-   the instant the gate is lifted - no extra nav rebuild needed. */
+/* .sec-hidden (owner-only keys card) and the [hidden] attribute (proxy-gated
+   Updates/Issues) both win over .active, so a gated card stays hidden while its
+   group is active and shows as soon as the gate is lifted. */
 .settings-section.sec-hidden { display: none !important; }
-.settings-section[hidden] { display: none !important; }
 .settings-section-head {
   margin: 0 0 4px; font-size: 15px;
   border-bottom: 1px solid var(--border); padding-bottom: 8px;
@@ -3185,11 +3169,6 @@ div:has(> .data-table) { overflow-x: auto; }
 /* .inline-check carries margin-left:14px for sitting beside a button row; here
    the flex gap does that job, so the first one is not indented off the edge. */
 .models-view-opts .inline-check { margin-left: 0; }
-/* .inline-check sets display:inline-flex, and author CSS outranks the browser's
-   own [hidden] { display: none } rule - so a toggle hidden on a tab it does not
-   apply to would otherwise stay visible. Same reason as .perf-backend-hint's
-   :not([hidden]) note above. */
-.models-view-opts .inline-check[hidden] { display: none; }
 
 /* Rule-5 note: what the All tab is leaving out, and where it went. */
 .models-other-note {

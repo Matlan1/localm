@@ -404,7 +404,8 @@ def register(app: FastAPI, ctx) -> None:
         place so the new code loads. EXPLICIT only (a button calls this); localm never
         self-updates on its own. A failed apply rolls back and is surfaced honestly,
         never as success. The asset is re-derived from the latest release server-side
-        (not taken from the client). The ``backup`` and ``runtime_note`` fields and
+        (not taken from the client). The ``backup``, ``runtime_note`` and
+        ``components_note`` fields and
         an ``error`` text are path-scrubbed (``http_server.path_formatter``) for a
         caller other than the local operator. A native runtime re-provision the
         update needs runs during the restart, after the models are unloaded
@@ -452,7 +453,7 @@ def register(app: FastAPI, ctx) -> None:
             # apply() already rolled back; report the failure, do not fake success.
             return {"applied": False,
                     "error": _hs.path_formatter(request)(format_localm_error(e))}
-        for key in ("backup", "runtime_note"):
+        for key in ("backup", "runtime_note", "components_note"):
             if res.get(key) is not None:
                 res[key] = _hs.path_formatter(request)(res[key])
         res["available"] = True

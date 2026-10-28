@@ -331,7 +331,10 @@ def register(app: FastAPI, ctx) -> None:
                      "'localm key generate').")
 
     async def _load_or_unload(request: Request, name: str, unload: bool,
-                              kind: str) -> JSONResponse:
+                              kind: str, *, force: bool = False) -> JSONResponse:
+        """Load model *name*, or unload it when *unload*. A busy model is
+        unloaded only with *force*, which stops its requests in flight;
+        without it the unload answers 409 and leaves the model loaded."""
         resolved = _canonical(name)
         peer_routed = peer_routing.get_route(resolved) is not None
         if unload:
@@ -342,10 +345,12 @@ def register(app: FastAPI, ctx) -> None:
                          "unload it there")
             if resolved not in _registry_names():
                 raise P.OllamaError(404, f"model '{name}' not found")
-            result = await _hs.unload_one_model(resolved)
-            if isinstance(result, dict) and result.get("status") == "confirm_required":
+            result = await _hs.unload_one_model(resolved, force=force)
+            if isinstance(result, dict) and result.get("status") in (
+                    "confirm_required", "in_use"):
                 raise P.OllamaError(
-                    409, f"model '{name}' is in use; retry when its requests finish")
+                    409, f"model '{name}' is in use; retry when its requests "
+                         "finish, or send \"force\": true to stop them and unload it")
         elif not peer_routed:
             try:
                 await _hs.get_engine(resolved)
@@ -412,7 +417,8 @@ def register(app: FastAPI, ctx) -> None:
         name = P.request_model_name(req)
         if not req.messages:
             return await _load_or_unload(
-                request, name, P.keep_alive_is_zero(req.keep_alive), "chat")
+                request, name, P.keep_alive_is_zero(req.keep_alive), "chat",
+                force=P.unload_forced(req))
         plan = P.plan_chat(req, _canonical(name))
         _note_ignored(plan, req)
         return await _run_chat(request, plan, "chat", name)
@@ -422,7 +428,8 @@ def register(app: FastAPI, ctx) -> None:
         name = P.request_model_name(req)
         if not req.prompt and not req.images:
             return await _load_or_unload(
-                request, name, P.keep_alive_is_zero(req.keep_alive), "generate")
+                request, name, P.keep_alive_is_zero(req.keep_alive), "generate",
+                force=P.unload_forced(req))
         plan = P.plan_generate(req, _canonical(name))
         _note_ignored(plan, req)
         return await _run_chat(request, plan, "generate", name)

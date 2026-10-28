@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // The Models page "Unload all" button's toast counts `unloaded_models` (chat
-// engines) plus the `embedder_unloaded` flag on the same response, which covers
-// the shared embedding model's separate lifecycle (localm.inference.embedder).
+// engines) plus `unloaded_other` (the embedding, reranker and speech models),
+// or the `embedder_unloaded` flag from a server that sends no `unloaded_other`.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -62,4 +62,65 @@ test("unload-all toast tolerates a response with no embedder_unloaded field (old
     status: "unloaded", model: "model-a", unloaded_models: ["model-a"],
   });
   assert.match(msg, /Unloaded 1 model/, `must not throw / miscount on a missing field (got: ${msg})`);
+});
+
+test("unload-all toast counts every embedding, reranker and speech model in unloaded_other", async () => {
+  const msg = await clickUnloadAll({
+    status: "unloaded", model: "model-a", unloaded_models: ["model-a"],
+    unloaded_other: ["embedding model", "reranker model", "speech model"],
+    embedder_unloaded: true,
+  });
+  assert.match(msg, /Unloaded 4 model/, `1 chat model + 3 others (got: ${msg})`);
+});
+
+function makeForceFlowFetch(first, forced, calls) {
+  return async (url, opts = {}) => {
+    const u = String(url);
+    if (u.startsWith("/api/models/unload")) {
+      const body = opts.body ? JSON.parse(opts.body) : {};
+      calls.push(body);
+      const data = body.force ? forced : first;
+      return { ok: true, status: 200, json: async () => data, text: async () => "" };
+    }
+    if (u === "/api/models" || u.startsWith("/api/models?")) {
+      return { ok: true, status: 200, json: async () => ({ models: [], active: null }) };
+    }
+    return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+  };
+}
+
+async function unloadAllThenConfirm(first, forced) {
+  const calls = [];
+  const { window } = loadAppWithPages({ fetchImpl: makeForceFlowFetch(first, forced, calls) });
+  const doc = window.document;
+  doc.getElementById("models-unload-all-btn").click();
+  await flush();
+  const confirmBtn = doc.querySelector("#modal-body .btn-danger");
+  assert.ok(confirmBtn, "a busy model asks before unloading anyway");
+  confirmBtn.click();
+  await flush();
+  return { calls, toast: doc.getElementById("toast").textContent };
+}
+
+const BUSY_REPLY = {
+  status: "in_use", model: "none", unloaded_models: [], unloaded_other: [],
+  embedder_unloaded: false, skipped_in_use: ["chat-a", "embedding model"],
+  confirm_required: { "chat-a": "1 other active request", "embedding model": "1 active request" },
+};
+
+test("unload-all anyway counts the chat and embedding models it stopped", async () => {
+  const { calls, toast } = await unloadAllThenConfirm(BUSY_REPLY, {
+    status: "unloaded", model: "chat-a", unloaded_models: ["chat-a"],
+    unloaded_other: ["embedding model"], embedder_unloaded: true,
+  });
+  assert.deepEqual(calls, [{}, { force: true }]);
+  assert.equal(toast, "Unloaded 2 model(s)");
+});
+
+test("unload-all anyway reports a model that still stayed loaded", async () => {
+  const { toast } = await unloadAllThenConfirm(BUSY_REPLY, {
+    status: "unloaded", model: "chat-a", unloaded_models: ["chat-a"],
+    unloaded_other: [], embedder_unloaded: false, skipped_in_use: ["embedding model"],
+  });
+  assert.equal(toast, "Unloaded 1 model(s); 1 still generating - try again once finished");
 });
