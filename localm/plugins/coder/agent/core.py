@@ -50,6 +50,29 @@ def _foreign_summary(description) -> str:
     return text
 
 
+def cap_backend_session_mode(backend, mode) -> None:
+    """Set ``backend.session_mode`` to the most private of its current value
+    and *mode*, so a localm server records the backend's requests no less
+    privately than *mode*. A backend without a ``session_mode`` attribute is
+    left unchanged. An unknown *mode* or current value counts as privacy.
+    Never raises."""
+    if not hasattr(backend, "session_mode"):
+        return
+    from localm.audit import most_private, parse_mode
+
+    def _parse(value) -> SessionMode:
+        try:
+            return parse_mode(str(getattr(value, "value", value)))
+        except ValueError:
+            return SessionMode.PRIVACY
+
+    modes = [_parse(mode)]
+    current = getattr(backend, "session_mode", None)
+    if current:
+        modes.append(_parse(current))
+    backend.session_mode = most_private(*modes).value
+
+
 def _foreign_tool_docs(heading: str, names, registry) -> GuardedText:
     """*heading* followed by one ``- name: summary`` line per registered tool
     in *names*, as a ``GuardedText`` whose untrusted ranges cover each line's
@@ -172,6 +195,7 @@ class Agent(
         self.parent         = parent
         self.server_side    = bool(server_side or getattr(parent, "server_side", False))
         self.mode           = mode
+        cap_backend_session_mode(backend, mode)
         # Publish this session's own cwd-resolved mode for debug_content_enabled()
         # (localm.debuglog) to see - it cannot resolve a project's own
         # .localcoder/config.toml privacy pin on its own (localm.audit.
