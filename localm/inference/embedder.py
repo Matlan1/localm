@@ -1951,14 +1951,15 @@ def model_vram_hold(model) -> Optional[int]:
 
 def resident_vram_hold() -> tuple[bool, Optional[int]]:
     """``(loaded, hold)``: whether the shared embedder is loaded and, when it
-    is, the VRAM bytes it is expected to hold (``model_vram_hold``; None when
-    unknown). Does not load. Takes ``_LOCK``; must not run on the event loop
-    thread."""
+    is, the VRAM bytes a ``reset_embedder(force=False)`` would free: 0 while a
+    request is using it, else ``model_vram_hold`` (None when unknown). Does
+    not load. Takes ``_LOCK``; must not run on the event loop thread."""
     with _LOCK:
         current = _EMBEDDER
+        busy = current is not None and _in_flight(current)
     if current is None:
         return False, None
-    return True, model_vram_hold(current)
+    return True, 0 if busy else model_vram_hold(current)
 
 
 def gpu_fallback_reason() -> Optional[str]:

@@ -534,15 +534,16 @@ def is_loaded() -> bool:
 
 def resident_vram_hold() -> tuple[bool, Optional[int]]:
     """``(loaded, hold)``: whether a speech model is resident and, when it is,
-    the VRAM bytes it is expected to hold (its ``vram_hold_bytes``; None when
-    unknown). Does not load. Takes ``_LOCK``; must not run on the event loop
-    thread."""
+    the VRAM bytes a ``reset_speech(force=False)`` would free: 0 while a
+    request is using it, else its ``vram_hold_bytes`` (None when unknown).
+    Does not load. Takes ``_LOCK``; must not run on the event loop thread."""
     from localm.inference.embedder import model_vram_hold
     with _LOCK:
         current = _ENGINE
+        busy = current is not None and _in_flight(current)
     if current is None:
         return False, None
-    return True, model_vram_hold(current)
+    return True, 0 if busy else model_vram_hold(current)
 
 
 def is_resident() -> bool:

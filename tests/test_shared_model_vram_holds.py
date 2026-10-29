@@ -126,6 +126,29 @@ class TestSpeechHold:
         assert speech.resident_vram_hold() == (True, 0)
 
 
+class TestBusySharedModelsFreeNothing:
+    def test_an_embedder_serving_a_request_frees_nothing(self, monkeypatch):
+        monkeypatch.setattr(emb, "_EMBEDDER",
+                            SimpleNamespace(vram_hold_bytes=5 * MB, active_requests=1))
+        assert emb.resident_vram_hold() == (True, 0)
+        monkeypatch.setattr(emb, "_EMBEDDER",
+                            SimpleNamespace(vram_hold_bytes=5 * MB, active_requests=0))
+        assert emb.resident_vram_hold() == (True, 5 * MB)
+
+    def test_a_reranker_pinned_by_a_request_frees_nothing(self, monkeypatch):
+        monkeypatch.setattr(reranker, "_RERANKER",
+                            SimpleNamespace(vram_hold_bytes=5 * MB, active_requests=0))
+        monkeypatch.setattr(reranker, "_RESIDENT_REQUESTS", 1)
+        assert reranker.resident_vram_hold() == (True, 0)
+        monkeypatch.setattr(reranker, "_RESIDENT_REQUESTS", 0)
+        assert reranker.resident_vram_hold() == (True, 5 * MB)
+
+    def test_a_speech_model_speaking_frees_nothing(self, monkeypatch):
+        monkeypatch.setattr(speech, "_ENGINE",
+                            SimpleNamespace(vram_hold_bytes=5 * MB, active_requests=2))
+        assert speech.resident_vram_hold() == (True, 0)
+
+
 class TestMediaRuntimeStates:
     def test_loaded_runtimes_report_busy_or_idle_and_nothing_is_stopped(
             self, monkeypatch):

@@ -2507,6 +2507,70 @@ class TestBusyReplyNothingFreedBeforeAsking:
                        "detail": _estimate_confirm_detail("model-b", _TOO_SMALL)}
         assert box.events == [] and box.loaded == {"embedder"} and not b.loaded
 
+    def test_an_idle_model_beside_a_busy_one_waits_for_the_reply_before_asking(
+            self, monkeypatch):
+        a = _SizedResident("model-a", hold=3 * GB)
+        c = _SizedResident("model-c", hold=3 * GB)
+        b = GatedEngine("model-b")
+        engines = {"model-a": a, "model-c": c, "model-b": b}
+
+        def _reading():
+            loaded = sum(1 for e in (a, c) if e.loaded)
+            return {"total": _TOO_SMALL, "free": _TOO_SMALL - loaded * 3 * GB}
+
+        env = _install(monkeypatch, engines, total=_TOO_SMALL, reading=_reading)
+        _knobs(monkeypatch, max_resident_models=3)
+        _seat("model-a", a)
+        _seat("model-c", c, active=True, busy=1)
+        events = []
+
+        def _reply_finishes():
+            events.append("reply-finished")
+            c.active_requests = 0
+
+        _flip_once_the_wait_starts(monkeypatch, _reply_finishes)
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert res == {"status": "confirm_required", "model": "model-b",
+                       "detail": _estimate_confirm_detail("model-b", _TOO_SMALL)}
+        assert events == ["reply-finished"], "the reply was waited for first"
+        assert a.unload_calls == 0 and c.unload_calls == 0 and env.cancelled == []
+
+    def test_a_reply_still_running_after_the_wait_is_asked_about_and_kept(
+            self, monkeypatch):
+        a = _SizedResident("model-a")
+        b = GatedEngine("model-b")
+        env, box = _install_shared(monkeypatch, {"model-a": a, "model-b": b},
+                                   total=_TOO_SMALL, holds={"embedder": _SHARED_HOLD})
+        _seat("model-a", a, active=True, busy=1)
+
+        async def _still_busy(engine, **kwargs):
+            return False
+
+        monkeypatch.setattr(hs, "_wait_for_pin_clear", _still_busy)
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert res["status"] == "confirm_required"
+        assert "cuts off the reply" in res["detail"] and "'model-a'" in res["detail"]
+        assert box.events == [] and env.cancelled == [] and a.unload_calls == 0
+        assert a.active_requests == 1
+
+    def test_a_busy_shared_model_is_not_counted_as_freed(self, monkeypatch):
+        a = _SizedResident("model-a")
+        b = GatedEngine("model-b")
+        env, box = _install_shared(monkeypatch, {"model-a": a, "model-b": b},
+                                   total=NEED + HEADROOM + 100 * MB,
+                                   holds={"embedder": _SHARED_HOLD},
+                                   reported={"embedder": 0})
+        _seat("model-a", a, active=True)
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert res["status"] == "confirm_required"
+        assert a.unload_calls == 0 and box.events == []
+
     def test_a_non_explicit_load_still_frees_the_embedder_first(self, monkeypatch):
         a = _SizedResident("model-a")
         b = GatedEngine("model-b")
