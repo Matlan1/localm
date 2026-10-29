@@ -1864,6 +1864,7 @@ export function addMessageRow(container, role, text, opts = {}) {
     body.appendChild(img);
   }
   for (const clip of opts.clips || []) {
+    body.classList.add("has-player");
     const wrap = el("div", "msg-clip");
     if (clip.name) wrap.appendChild(el("div", "msg-clip-name", clip.name));
     const player = document.createElement("audio");
@@ -1879,6 +1880,7 @@ export function addMessageRow(container, role, text, opts = {}) {
     body.appendChild(wrap);
   }
   for (const url of opts.audio || []) {
+    body.classList.add("has-player");
     const player = document.createElement("audio");
     player.controls = true;
     player.style.width = "100%";
@@ -1887,6 +1889,7 @@ export function addMessageRow(container, role, text, opts = {}) {
     body.appendChild(player);
   }
   for (const url of opts.video || []) {
+    body.classList.add("has-player");
     const player = document.createElement("video");
     player.controls = true;
     player.style.width = "100%";
