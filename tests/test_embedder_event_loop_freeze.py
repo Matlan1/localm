@@ -145,7 +145,8 @@ def test_gui_models_route_does_not_freeze_event_loop(hsclean, monkeypatch):
     monkeypatch.setattr("localm.config.load_registry", lambda: {})
 
     async def _drive():
-        return await _assert_event_loop_stays_responsive(lambda: endpoint(type=""))
+        return await _assert_event_loop_stays_responsive(
+            lambda: endpoint(request=None, type=""))
 
     result = asyncio.run(_drive())
     assert result == {"models": [], "active": None}

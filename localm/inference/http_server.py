@@ -3825,7 +3825,8 @@ def path_formatter(request: Request) -> Callable[[object], str]:
     """A function rendering a path (or any text) for this caller's response:
     ``str`` for the local operator (``caller_is_operator``), otherwise ``str``
     followed by a ``pathscrub.path_scrubber`` bound once (home, account name,
-    data dir, install root and env prefix replaced, file name kept)."""
+    data dir, install root, env prefix and the folders of every other absolute
+    host path replaced, file name kept)."""
     if caller_is_operator(request):
         return str
     from localm.pathscrub import path_scrubber
