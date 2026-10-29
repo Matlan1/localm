@@ -54,8 +54,7 @@ def cap_backend_session_mode(backend, mode) -> None:
     """Set ``backend.session_mode`` to the most private of its current value
     and *mode*, so a localm server records the backend's requests no less
     privately than *mode*. A backend without a ``session_mode`` attribute is
-    left unchanged. An unknown *mode* or current value counts as privacy.
-    Never raises."""
+    left unchanged. An unknown *mode* or current value counts as privacy."""
     if not hasattr(backend, "session_mode"):
         return
     from localm.audit import most_private, parse_mode
