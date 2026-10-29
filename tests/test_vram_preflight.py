@@ -475,6 +475,7 @@ class TestVramReport:
         assert "12.00 GB in use / 16.00 GB total" in out
         assert "+8.00 GB this load" in out
         assert "0.00 GB allocated" not in out      # the old, wrong line
+        assert b.vram_load_bytes == 8 * GIB
 
     def test_load_omits_used_free_when_reading_not_trusted(self, tmp_path, capsys):
         """A process-scoped reading (Windows + AMD ROCm/HIP torch, blind to every
@@ -503,6 +504,7 @@ class TestVramReport:
         assert "in use" not in out
         assert "0.14 GB" not in out
         assert "not trusted" in out
+        assert b.vram_load_bytes is None
 
     def test_load_skips_vram_probe_entirely_for_cpu_only_load(self, tmp_path):
         """A CPU-only load (n_gpu_layers=0, mirroring _check_vram's own

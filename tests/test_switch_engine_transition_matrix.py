@@ -2120,3 +2120,111 @@ class TestTooBigEvenAfterEviction:
         assert hs._active_model_name is None
         assert hs._last_active_model_name == "model-a"
         assert hs._resolve_unnamed_model_name() == "model-a"
+
+    def test_a_measured_hold_is_used_for_a_load_the_backend_did_not_size(
+            self, monkeypatch):
+        a = GatedEngine("model-a")
+        a.gpu_sizing = {"mode": "configured", "layers": 99, "n_ctx": 4096}
+        a.vram_load_bytes = NEED
+        b = GatedEngine("model-b")
+        env = _install(monkeypatch, {"model-a": a, "model-b": b}, total=_TOO_SMALL)
+        _seat("model-a", a, active=True)
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert res == {"status": "confirm_required", "model": "model-b",
+                       "detail": _estimate_confirm_detail("model-b", _TOO_SMALL)}
+        assert a.unload_calls == 0 and hs._active_model_name == "model-a"
+
+    def test_a_measured_hold_wins_over_the_sized_one(self, monkeypatch):
+        a = _SizedResident("model-a", hold=NEED - 2 * GB)
+        a.vram_load_bytes = NEED + 2 * GB
+        b = GatedEngine("model-b")
+        env = _install(monkeypatch, {"model-a": a, "model-b": b}, total=_TOO_SMALL)
+        _seat("model-a", a, active=True)
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert res["status"] == "confirm_required"
+        assert a.unload_calls == 1, "the measured hold said it would fit, so it evicted"
+
+    @pytest.mark.parametrize("unknown", [
+        {"gpu_sizing": {"mode": "configured", "layers": 99, "n_ctx": 4096}},
+        {"gpu_sizing": {"mode": "auto", "layers": 32, "n_ctx": 4096}},
+        {"gpu_placement": {"gpu_layers_offloaded": 32, "gpu_layers_total": 32,
+                           "degraded": True, "moe_cpu_layers": 24}},
+    ], ids=["configured-layers", "auto-without-bytes", "experts-in-ram"])
+    def test_an_unknown_hold_evicts_first_as_before(self, monkeypatch, unknown):
+        a = _SizedResident("model-a")
+        for key, value in unknown.items():
+            setattr(a, key, value)
+        b = GatedEngine("model-b")
+        env = _install(monkeypatch, {"model-a": a, "model-b": b}, total=_TOO_SMALL)
+        _seat("model-a", a, active=True)
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert res["status"] == "confirm_required"
+        assert a.unload_calls == 1
+
+    @pytest.mark.parametrize("shared, peers", [
+        (True, []),
+        (False, None),
+        (False, [0]),
+        (False, [2 * GB]),
+    ], ids=["shared-model-loaded", "peer-lookup-failed", "peer-without-estimate",
+            "peer-holds-the-shortfall"])
+    def test_vram_another_holder_may_free_evicts_first_as_before(
+            self, monkeypatch, shared, peers):
+        a = _SizedResident("model-a")
+        b = GatedEngine("model-b")
+        env = _install(monkeypatch, {"model-a": a, "model-b": b}, total=_TOO_SMALL)
+        monkeypatch.setattr(hs, "_shared_models_loaded", lambda: shared)
+        monkeypatch.setattr(hs, "_peer_vram_holds", lambda: peers)
+        _seat("model-a", a, active=True)
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert res["status"] == "confirm_required"
+        assert a.unload_calls == 1
+
+    def test_peer_holds_are_the_live_peers_with_a_model_on_this_load_s_gpus(
+            self, monkeypatch):
+        monkeypatch.setattr(hs, "_gpu_coord", {"instance_id": "me"})
+        monkeypatch.setattr(hs, "_load_gpu_indices", lambda: {0})
+        seen = []
+
+        def _peers(*, exclude_self_id=None, **kwargs):
+            seen.append(exclude_self_id)
+            return [{"model": "x", "gpu_index": 0, "vram_estimate_bytes": 3 * GB},
+                    {"model": "y", "gpu_index": None},
+                    {"model": "z", "gpu_index": 1, "vram_estimate_bytes": GB},
+                    {"model": None, "gpu_index": 0, "vram_estimate_bytes": GB}]
+
+        monkeypatch.setattr("localm.gpu_registry.list_gpu_peers", _peers)
+
+        assert hs._peer_vram_holds() == [3 * GB, 0]
+        assert seen == ["me"]
+
+    def test_peer_holds_without_coordination_or_on_a_failed_lookup(self, monkeypatch):
+        assert hs._peer_vram_holds() == []
+
+        def _broken(**kwargs):
+            raise OSError("no route")
+
+        monkeypatch.setattr(hs, "_gpu_coord", {"instance_id": "me"})
+        monkeypatch.setattr("localm.gpu_registry.list_gpu_peers", _broken)
+        assert hs._peer_vram_holds() is None
+
+    def test_a_peer_too_small_to_matter_still_asks_first(self, monkeypatch):
+        a = _SizedResident("model-a")
+        b = GatedEngine("model-b")
+        env = _install(monkeypatch, {"model-a": a, "model-b": b}, total=_TOO_SMALL)
+        monkeypatch.setattr(hs, "_peer_vram_holds", lambda: [100 * MB])
+        _seat("model-a", a, active=True)
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert res == {"status": "confirm_required", "model": "model-b",
+                       "detail": _estimate_confirm_detail("model-b", _TOO_SMALL + 100 * MB)}
+        assert a.unload_calls == 0

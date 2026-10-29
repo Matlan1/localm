@@ -1442,11 +1442,14 @@ def _victim_vram_estimate(engine) -> int:
 
 
 def _resident_vram_hold(engine) -> int:
-    """Bytes of VRAM resident *engine* is expected to hold. For a load the
+    """Bytes of VRAM resident *engine* is expected to hold: the free VRAM its
+    load took as measured (``Engine.vram_load_bytes``); else, for a load the
     backend sized itself (``Engine.gpu_sizing`` mode "auto") with every layer
     on the GPU (``gpu_placement`` not degraded), its sized model, KV cache and
-    overhead bytes; otherwise ``_victim_vram_estimate``. 0 when unknown.
-    Reads the filesystem; must not run on the event loop thread."""
+    overhead bytes; else 0 (unknown)."""
+    measured = getattr(engine, "vram_load_bytes", None)
+    if type(measured) is int and measured > 0:
+        return measured
     sizing = getattr(engine, "gpu_sizing", None)
     placement = getattr(engine, "gpu_placement", None)
     if (isinstance(sizing, dict) and sizing.get("mode") == "auto"
@@ -1456,7 +1459,46 @@ def _resident_vram_hold(engine) -> int:
         if (type(model) is int and type(kv) is int and type(overhead) is int
                 and model > 0 and kv >= 0 and overhead >= 0):
             return model + kv + overhead
-    return _victim_vram_estimate(engine)
+    return 0
+
+
+def _shared_models_loaded() -> bool:
+    """Whether the shared embedder, reranker or speech model is loaded. Takes
+    their locks; must not run on the event loop thread."""
+    from localm.inference import embedder as _embedder_mod
+    from localm.inference import reranker as _reranker_mod
+    from localm.inference import speech as _speech_mod
+    return (_embedder_mod.loaded_dim() is not None or _reranker_mod.is_loaded()
+            or _speech_mod.is_loaded())
+
+
+def _peer_vram_holds() -> Optional[list]:
+    """The ``vram_estimate_bytes`` (0 when a peer gives none) of every live
+    sibling localm instance holding a model on a GPU this load can use, the
+    peers ``_attempt_cooperative_unload`` could ask. [] when this instance is
+    not registered for coordination or no such peer is live; None when the
+    peer lookup fails. Blocking network IO; must not run on the event loop
+    thread."""
+    if not _gpu_coord:
+        return []
+    try:
+        from localm import gpu_registry
+        peers = gpu_registry.list_gpu_peers(exclude_self_id=_gpu_coord.get("instance_id"))
+    except Exception as exc:
+        from localm.debuglog import logger as _dbg
+        _dbg.info("switch_engine: could not list peer instances (%s: %s); not "
+                  "estimating the VRAM free after eviction", type(exc).__name__, exc)
+        return None
+    my_gpus = _load_gpu_indices()
+    out = []
+    for peer in peers:
+        if not peer.get("model"):
+            continue
+        if peer.get("gpu_index") is not None and peer.get("gpu_index") not in my_gpus:
+            continue
+        estimate = peer.get("vram_estimate_bytes")
+        out.append(estimate if type(estimate) is int and estimate > 0 else 0)
+    return out
 
 
 async def _switch_confirm_before_eviction(loop, probe: switch_admission.VramProbe,
@@ -1467,23 +1509,36 @@ async def _switch_confirm_before_eviction(loop, probe: switch_admission.VramProb
     decided before anything is evicted: returned when the free VRAM expected
     after evicting every evictable resident chat model
     (``switch_admission.evictable_residents``, each sized by
-    ``_resident_vram_hold`` off the event loop) is still below
-    ``budget.needed_bytes``. None when the load would fit after eviction, or
-    when that cannot be estimated (``switch_admission.free_after_eviction``).
-    With *reprobe*, a fresh VRAM reading replaces *probe* once every hold is
-    known. None as well when the evictable residents changed while it
-    awaited. Evicts and cancels nothing."""
+    ``_resident_vram_hold``) and freeing every peer instance's model
+    (``_peer_vram_holds``) is still below ``budget.needed_bytes``.
+
+    None when the load would fit after that, or when it cannot be estimated:
+    ``switch_admission.free_after_eviction`` cannot, the shared embedder,
+    reranker or speech model is loaded, or the evictable residents changed
+    while it awaited. With *reprobe*, a fresh VRAM reading replaces *probe*
+    once every resident's hold is known. Blocking reads run off the event
+    loop. Evicts and cancels nothing."""
     names = switch_admission.evictable_residents(budget, _engines_lru, _engines)
     engines = [_engines[n] for n in names]
     holds = await loop.run_in_executor(
         None, lambda: [_resident_vram_hold(e) for e in engines])
-    if reprobe and holds and all(h > 0 for h in holds):
-        probe = await _switch_probe_vram(loop, budget)
-    now = switch_admission.evictable_residents(budget, _engines_lru, _engines)
-    if [_engines[n] for n in now] != engines:
+    if any(h <= 0 for h in holds):
         return None
+    if reprobe:
+        probe = await _switch_probe_vram(loop, budget)
     after = switch_admission.free_after_eviction(probe, holds)
     if after is None or after >= budget.needed_bytes:
+        return None
+    if await loop.run_in_executor(None, _shared_models_loaded):
+        return None
+    peers = await loop.run_in_executor(None, _peer_vram_holds)
+    if peers is None:
+        return None
+    after = switch_admission.free_after_eviction(probe, holds + peers)
+    if after is None or after >= budget.needed_bytes:
+        return None
+    now = switch_admission.evictable_residents(budget, _engines_lru, _engines)
+    if [_engines[n] for n in now] != engines:
         return None
     from localm.debuglog import logger as _dbg
     _dbg.info("switch_engine: '%s' does not fit even after evicting %s (needs ~%s MB "
