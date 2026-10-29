@@ -496,6 +496,28 @@ _READ_REQUESTS = (
     "Check the changes made to config.py",
     "Show me how the update works",
     "Show me the build output",
+    "Read m00.py and summarise what it contains. Do not edit anything.",
+    "Read m00.py with read_file and summarise what it contains. Do not edit anything.",
+    "Explain main.py, do not modify it.",
+    "Read m00.py, then write a short summary of what it contains.",
+    "Explain utils.py without modifying it",
+    "Explain utils.py without making any changes",
+    "Review config.py. No changes.",
+    "Look at cli.py and make no changes",
+    "Don't change anything, just tell me what main.py does",
+    "Do not edit, modify or rewrite anything; describe app.py",
+    "Read x.py. You don't need to change anything.",
+    "Read x.py. Nothing should be modified.",
+    "Never edit files. Summarise main.py",
+    "I don't want you to edit anything, explain main.py",
+    "Write me a short summary of what parser.py does",
+    "Can you write a summary of utils.py?",
+    "Please write an explanation of how the cache works",
+    "Read the code and write a summary of what is in config.py",
+    "Generate a report of the failing tests",
+    "Make a plan for the refactor, do not write any code yet",
+    "Write a description of the API, don't touch any files",
+    "Summarise main.py and write the answer in plain English",
 )
 
 _CHANGE_REQUESTS = (
@@ -517,6 +539,30 @@ _CHANGE_REQUESTS = (
     "Review the code; the retry loop needs a timeout added",
     "Read foo.py. It should be refactored to use asyncio.",
     "Look at parser.py and the bug in it needs fixing",
+    "fix the bug in x.py",
+    "add a test",
+    "write a script that prints hello",
+    "rename foo to bar",
+    "write the summary to SUMMARY.md",
+    "Write a summary of m00.py to notes.md",
+    "write a summary in SUMMARY.md",
+    "Write a summary of the module in the README",
+    "write summary.md",
+    "write a summary function in utils.py",
+    "Add a summary to the README",
+    "Write a summary as a comment at the top of main.py",
+    "Write a docstring summary for each function",
+    "Make the summary function faster",
+    "update the summary",
+    "create a report generator",
+    "read a.py, then fix b.py; do not touch c.py",
+    "Don't just explain it, fix it",
+    "Do not edit a.py, fix b.py instead",
+    "Don't touch a.py and fix b.py",
+    "Explain main.py, then fix the bug in it",
+    "Don't stop until you fix the bug",
+    "Don't forget to fix the tests",
+    "Do not explain, just write the code",
 )
 
 
@@ -536,6 +582,32 @@ def test_a_request_to_read_code_is_answered_without_a_write_nudge(tmp_path):
                        for t in _user_texts(agent)), request
         assert "[not finished" not in result, request
         assert agent.last_run_ok is True, request
+
+
+def test_a_read_only_request_answered_in_prose_is_finished_without_a_nudge(tmp_path):
+    (tmp_path / "m00.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    for request in ("Read m00.py with read_file and summarise what it contains. "
+                    "Do not edit anything.",
+                    "Read m00.py, then write a short summary of what it contains."):
+        agent = _make_agent(tmp_path, max_turns=6)
+        summary = "Summary: m00.py defines add, which returns a + b."
+        with _scripted(agent, [_call("read_file", {"path": "m00.py"}), summary]) as llm:
+            result = agent.run_task(request)
+        assert llm.call_count == 2, request
+        assert not any("[nothing written]" in t for t in _user_texts(agent)), request
+        assert _final_answer(result) == summary, request
+        assert agent.last_run_ok is True, request
+
+
+def test_a_change_request_beside_a_negated_one_is_still_sent_back(tmp_path):
+    (tmp_path / "b.py").write_text("x = 1\n", encoding="utf-8")
+    agent = _make_agent(tmp_path, max_turns=8)
+    with _scripted(agent, [_call("read_file", {"path": "b.py"}), "b.py looks fine.",
+                           "Still fine."]):
+        result = agent.run_task("Read a.py, then fix b.py; do not touch c.py")
+    assert sum("[nothing written]" in t for t in _user_texts(agent)) == 1
+    assert "[not finished: nothing was written to any file" in result
+    assert agent.last_run_ok is False
 
 
 def test_generated_images_and_delegated_work_count_as_possible_writes(tmp_path):
