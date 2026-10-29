@@ -78,6 +78,68 @@ test("use button: label restores on a FAILED load, not stuck at 'loading…'", a
   assert.equal(btn.disabled, false, "re-enabled after a failed load");
 });
 
+/** A server with no model loaded whose load of "other-model" is refused the
+ *  way a corrupt GGUF is. `calls` records every request. */
+function failingLoadFetch(calls) {
+  const payload = { models: MODELS_PAYLOAD.models, active: "" };
+  return async (url, opts = {}) => {
+    const u = String(url);
+    calls.push({ url: u, body: opts.body });
+    if (u === "/api/models" || u.startsWith("/api/models?")) {
+      return { ok: true, status: 200, json: async () => payload, text: async () => "" };
+    }
+    if (u === "/api/models/load") {
+      return { ok: false, status: 400, statusText: "Bad Request",
+               json: async () => ({ detail: "failed to load model: bad GGUF version: 0" }),
+               text: async () => "" };
+    }
+    return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+  };
+}
+
+const pillText = (win) => win.document.getElementById("status-text").textContent;
+const pillClass = (win) => win.document.getElementById("status-text").className;
+const statusErrors = (calls) => calls.filter((c) => c.url === "/api/gui-error")
+  .map((c) => JSON.parse(c.body)).filter((p) => p.source === "status").map((p) => p.message);
+
+/** Asserts the end state a failed load leaves on the sidebar, whichever
+ *  control started it. */
+async function assertFailedLoadEndState(win, calls) {
+  for (let i = 0; i < 40 && /loading/.test(pillText(win)); i++) await tick();
+  await tick(10);
+  assert.doesNotMatch(pillText(win), /loading/, "the pill must leave 'loading' after a failed load");
+  assert.doesNotMatch(pillClass(win), /st-running/);
+  assert.deepEqual(statusErrors(calls), ["load failed"], "the failed state is shown and recorded once");
+  assert.equal(win.document.getElementById("model-select").value, "",
+    "the dropdown shows no model loaded");
+}
+
+test("use button: a FAILED load ends the sidebar pill the same way the dropdown does", async () => {
+  const calls = [];
+  const { window: win } = loadAppWithPages({ fetchImpl: failingLoadFetch(calls) });
+  await win.refreshModelsPage();
+  await tick();
+  await findUseButton(win).onclick();
+
+  await assertFailedLoadEndState(win, calls);
+  assert.match(win.document.getElementById("toast").textContent,
+    /Load failed: failed to load model: bad GGUF version: 0/);
+});
+
+test("dropdown: a FAILED load ends the sidebar pill in the same state", async () => {
+  const calls = [];
+  const { window: win } = loadAppWithPages({ fetchImpl: failingLoadFetch(calls) });
+  await win.refreshModelsPage();
+  await tick();
+  const select = win.document.getElementById("model-select");
+  select.value = "other-model";
+  await select.onchange();
+
+  await assertFailedLoadEndState(win, calls);
+  assert.match(win.document.getElementById("toast").textContent,
+    /Model load failed: failed to load model: bad GGUF version: 0/);
+});
+
 test("use button: label restores on 'superseded' (a newer selection took over), button usable again", async () => {
   const { fetchImpl, resolveLoad } = makeFetch({ loadBody: { status: "superseded", model: "other-model" } });
   const { window: win } = loadAppWithPages({ fetchImpl });
