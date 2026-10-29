@@ -1202,8 +1202,6 @@ class IsolatedEmbedder(VramSizingMixin):
     effective_pooling: Optional[int] = None
     # Set by stop(): no call starts, respawns or falls back to CPU afterwards.
     _stopped: bool = False
-    # Free VRAM the last worker load took (vram.vram_taken_since), or None.
-    vram_load_bytes: Optional[int] = None
 
     def __init__(self, model_path: str, *, n_gpu_layers: int = 99,
                  n_ctx: Optional[int] = None,
@@ -1334,11 +1332,7 @@ class IsolatedEmbedder(VramSizingMixin):
         if main_gpu is not None:
             params["main_gpu"] = main_gpu
         self._runner = EmbedderRunner()
-        from localm.vram import device_free_snapshot, vram_taken_since
-        self.vram_load_bytes = None
-        before = None if cpu_only else device_free_snapshot()
         meta = self._runner.spawn_and_load(params)
-        self.vram_load_bytes = None if cpu_only else vram_taken_since(before)
         self.dim = meta["dim"]
         self.declared_pooling = meta.get("declared_pooling")
         self.effective_pooling = meta.get("effective_pooling")
@@ -1381,14 +1375,11 @@ class IsolatedEmbedder(VramSizingMixin):
     def vram_hold_bytes(self) -> Optional[int]:
         """Bytes of VRAM this embedder's worker is expected to hold: 0 when it
         runs on the CPU (``gpu_fallback_reason`` set or ``n_gpu_layers`` 0);
-        else the free VRAM its last load took (``vram_load_bytes``); else, for a
-        load of every layer (``n_gpu_layers`` negative or 99 and above), the
-        model file size plus 20%; else None (unknown). Reads the file size."""
+        for a load of every layer (``n_gpu_layers`` negative or 99 and above),
+        the model file size plus 20%, the loaded-footprint estimate the VRAM
+        preflight uses; else None (unknown). Reads the file size."""
         if self.gpu_fallback_reason is not None or self.n_gpu_layers == 0:
             return 0
-        measured = self.vram_load_bytes
-        if type(measured) is int and measured > 0:
-            return measured
         if self.n_gpu_layers < 0 or self.n_gpu_layers >= 99:
             try:
                 size = Path(self.model_path).stat().st_size

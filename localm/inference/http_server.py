@@ -1603,9 +1603,10 @@ class SharedVramHolds(NamedTuple):
     ``holds`` are the bytes each loaded shared embedder, reranker or speech
     model is expected to hold (0 for one on the CPU), the models
     ``_switch_evict_embedder`` frees. ``unknown`` names the kinds of those
-    models, and of each idle native media runtime, whose hold cannot be
-    measured or estimated. ``busy_media`` names the native media runtimes
-    running a job, which a switch never stops."""
+    models whose hold cannot be estimated, and each loaded native media
+    runtime that is not running a job (idle, or its state unreadable).
+    ``busy_media`` names the native media runtimes running a job, which a
+    switch never stops."""
 
     holds: tuple = ()
     unknown: tuple = ()

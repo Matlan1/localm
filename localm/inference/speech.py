@@ -277,8 +277,6 @@ class SpeechEngine:
 
     # Set by stop(): no request starts on this engine afterwards.
     _stopped: bool = False
-    # Free VRAM the load took (vram.vram_taken_since), or None.
-    vram_load_bytes: Optional[int] = None
     n_gpu_layers: int = 0
     projector_on_gpu: bool = False
 
@@ -294,14 +292,10 @@ class SpeechEngine:
         self.active_requests = 0
         self.broken = False
         self.n_gpu_layers = int(n_gpu_layers)
-        from localm.vram import device_free_snapshot, vram_taken_since
-        on_cpu = self.n_gpu_layers <= 0
-        before = None if on_cpu else device_free_snapshot()
         meta = self._runner.spawn_and_load({
             "model_path": model.path, "mmproj_path": model.mmproj,
             "n_gpu_layers": self.n_gpu_layers, "n_ctx": self.n_ctx,
-            "n_threads": n_threads, "cpu_only": on_cpu})
-        self.vram_load_bytes = None if on_cpu else vram_taken_since(before)
+            "n_threads": n_threads, "cpu_only": self.n_gpu_layers <= 0})
         self.sample_rate = int(meta["sample_rate"])
         self.encoder_sample_rate = int(meta["encoder_sample_rate"])
         self.projector_on_gpu = bool(meta["projector_on_gpu"])
@@ -309,15 +303,12 @@ class SpeechEngine:
     @property
     def vram_hold_bytes(self) -> Optional[int]:
         """Bytes of VRAM the worker is expected to hold: 0 when it runs on the
-        CPU (``n_gpu_layers`` 0 or below); else the free VRAM its load took
-        when measured; else, for a load of every layer (``n_gpu_layers`` 99
-        and above) with the projector on the GPU, ``_estimate_bytes`` for its
-        files and context; else None (unknown). Reads the file sizes."""
+        CPU (``n_gpu_layers`` 0 or below); for a load of every layer
+        (``n_gpu_layers`` 99 and above) with the projector on the GPU,
+        ``_estimate_bytes`` for its files and context, the estimate its GPU
+        placement uses; else None (unknown). Reads the file sizes."""
         if self.n_gpu_layers <= 0:
             return 0
-        measured = self.vram_load_bytes
-        if type(measured) is int and measured > 0:
-            return measured
         if self.n_gpu_layers >= 99 and self.projector_on_gpu:
             estimate = _estimate_bytes(self.model, self.n_ctx)
             return estimate if estimate > 0 else None

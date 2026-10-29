@@ -284,8 +284,6 @@ class HFReranker:
 
     # Set by stop(): no request starts or restarts the worker afterwards.
     _stopped: bool = False
-    # Free VRAM the load took (vram.vram_taken_since), or None.
-    vram_load_bytes: Optional[int] = None
 
     def __init__(self, path: str, device: Optional[str] = None) -> None:
         from localm.inference.backends.hf import HFBackend
@@ -293,22 +291,17 @@ class HFReranker:
         self.active_requests = 0
         self._call_lock = threading.Lock()
         self._backend = HFBackend(path, device=device, task="rerank")
-        from localm.vram import device_free_snapshot, vram_taken_since
-        before = None if device == "cpu" else device_free_snapshot()
         self._backend.load()
-        self.vram_load_bytes = None if device == "cpu" else vram_taken_since(before)
         self.cls_labels = list(self._backend.rerank_labels)
         self._runner = self._backend._runner
 
     @property
     def vram_hold_bytes(self) -> Optional[int]:
-        """Bytes of VRAM the worker is expected to hold: 0 when it loaded on the
-        CPU, the free VRAM its load took when measured, else None (unknown).
-        A restart after the worker died is not re-measured."""
+        """Bytes of VRAM the worker is expected to hold: 0 when its load ran on
+        the CPU, else None (unknown)."""
         if getattr(self._backend, "loaded_device", None) == "cpu":
             return 0
-        measured = self.vram_load_bytes
-        return measured if type(measured) is int and measured > 0 else None
+        return None
 
     def rerank(self, pairs: list[tuple[str, str]]) -> list[dict]:
         """Score *pairs*, starting the worker again first when it has died.

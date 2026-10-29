@@ -770,54 +770,18 @@ def _native_runtime_busy(key: str) -> bool:
 
 
 def native_media_runtime_states() -> dict:
-    """``{display name: "busy" | "idle"}`` for each native media runtime this
-    process holds loaded: "busy" while a job holds it. Stops and waits for
-    nothing. Never raises; a runtime whose state cannot be read is left out."""
+    """``{display name: "busy" | "idle" | "unknown"}`` for each native media
+    runtime this process holds loaded: "busy" while a job holds it, "unknown"
+    when reading whether it is loaded or busy raised. Stops and waits for
+    nothing. Never raises."""
     states = {}
     for key, name in _NATIVE_RUNTIME_NAME.items():
         try:
             if _native_runtime_loaded(key):
                 states[name] = "busy" if _native_runtime_busy(key) else "idle"
         except Exception:
-            continue
+            states[name] = "unknown"
     return states
-
-
-def device_free_snapshot() -> Optional[list]:
-    """The free VRAM bytes of every GPU that reports a total, in device order,
-    from a fresh ``discover.list_gpus`` reading, for ``vram_taken_since``. None
-    when the reading fails, lists no such GPU, or any such GPU's free figure is
-    not trusted (``sysstats._vram_reading_trusted``: a completed probe and a
-    device-global free figure). Blocking; must not run on the event loop
-    thread."""
-    from localm.discover import list_gpus
-    from localm.sysstats import _vram_reading_trusted
-    try:
-        gpus, status = list_gpus(return_status=True, wait_for_inflight=True)
-    except Exception:
-        return None
-    out = []
-    for gpu in gpus:
-        if not gpu.get("total"):
-            continue
-        if not _vram_reading_trusted(gpu, status):
-            return None
-        out.append(int(gpu["free"]))
-    return out or None
-
-
-def vram_taken_since(before: Optional[list]) -> Optional[int]:
-    """The free VRAM taken since *before* (a ``device_free_snapshot``), summed
-    over the GPUs, from a fresh snapshot. None when *before* is None, the fresh
-    snapshot is None or lists a different number of GPUs, or the sum is not
-    positive. Blocking; must not run on the event loop thread."""
-    if before is None:
-        return None
-    after = device_free_snapshot()
-    if after is None or len(after) != len(before):
-        return None
-    taken = sum(b - a for b, a in zip(before, after, strict=True))
-    return taken if taken > 0 else None
 
 
 def _native_runtime_stop_if_idle(key: str) -> Optional[bool]:
