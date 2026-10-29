@@ -38,7 +38,7 @@ from click.testing import CliRunner
 
 import localm.setup_llama as sl
 from localm.setup_llama import pins
-from localm import config, cpu_backend_select, hwdetect
+from localm import config, cpu_backend_select, hwdetect, sysprog
 from localm.bugreport import LocalmError
 from localm.http_ssl import RedirectDowngradeRefused
 
@@ -202,6 +202,7 @@ class World:
         monkeypatch.setattr(sl, "verified_urlopen", self._urlopen)
         monkeypatch.setattr(subprocess, "run", self._run)
         monkeypatch.setattr(shutil, "which", lambda cmd, *args, **kwargs: None)
+        monkeypatch.setattr(sysprog, "find", lambda name: f"/usr/bin/{name}")
         monkeypatch.setattr(hwdetect, "detect", lambda: SimpleNamespace(
             vendors=list(self.vendors), gpu_names=self.gpu_names))
         monkeypatch.setattr(hwdetect, "recommended_install_backend",

@@ -23,6 +23,7 @@ from __future__ import annotations
 import contextlib
 import json as _json
 import shutil
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -1322,7 +1323,12 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
                 rt_plan["reprovision"] = True
             if rt_plan["reprovision"]:
                 klass = _max_class(klass, "runtime")
+            deps_changed = klass != "setup" and _deps_set(root) != _deps_set(target)
+            uv_exe = _uv_for_deps(target) if deps_changed else None
+            post_cmd = au.post_swap_command("deps", uv=uv_exe) if deps_changed else None
+            _require_runnable(post_cmd, "deps")
             if rt_plan["reprovision"] and klass != "setup":
+                _require_runnable([sys.executable], "runtime")
                 left = updater_runtime.stop_own_holders(
                     updater_runtime.runtime_lib(target), target, say=say,
                     stop=not defer_runtime)
@@ -1330,9 +1336,6 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
                     raise LocalmError(
                         "the native llama.cpp runtime is in use, so nothing was updated",
                         reason=updater_runtime.in_use_message(left, "run the update again"))
-            deps_changed = klass != "setup" and _deps_set(root) != _deps_set(target)
-            uv_exe = _uv_for_deps(target) if deps_changed else None
-            post_cmd = au.post_swap_command("deps", uv=uv_exe) if deps_changed else None
             # The update has verified: save a key set it replaced, before the swap.
             if new_keyset is not None:
                 _save_keyset(new_keyset)
@@ -1468,16 +1471,37 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
                 "kept_for_updates": kept}
 
 
+def _require_runnable(cmd, klass: str) -> None:
+    """Refuse, before anything is swapped, a post-swap command whose program is
+    not a full path to a file that can run. Raises LocalmError naming the
+    program and how to repair the install."""
+    if not cmd:
+        return
+    from localm import uv_tool
+    from localm.bugreport import LocalmError
+    program = str(cmd[0] or "")
+    if Path(program).is_absolute() and uv_tool.usable(program):
+        return
+    what = "is not a full path" if program and not Path(program).is_absolute() else "was not found"
+    setup = "setup.bat" if sys.platform == "win32" else "setup.sh"
+    raise LocalmError(
+        f"this update cannot run its {klass} step, so nothing was changed",
+        reason=f"the program it needs ({program or 'none'}) {what}. Run {setup} in the "
+               f"localm folder to repair the install, then update again")
+
+
 def _uv_for_deps(target: Path) -> str:
     """The uv that reinstalls the dependencies of the install at *target*.
 
-    Finds the install's own uv (:func:`localm.uv_tool.find_uv`); when there is
-    none, installs the pinned uv into ``<target>/.uv``. Raises LocalmError,
-    naming every place looked at and why the install failed, when neither
-    works. Called before the swap, so a refusal changes nothing."""
+    Takes the uv the ``uv`` package installed into this environment
+    (:func:`localm.uv_tool.bundled_uv`), else the install's own uv
+    (:func:`localm.uv_tool.find_uv`); when there is neither, installs the pinned
+    uv into ``<target>/.uv``. Raises LocalmError, naming every place looked at
+    and why the install failed, when nothing works. Called before the swap, so
+    a refusal changes nothing."""
     from localm import uv_tool
     from localm.bugreport import LocalmError
-    found = uv_tool.find_uv(target)
+    found = uv_tool.own_uv(target)
     if found:
         return found
     searched = uv_tool.describe_search(target)

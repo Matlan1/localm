@@ -940,9 +940,14 @@ def _proc_processes() -> Optional[list]:
 
 
 def _ps_processes() -> Optional[list]:
-    """[(pid, ppid, exe or None, None)] from ps (macOS and other POSIX)."""
+    """[(pid, ppid, exe or None, None)] from ps (macOS and other POSIX); None when
+    ps is not installed or does not answer."""
+    from localm import sysprog
+    ps = sysprog.find("ps")
+    if not ps:
+        return None
     try:
-        res = subprocess.run(["ps", "-axo", "pid=,ppid=,comm="],
+        res = subprocess.run([ps, "-axo", "pid=,ppid=,comm="],
                              capture_output=True, text=True, timeout=15)
     except (OSError, subprocess.SubprocessError):
         return None
@@ -1068,8 +1073,12 @@ def _alive(pid: int) -> bool:
         return False
     except OSError:
         return True
+    from localm import sysprog
+    ps = sysprog.find("ps")
+    if not ps:
+        return True
     try:
-        res = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)],
+        res = subprocess.run([ps, "-o", "stat=", "-p", str(pid)],
                              capture_output=True, text=True, timeout=10)
         return not res.stdout.strip().startswith("Z")
     except (OSError, subprocess.SubprocessError):

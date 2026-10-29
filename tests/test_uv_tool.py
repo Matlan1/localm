@@ -222,3 +222,77 @@ class TestBootstrap:
             uv_tool.bootstrap_uv(clone, download=lambda u, d: d.write_bytes(b"x"),
                                  run_installer=lambda s, e: 1)
         assert list(scratch.iterdir()) == []
+
+
+class TestBundledUv:
+    """The uv the ``uv`` Python package installed into this environment."""
+
+    @staticmethod
+    def _package(monkeypatch, find_uv_bin):
+        import sys
+        import types
+        module = types.ModuleType("uv")
+        module.find_uv_bin = find_uv_bin
+        monkeypatch.setitem(sys.modules, "uv", module)
+
+    def test_the_package_binary_is_returned_by_full_path(self, tmp_path, monkeypatch):
+        exe = _uv(tmp_path / "venv" / "Scripts")
+        self._package(monkeypatch, lambda: str(exe))
+        monkeypatch.setenv("PATH", str(tmp_path / "emptypath"))
+        assert uv_tool.bundled_uv() == str(exe)
+
+    def test_no_package_means_none(self, monkeypatch):
+        import sys
+        monkeypatch.setitem(sys.modules, "uv", None)
+        assert uv_tool.bundled_uv() is None
+
+    def test_a_package_without_its_binary_means_none(self, monkeypatch):
+        def missing():
+            raise FileNotFoundError("Could not find the uv binary")
+        self._package(monkeypatch, missing)
+        assert uv_tool.bundled_uv() is None
+
+    @pytest.mark.parametrize("answer", ["uv", "gone"])
+    def test_a_bare_or_absent_answer_means_none(self, tmp_path, monkeypatch, answer):
+        path = answer if answer == "uv" else str(tmp_path / "gone" / UV)
+        self._package(monkeypatch, lambda: path)
+        assert uv_tool.bundled_uv() is None
+
+
+class TestInstallerShell:
+    """The uv installer runs under the system shell named by full path."""
+
+    def test_the_installer_runs_the_shell_sysprog_finds(self, tmp_path, monkeypatch):
+        import subprocess
+        from localm import sysprog
+        shell = str(tmp_path / ("powershell.exe" if uv_tool.IS_WINDOWS else "sh"))
+        monkeypatch.setattr(sysprog, "find", lambda name: shell)
+        seen = []
+        monkeypatch.setattr(subprocess, "run", lambda argv, **kw: seen.append(argv)
+                            or subprocess.CompletedProcess(argv, 0))
+        assert uv_tool._run_installer(tmp_path / "uv-installer", {}) == 0
+        assert seen[0][0] == shell
+
+    def test_a_missing_shell_fails_the_bootstrap_by_name(self, tmp_path, monkeypatch):
+        from localm import sysprog
+        monkeypatch.setattr(sysprog, "find", lambda name: None)
+        installer = b"the pinned installer"
+        clone = _clone_with_pin(tmp_path, installer)
+        with pytest.raises(uv_tool.UvBootstrapError) as ei:
+            uv_tool.bootstrap_uv(clone, download=lambda u, d: d.write_bytes(installer))
+        assert "could not run the uv installer" in str(ei.value)
+        assert ("powershell" if uv_tool.IS_WINDOWS else "sh") in str(ei.value)
+
+
+class TestOwnUv:
+    def test_the_bundled_uv_comes_first(self, machine, monkeypatch):
+        root, _ = machine
+        _uv(root / ".uv")
+        monkeypatch.setattr(uv_tool, "bundled_uv", lambda: "/venv/bin/uv")
+        assert uv_tool.own_uv(root) == "/venv/bin/uv"
+
+    def test_without_a_bundled_uv_the_install_uv_is_used(self, machine, monkeypatch):
+        root, _ = machine
+        exe = _uv(root / ".uv")
+        monkeypatch.setattr(uv_tool, "bundled_uv", lambda: None)
+        assert uv_tool.own_uv(root) == str(exe)

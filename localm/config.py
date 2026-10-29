@@ -1362,8 +1362,13 @@ def restrict_file_perms(path: Path, *, mode: int = 0o600) -> bool:
             # /inheritance:r drops the inherited ACEs (BUILTIN\Users et al) and
             # /grant:r replaces any existing grant for this user, so the result
             # is an explicit, sole full-control ACE.
+            from localm import sysprog
+            icacls = sysprog.find("icacls")
+            if not icacls:
+                _perm_warn(path, "icacls was not found in the Windows system folder")
+                return False
             r = subprocess.run(
-                ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:F"],
+                [icacls, str(path), "/inheritance:r", "/grant:r", f"{user}:F"],
                 capture_output=True, check=False)
             if r.returncode != 0:
                 # icacls FAILS without raising (access denied, an unresolvable

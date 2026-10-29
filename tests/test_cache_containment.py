@@ -248,10 +248,18 @@ def test_runtime_wheel_install_runs_the_found_uv_by_path_and_never_a_bare_one(mo
 
     monkeypatch.setitem(sys.modules, "localm_llama_runtime", None)
     monkeypatch.setattr(setup_llama.subprocess, "run", lambda cmd, **kw: seen.append(cmd) or _Ok())
+    monkeypatch.setattr(setup_llama.runtime_dir.uv_tool, "bundled_uv", lambda: None)
     fake_uv = str(Path("/somewhere/uv"))
     monkeypatch.setattr(setup_llama.runtime_dir.uv_tool, "find_uv", lambda root: fake_uv)
     assert setup_llama._install_runtime_wheel(Path("some/pkg/dir")) is True
     assert seen[0][:3] == [fake_uv, "pip", "install"]
+
+    seen.clear()
+    bundled = str(Path("/venv/bin/uv"))
+    monkeypatch.setattr(setup_llama.runtime_dir.uv_tool, "bundled_uv", lambda: bundled)
+    assert setup_llama._install_runtime_wheel(Path("some/pkg/dir")) is True
+    assert seen[0][:3] == [bundled, "pip", "install"]
+    monkeypatch.setattr(setup_llama.runtime_dir.uv_tool, "bundled_uv", lambda: None)
 
     seen.clear()
     monkeypatch.setattr(setup_llama.runtime_dir.uv_tool, "find_uv", lambda root: None)

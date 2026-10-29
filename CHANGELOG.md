@@ -11,6 +11,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ## [Unreleased]
 
+### Fixed
+- **An update checks it can run every step before it changes anything.** If the uv that reinstalls dependencies, or the Python that updates the native runtime, cannot be found, the update is refused before any file is replaced or any process is stopped, with a message naming the program and saying to re-run setup. The other programs an update starts (the hardware checks, git for the managed ComfyUI, `ps`, `taskkill`, `icacls`, `nvidia-smi`) are run by their full path from the system folders first, so a program of the same name in the localm folder or early on PATH is not run instead.
+
 ## [0.3.2] - 2026-10-28
 
 Everything in 0.3.2rc1 and 0.3.2rc2 below, plus the changes listed here.

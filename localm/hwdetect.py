@@ -48,6 +48,8 @@ import sysconfig
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from localm import sysprog
+
 VENDORS = ("nvidia", "amd", "intel")
 
 # CPU architectures, as machine_arch() names them, that setup-llama can fetch a
@@ -181,7 +183,9 @@ def _run_ok(cmd: list) -> tuple[str, bool]:
     and exited 0. It is not a claim that the OUTPUT is trustworthy - powershell
     in particular can exit 0 having written a cmdlet error to stderr, which this
     function still returns as text, and ``detect``'s substring matching
-    tolerates that."""
+    tolerates that. A *cmd* whose program is None (not installed) did not run."""
+    if not cmd or not cmd[0]:
+        return "", False
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
     except Exception:
@@ -204,12 +208,12 @@ def _win_gpu_names() -> tuple[str, bool]:
     no adapters is a real answer ("this box has none"), so a subsequent wmic
     failure must not downgrade it."""
     out, ok = _run_ok([
-        "powershell", "-NoProfile", "-Command",
+        sysprog.find("powershell"), "-NoProfile", "-Command",
         "Get-CimInstance Win32_VideoController | "
         "Select-Object -ExpandProperty Name",
     ])
     if not out.strip():
-        out, wmic_ok = _run_ok(["wmic", "path", "win32_VideoController", "get", "name"])
+        out, wmic_ok = _run_ok([sysprog.find("wmic"), "path", "win32_VideoController", "get", "name"])
         ok = ok or wmic_ok
     return out.lower(), ok
 
@@ -219,7 +223,7 @@ def _linux_gpu_names() -> tuple[str, bool]:
     whether ``lspci`` actually answered (it is absent on plenty of minimal
     installs and containers, where "no display controllers" would be a fabricated
     answer rather than a measured one)."""
-    out, ok = _run_ok(["lspci"])
+    out, ok = _run_ok([sysprog.find("lspci")])
     return "\n".join(
         ln for ln in out.lower().splitlines()
         if "vga" in ln or "3d controller" in ln or "display" in ln
@@ -253,7 +257,7 @@ def detect() -> Detection:
     elif sys.platform == "darwin":
         # Apple Silicon: the GPU is integrated and driven via Metal, which the
         # official llama.cpp macos-arm64 build targets directly.
-        machine, uname_ok = _run_ok(["uname", "-m"])
+        machine, uname_ok = _run_ok([sysprog.find("uname"), "-m"])
         machine = machine.strip().lower()
         if "arm64" in machine:
             return Detection(vendors=["apple"], recommended="metal", source="apple silicon")
@@ -486,8 +490,7 @@ def _cuda_compute_capabilities() -> list:
     query) rather than an import from setup_llama: this module runs standalone
     via ``python -m localm.hwdetect torch-args <backend>``, a SEPARATE process
     from ``localm setup-llama``, and stays dependency-free."""
-    exe = shutil.which("nvidia-smi") or "nvidia-smi"
-    out = _run([exe, "--query-gpu=compute_cap", "--format=csv,noheader"])
+    out = _run([sysprog.find("nvidia-smi"), "--query-gpu=compute_cap", "--format=csv,noheader"])
     caps = []
     for line in out.strip().splitlines():
         line = line.strip()

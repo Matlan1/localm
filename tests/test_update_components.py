@@ -556,13 +556,23 @@ def torch_install(tmp_path, home, monkeypatch):
     (lib / ".localm-backend").write_text("vulkan b11928", encoding="utf-8")
     site = _venv(inst)
     monkeypatch.setattr(uc, "torch_args", lambda root, backend: "-e .[gpu]")
-    monkeypatch.setattr(updater, "_uv_for_deps", lambda t: "/x/uv")
+    uv = _fake_uv_exe(tmp_path)
+    monkeypatch.setattr(updater, "_uv_for_deps", lambda t: str(uv))
     return inst, site
+
+
+def _fake_uv_exe(tmp_path: Path) -> Path:
+    """A stand-in uv that exists and can run, so the pre-swap check accepts it."""
+    exe = tmp_path / "fake-uv-bin" / uv_tool.UV_NAME
+    exe.parent.mkdir(parents=True, exist_ok=True)
+    exe.write_bytes(b"")
+    exe.chmod(0o755)
+    return exe
 
 
 def _fake_uv_pip(site: Path, transformers="5.20.2", rc=0):
     def run(cmd):
-        if cmd[0] != "/x/uv" or ".[gpu,audio]" not in cmd:
+        if Path(cmd[0]).parent.name != "fake-uv-bin" or ".[gpu,audio]" not in cmd:
             return 0
         if rc:
             _uninstall(site, "transformers")
@@ -592,7 +602,8 @@ def test_pytorch_update_and_rollback_through_apply(tmp_path, torch_install):
     fake = _fake_uv_pip(site)
     res = updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
                         runner=lambda c: calls.append(c) or fake(c))
-    assert ["/x/uv", "pip", "install", "-p", ".venv", "-e", ".[gpu,audio]"] in calls
+    uv = str(_fake_uv_exe(tmp_path))
+    assert [uv, "pip", "install", "-p", ".venv", "-e", ".[gpu,audio]"] in calls
     assert res["components"]["state"] == "updated"
     assert uc.dists(site)["transformers"]["version"] == "5.20.2"
     updater.rollback_last(installed=inst)
