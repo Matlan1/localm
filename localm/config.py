@@ -2185,6 +2185,15 @@ def load_registry() -> dict:
     return reg if isinstance(reg, dict) else {}
 
 
+def peek_registry() -> dict:
+    """The registry as ``load_registry`` returns it, read without creating the
+    data dir or the models dir. ``{}`` when the file is absent, unreadable or
+    not a JSON object."""
+    with _io_lock:
+        reg = _read_json(REGISTRY_FILE, {})
+    return reg if isinstance(reg, dict) else {}
+
+
 def save_registry(reg: dict) -> None:
     ensure_dirs()
     with _io_lock:
