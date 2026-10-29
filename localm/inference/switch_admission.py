@@ -155,8 +155,8 @@ class EvictionAttempt:
     """Mutable bookkeeping for one load attempt's eviction loop.
 
     ``switch_engine`` updates it as it performs effects; the decisions here only
-    read it. Each bounded step (embedder eviction, stopping this process's idle
-    native media runtimes, each peer instance, the busy
+    read it. Each bounded step (embedder eviction, the stop of or wait for this
+    process's native media runtimes, each peer instance, the busy
     victim, the wait for a busy model to go idle, the longer wait for an evicted
     model's VRAM release) runs at most once per attempt, and inconclusive probes
     are retried ``_INCONCLUSIVE_LOAD_RETRIES`` times, so the loop always
@@ -332,6 +332,20 @@ def busy_victim_confirm(name: str, victim: str, in_use: str) -> dict:
             f"loading '{name}' needs to free "
             f"'{victim}', which is {in_use}; loading it anyway stops "
             f"'{victim}' and cuts off the reply it is writing"),
+    }
+
+
+def busy_media_confirm(name: str, runtimes: list) -> dict:
+    """The confirm_required result asking before loading *name* beside this
+    process's native media *runtimes* (display names) while a job runs on
+    them."""
+    which = " and the ".join(runtimes)
+    return {
+        "status": "confirm_required", "model": name,
+        "detail": (
+            f"'{name}' needs the VRAM localm's own {which} holds, which is "
+            f"running a job; loading it anyway can put part of '{name}' on the CPU, "
+            "which is slower (the job is not stopped)"),
     }
 
 

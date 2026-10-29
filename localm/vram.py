@@ -1092,8 +1092,8 @@ def reload_chat_after_media(job: Any, self_url: str, s: dict, backend: Any,
     """Hand VRAM back: ask *backend* (the plugin's own backend module, exposing
     ``free_vram(s)``) to drop its models, then reload the chat model so the next
     reply is instant. Skipped when reload-after-generate is off: the backend
-    stays loaded, and the next chat model load stops it when it needs the VRAM
-    (``http_server._switch_stop_idle_media``).
+    stays loaded, and the next chat model load stops it first
+    (``http_server._switch_free_own_media``).
     *instance_token*: forwarded to ``self_request`` - see
     ``unload_chat_for_media``'s docstring.
 
@@ -1106,8 +1106,8 @@ def reload_chat_after_media(job: Any, self_url: str, s: dict, backend: Any,
         _drop_deferred_reload_if_last()
         job.push({"type": "line", "text":
                   f"Keeping the {media_label} backend loaded (reload is off) - "
-                  "the chat model reloads on the next message, and stops it "
-                  "then if it needs the VRAM."})
+                  "the chat model reloads on the next message and stops it "
+                  "first."})
         return
     global _handover_reloading, _handover_deferred
     with _handover_cv:

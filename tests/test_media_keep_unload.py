@@ -17,6 +17,7 @@ import asyncio
 import logging
 import subprocess
 import sys
+import threading
 import time
 
 import pytest
@@ -227,22 +228,50 @@ def test_unload_all_without_media_leaves_the_worker_for_other_callers(fake_gpu, 
 
 
 # --------------------------------------------------------------------------- #
-#  A chat model load that is short of VRAM                                    #
+#  A chat model load                                                           #
 # --------------------------------------------------------------------------- #
 
-def _budget(need=8 * GB):
+CHAT_BYTES = 8 * GB
+CHAT_LAYERS = 28
+
+
+def _budget(need=CHAT_BYTES):
     return switch_admission.LoadBudget(
         name="chat-x", vram_required=need, headroom=0, resident_cap=None,
         pinned=frozenset(), check_split_fit=False)
 
 
-def _make_room(budget):
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(hs._switch_make_room(
-            loop, budget, preempt=False, force=False, activate=True))
-    finally:
-        loop.close()
+class _ChatEngine:
+    """A chat engine whose load puts as many of its layers on the GPU as the
+    free VRAM it reads at load time holds, the way automatic GPU layers size a
+    GGUF load."""
+
+    def __init__(self, name, events):
+        self.display_name = name
+        self.model_path = f"Z:/models/{name}.gguf"
+        self.active_requests = 0
+        self.gpu_placement = None
+        self._loaded = False
+        self._events = events
+
+    @property
+    def loaded(self):
+        return self._loaded
+
+    def set_load_cancel(self, cancel):
+        pass
+
+    def load(self):
+        free = discover.vram_capacity()["free"]
+        self._events.append(("sized", free))
+        layers = min(CHAT_LAYERS, CHAT_LAYERS * free // CHAT_BYTES)
+        self.gpu_placement = {"gpu_layers_offloaded": layers,
+                              "gpu_layers_total": CHAT_LAYERS,
+                              "degraded": layers < CHAT_LAYERS}
+        self._loaded = True
+
+    def unload(self):
+        self._loaded = False
 
 
 @pytest.fixture
@@ -251,28 +280,103 @@ def no_peers(monkeypatch):
     monkeypatch.setattr(gpu_registry, "list_gpu_peers", lambda **kw: [])
 
 
-def test_a_chat_load_short_of_vram_stops_the_idle_image_worker_first(
-        fake_gpu, no_peers, sd_worker, caplog):
+@pytest.fixture
+def chat_load(fake_gpu, no_peers, monkeypatch):
+    """``switch_engine('chat-x')`` with the stand-in GPU; ``events`` records each
+    ``runner.shutdown`` of the image worker and the free VRAM the load sized
+    itself against, in order."""
+    events = []
+
+    async def _not_refused(name, registry=None):
+        return None
+
+    monkeypatch.setattr(hs, "_refuse_non_chat_model", _not_refused)
+    monkeypatch.setattr(hs, "_switch_load_budget", lambda name: _budget())
+    monkeypatch.setattr(hs, "_engine_factory", lambda name: _ChatEngine(name, events))
+    real_shutdown = sd_shared.runner.shutdown
+
+    def counted_shutdown(*a, **kw):
+        events.append(("shutdown", None))
+        return real_shutdown(*a, **kw)
+
+    monkeypatch.setattr(sd_shared.runner, "shutdown", counted_shutdown)
+
+    def run(**kw):
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(hs.switch_engine("chat-x", None, **kw))
+        finally:
+            loop.close()
+    run.events = events
+    return run
+
+
+def test_a_chat_load_after_a_reload_off_image_job_stops_the_worker_and_loads_fully(
+        chat_load, sd_worker, caplog):
     caplog.set_level(logging.INFO, logger="localm")
-    assert _make_room(_budget()) is None
-    assert not sd_worker.is_alive(), "the chat model loads beside the idle image worker"
-    assert TOTAL - _held_bytes() == TOTAL
+    result = chat_load(preempt=False)
+
+    assert result["status"] == "loaded", result
+    assert not sd_worker.is_alive(), "the chat model loaded beside the idle image worker"
+    assert [e for e, _ in chat_load.events].count("shutdown") == 1, chat_load.events
+    assert chat_load.events[0] == ("shutdown", None), "the load was sized before the stop"
+    assert chat_load.events[-1] == ("sized", TOTAL), chat_load.events
+    assert result["gpu_layers_offloaded"] == CHAT_LAYERS and result["degraded"] is False
     assert any(f"stopped the idle {IMAGE_WORKER} to make room for the chat model "
                "'chat-x'" in r.getMessage() for r in caplog.records)
 
 
-def test_a_chat_load_that_fits_leaves_the_image_worker_loaded(fake_gpu, no_peers, sd_worker):
-    assert _make_room(_budget(need=4 * GB)) is None
-    assert sd_worker.is_alive()
+def test_a_chat_load_that_would_fit_beside_the_worker_still_stops_it(
+        chat_load, sd_worker, monkeypatch):
+    monkeypatch.setattr(hs, "_switch_load_budget", lambda name: _budget(need=2 * GB))
+    assert chat_load(preempt=False)["status"] == "loaded"
+    assert not sd_worker.is_alive()
 
 
-def test_a_chat_load_leaves_a_busy_image_worker_running(fake_gpu, no_peers, sd_worker):
+def test_a_chat_load_with_no_media_worker_stops_nothing(chat_load):
+    assert chat_load(preempt=False)["status"] == "loaded"
+    assert [e for e, _ in chat_load.events] == ["sized"]
+
+
+def test_a_chat_message_waits_for_a_busy_image_job_then_stops_the_worker(
+        chat_load, sd_worker, monkeypatch):
+    monkeypatch.setattr(hs, "_BUSY_VICTIM_IDLE_WAIT_S", 10.0)
+    assert sd_shared.lock.acquire(timeout=5)
+    statuses = []
+    threading.Timer(0.5, sd_shared.lock.release).start()
+    result = chat_load(preempt=False, on_status=statuses.append)
+
+    assert result["status"] == "loaded", result
+    assert not sd_worker.is_alive()
+    assert result["gpu_layers_offloaded"] == CHAT_LAYERS, result
+    assert statuses == [hs.WAITING_FOR_MODEL_STATUS, hs.LOADING_MODEL_STATUS]
+
+
+def test_a_chat_message_never_cuts_off_an_image_job_that_outlasts_the_wait(
+        chat_load, sd_worker, monkeypatch, caplog):
+    caplog.set_level(logging.WARNING, logger="localm")
+    monkeypatch.setattr(hs, "_BUSY_VICTIM_IDLE_WAIT_S", 0.5)
     assert sd_shared.lock.acquire(timeout=5)
     try:
-        assert _make_room(_budget()) is None
+        result = chat_load(preempt=False)
+        assert sd_worker.is_alive(), "a chat load killed the worker of a running job"
+    finally:
+        sd_shared.lock.release()
+    assert result["status"] == "loaded", result
+    assert any(f"the {IMAGE_WORKER} is still running a job" in r.getMessage()
+               for r in caplog.records)
+
+
+def test_a_model_switch_asks_before_loading_beside_a_busy_image_job(chat_load, sd_worker):
+    assert sd_shared.lock.acquire(timeout=5)
+    try:
+        result = chat_load(preempt=True)
         assert sd_worker.is_alive()
     finally:
         sd_shared.lock.release()
+    assert result["status"] == "confirm_required", result
+    assert f"localm's own {IMAGE_WORKER}" in result["detail"]
+    assert "the job is not stopped" in result["detail"]
 
 
 # --------------------------------------------------------------------------- #
