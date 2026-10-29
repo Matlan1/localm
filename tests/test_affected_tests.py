@@ -611,7 +611,7 @@ def test_a_lock_change_outside_the_packages_affects_every_test(dep_repo):
 
 def test_the_projects_own_locked_entry_outside_its_declarations_affects_every_test(dep_repo):
     mod, root = dep_repo
-    _bump(root, "demo", "1.0", "1.1")
+    _edit(root, "uv.lock", 'source = { editable = "." }', 'source = { editable = "sub" }')
     assert _everything(mod, _select(mod, ["uv.lock"]), "uv.lock")
 
 
@@ -861,3 +861,240 @@ def test_real_tree_every_declared_scanner_is_a_test_file():
     mod = _load()
     graph = mod.Graph()
     assert sorted(set(mod._TREE_SCANNERS) - set(graph.test_files)) == []
+
+
+# --------------------------------------------------------------------------- #
+#  Version bumps: VERSION, localm/__init__.py, pyproject.toml and uv.lock     #
+# --------------------------------------------------------------------------- #
+
+_VERSION_FILES = {
+    "VERSION": "1.0\n",
+    "localm/__init__.py": '"""Demo package."""\n__version__ = "1.0"\n',
+    "tests/test_reads_version.py": (
+        "from localm import __version__\n\n\ndef test_reads():\n    assert __version__\n"),
+    "tests/test_names_version_file.py": "def test_names():\n    assert open('VERSION')\n",
+    "tests/test_spells_version.py": "def test_spells():\n    assert '1.0' != ''\n",
+    "tests/test_names_changelog.py": "def test_names():\n    assert 'CHANGELOG.md'\n",
+}
+_VERSION_READERS = {
+    "tests/test_reads_version.py", "tests/test_names_version_file.py",
+    "tests/test_spells_version.py", "tests/test_names_changelog.py",
+    "tests/test_reads_pyproject.py",
+}
+
+
+@pytest.fixture
+def version_repo(dep_repo):
+    """The dependency checkout plus a VERSION file, a localm/__init__.py that
+    sets __version__, and tests that read, name or spell the version."""
+    mod, root = dep_repo
+    for rel, src in _VERSION_FILES.items():
+        (root / rel).write_text(src, encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "version")
+    return mod, root
+
+
+def _bump_all_version_files(root: Path, old: str = "1.0", new: str = "1.1") -> None:
+    _edit(root, "VERSION", old, new)
+    _edit(root, "localm/__init__.py", f'"{old}"', f'"{new}"')
+    _edit(root, "pyproject.toml", f'version = "{old}"', f'version = "{new}"')
+    _bump(root, "demo", old, new)
+
+
+def _every_test(mod, selected):
+    return len(selected) == len(mod.Graph().test_files)
+
+
+def test_a_version_file_bump_selects_the_tests_reading_the_version_not_every_test(version_repo):
+    mod, root = version_repo
+    _edit(root, "VERSION", "1.0", "1.1")
+    selected = _select(mod, ["VERSION"])
+    assert set(selected) == _VERSION_READERS
+    assert selected["tests/test_names_version_file.py"] == [
+        "names VERSION: the project version changed"]
+    assert selected["tests/test_spells_version.py"] == [
+        "spells 1.0: the project version changed"]
+    assert selected["tests/test_reads_version.py"] == [
+        "reads __version__: the project version changed"]
+
+
+def test_a_version_only_change_to_the_package_init_selects_the_version_readers(version_repo):
+    mod, root = version_repo
+    _edit(root, "localm/__init__.py", '"1.0"', '"1.1"')
+    selected = _select(mod, ["localm/__init__.py"])
+    assert set(selected) == _VERSION_READERS
+    assert "tests/test_a.py" not in selected and "tests/test_b.py" not in selected
+
+
+def test_any_other_change_to_the_package_init_still_selects_its_importers(version_repo):
+    mod, root = version_repo
+    _edit(root, "localm/__init__.py", '"1.0"', '"1.1"\nOTHER = 2')
+    selected = _select(mod, ["localm/__init__.py"])
+    assert "names localm" in selected["tests/test_a.py"]
+    assert "tests/test_names_version_file.py" not in selected
+    assert "tests/test_spells_version.py" not in selected
+    assert not any("the project version changed" in why
+                   for whys in selected.values() for why in whys)
+
+
+def test_a_version_only_bump_of_pyproject_and_the_lock_selects_the_version_readers(version_repo):
+    mod, root = version_repo
+    _edit(root, "pyproject.toml", 'version = "1.0"', 'version = "1.1"')
+    assert set(_select(mod, ["pyproject.toml"])) == _VERSION_READERS
+    _bump(root, "demo", "1.0", "1.1")
+    assert set(_select(mod, ["pyproject.toml", "uv.lock"])) == _VERSION_READERS
+    assert set(_select(mod, ["uv.lock"])) == _VERSION_READERS
+
+
+def test_every_file_of_a_release_bump_together_selects_the_version_readers(version_repo):
+    mod, root = version_repo
+    _bump_all_version_files(root)
+    assert set(_select(mod, ["VERSION", "localm/__init__.py", "pyproject.toml", "uv.lock"])) \
+        == _VERSION_READERS
+
+
+def test_a_version_bump_beside_another_pyproject_change_affects_every_test(version_repo):
+    mod, root = version_repo
+    _bump_all_version_files(root)
+    _edit(root, "pyproject.toml", 'addopts = "-q"', 'addopts = "-qq"')
+    assert _every_test(mod, _select(mod, ["pyproject.toml", "uv.lock"]))
+
+
+def test_a_version_bump_beside_another_lock_change_affects_every_test(version_repo):
+    mod, root = version_repo
+    _bump_all_version_files(root)
+    _edit(root, "uv.lock", 'requires-python = ">=3.12"', 'requires-python = ">=3.13"')
+    assert _every_test(mod, _select(mod, ["pyproject.toml", "uv.lock"]))
+
+
+def test_a_version_bump_beside_a_locked_dependency_bump_keeps_the_dependency_selection(
+        version_repo):
+    mod, root = version_repo
+    _bump_all_version_files(root)
+    _bump(root, "webkit-srv", "1.0.0", "1.1.0")
+    selected = _select(mod, ["pyproject.toml", "uv.lock"])
+    assert selected["tests/test_server.py"] == [
+        "imports localm.server, which imports webkit-srv: changed dependency webkit-srv"]
+    assert _VERSION_READERS <= set(selected)
+
+
+def test_a_version_change_of_another_locked_package_is_still_a_dependency_change(version_repo):
+    mod, root = version_repo
+    _bump(root, "webkit-srv", "1.0.0", "1.1.0")
+    selected = _select(mod, ["uv.lock"])
+    assert set(selected) == {"tests/test_server.py"}
+
+
+def test_a_locked_project_entry_that_is_not_the_editable_one_keeps_its_version_a_change(
+        version_repo):
+    mod, root = version_repo
+    _edit(root, "uv.lock", 'source = { editable = "." }', 'source = { virtual = "." }')
+    _git(root, "commit", "-qam", "virtual")
+    _bump(root, "demo", "1.0", "1.1")
+    assert _every_test(mod, _select(mod, ["uv.lock"]))
+
+
+def test_a_pyproject_without_a_string_version_affects_every_test(version_repo):
+    mod, root = version_repo
+    _edit(root, "pyproject.toml", 'version = "1.0"\n', "")
+    assert _every_test(mod, _select(mod, ["pyproject.toml"]))
+
+
+def test_a_version_file_that_does_not_differ_from_the_base_keeps_the_name_match(version_repo):
+    mod, _ = version_repo
+    selected = _select(mod, ["VERSION"])
+    assert selected["tests/test_names_version_file.py"] == ["names VERSION"]
+    assert "tests/test_reads_version.py" not in selected
+
+
+def test_a_package_init_that_does_not_differ_from_the_base_keeps_the_module_match(version_repo):
+    mod, _ = version_repo
+    selected = _select(mod, ["localm/__init__.py"])
+    assert "names localm" in selected["tests/test_a.py"]
+
+
+def test_a_version_bump_is_matched_with_its_tag_spelling_and_not_inside_longer_versions(
+        version_repo):
+    mod, root = version_repo
+    (root / "tests/test_tag.py").write_text("def test_tag():\n    assert 'v1.0' != ''\n",
+                                            encoding="utf-8")
+    (root / "tests/test_longer.py").write_text(
+        "def test_longer():\n    assert '1.0.5' + '11.0' + '1.0rc1' != ''\n", encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "spellings")
+    _bump_all_version_files(root)
+    selected = _select(mod, ["VERSION"])
+    assert "tests/test_tag.py" in selected
+    assert "tests/test_longer.py" not in selected
+
+
+@pytest.mark.parametrize(("old", "new", "expected"), [
+    ('__version__ = "1.0"\n', '__version__ = "1.1"\n', ("1.0", "1.1")),
+    ('"""Doc."""\n__version__ = "1.0"\nX = 1\n', '"""Doc."""\n__version__ = "2.0rc1"\nX = 1\n',
+     ("1.0", "2.0rc1")),
+    ('__version__ = "1.0"\n', '__version__ = "1.0"\n', None),
+    ('__version__ = "1.0"\n', '__version__ = "1.1"\nX = 1\n', None),
+    ('__version__ = "1.0"\nX = 1\n', '__version__ = "1.1"\nX = 2\n', None),
+    ('__version__ = "1.0"\n', 'VERSION = "1.1"\n', None),
+    ('__version__ = "1.0"\n', '__version__ = 11\n', None),
+    ('__version__ = "1.0"\n', '__version__ = "1.1"\n__version__ = "1.2"\n', None),
+    ('__version__ = "1.0"\n', '__version__ = (\n', None),
+    ("", '__version__ = "1.1"\n', None),
+    ('__version__: str = "1.0"\n', '__version__: str = "1.1"\n', None),
+])
+def test_init_version_change_reports_a_change_of_only_the_version_string(old, new, expected):
+    assert _load().init_version_change(old, new) == expected
+
+
+@pytest.mark.parametrize(("source", "expected"), [
+    ("from localm import __version__\n", True),
+    ("import localm\nprint(localm.__version__)\n", True),
+    ("name = '__version__'\n", True),
+    ("print(__version__)\n", True),
+    ("x = 1\nprint(version)\n", False),
+    ("def broken(:\n", False),
+])
+def test_references_version_finds_each_way_a_test_reads_the_version(source, expected):
+    assert _load()._references_version(source) is expected
+
+
+def test_a_lock_whose_project_version_is_not_a_string_affects_every_test(version_repo):
+    mod, root = version_repo
+    _edit(root, "uv.lock", 'name = "demo"\nversion = "1.0"', 'name = "demo"\nversion = 1')
+    assert _every_test(mod, _select(mod, ["uv.lock"]))
+    new_lock = _LOCK.replace('name = "demo"\nversion = "1.0"', 'name = "demo"\nversion = 1')
+    assert mod.project_versions(_PYPROJECT, _PYPROJECT, _LOCK, new_lock) == set()
+
+
+def test_project_versions_reports_each_side_that_changes_its_version():
+    mod = _load()
+    new_py = _PYPROJECT.replace('version = "1.0"', 'version = "1.1"')
+    new_lock = _LOCK.replace('name = "demo"\nversion = "1.0"', 'name = "demo"\nversion = "1.1"')
+    assert mod.project_versions(_PYPROJECT, new_py, _LOCK, _LOCK) == {"1.0", "1.1"}
+    assert mod.project_versions(_PYPROJECT, _PYPROJECT, _LOCK, new_lock) == {"1.0", "1.1"}
+    assert mod.project_versions(_PYPROJECT, _PYPROJECT, _LOCK, _LOCK) == set()
+    assert mod.project_versions("", new_py, _LOCK, _LOCK) == set()
+    assert mod.project_versions("[[", new_py, _LOCK, _LOCK) == set()
+
+
+def test_real_tree_a_version_bump_is_a_targeted_selection(monkeypatch):
+    mod = _load()
+    real_read, real_read_at = mod._read, mod._read_at
+    version = real_read("VERSION").strip()
+    texts = {
+        "VERSION": "999.0.0\n",
+        "localm/__init__.py": real_read("localm/__init__.py").replace(version, "999.0.0"),
+        "pyproject.toml": re.sub(r'(?m)^version = "[^"]+"', 'version = "999.0.0"',
+                                 real_read("pyproject.toml"), count=1),
+        "uv.lock": re.sub(r'(?m)(name = "localm"\nversion = )"[^"]+"', r'\1"999.0.0"',
+                          real_read("uv.lock"), count=1),
+    }
+    monkeypatch.setattr(mod, "_read", lambda rel: texts.get(rel) or real_read(rel))
+    monkeypatch.setattr(mod, "_read_at", lambda ref, rel: real_read_at("HEAD", rel))
+    graph = mod.Graph()
+    selected = mod.select(list(texts), graph)
+    assert "tests/test_version.py" in selected
+    assert "tests/test_updater.py" in selected
+    assert "tests/test_changelog_endpoint.py" in selected
+    assert 0 < len(selected) <= 0.25 * len(graph.test_files)
