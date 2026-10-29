@@ -1463,13 +1463,15 @@ def _resident_vram_hold(engine) -> int:
 
 
 def _shared_models_loaded() -> bool:
-    """Whether the shared embedder, reranker or speech model is loaded. Takes
-    their locks; must not run on the event loop thread."""
+    """Whether the shared embedder, reranker or speech model, or a native
+    media runtime of this process (``vram.loaded_native_media_runtimes``), is
+    loaded. Takes their locks; must not run on the event loop thread."""
     from localm.inference import embedder as _embedder_mod
     from localm.inference import reranker as _reranker_mod
     from localm.inference import speech as _speech_mod
+    from localm.vram import loaded_native_media_runtimes
     return (_embedder_mod.loaded_dim() is not None or _reranker_mod.is_loaded()
-            or _speech_mod.is_loaded())
+            or _speech_mod.is_loaded() or bool(loaded_native_media_runtimes()))
 
 
 def _peer_vram_holds() -> Optional[list]:

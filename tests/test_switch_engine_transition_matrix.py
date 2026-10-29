@@ -2188,6 +2188,19 @@ class TestTooBigEvenAfterEviction:
         assert res["status"] == "confirm_required"
         assert a.unload_calls == 1
 
+    def test_a_loaded_media_runtime_evicts_first_as_before(self, monkeypatch):
+        a = _SizedResident("model-a")
+        b = GatedEngine("model-b")
+        env = _install(monkeypatch, {"model-a": a, "model-b": b}, total=_TOO_SMALL)
+        monkeypatch.setattr("localm.vram.loaded_native_media_runtimes",
+                            lambda: ["stable-diffusion.cpp"])
+        _seat("model-a", a, active=True)
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert res["status"] == "confirm_required"
+        assert a.unload_calls == 1
+
     def test_peer_holds_are_the_live_peers_with_a_model_on_this_load_s_gpus(
             self, monkeypatch):
         monkeypatch.setattr(hs, "_gpu_coord", {"instance_id": "me"})
