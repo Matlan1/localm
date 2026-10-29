@@ -74,7 +74,7 @@ def stub_server():
             self.end_headers()
             self.wfile.write(data)
 
-        def log_message(self, *a):
+        def log_message(self, format, *args):
             pass
 
     srv = HTTPServer(("127.0.0.1", 0), Handler)

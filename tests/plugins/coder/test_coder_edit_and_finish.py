@@ -591,10 +591,11 @@ def test_a_read_only_request_answered_in_prose_is_finished_without_a_nudge(tmp_p
                     "Read m00.py, then write a short summary of what it contains."):
         agent = _make_agent(tmp_path, max_turns=6)
         summary = "Summary: m00.py defines add, which returns a + b."
-        with _scripted(agent, [_call("read_file", {"path": "m00.py"}), summary]) as llm:
+        with _scripted(agent, [_call("read_file", {"path": "m00.py"}), summary,
+                               "There is nothing to change."]) as llm:
             result = agent.run_task(request)
-        assert llm.call_count == 2, request
         assert not any("[nothing written]" in t for t in _user_texts(agent)), request
+        assert llm.call_count == 2, request
         assert _final_answer(result) == summary, request
         assert agent.last_run_ok is True, request
 
