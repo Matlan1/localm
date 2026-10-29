@@ -3824,14 +3824,21 @@ def caller_is_admin_key(request: Request) -> bool:
 def path_formatter(request: Request) -> Callable[[object], str]:
     """A function rendering a path (or any text) for this caller's response:
     ``str`` for the local operator (``caller_is_operator``), otherwise ``str``
-    followed by a ``pathscrub.path_scrubber`` bound once (home, account name,
-    data dir, install root, env prefix and the folders of every other absolute
-    host path replaced, file name kept)."""
+    followed by a ``pathscrub.scoped_path_scrubber`` bound once, on the first
+    call (home, account name, data dir, install root, env prefix, registry
+    model folders and the folders of every other absolute host path replaced,
+    file name kept)."""
     if caller_is_operator(request):
         return str
-    from localm.pathscrub import path_scrubber
-    scrub = path_scrubber()
-    return lambda value: scrub(str(value))
+    from localm.pathscrub import scoped_path_scrubber
+    bound: list = []
+
+    def show(value: object) -> str:
+        if not bound:
+            bound.append(scoped_path_scrubber())
+        return bound[0](str(value))
+
+    return show
 
 
 def principal_id(request: Request) -> Optional[str]:
@@ -5802,6 +5809,7 @@ async def stream_after_prep(
     *,
     engine_of: Callable[[object], Optional[Engine]],
     headers_of: Callable[[object], dict],
+    show_path: Callable[[object], str] = str,
 ) -> AsyncIterator[str]:
     """SSE body for a chat request whose preparation outlasted
     ``PREP_STATUS_GRACE_S``: a role chunk, a status chunk for every change of
@@ -5813,7 +5821,9 @@ async def stream_after_prep(
     ``localm_headers`` (the response headers the early stream could not set)
     when non-empty. A preparation that raises ends the stream with its message
     as an error reply (``finish_reason: "error"``) whose terminal chunk carries
-    ``localm_error: {"status": <HTTP status>, "detail": <message>}``. A client
+    ``localm_error: {"status": <HTTP status>, "detail": <message>}``; an
+    exception's message is rendered by ``inference_error_text`` with
+    *show_path* (``path_formatter`` for the caller). A client
     that disconnects before the reply starts leaves the preparation running;
     its pin is released when it finishes."""
     chunk_id = make_chunk_id()
@@ -5849,7 +5859,8 @@ async def stream_after_prep(
             from localm.debuglog import logger as _dbg
             _dbg.exception("chat request preparation failed")
             for line in _prep_error_lines(
-                    inference_error_text(e).strip(), 500, model_id, chunk_id, ts):
+                    inference_error_text(e, show_path).strip(), 500, model_id,
+                    chunk_id, ts):
                 yield line
             return
         meta = headers_of(prepared)
@@ -5921,9 +5932,11 @@ async def _stream_sse_body(
     role_sent: bool = False,
     meter: Optional[_GenerationMeter] = None,
     include_usage: bool = False,
+    show_path: Callable[[object], str] = str,
     **gen_kwargs,
 ) -> AsyncGenerator[str, None]:
-    """Stream the reply to *messages* as SSE ``data:`` lines.
+    """Stream the reply to *messages* as SSE ``data:`` lines. An error text is
+    rendered with *show_path* (``path_formatter`` for the caller).
 
     *chunk_id* reuses the id of a stream the caller already opened, and
     *role_sent* skips the role chunk that caller already sent. With
@@ -5983,7 +5996,7 @@ async def _stream_sse_body(
             except Exception as e:
                 from localm.debuglog import logger as _dbg
                 _dbg.exception("token recount after compaction failed")
-                refusal, refusal_status = inference_error_text(e).strip(), 500
+                refusal, refusal_status = inference_error_text(e, show_path).strip(), 500
                 prompt_tokens = None
         capacity = engine.context_capacity()
         if (not refusal and isinstance(capacity, int) and capacity > 0
@@ -6190,14 +6203,14 @@ async def _stream_sse_body(
 
     error_text = ""
     if gen_error is not None:
-        error_text = inference_error_text(gen_error)
+        error_text = inference_error_text(gen_error, show_path)
         err_chunk = ChatChunk.token(error_text, model_id, chunk_id, ts)
         err_status = backend_error_status(gen_error)
         if err_status is not None and not completion_parts:
             from localm.pathscrub import scrub_paths
             err_body = err_chunk.model_dump(mode="json")
             err_body["localm_error"] = {"status": err_status,
-                                        "detail": scrub_paths(str(gen_error))}
+                                        "detail": show_path(scrub_paths(str(gen_error)))}
             refusal = media_refusal_kind(gen_error)
             if refusal:
                 err_body["localm_error"]["refusal"] = refusal
@@ -6289,11 +6302,13 @@ async def _stream_sse_completion_body(
     meter: Optional[_GenerationMeter] = None,
     include_usage: bool = False,
     echo: Optional[str] = None,
+    show_path: Callable[[object], str] = str,
     **gen_kwargs,
 ) -> AsyncGenerator[str, None]:
     """Stream a text completion as SSE ``data:`` lines. *echo*, when given, is
     sent as the first text. With *include_usage* the usage moves from the finish
-    chunk to a last chunk with empty ``choices``."""
+    chunk to a last chunk with empty ``choices``. An error text is rendered with
+    *show_path* (``path_formatter`` for the caller)."""
     meter = meter or _GenerationMeter()
     chunk_id = make_chunk_id()
     ts = int(time.time())
@@ -6502,7 +6517,7 @@ async def _stream_sse_completion_body(
 
     error_text = ""
     if gen_error is not None:
-        error_text = inference_error_text(gen_error)
+        error_text = inference_error_text(gen_error, show_path)
         err = {
             "id": chunk_id, "object": "text_completion.chunk",
             "created": ts, "model": model_id,
@@ -7194,7 +7209,8 @@ async def _count_streamed_tokens(engine, streamed: str) -> int:
         return max(1, len(streamed) // 4) if streamed else 0
 
 
-def inference_error_text(exc: BaseException) -> str:
+def inference_error_text(exc: BaseException,
+                         show_path: Callable[[object], str] = str) -> str:
     """The `[inference error: ...]` body a FAILED generation is rendered as, on
     every one of the four generation paths.
 
@@ -7213,9 +7229,13 @@ def inference_error_text(exc: BaseException) -> str:
     line number survive, and only the leading directories are replaced. A caller
     still learns what failed without learning where this machine keeps its
     files.
+
+    *show_path* is applied after ``scrub_paths``: ``path_formatter(request)``
+    for a request, so a caller other than the local operator also gets every
+    other host folder replaced.
     """
     from localm.pathscrub import scrub_paths
-    return f"\n[inference error: {scrub_paths(str(exc))}]"
+    return f"\n[inference error: {show_path(scrub_paths(str(exc)))}]"
 
 
 async def _complete(
@@ -7297,7 +7317,8 @@ async def _complete(
             from localm.debuglog import logger as _dbg
             _dbg.exception("non-streaming generation failed")
             gen_error = e
-            text = inference_error_text(e)
+            text = inference_error_text(
+                e, path_formatter(request) if request is not None else str)
         gen_end = time.perf_counter()
     first_token_at = timing.get("first_token_at")
     generated = text
