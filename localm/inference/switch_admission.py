@@ -155,7 +155,8 @@ class EvictionAttempt:
     """Mutable bookkeeping for one load attempt's eviction loop.
 
     ``switch_engine`` updates it as it performs effects; the decisions here only
-    read it. Each bounded step (embedder eviction, each peer instance, the busy
+    read it. Each bounded step (embedder eviction, stopping this process's idle
+    native media runtimes, each peer instance, the busy
     victim, the wait for a busy model to go idle, the longer wait for an evicted
     model's VRAM release) runs at most once per attempt, and inconclusive probes
     are retried ``_INCONCLUSIVE_LOAD_RETRIES`` times, so the loop always
@@ -167,6 +168,7 @@ class EvictionAttempt:
     started: float
     asked_peers: set = field(default_factory=set)
     embedder_attempted: bool = False
+    media_attempted: bool = False
     busy_attempted: bool = False
     busy_waited: bool = False
     release_wait_extended: bool = False

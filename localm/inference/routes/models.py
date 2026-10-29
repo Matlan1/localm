@@ -187,7 +187,8 @@ def register(app: FastAPI, ctx) -> None:
 
     @app.post("/v1/models/unload",
               dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
-    async def unload_model(model: str | None = None, force: bool = False):
+    async def unload_model(model: str | None = None, force: bool = False,
+                           media: bool = True):
         """
         Release model(s) from GPU/CPU memory.
 
@@ -208,13 +209,20 @@ def register(app: FastAPI, ctx) -> None:
         answers `{"status": "in_use", ...}` (named) or is skipped the same way
         under its kind. Retrying with `force=true` stops the busy requests (the
         reply being written is cut off) and unloads the model.
+
+        An unload of everything also stops this server's own native media
+        runtimes (the image/video worker and the music runtime) that no job is
+        using, listed under `unloaded_other`; one a job is using stays running,
+        even with `force`, and is listed in `skipped_in_use` and
+        `media_left_running`. `media=false` (a query parameter) leaves them
+        loaded.
         """
         if model:
             from localm.config import load_registry
             if model not in load_registry() and model != _hs._default_model_name:
                 raise HTTPException(404, f"Model not registered: {model}")
             return await _hs.unload_one_model(model, force=force)
-        return await _hs.unload_all_models(force=force)
+        return await _hs.unload_all_models(force=force, media=media)
 
     @app.post("/v1/models/rename",
               dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])

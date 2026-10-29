@@ -3599,15 +3599,20 @@ if ($("models-import-comfy-btn")) {
 }
 
 // What an Unload all response released and left loaded: n counts the chat
-// models in unloaded_models plus the embedding, reranker and speech models in
-// unloaded_other (or 1 for embedder_unloaded from a server without that list);
-// skipped lists what stayed loaded because it was in use.
+// models in unloaded_models plus the embedding, reranker and speech models and
+// media runtimes in unloaded_other (or 1 for embedder_unloaded from a server
+// without that list); skipped lists what stayed loaded because it was in use;
+// forceable is the part of skipped a forced retry can stop (a media runtime in
+// media_left_running is never stopped by force).
 function unloadAllCounts(data) {
   const other = Array.isArray(data.unloaded_other)
     ? data.unloaded_other.length : (data.embedder_unloaded ? 1 : 0);
   const n = (data.unloaded_models || []).length + other;
   const skipped = Array.isArray(data.skipped_in_use) ? data.skipped_in_use : [];
-  return { n, skipped };
+  const media = (data.media_left_running && typeof data.media_left_running === "object")
+    ? data.media_left_running : {};
+  const forceable = skipped.filter((k) => !Object.prototype.hasOwnProperty.call(media, k));
+  return { n, skipped, forceable };
 }
 
 function unloadAllMessage(n, skipped) {
@@ -3630,18 +3635,17 @@ if (unloadAllBtn) {
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok) { toast(data.detail || t("models.unload.failed"), true); return; }
-      const { n, skipped } = unloadAllCounts(data);
+      const { n, skipped, forceable } = unloadAllCounts(data);
       toast(unloadAllMessage(n, skipped), skipped.length > 0);
       refreshModelsPage();
       refreshPerfEstimate();
-      // Offer to force through whatever is still in the way - the owner's
+      // Offer to force through whatever force can stop - the owner's
       // action is final, mirroring the per-row unload's own confirm/force
-      // contract. skipped_in_use is a real, non-empty count here, so there is
-      // something concrete to confirm.
-      if (skipped.length) {
+      // contract.
+      if (forceable.length) {
         const confirmed = await confirmDangerAsync(
           t("models.unloadAll.confirmTitle"),
-          t("models.unloadAll.confirmBody", { skipped: skipped.length }),
+          t("models.unloadAll.confirmBody", { skipped: forceable.length }),
           t("models.unloadAll.confirmLabel"));
         if (confirmed) {
           const r2 = await fetch("/api/models/unload", {

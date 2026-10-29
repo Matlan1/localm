@@ -1572,7 +1572,18 @@ class VramSizingMixin:
         instance. When no external holder is found,
         :func:`gpu_registry.own_status` reports whether THIS process's own live
         status explains it (e.g. this server has another model resident while
-        loading a second one)."""
+        loading a second one). A native media runtime this process holds loaded
+        (``localm.vram.loaded_native_media_runtimes``) is named before either."""
+        try:
+            from localm.vram import loaded_native_media_runtimes
+            media = loaded_native_media_runtimes()
+            if media:
+                return (f"this localm server's own {' and '.join(media)} "
+                        f"{'is' if len(media) == 1 else 'are'} holding it - "
+                        "Unload all on the Models page stops "
+                        f"{'it' if len(media) == 1 else 'them'} once no job is running.")
+        except Exception:
+            pass  # advisory only - fall through to the other holders
         try:
             from localm.config import load_config
             from localm.discover import last_gpu_reading, resolve_load_gpu_index

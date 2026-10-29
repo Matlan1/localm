@@ -648,8 +648,8 @@ def unload_chat_for_media(job: Any, self_url: str, media_label: str,
     job.push({"type": "line", "text": "Freeing VRAM: unloading the chat model..."})
     try:
         from localm.selfclient import self_request
-        resp = self_request("POST", "/models/unload", timeout=300, base_url=self_url,
-                            instance_token=instance_token)
+        resp = self_request("POST", "/models/unload?media=false", timeout=300,
+                            base_url=self_url, instance_token=instance_token)
         if not resp.ok:
             job.push({"type": "line", "text":
                       f"Could not unload the chat model (HTTP {resp.status_code}) - "
@@ -758,6 +758,52 @@ def loaded_native_media_runtimes() -> list:
         except Exception:
             continue
     return names
+
+
+def _native_runtime_stop_if_idle(key: str) -> Optional[bool]:
+    """Stop the native runtime *key* when no job holds it, without waiting. None
+    when a job holds it; otherwise True once it is no longer running."""
+    if key == "sdcpp":
+        from localm.media.sdcpp import shared
+        return shared.free_if_idle()
+    from localm.media.koboldcpp import server
+    return server.stop_if_idle()
+
+
+MEDIA_STOPPED = "stopped"
+MEDIA_BUSY = "busy"
+MEDIA_STOP_FAILED = "failed"
+
+
+def stop_idle_native_media() -> dict:
+    """Stop every native media runtime this process holds loaded that no job is
+    using, without waiting for a job to end. Returns ``{display name: outcome}``
+    for each runtime that was loaded, the outcome being ``MEDIA_STOPPED``,
+    ``MEDIA_BUSY`` (a job holds it; it is left running) or ``MEDIA_STOP_FAILED``
+    (the stop raised, or the process kept running; logged at WARNING). Empty
+    when none is loaded. Never raises. Takes each runtime's job lock without
+    blocking; a stop itself can take several seconds (the worker is asked to
+    exit, then killed)."""
+    from localm.debuglog import logger
+    outcomes = {}
+    for key, name in _NATIVE_RUNTIME_NAME.items():
+        try:
+            if not _native_runtime_loaded(key):
+                continue
+            stopped = _native_runtime_stop_if_idle(key)
+        except Exception as e:
+            logger.warning("media: could not stop the %s (%s: %s)",
+                           name, type(e).__name__, e)
+            outcomes[name] = MEDIA_STOP_FAILED
+            continue
+        if stopped is None:
+            outcomes[name] = MEDIA_BUSY
+        elif stopped:
+            outcomes[name] = MEDIA_STOPPED
+        else:
+            logger.warning("media: the %s kept running after it was stopped", name)
+            outcomes[name] = MEDIA_STOP_FAILED
+    return outcomes
 
 
 def _short_of(free: Optional[int], need: int) -> Optional[bool]:
@@ -1045,7 +1091,9 @@ def reload_chat_after_media(job: Any, self_url: str, s: dict, backend: Any,
                             instance_token: Optional[str] = None) -> None:
     """Hand VRAM back: ask *backend* (the plugin's own backend module, exposing
     ``free_vram(s)``) to drop its models, then reload the chat model so the next
-    reply is instant. Skipped when reload-after-generate is off.
+    reply is instant. Skipped when reload-after-generate is off: the backend
+    stays loaded, and the next chat model load stops it when it needs the VRAM
+    (``http_server._switch_stop_idle_media``).
     *instance_token*: forwarded to ``self_request`` - see
     ``unload_chat_for_media``'s docstring.
 
@@ -1058,7 +1106,8 @@ def reload_chat_after_media(job: Any, self_url: str, s: dict, backend: Any,
         _drop_deferred_reload_if_last()
         job.push({"type": "line", "text":
                   f"Keeping the {media_label} backend loaded (reload is off) - "
-                  "the chat model reloads on the next message."})
+                  "the chat model reloads on the next message, and stops it "
+                  "then if it needs the VRAM."})
         return
     global _handover_reloading, _handover_deferred
     with _handover_cv:
