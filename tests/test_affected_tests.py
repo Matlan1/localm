@@ -1041,9 +1041,30 @@ def test_a_version_bump_is_matched_with_its_tag_spelling_and_not_inside_longer_v
     ('__version__ = "1.0"\n', '__version__ = "1.1"\n__version__ = "1.2"\n', None),
     ('__version__ = "1.0"\n', '__version__ = (\n', None),
     ("", '__version__ = "1.1"\n', None),
+    ('__version__: str = "1.0"\n', '__version__: str = "1.1"\n', None),
 ])
 def test_init_version_change_reports_a_change_of_only_the_version_string(old, new, expected):
     assert _load().init_version_change(old, new) == expected
+
+
+@pytest.mark.parametrize(("source", "expected"), [
+    ("from localm import __version__\n", True),
+    ("import localm\nprint(localm.__version__)\n", True),
+    ("name = '__version__'\n", True),
+    ("print(__version__)\n", True),
+    ("x = 1\nprint(version)\n", False),
+    ("def broken(:\n", False),
+])
+def test_references_version_finds_each_way_a_test_reads_the_version(source, expected):
+    assert _load()._references_version(source) is expected
+
+
+def test_a_lock_whose_project_version_is_not_a_string_affects_every_test(version_repo):
+    mod, root = version_repo
+    _edit(root, "uv.lock", 'name = "demo"\nversion = "1.0"', 'name = "demo"\nversion = 1')
+    assert _every_test(mod, _select(mod, ["uv.lock"]))
+    new_lock = _LOCK.replace('name = "demo"\nversion = "1.0"', 'name = "demo"\nversion = 1')
+    assert mod.project_versions(_PYPROJECT, _PYPROJECT, _LOCK, new_lock) == set()
 
 
 def test_project_versions_reports_each_side_that_changes_its_version():
