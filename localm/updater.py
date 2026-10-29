@@ -335,6 +335,66 @@ def verify_signature(data: bytes, signature, *, trusted: Optional[dict] = None):
     return accepted
 
 
+# The oldest release signed by the current release key. Releases before it carry
+# only signatures in a format this install does not accept.
+_CURRENT_KEY_FLOOR = "0.3.0"
+
+
+class UnverifiedBuild(Exception):
+    """A selected build whose signature does not verify against the trusted key
+    set, raised by :func:`apply` before anything is extracted when the caller has
+    not passed ``allow_unverified``. Carries the requested *version*, a
+    user-facing *reason*, and the build's *sha256*, which the caller passes back as
+    ``expect_sha256`` to install exactly that build after the user agreed."""
+
+    def __init__(self, version: str, reason: str, sha256: str):
+        super().__init__(f"the build of {version} is not verified: {reason}")
+        self.version = version
+        self.reason = reason
+        self.sha256 = sha256
+
+
+def assess_signature(data: bytes, signature) -> dict:
+    """Verify *signature* over *data* with :func:`verify_signature`, but report a
+    failure instead of raising it.
+
+    Returns ``{"verified": True, "reason": None, "keyset": <replacement key set or
+    None>}`` when it verifies, else ``{"verified": False, "reason": <user-facing
+    text>, "keyset": None}``. The reason says the build is unsigned, or why its
+    signature does not verify, or why the check could not run. Never raises for
+    the signature itself."""
+    from localm.bugreport import LocalmError
+    if not isinstance(signature, str) or not signature.strip():
+        return {"verified": False, "keyset": None,
+                "reason": "the release has no signature, so nothing shows who built it"}
+    try:
+        return {"verified": True, "reason": None,
+                "keyset": verify_signature(data, signature)}
+    except ImportError:
+        return {"verified": False, "keyset": None,
+                "reason": "the signature could not be checked: the cryptography "
+                          "package is not installed"}
+    except LocalmError as e:
+        return {"verified": False, "keyset": None,
+                "reason": f"{e.reason or e.summary}. It may be signed with an unknown "
+                          "or retired key, or altered after it was signed"}
+
+
+def _check_selected_version(new_version: str, requested: str) -> None:
+    """Raise unless the build's VERSION *new_version* is the *requested* release.
+
+    A selected install may go to any version, older ones included, but only the
+    one asked for: a build carrying a different VERSION is refused."""
+    from localm.bugreport import LocalmError
+    if not new_version:
+        raise LocalmError(f"refusing to install {requested}: the build has no VERSION",
+                          reason="cannot confirm it is the version you chose")
+    if _version.normalize(new_version) != _version.normalize(requested):
+        raise LocalmError(
+            f"refusing to install the build served for {requested}: it is {new_version}",
+            reason="the update server sent a different version than the one you chose")
+
+
 def _refuse_downgrade(new_version: str) -> None:
     """Raise unless *new_version* is strictly newer than the running version.
 
@@ -485,6 +545,138 @@ def check(*, opener=None) -> dict:
         # The proxy serves the release's signature envelope text alongside the
         # asset; apply() verifies the downloaded build with verify_signature().
         "signature": data.get("signature") if isinstance(data, dict) else None,
+    }
+
+
+# ---------------------- choosing a version to install ---------------------
+
+def _selection_request(path: str, params: dict, *, opener=None) -> dict:
+    """GET *path* with *params* on the update proxy, under the same configuration,
+    network-policy and prerelease-channel rules as :func:`check`. A 404 means the
+    proxy predates version selection and raises a LocalmError saying so."""
+    import urllib.parse
+
+    from localm import _proxy
+    from localm.bugreport import LocalmError
+    base, token = endpoint()
+    if not base:
+        raise LocalmError("the updater is not configured",
+                          reason="set bugreport_upload_url (or update_url) to enable it")
+    if not _net_policy_allows_update_check():
+        raise LocalmError(
+            "update checks are off because network access is set to off",
+            reason='turn on "Check for updates even when network access is off" '
+                   "in Settings, or set network access to ask or allow")
+    query = dict(params)
+    if _prerelease_channel_enabled():
+        query["channel"] = "prerelease"
+    qs = urllib.parse.urlencode(query)
+    try:
+        data = _proxy.request(base, path + (f"?{qs}" if qs else ""), token=token,
+                              opener=opener)
+    except LocalmError as e:
+        if str(e.reason).startswith("HTTP 404"):
+            raise LocalmError(
+                "the update server does not offer a choice of versions yet",
+                reason="it needs the proxy version that serves /update/releases") from None
+        raise
+    if not isinstance(data, dict):
+        raise LocalmError("the update server sent an unexpected reply", reason=str(data)[:200])
+    return data
+
+
+def _direction(version: str, current: str) -> str:
+    """``"newer"``, ``"older"``, ``"same"`` or ``"unknown"`` (not comparable) for
+    *version* relative to the running *current* version."""
+    if not _version.comparable(version, current):
+        return "unknown"
+    if _version.is_newer(version, current):
+        return "newer"
+    if _version.is_newer(current, version):
+        return "older"
+    return "same"
+
+
+def list_versions(*, opener=None) -> dict:
+    """The releases a user can choose to install, newest first.
+
+    Returns ``{current, releases}``; each release is ``{version, name,
+    published_at, prerelease, notes, asset, signed, direction, installable,
+    reason, warnings}``. ``direction`` is from :func:`_direction`. ``installable``
+    is False only when the release has no build attached (``reason`` says so).
+    ``warnings`` lists what the user should know before choosing it: a downgrade,
+    a reinstall of the running version, an unrecognised version format, a release
+    with no signature, or one from before ``_CURRENT_KEY_FLOOR`` (a signature
+    format this version does not accept). The signature itself is checked when the build is installed, not
+    here.
+
+    Raises :class:`~localm.bugreport.LocalmError` like :func:`check`, and when the
+    proxy has no version list."""
+    data = _selection_request("/update/releases", {}, opener=opener)
+    current = _version.read_version()
+    out = []
+    for rel in data.get("releases") or []:
+        if not isinstance(rel, dict) or not isinstance(rel.get("version"), str):
+            continue
+        version = rel["version"]
+        asset = rel.get("asset") if isinstance(rel.get("asset"), dict) else None
+        signed = rel.get("signed") is True
+        direction = _direction(version, current)
+        warnings = []
+        if direction == "older":
+            warnings.append(f"older than the installed {current}: this is a downgrade")
+        elif direction == "same":
+            warnings.append("this is the installed version: it would be reinstalled")
+        elif direction == "unknown":
+            warnings.append("its version format is not recognised, so it cannot be "
+                            "ordered against the installed one")
+        pre_floor = (_version.comparable(version, _CURRENT_KEY_FLOOR)
+                     and _version.is_newer(_CURRENT_KEY_FLOOR, version))
+        if not signed:
+            warnings.append("the release has no signature")
+        elif pre_floor:
+            warnings.append(f"released before {_CURRENT_KEY_FLOOR}: its signature is in a "
+                            "format this version does not accept, so it will not verify")
+        installable = bool(asset and asset.get("id"))
+        out.append({
+            "version": version, "name": rel.get("name"),
+            "published_at": rel.get("published_at"),
+            "prerelease": rel.get("prerelease") is True,
+            "notes": str(rel.get("notes") or "")[:500],
+            "asset": asset, "signed": signed, "direction": direction,
+            "installable": installable,
+            "reason": None if installable else "the release has no build attached",
+            "warnings": warnings,
+        })
+    return {"current": current, "releases": out}
+
+
+def fetch_release(version: str, *, opener=None) -> dict:
+    """The proxy's meta for the release tagged *version* (with or without a leading
+    ``v``): ``{version, notes, published_at, prerelease, asset, signature}``, the
+    signature being the release's localm-update-sig/2 envelope when it has one.
+    Raises :class:`~localm.bugreport.LocalmError` when there is no such release or
+    the proxy answers with a different version than *version*, and like
+    :func:`list_versions` otherwise."""
+    from localm.bugreport import LocalmError
+    want = str(version or "").strip()
+    if not want:
+        raise LocalmError("no version given", reason="name the version to install")
+    data = _selection_request("/update/release", {"version": want}, opener=opener)
+    if not data.get("found") or not data.get("version"):
+        raise LocalmError(f"there is no release {want}",
+                          reason="localm update --list shows the releases you can install")
+    if _version.normalize(str(data["version"])) != _version.normalize(want):
+        raise LocalmError(
+            f"the update server answered {str(data['version'])[:40]} for {want}",
+            reason="it sent a different release than the one you chose; nothing was installed")
+    return {
+        "version": data["version"],
+        "notes": str(data.get("notes") or ""),
+        "published_at": data.get("published_at"),
+        "prerelease": data.get("prerelease") is True,
+        "asset": data.get("asset") if isinstance(data.get("asset"), dict) else None,
+        "signature": data.get("signature"),
     }
 
 
@@ -746,8 +938,13 @@ def _promote_backup(run_backup_dir: Path, backup_dir: Path) -> None:
     *run_backup_dir* is a complete, self-contained COPY of the pre-update install
     (``_apply_update.backup`` copies, never moves, the live tree).
 
+    The native runtime snapshot and the components snapshot of the update whose
+    backup this replaces (``_apply_update.runtime_snapshot_dir``,
+    ``updater_components.snapshot_dir``) are removed with it.
+
     Best-effort: a failure does not undo the update but IS surfaced as a warning,
     since it degrades a later ``update --rollback``."""
+    from localm import _apply_update as au
     try:
         if backup_dir.exists():
             shutil.rmtree(backup_dir)
@@ -756,13 +953,283 @@ def _promote_backup(run_backup_dir: Path, backup_dir: Path) -> None:
         _apply_warn("update applied, but could not move this run's backup from %s "
                     "to %s: %s; a later `update --rollback` may not find it",
                     run_backup_dir, backup_dir, e)
+    snapshot = au.runtime_snapshot_dir(backup_dir)
+    try:
+        if snapshot.exists():
+            shutil.rmtree(snapshot)
+    except OSError as e:
+        _apply_warn("update applied, but could not remove the native runtime kept by the "
+                    "previous update at %s: %s; a later `update --rollback` may put that "
+                    "older runtime back", snapshot, e)
+    from localm import updater_components
+    updater_components.discard(updater_components.snapshot_dir(backup_dir))
 
 
-def apply(asset_id, *, signature=None, installed=None, download_opener=None,
-          runner=None) -> dict:
+# Data dir entries an older build may read without the fields a newer one added,
+# and write back without them.
+_DOWNGRADE_DATA = ("config.json", "registry.json", "checkpoints", "memory", "plugins",
+                   "coder-hook-trust.json")
+
+
+def _backup_data_for_downgrade(new_version: str) -> Path:
+    """Copy the data dir entries in ``_DOWNGRADE_DATA`` that exist to
+    ``<data dir>/updates/data-before-<new_version>-<stamp>/`` and return that
+    directory. Raises :class:`~localm.bugreport.LocalmError` when a copy fails, so
+    the downgrade does not go ahead without it."""
+    from localm.bugreport import LocalmError
+    from localm.config import home_dir
+    home = home_dir()
+    safe = "".join(c if c.isalnum() or c in ".-_" else "_" for c in new_version)[:40]
+    dest = (_updates_dir() / f"data-before-{safe}-{time.strftime('%Y%m%d-%H%M%S')}"
+            f"-{uuid.uuid4().hex[:8]}")
+    try:
+        dest.mkdir(parents=True)
+    except OSError as e:
+        raise LocalmError("could not back up your data before the downgrade",
+                          reason=f"{dest}: {e}") from None
+    try:
+        for name in _DOWNGRADE_DATA:
+            src = home / name
+            if src.is_dir():
+                shutil.copytree(src, dest / name, symlinks=True)
+            elif src.is_file():
+                shutil.copy2(src, dest / name)
+    except OSError as e:
+        shutil.rmtree(dest, ignore_errors=True)
+        raise LocalmError("could not back up your data before the downgrade",
+                          reason=f"{dest}: {e}") from None
+    return dest
+
+
+def _carry_trust_forward() -> None:
+    """Save the key set this install trusts to the data dir's trust file when the
+    file holds an older one (or none) and the trusted set is past the first, so an
+    older build installed next reads it and can verify the releases this one can."""
+    trusted = _load_trusted()
+    if trusted["seq"] <= 1:
+        return
+    try:
+        saved = _parse_keyset(_strict_json(_trust_path().read_text(encoding="utf-8")),
+                              signed=True)
+    except FileNotFoundError:
+        saved = None
+    if saved is not None and saved["seq"] >= trusted["seq"]:
+        return
+    _save_keyset({**{k: trusted[k] for k in ("seq", "release", "recovery")},
+                  "signatures": trusted.get("signatures", [])})
+
+
+_BRIDGE_MODULE = "_update_trust_bridge.py"
+
+
+def _needs_trust_bridge(root: Path) -> bool:
+    """True when the build at *root* has an updater that cannot verify a
+    localm-update-sig/2 envelope (localm before 0.3.0) or does not refuse the
+    revoked keys (localm before 0.3.2)."""
+    try:
+        text = (root / "localm" / "updater.py").read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return _SIG_FORMAT not in text or "_REVOKED_KEYS" not in text
+
+
+def _install_trust_bridge(root: Path) -> None:
+    """Make the staged build at *root* verify its updates the way this build does.
+
+    Writes this module's source to ``localm/_update_trust_bridge.py`` in *root*
+    with ``_PINNED_KEYSET`` set to the key set trusted now, and appends to the
+    staged ``localm/updater.py`` a rebinding of its ``verify_signature`` to the
+    bridge's, which also saves a replacement key set an update carries. Raises
+    :class:`~localm.bugreport.LocalmError` when a write fails."""
+    from localm.bugreport import LocalmError
+    trusted = _load_trusted()
+    pinned = {k: trusted[k] for k in ("seq", "release", "recovery")}
+    try:
+        source = Path(__file__).read_text(encoding="utf-8")
+    except OSError as e:
+        raise LocalmError("could not prepare the older version to verify later updates",
+                          reason=str(e)) from None
+    bridge = (source.rstrip("\n")
+              + "\n\n\n_PINNED_KEYSET = " + _json.dumps(pinned, sort_keys=True) + "\n")
+    stanza = (
+        "\n\n# Verifies updates with the update signing keys of the localm build that\n"
+        "# installed this version (localm/_update_trust_bridge.py). A trusted= key\n"
+        "# set passed in is not used: the bridge verifies against its own.\n"
+        "def _localm_bridged_verify_signature(data, signature_b64=None, **_unused):\n"
+        "    from localm import _update_trust_bridge as bridge\n"
+        "    accepted = bridge.verify_signature(data, signature_b64)\n"
+        "    if accepted is not None:\n"
+        "        bridge._save_keyset(accepted)\n"
+        "\n\n"
+        "verify_signature = _localm_bridged_verify_signature\n")
+    try:
+        (root / "localm" / _BRIDGE_MODULE).write_text(bridge, encoding="utf-8")
+        with open(root / "localm" / "updater.py", "a", encoding="utf-8") as f:
+            f.write(stanza)
+    except OSError as e:
+        raise LocalmError("could not prepare the older version to verify later updates",
+                          reason=str(e)) from None
+
+
+def _needs_uv_bridge(root: Path) -> bool:
+    """True when the build at *root* runs its dependency step with a ``uv``
+    looked up on PATH (localm 0.3.1 and earlier)."""
+    try:
+        text = (root / "localm" / "_apply_update.py").read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return 'return ["uv", "pip"' in text
+
+
+def _install_uv_bridge(root: Path, uv: str, target: Path) -> None:
+    """Make the staged build at *root* run the dependency step of its later
+    updates with *uv* instead of a ``uv`` looked up on PATH.
+
+    Appends to the staged ``localm/updater.py`` a rebinding of
+    ``_apply_update.post_swap_command`` that replaces a bare ``uv`` first argument
+    with *uv*: relative to the install root when *uv* is inside the install
+    *target*, else the absolute path. Raises :class:`~localm.bugreport.LocalmError`
+    when the write fails."""
+    import os
+
+    from localm.bugreport import LocalmError
+    uv_path = Path(uv)
+    try:
+        rel = uv_path.resolve().relative_to(Path(target).resolve())
+        uv_expr = ("_localm_os.path.join(_localm_os.path.dirname(_localm_os.path.dirname("
+                   "_localm_os.path.abspath(__file__))), " + repr(str(rel)) + ")")
+    except ValueError:
+        uv_expr = repr(os.path.abspath(str(uv_path)))
+    stanza = (
+        "\n\n# Runs the dependency step of later updates with the uv the localm build\n"
+        "# that installed this version found, instead of a uv looked up on PATH.\n"
+        "import os as _localm_os\n"
+        "from localm import _apply_update as _localm_apply_update\n"
+        "_localm_unbridged_post_swap_command = _localm_apply_update.post_swap_command\n"
+        "\n\n"
+        "def _localm_bridged_post_swap_command(*args, **kwargs):\n"
+        "    cmd = _localm_unbridged_post_swap_command(*args, **kwargs)\n"
+        "    if cmd and cmd[0] == \"uv\":\n"
+        f"        cmd = [{uv_expr}] + list(cmd[1:])\n"
+        "    return cmd\n"
+        "\n\n"
+        "_localm_apply_update.post_swap_command = _localm_bridged_post_swap_command\n")
+    try:
+        with open(root / "localm" / "updater.py", "a", encoding="utf-8") as f:
+            f.write(stanza)
+    except OSError as e:
+        raise LocalmError("could not prepare the older version to install later updates",
+                          reason=str(e)) from None
+
+
+def _apply_components(plans, needed: bool, *, klass: str, target: Path, version: str,
+                      defer: bool, runner, say, backup_dir: Path, names) -> tuple:
+    """The component half of :func:`apply`, after the swap: record the pending
+    component update (``updater_components.write_pending``) and, unless
+    *defer* or the ``setup`` class, carry it out now. When it fails, the code
+    swap is rolled back (with the native runtime it re-provisioned) and
+    LocalmError is raised. Returns ``(status, note)``: the status of the
+    component update (None when none ran) and a one-line summary (None when
+    there is nothing to say)."""
+    from localm import _apply_update as au
+    from localm import updater_components
+    from localm.bugreport import LocalmError
+    note = updater_components.summary(plans)
+    if not needed:
+        try:
+            updater_components.clear_pending()
+        except OSError as e:
+            _apply_warn("could not clear an earlier pending component update: %s", e)
+        return None, note
+    try:
+        updater_components.write_pending(plans, root=target, version=version)
+    except OSError as e:
+        _apply_warn("could not record the pending component update: %s", e)
+        return None, (f"{note}; NOT done: the component update could not be recorded ({e}); "
+                      "it is retried on the next start of localm")
+    if klass == "setup":
+        return None, (f"{note}, " if note else "checks the components ") + (
+            "on the first start after setup")
+    if defer:
+        return None, (f"{note}, " if note else "checks the components ") + (
+            "while localm restarts")
+    try:
+        status = updater_components.finish_pending(root=target, runner=runner,
+                                                   env=_deps_env(target), say=say)
+    except Exception as e:
+        status = {"state": "failed", "note": f"the component update crashed: {e}"}
+    if status is not None and status["state"] in ("failed", "waiting"):
+        updater_components.clear_pending()
+        why = status["note"]
+        try:
+            au.rollback(backup_dir, target, names)
+        except Exception as rb:
+            raise LocalmError(
+                "a component update failed AND rolling the code back failed - manual "
+                "recovery needed", reason=f"{why}; rollback: {rb}; restore from {backup_dir}"
+            ) from None
+        raise LocalmError("a component could not be updated, so the update was rolled back",
+                          reason=why)
+    return status, (status["note"] if status is not None else note)
+
+
+def apply(asset_id, *, signature=None, target_version=None, allow_unverified=False,
+          expect_sha256=None, installed=None, download_opener=None,
+          runner=None, defer_runtime=False, say=None) -> dict:
     """Download, VERIFY (signature + anti-rollback), and swap a build into the
     install, then run the class's deps/runtime step. Returns
-    ``{applied, version, klass, backup, restart_needed}``.
+    ``{applied, version, klass, backup, restart_needed, verified, verify_reason,
+    downgrade, data_backup, runtime, runtime_note, components, components_note,
+    kept_for_updates}``.
+
+    THE NATIVE RUNTIME. When the build pins a different llama.cpp build for the
+    installed backend than the one installed (``updater_runtime.plan``), the
+    class is ``runtime`` and a pending re-provision is recorded. The code and
+    the runtime are updated both or neither: before the swap, this install's own
+    processes that hold the runtime are stopped
+    (``updater_runtime.stop_own_holders``; with *defer_runtime* only checked),
+    and a holder that is not this install's refuses the update with nothing
+    changed. Without *defer_runtime* the re-provision is carried out right after
+    the swap (``updater_runtime.finish_pending``); when it fails, the previous
+    runtime is put back, the code swap is rolled back and LocalmError is
+    raised. With it (the server, which still runs its models) the caller's
+    restart carries it out once its models are unloaded. ``runtime`` is that
+    status (None when nothing was attempted) and ``runtime_note`` a one-line
+    summary for the user (None when there is nothing to say). *say* receives
+    each step of stopping processes and replacing the runtime as one line of
+    text.
+
+    THE OTHER COMPONENTS. Every installed component the build pins differently
+    (``updater_components.plan``: the sd.cpp and KoboldCpp runtimes, the managed
+    ComfyUI, the uv inside the install) is brought to the build's pin after the
+    runtime, or with *defer_runtime* during the caller's restart, recorded as a
+    pending component update. A uv running from inside the install refuses the
+    update with nothing changed. When a component cannot be updated, the
+    components are put back, the code swap (and the runtime) is rolled back and
+    LocalmError is raised. ``components`` is that status (None when nothing ran)
+    and ``components_note`` a one-line summary, naming a component the user
+    chose themselves and kept (None when there is nothing to say).
+
+    *target_version* selects a release by version (``localm update --to``): the
+    anti-rollback check is replaced by :func:`_check_selected_version`, so an
+    older release installs, but only when the build's VERSION is the requested
+    one. Its signature is checked with :func:`assess_signature`; a build that does
+    not verify raises :class:`UnverifiedBuild` before it is extracted, unless
+    *allow_unverified* is True, which requires *expect_sha256* (the sha256 the
+    UnverifiedBuild named) so only the build the user agreed to is installed. An
+    unverified build never changes the trusted key set. Before a selected
+    downgrade is swapped in, the data dir files an older build may not read are
+    copied aside (:func:`_backup_data_for_downgrade`; ``data_backup`` is that
+    directory or None). A selected install also saves the trusted key set for
+    the build it installs (:func:`_carry_trust_forward`), and gives a build from
+    before 0.3.2 this build's signature check (:func:`_install_trust_bridge`) so
+    it can verify and install later releases and refuses the revoked keys;
+    ``kept_for_updates`` names each such part, the only parts of this build an
+    older one keeps (an empty list otherwise). Without
+    *target_version* nothing of this applies: the signature must verify and the
+    build must be newer.
+
+    *expect_sha256*, when given, must equal the downloaded build's sha256.
 
     *signature* is the signature envelope text from :func:`check` (the proxy serves
     it with the release). :func:`verify_signature` checks it BEFORE the build is
@@ -796,6 +1263,9 @@ def apply(asset_id, *, signature=None, installed=None, download_opener=None,
             "would overwrite unrelated packages in site-packages and leave "
             "pip unaware of what is installed",
             reason="run 'pip install --upgrade localm' instead")
+    if allow_unverified and not expect_sha256:
+        raise LocalmError("refusing to install an unverified build without its sha256",
+                          reason="pass the sha256 the verification warning named")
     updir = _updates_dir()
     backup_dir = _backup_dir(create=True)   # the STABLE location rollback_last() reads
 
@@ -805,21 +1275,79 @@ def apply(asset_id, *, signature=None, installed=None, download_opener=None,
             run_dir / "build.zip", run_dir / "staging", run_dir / "backup")
 
         try:
+            import hashlib
             download(asset_id, zip_path, opener=download_opener)
+            data = zip_path.read_bytes()
+            digest = hashlib.sha256(data).hexdigest()
+            if expect_sha256 is not None and digest != str(expect_sha256).strip().lower():
+                raise LocalmError(
+                    "refusing to install: the build differs from the one you confirmed",
+                    reason="the update server sent different bytes this time; "
+                           "choose the version again")
             # SIGNATURE GATE - runs before verify_zip/extract/swap, i.e. before any
             # of the downloaded build's code can be extracted or executed.
-            new_keyset = verify_signature(zip_path.read_bytes(), signature)
+            if target_version is None:
+                new_keyset = verify_signature(data, signature)
+                verified, verify_reason = True, None
+            else:
+                assessed = assess_signature(data, signature)
+                new_keyset = assessed["keyset"]
+                verified, verify_reason = assessed["verified"], assessed["reason"]
+                if not verified and not allow_unverified:
+                    raise UnverifiedBuild(str(target_version), verify_reason, digest)
             au.verify_zip(zip_path)
             root = au.extract(zip_path, staging)
             vf = root / "VERSION"
             new_version = vf.read_text(encoding="utf-8").strip() if vf.exists() else ""
-            # ANTI-ROLLBACK - a validly SIGNED but OLDER build must not be installable.
-            _refuse_downgrade(new_version)
+            if target_version is None:
+                # ANTI-ROLLBACK - a validly SIGNED but OLDER build must not be installable.
+                _refuse_downgrade(new_version)
+            else:
+                _check_selected_version(new_version, str(target_version))
+            downgrade = _version.is_newer(_version.read_version(), new_version)
             klass = classify(root, target, read_manifest(root))
-            uv_exe = _uv_for_deps(target) if klass == "deps" else None
+            from localm import updater_runtime
+            rt_plan = updater_runtime.plan(root, target)
+            from localm import updater_components
+            comp_plans = updater_components.plan(root, target, deep=False)
+            comp_update = updater_components.needs_finish(comp_plans)
+            if comp_update and klass != "setup":
+                held = updater_components.blockers(comp_plans, target)
+                if held:
+                    raise LocalmError(
+                        "a component this update replaces is in use, so nothing was updated",
+                        reason=updater_runtime.in_use_message(held, "run the update again"))
+            if (klass == "runtime" and rt_plan["source"] == "release" and rt_plan["target"]
+                    and rt_plan["current"] is not None):
+                rt_plan["reprovision"] = True
+            if rt_plan["reprovision"]:
+                klass = _max_class(klass, "runtime")
+            if rt_plan["reprovision"] and klass != "setup":
+                left = updater_runtime.stop_own_holders(
+                    updater_runtime.runtime_lib(target), target, say=say,
+                    stop=not defer_runtime)
+                if left:
+                    raise LocalmError(
+                        "the native llama.cpp runtime is in use, so nothing was updated",
+                        reason=updater_runtime.in_use_message(left, "run the update again"))
+            deps_changed = klass != "setup" and _deps_set(root) != _deps_set(target)
+            uv_exe = _uv_for_deps(target) if deps_changed else None
+            post_cmd = au.post_swap_command("deps", uv=uv_exe) if deps_changed else None
             # The update has verified: save a key set it replaced, before the swap.
             if new_keyset is not None:
                 _save_keyset(new_keyset)
+            data_backup = None
+            kept = []
+            if target_version is not None:
+                _carry_trust_forward()
+                if _needs_trust_bridge(root):
+                    _install_trust_bridge(root)
+                    kept.append("this version's update signature check and trusted keys")
+                if _needs_uv_bridge(root):
+                    _install_uv_bridge(root, uv_exe or _uv_for_deps(target), target)
+                    kept.append("the uv this version uses to apply later updates")
+                if downgrade:
+                    data_backup = _backup_data_for_downgrade(new_version)
         except Exception:
             # No backup exists for this run yet, so the scratch dir can go.
             shutil.rmtree(run_dir, ignore_errors=True)
@@ -860,7 +1388,7 @@ def apply(asset_id, *, signature=None, installed=None, download_opener=None,
                         "`update --rollback` will fall back to the backup listing and cannot "
                         "remove brand-new top-level entries this update added", manifest_path, e)
 
-        cmd = au.post_swap_command(klass, backend=_installed_backend(), uv=uv_exe)
+        cmd = post_cmd
         if cmd:
             run = runner or (lambda c: subprocess.run(
                 c, cwd=str(target), env=_deps_env(target)).returncode)
@@ -885,8 +1413,59 @@ def apply(asset_id, *, signature=None, installed=None, download_opener=None,
                 _rollback_or_raise(f"{cmd[0]} exited {rc}")
                 raise LocalmError("the post-update step failed; rolled back",
                                   reason=f"{cmd[0]} exited {rc}")
+        runtime_status, runtime_note = None, rt_plan["note"]
+        if not rt_plan["reprovision"]:
+            try:
+                updater_runtime.clear_pending()
+            except OSError as e:
+                _apply_warn("could not clear an earlier pending runtime update: %s", e)
+        else:
+            try:
+                updater_runtime.write_pending(rt_plan, root=target, version=new_version)
+            except OSError as e:
+                _apply_warn("could not record the pending runtime update: %s", e)
+                runtime_note = (f"the {rt_plan['backend']} runtime was NOT updated to "
+                                f"{rt_plan['target']} (could not record it: {e}); to update it: "
+                                f"localm setup-llama --backend {rt_plan['backend']} --force")
+            else:
+                if klass == "setup":
+                    runtime_note = f"{rt_plan['note']} on the first start after setup"
+                elif defer_runtime:
+                    runtime_note = f"{rt_plan['note']} while localm restarts"
+                else:
+                    try:
+                        runtime_status = updater_runtime.finish_pending(
+                            root=target, runner=runner, env=_deps_env(target), say=say)
+                    except Exception as e:
+                        runtime_status = {"state": "failed", "note": str(e)}
+                    if runtime_status is not None and runtime_status["state"] in (
+                            "failed", "waiting"):
+                        updater_runtime.clear_pending()
+                        why = runtime_status["note"]
+                        try:
+                            au.rollback(backup_dir, target, names)
+                        except Exception as rb:
+                            raise LocalmError(
+                                "the native runtime update failed AND rolling the code "
+                                "back failed - manual recovery needed",
+                                reason=f"{why}; rollback: {rb}; restore from {backup_dir}"
+                            ) from None
+                        raise LocalmError(
+                            "the native runtime could not be updated, so the update was "
+                            "rolled back", reason=why)
+                    if runtime_status is not None:
+                        runtime_note = runtime_status["note"]
+        components_status, components_note = _apply_components(
+            comp_plans, comp_update, klass=klass, target=target, version=new_version,
+            defer=defer_runtime, runner=runner, say=say, backup_dir=backup_dir, names=names)
         return {"applied": True, "version": new_version, "klass": klass,
-                "backup": str(backup_dir), "restart_needed": True}
+                "backup": str(backup_dir), "restart_needed": True,
+                "verified": verified, "verify_reason": verify_reason,
+                "downgrade": downgrade,
+                "data_backup": str(data_backup) if data_backup else None,
+                "runtime": runtime_status, "runtime_note": runtime_note,
+                "components": components_status, "components_note": components_note,
+                "kept_for_updates": kept}
 
 
 def _uv_for_deps(target: Path) -> str:
@@ -1096,9 +1675,24 @@ def rollback_info() -> dict:
             "current": _version.read_version()}
 
 
-def rollback_last(*, installed=None) -> dict:
+def rollback_last(*, installed=None, say=None) -> dict:
     """Restore the install from the most recent update backup. Returns
     ``{rolled_back, backup}``. Raises LocalmError when there is no backup.
+
+    The code and the native runtime the update replaced are restored both or
+    neither. When the runtime differs from the one the update kept
+    (``_apply_update.runtime_snapshot_dir``), this install's own processes that
+    hold it are stopped first (``updater_runtime.stop_own_holders``); a holder
+    that is not this install's, or a runtime that cannot be restored, raises
+    LocalmError with nothing changed. The runtime is restored before the code,
+    and put back as it was when the code restore fails. *say* receives each
+    step as one line of text.
+
+    The components the update replaced (``updater_components.snapshot_dir``)
+    and that are still installed are restored first, with the same guarantee:
+    a component that cannot be restored raises LocalmError with nothing
+    changed, and a later failure of the runtime or code restore puts them back
+    as they were.
 
     NOT signature- or freshness-checked; the owner gate on its HTTP callers
     (``inference/routes/admin.py``) is the control on this operation. Use
@@ -1139,5 +1733,86 @@ def rollback_last(*, installed=None) -> dict:
                             "added by the update will not be removed by this rollback", manifest)
         if names is None:
             names = [p.name for p in backup_dir.iterdir()]
-        au.rollback(backup_dir, target, names)
+        from localm import updater_components
+        comp_snap = updater_components.snapshot_dir(backup_dir)
+        comp_names = updater_components.installed_names(
+            updater_components.snapshot_names(comp_snap), target)
+        comp_keep = None
+        if comp_names:
+            comp_keep = comp_snap.with_name(comp_snap.name + "-current")
+            try:
+                updater_components.snapshot(comp_names, comp_keep, root=target)
+            except OSError as e:
+                raise LocalmError("could not keep a copy of the current components, so "
+                                  "nothing was rolled back", reason=str(e)) from None
+            errors = updater_components.restore(comp_snap, root=target, say=say,
+                                                names=comp_names)
+            if errors:
+                back = updater_components.restore(comp_keep, root=target, say=say)
+                updater_components.discard(comp_keep)
+                if back:
+                    raise RuntimeError("rollback incomplete: the components could not be "
+                                       "restored nor put back: " + "; ".join(errors + back))
+                raise LocalmError("a component could not be restored, so nothing was "
+                                  "rolled back", reason="; ".join(errors))
+        try:
+            from localm import updater_runtime
+            lib = target / au.RUNTIME_LIB
+            snapshot = au.runtime_snapshot_dir(backup_dir)
+            keep = None
+            if snapshot.is_dir() and au.runtime_differs(lib, snapshot):
+                left = updater_runtime.stop_own_holders(lib, target, say=say)
+                if left:
+                    raise LocalmError(
+                        "the native llama.cpp runtime is in use, so nothing was rolled back",
+                        reason=updater_runtime.in_use_message(left, "run the rollback again"))
+                keep = snapshot.with_name(snapshot.name + "-current")
+                try:
+                    au.snapshot_runtime(lib, keep)
+                except OSError as e:
+                    raise LocalmError("could not keep a copy of the current native runtime, so "
+                                      "nothing was rolled back", reason=str(e)) from None
+                if say:
+                    say("Restoring the native runtime the update replaced...")
+                errors = au.restore_runtime(snapshot, lib)
+                if errors:
+                    back = au.restore_runtime(keep, lib)
+                    shutil.rmtree(keep, ignore_errors=True)
+                    if back:
+                        raise RuntimeError("rollback incomplete: the native runtime could not be "
+                                           "restored nor put back: " + "; ".join(errors + back))
+                    raise LocalmError("the native runtime could not be restored, so nothing was "
+                                      "rolled back", reason="; ".join(errors))
+            if say:
+                say("Restoring the previous localm code...")
+            try:
+                au.rollback(backup_dir, target, names)
+            except Exception as e:
+                if keep is not None:
+                    back = au.restore_runtime(keep, lib)
+                    if back:
+                        raise RuntimeError(f"{e}; putting the native runtime back failed too: "
+                                           + "; ".join(back)) from None
+                raise
+            finally:
+                if keep is not None:
+                    shutil.rmtree(keep, ignore_errors=True)
+        except BaseException as e:
+            if comp_keep is not None:
+                back = updater_components.restore(comp_keep, root=target, say=say)
+                if back:
+                    raise RuntimeError(f"{e}; putting the components back failed too: "
+                                       + "; ".join(back)) from None
+            raise
+        finally:
+            if comp_keep is not None:
+                updater_components.discard(comp_keep)
+        try:
+            updater_components.clear_pending()
+        except OSError as e:
+            _apply_warn("could not clear a pending component update after the rollback: %s", e)
+        try:
+            updater_runtime.clear_pending()
+        except OSError as e:
+            _apply_warn("could not clear a pending runtime update after the rollback: %s", e)
         return {"rolled_back": True, "backup": str(backup_dir)}

@@ -4,11 +4,12 @@
 
 // --- ES module imports ---
 import { pickDirectory, pickFile } from "../app/picker.js";
-import { $, applyChatBackground, authHeaders, clearImageProxyCache, confirmDanger, confirmDangerAsync, el, fileToAvatarDataUri, fileToBackgroundDataUri, openModal, promptText, refreshCsrf, safeAvatarImageSrc, SHELL_TOKEN, streamJob, toast, whileBusy } from "../app/helpers.js";
+import { $, applyChatBackground, authHeaders, clearImageProxyCache, confirmDanger, confirmDangerAsync, el, fileToAvatarDataUri, fileToBackgroundDataUri, openModal, promptText, refreshCsrf, safeAvatarImageSrc, SHELL_TOKEN, showInlineError, streamJob, toast, whileBusy } from "../app/helpers.js";
 import { refreshCtxLimit } from "../app/chat.js";
 import { t, tn, tOr, tOrFirst } from "../app/i18n.js";
 import { emptyState } from "../app/icons.js";
 import { loginWithKey, modelCache } from "../app/models-sidebar.js";
+import { showView } from "../app/tabs.js";
 import { nativeModelSelect } from "../app/native-models.js";
 import { applyServerTtsConfig, browserVoiceOverride, caps, capsReady, clearBrowserVoiceOverride, refreshBackendInfo, refreshPerfEstimate, reloadActiveModelAfterSave, syncIndexSpaceHint, syncPerfCtxHelp, ttsProvider } from "../app/settings-perf.js";
 
@@ -1563,6 +1564,21 @@ export async function saveSettingsSection(secId) {
   return false;
 }
 
+/** The browser plugin's entry in /api/capabilities ({installed, enabled,
+ *  active, ...}), or null when the list does not name it or could not be read.
+ *  On null the caller falls back to the engine check, which reports its own
+ *  failure. Never throws. */
+async function browserPluginEntry() {
+  try {
+    const r = await fetch("/api/capabilities", { headers: authHeaders() });
+    if (!r.ok) return null;
+    const data = await r.json();
+    return (data.plugins || []).find((p) => p && p.name === "browser") || null;
+  } catch {
+    return null;
+  }
+}
+
 /** The "Browser setup" box under Settings > Network: whether the configured
  *  browser engine can start a browser, the one-time download of the bundled
  *  browser when that is what is missing, and a switch to the bundled browser
@@ -1587,13 +1603,20 @@ export function buildBrowserSetupBox() {
   const refresh = async () => {
     if (downloading) return null;
     actions.replaceChildren();
+    const plugin = await browserPluginEntry();
+    if (plugin && !plugin.active) {
+      statusLine.textContent = t(plugin.installed
+        ? "browser.setup.pluginDisabled" : "browser.setup.pluginMissing");
+      button(t("browser.setup.openPlugins"), () => showView("plugins"));
+      return null;
+    }
     let st = null;
     try {
       const r = await fetch("/api/browser/engine", { headers: authHeaders() });
       if (r.ok) st = await r.json();
     } catch { /* reported below */ }
     if (!st) {
-      statusLine.textContent = t("browser.setup.checkFailed");
+      showInlineError(statusLine, t("browser.setup.checkFailed"));
       return null;
     }
     if (st.ready) {
@@ -1743,12 +1766,11 @@ export async function refreshSettingsPage() {
 
   form.replaceChildren();
   // The two update-behavior toggles (update_allow_prerelease,
-  // update_ignore_net_policy, both admin_only) render INTO the static
-  // "Updates" card (index.html's #update-toggles-block) rather than getting
-  // their own section below - that second panel headed "Updates" is exactly
-  // the duplication S1's card merge removes. Reset to hidden first so a caller
-  // without those fields (or a schema fetch that dropped them) leaves it
-  // empty rather than showing a stale render from an earlier refresh.
+  // update_ignore_net_policy, both admin_only) render into the static "App
+  // update" sub-block (index.html's #update-toggles-block, inside
+  // #app-update-block) instead of a section of their own. Reset to hidden first
+  // so a caller without those fields (or a schema fetch that dropped them)
+  // leaves it empty rather than showing a stale render from an earlier refresh.
   const updateToggleBlock = $("update-toggles-block");
   if (updateToggleBlock) updateToggleBlock.hidden = true;
   for (const sec of ordered) {
@@ -1809,7 +1831,7 @@ export async function refreshSettingsPage() {
             sttBtn.style.display = "";
           }
         } catch {
-          sttStatus.textContent = t("settings.voice.statusFailed");
+          showInlineError(sttStatus, t("settings.voice.statusFailed"));
         }
       };
       updateSttStatus();
@@ -2640,7 +2662,7 @@ export async function buildTtsSection(form) {
         setupBtn.style.display = "";
       }
     } catch (e) {
-      setupStatus.textContent = t("settings.tts.cacheCheckFailed", { message: e.message });
+      showInlineError(setupStatus, t("settings.tts.cacheCheckFailed", { message: e.message }));
       setupBtn.style.display = "";
     }
   };
@@ -3622,8 +3644,8 @@ export function renderDoctorReport(body) {
       status.textContent = t("settings.diagnostics.notRunYet");
     } else if (report.verdict === "error") {
       // The run did not happen. This must never render as a clean result.
-      status.textContent = t("settings.diagnostics.couldNotRun",
-        { error: report.error || t("settings.diagnostics.noReasonReported") });
+      showInlineError(status, t("settings.diagnostics.couldNotRun",
+        { error: report.error || t("settings.diagnostics.noReasonReported") }));
     } else {
       const checks = report.checks || [];
       const bad = checks.filter((c) => c.status === "fail" || c.status === "warn");
@@ -3701,7 +3723,7 @@ export async function runDiagnostics() {
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.detail || r.statusText);
   } catch (e) {
-    if (status) status.textContent = t("settings.diagnostics.couldNotStart", { message: e.message });
+    showInlineError(status, t("settings.diagnostics.couldNotStart", { message: e.message }));
     if (btn) btn.disabled = false;
     return;
   }

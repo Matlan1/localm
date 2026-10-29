@@ -60,9 +60,11 @@ from localm.inference.protocol import (
 
 def _entry_path_is_folder(entry: dict) -> bool:
     """True when registry *entry*'s ``path`` names an existing folder; False
-    for an empty or missing path without touching the filesystem. Blocking:
+    for an empty, missing, malformed or ``..`` path without touching the
+    filesystem. Blocking:
     call it off the event loop."""
-    raw = str(entry.get("path") or "")
+    from localm.model_manager.registry import _entry_path
+    raw = _entry_path(entry)
     return bool(raw) and Path(raw).is_dir()
 
 
@@ -495,7 +497,7 @@ def register(app: FastAPI, ctx) -> None:
             prompt_tokens=prompt_tokens, compact_in_stream=compact_in_stream,
             compacted_here=compacted_here, route=route,
             routed_placement=routed_placement, include_usage=include_usage(req),
-            recorder=_caller_recorder(request))
+            recorder=_caller_recorder(request), show_path=_hs.path_formatter(request))
 
     def _prepared_engine(prepared) -> object:
         return prepared.engine
@@ -521,7 +523,7 @@ def register(app: FastAPI, ctx) -> None:
             prompt_tokens=prepared.prompt_tokens,
             compact=prepared.compact_in_stream,
             chunk_id=chunk_id, role_sent=chunk_id is not None,
-            include_usage=prepared.include_usage,
+            include_usage=prepared.include_usage, show_path=prepared.show_path,
             **prepared.gen_kwargs))
 
     async def _respond_complete(prepared, request: Request):
@@ -634,7 +636,8 @@ def register(app: FastAPI, ctx) -> None:
                     (route.resolved if route.routed
                      else req.model or route.resolved or "localm"),
                     _start_stream, engine_of=_prepared_engine,
-                    headers_of=_prepared_headers),
+                    headers_of=_prepared_headers,
+                    show_path=_hs.path_formatter(request)),
                 media_type="text/event-stream", headers=sse_headers)
         prepared = task.result()
         return StreamingResponse(
@@ -642,7 +645,7 @@ def register(app: FastAPI, ctx) -> None:
             headers={**sse_headers, **_prepared_headers(prepared)})
 
     @app.post("/v1/embeddings", dependencies=[Depends(_require_auth)])
-    async def embeddings(req: EmbeddingRequest):
+    async def embeddings(req: EmbeddingRequest, request: Request):
         # An empty model means "no preference": resolved below to the configured
         # embedder when one exists, otherwise through the general get_engine()
         # resolution. Refused only when there is nothing to fall back to.
@@ -722,7 +725,8 @@ def register(app: FastAPI, ctx) -> None:
                     vecs_emb = await loop.run_in_executor(None, _run_embed)
             except _rr.RerankerUnavailableError as e:
                 raise HTTPException(
-                    503, f"Embedding model {resolved_model!r} unavailable: {e}") from e
+                    503, f"Embedding model {resolved_model!r} unavailable: "
+                         f"{_hs.path_formatter(request)(e)}") from e
             except PretokenizerUnsafeInputError as e:
                 # A permanent property of this text against this model, not a
                 # transient worker condition, so 400 rather than the 503 below:
@@ -736,8 +740,8 @@ def register(app: FastAPI, ctx) -> None:
             if vecs_emb is None:
                 # Off the event loop: last_error() takes embedder._LOCK, which
                 # get_embedder holds across a spawn plus a native load.
-                why = await loop.run_in_executor(None, last_error) \
-                    or "embedding model unavailable"
+                why = await loop.run_in_executor(None, last_error)
+                why = _hs.path_formatter(request)(why) if why else "embedding model unavailable"
                 raise HTTPException(422, f"Embedding model unavailable ({why}). "
                                     "Run 'localm setup-embeddings'.")
 
@@ -829,7 +833,7 @@ def register(app: FastAPI, ctx) -> None:
         }
 
     @app.post("/v1/rerank", dependencies=[Depends(_require_auth)])
-    async def rerank(req: RerankRequest):
+    async def rerank(req: RerankRequest, request: Request):
         from localm.inference import reranker as _rr
         if not req.query.strip():
             raise HTTPException(400, '"query" must not be empty')
@@ -851,7 +855,8 @@ def register(app: FastAPI, ctx) -> None:
         except RerankerHeadMissingError as e:
             raise HTTPException(422, str(e)) from e
         except _rr.RerankerUnavailableError as e:
-            raise HTTPException(503, f"Reranker unavailable: {e}") from e
+            raise HTTPException(
+                503, f"Reranker unavailable: {_hs.path_formatter(request)(e)}") from e
         except RuntimeError as e:
             raise HTTPException(503, f"Reranking failed: {e}") from e
         results = _rr.rank_results(outcome.scored, req.top_n, outcome.labels)
@@ -1017,7 +1022,8 @@ def register(app: FastAPI, ctx) -> None:
                         audit=_caller_recorder(request), transcript=None,
                         pipeline=pipeline, ctx=ctx, prompt_tokens=prompt_tokens,
                         include_usage=include_usage(req),
-                        echo=prompt if req.echo else None, **gen_kwargs)),
+                        echo=prompt if req.echo else None,
+                        show_path=_hs.path_formatter(request), **gen_kwargs)),
                     media_type="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
                 )
@@ -1046,7 +1052,7 @@ def register(app: FastAPI, ctx) -> None:
                     gen_error = e
                     # The shared renderer also scrubs machine paths out of the
                     # text, which a model-load RuntimeError carries verbatim.
-                    text = _hs.inference_error_text(e)
+                    text = _hs.inference_error_text(e, _hs.path_formatter(request))
 
             generated = text
             if gen_error is None and req.stop:

@@ -96,6 +96,60 @@ def _update_marker(root: Path, target_commit: str, target_version: Optional[str]
         logger.debug("could not write managed-comfy update marker: %s", e)
 
 
+def _node_heads(root: Path) -> dict:
+    """``{name: commit}`` of the pinned custom nodes installed under *root*."""
+    from localm.media.managed_comfy_fresh import required_custom_nodes
+    out = {}
+    for node in required_custom_nodes().nodes:
+        d = root / "custom_nodes" / node.name
+        if d.is_dir():
+            head = _rev_parse_head(d)
+            if head:
+                out[node.name] = head
+    return out
+
+
+def _sync_custom_nodes(root: Path, on_progress: ProgressCb, say) -> tuple:
+    """Move every installed pinned custom node to its pinned commit. Returns
+    ``(ok, detail)``."""
+    from localm.media.managed_comfy_fresh import required_custom_nodes
+    for node in required_custom_nodes().nodes:
+        d = root / "custom_nodes" / node.name
+        head = _rev_parse_head(d) if d.is_dir() else None
+        if head is None or head == node.commit:
+            continue
+        say(f"Moving custom node {node.name} to {node.commit[:12]} (from {head[:12]}) ...")
+        ok, out = _run(["git", "-C", str(d), "fetch", "--quiet", node.repo, node.commit],
+                       on_progress=on_progress, timeout=1800)
+        if ok:
+            ok, out = _run(["git", "-C", str(d), "checkout", "--force", "--quiet",
+                            node.commit], on_progress=on_progress, timeout=300)
+        if not ok:
+            return False, f"custom node {node.name}: {_tail(out)}"
+    return True, ""
+
+
+def _sync_pinned_torch(venv_python: Path, on_progress: ProgressCb, say) -> tuple:
+    """Install the PyTorch this machine's managed ComfyUI uses
+    (``comfy_torch_spec``) when the managed venv does not have the exact
+    versions it pins. A spec without exact versions changes nothing. Returns
+    ``(ok, detail)``."""
+    from localm import updater_components as uc
+    from localm.media.managed_comfy_fresh import comfy_torch_install_args, comfy_torch_spec
+    args = comfy_torch_install_args(comfy_torch_spec())
+    pinned = [r for r in uc._requirements_in(args) if "==" in r]
+    site = uc.site_packages(venv_python.parent.parent)
+    if not pinned or site is None:
+        return True, ""
+    missing = uc.unsatisfied(pinned, uc.dists(site))
+    if not missing:
+        return True, ""
+    say("Installing the pinned PyTorch into the managed venv (" + ", ".join(missing) + ") ...")
+    ok, out = _run([str(venv_python), "-m", "pip", "install", "--disable-pip-version-check",
+                    *args], on_progress=on_progress, timeout=7200)
+    return ok, ("" if ok else _tail(out))
+
+
 def update_managed_comfy(cfg: Optional[dict] = None, *, on_progress: ProgressCb = None,
                          comfyui_repo: Optional[str] = None,
                          target_commit: Optional[str] = None,
@@ -143,6 +197,7 @@ def update_managed_comfy(cfg: Optional[dict] = None, *, on_progress: ProgressCb 
     acquired, busy = _acquire_update_lock()
     if not acquired:
         return _result(False, "busy", busy)
+    prev_nodes = _node_heads(root) if reinstall_requirements else {}
 
     def _rollback(reason: str) -> ProvisionResult:
         """Return the managed source to prev_commit and re-apply the patch set, then
@@ -151,6 +206,13 @@ def update_managed_comfy(cfg: Optional[dict] = None, *, on_progress: ProgressCb 
         re-applied on the restored source - say so rather than report a clean
         tree."""
         note = ""
+        for name, head in prev_nodes.items():
+            n_ok, n_out = _run(["git", "-C", str(root / "custom_nodes" / name), "checkout",
+                                "--force", "--quiet", head], on_progress=on_progress,
+                               timeout=300)
+            if not n_ok:
+                note += (f" Custom node {name} could not be moved back to {head[:12]} "
+                         f"({_tail(n_out)}).")
         ok, out = _run(["git", "-C", str(root), "checkout", "--force", "--quiet",
                         prev_commit], on_progress=on_progress, timeout=300)
         if ok:
@@ -236,6 +298,12 @@ def update_managed_comfy(cfg: Optional[dict] = None, *, on_progress: ProgressCb 
         #    rollback-able, so it is off by default and only the source rollback is
         #    guaranteed).
         if reinstall_requirements:
+            ok, detail = _sync_pinned_torch(paths.venv_python, on_progress, _say)
+            if not ok:
+                return _rollback(f"Installing the pinned PyTorch failed: {detail}")
+            ok, detail = _sync_custom_nodes(root, on_progress, _say)
+            if not ok:
+                return _rollback(f"Updating a pinned custom node failed: {detail}")
             req = root / "requirements.txt"
             if req.is_file():
                 _say("Reinstalling ComfyUI requirements into the managed venv ...")

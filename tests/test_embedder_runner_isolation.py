@@ -931,3 +931,242 @@ class TestNativeSignalCrashDiagnosticsReachDebugLog:
             r.shutdown(grace=5)
         assert not trace_path.exists(), (
             f"a cleanly shut-down worker left {trace_path} behind")
+
+
+# --------------------------------------------------------------------------- #
+#  The parent's native-console pause reaches the embedder worker               #
+# --------------------------------------------------------------------------- #
+
+_LIBRARY_LINE = b"ggml_cuda_init: found 1 ROCm devices:\n"
+_LOADER_LINE = b"llama_model_loader: - kv   0: general.architecture str = bert\n"
+
+
+class _ConsoleSpy:
+    """Stands in for the stderr duplicate dedup_native_stderr writes to."""
+
+    def __init__(self):
+        self.writes = []
+
+    def write(self, text):
+        self.writes.append(text)
+
+    def flush(self):
+        pass
+
+    def close(self):
+        pass
+
+    def text(self):
+        return "".join(self.writes)
+
+
+class _NativeWritingEmbedder:
+    """Writes to the real fd 2 the way GGUFEmbedder's load does: one line from
+    the native library before the model load's own dedup_native_stderr scope,
+    one inside it. Raises for model_path "broken.gguf" after writing both."""
+
+    def __init__(self, **kwargs):
+        from localm import debuglog
+        os.write(2, _LIBRARY_LINE)
+        with debuglog.dedup_native_stderr():
+            os.write(2, _LOADER_LINE)
+        if kwargs.get("model_path") == "broken.gguf":
+            raise RuntimeError("failed to load embedding model: broken.gguf")
+        self.dim = 4
+        self.declared_pooling = None
+        self.pooling_type = 1
+        self.n_ctx = 512
+
+    def close(self):
+        pass
+
+
+class TestPausedLoadKeepsNativeLinesOffTheTerminal:
+    """A "load" sent while the parent's native console is paused writes every
+    native line of the load (the library's start-up lines included) to the
+    debug log and none to the terminal; a load sent without it is unchanged.
+    Drives _runner_main's dispatch loop in-process with real fd-2 writes."""
+
+    def _run_load(self, monkeypatch, tmp_path, model_path, paused,
+                  embedder_cls=_NativeWritingEmbedder):
+        import queue as _q
+        from localm import debuglog
+        console = _ConsoleSpy()
+        monkeypatch.setattr(debuglog, "_stable_console_stream", lambda: console)
+        log = tmp_path / "debug.log"
+        monkeypatch.setattr(
+            debuglog, "native_stderr_target",
+            lambda: os.open(str(log), os.O_WRONLY | os.O_APPEND | os.O_CREAT))
+        monkeypatch.setattr("localm.inference.embedder.GGUFEmbedder", embedder_cls)
+        params = dict(model_path=model_path, n_gpu_layers=0, n_ctx=512,
+                      pooling_type=1)
+        if paused:
+            params[runner_mod._NATIVE_CONSOLE_PAUSED_KEY] = True
+        req_q, resp_q = _q.Queue(), _q.Queue()
+        req_q.put(("load", params))
+        req_q.put(None)
+        runner_mod._runner_main(req_q, resp_q)
+        logged = (log.read_bytes().decode().splitlines() if log.exists() else [])
+        return resp_q.get_nowait(), console, logged
+
+    def test_paused_load_lines_reach_the_debug_log_not_the_terminal(
+            self, monkeypatch, tmp_path, capfd):
+        reply, console, logged = self._run_load(
+            monkeypatch, tmp_path, "x.gguf", paused=True)
+        err = capfd.readouterr().err
+
+        assert _LIBRARY_LINE.decode().strip() in logged
+        assert _LOADER_LINE.decode().strip() in logged
+        assert _LIBRARY_LINE.decode().strip() not in err
+        assert _LOADER_LINE.decode().strip() not in err
+        assert console.text() == ""
+        assert reply[0] == "ok", reply
+
+    def test_unpaused_load_still_prints_its_native_lines(
+            self, monkeypatch, tmp_path, capfd):
+        reply, console, _logged = self._run_load(
+            monkeypatch, tmp_path, "x.gguf", paused=False)
+        err = capfd.readouterr().err
+
+        assert _LIBRARY_LINE.decode().strip() in err
+        assert _LOADER_LINE.decode().strip() in console.text()
+        assert reply[0] == "ok", reply
+
+    def test_paused_failed_load_is_still_reported_with_its_native_lines_logged(
+            self, monkeypatch, tmp_path, capfd):
+        reply, console, logged = self._run_load(
+            monkeypatch, tmp_path, "broken.gguf", paused=True)
+        err = capfd.readouterr().err
+
+        assert _LOADER_LINE.decode().strip() in logged
+        assert _LOADER_LINE.decode().strip() not in err
+        assert console.text() == ""
+        assert reply == ("error", "failed to load embedding model: broken.gguf")
+
+    def test_the_pause_key_never_reaches_the_embedder(self, monkeypatch, tmp_path):
+        seen = {}
+
+        class _Spy(_NativeWritingEmbedder):
+            def __init__(self, **kwargs):
+                seen.update(kwargs)
+                super().__init__(**kwargs)
+
+        reply, _console, _logged = self._run_load(
+            monkeypatch, tmp_path, "x.gguf", paused=True, embedder_cls=_Spy)
+
+        assert seen["model_path"] == "x.gguf"
+        assert runner_mod._NATIVE_CONSOLE_PAUSED_KEY not in seen
+        assert reply[0] == "ok", reply
+
+
+class TestPausedEmbedScope:
+    """An "embed" or "rerank" carrying the pause opens its dedup scope under
+    native_console_paused(); a change of pause state closes the open scope and
+    opens a new one."""
+
+    def test_pause_state_follows_each_command(self, monkeypatch):
+        import contextlib
+        import queue as _q
+        from localm import debuglog
+
+        events = []
+
+        @contextlib.contextmanager
+        def spy_dedup():
+            events.append("enter:paused" if debuglog.native_console_is_paused()
+                          else "enter:console")
+            yield
+            events.append("exit")
+
+        monkeypatch.setattr("localm.debuglog.dedup_native_stderr", spy_dedup)
+
+        class _Stub:
+            def __init__(self, **kwargs):
+                self.dim = 4
+                self.declared_pooling = None
+                self.pooling_type = 1
+                self.n_ctx = 512
+
+            def embed(self, texts):
+                events.append("embed")
+                return [[0.0] * 4 for _ in texts]
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr("localm.inference.embedder.GGUFEmbedder", _Stub)
+        req_q, resp_q = _q.Queue(), _q.Queue()
+        req_q.put(("load", dict(model_path="x.gguf", n_gpu_layers=0, n_ctx=512,
+                                pooling_type=1)))
+        req_q.put(("embed", ["a"], True))
+        req_q.put(("embed", ["b"], True))
+        req_q.put(("embed", ["c"]))
+        req_q.put(("shutdown", None))
+
+        runner_mod._runner_main(req_q, resp_q)
+
+        assert events == [
+            "enter:paused", "embed", "embed", "exit",
+            "enter:console", "embed", "exit",
+        ], events
+        assert not debuglog.native_console_is_paused()
+
+
+class TestParentForwardsThePause:
+    """EmbedderRunner adds the pause to "load", "embed" and "rerank" while this
+    process's native console is paused, and only then. A failed paused load is
+    still raised to the caller."""
+
+    def test_embed_and_rerank_carry_the_pause_only_while_paused(self):
+        from localm import debuglog
+        r = EmbedderRunner()
+        r._req_q = _queue.Queue()
+        r._resp_q = _queue.Queue()
+        for reply in (("ok", [[1.0]]), ("ok", [[1.0]]), ("ok", [])):
+            r._resp_q.put(reply)
+        r._proc = _AliveProc()
+
+        r.embed(["a"], timeout=5)
+        with debuglog.native_console_paused():
+            r.embed(["b"], timeout=5)
+            r.rerank([("q", "d")], timeout=5)
+
+        sent = [r._req_q.get_nowait() for _ in range(3)]
+        assert sent == [("embed", ["a"]), ("embed", ["b"], True),
+                        ("rerank", [("q", "d")], True)]
+
+    def test_load_carries_the_pause_only_while_paused(self, monkeypatch):
+        from localm import debuglog
+        sent = []
+
+        def fake_spawn(self):
+            self._req_q = _queue.Queue()
+            self._resp_q = _queue.Queue()
+            self._resp_q.put(("ok", {"dim": 4}))
+            self._proc = _AliveProc()
+            self._req_q.put = sent.append
+
+        monkeypatch.setattr(EmbedderRunner, "_spawn", fake_spawn)
+        params = dict(_DUMMY_LOAD_PARAMS)
+        EmbedderRunner().spawn_and_load(params, timeout=5)
+        with debuglog.native_console_paused():
+            EmbedderRunner().spawn_and_load(params, timeout=5)
+
+        assert sent == [
+            ("load", params),
+            ("load", {**params, runner_mod._NATIVE_CONSOLE_PAUSED_KEY: True}),
+        ]
+        assert runner_mod._NATIVE_CONSOLE_PAUSED_KEY not in params
+
+    def test_a_failed_paused_load_in_a_real_worker_is_raised(self):
+        from localm import debuglog
+        r = EmbedderRunner()
+        params = dict(_DUMMY_LOAD_PARAMS, not_a_real_param="boom")
+        try:
+            with debuglog.native_console_paused():
+                with pytest.raises(RuntimeError) as ei:
+                    r.spawn_and_load(params, timeout=60.0)
+            assert "not_a_real_param" in str(ei.value), ei.value
+            assert not r.is_alive()
+        finally:
+            r.shutdown(grace=0)

@@ -196,7 +196,7 @@ _CHANGELOG_LINKREF = re.compile(r"\[[^\]]+\]:\s")
 _CHANGELOG_VERSION_HEADER = re.compile(r"^##\s+\[(\d[^\]]*)\]")
 
 
-def _pending_release_version() -> str | None:
+def _pending_release_version(version_text: str | None = None) -> str | None:
     """The one version whose changelog section is still an editable DRAFT: the version
     the VERSION file names, when no release tag exists for it yet. None => freeze every
     version section (the old, unconditional behavior).
@@ -213,11 +213,16 @@ def _pending_release_version() -> str | None:
       - the VERSION-matching section re-freezes the moment its tag exists.
     So at most ONE section - the pending release - is ever editable, and every genuinely
     published section stays frozen regardless of local tag state. Any uncertainty (no
-    VERSION file, git unavailable, git error) fails SAFE by freezing everything."""
-    try:
-        version = (REPO / "VERSION").read_text(encoding="utf-8").strip()
-    except OSError:
-        return None                     # no VERSION file: freeze every version section
+    VERSION file, git unavailable, git error) fails SAFE by freezing everything.
+
+    *version_text* is the content of a VERSION file to judge instead of the working
+    tree's (the baseline's VERSION, read from git)."""
+    if version_text is None:
+        try:
+            version_text = (REPO / "VERSION").read_text(encoding="utf-8")
+        except OSError:
+            return None                 # no VERSION file: freeze every version section
+    version = version_text.strip()
     if not version:
         return None
     tag = _git("tag", "--list", f"v{version}")
@@ -278,15 +283,21 @@ def _changelog_protected_lines(text: str, pending_version: str | None = None) ->
 
 
 def _changelog_removed_lines(old_text: str, new_text: str,
-                             pending_version: str | None = None) -> list[str]:
+                             pending_version: str | None = None,
+                             old_pending_version: str | None = None) -> list[str]:
     """Protected content lines present in *old_text* but no longer present (with
     multiplicity) in *new_text*: shipped changelog entries that were DELETED or
     REWRITTEN rather than left intact with new entries added above them.
 
     *pending_version* exempts the cut-but-unreleased section (see
-    _changelog_protected_lines); None protects every version section."""
+    _changelog_protected_lines); None protects every version section.
+    *old_pending_version* is the pending release at the baseline: its section in
+    *old_text* is a draft too, so a version change may rename or re-cut it. It
+    defaults to *pending_version*."""
     from collections import Counter
-    old = Counter(_changelog_protected_lines(old_text, pending_version))
+    if old_pending_version is None:
+        old_pending_version = pending_version
+    old = Counter(_changelog_protected_lines(old_text, old_pending_version))
     new = Counter(_changelog_protected_lines(new_text, pending_version))
     removed = []
     for line, count in old.items():
@@ -359,7 +370,11 @@ def _changelog_append_only() -> list[str]:
         working = (REPO / _CHANGELOG).read_text(encoding="utf-8")
     except OSError:
         working = ""                    # deleted from the tree: every entry is gone
-    removed = _changelog_removed_lines(base.stdout, working, _pending_release_version())
+    pending = _pending_release_version()
+    base_version = _git("show", f"{ref}:VERSION")
+    base_pending = (_pending_release_version(base_version.stdout)
+                    if base_version is not None and base_version.returncode == 0 else None)
+    removed = _changelog_removed_lines(base.stdout, working, pending, base_pending or pending)
     if not removed:
         return []
     shown = "; ".join(repr(x.strip()) for x in removed[:4])

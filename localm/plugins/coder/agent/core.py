@@ -50,6 +50,28 @@ def _foreign_summary(description) -> str:
     return text
 
 
+def cap_backend_session_mode(backend, mode) -> None:
+    """Set ``backend.session_mode`` to the most private of its current value
+    and *mode*, so a localm server records the backend's requests no less
+    privately than *mode*. A backend without a ``session_mode`` attribute is
+    left unchanged. An unknown *mode* or current value counts as privacy."""
+    if not hasattr(backend, "session_mode"):
+        return
+    from localm.audit import most_private, parse_mode
+
+    def _parse(value) -> SessionMode:
+        try:
+            return parse_mode(str(getattr(value, "value", value)))
+        except ValueError:
+            return SessionMode.PRIVACY
+
+    modes = [_parse(mode)]
+    current = getattr(backend, "session_mode", None)
+    if current:
+        modes.append(_parse(current))
+    backend.session_mode = most_private(*modes).value
+
+
 def _foreign_tool_docs(heading: str, names, registry) -> GuardedText:
     """*heading* followed by one ``- name: summary`` line per registered tool
     in *names*, as a ``GuardedText`` whose untrusted ranges cover each line's
@@ -172,6 +194,7 @@ class Agent(
         self.parent         = parent
         self.server_side    = bool(server_side or getattr(parent, "server_side", False))
         self.mode           = mode
+        cap_backend_session_mode(backend, mode)
         # Publish this session's own cwd-resolved mode for debug_content_enabled()
         # (localm.debuglog) to see - it cannot resolve a project's own
         # .localcoder/config.toml privacy pin on its own (localm.audit.
@@ -312,6 +335,7 @@ class Agent(
 
         self._messages: list[dict] = []
         self._turns: int = 0
+        self._task_start_turns: int = 0   # session turn count when the current task started
         self._total_tokens: int = 0
         self._last_turn_tokens: int = 0   # tokens used in the most recently completed turn
         self._consecutive_errors: dict[str, int] = {}  # tool_name -> failure streak
@@ -1187,6 +1211,23 @@ class Agent(
     def request_stop(self) -> None:
         """Ask the loop to stop at the next safe point (turn or token boundary)."""
         self._stop_requested = True
+
+    detached = False
+
+    @property
+    def stop_pending(self) -> bool:
+        """True once this run should stop: a stop was requested on this agent
+        or on an ancestor that is blocked on this run, or it was cancelled.
+        A detached (background) agent follows only its own stop and cancel;
+        the ancestor walk ends at it."""
+        if self._stop_requested or self.cancelled:
+            return True
+        agent = self
+        while agent is not None and not agent.detached:
+            agent = getattr(agent, "parent", None)
+            if agent is not None and getattr(agent, "_stop_requested", False):
+                return True
+        return False
 
     @property
     def cancelled(self) -> bool:

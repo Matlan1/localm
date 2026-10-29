@@ -84,15 +84,24 @@ yourself - and are written in every session mode, privacy included:
 - **GUI uploads.** A file you upload for a model or tool to read is written
   to `<home>/uploads/`.
 - **Download records.** A model download in progress is recorded in
-  `<data dir>/pending-pulls/` (the model spec, its source URLs and sizes) so an
-  interrupted one can be resumed; the record is removed when it finishes or you
-  delete or resume it. Like the model registry, it holds model source details
-  only, never conversation content.
+  `<data dir>/pending-pulls/` so an interrupted one can be resumed. A record
+  holds the model spec and options, its source URLs, sizes and digests, the
+  absolute paths of the partial files on this machine, and the identity of the
+  localm process that ran the download (its process id and start time). It is
+  removed when that download finishes, when you delete it, when none of its
+  partial data is left on disk (noticed the next time interrupted downloads are
+  listed), and when a later download with the same options finishes (a
+  full-repository download of the same folder also clears it when the later
+  one used other options). Resuming does not remove it at once: the resumed
+  download writes its own record, which replaces it. A record you dismiss stays until one of those happens. Like the
+  model registry, it holds model source details only, never conversation
+  content.
 
 None of this is silent: each is something you explicitly asked localm to
 keep, not a trace of a conversation. But if you are relying on privacy mode
 alone to leave nothing behind, know that a job you scheduled, a document you
-indexed, a persona you saved, or a file you uploaded still lands on disk.
+indexed, a persona you saved, a file you uploaded, or a model download that
+stopped before it finished still lands on disk.
 
 ### Another localm instance answering for this one
 
@@ -151,6 +160,18 @@ model name or a model path, in any session mode. It writes nothing to disk.
 `<data dir>/logs/`, captures native llama.cpp stderr (model metadata/timings), and
 logs each request (method, path, status, timing - never request bodies). It does
 NOT record your chat content in privacy mode (see the guarantee below).
+
+### GUI error messages
+
+Every error message the GUI shows (an error toast, the sidebar status error, an
+error shown inside a page) and every script error in the page is also sent to the
+server, which writes it to its log as one `gui:` line at WARNING, with home paths,
+credentials, email addresses and machine names removed. A burst of the same error
+is sent as one line with a count. Like the server's own warnings, that line goes to the
+in-memory activity list behind the status window in every mode, and to the debug
+log file only when the debug log is on. The Settings "Recent errors" list (the
+last five) is kept in the browser's memory in privacy mode and gone on reload; in
+`log` and `full` mode it is also kept in the browser's local storage.
 
 ### "Keep diagnostics for bug reports" (`keep_diagnostics`)
 

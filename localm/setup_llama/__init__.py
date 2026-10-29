@@ -87,7 +87,7 @@ import click  # noqa: F401
 from localm import config  # noqa: F401
 from localm.http_ssl import verified_urlopen as _verified_urlopen
 from localm.setup_llama._common import (
-    console, _flush_stdin, _require_network_allowed,
+    console, _flush_stdin, _require_network_allowed, _interactive, _confirm, _choose,
 )
 from localm.setup_llama.pins import (
     DEFAULT_URL, DEFAULT_URL_SHA256, _ROCM_TAG, _ROCM_BUILD, _ROCM_CPU_ASSET, _ROCM_CPU_TAG,
@@ -115,6 +115,7 @@ from localm.setup_llama.runtime_dir import (
     installed_build, installed_runtime_identity, _repo_runtime_lib, _runtime_pkg_dir,
     _install_runtime_wheel, _PRESERVED_TARGET_FILES, RuntimeInUseError, _clearable_files, _files_in_use,
     _clear_target, _clear_target_or_refuse, _exit_runtime_in_use, _PROVISION_LOCK_OWNER,
+    _replace_target, _staging_path,
     ProvisioningBusyError, _provision_lock_path, _provision_lock_holder_pid,
     _provisioning_lock, _exit_provisioning_busy,
 )
@@ -177,6 +178,7 @@ __all__ = [
     "_BLACKWELL_MIN_CAP", "_BLAS_DIRS_REQUIRING_KERNELS", "blas_kernel_problems",
     "_BLAS_LIBRARY_DIRS", "_bundle_missing_native_deps", "check_runtime_update",
     "_clear_target", "_clear_target_or_refuse", "_clearable_files", "console",
+    "_replace_target", "_staging_path",
     "STAGED_NOTE", "IMAGE_TAG_FOR_LINE", "CUDA_CHECK_FAILED", "record_staged_cuda",
     "staged_cuda_line", "check_staged_cuda_runtime", "cuda_container_check",
     "_copy_binaries", "_copy_blas_library_dirs", "_copy_license_files", "CPU_OVERLAY_MARKER",
@@ -189,6 +191,7 @@ __all__ = [
     "_extract_archive", "_extract_libgomp_from_deb", "_fetch_and_place",
     "_fetch_cuda_runtime_libs", "_fetch_pypi_runtime_lib", "_fetch_verified",
     "_files_in_use", "_floor_at_pinned_tag", "_FLOOR_TAG_DESCRIPTION", "_flush_stdin",
+    "_interactive", "_confirm", "_choose",
     "_has_vendor_library", "_human_mb", "_informative_error_line",
     "install_rocm_simd_cpu", "_install_runtime_wheel", "installed_backend",
     "installed_build", "installed_cpu_overlay", "installed_runtime_identity",

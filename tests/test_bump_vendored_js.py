@@ -594,6 +594,10 @@ def test_a_region_found_twice_or_not_at_all_refuses_the_edit(bump, tree, capsys,
 # --------------------------------------------------------------------------- #
 
 def test_the_checklist_lists_prose_that_still_names_the_old_version(bump, tree, capsys):
+    readme = tree / bump.NOTICE_RELS[0]
+    readme.write_text(readme.read_text(encoding="utf-8")
+                      + f"\nAdvisory status for {MARKED} was established from OSV.\n",
+                      encoding="utf-8")
     reg = registry_for(bump, tree, "marked", NEW_MARKED)
     assert run(bump, ["--lib", "marked", "--tag", NEW_MARKED], reg) == 0
     out = capsys.readouterr().out

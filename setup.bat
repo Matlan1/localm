@@ -20,6 +20,7 @@ setlocal EnableDelayedExpansion
 set LOCALM_SETUP=1
 title LocaLM setup
 set "HBSEQ=0"
+set "RUNTIME_OK=1"
 
 rem ---- command-line options ---------------------------------------------------
 rem    uninstall  (or --uninstall / --rollback)  remove LocaLM from this folder
@@ -59,6 +60,7 @@ echo    [2] Uninstall              - remove LocaLM from this computer
 echo    [3] Cancel
 set "EXPICK="
 call :flush
+rem SETUP-Q: existing-install
 set /p "EXPICK=  Pick 1, 2 or 3 [1]: "
 if not defined EXPICK set "EXPICK=1"
 if "%EXPICK%"=="2" goto uninstall
@@ -125,6 +127,7 @@ echo    [1] Portable - everything in this folder (self-contained; re-downloads p
 echo    [2] Shared   - reuse/install uv at its normal per-user location (faster; lives in your user profile)
 set "STOREPICK="
 call :flush
+rem SETUP-Q: tooling-store
 set /p "STOREPICK=  Pick 1 or 2 [1]: "
 if not defined STOREPICK set "STOREPICK=1"
 set "CONTAINED=0"
@@ -183,6 +186,7 @@ if exist ".uv\uv.exe" (
 echo  [^^!] uv (the Python package manager localm builds on) is not installed.
 set "GETUV="
 call :flush
+rem SETUP-Q: uv-install
 set /p "GETUV=  Install it now with Astral's official installer? [Y/n]: "
 if not defined GETUV set "GETUV=Y"
 if /i "!GETUV:~0,1!"=="N" goto uv_manual
@@ -205,12 +209,14 @@ if "%CONTAINED%"=="1" (
 )
 set "UV_INSTALLER_VERSION=0.13.6"
 set "UV_INSTALLER_SHA256=d00580051699bee58a2e2d9b925f45788b35f7e0fff7966fd5bedfc3c547dc7d"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol=[Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; $f=$null; try { $d=$env:STMP; if ($d) { $d=(Resolve-Path -LiteralPath $d -ErrorAction Stop).ProviderPath } else { $d=[IO.Path]::GetTempPath() }; $f=Join-Path $d ('uv-installer-'+[guid]::NewGuid()+'.ps1'); try { Invoke-WebRequest -UseBasicParsing -Uri ('https://github.com/astral-sh/uv/releases/download/'+$env:UV_INSTALLER_VERSION+'/uv-installer.ps1') -OutFile $f -ErrorAction Stop } catch { exit 61 }; $h=$null; $fs=$null; try { $fs=[IO.File]::Open($f,'Open','Read','Read'); $h=[BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($fs)).Replace('-','') } catch { }; if ($h -ne $env:UV_INSTALLER_SHA256) { exit 62 }; $env:PSModulePath=$null; & powershell -NoProfile -ExecutionPolicy Bypass -File $f; exit $LASTEXITCODE } finally { if ($fs) { $fs.Dispose() }; if ($f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue } }"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol=[Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; $f=$null; $t=$null; try { $d=$env:STMP; if ($d) { $d=(Resolve-Path -LiteralPath $d -ErrorAction Stop).ProviderPath } else { $d=[IO.Path]::GetTempPath() }; $f=Join-Path $d ('uv-installer-'+[guid]::NewGuid()+'.ps1'); try { Invoke-WebRequest -UseBasicParsing -Uri ('https://github.com/astral-sh/uv/releases/download/'+$env:UV_INSTALLER_VERSION+'/uv-installer.ps1') -OutFile $f -ErrorAction Stop } catch { exit 61 }; $h=$null; $fs=$null; try { $fs=[IO.File]::Open($f,'Open','Read','Read'); $h=[BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($fs)).Replace('-','') } catch { }; if ($h -ne $env:UV_INSTALLER_SHA256) { exit 62 }; $t=Join-Path $d ('uv-tmp-'+[guid]::NewGuid()); try { $null=New-Item -ItemType Directory -Path $t -ErrorAction Stop } catch { $t=$null; exit 63 }; $env:TEMP=$t; $env:TMP=$t; $env:PSModulePath=$null; & powershell -NoProfile -ExecutionPolicy Bypass -File $f; exit $LASTEXITCODE } finally { if ($fs) { $fs.Dispose() }; if ($f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }; if ($t) { Remove-Item -LiteralPath $t -Recurse -Force -ErrorAction SilentlyContinue } }"
 set "UVRC=%errorlevel%"
 if "%UVRC%"=="61" echo  [^^!] Could not download the uv %UV_INSTALLER_VERSION% installer.
 if "%UVRC%"=="62" echo  [^^!] The downloaded uv installer did not match its expected checksum, or could not be read to check it, and was not run.
+if "%UVRC%"=="63" echo  [^^!] Could not create a temporary folder in %STMP% for the uv installer.
 if "%UVRC%"=="61" goto uv_refused
 if "%UVRC%"=="62" goto uv_refused
+if "%UVRC%"=="63" goto uv_refused
 if not "%CONTAINED%"=="1" set "UVSHARED=--uv-shared-installed"
 rem  Make the freshly installed uv callable for the rest of THIS run (the installer
 rem  updates the persistent USER PATH, not this already-running shell). Prepend every
@@ -298,6 +304,7 @@ set "REPLACEVENV="
 set "VENVKIND=Foreign"
 if "%OURS%"=="1" set "VENVKIND=LocalM"
 call :flush
+rem SETUP-Q: replace-venv
 set /p "REPLACEVENV=  !VENVKIND! .venv found. Replace it? [y/N]: "
 if not defined REPLACEVENV set "REPLACEVENV=N"
 if /i not "!REPLACEVENV:~0,1!"=="Y" (
@@ -378,6 +385,7 @@ if "!VENVLOCKISH!"=="1" (
         echo.
         set "STOPPICK="
         call :flush
+        rem SETUP-Q: venv-lockers
         set /p "STOPPICK=  Stop them and retry now? [Y/n]: "
         if not defined STOPPICK set "STOPPICK=Y"
         if /i not "!STOPPICK:~0,1!"=="N" (
@@ -428,6 +436,7 @@ if "!VENVREASON!"=="lockers_declined" (
 echo.
 set "RETRYPICK="
 call :flush
+rem SETUP-Q: venv-retry
 set /p "RETRYPICK=  Try again? [Y/n]: "
 if not defined RETRYPICK set "RETRYPICK=Y"
 if /i "!RETRYPICK:~0,1!"=="N" (
@@ -445,6 +454,7 @@ rem  Record the environment now; the record at the end of setup repeats it.
 setlocal DisableDelayedExpansion
 .venv\Scripts\python -m localm.install_manifest record --root . --venv "%CD%\.venv" %RCFLAG% --python-dir "%PYDIR%" --cache-dir "%CACHEDIR%" --uv-dir "%UVDIR%" %UVSHARED% >nul 2>nul
 endlocal
+call :record_shared_uv
 :venv_done
 call :step_done venv || exit /b 99
 
@@ -465,6 +475,7 @@ echo  LocaLM's data for this folder is in:
 .venv\Scripts\python -m localm.install_manifest current-data --root .
 set "KEEPDATA="
 call :flush
+rem SETUP-Q: keep-data
 set /p "KEEPDATA=  Keep using it? [Y/n]: "
 if not defined KEEPDATA set "KEEPDATA=Y"
 if /i "!KEEPDATA:~0,1!"=="N" goto choose_data_folder
@@ -481,6 +492,7 @@ echo    [1] Stop setup - connect it, then run setup again
 echo    [2] Choose a different data folder now
 set "MISSPICK="
 call :flush
+rem SETUP-Q: data-offline
 set /p "MISSPICK=  Pick 1 or 2 [1]: "
 if not defined MISSPICK set "MISSPICK=1"
 if "%MISSPICK%"=="2" goto choose_data_folder
@@ -499,6 +511,7 @@ rem  path's set /p below and be read as an empty path (SETUP-2). With set /p the
 rem  Enter belongs to THIS prompt, so the path prompt starts clean.
 set "DATAPICK="
 call :flush
+rem SETUP-Q: data-folder
 set /p "DATAPICK=  Pick 1 or 2 [1]: "
 if not defined DATAPICK set "DATAPICK=1"
 rem  Single-line `if ... call` into goto/label subroutines (defined at the end):
@@ -527,10 +540,17 @@ echo    [1] Browser    - opens in your default browser (no extra install)
 echo    [2] App window - its own window, no browser tab (installs localm[desktop])
 set "WPICK="
 call :flush
+rem SETUP-Q: window-mode
 set /p "WPICK=  Pick 1 or 2 [1]: "
 if not defined WPICK set "WPICK=1"
-set "EXTRAS=coder,voice,monitor"
-if "%WPICK%"=="2" set "EXTRAS=coder,voice,monitor,desktop"
+rem  The pip extras come from localm.setup_spec, the list every setup variant installs.
+set "XWIN="
+if "%WPICK%"=="2" set "XWIN=app-window"
+set "EXTRAS="
+.venv\Scripts\python -m localm.setup_spec extras %XWIN% > "%STMP%\localm_extras.txt" 2>nul
+if exist "%STMP%\localm_extras.txt" for /f "usebackq delims=" %%a in ("%STMP%\localm_extras.txt") do set "EXTRAS=%%a"
+del "%STMP%\localm_extras.txt" 2>nul
+if not defined EXTRAS goto extras_failed
 rem  WINMODE is that answer in words. The shortcut prompt and the closing
 rem  "how to start" lines below both describe what the GUI will actually do,
 rem  and that depends on THIS choice - `localm gui` opens a native window when
@@ -560,6 +580,11 @@ uv pip install -p .venv -e ".[%EXTRAS%]"
 if not errorlevel 1 goto install_ok
 echo  [^^!] Install failed - see the error above.
 call :offer_report "localm install failed during setup" "uv pip install -e .[%EXTRAS%] failed - see the error output above."
+pause
+exit /b 1
+:extras_failed
+echo  [^^!] Could not read the list of features to install ^(python -m localm.setup_spec extras^).
+call :offer_report "localm setup could not read its install list" "python -m localm.setup_spec extras gave no answer in the new .venv."
 pause
 exit /b 1
 :install_ok
@@ -595,81 +620,53 @@ if "%VENDOR%"=="" set "VENDOR=none"
 if "%REC%"=="" set "REC=cpu"
 echo  Detected graphics vendor: %VENDOR%
 echo  Recommended inference backend: %REC%
-if /i "%VENDOR%"=="nvidia" echo  NVIDIA note: [1] cuda = peak performance, fetches a self-contained runtime (no Toolkit) and falls back to Vulkan if your driver is too old; pick [2] vulkan for the no-download universal build.
+if /i "%VENDOR%"=="nvidia" echo  NVIDIA note: [1] cuda = peak performance, fetches a self-contained runtime (no Toolkit) and falls back to Vulkan if your driver is too old; pick vulkan for the no-download universal build.
 
 rem  Plain-language opt-out before the numbered menu below: on blank Enter that
 rem  menu defaults to REC, so a GPU box would otherwise fetch and load-test a
 rem  sizeable GPU runtime by default even for someone who wants CPU only.
-rem  Downgrades the DEFAULT the menu offers; [5] cpu is still there regardless.
+rem  Downgrades the DEFAULT the menu offers; cpu is still in the menu regardless.
 if /i not "%REC%"=="cpu" (
     set "GPUUSE="
     call :flush
+    rem SETUP-Q: gpu-use
     set /p "GPUUSE=  GPU acceleration looks available (%VENDOR%). Use it? [Y/n] (n = CPU only): "
     if not defined GPUUSE set "GPUUSE=Y"
     if /i "!GPUUSE:~0,1!"=="N" set "REC=cpu"
 )
 
-rem ---- the backends setup-llama has a build of for this machine ---------------
-rem  `python -m localm.hwdetect backends` prints the backends with a prebuilt
-rem  build for this OS and CPU architecture - the same list setup.sh builds its
-rem  menu from. The menu and the "provision later" hint list only these. The
-rem  fallback list is used only when the probe does not answer.
-set "AVAIL="
-.venv\Scripts\python -m localm.hwdetect backends > "%STMP%\localm_backends.txt" 2>nul
-if exist "%STMP%\localm_backends.txt" for /f "usebackq delims=" %%a in ("%STMP%\localm_backends.txt") do set "AVAIL=%%a"
-del "%STMP%\localm_backends.txt" 2>nul
-set "AVAILFALL=vulkan cuda amd-rocm sycl cpu"
-if /i "%PROCESSOR_ARCHITECTURE%"=="ARM64" set "AVAILFALL=vulkan cuda cpu"
-if not defined AVAIL set "AVAIL=!AVAILFALL!"
-
 rem ---- choose the llama.cpp backend (recommended pre-selected) ---------------
+rem  `python -m localm.setup_spec backend-menu REC` prints the menu every setup
+rem  variant shows, one "number key label" row per entry: [1] is REC, then each
+rem  backend setup-llama has a build of for this OS and CPU architecture, then
+rem  "own". BKEY_<number> maps a picked number to its backend.
 echo.
-rem  [1] is a shortcut for whichever backend the policy recommended, so it is
-rem  ALWAYS the same choice as one of the numbered entries below - amd-rocm on an
-rem  RX 6000, cuda on an NVIDIA card, sycl on Intel, vulkan otherwise. Listing it twice with no
-rem  relation shown reads as two different options that happen to share a name.
-rem  Mark the twin rather than removing it: the numbering has to stay stable, and
-rem  [1] must keep working even for a REC with no numbered entry of its own.
-set "M2=" & set "M3=" & set "M4=" & set "M5=" & set "M6="
-if /i "%REC%"=="vulkan"   set "M2=   (same as [1])"
-if /i "%REC%"=="cuda"     set "M3=   (same as [1])"
-if /i "%REC%"=="amd-rocm" set "M4=   (same as [1])"
-if /i "%REC%"=="sycl"     set "M5=   (same as [1])"
-if /i "%REC%"=="cpu"      set "M6=   (same as [1])"
-set "CHK= !AVAIL! "
-set "OFF2=" & set "OFF3=" & set "OFF4=" & set "OFF5=" & set "OFF6="
-if not "!CHK: vulkan =!"=="!CHK!"   set "OFF2=1"
-if not "!CHK: cuda =!"=="!CHK!"     set "OFF3=1"
-if not "!CHK: amd-rocm =!"=="!CHK!" set "OFF4=1"
-if not "!CHK: sycl =!"=="!CHK!"     set "OFF5=1"
-if not "!CHK: cpu =!"=="!CHK!"      set "OFF6=1"
-rem  Numbers stay fixed; an entry is listed only when setup-llama has a build of it.
-set "PICKS=1"
+for /l %%i in (1,1,30) do set "BKEY_%%i=" & set "BLBL_%%i="
+set "BMAX="
+.venv\Scripts\python -m localm.setup_spec backend-menu %REC% > "%STMP%\localm_menu.txt" 2>nul
+if exist "%STMP%\localm_menu.txt" for /f "usebackq tokens=1,2,*" %%a in ("%STMP%\localm_menu.txt") do set "BKEY_%%a=%%b" & set "BLBL_%%a=%%c" & set "BMAX=%%a"
+del "%STMP%\localm_menu.txt" 2>nul
+set "BACKEND="
+if not defined BMAX goto backend_menu_missing
 echo  Native inference runtime ^(llama.cpp^) - press Enter to accept the recommendation:
-echo    [1] %REC%   ^(recommended for your hardware^)
-if defined OFF2 set "PICKS=!PICKS! 2" & echo    [2] vulkan     - any GPU ^(AMD/NVIDIA/Intel^), no vendor toolkit%M2%
-if defined OFF3 set "PICKS=!PICKS! 3" & echo    [3] cuda       - NVIDIA, peak performance ^(fetches the CUDA runtime for you^)%M3%
-if defined OFF4 set "PICKS=!PICKS! 4" & echo    [4] amd-rocm   - AMD RX 6000 ^(gfx103X^), self-contained%M4%
-if defined OFF5 set "PICKS=!PICKS! 5" & echo    [5] sycl       - Intel GPU ^(incl. integrated^), often faster than Vulkan, self-contained%M5%
-if defined OFF6 set "PICKS=!PICKS! 6" & echo    [6] cpu        - no GPU%M6%
-set "PICKS=!PICKS! 7"
-echo    [7] I will build / provide my own ^(skip the download^)
+for /l %%i in (1,1,!BMAX!) do if defined BKEY_%%i echo    [%%i] !BLBL_%%i!
 echo    ^(your pick is load-tested; a failure offers Vulkan, never a silent swap^)
-call :backend_pickrange
 set "BSEL="
 call :flush
-set /p "BSEL=  Pick !PICKRANGE! [1]: "
+rem SETUP-Q: backend
+set /p "BSEL=  Pick 1-!BMAX! [1]: "
 if not defined BSEL set "BSEL=1"
-set "BACKEND=%REC%"
-if "%BSEL%"=="2" set "BACKEND=vulkan"
-if "%BSEL%"=="3" set "BACKEND=cuda"
-if "%BSEL%"=="4" set "BACKEND=amd-rocm"
-if "%BSEL%"=="5" set "BACKEND=sycl"
-if "%BSEL%"=="6" set "BACKEND=cpu"
-if "%BSEL%"=="7" set "BACKEND=own"
+set "BNUM=1"
+for /f "delims=0123456789" %%x in ("!BSEL!") do set "BNUM=0"
+if "!BNUM!"=="1" if defined BKEY_%BSEL% set "BACKEND=!BKEY_%BSEL%!"
 rem  A number the menu did not list on this machine falls back to the recommendation.
-set "PCHK= !PICKS! "
-for %%n in (2 3 4 5 6) do if "%BSEL%"=="%%n" if "!PCHK: %%n =!"=="!PCHK!" call :backend_unoffered %%n
+if not defined BACKEND if "!BNUM!"=="1" echo   [!BSEL!] is not offered on this machine; using !REC!.
+if not defined BACKEND set "BACKEND=!REC!"
+goto backend_chosen
+:backend_menu_missing
+echo  [^^!] Could not list the llama.cpp backends for this machine; using !REC!.
+set "BACKEND=!REC!"
+:backend_chosen
 
 rem ---- PyTorch + transformers for HuggingFace models (FOLLOWS your backend) --
 rem  PyTorch powers the HuggingFace/transformers backend; GGUF chat needs none of
@@ -713,30 +710,35 @@ rem  build), and places them in this venv so the install is runnable.
 call :jr begin native-runtime
 set "SLFORCE="
 if "%RESUMING%"=="1" if not "!OPENSET:;native-runtime;=!"=="!OPENSET!" set "SLFORCE=--force"
+rem  SLB: the backends setup-llama has a build of, as "a|b|c", for the
+rem  "provision later" hint.
+set "SLB="
+.venv\Scripts\python -m localm.setup_spec backend-hint > "%STMP%\localm_hint.txt" 2>nul
+if exist "%STMP%\localm_hint.txt" for /f "usebackq delims=" %%a in ("%STMP%\localm_hint.txt") do set "SLB=%%a"
+del "%STMP%\localm_hint.txt" 2>nul
+if not defined SLB set "SLB=backend"
 echo.
 if /i "%BACKEND%"=="own" (
     set "LLAMABUILD="
     call :flush
+    rem SETUP-Q: own-build-dir
     set /p "LLAMABUILD=  Path to your llama.cpp build dir with llama.dll (blank = skip): "
     if not "!LLAMABUILD!"=="" (
-        .venv\Scripts\localm setup-llama --from "!LLAMABUILD!"
+        .venv\Scripts\localm setup-llama --from "!LLAMABUILD!" --force
         if errorlevel 1 (
-            echo  [^^!] Provisioning failed - run later: .venv\Scripts\localm setup-llama --from "!LLAMABUILD!"
-            echo      ^(Double-click report-issue.bat to send a report about this.^)
-            pause
-            exit /b 1
+            set "PFHINT=.venv\Scripts\localm setup-llama --from "!LLAMABUILD!" --force"
+            set "PFDETAIL=Provisioning the native llama.cpp runtime with --from failed during setup."
+            call :provision_failed || exit /b 1
         )
     ) else (
-        call :backend_hint
         echo  Skipped - provision later: .venv\Scripts\localm setup-llama --backend ^<!SLB!^>
     )
 ) else (
     .venv\Scripts\localm setup-llama --backend %BACKEND% %SLFORCE%
     if errorlevel 1 (
-        echo  [^^!] Provisioning failed - run later: .venv\Scripts\localm setup-llama --backend %BACKEND%
-        echo      ^(Double-click report-issue.bat to send a report about this.^)
-        pause
-        exit /b 1
+        set "PFHINT=.venv\Scripts\localm setup-llama --backend %BACKEND% --force"
+        set "PFDETAIL=Provisioning the native llama.cpp runtime (--backend %BACKEND%) failed during setup."
+        call :provision_failed || exit /b 1
     )
 )
 
@@ -763,8 +765,10 @@ echo    [3] No shortcut
 rem  set /p for a consistent "type a number then Enter" across every menu.
 set "SCPICK="
 call :flush
+rem SETUP-Q: shortcut
 set /p "SCPICK=  Pick 1, 2 or 3 [1]: "
 if not defined SCPICK set "SCPICK=1"
+if /i "%SCPICK:~0,1%"=="Y" set "SCPICK=1" & echo  ^(y taken as [1]^)
 set "SCPATH="
 set "SCSTEP="
 if "%SCPICK%"=="1" call :intend_shortcut
@@ -825,6 +829,7 @@ echo.
 echo  Make 'localm' runnable from any terminal? (adds .\bin to your PATH)
 set "GLOBALPICK="
 call :flush
+rem SETUP-Q: global-command
 set /p "GLOBALPICK=  [y/N]: "
 if not defined GLOBALPICK set "GLOBALPICK=N"
 set "PATHDIR="
@@ -856,6 +861,8 @@ rem  `localm plugin setup` prints its own header (it states chat is always on),
 rem  so this is just a section divider - do not repeat that line here.
 echo.
 echo  Optional features (plugins):
+rem SETUP-Q: plugins
+rem SETUP-Q: plugin-deps
 .venv\Scripts\localm plugin setup
 
 rem ---- record what we installed (uninstall removes ONLY what we created) -----
@@ -865,6 +872,7 @@ setlocal DisableDelayedExpansion
 .venv\Scripts\python -m localm.install_manifest record --root . --venv "%CD%\.venv" --lib-dir "%CD%\runtime\localm_llama_runtime\lib" --shortcut "%SCPATH%" %RCFLAG% --python-dir "%PYDIR%" --cache-dir "%CACHEDIR%" --uv-dir "%UVDIR%" %UVSHARED% --path-dir "%PATHDIR%" --command-shim "%CMDSHIM%" %PATHMOD% >nul 2>nul
 endlocal
 if errorlevel 1 echo  [^^!] Could not record the install manifest (uninstall will be conservative).
+call :record_shared_uv
 call :step_done record || exit /b 99
 call :jr complete
 if exist ".localm-setup-tmp" rmdir /s /q ".localm-setup-tmp" >nul 2>nul
@@ -872,6 +880,18 @@ if exist ".localm-setup-tmp" rmdir /s /q ".localm-setup-tmp" >nul 2>nul
 rem ---- done ------------------------------------------------------------------
 echo.
 echo  Done. Setup complete.
+if "%RUNTIME_OK%"=="0" echo.
+if "%RUNTIME_OK%"=="0" echo  [^^!] No model can load yet - the native llama.cpp runtime did not finish
+if "%RUNTIME_OK%"=="0" echo      provisioning. Finish it any time with:
+if "%RUNTIME_OK%"=="0" echo        !PFHINT!
+rem  The backend setup-llama recorded as installed, when it differs from the pick.
+set "INSTALLEDBK="
+if exist "runtime\localm_llama_runtime\lib\.localm-backend" for /f "usebackq tokens=1" %%a in ("runtime\localm_llama_runtime\lib\.localm-backend") do if not defined INSTALLEDBK set "INSTALLEDBK=%%a"
+set "BKSWAP=0"
+if "%RUNTIME_OK%"=="1" if /i not "%BACKEND%"=="own" if defined INSTALLEDBK if /i not "!INSTALLEDBK!"=="%BACKEND%" set "BKSWAP=1"
+if "%BKSWAP%"=="1" echo.
+if "%BKSWAP%"=="1" echo  [^^!] The %BACKEND% runtime did not load here; !INSTALLEDBK! is installed and in use.
+if "%BKSWAP%"=="1" echo      Retry %BACKEND% any time with:  .venv\Scripts\localm setup-llama --backend %BACKEND% --force
 rem  Tell them how to start the way THEY chose - SCPICK 1/2 created a desktop
 rem  shortcut, so name that; only the "no shortcut" case falls back to the bat.
 if defined SCMADE if "%SCPICK%"=="1" echo  Start it from the LocaLM shortcut on your desktop.
@@ -912,6 +932,7 @@ echo  Your saved data - chats, settings, downloaded models, generated images -
 echo  is kept unless you choose to delete it now.
 set "DELDATA="
 call :flush
+rem SETUP-Q: uninstall-data
 set /p "DELDATA=  Also delete your saved data? [y/N]: "
 if not defined DELDATA set "DELDATA=N"
 if /i not "!DELDATA:~0,1!"=="Y" goto uninstall_confirm
@@ -924,6 +945,7 @@ if not "!UNRC!"=="0" if not "!UNRC!"=="2" goto uninstall_stop
 echo.
 set "GOON="
 call :flush
+rem SETUP-Q: uninstall-confirm
 set /p "GOON=  Uninstall LocaLM now? [y/N]: "
 if not defined GOON set "GOON=N"
 if /i "!GOON:~0,1!"=="Y" goto uninstall_go
@@ -964,6 +986,7 @@ echo      Run setup.bat again once Python is back to remove the rest.
 if "%UNYES%"=="1" goto uninstall_nopython_go
 set "GOON="
 call :flush
+rem SETUP-Q: uninstall-no-python
 set /p "GOON=  Remove those folders now? [y/N]: "
 if not defined GOON set "GOON=N"
 if /i "!GOON:~0,1!"=="Y" goto uninstall_nopython_go
@@ -1054,6 +1077,33 @@ goto :eof
 goto :eof
 
 rem ===========================================================================
+rem  :provision_failed - a setup-llama run failed. Prints PFDETAIL and the
+rem  retry command PFHINT, sets RUNTIME_OK=0 and asks whether to continue the
+rem  rest of setup without a runtime. Returns 0 to continue (after offering a
+rem  report), 1 when the user stops setup here.
+rem ===========================================================================
+:provision_failed
+set "RUNTIME_OK=0"
+echo.
+echo  [^^!] !PFDETAIL!
+echo      No model can load until this is fixed. Retry any time with:
+echo        !PFHINT!
+echo.
+set "RTCONT="
+call :flush
+rem SETUP-Q: runtime-failed
+set /p "RTCONT=  Continue the rest of setup without a working runtime? [Y/n]: "
+if not defined RTCONT set "RTCONT=Y"
+if /i "!RTCONT:~0,1!"=="N" goto provision_abort
+call :offer_report "localm setup-llama failed" "!PFDETAIL! (continuing setup without a runtime)"
+exit /b 0
+:provision_abort
+call :offer_report "localm setup-llama failed" "!PFDETAIL!"
+echo  Aborted - re-run setup.bat when ready.
+pause
+exit /b 1
+
+rem ===========================================================================
 rem  :heartbeat_start SECS "MESSAGE" / :heartbeat_stop - print MESSAGE every
 rem  SECS seconds while a following long, quiet step is still running (a uv
 rem  download, a venv build, a torch install), so it never looks identical to
@@ -1100,6 +1150,20 @@ echo  The previous setup stopped while installing uv here; starting that over.
 rmdir /s /q ".uv" >nul 2>nul
 goto :eof
 
+rem ===========================================================================
+rem  :record_shared_uv - Shared only: records the first uv on PATH as the
+rem  install's uv (--uv-exe). Runs with delayed expansion off, so a "!" in the
+rem  path is kept.
+rem ===========================================================================
+:record_shared_uv
+if "%CONTAINED%"=="1" goto :eof
+setlocal DisableDelayedExpansion
+set "UVEXE="
+for /f "delims=" %%u in ('where uv 2^>nul') do if not defined UVEXE set "UVEXE=%%u"
+if defined UVEXE .venv\Scripts\python -m localm.install_manifest record --root . --uv-exe "%UVEXE%" >nul 2>nul
+endlocal
+goto :eof
+
 :intend_shortcut
 set "DESKDIR="
 for /f "usebackq delims=" %%d in (`powershell -NoProfile -Command "[Environment]::GetFolderPath('Desktop')"`) do set "DESKDIR=%%d"
@@ -1112,51 +1176,6 @@ goto :eof
 .venv\Scripts\python -m localm.install_manifest journal --root . intend command "!CD!\bin\localm.cmd" >nul 2>nul
 call :jr begin global-command
 set "GCSTEP=1"
-goto :eof
-
-rem ===========================================================================
-rem  Backend menu helpers, called with delayed expansion on. :backend_pickrange
-rem  turns PICKS (the listed menu numbers, space-separated) into PICKRANGE: "1-7"
-rem  when every entry is listed, else "1, 2, 6 or 7". :backend_unoffered N reports
-rem  a number the menu did not list and sends BACKEND back to REC. :backend_hint
-rem  turns CHK (the backends setup-llama has a build of, space-padded) into SLB:
-rem  the "a|b|c" list for the provision-later hint.
-rem ===========================================================================
-:backend_pickrange
-set "PICKRANGE=1-7"
-if "!PICKS!"=="1 2 3 4 5 6 7" goto :eof
-set "PICKHEAD="
-set "PICKLAST="
-for %%p in (!PICKS!) do call :backend_pickadd %%p
-set "PICKRANGE=!PICKLAST!"
-if defined PICKHEAD set "PICKRANGE=!PICKHEAD! or !PICKLAST!"
-goto :eof
-
-:backend_pickadd
-if not defined PICKLAST goto :backend_picklast
-if not defined PICKHEAD goto :backend_pickfirst
-set "PICKHEAD=!PICKHEAD!, !PICKLAST!"
-goto :backend_picklast
-:backend_pickfirst
-set "PICKHEAD=!PICKLAST!"
-:backend_picklast
-set "PICKLAST=%1"
-goto :eof
-
-:backend_unoffered
-echo   [%1] is not offered on this machine; using !REC!.
-set "BACKEND=!REC!"
-goto :eof
-
-:backend_hint
-set "SLB="
-for %%b in (vulkan cuda amd-rocm sycl cpu) do if not "!CHK: %%b =!"=="!CHK!" call :backend_hintadd %%b
-if not defined SLB set "SLB=backend"
-goto :eof
-
-:backend_hintadd
-set "SLB=!SLB!|%1"
-if "!SLB:~0,1!"=="|" set "SLB=!SLB:~1!"
 goto :eof
 
 rem ===========================================================================
@@ -1263,6 +1282,7 @@ if not exist "%~dp0report-issue.bat" goto :eof
 echo.
 set "DOREP="
 call :flush
+rem SETUP-Q: report-problem
 set /p "DOREP=  Report this problem to the maintainer (no GitHub account needed)? [Y/n]: "
 if not defined DOREP set "DOREP=Y"
 if /i "!DOREP:~0,1!"=="N" goto :eof
@@ -1282,10 +1302,12 @@ rem ===========================================================================
 :do_custom_home
 set "CUSTOMHOME="
 call :flush
+rem SETUP-Q: data-folder
 set /p "CUSTOMHOME=  Enter the data directory path, or leave blank for the portable .\home: "
 if not defined CUSTOMHOME goto custom_home_blank
 set "OKHOME="
 call :flush
+rem SETUP-Q: custom-path-confirm
 set /p "OKHOME=  Use '!CUSTOMHOME!'? [Y/n]: "
 if not defined OKHOME set "OKHOME=Y"
 if /i "!OKHOME:~0,1!"=="N" goto do_custom_home

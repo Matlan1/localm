@@ -213,8 +213,9 @@ def _provision_staged_cuda(cuda_line: str, target: Path, lib_name: str,
     _pin_note_for_backend("cuda")
     used_tag: Optional[str] = None
     try:
-        _sl._clear_target_or_refuse(target)
-        used_tag = _sl._provision_backend("cuda", target, sha256, True, cuda_line)
+        used_tag = _sl._replace_target(
+            target, lambda staging: _sl._provision_backend("cuda", staging, sha256, True,
+                                                           cuda_line))
     except RuntimeInUseError as e:
         _exit_runtime_in_use(e)
     except click.ClickException as e:
@@ -264,8 +265,8 @@ def _keeps_existing_install(target: Path, lib_name: str, backend: str, force: bo
             build = _sl._provisioned_build(target) if have else None
             label = f" ({have} {build})" if build else (f" ({have})" if have else "")
             console.print(f"[green]Already provisioned[/green]{label} at {target}")
-            if (not assume_yes and sys.stdin and sys.stdin.isatty() and _net_allowed()
-                    and click.confirm("Do you want to re-download/replace them?", default=False)):
+            if (not assume_yes and _sl._interactive() and _net_allowed()
+                    and _sl._confirm("Do you want to re-download/replace them?", default=False)):
                 force = True
                 console.print("[yellow]Replacing existing build...[/yellow]")
             else:
@@ -344,18 +345,29 @@ def _print_pending_choice(target: Path) -> None:
                   f"--force  -  or keep {have}: localm setup-llama --backend {have}[/dim]")
 
 
+class _NoLibrary(Exception):
+    """A staged ``--from`` or ``--url`` build holds no runtime library."""
+
+
 def _provision_from_dir(from_dir: str, target: Path, lib_name: str) -> None:
     """Install the libraries of a local build directory (``--from``)."""
     src = Path(from_dir)
     console.print(f"Copying binaries from [bold]{src}[/bold] ...")
+    def _fill(staging: Path) -> int:
+        copied = _sl._copy_binaries(src, staging)
+        if not (staging / lib_name).exists():
+            raise _NoLibrary(lib_name)
+        return copied
+
     try:
-        _sl._clear_target_or_refuse(target)
+        n = _sl._replace_target(target, _fill)
     except RuntimeInUseError as e:
         _exit_runtime_in_use(e)
-    n = _sl._copy_binaries(src, target)
-    if not (target / lib_name).exists():
+        return
+    except _NoLibrary:
         console.print(f"[red]No {lib_name} found in the source directory.[/red] "
-                      f"Point --from at the build output containing {lib_name}.")
+                      f"Point --from at the build output containing {lib_name}. "
+                      "The installed runtime was left as it was.")
         sys.exit(1)
     console.print(f"[green]Copied {n} file(s)[/green] into {target}")
     _sl._install_runtime_wheel(_sl._runtime_pkg_dir())
@@ -380,14 +392,22 @@ def _provision_from_url(url: str, target: Path, lib_name: str,
     if not sha256:
         console.print("[yellow]Warning: Custom URL download is unverified (no --sha256 provided).[/yellow]")
     console.print(f"[dim]Fetching:[/dim] {url}")
+    def _fill(staging: Path) -> None:
+        _sl._fetch_and_place(url, staging, sha256)
+        if not (staging / lib_name).exists():
+            raise _NoLibrary(lib_name)
+
     try:
-        _sl._clear_target_or_refuse(target)
-        _sl._fetch_and_place(url, target, sha256)
+        _sl._replace_target(target, _fill)
     except RuntimeInUseError as e:
         # Ahead of the broad handlers below, which would otherwise report a
         # locked file as "Download failed" - a cause the user would go and
         # investigate instead of the one that is true.
         _exit_runtime_in_use(e)
+    except _NoLibrary:
+        console.print(f"[red]The archive did not contain {lib_name}.[/red] "
+                      "Try a different --url or use --from.")
+        sys.exit(1)
     except ArtifactError as e:
         console.print(f"[red]Refusing to install:[/red] {e}")
         console.print("Provide a local build with --from instead, or a different "
@@ -396,10 +416,6 @@ def _provision_from_url(url: str, target: Path, lib_name: str,
     except Exception as e:
         console.print(f"[red]Download failed:[/red] {e}")
         console.print("Provide a local build with --from instead, or a different --url.")
-        sys.exit(1)
-    if not (target / lib_name).exists():
-        console.print(f"[red]The archive did not contain {lib_name}.[/red] "
-                      "Try a different --url or use --from.")
         sys.exit(1)
     _sl._install_runtime_wheel(_sl._runtime_pkg_dir())
     loaded, detail = _sl._native_loads_ok()

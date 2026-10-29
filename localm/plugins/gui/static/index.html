@@ -890,11 +890,14 @@
                 <label data-i18n="settings.perf.splitLabel">Split across GPUs</label>
                 <div id="perf-gpu-split-list"></div>
                 <div id="perf-gpu-single-hint" class="sub" hidden></div>
+                <div id="perf-gpu-split-order" class="sub" hidden></div>
                 <div class="sub" data-i18n="settings.perf.splitHelp">Check one GPU to load a model on
                 that GPU only, or 2 or more to spread a model too large for one card over
                 them (overrides Main GPU); leave all unchecked for automatic placement.
-                Each card's share follows its free VRAM at load time, unless pinned below.
-                Saves immediately; applies on the next model load.</div>
+                The checked cards are filled in the order you check them: the first one
+                gets the first layers. Each card's share follows its free VRAM at load
+                time, unless pinned below. Saves immediately; applies on the next model
+                load.</div>
                 <!-- gpu_split_ratios: rendered by setupGpuSplitCheckboxes's
                      renderGpuSplitRatioRow (settings-perf.js), not the generic
                      settings form - same reasoning as gpu_split_indices above.
@@ -1097,6 +1100,17 @@
               </div>
             </section>
 
+            <section class="card settings-section" id="sec-recent-errors" data-group="system" data-sec-label="Recent errors">
+              <div class="card-head"><span class="ic cat-ic cat-slate" data-icon="warning"></span>
+                <div class="card-head-text"><h3 data-i18n="settings.recentErrors.title">Recent errors</h3></div></div>
+              <div class="sub" data-i18n="settings.recentErrors.help">The last five error messages this page showed, newest first. In privacy mode the list is kept only until the page is reloaded.</div>
+              <ol id="recent-errors-list" class="recent-errors-list"></ol>
+              <div id="recent-errors-empty" class="sub" data-i18n="settings.recentErrors.empty">No errors so far.</div>
+              <div class="actions">
+                <button class="btn-secondary" id="recent-errors-clear" data-i18n="settings.recentErrors.clear">Clear</button>
+              </div>
+            </section>
+
             <section class="card settings-section" id="sec-bugreport" data-group="system" data-sec-label="Report a bug">
               <div class="card-head"><span class="ic cat-ic cat-slate" data-icon="send"></span>
                 <div class="card-head-text"><h3 data-i18n="settings.bug.title">Report a bug</h3></div></div>
@@ -1155,9 +1169,8 @@
             </section>
 
             <!-- Updates: one card for both ways localm can be updated (a new app
-                 build, a new llama.cpp runtime) plus the two toggles that control
-                 how the check behaves. Used to be three panels (two of them both
-                 headed "Updates").
+                 build, a new llama.cpp runtime). The two toggles that control how
+                 the app-update check behaves sit inside #app-update-block.
 
                  THE TWO SUB-BLOCKS BELOW HAVE DIFFERENT VISIBILITY RULES, and
                  they stay independent on purpose:
@@ -1168,8 +1181,8 @@
                                       reports "nothing installed yet" when
                                       setup-llama has never run
                  The CARD ITSELF is therefore never [hidden]: the runtime block
-                 and the toggles below it must stay visible even on a build with
-                 no update proxy configured. Only the app-update sub-block gates. -->
+                 stays visible even on a build with no update proxy configured.
+                 Only the app-update sub-block (and the toggles inside it) gates. -->
             <section class="card settings-section" id="sec-updates" data-group="system" data-sec-label="Updates">
               <div class="card-head"><span class="ic cat-ic cat-slate" data-icon="download"></span>
                 <div class="card-head-text"><h3 data-i18n="settings.update.title">Updates</h3></div></div>
@@ -1183,6 +1196,41 @@
                   <button class="btn-primary" id="update-apply" hidden data-i18n="settings.update.applyButton">Update now</button>
                 </div>
                 <div id="update-status" class="sub" hidden></div>
+                <!-- The offered release's notes, rendered by renderUpdateNotes
+                     (pages/models.js) through the sanitizing Markdown path. -->
+                <div id="update-notes" class="update-notes" hidden></div>
+                <div class="actions" id="update-notes-actions" hidden>
+                  <button class="btn-secondary" id="update-notes-more" data-i18n="settings.update.notesShowAll">Show all</button>
+                </div>
+                <!-- update_allow_prerelease / update_ignore_net_policy: schema-driven
+                     admin-only toggles, rendered into #settings-sec-core-Updates by
+                     refreshSettingsPage's "core-Updates" case in settings.js. Stays
+                     [hidden] for a caller without those admin-only fields, or before
+                     the schema fetch resolves.
+
+                     #update-toggles-save carries .settings-section-save:
+                     saveActiveSettingsSection() (Ctrl+S) picks a section's save
+                     button via `.settings-section-save || .actions .btn-primary`,
+                     and #update-apply is an earlier .btn-primary in this card. -->
+                <div id="update-toggles-block" hidden>
+                  <div id="settings-sec-core-Updates" class="settings-fields"></div>
+                  <div class="actions">
+                    <button class="btn-primary settings-section-save" id="update-toggles-save" data-i18n="settings.update.saveButton">Save update settings</button>
+                  </div>
+                </div>
+                <!-- The GUI form of `localm update --list` / `--to <version>`. -->
+                <div class="actions">
+                  <button class="btn-secondary" id="update-versions" data-i18n="settings.update.versionsButton">Choose a version</button>
+                </div>
+                <div id="update-version-picker" hidden>
+                  <label class="sub" for="update-version-select" data-i18n="settings.update.versionLabel">Version to install</label>
+                  <select id="update-version-select"></select>
+                  <div id="update-version-info" class="sub"></div>
+                  <div class="actions">
+                    <button class="btn-secondary" id="update-install-version" data-i18n="settings.update.installVersionButton">Install this version</button>
+                  </div>
+                </div>
+                <div id="update-version-status" class="sub" hidden></div>
               </div>
 
               <!-- The GUI half of `localm update --rollback`. Its OWN sub-block, not
@@ -1285,30 +1333,6 @@
                 <div id="runtime-rollback-status" class="sub" hidden></div>
                 <pre id="runtime-update-log" class="comfy-managed-log" style="display:none"></pre>
               </div>
-
-              <!-- update_allow_prerelease / update_ignore_net_policy: schema-driven
-                   admin-only toggles, injected here by refreshSettingsPage's
-                   "Updates" special case in settings.js instead of rendering as
-                   their own separate section - that second "Updates" panel was
-                   exactly the duplication this card merges away. Stays [hidden]
-                   (nothing to render) for a caller without those admin-only
-                   fields, or before the schema fetch resolves.
-
-                   #update-toggles-save carries .settings-section-save (not just
-                   .btn-primary): saveActiveSettingsSection()'s Ctrl+S handler
-                   picks a section's save button via `.settings-section-save ||
-                   .actions .btn-primary` - with only .btn-primary, that fallback
-                   would match #update-apply first (also .btn-primary, earlier in
-                   this same card) and Ctrl+S would silently APPLY an app update
-                   instead of saving these toggles. The more specific class must
-                   win. -->
-              <div class="update-subsection" id="update-toggles-block" hidden>
-                <h4 class="update-sub-head" data-i18n="settings.update.toggleHeading">Update behavior</h4>
-                <div id="settings-sec-core-Updates" class="settings-fields"></div>
-                <div class="actions">
-                  <button class="btn-primary settings-section-save" id="update-toggles-save" data-i18n="settings.update.saveButton">Save Updates</button>
-                </div>
-              </div>
             </section>
 
             <!-- Diagnostics: the ACTIVE self-checks from `localm doctor` - the ones
@@ -1395,7 +1419,8 @@
   </main>
 </div>
 
-<div id="toast"></div>
+<div id="toast-errors" class="toast-errors" hidden></div>
+<div id="toast" role="status" aria-live="polite"></div>
 
 <!-- Artifacts canvas: renders a self-contained HTML/SVG block from a reply in a
      hard-sandboxed iframe (no same-origin, CSP blocks all network). Opened by the

@@ -162,6 +162,34 @@ def test_a_rebuild_that_cannot_be_restored_raises():
         _ctx(rt).apply_min_image_tokens(1024)
 
 
+@pytest.mark.parametrize("layout", [OLD, NEW])
+def test_the_cpu_retry_keeps_the_applied_minimum_image_tokens(layout):
+    rt = _FakeRuntime(layout, init_results=(0x8000, 0x8100))
+    c = _ctx(rt, on_gpu=True)
+    assert c.apply_min_image_tokens(1024) is True
+    assert c.retry_on_cpu() is True
+    assert rt.opened[-1]["use_gpu"] == 0
+    assert rt.opened[-1]["min"] == 1024
+    assert c._ctx == 0x8100
+
+
+@pytest.mark.parametrize("layout", [OLD, NEW])
+def test_the_cpu_retry_of_a_context_that_applied_nothing_asks_for_no_minimum(layout):
+    rt = _FakeRuntime(layout, init_results=(0x8100,))
+    c = _ctx(rt, on_gpu=True)
+    assert c.retry_on_cpu() is True
+    assert rt.opened[-1]["use_gpu"] == 0
+    assert rt.opened[-1]["min"] == -1
+
+
+def test_a_failed_minimum_rebuild_is_not_remembered_for_the_cpu_retry():
+    rt = _FakeRuntime(NEW, init_results=(0, 0x9000, 0x9100))
+    c = _ctx(rt, on_gpu=True)
+    assert c.apply_min_image_tokens(1024) is False
+    assert c.retry_on_cpu() is True
+    assert [o["min"] for o in rt.opened] == [1024, -1, -1]
+
+
 def test_the_shipped_runtime_layout_is_recognised():
     """Against the real mtmd of the provisioned runtime: its default struct must
     match one of the known layouts, with the documented defaults in the fields."""

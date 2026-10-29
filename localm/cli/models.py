@@ -837,6 +837,9 @@ def _print_interrupted(include_dismissed: bool) -> None:
         console.print(_interrupted_line(r))
         for u in r["urls"]:
             console.print(f"          [dim]{escape(u)}[/dim]")
+        if r.get("invalid"):
+            console.print("          [yellow]it names a place that is not a download folder "
+                          "of localm; nothing there is touched[/yellow]")
         if not r["resumable"]:
             console.print("          [yellow]cannot be resumed; delete or dismiss it[/yellow]")
     if recs:
@@ -930,6 +933,11 @@ def _resume_interrupted(r: dict) -> int:
                       f"localm pull --delete-interrupted {rec['id'][:8]} and pull "
                       "the model again to download the current version.")
         return 1
+    if check.get("refused"):
+        console.print(f"[red]Cannot resume {escape(str(rec['request']['spec']))}:[/red] "
+                      f"network policy refuses Hugging Face ({escape(check['detail'])}). "
+                      "Nothing was downloaded.")
+        return 1
     if check["changed"] is None:
         console.print(f"[yellow]Note:[/yellow] {escape(check['detail'])}; the "
                       "download checks each file again before continuing.")
@@ -963,7 +971,7 @@ def _delete_one(key: str) -> bool:
     except pending_pulls.UnknownPull:
         console.print(f"[red]Nothing to delete for {escape(key)}.[/red]")
         return False
-    except PullInFlight as e:
+    except (PullInFlight, pending_pulls.DownloadComplete) as e:
         console.print(f"[red]Not deleted:[/red] {escape(str(e))}")
         return False
     except OSError as e:
@@ -2051,11 +2059,13 @@ def gpus_cmd():
                 "initialize on first use). Run [cyan]localm gpus[/cyan] again - "
                 "the driver is usually warm on a second try.")
         return
+    # In nvidia-smi's own numbering the saved numbers cannot be paired with a card.
+    unmatched = any(g.get("numbering") == discover.GPU_NUMBERING_NVIDIA_SMI for g in gpus)
     for g in gpus:
         markers = []
-        if g["index"] == configured:
+        if not unmatched and g["index"] == configured:
             markers.append("[green](configured)[/green]")
-        if g["index"] in split:
+        if not unmatched and g["index"] in split:
             markers.append("[cyan](split)[/cyan]")
         marker = "  " + " ".join(markers) if markers else ""
         free = g.get("free")
@@ -2089,11 +2099,18 @@ def gpus_cmd():
         console.print(
             f"  [cyan]{g['index']}[/cyan]  {name_s:<30} "
             f"{free_s}{g['total'] / 1024**3:.1f} GB total{marker}{note}")
-    if configured is not None and not any(g["index"] == configured for g in gpus):
+    if unmatched:
+        console.print(
+            "[yellow]![/yellow]  these GPU numbers are nvidia-smi's: torch did not "
+            "answer, so they may not be the numbers main_gpu_index and "
+            "gpu_split_indices use. Run [cyan]localm gpus[/cyan] again before "
+            "choosing a GPU.")
+    elif configured is not None and not any(g["index"] == configured for g in gpus):
         console.print(
             f"[yellow]![/yellow]  configured main_gpu_index={configured} does not "
             "match any GPU detected right now; loads fall back to device 0.")
-    if split and not all(any(g["index"] == idx for g in gpus) for idx in split):
+    if not unmatched and split and not all(any(g["index"] == idx for g in gpus)
+                                           for idx in split):
         console.print(
             f"[yellow]![/yellow]  configured gpu_split_indices={split} references a "
             "GPU not detected right now; that device is dropped from the split.")
@@ -2179,28 +2196,45 @@ def unload_cmd(model):
         console.print(f"[dim]'{escape(str(data.get('model', model)))}' was not "
                       "loaded - nothing to do.[/dim]")
         return
+    skipped = [str(s) for s in (data.get("skipped_in_use") or [])]
+    left = data.get("media_left_running")
+    left = left if isinstance(left, dict) else {}
+
+    def _print_left_loaded() -> None:
+        for name in skipped:
+            why = ("could not be stopped (see the server log)"
+                   if left.get(name) == "failed" else "is still in use")
+            console.print(f"[yellow]{escape(name)} {why} and was left loaded.[/yellow]")
+
     if data.get("status") == "in_use":
-        console.print(f"[yellow]'{escape(str(data.get('model', model)))}' is in use by a "
-                      "running request and was not unloaded.[/yellow] Try again when it "
-                      "finishes.")
+        if skipped:
+            _print_left_loaded()
+            console.print("Try again when it finishes.")
+        else:
+            console.print(f"[yellow]'{escape(str(data.get('model', model)))}' is in use "
+                          "by a running request and was not unloaded.[/yellow] Try "
+                          "again when it finishes.")
         sys.exit(1)
     unloaded = data.get("unloaded_models")
     if unloaded is None:
         unloaded = [data["model"]] if data.get("model") not in (None, "none") else []
     else:
-        # unload-all's unloaded_models lists only chat engines; the shared
-        # embedding model has its own lifecycle and is reported via
-        # embedder_unloaded, so it is named here too.
+        # unload-all's unloaded_models lists only chat engines; the other models
+        # and media runtimes are listed in unloaded_other (an older server
+        # reports only embedder_unloaded).
         unloaded = list(unloaded)
-        if data.get("embedder_unloaded"):
+        other = data.get("unloaded_other")
+        if isinstance(other, list):
+            unloaded.extend(other)
+        elif data.get("embedder_unloaded"):
             unloaded.append("embedding model")
     if not unloaded:
         console.print("[dim]Nothing was loaded.[/dim]")
     else:
-        # unloaded holds server-reported model names plus the literal
-        # "embedding model", so they are escaped.
+        # unloaded holds server-reported names and kinds, so they are escaped.
         console.print(f"[green]✓[/green] unloaded: "
                       f"{', '.join(escape(str(u)) for u in unloaded)}")
+    _print_left_loaded()
 
 
 def _restarted_as(instances, entry: dict, entries: list) -> Optional[str]:

@@ -4,9 +4,10 @@
 // engine can start a browser, the one-time download of the bundled browser, and
 // the switch to it when the system engine finds no browser to drive.
 //
-// The box exists only while the browser plugin contributes its settings, and
-// reads GET /api/browser/engine; the fake server below answers that, the
-// download route, PATCH /v1/config and a job's event stream.
+// The box appears whenever the schema carries browser_engine. It reads the
+// browser plugin's entry in GET /api/capabilities, then GET /api/browser/engine;
+// the fake server below answers those, the download route, PATCH /v1/config and
+// a job's event stream.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -51,8 +52,10 @@ function makeFetch(server, calls) {
     if (u === "/v1/comfy/status") return json({ alive: false, launched_by_localm: false });
     if (u === "/v1/tts/config") return json({ plugin: "tts", active: false, fields: [] });
     if (u === "/v1/plugins/settings") return json({ plugins: [] });
+    if (u === "/api/capabilities") return json(server.caps || { plugins: [] });
     if (u === "/api/browser/engine") {
       const eng = typeof server.engine === "function" ? server.engine() : server.engine;
+      if (eng === 404) return json({ detail: "Not Found" }, 404);
       return eng === null ? json({ detail: "no" }, 500) : json(eng);
     }
     if (u === "/api/browser/download" && method === "POST") {
@@ -164,11 +167,69 @@ test("without the browser extra the box says how to install it", async () => {
   assert.equal(buttons(win).length, 0);
 });
 
+const guiErrors = (calls) => calls.filter((c) => c.url === "/api/gui-error")
+  .map((c) => JSON.parse(c.body).message);
+const recentErrors = (win) => [...win.document.querySelectorAll(
+  "#recent-errors-list .recent-error-text")].map((n) => n.textContent);
+const pluginEntry = (installed, enabled) => ({
+  name: "browser", installed, enabled, active: installed && enabled });
+
 test("a failed engine check is reported, not hidden", async () => {
-  const { win } = await render({ fields: [BROWSER_ENGINE], engine: null });
+  const { win, calls } = await render({ fields: [BROWSER_ENGINE], engine: null });
   await until(() => box(win) && /Could not check/.test(status(win)), "the status");
 
   assert.equal(status(win), "Could not check the browser.");
+  await until(() => guiErrors(calls).includes("Could not check the browser."),
+              "the error to reach the server log");
+  assert.ok(recentErrors(win).includes("Could not check the browser."));
+});
+
+test("without the browser plugin the box says so and records no error", async () => {
+  const { win, calls } = await render({
+    fields: [NET_MODE, BROWSER_ENGINE], engine: 404,
+    caps: { plugins: [pluginEntry(false, false)] } });
+  await until(() => box(win) && buttons(win).length === 1, "the plugins button");
+  for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0));
+
+  assert.equal(status(win), "The browser plugin is not installed. Install it on the " +
+    "Plugins page to let the model drive a web browser.");
+  assert.equal(buttons(win)[0].textContent, "Open the Plugins page");
+  assert.ok(!calls.some((c) => c.url === "/api/browser/engine"));
+  assert.deepEqual(guiErrors(calls), []);
+  assert.deepEqual(recentErrors(win), []);
+
+  buttons(win)[0].click();
+  assert.equal(win.document.querySelector(".view.active").id, "view-plugins");
+});
+
+test("an installed but disabled browser plugin says to turn it on", async () => {
+  const { win, calls } = await render({
+    fields: [BROWSER_ENGINE], engine: 404,
+    caps: { plugins: [pluginEntry(true, false)] } });
+  await until(() => box(win) && /turned off/.test(status(win)), "the status");
+
+  assert.match(status(win), /^The browser plugin is installed but turned off\./);
+  assert.deepEqual(guiErrors(calls), []);
+});
+
+test("an active browser plugin whose engine route is missing is an error", async () => {
+  const { win, calls } = await render({
+    fields: [BROWSER_ENGINE], engine: 404,
+    caps: { plugins: [pluginEntry(true, true)] } });
+  await until(() => box(win) && /Could not check/.test(status(win)), "the status");
+
+  assert.ok(calls.some((c) => c.url === "/api/browser/engine"));
+  await until(() => guiErrors(calls).includes("Could not check the browser."),
+              "the error to reach the server log");
+});
+
+test("an active browser plugin reads the engine as before", async () => {
+  const { win } = await render({
+    fields: [BROWSER_ENGINE], engine: READY,
+    caps: { plugins: [pluginEntry(true, true)] } });
+  await until(() => box(win) && /ready/.test(status(win)), "the status");
+
+  assert.equal(status(win), "The bundled browser is downloaded and ready.");
 });
 
 test("the download posts once, reads the job, and leaves the box ready", async () => {

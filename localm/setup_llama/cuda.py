@@ -17,8 +17,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-import click
-
 from localm.debuglog import logger
 from localm.setup_llama._common import console
 from localm.setup_llama.download import _extract_archive, _validate_archive, ArtifactError
@@ -289,8 +287,8 @@ _CUDA_RUNTIME_PIN = {
         "e4f53a8ca8c5d6e8c492d0d0a3d565ecb59a751b19cfdaa4f6da0ab2104c1702"),
     "nvidia-cuda-runtime": ("13.4.92",
         "9641f797da20ce1dd8e779b6e96d08cf9ba564cec8e8225458811ee26423f3a5"),
-    "nvidia-cublas": ("13.8.1.7",
-        "c11a27fd4379510e5b1f84b367a2514d1e52fe5cc13442117a0e0a1addee3cf2"),
+    "nvidia-cublas": ("13.8.2.12",
+        "21721774d8e7044debec3034ecc1a8cd22e173eb6dae5d7f5f8a014852382894"),
 }
 
 
@@ -352,6 +350,32 @@ def _fetch_pypi_runtime_lib(package: str, target: Path) -> int:
         return n
 
 
+# The record, in a runtime dir, of the PyPI CUDA libraries fetched into it.
+CUDA_RUNTIME_RECORD = ".localm-cuda-runtime.json"
+
+
+def record_cuda_runtime(target: Path, cuda_line: str) -> None:
+    """Record in *target* the CUDA line and the version of each PyPI CUDA library
+    :func:`_fetch_cuda_runtime_libs` fetched into it. Raises ``OSError``."""
+    pin = _sl._CUDA_RUNTIME_PIN
+    packages = {p: pin[p][0] for p in _CUDA_RUNTIME_PYPI_PACKAGES.get(cuda_line, ())
+                if p in pin}
+    (target / CUDA_RUNTIME_RECORD).write_text(
+        json.dumps({"line": cuda_line, "packages": packages}), encoding="utf-8")
+
+
+def read_cuda_runtime(target: Path) -> Optional[dict]:
+    """``{"line", "packages"}`` recorded by :func:`record_cuda_runtime` in
+    *target*, or None when there is no readable record."""
+    try:
+        data = json.loads((target / CUDA_RUNTIME_RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("packages"), dict):
+        return None
+    return data
+
+
 def _fetch_cuda_runtime_libs(cuda_line: str, target: Path) -> int:
     """Fetch every PyPI-hosted CUDA runtime library for *cuda_line* ('cuda-12'
     or 'cuda-13') into *target*. Returns the total files copied. Raises
@@ -363,6 +387,11 @@ def _fetch_cuda_runtime_libs(cuda_line: str, target: Path) -> int:
     for pkg in packages:
         console.print(f"[dim]Fetching CUDA runtime library:[/dim] {pkg}")
         total += _sl._fetch_pypi_runtime_lib(pkg, target)
+    try:
+        record_cuda_runtime(target, cuda_line)
+    except OSError as e:
+        logger.warning("could not record the CUDA runtime libraries fetched into %s: %s",
+                       target, e)
     return total
 
 
@@ -377,7 +406,7 @@ def _keep_choice_and_use_vulkan(reason: str, assume_yes: bool, explicit: bool = 
         return "vulkan", False, reason
     if not assume_yes:
         _sl._flush_stdin()
-        if not click.confirm("  Install the Vulkan build now so localm works? Your CUDA "
+        if not _sl._confirm("  Install the Vulkan build now so localm works? Your CUDA "
                              "choice is kept and shown until it can be used. "
                              "(No = stop, nothing is changed)", default=True):
             console.print("[yellow]Stopped. Nothing was changed.[/yellow] Fix the cause, "
@@ -459,7 +488,7 @@ def _cuda_setup_dialogue(info: NvidiaInfo, assume_yes: bool, det=None,
             return "cuda", True, None
         if not other_vendors:
             _sl._flush_stdin()
-            if click.confirm("  Continue with CUDA anyway? (No = use Vulkan)", default=False):
+            if _sl._confirm("  Continue with CUDA anyway? (No = use Vulkan)", default=False):
                 return "cuda", True, None
             return "vulkan", False, None
 
@@ -471,7 +500,9 @@ def _cuda_setup_dialogue(info: NvidiaInfo, assume_yes: bool, det=None,
         console.print("    [1] Continue with CUDA anyway")
         console.print(f"    [2] Switch to {recommended} (recommended for your hardware)")
         console.print("    [3] Quit")
-        pick = click.prompt("  Pick 1-3", type=click.Choice(["1", "2", "3"]), default="2")
+        pick = _sl._choose("  Pick 1-3", [("1", "Continue with CUDA anyway"),
+                                         ("2", f"Switch to {recommended}"),
+                                         ("3", "Quit")], "2")
         if pick == "1":
             return "cuda", True, None
         if pick == "3":
@@ -481,7 +512,7 @@ def _cuda_setup_dialogue(info: NvidiaInfo, assume_yes: bool, det=None,
     # Driver OK (or capability unknown but a GPU is present): offer the fetch.
     console.print("  [yellow]i[/yellow] Fetching self-contained CUDA runtime bundle. [bold]No Toolkit needed[/bold].")
     _sl._flush_stdin()
-    if assume_yes or click.confirm("  Download the CUDA build + runtime now?", default=True):
+    if assume_yes or _sl._confirm("  Download the CUDA build + runtime now?", default=True):
         return "cuda", True, None
     kept = "; your CUDA choice is kept" if explicit else ""
     console.print(f"  [dim]Using Vulkan for now (works on your driver){kept}. Retry "

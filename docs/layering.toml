@@ -54,8 +54,11 @@ units = ["model_manager", "image_gen", "music_gen", "video_gen"]
 
 [[tier]]
 name = "runtimes"
-role = "External runtimes localm provisions and drives: the shared ComfyUI client and managed install, per-plugin ComfyUI workflow files, the native llama.cpp binaries, headless Chromium, Whisper speech-to-text."
-units = ["media", "media_workflows", "setup_llama", "browser", "voice"]
+role = "External runtimes localm provisions and drives: the shared ComfyUI client and managed install, per-plugin ComfyUI workflow files, the native llama.cpp binaries and their re-provision by an update, the update of every other provisioned component, headless Chromium, Whisper speech-to-text."
+units = [
+    "media", "media_workflows", "setup_llama", "updater_runtime", "updater_components",
+    "browser", "voice",
+]
 
 [[tier]]
 name = "services"
@@ -72,6 +75,7 @@ units = [
     "auth", "audit", "tls", "http_ssl", "netpolicy", "netpin", "netname", "portmux",
     "peer_routing", "selfclient", "instances", "listeners", "gpu_usage", "hwdetect",
     "cpu_backend_select", "_torch_gpu_probe", "vram", "appface", "install_manifest", "uv_tool",
+    "setup_spec",
     "globalcmd", "winconsole", "settings_schema", "model_source_credentials", "model_meta", "rag",
     "bugreport", "_log_digest",
 ]

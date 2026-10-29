@@ -101,11 +101,12 @@ test("a cap below 1 is rejected client-side: no PATCH, a toast explains why", as
   const { window } = loadApp({ fetchImpl: makeFetch(calls) });
   const cap = window.document.getElementById("perf-max-resident");
   await waitFor(() => calls.some((c) => c.u.endsWith("/v1/config") && c.method === "GET"));
-  const before = calls.length;
+  const patches = () => calls.filter((c) => c.method === "PATCH").length;
+  const before = patches();
   cap.value = "0";
   cap.dispatchEvent(new window.Event("change", { bubbles: true }));
   await settle(50);
-  assert.equal(calls.length, before, "no PATCH is sent for an out-of-range cap");
+  assert.equal(patches(), before, "no PATCH is sent for an out-of-range cap");
   const toastEl = window.document.getElementById("toast");
   assert.match(toastEl.textContent, /whole number of 1 or more/);
 });

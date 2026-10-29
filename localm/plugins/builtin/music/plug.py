@@ -35,7 +35,7 @@ from pydantic import BaseModel, Field
 from localm.inference.http_server import path_formatter, principal_id
 from localm.media import gallery
 from localm.media import paths as media_paths
-from localm.media.native_models import apply_choice, check_request
+from localm.media.native_models import check_request
 from localm.pathsafe import confined_file, confined_name
 from localm.pathscrub import map_strings
 from localm.selfclient import resolve_self_url
@@ -144,7 +144,7 @@ async def music(req: MusicRequest, request: Request):
             if refused:
                 job.push({"type": "line", "text": refused})
                 return False
-            s = apply_choice(s, native_choice)
+            s = _backend.apply_job_choice(s, native_choice, _cfg)
         ok, msg = _backend.ensure_available(
             s, on_progress=lambda t: job.push({"type": "line", "text": t}))
         job.push({"type": "line", "text": msg})

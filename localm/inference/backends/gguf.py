@@ -308,6 +308,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # How the last load chose its n_gpu_layers (see
         # VramSizingMixin._record_gpu_sizing), or None before the first sizing.
         self.last_gpu_sizing: Optional[dict] = None
+        # Free VRAM the last load took, or None when it could not be measured.
+        self.vram_load_bytes: Optional[int] = None
         # The last load's placement over 2+ GPUs (_gpu_plan.Placement) and its
         # GPU list, or None and [] for a load on one GPU or the CPU.
         self._gpu_placement = None
@@ -884,10 +886,12 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                             "units": d.units} for d in placed]
             self._fit_source_index = {d.device.slot: d.device.index for d in placed}
             # The vision projector's GPU: the configured main_gpu_index when the
-            # placement uses it, else the worker's default (the output GPU).
+            # placement uses it, else the placed GPU with the most memory left.
             chosen_main = load_config().get("main_gpu_index")
             main_slot = next((d.device.slot for d in placed
                               if d.device.index == chosen_main), None)
+            if main_slot is None:
+                main_slot = max(placed, key=lambda d: d.device.free - d.need).device.slot
         auto_ratios = (None if gpu_devices is not None
                        else resolve_auto_split_ratios(wait_for_inflight=True))
         worker_split = auto_ratios
@@ -1109,6 +1113,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
 
         # VRAM usage after load, skipped for a CPU-only load.
         self._vram_report_thread = None
+        self.vram_load_bytes = None
         if gpu_layers != 0:
             report = None
             if getattr(_vram_report_deferral, "on", False):
@@ -1186,7 +1191,11 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         (a list_gpus reading taken before the load, with its status
         *vram_before_status*) when that one is trusted too; an untrusted reading
         shows total-only. Takes a fresh list_gpus reading, joining one in
-        flight, so it must run off the event loop."""
+        flight, so it must run off the event loop.
+
+        Sets ``vram_load_bytes`` to the free VRAM the load took, summed over
+        every device with a total, when every such device's before and after
+        readings are trusted and the sum is positive; else None."""
         from localm.discover import list_gpus
         from localm.sysstats import _vram_reading_trusted
         try:
@@ -1194,6 +1203,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                 return_status=True, wait_for_inflight=True)
         except Exception:
             vram_after, vram_after_status = [], None
+        held, measured, untrusted = 0, False, False
         for i, gpu in enumerate(vram_after):
             total = gpu.get("total")
             if not total:
@@ -1207,11 +1217,18 @@ class GgufBackend(VramSizingMixin, BaseBackend):
                 if before is not None and _vram_reading_trusted(before, vram_before_status):
                     delta = (before["free"] - free) / 1024**3
                     line += f", {delta:+.2f} GB this load"
+                    held += before["free"] - free
+                    measured = True
+                else:
+                    untrusted = True
                 line += ")"
             else:
+                untrusted = True
                 line = (f"  vram     : {total / 1024**3:.2f} GB total (device {i}"
                         f", used/free reading not trusted on this platform)")
             console.print(f"[dim]{line}[/dim]")
+        self.vram_load_bytes = (held if measured and not untrusted and held > 0
+                                else None)
 
     def _apply_speculation_report(self, report) -> None:
         """Record the loaded model's draft-model status from the worker's

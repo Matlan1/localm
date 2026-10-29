@@ -1,18 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""setup.sh's detect_gpu(): NVIDIA must win over leftover ROCm tooling.
+"""setup.sh's GPU recommendation, GPU question and backend menu.
 
-Checking rocminfo/rocm-smi//opt/rocm BEFORE nvidia-smi makes a box with an
-NVIDIA GPU but ALSO some ROCm tooling on PATH (a shared ML rig, a base image
-bundling both vendor stacks) report "rocm" - matching neither hwdetect.py's
-vendor priority ("nvidia", "amd", "intel") nor the actual hardware. The real
-backend recommendation comes from `python -m localm.hwdetect` further down in
-setup.sh; $GPU from detect_gpu() only becomes load-bearing as setup.sh's OWN
-fallback if that probe's output is unparseable - see the
-`case "$REC" in ... *) case "$GPU" in ...` guard.
+The recommendation comes from `python -m localm.hwdetect` once the venv exists;
+detect_gpu() (NVIDIA first, so leftover ROCm tooling on an NVIDIA box never
+reports "rocm") is used only when that gives no backend this machine has a build
+of. The GPU question follows the recommendation, as in setup.bat. The menu rows
+come from `python -m localm.setup_spec backend-menu`.
 
-Extracts and runs ONLY the detect_gpu() function body (not the whole script,
+Extracts and runs only the needed blocks of setup.sh (not the whole script,
 which has side effects and prompts) with a controlled PATH holding stub
-commands - no real GPU hardware needed either way.
+commands and a stub .venv/bin/python - no real GPU hardware needed either way.
 """
 
 from __future__ import annotations
@@ -21,6 +18,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -117,59 +115,37 @@ def test_nvidia_checked_before_rocm_in_source():
 
 
 # ---------------------------------------------------------------------------
-# detect_gpu()'s pre-venv guess must not be presented as its own detection
-# verdict.
-#
-# setup.sh has two things that can each claim to say what GPU acceleration is in
-# play: this bash-level detect_gpu(), which runs before the venv exists, and the
-# authoritative Recommended for your hardware line, sourced from
-# `python -m localm.hwdetect` once the venv exists. $GPU's only job is gating the
-# pre-venv Y/n prompt, plus setup.sh's own fallback if the hwdetect probe fails.
+# Before the venv exists setup.sh asks nothing about the GPU and sets no $GPU:
+# the GPU question waits for `python -m localm.hwdetect`, as in setup.bat.
 # ---------------------------------------------------------------------------
 
 
 def _pre_venv_gpu_block() -> str:
     src = SETUP_SH.read_text(encoding="utf-8")
-    start = src.index("# ---- detect GPU acceleration")
+    start = src.index("# ---- GPU probe fallback and platform flags")
     end = src.index("# ---- create the venv", start)
     return src[start:end]
 
 
-def _run_pre_venv_gpu_block(tmp_path: Path, *, stub_names: list[str], yes: bool) -> str:
+def test_the_pre_venv_block_asks_nothing_even_with_a_gpu_tool_present(tmp_path):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    for name in stub_names:
-        _make_stub(bin_dir, name)
-    # Minimal stand-ins for setup.sh's own say()/ask(), which the extracted
-    # block calls but which are defined earlier in the real script (outside
-    # this slice). ask() always echoes its default here, matching --yes mode.
+    _make_stub(bin_dir, "nvidia-smi")
     script = (
         'say() { printf "%s\\n" "$*"; }\n'
-        'ask() { echo "$2"; }\n'
-        f'YES={"1" if yes else "0"}\n'
+        'ask() { echo "ASKED $1"; echo Y; }\n'
+        "YES=0\nGPU=unset\n"
         + _pre_venv_gpu_block()
         + '\nprintf "GPU=%s\\n" "$GPU"\n'
     )
     env = dict(os.environ)
-    env["PATH"] = str(bin_dir)   # isolate: no real nvidia-smi/rocminfo must leak in
+    env["PATH"] = str(bin_dir)
     result = subprocess.run([_bash(), "-c", script], capture_output=True,
                             text=True, env=env, timeout=15)
     assert result.returncode == 0, result.stderr
-    return result.stdout
-
-
-def test_pre_venv_block_never_prints_a_detection_verdict_line(tmp_path):
-    out = _run_pre_venv_gpu_block(tmp_path, stub_names=["rocminfo"], yes=True)
-    assert "Detected acceleration" not in out
-    assert "GPU=rocm" in out
-
-
-def test_pre_venv_block_gpu_var_still_correct_for_the_probe_failed_fallback(tmp_path):
-    # $GPU still has to be right even though it is not printed as a verdict:
-    # setup.sh's own fallback on $REC falls through to a case on $GPU if the
-    # hwdetect probe's output is unparseable.
-    out = _run_pre_venv_gpu_block(tmp_path, stub_names=["nvidia-smi", "rocminfo"], yes=True)
-    assert "GPU=cuda" in out
+    assert "ASKED" not in result.stdout
+    assert "GPU=unset" in result.stdout
+    assert "Detected acceleration" not in result.stdout
 
 
 def test_authoritative_recommendation_still_sourced_from_hwdetect():
@@ -184,6 +160,266 @@ def test_detect_gpu_guess_not_printed_as_its_own_verdict_line_in_source():
     """Static backstop that holds even without bash on PATH."""
     src = SETUP_SH.read_text(encoding="utf-8")
     assert 'say "  Detected acceleration: $GPU"' not in src
+
+
+def test_no_cpu_override_from_the_shell_probe_remains():
+    src = SETUP_SH.read_text(encoding="utf-8")
+    assert 'if [ "$GPU" = cpu ]; then REC=cpu; fi' not in src
+    assert 'GPU="$(detect_gpu)"' in src
+    assert src.index('HWLINE="$(.venv/bin/python -m localm.hwdetect') < src.index(
+        'GPU="$(detect_gpu)"')
+
+
+# ---------------------------------------------------------------------------
+# The recommendation and the GPU question (G2). REC comes from
+# `python -m localm.hwdetect` ("<vendor> <backend>"); the shell probe
+# detect_gpu() is used only when that gives no backend this machine has a
+# build of. The GPU question is asked when REC is not cpu; "n" makes it cpu.
+# ---------------------------------------------------------------------------
+
+
+def _write_python_stub(root: Path, *, hw: str | None, hint: str | None,
+                       menu: str | None = None) -> None:
+    """.venv/bin/python answering hwdetect, setup_spec backend-hint and
+    backend-menu with canned text (shell builtins only), recording the
+    backend-menu argument in menu_args.txt."""
+    bin_dir = root / ".venv" / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    lines = ["#!/bin/sh"]
+    if hw is not None:
+        lines.append(f'if [ "$2" = localm.hwdetect ] && [ -z "$3" ]; then printf "%s\\n" "{hw}"; fi')
+    if hint is not None:
+        lines.append(f'if [ "$3" = backend-hint ]; then printf "%s\\n" "{hint}"; fi')
+    lines.append('if [ "$3" = backend-menu ]; then printf "%s\\n" "$4" >> menu_args.txt; fi')
+    if menu is not None:
+        (root / "menu.txt").write_text(menu, encoding="utf-8")
+        lines.append('if [ "$3" = backend-menu ]; then while IFS= read -r l; do '
+                     'printf "%s\\n" "$l"; done < menu.txt; fi')
+    lines.append("exit 0")
+    stub = bin_dir / "python"
+    stub.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _mark_executable(stub)
+
+
+def _rec_block() -> str:
+    src = SETUP_SH.read_text(encoding="utf-8")
+    start = src.index('BACKEND_HINT="$(.venv/bin/python -m localm.setup_spec backend-hint')
+    end = src.index('# The "provision later" hint.', start)
+    return src[start:end]
+
+
+def _run_rec(tmp_path: Path, *, hw: str | None, hint: str | None = "vulkan|cuda|hip|sycl|cpu",
+             answer: str = "Y", yes: bool = False, stub_names: tuple = (),
+             os_name: str | None = None, arch: str = "x86_64", is_macos: int = 0) -> str:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name in stub_names:
+        _make_stub(bin_dir, name)
+    if os_name:
+        _make_uname_stub(bin_dir, os_name=os_name, arch=arch)
+    _write_python_stub(tmp_path, hw=hw, hint=hint)
+    script = (
+        'say() { printf "%s\\n" "$*"; }\n'
+        f'ask() {{ echo "ASKED $1" >&2; echo {answer}; }}\n'
+        f'YES={1 if yes else 0}\nIS_MACOS={is_macos}\n'
+        + _function_body("detect_gpu")
+        + _rec_block()
+        + '\nprintf "REC=%s\\n" "$REC"\n'
+    )
+    env = dict(os.environ)
+    env["PATH"] = str(bin_dir)   # isolate: no real nvidia-smi/rocminfo must leak in
+    result = subprocess.run([_bash(), "-c", script], capture_output=True,
+                            text=True, cwd=tmp_path, env=env, timeout=15)
+    assert result.returncode == 0, result.stderr
+    return result.stdout + result.stderr
+
+
+def _rec(out: str) -> str:
+    return [ln for ln in out.splitlines() if ln.startswith("REC=")][-1][4:]
+
+
+def test_hwdetect_gpu_wins_over_a_shell_probe_that_found_none(tmp_path):
+    out = _run_rec(tmp_path, hw="amd vulkan", stub_names=())
+    assert "ASKED   GPU acceleration looks available (amd). Use it? [Y/n] (n = CPU only): " in out
+    assert _rec(out) == "vulkan"
+
+
+def test_answering_no_to_the_gpu_question_recommends_cpu(tmp_path):
+    out = _run_rec(tmp_path, hw="amd vulkan", answer="n")
+    assert "ASKED" in out
+    assert _rec(out) == "cpu"
+
+
+def test_yes_mode_asks_nothing_and_keeps_the_gpu_backend(tmp_path):
+    out = _run_rec(tmp_path, hw="nvidia cuda", yes=True)
+    assert "ASKED" not in out
+    assert _rec(out) == "cuda"
+
+
+def test_a_cpu_recommendation_asks_nothing(tmp_path):
+    out = _run_rec(tmp_path, hw="none cpu", stub_names=("nvidia-smi",))
+    assert "ASKED" not in out
+    assert _rec(out) == "cpu"
+
+
+def test_no_hwdetect_answer_falls_back_to_the_shell_probe(tmp_path):
+    out = _run_rec(tmp_path, hw=None, stub_names=("nvidia-smi",))
+    assert "GPU acceleration looks available (cuda)" in out
+    assert _rec(out) == "vulkan"
+
+
+def test_a_backend_with_no_build_here_falls_back_to_the_shell_probe(tmp_path):
+    out = _run_rec(tmp_path, hw="nvidia cuda", hint="cpu", stub_names=())
+    assert "ASKED" not in out
+    assert _rec(out) == "cpu"
+
+
+def test_no_spec_answer_falls_back_to_the_shell_probe(tmp_path):
+    out = _run_rec(tmp_path, hw="amd vulkan", hint=None, stub_names=())
+    assert _rec(out) == "cpu"
+
+
+def test_probe_failed_fallback_metal_gpu_stays_metal(tmp_path):
+    out = _run_rec(tmp_path, hw=None, os_name="Darwin", arch="arm64", is_macos=1)
+    assert "GPU acceleration looks available (metal)" in out
+    assert _rec(out) == "metal"
+
+
+def test_probe_failed_fallback_on_macos_is_cpu_not_vulkan(tmp_path):
+    out = _run_rec(tmp_path, hw=None, stub_names=("rocminfo",), is_macos=1)
+    assert _rec(out) == "cpu"
+
+
+def test_probe_succeeded_metal_is_trusted_directly(tmp_path):
+    out = _run_rec(tmp_path, hw="apple metal", hint="metal|cpu", stub_names=())
+    assert _rec(out) == "metal"
+
+
+def test_the_shell_probe_fallback_keeps_metal_before_the_generic_vulkan_case():
+    """Static backstop that holds even without bash on PATH."""
+    body = _rec_block()
+    assert body.index("metal) REC=metal") < body.index("REC=vulkan")
+
+
+# ---------------------------------------------------------------------------
+# The backend menu (G3): rows from `python -m localm.setup_spec backend-menu
+# REC`, printed as "    [N] label"; the prompt is "Pick 1-<last> [1]: "; a
+# number with no row prints a line and uses REC; no rows: a [!] line and REC.
+# ---------------------------------------------------------------------------
+
+ROWS = (
+    "1\tvulkan\tvulkan - any GPU, no vendor toolkit   (recommended for your hardware)\n"
+    "2\tvulkan\tvulkan - any GPU, no vendor toolkit   (same as [1])\n"
+    "3\tcuda\tcuda - NVIDIA, peak performance\n"
+    "4\tcpu\tcpu - no GPU\n"
+    "5\town\tI will build / provide my own (skip the download)\n"
+)
+
+
+def _backend_menu_block() -> str:
+    src = SETUP_SH.read_text(encoding="utf-8")
+    start = src.index("# The menu: `python -m localm.setup_spec backend-menu REC`")
+    end = src.index('\nif [ "$LOCALM_BIN_OK" != 1 ]; then\n', start)
+    return src[start:end]
+
+
+def _run_menu(tmp_path: Path, *, rec: str, bpick: str, rows: str | None = ROWS,
+              env: dict | None = None) -> subprocess.CompletedProcess:
+    if rows is not None or env is None:
+        _write_python_stub(tmp_path, hw=None, hint=None, menu=rows)
+    script = (
+        'set -euo pipefail\n'
+        'say() { printf "%s\\n" "$*"; }\n'
+        f'ask() {{ printf "%s" "$1" >&2; echo "{bpick}"; }}\n'
+        f'REC="{rec}"\n'
+        + _backend_menu_block()
+        + '\nprintf "BACKEND=%s\\n" "$BACKEND"\n'
+    )
+    result = subprocess.run([_bash(), "-c", script], capture_output=True,
+                            text=True, cwd=tmp_path, timeout=60, env=env)
+    assert result.returncode == 0, result.stderr
+    return result
+
+
+def _backend(result) -> str:
+    return result.stdout.strip().splitlines()[-1].split("=", 1)[1]
+
+
+def test_every_spec_row_is_listed_with_its_label(tmp_path):
+    r = _run_menu(tmp_path, rec="vulkan", bpick="1")
+    for line in ROWS.splitlines():
+        n, _key, label = line.split("\t")
+        assert f"    [{n}] {label}" in r.stdout
+    assert "Pick 1-5 [1]: " in r.stderr
+    assert "Recommended for your hardware: vulkan" in r.stdout
+    assert _backend(r) == "vulkan"
+
+
+def test_the_recommendation_is_passed_to_the_spec(tmp_path):
+    _run_menu(tmp_path, rec="cuda", bpick="1")
+    assert (tmp_path / "menu_args.txt").read_text(encoding="utf-8").split() == ["cuda"]
+
+
+@pytest.mark.parametrize("bpick, backend", [("2", "vulkan"), ("3", "cuda"), ("4", "cpu"),
+                                            ("5", "own")])
+def test_a_listed_number_picks_its_backend(tmp_path, bpick, backend):
+    r = _run_menu(tmp_path, rec="vulkan", bpick=bpick)
+    assert _backend(r) == backend
+    assert "is not offered" not in r.stdout
+
+
+@pytest.mark.parametrize("bpick", ["6", "8", "11"])
+def test_an_unlisted_number_says_what_it_used_instead(tmp_path, bpick):
+    r = _run_menu(tmp_path, rec="cuda", bpick=bpick)
+    assert f"  [{bpick}] is not offered on this machine; using cuda." in r.stdout
+    assert _backend(r) == "cuda"
+
+
+def test_a_junk_answer_takes_the_recommendation_silently(tmp_path):
+    r = _run_menu(tmp_path, rec="cuda", bpick="zz")
+    assert "is not offered" not in r.stdout
+    assert _backend(r) == "cuda"
+
+
+def test_no_rows_from_the_spec_says_so_and_uses_the_recommendation(tmp_path):
+    r = _run_menu(tmp_path, rec="metal", bpick="3", rows=None)
+    assert "  [!] Could not list the llama.cpp backends for this machine; using metal." in r.stdout
+    assert "Pick" not in r.stderr
+    assert _backend(r) == "metal"
+
+
+def test_the_load_tested_note_is_kept(tmp_path):
+    r = _run_menu(tmp_path, rec="vulkan", bpick="1")
+    assert "(your pick is load-tested; on failure you can retry after fixing the" in r.stdout
+
+
+def test_the_real_spec_menu_parses(tmp_path):
+    """The real interpreter and the real localm.setup_spec behind
+    .venv/bin/python: every row is listed, and the last number picks "own"."""
+    from localm import setup_spec
+
+    bin_dir = tmp_path / ".venv" / "bin"
+    bin_dir.mkdir(parents=True)
+    exe = Path(sys.executable).as_posix()
+    stub = bin_dir / "python"
+    stub.write_text(f'#!/bin/sh\nexec "{exe}" "$@"\n', encoding="utf-8")
+    _mark_executable(stub)
+    rows = setup_spec.backend_menu("cpu")
+    env = dict(os.environ, PYTHONPATH=str(ROOT))
+    r = _run_menu(tmp_path, rec="cpu", bpick=rows[-1][0], rows=None, env=env)
+    for n, _key, label in rows:
+        assert f"    [{n}] {label}" in r.stdout, r.stdout
+    assert f"Pick 1-{rows[-1][0]} [1]: " in r.stderr
+    assert _backend(r) == "own"
+
+
+def test_no_backend_list_is_hardcoded_in_the_menu():
+    src = SETUP_SH.read_text(encoding="utf-8")
+    code = "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
+    for gone in ("hwdetect backends", "_m2", "_m8", "for _b in", "vulkan|cuda|hip",
+                 'AVAIL="vulkan', "if offered "):
+        assert gone not in code, gone
+    assert "localm.setup_spec backend-menu" in code
 
 
 # ---------------------------------------------------------------------------
@@ -253,305 +489,3 @@ def test_darwin_branch_checked_after_vendor_tools_in_source():
     body = _function_body("detect_gpu")
     assert body.index("nvidia-smi") < body.index('"Darwin"')
     assert body.index("rocminfo") < body.index('"Darwin"')
-
-
-# ---------------------------------------------------------------------------
-# The "probe failed" fallback (fires only if `python -m localm.hwdetect`
-# itself produced no known backend token) must not recommend "vulkan" for a
-# GPU value of "metal" - localm has no vulkan build for darwin at all (see
-# setup_llama's _BACKEND_ASSETS), so that fallback would recommend a
-# backend nothing can ever provision on Apple Silicon.
-# ---------------------------------------------------------------------------
-
-
-def _rec_fallback_case() -> str:
-    src = SETUP_SH.read_text(encoding="utf-8")
-    marker = 'case "$REC" in\n  vulkan|cuda|hip|sycl|cpu|metal|amd-rocm) ;;'
-    start = src.index(marker)
-    end = src.index("esac\n", start) + len("esac\n")
-    return src[start:end]
-
-
-def _run_rec_fallback(tmp_path: Path, *, gpu: str, rec: str = "") -> str:
-    script = f'REC="{rec}"\nGPU="{gpu}"\n' + _rec_fallback_case() + '\nprintf "REC=%s\\n" "$REC"\n'
-    result = subprocess.run([_bash(), "-c", script], capture_output=True,
-                            text=True, cwd=tmp_path, timeout=15)
-    assert result.returncode == 0, result.stderr
-    return result.stdout.strip()
-
-
-def test_probe_failed_fallback_metal_gpu_stays_metal(tmp_path):
-    assert _run_rec_fallback(tmp_path, gpu="metal") == "REC=metal"
-
-
-def test_probe_failed_fallback_cpu_gpu_stays_cpu(tmp_path):
-    assert _run_rec_fallback(tmp_path, gpu="cpu") == "REC=cpu"
-
-
-def test_probe_failed_fallback_other_gpu_is_vulkan(tmp_path):
-    assert _run_rec_fallback(tmp_path, gpu="cuda") == "REC=vulkan"
-
-
-def test_probe_succeeded_metal_is_trusted_directly(tmp_path):
-    # The probe SUCCEEDED (REC is already a known backend) - the case
-    # statement's first arm must leave it alone rather than falling into the
-    # GPU-based fallback at all.
-    assert _run_rec_fallback(tmp_path, gpu="cpu", rec="metal") == "REC=metal"
-
-
-def test_probe_failed_fallback_metal_case_precedes_generic_vulkan_fallback_in_source():
-    """Static backstop that holds even without bash on PATH."""
-    body = _rec_fallback_case()
-    assert body.index("metal) REC=metal") < body.index("REC=vulkan")
-
-
-# ---------------------------------------------------------------------------
-# The backend-choice menu must offer metal as a real, selectable numbered
-# entry on Apple Silicon (not only reachable via the recommended-default
-# shortcut [1]) - and must never offer it on a platform with no darwin build
-# to provision at all.
-# ---------------------------------------------------------------------------
-
-
-def _backend_menu_block() -> str:
-    """From the offered-backends probe through the unlisted-pick check. Run where
-    no .venv exists, the probe does not answer and the fallback list applies."""
-    src = SETUP_SH.read_text(encoding="utf-8")
-    start = src.index("# The backends setup-llama has a build of")
-    tail = src.index("# A number the menu did not list", start)
-    end = src.index("\nesac\n", tail) + len("\nesac\n")
-    return src[start:end]
-
-
-def _run_backend_menu(tmp_path: Path, *, rec: str, is_apple_silicon: bool, bpick: str,
-                      is_macos: bool | None = None) -> dict:
-    macos = is_apple_silicon if is_macos is None else is_macos
-    script = (
-        'set -euo pipefail\n'
-        'say() { :; }\n'
-        f'ask() {{ echo "{bpick}"; }}\n'
-        f'REC="{rec}"\n'
-        f'GPU=irrelevant\n'
-        f'IS_APPLE_SILICON={1 if is_apple_silicon else 0}\n'
-        f'IS_MACOS={1 if macos else 0}\n'
-        + _backend_menu_block()
-        + '\nprintf "BACKEND=%s\\n" "$BACKEND"\n'
-    )
-    result = subprocess.run([_bash(), "-c", script], capture_output=True,
-                            text=True, cwd=tmp_path, timeout=15)
-    assert result.returncode == 0, result.stderr
-    return dict(line.split("=", 1) for line in result.stdout.strip().splitlines() if "=" in line)
-
-
-def test_menu_bpick_8_selects_metal_on_apple_silicon(tmp_path):
-    out = _run_backend_menu(tmp_path, rec="cpu", is_apple_silicon=True, bpick="8")
-    assert out["BACKEND"] == "metal"
-
-
-def test_menu_default_pick_on_apple_silicon_with_rec_metal_is_metal(tmp_path):
-    # ask() here returns bpick itself (default "1" simulated directly), so this
-    # covers the recommended-default path staying correct too.
-    out = _run_backend_menu(tmp_path, rec="metal", is_apple_silicon=True, bpick="1")
-    assert out["BACKEND"] == "metal"
-
-
-def test_menu_shows_metal_line_only_on_apple_silicon(tmp_path):
-    script_apple = (
-        'say() { printf "%s\\n" "$*"; }\n'
-        'ask() { echo 1; }\n'
-        'REC="metal"\nGPU=irrelevant\nIS_APPLE_SILICON=1\n'
-        + _backend_menu_block()
-    )
-    script_other = script_apple.replace("IS_APPLE_SILICON=1", "IS_APPLE_SILICON=0")
-    out_apple = subprocess.run([_bash(), "-c", script_apple], capture_output=True,
-                               text=True, cwd=tmp_path, timeout=15)
-    out_other = subprocess.run([_bash(), "-c", script_other], capture_output=True,
-                               text=True, cwd=tmp_path, timeout=15)
-    assert out_apple.returncode == 0, out_apple.stderr
-    assert out_other.returncode == 0, out_other.stderr
-    assert "[8] metal" in out_apple.stdout
-    assert "[8] metal" not in out_other.stdout
-
-
-def test_menu_pick_range_extends_to_8_only_on_apple_silicon(tmp_path):
-    script_apple = (
-        'say() { :; }\n'
-        'ask() { printf "%s" "$1" >&2; echo 1; }\n'
-        'REC="metal"\nGPU=irrelevant\nIS_APPLE_SILICON=1\nIS_MACOS=1\n'
-        + _backend_menu_block()
-    )
-    result = subprocess.run([_bash(), "-c", script_apple], capture_output=True,
-                            text=True, cwd=tmp_path, timeout=15)
-    assert result.returncode == 0, result.stderr
-    assert "Pick 1, 6, 7 or 8" in result.stderr
-
-
-def test_menu_pick_range_is_1_to_7_without_apple_silicon(tmp_path):
-    script = (
-        'say() { :; }\n'
-        'ask() { printf "%s" "$1" >&2; echo 1; }\n'
-        'REC="vulkan"\nGPU=irrelevant\nIS_APPLE_SILICON=0\n'
-        + _backend_menu_block()
-    )
-    result = subprocess.run([_bash(), "-c", script], capture_output=True,
-                            text=True, cwd=tmp_path, timeout=15)
-    assert result.returncode == 0, result.stderr
-    assert "Pick 1-7" in result.stderr
-
-
-def test_menu_shows_metal_even_when_gpu_was_downgraded_to_cpu(tmp_path):
-    # $GPU can be downgraded to "cpu" by the earlier Y/n prompt (a declined
-    # GPU); IS_APPLE_SILICON is a separate flag computed once from uname, so a
-    # declined GPU must not also remove the [8] metal choice from the menu.
-    script = (
-        'say() { printf "%s\\n" "$*"; }\n'
-        'ask() { echo 1; }\n'
-        'REC="cpu"\nGPU=cpu\nIS_APPLE_SILICON=1\n'
-        + _backend_menu_block()
-    )
-    result = subprocess.run([_bash(), "-c", script], capture_output=True,
-                            text=True, cwd=tmp_path, timeout=15)
-    assert result.returncode == 0, result.stderr
-    assert "[8] metal" in result.stdout
-
-
-# ---------------------------------------------------------------------------
-# sycl: a real, always-offered numbered choice (Intel iGPU/dGPU, selectable
-# on every platform, matching how vulkan/cuda/hip are offered regardless of
-# detected vendor) - not gated behind Intel detection or IS_APPLE_SILICON.
-# ---------------------------------------------------------------------------
-
-
-def test_menu_bpick_5_selects_sycl(tmp_path):
-    out = _run_backend_menu(tmp_path, rec="vulkan", is_apple_silicon=False, bpick="5")
-    assert out["BACKEND"] == "sycl"
-
-
-def _menu_text(tmp_path: Path, *, is_macos: bool, is_apple_silicon: bool,
-               rec: str = "cpu") -> tuple[str, str]:
-    """(menu stdout, pick prompt) for one platform."""
-    script = (
-        'set -euo pipefail\n'
-        'say() { printf "%s\\n" "$*"; }\n'
-        'ask() { printf "%s" "$1" >&2; echo 1; }\n'
-        f'REC="{rec}"\nGPU=irrelevant\n'
-        f'IS_APPLE_SILICON={1 if is_apple_silicon else 0}\nIS_MACOS={1 if is_macos else 0}\n'
-        + _backend_menu_block()
-    )
-    result = subprocess.run([_bash(), "-c", script], capture_output=True,
-                            text=True, cwd=tmp_path, timeout=15)
-    assert result.returncode == 0, result.stderr
-    return result.stdout, result.stderr
-
-
-def test_menu_shows_the_vendor_backends_off_macos(tmp_path):
-    out, prompt = _menu_text(tmp_path, is_macos=False, is_apple_silicon=False)
-    for line in ("[2] vulkan", "[3] cuda", "[4] hip", "[5] sycl", "[6] cpu", "[7] I will"):
-        assert line in out
-    assert "Pick 1-7" in prompt
-
-
-@pytest.mark.parametrize("apple, entries, pick", [
-    (True, ("[6] cpu", "[7] I will", "[8] metal"), "Pick 1, 6, 7 or 8"),
-    (False, ("[6] cpu", "[7] I will"), "Pick 1, 6 or 7"),
-])
-def test_macos_menu_lists_only_backends_with_a_macos_build(tmp_path, apple, entries, pick):
-    out, prompt = _menu_text(tmp_path, is_macos=True, is_apple_silicon=apple)
-    for line in entries:
-        assert line in out
-    for line in ("[2] vulkan", "[3] cuda", "[4] hip", "[5] sycl"):
-        assert line not in out
-    assert ("[8] metal" in out) is apple
-    assert pick in prompt
-
-
-@pytest.mark.parametrize("bpick", ["2", "3", "4", "5"])
-@pytest.mark.parametrize("apple, rec", [(True, "metal"), (False, "cpu")])
-def test_an_unlisted_number_on_macos_uses_the_recommendation(tmp_path, bpick, apple, rec):
-    out = _run_backend_menu(tmp_path, rec=rec, is_apple_silicon=apple, is_macos=True,
-                            bpick=bpick)
-    assert out["BACKEND"] == rec
-
-
-def test_metal_is_not_pickable_without_apple_silicon(tmp_path):
-    out = _run_backend_menu(tmp_path, rec="vulkan", is_apple_silicon=False, bpick="8")
-    assert out["BACKEND"] == "vulkan"
-    out = _run_backend_menu(tmp_path, rec="cpu", is_apple_silicon=False, is_macos=True,
-                            bpick="8")
-    assert out["BACKEND"] == "cpu"
-
-
-def test_an_unlisted_pick_says_what_it_used_instead(tmp_path):
-    script = (
-        'say() { printf "%s\\n" "$*"; }\n'
-        'ask() { echo 3; }\n'
-        'REC="cpu"\nGPU=irrelevant\nIS_APPLE_SILICON=0\nIS_MACOS=1\n'
-        + _backend_menu_block()
-    )
-    result = subprocess.run([_bash(), "-c", script], capture_output=True,
-                            text=True, cwd=tmp_path, timeout=15)
-    assert result.returncode == 0, result.stderr
-    assert "[3] is not offered on this machine; using cpu." in result.stdout
-
-
-def _menu_with_probe(tmp_path: Path, avail: str, bpick: str, rec: str) -> tuple[str, str]:
-    """(stdout, stderr) of the menu when `python -m localm.hwdetect backends`
-    answers *avail*."""
-    bin_dir = tmp_path / ".venv" / "bin"
-    bin_dir.mkdir(parents=True)
-    stub = bin_dir / "python"
-    stub.write_text(f'#!/bin/sh\n[ "$3" = backends ] && echo "{avail}"\n', encoding="utf-8")
-    _mark_executable(stub)
-    script = (
-        'set -euo pipefail\n'
-        'say() { printf "%s\\n" "$*"; }\n'
-        f'ask() {{ printf "%s" "$1" >&2; echo {bpick}; }}\n'
-        f'REC="{rec}"\nGPU=irrelevant\nIS_APPLE_SILICON=0\nIS_MACOS=0\n'
-        + _backend_menu_block()
-        + '\nprintf "BACKEND=%s\\n" "$BACKEND"\n'
-    )
-    result = subprocess.run([_bash(), "-c", script], capture_output=True,
-                            text=True, cwd=tmp_path, timeout=15)
-    assert result.returncode == 0, result.stderr
-    return result.stdout, result.stderr
-
-
-def test_menu_lists_what_the_probe_offers_on_arm64_linux(tmp_path):
-    out, prompt = _menu_with_probe(tmp_path, "cpu vulkan cuda", "1", "vulkan")
-    assert "[2] vulkan" in out and "[3] cuda" in out and "[6] cpu" in out and "[7] I will" in out
-    for line in ("[4] hip", "[5] sycl", "[8] metal"):
-        assert line not in out
-    assert "Pick 1, 2, 3, 6 or 7" in prompt
-
-
-def test_a_pick_the_probe_does_not_offer_uses_the_recommendation(tmp_path):
-    out, _prompt = _menu_with_probe(tmp_path, "cpu vulkan", "3", "vulkan")
-    assert "[3] is not offered on this machine; using vulkan." in out
-    assert out.strip().endswith("BACKEND=vulkan")
-
-
-def test_the_probe_answer_wins_over_the_fallback_list(tmp_path):
-    out, prompt = _menu_with_probe(tmp_path, "cpu metal", "8", "metal")
-    assert "[8] metal" in out and "[2] vulkan" not in out
-    assert "Pick 1, 6, 7 or 8" in prompt
-    assert out.strip().endswith("BACKEND=metal")
-
-
-def test_menu_cuda_line_says_the_runtime_is_fetched():
-    block = _backend_menu_block()
-    assert "[3] cuda     - NVIDIA, peak performance (fetches the CUDA runtime for you)" in block
-    assert "needs the CUDA runtime" not in block
-
-
-def test_probe_failed_fallback_on_macos_is_cpu_not_vulkan(tmp_path):
-    script = ('IS_MACOS=1\nREC=""\nGPU="rocm"\n' + _rec_fallback_case()
-              + '\nprintf "REC=%s\\n" "$REC"\n')
-    result = subprocess.run([_bash(), "-c", script], capture_output=True,
-                            text=True, cwd=tmp_path, timeout=15)
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "REC=cpu"
-
-
-def test_rec_sycl_marks_bpick_5_as_the_recommended_twin(tmp_path):
-    out = _run_backend_menu(tmp_path, rec="sycl", is_apple_silicon=False, bpick="1")
-    assert out["BACKEND"] == "sycl"

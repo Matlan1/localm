@@ -6,7 +6,8 @@
 "use strict";
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
-import { $, applyChatBackground, authHeaders, autoGrow, CHAT_SURFACE_HEADERS, confirmDanger, el, fetchImageURL, INSTANCE_SCOPED_KEYS, promptText, readStoredJSON, reconcileInstanceId, renderMarkdown, safeAvatarImageSrc, scrubMarkers, stripAsrPrefix, stripThink, toast } from "./helpers.js";
+import { $, applyChatBackground, authHeaders, autoGrow, CHAT_SURFACE_HEADERS, confirmDanger, el, fetchImageURL, INSTANCE_SCOPED_KEYS, promptText, readStoredJSON, reconcileInstanceId, renderMarkdown, revealFilledAdvanced, safeAvatarImageSrc, scrubMarkers, stripAsrPrefix, stripThink, toast, updateAdvancedCount } from "./helpers.js";
+import { restoreRecentGuiErrors, setRecentGuiErrorStore } from "./client-log.js";
 import { t, tn, tOr } from "./i18n.js";
 import { emptyState, iconEl } from "./icons.js";
 import { modelCache, modelSelect } from "./models-sidebar.js";
@@ -770,6 +771,7 @@ export async function refreshCtxLimit() {
       for (const key of INSTANCE_SCOPED_KEYS) {
         if (scopedKeyPrivate(key)) localStorage.removeItem(key);
       }
+      _syncRecentErrorsStore();
       if (chat.serverPrivacy) {
         // The Coder tab's "Project directory" input was filled from
         // "localm.coderCwd" at boot; clear it once per privacy confirmation.
@@ -883,6 +885,22 @@ const CHAT_SCOPED_KEYS = Object.freeze([
 /** True when *key* must not be kept in localStorage under the confirmed mode. */
 export function scopedKeyPrivate(key) {
   return CHAT_SCOPED_KEYS.includes(key) ? chat.privacy : chat.serverPrivacy;
+}
+
+// The Settings "Recent errors" list follows the server mode: memory only in
+// privacy mode, kept in localStorage otherwise (restored once per page load).
+const RECENT_ERRORS_STORE_KEY = "localm.recentErrors";
+let _recentErrorsRestored = false;
+function _syncRecentErrorsStore() {
+  if (chat.serverPrivacy) {
+    setRecentGuiErrorStore(null);
+    return;
+  }
+  setRecentGuiErrorStore({ save: (list) => lsSetScoped(RECENT_ERRORS_STORE_KEY, JSON.stringify(list)) });
+  if (!_recentErrorsRestored) {
+    _recentErrorsRestored = true;
+    restoreRecentGuiErrors(readStoredJSON(RECENT_ERRORS_STORE_KEY, []));
+  }
 }
 
 export function lsSetScoped(key, value) {
@@ -1201,6 +1219,93 @@ export function setConversationPin(on) {
 }
 window.setConversationPin = setConversationPin;
 
+/* ---- per-conversation parameter fields ---- */
+
+/** The parameters-drawer fields that belong to one conversation, by the key
+ *  they are stored under in conv.params. Web access, memory, speak-aloud, voice
+ *  and the knowledge collection are not here: they are global or handled
+ *  elsewhere. */
+export const CONV_PARAM_FIELDS = {
+  persona: "p-persona",
+  system: "p-system",
+  temperature: "p-temperature",
+  top_p: "p-top-p",
+  top_k: "p-top-k",
+  repeat_penalty: "p-repeat-penalty",
+  max_tokens: "p-max-tokens",
+  seed: "p-seed",
+  grammar: "p-grammar",
+};
+
+// The id of the conversation whose values the drawer fields currently show;
+// null when the fields belong to no conversation.
+let _paramsOwner = null;
+
+/** Writes the drawer's per-conversation fields into conv.params (only the
+ *  non-blank ones; the key is removed when all are blank). Returns true when
+ *  the stored value changed. */
+export function captureConvParams(conv) {
+  if (!conv) return false;
+  const next = {};
+  for (const [key, id] of Object.entries(CONV_PARAM_FIELDS)) {
+    const f = $(id);
+    if (f && String(f.value ?? "").trim() !== "") next[key] = f.value;
+  }
+  const had = conv.params ? JSON.stringify(conv.params) : "";
+  const has = Object.keys(next).length ? JSON.stringify(next) : "";
+  if (had === has) return false;
+  if (has) conv.params = next;
+  else delete conv.params;
+  return true;
+}
+
+/** Shows *params* (a conv.params object, or none for a blank panel) in the
+ *  drawer fields and refreshes the Advanced fold's badge; a fold holding a
+ *  value opens. */
+function showConvParams(params) {
+  const p = params || {};
+  for (const [key, id] of Object.entries(CONV_PARAM_FIELDS)) {
+    const f = $(id);
+    if (!f) continue;
+    const v = p[key] == null ? "" : String(p[key]);
+    f.value = v;
+    if (f.tagName === "SELECT" && f.value !== v) f.value = "";
+  }
+  const drawer = document.getElementById("params");
+  if (drawer) revealFilledAdvanced(drawer);
+  const fold = document.getElementById("p-advanced");
+  if (fold) updateAdvancedCount(fold);
+}
+
+/** Stores the drawer's current per-conversation values on the conversation
+ *  they are showing, locally. Call after a programmatic write into the fields. */
+export function persistChatParams() {
+  const conv = currentConv();
+  if (!conv || conv.id !== _paramsOwner) return;
+  if (captureConvParams(conv)) saveConversations();
+}
+
+/** Makes the drawer show the active conversation's own values: the outgoing
+ *  conversation keeps what the fields held, the incoming one gets its stored
+ *  values (blank defaults when it has none). Fields holding values typed with
+ *  no conversation open go to the first conversation that appears. */
+function syncChatParams(conv) {
+  const id = conv ? conv.id : null;
+  if (id === _paramsOwner) return;
+  const prev = _paramsOwner
+    ? chat.conversations.find((c) => c.id === _paramsOwner) : null;
+  if (prev && captureConvParams(prev)) saveConversations();
+  if (conv && _paramsOwner === null && !conv.params) captureConvParams(conv);
+  else showConvParams(conv ? conv.params : null);
+  _paramsOwner = id;
+}
+
+for (const evt of ["input", "change"]) {
+  $("params").addEventListener(evt, (e) => {
+    if (Object.values(CONV_PARAM_FIELDS).includes(e.target.id)) persistChatParams();
+  });
+}
+
 export function newConversation() {
   const conv = { id: Date.now().toString(36), title: "New chat", messages: [] };
   chat.conversations.unshift(conv);
@@ -1344,9 +1449,15 @@ export function elideAudioForWire(messages) {
   return messages;
 }
 
-/** True when the wire *messages* carry both an image part and an audio clip:
- *  no model reads both, so a request that needs only one of them must leave
- *  the other out. */
+/** True when the registry row of the model *name* records that it cannot take
+ *  audio input (`audio_input: false`). An unknown model, or one whose files
+ *  could not be inspected (no `audio_input` key), is not reported as deaf. */
+export function modelCannotHearAudio(name) {
+  const row = ((modelCache && modelCache.models) || []).find((m) => m.name === name);
+  return !!row && row.audio_input === false;
+}
+
+/** True when the wire *messages* carry both an image part and an audio clip. */
 export function wireHasImageAndAudio(messages) {
   const has = (type) => messages.some((m) => Array.isArray(m.content) &&
     m.content.some((p) => p.type === type));
@@ -1840,6 +1951,7 @@ export function addMessageRow(container, role, text, opts = {}) {
     body.appendChild(img);
   }
   for (const clip of opts.clips || []) {
+    body.classList.add("has-player");
     const wrap = el("div", "msg-clip");
     if (clip.name) wrap.appendChild(el("div", "msg-clip-name", clip.name));
     const player = document.createElement("audio");
@@ -1855,6 +1967,7 @@ export function addMessageRow(container, role, text, opts = {}) {
     body.appendChild(wrap);
   }
   for (const url of opts.audio || []) {
+    body.classList.add("has-player");
     const player = document.createElement("audio");
     player.controls = true;
     player.style.width = "100%";
@@ -1863,6 +1976,7 @@ export function addMessageRow(container, role, text, opts = {}) {
     body.appendChild(player);
   }
   for (const url of opts.video || []) {
+    body.classList.add("has-player");
     const player = document.createElement("video");
     player.controls = true;
     player.style.width = "100%";
@@ -2241,6 +2355,7 @@ export function renderChat() {
   const conv = currentConv();
   pruneClipUrls(conv);
   syncPinModelToggle(conv);
+  syncChatParams(conv);
   // R40: a not-yet-loaded conversation (server index row) hydrates its body on
   // first render, then re-renders. Try once per row (a failed/offline load sets
   // _hydrateFailed so we never spin).

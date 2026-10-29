@@ -1,0 +1,321 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""POST /api/gui-error: a GUI error reaches the server log (the recent-activity
+buffer behind /api/activity) as one sanitized, scrubbed, rate-limited line."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+from localm.plugins.gui.routes import client_errors as ce
+
+
+@pytest.fixture
+def fresh_ring():
+    """A clean ring buffer on the localm logger for one test; the logger's
+    handlers, level and ring global are restored afterwards."""
+    from localm import debuglog
+    logger = debuglog.logger
+    saved_handlers = list(logger.handlers)
+    saved_level = logger.level
+    saved_ring = debuglog._ring_handler
+    for h in list(logger.handlers):
+        if isinstance(h, debuglog._RingBufferHandler):
+            logger.removeHandler(h)
+    debuglog._ring_handler = None
+    assert debuglog.install_ring_buffer() is True
+    yield
+    logger.handlers[:] = saved_handlers
+    logger.setLevel(saved_level)
+    debuglog._ring_handler = saved_ring
+
+
+@pytest.fixture
+def app(tmp_path, monkeypatch, fresh_ring):
+    home = tmp_path / ".localm"
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    import localm.config as _cfg
+    monkeypatch.setattr(_cfg, "HOME_DIR", home)
+    monkeypatch.setattr(_cfg, "MODELS_DIR", home / "models")
+    monkeypatch.setattr(_cfg, "CONFIG_FILE", home / "config.json")
+    monkeypatch.setattr(_cfg, "REGISTRY_FILE", home / "registry.json")
+    from localm.inference.http_server import create_app
+    from localm.plugins.gui.web import attach_gui
+    a = create_app(None)
+    attach_gui(a, self_url="http://127.0.0.1:9/v1",
+               switch_model=lambda n: None, active_model=lambda: "model-a")
+    return a
+
+
+def _shell(app):
+    return {"Authorization": f"Bearer {app.state.shell_token}"}
+
+
+def _gui_lines():
+    from localm.debuglog import recent_activity
+    return [ln for ln in recent_activity() if " localm: gui: " in ln]
+
+
+def test_a_report_is_logged_at_warning_with_the_gui_prefix(app):
+    c = TestClient(app)
+    r = c.post("/api/gui-error", headers=_shell(app),
+               json={"message": "Could not load model x", "source": "toast",
+                     "page": "#models", "time": "2026-10-27T10:00:00Z"})
+    assert r.status_code == 200 and r.json() == {"logged": True}
+    lines = _gui_lines()
+    assert len(lines) == 1
+    assert "WARNING" in lines[0]
+    assert lines[0].endswith("gui: [toast #models] Could not load model x")
+    assert "2026-10-27T10:00:00Z" not in lines[0]
+
+
+def test_crlf_ansi_control_and_bidi_characters_are_removed(app):
+    c = TestClient(app)
+    msg = ("boom\r\n2026-01-01 00:00:00 ERROR   localm: forged line"
+           "\x1b[31mred\x1b[0m\x1b]0;title\x07 tab\there \x00nul sep‮RTL\x85")
+    assert c.post("/api/gui-error", headers=_shell(app), json={"message": msg}).status_code == 200
+    (line,) = _gui_lines()
+    assert "\n" not in line and "\r" not in line
+    assert all(ch not in line for ch in "\x1b\x00\t ‮\x85")
+    assert "red" in line and "title" not in line
+    assert "boom 2026-01-01 00:00:00 ERROR localm: forged line" in line
+
+
+def test_message_source_and_page_are_capped(app):
+    c = TestClient(app)
+    r = c.post("/api/gui-error", headers=_shell(app),
+               json={"message": "m" * 5000, "source": "s" * 500, "page": "p" * 500})
+    assert r.status_code == 200
+    (line,) = _gui_lines()
+    body = line.split(" localm: gui: ", 1)[1]
+    msg = body.split("] ", 1)[1]
+    assert len(msg) == ce.MAX_MESSAGE_CHARS and msg.endswith("...")
+    src, page = body[1:].split("] ", 1)[0].split(" ")
+    assert len(src) == ce.MAX_SOURCE_CHARS and len(page) == ce.MAX_PAGE_CHARS
+
+
+def test_a_body_over_the_cap_is_refused_and_not_logged(app):
+    c = TestClient(app)
+    big = '{"message": "' + "x" * (ce.MAX_BODY_BYTES + 10) + '"}'
+    r = c.post("/api/gui-error", headers={**_shell(app), "Content-Type": "application/json"},
+               content=big)
+    assert r.status_code == 413
+    assert _gui_lines() == []
+
+
+@pytest.mark.parametrize("body", ["not json", "[1, 2]", '{"message": ""}',
+                                  '{"message": 42}', '{"message": "\\u0000\\r\\n"}', "",
+                                  "[" * 5000])
+def test_a_malformed_or_empty_report_is_refused(app, body):
+    c = TestClient(app)
+    r = c.post("/api/gui-error", headers={**_shell(app), "Content-Type": "application/json"},
+               content=body)
+    assert r.status_code == 400
+    assert _gui_lines() == []
+
+
+def test_home_paths_and_credentials_are_scrubbed(app, tmp_path):
+    c = TestClient(app)
+    home = str(Path.home())
+    msg = (f"failed to open {home}/models/secret-name.gguf with "
+           "Authorization: Bearer abcdefghijklmnop1234 and localm-sk-ABCDEFGHIJKLMNOPQR")
+    assert c.post("/api/gui-error", headers=_shell(app), json={"message": msg}).status_code == 200
+    (line,) = _gui_lines()
+    assert home not in line
+    assert "abcdefghijklmnop1234" not in line
+    assert "ABCDEFGHIJKLMNOPQR" not in line
+    assert "secret-name.gguf" in line
+
+
+def test_a_scrubber_failure_logs_no_text(app, monkeypatch):
+    from localm.bugreport import scrub
+
+    def _boom(text):
+        raise RuntimeError("scrubber down")
+
+    monkeypatch.setattr(scrub, "_scrub_secrets", _boom)
+    c = TestClient(app)
+    r = c.post("/api/gui-error", headers=_shell(app),
+               json={"message": "token " + "sk-" + "SHOULDNOTAPPEAR123456",
+                     "source": "SOURCEMUSTNOTAPPEAR"})
+    assert r.status_code == 200 and r.json() == {"logged": False}
+    lines = _gui_lines()
+    assert len(lines) == 1 and "scrubber failed" in lines[0]
+    assert "SHOULDNOTAPPEAR" not in "\n".join(lines)
+    assert "SOURCEMUSTNOTAPPEAR" not in "\n".join(lines)
+
+
+def test_rate_limit_drops_extra_reports_and_counts_them(app, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(ce.time, "monotonic", lambda: clock[0])
+    c = TestClient(app)
+    for i in range(ce.RATE_LIMIT_COUNT):
+        assert c.post("/api/gui-error", headers=_shell(app),
+                      json={"message": f"e{i}"}).status_code == 200
+    for i in range(5):
+        r = c.post("/api/gui-error", headers=_shell(app), json={"message": f"over{i}"})
+        assert r.status_code == 429 and r.json() == {"logged": False}
+    lines = _gui_lines()
+    assert len(lines) == ce.RATE_LIMIT_COUNT + 1
+    assert "dropping further reports" in lines[-1]
+    assert not any("over" in ln for ln in lines)
+    clock[0] += ce.RATE_LIMIT_WINDOW_S
+    assert c.post("/api/gui-error", headers=_shell(app),
+                  json={"message": "after"}).status_code == 200
+    tail = _gui_lines()[-2:]
+    assert "5 GUI error report(s) were dropped" in tail[0]
+    assert tail[1].endswith("gui: [gui] after")
+
+
+def test_rate_limit_is_per_credential():
+    lim = ce._RateLimiter(2, 60.0, 8)
+    assert lim.admit("a", 0)[0] and lim.admit("a", 0)[0]
+    assert lim.admit("a", 0)[0] is False
+    assert lim.admit("b", 0)[0] is True
+
+
+def test_rate_limiter_tracks_a_bounded_number_of_clients():
+    lim = ce._RateLimiter(1, 60.0, 3)
+    for k in "abcdef":
+        lim.admit(k, 0)
+    assert len(lim._state) == 3
+
+
+def test_open_mode_without_the_shell_token_is_refused(app):
+    c = TestClient(app)
+    assert c.post("/api/gui-error", json={"message": "x"}).status_code == 403
+    assert _gui_lines() == []
+
+
+def test_a_cross_origin_post_is_refused(app):
+    c = TestClient(app)
+    r = c.post("/api/gui-error", headers={**_shell(app), "Origin": "http://evil.example"},
+               json={"message": "x"})
+    assert r.status_code == 403
+    assert _gui_lines() == []
+
+
+def test_a_keyed_server_refuses_a_request_without_a_key(app, monkeypatch):
+    monkeypatch.setenv("LOCALM_API_KEY", "ownersecret")
+    c = TestClient(app)
+    assert c.post("/api/gui-error", json={"message": "x"}).status_code == 401
+    assert c.post("/api/gui-error", headers={"Authorization": "Bearer wrong"},
+                  json={"message": "x"}).status_code == 401
+    assert _gui_lines() == []
+    r = c.post("/api/gui-error", headers={"Authorization": "Bearer ownersecret"},
+               json={"message": "keyed ok"})
+    assert r.status_code == 200
+    assert _gui_lines()[-1].endswith("keyed ok")
+
+
+
+def test_the_record_reaches_the_status_window_log_source(app):
+    """The status window's live log and "View logs" read debuglog.recent_activity
+    (localm/plugins/gui/cli.py _start_app_face)."""
+    from localm.plugins.gui import cli
+    import inspect
+    assert "get_log_lines=debuglog.recent_activity" in inspect.getsource(cli._start_app_face)
+    c = TestClient(app)
+    c.post("/api/gui-error", headers=_shell(app), json={"message": "visible in the window"})
+    from localm.debuglog import recent_activity
+    assert any(ln.endswith("gui: [gui] visible in the window") for ln in recent_activity())
+
+
+def test_a_5xx_refusal_is_logged_at_warning_on_one_line_and_throttled(app, monkeypatch):
+    from fastapi import HTTPException
+
+    from localm.inference.app_assembly import errors
+
+    @app.get("/api/test-boom")
+    async def _boom():
+        raise HTTPException(500, "Could not save x\r\n2026-01-01 ERROR forged")
+
+    @app.get("/api/test-missing")
+    async def _missing():
+        raise HTTPException(404, "no such thing")
+
+    @app.get("/api/test-busy")
+    async def _busy():
+        raise HTTPException(503, "No engine initialised")
+
+    # Ahead of attach_gui's catch-all static mount.
+    for _ in range(3):
+        app.router.routes.insert(0, app.router.routes.pop())
+
+    clock = [500.0]
+    monkeypatch.setattr(errors.time, "monotonic", lambda: clock[0])
+    from localm.debuglog import recent_activity
+    c = TestClient(app)
+    for _ in range(3):
+        assert c.get("/api/test-boom", headers=_shell(app)).status_code == 500
+    assert c.get("/api/test-missing", headers=_shell(app)).status_code == 404
+    assert c.get("/api/test-busy", headers=_shell(app)).status_code == 503
+    lines = [ln for ln in recent_activity() if "/api/test-" in ln]
+    assert len(lines) == 1, lines
+    assert "WARNING" in lines[0]
+    assert "GET /api/test-boom failed 500: Could not save x 2026-01-01 ERROR forged" in lines[0]
+    clock[0] += errors.SERVER_ERROR_LOG_INTERVAL_S
+    c.get("/api/test-boom", headers=_shell(app))
+    lines = [ln for ln in recent_activity() if "/api/test-" in ln]
+    assert len(lines) == 2 and lines[1].endswith("(2 more like this not logged)")
+
+
+def test_the_rate_limit_key_is_the_api_key_identity(app):
+    """Each key gets its own bucket, a bearer key and a session minted from it share one."""
+    from localm import auth
+    from localm import scopes as S
+    from starlette.requests import Request
+
+    a = auth.create_key("A", [S.MODELS_READ])["key"]
+    b = auth.create_key("B", [S.MODELS_READ])["key"]
+
+    def req(token):
+        return Request({"type": "http", "method": "POST", "path": "/api/gui-error",
+                        "headers": [(b"authorization", f"Bearer {token}".encode())],
+                        "app": app})
+
+    ka, kb = ce._client_key(req(a)), ce._client_key(req(b))
+    assert ka != kb
+    assert ka == ce._client_key(req(a))
+    assert a not in ka and ka != "local"
+    assert ka == auth._hash_key(a)
+
+
+def test_keys_have_separate_rate_limit_buckets_on_the_route(app, monkeypatch):
+    from localm import auth
+    from localm import scopes as S
+    monkeypatch.setattr(ce.time, "monotonic", lambda: 50.0)
+    a = auth.create_key("A", [S.MODELS_READ])["key"]
+    b = auth.create_key("B", [S.MODELS_READ])["key"]
+    c = TestClient(app)
+    for i in range(ce.RATE_LIMIT_COUNT):
+        assert c.post("/api/gui-error", headers={"Authorization": f"Bearer {a}"},
+                      json={"message": f"a{i}"}).status_code == 200
+    assert c.post("/api/gui-error", headers={"Authorization": f"Bearer {a}"},
+                  json={"message": "a over"}).status_code == 429
+    assert c.post("/api/gui-error", headers={"Authorization": f"Bearer {b}"},
+                  json={"message": "b first"}).status_code == 200
+
+
+def test_a_5xx_line_carries_the_path_on_one_line(app):
+    from fastapi import HTTPException
+
+    from localm.debuglog import recent_activity
+
+    @app.get("/api/test-path/{name}")
+    async def _boom(name: str):
+        raise HTTPException(500, "x")
+
+    app.router.routes.insert(0, app.router.routes.pop())
+    c = TestClient(app)
+    esc, ls = chr(27), chr(0x2028)
+    r = c.get("/api/test-path/a%0D%0Aforged%1B[31m%E2%80%A8b", headers=_shell(app))
+    assert r.status_code == 500
+    lines = [ln for ln in recent_activity() if "/api/test-path/" in ln]
+    assert len(lines) == 1
+    assert "\n" not in lines[0] and "\r" not in lines[0]
+    assert esc not in lines[0] and ls not in lines[0]

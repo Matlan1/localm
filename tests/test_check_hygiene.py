@@ -570,6 +570,47 @@ def test_pending_section_refreezes_once_tagged(tmp_path, monkeypatch):
     assert problems and any("append-only" in p for p in problems), problems
 
 
+def _commit_version(tmp_path, version):
+    import os
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+    (tmp_path / "VERSION").write_text(f"{version}\n", encoding="utf-8")
+    subprocess.run(["git", "add", "VERSION"], cwd=tmp_path, check=True, env=env)
+    subprocess.run(["git", "commit", "-qm", "version"], cwd=tmp_path, check=True, env=env)
+
+
+def test_baseline_pending_section_may_be_renamed_with_the_version(tmp_path, monkeypatch):
+    """The baseline's VERSION names 0.1.0 with no tag, so its section is a draft there:
+    moving VERSION to a release candidate may rename that section to the candidate."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    _init_changelog_repo(tmp_path, _BASE_CHANGELOG)
+    _commit_version(tmp_path, "0.1.0")
+
+    (tmp_path / "VERSION").write_text("0.1.0rc2\n", encoding="utf-8")
+    (tmp_path / "CHANGELOG.md").write_text(
+        _BASE_CHANGELOG.replace("## [0.1.0] - 2026-07-04", "## [0.1.0rc2] - 2026-07-04"),
+        encoding="utf-8")
+    assert ch._pending_release_version() == "0.1.0rc2"
+    assert ch._changelog_append_only() == []
+
+
+def test_baseline_section_stays_frozen_once_tagged_when_the_version_moves(tmp_path, monkeypatch):
+    """The same rename rewrites history once v0.1.0 exists."""
+    ch = _load_check_hygiene()
+    monkeypatch.setattr(ch, "REPO", tmp_path)
+    _init_changelog_repo(tmp_path, _BASE_CHANGELOG)
+    _commit_version(tmp_path, "0.1.0")
+    _tag(tmp_path, "v0.1.0")
+
+    (tmp_path / "VERSION").write_text("0.1.1rc1\n", encoding="utf-8")
+    (tmp_path / "CHANGELOG.md").write_text(
+        _BASE_CHANGELOG.replace("## [0.1.0] - 2026-07-04", "## [0.1.1rc1] - 2026-07-04"),
+        encoding="utf-8")
+    problems = ch._changelog_append_only()
+    assert problems and any("[0.1.0] - 2026-07-04" in p for p in problems), problems
+
+
 def test_older_section_stays_frozen_even_with_no_tags(tmp_path, monkeypatch):
     """The safety property that makes the tag lookup safe: a section whose version is
     NOT the current VERSION is frozen unconditionally, so a clone with no tags at all

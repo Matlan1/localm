@@ -70,10 +70,16 @@ UNDECODABLE_BODY_MESSAGE = (
     "be JSON. Send a JSON document, or the right Content-Type for other data.")
 
 
+FASTAPI_BODY_PARSE_DETAIL = "There was an error parsing the body"
+
+
 def is_undecodable_body(exc: Exception) -> bool:
-    """True for the HTTP 400 FastAPI raises when a body labelled JSON cannot be
-    decoded as text (its cause is the ``UnicodeDecodeError``)."""
+    """True for the HTTP 400 FastAPI itself raises when a body labelled JSON
+    cannot be decoded as text (its detail is FastAPI's body-parse text and its
+    cause is the ``UnicodeDecodeError``). A route's own 400 chained from a
+    ``UnicodeDecodeError`` is not matched."""
     return (getattr(exc, "status_code", None) == 400
+            and getattr(exc, "detail", None) == FASTAPI_BODY_PARSE_DETAIL
             and isinstance(exc.__cause__, UnicodeDecodeError))
 
 

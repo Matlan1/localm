@@ -8,6 +8,7 @@ import json
 import math
 import os
 import re
+import secrets
 import shutil
 import stat as _stat
 import sys
@@ -35,6 +36,7 @@ from ._shared import console
 from .gguf import _SPLIT_GGUF_RE
 from .gguf import _find_model_units
 from .gguf import _is_hf_model_dir
+from .gguf import TRANSFER_TEMP_PREFIX
 from .gguf import _gguf_declared_min_size
 from .gguf import _has_gguf_magic
 from .gguf import gguf_unusable_reason
@@ -3091,6 +3093,216 @@ def _repoint_projector_references(moved: dict) -> None:
         console.print(f"[dim]Updated the projector path recorded for {names}.[/dim]")
 
 
+def _remove_partial_dir(dest: Path) -> str:
+    """Remove *dest*, a directory a failed transfer left behind. Returns ``""``
+    when it is gone, else a sentence saying it could not be removed (also
+    logged)."""
+    try:
+        shutil.rmtree(dest)
+    except FileNotFoundError:
+        return ""
+    except OSError as e:
+        logger.warning("_transfer_model_dir: could not remove the partial folder %s: %s",
+                       dest, e)
+        return f" The partial folder {dest} could not be removed ({e}); delete it by hand."
+    return ""
+
+
+def _verify_dir_copy(src: Path, dest: Path) -> Optional[str]:
+    """Compare the file tree under *src* with the copy under *dest*: the same
+    relative paths, the same sizes and the same SHA-256 per file. None when
+    they match, else a sentence naming the first difference."""
+    src_files = sorted(f.relative_to(src) for f in src.rglob("*") if f.is_file())
+    dest_files = sorted(f.relative_to(dest) for f in dest.rglob("*") if f.is_file())
+    if src_files != dest_files:
+        missing = sorted(set(src_files) - set(dest_files))
+        extra = sorted(set(dest_files) - set(src_files))
+        return f"the copy's file list differs (missing {missing[:3]}, unexpected {extra[:3]})"
+    for rel in src_files:
+        if (src / rel).stat().st_size != (dest / rel).stat().st_size:
+            return f"{rel} has a different size after the copy"
+    for rel in src_files:
+        a = _verify_digest(src / rel, purpose="to compare it with the copy")
+        b = _verify_digest(dest / rel, purpose="to confirm the copy")
+        if a != b:
+            return f"sha256 mismatch for {rel} after the copy"
+    return None
+
+
+def _repoint_directory_references(old: Path, new: Path) -> None:
+    """Point every registry entry whose ``path`` resolves to the directory *old*,
+    which was just moved to *new*, at *new*, in one atomic registry update.
+    Prints the names of the entries it changed. Never raises: a registry that
+    cannot be updated is logged and printed, and the entries keep naming *old*."""
+    from rich.markup import escape
+
+    target = os.path.normcase(str(old.resolve()))
+    new_path = str(new.resolve())
+    repointed: list[str] = []
+
+    def _repoint(reg: dict) -> None:
+        repointed.clear()
+        for entry_name, entry in reg.items():
+            value = _entry_path(entry)
+            if value is None:
+                continue
+            try:
+                if os.path.normcase(str(Path(value).resolve())) == target:
+                    entry["path"] = new_path
+                    repointed.append(entry_name)
+            except OSError:
+                continue
+
+    try:
+        _mm.update_registry(_repoint)
+    except Exception as e:  # noqa: BLE001 - reported below, the move itself succeeded
+        logger.warning("_repoint_directory_references: could not update the registry "
+                       "entries recording %s: %s", old, e)
+        console.print(
+            f"[yellow]The folder is now at {escape(str(new))}, but the registry entries "
+            f"that record {escape(str(old))} could not be updated: {escape(str(e))}. "
+            "They still name the old location.[/yellow]")
+        return
+    if repointed:
+        # repointed: registry names, not restricted to a safe charset.
+        names = ", ".join(escape(n) for n in repointed)
+        console.print(f"[dim]Updated the path recorded for {names}.[/dim]")
+
+
+_TRANSFER_TEMP_RE = re.compile(
+    re.escape(TRANSFER_TEMP_PREFIX) + r".+\.(?P<pid>\d+)\.[0-9a-f]{8}")
+_RENAME_ATTEMPTS = 5
+_RENAME_RETRY_SECONDS = 0.25
+
+
+def _remove_stale_transfer_folders() -> None:
+    """Remove the temporary folders (``TRANSFER_TEMP_PREFIX`` names directly under
+    ``MODELS_DIR``) that an import left behind when its process ended before
+    finishing. A folder whose process is alive, or that a registry entry names,
+    is left alone. Never raises."""
+    from localm.instances import pid_alive
+    from rich.markup import escape
+
+    try:
+        candidates = [d for d in _mm.MODELS_DIR.iterdir()
+                      if d.is_dir() and not d.is_symlink()
+                      and (m := _TRANSFER_TEMP_RE.fullmatch(d.name)) is not None
+                      and not pid_alive(int(m.group("pid")))]
+    except (OSError, OverflowError) as e:
+        logger.debug("_remove_stale_transfer_folders: cannot list %s: %s", _mm.MODELS_DIR, e)
+        return
+    if not candidates:
+        return
+    known: set[str] = set()
+    for entry in _mm.load_registry().values():
+        value = _entry_path(entry)
+        if value is None:
+            continue
+        try:
+            known.add(os.path.normcase(str(Path(value).resolve())))
+        except OSError:
+            continue
+    for folder in candidates:
+        try:
+            if os.path.normcase(str(folder.resolve())) in known:
+                continue
+        except OSError:
+            continue
+        if not _remove_partial_dir(folder):
+            console.print("[dim]Removed a half-copied folder an interrupted import left "
+                          f"behind: {escape(folder.name)}[/dim]")
+
+
+def _rename_into_place(temp: Path, dest: Path, action: str, source: Path) -> Optional[str]:
+    """Rename the finished *temp* folder to *dest*, which must still not exist.
+    Returns None when done, else a sentence saying why not. A *dest* that appeared
+    in the meantime is never replaced or removed. Retries a few times when the
+    rename is refused while *dest* is still free (Windows refuses to rename a
+    folder whose files a scanner has open)."""
+    last: Optional[OSError] = None
+    for attempt in range(_RENAME_ATTEMPTS):
+        if dest.exists():
+            break
+        try:
+            os.rename(temp, dest)
+            return None
+        except PermissionError as e:
+            last = e
+            if dest.exists() or attempt == _RENAME_ATTEMPTS - 1:
+                break
+            time.sleep(_RENAME_RETRY_SECONDS)
+        except OSError as e:
+            last = e
+            break
+    if dest.exists():
+        return (f"Cannot {action} {source}: {dest} already exists (another import "
+                f"created it first). Nothing was replaced and {source} is untouched.")
+    return f"Cannot {action} {source} into {_mm.MODELS_DIR}: {last}."
+
+
+def _transfer_model_dir(path: Path, dest: Path, action: str) -> None:
+    """Copy or move the directory *path* to *dest*, which must not exist.
+
+    A move renames when it can. Otherwise the tree is copied into a temporary
+    folder this call creates beside *dest* (``TRANSFER_TEMP_PREFIX`` name), checked
+    against the source (:func:`_verify_dir_copy`), and only then renamed to *dest*,
+    so *dest* never holds a partial model and a *dest* created by another import
+    meanwhile is never replaced or removed. A move then removes the source; one
+    that cannot be fully removed is reported while *dest* stays. Registry entries
+    that named a moved directory are pointed at *dest*. Temporary folders left by
+    an import whose process is gone are removed first.
+
+    Raises RuntimeError, after removing the temporary folder it created, when the
+    transfer, its verification or the rename into place fails; the source is
+    untouched in that case. An interrupt (KeyboardInterrupt) removes the
+    temporary folder too and propagates."""
+    from rich.markup import escape
+
+    old_resolved = path.resolve()
+    _remove_stale_transfer_folders()
+    if action == "move":
+        try:
+            os.rename(path, dest)
+        except OSError:
+            if dest.exists():
+                raise RuntimeError(f"Cannot {action}: {dest} already exists") from None
+        else:
+            _repoint_directory_references(old_resolved, dest)
+            return
+    temp = dest.with_name(
+        f"{TRANSFER_TEMP_PREFIX}{dest.name}.{os.getpid()}.{secrets.token_hex(4)}")
+    try:
+        os.mkdir(temp)
+    except OSError as e:
+        raise RuntimeError(f"Cannot {action} {path} into {_mm.MODELS_DIR}: {e}.") from e
+    try:
+        shutil.copytree(path, temp, dirs_exist_ok=True)
+        problem = _verify_dir_copy(path, temp)
+        if problem is not None:
+            failure: Optional[str] = (
+                f"Copy verification failed for {path.name}: {problem} (source left "
+                "untouched, bad copy removed).")
+        else:
+            failure = _rename_into_place(temp, dest, action, path)
+    except OSError as e:
+        failure = f"Cannot {action} {path} into {_mm.MODELS_DIR}: {e}."
+    except BaseException:
+        _remove_partial_dir(temp)
+        raise
+    if failure is not None:
+        raise RuntimeError(failure + _remove_partial_dir(temp))
+    if action == "move":
+        _repoint_directory_references(old_resolved, dest)
+        try:
+            shutil.rmtree(path)
+        except OSError as e:
+            logger.warning("_transfer_model_dir: could not remove the source %s "
+                           "after moving it: %s", path, e)
+            console.print(
+                f"[yellow]{escape(str(path))} was copied to {escape(str(dest))} but "
+                f"could not be fully removed: {escape(str(e))}[/yellow]")
+
+
 def _store_into_models_dir(path: Path, action: str, *,
                            attached_projector_only: bool = False) -> Path:
     """:func:`_store_with_projector`, returning only the new primary path."""
@@ -3114,7 +3326,12 @@ def _store_with_projector(path: Path, action: str, *,
         projector another model in the source folder may also use is copied,
         not moved, and a console note names that model. With
         *attached_projector_only* only the attached one travels.
-      - an HF-style model directory - the whole tree (shutil.copytree/move)
+      - an HF-style model directory - the whole tree (:func:`_transfer_model_dir`)
+
+    A directory transfer that fails raises RuntimeError after removing the
+    temporary folder it copied into; the source is left as it was, and a
+    destination another import created meanwhile is never replaced or removed.
+    A directory copy is verified like a file copy (every file's size and sha256).
 
     Refuses (raises RuntimeError, does not touch anything) when a name inside
     MODELS_DIR is already occupied by a genuinely different file - the same
@@ -3165,10 +3382,7 @@ def _store_with_projector(path: Path, action: str, *,
         # path/dest: a caller-named filesystem path (add_local's path_str) -
         # not restricted to a safe charset.
         console.print(f"[dim]{verb} {escape(str(path))} to {escape(str(dest))}…[/dim]")
-        if action == "copy":
-            shutil.copytree(path, dest)
-        else:
-            shutil.move(str(path), str(dest))
+        _transfer_model_dir(path, dest, action)
         return StoredModel(dest, None)
 
     # Single GGUF: every split part, plus the projector files _plan_projectors
@@ -4510,16 +4724,18 @@ def _add_local_gguf_dir(
 
 
 def _registered_name_for_file(reg: dict, gguf: Path, wanted: str) -> Optional[str]:
-    """The name *gguf* is already registered under that an import of it would
-    have chosen: *wanted* itself, or *wanted* with the ``-N`` suffix
-    :func:`_unique_registry_name` adds. None when the file is not registered
-    under such a name. Used when a duplicate would only be skipped, so the file
+    """The name *gguf* is already registered under. Prefers the name an import
+    of it would have chosen: *wanted* itself, or *wanted* with the ``-N``
+    suffix :func:`_unique_registry_name` adds; otherwise any other name
+    registered for the same path (a model the user renamed). None when the path
+    is not registered. Used when a duplicate would only be skipped, so the file
     is reported as already registered instead of declined."""
     base = _sanitize_name(wanted)
-    for alias in find_aliases_by_path(gguf, reg):
+    aliases = find_aliases_by_path(gguf, reg)
+    for alias in aliases:
         if alias == base or re.fullmatch(re.escape(base) + r"-\d+", alias):
             return alias
-    return None
+    return aliases[0] if aliases else None
 
 
 def _gguf_names_in(folder: Path) -> set:
@@ -5333,7 +5549,10 @@ def add_local(
                 wanted = _sanitize_name(name) if (name and only_one) else hf_dir.name
                 reg = _mm.load_registry()
                 would_skip = on_duplicate == "skip" or (on_duplicate == "ask" and not can_prompt())
-                hf_name = ((_registered_name_for_file(reg, hf_dir, wanted) if would_skip else None)
+                external_store = bool(store) and _mm.is_external_path(hf_dir)
+                reuse = (would_skip and not external_store) or (
+                    store == "move" and external_store)
+                hf_name = ((_registered_name_for_file(reg, hf_dir, wanted) if reuse else None)
                            or _unique_registry_name(reg, wanted))
                 done = add_local(
                     str(hf_dir), hf_name,
@@ -5397,6 +5616,9 @@ def add_local(
     # Handles the split-GGUF parts and the mmproj siblings on its own
     # (_store_with_projector); works for is_hf's whole directory too.
     stored_mmproj: Optional[Path] = None
+    moved_aliases: list[str] = []
+    if store == "move" and p.is_dir() and _mm.is_external_path(p):
+        moved_aliases = find_aliases_by_path(p, _mm.load_registry())
     if store and _mm.is_external_path(p):
         # Refuse before touching the filesystem when registration is already
         # known to be refused - a name collision with no terminal to confirm an
@@ -5465,6 +5687,13 @@ def add_local(
         mmproj=stored_mmproj if model_type in _PROJECTOR_TYPES else None,
         architecture=gguf_metadata.get("architecture"), expert_count=gguf_metadata.get("expert_count"),
     )
+    if not registered and moved_aliases:
+        now_named = [n for n in find_aliases_by_path(p, _mm.load_registry())
+                     if n in moved_aliases]
+        if now_named:
+            console.print(f"[dim]Already registered as {escape(now_named[0])}; it now "
+                          "points at the new location.[/dim]")
+            registered = True
     if not registered and store:
         verb = "moved" if store == "move" else "copied"
         console.print(

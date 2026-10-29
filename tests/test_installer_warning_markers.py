@@ -55,8 +55,11 @@ def test_every_known_site_uses_the_double_caret_escape(bat):
         'uv pip install -p .venv -e ".[gpu,audio]" || echo  [^^!] ROCm torch install failed.',
         'uv pip install -p .venv %TORCHSPEC% || echo  [^^!] torch install failed.',
         'uv pip install -p .venv -e ".[hf,audio]" || echo  [^^!] transformers install failed.',
-        'echo  [^^!] Provisioning failed - run later: .venv\\Scripts\\localm setup-llama --from "!LLAMABUILD!"',
-        'echo  [^^!] Provisioning failed - run later: .venv\\Scripts\\localm setup-llama --backend %BACKEND%',
+        'echo  [^^!] !PFDETAIL!',
+        'if "%RUNTIME_OK%"=="0" echo  [^^!] No model can load yet - the native llama.cpp runtime did not finish',
+        'if "%BKSWAP%"=="1" echo  [^^!] The %BACKEND% runtime did not load here;',
+        'echo  [^^!] Could not list the llama.cpp backends for this machine; using !REC!.',
+        'echo  [^^!] Could not read the list of features to install ^(python -m localm.setup_spec extras^).',
         "if errorlevel 1 echo  [^^!] Could not build LocaLM.exe",
         "if errorlevel 1 echo  [^^!] Could not record the install manifest",
         'echo  [^^!] Uninstall stopped - see the messages above. Close any LocaLM window',
@@ -69,6 +72,7 @@ def test_every_known_site_uses_the_double_caret_escape(bat):
         'echo  [^^!] Could not set up the setup journal - if this setup is interrupted',
         'if "%UVRC%"=="61" echo  [^^!] Could not download the uv %UV_INSTALLER_VERSION% installer.',
         'if "%UVRC%"=="62" echo  [^^!] The downloaded uv installer did not match its expected checksum, or could not be read to check it, and was not run.',
+        'if "%UVRC%"=="63" echo  [^^!] Could not create a temporary folder in %STMP% for the uv installer.',
     ]
     for site in sites:
         assert site in bat, site
@@ -149,25 +153,31 @@ class TestBangSurvivesEveryStructuralShape:
         block = _own_backend_block(bat)
         real_call = '.venv\\Scripts\\localm setup-llama --from "!LLAMABUILD!"'
         assert block.count(real_call) == 2, (
-            "expected the real call once and the echo's suggested retry once; "
-            "the block shape moved - update this test")
+            "expected the real call once and the retry command kept for the "
+            "failure message once; the block shape moved - update this test")
         stubbed = block.replace(real_call, "cmd /c exit /b 1", 1)
-        stubbed += "\r\ngoto :after_flush_stub\r\n:flush\r\nexit /b 0\r\n:after_flush_stub\r\n"
+        text = bat.replace("\r\n", "\n")
+        sub_start = text.index("\n:provision_failed\n")
+        subroutine = text[sub_start:text.index("\nrem ====", sub_start + 1)]
+        stubbed += ("\r\ngoto :after_flush_stub\r\n:flush\r\nexit /b 0\r\n"
+                    ":offer_report\r\nexit /b 0\r\n:step_done\r\nexit /b 0\r\n"
+                    + subroutine.replace("\n", "\r\n") + "\r\n:after_flush_stub\r\n")
         out = self._run(tmp_path, 'set "BACKEND=own"\r\n', stubbed,
-                        stdin_input="C:\\some\\bang!path\r\n")
-        expected = (
-            '[!] Provisioning failed - run later: .venv\\Scripts\\localm '
-            'setup-llama --from "C:\\some\\bang!path"'
-        )
-        assert expected in out.stdout, (out.stdout, out.stderr)
+                        stdin_input="C:\\some\\bang!path\r\nn\r\n")
+        assert ("[!] Provisioning the native llama.cpp runtime with --from failed during setup."
+                in out.stdout), (out.stdout, out.stderr)
+        assert ('.venv\\Scripts\\localm setup-llama --from "C:\\some\\bang!path"'
+                in out.stdout), (out.stdout, out.stderr)
 
     @pytest.mark.parametrize("rc, text", [
         ("61", "[!] Could not download the uv 0.13.0 installer."),
         ("62", "[!] The downloaded uv installer did not match its expected checksum, or could not be read to check it, and was not run."),
+        ("63", "[!] Could not create a temporary folder in .localm-setup-tmp for the uv installer."),
     ])
     def test_the_uv_installer_refusal_reasons(self, bat, tmp_path, rc, text):
         line = _line_containing(bat, f'if "%UVRC%"=="{rc}" echo')
-        preamble = f'set "UV_INSTALLER_VERSION=0.13.0"\r\nset "UVRC={rc}"\r\n'
+        preamble = (f'set "UV_INSTALLER_VERSION=0.13.0"\r\nset "UVRC={rc}"\r\n'
+                    'set "STMP=.localm-setup-tmp"\r\n')
         out = self._run(tmp_path, preamble, line)
         assert text in out.stdout, (out.stdout, out.stderr)
 

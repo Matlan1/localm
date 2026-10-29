@@ -230,17 +230,28 @@ class _CapturedStderr:
 _IMAGE_MIN_TOKENS_ADVICE = re.compile(r"--image-min-tokens (\d{1,6})\b")
 
 
+def _runtime_has_gpu_device() -> bool:
+    """True when the runtime registers a non-CPU ggml device; when the device
+    registry cannot be read, the runtime's own ``llama_supports_gpu_offload``
+    answer."""
+    from . import _loader
+    present = _loader.has_gpu_device()
+    if present is None:
+        return api.llama_supports_gpu_offload()
+    return present
+
+
 def _apply_projector_notices(mt, notices: dict) -> None:
     """Act on what llama.cpp reported while loading the projector *mt*
     (``_CapturedStderr.projector_notices``): a warning when it encodes images on
     the CPU although the GPU was requested (*mt* is then marked as not on the
-    GPU; the warning is skipped when the runtime has no GPU backend), and the minimum image tokens it advised, which *mt* is rebuilt with
+    GPU; the warning is skipped when the runtime registers no GPU device), and the minimum image tokens it advised, which *mt* is rebuilt with
     (:meth:`MtmdContext.apply_min_image_tokens`); a warning when the runtime's
     params layout does not allow that."""
     from localm.debuglog import logger
     if notices.get("cpu") and getattr(mt, "on_gpu", False):
         mt.on_gpu = False
-        if api.llama_supports_gpu_offload():
+        if _runtime_has_gpu_device():
             logger.warning(
                 "mtmd: llama.cpp placed the vision projector on the CPU (CLIP using CPU "
                 "backend) although the GPU was requested, so image encoding is much "
@@ -1625,15 +1636,25 @@ class LlamaCpp:
         # llama.cpp's device numbering when given; leaves the native default
         # (device 0) untouched when unset. See discover.apply_main_gpu.
         from localm.discover import apply_gpu_devices, apply_gpu_split, apply_main_gpu
-        self._gpu_devices_arg = list(gpu_devices) if gpu_devices else None
-        if self._gpu_devices_arg:
+        # n_gpu_layers 0: an empty device list, so neither the model nor its
+        # contexts get a GPU backend and llama.cpp's op offload cannot send a
+        # prompt batch's matmuls to a GPU. The vision projector and a draft
+        # model stay on the CPU too. See test_a_cpu_only_load_gets_no_gpu_device.
+        self._cpu_only = n_gpu_layers == 0
+        self._gpu_devices_arg = (list(gpu_devices) if gpu_devices and not self._cpu_only
+                                 else None)
+        _no_devices = (ctypes.c_void_p * 1)(None)
+        if self._cpu_only:
+            mp.devices = ctypes.cast(_no_devices, ctypes.c_void_p).value
+            _tensor_split_keepalive = None
+            self._main_gpu_index = 0
+        elif self._gpu_devices_arg:
             # The parent's placement over 2+ GPUs: exactly those devices, in
             # its order, with its layer counts. The returned arrays must stay
             # alive through llama_load_model_from_file below.
             _tensor_split_keepalive = apply_gpu_devices(mp, self._gpu_devices_arg)
             # The vision projector goes on main_gpu (a slot in llama.cpp's
-            # device list) when the parent chose one, else on the last device,
-            # which holds the output layer.
+            # device list) when the parent gives one, else on the last device.
             self._main_gpu_index = int(main_gpu if main_gpu is not None
                                        else self._gpu_devices_arg[-1]["slot"])
         else:
@@ -2065,7 +2086,8 @@ class LlamaCpp:
                     # the "leave clip's own default alone" value.
                     mt = MtmdContext(
                         compatible_mmproj_path(mmproj_path), self._model_ptr,
-                        gpu_index=getattr(self, "_main_gpu_index", 0))
+                        gpu_index=getattr(self, "_main_gpu_index", 0),
+                        use_gpu=not getattr(self, "_cpu_only", False))
                     if captured is not None:
                         _apply_projector_notices(mt, captured.projector_notices())
                 except Exception:
@@ -4502,7 +4524,7 @@ class LlamaCpp:
         draft = self._spec_source_name == SPEC_DRAFT
         if draft and can_drop:
             self._load_draft_model(spec_draft_model, n_threads, verbose,
-                                   on_gpu=spec_draft_gpu)
+                                   on_gpu=spec_draft_gpu and not getattr(self, "_cpu_only", False))
         source = self._draft_source()
         if not isinstance(source, CountedSource):
             return

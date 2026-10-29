@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -719,9 +720,13 @@ def slot_is_satisfied(slot: dict) -> bool:
 # ---------------------------------------------------------------------------
 
 def _localm_unload(localm_url: Optional[str] = None,
-                    instance_token: Optional[str] = None) -> Optional[dict]:
+                    instance_token: Optional[str] = None, *,
+                    media: bool = True) -> Optional[dict]:
     """
-    Ask a localm server to release its model from GPU memory.
+    Ask a localm server to release its model from GPU memory. With *media*
+    False the server's own idle native media runtimes stay loaded
+    (``?media=false``); a native media job passes that so it keeps the worker
+    it is about to use.
 
     Reads LOCALM_URL from the environment if *localm_url* is not given, and
     authenticates via ``auth.resolve_bearer_headers`` (the owner key - env,
@@ -763,7 +768,8 @@ def _localm_unload(localm_url: Optional[str] = None,
         # Unload waits for any in-flight generation to finish AND for VRAM to be
         # actually reclaimed before it returns (it must not free the context
         # mid-decode), so give it time.
-        resp = _rq.post(f"{url}/models/unload", headers=headers, timeout=180,
+        target = f"{url}/models/unload" + ("" if media else "?media=false")
+        resp = _rq.post(target, headers=headers, timeout=180,
                         verify=_tls.requests_verify(url))
         if not resp.ok:
             return None
@@ -924,6 +930,64 @@ def _comfy_alive(api_url: str, timeout: float = 3.0) -> bool:
             return True
     except Exception:
         return False
+
+
+def comfy_failure_detail(api_url: str, timeout: float = 10.0) -> Optional[str]:
+    """Why ``/system_stats`` at *api_url* does not answer as a healthy ComfyUI.
+
+    Returns None when it answers normally, ``"it answers HTTP <code>"`` when it
+    responds with an HTTP error (a ComfyUI whose GPU context broke answers 500),
+    or ``"it does not answer"`` when nothing usable comes back within *timeout*.
+    Never raises."""
+    try:
+        with _comfy_urlopen(f"{api_url}/system_stats", timeout=timeout):
+            return None
+    except urllib.error.HTTPError as e:
+        return f"it answers HTTP {e.code}"
+    except Exception:
+        return "it does not answer"
+
+
+# api_url -> the device error a job on localm's own ComfyUI reported there. Set
+# by comfy_poll_until_done, cleared when that process is stopped or replaced.
+_device_errors: dict[str, str] = {}
+_device_errors_lock = threading.Lock()
+
+_DEVICE_ERROR_MARKERS = (
+    "hip error", "cuda error", "hiperror", "cudaerror", "acceleratorerror",
+    "device-side assert", "illegal memory access", "unspecified launch failure",
+)
+
+
+def is_comfy_device_error(detail) -> bool:
+    """True when a ComfyUI execution-error *detail* is a GPU runtime fault that
+    leaves the ComfyUI process unusable (a HIP/CUDA error, an AcceleratorError),
+    and False for an out-of-memory error, which ComfyUI recovers from."""
+    if not detail:
+        return False
+    text = str(detail).lower()
+    if "out of memory" in text:
+        return False
+    return any(m in text for m in _DEVICE_ERROR_MARKERS)
+
+
+def mark_comfy_device_error(api_url: str, detail: str) -> None:
+    """Record that a job at *api_url* hit a GPU runtime fault, so the next
+    ``ensure_comfy`` restarts localm's own ComfyUI there before using it."""
+    first_line = str(detail).strip().splitlines()[0] if str(detail).strip() else ""
+    with _device_errors_lock:
+        _device_errors[api_url.rstrip("/")] = first_line[:200] or "a GPU error"
+
+
+def comfy_device_error(api_url: str) -> Optional[str]:
+    """The recorded GPU fault for *api_url* (see mark_comfy_device_error), or None."""
+    with _device_errors_lock:
+        return _device_errors.get(api_url.rstrip("/"))
+
+
+def clear_comfy_device_error(api_url: str) -> None:
+    with _device_errors_lock:
+        _device_errors.pop(api_url.rstrip("/"), None)
 
 
 # ---------------------------------------------------------------------------
@@ -1220,6 +1284,34 @@ def discover_launch_cmd(folder: Path) -> Optional[str]:
     return None
 
 
+def comfy_runs_on_amd(api_url: str, timeout: float = 5.0) -> Optional[bool]:
+    """Whether the ComfyUI at *api_url* runs on an AMD GPU, read from its
+    ``/system_stats``: True when a reported device name names AMD or Radeon, or
+    the reported torch is a ROCm build; False when it reports devices and none is
+    AMD; None when the stats cannot be fetched or carry no device list."""
+    try:
+        with _comfy_urlopen(f"{api_url}/system_stats", timeout=timeout) as resp:
+            stats = json.loads(resp.read().decode("utf-8", "replace"))
+    except Exception as e:
+        from localm.debuglog import logger
+        logger.debug("could not read ComfyUI /system_stats at %s: %s", api_url, e)
+        return None
+    if not isinstance(stats, dict):
+        return None
+    system = stats.get("system")
+    torch_version = system.get("pytorch_version") if isinstance(system, dict) else None
+    if isinstance(torch_version, str) and "rocm" in torch_version.lower():
+        return True
+    devices = stats.get("devices")
+    if not isinstance(devices, list) or not devices:
+        return None
+    for dev in devices:
+        name = dev.get("name") if isinstance(dev, dict) else None
+        if isinstance(name, str) and ("amd" in name.lower().split() or "radeon" in name.lower()):
+            return True
+    return False
+
+
 def _amd_rocm_launch_env() -> Optional[dict]:
     """Child env for the ComfyUI launch with ROCm's bin on PATH, or None to inherit.
 
@@ -1295,10 +1387,18 @@ def func_shim_enabled(cfg: Optional[dict] = None) -> bool:
         return False
 
 
-def comfy_child_env(cfg: Optional[dict] = None) -> Optional[dict]:
-    """The environment for a ComfyUI process localm SPAWNS. Starts from the AMD/ROCm
-    launch env (or the inherited env), and layers on two things when they apply:
+# MIOpen convolution find mode for a ComfyUI localm spawns: a convolution shape
+# missing from MIOpen's find-db gets a solver without benchmarking every
+# candidate. See test_child_env_sets_fast_miopen_find_mode.
+COMFY_MIOPEN_FIND_MODE = "FAST"
 
+
+def comfy_child_env(cfg: Optional[dict] = None) -> dict:
+    """The environment for a ComfyUI process localm SPAWNS. Starts from the AMD/ROCm
+    launch env (or the inherited env), and layers on three things when they apply:
+
+    - ``MIOPEN_FIND_MODE`` set to ``COMFY_MIOPEN_FIND_MODE``, unless the inherited env
+      already sets it. A CUDA (NVIDIA) torch build ignores it.
     - ONLY when the shim is enabled, PREPENDS the localm-owned shim dir to PYTHONPATH
       (preserving any pre-existing PYTHONPATH).
     - ONLY for a USER'S OWN ComfyUI, ORDERS ``CUDA_VISIBLE_DEVICES``/
@@ -1323,9 +1423,9 @@ def comfy_child_env(cfg: Optional[dict] = None) -> Optional[dict]:
     CUDA is emulated over HIP. NOT set for the managed instance, so its device has
     exactly ONE source of truth (the argv).
 
-    Nothing is set when the user configured no split and no main GPU, or when no
+    No device order is set when the user configured no split and no main GPU, or when no
     torch-visible device can be named honestly: ``visible_device_order()`` returns None
-    and a plain box spawns unchanged, rather than being pinned to an invented card
+    rather than the launch being pinned to an invented card
     (which would also hide a second GPU the user later adds). Never writes anything
     to disk."""
     base = _amd_rocm_launch_env()
@@ -1347,9 +1447,9 @@ def comfy_child_env(cfg: Optional[dict] = None) -> Optional[dict]:
                        "check may not match the card ComfyUI uses.", e)
 
     shim_on = func_shim_enabled(cfg)
-    if not shim_on and not order:
-        return base          # unchanged: the launch env with no additions
     env = base if base is not None else dict(os.environ)
+    if "MIOPEN_FIND_MODE" not in env:
+        env["MIOPEN_FIND_MODE"] = COMFY_MIOPEN_FIND_MODE
     if shim_on:
         shim = str(comfy_shim_dir())
         prev = env.get("PYTHONPATH", "")
@@ -1380,6 +1480,7 @@ _spawned_lock = _threading.Lock()
 def _remember_spawned(api_url: str, proc) -> None:
     with _spawned_lock:
         _spawned_procs[api_url] = proc
+    clear_comfy_device_error(api_url)
 
 
 def _take_spawned(api_url: str):
@@ -1421,6 +1522,27 @@ def spawned_pid(api_url: Optional[str] = None) -> Optional[int]:
         return None
 
 
+def is_own_comfy_process(api_url: str, pid: Optional[int]) -> bool:
+    """True when *pid* is the ComfyUI process localm launched for *api_url* or
+    one of its descendants: the same process tree ``stop_comfy`` ends. On
+    Windows a venv ``python.exe`` is a launcher whose child is the interpreter
+    that listens on the port, so the listener is a descendant of the handle."""
+    if not pid:
+        return False
+    root = spawned_pid(api_url)
+    if root is None:
+        return False
+    if pid == root:
+        return True
+    try:
+        import psutil
+        return any(c.pid == pid for c in psutil.Process(root).children(recursive=True))
+    except Exception as e:
+        from localm.debuglog import logger
+        logger.debug("could not read the process tree of ComfyUI pid %s: %s", root, e)
+        return False
+
+
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "0.0.0.0"})
 
 
@@ -1429,10 +1551,12 @@ def comfy_port_holder(api_url: str, timeout: float = 1.0) -> Optional[dict]:
 
     ``None`` when *api_url* is not a loopback address, the port is free, or the
     probe could not connect. Otherwise ``{"port": int, "pid": int | None,
-    "name": str | None}``: something accepts connections there, ``pid`` and
-    ``name`` identify the listener when the OS lets this account see them.
-    Never raises, never signals a process. Callers use it after the
-    ``/system_stats`` probe failed, so a holder means a process that accepts a
+    "name": str | None, "localm_launched": bool}``: something accepts
+    connections there, ``pid`` and ``name`` identify the listener when the OS
+    lets this account see them, and ``localm_launched`` is
+    ``is_own_comfy_process(api_url, pid)``. Never raises, never signals a
+    process. Callers use it after the ``/system_stats`` probe failed, so a
+    holder means a process that accepts a
     connection but does not answer ComfyUI's API."""
     import socket
     try:
@@ -1449,7 +1573,7 @@ def comfy_port_holder(api_url: str, timeout: float = 1.0) -> Optional[dict]:
             pass
     except OSError:
         return None
-    holder: dict = {"port": port, "pid": None, "name": None}
+    holder: dict = {"port": port, "pid": None, "name": None, "localm_launched": False}
     try:
         import psutil
         for conn in psutil.net_connections(kind="tcp"):
@@ -1464,15 +1588,21 @@ def comfy_port_holder(api_url: str, timeout: float = 1.0) -> Optional[dict]:
     except Exception as e:
         from localm.debuglog import logger
         logger.debug("could not identify the listener on port %s: %s", port, e)
+    holder["localm_launched"] = is_own_comfy_process(api_url, holder["pid"])
     return holder
 
 
 def comfy_port_held_message(api_url: str, holder: dict) -> str:
-    """The user-facing sentence for a ``comfy_port_holder`` result."""
+    """The user-facing sentence for a ``comfy_port_holder`` result, worded by
+    whether the holder is the ComfyUI localm launched (``localm_launched``)."""
     who = "another process"
     if holder.get("pid"):
         name = f" ({holder['name']})" if holder.get("name") else ""
         who = f"process {holder['pid']}{name}"
+    if holder.get("localm_launched"):
+        return (f"Port {holder['port']} at {api_url} is still held by the ComfyUI "
+                f"localm launched ({who}), which does not answer as ComfyUI. Stop it "
+                "with: localm comfy stop, then try again.")
     return (f"Port {holder['port']} at {api_url} is held by {who}, which accepts "
             "connections but does not answer as ComfyUI (a ComfyUI that hung after "
             "a GPU crash looks like this). localm did not start it and will not stop "
@@ -1782,6 +1912,7 @@ def stop_comfy(api_url: Optional[str] = None) -> tuple[bool, str]:
     process is left alone (only our own are killed) and the caller is told so."""
     api_url = (api_url or default_api_url()).rstrip("/")
     mark_comfy_dead(api_url)   # about to stop it either way - the next check must be real
+    clear_comfy_device_error(api_url)
     interrupt_comfy(api_url)                       # abort render + clear queue
     try:
         free_comfy_vram(api_url)
@@ -1796,8 +1927,9 @@ def stop_comfy(api_url: Optional[str] = None) -> tuple[bool, str]:
                           "left running - stop it where you started it.")
         return True, "ComfyUI is not running."
     try:
-        if proc.poll() is None:
-            _kill_process_tree(proc)
+        if proc.poll() is not None:
+            return True, "The ComfyUI localm launched had already exited."
+        _kill_process_tree(proc)
     except Exception as e:
         return False, f"Could not stop the ComfyUI localm launched: {e}"
     return True, "Stopped the ComfyUI that localm launched."
@@ -1903,11 +2035,12 @@ def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
                 pass
 
     api_url = (api_url or default_api_url()).rstrip("/")
-    if is_comfy_confirmed(api_url):
-        return True, "ComfyUI is running."
-    if _comfy_alive(api_url):
-        mark_comfy_alive(api_url)
-        return True, "ComfyUI is running."
+    if comfy_device_error(api_url) is None:
+        if is_comfy_confirmed(api_url):
+            return True, "ComfyUI is running."
+        if _comfy_alive(api_url):
+            mark_comfy_alive(api_url)
+            return True, "ComfyUI is running."
     mark_comfy_dead(api_url)
 
     with _launch_lock_for(api_url):
@@ -1916,20 +2049,80 @@ def ensure_comfy(api_url: Optional[str] = None, on_progress=None,
         # waiting for it above - the classic double-checked pattern. Without
         # this a caller that waited through someone else's whole launch would
         # still go on to attempt a redundant one of its own.
-        if is_comfy_confirmed(api_url) or _comfy_alive(api_url):
+        device_error = comfy_device_error(api_url)
+        if device_error is not None and spawned_pid(api_url) is None:
+            clear_comfy_device_error(api_url)
+            device_error = None
+        if device_error is None and (is_comfy_confirmed(api_url) or _comfy_alive(api_url)):
             mark_comfy_alive(api_url)
             return True, "ComfyUI is running."
+        spent = 0.0
+        if spawned_pid(api_url) is not None:
+            recovery_started = time.monotonic()
+            if device_error is not None:
+                reason = f"a job hit a GPU error: {device_error}"
+            else:
+                reason = comfy_failure_detail(api_url, timeout=_RECOVERY_PROBE_S)
+                if reason is None:
+                    mark_comfy_alive(api_url)
+                    return True, "ComfyUI is running."
+            _say(f"The ComfyUI localm launched stopped working ({reason}); "
+                 "restarting it.")
+            stopped, message = _stop_own_comfy_for_relaunch(api_url)
+            if not stopped:
+                return False, message
+            spent = time.monotonic() - recovery_started
         return _launch_and_wait(
-            api_url, launch_cmd, workdir, wait_seconds, _say)
+            api_url, launch_cmd, workdir, wait_seconds, _say, already_spent=spent)
+
+
+# How long the restart path asks a ComfyUI it launched whether it is healthy.
+_RECOVERY_PROBE_S = 5.0
+
+
+def _stop_own_comfy_for_relaunch(api_url: str) -> tuple[bool, str]:
+    """End the process tree of the ComfyUI localm launched for *api_url* by its
+    recorded handle, keep its console log as ``<log>.prev``, and wait for the
+    port to be released. Caller must hold ``_launch_lock_for(api_url)``.
+
+    Returns ``(True, "")`` once the port is free, or ``(False, message)`` naming
+    the holder when the port is still held after the wait."""
+    proc = _take_spawned(api_url)
+    mark_comfy_dead(api_url)
+    clear_comfy_device_error(api_url)
+    if proc is not None:
+        try:
+            if proc.poll() is None:
+                _kill_process_tree(proc)
+        except Exception as e:
+            return False, f"Could not stop the ComfyUI localm launched: {e}"
+    if not _wait_for_port_release(api_url):
+        holder = comfy_port_holder(api_url)
+        if holder is not None:
+            return False, comfy_port_held_message(api_url, holder)
+    try:
+        log_path = comfy_launch_log_path(api_url)
+        if log_path.is_file():
+            os.replace(log_path, log_path.with_name(log_path.name + ".prev"))
+    except OSError as e:
+        from localm.debuglog import logger
+        logger.debug("could not keep the previous ComfyUI launch log: %s", e)
+    return True, ""
 
 
 def _launch_and_wait(api_url: str, launch_cmd: Optional[str],
                      workdir: Optional[str], wait_seconds: Optional[int],
-                     _say) -> tuple[bool, str]:
+                     _say, already_spent: float = 0.0) -> tuple[bool, str]:
     """The actual decide-config / spawn / poll-until-up body of ensure_comfy(),
     split out so the lock in ensure_comfy() wraps it without needing to
     re-indent it. Always called with _launch_lock_for(api_url) already held -
-    not meant to be called directly."""
+    not meant to be called directly.
+
+    *already_spent* is the seconds ensure_comfy() used stopping its own
+    unhealthy ComfyUI first; it is taken off the launch wait so the whole call
+    stays within the wait budget its bounded callers allow
+    (``comfy_launch_wait_seconds`` plus their buffer). The wait never drops
+    below one second."""
     import shlex
     import subprocess
     import sys as _sys
@@ -2000,6 +2193,8 @@ def _launch_and_wait(api_url: str, launch_cmd: Optional[str],
     if wait_seconds is None:
         wait_seconds = comfy_launch_wait_seconds(cfg)
     wait_seconds = max(30, wait_seconds)
+    if already_spent > 0:
+        wait_seconds = max(1, int(wait_seconds - already_spent))
 
     # Optionally start ComfyUI headless. Off by default; when
     # comfy_disable_auto_launch is set, append ComfyUI's
@@ -2011,10 +2206,9 @@ def _launch_and_wait(api_url: str, launch_cmd: Optional[str],
             "--disable-auto-launch" not in launch_cmd:
         launch_cmd = launch_cmd + " --disable-auto-launch"
 
-    if spawned_pid(api_url) is None:
-        holder = comfy_port_holder(api_url)
-        if holder is not None:
-            return False, comfy_port_held_message(api_url, holder)
+    holder = comfy_port_holder(api_url)
+    if holder is not None:
+        return False, comfy_port_held_message(api_url, holder)
 
     _say(f"ComfyUI not running - launching: {launch_cmd}")
     if discovered:
@@ -2691,6 +2885,8 @@ def comfy_poll_until_done(
                 entry = history[prompt_id]
                 err = history_execution_error(entry)
                 if err:
+                    if is_comfy_device_error(err) and spawned_pid(api_url) is not None:
+                        mark_comfy_device_error(api_url, err)
                     return POLL_EXEC_ERROR, err
                 return POLL_FINISHED, entry
         except Exception as e:

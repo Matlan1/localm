@@ -427,6 +427,62 @@ test("2 checked boxes PATCH gpu_split_indices with both selected indices", async
     "PATCH carries both checked GPU indices once 2 are checked");
 });
 
+const THREE_GPUS = [
+  { index: 0, name: "GPU A", total: 24 * GIB, free: 20 * GIB },
+  { index: 1, name: "GPU B", total: 12 * GIB, free: 10 * GIB },
+  { index: 2, name: "GPU C", total: 16 * GIB, free: 14 * GIB },
+];
+
+function lastSplitPatch(calls) {
+  const patch = calls.filter((c) => c.u.endsWith("/v1/config") && c.method === "PATCH").at(-1);
+  return patch ? JSON.parse(patch.body).gpu_split_indices : undefined;
+}
+
+async function toggle(window, calls, box, checked) {
+  const before = calls.length;
+  box.checked = checked;
+  box.dispatchEvent(new window.Event("change", { bubbles: true }));
+  assert.ok(await waitFor(() => calls.slice(before).some(
+    (c) => c.u.endsWith("/v1/config") && c.method === "PATCH")), "the toggle issues a PATCH");
+}
+
+test("checked GPUs are saved in the order they were checked, and the load order is shown", async () => {
+  const calls = [];
+  const { window } = loadApp({ fetchImpl: makeFetch(calls, { gpus: THREE_GPUS, gpuSplitIndices: null }) });
+  const list = window.document.getElementById("perf-gpu-split-list");
+  const order = window.document.getElementById("perf-gpu-split-order");
+  assert.ok(await waitFor(() => list.querySelectorAll("input[type=checkbox]").length === 3),
+    "checkbox list populated");
+  assert.equal(order.hidden, true, "no load order line with nothing checked");
+  const boxes = [...list.querySelectorAll("input[type=checkbox]")];
+  await toggle(window, calls, boxes[2], true);
+  assert.deepEqual(lastSplitPatch(calls), [2]);
+  await toggle(window, calls, boxes[0], true);
+  assert.deepEqual(lastSplitPatch(calls), [2, 0], "GPU 2 was checked first, so it loads first");
+  assert.equal(order.hidden, false);
+  assert.match(order.textContent, /GPU 2, GPU 0/);
+  const ratioIdx = [...window.document.querySelectorAll("#perf-gpu-ratio-list input[type=number]")]
+    .map((i) => i.dataset.gpuIndex);
+  assert.deepEqual(ratioIdx, ["2", "0"], "the ratio inputs follow the load order");
+});
+
+test("a stored load order is kept when another GPU is checked or one is unchecked", async () => {
+  const calls = [];
+  const { window } = loadApp({ fetchImpl: makeFetch(calls, { gpus: THREE_GPUS, gpuSplitIndices: [2, 0] }) });
+  const list = window.document.getElementById("perf-gpu-split-list");
+  const order = window.document.getElementById("perf-gpu-split-order");
+  assert.ok(await waitFor(() => order.hidden === false), "the stored order is shown");
+  assert.match(order.textContent, /GPU 2, GPU 0/);
+  const boxes = [...list.querySelectorAll("input[type=checkbox]")];
+  await toggle(window, calls, boxes[1], true);
+  assert.deepEqual(lastSplitPatch(calls), [2, 0, 1], "a newly checked GPU goes last");
+  await toggle(window, calls, boxes[0], false);
+  assert.deepEqual(lastSplitPatch(calls), [2, 1]);
+  await toggle(window, calls, boxes[0], true);
+  assert.deepEqual(lastSplitPatch(calls), [2, 1, 0], "checking a GPU again moves it to the end");
+  assert.match(order.textContent, /GPU 2, GPU 1, GPU 0/);
+});
+
 test("a weight typed for every checked GPU PATCHes gpu_split_ratios, position-paired with gpu_split_indices", async () => {
   const calls = [];
   const gpus = [

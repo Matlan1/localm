@@ -128,13 +128,33 @@ def prepare_for_job(s: dict, full_config: dict) -> dict:
     ``vram_estimate_bytes`` taken from its model files unless the plugin sets
     ``vram_estimate_gb``. Returns *s*, updated in place."""
     backend_choice.refine_auto(s, "Video")
-    if s.get("backend") == "native":
-        block, _w = media_config.resolve_config("video", full_config)
-        if not isinstance(block.get("vram_estimate_gb"), (int, float)):
-            from .backends import native
-            est = native.vram_estimate_bytes(s)
-            if est:
-                s["vram_estimate_bytes"] = est
+    return _set_vram_estimate(s, full_config)
+
+
+def apply_job_choice(s: dict, choice: dict, full_config: dict) -> dict:
+    """*s* (from ``prepare_for_job``) with one job's native model *choice*
+    laid over it (``native_models.apply_choice``, a copy), and its
+    ``vram_estimate_bytes`` taken again for the models that job runs, by the
+    same rule as ``prepare_for_job``. *s* itself when *choice* is empty."""
+    if not choice:
+        return s
+    from localm.media.native_models import apply_choice
+    return _set_vram_estimate(apply_choice(s, choice), full_config)
+
+
+def _set_vram_estimate(s: dict, full_config: dict) -> dict:
+    """A native *s*'s ``vram_estimate_bytes`` set from the model files it
+    resolves to, or the plugin default when they do not resolve; left as is
+    when the plugin sets ``vram_estimate_gb`` or the backend is not native.
+    Returns *s*, updated in place."""
+    if s.get("backend") != "native":
+        return s
+    block, _w = media_config.resolve_config("video", full_config)
+    if isinstance(block.get("vram_estimate_gb"), (int, float)):
+        return s
+    from .backends import native
+    s["vram_estimate_bytes"] = (native.vram_estimate_bytes(s)
+                                or media_estimate_bytes("video", block))
     return s
 
 

@@ -65,10 +65,13 @@ the chat `/generate-image` command, the coder agent's image tool and the MCP
    2.x, SDXL) loads on its own.
 
    A `.gguf` or `.safetensors` image model whose family localm cannot tell from its
-   header is refused before anything loads, with what the header shows (its GGUF
-   architecture and input channels): stable-diffusion.cpp cannot load it without the
-   right parts. Choose a model of a family listed here, update localm, or use the
-   ComfyUI backend.
+   header is refused before anything loads when you have not chosen a text encoder for
+   it, with what the header shows (its GGUF architecture and input channels): localm
+   cannot pair the parts it needs. Choose a model of a family listed here, update
+   localm, use the ComfyUI backend, or choose its text encoder yourself: the file is
+   then passed to stable-diffusion.cpp with the parts you chose, which detects the
+   family itself (some families it knows are not listed here), and the job log says
+   localm does not recognise it.
 
 ### Qwen-Image 2.1
 

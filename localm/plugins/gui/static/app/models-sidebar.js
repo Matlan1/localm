@@ -4,6 +4,7 @@
 
 // --- ES module imports ---
 import { lsSetScoped } from "./chat.js";
+import { recordGuiError } from "./client-log.js";
 import { $, GIB, authHeaders, cancelJob, confirmDangerAsync, el, fmtDuration, instanceCacheTrusted, openModal, streamJob, toast } from "./helpers.js";
 import { t, tn } from "./i18n.js";
 import { interruptedCount, loadInterrupted, onInterruptedChange, renderInterrupted } from "./interrupted-pulls.js";
@@ -29,8 +30,12 @@ const STATUS_STATE_CLASS = { ok: "st-ok", busy: "st-running", err: "st-error" };
 export function setStatus(state, text) {
   _statusBusy = state === "busy";
   _statusFromPoll = false;
-  $("status-text").className = "job-state " + (STATUS_STATE_CLASS[state] || "");
-  $("status-text").textContent = text;
+  const pill = $("status-text");
+  // An error is recorded when it newly appears, not on every repeat of it.
+  const repeat = pill.classList.contains(STATUS_STATE_CLASS.err) && pill.textContent === text;
+  pill.className = "job-state " + (STATUS_STATE_CLASS[state] || "");
+  pill.textContent = text;
+  if (state === "err" && !repeat) recordGuiError(text, "status");
   // The pill is hidden for "ok" alone: the dropdown above already renders the
   // active model's name, or its disabled "No model loaded" placeholder. "busy"
   // and "err" stay visible - neither is expressible in the select, and "err" is
@@ -1091,6 +1096,15 @@ async function _maybeRoutePeer(model) {
 // its route (data.peer_routes).
 let _peerSelected = null;
 
+// Point the model dropdown at the model modelCache says serves the next
+// message (the active one, else the resumable one), or at the "No model
+// loaded" placeholder when there is none, even while the dropdown has focus.
+function _showServedModel() {
+  const shown = modelCache.active || modelCache.resumable || "";
+  modelSelect.value = shown;
+  if (modelSelect.value !== shown) modelSelect.value = "";
+}
+
 async function _postLoad(model, force) {
   const r = await fetch("/api/models/load", {
     method: "POST",
@@ -1118,21 +1132,35 @@ async function _postLoad(model, force) {
 // to slow CPU offload) is never returned to the caller: it is resolved right
 // here, so every caller gets the same final outcome without each needing its
 // own confirm/force plumbing.
+//
+// On a failed load or peer route it sets the pill to "load failed", starts a
+// refreshModels(), and rethrows; the caller only reports the error.
 export async function switchModel(model, { local = false } = {}) {
-  const routed = local ? null : await _maybeRoutePeer(model);
-  if (routed) return routed;
-  _peerSelected = null;
-  setStatus("busy", t("sidebar.status.loading", { model }));
-  let data = await _postLoad(model, false);
-  if (data.status === "confirm_required") {
-    const confirmed = await confirmDangerAsync(
-      t("models.switch.confirmTitle"), data.detail, t("models.switch.confirmLabel"));
-    if (!confirmed) {
-      setStatus("ok", modelCache.active || t("sidebar.status.noModel"));
-      return { status: "cancelled", reason: "declined by user", model };
-    }
+  let data;
+  try {
+    const routed = local ? null : await _maybeRoutePeer(model);
+    if (routed) return routed;
+    _peerSelected = null;
     setStatus("busy", t("sidebar.status.loading", { model }));
-    data = await _postLoad(model, true);
+    data = await _postLoad(model, false);
+    if (data.status === "confirm_required") {
+      const confirmed = await confirmDangerAsync(
+        t("models.switch.confirmTitle"), data.detail, t("models.switch.confirmLabel"));
+      if (!confirmed) {
+        setStatus("ok", modelCache.active || t("sidebar.status.noModel"));
+        _showServedModel();
+        refreshModels().then(_showServedModel);
+        return { status: "cancelled", reason: "declined by user", model };
+      }
+      setStatus("busy", t("sidebar.status.loading", { model }));
+      data = await _postLoad(model, true);
+    }
+  } catch (e) {
+    // A failed load ends the busy pill and re-reads the server's model state.
+    setStatus("err", t("sidebar.status.loadFailed"));
+    _showServedModel();
+    refreshModels().then(_showServedModel);
+    throw e;
   }
   if (data.status === "superseded" || data.status === "cancelled") return data;
   setStatus("ok", data.model || model);
@@ -1181,10 +1209,8 @@ export async function reloadModel(model) {
   try {
     res = await switchModel(model, { local: true });
   } catch (e) {
-    setStatus("err", t("sidebar.status.loadFailed"));
     modelCache.active = "";
     modelCache.resumable = model;
-    refreshModels();
     throw e;
   }
   if (res && res.status === "cancelled") {
@@ -1262,9 +1288,7 @@ modelSelect.onchange = async () => {
       refreshPerfEstimate();
     }
   } catch (e) {
-    setStatus("err", t("sidebar.status.loadFailed"));
     toast("Model load failed: " + e.message, true);
-    refreshModels();
   }
 };
 

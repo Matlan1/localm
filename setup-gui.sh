@@ -44,77 +44,102 @@ echo
 echo "  LocaLM graphical setup"
 echo
 
-# ---- locate uv --------------------------------------------------------------
-# A uv already inside this folder (setup.sh's Portable option puts one there) is
-# used as is. A uv found elsewhere on this computer is used only when the user
-# says so: the same Portable / Shared question setup.sh asks, because Portable
-# means uv itself lives in this folder.
-UVEXE=""
-SYSUV=""
-if [ -x "./.uv/uv" ]; then
-    UVEXE="$PWD/.uv/uv"
-elif command -v uv >/dev/null 2>&1; then
-    SYSUV=1
-    echo "  A uv is already installed on this computer."
-    echo
-    echo "  Keep localm's Python tooling (uv itself, its runtime, and downloads) inside this folder?"
-    echo "    [1] Portable - everything in this folder (self-contained; re-downloads per clone)"
-    echo "    [2] Shared   - reuse/install uv at its normal per-user location (faster; lives in ~/.local)"
-    STOREPICK=""
-    read -r -p "  Pick 1 or 2 [1]: " STOREPICK || STOREPICK=""
-    case "${STOREPICK:-1}" in
-        2*)
-            UVEXE="$(command -v uv)"
-            export LOCALM_GUI_STORE=shared
-            echo "  Using $UVEXE"
+# ---- portable vs shared: where localm's Python tooling lives ----------------
+# The question setup.sh asks, asked once, here. The window reads the answer from
+# LOCALM_GUI_STORE (portable or shared), the uv in use from LOCALM_GUI_UV, and
+# LOCALM_GUI_UV_INSTALLED=1 when uv was installed at its per-user location by
+# this run. Portable uses only ./.uv/uv, installing it there when it is missing.
+# Shared uses the uv on PATH, never ./.uv, and installs uv at its normal per-user
+# location when there is none.
+shared_uv() {  # prints the first uv on PATH that is not this folder's ./.uv copy
+    local d dirs
+    IFS=: read -r -a dirs <<< "$PATH"
+    for d in "${dirs[@]}"; do
+        [ -n "$d" ] || continue
+        [ -x "$d/uv" ] && [ ! -d "$d/uv" ] || continue
+        if [ "$(cd "$d" 2>/dev/null && pwd)" = "$PWD/.uv" ]; then continue; fi
+        echo "$d/uv"
+        return 0
+    done
+    return 0
+}
+ask_install_uv() {  # setup.sh's uv-install question; exits when the user declines
+    local getuv=""
+    echo "  [!] uv (the Python package manager localm builds on) is not installed."
+    # SETUP-Q: uv-install
+    read -r -p "  Install it now with Astral's official installer? [Y/n]: " getuv || getuv=""
+    case "${getuv:-Y}" in
+        [Nn]*)
+            echo
+            echo "  Nothing was installed. Run ./setup.sh for the console installer."
+            exit 1
             ;;
     esac
-    echo
-fi
-
-if [ -z "$UVEXE" ]; then
-    if [ -z "$SYSUV" ]; then
-        echo "  uv (the Python package manager LocaLM builds on) is not installed yet."
-        echo "  It is a small download and is needed before any window can open."
-        echo
-        read -r -p "  Install it now? [Y/n]: " GETUV
-        case "${GETUV:-Y}" in
-            [Nn]*)
-                echo
-                echo "  Nothing was installed. Run ./setup.sh for the console installer."
-                exit 1
-                ;;
-        esac
-    fi
-    echo "  Installing uv into this folder ..."
-    # UV_UNMANAGED_INSTALL keeps it in ./.uv without editing shell startup
-    # files or writing an install receipt under ~/.config/uv.
-    export UV_INSTALL_DIR="$PWD/.uv"
-    export UV_UNMANAGED_INSTALL="$PWD/.uv"
-    UVTMP="$(mktemp -d 2>/dev/null)" || { UVTMP="$(pwd)/.uv-installer-tmp"; mkdir -p "$UVTMP"; }
-    if ! { fetch_uv_installer "$UVTMP/uv-installer.sh" && sh "$UVTMP/uv-installer.sh"; }; then
+}
+run_uv_installer() {  # the pinned, checksum-verified Astral installer; exits on failure
+    # The installer script and everything Astral's installer downloads (TMPDIR)
+    # stay in ./.localm-setup-tmp, which is removed again when it is empty.
+    UVTMP="$(pwd)/.localm-setup-tmp/uv-installer.$$"
+    if ! { mkdir -p "$UVTMP/tmp" && fetch_uv_installer "$UVTMP/uv-installer.sh" \
+            && TMPDIR="$UVTMP/tmp" sh "$UVTMP/uv-installer.sh"; }; then
         rm -rf "$UVTMP"
+        rmdir ./.localm-setup-tmp 2>/dev/null || true
         echo
         echo "  [!] Could not download or run Astral's uv installer."
         echo "      Use the console installer instead:  ./setup.sh"
         exit 1
     fi
     rm -rf "$UVTMP"
-    # The installer updates the shell profile, which this already running shell
-    # does not see. Prepend every directory it may have used, in setup.sh's own
-    # order, so the uv just installed is callable right now.
-    export PATH="$PWD/.uv:$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
-    if [ -x "./.uv/uv" ]; then
-        UVEXE="$PWD/.uv/uv"
-    elif [ -z "$SYSUV" ] && command -v uv >/dev/null 2>&1; then
-        UVEXE="$(command -v uv)"
+    rmdir ./.localm-setup-tmp 2>/dev/null || true
+}
+
+echo "  Keep localm's Python tooling (uv itself, its runtime, and downloads) inside this folder?"
+echo "    [1] Portable - everything in this folder (self-contained; re-downloads per clone)"
+echo "    [2] Shared   - reuse/install uv at its normal per-user location (faster; lives in ~/.local)"
+STOREPICK=""
+# SETUP-Q: tooling-store
+read -r -p "  Pick 1 or 2 [1]: " STOREPICK || STOREPICK=""
+STOREPICK="${STOREPICK:-1}"
+UVEXE=""
+unset LOCALM_GUI_UV_INSTALLED
+if [ "$STOREPICK" = 1 ]; then
+    export LOCALM_GUI_STORE=portable
+    echo "  Portable: uv, Python, and downloads all under this folder"
+    if [ ! -x "./.uv/uv" ]; then
+        ask_install_uv
+        echo "  Installing uv ..."
+        # UV_UNMANAGED_INSTALL keeps it in ./.uv without editing shell startup
+        # files or writing an install receipt under ~/.config/uv.
+        export UV_INSTALL_DIR="$PWD/.uv"
+        export UV_UNMANAGED_INSTALL="$PWD/.uv"
+        echo "  Portable: installing uv itself under ./.uv"
+        run_uv_installer
+    fi
+    if [ -x "./.uv/uv" ]; then UVEXE="$PWD/.uv/uv"; fi
+else
+    export LOCALM_GUI_STORE=shared
+    echo "  Shared: reusing/installing uv and its Python + cache (outside this folder)."
+    UVEXE="$(shared_uv)"
+    if [ -z "$UVEXE" ]; then
+        ask_install_uv
+        echo "  Installing uv ..."
+        unset UV_INSTALL_DIR UV_UNMANAGED_INSTALL
+        run_uv_installer
+        export LOCALM_GUI_UV_INSTALLED=1
+        # Prepend both directories the installer may have used, in setup.sh's
+        # own order.
+        export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+        UVEXE="$(shared_uv)"
     fi
 fi
+echo
 
 if [ -z "$UVEXE" ]; then
     echo
     echo "  [!] uv still is not callable, so the graphical setup cannot start."
-    echo "      Looked for $PWD/.uv/uv (the installer did not leave one there)."
+    if [ "$LOCALM_GUI_STORE" = portable ]; then
+        echo "      Looked for $PWD/.uv/uv (the installer did not leave one there)."
+    fi
     echo "      Open a NEW terminal and run ./setup.sh instead."
     exit 1
 fi
@@ -131,16 +156,17 @@ if [ "$(uname -s)" != "Darwin" ] && [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DIS
     exit 1
 fi
 
+export LOCALM_GUI_UV="$UVEXE"
 echo "  Opening the setup window ..."
-# Keep the interpreter this window runs on inside the folder, so a portable
+# Portable keeps the interpreter this window runs on inside the folder, so the
 # install reuses it rather than downloading a second copy.
-if [ "${LOCALM_GUI_STORE:-}" != shared ]; then
+if [ "$LOCALM_GUI_STORE" = portable ]; then
     export UV_PYTHON_INSTALL_DIR="$PWD/.python"
     export UV_CACHE_DIR="$PWD/.cache"
 fi
 export UV_SYSTEM_CERTS=1
 rc=0
-"$UVEXE" run --no-project --python 3.12 python installer/gui.py || rc=$?
+"$UVEXE" run --no-project --isolated --python 3.12 python installer/gui.py || rc=$?
 # 42 and 43: an uninstall finished in the window; the Python runtime it ran on
 # is removed now that it has closed. 43 and 44: something asked for was kept.
 # 45: the uninstall did not finish.

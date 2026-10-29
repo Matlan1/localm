@@ -566,6 +566,8 @@ _INCONCLUSIVE_LOAD_RETRY_DELAY = 1.5
 # model to finish its requests, so that model can be evicted instead of the new
 # one loading beside it on whatever VRAM is left.
 _BUSY_VICTIM_IDLE_WAIT_S = 30.0
+# How often that wait checks whether a busy native media runtime's job ended.
+_BUSY_MEDIA_POLL_S = 0.25
 
 # How much longer _switch_free_victim waits for an evicted model's VRAM when
 # the first wait_for_vram_release saw no release.
@@ -665,8 +667,9 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
     engine for a name not registered in ``_engines``. *on_active* is called
     with *name* when it becomes the active model. *preempt* marks an explicit
     user switch: it supersedes an earlier explicit switch that is still
-    loading, and may cancel a busy resident model or ask before a degraded
-    load. *force* skips those confirmations. With *activate* False the model
+    loading, and asks before evicting a busy resident model or loading
+    degraded. *force* skips those confirmations and cancels the busy model's
+    generations before evicting it. With *activate* False the model
     becomes active only when nothing else would answer an unnamed request.
     With *skip_if_latched* (a load that capability routing chose, not one the
     user asked for) a model that is not resident is not loaded when its last
@@ -676,9 +679,12 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
     waits for a busy model to finish and with ``LOADING_MODEL_STATUS`` when it
     goes on.
 
-    A load that is not an explicit switch waits up to ``_BUSY_VICTIM_IDLE_WAIT_S``
-    for a busy resident model that stands in its way to go idle, then evicts it
-    (``_switch_wait_for_busy_victim``). A resident model left partly on the CPU
+    Before a load is sized, this process's idle native media runtimes are
+    stopped (``_switch_free_own_media``). A load that is not an explicit switch
+    waits up to ``_BUSY_VICTIM_IDLE_WAIT_S`` for a busy resident model that
+    stands in its way to go idle, then evicts it
+    (``_switch_wait_for_busy_victim``), and as long again for a media runtime
+    that is running a job (``_switch_wait_for_busy_media``). A resident model left partly on the CPU
     by an earlier load is reloaded instead of reused, once, when a model that
     held the VRAM it lacked is idle or gone (``_placement_heal_due``) and a
     fresh VRAM reading is conclusive; an explicit switch reuses it as it is.
@@ -694,7 +700,14 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
     - ``cancelled``: the load was cancelled for another ``reason``.
     - ``confirm_required``: an explicit switch without *force* would have to
       evict a model still in use, or load below the whole-model VRAM
-      estimate; ``detail`` says which.
+      estimate; ``detail`` says which. When the free VRAM expected after
+      evicting every evictable model and freeing the shared embedding,
+      reranker and speech models can be estimated and is too small, this is
+      returned before anything is evicted or freed.
+
+    When the call ends without loading *name* after evicting the active
+    model, that model becomes ``_last_active_model_name``
+    (``_remember_evicted_active``).
 
     Raises HTTPException 404 when *name* is registered but its files are not
     found, and 503 when a static split device is short of VRAM, the VRAM probe
@@ -765,6 +778,8 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
             if name in latched:
                 raise LoadSkipped(latched[name])
 
+        await _switch_free_own_media(loop, name)
+
         built = None
         reading = None
         if healing is not None:
@@ -778,50 +793,69 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                 reading = _FirstPassReading.open()
                 budget = await _switch_with_backend_need(loop, budget, sized,
                                                          reading=reading)
-        attempt = switch_admission.EvictionAttempt(started=time.monotonic())
-        evictions: list[VictimRelease] = []
-        if healing is not None:
-            release = await _switch_free_for_reload(loop, name, healing, heal_probe,
-                                                    heal_budget.needed_bytes)
-            attempt.release_wait_extended = release.extended
-            evictions.append(release)
-        if budget is not None:
-            early = await _switch_make_room(loop, budget, preempt=preempt,
-                                            force=force, activate=activate,
-                                            attempt=attempt, evictions=evictions,
-                                            on_status=on_status, reading=reading)
-            if early is not None:
-                return early
+        prior_active = _active_model_name
+        loaded = False
+        try:
+            attempt = switch_admission.EvictionAttempt(started=time.monotonic())
+            evictions: list[VictimRelease] = []
+            if healing is not None:
+                release = await _switch_free_for_reload(loop, name, healing, heal_probe,
+                                                        heal_budget.needed_bytes)
+                attempt.release_wait_extended = release.extended
+                evictions.append(release)
+            if budget is not None:
+                early = await _switch_make_room(loop, budget, preempt=preempt,
+                                                force=force, activate=activate,
+                                                attempt=attempt, evictions=evictions,
+                                                on_status=on_status, reading=reading)
+                if early is not None:
+                    return early
 
-        # *name* may itself be a victim another call detached and is still freeing.
-        if name in _evicting_names:
-            raise HTTPException(
-                503, f"'{name}' is currently being freed by another request; "
-                f"retry shortly.")
+            # *name* may itself be a victim another call detached and is still freeing.
+            if name in _evicting_names:
+                raise HTTPException(
+                    503, f"'{name}' is currently being freed by another request; "
+                    f"retry shortly.")
 
-        if healing is not None:
-            new_engine = healing
-        elif name in _engines:
-            new_engine = _engines[name]
-        else:
-            new_engine = built if built is not None else await loop.run_in_executor(
-                None, _engine_factory, name)
-        interrupted = await _switch_load(loop, name, new_engine, preempt=preempt,
-                                         reading=reading)
-        if interrupted is not None:
-            return interrupted
+            if healing is not None:
+                new_engine = healing
+            elif name in _engines:
+                new_engine = _engines[name]
+            else:
+                new_engine = built if built is not None else await loop.run_in_executor(
+                    None, _engine_factory, name)
+            interrupted = await _switch_load(loop, name, new_engine, preempt=preempt,
+                                             reading=reading)
+            if interrupted is not None:
+                return interrupted
 
-        if healing is not None:
-            healing.unloading = False
-        _switch_commit(name, new_engine, sem, activate=activate or was_active,
-                       on_active=on_active)
-        _log_switch_placement(name, new_engine, evictions)
-        _record_placement_heal(name, new_engine,
-                               budget.pinned if budget is not None else frozenset(),
-                               evictions, allowed=healing is None,
-                               deferred=attempt.deferred_to_backend)
-        return {"status": "loaded", "model": name,
-                **_gpu_placement_fields(new_engine)}
+            if healing is not None:
+                healing.unloading = False
+            _switch_commit(name, new_engine, sem, activate=activate or was_active,
+                           on_active=on_active)
+            loaded = True
+            _log_switch_placement(name, new_engine, evictions)
+            _record_placement_heal(name, new_engine,
+                                   budget.pinned if budget is not None else frozenset(),
+                                   evictions, allowed=healing is None,
+                                   deferred=attempt.deferred_to_backend)
+            return {"status": "loaded", "model": name,
+                    **_gpu_placement_fields(new_engine)}
+        finally:
+            if not loaded:
+                _remember_evicted_active(prior_active, name)
+
+
+def _remember_evicted_active(prior: Optional[str], name: str) -> None:
+    """After a switch to *name* that did not load *name*: when *prior* (the
+    active model when the switch began making room) is no longer resident
+    and no model is active or remembered, keep *prior* as
+    ``_last_active_model_name``, the name an unnamed request resolves to,
+    instead of the startup model."""
+    global _last_active_model_name
+    if (prior and prior != name and _active_model_name is None
+            and _last_active_model_name is None and prior not in _engines):
+        _last_active_model_name = prior
 
 
 def _is_reusable(engine) -> bool:
@@ -938,11 +972,16 @@ async def _switch_make_room(loop, budget: switch_admission.LoadBudget, *,
     under *reading* when given; *reading* is closed when that iteration does
     not admit the load, so every later iteration reads the GPUs again.
 
+    Before each eviction for an explicit switch without *force* that VRAM
+    (not the resident cap) asks for, ``_switch_confirm_before_eviction`` may
+    return its ``confirm_required`` result with nothing evicted or freed,
+    after ``_switch_wait_busy_before_asking``.
+
     Returns None when the load may proceed, or a ``confirm_required`` result
     for switch_engine to return. Raises HTTPException 503 when a static split
     device is short or the probe stays inconclusive.
 
-    There is no await between choosing a victim, re-checking its pin and
+    There is no await between looking up a victim, re-checking its pin and
     detaching it. See test_eviction_victim_not_pinnable_during_native_free.
     """
     from localm.inference import embedder as _embedder_mod
@@ -981,6 +1020,16 @@ async def _switch_make_room(loop, budget: switch_admission.LoadBudget, *,
             if step.kind == switch_admission.RETURN_RESULT:
                 return step.result
             victim, force_busy = step.victim, step.force_busy
+
+        if (preempt and not force and not decision.vram_ok and victim is not None
+                and _is_reusable(_engines.get(victim))):
+            ask = await _switch_confirm_before_eviction(
+                loop, probe, budget,
+                reprobe=decision.action == switch_admission.EXHAUSTED)
+            if ask is not None:
+                ask = await _switch_wait_busy_before_asking(loop, probe, budget, ask)
+            if ask is not None:
+                return ask
 
         victim_engine = _engines.get(victim)
         if victim_engine is None or getattr(victim_engine, "unloading", False) is True:
@@ -1072,17 +1121,33 @@ async def _switch_exhaustion_ladder(loop, probe: switch_admission.VramProbe,
                                     ) -> switch_admission.EvictionStep:
     """Find room once no idle chat model is evictable, in this order: free the
     idle shared embedder; act on the probe verdict (load best-effort when the
-    box cannot measure, retry or refuse when the probe was inconclusive); ask
-    a sibling localm instance to free its VRAM; cancel and claim a busy
-    resident model (explicit switch) or wait for it to go idle
+    box cannot measure, retry or refuse when the probe was inconclusive); stop
+    or wait for this process's native media runtimes
+    (``_switch_wait_for_busy_media``); ask
+    a sibling localm instance to free its VRAM; claim a busy resident model
+    (explicit switch, ``_switch_claim_busy_victim``) or wait for it to go idle
     (``_switch_wait_for_busy_victim``, any other load); then refuse, ask, or
     defer to the backend's own sizing
     (``switch_admission.final_exhaustion_verdict``).
+
+    For an explicit switch without *force* on a usable reading,
+    ``_switch_confirm_before_eviction`` runs first. When it would ask, nothing
+    is freed and no peer is asked: ``_switch_wait_busy_before_asking`` waits
+    for the replies of busy resident models first and its result is
+    returned.
 
     Returns the loop's next ``switch_admission.EvictionStep``. Raises
     HTTPException 503 when a static split device is short or the probe stayed
     inconclusive through every retry."""
     step = switch_admission.EvictionStep
+    if preempt and not force and switch_admission.exhausted_probe_verdict(
+            probe, retries_used=attempt.inconclusive_retries,
+            max_retries=_INCONCLUSIVE_LOAD_RETRIES) == switch_admission.KEEP_FREEING:
+        ask = await _switch_confirm_before_eviction(loop, probe, budget)
+        if ask is not None:
+            ask = await _switch_wait_busy_before_asking(loop, probe, budget, ask)
+        if ask is not None:
+            return step(switch_admission.RETURN_RESULT, result=ask)
     if not attempt.embedder_attempted:
         if await _switch_evict_embedder(loop, probe, attempt, embedder_mod):
             return step(switch_admission.REPROBE)
@@ -1098,6 +1163,11 @@ async def _switch_exhaustion_ladder(loop, probe: switch_admission.VramProbe,
         return step(switch_admission.REPROBE)
     if verdict == switch_admission.GIVE_UP_PROBE:
         raise _switch_inconclusive_failure(budget.name, attempt)
+
+    media = await _switch_wait_for_busy_media(loop, budget, attempt, preempt=preempt,
+                                              force=force, on_status=on_status)
+    if media is not None:
+        return media
 
     if await _switch_ask_peers(loop, probe, budget, attempt):
         return step(switch_admission.REPROBE)
@@ -1118,14 +1188,14 @@ async def _switch_exhaustion_ladder(loop, probe: switch_admission.VramProbe,
     if final == switch_admission.CONFIRM_DEGRADED_LOAD:
         return step(switch_admission.RETURN_RESULT,
                     result=switch_admission.degraded_load_confirm(
-                        budget.name, budget.whole_model_bytes, probe.free,
+                        budget.name, budget.needed_bytes, probe.free,
                         moe=_registered_as_moe(budget.name)))
     from localm.debuglog import logger as _dbg
     _dbg.info(
-        "switch_engine: '%s' exceeds the whole-model VRAM estimate "
-        "(need ~%s MB, %s MB free) after eviction - deferring to the "
-        "backend's own load-time sizing instead of refusing",
-        budget.name, budget.whole_model_bytes // 1024 ** 2, probe.free // 1024 ** 2)
+        "switch_engine: '%s' does not fit the free VRAM after eviction "
+        "(needs ~%s MB free including the safety margin, %s MB free) - deferring "
+        "to the backend's own load-time sizing instead of refusing",
+        budget.name, budget.needed_bytes // 1024 ** 2, probe.free // 1024 ** 2)
     attempt.deferred_to_backend = True
     return step(switch_admission.PROCEED_TO_LOAD)
 
@@ -1186,6 +1256,109 @@ async def _switch_evict_embedder(loop, probe: switch_admission.VramProbe,
     return True
 
 
+async def _stop_idle_media_for(loop, name: str) -> tuple[bool, list]:
+    """Stop this process's native media runtimes that no job is using
+    (``localm.vram.stop_idle_native_media``) for chat model *name*, logging
+    each stop at INFO. Returns ``(stopped_any, busy)``, *busy* being the
+    runtimes left running because a job is using them."""
+    from localm import vram as _vram
+    from localm.debuglog import logger as _dbg
+
+    outcomes = await loop.run_in_executor(None, _vram.stop_idle_native_media)
+    stopped = False
+    busy = []
+    for kind, outcome in outcomes.items():
+        if outcome == _vram.MEDIA_STOPPED:
+            stopped = True
+            _dbg.info("switch_engine: stopped the idle %s to make room for the "
+                      "chat model '%s'", kind, name)
+        elif outcome == _vram.MEDIA_BUSY:
+            busy.append(kind)
+    return stopped, busy
+
+
+async def _switch_free_own_media(loop, name: str) -> None:
+    """Before chat model *name* is sized and loaded: stop every native media
+    runtime this process holds loaded that no job is using
+    (``_stop_idle_media_for``), then wait for the VRAM release when a fresh,
+    device-wide free reading was taken before the stop. A runtime that is
+    running a job is left running (``_switch_wait_for_busy_media`` handles it
+    when the load does not fit). Never raises for a runtime that cannot be
+    stopped; that is logged at WARNING."""
+    from localm import vram as _vram
+    from localm.debuglog import logger as _dbg
+    from localm.discover import FREE_SCOPE_DEVICE
+
+    loaded = await loop.run_in_executor(None, _vram.loaded_native_media_runtimes)
+    if not loaded:
+        return
+    before, fresh, scope = await loop.run_in_executor(None, _vram._vram_free_reading)
+    stopped, _busy = await _stop_idle_media_for(loop, name)
+    if not (stopped and fresh and scope == FREE_SCOPE_DEVICE and before is not None):
+        return
+    released, after = await loop.run_in_executor(
+        None, lambda: _vram.wait_for_vram_release(_vram._live_free_vram_bytes,
+                                                  before_bytes=before))
+    _dbg.debug("switch_engine: VRAM release after stopping the media runtime %s "
+               "(%s -> %s MB free)",
+               {True: "confirmed", False: "not seen"}.get(released, "not verifiable"),
+               before // 1024 ** 2, after // 1024 ** 2 if after is not None else "?")
+
+
+async def _switch_wait_for_busy_media(loop, budget: switch_admission.LoadBudget,
+                                      attempt: switch_admission.EvictionAttempt, *,
+                                      preempt: bool, force: bool,
+                                      on_status: Optional[Callable[[str], None]] = None
+                                      ) -> switch_admission.EvictionStep | None:
+    """Once per load attempt (``attempt.media_attempted``), for chat model
+    ``budget.name`` that does not fit while this process holds a native media
+    runtime loaded: stop the runtimes no job is using, and for one a job is
+    using, ask (an explicit switch without *force*) or wait up to
+    ``_BUSY_VICTIM_IDLE_WAIT_S`` for the job to end and then stop it (any
+    other load; *on_status* is called with ``WAITING_FOR_MODEL_STATUS`` before
+    the wait and ``LOADING_MODEL_STATUS`` after it). A job is never cut off.
+
+    Returns a REPROBE step once a runtime stopped or went away, a RETURN_RESULT
+    step with ``switch_admission.busy_media_confirm`` when asking, else None
+    (nothing loaded, *force*, or the job still running when the wait ended,
+    which is logged at WARNING)."""
+    from localm import vram as _vram
+    from localm.debuglog import logger as _dbg
+
+    step = switch_admission.EvictionStep
+    if attempt.media_attempted:
+        return None
+    if not await loop.run_in_executor(None, _vram.loaded_native_media_runtimes):
+        return None
+    attempt.media_attempted = True
+    stopped, busy = await _stop_idle_media_for(loop, budget.name)
+    if stopped or not busy:
+        return step(switch_admission.REPROBE)
+    if preempt and not force:
+        return step(switch_admission.RETURN_RESULT,
+                    result=switch_admission.busy_media_confirm(budget.name, busy))
+    if not force:
+        _dbg.info("switch_engine: '%s' needs the VRAM the %s holds; waiting up to "
+                  "%.0fs for its job to finish", budget.name, " and the ".join(busy),
+                  _BUSY_VICTIM_IDLE_WAIT_S)
+        if on_status is not None:
+            on_status(WAITING_FOR_MODEL_STATUS)
+        deadline = time.monotonic() + _BUSY_VICTIM_IDLE_WAIT_S
+        try:
+            while time.monotonic() < deadline:
+                await asyncio.sleep(_BUSY_MEDIA_POLL_S)
+                stopped, busy = await _stop_idle_media_for(loop, budget.name)
+                if stopped or not busy:
+                    return step(switch_admission.REPROBE)
+        finally:
+            if on_status is not None:
+                on_status(LOADING_MODEL_STATUS)
+    _dbg.warning("switch_engine: the %s is still running a job; the chat model '%s' "
+                 "loads beside it and may not fit on the GPU entirely",
+                 " and the ".join(busy), budget.name)
+    return None
+
+
 def _switch_inconclusive_failure(name: str,
                                  attempt: switch_admission.EvictionAttempt
                                  ) -> HTTPException:
@@ -1233,14 +1406,18 @@ async def _switch_claim_busy_victim(budget: switch_admission.LoadBudget,
                                     attempt: switch_admission.EvictionAttempt,
                                     *, preempt: bool, force: bool
                                     ) -> switch_admission.EvictionStep | None:
-    """Cancel every generation on a busy resident model and claim it as the
-    eviction victim, for an explicit switch only and once per load attempt
+    """Claim a busy resident model as the eviction victim, for an explicit
+    switch only and once per load attempt
     (``switch_admission.busy_victim_candidate``).
 
-    Returns None when there is no candidate. Without *force*, waits for its
-    pins to clear (``_wait_for_pin_clear``) and returns a ``confirm_required``
-    result step when they do not. Otherwise returns an EVICT step whose
-    ``force_busy`` is *force*: evicted even if a pin is still held."""
+    Returns None when there is no candidate. Without *force*, nothing is
+    cancelled: waits for its requests to finish on their own
+    (``_wait_for_pin_clear``) and returns an EVICT step when they do, else a
+    ``confirm_required`` result step, leaving the model loaded and its
+    generations running. With *force*, cancels every generation on it
+    (``residency.cancel_all``) and returns an EVICT step with ``force_busy``:
+    evicted even if a pin is still held. See
+    TestBusyVictim.test_explicit_switch_never_cancels_a_busy_model_before_asking."""
     busy_name = switch_admission.busy_victim_candidate(
         budget, _engines_lru, _engines, preempt=preempt,
         already_attempted=attempt.busy_attempted)
@@ -1248,14 +1425,16 @@ async def _switch_claim_busy_victim(budget: switch_admission.LoadBudget,
         return None
     attempt.busy_attempted = True
     busy_engine = _engines[busy_name]
+    if not force:
+        if not await _wait_for_pin_clear(busy_engine):
+            return switch_admission.EvictionStep(
+                switch_admission.RETURN_RESULT,
+                result=switch_admission.busy_victim_confirm(
+                    budget.name, busy_name, _in_use_description(busy_name, busy_engine)))
+        return switch_admission.EvictionStep(switch_admission.EVICT, victim=busy_name)
     residency.cancel_all(busy_name)
-    if not force and not await _wait_for_pin_clear(busy_engine):
-        return switch_admission.EvictionStep(
-            switch_admission.RETURN_RESULT,
-            result=switch_admission.busy_victim_confirm(
-                budget.name, busy_name, _in_use_description(busy_name, busy_engine)))
     return switch_admission.EvictionStep(
-        switch_admission.EVICT, victim=busy_name, force_busy=force)
+        switch_admission.EVICT, victim=busy_name, force_busy=True)
 
 
 async def _switch_wait_for_busy_victim(budget: switch_admission.LoadBudget,
@@ -1395,6 +1574,195 @@ def _victim_vram_estimate(engine) -> int:
     if isinstance(placement, dict) and placement.get("gpu_layers_total"):
         size = size * placement.get("gpu_layers_offloaded", 0) // placement["gpu_layers_total"]
     return residency.required_vram_bytes(size)
+
+
+def _resident_vram_hold(engine) -> int:
+    """Bytes of VRAM resident *engine* is expected to hold: the free VRAM its
+    load took as measured (``Engine.vram_load_bytes``); else, for a load the
+    backend sized itself (``Engine.gpu_sizing`` mode "auto") with every layer
+    on the GPU (``gpu_placement`` not degraded), its sized model, KV cache and
+    overhead bytes; else 0 (unknown)."""
+    measured = getattr(engine, "vram_load_bytes", None)
+    if type(measured) is int and measured > 0:
+        return measured
+    sizing = getattr(engine, "gpu_sizing", None)
+    placement = getattr(engine, "gpu_placement", None)
+    if (isinstance(sizing, dict) and sizing.get("mode") == "auto"
+            and isinstance(placement, dict) and placement.get("degraded") is False):
+        model, kv, overhead = (sizing.get(k) for k in (
+            "model_bytes", "kv_bytes", "overhead_bytes"))
+        if (type(model) is int and type(kv) is int and type(overhead) is int
+                and model > 0 and kv >= 0 and overhead >= 0):
+            return model + kv + overhead
+    return 0
+
+
+class SharedVramHolds(NamedTuple):
+    """The VRAM this process holds outside its chat models
+    (``_shared_vram_holds``).
+
+    ``holds`` are the bytes ``_switch_evict_embedder`` is expected to free
+    from each loaded shared embedder, reranker or speech model (0 for one on
+    the CPU or one a request is using, which it leaves loaded). ``unknown`` names the kinds of those
+    models whose hold cannot be estimated, and each loaded native media
+    runtime that is not running a job (idle, or its state unreadable).
+    ``busy_media`` names the native media runtimes running a job, which a
+    switch never stops."""
+
+    holds: tuple = ()
+    unknown: tuple = ()
+    busy_media: tuple = ()
+
+
+def _shared_vram_holds() -> SharedVramHolds:
+    """The ``SharedVramHolds`` of the shared embedder, reranker and speech
+    model (each module's ``resident_vram_hold``) and of this process's native
+    media runtimes (``vram.native_media_runtime_states``). Takes their locks;
+    must not run on the event loop thread."""
+    from localm import vram as _vram
+    from localm.inference import embedder as _embedder_mod
+    from localm.inference import reranker as _reranker_mod
+    from localm.inference import speech as _speech_mod
+    holds, unknown = [], []
+    for kind, mod in (("embedding model", _embedder_mod),
+                      ("reranker model", _reranker_mod),
+                      ("speech model", _speech_mod)):
+        loaded, hold = mod.resident_vram_hold()
+        if not loaded:
+            continue
+        if hold is None:
+            unknown.append(kind)
+        else:
+            holds.append(hold)
+    busy = []
+    for name, state in _vram.native_media_runtime_states().items():
+        (busy if state == "busy" else unknown).append(name)
+    return SharedVramHolds(tuple(holds), tuple(unknown), tuple(busy))
+
+
+def _peer_vram_holds() -> Optional[list]:
+    """The ``vram_estimate_bytes`` (0 when a peer gives none) of every live
+    sibling localm instance holding a model on a GPU this load can use, the
+    peers ``_attempt_cooperative_unload`` could ask. [] when this instance is
+    not registered for coordination or no such peer is live; None when the
+    peer lookup fails. Blocking network IO; must not run on the event loop
+    thread."""
+    if not _gpu_coord:
+        return []
+    try:
+        from localm import gpu_registry
+        peers = gpu_registry.list_gpu_peers(exclude_self_id=_gpu_coord.get("instance_id"))
+    except Exception as exc:
+        from localm.debuglog import logger as _dbg
+        _dbg.info("switch_engine: could not list peer instances (%s: %s); not "
+                  "estimating the VRAM free after eviction", type(exc).__name__, exc)
+        return None
+    my_gpus = _load_gpu_indices()
+    out = []
+    for peer in peers:
+        if not peer.get("model"):
+            continue
+        if peer.get("gpu_index") is not None and peer.get("gpu_index") not in my_gpus:
+            continue
+        estimate = peer.get("vram_estimate_bytes")
+        out.append(estimate if type(estimate) is int and estimate > 0 else 0)
+    return out
+
+
+async def _switch_confirm_before_eviction(loop, probe: switch_admission.VramProbe,
+                                          budget: switch_admission.LoadBudget,
+                                          *, reprobe: bool = False
+                                          ) -> Optional[dict]:
+    """The ``confirm_required`` result for an explicit switch, decided before
+    anything is evicted or freed: returned when the free VRAM expected after
+    evicting every evictable resident chat model
+    (``switch_admission.evictable_residents``, each sized by
+    ``_resident_vram_hold``), freeing the shared embedder, reranker and speech
+    model (``_shared_vram_holds``) and every peer instance's model
+    (``_peer_vram_holds``) is still below ``budget.needed_bytes``. It is the
+    busy-media ``switch_admission.busy_media_confirm`` when a native media
+    runtime is running a job (its VRAM is not counted as freed), else the
+    degraded-load ``switch_admission.degraded_load_confirm``.
+
+    None when the load would fit after that, or when it cannot be estimated
+    (logged at INFO): a chat model's or shared model's hold is unknown, an
+    idle native media runtime is loaded, ``switch_admission.free_after_eviction``
+    cannot estimate from the reading, a peer lookup fails or a peer gives no
+    estimate, or the evictable residents changed while it awaited. With
+    *reprobe*, a fresh VRAM reading replaces *probe* once every resident's hold
+    is known. Blocking reads run off the event loop. Evicts, frees, asks and
+    cancels nothing."""
+    from localm.debuglog import logger as _dbg
+
+    def _cannot(why: str) -> None:
+        _dbg.info("switch_engine: cannot estimate the VRAM free after eviction for "
+                  "'%s' (%s); evicting and measuring instead of asking first",
+                  budget.name, why)
+        return None
+
+    names = switch_admission.evictable_residents(budget, _engines_lru, _engines)
+    engines = [_engines[n] for n in names]
+    holds = await loop.run_in_executor(
+        None, lambda: [_resident_vram_hold(e) for e in engines])
+    unsized = [n for n, h in zip(names, holds, strict=True) if h <= 0]
+    if unsized:
+        return _cannot(f"no VRAM figure for {unsized}")
+    if reprobe:
+        probe = await _switch_probe_vram(loop, budget)
+    after = switch_admission.free_after_eviction(probe, holds)
+    if after is None:
+        return _cannot("the VRAM reading cannot be used for an estimate")
+    if after >= budget.needed_bytes:
+        return None
+    shared = await loop.run_in_executor(None, _shared_vram_holds)
+    if shared.unknown:
+        return _cannot(f"no VRAM figure for the {' and the '.join(shared.unknown)}")
+    peers = await loop.run_in_executor(None, _peer_vram_holds)
+    if peers is None:
+        return _cannot("the peer instances could not be listed")
+    if any(h <= 0 for h in peers):
+        return _cannot("a peer instance gives no VRAM estimate")
+    after = switch_admission.free_after_eviction(
+        probe, holds + [h for h in shared.holds if h > 0] + peers)
+    if after is None or after >= budget.needed_bytes:
+        return None
+    now = switch_admission.evictable_residents(budget, _engines_lru, _engines)
+    if [_engines[n] for n in now] != engines:
+        return _cannot("the resident models changed while estimating")
+    _dbg.info("switch_engine: '%s' does not fit even after evicting %s and the "
+              "shared models (needs ~%s MB free including the safety margin, ~%s MB "
+              "expected free%s); asking before evicting anything", budget.name, names,
+              budget.needed_bytes // 1024 ** 2, after // 1024 ** 2,
+              f", the {' and the '.join(shared.busy_media)} running a job"
+              if shared.busy_media else "")
+    if shared.busy_media:
+        return switch_admission.busy_media_confirm(budget.name, list(shared.busy_media))
+    return switch_admission.degraded_load_confirm(
+        budget.name, budget.needed_bytes, after, moe=_registered_as_moe(budget.name))
+
+
+async def _switch_wait_busy_before_asking(loop, probe: switch_admission.VramProbe,
+                                          budget: switch_admission.LoadBudget,
+                                          ask: dict) -> Optional[dict]:
+    """Before *ask* (a ``_switch_confirm_before_eviction`` result) is returned:
+    wait for each evictable resident model with requests in flight to finish
+    them (``_wait_for_pin_clear``; nothing is cancelled). Returns
+    ``switch_admission.busy_victim_confirm`` for the first one still busy
+    after its wait; *ask* when none was busy; else a fresh
+    ``_switch_confirm_before_eviction`` (None when the target now fits).
+    Evicts and frees nothing."""
+    waited = False
+    for name in switch_admission.evictable_residents(budget, _engines_lru, _engines):
+        engine = _engines.get(name)
+        if engine is None or getattr(engine, "active_requests", 0) == 0:
+            continue
+        waited = True
+        if not await _wait_for_pin_clear(engine):
+            return switch_admission.busy_victim_confirm(
+                budget.name, name, _in_use_description(name, engine))
+    if not waited:
+        return ask
+    return await _switch_confirm_before_eviction(loop, probe, budget, reprobe=True)
 
 
 async def _switch_free_victim(loop, victim: str, engine,
@@ -2065,12 +2433,9 @@ async def _unload_engine_off_loop(loop, engine, on_unloaded) -> None:
 
 async def _wait_for_pin_clear(engine, *, timeout: float = 2.0,
                               poll_interval: float = 0.05) -> bool:
-    """Poll ``engine.active_requests`` until it reads 0, or *timeout* elapses.
-    Meant to run right after ``residency.cancel_all()``: a generation that
-    was only still running because nobody had told it to stop (the caller's
-    own just-cancelled request, most commonly) clears within a token or two,
-    so this resolves the common "still generating" complaint without ever
-    surfacing a confirm box for it. Returns whether the pin is clear."""
+    """Poll ``engine.active_requests`` every *poll_interval* seconds until it
+    reads 0, or *timeout* seconds elapse. Cancels nothing. Returns whether the
+    pin is clear."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     while loop.time() < deadline:
@@ -2116,7 +2481,21 @@ def _in_use_description(name: str, engine) -> str:
     return " and ".join(parts) if parts else "still in use"
 
 
-async def unload_all_models(*, force: bool = False) -> dict:
+def _has_requests_in_flight(engine) -> bool:
+    """Whether *engine* has requests in flight: an int ``active_requests``
+    above 0 (anything else, such as a bare test double, reads as idle)."""
+    active = getattr(engine, "active_requests", 0)
+    return isinstance(active, int) and active > 0
+
+
+def _unload_busy_confirm_detail(name: str, engine) -> str:
+    """The ``confirm_required`` detail for unloading model *name* while
+    *engine* still has requests in flight."""
+    return (f"'{name}' is in use ({_in_use_description(name, engine)}); "
+            "unloading it anyway stops it and cuts off the reply it is writing")
+
+
+async def unload_all_models(*, force: bool = False, media: bool = False) -> dict:
     """Release every currently-loaded model from GPU/CPU memory and wait until
     VRAM is actually reclaimed (see ``localm.vram.wait_for_vram_release`` - the
     driver-hang guard: otherwise a media model can load on top of a
@@ -2127,8 +2506,39 @@ async def unload_all_models(*, force: bool = False) -> dict:
     owner-scoped ``/v1/models/unload`` route (``MODELS_WRITE``), and the
     requester-vouched ``POST /v1/instances/cooperate-unload`` (a
     sibling localm instance asking THIS one to free VRAM - multi-instance GPU
-    coordination, see ``localm.gpu_registry``). Behavior is unchanged from the
-    original inline implementation."""
+    coordination, see ``localm.gpu_registry``).
+
+    Without *force*, nothing is cancelled: a chat model with requests in
+    flight gets up to ``_wait_for_pin_clear``'s timeout (one wait shared by
+    every busy model) to finish on its own, and one still in use after that
+    stays loaded with its requests running, listed in ``skipped_in_use`` and
+    described in ``confirm_required``; a busy embedding, reranker or speech
+    model is skipped and described the same way, under its kind. With
+    *force*, every generation on a busy chat model is cancelled
+    (``residency.cancel_all``) and it is unloaded, and a busy embedding,
+    reranker or speech model is stopped and unloaded.
+    See test_unload_all_never_cancels_a_busy_model_before_asking.
+
+    With *media*, this process's native media runtimes (the image/video worker
+    and the music runtime, ``localm.vram.stop_idle_native_media``) are stopped
+    too when no job is using them. One that a job is using is left running,
+    with or without *force*, and listed in ``skipped_in_use`` and
+    ``media_left_running``, never in ``confirm_required``.
+
+    Returns ``{"status", "model", "unloaded_models", "unloaded_other",
+    "embedder_unloaded", ...vram fields}``: *status* is ``"unloaded"``,
+    ``"in_use"`` (nothing released, something skipped) or
+    ``"already_unloaded"``; ``unloaded_models`` names the chat models
+    released, ``unloaded_other`` the kinds of the other models and runtimes
+    released (``"embedding model"``, ``"reranker model"``, ``"speech model"``,
+    ``"native image/video worker"``, ``"native music runtime"``), and
+    ``embedder_unloaded`` is whether an embedding, reranker or speech model was
+    released. ``skipped_in_use`` (names and kinds left loaded) is present only
+    when something was skipped; ``confirm_required`` (each skipped model that
+    *force* would stop, mapped to what is using it) only when there is one; and
+    ``media_left_running`` (each media runtime left running, mapped to
+    ``"busy"`` when a job is using it or ``"failed"`` when the stop did not
+    take) only when there is one."""
     global _active_model_name, _last_active_model_name, _engine, _inference_sem
     loop = asyncio.get_running_loop()
     from localm.vram import (_live_free_vram_bytes, _vram_free_reading,
@@ -2141,6 +2551,7 @@ async def unload_all_models(*, force: bool = False) -> dict:
         None, _vram_free_reading)
     unloaded_models = []
     skipped_in_use = []
+    unloaded_other: list[str] = []
     confirm_required: dict[str, str] = {}
 
     def _reset_active_pointers():
@@ -2158,7 +2569,8 @@ async def unload_all_models(*, force: bool = False) -> dict:
     try:
         embedder_was_loaded = await _unload_engines_and_embedder(
             loop, _embedder_mod, unloaded_models, skipped_in_use,
-            confirm_required=confirm_required, force=force)
+            confirm_required=confirm_required, unloaded_other=unloaded_other,
+            force=force)
     except asyncio.CancelledError:
         # The caller stopped waiting: an engine already unloaded above still
         # gets the pointer reset the normal path does below.
@@ -2172,7 +2584,20 @@ async def unload_all_models(*, force: bool = False) -> dict:
     if _active_model_name not in skipped_in_use:
         _reset_active_pointers()
 
-    released_anything = bool(unloaded_models) or embedder_was_loaded
+    media_left_running: dict[str, str] = {}
+    media_stopped = False
+    if media:
+        from localm.vram import MEDIA_STOPPED, stop_idle_native_media
+        outcomes = await loop.run_in_executor(None, stop_idle_native_media)
+        for kind, outcome in outcomes.items():
+            if outcome == MEDIA_STOPPED:
+                unloaded_other.append(kind)
+                media_stopped = True
+            else:
+                skipped_in_use.append(kind)
+                media_left_running[kind] = outcome
+
+    released_anything = bool(unloaded_models) or embedder_was_loaded or media_stopped
     if before is not None and released_anything:
         released, after = await loop.run_in_executor(
             None, lambda: wait_for_vram_release(_free, before_bytes=before))
@@ -2189,15 +2614,17 @@ async def unload_all_models(*, force: bool = False) -> dict:
         "status": status,
         "model": unloaded_models[0] if unloaded_models else "none",
         "unloaded_models": unloaded_models,
+        "unloaded_other": unloaded_other,
         "embedder_unloaded": embedder_was_loaded,
     }
     if skipped_in_use:
         result["skipped_in_use"] = skipped_in_use
     if confirm_required:
-        # Present only for a model that is STILL in use after cancel_all()
-        # was given its grace period - describes what to tell the caller
-        # before it retries this same call with force=True.
+        # A model still in use after the wait, described for the caller to
+        # show before it retries with force=True.
         result["confirm_required"] = confirm_required
+    if media_left_running:
+        result["media_left_running"] = media_left_running
     _add_vram_fields(result, before=before, released=released, after=after,
                      before_fresh=before_fresh, before_scope=before_scope)
     return result
@@ -2205,31 +2632,38 @@ async def unload_all_models(*, force: bool = False) -> dict:
 
 async def _unload_engines_and_embedder(loop, _embedder_mod, unloaded_models,
                                        skipped_in_use, *,
-                                       confirm_required: dict, force: bool = False) -> bool:
-    """The releasing half of ``unload_all_models``: unload every loaded, unpinned
-    chat engine (appending to *unloaded_models* / *skipped_in_use*), then the
-    shared embedder. Returns whether the embedder was released."""
+                                       confirm_required: dict,
+                                       unloaded_other: list,
+                                       force: bool = False) -> bool:
+    """The releasing half of ``unload_all_models``: unload every loaded chat
+    engine that is idle, or every one with *force* (appending to
+    *unloaded_models* / *skipped_in_use* / *confirm_required*), then the
+    shared embedding model, the resident reranker and the resident speech
+    model (appending their kinds, such as ``"embedding model"``, to
+    *unloaded_other* / *skipped_in_use* / *confirm_required*). Without
+    *force*, cancels nothing: first waits once, for every busy engine at the
+    same time, for its requests to finish on their own, then skips any engine
+    that has requests in flight when its turn comes, and skips a busy
+    embedding, reranker or speech model at once. With *force*, cancels a busy
+    engine's generations (``residency.cancel_all``) before unloading it, and
+    stops a busy embedding, reranker or speech model (``reset_*(force=True)``:
+    its worker is stopped and its requests in flight fail). Returns whether
+    anything other than a chat engine was released."""
+    if not force:
+        busy = [e for e in list(_engines.values())
+                if e.loaded and _has_requests_in_flight(e)]
+        if busy:
+            await asyncio.gather(*(_wait_for_pin_clear(e) for e in busy))
     for name in list(_engines.keys()):
         engine = _engines[name]
         if not engine.loaded:
             continue
-        # Honor the in-flight-request pin, like the VRAM-eviction and
-        # idle-unload paths: a pinned engine has a request generating (or about to)
-        # against it. Unloading it would free VRAM the request immediately reloads
-        # (so the reported "freed" total is a lie) and race a use-after-unload; skip
-        # it and report it as still in use. Gate on isinstance(int) exactly like
-        # _pin/_unpin: a non-int active_requests (a bare test double) is "not pinned".
-        active = getattr(engine, "active_requests", 0)
-        if isinstance(active, int) and active > 0:
-            residency.cancel_all(name)
-            if not force and not await _wait_for_pin_clear(engine):
+        if _has_requests_in_flight(engine):
+            if not force:
                 skipped_in_use.append(name)
                 confirm_required[name] = _in_use_description(name, engine)
                 continue
-            # Either the grace period cleared it (the common case: the
-            # caller's own just-stopped generation), or force=True proceeds
-            # regardless - engine.unload() below still forcibly kills the
-            # worker if something is genuinely still running.
+            residency.cancel_all(name)
         sem = _inference_sems.setdefault(name, InferenceGate())
         # Flag BEFORE acquiring the semaphore so no request that arrives after the
         # pin check above can take get_engine's fast path and pin this engine while
@@ -2260,45 +2694,40 @@ async def _unload_engines_and_embedder(loop, _embedder_mod, unloaded_models,
     # request this server is serving - for that entire window, not just this
     # coroutine. Executor-offloading them, like every other blocking call in
     # this function, keeps the wait local to this one coroutine instead.
-    embedder_was_loaded = False
-    embedder_dim = await loop.run_in_executor(None, _embedder_mod.loaded_dim)
-    if embedder_dim is not None:
-        # Honor the in-flight-request pin for the embedder too, exactly like
-        # the chat-engine loop above: a request mid-embed() must not have its
-        # embedder (and the isolated worker process it is waiting on) freed out
-        # from under it. reset_embedder(force=False) checks active_requests()==0
-        # and clears the embedder in ONE locked step, never two separate
-        # executor calls, which would leave a TOCTOU window since
-        # IsolatedEmbedder.embed() pins active_requests without taking
-        # embedder._LOCK. Skip it and report it alongside the pinned chat
-        # engines instead of a lying "unloaded".
-        cleared = await loop.run_in_executor(
-            None, functools.partial(_embedder_mod.reset_embedder, force=False))
-        if cleared:
-            embedder_was_loaded = True
-        else:
-            skipped_in_use.append("embedding model")
-    # The resident reranker is the same kind of separate lifecycle, released the
-    # same way: loaded()/reset off the event loop, a request in flight pins it.
+    async def _release(kind: str, active_fn, reset_fn) -> None:
+        if await loop.run_in_executor(
+                None, functools.partial(reset_fn, force=force)):
+            unloaded_other.append(kind)
+            return
+        skipped_in_use.append(kind)
+        active = await loop.run_in_executor(None, active_fn)
+        detail = (f"{active} active request{'s' if active != 1 else ''}" if active > 0
+                  else "still in use")
+        confirm_required[kind] = (f"{confirm_required[kind]} and {detail}"
+                                  if kind in confirm_required else detail)
+
+    # reset_embedder(force=False) checks active_requests()==0 and clears the
+    # embedder in ONE locked step: IsolatedEmbedder.embed() pins
+    # active_requests without taking embedder._LOCK. Every embedder, reranker
+    # and speech reader runs in the executor: each blocks on its module lock,
+    # which a load holds for its whole duration.
+    if await loop.run_in_executor(None, _embedder_mod.loaded_dim) is not None:
+        await _release("embedding model", _embedder_mod.active_requests,
+                       _embedder_mod.reset_embedder)
     from localm.inference import reranker as _reranker_mod
     if await loop.run_in_executor(None, _reranker_mod.is_loaded):
-        if await loop.run_in_executor(
-                None, functools.partial(_reranker_mod.reset_reranker, force=False)):
-            embedder_was_loaded = True
-        else:
-            resident = await loop.run_in_executor(None, _reranker_mod.reranker_info)
-            skipped_in_use.append(resident["kind"] if resident else "reranker model")
+        resident = await loop.run_in_executor(None, _reranker_mod.reranker_info)
+        await _release(resident["kind"] if resident else "reranker model",
+                       _reranker_mod.active_requests, _reranker_mod.reset_reranker)
     from localm.inference import speech as _speech_mod
     if await loop.run_in_executor(None, _speech_mod.is_loaded):
-        if await loop.run_in_executor(
-                None, functools.partial(_speech_mod.reset_speech, force=False)):
-            embedder_was_loaded = True
-        else:
-            skipped_in_use.append("speech model")
-    return embedder_was_loaded
+        await _release("speech model", _speech_mod.active_requests,
+                       _speech_mod.reset_speech)
+    return bool(unloaded_other)
 
 
-async def _unload_embedder_if_matches(name: str, loop) -> Optional[dict]:
+async def _unload_embedder_if_matches(name: str, loop, *,
+                                      force: bool = False) -> Optional[dict]:
     """If *name* is a registered model whose path matches the currently-loaded
     shared embedder, release it and report the freed VRAM - the targeted-unload
     counterpart to ``unload_all_models``'s embedder release above.
@@ -2314,7 +2743,9 @@ async def _unload_embedder_if_matches(name: str, loop) -> Optional[dict]:
     path, a registered name, or a known key) - what matters is which file is
     actually resident. Returns None when *name* is not the embedder, so the
     caller falls back to its normal "already_unloaded" outcome for a genuinely
-    untracked/never-loaded chat model."""
+    untracked/never-loaded chat model; ``{"status": "in_use"}`` while an embed
+    request is in flight, unless *force*, which stops the embedder and fails
+    its requests in flight (``reset_embedder(force=True)``)."""
     from localm.inference import embedder as _embedder_mod
     # Executor-offloaded, not a direct call: get_embedder() can hold
     # embedder._LOCK for the full duration of an IsolatedEmbedder
@@ -2357,7 +2788,7 @@ async def _unload_embedder_if_matches(name: str, loop) -> Optional[dict]:
     # which get_embedder() can hold for the length of an IsolatedEmbedder load,
     # and a synchronous call here would freeze the whole event loop.
     embedder_active = await loop.run_in_executor(None, _embedder_mod.active_requests)
-    if embedder_active > 0:
+    if embedder_active > 0 and not force:
         return {"status": "in_use", "model": name, "vram_freed": 0}
 
     from localm.vram import (_live_free_vram_bytes, _vram_free_reading,
@@ -2368,7 +2799,7 @@ async def _unload_embedder_if_matches(name: str, loop) -> Optional[dict]:
     before, before_fresh, before_scope = await loop.run_in_executor(
         None, _vram_free_reading)
     cleared = await loop.run_in_executor(
-        None, functools.partial(_embedder_mod.reset_embedder, force=False))
+        None, functools.partial(_embedder_mod.reset_embedder, force=force))
     if not cleared:
         return {"status": "in_use", "model": name, "vram_freed": 0}
     if before is not None:
@@ -2382,12 +2813,14 @@ async def _unload_embedder_if_matches(name: str, loop) -> Optional[dict]:
     return result
 
 
-async def _unload_reranker_if_matches(name: str, loop) -> Optional[dict]:
+async def _unload_reranker_if_matches(name: str, loop, *,
+                                      force: bool = False) -> Optional[dict]:
     """If *name* is a registered model whose path matches the resident reranker,
     release it and report the freed VRAM - the reranker counterpart to
     ``_unload_embedder_if_matches``. Matched by resolved PATH. Returns None when
     *name* is not the resident reranker; ``{"status": "in_use"}`` while a rerank
-    request is in flight.
+    request is in flight, unless *force*, which stops it and fails its requests
+    in flight (``reset_reranker(force=True)``).
 
     Every reranker reader runs in an executor: each takes the reranker lock,
     which a load holds for its whole duration. ``active_requests()`` is checked
@@ -2409,7 +2842,7 @@ async def _unload_reranker_if_matches(name: str, loop) -> Optional[dict]:
     except OSError:
         return None
 
-    if await loop.run_in_executor(None, _reranker_mod.active_requests) > 0:
+    if not force and await loop.run_in_executor(None, _reranker_mod.active_requests) > 0:
         return {"status": "in_use", "model": name, "vram_freed": 0}
 
     from localm.vram import (_live_free_vram_bytes, _vram_free_reading,
@@ -2420,7 +2853,7 @@ async def _unload_reranker_if_matches(name: str, loop) -> Optional[dict]:
     before, before_fresh, before_scope = await loop.run_in_executor(
         None, _vram_free_reading)
     cleared = await loop.run_in_executor(
-        None, functools.partial(_reranker_mod.reset_reranker, force=False))
+        None, functools.partial(_reranker_mod.reset_reranker, force=force))
     if not cleared:
         return {"status": "in_use", "model": name, "vram_freed": 0}
     if before is not None:
@@ -2434,11 +2867,13 @@ async def _unload_reranker_if_matches(name: str, loop) -> Optional[dict]:
     return result
 
 
-async def _unload_speech_if_matches(name: str, loop) -> Optional[dict]:
+async def _unload_speech_if_matches(name: str, loop, *,
+                                    force: bool = False) -> Optional[dict]:
     """If *name* is a registered model whose path matches the resident speech
     model, release it and report the freed VRAM. Returns None when *name* is not
     the resident speech model; ``{"status": "in_use"}`` while a synthesis is in
-    flight. Every speech reader runs in an executor: each takes the speech lock,
+    flight, unless *force*, which stops it and fails its requests in flight
+    (``reset_speech(force=True)``). Every speech reader runs in an executor: each takes the speech lock,
     which a load holds for its whole duration."""
     from localm.inference import speech as _speech_mod
     info = await loop.run_in_executor(None, _speech_mod.speech_info)
@@ -2456,7 +2891,7 @@ async def _unload_speech_if_matches(name: str, loop) -> Optional[dict]:
     except OSError:
         return None
 
-    if await loop.run_in_executor(None, _speech_mod.active_requests) > 0:
+    if not force and await loop.run_in_executor(None, _speech_mod.active_requests) > 0:
         return {"status": "in_use", "model": name, "vram_freed": 0}
 
     from localm.vram import (_live_free_vram_bytes, _vram_free_reading,
@@ -2467,7 +2902,7 @@ async def _unload_speech_if_matches(name: str, loop) -> Optional[dict]:
     before, before_fresh, before_scope = await loop.run_in_executor(
         None, _vram_free_reading)
     cleared = await loop.run_in_executor(
-        None, functools.partial(_speech_mod.reset_speech, force=False))
+        None, functools.partial(_speech_mod.reset_speech, force=force))
     if not cleared:
         return {"status": "in_use", "model": name, "vram_freed": 0}
     if before is not None:
@@ -2493,17 +2928,20 @@ async def unload_one_model(name: str, *, force: bool = False) -> dict:
     case), not an error - callers that need to reject an unknown model name
     outright should check the registry themselves before calling this.
 
-    A pinned engine is no longer refused outright: ``residency.cancel_all``
-    is broadcast first, and a short grace period lets a generation that was
-    only running because nobody had told it to stop (the caller's own
-    just-cancelled request, most commonly) clear on its own - the common
-    case resolves with no confirm box at all. If it is still in use after
-    that, the owner's explicit action is final: pass *force* to evict
-    immediately regardless of what is running (the underlying
-    ``engine.unload()`` forcibly kills the isolated worker if it does not
-    exit within its own grace period); without it, this returns
-    ``{"status": "confirm_required", ...}`` describing what was found using
-    it, for the caller to show a confirmation before retrying with force."""
+    An engine with requests in flight: without *force*, nothing is
+    cancelled; waits for its requests to finish on their own
+    (``_wait_for_pin_clear``) and unloads it when they do, else returns
+    ``{"status": "confirm_required", "model": name, "detail": ...}`` with the
+    model loaded and its requests running, for the caller to confirm before
+    retrying with *force*. With *force*, cancels every generation on it
+    (``residency.cancel_all``) and unloads it at once (``engine.unload()``
+    kills the isolated worker if it does not exit within its own grace
+    period). See test_unload_one_never_cancels_a_busy_model_before_asking.
+
+    A busy embedding, reranker or speech model named by *name*: without
+    *force*, returns ``{"status": "in_use", "model": name, "vram_freed": 0}``
+    with it loaded; with *force*, stops it (its requests in flight fail) and
+    unloads it."""
     global _active_model_name, _last_active_model_name, _engine, _inference_sem
     loop = asyncio.get_running_loop()
     from localm.vram import (_live_free_vram_bytes, _vram_free_reading,
@@ -2511,27 +2949,22 @@ async def unload_one_model(name: str, *, force: bool = False) -> dict:
 
     engine = _engines.get(name)
     if engine is None or not engine.loaded:
-        embedder_result = await _unload_embedder_if_matches(name, loop)
+        embedder_result = await _unload_embedder_if_matches(name, loop, force=force)
         if embedder_result is not None:
             return embedder_result
-        reranker_result = await _unload_reranker_if_matches(name, loop)
+        reranker_result = await _unload_reranker_if_matches(name, loop, force=force)
         if reranker_result is not None:
             return reranker_result
-        speech_result = await _unload_speech_if_matches(name, loop)
+        speech_result = await _unload_speech_if_matches(name, loop, force=force)
         if speech_result is not None:
             return speech_result
         return {"status": "already_unloaded", "model": name}
-    # Honor the in-flight-request pin: an engine a request is
-    # generating on must not be unloaded out from under it (it would reload it
-    # anyway, making the "freed" report a lie). Report it as in use, not unloaded.
-    # isinstance(int) guard matches _pin/_unpin (a bare test double is not pinned).
-    active = getattr(engine, "active_requests", 0)
-    if isinstance(active, int) and active > 0:
-        residency.cancel_all(name)
-        if not force and not await _wait_for_pin_clear(engine):
+    if _has_requests_in_flight(engine):
+        if force:
+            residency.cancel_all(name)
+        elif not await _wait_for_pin_clear(engine):
             return {"status": "confirm_required", "model": name,
-                    "detail": _in_use_description(name, engine)}
-        # Cleared during the grace period, or force=True - proceed below.
+                    "detail": _unload_busy_confirm_detail(name, engine)}
 
     _free = _live_free_vram_bytes
 
@@ -3777,13 +4210,21 @@ def caller_is_admin_key(request: Request) -> bool:
 def path_formatter(request: Request) -> Callable[[object], str]:
     """A function rendering a path (or any text) for this caller's response:
     ``str`` for the local operator (``caller_is_operator``), otherwise ``str``
-    followed by a ``pathscrub.path_scrubber`` bound once (home, account name,
-    data dir, install root and env prefix replaced, file name kept)."""
+    followed by a ``pathscrub.scoped_path_scrubber`` bound once, on the first
+    call (home, account name, data dir, install root, env prefix, registry
+    model folders and the folders of every other absolute host path replaced,
+    file name kept)."""
     if caller_is_operator(request):
         return str
-    from localm.pathscrub import path_scrubber
-    scrub = path_scrubber()
-    return lambda value: scrub(str(value))
+    from localm.pathscrub import scoped_path_scrubber
+    bound: list = []
+
+    def show(value: object) -> str:
+        if not bound:
+            bound.append(scoped_path_scrubber())
+        return bound[0](str(value))
+
+    return show
 
 
 def principal_id(request: Request) -> Optional[str]:
@@ -4593,6 +5034,8 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
         except Exception:
             _dbg_swallow("VRAM-release wait before restart failed (non-fatal)")
 
+    _finish_pending_runtime_update()
+
     try:
         from localm import bugreport
         bugreport.disarm_crash_guard(instance_id=instance_id)
@@ -4658,6 +5101,58 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
 
     _set_restart_env()
     _execv_restart(port, instance_id)
+
+
+def _finish_pending_runtime_update() -> None:
+    """Carry out the native runtime re-provision an applied update left pending
+    (``updater_runtime.finish_pending``), once this server's models, workers and
+    jobs are stopped: stops the runtime probe daemon, then this install's other
+    processes that hold the runtime, then provisions in a child process. When
+    the runtime cannot be updated, the update's code is rolled back
+    (``updater.rollback_last``) so the restart loads the previous version with
+    its own runtime. Logs each step and the outcome; never raises, so the
+    restart always proceeds.
+
+    Then the component update the applied update left pending
+    (``updater_components.finish_pending``: sd.cpp, KoboldCpp, the managed
+    ComfyUI, uv), with the same rollback when a component cannot be updated."""
+    try:
+        from localm import updater_components, updater_runtime
+        from localm.debuglog import logger as _dbg
+        if updater_runtime.read_pending() is not None:
+            try:
+                from localm.inference.backends.llamacpp._loader import stop_probe_daemon
+                stop_probe_daemon()
+            except Exception:
+                _dbg_swallow("stopping the runtime probe daemon before the runtime update "
+                             "failed", level="warning")
+            status = updater_runtime.finish_pending(
+                say=lambda m: _dbg.info("runtime update during restart: %s", m))
+            if status is not None and status["state"] not in ("updated", "current"):
+                _dbg.warning("runtime update during restart: %s; rolling the update back",
+                             status["note"])
+                updater_components.clear_pending()
+                from localm import updater
+                updater.rollback_last()
+                return
+            if status is not None:
+                _dbg.info("runtime update during restart: %s", status["note"])
+        if updater_components.read_pending() is None:
+            return
+        status = updater_components.finish_pending(
+            say=lambda m: _dbg.info("component update during restart: %s", m))
+        if status is None:
+            return
+        if status["state"] in ("updated", "current"):
+            _dbg.info("component update during restart: %s", status["note"])
+            return
+        _dbg.warning("component update during restart: %s; rolling the update back",
+                     status["note"])
+        from localm import updater
+        updater.rollback_last()
+    except Exception:
+        _dbg_swallow("the pending runtime update or its rollback could not be carried out "
+                     "during the restart", level="warning")
 
 
 def _execv_restart(port: Optional[int], instance_id: Optional[str]) -> None:
@@ -4805,12 +5300,6 @@ def _make_lifespan():
         _pm = getattr(app.state, "plugin_manager", None)
         if _pm is not None:
             _pm.run_startup_callbacks()
-        # A GPU choice saved in the numbering localm used before it numbered
-        # NVIDIA GPUs by PCI bus is renumbered once, off the loop (it may probe).
-        if "pytest" not in sys.modules:
-            from localm.discover import renumber_saved_gpu_selection
-            threading.Thread(target=renumber_saved_gpu_selection,
-                             name="localm-gpu-renumber", daemon=True).start()
         # Optional idle-unload background task (config "idle_unload_seconds"); it
         # is a cheap no-op while disabled. Cancelled on shutdown so it never
         # outlives the app.
@@ -5706,6 +6195,7 @@ async def stream_after_prep(
     *,
     engine_of: Callable[[object], Optional[Engine]],
     headers_of: Callable[[object], dict],
+    show_path: Callable[[object], str] = str,
 ) -> AsyncIterator[str]:
     """SSE body for a chat request whose preparation outlasted
     ``PREP_STATUS_GRACE_S``: a role chunk, a status chunk for every change of
@@ -5717,7 +6207,9 @@ async def stream_after_prep(
     ``localm_headers`` (the response headers the early stream could not set)
     when non-empty. A preparation that raises ends the stream with its message
     as an error reply (``finish_reason: "error"``) whose terminal chunk carries
-    ``localm_error: {"status": <HTTP status>, "detail": <message>}``. A client
+    ``localm_error: {"status": <HTTP status>, "detail": <message>}``; an
+    exception's message is rendered by ``inference_error_text`` with
+    *show_path* (``path_formatter`` for the caller). A client
     that disconnects before the reply starts leaves the preparation running;
     its pin is released when it finishes."""
     chunk_id = make_chunk_id()
@@ -5753,7 +6245,8 @@ async def stream_after_prep(
             from localm.debuglog import logger as _dbg
             _dbg.exception("chat request preparation failed")
             for line in _prep_error_lines(
-                    inference_error_text(e).strip(), 500, model_id, chunk_id, ts):
+                    inference_error_text(e, show_path).strip(), 500, model_id,
+                    chunk_id, ts):
                 yield line
             return
         meta = headers_of(prepared)
@@ -5825,9 +6318,11 @@ async def _stream_sse_body(
     role_sent: bool = False,
     meter: Optional[_GenerationMeter] = None,
     include_usage: bool = False,
+    show_path: Callable[[object], str] = str,
     **gen_kwargs,
 ) -> AsyncGenerator[str, None]:
-    """Stream the reply to *messages* as SSE ``data:`` lines.
+    """Stream the reply to *messages* as SSE ``data:`` lines. An error text is
+    rendered with *show_path* (``path_formatter`` for the caller).
 
     *chunk_id* reuses the id of a stream the caller already opened, and
     *role_sent* skips the role chunk that caller already sent. With
@@ -5887,7 +6382,7 @@ async def _stream_sse_body(
             except Exception as e:
                 from localm.debuglog import logger as _dbg
                 _dbg.exception("token recount after compaction failed")
-                refusal, refusal_status = inference_error_text(e).strip(), 500
+                refusal, refusal_status = inference_error_text(e, show_path).strip(), 500
                 prompt_tokens = None
         capacity = engine.context_capacity()
         if (not refusal and isinstance(capacity, int) and capacity > 0
@@ -6094,14 +6589,14 @@ async def _stream_sse_body(
 
     error_text = ""
     if gen_error is not None:
-        error_text = inference_error_text(gen_error)
+        error_text = inference_error_text(gen_error, show_path)
         err_chunk = ChatChunk.token(error_text, model_id, chunk_id, ts)
         err_status = backend_error_status(gen_error)
         if err_status is not None and not completion_parts:
             from localm.pathscrub import scrub_paths
             err_body = err_chunk.model_dump(mode="json")
             err_body["localm_error"] = {"status": err_status,
-                                        "detail": scrub_paths(str(gen_error))}
+                                        "detail": show_path(scrub_paths(str(gen_error)))}
             refusal = media_refusal_kind(gen_error)
             if refusal:
                 err_body["localm_error"]["refusal"] = refusal
@@ -6193,11 +6688,13 @@ async def _stream_sse_completion_body(
     meter: Optional[_GenerationMeter] = None,
     include_usage: bool = False,
     echo: Optional[str] = None,
+    show_path: Callable[[object], str] = str,
     **gen_kwargs,
 ) -> AsyncGenerator[str, None]:
     """Stream a text completion as SSE ``data:`` lines. *echo*, when given, is
     sent as the first text. With *include_usage* the usage moves from the finish
-    chunk to a last chunk with empty ``choices``."""
+    chunk to a last chunk with empty ``choices``. An error text is rendered with
+    *show_path* (``path_formatter`` for the caller)."""
     meter = meter or _GenerationMeter()
     chunk_id = make_chunk_id()
     ts = int(time.time())
@@ -6406,7 +6903,7 @@ async def _stream_sse_completion_body(
 
     error_text = ""
     if gen_error is not None:
-        error_text = inference_error_text(gen_error)
+        error_text = inference_error_text(gen_error, show_path)
         err = {
             "id": chunk_id, "object": "text_completion.chunk",
             "created": ts, "model": model_id,
@@ -7078,15 +7575,28 @@ async def _count_streamed_tokens(engine, streamed: str) -> int:
     content has been streamed already, so raising here would end the response
     with no terminal chunk, no usage and no ``[DONE]``. A model can emit a run
     the pre-tokenizer aborts on just as a caller can send one.
+
+    Also falls back to the estimate when the count raises RuntimeError and
+    *engine* is no longer loaded: a forced unload cut the reply off and took
+    the tokenizer with it. A RuntimeError from a loaded engine propagates.
     """
     from localm.inference.pretokenizer_guard import count_tokens_or_estimate
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        None, count_tokens_or_estimate, engine.count_tokens, streamed,
-        "the generated text")
+    try:
+        return await loop.run_in_executor(
+            None, count_tokens_or_estimate, engine.count_tokens, streamed,
+            "the generated text")
+    except RuntimeError:
+        if getattr(engine, "loaded", True):
+            raise
+        from localm.debuglog import logger as _dbg
+        _dbg.info("usage: the model was unloaded while its reply was written, so "
+                  "the reported token count is an estimate")
+        return max(1, len(streamed) // 4) if streamed else 0
 
 
-def inference_error_text(exc: BaseException) -> str:
+def inference_error_text(exc: BaseException,
+                         show_path: Callable[[object], str] = str) -> str:
     """The `[inference error: ...]` body a FAILED generation is rendered as, on
     every one of the four generation paths.
 
@@ -7105,9 +7615,13 @@ def inference_error_text(exc: BaseException) -> str:
     line number survive, and only the leading directories are replaced. A caller
     still learns what failed without learning where this machine keeps its
     files.
+
+    *show_path* is applied after ``scrub_paths``: ``path_formatter(request)``
+    for a request, so a caller other than the local operator also gets every
+    other host folder replaced.
     """
     from localm.pathscrub import scrub_paths
-    return f"\n[inference error: {scrub_paths(str(exc))}]"
+    return f"\n[inference error: {show_path(scrub_paths(str(exc)))}]"
 
 
 async def _complete(
@@ -7189,7 +7703,8 @@ async def _complete(
             from localm.debuglog import logger as _dbg
             _dbg.exception("non-streaming generation failed")
             gen_error = e
-            text = inference_error_text(e)
+            text = inference_error_text(
+                e, path_formatter(request) if request is not None else str)
         gen_end = time.perf_counter()
     first_token_at = timing.get("first_token_at")
     generated = text

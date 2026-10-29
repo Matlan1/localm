@@ -173,3 +173,52 @@ def test_checkpoint_info_reports_unreadable_for_a_corrupt_checkpoint(
     cp.write_text("{not valid json", encoding="utf-8")
 
     assert checkpoint_info(proj) == {"unreadable": True}
+
+
+def _agent_with_real_project_map(cwd, **kw):
+    from localm.plugins.coder.agent import Agent
+    with patch("localm.plugins.coder.agent.make_audit_log"), \
+         patch("localm.plugins.coder.agent.load_memory", return_value=""):
+        return Agent(_Stub(), cwd=cwd, auto_approve=True, self_verify=False, **kw)
+
+
+def test_checkpoint_info_is_none_when_only_the_project_map_exists(
+        tmp_path, monkeypatch):
+    """A log-mode agent writes projectmap.json beside the checkpoints at
+    startup; with no checkpoint saved, checkpoint_info reports nothing to
+    resume rather than an unreadable session."""
+    import localm.config as cfg
+    monkeypatch.setattr(cfg, "HOME_DIR", tmp_path / "home")
+    from localm.plugins.coder.agent import checkpoint_info
+    from localm.plugins.coder.agent.checkpoint import (
+        _project_dir_for, _project_map_path_for, list_checkpoints,
+    )
+    proj = tmp_path / "proj"; proj.mkdir()
+    (proj / "main.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+
+    _agent_with_real_project_map(proj, mode=SessionMode.LOG)
+
+    assert _project_map_path_for(proj).is_file()
+    assert [p.name for p in _project_dir_for(proj).iterdir()] == ["projectmap.json"]
+    assert checkpoint_info(proj) is None
+    assert list_checkpoints(proj) == []
+
+
+def test_checkpoint_info_reports_unreadable_checkpoint_beside_a_project_map(
+        tmp_path, monkeypatch):
+    """A corrupt checkpoint next to the project map is still reported as
+    unreadable."""
+    import localm.config as cfg
+    monkeypatch.setattr(cfg, "HOME_DIR", tmp_path / "home")
+    from localm.plugins.coder.agent import checkpoint_info, _checkpoint_path_for
+    from localm.plugins.coder.agent.checkpoint import _project_map_path_for
+    proj = tmp_path / "proj"; proj.mkdir()
+    (proj / "main.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+
+    _agent_with_real_project_map(proj, mode=SessionMode.LOG)
+    assert _project_map_path_for(proj).is_file()
+
+    cp = _checkpoint_path_for(proj, "abc123")
+    cp.write_text("{not valid json", encoding="utf-8")
+
+    assert checkpoint_info(proj) == {"unreadable": True}

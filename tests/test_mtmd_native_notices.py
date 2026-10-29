@@ -6,11 +6,19 @@ rebuilding the projector with them."""
 
 from __future__ import annotations
 
+import json
 import os
+import subprocess
+import sys
+from pathlib import Path
 
+import pytest
+
+from localm.inference.backends.llamacpp import _loader
 from localm.inference.backends.llamacpp import llama as llama_mod
 from localm.inference.backends.llamacpp import mtmd as mtmd_mod
 from tests._bare_llama import make_bare_llama
+from tests._real_gguf import require_native_runtime
 
 ADVICE = ("clip_ctx: Qwen-VL models require at minimum 1024 image tokens to function "
           "correctly on grounding tasks\n"
@@ -24,7 +32,7 @@ def _projector_that_logs(native_text: str, *, on_gpu: bool = True, can_apply: bo
         supports_audio = False
         applied: list = []
 
-        def __init__(self, mmproj_path, model_ptr, gpu_index=0):
+        def __init__(self, mmproj_path, model_ptr, gpu_index=0, use_gpu=True):
             self.on_gpu = on_gpu
             self.applied = []
             os.write(2, native_text.encode())
@@ -49,21 +57,163 @@ def _records(caplog, level):
     return [r.getMessage() for r in caplog.records if r.levelname == level]
 
 
+def _runtime_gpu(monkeypatch, has_gpu, *, offload_flag=True):
+    monkeypatch.setattr(_loader, "has_gpu_device", lambda: has_gpu)
+    monkeypatch.setattr(llama_mod.api, "llama_supports_gpu_offload", lambda: offload_flag)
+
+
+def _warned(caplog):
+    return any("placed the vision projector on the CPU" in m
+               for m in _records(caplog, "WARNING"))
+
+
 def test_a_projector_clip_places_on_the_cpu_is_marked_and_reported(monkeypatch, caplog):
-    monkeypatch.setattr(llama_mod.api, "llama_supports_gpu_offload", lambda: True)
+    _runtime_gpu(monkeypatch, True)
     with caplog.at_level("INFO", logger="localm"):
         inst = _load(monkeypatch, "clip_ctx: CLIP using CPU backend\n")
     assert inst._mtmd.on_gpu is False
-    assert any("placed the vision projector on the CPU" in m for m in _records(caplog, "WARNING"))
+    assert _warned(caplog)
 
 
-def test_a_projector_on_the_cpu_of_a_cpu_only_runtime_is_marked_but_not_warned(
+def test_a_cpu_only_machine_with_the_offload_flag_set_is_marked_but_not_warned(
         monkeypatch, caplog):
-    monkeypatch.setattr(llama_mod.api, "llama_supports_gpu_offload", lambda: False)
+    _runtime_gpu(monkeypatch, False, offload_flag=True)
     with caplog.at_level("INFO", logger="localm"):
         inst = _load(monkeypatch, "clip_ctx: CLIP using CPU backend\n")
     assert inst._mtmd.on_gpu is False
     assert not _records(caplog, "WARNING")
+
+
+def test_an_unreadable_device_registry_falls_back_to_the_offload_flag(
+        monkeypatch, caplog):
+    _runtime_gpu(monkeypatch, None, offload_flag=True)
+    with caplog.at_level("INFO", logger="localm"):
+        _load(monkeypatch, "clip_ctx: CLIP using CPU backend\n")
+    assert _warned(caplog)
+    caplog.clear()
+    _runtime_gpu(monkeypatch, None, offload_flag=False)
+    with caplog.at_level("INFO", logger="localm"):
+        _load(monkeypatch, "clip_ctx: CLIP using CPU backend\n")
+    assert not _records(caplog, "WARNING")
+
+
+GPU, CPU = _loader.GGML_DEV_TYPE_GPU, _loader.GGML_DEV_TYPE_CPU
+
+ACCEL = 3
+
+
+@pytest.mark.parametrize("devices, expected", [
+    ([(CPU, "CPU")], False),
+    ([(CPU, "CPU"), (CPU, None)], False),
+    ([(GPU, "ROCm"), (CPU, "CPU")], True),
+    ([(GPU, None), (CPU, "CPU")], True),
+    ([(2, "BLAS"), (CPU, "CPU")], False),
+    ([(3, "BLAS"), (CPU, "CPU")], False),
+    ([(2, "AMX"), (3, "KleidiAI"), (CPU, "CPU")], False),
+    ([(2, "RPC")], False),
+    ([(2, "Vulkan"), (CPU, "CPU")], True),
+    ([(3, "Vulkan"), (CPU, "CPU")], True),
+    ([(2, "BLAS"), (3, "Vulkan"), (CPU, "CPU")], True),
+    ([(2, None), (CPU, "CPU")], None),
+    ([(2, None), (GPU, "CUDA")], True),
+    ([(2, "ZenDNN"), (CPU, "CPU")], False),
+    ([(3, "zDNN"), (CPU, "CPU")], False),
+    ([(ACCEL, "ZenDNN"), (3, "Vulkan"), (CPU, "CPU")], True),
+    ([], False),
+])
+def test_only_a_gpu_or_an_integrated_gpu_counts_as_a_gpu_device(devices, expected):
+    assert _loader.classify_gpu_devices(devices) is expected
+
+
+_PROBE = """
+import json
+from localm.inference.backends.llamacpp import _api, _loader
+print(json.dumps({"devices": _loader.compute_devices(),
+                  "offload": _api.llama_supports_gpu_offload(),
+                  "gpu": _loader.has_gpu_device()}))
+"""
+
+
+def _probe_native_runtime(extra_env):
+    env = {**os.environ, **extra_env,
+           "PYTHONPATH": os.pathsep.join(
+               [str(Path(llama_mod.__file__).parents[4]), os.environ.get("PYTHONPATH", "")])}
+    out = subprocess.run([sys.executable, "-c", _PROBE], env=env, capture_output=True,
+                         text=True, timeout=180)
+    assert out.returncode == 0, out.stderr[-2000:]
+    return json.loads(out.stdout.strip().splitlines()[-1])
+
+
+def test_the_gate_reads_the_native_devices_not_the_offload_flag():
+    require_native_runtime()
+    hidden = {"HIP_VISIBLE_DEVICES": "-1", "CUDA_VISIBLE_DEVICES": "-1",
+              "ROCR_VISIBLE_DEVICES": "-1", "GGML_VK_VISIBLE_DEVICES": "-1"}
+    visible = _probe_native_runtime({})
+    if not visible["devices"]:
+        pytest.skip("runtime lacks the ggml_backend_dev_* registry symbols")
+    if any(t == GPU for _, t in visible["devices"]):
+        assert visible["gpu"] is True, visible
+    masked = _probe_native_runtime(hidden)
+    if any(t != CPU for _, t in masked["devices"]):
+        pytest.skip("the visible-devices variables do not hide every GPU on this machine, "
+                    "so the all-CPU arm cannot be reached")
+    assert masked["gpu"] is False, masked
+    if not masked["offload"]:
+        pytest.skip("the runtime's offload flag is already False with the devices hidden, "
+                    "so this run cannot tell the device check from the flag")
+
+
+class _Sym:
+    def __init__(self, fn=None):
+        self.fn = fn
+        self.restype = None
+        self.argtypes = None
+
+    def __call__(self, *a):
+        return self.fn(*a)
+
+
+def _debug_lines(caplog):
+    return [m for m in _records(caplog, "DEBUG") if m.startswith("has_gpu_device()")]
+
+
+def test_a_runtime_without_the_registry_symbols_logs_why_the_check_is_skipped(
+        monkeypatch, caplog):
+    monkeypatch.setattr(_loader, "load_lib", lambda *a, **k: None)
+    monkeypatch.setattr(_loader, "_ggml_dev_handles", lambda: [])
+    monkeypatch.setattr(_loader, "_ggml_sym", lambda handles, name: None)
+    with caplog.at_level("DEBUG", logger="localm"):
+        assert _loader.has_gpu_device() is None
+    assert any("lacks the ggml_backend_dev_* registry symbols" in m
+               for m in _debug_lines(caplog))
+
+
+def test_an_unreadable_registry_logs_why_the_check_is_skipped(monkeypatch, caplog):
+    def _boom():
+        raise OSError("registry gone")
+
+    syms = {"ggml_backend_dev_count": _Sym(_boom),
+            "ggml_backend_dev_get": _Sym(lambda i: 1),
+            "ggml_backend_dev_type": _Sym(lambda d: 0)}
+    monkeypatch.setattr(_loader, "load_lib", lambda *a, **k: None)
+    monkeypatch.setattr(_loader, "_ggml_dev_handles", lambda: [])
+    monkeypatch.setattr(_loader, "_ggml_sym", lambda handles, name: syms.get(name))
+    with caplog.at_level("DEBUG", logger="localm"):
+        assert _loader.has_gpu_device() is None
+    lines = _debug_lines(caplog)
+    assert any("device registry could not be read (OSError)" in m for m in lines)
+
+
+def test_a_device_without_a_backend_name_logs_why_the_check_is_skipped(monkeypatch, caplog):
+    syms = {"ggml_backend_dev_count": _Sym(lambda: 1),
+            "ggml_backend_dev_get": _Sym(lambda i: 1),
+            "ggml_backend_dev_type": _Sym(lambda d: 2)}
+    monkeypatch.setattr(_loader, "load_lib", lambda *a, **k: None)
+    monkeypatch.setattr(_loader, "_ggml_dev_handles", lambda: [])
+    monkeypatch.setattr(_loader, "_ggml_sym", lambda handles, name: syms.get(name))
+    with caplog.at_level("DEBUG", logger="localm"):
+        assert _loader.has_gpu_device() is None
+    assert any("no readable backend name" in m for m in _debug_lines(caplog))
 
 
 def test_a_projector_clip_places_on_the_gpu_is_not_reported(monkeypatch, caplog):

@@ -778,6 +778,19 @@ cuda = _Cuda()
         assert [d["index"] for d in devices] == [1], (
             f"a failing device hid the healthy one: {devices!r}")
 
+    def test_child_without_torch_answers_no_device_and_exits_0(self, tmp_path):
+        stub = 'raise ModuleNotFoundError("No module named \'torch\'", name="torch")\n'
+        proc = self._run_child_with_stub_torch(tmp_path, stub=stub)
+        assert proc.stdout.strip() == "[]"
+        assert proc.returncode == 0
+
+    def test_child_whose_torch_fails_exits_1(self, tmp_path):
+        stub = 'raise RuntimeError("CUDA driver is broken")\n'
+        proc = self._run_child_with_stub_torch(tmp_path, stub=stub)
+        assert proc.stdout.strip() == "[]"
+        assert proc.returncode == 1
+        assert "CUDA driver is broken" in proc.stderr
+
     def test_child_reports_no_device_when_stub_torch_has_none(self, tmp_path):
         stub = self._STUB_TORCH.replace("return True", "return False")
         proc = self._run_child_with_stub_torch(tmp_path, stub=stub)

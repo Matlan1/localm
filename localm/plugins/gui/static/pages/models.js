@@ -3,8 +3,9 @@
 "use strict";
 
 // --- ES module imports ---
+import { clearRecentGuiErrors, onRecentGuiErrorsChange, recentGuiErrors } from "../app/client-log.js";
 import { pickDirectory } from "../app/picker.js";
-import { $, GIB, authHeaders, cancelJob, confirmDanger, confirmDangerAsync, downloadRate, el, fmtBytes, fmtDuration, openModal, promptText, renderMarkdown, streamJob, toast, whileBusy } from "../app/helpers.js";
+import { $, GIB, authHeaders, cancelJob, confirmDanger, confirmDangerAsync, downloadRate, el, fmtBytes, fmtDuration, openModal, promptText, renderMarkdown, showInlineError, streamJob, toast, whileBusy } from "../app/helpers.js";
 import { t, tn } from "../app/i18n.js";
 import { onServerUnreachable } from "../app/init.js";
 import { emptyState, iconEl } from "../app/icons.js";
@@ -364,7 +365,7 @@ export function openAdapterAttachModal(m) {
       try {
         const { ok: good, data } = await postAdapterAttach(m.name, baseSel.value, scale);
         if (!good) {
-          err.textContent = data.detail || t("models.adapter.attachFailed");
+          showInlineError(err, data.detail || t("models.adapter.attachFailed"));
           err.hidden = false;
           return;
         }
@@ -373,7 +374,7 @@ export function openAdapterAttachModal(m) {
                 { name: m.name, base: baseSel.value }));
         refreshModelsPage();
       } catch (e) {
-        err.textContent = t("models.adapter.attachFailedWith", { message: e.message });
+        showInlineError(err, t("models.adapter.attachFailedWith", { message: e.message }));
         err.hidden = false;
       } finally { ok.disabled = false; }
     };
@@ -693,6 +694,7 @@ export async function refreshModelsPage() {
             }
           } catch (e) {
             toast(t("models.use.loadFailed", { message: e.message }), true);
+            refreshModelsPage();
           } finally { use.disabled = false; use.textContent = prevLabel; }
         };
         actions.appendChild(use);
@@ -1871,7 +1873,7 @@ export async function submitBugReport(review) {
     if (out) {
       out.hidden = false;
       if (review) {
-        out.textContent = t("settings.bug.reviewUnavailable", { where });
+        showInlineError(out, t("settings.bug.reviewUnavailable", { where }));
       } else {
         const maintainerSuffix = data.maintainer
           ? t("settings.bug.maintainerSuffix", { maintainer: data.maintainer }) : "";
@@ -1930,7 +1932,9 @@ export async function sendReviewedBugReport(isRetry = false, rep = _reviewedBugR
         const message = data.upload_message || data.upload_error;
         const whereSuffix = rep.where ? t("settings.bug.whereSuffix", { where: rep.where }) : "";
         const maintainer = data.maintainer || t("settings.bug.defaultMaintainer");
-        out.textContent = t("settings.bug.couldNotSend", { message, whereSuffix, maintainer });
+        const text = t("settings.bug.couldNotSend", { message, whereSuffix, maintainer });
+        if (uploadFailed) out.textContent = text;
+        else showInlineError(out, text);
       }
     }
     if (sent) {
@@ -1983,12 +1987,132 @@ async function countdownRetryBugReport(secs, out, rep) {
   await sendReviewedBugReport(true, rep);
 }
 
+// Settings "Recent errors": the last errors this page showed (client-log.js),
+// newest first, each with Copy and "Report this error". Report fills the bug
+// report form above with the error and opens it; nothing is saved or sent until
+// the user presses one of that form's own buttons.
+
+function _recentErrorWhen(entry) {
+  try { return new Date(entry.time).toLocaleString(); } catch { return ""; }
+}
+
+/** Add *entry* (from recentGuiErrors()) to the bug report form and show it: the
+ *  error text goes into "What happened" (appended below text already there, never
+ *  twice), and "What were you doing" is filled only when empty. An open review is
+ *  left as it is. Never saves or sends. */
+export function reportGuiErrorEntry(entry) {
+  const happened = $("bug-happened"), desc = $("bug-desc");
+  if (!happened || !entry) return;
+  const current = happened.value.trim();
+  if (!current) happened.value = entry.text;
+  else if (!current.includes(entry.text)) happened.value = current + "\n\n" + entry.text;
+  if (desc && !desc.value.trim()) {
+    desc.value = t("settings.recentErrors.reportDescription", {
+      page: entry.page || "-", time: _recentErrorWhen(entry) });
+  }
+  if (typeof window.showView === "function") window.showView("settings");
+  if (typeof window.gotoSettingsSection === "function") window.gotoSettingsSection("sec-bugreport");
+  (desc || happened).focus();
+}
+
+/** Open Settings at the "Recent errors" card. */
+export function openRecentErrors() {
+  if (typeof window.showView === "function") window.showView("settings");
+  if (typeof window.gotoSettingsSection === "function") window.gotoSettingsSection("sec-recent-errors");
+}
+window.openRecentErrors = openRecentErrors;
+
+/** Render the "Recent errors" card from *list* (newest first). */
+export function renderRecentErrors(list = recentGuiErrors()) {
+  const box = $("recent-errors-list");
+  if (!box) return;
+  box.replaceChildren();
+  for (const entry of list) {
+    const li = el("li", "recent-error");
+    const meta = el("div", "recent-error-meta sub");
+    const bits = [_recentErrorWhen(entry), entry.page, entry.source].filter(Boolean);
+    meta.textContent = bits.join("  ·  ");
+    if (entry.count > 1) meta.textContent += "  " + t("toast.repeatCount", { count: entry.count });
+    const text = el("div", "recent-error-text", entry.text);
+    const actions = el("div", "actions");
+    const copy = el("button", "btn-secondary", t("settings.recentErrors.copy"));
+    copy.type = "button";
+    copy.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(entry.text);
+        copy.textContent = t("settings.recentErrors.copied");
+        setTimeout(() => (copy.textContent = t("settings.recentErrors.copy")), 1200);
+      } catch {
+        toast(t("chat.copyBlocked"), true);
+      }
+    };
+    const report = el("button", "btn-secondary", t("settings.recentErrors.report"));
+    report.type = "button";
+    report.onclick = () => reportGuiErrorEntry(entry);
+    actions.append(copy, report);
+    li.append(meta, text, actions);
+    box.appendChild(li);
+  }
+  const empty = $("recent-errors-empty");
+  if (empty) empty.hidden = list.length > 0;
+  const clear = $("recent-errors-clear");
+  if (clear) clear.disabled = list.length === 0;
+}
+
+onRecentGuiErrorsChange(renderRecentErrors);
+renderRecentErrors();
+if ($("recent-errors-clear")) $("recent-errors-clear").onclick = () => clearRecentGuiErrors();
+
 if ($("bug-send")) $("bug-send").onclick = () => submitBugReport(false);
 if ($("bug-upload")) $("bug-upload").onclick = () => submitBugReport(true);
 if ($("bug-confirm-send")) $("bug-confirm-send").onclick = () => sendReviewedBugReport();
 if ($("bug-cancel-send")) $("bug-cancel-send").onclick = () => cancelBugReview();
 if ($("bug-retry")) $("bug-retry").onclick = () => sendReviewedBugReport();
 if ($("bug-download")) $("bug-download").onclick = () => downloadBugReport();
+
+// Release notes longer than this (characters or lines) start collapsed behind
+// "Show all".
+const UPDATE_NOTES_SHORT_CHARS = 400;
+const UPDATE_NOTES_SHORT_LINES = 6;
+
+function _setUpdateNotesCollapsed(box, more, collapsed) {
+  box.classList.toggle("collapsed", collapsed);
+  more.textContent = t(collapsed ? "settings.update.notesShowAll" : "settings.update.notesShowLess");
+  more.setAttribute("aria-expanded", String(!collapsed));
+}
+
+/** Render the offered release's *notes* (remote Markdown) into #update-notes
+ *  through renderMarkdown, the DOMPurify-sanitized path chat and the changelog
+ *  use. Empty or non-string notes hide the box. Notes longer than
+ *  UPDATE_NOTES_SHORT_CHARS characters or UPDATE_NOTES_SHORT_LINES lines start
+ *  collapsed behind a "Show all" toggle. */
+export function renderUpdateNotes(notes) {
+  const box = $("update-notes");
+  if (!box) return;
+  const more = $("update-notes-more"), moreRow = $("update-notes-actions");
+  const text = typeof notes === "string" ? notes.trim() : "";
+  box.replaceChildren();
+  box.classList.remove("collapsed");
+  if (moreRow) moreRow.hidden = true;
+  if (!text) { box.hidden = true; return; }
+  renderMarkdown(box, text, { imageScope: "update-notes" });
+  box.hidden = false;
+  const long = text.length > UPDATE_NOTES_SHORT_CHARS
+    || text.split("\n").length > UPDATE_NOTES_SHORT_LINES;
+  if (long && more && moreRow) {
+    _setUpdateNotesCollapsed(box, more, true);
+    more.onclick = () => _setUpdateNotesCollapsed(box, more, !box.classList.contains("collapsed"));
+    moreRow.hidden = false;
+  }
+}
+
+// Repaint the Show all / Show less label for the current state in the new language.
+document.addEventListener("localm:language", () => {
+  const box = $("update-notes"), more = $("update-notes-more"), moreRow = $("update-notes-actions");
+  if (box && more && moreRow && !moreRow.hidden) {
+    _setUpdateNotesCollapsed(box, more, box.classList.contains("collapsed"));
+  }
+});
 
 // Updates: a check-only auto-surface (a throttled startup check in app.js calls
 // __localmUpdateCheck) plus an explicit "Update now". The apply runs only on
@@ -1997,18 +2121,19 @@ export async function updateCheck() {
   const out = $("update-status"), applyBtn = $("update-apply");
   const checkBtn = $("update-check");
   if (out) { out.hidden = false; out.textContent = t("settings.update.checking"); }
+  renderUpdateNotes("");
   if (checkBtn) checkBtn.disabled = true;
   try {
     const r = await fetch("/api/update/check", { headers: authHeaders() });
     const d = await r.json().catch(() => ({}));
     if (out) out.hidden = false;
     if (!r.ok) throw new Error(d.detail || r.statusText);
-    if (d.error) { if (out) out.textContent = t("settings.update.checkFailed", { message: d.error }); return; }
+    if (d.error) { showInlineError(out, t("settings.update.checkFailed", { message: d.error })); return; }
     if (!d.available) { if (out) out.textContent = t("settings.update.notConfigured"); return; }
     if (d.newer && d.asset && d.asset.id) {
       if (out) out.textContent = t("settings.update.available",
-        { latest: d.latest, current: d.current }) +
-        (d.notes ? "  " + String(d.notes).slice(0, 200) : "");
+        { latest: d.latest, current: d.current });
+      renderUpdateNotes(d.notes);
       if (applyBtn) applyBtn.hidden = false;
     } else if (d.newer) {
       if (out) out.textContent = t("settings.update.availableNoAsset", { latest: d.latest });
@@ -2027,12 +2152,25 @@ export async function updateCheck() {
       if (applyBtn) applyBtn.hidden = true;
     }
   } catch (e) {
-    if (out) { out.hidden = false; out.textContent = t("settings.update.checkFailed", { message: e.message }); }
+    if (out) out.hidden = false;
+    showInlineError(out, t("settings.update.checkFailed", { message: e.message }));
   } finally {
     if (checkBtn) checkBtn.disabled = false;
   }
 }
 window.__localmUpdateCheck = updateCheck;
+
+// What an applied update did to the native runtime and the other components,
+// and which parts of the current version an older one keeps, as text appended
+// to the status line.
+function _updateExtras(d) {
+  let text = "";
+  if (d.runtime_note) text += "  " + t("settings.update.runtimeNote", { note: d.runtime_note });
+  if (d.components_note) text += "  " + t("settings.update.componentsNote", { note: d.components_note });
+  const kept = Array.isArray(d.kept_for_updates) ? d.kept_for_updates : [];
+  if (kept.length) text += "  " + t("settings.update.keptForUpdates", { parts: kept.join("; ") });
+  return text;
+}
 
 export async function updateApply() {
   const out = $("update-status"), btn = $("update-apply");
@@ -2045,23 +2183,155 @@ export async function updateApply() {
     if (d.applied) {
       const version = d.version || "";
       if (out) {
-        out.textContent = d.restarting
+        out.textContent = (d.restarting
           ? t("settings.update.updatedRestarting", { version })
           : (d.klass === "setup"
             ? t("settings.update.updatedSetup", { version })
-            : t("settings.update.updatedPlain", { version }));
+            : t("settings.update.updatedPlain", { version }))) + _updateExtras(d);
       }
       if (btn) btn.hidden = true;
     } else if (d.error) {
-      if (out) out.textContent = t("settings.update.failedRolledBack", { error: d.error });
+      showInlineError(out, t("settings.update.failedRolledBack", { error: d.error }));
     } else {
       if (out) out.textContent = d.reason || t("settings.update.nothingToApply");
     }
-  } catch (e) { if (out) out.textContent = t("settings.update.applyFailed", { message: e.message }); }
+  } catch (e) { showInlineError(out, t("settings.update.applyFailed", { message: e.message })); }
   finally { if (btn) btn.disabled = false; }
 }
 if ($("update-check")) $("update-check").onclick = updateCheck;
 if ($("update-apply")) $("update-apply").onclick = updateApply;
+
+// Choose a version: the GUI form of `localm update --list` / `--to <version>`.
+// The server re-derives the build and signature from the proxy; a build whose
+// signature does not verify comes back as needs_confirmation, and is installed
+// only when the user confirms a warning that names the reason.
+let _updateReleases = [];
+let _updateCurrent = "";
+
+function _selectedRelease() {
+  const sel = $("update-version-select");
+  return sel ? _updateReleases.find((r) => r.version === sel.value) || null : null;
+}
+
+function _renderVersionInfo() {
+  const info = $("update-version-info"), btn = $("update-install-version");
+  const rel = _selectedRelease();
+  if (btn) btn.disabled = !(rel && rel.installable);
+  if (!info) return;
+  if (!rel) { info.textContent = ""; return; }
+  const lines = [];
+  if (rel.published_at) lines.push(t("settings.update.versionPublished", { date: String(rel.published_at).slice(0, 10) }));
+  if (!rel.installable) lines.push(t("settings.update.versionNotInstallable", { reason: rel.reason || "" }));
+  for (const w of rel.warnings || []) lines.push(w);
+  info.textContent = lines.join(" · ");
+}
+
+export async function updateListVersions() {
+  const picker = $("update-version-picker"), sel = $("update-version-select");
+  const out = $("update-version-status"), btn = $("update-versions");
+  if (btn) btn.disabled = true;
+  if (out) { out.hidden = false; out.textContent = t("settings.update.versionsLoading"); }
+  try {
+    const r = await fetch("/api/update/releases", { headers: authHeaders() });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.detail || r.statusText);
+    if (!d.available) { if (out) out.textContent = t("settings.update.notConfigured"); return; }
+    if (d.error) { showInlineError(out, t("settings.update.versionsFailed", { message: d.error })); return; }
+    _updateReleases = Array.isArray(d.releases) ? d.releases : [];
+    _updateCurrent = d.current || "";
+    if (!_updateReleases.length) {
+      if (picker) picker.hidden = true;
+      if (out) out.textContent = t("settings.update.versionsNone", { current: d.current || "" });
+      return;
+    }
+    if (sel) {
+      sel.textContent = "";
+      for (const rel of _updateReleases) {
+        const tag = t(`settings.update.direction.${rel.direction}`);
+        const label = rel.version + "  (" + tag + (rel.prerelease ? ", " + t("settings.update.prerelease") : "") + ")";
+        const opt = el("option", "", label);
+        opt.value = rel.version;
+        opt.disabled = !rel.installable;
+        sel.appendChild(opt);
+      }
+      const first = _updateReleases.find((x) => x.installable && x.direction !== "same");
+      if (first) sel.value = first.version;
+      sel.onchange = _renderVersionInfo;
+    }
+    if (picker) picker.hidden = false;
+    if (out) out.textContent = t("settings.update.versionsCurrent", { current: d.current || "" });
+    _renderVersionInfo();
+  } catch (e) {
+    if (out) out.hidden = false;
+    showInlineError(out, t("settings.update.versionsFailed", { message: e.message }));
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function _postSelectedVersion(rel, extra) {
+  const out = $("update-version-status"), btn = $("update-install-version");
+  if (btn) btn.disabled = true;
+  if (out) { out.hidden = false; out.textContent = t("settings.update.installing", { version: rel.version }); }
+  try {
+    const r = await fetch("/api/update/apply", {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ version: rel.version, ...extra }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.detail || r.statusText);
+    if (d.needs_confirmation === "unverified" && !extra.allow_unverified) {
+      if (out) out.textContent = t("settings.update.unverifiedStatus", { version: rel.version, reason: d.reason || "" });
+      const ok = await confirmDangerAsync(
+        t("settings.update.unverifiedTitle", { version: rel.version }),
+        t("settings.update.unverifiedBody", { reason: d.reason || "" }),
+        t("settings.update.unverifiedConfirm"));
+      if (!ok) { if (out) out.textContent = t("settings.update.notInstalled"); return; }
+      return await _postSelectedVersion(rel, { allow_unverified: true, sha256: d.sha256 });
+    }
+    if (d.applied) {
+      const version = d.version || rel.version;
+      if (out) {
+        out.textContent = (d.restarting
+          ? t("settings.update.installedRestarting", { version })
+          : (d.klass === "setup"
+            ? t("settings.update.updatedSetup", { version })
+            : t("settings.update.updatedPlain", { version })))
+          + (d.data_backup ? "  " + t("settings.update.dataBackup", { path: d.data_backup }) : "")
+          + _updateExtras(d);
+      }
+      if (btn) btn.hidden = true;
+      if (d.restarting && window.onServerUnreachable) {
+        setTimeout(() => onServerUnreachable(), d.data_backup ? 6000 : 800);
+      }
+    } else if (d.error) {
+      showInlineError(out, t("settings.update.failedRolledBack", { error: d.error }));
+    } else {
+      if (out) out.textContent = d.reason || t("settings.update.nothingToApply");
+    }
+  } catch (e) {
+    showInlineError(out, t("settings.update.applyFailed", { message: e.message }));
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+export async function updateInstallVersion() {
+  const rel = _selectedRelease();
+  if (!rel || !rel.installable) return;
+  const current = _updateCurrent;
+  const key = rel.direction === "older" ? "downgrade" : (rel.direction === "same" ? "reinstall" : "install");
+  const ok = await confirmDangerAsync(
+    t(`settings.update.${key}Title`, { version: rel.version }),
+    t(`settings.update.${key}Body`, { version: rel.version, current }),
+    t(`settings.update.${key}Confirm`));
+  if (!ok) return;
+  await _postSelectedVersion(rel, {});
+}
+
+if ($("update-versions")) $("update-versions").onclick = updateListVersions;
+if ($("update-install-version")) $("update-install-version").onclick = updateInstallVersion;
 
 // Roll back: the GUI form of `localm update --rollback`. Probes first - the GET
 // is read-only and never performs the rollback - so the control appears only
@@ -2111,7 +2381,7 @@ export async function updateRollback() {
         if (btn) btn.hidden = true;
         if (window.onServerUnreachable) setTimeout(() => onServerUnreachable(), 800);
       } catch (e) {
-        if (out) out.textContent = t("settings.rollback.failed", { message: e.message });
+        showInlineError(out, t("settings.rollback.failed", { message: e.message }));
         if (btn) btn.disabled = false;
       }
     });
@@ -2143,7 +2413,7 @@ export async function rebuildLauncher() {
           (notes ? t("settings.launcher.notesColonSuffix", { notes }) : ".");
     }
   } catch (e) {
-    if (out) out.textContent = t("settings.launcher.failed", { message: e.message });
+    showInlineError(out, t("settings.launcher.failed", { message: e.message }));
   } finally {
     if (btn) btn.disabled = false;
   }
@@ -2267,7 +2537,7 @@ export async function runtimeKeepInstalled(installed) {
   } catch (e) {
     if (out) {
       out.hidden = false;
-      out.textContent = t("settings.runtime.choiceKeepFailed", { installed, message: e.message });
+      showInlineError(out, t("settings.runtime.choiceKeepFailed", { installed, message: e.message }));
     }
     return;
   }
@@ -2330,7 +2600,8 @@ export async function runtimeUpdateCheck() {
     }
   } catch (e) {
     runtimeCheckState = null;
-    if (out) { out.hidden = false; out.textContent = t("settings.runtime.checkFailed", { message: e.message }); }
+    if (out) out.hidden = false;
+    showInlineError(out, t("settings.runtime.checkFailed", { message: e.message }));
   }
   syncRuntimeApply();
   syncRuntimeRollback();
@@ -2466,7 +2737,7 @@ export async function showChangelog() {
         md.textContent = "";
         renderMarkdown(md, d.markdown || "");
       })
-      .catch((e) => { md.textContent = t("settings.changelog.failed", { message: e.message }); });
+      .catch((e) => { showInlineError(md, t("settings.changelog.failed", { message: e.message })); });
   });
 }
 if ($("changelog-show")) $("changelog-show").onclick = showChangelog;
@@ -2480,7 +2751,7 @@ export async function issuesRefresh() {
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.detail || r.statusText);
     if (!out) return;
-    if (d.error) { out.textContent = t("settings.issues.loadError", { error: d.error }); return; }
+    if (d.error) { showInlineError(out, t("settings.issues.loadError", { error: d.error })); return; }
     const list = d.issues || [];
     // Reached only on a SUCCESSFUL fetch of an empty list; the error paths above
     // and below say "could not load" instead.
@@ -2501,7 +2772,7 @@ export async function issuesRefresh() {
       }
       out.appendChild(row);
     }
-  } catch (e) { if (out) out.textContent = t("settings.issues.loadFailed", { message: e.message }); }
+  } catch (e) { showInlineError(out, t("settings.issues.loadFailed", { message: e.message })); }
 }
 if ($("issues-refresh")) $("issues-refresh").onclick = issuesRefresh;
 
@@ -3345,6 +3616,42 @@ if ($("models-import-comfy-btn")) {
   $("models-import-comfy-btn").onclick = () => openImportComfyModal();
 }
 
+// What an Unload all response released and left loaded: n counts the chat
+// models in unloaded_models plus the embedding, reranker and speech models and
+// media runtimes in unloaded_other (or 1 for embedder_unloaded from a server
+// without that list); skipped lists what stayed loaded because it was in use;
+// forceable is the part of skipped a forced retry can stop (a media runtime in
+// media_left_running is never stopped by force); failed lists the media
+// runtimes whose stop did not take, which are not counted in skipped.
+function unloadAllCounts(data) {
+  const other = Array.isArray(data.unloaded_other)
+    ? data.unloaded_other.length : (data.embedder_unloaded ? 1 : 0);
+  const n = (data.unloaded_models || []).length + other;
+  const media = (data.media_left_running && typeof data.media_left_running === "object")
+    ? data.media_left_running : {};
+  const failed = Object.keys(media).filter((k) => media[k] === "failed");
+  const skipped = (Array.isArray(data.skipped_in_use) ? data.skipped_in_use : [])
+    .filter((k) => !failed.includes(k));
+  const forceable = skipped.filter((k) => !Object.prototype.hasOwnProperty.call(media, k));
+  return { n, skipped, forceable, failed };
+}
+
+function unloadAllMessage(n, skipped, failed = []) {
+  const stopFailed = failed.length
+    ? t("models.unloadAll.mediaStopFailed", { names: failed.join(", ") }) : "";
+  let msg;
+  if (n && skipped.length) {
+    msg = t("models.unloadAll.someStillGenerating", { n, skipped: skipped.length });
+  } else if (n) {
+    msg = t("models.unloadAll.allUnloaded", { n });
+  } else if (skipped.length) {
+    msg = t("models.unloadAll.stillGenerating", { skipped: skipped.length });
+  } else {
+    return stopFailed || t("models.unloadAll.nothingLoaded");
+  }
+  return stopFailed ? `${msg}. ${stopFailed}` : msg;
+}
+
 // Bind Unload-all button click handler
 const unloadAllBtn = $("models-unload-all-btn");
 if (unloadAllBtn) {
@@ -3356,35 +3663,17 @@ if (unloadAllBtn) {
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok) { toast(data.detail || t("models.unload.failed"), true); return; }
-      // unloaded_models lists only chat engines; the shared embedding model has
-      // its own lifecycle (localm.inference.embedder) and is reported via
-      // embedder_unloaded, so it is counted too.
-      const n = (data.unloaded_models || []).length + (data.embedder_unloaded ? 1 : 0);
-      // unload_all_models() (http_server.py) reports any pinned (mid-generation)
-      // engine in skipped_in_use rather than unloading it - loaded, but not
-      // released - so the message names it separately.
-      const skipped = Array.isArray(data.skipped_in_use) ? data.skipped_in_use : [];
-      let msg;
-      if (n && skipped.length) {
-        msg = t("models.unloadAll.someStillGenerating", { n, skipped: skipped.length });
-      } else if (n) {
-        msg = t("models.unloadAll.allUnloaded", { n });
-      } else if (skipped.length) {
-        msg = t("models.unloadAll.stillGenerating", { skipped: skipped.length });
-      } else {
-        msg = t("models.unloadAll.nothingLoaded");
-      }
-      toast(msg, skipped.length > 0);
+      const { n, skipped, forceable, failed } = unloadAllCounts(data);
+      toast(unloadAllMessage(n, skipped, failed), skipped.length > 0 || failed.length > 0);
       refreshModelsPage();
       refreshPerfEstimate();
-      // Offer to force through whatever is still in the way - the owner's
+      // Offer to force through whatever force can stop - the owner's
       // action is final, mirroring the per-row unload's own confirm/force
-      // contract. skipped_in_use is a real, non-empty count here, so there is
-      // something concrete to confirm.
-      if (skipped.length) {
+      // contract.
+      if (forceable.length) {
         const confirmed = await confirmDangerAsync(
           t("models.unloadAll.confirmTitle"),
-          t("models.unloadAll.confirmBody", { skipped: skipped.length }),
+          t("models.unloadAll.confirmBody", { skipped: forceable.length }),
           t("models.unloadAll.confirmLabel"));
         if (confirmed) {
           const r2 = await fetch("/api/models/unload", {
@@ -3393,8 +3682,9 @@ if (unloadAllBtn) {
           });
           const data2 = await r2.json().catch(() => ({}));
           if (!r2.ok) { toast(data2.detail || t("models.unload.failed"), true); return; }
-          const n2 = (data2.unloaded_models || []).length + (data2.embedder_unloaded ? 1 : 0);
-          toast(t("models.unloadAll.allUnloaded", { n: n2 }));
+          const after = unloadAllCounts(data2);
+          toast(unloadAllMessage(after.n, after.skipped, after.failed),
+            after.skipped.length > 0 || after.failed.length > 0);
           refreshModelsPage();
           refreshPerfEstimate();
         }

@@ -73,7 +73,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
     jobs = context.jobs
 
     @app.get("/api/models", dependencies=[Depends(require_scope(scopes.MODELS_READ))])
-    async def gui_models(type: str = ""):
+    async def gui_models(request: Request, type: str = ""):
         # The annotation stays a builtin so FastAPI can resolve the forward-ref
         # this module's ``from __future__ import annotations`` produces. "" is the
         # no-filter sentinel, as on the sibling routes.
@@ -186,6 +186,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             get_plugin_executor(), _adapter_maps, registry,
             [name for name, _e, _m, _p in rows])
 
+        show_path = None
         models = []
         for name, entry, mtype, epath in rows:
             size = sizes.get(epath)
@@ -240,10 +241,13 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             if not _has_recorded_model_type(entry):
                 row_out["model_type_recorded"] = False
             # Emitted only on a missing row. `last_path` is the registry's own path
-            # string, which gives the GUI relocate control a starting point.
+            # string, which gives the GUI relocate control a starting point;
+            # path-scrubbed for a caller other than the local operator.
             if missing_flags.get(epath):
                 row_out["missing"] = True
-                row_out["last_path"] = epath
+                if show_path is None:
+                    show_path = _hs.path_formatter(request)
+                row_out["last_path"] = show_path(epath)
             if name in adapter_info:
                 row_out.update(adapter_info[name])
             elif attached_to.get(name):
@@ -417,12 +421,14 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
     async def gui_unload_model(req: UnloadModelRequest):
         """Release model(s) from GPU/CPU memory. With no `model` (or an empty
         POST body), unloads everything - the GUI's global "Unload all"
-        button. With `model` set, unloads only that one, leaving any other
-        loaded models untouched - the GUI's per-row Unload button."""
+        button, which also stops this server's idle native media runtimes
+        (``unload_all_models(media=True)``). With `model` set, unloads only
+        that one, leaving any other loaded models untouched - the GUI's
+        per-row Unload button."""
         if req.model:
             _require_registered(req.model)
             return await unload_one_model(req.model, force=req.force)
-        return await unload_all_models(force=req.force)
+        return await unload_all_models(force=req.force, media=True)
 
     @app.post("/api/embedding/warmup",
               dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
@@ -655,10 +661,14 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         ``gpus`` is a frozen last-known-good or []), so a timed-out probe is
         distinguishable from a GPU-less box.
 
-        ``index_space`` (present only as ``"native"``) says the ``gpus``
-        indices are the ones a MODEL LOAD consumes rather than list_gpus()'s
-        torch/nvidia-smi numbering - see the opaque-index-space branch below
-        (vulkan or sycl); the client labels the numbering accordingly. That
+        ``index_space`` is ``"native"`` when the ``gpus`` indices are the ones
+        a MODEL LOAD consumes rather than list_gpus()'s torch/nvidia-smi
+        numbering - see the opaque-index-space branch below (vulkan or sycl);
+        the client labels the numbering accordingly. It is ``"nvidia-smi"``
+        when the reading is in nvidia-smi's own numbering on a box where torch
+        numbers the GPUs (discover._nvidia_smi_numbering), so the indices are
+        not the ones main_gpu_index / gpu_split_indices use; the client locks
+        its GPU choices then. Absent otherwise. That
         is llama.cpp's own device list,
         NOT the raw ggml registry order: integrated GPUs and accelerators are
         dropped and the rest renumbered before they get here
@@ -693,6 +703,10 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
 
         gpus, probe_status, index_space = await loop.run_in_executor(
             get_plugin_executor(), _read_devices)
+        from localm.discover import GPU_NUMBERING_NVIDIA_SMI
+        if index_space is None and any(isinstance(g, dict) and g.get("numbering")
+                                       == GPU_NUMBERING_NVIDIA_SMI for g in gpus):
+            index_space = "nvidia-smi"
         out = {"gpus": gpus,
                "probe_status": probe_status,
                "main_gpu_index": cfg.get("main_gpu_index"),

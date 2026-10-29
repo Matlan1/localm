@@ -41,6 +41,7 @@ function _routeOwns403(url) {
 }
 
 const _rawFetch = window.fetch.bind(window);
+window.__localmRawFetch = _rawFetch;
 window.fetch = async function (input, init) {
   const res = await _rawFetch(input, init);
   try {

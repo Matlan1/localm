@@ -1112,46 +1112,6 @@
         ],
         "./localm/inference/_embedder_runner.py": [
             {
-                "code": "reportCallIssue",
-                "range": {
-                    "startColumn": 22,
-                    "endColumn": 35,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportArgumentType",
-                "range": {
-                    "startColumn": 27,
-                    "endColumn": 34,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportCallIssue",
-                "range": {
-                    "startColumn": 15,
-                    "endColumn": 45,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportArgumentType",
-                "range": {
-                    "startColumn": 27,
-                    "endColumn": 37,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportCallIssue",
-                "range": {
-                    "startColumn": 42,
-                    "endColumn": 49,
-                    "lineCount": 1
-                }
-            },
-            {
                 "code": "reportOptionalMemberAccess",
                 "range": {
                     "startColumn": 20,
@@ -3046,14 +3006,6 @@
                     "endColumn": 41,
                     "lineCount": 1
                 }
-            },
-            {
-                "code": "reportOptionalMemberAccess",
-                "range": {
-                    "startColumn": 22,
-                    "endColumn": 27,
-                    "lineCount": 1
-                }
             }
         ],
         "./localm/inference/engine.py": [
@@ -3182,16 +3134,16 @@
             {
                 "code": "reportArgumentType",
                 "range": {
-                    "startColumn": 73,
-                    "endColumn": 83,
+                    "startColumn": 77,
+                    "endColumn": 87,
                     "lineCount": 1
                 }
             },
             {
                 "code": "reportOptionalMemberAccess",
                 "range": {
-                    "startColumn": 64,
-                    "endColumn": 76,
+                    "startColumn": 68,
+                    "endColumn": 80,
                     "lineCount": 1
                 }
             },
@@ -3254,16 +3206,16 @@
             {
                 "code": "reportArgumentType",
                 "range": {
-                    "startColumn": 63,
-                    "endColumn": 73,
+                    "startColumn": 58,
+                    "endColumn": 68,
                     "lineCount": 1
                 }
             },
             {
                 "code": "reportOptionalOperand",
                 "range": {
-                    "startColumn": 60,
-                    "endColumn": 70,
+                    "startColumn": 55,
+                    "endColumn": 65,
                     "lineCount": 1
                 }
             },
@@ -5025,22 +4977,6 @@
                 "code": "reportAttributeAccessIssue",
                 "range": {
                     "startColumn": 24,
-                    "endColumn": 39,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportAttributeAccessIssue",
-                "range": {
-                    "startColumn": 48,
-                    "endColumn": 57,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportAttributeAccessIssue",
-                "range": {
-                    "startColumn": 24,
                     "endColumn": 32,
                     "lineCount": 1
                 }
@@ -5356,14 +5292,6 @@
             {
                 "code": "reportAttributeAccessIssue",
                 "range": {
-                    "startColumn": 20,
-                    "endColumn": 29,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportAttributeAccessIssue",
-                "range": {
                     "startColumn": 17,
                     "endColumn": 30,
                     "lineCount": 1
@@ -5590,14 +5518,6 @@
             {
                 "code": "reportAttributeAccessIssue",
                 "range": {
-                    "startColumn": 48,
-                    "endColumn": 57,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportAttributeAccessIssue",
-                "range": {
                     "startColumn": 35,
                     "endColumn": 48,
                     "lineCount": 1
@@ -5688,14 +5608,6 @@
                 "range": {
                     "startColumn": 32,
                     "endColumn": 41,
-                    "lineCount": 1
-                }
-            },
-            {
-                "code": "reportAttributeAccessIssue",
-                "range": {
-                    "startColumn": 48,
-                    "endColumn": 57,
                     "lineCount": 1
                 }
             },

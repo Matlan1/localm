@@ -64,6 +64,10 @@ _REPLACE_WAIT_S = 120.0
 # seconds, until it changes, or until reset_reranker() runs.
 _LOAD_FAILED: dict[tuple[str, int, int], tuple[str, float]] = {}
 _LOAD_RETRY_AFTER_S = 60.0
+# HFReranker.stop(): how long it waits for the request holding the worker to
+# leave, and how often it kills the worker again meanwhile.
+_STOP_TIMEOUT = 30.0
+_STOP_POLL = 0.5
 
 
 class RerankerModelError(Exception):
@@ -278,6 +282,9 @@ class HFReranker:
     this module uses (``rerank``, ``cls_labels``, ``active_requests``, ``close``,
     ``model_path`` and ``_runner``)."""
 
+    # Set by stop(): no request starts or restarts the worker afterwards.
+    _stopped: bool = False
+
     def __init__(self, path: str, device: Optional[str] = None) -> None:
         from localm.inference.backends.hf import HFBackend
         self.model_path = path
@@ -287,6 +294,14 @@ class HFReranker:
         self._backend.load()
         self.cls_labels = list(self._backend.rerank_labels)
         self._runner = self._backend._runner
+
+    @property
+    def vram_hold_bytes(self) -> Optional[int]:
+        """Bytes of VRAM the worker is expected to hold: 0 when its load ran on
+        the CPU, else None (unknown)."""
+        if getattr(self._backend, "loaded_device", None) == "cpu":
+            return 0
+        return None
 
     def rerank(self, pairs: list[tuple[str, str]]) -> list[dict]:
         """Score *pairs*, starting the worker again first when it has died.
@@ -298,14 +313,60 @@ class HFReranker:
         self.active_requests += 1
         try:
             with self._call_lock:
+                self._refuse_if_stopped()
                 alive = self._backend.loaded
                 if alive:
-                    return self._backend.rerank(pairs)
+                    return self._rerank_locked(pairs)
             self._restart()
             with self._call_lock:
-                return self._backend.rerank(pairs)
+                self._refuse_if_stopped()
+                return self._rerank_locked(pairs)
         finally:
             self.active_requests = max(0, self.active_requests - 1)
+
+    def _rerank_locked(self, pairs: list[tuple[str, str]]) -> list[dict]:
+        """Score *pairs* on the worker; a failure caused by :meth:`stop` raises
+        :class:`RerankerUnavailableError`. Caller must hold ``_call_lock``."""
+        try:
+            return self._backend.rerank(pairs)
+        except RuntimeError as e:
+            if self._stopped:
+                raise RerankerUnavailableError(self._stopped_message()) from e
+            raise
+
+    def _refuse_if_stopped(self) -> None:
+        if self._stopped:
+            raise RerankerUnavailableError(self._stopped_message())
+
+    def _stopped_message(self) -> str:
+        return (f"{Path(self.model_path).name} was unloaded while this request was "
+                "running; retry the request to load it again")
+
+    def stop(self, timeout: float = _STOP_TIMEOUT) -> bool:
+        """Release the worker even while a request is in flight: the worker
+        process is killed, the request running on it and every request queued
+        behind it raise :class:`RerankerUnavailableError`, and once the running
+        request has left, the worker is released. Waits up to *timeout*
+        seconds for that request to leave. Returns whether the worker was
+        released; on False its process is killed but its handles stay open."""
+        self._stopped = True
+        deadline = time.monotonic() + timeout
+        while True:
+            runner = self._backend._runner
+            if runner is not None:
+                runner.kill()
+            if self._call_lock.acquire(timeout=_STOP_POLL):
+                try:
+                    self.close()
+                finally:
+                    self._call_lock.release()
+                return True
+            if time.monotonic() >= deadline:
+                logger.warning(
+                    "reranker %s: a request still held the worker %.0fs after it "
+                    "was killed; the worker's handles were not released",
+                    Path(self.model_path).name, timeout)
+                return False
 
     def _restart(self) -> None:
         """Load the worker again under the engine's load lock when it is not
@@ -354,9 +415,12 @@ class HFReranker:
 
 
 def _busy(model) -> bool:
-    """Whether *model*, the resident one, has a request in flight. Call with
-    _LOCK held."""
-    return model.active_requests > 0 or _RESIDENT_REQUESTS > 0
+    """Whether *model*, the resident one, has a request in flight: an int
+    ``active_requests`` above 0 (anything else, such as a bare test double,
+    reads as idle) or a request counted by :func:`_pin`. Call with _LOCK
+    held."""
+    active = getattr(model, "active_requests", 0)
+    return (isinstance(active, int) and active > 0) or _RESIDENT_REQUESTS > 0
 
 
 def _release_failed(failed, reason: str) -> None:
@@ -568,6 +632,21 @@ def is_loaded() -> bool:
         return _RERANKER is not None
 
 
+def resident_vram_hold() -> tuple[bool, Optional[int]]:
+    """``(loaded, hold)``: whether a reranker (or embedding model) is resident
+    and, when it is, the VRAM bytes a ``reset_reranker(force=False)`` would
+    free: 0 while a request is using it, else its ``vram_hold_bytes`` (None
+    when unknown). Does not load. Takes ``_LOCK``; must not run on the event
+    loop thread."""
+    from localm.inference.embedder import model_vram_hold
+    with _LOCK:
+        current = _RERANKER
+        busy = current is not None and _busy(current)
+    if current is None:
+        return False, None
+    return True, 0 if busy else model_vram_hold(current)
+
+
 def is_resident() -> bool:
     """True while a reranker is resident. Takes no lock, so an exit path can ask
     while a load is running; the answer is a snapshot."""
@@ -586,20 +665,37 @@ def reset_reranker(*, force: bool = True) -> bool:
     """Release the resident reranker and clear the failed-load memory. Returns
     True when a reranker was released; with ``force=False`` a reranker with a
     request in flight is left alone (and nothing is cleared), checked and
-    released in one locked step."""
+    released in one locked step. With ``force=True`` a reranker with a request
+    in flight is detached under ``_LOCK`` and stopped outside it (its
+    ``stop()``): its worker is killed and every request in flight on it
+    raises."""
     global _RERANKER, _RERANKER_KEY, _RESIDENT_REQUESTS
     with _LOCK:
-        if not force and _RERANKER is not None and _busy(_RERANKER):
+        busy = _RERANKER is not None and _busy(_RERANKER)
+        if not force and busy:
             return False
         current = _RERANKER
-        if current is not None:
+        if current is not None and not busy:
+            current._stopped = True
             current.close()
         _RERANKER = None
         _RERANKER_KEY = None
         _RESIDENT_REQUESTS = 0
         _IDLE.notify_all()
         _LOAD_FAILED.clear()
-        return current is not None
+    if current is not None and busy:
+        _stop_busy(current)
+    return current is not None
+
+
+def _stop_busy(model) -> None:
+    """Stop *model*, detached while requests were in flight on it:
+    ``model.stop()`` when it has one, else ``model.close()``."""
+    stop = getattr(model, "stop", None)
+    if callable(stop):
+        stop()
+    else:
+        model.close()
 
 
 def release_for_exit() -> bool:

@@ -445,10 +445,10 @@ class VramSizingMixin:
         Never raises: a correction that cannot be made degrades to None, so the
         caller uses the uncorrected reading. Only acts where
         ``gpu_usage.raw_reading_is_process_scoped()`` is True - Windows plus a
-        ROCm/HIP torch build, and the torch-less processes whose readings come
-        from the resident bundled HIP runtime (the GGUF worker deciding a
-        context grow, answered via ``discover.native_hip_runtime_resident()``).
-        NVIDIA / Linux / Vulkan reads are left unchanged.
+        ROCm/HIP torch build, and the processes whose readings come from the
+        bundled HIP runtime: resident in the process (the GGUF worker deciding a
+        context grow) or loaded by the isolated VRAM probe daemon (the parent
+        sizing a load). NVIDIA / Linux / Vulkan reads are left unchanged.
 
         The device entry carries the PCI bus id from the last completed GPU
         probe (``discover.last_known_gpus``, no new probe), which is what pairs
@@ -930,27 +930,27 @@ class VramSizingMixin:
         from localm.inference.backends.llamacpp import _loader
         if _loader.native_lib_loaded():
             return None
-        import sys
-
         from localm.debuglog import logger as _dbg
-        from localm.discover import gguf_split_devices, renumber_saved_gpu_selection
-        if "pytest" not in sys.modules:
-            renumber_saved_gpu_selection()
+        from localm.discover import gguf_split_devices
         devices, reason = gguf_split_devices(
             gpus=getattr(self, "_sizing_gpus", None) or None, wait_for_inflight=True)
+        from localm.discover import listed_gpu_order
+        order = listed_gpu_order()
+        unordered = (f", not in the listed order {order}" if order else "")
         if not devices:
-            if reason in self._ONE_GPU_REASONS or reason.startswith("no fresh GPU reading"):
+            if reason in self._ONE_GPU_REASONS or (
+                    reason.startswith("no fresh GPU reading") and not order):
                 _dbg.debug("GPU placement: not spread over GPUs (%s)", reason)
             else:
                 _dbg.warning("GPU placement: the GPUs could not be matched to "
                              "llama.cpp's device list (%s); llama.cpp places the "
-                             "layers by its own default", reason)
+                             "layers by its own default%s", reason, unordered)
             return None
         units = self._placement_units()
         if units is None:
             _dbg.warning("GPU placement: the layer sizes of %s could not be read; "
-                         "llama.cpp splits it by free memory",
-                         Path(self.model_path).name)
+                         "llama.cpp splits it by free memory%s",
+                         Path(self.model_path).name, unordered)
             return None
         from localm.inference.backends.llamacpp._gpu_plan import PlanDevice, plan_placement
         plan_devices = [PlanDevice(slot=d["slot"], index=d["index"], name=d["name"],
@@ -1572,7 +1572,18 @@ class VramSizingMixin:
         instance. When no external holder is found,
         :func:`gpu_registry.own_status` reports whether THIS process's own live
         status explains it (e.g. this server has another model resident while
-        loading a second one)."""
+        loading a second one). A native media runtime this process holds loaded
+        (``localm.vram.loaded_native_media_runtimes``) is named before either."""
+        try:
+            from localm.vram import loaded_native_media_runtimes
+            media = loaded_native_media_runtimes()
+            if media:
+                return (f"this localm server's own {' and '.join(media)} "
+                        f"{'is' if len(media) == 1 else 'are'} holding it - "
+                        "Unload all on the Models page stops "
+                        f"{'it' if len(media) == 1 else 'them'} once no job is running.")
+        except Exception:
+            pass  # advisory only - fall through to the other holders
         try:
             from localm.config import load_config
             from localm.discover import last_gpu_reading, resolve_load_gpu_index

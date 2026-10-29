@@ -6,6 +6,7 @@
 "use strict";
 
 // --- ES module imports ---
+import { recordGuiError, setGuiErrorAuth } from "./client-log.js";
 import { t } from "./i18n.js";
 
 export const $ = (id) => document.getElementById(id);
@@ -78,6 +79,7 @@ export const INSTANCE_SCOPED_KEYS = [
   "localm.studioOpen",
   "localm.coderOpen",
   "localm.backendHintDismissed",
+  "localm.recentErrors",
 ];
 
 const INSTANCE_ID_KEY = "localm.instanceId";
@@ -163,6 +165,7 @@ export function authHeaders(extra = {}) {
   }
   return h;
 }
+setGuiErrorAuth(() => authHeaders());
 
 /** True when *headers* is a request header set WE built (authHeaders above) that
  *  carries the OPEN-MODE shell token as its credential.
@@ -220,12 +223,145 @@ export async function whileBusy(btn, label, work) {
   }
 }
 
+/** Show *text* as an error message in *target* (when given) and record it the way an
+ *  error toast is recorded: the Recent errors list and the server log. Nothing is
+ *  recorded when *target* already shows exactly this text. */
+export function showInlineError(target, text, source = "inline") {
+  const msg = String(text ?? "");
+  if (target) {
+    if (target.textContent === msg) return;
+    target.textContent = msg;
+  }
+  recordGuiError(msg, source);
+}
+
+export const TOAST_ERROR_STACK_MAX = 3;
+// Undismissed error toasts kept for the "+N more" count; the oldest go first.
+export const TOAST_ERROR_KEEP_MAX = 50;
+// Undismissed error toasts, oldest first: { text, count }.
+let _toastErrors = [];
+// The element that had focus before focus moved into the error stack.
+let _toastErrorFocusReturn = null;
+// The error toast to announce on the next render (the one just added or raised).
+let _toastErrorAnnounce = null;
+
+/** Show *msg* as a toast. An info toast replaces the previous info toast and
+ *  hides after 3.5 s. An error toast (isError true) stays until dismissed: it
+ *  joins the error stack (the newest TOAST_ERROR_STACK_MAX shown, the rest
+ *  counted in a "+N more" row), an error equal to one already on the stack
+ *  raises that one's count instead, and the error is recorded in the recent
+ *  errors list and the server log. #toast always holds the latest message and
+ *  carries the "error" class for an error; it is shown only for an info toast. */
 export function toast(msg, isError = false) {
   const el = $("toast");
-  el.textContent = msg;
-  el.className = "show" + (isError ? " error" : "");
+  const text = String(msg ?? "");
+  el.textContent = text;
   clearTimeout(el._t);
+  if (isError) {
+    el.className = "error";
+    showErrorToast(text);
+    recordGuiError(text, "toast");
+    return;
+  }
+  el.className = "show";
   el._t = setTimeout(() => (el.className = ""), 3500);
+}
+
+/** Put *text* on the error toast stack (or raise the count of the same error
+ *  already there) without recording it anywhere. */
+export function showErrorToast(text) {
+  const i = _toastErrors.findIndex((e) => e.text === text);
+  if (i >= 0) {
+    const [same] = _toastErrors.splice(i, 1);
+    same.count += 1;
+    _toastErrors.push(same);
+  } else {
+    _toastErrors.push({ text, count: 1 });
+    if (_toastErrors.length > TOAST_ERROR_KEEP_MAX) _toastErrors.shift();
+  }
+  _toastErrorAnnounce = text;
+  renderErrorToasts();
+}
+
+/** Remove the error toast for *text* from the stack. */
+export function dismissErrorToast(text) {
+  _toastErrors = _toastErrors.filter((e) => e.text !== text);
+  renderErrorToasts();
+}
+
+/** Remove every error toast from the stack. */
+export function dismissAllErrorToasts() {
+  _toastErrors = [];
+  renderErrorToasts();
+}
+
+/** The error toasts on the stack, oldest first (a copy). */
+export function errorToasts() {
+  return _toastErrors.map((e) => ({ ...e }));
+}
+
+// Focus the next close button, or, when the stack is empty, the element that had
+// focus before focus moved into the stack.
+function _focusNextErrorClose(box) {
+  const next = box.querySelector(".toast-error-close");
+  if (next) { next.focus(); return; }
+  const back = _toastErrorFocusReturn;
+  _toastErrorFocusReturn = null;
+  if (back && back.isConnected && typeof back.focus === "function") back.focus();
+}
+
+/** Render the error toast stack into #toast-errors. */
+export function renderErrorToasts() {
+  const box = $("toast-errors");
+  if (!box) return;
+  if (!box._focusReturnWatched) {
+    box._focusReturnWatched = true;
+    box.addEventListener("focusin", (e) => {
+      if (e.relatedTarget && !box.contains(e.relatedTarget)) _toastErrorFocusReturn = e.relatedTarget;
+    });
+  }
+  const focused = box.contains(document.activeElement)
+    ? document.activeElement.closest(".toast-error")?.dataset.text : undefined;
+  const announce = _toastErrorAnnounce;
+  _toastErrorAnnounce = null;
+  box.replaceChildren();
+  const shown = _toastErrors.slice(-TOAST_ERROR_STACK_MAX);
+  const hidden = _toastErrors.length - shown.length;
+  if (hidden > 0) {
+    const row = el("div", "toast-error toast-error-more");
+    const more = el("button", "toast-error-more-btn", t("toast.moreErrors", { count: hidden }));
+    more.type = "button";
+    more.onclick = () => { if (typeof window.openRecentErrors === "function") window.openRecentErrors(); };
+    const all = el("button", "toast-error-dismiss-all", t("toast.dismissAll"));
+    all.type = "button";
+    all.onclick = () => dismissAllErrorToasts();
+    row.append(more, all);
+    box.appendChild(row);
+  }
+  for (const entry of shown) {
+    const item = el("div", "toast-error");
+    item.dataset.text = entry.text;
+    if (entry.text === announce) item.setAttribute("role", "alert");
+    const text = el("span", "toast-error-text", entry.text);
+    item.appendChild(text);
+    if (entry.count > 1) item.appendChild(el("span", "toast-error-count", t("toast.repeatCount", { count: entry.count })));
+    const close = el("button", "toast-error-close", "×");
+    close.type = "button";
+    close.setAttribute("aria-label", t("toast.dismissError"));
+    close.title = t("toast.dismissError");
+    close.onclick = () => { dismissErrorToast(entry.text); _focusNextErrorClose(box); };
+    item.appendChild(close);
+    item.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopPropagation();
+      dismissErrorToast(entry.text);
+      _focusNextErrorClose(box);
+    });
+    box.appendChild(item);
+    if (focused === entry.text) close.focus();
+  }
+  box.hidden = _toastErrors.length === 0;
 }
 
 marked.setOptions({ breaks: true });
@@ -663,52 +799,108 @@ function mainHasVisibleContent(main) {
 const _CODE_SPAN = /(```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)|`[^`\n]+`)/;
 const _DISPLAY_LINE = String.raw`(?![ \t]*$)(?![ \t]*(?:[-*]|\d+[.)]|#{1,6})[ \t])[^\n]{0,2000}\n`;
 const _MATH_SPAN = new RegExp([
-  String.raw`(?<![\\($\w])\$\$(?![\s$])[^\n]{0,500}?(?<![\s$])\$\$(?!\$)`,
-  String.raw`(?<=^[ \t]*)\$\$(?:[ \t]*\n|(?=[^\s$]))(?:${_DISPLAY_LINE}){1,40}?(?:[ \t]*|[^\n]{0,2000}[^\s$])\$\$[ \t]*$`,
-  String.raw`\\\[[\s\S]+?\\\]`,
-  String.raw`\\\([\s\S]+?\\\)`,
-  String.raw`(?<![\\$])\$(?!\s)[^$\n]*[^$\s\n]\$(?!\d)`,
+  String.raw`(?<![\\($\w*~"'\[])\$\$(?![\s$])[^\n]{0,500}?(?<![\s$])\$\$(?!\$)`,
+  // The line-start check follows the literal $$ so it runs only at candidate openers. See "protectMath stays linear on long runs of spaces and tabs".
+  String.raw`\$\$(?<=^[ \t]*\$\$)(?:[ \t]*\n|(?=[^\s$]))(?:${_DISPLAY_LINE}){1,40}?(?:[ \t]*|[^\n]{0,2000}[^\s$])\$\$[ \t]*$`,
+  String.raw`\\\[[\s\S]{1,4000}?\\\]`,
+  String.raw`\\\([\s\S]{1,4000}?\\\)`,
+  String.raw`(?<![\\$])\$(?![\s\d)\]},.;:!?])[^$\n]*[^$\s\n(\[{]\$(?!\d)`,
 ].join("|"), "gm");
+
+const _LITERAL_DOLLAR = String.raw`\\\$|\${3,}|\$\$[ \t]+\$\$|(?<=["'(\[*~])\$\$(?=["')\]*~])|(?<!\$)\$(?!\$)`;
+const _MATH_OR_DOLLAR = new RegExp(`${_MATH_SPAN.source}|(?<lit>${_LITERAL_DOLLAR})`, "gm");
 
 /** Swap each math span of *text* that lies outside code for an inert token, so
  *  the markdown pass cannot consume its escapes (`\,`, `\\`, `\{`) or emphasis
- *  marks. Returns `{ text, restore }`; `restore(root)` puts the original source
- *  back into the TEXT NODES of the sanitised, rendered *root*. A token that
- *  ended up in an attribute (a link target, an image source) is left as the
- *  inert token, so math source never reaches an attribute after sanitising.
+ *  marks. Returns `{ text, restore, finish }`; `restore(root)` puts the original
+ *  source back into the TEXT NODES of the sanitised, rendered *root*. A math
+ *  token that ended up in an attribute (a link target, an image source) is left
+ *  as the inert token, so math source never reaches an attribute after
+ *  sanitising.
  *
  *  `$$` display math is protected in two shapes only, so a price marker such as
- *  `($$)`, `$$$$` or `Price: $$ for A` never pairs across the text between two
- *  of them:
- *   - one line: `$$` not preceded by `(`, a word character or `$`, followed by a
+ *  `($$)`, `**$$**`, `$$$$` or `Price: $$ for A` never pairs across the text between
+ *  two of them:
+ *   - one line: `$$` not preceded by `(`, `*`, `~`, a quote, `[`, a word character or `$`, followed by a
  *     character that is neither whitespace nor `$`, closed on the same line (at
  *     most 500 characters later) by `$$` that follows neither whitespace nor `$`
  *     and is not followed by `$`;
  *   - several lines: `$$` opens a line (alone or followed at once by TeX) and a
  *     later line (at most 40 lines on) ends with `$$`; no line in between may be
  *     blank or start a markdown list item (`-`, `*`, `1.`) or heading (`#`).
- *  Any other `$$` is left to the markdown pass and KaTeX's own auto-render. */
+ *  Any other pair of `$$` is left to the markdown pass and KaTeX's own auto-render.
+ *
+ *  `\[...\]` and `\(...\)` spans are protected up to 4000 characters long.
+ *
+ *  Inline `$...$` is math only when the opening `$` is followed by a character
+ *  that is neither whitespace, a digit nor closing punctuation and the closing
+ *  `$` follows a character that is neither whitespace nor an opening bracket and
+ *  is not followed by a digit. Every other dollar sign outside code (a lone `$`,
+ *  a run of three or more, an empty `$$ $$`, a `$$` standing alone between
+ *  brackets, quotes or `*`/`~` marks, an escaped `\$`) is swapped for an inert
+ *  token so KaTeX's auto-render never pairs it. A leftover `$$ ... $$` pair that
+ *  encloses such a dollar sign is prose, so its `$$` are swapped as well.
+ *  `restore(root)` puts the math source back and the literal `$` into every
+ *  attribute, and runs before the auto-render pass; `finish(root)` puts the
+ *  literal `$` back into the text nodes (an escaped `\$` stays `\$` inside
+ *  `pre` and `code`) and runs after it. */
 export function protectMath(text) {
   const spans = [];
   const tag = "ZZLMATH" + Math.random().toString(36).slice(2, 8);
+  const dollar = `${tag}DZZ`;
+  const escaped = `${tag}EZZ`;
+  const dollarizePricePairs = (part) => {
+    let out = "";
+    let from = 0;
+    let open = part.indexOf("$$");
+    while (open >= 0) {
+      const close = part.indexOf("$$", open + 2);
+      if (close < 0) break;
+      const gap = part.slice(open + 2, close);
+      if (gap.includes(dollar) || gap.includes(escaped)) {
+        out += part.slice(from, open) + part.slice(open, close + 2).replace(/\$/g, dollar);
+        from = close + 2;
+        open = part.indexOf("$$", from);
+      } else {
+        open = close;
+      }
+    }
+    return out + part.slice(from);
+  };
   const protectedText = String(text || "").split(_CODE_SPAN).map((part, i) =>
-    i % 2 === 1 ? part : part.replace(_MATH_SPAN, (src) => {
+    i % 2 === 1 ? part : dollarizePricePairs(part.replace(_MATH_OR_DOLLAR, (src, ...rest) => {
+      if (rest[rest.length - 1].lit !== undefined) return src === "\\$" ? escaped : src.replace(/\$/g, dollar);
       spans.push(src);
       return `${tag}${spans.length - 1}ZZ`;
-    })).join("");
-  const restore = (root) => {
-    if (!spans.length) return;
-    const re = new RegExp(`${tag}(\\d+)ZZ`, "g");
+    }))).join("");
+  const rewrite = (root, from, to) => {
     const walker = document.createTreeWalker(root, 4);
     const nodes = [];
     for (let n = walker.nextNode(); n; n = walker.nextNode()) nodes.push(n);
     for (const node of nodes) {
-      if (node.nodeValue.includes(tag)) {
-        node.nodeValue = node.nodeValue.replace(re, (_m, i) => spans[Number(i)]);
+      if (node.nodeValue.includes(tag)) node.nodeValue = node.nodeValue.replace(from, to);
+    }
+  };
+  const literalRe = new RegExp(`${dollar}|${escaped}`, "g");
+  const restore = (root) => {
+    if (spans.length) rewrite(root, new RegExp(`${tag}(\\d+)ZZ`, "g"), (_m, i) => spans[Number(i)]);
+    for (const el of root.querySelectorAll("*")) {
+      for (const attr of el.attributes) {
+        if (attr.value.includes(tag)) attr.value = attr.value.replace(literalRe, () => "$");
       }
     }
   };
-  return { text: protectedText, restore };
+  const finish = (root) => {
+    const walker = document.createTreeWalker(root, 4);
+    const nodes = [];
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) nodes.push(n);
+    for (const node of nodes) {
+      if (!node.nodeValue.includes(tag)) continue;
+      const inCode = !!(node.parentElement && node.parentElement.closest("pre, code"));
+      node.nodeValue = node.nodeValue.replace(literalRe, (m) => (m === escaped && inCode ? "\\$" : "$"));
+    }
+  };
+  return { text: protectedText, restore, finish };
 }
 
 /** Render one model reply into *target*.
@@ -731,6 +923,7 @@ export function renderMarkdown(target, text, opts = {}) {
   // user toggle stick. Default: open while thinking, collapse once done - until
   // the user clicks it (data-userset), after which their choice is left alone.
   let det = target.querySelector("details.think-block");
+  let thinkFinish = null;
   if (think) {
     if (!det) {
       det = document.createElement("details");
@@ -746,6 +939,7 @@ export function renderMarkdown(target, text, opts = {}) {
     const thinkBody = det.querySelector("div");
     thinkBody.innerHTML = DOMPurify.sanitize(marked.parse(thinkMath.text));
     thinkMath.restore(thinkBody);
+    thinkFinish = () => thinkMath.finish(thinkBody);
     if (!det.dataset.userset) det.open = open;
   } else if (det) {
     det.remove();
@@ -796,6 +990,8 @@ export function renderMarkdown(target, text, opts = {}) {
       });
     } catch { /* malformed TeX mid-stream - final render fixes it */ }
   }
+  restMath.finish(main);
+  if (thinkFinish) thinkFinish();
   target.querySelectorAll("pre code").forEach((block) => {
     // Record the source language BEFORE hljs rewrites the class list, so the
     // artifact detector still knows this block was ```html / ```svg.

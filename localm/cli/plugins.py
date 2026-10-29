@@ -8,6 +8,7 @@ from ..console import show_url
 from ._core import console, main
 from .errors import run_or_die
 from ..bindhost import self_connect_host, url_host
+from ..setup_spec import RECOMMENDED_PLUGINS as _SETUP_DEFAULTS
 
 
 # ------------------------------------------------------------------ #
@@ -153,10 +154,8 @@ def plugin_install_engine(target, force, with_deps):
 
 
 
-# Recommended everyday set for a non-interactive install: the surfaces that work
-# without a separate external service. image/music/video need a ComfyUI server,
-# voice needs the [voice] extra + a model, mcp is for external clients - all opt-in.
-_SETUP_DEFAULTS = ("coder", "rag", "web", "tts")
+# Answers to the interactive picker that install nothing.
+_SKIP_ANSWERS = ("none", "-")
 
 
 
@@ -217,7 +216,11 @@ def _parse_plugin_selection(raw, available):
 @click.option("--with-deps/--no-deps", "with_deps", default=None,
               help="Install pip extras for the chosen plugins (default: ask "
                    "interactively, else the auto_install_plugin_deps setting).")
-def plugin_setup(plugins_csv, install_all, install_defaults, with_deps=None):
+@click.option("--remember-deps", "remember_deps", is_flag=True, hidden=True,
+              help="Save --with-deps/--no-deps as the auto_install_plugin_deps "
+                   "setting (used by the graphical installer).")
+def plugin_setup(plugins_csv, install_all, install_defaults, with_deps=None,
+                 remember_deps=False):
     """Choose which first-party plugins to install.
 
     Out of the box only chat is active; this turns on the features you want
@@ -232,7 +235,9 @@ def plugin_setup(plugins_csv, install_all, install_defaults, with_deps=None):
     from localm import cli as _cli
     mgr = _cli._engine_manager()
     installed = _installed_plugin_names(mgr)
-    available = [e for e in catalog.CATALOG if not e.preinstalled and e.offered]
+    from localm import setup_spec
+    offered = {n for n, _ in setup_spec.setup_plugins()}
+    available = [e for e in catalog.CATALOG if e.name in offered]
     interactive = False
 
     if install_all:
@@ -271,22 +276,25 @@ def plugin_setup(plugins_csv, install_all, install_defaults, with_deps=None):
                      if e.extra else "")
             console.print(f"  [bold]{i:>2}.[/bold] {escape(e.name):<7} "
                           f"{escape(e.description)}{mark}{extra}")
+        defaults = ",".join(_SETUP_DEFAULTS)
         console.print(
             "\nEnter numbers or names (comma-separated), a range like 1-5, "
-            "'all', or blank to skip.")
+            "'all', or 'none' to skip. Press Enter for the recommended set "
+            f"({escape(defaults)}).")
         console.print(
             "[dim]This ADDS the features you pick; anything already installed "
             "stays. Remove one later with: localm plugin uninstall <name>.[/dim]")
-        # Re-ask on an entry that matched nothing (e.g. junk like "ewew"), so we
-        # never silently leave zero plugins after the user clearly tried to pick
-        # something. A blank entry is a deliberate "skip" and breaks the loop.
+        # Re-ask on an entry that matched nothing; "none" or "-" skips.
         while True:
-            raw = click.prompt("Install", default="", show_default=False)
+            raw = click.prompt("Install", default=defaults)
+            if raw.strip().lower() in _SKIP_ANSWERS:
+                chosen = []
+                break
             chosen = _parse_plugin_selection(raw, available)
             if raw.strip() and not chosen:
                 console.print("[yellow]Nothing recognised in that entry. Use the "
                               "numbers/names listed above, a range like 1-5, or "
-                              "leave blank to skip.[/yellow]")
+                              "'none' to skip.[/yellow]")
                 continue
             break
 
@@ -309,6 +317,8 @@ def plugin_setup(plugins_csv, install_all, install_defaults, with_deps=None):
     # remember the answer as the auto_install_plugin_deps setting; otherwise the
     # --with-deps/--no-deps flag or the existing setting decides.
     want = with_deps
+    if want is not None and remember_deps:
+        _set_auto_deps(want)
     if want is None and interactive:
         need_any = any(mgr.plugin_missing_deps(n) for n in chosen)
         if need_any:

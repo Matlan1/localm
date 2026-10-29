@@ -136,6 +136,39 @@ class InfraError(PipelineError):
     (cooldown retry, never logged to the issue backlog) rather than FAIL."""
 
 
+_SCRATCH_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+def main_checkout_root(checkout: Path | None = None) -> Path:
+    """The main checkout that *checkout* (a checkout's top level, default REPO) belongs
+    to: the parent of git's common directory, the same directory `git rev-parse
+    --git-common-dir` names. Returns *checkout* itself when it holds no `.git` file (the
+    main checkout, or no git checkout at all). Raises InfraError when its `.git` file is
+    not a gitdir link."""
+    checkout = REPO if checkout is None else checkout
+    dot_git = checkout / ".git"
+    if not dot_git.is_file():
+        return checkout
+    text = dot_git.read_text(encoding="utf-8").strip()
+    if not text.startswith("gitdir:"):
+        raise InfraError(f"{dot_git} is not a git worktree link: {text[:200]!r}")
+    gitdir = (checkout / text[len("gitdir:"):].strip()).resolve()
+    commondir = gitdir / "commondir"
+    common = gitdir
+    if commondir.is_file():
+        common = (gitdir / commondir.read_text(encoding="utf-8").strip()).resolve()
+    return common.parent
+
+
+def pipeline_scratch_dir(key: str, checkout: Path | None = None) -> Path:
+    """`<main checkout>/scratch/pin-pipeline/<key>`: the scratch directory of one pipeline
+    job, inside the gitignored `scratch/` of the main checkout *checkout* (default REPO)
+    belongs to. Raises ValueError when *key* is not a single plain name."""
+    if not _SCRATCH_KEY.fullmatch(key):
+        raise ValueError(f"not a plain scratch key: {key!r}")
+    return main_checkout_root(checkout) / "scratch" / "pin-pipeline" / key
+
+
 def gpu_lease_script() -> Path:
     """The GPU lease script's path, verified to exist. Raises PipelineError
     rather than running without lease coordination."""
@@ -326,7 +359,7 @@ def _comfyui_scratch_workdir() -> Path:
     into it, smoke launches and tests that SAME install), and its cache/
     subdir surviving between pipeline RUNS is what avoids re-downloading
     several GB of torch/ComfyUI wheels every single time."""
-    return REPO.parent / f"{REPO.name}-pin-pipeline-comfy-scratch"
+    return pipeline_scratch_dir("comfy")
 
 
 def run_comfyui_confirm(tag: str, commit: str, receipt_path: Path) -> int:
@@ -403,9 +436,14 @@ def check_free_space(path: Path, minimum: int = MIN_FREE_BYTES) -> None:
 
 
 def worktree_temp_dir(worktree: Path) -> Path:
-    """Scratch directory beside the pipeline worktree (same drive) that every test and
-    npm process started for it uses as its temp and cache location."""
-    return worktree.parent / f"{worktree.name}-tmp"
+    """`<main checkout>/scratch/pin-pipeline/worktree-tmp`: the temp and cache location of
+    every test and npm process started for the pipeline worktree *worktree*, whether or not
+    it exists yet. A path at `<checkout>/.claude/worktrees/<name>` maps to the main checkout
+    of `<checkout>`; any other path maps through main_checkout_root()."""
+    owner = worktree
+    if worktree.parent.name == "worktrees" and worktree.parent.parent.name == ".claude":
+        owner = worktree.parent.parent.parent
+    return pipeline_scratch_dir("worktree-tmp", owner)
 
 
 def _worktree_env(worktree: Path) -> dict:
@@ -758,9 +796,10 @@ def sync_main_checkout(repo: Path = REPO) -> None:
                          f"{result.stderr}")
 
 
-def pipeline_worktree_path(repo: Path = REPO) -> Path:
-    """Where the dedicated pipeline worktree for *repo* lives (it may not exist yet)."""
-    return repo.parent / f"{repo.name}-pin-pipeline-worktree"
+def pipeline_worktree_path(repo: Path | None = None) -> Path:
+    """`<main checkout>/.claude/worktrees/pin-pipeline`: where the dedicated pipeline
+    worktree for *repo* (default REPO) lives (it may not exist yet)."""
+    return main_checkout_root(repo) / ".claude" / "worktrees" / "pin-pipeline"
 
 
 def ensure_pipeline_worktree(repo: Path = REPO) -> Path:
@@ -770,8 +809,8 @@ def ensure_pipeline_worktree(repo: Path = REPO) -> Path:
     _verify_main_checkout(repo)
     worktree_path = pipeline_worktree_path(repo)
     existing = _run_git(["worktree", "list", "--porcelain"], cwd=repo).stdout
-    registered = (str(worktree_path) in existing
-                  or str(worktree_path).replace("\\", "/") in existing)
+    registered = any(Path(line[len("worktree "):].strip()) == worktree_path
+                     for line in existing.splitlines() if line.startswith("worktree "))
     if not registered or not worktree_path.is_dir():
         _run_git(["fetch", "origin"], cwd=repo, check=False)
         # --force re-attaches this one path when git still lists it but the folder is gone.

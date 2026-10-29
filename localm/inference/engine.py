@@ -625,6 +625,15 @@ class Engine:
         return dict(sizing) if isinstance(sizing, dict) else None
 
     @property
+    def vram_load_bytes(self) -> Optional[int]:
+        """Free VRAM the last load took, measured from trusted device-global
+        readings before and after it (the backend's ``vram_load_bytes``), or
+        None for a backend that does not measure it, when the readings were
+        not trusted, or before the measurement finished."""
+        held = getattr(self._backend, "vram_load_bytes", None)
+        return held if type(held) is int and held > 0 else None
+
+    @property
     def mmap_state(self) -> Optional[dict]:
         """What the last load did with memory-mapping, or None when the backend
         did not report it: ``use_mmap`` (the setting: auto, on or off), ``mmap``

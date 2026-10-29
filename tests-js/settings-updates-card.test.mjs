@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// The Settings "Updates" card (S1): app update + runtime update + the two
-// update-behavior toggles, merged into ONE card that used to be three separate
-// panels (two of them both headed "Updates"). The merge has two INDEPENDENT
-// visibility gates that must not collapse into each other:
-//   #app-update-block   proxy-gated - hidden until capabilities.update_available
-//   the rest of the card (runtime-update block, the toggles) - ALWAYS shown
-// These tests pin both directions, plus the Ctrl+S save-target hazard the merge
-// introduced (multiple .btn-primary buttons now share one card).
+// The Settings "Updates" card: app update (with the two update-behavior toggles
+// inside it, beside Check for updates / Update now), app launcher and runtime
+// update in ONE card. Two INDEPENDENT visibility gates:
+//   #app-update-block (and the toggles in it)  proxy-gated - hidden until
+//                                              capabilities.update_available
+//   the rest of the card (runtime-update, app launcher)  ALWAYS shown
+// These tests pin both directions, the toggles' placement and save path, plus
+// the Ctrl+S save-target hazard (several .btn-primary buttons share one card).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -64,25 +64,47 @@ async function setup({ updateAvailable = false } = {}) {
   return { window, doc: window.document, patches };
 }
 
-test("capabilities-absent: app-update is hidden, runtime-update and the toggles are not", async () => {
+test("capabilities-absent: app-update (with its toggles) is hidden, runtime-update is not", async () => {
   const { doc } = await setup({ updateAvailable: false });
 
   assert.equal(doc.getElementById("sec-updates").hidden, false,
     "the merged card itself is never hidden");
-  assert.equal(doc.getElementById("app-update-block").hidden, true,
+  const appBlock = doc.getElementById("app-update-block");
+  assert.equal(appBlock.hidden, true,
     "app-update stays gated off when the proxy has no update to offer");
+  assert.ok(appBlock.contains(doc.getElementById("update-toggles-block")),
+    "the toggles are gated with the App update block they live in");
 
   // Always shown, regardless of update_available.
   assert.equal(doc.getElementById("runtime-update-check").closest(".update-subsection").hidden,
     false, "the runtime-update block is never gated");
   assert.equal(doc.getElementById("app-launcher-block").hidden, false,
     "App launcher is local disk state too - same rule as runtime-update");
-  assert.equal(doc.getElementById("update-toggles-block").hidden, false,
-    "the update-behavior toggles render regardless of update_available");
-  assert.ok(doc.querySelector('#settings-sec-core-Updates [data-field-key="update_allow_prerelease"]'),
-    "the prerelease toggle is actually rendered, not just the empty wrapper");
-  assert.ok(doc.querySelector('#settings-sec-core-Updates [data-field-key="update_ignore_net_policy"]'),
-    "the net-policy toggle is actually rendered too");
+});
+
+test("the update-behavior toggles live in the App update block beside Check for updates", async () => {
+  const { doc } = await setup({ updateAvailable: true });
+
+  const appBlock = doc.getElementById("app-update-block");
+  const toggles = doc.getElementById("update-toggles-block");
+  assert.ok(appBlock.contains(toggles), "the toggles block is inside #app-update-block");
+  assert.ok(appBlock.contains(doc.getElementById("update-check")));
+  assert.ok(appBlock.contains(doc.getElementById("update-apply")));
+  assert.equal(toggles.hidden, false, "the toggles render once the schema resolves");
+  for (const key of ["update_allow_prerelease", "update_ignore_net_policy"]) {
+    const field = doc.querySelector(`[data-field-key="${key}"]`);
+    assert.ok(field, `${key} is rendered`);
+    assert.ok(appBlock.contains(field), `${key} renders inside the App update block`);
+    assert.equal(doc.querySelectorAll(`[data-field-key="${key}"]`).length, 1,
+      `${key} renders exactly once`);
+  }
+  assert.equal(doc.getElementById("settings-sec-core-Updates").closest(".update-subsection"),
+    appBlock, "no separate Update behavior sub-block remains");
+  assert.equal(doc.querySelectorAll("#sec-updates .update-subsection").length,
+    doc.querySelectorAll("#sec-updates > .update-subsection").length,
+    "no sub-block is nested inside another");
+  assert.doesNotMatch(doc.getElementById("sec-updates").textContent, /Update behavior/,
+    "the old Update behavior heading is gone");
 });
 
 test("capabilities-present: app-update, runtime-update and the toggles are all shown", async () => {
@@ -98,20 +120,26 @@ test("capabilities-present: app-update, runtime-update and the toggles are all s
   assert.equal(doc.getElementById("update-toggles-block").hidden, false);
 });
 
-test("the toggles save through the merged card's own Save button", async () => {
-  const { doc, patches } = await setup({ updateAvailable: false });
+test("the toggles save the same keys through the App update block's Save button", async () => {
+  const { doc, patches } = await setup({ updateAvailable: true });
 
-  const toggle = doc.querySelector(
+  const save = doc.getElementById("update-toggles-save");
+  assert.ok(doc.getElementById("app-update-block").contains(save),
+    "the Save button sits in the App update block");
+  const prerelease = doc.querySelector(
     '#settings-sec-core-Updates [data-field-key="update_allow_prerelease"] input');
-  assert.ok(toggle, "the prerelease checkbox exists");
-  toggle.checked = true;
+  const netOff = doc.querySelector(
+    '#settings-sec-core-Updates [data-field-key="update_ignore_net_policy"] input');
+  assert.ok(prerelease && netOff, "both checkboxes exist");
+  prerelease.checked = true;
 
-  doc.getElementById("update-toggles-save").click();
+  save.click();
   await drain();
 
   assert.equal(patches.length, 1, "exactly one PATCH was sent");
-  assert.equal(patches[0].update_allow_prerelease, true,
-    "the toggle's value reached the PATCH body");
+  assert.deepEqual(patches[0],
+    { update_allow_prerelease: true, update_ignore_net_policy: false },
+    "both settings keys, and only those, reach the PATCH body");
 });
 
 test("Ctrl+S from inside the merged card saves the toggles, never the pending app update", async () => {

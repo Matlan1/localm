@@ -487,6 +487,35 @@ def _hf_blob_lock_is_free(base_dir: Path, rel: str) -> bool:
         return False
 
 
+def _lock_file_is_held(lock_path: Path) -> bool:
+    """True only when someone holds the file lock at *lock_path* right now, in
+    this or another process. False when it is free or the probe cannot tell."""
+    try:
+        from filelock import FileLock, Timeout
+        lock = FileLock(str(lock_path), timeout=0)
+        try:
+            lock.acquire(timeout=0)
+        except Timeout:
+            return True
+        lock.release()
+        return False
+    except Exception as e:
+        logger.debug("cannot probe the download lock %s: %s", lock_path, e)
+        return False
+
+
+def _hf_blob_lock_is_held(base_dir: Path, rel: str) -> bool:
+    """True only when a download of *rel* under *base_dir* holds
+    huggingface_hub's per-file download lock right now. False when the lock is
+    free or the probe cannot tell."""
+    try:
+        from huggingface_hub._local_folder import get_local_download_paths
+        return _lock_file_is_held(get_local_download_paths(Path(base_dir), rel).lock_path)
+    except Exception as e:
+        logger.debug("cannot compute the download lock path for %s: %s", rel, e)
+        return False
+
+
 _REPO_PATH_PART_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._+-]*\Z")
 
 
@@ -2565,6 +2594,15 @@ def _pull_gguf_file(
                       + (f"@[bold]{escape(revision.ref)}[/bold]" if revision else "")
                       + f" / [bold]{escape(filename)}[/bold]")
 
+    running = next((_remote(p) for p in missing
+                    if _hf_blob_lock_is_held(stage_dir, _remote(p))), None)
+    if running is not None:
+        console.print(
+            f"[red]Download already in progress:[/red] {escape(running)} of "
+            f"{escape(repo_id)} is being downloaded by another pull. Wait for it "
+            "to finish.")
+        return False
+
     from . import pending_pulls
     pending_pulls.note_source(source="hf-file", repo=repo_id,
                               revision=revision.ref if revision else None,
@@ -3293,6 +3331,9 @@ def _pull_hf_snapshot_locked(
             and not _holds_other_revision(dest, repo_id, revision)
             and (adopted or _snapshot_is_complete(dest, repo_siblings, repo_id))):
         console.print(f"[yellow]Already downloaded:[/yellow] {escape(model_name)}")
+        from . import pending_pulls
+        pending_pulls.note_snapshot_complete(dest, repo_id,
+                                             revision.ref if revision else None)
         registered = _mm._register_with_dedup(
             model_name, dest, f"hf:{repo_id}",
             model_type=_resolve_snapshot_type(dest, model_type),

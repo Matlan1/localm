@@ -1492,6 +1492,7 @@ export const I18N_EN = {
   "models.unloadAll.confirmLabel": "Unload all anyway",
   "models.unloadAll.confirmTitle": "Some models are in use",
   "models.unloadAll.failedException": "Unload failed: {message}",
+  "models.unloadAll.mediaStopFailed": "Could not stop the {names}; see the server log",
   "models.unloadAll.nothingLoaded": "Nothing was loaded",
   "models.unloadAll.someStillGenerating":
     "Unloaded {n} model(s); {skipped} still generating - try again once finished",
@@ -2244,11 +2245,15 @@ export const I18N_EN = {
   "settings.perf.mainGpuHelp": "Which device the model loads onto. Saves immediately; applies on the next model load.",
   "settings.perf.splitLabel": "Split across GPUs",
   "settings.perf.splitHelp":
-    "Check one GPU to load a model on that GPU only, or 2 or more to spread a model too large for one card over them (overrides Main GPU); leave all unchecked for automatic placement. Each card's share follows its free VRAM at load time, unless pinned below. Saves immediately; applies on the next model load.",
+    "Check one GPU to load a model on that GPU only, or 2 or more to spread a model too large for one card over them (overrides Main GPU); leave all unchecked for automatic placement. The checked cards are filled in the order you check them: the first one gets the first layers. Each card's share follows its free VRAM at load time, unless pinned below. Saves immediately; applies on the next model load.",
+  "settings.perf.splitOrder": "Load order: {order}",
+  "settings.perf.splitOrderGpu": "GPU {index}",
   "settings.perf.singleGpuHint": "One GPU chosen: a model loads on GPU {index} ({name}) only.",
   "settings.perf.singleGpuToast": "Saved - a model loads on GPU {index} only, from the next model load",
   "settings.perf.ratioHint":
     "Optional relative weight per checked device (e.g. 3 and 1 gives the first card three times the second's share). Leave every weight blank to keep the automatic free-VRAM sizing above.",
+  "settings.perf.numberingUnknownHint":
+    "GPU numbers are not available right now: the GPU check through torch did not answer, and nvidia-smi numbers the cards its own way. The GPU choices are locked until torch answers.",
   "settings.perf.indexSpaceHint":
     "Device numbers are the installed GPU backend's own order (what a model load uses); other tools may number GPUs differently.",
   "settings.perf.splitPartialWarningToast":
@@ -2366,6 +2371,20 @@ export const I18N_EN = {
   "settings.instances.stoppedToast": "Stopped {name}",
   "settings.instances.stopFailed": "Could not stop: {message}",
 
+  // ---- Settings > Recent errors, and the error toast ----
+  "settings.recentErrors.title": "Recent errors",
+  "settings.recentErrors.help": "The last five error messages this page showed, newest first. In privacy mode the list is kept only until the page is reloaded.",
+  "settings.recentErrors.empty": "No errors so far.",
+  "settings.recentErrors.clear": "Clear",
+  "settings.recentErrors.copy": "Copy",
+  "settings.recentErrors.copied": "Copied",
+  "settings.recentErrors.report": "Report this error",
+  "settings.recentErrors.reportDescription": "The GUI showed this error (page {page}, {time}).",
+  "toast.dismissError": "Dismiss this error",
+  "toast.dismissAll": "Dismiss all",
+  "toast.moreErrors": "+{count} more",
+  "toast.repeatCount": "(x{count})",
+
   // ---- Settings > Report a bug ----
   "settings.bug.title": "Report a bug",
   "settings.bug.help":
@@ -2424,8 +2443,9 @@ export const I18N_EN = {
   "settings.update.checking": "Checking for updates…",
   "settings.update.checkButton": "Check for updates",
   "settings.update.applyButton": "Update now",
-  "settings.update.toggleHeading": "Update behavior",
-  "settings.update.saveButton": "Save Updates",
+  "settings.update.saveButton": "Save update settings",
+  "settings.update.notesShowAll": "Show all",
+  "settings.update.notesShowLess": "Show less",
   "settings.update.checkFailed": "Could not check: {message}",
   "settings.update.notConfigured": "The updater is not configured.",
   "settings.update.available": "Update available: {latest} (you have {current}).",
@@ -2440,6 +2460,44 @@ export const I18N_EN = {
   "settings.update.failedRolledBack": "Update failed (rolled back): {error}",
   "settings.update.nothingToApply": "Nothing to apply.",
   "settings.update.applyFailed": "Update failed: {message}",
+  "settings.update.versionsButton": "Choose a version",
+  "settings.update.versionLabel": "Version to install",
+  "settings.update.installVersionButton": "Install this version",
+  "settings.update.versionsLoading": "Loading the releases…",
+  "settings.update.versionsFailed": "Could not list the releases: {message}",
+  "settings.update.versionsNone": "No releases are published yet. You are on {current}.",
+  "settings.update.versionsCurrent": "You are on {current}. Pick a release to install, older or newer.",
+  "settings.update.versionPublished": "Published {date}",
+  "settings.update.versionNotInstallable": "Not installable: {reason}",
+  "settings.update.direction.newer": "newer",
+  "settings.update.direction.older": "older",
+  "settings.update.direction.same": "installed",
+  "settings.update.direction.unknown": "unknown order",
+  "settings.update.prerelease": "prerelease",
+  "settings.update.installTitle": "Install {version}?",
+  "settings.update.installBody":
+    "This downloads {version}, replaces the running LocaLM code with it (you have {current}), then restarts the server.",
+  "settings.update.installConfirm": "Install",
+  "settings.update.reinstallTitle": "Reinstall {version}?",
+  "settings.update.reinstallBody":
+    "{version} is the version you are running. This downloads it again, replaces the running code with it, then restarts the server.",
+  "settings.update.reinstallConfirm": "Reinstall",
+  "settings.update.downgradeTitle": "Downgrade to {version}?",
+  "settings.update.downgradeBody":
+    "{version} is older than the {current} you are running. Problems fixed since then come back. Your settings, model registry, coder sessions, memory and plugins are first copied to updates/data-before-<version>-<date>-<time>-<id> in your data folder (to restore them, copy those files back while LocaLM is stopped), and Roll back returns you to {current}.",
+  "settings.update.downgradeConfirm": "Downgrade",
+  "settings.update.installing": "Downloading and checking {version}…",
+  "settings.update.unverifiedStatus": "The signature of {version} does not verify: {reason}",
+  "settings.update.unverifiedTitle": "Install {version} without a verified signature?",
+  "settings.update.unverifiedBody":
+    "Its signature does not verify: {reason}. Install it only if you trust where it came from.",
+  "settings.update.unverifiedConfirm": "Install anyway",
+  "settings.update.notInstalled": "Not installed.",
+  "settings.update.installedRestarting": "Installed {version}. Restarting…",
+  "settings.update.dataBackup": "Your data from before the downgrade was copied to {path}; copy the files back into the data folder while LocaLM is stopped to restore them.",
+  "settings.update.runtimeNote": "Native runtime: {note}.",
+  "settings.update.componentsNote": "Components: {note}.",
+  "settings.update.keptForUpdates": "Kept from the version you had, so this one can update again: {parts}.",
 
   // ---- Settings > Updates > Roll back ----
   "settings.rollback.subHead": "Roll back",
@@ -3021,9 +3079,16 @@ export const I18N_EN = {
   "browser.setup.downloadFailed": "The download did not finish: {detail}",
   "browser.setup.downloading": "Downloading the browser...",
   "browser.setup.heading": "Browser setup",
+  "browser.setup.openPlugins": "Open the Plugins page",
   "browser.setup.playwrightMissing":
     "The browser automation extra is not installed. Install it with:  " +
     "pip install \"localm[browser]\"",
+  "browser.setup.pluginDisabled":
+    "The browser plugin is installed but turned off. Turn it on on the " +
+    "Plugins page to let the model drive a web browser.",
+  "browser.setup.pluginMissing":
+    "The browser plugin is not installed. Install it on the Plugins page to " +
+    "let the model drive a web browser.",
   "browser.setup.readyBundled": "The bundled browser is downloaded and ready.",
   "browser.setup.readySystem": "localm will use {browser}, found on this computer.",
   "browser.setup.switchedToBundled": "Switched to the bundled browser.",

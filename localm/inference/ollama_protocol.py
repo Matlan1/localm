@@ -122,6 +122,13 @@ def unknown_fields(req: BaseModel) -> list[str]:
 _ZERO_DURATION = re.compile(r"^\s*0+(\.0+)?\s*(ns|us|µs|ms|s|m|h)?\s*$")
 
 
+def unload_forced(req: BaseModel) -> bool:
+    """Whether a load/unload request carries the localm extension field
+    ``"force": true``, which lets a ``keep_alive: 0`` unload stop a model's
+    requests in flight."""
+    return (req.model_extra or {}).get("force") is True
+
+
 def keep_alive_is_zero(value: Any) -> bool:
     """Whether a ``keep_alive`` value asks for an immediate unload."""
     if isinstance(value, bool) or value is None:

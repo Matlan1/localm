@@ -654,6 +654,10 @@ class MtmdContext:
     # Number of media chunks this context has run through the projector.
     encode_count: int = 0
 
+    # Minimum image tokens the live context was built with; None when none was
+    # applied. retry_on_cpu rebuilds with it.
+    _min_image_tokens: Optional[int] = None
+
     # Whether the projector takes images and audio. __init__ always sets them.
     supports_vision: bool = True
     supports_audio: bool = False
@@ -668,7 +672,12 @@ class MtmdContext:
     _n_embd_inp: int = 0
 
     def __init__(self, mmproj_path: str, model_ptr: int,
-                 gpu_index: int = 0) -> None:
+                 gpu_index: int = 0, use_gpu: bool = True) -> None:
+        """Load the projector at *mmproj_path* for the text model *model_ptr*.
+
+        *gpu_index* is the text model's resolved primary device. *use_gpu* False
+        opens the projector on the CPU only, with no GPU attempt and no warning.
+        Raises MtmdUnavailable when no context can be created."""
         self._m = _load_lib()
         self._mmproj_path = mmproj_path
         self._model_ptr = model_ptr
@@ -689,10 +698,10 @@ class MtmdContext:
                 "mtmd: ignoring an unusable projector device index %r; the vision "
                 "projector will use the default GPU device", gpu_index)
             self._gpu_index = 0
-        self.on_gpu = True
+        self.on_gpu = bool(use_gpu)
         _cpu_requested = bool(os.environ.get("LOCALM_MTMD_CPU"))
-        self._ctx = self._open(use_gpu=True)
-        if not self._ctx:
+        self._ctx = self._open(use_gpu=self.on_gpu)
+        if not self._ctx and self.on_gpu:
             # A GPU-side refusal at INIT (the backend cannot take this projector
             # at all) degrades to CPU rather than losing vision, and is logged,
             # only after the GPU path was actually tried. _open() returns None
@@ -844,9 +853,11 @@ class MtmdContext:
         except Exception:   # noqa: BLE001 - freeing a wedged context must not mask the rebuild
             pass
         self._ctx = None
+        self._min_image_tokens = None
         self.clear_embeddings()
         self._ctx = self._open(use_gpu=self.on_gpu, min_image_tokens=tokens)
         if self._ctx:
+            self._min_image_tokens = tokens
             return True
         self._ctx = self._open(use_gpu=self.on_gpu)
         if not self._ctx:
@@ -876,7 +887,7 @@ class MtmdContext:
         self._ctx = None
         self.on_gpu = False
         self.clear_embeddings()
-        self._ctx = self._open(use_gpu=False)
+        self._ctx = self._open(use_gpu=False, min_image_tokens=self._min_image_tokens)
         return bool(self._ctx)
 
     def tokenize(self, prompt: str, images: list, *,

@@ -1,0 +1,786 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""The native llama.cpp runtime half of a localm update.
+
+A release pins the runtime build it was made with (``_PINNED_TAG`` for the
+upstream backends, ``_ROCM_BUILD`` for amd-rocm). Applying a release compares
+what the staged tree pins for the INSTALLED backend with the build recorded in
+the installed runtime's marker (:func:`plan`). When they differ, the update
+records a pending re-provision (:func:`write_pending`) that
+:func:`finish_pending` carries out once no process holds the runtime files:
+right after the swap for ``localm update``, during the server's restart (after
+its models and workers are stopped) for an update applied from the GUI, else on
+the next start of a command that loads models.
+
+A re-provision keeps a snapshot of the runtime it replaces beside the update
+backup (``_apply_update.runtime_snapshot_dir``); a failed one restores it, and a
+later rollback of the update restores it too.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import sys
+from pathlib import Path
+from typing import Callable, Optional
+
+from localm import _apply_update as au
+
+PENDING_FILE = "pending-runtime.json"
+STATUS_FILE = "runtime-update.json"
+
+# Files that carried the runtime pins, newest layout first.
+_RELEASE_TREE_FILES = ("localm/setup_llama/pins.py", "localm/setup_llama/__init__.py",
+              "localm/setup_llama.py")
+
+# Commands that load the native runtime, and so finish a pending re-provision
+# before they start.
+RUNTIME_COMMANDS = frozenset({"run", "serve", "gui", "chat", "coder", "bench-spec",
+                              "rag", "rerank", "speak"})
+
+
+def runtime_lib(root) -> Path:
+    """The provisioned runtime directory of the install at *root*."""
+    return Path(root) / au.RUNTIME_LIB
+
+
+# ------------------------------- the decision --------------------------------
+
+def _const(text: str, name: str) -> Optional[str]:
+    m = re.search(rf'^{name}\s*=\s*"([^"]+)"\s*$', text, re.MULTILINE)
+    return m.group(1) if m else None
+
+
+def staged_pins(root) -> dict:
+    """The runtime pins of the localm tree at *root*, read as text (never
+    imported): ``{"pinned_tag", "rocm_tag", "rocm_cpu_tag", "rocm_build"}``, each
+    None when that tree does not pin it. ``rocm_build`` is the build identity
+    that tree's setup-llama records for amd-rocm: its ``_ROCM_BUILD``, or its
+    ``_ROCM_TAG`` for a tree from before the SIMD CPU backend."""
+    pins: dict[str, Optional[str]] = {"pinned_tag": None, "rocm_tag": None,
+                                      "rocm_cpu_tag": None, "rocm_build": None}
+    for rel in _RELEASE_TREE_FILES:
+        try:
+            text = (Path(root) / rel).read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if not re.search(r"^_PINNED_TAG\s*=", text, re.MULTILINE):
+            continue
+        pins["pinned_tag"] = _const(text, "_PINNED_TAG")
+        pins["rocm_tag"] = _const(text, "_ROCM_TAG")
+        pins["rocm_cpu_tag"] = _const(text, "_ROCM_CPU_TAG")
+        literal = _const(text, "_ROCM_BUILD")
+        composed = re.search(r'^_ROCM_BUILD\s*=\s*f"\{_ROCM_TAG\}-cpu-\{_ROCM_CPU_TAG\}"\s*$',
+                             text, re.MULTILINE)
+        if literal:
+            pins["rocm_build"] = literal
+        elif composed and pins["rocm_tag"] and pins["rocm_cpu_tag"]:
+            pins["rocm_build"] = f"{pins['rocm_tag']}-cpu-{pins['rocm_cpu_tag']}"
+        elif not re.search(r"^_ROCM_BUILD\s*=", text, re.MULTILINE):
+            pins["rocm_build"] = pins["rocm_tag"]
+        break
+    return pins
+
+
+_CUDA_FILES = ("localm/setup_llama/cuda.py", "localm/setup_llama.py")
+
+
+def cuda_pins(root) -> dict:
+    """``{line: {package: version}}``: the PyPI CUDA libraries the tree at
+    *root* fetches into a Linux cuda runtime, per CUDA line, read as text.
+    Empty when the tree pins none."""
+    import ast
+    for rel in _CUDA_FILES:
+        try:
+            tree = ast.parse((Path(root) / rel).read_text(encoding="utf-8"))
+        except (OSError, ValueError, SyntaxError, RecursionError):
+            continue
+        found: dict = {}
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(
+                    node.targets[0], ast.Name) and node.targets[0].id in (
+                    "_CUDA_RUNTIME_PIN", "_CUDA_RUNTIME_PYPI_PACKAGES"):
+                try:
+                    found[node.targets[0].id] = ast.literal_eval(node.value)
+                except (ValueError, TypeError, SyntaxError, RecursionError):
+                    continue
+        pin, lines = found.get("_CUDA_RUNTIME_PIN"), found.get("_CUDA_RUNTIME_PYPI_PACKAGES")
+        if isinstance(pin, dict) and isinstance(lines, dict):
+            return {line: {p: pin[p][0] for p in pkgs if p in pin}
+                    for line, pkgs in lines.items()}
+    return {}
+
+
+def _cuda_line_of(lib: Path) -> Optional[str]:
+    """The CUDA line of the PyPI CUDA libraries in *lib* (``cuda-12`` or
+    ``cuda-13``, from the cuBLAS file name), or None when it holds none."""
+    for f in sorted(lib.glob("libcublas.so.*")):
+        major = f.name.split(".so.", 1)[1].split(".", 1)[0]
+        if major in ("12", "13"):
+            return f"cuda-{major}"
+    return None
+
+
+def _cuda_state(lib: Path, staged_root, installed_root) -> Optional[tuple]:
+    """``(installed, wanted)`` package versions of the PyPI CUDA libraries of the
+    cuda runtime at *lib*: the installed ones from its record, or, without one,
+    the ones the install at *installed_root* pins; the wanted ones those the
+    tree at *staged_root* pins. None when the runtime holds no PyPI CUDA
+    libraries."""
+    from localm.setup_llama.cuda import read_cuda_runtime
+    rec = read_cuda_runtime(lib)
+    line = (rec or {}).get("line") or _cuda_line_of(lib)
+    if not line:
+        return None
+    have = (rec or {}).get("packages")
+    if have is None:
+        have = cuda_pins(installed_root).get(line, {})
+    want = cuda_pins(staged_root).get(line)
+    if not want:
+        return None
+    return dict(have), dict(want)
+
+
+def _is_current(lib: Path, backend: str, build: Optional[str], target: str, pins: dict,
+                *, after: bool = False) -> bool:
+    """Whether the runtime at *lib* is the build *target* (and, for a cuda
+    runtime whose pins name its PyPI CUDA libraries, holds those versions).
+    With *after* (checking a re-provision just made) a cuda runtime without a
+    record of its CUDA libraries counts as current: a tree from before the
+    record does not write it."""
+    if backend == "amd-rocm":
+        from localm import setup_llama as sl
+        return sl.rocm_build_is_current(lib, build, rocm_tag=pins.get("rocm_tag"),
+                                        rocm_build_id=target,
+                                        cpu_tag=pins.get("rocm_cpu_tag"))
+    if build != target:
+        return False
+    if backend == "cuda" and pins.get("cuda"):
+        from localm.setup_llama.cuda import read_cuda_runtime
+        rec = read_cuda_runtime(lib)
+        if rec is None:
+            return after or pins.get("cuda_have") == pins["cuda"]
+        return rec.get("packages") == pins["cuda"]
+    return True
+
+
+def _manual_command(backend: str) -> str:
+    return f"localm setup-llama --backend {backend} --force"
+
+
+def plan(staged_root, installed_root) -> dict:
+    """Whether applying the tree at *staged_root* over the install at
+    *installed_root* must re-provision the native runtime.
+
+    Returns ``{"reprovision", "backend", "current", "target", "source", "pins",
+    "note"}``. ``reprovision`` is True only when a runtime is installed, its
+    marker records its build, the build the staged release installs for that
+    backend comes from the release (not from the user's pin or "latest"
+    choice, see ``setup_llama.versions.runtime_target``), and it differs from
+    the installed one. ``note`` is a one-line, user-facing sentence for the
+    update summary, or None. Never raises: a failure to read the marker or the
+    configuration answers ``reprovision`` False with a note saying so."""
+    out = {"reprovision": False, "backend": None, "current": None, "target": None,
+           "source": None, "pins": {}, "note": None}
+    try:
+        from localm import setup_llama as sl
+        from localm.setup_llama.versions import runtime_target
+        lib = runtime_lib(installed_root)
+        backend = sl._provisioned_backend(lib)
+        if not backend:
+            return out
+        current = sl._provisioned_build(lib)
+        pins = staged_pins(staged_root)
+        release_build = pins["rocm_build"] if backend == "amd-rocm" else pins["pinned_tag"]
+        if backend == "custom":
+            out.update(backend=backend, pins=pins)
+            if release_build:
+                out["note"] = ("kept the llama.cpp build you installed yourself (--from or "
+                               f"--url); this release ships {release_build}")
+            return out
+        pin = sl.pinned_tag()
+        target, source = runtime_target(backend, pin=pin, tracking=sl.tracks_latest(),
+                                        release_tag=pins["pinned_tag"],
+                                        rocm_build_id=pins["rocm_build"])
+        out.update(backend=backend, current=current, target=target, source=source, pins=pins)
+        if source == "pin":
+            if release_build and release_build != pin:
+                out["note"] = (f"kept your pinned llama.cpp build {pin}; this release ships "
+                               f"{release_build}")
+            return out
+        if source == "latest":
+            if release_build:
+                out["note"] = ("kept your choice to follow upstream's newest llama.cpp build; "
+                               f"this release ships {release_build} (to update the runtime: "
+                               f"{_manual_command(backend)})")
+            return out
+        if not target:
+            return out
+        if current is None:
+            out["note"] = (f"the installed {backend} runtime does not record its build, so it "
+                           f"was left as it is; this release ships {target} (to install it: "
+                           f"{_manual_command(backend)})")
+            return out
+        cuda = _cuda_state(lib, staged_root, installed_root) if backend == "cuda" else None
+        if cuda is not None:
+            pins["cuda_have"], pins["cuda"] = cuda
+        if _is_current(lib, backend, current, target, pins):
+            return out
+        out["reprovision"] = True
+        if current == target and cuda is not None:
+            out["note"] = (f"re-provisions the {backend} runtime {target} to update its CUDA "
+                           "libraries ("
+                           + ", ".join(f"{p} {cuda[0].get(p, '?')} -> {v}"
+                                       for p, v in sorted(cuda[1].items())
+                                       if cuda[0].get(p) != v) + ")")
+        else:
+            out["note"] = f"re-provisions the {backend} runtime from {current} to {target}"
+        return out
+    except Exception as e:
+        from localm.debuglog import logger
+        logger.warning("update: could not compare the installed llama.cpp runtime with the "
+                       "release's pin: %s", e)
+        out["note"] = (f"could not compare the installed llama.cpp runtime with this release's "
+                       f"pin ({e}); it was left as it is")
+        return out
+
+
+# ------------------------------ who holds it ---------------------------------
+
+def _rm_holders(files: list) -> list:
+    """Processes holding *files*, from the Windows Restart Manager:
+    ``[{"pid", "name"}]``. Empty when it names none or cannot be asked."""
+    if sys.platform != "win32":
+        return []
+    import ctypes
+    from ctypes import wintypes
+    rm = ctypes.WinDLL("rstrtmgr")
+
+    class _UniqueProcess(ctypes.Structure):
+        _fields_ = [("dwProcessId", wintypes.DWORD), ("ProcessStartTime", wintypes.FILETIME)]
+
+    class _ProcessInfo(ctypes.Structure):
+        _fields_ = [("Process", _UniqueProcess), ("strAppName", ctypes.c_wchar * 256),
+                    ("strServiceShortName", ctypes.c_wchar * 64),
+                    ("ApplicationType", ctypes.c_int), ("AppStatus", wintypes.ULONG),
+                    ("TSSessionId", wintypes.DWORD), ("bRestartable", wintypes.BOOL)]
+
+    session = wintypes.DWORD()
+    key = ctypes.create_unicode_buffer(33)
+    if rm.RmStartSession(ctypes.byref(session), 0, key) != 0:
+        return []
+    try:
+        names = (ctypes.c_wchar_p * len(files))(*[str(f) for f in files])
+        if rm.RmRegisterResources(session, len(files), names, 0, None, 0, None) != 0:
+            return []
+        needed, count, reasons = wintypes.UINT(0), wintypes.UINT(0), wintypes.DWORD(0)
+        rc = rm.RmGetList(session, ctypes.byref(needed), ctypes.byref(count), None,
+                          ctypes.byref(reasons))
+        if rc not in (0, 234) or needed.value == 0:
+            return []
+        infos = (_ProcessInfo * needed.value)()
+        count = wintypes.UINT(needed.value)
+        if rm.RmGetList(session, ctypes.byref(needed), ctypes.byref(count), infos,
+                        ctypes.byref(reasons)) != 0:
+            return []
+        return [{"pid": int(i.Process.dwProcessId), "name": i.strAppName}
+                for i in infos[:count.value]]
+    finally:
+        rm.RmEndSession(session)
+
+
+def _proc_holders(lib: Path) -> list:
+    """Processes other than this one that map a file under *lib* (Linux):
+    ``[{"pid", "name"}]``."""
+    found = []
+    for pid in sorted(au.mapped_by_others(lib)):
+        try:
+            name = Path(f"/proc/{pid}/comm").read_text(encoding="utf-8").strip()
+        except OSError:
+            name = "?"
+        found.append({"pid": pid, "name": name})
+    return found
+
+
+def holders(lib) -> list:
+    """The processes that hold the runtime at *lib*, so it cannot be replaced
+    now: ``[{"pid", "name"}]`` (pid None when Windows reports files in use but
+    cannot say by whom). Empty when nothing holds it. Never raises."""
+    lib = Path(lib)
+    try:
+        if sys.platform == "win32":
+            held = au.held_files(lib)
+            if not held:
+                return []
+            try:
+                found = _rm_holders(held)
+            except Exception as e:
+                from localm.debuglog import logger
+                logger.warning("update: could not ask which process holds the runtime: %s", e)
+                found = []
+            return found or [{"pid": None, "name": f"an unidentified process ({held[0].name})"}]
+        if sys.platform.startswith("linux") and lib.is_dir():
+            return _proc_holders(lib)
+        return []
+    except Exception as e:
+        from localm.debuglog import logger
+        logger.warning("update: could not check whether the runtime is in use: %s", e)
+    return []
+
+
+def describe_holders(found: list) -> str:
+    """*found* (from :func:`holders`) as text: ``name (pid N), ...``."""
+    return ", ".join(f"{h['name']} (pid {h['pid']})" if h.get("pid") else str(h["name"])
+                     for h in found)
+
+
+# ----------------------- stopping this install's processes --------------------
+
+# Seconds to wait, after stopping this install's processes, for the OS to
+# release the runtime files they held.
+RELEASE_WAIT_S = 10.0
+# Seconds a single stopped process may take to exit.
+_STOP_WAIT_S = 5.0
+# Seconds a registered process may have started after its registry entry's
+# "started" time and still be the process that wrote it.
+_START_SLACK_S = 5.0
+
+
+def _start_epoch(start) -> Optional[float]:
+    """A process start from ``install_manifest.list_processes`` as epoch
+    seconds: a FILETIME on Windows, clock ticks since boot on Linux. None when
+    it cannot be converted."""
+    if start is None:
+        return None
+    try:
+        if sys.platform == "win32":
+            return (int(start) - 116444736000000000) / 1e7
+        if sys.platform.startswith("linux"):
+            with open("/proc/stat", encoding="utf-8") as fh:
+                btime = next(int(line.split()[1]) for line in fh if line.startswith("btime "))
+            return btime + int(start) / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, StopIteration):
+        return None
+    return None
+
+
+def _entry_epoch(entry: dict) -> Optional[float]:
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(str(entry.get("started"))).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def _registered(home, by_pid: dict) -> dict:
+    """``{pid: entry}`` for the localm servers in the instance registry of the
+    data dir *home* whose process is running and started no later than the
+    entry was written (a reused pid is not the server that wrote it)."""
+    from localm import instances
+    out = {}
+    for entry in instances.list_entries(Path(home)):
+        try:
+            pid = int(entry.get("pid") or -1)
+        except (TypeError, ValueError):
+            continue
+        if pid not in by_pid:
+            continue
+        started, wrote = _start_epoch(by_pid[pid][3]), _entry_epoch(entry)
+        if started is not None and wrote is not None and started > wrote + _START_SLACK_S:
+            continue
+        out[pid] = entry
+    return out
+
+
+def _parent(by_pid: dict, pid: int) -> Optional[int]:
+    """The running parent of *pid*, or None when it has exited (a pid whose
+    process started after *pid* is a reused one, not the parent)."""
+    ppid = by_pid[pid][1]
+    if not ppid or ppid == pid or ppid not in by_pid:
+        return None
+    child_start, parent_start = by_pid[pid][3], by_pid[ppid][3]
+    if child_start is not None and parent_start is not None and parent_start > child_start:
+        return None
+    return ppid
+
+
+def _subtree(by_pid: dict, top: int) -> list:
+    """*top* and every running descendant of it, deepest first."""
+    children: dict = {}
+    for pid in by_pid:
+        parent = _parent(by_pid, pid)
+        if parent is not None:
+            children.setdefault(parent, []).append(pid)
+    order, stack = [], [(top, 0)]
+    seen = set()
+    while stack:
+        pid, depth = stack.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        order.append((depth, pid))
+        stack.extend((c, depth + 1) for c in children.get(pid, ()))
+    return [pid for _d, pid in sorted(order, key=lambda x: -x[0])]
+
+
+def classify_holders(found: list, root, *, home=None, procs=None,
+                     self_pid: Optional[int] = None) -> tuple:
+    """Split the holders *found* (from :func:`holders`) of the runtime of the
+    install at *root* into this install's own localm processes and the rest.
+
+    A holder is this install's when it, or an ancestor of it below this process
+    and its ancestors, is a process whose program file is inside *root* (the
+    install's venv launcher), a localm server registered in the instance
+    registry of the data dir *home* (default the configured one), or this
+    process itself (a holder this process started). Never by process name.
+
+    Returns ``(tops, foreign)``: ``tops`` maps the pid of the highest such
+    process of each holder to ``{"pid", "label", "entries", "tree"}``
+    (``entries`` the registry entries in its tree, ``tree`` its pids deepest
+    first); ``foreign`` lists the holders that are not this install's, this
+    process and its ancestors included (they cannot be stopped from here), and
+    every holder Windows could not name."""
+    from localm import install_manifest
+    procs = install_manifest.list_processes() if procs is None else procs
+    if procs is None:
+        return {}, list(found)
+    by_pid = {p[0]: p for p in procs}
+    me = os.getpid() if self_pid is None else self_pid
+    blocked = install_manifest._ancestors(procs, me)
+    if home is None:
+        from localm.config import home_dir
+        home = home_dir()
+    reg = _registered(home, by_pid)
+    root_s = str(Path(root).resolve())
+
+    def is_localm(pid: int) -> bool:
+        p = by_pid[pid]
+        progs = [x for x in (p[2], p[4] if len(p) > 4 else None) if x and os.path.isabs(x)]
+        return pid in reg or any(install_manifest._inside(x, root_s) for x in progs)
+
+    tops: dict = {}
+    foreign = []
+    for h in found:
+        pid = h.get("pid")
+        if not pid:
+            foreign.append(h)
+            continue
+        if pid not in by_pid:
+            continue
+        if pid in blocked:
+            foreign.append(dict(h, name=f"this localm process ({h.get('name')})"))
+            continue
+        top, cur, last = None, pid, pid
+        while cur is not None and cur not in blocked:
+            if is_localm(cur):
+                top = cur
+            last, cur = cur, _parent(by_pid, cur)
+        if cur == me:
+            top = last
+        if top is None:
+            foreign.append(h)
+            continue
+        tree = _subtree(by_pid, top)
+        entries = [reg[p] for p in tree if p in reg]
+        if entries:
+            label = f"the background localm server (pid {entries[0]['pid']})"
+        else:
+            label = f"the localm process {Path(by_pid[top][2] or '?').name} (pid {top})"
+        tops[top] = {"pid": top, "label": label, "entries": entries, "tree": tree}
+    return tops, foreign
+
+
+def _stop_tree(tree: list, deadline: float) -> list:
+    """Terminate every pid of *tree* (deepest first) and wait, until *deadline*,
+    for each to exit. Returns the pids still running."""
+    import time
+
+    from localm import install_manifest
+    left = []
+    for pid in tree:
+        budget = max(0.1, min(_STOP_WAIT_S, deadline - time.monotonic()))
+        try:
+            gone = install_manifest._stop(pid, timeout=budget)
+        except Exception as e:
+            from localm.debuglog import logger
+            logger.warning("update: could not stop process %s: %s", pid, e)
+            gone = False
+        if not gone:
+            left.append(pid)
+    return left
+
+
+def stop_own_holders(lib, root, *, home=None, say: Optional[Callable] = None,
+                     wait: float = RELEASE_WAIT_S, stop: bool = True) -> list:
+    """Free the runtime at *lib* of the install at *root* by stopping this
+    install's own localm processes that hold it (:func:`classify_holders`):
+    each one's whole process tree (server, model workers, probe daemons) is
+    terminated, its registry entry removed and its crash marker cleared, then
+    this waits up to *wait* seconds for the OS to release the files.
+
+    Stops nothing when any holder is not this install's. *say* receives each
+    step as one line of text. With *stop* False nothing is stopped and only the
+    holders that are not this install's are returned.
+
+    Returns the holders left: empty when the runtime is free, else the holders
+    that are not this install's or did not exit. Never raises."""
+    import time
+    say = say or (lambda _m: None)
+    lib = Path(lib)
+    try:
+        found = holders(lib)
+        if not found:
+            return []
+        tops, foreign = classify_holders(found, root, home=home)
+        if foreign or not stop:
+            return foreign
+        deadline = time.monotonic() + max(0.5, wait)
+        for top in tops.values():
+            say(f"Stopping {top['label']}...")
+            left = _stop_tree(top["tree"], deadline)
+            if left:
+                from localm.debuglog import logger
+                logger.warning("update: processes %s of %s did not exit", left, top["label"])
+            for entry in top["entries"]:
+                if entry.get("_path"):
+                    from localm import instances
+                    instances.unregister_instance(entry["_path"])
+                try:
+                    from localm import bugreport
+                    bugreport.disarm_crash_guard(home, instance_id=entry.get("instance_id"))
+                except Exception as e:
+                    from localm.debuglog import logger
+                    logger.warning("update: could not clear the crash marker of the stopped "
+                                   "server %s: %s", entry.get("instance_id"), e)
+        found = holders(lib)
+        while found and time.monotonic() < deadline:
+            time.sleep(0.25)
+            found = holders(lib)
+        return found
+    except Exception as e:
+        from localm.debuglog import logger
+        logger.warning("update: could not stop the processes holding the runtime: %s", e)
+        return holders(lib) or [{"pid": None, "name": f"a process ({e})"}]
+
+
+def in_use_message(found: list, retry: str) -> str:
+    """The user-facing refusal for the holders *found*: which to close, then
+    *retry*."""
+    return f"close {describe_holders(found)}, then {retry}"
+
+
+# ------------------------------ pending marker -------------------------------
+
+def _updates_dir() -> Path:
+    from localm import updater
+    return updater._updates_dir(create=True)
+
+
+def write_pending(p: dict, *, root, version: str) -> None:
+    """Record the re-provision :func:`plan` decided for the install at *root*,
+    for :func:`finish_pending`. Raises OSError when it cannot be written."""
+    data = {"root": str(Path(root).resolve()), "version": version,
+            "backend": p["backend"], "from": p["current"], "target": p["target"],
+            "pins": p["pins"]}
+    path = _updates_dir() / PENDING_FILE
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def read_pending() -> Optional[dict]:
+    """The pending re-provision, or None. A marker that cannot be parsed is
+    reported once in the log and treated as none."""
+    from localm import updater
+    path = updater._updates_dir(create=False) / PENDING_FILE
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, RecursionError) as e:
+        from localm.debuglog import logger
+        logger.warning("update: ignoring an unreadable pending runtime update %s: %s", path, e)
+        return None
+    if not isinstance(data, dict) or not data.get("backend") or not data.get("target"):
+        return None
+    return data
+
+
+def catch_up(root=None) -> Optional[dict]:
+    """Record a pending re-provision when none is pending and the runtime
+    installed at *root* (default the running install) is not the build that
+    install's own release pins for its backend, the user having chosen neither
+    a pin nor "latest" (:func:`plan` of the install against itself). Covers an
+    install updated by an updater from before this check, setup re-run over an
+    older runtime, and a copied install. Returns the plan when it recorded one,
+    else None. Raises OSError when the marker cannot be written."""
+    from localm import _version, updater
+    root = Path(root) if root else updater.repo_root()
+    if read_pending() is not None:
+        return None
+    p = plan(root, root)
+    if not p["reprovision"]:
+        return None
+    write_pending(p, root=root, version=_version.read_version())
+    return p
+
+
+def clear_pending() -> None:
+    from localm import updater
+    try:
+        (updater._updates_dir(create=False) / PENDING_FILE).unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _write_status(status: dict) -> None:
+    try:
+        (_updates_dir() / STATUS_FILE).write_text(json.dumps(status), encoding="utf-8")
+    except OSError as e:
+        from localm.debuglog import logger
+        logger.warning("update: could not record the runtime update result: %s", e)
+
+
+def last_status() -> Optional[dict]:
+    """The result of the last re-provision :func:`finish_pending` attempted, or None."""
+    from localm import updater
+    try:
+        data = json.loads((updater._updates_dir(create=False) / STATUS_FILE)
+                          .read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+# ------------------------------ the re-provision -----------------------------
+
+def _command(root: Path, backend: str) -> list:
+    cmd = [sys.executable, "-m", "localm", "setup-llama", "--backend", backend,
+           "--force", "--yes", "--keep-choice"]
+    text = ""
+    for rel in ("localm/setup_llama/cli.py", "localm/setup_llama.py"):
+        try:
+            text += (root / rel).read_text(encoding="utf-8")
+        except OSError:
+            continue
+    if '"--keep-choice"' not in text:
+        cmd.remove("--keep-choice")
+    return cmd
+
+
+def finish_pending(*, root=None, runner: Optional[Callable] = None,
+                   env: Optional[dict] = None, wait: float = RELEASE_WAIT_S,
+                   say: Optional[Callable] = None) -> Optional[dict]:
+    """Carry out the pending re-provision, if there is one for the install at
+    *root* (default the running install). A pending re-provision recorded for
+    another version than the one installed at *root* (the update was rolled
+    back or replaced since) is dropped and None returned.
+
+    Returns None when nothing is pending, else a status ``{"state", "backend",
+    "from", "to", "holders", "error", "note"}`` (also recorded for ``localm
+    doctor``). ``state`` is:
+
+    - ``"updated"``: the runtime now is the release's build;
+    - ``"current"``: it already was, or the user has since chosen a build;
+    - ``"waiting"``: a process that is not this install's (or did not exit)
+      holds the runtime files; nothing was changed and the re-provision stays
+      pending for the next start;
+    - ``"failed"``: the re-provision did not produce the release's build for the
+      same backend; the previous runtime was put back (``error`` says what
+      failed, including a restore that failed).
+
+    Before replacing anything, this install's own processes that hold the
+    runtime are stopped (:func:`stop_own_holders`, which waits up to *wait*
+    seconds for the OS to release their files). *say* receives each step as
+    one line of text. *runner* runs the setup-llama argv and returns its exit
+    code (tests); *env* is its environment."""
+    import subprocess
+
+    from localm import setup_llama as sl
+    from localm import updater
+    from localm.setup_llama.versions import runtime_target
+    pending = read_pending()
+    if pending is None:
+        return None
+    root = Path(root) if root else updater.repo_root()
+    if Path(pending.get("root") or "").resolve() != root.resolve():
+        return None
+    try:
+        installed_version = (root / "VERSION").read_text(encoding="utf-8").strip()
+    except OSError:
+        installed_version = None
+    if pending.get("version") and installed_version and pending["version"] != installed_version:
+        clear_pending()
+        return None
+    lib = runtime_lib(root)
+    backend, target, pins = pending["backend"], pending["target"], pending.get("pins") or {}
+    status = {"state": None, "backend": backend, "from": pending.get("from"), "to": target,
+              "holders": [], "error": None, "note": None}
+
+    _t, source = runtime_target(backend, pin=sl.pinned_tag(), tracking=sl.tracks_latest(),
+                                release_tag=pins.get("pinned_tag"),
+                                rocm_build_id=pins.get("rocm_build"))
+    installed = sl._provisioned_backend(lib)
+    if source != "release" or installed != backend or _is_current(
+            lib, backend, sl._provisioned_build(lib), target, pins):
+        clear_pending()
+        status.update(state="current", note=f"the {installed or backend} runtime was left as "
+                                            "it is (it is current or was changed since)")
+        _write_status(status)
+        return status
+
+    found = stop_own_holders(lib, root, say=say, wait=wait)
+    if found:
+        status.update(state="waiting", holders=found, note=(
+            f"the {backend} runtime is in use, so it was not changed: "
+            + in_use_message(found, f"start localm again (or run: {_manual_command(backend)})")))
+        _write_status(status)
+        return status
+    if say:
+        say(f"Replacing the {backend} runtime ({pending.get('from')} -> {target})...")
+
+    snapshot = au.runtime_snapshot_dir(updater._backup_dir(create=True))
+    try:
+        au.snapshot_runtime(lib, snapshot)
+    except OSError as e:
+        clear_pending()
+        status.update(state="failed", error=f"could not keep a copy of the current runtime: {e}",
+                      note=(f"the {backend} runtime was not re-provisioned because a copy of "
+                            f"the current one could not be kept ({e}); to update it: "
+                            f"{_manual_command(backend)}"))
+        _write_status(status)
+        return status
+
+    cmd = _command(root, backend)
+    if env is None:
+        env = updater._deps_env(root)
+    run = runner or (lambda c: subprocess.run(c, cwd=str(root), env=env).returncode)
+    try:
+        rc = int(run(cmd))
+        problem = None if rc == 0 else f"setup-llama exited {rc}"
+    except Exception as e:
+        problem = f"could not run setup-llama: {e}"
+    now_backend, now_build = sl._provisioned_backend(lib), sl._provisioned_build(lib)
+    if problem is None and now_backend != backend:
+        problem = f"setup-llama installed the {now_backend} runtime instead of {backend}"
+    if problem is None and not _is_current(lib, backend, now_build, target, pins,
+                                           after=True):
+        problem = f"setup-llama installed {now_build or 'an unrecorded build'}, not {target}"
+    clear_pending()
+    if problem is None:
+        status.update(state="updated", note=f"re-provisioned the {backend} runtime: "
+                                            f"{pending.get('from')} -> {target}")
+        _write_status(status)
+        return status
+    restore_errors = au.restore_runtime(snapshot, lib)
+    kept = ("the previous runtime was put back" if not restore_errors
+            else "putting the previous runtime back FAILED: " + "; ".join(restore_errors))
+    status.update(state="failed", error=problem + ("; " + "; ".join(restore_errors)
+                                                   if restore_errors else ""),
+                  note=(f"the {backend} runtime was NOT updated to {target} ({problem}); "
+                        f"{kept}. To retry: {_manual_command(backend)}"))
+    from localm.debuglog import logger
+    logger.warning("update: runtime re-provision failed: %s", status["error"])
+    _write_status(status)
+    return status

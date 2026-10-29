@@ -516,6 +516,9 @@ def _is_hf_model_dir(folder: Path) -> bool:
     return not has_gguf or has_weights
 
 
+TRANSFER_TEMP_PREFIX = ".localm-incoming-"
+
+
 def _find_model_units(d: Path, max_depth: int = 3, *,
                       skip_hidden: bool = False,
                       skip_dirs: Collection[str] = ()) -> tuple[list[Path], list[Path]]:
@@ -528,7 +531,9 @@ def _find_model_units(d: Path, max_depth: int = 3, *,
     contributes only its first part. A HuggingFace model directory
     (``_is_hf_model_dir``) is ONE unit: the walk does not descend into it, so its
     files and any folders inside it are never reported separately. *d* itself is
-    never reported as an HF dir - the caller decides what *d* is.
+    never reported as an HF dir - the caller decides what *d* is. A folder named
+    with ``TRANSFER_TEMP_PREFIX`` (an import still copying, or its leftover) is
+    never walked into either.
 
     Never walked into and never reported: a diffusers pipeline (a folder holding
     ``model_index.json``, whose component folders are not models of their own,
@@ -558,7 +563,8 @@ def _find_model_units(d: Path, max_depth: int = 3, *,
                         continue
                 for child in folder.iterdir():
                     if child.is_dir():
-                        if not (skip_hidden and child.name.startswith(".")):
+                        if (not (skip_hidden and child.name.startswith("."))
+                                and not child.name.startswith(TRANSFER_TEMP_PREFIX)):
                             next_frontier.append(child)
                     elif (child.name.lower().endswith(".gguf") and child.is_file()
                           and not _is_non_first_split_part(child.name)):

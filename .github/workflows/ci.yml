@@ -168,7 +168,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
 
@@ -190,7 +190,7 @@ jobs:
       # pull torch / ROCm / llama-cpp wheels and are never installed in CI;
       # tests needing those extras skip themselves (importorskip).
       - name: Install uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
       - name: Install
         shell: bash
         run: |
@@ -266,7 +266,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
 
@@ -274,7 +274,7 @@ jobs:
       # dependency change without a matching `uv lock` cannot silently rot the lock
       # into a stale claim. `uv lock --check` fails on drift.
       - name: Install uv (for the lockfile check)
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
       - name: Verify uv.lock matches pyproject (DEP-1, no silent drift)
         run: uv lock --check
 
@@ -368,25 +368,49 @@ jobs:
     # The other job that runs a test suite, and jsdom has its own documented
     # hang. It finishes in a couple of minutes, so 20 fails a hang quickly.
     timeout-minutes: 20
-    # Same gate as the `test` matrix: on a pull_request only when the PR
-    # carries the `full-ci` label, never on push, unconditional for
-    # workflow_dispatch and schedule.
-    if: >-
-      github.event_name != 'push' &&
-      (github.event_name != 'pull_request' ||
-       contains(github.event.pull_request.labels.*.name, 'full-ci'))
+    # Never on push; unconditional for workflow_dispatch and schedule. On a
+    # pull_request: both hosts with the `full-ci` label; without it, the Linux
+    # host only and only when the change touches the GUI or its tests (the
+    # scope step below), the Windows host skips its steps.
+    if: github.event_name != 'push'
     strategy:
       fail-fast: false
       matrix:
         os: [windows-latest, ubuntu-latest]
     steps:
+      # fetch-depth: 2 so a pull request's merge commit has its base as HEAD^1.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
           persist-credentials: false
+          fetch-depth: 2
+
+      - name: Does this pull request touch the GUI?
+        id: scope
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          FULL_CI: ${{ contains(github.event.pull_request.labels.*.name, 'full-ci') }}
+          HOST_OS: ${{ runner.os }}
+        run: |
+          if [ "$EVENT" != "pull_request" ] || [ "$FULL_CI" = "true" ]; then echo "run=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          if [ "$HOST_OS" != "Linux" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Unlabelled pull request: GUI tests run on the Linux host only."
+            exit 0
+          fi
+          if git diff --name-only HEAD^1 HEAD | grep -qE '^(localm/plugins/gui/static/|tests-js/|package\.json|package-lock\.json|\.github/workflows/ci\.yml)'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No GUI file changed in this pull request; the GUI tests run nightly."
+          fi
+
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        if: steps.scope.outputs.run == 'true'
         with:
           node-version: "22"
       - name: GUI tests (jsdom)
+        if: steps.scope.outputs.run == 'true'
         run: |
           npm ci
           npm test
@@ -395,7 +419,7 @@ jobs:
       # job. One host only: matches the ruff job's "result does not vary by
       # host" below. (#1780)
       - name: Lint (eslint, non-blocking)
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-latest' && steps.scope.outputs.run == 'true'
         continue-on-error: true
         run: npm run lint
 
@@ -411,7 +435,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
           persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
       - name: Create the project venv
@@ -419,7 +443,7 @@ jobs:
       - name: Put the venv on PATH
         run: echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
       - name: Install uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
       # The optional stacks are installed so basedpyright type-checks the modules
       # that use torch, transformers, av, pywebview and playwright against their
       # real types. torch comes first, from the CPU index.
@@ -487,12 +511,12 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
 
       - name: Install uv (for the lockfile check)
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
       - name: Verify uv.lock matches pyproject (no silent drift)
         run: uv lock --check
 
@@ -543,12 +567,12 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
       - name: Install
         shell: bash
         run: |
@@ -638,7 +662,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
 
@@ -672,7 +696,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
       - name: Which mutation-tested modules does this run need?
@@ -719,7 +743,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
 
@@ -729,7 +753,7 @@ jobs:
         run: echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
       - name: Install
         run: |
           uv export --quiet --locked --no-emit-project --extra dev -o "$RUNNER_TEMP/requirements.txt"
@@ -809,7 +833,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
 
@@ -909,7 +933,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
 
@@ -943,12 +967,12 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
       - name: Install
         run: |
           uv export --quiet --locked --no-emit-project -o "$RUNNER_TEMP/requirements.txt"
@@ -958,6 +982,46 @@ jobs:
       - name: Run one real search per search service and report whether each layout still parses
         continue-on-error: true
         run: python scripts/check_web_search_canary.py
+
+  # The update proxy's tests (tools/bugreport-proxy/worker.js). Runs on a pull
+  # request only when it changes the proxy or its tests, and on every schedule
+  # and dispatch. node:test only, no dependencies to install.
+  proxy-tests:
+    name: update proxy tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: >-
+      github.event_name == 'pull_request' ||
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch'
+    steps:
+      # fetch-depth: 2 so a pull request's merge commit has its base as HEAD^1.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+
+      - name: Does this pull request touch the update proxy?
+        id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" != "pull_request" ]; then echo "run=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          if git diff --name-only HEAD^1 HEAD | grep -qE '^(tools/bugreport-proxy/|tests-js/bugreport-proxy-worker\.test\.mjs|\.github/workflows/ci\.yml)'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No update proxy file changed in this pull request; its tests run nightly."
+          fi
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        if: steps.scope.outputs.run == 'true'
+        with:
+          node-version: "22"
+
+      - name: Proxy tests
+        if: steps.scope.outputs.run == 'true'
+        run: node --test --test-force-exit tools/bugreport-proxy/worker.test.mjs tests-js/bugreport-proxy-worker.test.mjs
 
   # Speech-to-text against the voice stack a user actually gets. Every other job
   # installs `.[dev,rag]`, which has no PyAV or faster-whisper, so the voice
@@ -998,14 +1062,14 @@ jobs:
             echo "::notice::No voice file changed in this pull request; the voice stack runs nightly."
           fi
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         if: steps.scope.outputs.run == 'true'
         with:
           python-version: "3.12"
 
       - name: Install uv
         if: steps.scope.outputs.run == 'true'
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
       - name: Install the voice extra
         if: steps.scope.outputs.run == 'true'
         run: |
@@ -1069,12 +1133,12 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
       # torch first, from the CPU index, so no later install pulls a CUDA build.
       - name: Install the optional stacks
         run: |
@@ -1099,7 +1163,8 @@ jobs:
   # lint and mutation-scope must have succeeded; without the `full-ci`
   # label python-pr-gate must have succeeded and the change must not be a
   # release (VERSION unchanged); with the label the test matrix and
-  # gui-tests must have succeeded (gui-tests runs only on a labelled PR);
+  # gui-tests must have succeeded (without the label gui-tests runs its
+  # steps only for a GUI change, on the Linux host, and reads success otherwise);
   # mutation-test must have succeeded when mutation-scope selected any
   # shard, and must not have failed otherwise (skipped is neutral then). A release PR without the label fails here with the
   # label named; every other PR merges without the matrix. A skipped
@@ -1124,7 +1189,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
 
