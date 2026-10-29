@@ -694,6 +694,7 @@ export async function refreshModelsPage() {
             }
           } catch (e) {
             toast(t("models.use.loadFailed", { message: e.message }), true);
+            refreshModelsPage();
           } finally { use.disabled = false; use.textContent = prevLabel; }
         };
         actions.appendChild(use);

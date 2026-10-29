@@ -9,6 +9,7 @@ import { refreshCtxLimit } from "../app/chat.js";
 import { t, tn, tOr, tOrFirst } from "../app/i18n.js";
 import { emptyState } from "../app/icons.js";
 import { loginWithKey } from "../app/models-sidebar.js";
+import { showView } from "../app/tabs.js";
 import { nativeModelSelect } from "../app/native-models.js";
 import { applyServerTtsConfig, browserVoiceOverride, caps, capsReady, clearBrowserVoiceOverride, refreshBackendInfo, refreshPerfEstimate, syncIndexSpaceHint, syncPerfCtxHelp, ttsProvider } from "../app/settings-perf.js";
 
@@ -1562,6 +1563,21 @@ export async function saveSettingsSection(secId) {
   }
 }
 
+/** The browser plugin's entry in /api/capabilities ({installed, enabled,
+ *  active, ...}), or null when the list does not name it or could not be read.
+ *  On null the caller falls back to the engine check, which reports its own
+ *  failure. Never throws. */
+async function browserPluginEntry() {
+  try {
+    const r = await fetch("/api/capabilities", { headers: authHeaders() });
+    if (!r.ok) return null;
+    const data = await r.json();
+    return (data.plugins || []).find((p) => p && p.name === "browser") || null;
+  } catch {
+    return null;
+  }
+}
+
 /** The "Browser setup" box under Settings > Network: whether the configured
  *  browser engine can start a browser, the one-time download of the bundled
  *  browser when that is what is missing, and a switch to the bundled browser
@@ -1586,6 +1602,13 @@ export function buildBrowserSetupBox() {
   const refresh = async () => {
     if (downloading) return null;
     actions.replaceChildren();
+    const plugin = await browserPluginEntry();
+    if (plugin && !plugin.active) {
+      statusLine.textContent = t(plugin.installed
+        ? "browser.setup.pluginDisabled" : "browser.setup.pluginMissing");
+      button(t("browser.setup.openPlugins"), () => showView("plugins"));
+      return null;
+    }
     let st = null;
     try {
       const r = await fetch("/api/browser/engine", { headers: authHeaders() });
