@@ -477,6 +477,29 @@ class TestVramReport:
         assert "0.00 GB allocated" not in out      # the old, wrong line
         assert b.vram_load_bytes == 8 * GIB
 
+    def test_load_vram_is_not_measured_when_one_device_is_not_trusted(self, tmp_path):
+        from localm.discover import FREE_SCOPE_DEVICE, FREE_SCOPE_PROCESS, GPU_PROBE_OK
+        b = _backend(tmp_path, size_bytes=1_000_000)
+        GIB = 1024 ** 3
+        readings = iter([
+            [{"index": 0, "total": 16 * GIB, "free": 12 * GIB, "free_scope": FREE_SCOPE_DEVICE},
+             {"index": 1, "total": 8 * GIB, "free": 8 * GIB, "free_scope": FREE_SCOPE_PROCESS}],
+            [{"index": 0, "total": 16 * GIB, "free": 10 * GIB, "free_scope": FREE_SCOPE_DEVICE},
+             {"index": 1, "total": 8 * GIB, "free": 8 * GIB, "free_scope": FREE_SCOPE_PROCESS}],
+        ])
+
+        def _fake_list_gpus(*, deadline=None, return_status=False,
+                            wait_for_inflight=False):
+            gpus = next(readings)
+            return (gpus, GPU_PROBE_OK) if return_status else gpus
+
+        with patch("localm.discover.list_gpus", side_effect=_fake_list_gpus), \
+             patch("localm.inference.backends.llamacpp._runner.ModelRunner.spawn_and_load",
+                   return_value={"n_layers": None, "kv_bytes_per_token": 0,
+                                 "supports_images": False}):
+            b._load_native()
+        assert b.vram_load_bytes is None
+
     def test_load_omits_used_free_when_reading_not_trusted(self, tmp_path, capsys):
         """A process-scoped reading (Windows + AMD ROCm/HIP torch, blind to every
         OTHER process's VRAM - the case for a GGUF load, which always runs in its
