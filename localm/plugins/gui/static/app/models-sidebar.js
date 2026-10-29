@@ -1096,6 +1096,15 @@ async function _maybeRoutePeer(model) {
 // its route (data.peer_routes).
 let _peerSelected = null;
 
+// Point the model dropdown at the model modelCache says serves the next
+// message (the active one, else the resumable one), or at the "No model
+// loaded" placeholder when there is none, even while the dropdown has focus.
+function _showServedModel() {
+  const shown = modelCache.active || modelCache.resumable || "";
+  modelSelect.value = shown;
+  if (modelSelect.value !== shown) modelSelect.value = "";
+}
+
 async function _postLoad(model, force) {
   const r = await fetch("/api/models/load", {
     method: "POST",
@@ -1139,6 +1148,8 @@ export async function switchModel(model, { local = false } = {}) {
         t("models.switch.confirmTitle"), data.detail, t("models.switch.confirmLabel"));
       if (!confirmed) {
         setStatus("ok", modelCache.active || t("sidebar.status.noModel"));
+        _showServedModel();
+        refreshModels().then(_showServedModel);
         return { status: "cancelled", reason: "declined by user", model };
       }
       setStatus("busy", t("sidebar.status.loading", { model }));
@@ -1147,7 +1158,8 @@ export async function switchModel(model, { local = false } = {}) {
   } catch (e) {
     // A failed load ends the busy pill and re-reads the server's model state.
     setStatus("err", t("sidebar.status.loadFailed"));
-    refreshModels();
+    _showServedModel();
+    refreshModels().then(_showServedModel);
     throw e;
   }
   if (data.status === "superseded" || data.status === "cancelled") return data;
