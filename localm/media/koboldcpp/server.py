@@ -478,6 +478,11 @@ def stop_if_idle() -> Optional[bool]:
         _lock.release()
 
 
+def is_busy() -> bool:
+    """Whether a generation holds the server lock. Takes no lock."""
+    return _lock.locked()
+
+
 def running_pid() -> Optional[int]:
     """The PID of the music server localm started, if it is running."""
     srv = _server

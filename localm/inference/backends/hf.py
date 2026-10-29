@@ -164,6 +164,8 @@ class HFBackend(BaseBackend):
                  task: str = "chat") -> None:
         self.model_path = str(Path(model_path).resolve())
         self._device = device      # None = auto-detect
+        # The device the last load ran on ("cpu", "cuda", ...), or None.
+        self.loaded_device: Optional[str] = None
         # "chat" for every ordinary model; "rerank" loads the checkpoint's
         # sequence-classification head so rerank() can score pairs.
         self._task = task
@@ -340,6 +342,8 @@ class HFBackend(BaseBackend):
                 params["gpu_order"] = order
         meta = self._runner.spawn_and_load(params, timeout=self._load_timeout_seconds())
         self.rerank_labels = [str(n) for n in (meta.get("rerank_labels") or [])]
+        device_name = meta.get("device")
+        self.loaded_device = device_name if isinstance(device_name, str) else None
         self._supports_images = bool(meta.get("supports_images"))
         self._supports_audio = bool(meta.get("supports_audio"))
         self._processor_error = meta.get("processor_error")

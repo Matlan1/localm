@@ -701,8 +701,9 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
     - ``confirm_required``: an explicit switch without *force* would have to
       evict a model still in use, or load below the whole-model VRAM
       estimate; ``detail`` says which. When the free VRAM expected after
-      evicting every evictable model can be estimated and is too small, this
-      is returned before anything is evicted.
+      evicting every evictable model and freeing the shared embedding,
+      reranker and speech models can be estimated and is too small, this is
+      returned before anything is evicted or freed.
 
     When the call ends without loading *name* after evicting the active
     model, that model becomes ``_last_active_model_name``
@@ -973,7 +974,8 @@ async def _switch_make_room(loop, budget: switch_admission.LoadBudget, *,
 
     Before each eviction for an explicit switch without *force* that VRAM
     (not the resident cap) asks for, ``_switch_confirm_before_eviction`` may
-    return the degraded-load ``confirm_required`` result with nothing evicted.
+    return its ``confirm_required`` result with nothing evicted or freed,
+    after ``_switch_wait_busy_before_asking``.
 
     Returns None when the load may proceed, or a ``confirm_required`` result
     for switch_engine to return. Raises HTTPException 503 when a static split
@@ -1024,6 +1026,8 @@ async def _switch_make_room(loop, budget: switch_admission.LoadBudget, *,
             ask = await _switch_confirm_before_eviction(
                 loop, probe, budget,
                 reprobe=decision.action == switch_admission.EXHAUSTED)
+            if ask is not None:
+                ask = await _switch_wait_busy_before_asking(loop, probe, budget, ask)
             if ask is not None:
                 return ask
 
@@ -1126,10 +1130,24 @@ async def _switch_exhaustion_ladder(loop, probe: switch_admission.VramProbe,
     defer to the backend's own sizing
     (``switch_admission.final_exhaustion_verdict``).
 
+    For an explicit switch without *force* on a usable reading,
+    ``_switch_confirm_before_eviction`` runs first. When it would ask, nothing
+    is freed and no peer is asked: ``_switch_wait_busy_before_asking`` waits
+    for the replies of busy resident models first and its result is
+    returned.
+
     Returns the loop's next ``switch_admission.EvictionStep``. Raises
     HTTPException 503 when a static split device is short or the probe stayed
     inconclusive through every retry."""
     step = switch_admission.EvictionStep
+    if preempt and not force and switch_admission.exhausted_probe_verdict(
+            probe, retries_used=attempt.inconclusive_retries,
+            max_retries=_INCONCLUSIVE_LOAD_RETRIES) == switch_admission.KEEP_FREEING:
+        ask = await _switch_confirm_before_eviction(loop, probe, budget)
+        if ask is not None:
+            ask = await _switch_wait_busy_before_asking(loop, probe, budget, ask)
+        if ask is not None:
+            return step(switch_admission.RETURN_RESULT, result=ask)
     if not attempt.embedder_attempted:
         if await _switch_evict_embedder(loop, probe, attempt, embedder_mod):
             return step(switch_admission.REPROBE)
@@ -1579,16 +1597,47 @@ def _resident_vram_hold(engine) -> int:
     return 0
 
 
-def _shared_models_loaded() -> bool:
-    """Whether the shared embedder, reranker or speech model, or a native
-    media runtime of this process (``vram.loaded_native_media_runtimes``), is
-    loaded. Takes their locks; must not run on the event loop thread."""
+class SharedVramHolds(NamedTuple):
+    """The VRAM this process holds outside its chat models
+    (``_shared_vram_holds``).
+
+    ``holds`` are the bytes ``_switch_evict_embedder`` is expected to free
+    from each loaded shared embedder, reranker or speech model (0 for one on
+    the CPU or one a request is using, which it leaves loaded). ``unknown`` names the kinds of those
+    models whose hold cannot be estimated, and each loaded native media
+    runtime that is not running a job (idle, or its state unreadable).
+    ``busy_media`` names the native media runtimes running a job, which a
+    switch never stops."""
+
+    holds: tuple = ()
+    unknown: tuple = ()
+    busy_media: tuple = ()
+
+
+def _shared_vram_holds() -> SharedVramHolds:
+    """The ``SharedVramHolds`` of the shared embedder, reranker and speech
+    model (each module's ``resident_vram_hold``) and of this process's native
+    media runtimes (``vram.native_media_runtime_states``). Takes their locks;
+    must not run on the event loop thread."""
+    from localm import vram as _vram
     from localm.inference import embedder as _embedder_mod
     from localm.inference import reranker as _reranker_mod
     from localm.inference import speech as _speech_mod
-    from localm.vram import loaded_native_media_runtimes
-    return (_embedder_mod.loaded_dim() is not None or _reranker_mod.is_loaded()
-            or _speech_mod.is_loaded() or bool(loaded_native_media_runtimes()))
+    holds, unknown = [], []
+    for kind, mod in (("embedding model", _embedder_mod),
+                      ("reranker model", _reranker_mod),
+                      ("speech model", _speech_mod)):
+        loaded, hold = mod.resident_vram_hold()
+        if not loaded:
+            continue
+        if hold is None:
+            unknown.append(kind)
+        else:
+            holds.append(hold)
+    busy = []
+    for name, state in _vram.native_media_runtime_states().items():
+        (busy if state == "busy" else unknown).append(name)
+    return SharedVramHolds(tuple(holds), tuple(unknown), tuple(busy))
 
 
 def _peer_vram_holds() -> Optional[list]:
@@ -1624,48 +1673,96 @@ async def _switch_confirm_before_eviction(loop, probe: switch_admission.VramProb
                                           budget: switch_admission.LoadBudget,
                                           *, reprobe: bool = False
                                           ) -> Optional[dict]:
-    """The degraded-load ``confirm_required`` result for an explicit switch,
-    decided before anything is evicted: returned when the free VRAM expected
-    after evicting every evictable resident chat model
+    """The ``confirm_required`` result for an explicit switch, decided before
+    anything is evicted or freed: returned when the free VRAM expected after
+    evicting every evictable resident chat model
     (``switch_admission.evictable_residents``, each sized by
-    ``_resident_vram_hold``) and freeing every peer instance's model
-    (``_peer_vram_holds``) is still below ``budget.needed_bytes``.
+    ``_resident_vram_hold``), freeing the shared embedder, reranker and speech
+    model (``_shared_vram_holds``) and every peer instance's model
+    (``_peer_vram_holds``) is still below ``budget.needed_bytes``. It is the
+    busy-media ``switch_admission.busy_media_confirm`` when a native media
+    runtime is running a job (its VRAM is not counted as freed), else the
+    degraded-load ``switch_admission.degraded_load_confirm``.
 
-    None when the load would fit after that, or when it cannot be estimated:
-    ``switch_admission.free_after_eviction`` cannot, the shared embedder,
-    reranker or speech model is loaded, or the evictable residents changed
-    while it awaited. With *reprobe*, a fresh VRAM reading replaces *probe*
-    once every resident's hold is known. Blocking reads run off the event
-    loop. Evicts and cancels nothing."""
+    None when the load would fit after that, or when it cannot be estimated
+    (logged at INFO): a chat model's or shared model's hold is unknown, an
+    idle native media runtime is loaded, ``switch_admission.free_after_eviction``
+    cannot estimate from the reading, a peer lookup fails or a peer gives no
+    estimate, or the evictable residents changed while it awaited. With
+    *reprobe*, a fresh VRAM reading replaces *probe* once every resident's hold
+    is known. Blocking reads run off the event loop. Evicts, frees, asks and
+    cancels nothing."""
+    from localm.debuglog import logger as _dbg
+
+    def _cannot(why: str) -> None:
+        _dbg.info("switch_engine: cannot estimate the VRAM free after eviction for "
+                  "'%s' (%s); evicting and measuring instead of asking first",
+                  budget.name, why)
+        return None
+
     names = switch_admission.evictable_residents(budget, _engines_lru, _engines)
     engines = [_engines[n] for n in names]
     holds = await loop.run_in_executor(
         None, lambda: [_resident_vram_hold(e) for e in engines])
-    if any(h <= 0 for h in holds):
-        return None
+    unsized = [n for n, h in zip(names, holds, strict=True) if h <= 0]
+    if unsized:
+        return _cannot(f"no VRAM figure for {unsized}")
     if reprobe:
         probe = await _switch_probe_vram(loop, budget)
     after = switch_admission.free_after_eviction(probe, holds)
-    if after is None or after >= budget.needed_bytes:
+    if after is None:
+        return _cannot("the VRAM reading cannot be used for an estimate")
+    if after >= budget.needed_bytes:
         return None
-    if await loop.run_in_executor(None, _shared_models_loaded):
-        return None
+    shared = await loop.run_in_executor(None, _shared_vram_holds)
+    if shared.unknown:
+        return _cannot(f"no VRAM figure for the {' and the '.join(shared.unknown)}")
     peers = await loop.run_in_executor(None, _peer_vram_holds)
     if peers is None:
-        return None
-    after = switch_admission.free_after_eviction(probe, holds + peers)
+        return _cannot("the peer instances could not be listed")
+    if any(h <= 0 for h in peers):
+        return _cannot("a peer instance gives no VRAM estimate")
+    after = switch_admission.free_after_eviction(
+        probe, holds + [h for h in shared.holds if h > 0] + peers)
     if after is None or after >= budget.needed_bytes:
         return None
     now = switch_admission.evictable_residents(budget, _engines_lru, _engines)
     if [_engines[n] for n in now] != engines:
-        return None
-    from localm.debuglog import logger as _dbg
-    _dbg.info("switch_engine: '%s' does not fit even after evicting %s (needs ~%s MB "
-              "free including the safety margin, ~%s MB expected free); asking "
-              "before evicting anything", budget.name, names,
-              budget.needed_bytes // 1024 ** 2, after // 1024 ** 2)
+        return _cannot("the resident models changed while estimating")
+    _dbg.info("switch_engine: '%s' does not fit even after evicting %s and the "
+              "shared models (needs ~%s MB free including the safety margin, ~%s MB "
+              "expected free%s); asking before evicting anything", budget.name, names,
+              budget.needed_bytes // 1024 ** 2, after // 1024 ** 2,
+              f", the {' and the '.join(shared.busy_media)} running a job"
+              if shared.busy_media else "")
+    if shared.busy_media:
+        return switch_admission.busy_media_confirm(budget.name, list(shared.busy_media))
     return switch_admission.degraded_load_confirm(
         budget.name, budget.needed_bytes, after, moe=_registered_as_moe(budget.name))
+
+
+async def _switch_wait_busy_before_asking(loop, probe: switch_admission.VramProbe,
+                                          budget: switch_admission.LoadBudget,
+                                          ask: dict) -> Optional[dict]:
+    """Before *ask* (a ``_switch_confirm_before_eviction`` result) is returned:
+    wait for each evictable resident model with requests in flight to finish
+    them (``_wait_for_pin_clear``; nothing is cancelled). Returns
+    ``switch_admission.busy_victim_confirm`` for the first one still busy
+    after its wait; *ask* when none was busy; else a fresh
+    ``_switch_confirm_before_eviction`` (None when the target now fits).
+    Evicts and frees nothing."""
+    waited = False
+    for name in switch_admission.evictable_residents(budget, _engines_lru, _engines):
+        engine = _engines.get(name)
+        if engine is None or getattr(engine, "active_requests", 0) == 0:
+            continue
+        waited = True
+        if not await _wait_for_pin_clear(engine):
+            return switch_admission.busy_victim_confirm(
+                budget.name, name, _in_use_description(name, engine))
+    if not waited:
+        return ask
+    return await _switch_confirm_before_eviction(loop, probe, budget, reprobe=True)
 
 
 async def _switch_free_victim(loop, victim: str, engine,

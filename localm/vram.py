@@ -760,6 +760,30 @@ def loaded_native_media_runtimes() -> list:
     return names
 
 
+def _native_runtime_busy(key: str) -> bool:
+    """Whether a job holds the native runtime *key*'s job lock. Takes no lock."""
+    if key == "sdcpp":
+        from localm.media.sdcpp import shared
+        return shared.is_busy()
+    from localm.media.koboldcpp import server
+    return server.is_busy()
+
+
+def native_media_runtime_states() -> dict:
+    """``{display name: "busy" | "idle" | "unknown"}`` for each native media
+    runtime this process holds loaded: "busy" while a job holds it, "unknown"
+    when reading whether it is loaded or busy raised. Stops and waits for
+    nothing. Never raises."""
+    states = {}
+    for key, name in _NATIVE_RUNTIME_NAME.items():
+        try:
+            if _native_runtime_loaded(key):
+                states[name] = "busy" if _native_runtime_busy(key) else "idle"
+        except Exception:
+            states[name] = "unknown"
+    return states
+
+
 def _native_runtime_stop_if_idle(key: str) -> Optional[bool]:
     """Stop the native runtime *key* when no job holds it, without waiting. None
     when a job holds it; otherwise True once it is no longer running."""

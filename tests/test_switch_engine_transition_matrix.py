@@ -20,7 +20,8 @@ adaptive multi-GPU split handling.
 
 Patched boundaries: localm.discover.vram_capacity and gpu_split_shortfall,
 the registry and config readers, residency.cancel_all, the embedder's
-loaded_dim and localm.vram.wait_for_vram_release.
+loaded_dim, the shared models' resident_vram_hold and
+localm.vram.wait_for_vram_release.
 """
 
 import asyncio
@@ -141,6 +142,9 @@ def _install(monkeypatch, engines, *, total=10 * GB, measurable=True,
 
     monkeypatch.setattr("localm.vram.wait_for_vram_release", _wait_for_release)
     monkeypatch.setattr("localm.inference.embedder.loaded_dim", lambda: None)
+    for module in ("embedder", "reranker", "speech"):
+        monkeypatch.setattr(f"localm.inference.{module}.resident_vram_hold",
+                            lambda: (False, None))
 
     real_cancel_all = residency.cancel_all
 
@@ -2168,18 +2172,18 @@ class TestTooBigEvenAfterEviction:
         assert a.unload_calls == 1
 
     @pytest.mark.parametrize("shared, peers", [
-        (True, []),
-        (False, None),
-        (False, [0]),
-        (False, [2 * GB]),
-    ], ids=["shared-model-loaded", "peer-lookup-failed", "peer-without-estimate",
+        (hs.SharedVramHolds(unknown=("embedding model",)), []),
+        (hs.SharedVramHolds(), None),
+        (hs.SharedVramHolds(), [0]),
+        (hs.SharedVramHolds(), [2 * GB]),
+    ], ids=["shared-model-hold-unknown", "peer-lookup-failed", "peer-without-estimate",
             "peer-holds-the-shortfall"])
     def test_vram_another_holder_may_free_evicts_first_as_before(
             self, monkeypatch, shared, peers):
         a = _SizedResident("model-a")
         b = GatedEngine("model-b")
         env = _install(monkeypatch, {"model-a": a, "model-b": b}, total=_TOO_SMALL)
-        monkeypatch.setattr(hs, "_shared_models_loaded", lambda: shared)
+        monkeypatch.setattr(hs, "_shared_vram_holds", lambda: shared)
         monkeypatch.setattr(hs, "_peer_vram_holds", lambda: peers)
         _seat("model-a", a, active=True)
 
@@ -2188,12 +2192,12 @@ class TestTooBigEvenAfterEviction:
         assert res["status"] == "confirm_required"
         assert a.unload_calls == 1
 
-    def test_a_loaded_media_runtime_evicts_first_as_before(self, monkeypatch):
+    def test_an_idle_media_runtime_evicts_first_as_before(self, monkeypatch):
         a = _SizedResident("model-a")
         b = GatedEngine("model-b")
         env = _install(monkeypatch, {"model-a": a, "model-b": b}, total=_TOO_SMALL)
-        monkeypatch.setattr("localm.vram.loaded_native_media_runtimes",
-                            lambda: ["stable-diffusion.cpp"])
+        monkeypatch.setattr("localm.vram.native_media_runtime_states",
+                            lambda: {"native image/video worker": "idle"})
         _seat("model-a", a, active=True)
 
         res = asyncio.run(hs.switch_engine("model-b", env.factory))
@@ -2241,3 +2245,349 @@ class TestTooBigEvenAfterEviction:
         assert res == {"status": "confirm_required", "model": "model-b",
                        "detail": _estimate_confirm_detail("model-b", _TOO_SMALL + 100 * MB)}
         assert a.unload_calls == 0
+
+
+# --------------------------------------------------------------------------- #
+#  Shared embedding, reranker and speech models and media runtimes            #
+# --------------------------------------------------------------------------- #
+
+_SHARED_HOLD = 600 * MB
+
+
+class _SharedBox:
+    """The shared embedder, reranker and speech model and the native media
+    runtimes of a simulated box, each holding VRAM the device reading counts.
+
+    ``holds`` maps a kind to the bytes it holds while loaded; ``reported``
+    overrides what its module's ``resident_vram_hold`` reports (None for an
+    unknown hold). ``media`` maps a runtime's display name to its state, each
+    holding ``_SHARED_HOLD``. ``events`` records every free and peer ask."""
+
+    _MODULES = {"embedder": "localm.inference.embedder",
+                "reranker": "localm.inference.reranker",
+                "speech": "localm.inference.speech"}
+
+    def __init__(self, monkeypatch, *, holds, reported=None, media=None):
+        self.holds = dict(holds)
+        self.loaded = set(self.holds)
+        self.reported = dict(reported or {})
+        self.media = dict(media or {})
+        self.events = []
+        for kind, mod in self._MODULES.items():
+            monkeypatch.setattr(f"{mod}.resident_vram_hold",
+                                lambda k=kind: self._hold(k))
+        monkeypatch.setattr("localm.inference.embedder.loaded_dim",
+                            lambda: 384 if "embedder" in self.loaded else None)
+        monkeypatch.setattr("localm.inference.reranker.is_loaded",
+                            lambda: "reranker" in self.loaded)
+        monkeypatch.setattr("localm.inference.speech.is_loaded",
+                            lambda: "speech" in self.loaded)
+        monkeypatch.setattr("localm.inference.embedder.reset_embedder",
+                            lambda force=True: self._reset("embedder"))
+        monkeypatch.setattr("localm.inference.reranker.reset_reranker",
+                            lambda force=True: self._reset("reranker"))
+        monkeypatch.setattr("localm.inference.speech.reset_speech",
+                            lambda force=True: self._reset("speech"))
+        monkeypatch.setattr("localm.vram.native_media_runtime_states",
+                            lambda: dict(self.media))
+        monkeypatch.setattr("localm.vram.loaded_native_media_runtimes",
+                            lambda: list(self.media))
+        monkeypatch.setattr("localm.vram.stop_idle_native_media", self._stop_idle_media)
+
+        def _ask_peer(**kwargs):
+            self.events.append("ask-peer")
+            return False
+
+        monkeypatch.setattr(hs, "_attempt_cooperative_unload", _ask_peer)
+
+    def _hold(self, kind):
+        if kind not in self.loaded:
+            return False, None
+        return True, self.reported.get(kind, self.holds[kind])
+
+    def _reset(self, kind):
+        self.events.append(f"free-{kind}")
+        was = kind in self.loaded
+        self.loaded.discard(kind)
+        return was
+
+    def _stop_idle_media(self):
+        from localm.vram import MEDIA_BUSY, MEDIA_STOPPED
+        out = {}
+        for name, state in list(self.media.items()):
+            if state == "busy":
+                out[name] = MEDIA_BUSY
+            else:
+                self.events.append(f"stop-{name}")
+                del self.media[name]
+                out[name] = MEDIA_STOPPED
+        return out
+
+    def taken(self):
+        return (sum(self.holds[k] for k in self.loaded)
+                + _SHARED_HOLD * len(self.media))
+
+
+def _install_shared(monkeypatch, engines, *, total, **shared):
+    """``_install`` on a box whose free reading also counts *shared*'s holds."""
+    box = None
+
+    def _reading():
+        loaded = sum(1 for e in engines.values() if e.loaded)
+        return {"total": total, "free": total - loaded * NEED - box.taken()}
+
+    env = _install(monkeypatch, engines, total=total, reading=_reading)
+    box = _SharedBox(monkeypatch, **shared)
+    return env, box
+
+
+class TestSharedModelsCountedBeforeEviction:
+    @pytest.mark.parametrize("kind", ["embedder", "reranker", "speech"])
+    def test_a_loaded_shared_model_is_counted_and_nothing_is_evicted(
+            self, monkeypatch, kind):
+        a = _SizedResident("model-a")
+        b = GatedEngine("model-b")
+        env, box = _install_shared(monkeypatch, {"model-a": a, "model-b": b},
+                                   total=_TOO_SMALL, holds={kind: _SHARED_HOLD})
+        _seat("model-a", a, active=True)
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert res == {"status": "confirm_required", "model": "model-b",
+                       "detail": _estimate_confirm_detail("model-b", _TOO_SMALL)}
+        assert a.unload_calls == 0 and a.loaded and env.release_waits == []
+        assert box.events == [], "nothing was freed before asking"
+        assert box.loaded == {kind}
+        assert hs._engines == {"model-a": a} and hs._active_model_name == "model-a"
+
+    def test_cancel_keeps_the_chat_model_and_every_shared_model(self, monkeypatch):
+        a = _SizedResident("model-a")
+        b = GatedEngine("model-b")
+        env, box = _install_shared(
+            monkeypatch, {"model-a": a, "model-b": b}, total=_TOO_SMALL,
+            holds={"embedder": _SHARED_HOLD, "reranker": 200 * MB, "speech": 0})
+        monkeypatch.setattr(hs, "_default_model_name", "model-startup")
+        _seat("model-a", a, active=True)
+
+        asked = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert asked["status"] == "confirm_required"
+        assert box.events == [] and box.loaded == {"embedder", "reranker", "speech"}
+        assert hs._engines == {"model-a": a}
+        assert hs._resolve_unnamed_model_name() == "model-a"
+
+    def test_a_target_that_fits_once_the_embedder_is_freed_loads_without_asking(
+            self, monkeypatch):
+        a = _SizedResident("model-a")
+        b = GatedEngine("model-b")
+        env, box = _install_shared(monkeypatch, {"model-a": a, "model-b": b},
+                                   total=NEED + HEADROOM + 100 * MB,
+                                   holds={"embedder": _SHARED_HOLD})
+        _seat("model-a", a, active=True)
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert res == {"status": "loaded", "model": "model-b"}
+        assert a.unload_calls == 1 and box.events == ["free-embedder"]
+
+    def test_a_busy_media_runtime_asks_about_the_job_before_evicting(self, monkeypatch):
+        a = _SizedResident("model-a")
+        b = GatedEngine("model-b")
+        env, box = _install_shared(
+            monkeypatch, {"model-a": a, "model-b": b}, total=_TOO_SMALL + _SHARED_HOLD,
+            holds={"embedder": _SHARED_HOLD},
+            media={"native image/video worker": "busy"})
+        _seat("model-a", a, active=True)
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert res == hs.switch_admission.busy_media_confirm(
+            "model-b", ["native image/video worker"])
+        assert a.unload_calls == 0 and box.events == []
+        assert box.loaded == {"embedder"}
+        assert box.media == {"native image/video worker": "busy"}
+
+    def test_confirm_evicts_frees_and_loads(self, monkeypatch):
+        a = _SizedResident("model-a")
+        b = GatedEngine("model-b")
+        env, box = _install_shared(monkeypatch, {"model-a": a, "model-b": b},
+                                   total=_TOO_SMALL, holds={"embedder": _SHARED_HOLD})
+        _seat("model-a", a, active=True)
+
+        asked = asyncio.run(hs.switch_engine("model-b", env.factory))
+        assert asked["status"] == "confirm_required" and box.events == []
+
+        forced = asyncio.run(hs.switch_engine("model-b", env.factory, force=True))
+
+        assert forced == {"status": "loaded", "model": "model-b"}
+        assert a.unload_calls == 1 and "free-embedder" in box.events
+        assert hs._engines == {"model-b": b} and hs._active_model_name == "model-b"
+
+    @pytest.mark.parametrize("kind, label", [
+        ("embedder", "embedding model"), ("reranker", "reranker model"),
+        ("speech", "speech model")])
+    def test_an_unknown_shared_hold_falls_back_and_says_so(
+            self, monkeypatch, caplog, kind, label):
+        a = _SizedResident("model-a")
+        b = GatedEngine("model-b")
+        env, box = _install_shared(monkeypatch, {"model-a": a, "model-b": b},
+                                   total=_TOO_SMALL, holds={kind: _SHARED_HOLD},
+                                   reported={kind: None})
+        _seat("model-a", a, active=True)
+
+        with caplog.at_level("INFO", logger="localm"):
+            res = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert res["status"] == "confirm_required"
+        assert a.unload_calls == 1, "it evicted and measured, as before"
+        assert any(r.getMessage().startswith(
+            "switch_engine: cannot estimate the VRAM free after eviction for "
+            f"'model-b' (no VRAM figure for the {label})") for r in caplog.records)
+
+    def test_an_idle_media_runtime_falls_back_and_says_so(self, monkeypatch, caplog):
+        a = _SizedResident("model-a")
+        b = GatedEngine("model-b")
+        env, box = _install_shared(monkeypatch, {"model-a": a, "model-b": b},
+                                   total=_TOO_SMALL, holds={})
+        _seat("model-a", a, active=True)
+        monkeypatch.setattr("localm.vram.native_media_runtime_states",
+                            lambda: {"native music runtime": "idle"})
+
+        with caplog.at_level("INFO", logger="localm"):
+            res = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert res["status"] == "confirm_required" and a.unload_calls == 1
+        assert any("(no VRAM figure for the native music runtime)" in r.getMessage()
+                   for r in caplog.records)
+
+    def test_an_unknown_chat_hold_falls_back_and_says_so(self, monkeypatch, caplog):
+        a = GatedEngine("model-a")
+        b = GatedEngine("model-b")
+        env, box = _install_shared(monkeypatch, {"model-a": a, "model-b": b},
+                                   total=_TOO_SMALL, holds={"embedder": _SHARED_HOLD})
+        _seat("model-a", a, active=True)
+
+        with caplog.at_level("INFO", logger="localm"):
+            res = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert res["status"] == "confirm_required" and a.unload_calls == 1
+        assert any("(no VRAM figure for ['model-a'])" in r.getMessage()
+                   for r in caplog.records)
+
+
+class TestBusyReplyNothingFreedBeforeAsking:
+    def test_the_reply_finishes_then_it_asks_with_nothing_freed(self, monkeypatch):
+        a = _SizedResident("model-a")
+        b = GatedEngine("model-b")
+        env, box = _install_shared(monkeypatch, {"model-a": a, "model-b": b},
+                                   total=_TOO_SMALL, holds={"embedder": _SHARED_HOLD})
+        monkeypatch.setattr(hs, "_peer_vram_holds", lambda: [])
+        _seat("model-a", a, active=True, busy=1)
+
+        def _reply_finishes():
+            box.events.append("reply-finished")
+            a.active_requests = 0
+
+        _flip_once_the_wait_starts(monkeypatch, _reply_finishes)
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert res == {"status": "confirm_required", "model": "model-b",
+                       "detail": _estimate_confirm_detail("model-b", _TOO_SMALL)}
+        assert box.events == ["reply-finished"], "no free or peer ask before asking"
+        assert env.cancelled == [] and a.unload_calls == 0 and a.loaded
+        assert box.loaded == {"embedder"}
+        assert hs._engines == {"model-a": a} and hs._active_model_name == "model-a"
+
+    def test_with_no_chat_model_loaded_the_embedder_is_not_freed_before_asking(
+            self, monkeypatch):
+        b = GatedEngine("model-b")
+        env, box = _install_shared(monkeypatch, {"model-b": b}, total=_TOO_SMALL,
+                                   holds={"embedder": _SHARED_HOLD})
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert res == {"status": "confirm_required", "model": "model-b",
+                       "detail": _estimate_confirm_detail("model-b", _TOO_SMALL)}
+        assert box.events == [] and box.loaded == {"embedder"} and not b.loaded
+
+    def test_an_idle_model_beside_a_busy_one_waits_for_the_reply_before_asking(
+            self, monkeypatch):
+        a = _SizedResident("model-a", hold=3 * GB)
+        c = _SizedResident("model-c", hold=3 * GB)
+        b = GatedEngine("model-b")
+        engines = {"model-a": a, "model-c": c, "model-b": b}
+
+        def _reading():
+            loaded = sum(1 for e in (a, c) if e.loaded)
+            return {"total": _TOO_SMALL, "free": _TOO_SMALL - loaded * 3 * GB}
+
+        env = _install(monkeypatch, engines, total=_TOO_SMALL, reading=_reading)
+        _knobs(monkeypatch, max_resident_models=3)
+        _seat("model-a", a)
+        _seat("model-c", c, active=True, busy=1)
+        events = []
+
+        def _reply_finishes():
+            events.append("reply-finished")
+            c.active_requests = 0
+
+        _flip_once_the_wait_starts(monkeypatch, _reply_finishes)
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert res == {"status": "confirm_required", "model": "model-b",
+                       "detail": _estimate_confirm_detail("model-b", _TOO_SMALL)}
+        assert events == ["reply-finished"], "the reply was waited for first"
+        assert a.unload_calls == 0 and c.unload_calls == 0 and env.cancelled == []
+
+    def test_a_reply_still_running_after_the_wait_is_asked_about_and_kept(
+            self, monkeypatch):
+        a = _SizedResident("model-a")
+        b = GatedEngine("model-b")
+        env, box = _install_shared(monkeypatch, {"model-a": a, "model-b": b},
+                                   total=_TOO_SMALL, holds={"embedder": _SHARED_HOLD})
+        _seat("model-a", a, active=True, busy=1)
+
+        async def _still_busy(engine, **kwargs):
+            return False
+
+        monkeypatch.setattr(hs, "_wait_for_pin_clear", _still_busy)
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert res["status"] == "confirm_required"
+        assert "cuts off the reply" in res["detail"] and "'model-a'" in res["detail"]
+        assert box.events == [] and env.cancelled == [] and a.unload_calls == 0
+        assert a.active_requests == 1
+
+    def test_a_busy_shared_model_is_not_counted_as_freed(self, monkeypatch):
+        a = _SizedResident("model-a")
+        b = GatedEngine("model-b")
+        env, box = _install_shared(monkeypatch, {"model-a": a, "model-b": b},
+                                   total=NEED + HEADROOM + 100 * MB,
+                                   holds={"embedder": _SHARED_HOLD},
+                                   reported={"embedder": 0})
+        _seat("model-a", a, active=True)
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert res["status"] == "confirm_required"
+        assert a.unload_calls == 0 and box.events == []
+
+    def test_a_non_explicit_load_still_frees_the_embedder_first(self, monkeypatch):
+        a = _SizedResident("model-a")
+        b = GatedEngine("model-b")
+        env, box = _install_shared(monkeypatch, {"model-a": a, "model-b": b},
+                                   total=_TOO_SMALL, holds={"embedder": _SHARED_HOLD})
+        _seat("model-a", a, active=True, busy=1)
+
+        def _reply_finishes():
+            a.active_requests = 0
+
+        _flip_once_the_wait_starts(monkeypatch, _reply_finishes)
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory, preempt=False))
+
+        assert res == {"status": "loaded", "model": "model-b"}
+        assert box.events[0] == "free-embedder"

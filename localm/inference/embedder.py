@@ -1371,6 +1371,23 @@ class IsolatedEmbedder(VramSizingMixin):
             Path(self.model_path).name, pooling_name(declared),
             pooling_name(effective), pooling_name(effective))
 
+    @property
+    def vram_hold_bytes(self) -> Optional[int]:
+        """Bytes of VRAM this embedder's worker is expected to hold: 0 when it
+        runs on the CPU (``gpu_fallback_reason`` set or ``n_gpu_layers`` 0);
+        for a load of every layer (``n_gpu_layers`` negative or 99 and above),
+        the model file size plus 20%, the loaded-footprint estimate the VRAM
+        preflight uses; else None (unknown). Reads the file size."""
+        if self.gpu_fallback_reason is not None or self.n_gpu_layers == 0:
+            return 0
+        if self.n_gpu_layers < 0 or self.n_gpu_layers >= 99:
+            try:
+                size = Path(self.model_path).stat().st_size
+            except OSError:
+                return None
+            return int(size * 1.2) if size else None
+        return None
+
     def embed(self, texts: list[str]) -> list[list[float]]:
         """Embed *texts* via the isolated worker, transparently respawning it
         first if a PRIOR call's crash left it dead. A crash DURING this call is
@@ -1923,6 +1940,26 @@ def loaded_dim() -> Optional[int]:
     Does NOT trigger a load - safe for a cheap status probe (GUI picker)."""
     with _LOCK:
         return _EMBEDDER.dim if _EMBEDDER is not None else None
+
+
+def model_vram_hold(model) -> Optional[int]:
+    """*model*'s ``vram_hold_bytes`` when it is a non-negative int, else None
+    (unknown)."""
+    hold = getattr(model, "vram_hold_bytes", None)
+    return hold if type(hold) is int and hold >= 0 else None
+
+
+def resident_vram_hold() -> tuple[bool, Optional[int]]:
+    """``(loaded, hold)``: whether the shared embedder is loaded and, when it
+    is, the VRAM bytes a ``reset_embedder(force=False)`` would free: 0 while a
+    request is using it, else ``model_vram_hold`` (None when unknown). Does
+    not load. Takes ``_LOCK``; must not run on the event loop thread."""
+    with _LOCK:
+        current = _EMBEDDER
+        busy = current is not None and _in_flight(current)
+    if current is None:
+        return False, None
+    return True, 0 if busy else model_vram_hold(current)
 
 
 def gpu_fallback_reason() -> Optional[str]:
