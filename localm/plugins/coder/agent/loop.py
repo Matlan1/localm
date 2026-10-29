@@ -143,12 +143,96 @@ def _is_change_verb(word: str) -> bool:
     return word in _CHANGE_VERBS
 
 
-def _is_inflected_change_verb(word: str) -> bool:
-    """True for an -ing, -ed or -ied form of a change verb."""
+def _change_base(word: str) -> str:
+    """The change verb *word* is, or is an -ing, -ed or -ied form of; "" when
+    it is neither."""
+    if word in _CHANGE_VERBS:
+        return word
     for suffix, repl in (("ing", ""), ("ing", "e"), ("ed", ""), ("ed", "e"),
                          ("ied", "y")):
         if word.endswith(suffix) and word[:-len(suffix)] + repl in _CHANGE_VERBS:
+            return word[:-len(suffix)] + repl
+    return ""
+
+
+def _is_inflected_change_verb(word: str) -> bool:
+    """True for an -ing, -ed or -ied form of a change verb."""
+    return word not in _CHANGE_VERBS and bool(_change_base(word))
+
+
+def _is_negated_change(words: list[str], k: int, carry: bool) -> bool:
+    """True when the change word at ``words[k]`` is negated.
+
+    It is negated when a negation ("not", "never", "don't", "without", ...)
+    comes before it in the clause with only conjunctions, adverbs, other change
+    words or a "need/want/try ... to" or "should be" span in between ("do not
+    edit or change", "don't even try to modify", "should not be changed"), or
+    when "no" or "nothing" follows it ("make no changes", "change nothing").
+    With *carry*, a run of such words that reaches the start of the clause
+    continues a negation that ended the previous clause ("do not edit, modify
+    or rewrite anything")."""
+    if k + 1 < len(words) and words[k + 1] in _NEGATED_OBJECTS:
+        return True
+    for j in range(k - 1, -1, -1):
+        w = words[j]
+        if w in _CHANGE_NEGATIONS:
             return True
+        if not (w in _NEGATION_SPAN or _change_base(w)):
+            return False
+    return carry
+
+
+def _has_file_target(rest: str) -> bool:
+    """True when *rest*, the text after a piece of prose a request asks for,
+    sends it to a file: a path, or a file or workspace noun ("file", "the
+    README", "a docstring"), after "to", "into" or "as", or after "in" or
+    "inside" that does not follow "is", "are", "was" or "were" ("what is in
+    config.py" names where the content is, not where the text goes)."""
+    parts = rest.split()
+    for i, part in enumerate(parts):
+        if part not in _PROSE_TARGET_PREPS:
+            continue
+        if part in ("in", "inside") and i and parts[i - 1] in ("is", "are", "was", "were"):
+            continue
+        targets = parts[i + 1:i + 3]
+        if targets and targets[0] in _PROSE_TARGET_DETERMINERS:
+            targets = targets[1:]
+        if not targets:
+            continue
+        target = targets[0].rstrip(".,:;!?")
+        if (_names_a_path(target) or _RE_WORKSPACE_NOUN.fullmatch(target)
+                or target in _PROSE_TARGET_NOUNS):
+            return True
+    return False
+
+
+def _is_prose_output(clause: str, tokens: list[re.Match], k: int) -> bool:
+    """True when the change verb at ``tokens[k]`` asks for text in the reply,
+    not for a change to the project.
+
+    That is a "write", "make", "create" or "generate" (or an -ing or -ed form)
+    whose object, within the next four words, is a summary, an explanation, a
+    description, an answer, a report or similar prose, with no code or
+    workspace noun before it, not used as a modifier of a code noun ("a
+    summary function"), not part of a file name ("summary.md"), and with no
+    file target after it (see :func:`_has_file_target`)."""
+    words = [t.group() for t in tokens]
+    if _change_base(words[k]) not in _PROSE_VERBS:
+        return False
+    for j in range(k + 1, min(len(words), k + 5)):
+        w = words[j]
+        if w in _PROSE_NOUNS:
+            start, end = tokens[j].start(), tokens[j].end()
+            if (start and clause[start - 1] in "./\\_-") or (
+                    end < len(clause) and clause[end] in "./\\_-"
+                    and clause[end + 1:end + 2].strip()):
+                return False
+            if j + 1 < len(words) and (words[j + 1] in _CODE_NOUNS
+                                        or _RE_WORKSPACE_NOUN.fullmatch(words[j + 1])):
+                return False
+            return not _has_file_target(clause[end:])
+        if w in _CODE_NOUNS or _RE_WORKSPACE_NOUN.fullmatch(w):
+            return False
     return False
 
 
@@ -165,6 +249,12 @@ def asks_for_change(text: str) -> bool:
     the retry function add a backoff" asks for a change. A noun-like change
     word ("code") counts only when it opens a clause.
 
+    A negated change word never counts ("do not edit anything", "don't change
+    it", "make no changes", see :func:`_is_negated_change`), and neither does a
+    request for prose in the reply ("write a short summary", see
+    :func:`_is_prose_output`). Any other change verb in the text still makes it
+    a change request: "read a.py, then fix b.py; do not touch c.py" is one.
+
     Pure and module-level, so it can be tested directly on request strings."""
     lowered = (text or "").lower()
     if not lowered.strip():
@@ -172,25 +262,42 @@ def asks_for_change(text: str) -> bool:
     for m in _RE_POLITE_VERB.finditer(lowered):
         word = m.group(1)
         if _is_change_verb(word) or _is_inflected_change_verb(word):
-            return True
+            tail = _RE_CLAUSE_SPLIT.split(lowered[m.start(1):], maxsplit=1)[0]
+            tail_tokens = list(_RE_WORD.finditer(tail))
+            head = _RE_WORD.findall(_RE_CLAUSE_SPLIT.split(lowered[:m.start(1)])[-1])
+            if _is_negated_change(head + [t.group() for t in tail_tokens], len(head), False):
+                continue
+            if not _is_prose_output(tail, tail_tokens, 0):
+                return True
+    carry = False
     for clause in _RE_CLAUSE_SPLIT.split(lowered):
-        words = _RE_WORD.findall(clause)
+        tokens = list(_RE_WORD.finditer(clause))
+        words = [t.group() for t in tokens]
         first = next((k for k, w in enumerate(words) if w not in _IMPERATIVE_LEADS),
                      len(words))
+        negated_last = False
         for k, word in enumerate(words):
             prev = words[k - 1] if k else ""
             if _is_change_verb(word):
+                if _is_negated_change(words, k, carry):
+                    negated_last = k == len(words) - 1
+                    continue
                 if prev in _CHANGE_NOUN_CONTEXT:
                     continue
                 if word == "code" and k != first:
                     continue
                 if k == first and _is_statement_subject(words[k + 1:]):
                     continue
+                if _is_prose_output(clause, tokens, k):
+                    continue
                 return True
             if _is_inflected_change_verb(word) and k > 0 and (
                     prev in _CHANGE_FORM_LEADS
                     or any(w in _CHANGE_OBLIGATIONS for w in words[max(0, k - 6):k])):
+                if _is_negated_change(words, k, carry) or _is_prose_output(clause, tokens, k):
+                    continue
                 return True
+        carry = negated_last
     return False
 
 
@@ -326,7 +433,7 @@ _CHANGE_VERBS = frozenset({
     "implement", "write", "create", "add", "build", "make", "fix", "change",
     "update", "modify", "edit", "refactor", "rewrite", "generate", "code",
     "develop", "extend", "replace", "insert", "apply", "port", "convert",
-    "finish", "complete",
+    "finish", "complete", "rename",
 })
 # Words right before a change word that make it a noun, a participle of a
 # description or part of a question ("the update", "was added", "where users
@@ -344,6 +451,47 @@ _CHANGE_NOUN_CONTEXT = frozenset({
 _CHANGE_FORM_LEADS = frozenset({
     "start", "begin", "continue", "keep", "proceed", "try", "by"})
 _CHANGE_OBLIGATIONS = frozenset({"needs", "need", "should", "must"})
+# Words that negate a change word after them.
+_CHANGE_NEGATIONS = frozenset({
+    "not", "never", "don't", "dont", "doesn't", "doesnt", "won't", "wont",
+    "shouldn't", "shouldnt", "mustn't", "mustnt", "can't", "cant", "cannot",
+    "nor", "without", "nothing"})
+# Words that may stand between a negation and the change word it negates.
+_NEGATION_SPAN = frozenset({
+    "or", "and", "nor", "even", "ever", "actually", "yet", "also", "really",
+    "need", "needs", "want", "you", "to", "try", "attempt", "bother", "should",
+    "must", "be", "been", "being", "get"})
+# Objects that negate the change word before them ("make no changes").
+_NEGATED_OBJECTS = frozenset({"no", "nothing"})
+# Change verbs that can ask for prose in the reply ("write a summary").
+_PROSE_VERBS = frozenset({"write", "make", "create", "generate"})
+# Pieces of prose an answer can be.
+_PROSE_NOUNS = frozenset({
+    "summary", "summaries", "explanation", "explanations", "description",
+    "descriptions", "answer", "answers", "report", "overview", "recap",
+    "analysis", "breakdown", "outline", "walkthrough", "review", "critique",
+    "assessment", "evaluation", "synopsis", "rundown", "comparison",
+    "paragraph", "paragraphs", "sentence", "sentences", "response", "reply",
+    "plan"})
+# Nouns that make a piece of prose part of the code ("a summary function").
+_CODE_NOUNS = frozenset({
+    "function", "functions", "method", "methods", "class", "classes", "script",
+    "scripts", "module", "modules", "test", "tests", "file", "files", "page",
+    "endpoint", "command", "field", "section", "table", "view", "component",
+    "helper", "tool", "feature", "generator", "route", "screen", "widget",
+    "option", "flag", "doc", "docs", "document", "docstring", "docstrings",
+    "comment", "comments", "line", "lines", "column", "template", "struct",
+    "type", "api", "job", "hook", "handler", "parser", "cli", "button",
+    "dialog", "tab", "panel", "schema", "query", "variable", "constant", "log",
+    "logger", "step", "task", "card", "row", "header", "footer", "message"})
+# Words before a file target of a piece of prose ("to SUMMARY.md").
+_PROSE_TARGET_PREPS = frozenset({"to", "into", "as", "in", "inside"})
+_PROSE_TARGET_DETERMINERS = frozenset({
+    "the", "a", "an", "new", "my", "our", "your", "this", "that", "its"})
+# File nouns a piece of prose can be sent to, besides the workspace nouns.
+_PROSE_TARGET_NOUNS = frozenset({
+    "comment", "comments", "docstring", "docstrings", "docs", "documentation",
+    "changelog", "notes", "wiki", "doc", "document"})
 
 
 # A shell command that runs a project's tests.

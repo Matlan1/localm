@@ -850,12 +850,19 @@ loaded or configured to fall back to, the load is a 503; an unregistered name is
 `POST /v1/models/unload` with no `model` returns `status` (`"unloaded"`,
 `"in_use"` when every loaded model was mid-request and none could be freed, or
 `"already_unloaded"`), `unloaded_models` (the chat models released),
-`unloaded_other` (the other models released, by kind: `"embedding model"`,
-`"reranker model"`, `"speech model"`), `embedder_unloaded` (whether
-`unloaded_other` is non-empty), and `skipped_in_use` (names and kinds left
-loaded) when something was still busy with a request. A busy chat model gets a
-short grace period to finish first. Whatever stayed loaded is also described in
-`confirm_required`, a map from each name or kind to what is using it:
+`unloaded_other` (the other models and media runtimes released, by kind:
+`"embedding model"`, `"reranker model"`, `"speech model"`,
+`"native image/video worker"`, `"native music runtime"`), `embedder_unloaded`
+(whether an embedding, reranker or speech model was released), and
+`skipped_in_use` (names and kinds left loaded) when something was still busy
+with a request. A busy chat model gets a short grace period to finish first.
+Unloading everything also stops this server's own native image/video worker and
+music runtime when no job is using them; one that is running a job is left
+running, even with `force=true`, and listed in `skipped_in_use` and in
+`media_left_running` (`{kind: "busy"}`, or `"failed"` when the stop did not
+take). Add `media=false` to leave them loaded. Whatever else stayed loaded is
+also described in `confirm_required`, a map from each name or kind to what is
+using it:
 
 ```json
 {"status": "in_use", "model": "none", "unloaded_models": [], "unloaded_other": [],
@@ -1082,6 +1089,11 @@ On success the response carries `saved` (true), `filename`, `path` (scrubbed of
 machine paths for a caller other than the local operator), `maintainer`, and,
 when the saved file can be read back, `report_markdown` (its full text, for
 review and download) and `report_sha256` (the hex SHA-256 of that text).
+
+For a caller other than the local operator the report itself is saved scrubbed:
+every machine path in it, the attached log included, keeps only its file name
+after `<data>`, `<install>`, `<env>`, `~` or `<path>` (any other folder, such as
+that of a model registered in place).
 
 ### `POST /api/bug-report/send`
 

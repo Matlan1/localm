@@ -1485,6 +1485,7 @@ export const I18N_EN = {
   "models.unloadAll.confirmLabel": "Unload all anyway",
   "models.unloadAll.confirmTitle": "Some models are in use",
   "models.unloadAll.failedException": "Unload failed: {message}",
+  "models.unloadAll.mediaStopFailed": "Could not stop the {names}; see the server log",
   "models.unloadAll.nothingLoaded": "Nothing was loaded",
   "models.unloadAll.someStillGenerating":
     "Unloaded {n} model(s); {skipped} still generating - try again once finished",
@@ -3065,9 +3066,16 @@ export const I18N_EN = {
   "browser.setup.downloadFailed": "The download did not finish: {detail}",
   "browser.setup.downloading": "Downloading the browser...",
   "browser.setup.heading": "Browser setup",
+  "browser.setup.openPlugins": "Open the Plugins page",
   "browser.setup.playwrightMissing":
     "The browser automation extra is not installed. Install it with:  " +
     "pip install \"localm[browser]\"",
+  "browser.setup.pluginDisabled":
+    "The browser plugin is installed but turned off. Turn it on on the " +
+    "Plugins page to let the model drive a web browser.",
+  "browser.setup.pluginMissing":
+    "The browser plugin is not installed. Install it on the Plugins page to " +
+    "let the model drive a web browser.",
   "browser.setup.readyBundled": "The bundled browser is downloaded and ready.",
   "browser.setup.readySystem": "localm will use {browser}, found on this computer.",
   "browser.setup.switchedToBundled": "Switched to the bundled browser.",

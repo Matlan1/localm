@@ -101,7 +101,14 @@ def add_debug_stacks(app: FastAPI) -> None:
         # a usable hang diagnosis: scrubbed, not muted. Bound once
         # rather than per string: a dump is hundreds of frames and each prefix
         # resolve is a filesystem call.
-        scrub = path_scrubber()
+        # A caller other than the local operator also gets every other host
+        # folder replaced (path_formatter).
+        own_scrub = path_scrubber()
+        show = _hs.path_formatter(request)
+
+        def scrub(text: str) -> str:
+            return show(own_scrub(text))
+
         threads = {str(tid): [scrub(line) for line in traceback.format_stack(frame)]
                    for tid, frame in sys._current_frames().items()}
         tasks = []
