@@ -248,7 +248,8 @@ def check_mcp(work_dir: Path, trusted_servers: Optional[dict] = None) -> list[Ch
         label = f"mcp:{name}"
         server = MCPServer(name=name, command=spec["command"],
                            args=spec.get("args", []), env=spec.get("env"),
-                           trusted=bool(spec.get("trusted", False)))
+                           trusted=bool(spec.get("trusted", False)),
+                           cwd=work_dir)
         try:
             server.start()
             out.append(Check(label, OK, f"{len(server.tools)} tool(s)"))

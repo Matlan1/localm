@@ -32,7 +32,7 @@ def _projector_that_logs(native_text: str, *, on_gpu: bool = True, can_apply: bo
         supports_audio = False
         applied: list = []
 
-        def __init__(self, mmproj_path, model_ptr, gpu_index=0):
+        def __init__(self, mmproj_path, model_ptr, gpu_index=0, use_gpu=True):
             self.on_gpu = on_gpu
             self.applied = []
             os.write(2, native_text.encode())

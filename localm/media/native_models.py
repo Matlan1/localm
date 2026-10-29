@@ -443,7 +443,9 @@ def make_router(media: str, prefix: str, plugin_backend) -> APIRouter:
     """``GET /api/<prefix>/native-models``: the picker options for *media*
     (``pairing.native_options``), the settings' current choice, and a preview
     (``pairing.preview``) of what a job would load for the model and slots in
-    the query string (or the settings when the query names no model)."""
+    the query string (or the settings when the query names no model). For a
+    caller other than the local operator every string in the response is
+    path-scrubbed (``http_server.path_formatter``)."""
     router = APIRouter()
 
     @router.get(f"/api/{prefix}/native-models")
@@ -487,8 +489,12 @@ def make_router(media: str, prefix: str, plugin_backend) -> APIRouter:
             out["current"] = {k: display_name(v) if v else "" for k, v in configured.items()}
             out["preview"] = preview
             return out
+        from localm.inference.http_server import path_formatter
+        from localm.pathscrub import map_strings
         try:
-            return await run_in_threadpool_bounded(_read, timeout=30.0)
+            out = await run_in_threadpool_bounded(_read, timeout=30.0)
+            show = path_formatter(request)
+            return out if show is str else map_strings(out, show)
         except ThreadCallTimeout as e:
             raise HTTPException(504, f"Reading the native models timed out: {e}") from e
 

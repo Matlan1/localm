@@ -17,6 +17,7 @@ import threading
 import time as _time
 import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 
@@ -491,12 +492,13 @@ def test_swap_asks_the_server_to_unload_the_chat_model(tmp_path, monkeypatch, fa
     from localm.media import comfy_client
     calls = []
     monkeypatch.setattr(comfy_client, "_localm_unload",
-                        lambda url, token=None: calls.append((url, token)) or answer)
+                        lambda url, token=None, media=True:
+                        calls.append((url, token, media)) or answer)
     lines = []
     ok, _msg = native.generate(_s(), "x", tmp_path / "t.wav", duration_seconds=1.0,
                                self_url="http://127.0.0.1:9/v1", instance_token="tok",
                                swap=True, on_progress=lines.append)
-    assert ok and calls == [("http://127.0.0.1:9/v1", "tok")]
+    assert ok and calls == [("http://127.0.0.1:9/v1", "tok", False)]
     assert "Freeing VRAM: unloading the chat model..." in lines
     assert any("Could not unload the chat model" in ln for ln in lines) is complaint
 
@@ -518,7 +520,8 @@ def test_cli_music_hands_the_gpu_over_through_localm_url(tmp_path, monkeypatch, 
     monkeypatch.setattr(server, "stop", lambda: True)
     calls = []
     monkeypatch.setattr(comfy_client, "_localm_unload",
-                        lambda url, token=None: calls.append(url) or {"status": "unloaded"})
+                        lambda url, token=None, media=True:
+                        calls.append(url) or {"status": "unloaded"})
     monkeypatch.setenv("LOCALM_URL", "http://127.0.0.1:9")
     from localm.cli import main
     result = cli_runner.invoke(main, ["music", "lofi", "-d", "1", "-o", str(tmp_path / "s.wav")])
@@ -565,6 +568,40 @@ def test_route_says_gpu_placement_is_comfyui_only_for_native(tmp_path, monkeypat
         end, lines = _wait_job(c, r.json()["job_id"], h)
         assert end and end["status"] == "done", lines
         assert any("GPU placement applies to ComfyUI only" in ln for ln in lines)
+
+
+def test_the_vram_gate_budgets_for_the_component_picked_for_the_job(tmp_path, monkeypatch,
+                                                                     no_comfy, fake_generate):
+    from fastapi.testclient import TestClient
+
+    from localm.config import REGISTRY_FILE, update_config
+    from tests.test_gguf_architecture_roles import _gguf
+    files = {comp: str(_gguf(tmp_path / f"{comp}.gguf", arch))
+             for comp, arch in models.ARCHITECTURES.items() if comp != "lm"}
+    picked = _gguf(tmp_path / "picked-dit.gguf", models.ARCHITECTURES["dit"])
+    with open(picked, "ab") as f:
+        f.truncate(8 * 1024 * 1024)
+    REGISTRY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    REGISTRY_FILE.write_text(json.dumps({"picked-dit": {
+        "path": str(picked), "model_type": "diffusion-unet", "architecture": "acestep-dit"}}),
+        encoding="utf-8")
+    update_config(lambda cfg: cfg.setdefault("plugins", {}).setdefault("music", {}).update(
+        {"backend": "native", "native": dict(files, plan=False)}))
+    seen = []
+    monkeypatch.setattr("localm.vram.decide_media_swap",
+                        lambda s, *a, **k: seen.append(s.get("vram_estimate_bytes")) or False)
+    monkeypatch.setattr("localm.vram.media_single_device_shortfall", lambda *a, **k: None)
+    app = _music_app(tmp_path, monkeypatch)
+    h = _key(["music"])
+    with TestClient(app) as c:
+        r = c.post("/api/music", headers=h, json={
+            "tags": "lofi", "duration_seconds": 2, "native_models": {"dit": "picked-dit"}})
+        assert r.status_code == 200, r.text
+        end, lines = _wait_job(c, r.json()["job_id"], h)
+    assert end and end["status"] == "done", lines
+    want = (Path(files["text_encoder"]).stat().st_size + Path(files["vae"]).stat().st_size
+            + picked.stat().st_size + models._OVERHEAD_WITHOUT_LM)
+    assert seen and set(seen) == {want}
 
 
 def test_route_applies_the_pages_component_choice_for_one_job(tmp_path, monkeypatch, no_comfy,

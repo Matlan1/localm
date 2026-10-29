@@ -5,6 +5,8 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { loadApp, runScript } from "./harness.mjs";
 
 const WAV_BYTES = new Uint8Array([
@@ -257,6 +259,36 @@ test("sending sends exactly an input_audio part, shows a player, and clears the 
   assert.equal(window.__blobs[0].size, WAV_BYTES.length, "the blob holds the decoded bytes");
   assert.match(window.document.querySelector("#chat-messages .msg-clip-name").textContent, /hello\.wav/);
   assert.ok(conv.messages.some((m) => m.role === "assistant" && m.content === "a transcript"));
+});
+
+test("the bubble of a short message with a clip is marked as holding a player", async () => {
+  const { window } = setup();
+  activate(window, { id: "c1", title: "t", messages: [] });
+  await attachWav(window);
+  await sendText(window, "Hi");
+  const body = window.document.querySelector("#chat-messages .msg-row.user .msg-body");
+  assert.ok(body.querySelector("audio"), "the clip player is in the bubble");
+  assert.ok(body.classList.contains("has-player"),
+    "without the marker a short message shrinks the bubble and the native controls lose their play button");
+});
+
+test("a bubble without media is not marked as holding a player", async () => {
+  const { window } = setup();
+  activate(window, { id: "c1", title: "t", messages: [] });
+  await sendText(window, "Hi");
+  const body = window.document.querySelector("#chat-messages .msg-row.user .msg-body");
+  assert.ok(!body.classList.contains("has-player"));
+});
+
+test("style.css gives a player bubble a floor width that never exceeds its row", () => {
+  const css = readFileSync(
+    fileURLToPath(new URL("../localm/plugins/gui/static/style.css", import.meta.url)), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "");
+  const m = css.match(/\.msg-body\.has-player\s*\{([^}]*)\}/);
+  assert.ok(m, ".msg-body.has-player rule exists");
+  const w = m[1].match(/min-width:\s*min\(\s*(\d+)px\s*,\s*100%\s*\)/);
+  assert.ok(w, "min-width is capped at 100% of the row so a phone window cannot scroll sideways");
+  assert.ok(Number(w[1]) >= 240, "wide enough for play, time and volume controls");
 });
 
 test("a clip with no typed text still sends, as the audio part alone", async () => {

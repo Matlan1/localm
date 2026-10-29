@@ -236,6 +236,33 @@ class TestFinalExhaustionVerdict:
                                            force=force) == verdict
 
 
+class TestEvictableResidents:
+    def test_lists_idle_and_busy_models_but_never_the_target_a_pin_or_an_unloading_one(self):
+        engines = {"idle": _engine(), "busy": _engine(busy=1),
+                   "pinned": _engine(), "going": _engine(unloading=True),
+                   "model-new": _engine()}
+        lru = ["idle", "pinned", "going", "model-new", "busy", "gone"]
+
+        assert sa.evictable_residents(_budget(pinned=["pinned"]), lru, engines) == [
+            "idle", "busy"]
+
+
+class TestFreeAfterEviction:
+    def test_adds_every_hold_to_the_free_reading(self):
+        assert sa.free_after_eviction(_probe(free=2 * GB), [3 * GB, GB]) == 6 * GB
+
+    @pytest.mark.parametrize("probe, holds", [
+        (_probe(ok=False), [GB]),
+        (_probe(free=None), [GB]),
+        (_probe(process_scoped=True), [GB]),
+        (_probe(shortfall=[{"index": 0, "needed": GB, "free": 0}]), [GB]),
+        (_probe(), [GB, 0]),
+    ], ids=["inconclusive", "unmeasurable", "process-scoped", "split-shortfall",
+            "unknown-hold"])
+    def test_cannot_estimate(self, probe, holds):
+        assert sa.free_after_eviction(probe, holds) is None
+
+
 class TestMessages:
     def test_split_shortfall_refusal_names_every_short_device(self):
         assert sa.split_shortfall_refusal("m", [

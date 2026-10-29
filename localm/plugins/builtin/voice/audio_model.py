@@ -156,7 +156,9 @@ async def transcribe(request: Request, model: str, data: bytes, label: str, *,
             raise HTTPException(_hs.backend_error_status(e) or 500, str(e)) from e
         except RuntimeError as e:
             from localm.pathscrub import scrub_paths
-            raise HTTPException(502, f"Transcription failed: {scrub_paths(str(e))}") from e
+            raise HTTPException(
+                502, "Transcription failed: "
+                     f"{_hs.path_formatter(request)(scrub_paths(str(e)))}") from e
         finish = (timing.get("outcome") or {}).get("finish_reason")
         if finish == "length":
             generated = await loop.run_in_executor(None, _generated_tokens, engine, text, budget)

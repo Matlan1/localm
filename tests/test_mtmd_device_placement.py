@@ -389,7 +389,7 @@ class TestLlamaCppPassesTheResolvedDevice:
         seen = {}
 
         class _Recorder:
-            def __init__(self, mmproj_path, model_ptr, gpu_index=0):
+            def __init__(self, mmproj_path, model_ptr, gpu_index=0, use_gpu=True):
                 seen["gpu_index"] = gpu_index
                 self.supports_vision = True
 
@@ -406,7 +406,7 @@ class TestLlamaCppPassesTheResolvedDevice:
         seen = {}
 
         class _Recorder:
-            def __init__(self, mmproj_path, model_ptr, gpu_index=0):
+            def __init__(self, mmproj_path, model_ptr, gpu_index=0, use_gpu=True):
                 seen["gpu_index"] = gpu_index
                 self.supports_vision = True
 

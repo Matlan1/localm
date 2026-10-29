@@ -694,6 +694,7 @@ export async function refreshModelsPage() {
             }
           } catch (e) {
             toast(t("models.use.loadFailed", { message: e.message }), true);
+            refreshModelsPage();
           } finally { use.disabled = false; use.textContent = prevLabel; }
         };
         actions.appendChild(use);
@@ -3597,6 +3598,42 @@ if ($("models-import-comfy-btn")) {
   $("models-import-comfy-btn").onclick = () => openImportComfyModal();
 }
 
+// What an Unload all response released and left loaded: n counts the chat
+// models in unloaded_models plus the embedding, reranker and speech models and
+// media runtimes in unloaded_other (or 1 for embedder_unloaded from a server
+// without that list); skipped lists what stayed loaded because it was in use;
+// forceable is the part of skipped a forced retry can stop (a media runtime in
+// media_left_running is never stopped by force); failed lists the media
+// runtimes whose stop did not take, which are not counted in skipped.
+function unloadAllCounts(data) {
+  const other = Array.isArray(data.unloaded_other)
+    ? data.unloaded_other.length : (data.embedder_unloaded ? 1 : 0);
+  const n = (data.unloaded_models || []).length + other;
+  const media = (data.media_left_running && typeof data.media_left_running === "object")
+    ? data.media_left_running : {};
+  const failed = Object.keys(media).filter((k) => media[k] === "failed");
+  const skipped = (Array.isArray(data.skipped_in_use) ? data.skipped_in_use : [])
+    .filter((k) => !failed.includes(k));
+  const forceable = skipped.filter((k) => !Object.prototype.hasOwnProperty.call(media, k));
+  return { n, skipped, forceable, failed };
+}
+
+function unloadAllMessage(n, skipped, failed = []) {
+  const stopFailed = failed.length
+    ? t("models.unloadAll.mediaStopFailed", { names: failed.join(", ") }) : "";
+  let msg;
+  if (n && skipped.length) {
+    msg = t("models.unloadAll.someStillGenerating", { n, skipped: skipped.length });
+  } else if (n) {
+    msg = t("models.unloadAll.allUnloaded", { n });
+  } else if (skipped.length) {
+    msg = t("models.unloadAll.stillGenerating", { skipped: skipped.length });
+  } else {
+    return stopFailed || t("models.unloadAll.nothingLoaded");
+  }
+  return stopFailed ? `${msg}. ${stopFailed}` : msg;
+}
+
 // Bind Unload-all button click handler
 const unloadAllBtn = $("models-unload-all-btn");
 if (unloadAllBtn) {
@@ -3608,35 +3645,17 @@ if (unloadAllBtn) {
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok) { toast(data.detail || t("models.unload.failed"), true); return; }
-      // unloaded_models lists only chat engines; the shared embedding model has
-      // its own lifecycle (localm.inference.embedder) and is reported via
-      // embedder_unloaded, so it is counted too.
-      const n = (data.unloaded_models || []).length + (data.embedder_unloaded ? 1 : 0);
-      // unload_all_models() (http_server.py) reports any pinned (mid-generation)
-      // engine in skipped_in_use rather than unloading it - loaded, but not
-      // released - so the message names it separately.
-      const skipped = Array.isArray(data.skipped_in_use) ? data.skipped_in_use : [];
-      let msg;
-      if (n && skipped.length) {
-        msg = t("models.unloadAll.someStillGenerating", { n, skipped: skipped.length });
-      } else if (n) {
-        msg = t("models.unloadAll.allUnloaded", { n });
-      } else if (skipped.length) {
-        msg = t("models.unloadAll.stillGenerating", { skipped: skipped.length });
-      } else {
-        msg = t("models.unloadAll.nothingLoaded");
-      }
-      toast(msg, skipped.length > 0);
+      const { n, skipped, forceable, failed } = unloadAllCounts(data);
+      toast(unloadAllMessage(n, skipped, failed), skipped.length > 0 || failed.length > 0);
       refreshModelsPage();
       refreshPerfEstimate();
-      // Offer to force through whatever is still in the way - the owner's
+      // Offer to force through whatever force can stop - the owner's
       // action is final, mirroring the per-row unload's own confirm/force
-      // contract. skipped_in_use is a real, non-empty count here, so there is
-      // something concrete to confirm.
-      if (skipped.length) {
+      // contract.
+      if (forceable.length) {
         const confirmed = await confirmDangerAsync(
           t("models.unloadAll.confirmTitle"),
-          t("models.unloadAll.confirmBody", { skipped: skipped.length }),
+          t("models.unloadAll.confirmBody", { skipped: forceable.length }),
           t("models.unloadAll.confirmLabel"));
         if (confirmed) {
           const r2 = await fetch("/api/models/unload", {
@@ -3645,8 +3664,9 @@ if (unloadAllBtn) {
           });
           const data2 = await r2.json().catch(() => ({}));
           if (!r2.ok) { toast(data2.detail || t("models.unload.failed"), true); return; }
-          const n2 = (data2.unloaded_models || []).length + (data2.embedder_unloaded ? 1 : 0);
-          toast(t("models.unloadAll.allUnloaded", { n: n2 }));
+          const after = unloadAllCounts(data2);
+          toast(unloadAllMessage(after.n, after.skipped, after.failed),
+            after.skipped.length > 0 || after.failed.length > 0);
           refreshModelsPage();
           refreshPerfEstimate();
         }

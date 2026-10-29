@@ -1125,7 +1125,9 @@ async def rag_embedding_status(request: Request):
     the boolean and the path itself are owner-only information: `embedding_model`
     is admin_only, so GET /v1/config already strips its value for a non-owner, and
     an absolute path also discloses the OS user's directory layout. The owner
-    (open mode, or an ADMIN key) sees everything, unchanged.
+    (open mode, or an ADMIN key) sees everything, unchanged. For a caller other
+    than the local operator, `error` and `gpu_fallback_reason` are path-scrubbed
+    (``http_server.path_formatter``).
 
     `can_download` tells the GUI whether to offer the one-time "download now"
     action (POST /api/rag/embedding/download): the configured model is an
@@ -1179,14 +1181,15 @@ async def rag_embedding_status(request: Request):
         # Past READ_TIMEOUT_S the lock is wedged: report that, rather than returning
         # dim: null / error: null, which reads as "nothing loaded, nothing wrong".
         raise HTTPException(504, f"Could not read the embedder state: {e}") from e
+    show = _hs.path_formatter(request)
     return {
         "model": model,
         "default": DEFAULT_EMBEDDING_MODEL,
         "internal": list(KNOWN_EMBEDDING_MODELS),
         "installed": installed,
         "dim": dim,
-        "error": error,
-        "gpu_fallback_reason": fallback,
+        "error": show(error) if error else error,
+        "gpu_fallback_reason": show(fallback) if fallback else fallback,
         "status": status,
         "can_download": can_download,
     }

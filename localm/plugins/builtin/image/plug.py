@@ -52,7 +52,7 @@ from localm.media import gallery
 from localm.media import paths as media_paths
 from localm.media.native_models import (
     MAX_BATCH, MAX_EMBEDDINGS, MAX_LORAS, MAX_REF_IMAGES, ControlChoice, HiresChoice, LoraChoice,
-    apply_choice, check_generation_extras, check_image_inputs, check_request, validate_addons,
+    check_generation_extras, check_image_inputs, check_request, validate_addons,
     validate_upscaler,
 )
 from localm.pathsafe import confined_file, confined_name
@@ -185,7 +185,7 @@ def _make_generate(req, *, input_image, lora_name, out_path, owner, self_url,
             if refused:
                 job.push({"type": "line", "outcome": True, "text": refused})
                 return False
-            s = apply_choice(s, native_choice or {})
+            s = _backend.apply_job_choice(s, native_choice or {}, _cfg)
             refused = (native.input_refusal(s, input_image=input_image, **extras)
                        or native.lora_refusal(
                            s, ([{"name": lora_name}] if lora_name else [])

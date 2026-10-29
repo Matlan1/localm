@@ -660,6 +660,15 @@ class HFRunner:
     def is_alive(self) -> bool:
         return self._proc is not None and self._proc.is_alive()
 
+    def kill(self) -> None:
+        """Terminate the worker process at once, from any thread. Leaves the
+        queues and handles in place, so a request waiting on the worker sees it
+        gone and raises RuntimeError; :meth:`shutdown` releases the rest. A
+        no-op when no worker is running."""
+        proc = self._proc
+        if proc is not None and proc.is_alive():
+            proc.terminate()
+
     @property
     def streams_waiting(self) -> int:
         """Streams blocked on ``_q_lock`` behind a generation already running."""

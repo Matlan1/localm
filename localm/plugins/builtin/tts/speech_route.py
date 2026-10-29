@@ -28,7 +28,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
 
-from localm.inference.http_server import _resolve_disconnect_poll, principal_id
+from localm.inference.http_server import _resolve_disconnect_poll, path_formatter, principal_id
 from localm.multipartform import MultipartError, read_form
 
 router = APIRouter()
@@ -313,7 +313,7 @@ async def create_speech(request: Request):
         raise HTTPException(409, "The speech synthesis was cancelled.")
     if "error" in holder:
         code, message = _error_status(holder["error"])
-        raise HTTPException(code, message)
+        raise HTTPException(code, path_formatter(request)(message))
     out = holder.get("out")
     if status != "done" or out is None:
         raise HTTPException(502, "Speech synthesis failed: no audio was produced.")

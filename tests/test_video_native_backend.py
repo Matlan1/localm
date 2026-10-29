@@ -413,6 +413,32 @@ def test_video_route_generates_natively(video_app):
     assert runner.generates[0]["prompt"] == "a lighthouse"
 
 
+def test_the_vram_gate_budgets_for_the_parts_picked_for_the_job(video_app, fake_video,
+                                                                 tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    app, runner = video_app
+    _runner, s = fake_video
+    picked = tmp_path / "picked-vae.gguf"
+    with open(picked, "wb") as f:
+        f.write(b"w")
+        f.truncate(8 * 1024 * 1024)
+    _register("picked-vae", picked, "vae")
+    seen = []
+    monkeypatch.setattr("localm.vram.decide_media_swap",
+                        lambda s: seen.append(s.get("vram_estimate_bytes")) or False)
+    with TestClient(app) as c:
+        r = c.post("/api/video", json={"prompt": "a lighthouse", "seconds": 1, "fps": 8,
+                                       "width": 96, "height": 64,
+                                       "native_models": {"vae": "picked-vae"}})
+        assert r.status_code == 200, r.text
+        job = _wait_job(app, r.json()["job_id"])
+    assert job.status == "done", _lines(job)
+    assert runner.loads[-1]["vae_path"] == str(picked)
+    files = (Path(s["native"]["model"]).stat().st_size
+             + Path(s["native"]["t5xxl"]).stat().st_size + picked.stat().st_size)
+    assert seen and set(seen) == {int(files * 1.2) + native.COMPUTE_ALLOWANCE_BYTES}
+
+
 def test_a_native_video_job_streams_its_previews_as_frames_kept_only_in_memory(video_app):
     import base64
 

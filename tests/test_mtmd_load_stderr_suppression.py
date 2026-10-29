@@ -52,7 +52,7 @@ class TestVisionLoadNeverReachesConsole:
             "localm.debuglog.native_stderr_target", lambda: None)
 
         class _FakeMtmdPrintsLikeClip:
-            def __init__(self, mmproj_path, model_ptr, gpu_index=0):
+            def __init__(self, mmproj_path, model_ptr, gpu_index=0, use_gpu=True):
                 # Verbatim shape from a real load: one such line per tensor.
                 os.write(2, b"clip_model_loader: tensor[0]: mm.0.weight\n")
                 os.write(2, b"clip_model_loader: tensor[1]: mm.0.bias\n")
@@ -84,7 +84,7 @@ class TestVisionLoadNeverReachesConsole:
         so the test above is measuring the suppression rather than an inert
         fake."""
         class _FakeMtmdPrintsLikeClip:
-            def __init__(self, mmproj_path, model_ptr, gpu_index=0):
+            def __init__(self, mmproj_path, model_ptr, gpu_index=0, use_gpu=True):
                 os.write(2, b"clip_model_loader: tensor[0]: mm.0.weight\n")
                 self.supports_vision = True
 
@@ -113,7 +113,7 @@ class TestAbiProbeNeverReachesConsole:
             "localm.debuglog.native_stderr_target", lambda: None)
 
         class _FakeMtmdRunsAbiProbe:
-            def __init__(self, mmproj_path, model_ptr, gpu_index=0):
+            def __init__(self, mmproj_path, model_ptr, gpu_index=0, use_gpu=True):
                 # The leaked shape: the control probe ("a"*256) followed by the
                 # embedded-NUL probe (prints empty after the NUL truncates it).
                 os.write(2, b"add_text: " + b"a" * 256 + b"\n")
@@ -149,7 +149,7 @@ class TestFailedMmprojOpenSurfacesNativeReason:
             "localm.debuglog.native_stderr_target", lambda: None)
 
         class _FakeMtmdFailsWithRealReason:
-            def __init__(self, mmproj_path, model_ptr, gpu_index=0):
+            def __init__(self, mmproj_path, model_ptr, gpu_index=0, use_gpu=True):
                 os.write(
                     2,
                     b"clip_model_loader: unknown projector type: 'nope'\n"
@@ -179,7 +179,7 @@ class TestFailedMmprojOpenSurfacesNativeReason:
             "localm.debuglog.native_stderr_target", lambda: None)
 
         class _FakeMtmdFailsSilently:
-            def __init__(self, mmproj_path, model_ptr, gpu_index=0):
+            def __init__(self, mmproj_path, model_ptr, gpu_index=0, use_gpu=True):
                 raise mtmd_mod.MtmdUnavailable(
                     f"mtmd_init_from_file returned NULL for {mmproj_path} "
                     "(mmproj incompatible with this model or build)")
@@ -201,7 +201,7 @@ class TestFailedMmprojOpenSurfacesNativeReason:
             "localm.debuglog.native_stderr_target", lambda: None)
 
         class _FakeMtmdFails:
-            def __init__(self, mmproj_path, model_ptr, gpu_index=0):
+            def __init__(self, mmproj_path, model_ptr, gpu_index=0, use_gpu=True):
                 raise mtmd_mod.MtmdUnavailable("NULL for fake.mmproj")
 
         monkeypatch.setattr(mtmd_mod, "MtmdContext", _FakeMtmdFails)
@@ -224,7 +224,7 @@ class TestVerboseModeSkipsTheWrap:
 
     def test_verbose_true_does_not_redirect_fd2(self, tmp_path, monkeypatch):
         class _FakeMtmdPrints:
-            def __init__(self, mmproj_path, model_ptr, gpu_index=0):
+            def __init__(self, mmproj_path, model_ptr, gpu_index=0, use_gpu=True):
                 os.write(2, b"clip_model_loader: tensor[0]: mm.0.weight\n")
                 self.supports_vision = True
 

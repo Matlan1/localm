@@ -163,7 +163,7 @@ def _generate(s: dict, tags: str, out_path: Path, *, self_url: Optional[str] = "
     if swap and self_url:
         from localm.media.comfy_client import _localm_unload
         say("Freeing VRAM: unloading the chat model...")
-        if _localm_unload(self_url, instance_token) is None:
+        if _localm_unload(self_url, instance_token, media=False) is None:
             say("Could not unload the chat model; the native runtime may not fit in the "
                 "remaining VRAM.")
     elif swap:

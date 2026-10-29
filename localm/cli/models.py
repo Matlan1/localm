@@ -2196,28 +2196,45 @@ def unload_cmd(model):
         console.print(f"[dim]'{escape(str(data.get('model', model)))}' was not "
                       "loaded - nothing to do.[/dim]")
         return
+    skipped = [str(s) for s in (data.get("skipped_in_use") or [])]
+    left = data.get("media_left_running")
+    left = left if isinstance(left, dict) else {}
+
+    def _print_left_loaded() -> None:
+        for name in skipped:
+            why = ("could not be stopped (see the server log)"
+                   if left.get(name) == "failed" else "is still in use")
+            console.print(f"[yellow]{escape(name)} {why} and was left loaded.[/yellow]")
+
     if data.get("status") == "in_use":
-        console.print(f"[yellow]'{escape(str(data.get('model', model)))}' is in use by a "
-                      "running request and was not unloaded.[/yellow] Try again when it "
-                      "finishes.")
+        if skipped:
+            _print_left_loaded()
+            console.print("Try again when it finishes.")
+        else:
+            console.print(f"[yellow]'{escape(str(data.get('model', model)))}' is in use "
+                          "by a running request and was not unloaded.[/yellow] Try "
+                          "again when it finishes.")
         sys.exit(1)
     unloaded = data.get("unloaded_models")
     if unloaded is None:
         unloaded = [data["model"]] if data.get("model") not in (None, "none") else []
     else:
-        # unload-all's unloaded_models lists only chat engines; the shared
-        # embedding model has its own lifecycle and is reported via
-        # embedder_unloaded, so it is named here too.
+        # unload-all's unloaded_models lists only chat engines; the other models
+        # and media runtimes are listed in unloaded_other (an older server
+        # reports only embedder_unloaded).
         unloaded = list(unloaded)
-        if data.get("embedder_unloaded"):
+        other = data.get("unloaded_other")
+        if isinstance(other, list):
+            unloaded.extend(other)
+        elif data.get("embedder_unloaded"):
             unloaded.append("embedding model")
     if not unloaded:
         console.print("[dim]Nothing was loaded.[/dim]")
     else:
-        # unloaded holds server-reported model names plus the literal
-        # "embedding model", so they are escaped.
+        # unloaded holds server-reported names and kinds, so they are escaped.
         console.print(f"[green]✓[/green] unloaded: "
                       f"{', '.join(escape(str(u)) for u in unloaded)}")
+    _print_left_loaded()
 
 
 def _restarted_as(instances, entry: dict, entries: list) -> Optional[str]:

@@ -173,8 +173,9 @@ as a generated image, leaves nothing under `activity/` and is not listed after a
 restart.
 
 For a caller using a key without the owner scope, every text in an operation's
-row and event stream has local paths replaced (`<data>`, `<install>`, `~`), as
-in the other routes such a key reaches.
+row and event stream has local paths replaced (`<data>`, `<install>`, `~`, and
+`<path>` for the folders of any other path on the machine), as in the other
+routes such a key reaches.
 
 What it does not promise beyond that: a finished operation is dropped about an
 hour after it finishes, and only when some new operation starts, so an idle

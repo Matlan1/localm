@@ -356,6 +356,23 @@ class SpeechRunner:
                 _raise_tagged(msg[1], msg[2] if len(msg) > 2 else None)
             raise RuntimeError(f"Unexpected response from the speech worker: {kind!r}")
 
+    def cancel(self) -> None:
+        """Ask the worker, from any thread, to stop the synthesis it is
+        running; the waiting :meth:`speak` then raises ``SpeechCancelled``. A
+        no-op when no worker is running."""
+        event = self._cancel
+        if event is not None:
+            event.set()
+
+    def kill(self) -> None:
+        """Terminate the worker process at once, from any thread. Leaves the
+        queues and handles in place, so a :meth:`speak` waiting on the worker
+        sees it gone and raises RuntimeError; :meth:`shutdown` releases the
+        rest. A no-op when no worker is running."""
+        proc = self._proc
+        if proc is not None and proc.is_alive():
+            proc.terminate()
+
     def shutdown(self, grace: float = 5.0) -> None:
         """Stop the worker: politely within *grace* seconds, then by force. Safe
         to call more than once."""

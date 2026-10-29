@@ -295,7 +295,7 @@ def test_load_mmproj_hands_mtmd_the_compatible_path(tmp_path, compat_cache, monk
     seen = {}
 
     class _Recorder:
-        def __init__(self, mmproj_path, model_ptr, gpu_index=0):
+        def __init__(self, mmproj_path, model_ptr, gpu_index=0, use_gpu=True):
             seen["path"] = mmproj_path
             self.supports_vision = True
 

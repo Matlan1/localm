@@ -500,8 +500,11 @@ class TestApplyGpuOrder:
         from localm.inference.backends import _hf_worker
         monkeypatch.setattr(_hf_worker, "_GPU_ORDER", None)
         monkeypatch.setattr(_hf_worker, "_torch_build", lambda: "cuda")
+        # setenv first so teardown restores each var's original state, also
+        # undoing the direct os.environ writes of _apply_gpu_order.
         for var in ("CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES"):
-            monkeypatch.delenv(var, raising=False)
+            monkeypatch.setenv(var, "")
+            monkeypatch.delenv(var)
         modules = dict(sys.modules)
         modules.pop("torch", None)
         monkeypatch.setattr(sys, "modules", modules)

@@ -6,6 +6,8 @@ import os
 import sys
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from localm.image_gen import comfy
 # ensure_comfy calls _comfy_alive as a bare global in comfy_client, so a test
 # that stubs the reachability probe must patch it on comfy_client, not on the
@@ -15,6 +17,18 @@ from localm.image_gen import comfy
 from localm.media import comfy_client
 from localm.media import managed_comfy as mc
 from tests._popen_scope import ignore_background_threads
+
+
+@pytest.fixture(autouse=True)
+def _no_leftover_comfy_handles():
+    """Each test starts and ends with no remembered ComfyUI handle: a stub
+    handle whose poll() says "running" would otherwise be stopped and replaced
+    by the next test's ensure_comfy as localm's own unhealthy ComfyUI."""
+    comfy_client._spawned_procs.clear()
+    comfy_client._device_errors.clear()
+    yield
+    comfy_client._spawned_procs.clear()
+    comfy_client._device_errors.clear()
 
 
 def test_derive_workdir_from_full_bat_path(tmp_path):
@@ -676,6 +690,7 @@ def test_comfy_launch_argv_safety(tmp_path, monkeypatch):
     # readiness cache the first call just set, else this short-circuits before
     # ever reaching subprocess.Popen.
     comfy_client._confirmed_alive.clear()
+    comfy_client._spawned_procs.clear()
     cfg_bat = {"comfy_launch_cmd": 'Z:\\path\\comfy.bat --port 8188',
                "comfy_workdir": str(tmp_path), "comfy_launch_timeout": 30,
                "comfy_disable_auto_launch": True}

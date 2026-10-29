@@ -26,6 +26,15 @@ import pytest
 from tests._popen_scope import ignore_background_threads
 
 
+@pytest.fixture(autouse=True)
+def _isolated_comfy_handles(monkeypatch):
+    """A fresh ComfyUI handle registry per test, so a stub handle one test
+    leaves "running" is never stopped and replaced by another test's launch."""
+    from localm.media import comfy_client
+    monkeypatch.setattr(comfy_client, "_spawned_procs", {})
+    monkeypatch.setattr(comfy_client, "_device_errors", {})
+
+
 # --- fixtures: fake ComfyUI internals written to real files so getsource works ----
 
 # Copy of the upstream body; the `.__func__` access is the line that raises.

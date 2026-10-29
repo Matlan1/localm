@@ -681,6 +681,59 @@ def test_imagine_route_generates_natively_at_the_requested_size(native_app):
     assert runner.generates[0]["prompt"] == "a lighthouse"
 
 
+def _sized_file(path: Path, size: int) -> Path:
+    with open(path, "wb") as f:
+        f.write(b"weights")
+        f.truncate(size)
+    return path
+
+
+def test_the_vram_gate_budgets_for_the_model_picked_for_the_job(native_app, tmp_path,
+                                                                 monkeypatch):
+    from fastapi.testclient import TestClient
+    app, runner = native_app
+    picked = _sized_file(tmp_path / "picked.gguf", 8 * 1024 * 1024)
+    _register("picked", picked)
+    seen = []
+    monkeypatch.setattr("localm.vram.decide_media_swap",
+                        lambda s: seen.append(s.get("vram_estimate_bytes")) or False)
+    with TestClient(app) as c:
+        r = c.post("/api/imagine", json={"prompt": "a lighthouse",
+                                         "native_models": {"model": "picked"}})
+        assert r.status_code == 200, r.text
+        job = _wait_job(app, r.json()["job_id"])
+    lines = [e.get("text", "") for e in job._history if e.get("type") == "line"]
+    assert job.status == "done", lines
+    assert runner.loads[-1][1]["model_path"] == str(picked)
+    picked_est = int(picked.stat().st_size * 1.2) + native.COMPUTE_ALLOWANCE_BYTES
+    settings_est = int(len(b"weights") * 1.2) + native.COMPUTE_ALLOWANCE_BYTES
+    assert seen and set(seen) == {picked_est}
+    assert picked_est != settings_est
+
+
+def test_a_job_choice_keeps_a_configured_vram_estimate_and_falls_back_to_the_default(
+        fake_native, tmp_path):
+    from localm.vram import media_estimate_bytes
+    _runner, s = fake_native
+    picked = _sized_file(tmp_path / "picked.gguf", 4 * 1024 * 1024)
+    _register("picked", picked)
+    gone = tmp_path / "gone.gguf"
+    _register("gone", gone)
+    cfg = {"plugins": {"image": {"backend": "native", "native": dict(s["native"])}}}
+    base = image_backend.prepare_for_job(image_backend.settings(cfg), cfg)
+    chosen = image_backend.apply_job_choice(base, {"model": "picked"}, cfg)
+    assert chosen["vram_estimate_bytes"] == (int(picked.stat().st_size * 1.2)
+                                             + native.COMPUTE_ALLOWANCE_BYTES)
+    assert base["native"]["model"] == s["native"]["model"]
+    assert image_backend.apply_job_choice(base, {}, cfg) is base
+    missing = image_backend.apply_job_choice(base, {"model": "gone"}, cfg)
+    assert missing["vram_estimate_bytes"] == media_estimate_bytes("image", {})
+    cfg["plugins"]["image"]["vram_estimate_gb"] = 3
+    base = image_backend.prepare_for_job(image_backend.settings(cfg), cfg)
+    chosen = image_backend.apply_job_choice(base, {"model": "picked"}, cfg)
+    assert chosen["vram_estimate_bytes"] == 3 * 1024 ** 3
+
+
 def test_route_says_gpu_placement_is_comfyui_only_for_native(native_app):
     from fastapi.testclient import TestClient
     from localm.config import update_config
