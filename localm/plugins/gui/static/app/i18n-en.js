@@ -1485,6 +1485,7 @@ export const I18N_EN = {
   "models.unloadAll.confirmLabel": "Unload all anyway",
   "models.unloadAll.confirmTitle": "Some models are in use",
   "models.unloadAll.failedException": "Unload failed: {message}",
+  "models.unloadAll.mediaStopFailed": "Could not stop the {names}; see the server log",
   "models.unloadAll.nothingLoaded": "Nothing was loaded",
   "models.unloadAll.someStillGenerating":
     "Unloaded {n} model(s); {skipped} still generating - try again once finished",

@@ -720,9 +720,13 @@ def slot_is_satisfied(slot: dict) -> bool:
 # ---------------------------------------------------------------------------
 
 def _localm_unload(localm_url: Optional[str] = None,
-                    instance_token: Optional[str] = None) -> Optional[dict]:
+                    instance_token: Optional[str] = None, *,
+                    media: bool = True) -> Optional[dict]:
     """
-    Ask a localm server to release its model from GPU memory.
+    Ask a localm server to release its model from GPU memory. With *media*
+    False the server's own idle native media runtimes stay loaded
+    (``?media=false``); a native media job passes that so it keeps the worker
+    it is about to use.
 
     Reads LOCALM_URL from the environment if *localm_url* is not given, and
     authenticates via ``auth.resolve_bearer_headers`` (the owner key - env,
@@ -764,7 +768,8 @@ def _localm_unload(localm_url: Optional[str] = None,
         # Unload waits for any in-flight generation to finish AND for VRAM to be
         # actually reclaimed before it returns (it must not free the context
         # mid-decode), so give it time.
-        resp = _rq.post(f"{url}/models/unload", headers=headers, timeout=180,
+        target = f"{url}/models/unload" + ("" if media else "?media=false")
+        resp = _rq.post(target, headers=headers, timeout=180,
                         verify=_tls.requests_verify(url))
         if not resp.ok:
             return None

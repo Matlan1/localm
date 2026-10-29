@@ -492,12 +492,13 @@ def test_swap_asks_the_server_to_unload_the_chat_model(tmp_path, monkeypatch, fa
     from localm.media import comfy_client
     calls = []
     monkeypatch.setattr(comfy_client, "_localm_unload",
-                        lambda url, token=None: calls.append((url, token)) or answer)
+                        lambda url, token=None, media=True:
+                        calls.append((url, token, media)) or answer)
     lines = []
     ok, _msg = native.generate(_s(), "x", tmp_path / "t.wav", duration_seconds=1.0,
                                self_url="http://127.0.0.1:9/v1", instance_token="tok",
                                swap=True, on_progress=lines.append)
-    assert ok and calls == [("http://127.0.0.1:9/v1", "tok")]
+    assert ok and calls == [("http://127.0.0.1:9/v1", "tok", False)]
     assert "Freeing VRAM: unloading the chat model..." in lines
     assert any("Could not unload the chat model" in ln for ln in lines) is complaint
 
@@ -519,7 +520,8 @@ def test_cli_music_hands_the_gpu_over_through_localm_url(tmp_path, monkeypatch, 
     monkeypatch.setattr(server, "stop", lambda: True)
     calls = []
     monkeypatch.setattr(comfy_client, "_localm_unload",
-                        lambda url, token=None: calls.append(url) or {"status": "unloaded"})
+                        lambda url, token=None, media=True:
+                        calls.append(url) or {"status": "unloaded"})
     monkeypatch.setenv("LOCALM_URL", "http://127.0.0.1:9")
     from localm.cli import main
     result = cli_runner.invoke(main, ["music", "lofi", "-d", "1", "-o", str(tmp_path / "s.wav")])

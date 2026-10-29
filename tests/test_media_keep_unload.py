@@ -14,6 +14,7 @@ follows the real stop path: ``runner.shutdown()`` killing the child.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import subprocess
 import sys
@@ -227,6 +228,106 @@ def test_unload_all_without_media_leaves_the_worker_for_other_callers(fake_gpu, 
     assert data["unloaded_other"] == [], data
 
 
+def test_gui_unload_all_reports_a_busy_music_runtime_and_leaves_it_running(
+        gui_client, music_runtime):
+    assert kobold_server._lock.acquire(timeout=5)
+    try:
+        data = gui_client.post("/api/models/unload", json={"force": True}).json()
+        assert music_runtime.is_alive(), "Unload all killed the music runtime of a job"
+    finally:
+        kobold_server._lock.release()
+    assert data["media_left_running"] == {MUSIC_RUNTIME: "busy"}, data
+
+
+def test_a_media_stop_that_does_not_take_is_reported_failed_not_busy(
+        gui_client, sd_worker, monkeypatch, caplog):
+    caplog.set_level(logging.WARNING, logger="localm")
+    monkeypatch.setattr(sd_shared.runner, "shutdown", lambda *a, **kw: None)
+    data = gui_client.post("/api/models/unload", json={}).json()
+    assert sd_worker.is_alive()
+    assert data["media_left_running"] == {IMAGE_WORKER: "failed"}, data
+    assert data["skipped_in_use"] == [IMAGE_WORKER], data
+    assert any(f"the {IMAGE_WORKER} kept running" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("module_path", [
+    "localm.plugins.builtin.image.backends.native",
+    "localm.plugins.builtin.video.backends.native",
+    "localm.plugins.builtin.music.backends.native",
+])
+def test_the_native_fallback_unload_keeps_the_media_worker(module_path):
+    """Each native backend's own fallback chat unload (taken when the
+    handover's unload failed) asks the server to keep its media runtimes."""
+    import importlib
+    import inspect
+    src = inspect.getsource(importlib.import_module(module_path))
+    calls = [ln.strip() for ln in src.splitlines() if "_localm_unload(" in ln
+             and "import" not in ln]
+    assert calls and all("media=False" in c for c in calls), calls
+
+
+def test_the_fallback_unload_url_asks_to_keep_media(monkeypatch):
+    from localm.media import comfy_client
+    urls = []
+
+    class _Resp:
+        ok = True
+
+        def json(self):
+            return {"status": "already_unloaded"}
+
+    monkeypatch.setattr("requests.post",
+                        lambda url, **kw: (urls.append(url), _Resp())[1])
+    monkeypatch.setattr("localm.tls.requests_verify", lambda url: True)
+    comfy_client._localm_unload("http://127.0.0.1:9/v1", media=False)
+    comfy_client._localm_unload("http://127.0.0.1:9/v1")
+    assert urls == ["http://127.0.0.1:9/v1/models/unload?media=false",
+                    "http://127.0.0.1:9/v1/models/unload"]
+
+
+def _cli_unload(monkeypatch, reply):
+    from click.testing import CliRunner
+
+    from localm import instances
+    from localm.cli import main
+
+    class _Resp:
+        status_code = 200
+        ok = True
+        text = json.dumps(reply)
+
+        def json(self):
+            return reply
+
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.setattr(instances, "find_attachable", lambda *a, **k: {
+        "instance_id": "abcd1234ef", "pid": 999999, "root_dir": "/proj/demo",
+        "scheme": "http", "host": "127.0.0.1", "port": 8642, "token": "t",
+        "_path": "/run/abcd1234ef.json"})
+    monkeypatch.setattr("requests.post", lambda *a, **k: _Resp())
+    monkeypatch.setattr("localm.tls.requests_verify", lambda url: True)
+    return CliRunner().invoke(main, ["unload"])
+
+
+def test_cli_unload_names_a_stopped_media_worker(monkeypatch):
+    res = _cli_unload(monkeypatch, {
+        "status": "unloaded", "model": "none", "unloaded_models": [],
+        "unloaded_other": [IMAGE_WORKER], "embedder_unloaded": False})
+    assert res.exit_code == 0, res.output
+    assert f"unloaded: {IMAGE_WORKER}" in res.output
+    assert "Nothing was loaded" not in res.output
+
+
+def test_cli_unload_names_a_busy_media_worker_left_loaded(monkeypatch):
+    res = _cli_unload(monkeypatch, {
+        "status": "in_use", "model": "none", "unloaded_models": [], "unloaded_other": [],
+        "embedder_unloaded": False, "skipped_in_use": [IMAGE_WORKER],
+        "media_left_running": {IMAGE_WORKER: "busy"}})
+    assert res.exit_code == 1, res.output
+    assert f"{IMAGE_WORKER} is still in use and was left loaded" in res.output
+    assert "'none'" not in res.output
+
+
 # --------------------------------------------------------------------------- #
 #  A chat model load                                                           #
 # --------------------------------------------------------------------------- #
@@ -377,6 +478,21 @@ def test_a_model_switch_asks_before_loading_beside_a_busy_image_job(chat_load, s
     assert result["status"] == "confirm_required", result
     assert f"localm's own {IMAGE_WORKER}" in result["detail"]
     assert "the job is not stopped" in result["detail"]
+
+
+def test_a_forced_model_switch_loads_beside_a_busy_image_job_without_stopping_it(
+        chat_load, sd_worker, caplog):
+    caplog.set_level(logging.WARNING, logger="localm")
+    assert sd_shared.lock.acquire(timeout=5)
+    try:
+        result = chat_load(preempt=True, force=True)
+        assert sd_worker.is_alive(), "a forced switch killed the worker of a running job"
+    finally:
+        sd_shared.lock.release()
+    assert result["status"] == "loaded", result
+    assert result["degraded"] is True, result
+    assert any(f"the {IMAGE_WORKER} is still running a job" in r.getMessage()
+               for r in caplog.records)
 
 
 # --------------------------------------------------------------------------- #
