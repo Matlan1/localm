@@ -1127,11 +1127,11 @@ async def _switch_exhaustion_ladder(loop, probe: switch_admission.VramProbe,
     defer to the backend's own sizing
     (``switch_admission.final_exhaustion_verdict``).
 
-    For an explicit switch without *force* on a usable reading, the busy
-    resident model is claimed first (its reply is waited for, never cut), and
-    then, when no busy model was claimed, ``_switch_confirm_before_eviction``
-    may return its ``confirm_required`` result; nothing is freed and no peer is
-    asked before either.
+    For an explicit switch without *force* on a usable reading,
+    ``_switch_confirm_before_eviction`` runs first. When it would ask, nothing
+    is freed and no peer is asked: a busy resident model is claimed (its reply
+    is waited for, never cut; the EVICT step it returns is asked about again
+    before the eviction), else its ``confirm_required`` result is returned.
 
     Returns the loop's next ``switch_admission.EvictionStep``. Raises
     HTTPException 503 when a static split device is short or the probe stayed
@@ -1140,12 +1140,12 @@ async def _switch_exhaustion_ladder(loop, probe: switch_admission.VramProbe,
     if preempt and not force and switch_admission.exhausted_probe_verdict(
             probe, retries_used=attempt.inconclusive_retries,
             max_retries=_INCONCLUSIVE_LOAD_RETRIES) == switch_admission.KEEP_FREEING:
-        busy = await _switch_claim_busy_victim(budget, attempt, preempt=preempt,
-                                               force=force)
-        if busy is not None:
-            return busy
         ask = await _switch_confirm_before_eviction(loop, probe, budget)
         if ask is not None:
+            busy = await _switch_claim_busy_victim(budget, attempt, preempt=preempt,
+                                                   force=force)
+            if busy is not None:
+                return busy
             return step(switch_admission.RETURN_RESULT, result=ask)
     if not attempt.embedder_attempted:
         if await _switch_evict_embedder(loop, probe, attempt, embedder_mod):
