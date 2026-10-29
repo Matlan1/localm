@@ -276,6 +276,37 @@ def idle_wait_candidate(budget: LoadBudget, lru: Iterable[str],
         lru, engines, requested=budget.name, pinned=budget.pinned)
 
 
+def evictable_residents(budget: LoadBudget, lru: Iterable[str],
+                        engines: Mapping[str, Any]) -> list:
+    """Every resident chat model an explicit switch to ``budget.name`` may
+    evict, idle or busy, least recently used first: the same exclusions as
+    ``residency.pick_busy_eviction_victim`` (never the requested model, a
+    pinned one, one no longer registered or one already mid-unload)."""
+    out = []
+    for candidate in lru:
+        if candidate == budget.name or candidate in budget.pinned:
+            continue
+        engine = engines.get(candidate)
+        if engine is None or getattr(engine, "unloading", False) is True:
+            continue
+        out.append(candidate)
+    return out
+
+
+def free_after_eviction(probe: VramProbe, holds: Iterable[int]) -> Optional[int]:
+    """The free VRAM expected once every model holding *holds* (bytes each,
+    0 when unknown) is evicted: ``probe.free`` plus their sum.
+
+    None when it cannot be estimated: the reading is inconclusive, carries no
+    free figure, counts only this process's allocations, shows a split
+    shortfall, or any hold is unknown."""
+    holds = list(holds)
+    if (not probe.probe_ok or probe.free is None or probe.process_scoped
+            or probe.shortfall or any(h <= 0 for h in holds)):
+        return None
+    return probe.free + sum(holds)
+
+
 def final_exhaustion_verdict(probe: VramProbe, *, preempt: bool, force: bool) -> str:
     """With local, peer and busy eviction all exhausted on a measurable reading:
 

@@ -2,7 +2,7 @@
 """Redact machine-identifying absolute paths out of text that crosses a trust
 boundary (an HTTP response body, a shareable bug report).
 
-Two levels:
+Three levels:
 
 ``scrub_user_paths``
     Drops the user's HOME directory and, as an always-on backstop, the account
@@ -12,14 +12,21 @@ Two levels:
 
 ``scrub_paths``
     Everything above PLUS the localm data dir (``LOCALM_HOME``), the install
-    root, the Python environment prefix and the folder of every absolute path
-    the model registry stores (a model registered in place), and then the
-    leading directories of ANY remaining absolute host path, written as
-    ``<path>`` (``scrub_host_paths``: a drive-letter or UNC path, or a POSIX
-    path whose first component is a name at this machine's filesystem root).
-    Use it for anything handed to a caller who is not the local operator.
+    root and the Python environment prefix. Use it for an error text shown to
+    every caller, the local operator included; on a portable install the data
+    dir can sit nowhere near ``Path.home()``, so the username rule alone would
+    not catch it.
 
-Both KEEP THE STRUCTURE that makes the text useful - the file name, the line
+``scoped_path_scrubber``
+    Everything above PLUS the folder of every absolute path the model registry
+    stores (a model registered in place), and then the leading directories of
+    ANY remaining absolute host path, written as ``<path>``
+    (``scrub_host_paths``: a drive-letter or UNC path, or a POSIX path whose
+    first component is a name at this machine's filesystem root). Use it for
+    anything handed to a caller who is not the local operator
+    (``http_server.path_formatter``).
+
+All KEEP THE STRUCTURE that makes the text useful - the file name, the line
 number, the reason - and replace only the leading directories: these paths are
 redacted, never muted.
 
@@ -95,8 +102,8 @@ def scrub_user_paths(text: str) -> str:
 # The placeholder scrub_paths writes in place of the localm data dir.
 DATA_DIR_LABEL = "<data>"
 
-# The placeholder scrub_paths writes in place of the leading directories of any
-# other absolute host path.
+# The placeholder scoped_path_scrubber writes in place of the leading
+# directories of any other absolute host path.
 PATH_LABEL = "<path>"
 
 # One segment of a Windows path: no separator, line break, tab, or character
@@ -213,9 +220,10 @@ def _registry_folders() -> list[str]:
     return sorted(folders)
 
 
-def _machine_prefixes() -> list[tuple[str, str]]:
+def _machine_prefixes(registry_folders: bool = False) -> list[tuple[str, str]]:
     """(prefix, replacement) for every directory that names THIS machine's
-    layout, longest first.
+    layout, longest first. With *registry_folders*, also the folder of every
+    absolute registry path outside those directories and home, as ``<path>``.
 
     The order is load-bearing: the data dir often sits INSIDE the install root
     (a portable install) or inside the venv prefix, and replacing the parent
@@ -266,14 +274,15 @@ def _machine_prefixes() -> list[tuple[str, str]]:
     add(getattr(sys, "base_prefix", ""), "<env>")
 
     # Registry folders inside a prefix above, or inside home, keep that label.
-    try:
-        home = str(Path.home())
-    except Exception:
-        home = ""
-    bases = [p for p, _label in found if p] + ([home] if home else [])
-    for folder in _registry_folders():
-        if not any(_is_under(folder, base) for base in bases):
-            found.append((folder, PATH_LABEL))
+    if registry_folders:
+        try:
+            home = str(Path.home())
+        except Exception:
+            home = ""
+        bases = [p for p, _label in found if p] + ([home] if home else [])
+        for folder in _registry_folders():
+            if not any(_is_under(folder, base) for base in bases):
+                found.append((folder, PATH_LABEL))
 
     uniq = {(p, label) for p, label in found if p and p not in ("/", "\\")}
     return sorted(uniq, key=lambda item: len(item[0]), reverse=True)
@@ -287,6 +296,24 @@ def path_scrubber() -> Callable[[str], str]:
     strings should bind once with this instead.
     """
     prefixes = _machine_prefixes()
+
+    def scrub(text: str) -> str:
+        if not text:
+            return text
+        for prefix, label in prefixes:
+            text = _sub_prefix(text, prefix, label)
+        return scrub_user_paths(text)
+
+    return scrub
+
+
+def scoped_path_scrubber() -> Callable[[str], str]:
+    """A scrubber for text handed to a caller who is not the local operator,
+    bound to the prefixes resolved ONCE: ``path_scrubber``'s prefixes plus the
+    registry model folders (``<path>``), ``scrub_user_paths``, then
+    ``scrub_host_paths`` for every other absolute host path. Idempotent, and
+    safe to apply to text ``scrub_paths`` already scrubbed."""
+    prefixes = _machine_prefixes(registry_folders=True)
     roots: list = []
 
     def scrub(text: str) -> str:
@@ -316,10 +343,9 @@ def map_strings(value, fn: Callable[[str], str]):
 
 
 def scrub_paths(text: str) -> str:
-    """``scrub_user_paths`` plus the localm data dir, install root, env prefix
-    and registry model folders, then ``scrub_host_paths`` for every other
-    absolute host path. Use for anything handed to a caller who is not the
-    local operator.
+    """``scrub_user_paths`` plus the localm data dir, install root and env
+    prefix. Other folders are kept: for a caller who is not the local operator,
+    pass the result through ``http_server.path_formatter`` as well.
 
     Returns *text* unchanged when it is empty or ``None``.
     """

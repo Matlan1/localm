@@ -445,7 +445,7 @@ def register(app: FastAPI, ctx) -> None:
             raise P.OllamaError(400, "dimensions is not supported")
         started = time.perf_counter()
         result = await _endpoint(request.app, "/v1/embeddings")(
-            EmbeddingRequest(model=_canonical(name), input=texts))
+            EmbeddingRequest(model=_canonical(name), input=texts), request)
         vectors = [item["embedding"] for item in result["data"]]
         if len(vectors) != len(texts):
             raise P.OllamaError(

@@ -261,11 +261,23 @@ _OPENAPI_REQUEST_BODY = {"requestBody": {"required": True, "content": {
 
 
 @router.post("/v1/audio/transcriptions", openapi_extra=_OPENAPI_REQUEST_BODY)
-@route_errors({
-    VoiceError: _error_status,
-    Exception: lambda e: (502, f"Transcription failed: {scrub_paths(str(e))}"),
-})
+@route_errors({VoiceError: _error_status})
 async def create_transcription(request: Request):
+    """``_transcribe_request``, with any other failure than an ``HTTPException``
+    or a ``VoiceError`` answered as a 502 whose text is path-scrubbed
+    (``scrub_paths``, then ``http_server.path_formatter`` for the caller)."""
+    try:
+        return await _transcribe_request(request)
+    except (HTTPException, VoiceError):
+        raise
+    except Exception as e:
+        from localm.inference.http_server import path_formatter
+        raise HTTPException(
+            502, f"Transcription failed: {path_formatter(request)(scrub_paths(str(e)))}") from e
+
+
+async def _transcribe_request(request: Request):
+    """The transcription of the audio in *request*."""
     if not _origin_allowed(request):
         raise HTTPException(
             403, "Cross-origin request refused (only this server's own pages, local "

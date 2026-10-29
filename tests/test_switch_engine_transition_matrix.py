@@ -921,7 +921,7 @@ class TestLoadError:
         assert hs._engines == {} and hs._engines_lru == []
         assert hs._active_model_name is None and hs._engine is None
         assert hs._inference_sem is None
-        assert hs._last_active_model_name is None
+        assert hs._last_active_model_name == "model-a"
 
     def test_a_non_runtime_load_failure_propagates_unconverted(self, monkeypatch):
         a = GatedEngine("model-a")
@@ -1990,3 +1990,254 @@ class TestPlacementRecheck:
         asyncio.run(hs.get_engine("model-b", activate=False))
 
         assert b.load_calls == 1 and b.placement_heal.recheck_at > 0.0
+
+
+# --------------------------------------------------------------------------- #
+#  Target too big even after eviction                                         #
+# --------------------------------------------------------------------------- #
+
+# A box where model-b's admission bar (NEED + HEADROOM) is above the whole
+# device, so it cannot fit even with model-a evicted.
+_TOO_SMALL = NEED + HEADROOM - 300 * MB
+
+
+class _SizedResident(GatedEngine):
+    """A resident whose backend sized its load itself with every layer on the
+    GPU, holding *hold* bytes (``gpu_sizing`` model + KV + overhead)."""
+
+    def __init__(self, display_name, *, hold=NEED, gate=False):
+        super().__init__(display_name, gate=gate)
+        self.gpu_sizing = {"mode": "auto", "model_bytes": hold - 2 * GB,
+                           "kv_bytes": GB, "overhead_bytes": GB}
+        self.gpu_placement = {"gpu_layers_offloaded": 32, "gpu_layers_total": 32,
+                              "degraded": False}
+
+
+class TestTooBigEvenAfterEviction:
+    def test_an_explicit_switch_asks_before_evicting_anything(self, monkeypatch):
+        a = _SizedResident("model-a")
+        b = GatedEngine("model-b")
+        env = _install(monkeypatch, {"model-a": a, "model-b": b}, total=_TOO_SMALL)
+        _seat("model-a", a, active=True)
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert res == {"status": "confirm_required", "model": "model-b",
+                       "detail": _estimate_confirm_detail("model-b", _TOO_SMALL)}
+        assert a.unload_calls == 0 and a.loaded and a.unloading is False
+        assert env.release_waits == [], "no eviction ran before asking"
+        assert env.cancelled == [] and not b.loaded
+
+    def test_cancel_keeps_the_current_model_loaded_and_active(self, monkeypatch):
+        a = _SizedResident("model-a")
+        b = GatedEngine("model-b")
+        env = _install(monkeypatch, {"model-a": a, "model-b": b}, total=_TOO_SMALL)
+        monkeypatch.setattr(hs, "_default_model_name", "model-startup")
+        _seat("model-a", a, active=True)
+
+        asked = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert asked["status"] == "confirm_required"
+        assert hs._engines == {"model-a": a} and hs._engines_lru == ["model-a"]
+        assert hs._active_model_name == "model-a" and hs._engine is a
+        assert hs._resolve_unnamed_model_name() == "model-a"
+
+    def test_confirm_evicts_and_loads_the_target(self, monkeypatch):
+        a = _SizedResident("model-a")
+        b = GatedEngine("model-b")
+        env = _install(monkeypatch, {"model-a": a, "model-b": b}, total=_TOO_SMALL)
+        _seat("model-a", a, active=True)
+
+        asked = asyncio.run(hs.switch_engine("model-b", env.factory))
+        assert asked["status"] == "confirm_required" and a.unload_calls == 0
+
+        forced = asyncio.run(hs.switch_engine("model-b", env.factory, force=True))
+
+        assert forced == {"status": "loaded", "model": "model-b"}
+        assert a.unload_calls == 1 and _registered_anywhere("model-a") == set()
+        assert hs._engines == {"model-b": b} and b.loaded
+        assert hs._active_model_name == "model-b"
+
+    def test_a_busy_model_is_waited_for_then_asked_about_without_evicting(
+            self, monkeypatch):
+        a = _SizedResident("model-a")
+        b = GatedEngine("model-b")
+        env = _install(monkeypatch, {"model-a": a, "model-b": b}, total=_TOO_SMALL)
+        _seat("model-a", a, active=True, busy=1)
+        waited = []
+
+        def _reply_finishes():
+            waited.append(a.active_requests)
+            a.active_requests = 0
+
+        _flip_once_the_wait_starts(monkeypatch, _reply_finishes)
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert waited == [1], "the switch waited for the reply"
+        assert res == {"status": "confirm_required", "model": "model-b",
+                       "detail": _estimate_confirm_detail("model-b", _TOO_SMALL)}
+        assert env.cancelled == [], "the reply was not cut"
+        assert a.unload_calls == 0 and a.loaded
+        assert hs._engines == {"model-a": a} and hs._active_model_name == "model-a"
+
+    def test_a_target_that_fits_after_eviction_is_loaded_without_asking(
+            self, monkeypatch):
+        a = _SizedResident("model-a")
+        b = GatedEngine("model-b")
+        env = _install(monkeypatch, {"model-a": a, "model-b": b},
+                       total=NEED + HEADROOM)
+        _seat("model-a", a, active=True)
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert res == {"status": "loaded", "model": "model-b"}
+        assert a.unload_calls == 1 and hs._active_model_name == "model-b"
+
+    def test_an_api_routed_load_evicts_and_defers_to_the_backend(self, monkeypatch):
+        a = _SizedResident("model-a")
+        b = GatedEngine("model-b")
+        env = _install(monkeypatch, {"model-a": a, "model-b": b}, total=_TOO_SMALL)
+        _seat("model-a", a, active=True)
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory, preempt=False))
+
+        assert res == {"status": "loaded", "model": "model-b"}
+        assert a.unload_calls == 1 and hs._engines == {"model-b": b}
+
+    def test_a_decline_after_an_eviction_remembers_the_evicted_active_model(
+            self, monkeypatch):
+        a = _SizedResident("model-a", hold=NEED + 2 * GB)
+        b = GatedEngine("model-b")
+        env = _install(monkeypatch, {"model-a": a, "model-b": b}, total=_TOO_SMALL)
+        monkeypatch.setattr(hs, "_default_model_name", "model-startup")
+        _seat("model-a", a, active=True)
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert res["status"] == "confirm_required"
+        assert a.unload_calls == 1, "the hold estimate said it would fit, so it evicted"
+        assert hs._active_model_name is None
+        assert hs._last_active_model_name == "model-a"
+        assert hs._resolve_unnamed_model_name() == "model-a"
+
+    def test_a_measured_hold_is_used_for_a_load_the_backend_did_not_size(
+            self, monkeypatch):
+        a = GatedEngine("model-a")
+        a.gpu_sizing = {"mode": "configured", "layers": 99, "n_ctx": 4096}
+        a.vram_load_bytes = NEED
+        b = GatedEngine("model-b")
+        env = _install(monkeypatch, {"model-a": a, "model-b": b}, total=_TOO_SMALL)
+        _seat("model-a", a, active=True)
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert res == {"status": "confirm_required", "model": "model-b",
+                       "detail": _estimate_confirm_detail("model-b", _TOO_SMALL)}
+        assert a.unload_calls == 0 and hs._active_model_name == "model-a"
+
+    def test_a_measured_hold_wins_over_the_sized_one(self, monkeypatch):
+        a = _SizedResident("model-a", hold=NEED - 2 * GB)
+        a.vram_load_bytes = NEED + 2 * GB
+        b = GatedEngine("model-b")
+        env = _install(monkeypatch, {"model-a": a, "model-b": b}, total=_TOO_SMALL)
+        _seat("model-a", a, active=True)
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert res["status"] == "confirm_required"
+        assert a.unload_calls == 1, "the measured hold said it would fit, so it evicted"
+
+    @pytest.mark.parametrize("unknown", [
+        {"gpu_sizing": {"mode": "configured", "layers": 99, "n_ctx": 4096}},
+        {"gpu_sizing": {"mode": "auto", "layers": 32, "n_ctx": 4096}},
+        {"gpu_placement": {"gpu_layers_offloaded": 32, "gpu_layers_total": 32,
+                           "degraded": True, "moe_cpu_layers": 24}},
+    ], ids=["configured-layers", "auto-without-bytes", "experts-in-ram"])
+    def test_an_unknown_hold_evicts_first_as_before(self, monkeypatch, unknown):
+        a = _SizedResident("model-a")
+        for key, value in unknown.items():
+            setattr(a, key, value)
+        b = GatedEngine("model-b")
+        env = _install(monkeypatch, {"model-a": a, "model-b": b}, total=_TOO_SMALL)
+        _seat("model-a", a, active=True)
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert res["status"] == "confirm_required"
+        assert a.unload_calls == 1
+
+    @pytest.mark.parametrize("shared, peers", [
+        (True, []),
+        (False, None),
+        (False, [0]),
+        (False, [2 * GB]),
+    ], ids=["shared-model-loaded", "peer-lookup-failed", "peer-without-estimate",
+            "peer-holds-the-shortfall"])
+    def test_vram_another_holder_may_free_evicts_first_as_before(
+            self, monkeypatch, shared, peers):
+        a = _SizedResident("model-a")
+        b = GatedEngine("model-b")
+        env = _install(monkeypatch, {"model-a": a, "model-b": b}, total=_TOO_SMALL)
+        monkeypatch.setattr(hs, "_shared_models_loaded", lambda: shared)
+        monkeypatch.setattr(hs, "_peer_vram_holds", lambda: peers)
+        _seat("model-a", a, active=True)
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert res["status"] == "confirm_required"
+        assert a.unload_calls == 1
+
+    def test_a_loaded_media_runtime_evicts_first_as_before(self, monkeypatch):
+        a = _SizedResident("model-a")
+        b = GatedEngine("model-b")
+        env = _install(monkeypatch, {"model-a": a, "model-b": b}, total=_TOO_SMALL)
+        monkeypatch.setattr("localm.vram.loaded_native_media_runtimes",
+                            lambda: ["stable-diffusion.cpp"])
+        _seat("model-a", a, active=True)
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert res["status"] == "confirm_required"
+        assert a.unload_calls == 1
+
+    def test_peer_holds_are_the_live_peers_with_a_model_on_this_load_s_gpus(
+            self, monkeypatch):
+        monkeypatch.setattr(hs, "_gpu_coord", {"instance_id": "me"})
+        monkeypatch.setattr(hs, "_load_gpu_indices", lambda: {0})
+        seen = []
+
+        def _peers(*, exclude_self_id=None, **kwargs):
+            seen.append(exclude_self_id)
+            return [{"model": "x", "gpu_index": 0, "vram_estimate_bytes": 3 * GB},
+                    {"model": "y", "gpu_index": None},
+                    {"model": "z", "gpu_index": 1, "vram_estimate_bytes": GB},
+                    {"model": None, "gpu_index": 0, "vram_estimate_bytes": GB}]
+
+        monkeypatch.setattr("localm.gpu_registry.list_gpu_peers", _peers)
+
+        assert hs._peer_vram_holds() == [3 * GB, 0]
+        assert seen == ["me"]
+
+    def test_peer_holds_without_coordination_or_on_a_failed_lookup(self, monkeypatch):
+        assert hs._peer_vram_holds() == []
+
+        def _broken(**kwargs):
+            raise OSError("no route")
+
+        monkeypatch.setattr(hs, "_gpu_coord", {"instance_id": "me"})
+        monkeypatch.setattr("localm.gpu_registry.list_gpu_peers", _broken)
+        assert hs._peer_vram_holds() is None
+
+    def test_a_peer_too_small_to_matter_still_asks_first(self, monkeypatch):
+        a = _SizedResident("model-a")
+        b = GatedEngine("model-b")
+        env = _install(monkeypatch, {"model-a": a, "model-b": b}, total=_TOO_SMALL)
+        monkeypatch.setattr(hs, "_peer_vram_holds", lambda: [100 * MB])
+        _seat("model-a", a, active=True)
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert res == {"status": "confirm_required", "model": "model-b",
+                       "detail": _estimate_confirm_detail("model-b", _TOO_SMALL + 100 * MB)}
+        assert a.unload_calls == 0
