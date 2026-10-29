@@ -20,7 +20,8 @@ adaptive multi-GPU split handling.
 
 Patched boundaries: localm.discover.vram_capacity and gpu_split_shortfall,
 the registry and config readers, residency.cancel_all, the embedder's
-loaded_dim and localm.vram.wait_for_vram_release.
+loaded_dim, the shared models' resident_vram_hold and
+localm.vram.wait_for_vram_release.
 """
 
 import asyncio
@@ -141,6 +142,9 @@ def _install(monkeypatch, engines, *, total=10 * GB, measurable=True,
 
     monkeypatch.setattr("localm.vram.wait_for_vram_release", _wait_for_release)
     monkeypatch.setattr("localm.inference.embedder.loaded_dim", lambda: None)
+    for module in ("embedder", "reranker", "speech"):
+        monkeypatch.setattr(f"localm.inference.{module}.resident_vram_hold",
+                            lambda: (False, None))
 
     real_cancel_all = residency.cancel_all
 
