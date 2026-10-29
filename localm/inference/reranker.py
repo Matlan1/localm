@@ -284,6 +284,8 @@ class HFReranker:
 
     # Set by stop(): no request starts or restarts the worker afterwards.
     _stopped: bool = False
+    # Free VRAM the load took (vram.vram_taken_since), or None.
+    vram_load_bytes: Optional[int] = None
 
     def __init__(self, path: str, device: Optional[str] = None) -> None:
         from localm.inference.backends.hf import HFBackend
@@ -291,9 +293,22 @@ class HFReranker:
         self.active_requests = 0
         self._call_lock = threading.Lock()
         self._backend = HFBackend(path, device=device, task="rerank")
+        from localm.vram import device_free_snapshot, vram_taken_since
+        before = None if device == "cpu" else device_free_snapshot()
         self._backend.load()
+        self.vram_load_bytes = None if device == "cpu" else vram_taken_since(before)
         self.cls_labels = list(self._backend.rerank_labels)
         self._runner = self._backend._runner
+
+    @property
+    def vram_hold_bytes(self) -> Optional[int]:
+        """Bytes of VRAM the worker is expected to hold: 0 when it loaded on the
+        CPU, the free VRAM its load took when measured, else None (unknown).
+        A restart after the worker died is not re-measured."""
+        if getattr(self._backend, "loaded_device", None) == "cpu":
+            return 0
+        measured = self.vram_load_bytes
+        return measured if type(measured) is int and measured > 0 else None
 
     def rerank(self, pairs: list[tuple[str, str]]) -> list[dict]:
         """Score *pairs*, starting the worker again first when it has died.
@@ -622,6 +637,19 @@ def is_loaded() -> bool:
     """True while a reranker is resident. Does not load."""
     with _LOCK:
         return _RERANKER is not None
+
+
+def resident_vram_hold() -> tuple[bool, Optional[int]]:
+    """``(loaded, hold)``: whether a reranker (or embedding model) is resident
+    and, when it is, the VRAM bytes it is expected to hold (its
+    ``vram_hold_bytes``; None when unknown). Does not load. Takes ``_LOCK``;
+    must not run on the event loop thread."""
+    from localm.inference.embedder import model_vram_hold
+    with _LOCK:
+        current = _RERANKER
+    if current is None:
+        return False, None
+    return True, model_vram_hold(current)
 
 
 def is_resident() -> bool:

@@ -133,6 +133,11 @@ def free_if_idle() -> Optional[bool]:
         lock.release()
 
 
+def is_busy() -> bool:
+    """Whether a job holds ``lock``. Takes no lock."""
+    return lock.locked()
+
+
 def worker_pid() -> Optional[int]:
     """The live worker's process id, or None."""
     pid = runner.pid

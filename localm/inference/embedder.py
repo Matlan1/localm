@@ -1202,6 +1202,8 @@ class IsolatedEmbedder(VramSizingMixin):
     effective_pooling: Optional[int] = None
     # Set by stop(): no call starts, respawns or falls back to CPU afterwards.
     _stopped: bool = False
+    # Free VRAM the last worker load took (vram.vram_taken_since), or None.
+    vram_load_bytes: Optional[int] = None
 
     def __init__(self, model_path: str, *, n_gpu_layers: int = 99,
                  n_ctx: Optional[int] = None,
@@ -1332,7 +1334,11 @@ class IsolatedEmbedder(VramSizingMixin):
         if main_gpu is not None:
             params["main_gpu"] = main_gpu
         self._runner = EmbedderRunner()
+        from localm.vram import device_free_snapshot, vram_taken_since
+        self.vram_load_bytes = None
+        before = None if cpu_only else device_free_snapshot()
         meta = self._runner.spawn_and_load(params)
+        self.vram_load_bytes = None if cpu_only else vram_taken_since(before)
         self.dim = meta["dim"]
         self.declared_pooling = meta.get("declared_pooling")
         self.effective_pooling = meta.get("effective_pooling")
@@ -1370,6 +1376,26 @@ class IsolatedEmbedder(VramSizingMixin):
             "re-indexing after the change.",
             Path(self.model_path).name, pooling_name(declared),
             pooling_name(effective), pooling_name(effective))
+
+    @property
+    def vram_hold_bytes(self) -> Optional[int]:
+        """Bytes of VRAM this embedder's worker is expected to hold: 0 when it
+        runs on the CPU (``gpu_fallback_reason`` set or ``n_gpu_layers`` 0);
+        else the free VRAM its last load took (``vram_load_bytes``); else, for a
+        load of every layer (``n_gpu_layers`` negative or 99 and above), the
+        model file size plus 20%; else None (unknown). Reads the file size."""
+        if self.gpu_fallback_reason is not None or self.n_gpu_layers == 0:
+            return 0
+        measured = self.vram_load_bytes
+        if type(measured) is int and measured > 0:
+            return measured
+        if self.n_gpu_layers < 0 or self.n_gpu_layers >= 99:
+            try:
+                size = Path(self.model_path).stat().st_size
+            except OSError:
+                return None
+            return int(size * 1.2) if size else None
+        return None
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         """Embed *texts* via the isolated worker, transparently respawning it
@@ -1923,6 +1949,25 @@ def loaded_dim() -> Optional[int]:
     Does NOT trigger a load - safe for a cheap status probe (GUI picker)."""
     with _LOCK:
         return _EMBEDDER.dim if _EMBEDDER is not None else None
+
+
+def model_vram_hold(model) -> Optional[int]:
+    """*model*'s ``vram_hold_bytes`` when it is a non-negative int, else None
+    (unknown)."""
+    hold = getattr(model, "vram_hold_bytes", None)
+    return hold if type(hold) is int and hold >= 0 else None
+
+
+def resident_vram_hold() -> tuple[bool, Optional[int]]:
+    """``(loaded, hold)``: whether the shared embedder is loaded and, when it
+    is, the VRAM bytes it is expected to hold (``model_vram_hold``; None when
+    unknown). Does not load. Takes ``_LOCK``; must not run on the event loop
+    thread."""
+    with _LOCK:
+        current = _EMBEDDER
+    if current is None:
+        return False, None
+    return True, model_vram_hold(current)
 
 
 def gpu_fallback_reason() -> Optional[str]:
