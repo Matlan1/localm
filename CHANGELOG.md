@@ -14,6 +14,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ### Added
 - **A model can be reloaded from the interface.** The running model's row on the Models page has a **reload** button (also on a loaded model whose adapter change is waiting for a reload), Settings > Runtime & GPU has **Save and reload model** beside Save, and Settings > Live tuning has **Reload model** for the settings that save immediately. A plain save still never reloads; the buttons appear only while a model is loaded.
 
+### Fixed
+- **Setup installs uv from a folder whose path contains `[` or `]`.** Running `setup.bat` or `setup-gui.bat` from a folder such as `D:\apps\localm [test]` stopped at the uv step with uv not installed. The console and graphical setups now install uv from such a folder too, keeping the installer's temporary files in a short-lived folder that is removed afterwards.
+
 ## [0.3.2] - 2026-10-29
 
 Everything in 0.3.2rc1 and 0.3.2rc2 below, plus the changes listed here.
