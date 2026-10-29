@@ -124,3 +124,54 @@ test("unload-all anyway reports a model that still stayed loaded", async () => {
   });
   assert.equal(toast, "Unloaded 1 model(s); 1 still generating - try again once finished");
 });
+
+test("unload-all toast counts a stopped native image worker in unloaded_other", async () => {
+  const msg = await clickUnloadAll({
+    status: "unloaded", model: "model-a", unloaded_models: ["model-a"],
+    unloaded_other: ["native image/video worker"], embedder_unloaded: false,
+  });
+  assert.match(msg, /Unloaded 2 model/, `1 chat model + the image worker (got: ${msg})`);
+});
+
+test("unload-all reports a busy media runtime and does not offer to force it", async () => {
+  const calls = [];
+  const { window } = loadAppWithPages({ fetchImpl: makeForceFlowFetch({
+    status: "in_use", model: "none", unloaded_models: [], unloaded_other: [],
+    embedder_unloaded: false, skipped_in_use: ["native image/video worker"],
+    media_left_running: { "native image/video worker": "busy" },
+  }, {}, calls) });
+  const doc = window.document;
+  doc.getElementById("models-unload-all-btn").click();
+  await flush();
+  assert.equal(doc.getElementById("toast").textContent,
+    "1 model(s) still generating - try again once finished");
+  assert.equal(doc.querySelector("#modal-body .btn-danger"), null,
+    "force cannot stop a media job, so no unload-anyway confirm is shown");
+  assert.deepEqual(calls, [{}]);
+});
+
+test("unload-all says a media runtime could not be stopped, not that it is generating", async () => {
+  const calls = [];
+  const { window } = loadAppWithPages({ fetchImpl: makeForceFlowFetch({
+    status: "in_use", model: "none", unloaded_models: [], unloaded_other: [],
+    embedder_unloaded: false, skipped_in_use: ["native image/video worker"],
+    media_left_running: { "native image/video worker": "failed" },
+  }, {}, calls) });
+  const doc = window.document;
+  doc.getElementById("models-unload-all-btn").click();
+  await flush();
+  const msg = doc.getElementById("toast").textContent;
+  assert.equal(msg, "Could not stop the native image/video worker; see the server log");
+  assert.equal(doc.querySelector("#modal-body .btn-danger"), null);
+  assert.deepEqual(calls, [{}]);
+});
+
+test("unload-all offers force only for the chat model beside a busy media runtime", async () => {
+  const { calls } = await unloadAllThenConfirm({
+    status: "in_use", model: "none", unloaded_models: [], unloaded_other: [],
+    embedder_unloaded: false, skipped_in_use: ["chat-a", "native music runtime"],
+    confirm_required: { "chat-a": "1 other active request" },
+    media_left_running: { "native music runtime": "busy" },
+  }, { status: "unloaded", model: "chat-a", unloaded_models: ["chat-a"] });
+  assert.deepEqual(calls, [{}, { force: true }]);
+});

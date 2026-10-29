@@ -3599,24 +3599,39 @@ if ($("models-import-comfy-btn")) {
 }
 
 // What an Unload all response released and left loaded: n counts the chat
-// models in unloaded_models plus the embedding, reranker and speech models in
-// unloaded_other (or 1 for embedder_unloaded from a server without that list);
-// skipped lists what stayed loaded because it was in use.
+// models in unloaded_models plus the embedding, reranker and speech models and
+// media runtimes in unloaded_other (or 1 for embedder_unloaded from a server
+// without that list); skipped lists what stayed loaded because it was in use;
+// forceable is the part of skipped a forced retry can stop (a media runtime in
+// media_left_running is never stopped by force); failed lists the media
+// runtimes whose stop did not take, which are not counted in skipped.
 function unloadAllCounts(data) {
   const other = Array.isArray(data.unloaded_other)
     ? data.unloaded_other.length : (data.embedder_unloaded ? 1 : 0);
   const n = (data.unloaded_models || []).length + other;
-  const skipped = Array.isArray(data.skipped_in_use) ? data.skipped_in_use : [];
-  return { n, skipped };
+  const media = (data.media_left_running && typeof data.media_left_running === "object")
+    ? data.media_left_running : {};
+  const failed = Object.keys(media).filter((k) => media[k] === "failed");
+  const skipped = (Array.isArray(data.skipped_in_use) ? data.skipped_in_use : [])
+    .filter((k) => !failed.includes(k));
+  const forceable = skipped.filter((k) => !Object.prototype.hasOwnProperty.call(media, k));
+  return { n, skipped, forceable, failed };
 }
 
-function unloadAllMessage(n, skipped) {
+function unloadAllMessage(n, skipped, failed = []) {
+  const stopFailed = failed.length
+    ? t("models.unloadAll.mediaStopFailed", { names: failed.join(", ") }) : "";
+  let msg;
   if (n && skipped.length) {
-    return t("models.unloadAll.someStillGenerating", { n, skipped: skipped.length });
+    msg = t("models.unloadAll.someStillGenerating", { n, skipped: skipped.length });
+  } else if (n) {
+    msg = t("models.unloadAll.allUnloaded", { n });
+  } else if (skipped.length) {
+    msg = t("models.unloadAll.stillGenerating", { skipped: skipped.length });
+  } else {
+    return stopFailed || t("models.unloadAll.nothingLoaded");
   }
-  if (n) return t("models.unloadAll.allUnloaded", { n });
-  if (skipped.length) return t("models.unloadAll.stillGenerating", { skipped: skipped.length });
-  return t("models.unloadAll.nothingLoaded");
+  return stopFailed ? `${msg}. ${stopFailed}` : msg;
 }
 
 // Bind Unload-all button click handler
@@ -3630,18 +3645,17 @@ if (unloadAllBtn) {
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok) { toast(data.detail || t("models.unload.failed"), true); return; }
-      const { n, skipped } = unloadAllCounts(data);
-      toast(unloadAllMessage(n, skipped), skipped.length > 0);
+      const { n, skipped, forceable, failed } = unloadAllCounts(data);
+      toast(unloadAllMessage(n, skipped, failed), skipped.length > 0 || failed.length > 0);
       refreshModelsPage();
       refreshPerfEstimate();
-      // Offer to force through whatever is still in the way - the owner's
+      // Offer to force through whatever force can stop - the owner's
       // action is final, mirroring the per-row unload's own confirm/force
-      // contract. skipped_in_use is a real, non-empty count here, so there is
-      // something concrete to confirm.
-      if (skipped.length) {
+      // contract.
+      if (forceable.length) {
         const confirmed = await confirmDangerAsync(
           t("models.unloadAll.confirmTitle"),
-          t("models.unloadAll.confirmBody", { skipped: skipped.length }),
+          t("models.unloadAll.confirmBody", { skipped: forceable.length }),
           t("models.unloadAll.confirmLabel"));
         if (confirmed) {
           const r2 = await fetch("/api/models/unload", {
@@ -3651,7 +3665,8 @@ if (unloadAllBtn) {
           const data2 = await r2.json().catch(() => ({}));
           if (!r2.ok) { toast(data2.detail || t("models.unload.failed"), true); return; }
           const after = unloadAllCounts(data2);
-          toast(unloadAllMessage(after.n, after.skipped), after.skipped.length > 0);
+          toast(unloadAllMessage(after.n, after.skipped, after.failed),
+            after.skipped.length > 0 || after.failed.length > 0);
           refreshModelsPage();
           refreshPerfEstimate();
         }

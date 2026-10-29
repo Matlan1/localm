@@ -1336,6 +1336,7 @@
   "models.unloadAll.confirmLabel": "Trotzdem alle entladen",
   "models.unloadAll.confirmTitle": "Einige Modelle werden verwendet",
   "models.unloadAll.failedException": "Entladen fehlgeschlagen: {message}",
+  "models.unloadAll.mediaStopFailed": "Konnte {names} nicht stoppen; siehe Server-Log",
   "models.unloadAll.nothingLoaded": "Es war nichts geladen",
   "models.unloadAll.someStillGenerating": "{n} Modell(e) entladen; {skipped} generieren noch - versuchen Sie es erneut, sobald sie fertig sind",
   "models.unloadAll.stillGenerating": "{skipped} Modell(e) generieren noch - versuchen Sie es erneut, sobald sie fertig sind",

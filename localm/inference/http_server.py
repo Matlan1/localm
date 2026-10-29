@@ -566,6 +566,8 @@ _INCONCLUSIVE_LOAD_RETRY_DELAY = 1.5
 # model to finish its requests, so that model can be evicted instead of the new
 # one loading beside it on whatever VRAM is left.
 _BUSY_VICTIM_IDLE_WAIT_S = 30.0
+# How often that wait checks whether a busy native media runtime's job ended.
+_BUSY_MEDIA_POLL_S = 0.25
 
 # How much longer _switch_free_victim waits for an evicted model's VRAM when
 # the first wait_for_vram_release saw no release.
@@ -677,9 +679,12 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
     waits for a busy model to finish and with ``LOADING_MODEL_STATUS`` when it
     goes on.
 
-    A load that is not an explicit switch waits up to ``_BUSY_VICTIM_IDLE_WAIT_S``
-    for a busy resident model that stands in its way to go idle, then evicts it
-    (``_switch_wait_for_busy_victim``). A resident model left partly on the CPU
+    Before a load is sized, this process's idle native media runtimes are
+    stopped (``_switch_free_own_media``). A load that is not an explicit switch
+    waits up to ``_BUSY_VICTIM_IDLE_WAIT_S`` for a busy resident model that
+    stands in its way to go idle, then evicts it
+    (``_switch_wait_for_busy_victim``), and as long again for a media runtime
+    that is running a job (``_switch_wait_for_busy_media``). A resident model left partly on the CPU
     by an earlier load is reloaded instead of reused, once, when a model that
     held the VRAM it lacked is idle or gone (``_placement_heal_due``) and a
     fresh VRAM reading is conclusive; an explicit switch reuses it as it is.
@@ -771,6 +776,8 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
             latched = await loop.run_in_executor(None, _routing_latch.skipped, [name])
             if name in latched:
                 raise LoadSkipped(latched[name])
+
+        await _switch_free_own_media(loop, name)
 
         built = None
         reading = None
@@ -1110,7 +1117,9 @@ async def _switch_exhaustion_ladder(loop, probe: switch_admission.VramProbe,
                                     ) -> switch_admission.EvictionStep:
     """Find room once no idle chat model is evictable, in this order: free the
     idle shared embedder; act on the probe verdict (load best-effort when the
-    box cannot measure, retry or refuse when the probe was inconclusive); ask
+    box cannot measure, retry or refuse when the probe was inconclusive); stop
+    or wait for this process's native media runtimes
+    (``_switch_wait_for_busy_media``); ask
     a sibling localm instance to free its VRAM; claim a busy resident model
     (explicit switch, ``_switch_claim_busy_victim``) or wait for it to go idle
     (``_switch_wait_for_busy_victim``, any other load); then refuse, ask, or
@@ -1136,6 +1145,11 @@ async def _switch_exhaustion_ladder(loop, probe: switch_admission.VramProbe,
         return step(switch_admission.REPROBE)
     if verdict == switch_admission.GIVE_UP_PROBE:
         raise _switch_inconclusive_failure(budget.name, attempt)
+
+    media = await _switch_wait_for_busy_media(loop, budget, attempt, preempt=preempt,
+                                              force=force, on_status=on_status)
+    if media is not None:
+        return media
 
     if await _switch_ask_peers(loop, probe, budget, attempt):
         return step(switch_admission.REPROBE)
@@ -1222,6 +1236,109 @@ async def _switch_evict_embedder(loop, probe: switch_admission.VramProbe,
                    probe.free // 1024 ** 2,
                    after // 1024 ** 2 if after is not None else "?")
     return True
+
+
+async def _stop_idle_media_for(loop, name: str) -> tuple[bool, list]:
+    """Stop this process's native media runtimes that no job is using
+    (``localm.vram.stop_idle_native_media``) for chat model *name*, logging
+    each stop at INFO. Returns ``(stopped_any, busy)``, *busy* being the
+    runtimes left running because a job is using them."""
+    from localm import vram as _vram
+    from localm.debuglog import logger as _dbg
+
+    outcomes = await loop.run_in_executor(None, _vram.stop_idle_native_media)
+    stopped = False
+    busy = []
+    for kind, outcome in outcomes.items():
+        if outcome == _vram.MEDIA_STOPPED:
+            stopped = True
+            _dbg.info("switch_engine: stopped the idle %s to make room for the "
+                      "chat model '%s'", kind, name)
+        elif outcome == _vram.MEDIA_BUSY:
+            busy.append(kind)
+    return stopped, busy
+
+
+async def _switch_free_own_media(loop, name: str) -> None:
+    """Before chat model *name* is sized and loaded: stop every native media
+    runtime this process holds loaded that no job is using
+    (``_stop_idle_media_for``), then wait for the VRAM release when a fresh,
+    device-wide free reading was taken before the stop. A runtime that is
+    running a job is left running (``_switch_wait_for_busy_media`` handles it
+    when the load does not fit). Never raises for a runtime that cannot be
+    stopped; that is logged at WARNING."""
+    from localm import vram as _vram
+    from localm.debuglog import logger as _dbg
+    from localm.discover import FREE_SCOPE_DEVICE
+
+    loaded = await loop.run_in_executor(None, _vram.loaded_native_media_runtimes)
+    if not loaded:
+        return
+    before, fresh, scope = await loop.run_in_executor(None, _vram._vram_free_reading)
+    stopped, _busy = await _stop_idle_media_for(loop, name)
+    if not (stopped and fresh and scope == FREE_SCOPE_DEVICE and before is not None):
+        return
+    released, after = await loop.run_in_executor(
+        None, lambda: _vram.wait_for_vram_release(_vram._live_free_vram_bytes,
+                                                  before_bytes=before))
+    _dbg.debug("switch_engine: VRAM release after stopping the media runtime %s "
+               "(%s -> %s MB free)",
+               {True: "confirmed", False: "not seen"}.get(released, "not verifiable"),
+               before // 1024 ** 2, after // 1024 ** 2 if after is not None else "?")
+
+
+async def _switch_wait_for_busy_media(loop, budget: switch_admission.LoadBudget,
+                                      attempt: switch_admission.EvictionAttempt, *,
+                                      preempt: bool, force: bool,
+                                      on_status: Optional[Callable[[str], None]] = None
+                                      ) -> switch_admission.EvictionStep | None:
+    """Once per load attempt (``attempt.media_attempted``), for chat model
+    ``budget.name`` that does not fit while this process holds a native media
+    runtime loaded: stop the runtimes no job is using, and for one a job is
+    using, ask (an explicit switch without *force*) or wait up to
+    ``_BUSY_VICTIM_IDLE_WAIT_S`` for the job to end and then stop it (any
+    other load; *on_status* is called with ``WAITING_FOR_MODEL_STATUS`` before
+    the wait and ``LOADING_MODEL_STATUS`` after it). A job is never cut off.
+
+    Returns a REPROBE step once a runtime stopped or went away, a RETURN_RESULT
+    step with ``switch_admission.busy_media_confirm`` when asking, else None
+    (nothing loaded, *force*, or the job still running when the wait ended,
+    which is logged at WARNING)."""
+    from localm import vram as _vram
+    from localm.debuglog import logger as _dbg
+
+    step = switch_admission.EvictionStep
+    if attempt.media_attempted:
+        return None
+    if not await loop.run_in_executor(None, _vram.loaded_native_media_runtimes):
+        return None
+    attempt.media_attempted = True
+    stopped, busy = await _stop_idle_media_for(loop, budget.name)
+    if stopped or not busy:
+        return step(switch_admission.REPROBE)
+    if preempt and not force:
+        return step(switch_admission.RETURN_RESULT,
+                    result=switch_admission.busy_media_confirm(budget.name, busy))
+    if not force:
+        _dbg.info("switch_engine: '%s' needs the VRAM the %s holds; waiting up to "
+                  "%.0fs for its job to finish", budget.name, " and the ".join(busy),
+                  _BUSY_VICTIM_IDLE_WAIT_S)
+        if on_status is not None:
+            on_status(WAITING_FOR_MODEL_STATUS)
+        deadline = time.monotonic() + _BUSY_VICTIM_IDLE_WAIT_S
+        try:
+            while time.monotonic() < deadline:
+                await asyncio.sleep(_BUSY_MEDIA_POLL_S)
+                stopped, busy = await _stop_idle_media_for(loop, budget.name)
+                if stopped or not busy:
+                    return step(switch_admission.REPROBE)
+        finally:
+            if on_status is not None:
+                on_status(LOADING_MODEL_STATUS)
+    _dbg.warning("switch_engine: the %s is still running a job; the chat model '%s' "
+                 "loads beside it and may not fit on the GPU entirely",
+                 " and the ".join(busy), budget.name)
+    return None
 
 
 def _switch_inconclusive_failure(name: str,
@@ -2281,7 +2398,7 @@ def _unload_busy_confirm_detail(name: str, engine) -> str:
             "unloading it anyway stops it and cuts off the reply it is writing")
 
 
-async def unload_all_models(*, force: bool = False) -> dict:
+async def unload_all_models(*, force: bool = False, media: bool = False) -> dict:
     """Release every currently-loaded model from GPU/CPU memory and wait until
     VRAM is actually reclaimed (see ``localm.vram.wait_for_vram_release`` - the
     driver-hang guard: otherwise a media model can load on top of a
@@ -2305,16 +2422,26 @@ async def unload_all_models(*, force: bool = False) -> dict:
     reranker or speech model is stopped and unloaded.
     See test_unload_all_never_cancels_a_busy_model_before_asking.
 
+    With *media*, this process's native media runtimes (the image/video worker
+    and the music runtime, ``localm.vram.stop_idle_native_media``) are stopped
+    too when no job is using them. One that a job is using is left running,
+    with or without *force*, and listed in ``skipped_in_use`` and
+    ``media_left_running``, never in ``confirm_required``.
+
     Returns ``{"status", "model", "unloaded_models", "unloaded_other",
     "embedder_unloaded", ...vram fields}``: *status* is ``"unloaded"``,
     ``"in_use"`` (nothing released, something skipped) or
     ``"already_unloaded"``; ``unloaded_models`` names the chat models
-    released, ``unloaded_other`` the kinds of the other models released
-    (``"embedding model"``, ``"reranker model"``, ``"speech model"``), and
-    ``embedder_unloaded`` is whether ``unloaded_other`` is non-empty.
-    ``skipped_in_use`` (names and kinds left loaded) and ``confirm_required``
-    (each of those mapped to what is using it) are present only when
-    something was skipped."""
+    released, ``unloaded_other`` the kinds of the other models and runtimes
+    released (``"embedding model"``, ``"reranker model"``, ``"speech model"``,
+    ``"native image/video worker"``, ``"native music runtime"``), and
+    ``embedder_unloaded`` is whether an embedding, reranker or speech model was
+    released. ``skipped_in_use`` (names and kinds left loaded) is present only
+    when something was skipped; ``confirm_required`` (each skipped model that
+    *force* would stop, mapped to what is using it) only when there is one; and
+    ``media_left_running`` (each media runtime left running, mapped to
+    ``"busy"`` when a job is using it or ``"failed"`` when the stop did not
+    take) only when there is one."""
     global _active_model_name, _last_active_model_name, _engine, _inference_sem
     loop = asyncio.get_running_loop()
     from localm.vram import (_live_free_vram_bytes, _vram_free_reading,
@@ -2360,7 +2487,20 @@ async def unload_all_models(*, force: bool = False) -> dict:
     if _active_model_name not in skipped_in_use:
         _reset_active_pointers()
 
-    released_anything = bool(unloaded_models) or embedder_was_loaded
+    media_left_running: dict[str, str] = {}
+    media_stopped = False
+    if media:
+        from localm.vram import MEDIA_STOPPED, stop_idle_native_media
+        outcomes = await loop.run_in_executor(None, stop_idle_native_media)
+        for kind, outcome in outcomes.items():
+            if outcome == MEDIA_STOPPED:
+                unloaded_other.append(kind)
+                media_stopped = True
+            else:
+                skipped_in_use.append(kind)
+                media_left_running[kind] = outcome
+
+    released_anything = bool(unloaded_models) or embedder_was_loaded or media_stopped
     if before is not None and released_anything:
         released, after = await loop.run_in_executor(
             None, lambda: wait_for_vram_release(_free, before_bytes=before))
@@ -2386,6 +2526,8 @@ async def unload_all_models(*, force: bool = False) -> dict:
         # A model still in use after the wait, described for the caller to
         # show before it retries with force=True.
         result["confirm_required"] = confirm_required
+    if media_left_running:
+        result["media_left_running"] = media_left_running
     _add_vram_fields(result, before=before, released=released, after=after,
                      before_fresh=before_fresh, before_scope=before_scope)
     return result

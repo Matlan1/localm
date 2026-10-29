@@ -461,6 +461,23 @@ def stop(cancel_check: Optional[CancelCheck] = None) -> bool:
         _lock.release()
 
 
+def stop_if_idle() -> Optional[bool]:
+    """Stop the music server when no generation holds it, without waiting for
+    one. None when a generation holds it (the server is left running);
+    otherwise True once no server is running."""
+    global _server
+    if not _lock.acquire(blocking=False):
+        return None
+    try:
+        _cancel_idle_timer()
+        if _server is not None:
+            _server.stop()
+            _server = None
+        return True
+    finally:
+        _lock.release()
+
+
 def running_pid() -> Optional[int]:
     """The PID of the music server localm started, if it is running."""
     srv = _server

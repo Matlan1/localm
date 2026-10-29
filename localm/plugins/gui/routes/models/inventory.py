@@ -421,12 +421,14 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
     async def gui_unload_model(req: UnloadModelRequest):
         """Release model(s) from GPU/CPU memory. With no `model` (or an empty
         POST body), unloads everything - the GUI's global "Unload all"
-        button. With `model` set, unloads only that one, leaving any other
-        loaded models untouched - the GUI's per-row Unload button."""
+        button, which also stops this server's idle native media runtimes
+        (``unload_all_models(media=True)``). With `model` set, unloads only
+        that one, leaving any other loaded models untouched - the GUI's
+        per-row Unload button."""
         if req.model:
             _require_registered(req.model)
             return await unload_one_model(req.model, force=req.force)
-        return await unload_all_models(force=req.force)
+        return await unload_all_models(force=req.force, media=True)
 
     @app.post("/api/embedding/warmup",
               dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
