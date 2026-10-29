@@ -12,10 +12,11 @@ import os
 import threading
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 
 from localm import scopes
-from localm.inference.http_server import require_fs_host, require_scope
+from localm.inference.http_server import path_formatter, require_fs_host, require_scope
+from localm.pathscrub import map_strings
 from localm.pathsafe import check_plain_name, confined_name, reject_unsafe_path_string
 from localm.plugins.gui.web import (
     FsMkdirRequest,
@@ -157,7 +158,7 @@ def register(app: FastAPI, ctx) -> None:
         return result
 
     @app.post("/api/comfyui/create-launcher", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
-    def create_comfy_launcher(workdir: str):
+    def create_comfy_launcher(workdir: str, request: Request):
         # Plain `def`, NOT `async def`: every branch below touches the filesystem
         # (resolve/is_dir/exists/write_text), and Starlette runs a sync handler in its
         # threadpool instead of on the event loop.
@@ -220,17 +221,20 @@ def register(app: FastAPI, ctx) -> None:
         except HTTPException:
             raise
         except Exception as e:
-            raise HTTPException(500, f"Failed to create launcher: {e}") from e
+            raise HTTPException(
+                500, f"Failed to create launcher: {path_formatter(request)(e)}") from e
 
         return {"status": "ok"}
 
     @app.post("/api/app/rebuild-launcher",
               dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
-    def rebuild_launcher(force: bool = False):
+    def rebuild_launcher(request: Request, force: bool = False):
         """The GUI form of `localm make-launcher` (localm/cli/maintenance.py):
         refresh the copied interpreter, with `--force` mirroring the CLI flag
         exactly. make_launcher() already returns a structured LauncherResult and
-        never raises, so this is a thin passthrough.
+        never raises, so this is a thin passthrough. For a caller other than the
+        local operator, `path`, `desktop_file` and `notes` are path-scrubbed
+        (``http_server.path_formatter``).
 
         Plain `def`, NOT `async def`: make_launcher() copies the interpreter
         (+ DLLs) and spawns a self-check subprocess, all blocking - same
@@ -250,12 +254,13 @@ def register(app: FastAPI, ctx) -> None:
             res = applaunch.make_launcher(force=force)
         finally:
             _launcher_build_lock.release()
+        show = path_formatter(request)
         return {
             "ok": res.ok,
-            "path": str(res.path) if res.path else None,
-            "desktop_file": str(res.desktop_file) if res.desktop_file else None,
+            "path": show(res.path) if res.path else None,
+            "desktop_file": show(res.desktop_file) if res.desktop_file else None,
             "icon_stamped": res.icon_stamped,
-            "notes": res.notes,
+            "notes": map_strings(res.notes, show),
         }
 
     @app.get("/api/fs/dirs", dependencies=[Depends(require_fs_host)])

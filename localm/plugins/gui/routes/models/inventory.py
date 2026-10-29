@@ -73,7 +73,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
     jobs = context.jobs
 
     @app.get("/api/models", dependencies=[Depends(require_scope(scopes.MODELS_READ))])
-    async def gui_models(type: str = ""):
+    async def gui_models(request: Request, type: str = ""):
         # The annotation stays a builtin so FastAPI can resolve the forward-ref
         # this module's ``from __future__ import annotations`` produces. "" is the
         # no-filter sentinel, as on the sibling routes.
@@ -186,6 +186,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             get_plugin_executor(), _adapter_maps, registry,
             [name for name, _e, _m, _p in rows])
 
+        show_path = None
         models = []
         for name, entry, mtype, epath in rows:
             size = sizes.get(epath)
@@ -240,10 +241,13 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             if not _has_recorded_model_type(entry):
                 row_out["model_type_recorded"] = False
             # Emitted only on a missing row. `last_path` is the registry's own path
-            # string, which gives the GUI relocate control a starting point.
+            # string, which gives the GUI relocate control a starting point;
+            # path-scrubbed for a caller other than the local operator.
             if missing_flags.get(epath):
                 row_out["missing"] = True
-                row_out["last_path"] = epath
+                if show_path is None:
+                    show_path = _hs.path_formatter(request)
+                row_out["last_path"] = show_path(epath)
             if name in adapter_info:
                 row_out.update(adapter_info[name])
             elif attached_to.get(name):
