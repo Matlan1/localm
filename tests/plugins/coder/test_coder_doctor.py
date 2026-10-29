@@ -321,6 +321,21 @@ def test_mcp_check_leaves_no_server_process_running(tmp_path):
     assert dict(mcp._POOL) == before
 
 
+def test_mcp_relative_script_resolves_in_the_project_from_another_cwd(
+        tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "mcpsrv.py").write_text(_MCP_SERVER, encoding="utf-8")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    _write_mcp_config(project, {
+        "mx": {"command": sys.executable, "args": ["mcpsrv.py", "v1"]}})
+    monkeypatch.chdir(elsewhere)
+    got = {c.name: c for c in doctor.check_mcp(project)}
+    assert got["mcp:mx"].status == OK, got["mcp:mx"].detail
+    assert "2 tool(s)" in got["mcp:mx"].detail
+
+
 # ---------------------------------------------------------------- runner
 
 def test_a_raising_check_is_reported_as_a_failure_not_dropped():

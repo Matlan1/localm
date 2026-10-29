@@ -388,7 +388,7 @@ def register(app: FastAPI, ctx) -> None:
             res = await asyncio.to_thread(
                 updater.apply, asset["id"], signature=rel.get("signature"),
                 target_version=rel["version"], allow_unverified=allow_unverified,
-                expect_sha256=sha256)
+                expect_sha256=sha256, defer_runtime=True)
         except updater.UnverifiedBuild as e:
             return {"applied": False, "needs_confirmation": "unverified",
                     "version": rel["version"], "reason": e.reason, "sha256": e.sha256}
@@ -404,9 +404,12 @@ def register(app: FastAPI, ctx) -> None:
         place so the new code loads. EXPLICIT only (a button calls this); localm never
         self-updates on its own. A failed apply rolls back and is surfaced honestly,
         never as success. The asset is re-derived from the latest release server-side
-        (not taken from the client). The ``backup`` field and an ``error`` text are
-        path-scrubbed (``http_server.path_formatter``) for a caller other than the
-        local operator.
+        (not taken from the client). The ``backup``, ``runtime_note`` and
+        ``components_note`` fields and
+        an ``error`` text are path-scrubbed (``http_server.path_formatter``) for a
+        caller other than the local operator. A native runtime re-provision the
+        update needs runs during the restart, after the models are unloaded
+        (``updater.apply``'s *defer_runtime*).
 
         A JSON body ``{"version": V}`` installs release V instead, older ones
         included; see ``_apply_selected`` for that path and its optional
@@ -444,13 +447,15 @@ def register(app: FastAPI, ctx) -> None:
             raise HTTPException(400, "This release has no downloadable build attached.")
         try:
             res = await asyncio.to_thread(
-                updater.apply, asset["id"], signature=info.get("signature"))
+                updater.apply, asset["id"], signature=info.get("signature"),
+                defer_runtime=True)
         except LocalmError as e:
             # apply() already rolled back; report the failure, do not fake success.
             return {"applied": False,
                     "error": _hs.path_formatter(request)(format_localm_error(e))}
-        if res.get("backup") is not None:
-            res["backup"] = _hs.path_formatter(request)(res["backup"])
+        for key in ("backup", "runtime_note", "components_note"):
+            if res.get(key) is not None:
+                res[key] = _hs.path_formatter(request)(res[key])
         res["available"] = True
         _restart_after_apply(res)
         return res

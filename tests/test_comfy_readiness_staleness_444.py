@@ -41,6 +41,14 @@ from tests._popen_scope import ignore_background_threads
 URL = "http://127.0.0.1:8188"
 
 
+@pytest.fixture(autouse=True)
+def _isolated_comfy_handles(monkeypatch):
+    """A fresh ComfyUI handle registry per test, so a stub handle one test
+    leaves "running" is never stopped and replaced by another test's launch."""
+    monkeypatch.setattr(comfy_client, "_spawned_procs", {})
+    monkeypatch.setattr(comfy_client, "_device_errors", {})
+
+
 @pytest.fixture
 def no_launch(monkeypatch, tmp_path):
     """No launch command configured, so ensure_comfy's "cannot launch" branch

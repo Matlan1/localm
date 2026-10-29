@@ -236,6 +236,33 @@ class TestFinalExhaustionVerdict:
                                            force=force) == verdict
 
 
+class TestEvictableResidents:
+    def test_lists_idle_and_busy_models_but_never_the_target_a_pin_or_an_unloading_one(self):
+        engines = {"idle": _engine(), "busy": _engine(busy=1),
+                   "pinned": _engine(), "going": _engine(unloading=True),
+                   "model-new": _engine()}
+        lru = ["idle", "pinned", "going", "model-new", "busy", "gone"]
+
+        assert sa.evictable_residents(_budget(pinned=["pinned"]), lru, engines) == [
+            "idle", "busy"]
+
+
+class TestFreeAfterEviction:
+    def test_adds_every_hold_to_the_free_reading(self):
+        assert sa.free_after_eviction(_probe(free=2 * GB), [3 * GB, GB]) == 6 * GB
+
+    @pytest.mark.parametrize("probe, holds", [
+        (_probe(ok=False), [GB]),
+        (_probe(free=None), [GB]),
+        (_probe(process_scoped=True), [GB]),
+        (_probe(shortfall=[{"index": 0, "needed": GB, "free": 0}]), [GB]),
+        (_probe(), [GB, 0]),
+    ], ids=["inconclusive", "unmeasurable", "process-scoped", "split-shortfall",
+            "unknown-hold"])
+    def test_cannot_estimate(self, probe, holds):
+        assert sa.free_after_eviction(probe, holds) is None
+
+
 class TestMessages:
     def test_split_shortfall_refusal_names_every_short_device(self):
         assert sa.split_shortfall_refusal("m", [
@@ -248,8 +275,9 @@ class TestMessages:
     def test_degraded_load_confirm(self):
         assert sa.degraded_load_confirm("m", 4800 * MB, 3000 * MB) == {
             "status": "confirm_required", "model": "m",
-            "detail": ("'m' does not fit the estimated free VRAM (need ~4800 MB, "
-                       "3000 MB free) even after eviction; loading it anyway will "
+            "detail": ("'m' does not fit the estimated free VRAM (needs ~4800 MB "
+                       "free including a safety margin, 3000 MB free) even after "
+                       "eviction; loading it anyway will "
                        "let the backend fall back to partial CPU offload, which "
                        "is slower")}
 
@@ -261,7 +289,9 @@ class TestMessages:
     def test_busy_victim_confirm(self):
         assert sa.busy_victim_confirm("m", "v", "still in use") == {
             "status": "confirm_required", "model": "m",
-            "detail": "loading 'm' needs to free 'v', which is still in use"}
+            "detail": ("loading 'm' needs to free 'v', which is still in use; "
+                       "loading it anyway stops 'v' and cuts off the reply it "
+                       "is writing")}
 
     def test_inconclusive_texts(self):
         assert sa.inconclusive_restart_reason("m", 3) == (

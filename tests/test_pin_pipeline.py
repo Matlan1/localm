@@ -803,11 +803,11 @@ def test_merge_pr_pins_the_head_commit_it_waited_on(monkeypatch, tmp_path):
     assert merge[merge.index("--match-head-commit") + 1] == "cafe123"
 
 
-def test_worktree_processes_get_temp_and_cache_dirs_beside_the_worktree(tmp_path):
+def test_worktree_processes_get_temp_and_cache_dirs_in_the_main_checkouts_scratch(tmp_path):
     worktree = tmp_path / "wt"
     env = pipeline._worktree_env(worktree)
     temp = pipeline.worktree_temp_dir(worktree)
-    assert temp.is_dir() and temp.parent == worktree.parent and not str(temp).startswith(str(worktree) + os.sep)
+    assert temp.is_dir() and temp == worktree / "scratch" / "pin-pipeline" / "worktree-tmp"
     assert {env["TMP"], env["TEMP"], env["TMPDIR"]} == {str(temp)}
     assert env["npm_config_cache"].startswith(str(temp)) and env["PYTHONPATH"] == str(worktree)
 
@@ -1119,7 +1119,7 @@ def test_ensure_pipeline_worktree_creates_and_reuses_the_same_dedicated_worktree
 
     first = pipeline.ensure_pipeline_worktree(repo)
     assert first.exists()
-    assert first == repo.parent / f"{repo.name}-pin-pipeline-worktree"
+    assert first == repo / ".claude" / "worktrees" / "pin-pipeline"
 
     second = pipeline.ensure_pipeline_worktree(repo)
     assert second == first, "a second call must reuse the same worktree, not create another"

@@ -100,12 +100,30 @@ def describe_search(root) -> str:
     return "; ".join(places)
 
 
+def _uv_in(folder) -> Optional[Path]:
+    """The uv in *folder* (directly or in its ``bin``), or None."""
+    for rel in (Path(UV_NAME), Path("bin") / UV_NAME):
+        if usable(Path(folder) / rel):
+            return Path(folder) / rel
+    return None
+
+
 def contained_uv(root) -> Optional[Path]:
     """The uv copy inside *root* (``.uv``), or None."""
-    for rel in (Path(CONTAINED_DIR) / UV_NAME, Path(CONTAINED_DIR) / "bin" / UV_NAME):
-        if usable(Path(root) / rel):
-            return Path(root) / rel
-    return None
+    return _uv_in(Path(root) / CONTAINED_DIR)
+
+
+def uv_version(path) -> Optional[str]:
+    """The version the uv at *path* reports (``uv --version``), or None when it
+    cannot be run or prints no version."""
+    try:
+        out = subprocess.run([str(path), "--version"], capture_output=True, text=True,
+                             encoding="utf-8", errors="replace", timeout=30,
+                             stdin=subprocess.DEVNULL).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.search(r"^uv\s+([0-9][^\s]*)", out or "", re.M)
+    return m.group(1) if m else None
 
 
 def is_inside(path, root) -> bool:
@@ -158,19 +176,41 @@ def _run_installer(script: Path, env: dict) -> int:
 
 def bootstrap_uv(root, *, download: Optional[Callable[[str, Path], None]] = None,
                  run_installer: Optional[Callable[[Path, dict], int]] = None,
-                 emit: Callable[[str], None] = lambda s: None) -> Path:
-    """Install the pinned uv into ``<root>/.uv`` and return its path.
+                 emit: Callable[[str], None] = lambda s: None,
+                 dest=None) -> Path:
+    """Install the uv pinned by the setup scripts in *root* into ``<root>/.uv``
+    (or into the folder *dest* when given) and return its path.
 
     The installer script is downloaded from the pinned release and runs only if
     its sha256 equals the pin in the setup script; it is told to keep uv in
-    ``.uv`` and to leave PATH and the user profile alone. Raises
+    ``.uv`` and to leave PATH and the user profile alone. The installer script
+    and every temporary file the installer writes (TEMP, TMP and TMPDIR point
+    there) stay in a scratch folder under ``<root>/.localm-setup-tmp``, which
+    is removed afterwards, together with ``.localm-setup-tmp`` when this call
+    created it and it is empty. On Windows, when that scratch path contains
+    ``[`` or ``]``, the installer's temporary files go to a fresh folder in the
+    system temp folder instead, also removed afterwards: Astral's PowerShell
+    installer cannot unpack under a path holding wildcard characters (see
+    test_bootstrap_uv_avoids_a_bracketed_temp_folder_on_windows). Raises
     UvBootstrapError, naming the step that failed, and installs nothing on a
     failed download or a checksum mismatch."""
+    from localm.install_manifest import SETUP_TMP_NAME
     root = Path(root)
     version, expected = read_pin(root)
-    target = root / CONTAINED_DIR
+    target = Path(dest) if dest is not None else root / CONTAINED_DIR
     url = f"https://github.com/astral-sh/uv/releases/download/{version}/{_INSTALLER_NAME}"
-    scratch = Path(tempfile.mkdtemp(prefix="uv-installer-"))
+    parent = root / SETUP_TMP_NAME
+    made_parent = not parent.exists()
+    try:
+        parent.mkdir(exist_ok=True)
+        scratch = Path(tempfile.mkdtemp(prefix="uv-installer-", dir=parent))
+        installer_tmp = scratch / "tmp"
+        if IS_WINDOWS and ("[" in str(installer_tmp) or "]" in str(installer_tmp)):
+            installer_tmp = Path(tempfile.mkdtemp(prefix="localm-uv-tmp-"))
+        else:
+            installer_tmp.mkdir()
+    except OSError as e:
+        raise UvBootstrapError(f"could not create a temporary folder in {parent}: {e}") from None
     try:
         script = scratch / _INSTALLER_NAME
         emit(f"Downloading the uv {version} installer ...")
@@ -184,7 +224,8 @@ def bootstrap_uv(root, *, download: Optional[Callable[[str, Path], None]] = None
             raise UvBootstrapError(
                 f"the downloaded uv {version} installer did not match its expected "
                 "checksum and was not run")
-        env = dict(os.environ, UV_INSTALL_DIR=str(target), UV_UNMANAGED_INSTALL=str(target))
+        env = dict(os.environ, UV_INSTALL_DIR=str(target), UV_UNMANAGED_INSTALL=str(target),
+                   TEMP=str(installer_tmp), TMP=str(installer_tmp), TMPDIR=str(installer_tmp))
         emit(f"Installing uv {version} into {target} ...")
         try:
             rc = (run_installer or _run_installer)(script, env)
@@ -194,7 +235,10 @@ def bootstrap_uv(root, *, download: Optional[Callable[[str, Path], None]] = None
             raise UvBootstrapError(f"the uv installer exited {rc}")
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
-    found = contained_uv(root)
+        shutil.rmtree(installer_tmp, ignore_errors=True)
+        if made_parent and parent.is_dir() and not any(parent.iterdir()):
+            parent.rmdir()
+    found = _uv_in(target)
     if found is None:
         raise UvBootstrapError(f"the uv installer finished but no {UV_NAME} appeared in {target}")
     return found

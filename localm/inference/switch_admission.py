@@ -155,7 +155,8 @@ class EvictionAttempt:
     """Mutable bookkeeping for one load attempt's eviction loop.
 
     ``switch_engine`` updates it as it performs effects; the decisions here only
-    read it. Each bounded step (embedder eviction, each peer instance, the busy
+    read it. Each bounded step (embedder eviction, the stop of or wait for this
+    process's native media runtimes, each peer instance, the busy
     victim, the wait for a busy model to go idle, the longer wait for an evicted
     model's VRAM release) runs at most once per attempt, and inconclusive probes
     are retried ``_INCONCLUSIVE_LOAD_RETRIES`` times, so the loop always
@@ -167,6 +168,7 @@ class EvictionAttempt:
     started: float
     asked_peers: set = field(default_factory=set)
     embedder_attempted: bool = False
+    media_attempted: bool = False
     busy_attempted: bool = False
     busy_waited: bool = False
     release_wait_extended: bool = False
@@ -274,6 +276,37 @@ def idle_wait_candidate(budget: LoadBudget, lru: Iterable[str],
         lru, engines, requested=budget.name, pinned=budget.pinned)
 
 
+def evictable_residents(budget: LoadBudget, lru: Iterable[str],
+                        engines: Mapping[str, Any]) -> list:
+    """Every resident chat model an explicit switch to ``budget.name`` may
+    evict, idle or busy, least recently used first: the same exclusions as
+    ``residency.pick_busy_eviction_victim`` (never the requested model, a
+    pinned one, one no longer registered or one already mid-unload)."""
+    out = []
+    for candidate in lru:
+        if candidate == budget.name or candidate in budget.pinned:
+            continue
+        engine = engines.get(candidate)
+        if engine is None or getattr(engine, "unloading", False) is True:
+            continue
+        out.append(candidate)
+    return out
+
+
+def free_after_eviction(probe: VramProbe, holds: Iterable[int]) -> Optional[int]:
+    """The free VRAM expected once every model holding *holds* (bytes each,
+    0 when unknown) is evicted: ``probe.free`` plus their sum.
+
+    None when it cannot be estimated: the reading is inconclusive, carries no
+    free figure, counts only this process's allocations, shows a split
+    shortfall, or any hold is unknown."""
+    holds = list(holds)
+    if (not probe.probe_ok or probe.free is None or probe.process_scoped
+            or probe.shortfall or any(h <= 0 for h in holds)):
+        return None
+    return probe.free + sum(holds)
+
+
 def final_exhaustion_verdict(probe: VramProbe, *, preempt: bool, force: bool) -> str:
     """With local, peer and busy eviction all exhausted on a measurable reading:
 
@@ -299,11 +332,13 @@ def split_shortfall_refusal(name: str, shortfall: Iterable[Mapping]) -> str:
             f"device(s) to load '{name}' ({detail}).")
 
 
-def degraded_load_confirm(name: str, vram_required: int, free: int,
+def degraded_load_confirm(name: str, needed: int, free: int,
                           *, moe: bool = False) -> dict:
-    """The confirm_required result asking before a partial-offload load. *moe*
-    is True for a mixture-of-experts model, whose experts the backend moves to
-    system RAM before it moves any layer off the GPU."""
+    """The confirm_required result asking before a partial-offload load.
+    *needed* is the free VRAM the load was admitted against
+    (``LoadBudget.needed_bytes``, safety margin included). *moe* is True for a
+    mixture-of-experts model, whose experts the backend moves to system RAM
+    before it moves any layer off the GPU."""
     plan = (
         "keep the experts in system RAM (and move layers to the CPU too if "
         "that is still too large)" if moe
@@ -312,7 +347,7 @@ def degraded_load_confirm(name: str, vram_required: int, free: int,
         "status": "confirm_required", "model": name,
         "detail": (
             f"'{name}' does not fit the estimated free VRAM "
-            f"(need ~{vram_required // _MB} MB, "
+            f"(needs ~{needed // _MB} MB free including a safety margin, "
             f"{free // _MB} MB free) even after "
             f"eviction; loading it anyway will let the backend {plan}, "
             "which is slower"),
@@ -326,7 +361,22 @@ def busy_victim_confirm(name: str, victim: str, in_use: str) -> dict:
         "status": "confirm_required", "model": name,
         "detail": (
             f"loading '{name}' needs to free "
-            f"'{victim}', which is {in_use}"),
+            f"'{victim}', which is {in_use}; loading it anyway stops "
+            f"'{victim}' and cuts off the reply it is writing"),
+    }
+
+
+def busy_media_confirm(name: str, runtimes: list) -> dict:
+    """The confirm_required result asking before loading *name* beside this
+    process's native media *runtimes* (display names) while a job runs on
+    them."""
+    which = " and the ".join(runtimes)
+    return {
+        "status": "confirm_required", "model": name,
+        "detail": (
+            f"'{name}' needs the VRAM localm's own {which} holds, which is "
+            f"running a job; loading it anyway can put part of '{name}' on the CPU, "
+            "which is slower (the job is not stopped)"),
     }
 
 

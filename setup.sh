@@ -515,13 +515,16 @@ if [ "$uv_present" != 1 ]; then
   fi
   # A failed fetch, checksum mismatch or installer failure leaves uv missing;
   # the re-check below reports it.
-  UVTMP="$(mktemp -d 2>/dev/null)" || { UVTMP="$(pwd)/.uv-installer-tmp"; mkdir -p "$UVTMP"; }
-  if fetch_uv_installer "$UVTMP/uv-installer.sh"; then
-    sh "$UVTMP/uv-installer.sh" || true
+  # The installer script and everything Astral's installer downloads (TMPDIR)
+  # stay in ./.localm-setup-tmp, which is removed again when it is empty.
+  UVTMP="$(pwd)/.localm-setup-tmp/uv-installer.$$"
+  if mkdir -p "$UVTMP/tmp" && fetch_uv_installer "$UVTMP/uv-installer.sh"; then
+    TMPDIR="$UVTMP/tmp" sh "$UVTMP/uv-installer.sh" || true
   else
     jr abandon "$UVSTEP"
   fi
   rm -rf "$UVTMP"
+  rmdir ./.localm-setup-tmp 2>/dev/null || true
   # uv lands in ~/.local/bin (older builds used ~/.cargo/bin) unless UV_INSTALL_DIR
   # was set above; the installer edits a shell profile, not this running shell, so
   # add it (when set) plus both defaults to PATH for the rest of setup. Guarded so

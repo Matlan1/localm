@@ -44,6 +44,13 @@ NEVER_TOUCH = frozenset({
 # runtime/ still updates normally.
 PRESERVE_WITHIN = ("runtime/localm_llama_runtime/lib",)
 
+# The provisioned llama.cpp runtime, relative to the install root.
+RUNTIME_LIB = PRESERVE_WITHIN[0]
+
+# Files up to this size are compared by content in :func:`runtime_differs`; larger
+# ones by size.
+_SMALL_FILE = 64 * 1024
+
 
 def _debug_warn(msg, *args) -> None:
     """Best-effort WARNING via localm's logger. This module is stdlib-only and can be
@@ -305,6 +312,9 @@ def rollback(backup_dir, installed, names) -> None:
     and restored, the provisioned binaries are left in place), so rollback also never
     trips over a locked binary.
 
+    When the update re-provisioned the native runtime, its snapshot
+    (:func:`runtime_snapshot_dir`) is restored too (:func:`restore_runtime`).
+
     Raises RuntimeError listing any restore operation that FAILED, so a failed
     rollback is NEVER reported as a success. The backup dir is left intact for manual
     recovery. Best-effort: it attempts every name even if one fails, then reports the
@@ -346,6 +356,9 @@ def rollback(backup_dir, installed, names) -> None:
                     shutil.copy2(entry, dst)
             except OSError as e:
                 errors.append(f"restore {entry.name}: {e}")
+    snapshot = runtime_snapshot_dir(backup_dir)
+    if snapshot.is_dir():
+        errors.extend(restore_runtime(snapshot, installed / RUNTIME_LIB))
     if errors:
         raise RuntimeError(
             f"rollback incomplete (backup kept at {backup_dir}): " + "; ".join(errors[:6]))
@@ -395,3 +408,172 @@ def post_swap_command(klass: str, backend: Optional[str] = None,
         return [sys.executable, "-m", "localm", "setup-llama",
                 "--backend", backend or "vulkan", "--force", "--yes", "--keep-choice"]
     return None
+
+
+# ------------------------- native runtime snapshot ---------------------------
+
+def runtime_snapshot_dir(backup_dir) -> Path:
+    """Where the update whose backup is *backup_dir* keeps the native runtime it
+    replaced: a sibling ``<backup_dir>-runtime``."""
+    backup_dir = Path(backup_dir)
+    return backup_dir.with_name(backup_dir.name + "-runtime")
+
+
+def _link_or_copy(src: Path, dst: Path) -> None:
+    """Hard-link *src* to *dst*, or copy it when the link cannot be made (another
+    volume, a file system without hard links). Files up to ``_SMALL_FILE`` (the
+    markers and choice record, which are rewritten in place) are always copied, so
+    a write to one side never changes the other."""
+    if src.stat().st_size > _SMALL_FILE:
+        try:
+            import os
+            os.link(src, dst)
+            return
+        except OSError:
+            pass
+    shutil.copy2(src, dst)
+
+
+def _clone_tree(src: Path, dst: Path) -> None:
+    """Recreate every directory and file under *src* in *dst* (which must not
+    exist) by :func:`_link_or_copy`. Raises OSError."""
+    dst.mkdir(parents=True)
+    for s in sorted(src.rglob("*")):
+        d = dst / s.relative_to(src)
+        if s.is_dir():
+            d.mkdir(parents=True, exist_ok=True)
+        else:
+            d.parent.mkdir(parents=True, exist_ok=True)
+            _link_or_copy(s, d)
+
+
+def snapshot_runtime(lib, dest) -> None:
+    """Keep the runtime at *lib* in *dest* (replaced first) as hard links where
+    possible, so a re-provision can be undone. Raises OSError; *dest* is removed
+    again when the snapshot cannot be completed."""
+    lib, dest = Path(lib), Path(dest)
+    if dest.exists():
+        shutil.rmtree(dest)
+    try:
+        _clone_tree(lib, dest)
+    except OSError:
+        shutil.rmtree(dest, ignore_errors=True)
+        raise
+
+
+def _tree_signature(root: Path) -> dict:
+    """Relative path -> content (small files) or size, for every file under *root*."""
+    sig = {}
+    for f in root.rglob("*"):
+        if f.is_file():
+            st = f.stat()
+            key = f.relative_to(root).as_posix()
+            sig[key] = f.read_bytes() if st.st_size <= _SMALL_FILE else st.st_size
+    return sig
+
+
+def runtime_differs(lib, snapshot) -> bool:
+    """Whether the runtime at *lib* differs from *snapshot*: a file added, removed,
+    resized, or a small file (the markers) with other content. True when either
+    side cannot be read."""
+    try:
+        return _tree_signature(Path(lib)) != _tree_signature(Path(snapshot))
+    except OSError:
+        return True
+
+
+def mapped_by_others(root) -> dict:
+    """Linux: ``{pid: [paths]}`` for every other process that maps a file under
+    *root* (``/proc/<pid>/maps``), the way a loaded shared library shows. Empty
+    elsewhere, or when ``/proc`` cannot be read."""
+    import os
+    found = {}
+    proc = Path("/proc")
+    if not sys.platform.startswith("linux") or not proc.is_dir():
+        return found
+    try:
+        prefix = str(Path(root).resolve()) + "/"
+        entries = list(proc.iterdir())
+    except OSError:
+        return found
+    for d in entries:
+        if not d.name.isdigit() or int(d.name) == os.getpid():
+            continue
+        try:
+            maps = (d / "maps").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        paths = sorted({line.split(None, 5)[5].strip() for line in maps.splitlines()
+                        if len(line.split(None, 5)) == 6
+                        and line.split(None, 5)[5].startswith(prefix)})
+        if paths:
+            found[int(d.name)] = [Path(p) for p in paths]
+    return found
+
+
+def held_files(root) -> list:
+    """Files under *root* another process holds so they cannot be replaced
+    safely. Windows: probed with ``open(..., "r+b")`` (writes nothing), which it
+    refuses for a loaded DLL. Linux: files another process maps
+    (:func:`mapped_by_others`), since replacing a library under a live process
+    mixes builds in it. A file that cannot be probed for another reason counts
+    as not held."""
+    held = []
+    root = Path(root)
+    if not root.is_dir():
+        return held
+    if sys.platform != "win32":
+        for paths in mapped_by_others(root).values():
+            held.extend(p for p in paths if p not in held)
+        return held
+    for f in root.rglob("*"):
+        if not f.is_file():
+            continue
+        try:
+            with open(f, "r+b"):
+                pass
+        except PermissionError:
+            held.append(f)
+        except OSError:
+            continue
+    return held
+
+
+def restore_runtime(snapshot, lib) -> list:
+    """Put the runtime kept in *snapshot* back at *lib*. Returns the failures as
+    strings (empty on success, or when *lib* already equals the snapshot).
+
+    Refuses before changing anything when a file under *lib* is held by another
+    process, so the installed runtime is never left half replaced by this call."""
+    snapshot, lib = Path(snapshot), Path(lib)
+    if not runtime_differs(lib, snapshot):
+        return []
+    held = held_files(lib)
+    if held:
+        return [f"native runtime not restored: {len(held)} file(s) under {lib} are in use "
+                f"(first: {held[0].name}); close every localm process and run the same "
+                "rollback again, or re-provision it with `localm setup-llama --force`"]
+    errors = []
+    if lib.exists():
+        for entry in sorted(lib.iterdir()):
+            try:
+                if entry.is_dir():
+                    shutil.rmtree(entry)
+                else:
+                    entry.unlink()
+            except OSError as e:
+                errors.append(f"native runtime: remove {entry.name}: {e}")
+    if errors:
+        return errors
+    try:
+        lib.mkdir(parents=True, exist_ok=True)
+        for s in sorted(snapshot.rglob("*")):
+            d = lib / s.relative_to(snapshot)
+            if s.is_dir():
+                d.mkdir(parents=True, exist_ok=True)
+            else:
+                d.parent.mkdir(parents=True, exist_ok=True)
+                _link_or_copy(s, d)
+    except OSError as e:
+        errors.append(f"native runtime: restore from {snapshot}: {e}")
+    return errors

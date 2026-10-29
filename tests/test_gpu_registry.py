@@ -300,11 +300,14 @@ class TestSwitchEngineBusyEviction:
             self, multi_model_registry, monkeypatch):
         """An explicit switch (preempt=True, the GUI/CLI path) against a
         busy local peer that never clears its pin, with no cooperation
-        configured, asks for confirmation rather than silently refusing or
-        silently killing the generation."""
+        configured, asks for confirmation without cancelling the peer's
+        generation."""
         assert hs._gpu_coord is None
         monkeypatch.setattr("localm.discover.vram_info", probe_double(_dynamic_vram()))
         self._shorten_wait(monkeypatch)
+        from localm.inference import residency
+        cancelled = []
+        monkeypatch.setattr(residency, "cancel_all", lambda name: cancelled.append(name) or 0)
 
         async def scenario():
             await hs.switch_engine("model-a", _make_engine)
@@ -317,13 +320,18 @@ class TestSwitchEngineBusyEviction:
         assert "model-a" in result["detail"]
         assert "model-b" not in hs._engines, "must not have loaded without confirmation"
         assert hs._engines["model-a"].loaded, "must not have evicted without confirmation"
+        assert cancelled == [], "must not have cancelled the generation before asking"
+        assert hs._engines["model-a"].active_requests == 1
 
     def test_explicit_switch_force_evicts_a_busy_peer_regardless_of_the_pin(
             self, multi_model_registry, monkeypatch):
-        """The owner's explicit force wins unconditionally - it is not asked
-        to clear first, mirroring unload_one_model's own force contract."""
+        """The owner's explicit force cancels the busy peer's generation and
+        evicts it without waiting for the pin to clear."""
         assert hs._gpu_coord is None
         monkeypatch.setattr("localm.discover.vram_info", probe_double(_dynamic_vram()))
+        from localm.inference import residency
+        cancelled = []
+        monkeypatch.setattr(residency, "cancel_all", lambda name: cancelled.append(name) or 0)
         monkeypatch.setattr(
             hs, "_wait_for_pin_clear",
             lambda engine, **kw: (_ for _ in ()).throw(
@@ -339,15 +347,18 @@ class TestSwitchEngineBusyEviction:
         assert result["model"] == "model-b"
         assert "model-b" in hs._engines
         assert "model-a" not in hs._engines, "force must evict the busy peer"
+        assert cancelled == ["model-a"], "force must stop the busy peer's generation"
 
     def test_explicit_switch_a_pin_that_clears_during_the_grace_period_needs_no_confirmation(
             self, multi_model_registry, monkeypatch):
-        """The common case this mechanism exists for: the caller pressed
-        Stop, then switched models. cancel_all's signal clears the pin
-        within the grace period, and the switch just succeeds - no confirm
-        box at all."""
+        """A busy peer whose reply finishes on its own within the grace
+        period is evicted without a confirm box and without being
+        cancelled."""
         assert hs._gpu_coord is None
         monkeypatch.setattr("localm.discover.vram_info", probe_double(_dynamic_vram()))
+        from localm.inference import residency
+        cancelled = []
+        monkeypatch.setattr(residency, "cancel_all", lambda name: cancelled.append(name) or 0)
 
         async def _clears_soon(engine, **kw):
             engine.active_requests = 0
@@ -364,6 +375,7 @@ class TestSwitchEngineBusyEviction:
         assert result["status"] == "loaded"
         assert "model-b" in hs._engines
         assert "model-a" not in hs._engines
+        assert cancelled == []
 
     def test_busy_eviction_is_tried_only_after_cooperative_unload_fails(
             self, multi_model_registry, monkeypatch):

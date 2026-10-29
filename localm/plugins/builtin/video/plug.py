@@ -34,7 +34,7 @@ from localm.inference.http_server import path_formatter, principal_id
 from localm.media import gallery
 from localm.media import paths as media_paths
 from localm.media.native_models import (
-    MAX_LORAS, LoraChoice, apply_choice, check_generation_extras, check_request,
+    MAX_LORAS, LoraChoice, check_generation_extras, check_request,
 )
 from localm.pathsafe import confined_file, confined_name
 from localm.pathscrub import map_strings
@@ -143,15 +143,14 @@ async def video(req: VideoRequest, request: Request):
             job.push({"type": "line", "text": s["backend_note"]})
         if s.get("backend") == "native":
             from .backends import native
+            s = _backend.apply_job_choice(s, native_choice, _cfg)
             refused = native.refusal(model_overrides=req.model_overrides,
                                      width=req.width, height=req.height,
                                      seconds=req.seconds, fps=req.fps,
-                                     input_image=input_image, s=apply_choice(s, native_choice),
-                                     **native_extras)
+                                     input_image=input_image, s=s, **native_extras)
             if refused:
                 job.push({"type": "line", "text": refused})
                 return False
-            s = apply_choice(s, native_choice)
             refused = native.lora_refusal(s, list(native_loras or []))
             if refused:
                 job.push({"type": "line", "text": refused})

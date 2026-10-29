@@ -694,6 +694,7 @@ export async function refreshModelsPage() {
             }
           } catch (e) {
             toast(t("models.use.loadFailed", { message: e.message }), true);
+            refreshModelsPage();
           } finally { use.disabled = false; use.textContent = prevLabel; }
         };
         actions.appendChild(use);
@@ -2051,6 +2052,50 @@ if ($("bug-cancel-send")) $("bug-cancel-send").onclick = () => cancelBugReview()
 if ($("bug-retry")) $("bug-retry").onclick = () => sendReviewedBugReport();
 if ($("bug-download")) $("bug-download").onclick = () => downloadBugReport();
 
+// Release notes longer than this (characters or lines) start collapsed behind
+// "Show all".
+const UPDATE_NOTES_SHORT_CHARS = 400;
+const UPDATE_NOTES_SHORT_LINES = 6;
+
+function _setUpdateNotesCollapsed(box, more, collapsed) {
+  box.classList.toggle("collapsed", collapsed);
+  more.textContent = t(collapsed ? "settings.update.notesShowAll" : "settings.update.notesShowLess");
+  more.setAttribute("aria-expanded", String(!collapsed));
+}
+
+/** Render the offered release's *notes* (remote Markdown) into #update-notes
+ *  through renderMarkdown, the DOMPurify-sanitized path chat and the changelog
+ *  use. Empty or non-string notes hide the box. Notes longer than
+ *  UPDATE_NOTES_SHORT_CHARS characters or UPDATE_NOTES_SHORT_LINES lines start
+ *  collapsed behind a "Show all" toggle. */
+export function renderUpdateNotes(notes) {
+  const box = $("update-notes");
+  if (!box) return;
+  const more = $("update-notes-more"), moreRow = $("update-notes-actions");
+  const text = typeof notes === "string" ? notes.trim() : "";
+  box.replaceChildren();
+  box.classList.remove("collapsed");
+  if (moreRow) moreRow.hidden = true;
+  if (!text) { box.hidden = true; return; }
+  renderMarkdown(box, text, { imageScope: "update-notes" });
+  box.hidden = false;
+  const long = text.length > UPDATE_NOTES_SHORT_CHARS
+    || text.split("\n").length > UPDATE_NOTES_SHORT_LINES;
+  if (long && more && moreRow) {
+    _setUpdateNotesCollapsed(box, more, true);
+    more.onclick = () => _setUpdateNotesCollapsed(box, more, !box.classList.contains("collapsed"));
+    moreRow.hidden = false;
+  }
+}
+
+// Repaint the Show all / Show less label for the current state in the new language.
+document.addEventListener("localm:language", () => {
+  const box = $("update-notes"), more = $("update-notes-more"), moreRow = $("update-notes-actions");
+  if (box && more && moreRow && !moreRow.hidden) {
+    _setUpdateNotesCollapsed(box, more, box.classList.contains("collapsed"));
+  }
+});
+
 // Updates: a check-only auto-surface (a throttled startup check in app.js calls
 // __localmUpdateCheck) plus an explicit "Update now". The apply runs only on
 // that click; the server rolls back and reports on failure.
@@ -2058,6 +2103,7 @@ export async function updateCheck() {
   const out = $("update-status"), applyBtn = $("update-apply");
   const checkBtn = $("update-check");
   if (out) { out.hidden = false; out.textContent = t("settings.update.checking"); }
+  renderUpdateNotes("");
   if (checkBtn) checkBtn.disabled = true;
   try {
     const r = await fetch("/api/update/check", { headers: authHeaders() });
@@ -2068,8 +2114,8 @@ export async function updateCheck() {
     if (!d.available) { if (out) out.textContent = t("settings.update.notConfigured"); return; }
     if (d.newer && d.asset && d.asset.id) {
       if (out) out.textContent = t("settings.update.available",
-        { latest: d.latest, current: d.current }) +
-        (d.notes ? "  " + String(d.notes).slice(0, 200) : "");
+        { latest: d.latest, current: d.current });
+      renderUpdateNotes(d.notes);
       if (applyBtn) applyBtn.hidden = false;
     } else if (d.newer) {
       if (out) out.textContent = t("settings.update.availableNoAsset", { latest: d.latest });
@@ -2096,6 +2142,18 @@ export async function updateCheck() {
 }
 window.__localmUpdateCheck = updateCheck;
 
+// What an applied update did to the native runtime and the other components,
+// and which parts of the current version an older one keeps, as text appended
+// to the status line.
+function _updateExtras(d) {
+  let text = "";
+  if (d.runtime_note) text += "  " + t("settings.update.runtimeNote", { note: d.runtime_note });
+  if (d.components_note) text += "  " + t("settings.update.componentsNote", { note: d.components_note });
+  const kept = Array.isArray(d.kept_for_updates) ? d.kept_for_updates : [];
+  if (kept.length) text += "  " + t("settings.update.keptForUpdates", { parts: kept.join("; ") });
+  return text;
+}
+
 export async function updateApply() {
   const out = $("update-status"), btn = $("update-apply");
   if (btn) btn.disabled = true;
@@ -2107,11 +2165,11 @@ export async function updateApply() {
     if (d.applied) {
       const version = d.version || "";
       if (out) {
-        out.textContent = d.restarting
+        out.textContent = (d.restarting
           ? t("settings.update.updatedRestarting", { version })
           : (d.klass === "setup"
             ? t("settings.update.updatedSetup", { version })
-            : t("settings.update.updatedPlain", { version }));
+            : t("settings.update.updatedPlain", { version }))) + _updateExtras(d);
       }
       if (btn) btn.hidden = true;
     } else if (d.error) {
@@ -2222,7 +2280,8 @@ async function _postSelectedVersion(rel, extra) {
           : (d.klass === "setup"
             ? t("settings.update.updatedSetup", { version })
             : t("settings.update.updatedPlain", { version })))
-          + (d.data_backup ? "  " + t("settings.update.dataBackup", { path: d.data_backup }) : "");
+          + (d.data_backup ? "  " + t("settings.update.dataBackup", { path: d.data_backup }) : "")
+          + _updateExtras(d);
       }
       if (btn) btn.hidden = true;
       if (d.restarting && window.onServerUnreachable) {
@@ -3539,6 +3598,42 @@ if ($("models-import-comfy-btn")) {
   $("models-import-comfy-btn").onclick = () => openImportComfyModal();
 }
 
+// What an Unload all response released and left loaded: n counts the chat
+// models in unloaded_models plus the embedding, reranker and speech models and
+// media runtimes in unloaded_other (or 1 for embedder_unloaded from a server
+// without that list); skipped lists what stayed loaded because it was in use;
+// forceable is the part of skipped a forced retry can stop (a media runtime in
+// media_left_running is never stopped by force); failed lists the media
+// runtimes whose stop did not take, which are not counted in skipped.
+function unloadAllCounts(data) {
+  const other = Array.isArray(data.unloaded_other)
+    ? data.unloaded_other.length : (data.embedder_unloaded ? 1 : 0);
+  const n = (data.unloaded_models || []).length + other;
+  const media = (data.media_left_running && typeof data.media_left_running === "object")
+    ? data.media_left_running : {};
+  const failed = Object.keys(media).filter((k) => media[k] === "failed");
+  const skipped = (Array.isArray(data.skipped_in_use) ? data.skipped_in_use : [])
+    .filter((k) => !failed.includes(k));
+  const forceable = skipped.filter((k) => !Object.prototype.hasOwnProperty.call(media, k));
+  return { n, skipped, forceable, failed };
+}
+
+function unloadAllMessage(n, skipped, failed = []) {
+  const stopFailed = failed.length
+    ? t("models.unloadAll.mediaStopFailed", { names: failed.join(", ") }) : "";
+  let msg;
+  if (n && skipped.length) {
+    msg = t("models.unloadAll.someStillGenerating", { n, skipped: skipped.length });
+  } else if (n) {
+    msg = t("models.unloadAll.allUnloaded", { n });
+  } else if (skipped.length) {
+    msg = t("models.unloadAll.stillGenerating", { skipped: skipped.length });
+  } else {
+    return stopFailed || t("models.unloadAll.nothingLoaded");
+  }
+  return stopFailed ? `${msg}. ${stopFailed}` : msg;
+}
+
 // Bind Unload-all button click handler
 const unloadAllBtn = $("models-unload-all-btn");
 if (unloadAllBtn) {
@@ -3550,35 +3645,17 @@ if (unloadAllBtn) {
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok) { toast(data.detail || t("models.unload.failed"), true); return; }
-      // unloaded_models lists only chat engines; the shared embedding model has
-      // its own lifecycle (localm.inference.embedder) and is reported via
-      // embedder_unloaded, so it is counted too.
-      const n = (data.unloaded_models || []).length + (data.embedder_unloaded ? 1 : 0);
-      // unload_all_models() (http_server.py) reports any pinned (mid-generation)
-      // engine in skipped_in_use rather than unloading it - loaded, but not
-      // released - so the message names it separately.
-      const skipped = Array.isArray(data.skipped_in_use) ? data.skipped_in_use : [];
-      let msg;
-      if (n && skipped.length) {
-        msg = t("models.unloadAll.someStillGenerating", { n, skipped: skipped.length });
-      } else if (n) {
-        msg = t("models.unloadAll.allUnloaded", { n });
-      } else if (skipped.length) {
-        msg = t("models.unloadAll.stillGenerating", { skipped: skipped.length });
-      } else {
-        msg = t("models.unloadAll.nothingLoaded");
-      }
-      toast(msg, skipped.length > 0);
+      const { n, skipped, forceable, failed } = unloadAllCounts(data);
+      toast(unloadAllMessage(n, skipped, failed), skipped.length > 0 || failed.length > 0);
       refreshModelsPage();
       refreshPerfEstimate();
-      // Offer to force through whatever is still in the way - the owner's
+      // Offer to force through whatever force can stop - the owner's
       // action is final, mirroring the per-row unload's own confirm/force
-      // contract. skipped_in_use is a real, non-empty count here, so there is
-      // something concrete to confirm.
-      if (skipped.length) {
+      // contract.
+      if (forceable.length) {
         const confirmed = await confirmDangerAsync(
           t("models.unloadAll.confirmTitle"),
-          t("models.unloadAll.confirmBody", { skipped: skipped.length }),
+          t("models.unloadAll.confirmBody", { skipped: forceable.length }),
           t("models.unloadAll.confirmLabel"));
         if (confirmed) {
           const r2 = await fetch("/api/models/unload", {
@@ -3587,8 +3664,9 @@ if (unloadAllBtn) {
           });
           const data2 = await r2.json().catch(() => ({}));
           if (!r2.ok) { toast(data2.detail || t("models.unload.failed"), true); return; }
-          const n2 = (data2.unloaded_models || []).length + (data2.embedder_unloaded ? 1 : 0);
-          toast(t("models.unloadAll.allUnloaded", { n: n2 }));
+          const after = unloadAllCounts(data2);
+          toast(unloadAllMessage(after.n, after.skipped, after.failed),
+            after.skipped.length > 0 || after.failed.length > 0);
           refreshModelsPage();
           refreshPerfEstimate();
         }

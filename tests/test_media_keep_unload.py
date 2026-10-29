@@ -1,0 +1,532 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""With reload-after-generation off, localm's own native media worker stays
+loaded after a job. Unload all must stop it when idle (and report it busy, not
+kill it, while a job runs), a chat model load that is short of VRAM must stop
+it first, and the low-VRAM explanation must name it instead of an outside app.
+
+The stand-in worker is a real child process installed where the shared
+stable-diffusion.cpp worker lives (``sdcpp.shared.runner``), or where the music
+runtime lives (``koboldcpp.server._server``). The fake GPU reports its VRAM as
+held for as long as that child is alive, so every assertion about freed VRAM
+follows the real stop path: ``runner.shutdown()`` killing the child.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import subprocess
+import sys
+import threading
+import time
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from localm import discover, gpu_registry
+from localm.inference import http_server as hs
+from localm.inference import switch_admission
+from localm.media.koboldcpp import server as kobold_server
+from localm.media.sdcpp import shared as sd_shared
+
+GB = 1024 ** 3
+TOTAL = 16 * GB
+WORKER_HOLDS = 10 * GB
+IMAGE_WORKER = "native image/video worker"
+MUSIC_RUNTIME = "native music runtime"
+
+
+class _ChildProc:
+    """A real child process with the ``multiprocessing.Process`` surface
+    ``SdRunner.shutdown`` uses."""
+
+    def __init__(self):
+        self.popen = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(120)"])
+
+    @property
+    def pid(self):
+        return self.popen.pid
+
+    def is_alive(self):
+        return self.popen.poll() is None
+
+    def join(self, timeout=None):
+        try:
+            self.popen.wait(timeout)
+        except subprocess.TimeoutExpired:
+            pass
+
+    def kill(self):
+        self.popen.kill()
+
+
+class _MusicServer:
+    """The parts of ``koboldcpp.server._Server`` that ``running_pid`` and
+    ``stop`` use, over a real child process."""
+
+    def __init__(self):
+        self.mp = _ChildProc()
+
+    def alive(self):
+        return self.mp.is_alive()
+
+    def stop(self):
+        self.mp.kill()
+        self.mp.join(5)
+
+
+@pytest.fixture
+def sd_worker():
+    child = _ChildProc()
+    sd_shared.runner._proc = child
+    sd_shared.runner._req_q = None
+    try:
+        yield child
+    finally:
+        if child.is_alive():
+            child.kill()
+            child.join(5)
+        sd_shared.cancel_idle_timer()
+        sd_shared.runner._reset()
+
+
+@pytest.fixture
+def music_runtime():
+    srv = _MusicServer()
+    kobold_server._server = srv
+    try:
+        yield srv.mp
+    finally:
+        if srv.mp.is_alive():
+            srv.stop()
+        kobold_server._cancel_idle_timer()
+        kobold_server._server = None
+
+
+def _held_bytes() -> int:
+    held = 0
+    if sd_shared.worker_pid() is not None:
+        held += WORKER_HOLDS
+    if kobold_server.running_pid() is not None:
+        held += WORKER_HOLDS
+    return held
+
+
+@pytest.fixture
+def fake_gpu(monkeypatch):
+    """A 16 GB card whose free VRAM drops by 10 GB per live stand-in worker."""
+    def vram_capacity(return_status=False, **_kw):
+        info = {"free": TOTAL - _held_bytes(), "total": TOTAL,
+                "free_scope": discover.FREE_SCOPE_DEVICE}
+        return (info, discover.GPU_PROBE_OK) if return_status else info
+
+    monkeypatch.setattr(discover, "vram_capacity", vram_capacity)
+    for d in (hs._engines, hs._engines_lru, hs._inference_sems,
+              hs._last_activity_per_model):
+        d.clear()
+    hs._active_model_name = None
+    hs._engine = None
+    hs._inference_sem = None
+    yield
+    for d in (hs._engines, hs._engines_lru, hs._inference_sems):
+        d.clear()
+
+
+@pytest.fixture
+def gui_client(fake_gpu):
+    from localm.plugins.gui.web import attach_gui
+    app = FastAPI()
+    attach_gui(app, self_url="http://127.0.0.1:9/v1",
+               switch_model=lambda name: None,
+               active_model=lambda: hs._active_model_name)
+    with TestClient(app) as client:
+        yield client
+
+
+# --------------------------------------------------------------------------- #
+#  Unload all                                                                  #
+# --------------------------------------------------------------------------- #
+
+def test_gui_unload_all_stops_an_idle_image_worker_and_reports_it(gui_client, sd_worker):
+    assert TOTAL - _held_bytes() == 6 * GB
+
+    r = gui_client.post("/api/models/unload", json={})
+
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert not sd_worker.is_alive(), "the idle image worker is still running"
+    assert data["status"] == "unloaded", data
+    assert data["unloaded_other"] == [IMAGE_WORKER], data
+    assert "skipped_in_use" not in data and "media_left_running" not in data
+    assert data["vram_freed"] is True, data
+    assert data["vram_after_bytes"] - data["vram_before_bytes"] == WORKER_HOLDS
+
+
+def test_gui_unload_all_stops_an_idle_music_runtime(gui_client, music_runtime):
+    data = gui_client.post("/api/models/unload", json={}).json()
+    assert not music_runtime.is_alive()
+    assert data["unloaded_other"] == [MUSIC_RUNTIME], data
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_gui_unload_all_reports_a_busy_image_worker_and_leaves_it_running(
+        gui_client, sd_worker, force):
+    assert sd_shared.lock.acquire(timeout=5)
+    try:
+        data = gui_client.post("/api/models/unload", json={"force": force}).json()
+        assert sd_worker.is_alive(), "Unload all killed the worker of a running job"
+    finally:
+        sd_shared.lock.release()
+    assert data["status"] == "in_use", data
+    assert data["skipped_in_use"] == [IMAGE_WORKER], data
+    assert data["media_left_running"] == {IMAGE_WORKER: "busy"}, data
+    assert "confirm_required" not in data, data
+    assert data["unloaded_other"] == [], data
+
+
+def test_the_api_unload_takes_media_false_for_the_media_handover(fake_gpu, sd_worker,
+                                                                 monkeypatch):
+    monkeypatch.setattr("localm.config.load_registry", lambda: {})
+    app = hs.create_app(None)
+    client = TestClient(app)
+    client.headers["Authorization"] = f"Bearer {app.state.shell_token}"
+
+    kept = client.post("/v1/models/unload", params={"media": "false"}).json()
+    assert sd_worker.is_alive(), "the media handover's unload stopped the worker it reuses"
+    assert kept["status"] == "already_unloaded", kept
+
+    stopped = client.post("/v1/models/unload").json()
+    assert not sd_worker.is_alive()
+    assert stopped["unloaded_other"] == [IMAGE_WORKER], stopped
+
+
+def test_the_media_handover_unload_asks_to_keep_media(monkeypatch):
+    from localm import selfclient, vram
+
+    paths = []
+
+    class _Resp:
+        ok = True
+        status_code = 200
+
+        def json(self):
+            return {"status": "already_unloaded"}
+
+    monkeypatch.setattr(selfclient, "self_request",
+                        lambda method, path, **kw: (paths.append(path), _Resp())[1])
+    job = type("J", (), {"push": lambda self, ev: None})()
+    assert vram.unload_chat_for_media(job, "http://127.0.0.1:9/v1", "image") is True
+    assert paths == ["/models/unload?media=false"]
+
+
+def test_unload_all_without_media_leaves_the_worker_for_other_callers(fake_gpu, sd_worker):
+    data = asyncio.run(hs.unload_all_models())
+    assert sd_worker.is_alive()
+    assert data["unloaded_other"] == [], data
+
+
+def test_gui_unload_all_reports_a_busy_music_runtime_and_leaves_it_running(
+        gui_client, music_runtime):
+    assert kobold_server._lock.acquire(timeout=5)
+    try:
+        data = gui_client.post("/api/models/unload", json={"force": True}).json()
+        assert music_runtime.is_alive(), "Unload all killed the music runtime of a job"
+    finally:
+        kobold_server._lock.release()
+    assert data["media_left_running"] == {MUSIC_RUNTIME: "busy"}, data
+
+
+def test_a_media_stop_that_does_not_take_is_reported_failed_not_busy(
+        gui_client, sd_worker, monkeypatch, caplog):
+    caplog.set_level(logging.WARNING, logger="localm")
+    monkeypatch.setattr(sd_shared.runner, "shutdown", lambda *a, **kw: None)
+    data = gui_client.post("/api/models/unload", json={}).json()
+    assert sd_worker.is_alive()
+    assert data["media_left_running"] == {IMAGE_WORKER: "failed"}, data
+    assert data["skipped_in_use"] == [IMAGE_WORKER], data
+    assert any(f"the {IMAGE_WORKER} kept running" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("module_path", [
+    "localm.plugins.builtin.image.backends.native",
+    "localm.plugins.builtin.video.backends.native",
+    "localm.plugins.builtin.music.backends.native",
+])
+def test_the_native_fallback_unload_keeps_the_media_worker(module_path):
+    """Each native backend's own fallback chat unload (taken when the
+    handover's unload failed) asks the server to keep its media runtimes."""
+    import importlib
+    import inspect
+    src = inspect.getsource(importlib.import_module(module_path))
+    calls = [ln.strip() for ln in src.splitlines() if "_localm_unload(" in ln
+             and "import" not in ln]
+    assert calls and all("media=False" in c for c in calls), calls
+
+
+def test_the_fallback_unload_url_asks_to_keep_media(monkeypatch):
+    from localm.media import comfy_client
+    urls = []
+
+    class _Resp:
+        ok = True
+
+        def json(self):
+            return {"status": "already_unloaded"}
+
+    monkeypatch.setattr("requests.post",
+                        lambda url, **kw: (urls.append(url), _Resp())[1])
+    monkeypatch.setattr("localm.tls.requests_verify", lambda url: True)
+    comfy_client._localm_unload("http://127.0.0.1:9/v1", media=False)
+    comfy_client._localm_unload("http://127.0.0.1:9/v1")
+    assert urls == ["http://127.0.0.1:9/v1/models/unload?media=false",
+                    "http://127.0.0.1:9/v1/models/unload"]
+
+
+def _cli_unload(monkeypatch, reply):
+    from click.testing import CliRunner
+
+    from localm import instances
+    from localm.cli import main
+
+    class _Resp:
+        status_code = 200
+        ok = True
+        text = json.dumps(reply)
+
+        def json(self):
+            return reply
+
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.setattr(instances, "find_attachable", lambda *a, **k: {
+        "instance_id": "abcd1234ef", "pid": 999999, "root_dir": "/proj/demo",
+        "scheme": "http", "host": "127.0.0.1", "port": 8642, "token": "t",
+        "_path": "/run/abcd1234ef.json"})
+    monkeypatch.setattr("requests.post", lambda *a, **k: _Resp())
+    monkeypatch.setattr("localm.tls.requests_verify", lambda url: True)
+    return CliRunner().invoke(main, ["unload"])
+
+
+def test_cli_unload_names_a_stopped_media_worker(monkeypatch):
+    res = _cli_unload(monkeypatch, {
+        "status": "unloaded", "model": "none", "unloaded_models": [],
+        "unloaded_other": [IMAGE_WORKER], "embedder_unloaded": False})
+    assert res.exit_code == 0, res.output
+    assert f"unloaded: {IMAGE_WORKER}" in res.output
+    assert "Nothing was loaded" not in res.output
+
+
+def test_cli_unload_names_a_busy_media_worker_left_loaded(monkeypatch):
+    res = _cli_unload(monkeypatch, {
+        "status": "in_use", "model": "none", "unloaded_models": [], "unloaded_other": [],
+        "embedder_unloaded": False, "skipped_in_use": [IMAGE_WORKER],
+        "media_left_running": {IMAGE_WORKER: "busy"}})
+    assert res.exit_code == 1, res.output
+    assert f"{IMAGE_WORKER} is still in use and was left loaded" in res.output
+    assert "'none'" not in res.output
+
+
+# --------------------------------------------------------------------------- #
+#  A chat model load                                                           #
+# --------------------------------------------------------------------------- #
+
+CHAT_BYTES = 8 * GB
+CHAT_LAYERS = 28
+
+
+def _budget(need=CHAT_BYTES):
+    return switch_admission.LoadBudget(
+        name="chat-x", vram_required=need, headroom=0, resident_cap=None,
+        pinned=frozenset(), check_split_fit=False)
+
+
+class _ChatEngine:
+    """A chat engine whose load puts as many of its layers on the GPU as the
+    free VRAM it reads at load time holds, the way automatic GPU layers size a
+    GGUF load."""
+
+    def __init__(self, name, events):
+        self.display_name = name
+        self.model_path = f"Z:/models/{name}.gguf"
+        self.active_requests = 0
+        self.gpu_placement = None
+        self._loaded = False
+        self._events = events
+
+    @property
+    def loaded(self):
+        return self._loaded
+
+    def set_load_cancel(self, cancel):
+        pass
+
+    def load(self):
+        free = discover.vram_capacity()["free"]
+        self._events.append(("sized", free))
+        layers = min(CHAT_LAYERS, CHAT_LAYERS * free // CHAT_BYTES)
+        self.gpu_placement = {"gpu_layers_offloaded": layers,
+                              "gpu_layers_total": CHAT_LAYERS,
+                              "degraded": layers < CHAT_LAYERS}
+        self._loaded = True
+
+    def unload(self):
+        self._loaded = False
+
+
+@pytest.fixture
+def no_peers(monkeypatch):
+    monkeypatch.setattr(hs, "_attempt_cooperative_unload", lambda **kw: False)
+    monkeypatch.setattr(gpu_registry, "list_gpu_peers", lambda **kw: [])
+
+
+@pytest.fixture
+def chat_load(fake_gpu, no_peers, monkeypatch):
+    """``switch_engine('chat-x')`` with the stand-in GPU; ``events`` records each
+    ``runner.shutdown`` of the image worker and the free VRAM the load sized
+    itself against, in order."""
+    events = []
+
+    async def _not_refused(name, registry=None):
+        return None
+
+    monkeypatch.setattr(hs, "_refuse_non_chat_model", _not_refused)
+    monkeypatch.setattr(hs, "_switch_load_budget", lambda name: _budget())
+    monkeypatch.setattr(hs, "_engine_factory", lambda name: _ChatEngine(name, events))
+    real_shutdown = sd_shared.runner.shutdown
+
+    def counted_shutdown(*a, **kw):
+        events.append(("shutdown", None))
+        return real_shutdown(*a, **kw)
+
+    monkeypatch.setattr(sd_shared.runner, "shutdown", counted_shutdown)
+
+    def run(**kw):
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(hs.switch_engine("chat-x", None, **kw))
+        finally:
+            loop.close()
+    run.events = events
+    return run
+
+
+def test_a_chat_load_after_a_reload_off_image_job_stops_the_worker_and_loads_fully(
+        chat_load, sd_worker, caplog):
+    caplog.set_level(logging.INFO, logger="localm")
+    result = chat_load(preempt=False)
+
+    assert result["status"] == "loaded", result
+    assert not sd_worker.is_alive(), "the chat model loaded beside the idle image worker"
+    assert [e for e, _ in chat_load.events].count("shutdown") == 1, chat_load.events
+    assert chat_load.events[0] == ("shutdown", None), "the load was sized before the stop"
+    assert chat_load.events[-1] == ("sized", TOTAL), chat_load.events
+    assert result["gpu_layers_offloaded"] == CHAT_LAYERS and result["degraded"] is False
+    assert any(f"stopped the idle {IMAGE_WORKER} to make room for the chat model "
+               "'chat-x'" in r.getMessage() for r in caplog.records)
+
+
+def test_a_chat_load_that_would_fit_beside_the_worker_still_stops_it(
+        chat_load, sd_worker, monkeypatch):
+    monkeypatch.setattr(hs, "_switch_load_budget", lambda name: _budget(need=2 * GB))
+    assert chat_load(preempt=False)["status"] == "loaded"
+    assert not sd_worker.is_alive()
+
+
+def test_a_chat_load_with_no_media_worker_stops_nothing(chat_load):
+    assert chat_load(preempt=False)["status"] == "loaded"
+    assert [e for e, _ in chat_load.events] == ["sized"]
+
+
+def test_a_chat_message_waits_for_a_busy_image_job_then_stops_the_worker(
+        chat_load, sd_worker, monkeypatch):
+    monkeypatch.setattr(hs, "_BUSY_VICTIM_IDLE_WAIT_S", 10.0)
+    assert sd_shared.lock.acquire(timeout=5)
+    statuses = []
+    threading.Timer(0.5, sd_shared.lock.release).start()
+    result = chat_load(preempt=False, on_status=statuses.append)
+
+    assert result["status"] == "loaded", result
+    assert not sd_worker.is_alive()
+    assert result["gpu_layers_offloaded"] == CHAT_LAYERS, result
+    assert statuses == [hs.WAITING_FOR_MODEL_STATUS, hs.LOADING_MODEL_STATUS]
+
+
+def test_a_chat_message_never_cuts_off_an_image_job_that_outlasts_the_wait(
+        chat_load, sd_worker, monkeypatch, caplog):
+    caplog.set_level(logging.WARNING, logger="localm")
+    monkeypatch.setattr(hs, "_BUSY_VICTIM_IDLE_WAIT_S", 0.5)
+    assert sd_shared.lock.acquire(timeout=5)
+    try:
+        result = chat_load(preempt=False)
+        assert sd_worker.is_alive(), "a chat load killed the worker of a running job"
+    finally:
+        sd_shared.lock.release()
+    assert result["status"] == "loaded", result
+    assert any(f"the {IMAGE_WORKER} is still running a job" in r.getMessage()
+               for r in caplog.records)
+
+
+def test_a_model_switch_asks_before_loading_beside_a_busy_image_job(chat_load, sd_worker):
+    assert sd_shared.lock.acquire(timeout=5)
+    try:
+        result = chat_load(preempt=True)
+        assert sd_worker.is_alive()
+    finally:
+        sd_shared.lock.release()
+    assert result["status"] == "confirm_required", result
+    assert f"localm's own {IMAGE_WORKER}" in result["detail"]
+    assert "the job is not stopped" in result["detail"]
+
+
+def test_a_forced_model_switch_loads_beside_a_busy_image_job_without_stopping_it(
+        chat_load, sd_worker, caplog):
+    caplog.set_level(logging.WARNING, logger="localm")
+    assert sd_shared.lock.acquire(timeout=5)
+    try:
+        result = chat_load(preempt=True, force=True)
+        assert sd_worker.is_alive(), "a forced switch killed the worker of a running job"
+    finally:
+        sd_shared.lock.release()
+    assert result["status"] == "loaded", result
+    assert result["degraded"] is True, result
+    assert any(f"the {IMAGE_WORKER} is still running a job" in r.getMessage()
+               for r in caplog.records)
+
+
+# --------------------------------------------------------------------------- #
+#  The low-VRAM explanation                                                    #
+# --------------------------------------------------------------------------- #
+
+def _hint(tmp_path, monkeypatch):
+    from localm.inference.backends.gguf import GgufBackend
+    monkeypatch.setattr(gpu_registry, "list_gpu_peers", lambda **kw: [])
+    monkeypatch.setattr(gpu_registry, "own_status", lambda: None)
+    monkeypatch.setattr("localm.discover.resolve_main_gpu_index",
+                        lambda configured, **k: 0)
+    f = tmp_path / "model.gguf"
+    f.write_bytes(b"\0" * 4096)
+    return GgufBackend(str(f), n_gpu_layers=99, n_gpu_layers_auto=False,
+                       n_ctx=4096)._vram_holder_hint()
+
+
+def test_the_low_vram_hint_names_localms_own_image_worker(tmp_path, monkeypatch, sd_worker):
+    hint = _hint(tmp_path, monkeypatch)
+    assert "another GPU app" not in hint
+    assert f"this localm server's own {IMAGE_WORKER} is holding it" in hint
+    assert "Unload all" in hint
+
+
+def test_the_low_vram_hint_without_an_own_worker_stays_generic(tmp_path, monkeypatch):
+    assert sd_shared.worker_pid() is None
+    assert "another GPU app" in _hint(tmp_path, monkeypatch)
+
+
+def test_the_stand_in_worker_is_a_live_child_until_stopped(sd_worker):
+    assert sd_shared.worker_pid() == sd_worker.pid
+    assert sd_shared.free_if_idle() is True
+    deadline = time.monotonic() + 5
+    while sd_worker.is_alive() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not sd_worker.is_alive()

@@ -119,6 +119,25 @@ def free(cancel_check: Optional[Callable[[], bool]] = None) -> bool:
         lock.release()
 
 
+def free_if_idle() -> Optional[bool]:
+    """Stop the worker when no job holds ``lock``, without waiting for one.
+    None when a job holds it (the worker is left running); otherwise True once
+    no worker is running, False when it kept running."""
+    if not lock.acquire(blocking=False):
+        return None
+    try:
+        cancel_idle_timer()
+        runner.shutdown()
+        return not runner.is_alive()
+    finally:
+        lock.release()
+
+
+def is_busy() -> bool:
+    """Whether a job holds ``lock``. Takes no lock."""
+    return lock.locked()
+
+
 def worker_pid() -> Optional[int]:
     """The live worker's process id, or None."""
     pid = runner.pid
