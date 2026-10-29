@@ -186,7 +186,12 @@ def test_bug_report_log_tail_holds_no_host_path_for_a_scoped_key(home, tmp_path,
     _assert_no_folder(text, other)
     assert f"embedding model ready: {PATH_LABEL}{os.sep}{model.name}" in text
     assert f"{PATH_LABEL}{os.sep}thing.bin" in text
-    assert str(model) in full["report_markdown"], "the owner's report keeps the path"
+    # The owner's report keeps the folders; only a home or user-account prefix
+    # (when tmp_path sits under one, as on a CI runner) is replaced.
+    owner_form = pathscrub.scrub_user_paths(str(model))
+    assert f"Model Store{os.sep}gguf{os.sep}{model.name}" in owner_form
+    assert f"embedding model ready: {owner_form}" in full["report_markdown"], (
+        "the owner's report keeps the path")
 
 
 # --------------------------------------------------------------------------- #
