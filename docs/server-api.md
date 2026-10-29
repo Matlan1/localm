@@ -1090,6 +1090,11 @@ machine paths for a caller other than the local operator), `maintainer`, and,
 when the saved file can be read back, `report_markdown` (its full text, for
 review and download) and `report_sha256` (the hex SHA-256 of that text).
 
+For a caller other than the local operator the report itself is saved scrubbed:
+every machine path in it, the attached log included, keeps only its file name
+after `<data>`, `<install>`, `<env>`, `~` or `<path>` (any other folder, such as
+that of a model registered in place).
+
 ### `POST /api/bug-report/send`
 
 Scope: `config:write`.
