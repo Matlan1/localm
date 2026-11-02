@@ -171,7 +171,7 @@ gpu = [
     # `from transformers import AutoTokenizer` path breaks every HF model load there.
     # Move the cap only to a release that imports, loads and generates on that torch
     # from a fresh install of the lock.
-    "transformers[kernels]~=5.20.2",
+    "transformers[kernels]>=5.20.2,<5.23.0",
     # Pinned exactly so repeated setup runs resolve the same tokenizers; it must sit
     # inside the range the capped transformers requires (5.20: >=0.23.1,<0.24).
     "tokenizers==0.23.3",
@@ -195,7 +195,7 @@ gpu = [
 # see test_hf_extra_matches_gpu_extra_on_the_shared_hf_pins.
 # Install with:  uv pip install -e ".[hf]"
 hf = [
-    "transformers[kernels]~=5.20.2",
+    "transformers[kernels]>=5.20.2,<5.23.0",
     "tokenizers==0.23.3",
     "accelerate>=1.14.0",
     "psutil>=7.2.2",
