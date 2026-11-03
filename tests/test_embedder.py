@@ -1378,13 +1378,14 @@ def test_real_gguf_embeddings_via_isolated_embedder(monkeypatch):
 @pytest.mark.skipif(not _EMBED_MODEL,
                     reason="set LOCALM_TEST_EMBED_MODEL to a real embedding GGUF")
 def test_real_gpu_embedder_worker_stays_on_the_gpu(monkeypatch):
-    """The isolated worker, fully offloaded, embeds one short text (a 1-column
-    GEMM) and batches of short and long texts without a worker fault, so the
+    """The isolated worker, fully offloaded, embeds single short texts (on ROCm
+    "alpha #0" runs a 1-column rocBLAS GEMM served from the runtime's kernel
+    packs) and batches of short and long texts without a worker fault, so the
     CPU never takes over. Holds the GPU: run it under the GPU lease."""
     set_config(monkeypatch, lambda: {"n_gpu_layers": 99, "net_mode": "off"})
     e = emb.IsolatedEmbedder(_EMBED_MODEL, n_gpu_layers=99)
     try:
-        for texts in (["a cat"], ["a cat", "a kitten", "a car"],
+        for texts in (["alpha #0"], ["a cat"], ["a cat", "a kitten", "a car"],
                       [" ".join(["word"] * n) for n in (1, 7, 60, 300)]):
             V = e.embed(texts)
             assert len(V) == len(texts) and all(len(v) == e.dim for v in V)
