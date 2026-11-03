@@ -292,8 +292,8 @@ class TestPullCivitaiFile:
 
         assert _pull_civitai_file("135867", None) is True
 
-        shown = " ".join(capsys.readouterr().out.split())
-        shown = shown.replace(" ".join(str(models_dir).split()), "")
+        shown = "".join(capsys.readouterr().out.split())
+        shown = shown.replace("".join(str(models_dir).split()), "")
         assert "comfy" not in shown.lower()
 
     def test_a_comfy_workdir_still_receives_the_file_in_its_subfolder(
