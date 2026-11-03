@@ -103,7 +103,7 @@ class TestBackendRecordsGpuPlacement:
         from localm.inference.backends.llamacpp import _sizing
         printed = []
         monkeypatch.setattr(_sizing.console, "print",
-                            lambda s, *a, **k: printed.append(str(s)))
+                            lambda *a, **k: printed.extend(str(x) for x in a))
         monkeypatch.setattr("localm.sysstats.system_ram", lambda: (64 * 1024 ** 3,
                                                                     32 * 1024 ** 3))
         b = _backend(tmp_path, n_gpu_layers=0)
