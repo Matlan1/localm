@@ -1472,6 +1472,7 @@ export const I18N_EN = {
   "models.switch.unloadAskLabel": "Unload and switch",
   "models.switch.unloadAsk": "Loading '{model}' unloads {names}.",
   "models.switch.unloadAskFreed": "Loading '{model}' unloads {names}, which frees about {freed} MB of VRAM.",
+  "models.switch.busyModel": "'{model}' (stopping the reply it is writing)",
   "models.switch.peerModel": "{model} of another localm instance",
   "models.switch.unloadChoice": "'{model}' needs about {plan} MB of free VRAM to run every layer on the GPU and about {free} MB is free beside {names}.",
   "models.switch.loadBeside": "Load beside them (slower)",

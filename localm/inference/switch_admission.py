@@ -444,22 +444,25 @@ def degraded_load_confirm(name: str, budget: LoadBudget, free: int,
 
 
 def unload_ask_confirm(name: str, models: Iterable[str], freed: int, *,
-                       shared: bool = False, peers: Iterable[str] = ()) -> dict:
+                       shared: bool = False, peers: Iterable[str] = (),
+                       busy: Iterable[str] = ()) -> dict:
     """The confirm_required result of the "ask" unload policy: loading *name*
-    unloads the models named in *models*, the shared embedding, reranker and
-    speech models (*shared*) and the models of the other localm instances named
-    in *peers*, which together free about *freed* bytes (0 when unknown).
-    Carries ``reason`` "unload_ask", ``unloaded``, ``unloads_shared``,
-    ``peers`` and ``freed_mb`` besides ``detail``."""
-    models, peers = list(models), list(peers)
-    what = [repr(n) for n in models]
+    unloads the models named in *models* (those also in *busy* are answering a
+    request, which unloading stops), the shared embedding, reranker and speech
+    models (*shared*) and the models of the other localm instances named in
+    *peers*, which together free about *freed* bytes (0 when unknown).
+    Carries ``reason`` "unload_ask", ``unloaded``, ``busy``,
+    ``unloads_shared``, ``peers`` and ``freed_mb`` besides ``detail``."""
+    models, peers, busy = list(models), list(peers), list(busy)
+    what = [repr(n) + (" (stopping the reply it is writing)" if n in busy else "")
+            for n in models]
     if shared:
         what.append("the shared embedding, reranker and speech models")
     what += [f"{p} of another localm instance" for p in peers]
     frees = f", which frees about {freed // _MB} MB of VRAM" if freed > 0 else ""
     return {
         "status": "confirm_required", "model": name, "reason": "unload_ask",
-        "unloaded": models, "unloads_shared": shared, "peers": peers,
+        "unloaded": models, "busy": busy, "unloads_shared": shared, "peers": peers,
         "freed_mb": max(0, freed) // _MB,
         "detail": f"Loading '{name}' unloads {', '.join(what)}{frees}.",
     }

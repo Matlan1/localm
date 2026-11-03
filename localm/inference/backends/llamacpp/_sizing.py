@@ -826,10 +826,11 @@ class VramSizingMixin:
                 return True, n
         return True, None
 
-    def _placement_units(self):
+    def _placement_units(self, kv_tokens: Optional[int] = None):
         """The :class:`~localm.inference.backends.llamacpp._gpu_plan.ModelUnits`
         of this load, read from the GGUF header: each block's weights and
-        routed-expert bytes, its KV cache for ``_plan_kv_tokens()`` tokens and per
+        routed-expert bytes, its KV cache for *kv_tokens* tokens (default
+        ``_plan_kv_tokens()``) and per
         token, the recurrent state of the blocks that keep one, the output
         layer and the logits of one batch, ``_VRAM_OVERHEAD_BYTES`` per device
         and a draft model or MoE cache shared among the devices. MTP / nextn
@@ -873,7 +874,7 @@ class VramSizingMixin:
                     expert_bytes[il] += int(size)
             repeating = max(1, n_layer - nextn)
             per_token = self._kv_bytes_per_token() // repeating
-            plan_tokens = self._plan_kv_tokens()
+            plan_tokens = self._plan_kv_tokens() if kv_tokens is None else int(kv_tokens)
             state = (-(-self._recurrent_state_vram_bytes() // len(recurrent))
                      if recurrent else 0)
             draft = (-(-self._mtp_draft_context_vram_bytes() // nextn) if mtp_on else 0)
@@ -921,7 +922,10 @@ class VramSizingMixin:
         ``n_gpu_layers_auto`` on and ``n_gpu_layers`` left at 99 the planner
         chooses how many layers go on the GPUs and, unless ``n_cpu_moe`` is
         set, how many blocks keep their routed experts in system RAM;
-        otherwise both are the configured values. Must run off the event loop
+        otherwise both are the configured values. The KV cache is charged for
+        :meth:`_plan_kv_tokens`; when that plan leaves a layer off the GPUs or
+        does not fit, a plan with the KV cache for ``n_ctx`` tokens is used
+        when it fits or puts more layers on the GPUs. Must run off the event loop
         (it probes). Raises :class:`localm.discover.GpuSplitConfigError` for a
         configured split naming an integrated GPU llama.cpp leaves out."""
         self._gpu_placement = None
@@ -970,6 +974,19 @@ class VramSizingMixin:
         want_moe = configured_moe if (configured_moe > 0 or not auto) else None
         placement = plan_placement(plan_devices, units, n_gpu_layers=want_layers,
                                    n_cpu_moe=want_moe)
+        if ((not placement.full_offload or not placement.fits)
+                and self._plan_kv_tokens() > int(self.n_ctx)):
+            small = self._placement_units(kv_tokens=int(self.n_ctx))
+            if small is not None:
+                fallback = plan_placement(plan_devices, small, n_gpu_layers=want_layers,
+                                          n_cpu_moe=want_moe)
+                if ((fallback.fits, fallback.n_gpu_layers)
+                        > (placement.fits, placement.n_gpu_layers)):
+                    _dbg.info("GPU placement for %s: the reserved %s-token window does "
+                              "not fit beside every layer; sizing the KV cache for "
+                              "%s tokens", Path(self.model_path).name,
+                              self._plan_kv_tokens(), self.n_ctx)
+                    placement = fallback
         self._gpu_placement = placement
         self._gpu_placement_devices = plan_devices
         _dbg.info("GPU placement for %s: %s", Path(self.model_path).name,
@@ -1010,6 +1027,12 @@ class VramSizingMixin:
                           f"[yellow]does not fit: {escape(cause)}[/yellow]")
         elif placement.full_offload and placement.n_cpu_moe == 0:
             console.print(f"[dim]  gpu split: {escape(summary)}[/dim]")
+        elif placement.full_offload and auto:
+            console.print(f"[dim]  gpu split: {escape(summary)}[/dim]")
+            from localm.debuglog import logger as _dbg
+            _dbg.info("GPU placement for %s: every layer on the GPUs, the routed "
+                      "experts of %s blocks in system RAM", Path(self.model_path).name,
+                      placement.n_cpu_moe)
         else:
             cause = ("the model does not fit the free memory of the GPUs it uses"
                      if auto else "set by n_gpu_layers / n_cpu_moe")
@@ -1019,12 +1042,15 @@ class VramSizingMixin:
         self.last_gpu_sizing = record
         return layers
 
-    def _placement_full_offload_need(self, n_cpu_moe: Optional[int] = None) -> Optional[int]:
+    def _placement_full_offload_need(self, n_cpu_moe: Optional[int] = None,
+                                     kv_tokens: Optional[int] = None) -> Optional[int]:
         """The summed per-GPU charge of every layer on the GPUs, with the
         routed experts of the first *n_cpu_moe* blocks in system RAM (default
-        the configured n_cpu_moe), for a load that spreads over two or more
-        GPUs, or None when it does not (see :meth:`_plan_gpu_placement`) or
-        this is the worker process. Must run off the event loop. Never raises."""
+        the configured n_cpu_moe) and the KV cache for *kv_tokens* tokens
+        (default :meth:`_plan_kv_tokens`), for a load that spreads over two or
+        more GPUs, or None when it does not (see :meth:`_plan_gpu_placement`)
+        or this is the worker process. Must run off the event loop. Never
+        raises."""
         try:
             from localm.inference.backends.llamacpp import _loader
             if _loader.native_lib_loaded():
@@ -1033,7 +1059,7 @@ class VramSizingMixin:
             devices, _reason = gguf_split_devices(wait_for_inflight=True)
             if not devices:
                 return None
-            units = self._placement_units()
+            units = self._placement_units(kv_tokens=kv_tokens)
             if units is None:
                 return None
             from localm.inference.backends.llamacpp._gpu_plan import (
@@ -2227,8 +2253,7 @@ class VramSizingMixin:
         needs. For a load that trades routed experts for context
         (:meth:`_trades_experts_for_context`) the minimum keeps every block's
         routed experts in system RAM and charges the KV cache for ``n_ctx``
-        tokens (for the reserved window on two or more GPUs); for any other
-        load it equals the full figure.
+        tokens; for any other load it equals the full figure.
 
         None as for :meth:`full_offload_vram_bytes`. Must not run on an event
         loop thread."""
@@ -2238,7 +2263,8 @@ class VramSizingMixin:
         all_layers = (max(self._moe_expert_bytes_by_layer()) + 1) if trades else 0
         spread = self._placement_full_offload_need()
         if spread is not None:
-            low = self._placement_full_offload_need(all_layers) if trades else None
+            low = (self._placement_full_offload_need(all_layers, kv_tokens=int(self.n_ctx))
+                   if trades else None)
             return spread, min(spread, low) if low is not None else spread
         _free, _total, split_devices = self._split_free_total_bytes()
         model, kv, overhead = self._full_offload_parts(split_devices or 1)

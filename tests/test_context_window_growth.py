@@ -181,3 +181,69 @@ class TestWanted:
             self, prompt, min_context, capacity, expected):
         engine = _EngineWithBackend(_MockBackend(capacity))
         assert hs.context_window_wanted(engine, prompt, min_context, capacity) == expected
+
+
+class TestGrowthSafety:
+    def test_a_reload_that_does_not_grow_the_window_is_not_repeated(self):
+        backend = _GrowableBackend(capacity=100)
+        backend.load = lambda: setattr(backend, "loads", backend.loads + 1)
+        backend._loaded = True
+        client = TestClient(create_app(_EngineWithBackend(backend)))
+
+        first = _post_chat(client, "x" * 150)
+        second = _post_chat(client, "x" * 150)
+
+        assert first.status_code == second.status_code == 413
+        assert backend.loads == 1, "the second request does not reload again"
+
+    def test_a_model_whose_files_cannot_be_resolved_is_used_as_loaded(self, monkeypatch):
+        backend = _GrowableBackend(capacity=100)
+        monkeypatch.setattr("localm.config.load_registry",
+                            lambda: {"other": {"path": "models/other.gguf"}})
+        monkeypatch.setattr("localm.model_manager.get_model_info", lambda name: None)
+        client = TestClient(create_app(_EngineWithBackend(backend)))
+
+        resp = _post_chat(client, "x" * 150)
+
+        assert resp.status_code == 413, resp.text
+        assert backend.loads == 0 and backend.ctx_reserve == 0
+
+    def test_the_request_keeps_its_pin_through_the_reload(self):
+        backend = _GrowableBackend(capacity=100)
+        engine = _EngineWithBackend(backend)
+        seen = []
+        real_load = backend.load
+
+        def _load():
+            seen.append(engine.active_requests)
+            real_load()
+
+        backend.load = _load
+        client = TestClient(create_app(engine))
+
+        resp = _post_chat(client, "x" * 150)
+
+        assert resp.status_code == 200
+        assert seen == [1], "the reload ran while the request still held the engine"
+        assert engine.active_requests == 0
+
+    def test_a_failed_growth_reload_loads_the_model_again_with_its_window(self):
+        backend = _GrowableBackend(capacity=100)
+        real_load = backend.load
+        calls = []
+
+        def _load():
+            calls.append(backend.ctx_reserve)
+            if len(calls) == 1:
+                raise RuntimeError("out of memory")
+            real_load()
+
+        backend.load = _load
+        engine = _EngineWithBackend(backend)
+        client = TestClient(create_app(engine))
+
+        resp = _post_chat(client, "x" * 150)
+
+        assert resp.status_code == 413, resp.text
+        assert calls == [hs._CONTEXT_GROW_STEP, 0]
+        assert hs._engines["test-cap-model"].loaded

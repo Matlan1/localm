@@ -1150,7 +1150,9 @@ async function _postLoad(model, force, asChat = false, keepOthers = false) {
 // unloaded models, the shared models (unloads_shared) and other instances'
 // models (peers), quoted and in the GUI's language.
 function _unloadNames(data) {
-  const names = (Array.isArray(data.unloaded) ? data.unloaded : []).map((n) => `'${n}'`);
+  const busy = Array.isArray(data.busy) ? data.busy : [];
+  const names = (Array.isArray(data.unloaded) ? data.unloaded : []).map(
+    (n) => (busy.includes(n) ? t("models.switch.busyModel", { model: n }) : `'${n}'`));
   if (data.unloads_shared) names.push(t("models.switch.sharedModels"));
   if (data.unloads_peers) names.push(t("models.switch.peerModels"));
   for (const p of Array.isArray(data.peers) ? data.peers : []) {

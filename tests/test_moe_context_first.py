@@ -228,3 +228,49 @@ def test_the_real_moe_file_plans_every_layer_on_the_gpu_with_its_reserved_window
     assert budget.kv == 32768 * b._kv_bytes_per_token()
     assert 23 < budget.moe_cpu_layers < 48
     assert low < 5 * 1024 ** 3 < free < full
+
+
+class TestTwoGpuPlanKeepsEveryLayer:
+    """The placement planner for two or more GPUs falls back to an n_ctx KV
+    cache when the reserved window does not fit beside every layer."""
+
+    def _plan(self, b, free_each):
+        devices = [{"slot": i, "index": i, "name": f"gpu{i}", "free": free_each,
+                    "total": free_each * 2} for i in range(2)]
+        with patch("localm.discover.gguf_split_devices", return_value=(devices, "")), \
+                patch("localm.discover.listed_gpu_order", return_value=None), \
+                patch("localm.inference.backends.llamacpp._loader.native_lib_loaded",
+                      return_value=False), \
+                patch.object(GgufBackend, "_VRAM_OVERHEAD_BYTES", OVERHEAD):
+            return b._plan_gpu_placement()
+
+    def test_a_window_that_never_fits_keeps_every_layer_on_the_gpus(self, tmp_path):
+        b = _backend(_moe_model(tmp_path), ctx_reserve=10**6)
+        placement = self._plan(b, 400_000)
+        assert placement is not None
+        assert placement.full_offload and placement.fits
+
+    def test_a_window_that_fits_is_kept(self, tmp_path):
+        b = _backend(_moe_model(tmp_path), ctx_reserve=RESERVE)
+        placement = self._plan(b, 10**8)
+        assert placement.full_offload and placement.fits
+        kv = sum(d.kv for d in placement.loads)
+        assert kv >= RESERVE * KV_PER_TOKEN
+
+
+class TestUnlimitedCeiling:
+    def test_no_ceiling_reports_the_trained_window_not_n_ctx(self, tmp_path):
+        engine = Engine(str(_trained_moe(tmp_path, 40960)))
+        backend = engine._backend
+        backend.ctx_auto = False
+        backend.n_ctx_max = 0
+        backend.effective_ctx_max = 0
+        assert engine.context_capacity() == 40960
+        assert backend.ctx_reserve_limit() == (40960, "trained")
+
+    def test_no_ceiling_and_no_trained_window_has_no_capacity_bound(self, tmp_path):
+        engine = Engine(str(_moe_model(tmp_path)))
+        engine._backend.ctx_auto = False
+        engine._backend.n_ctx_max = 0
+        engine._backend.effective_ctx_max = 0
+        assert engine.context_capacity() is None

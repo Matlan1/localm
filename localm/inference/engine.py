@@ -898,12 +898,19 @@ class Engine:
         """Maximum token capacity of the loaded model's context window.
 
         Prefers the RESOLVED ceiling from the last load (VRAM-derived under
-        ctx_auto), then the configured ceiling, then the base window. Returns None
-        only when nothing is loaded or resolvable."""
+        ctx_auto), then the configured ceiling, then the base window. A load
+        whose resolved ceiling is 0 with ``n_ctx_max`` 0 has no ceiling: its
+        window grows to the model's trained window (the backend's
+        ``_trained_ctx``), or without a bound (None) when that is unknown.
+        Returns None only for no ceiling or when nothing is loaded or
+        resolvable."""
         b = self._backend
         eff = getattr(b, "effective_ctx_max", None)
         if isinstance(eff, int) and eff > 0:
             return eff
+        if eff == 0 and getattr(b, "n_ctx_max", None) == 0:
+            trained = getattr(b, "_trained_ctx", None)
+            return trained() if callable(trained) else None
         for attr in ("n_ctx_max", "_n_ctx_max", "n_ctx", "_n_ctx"):
             v = getattr(b, attr, None)
             if isinstance(v, int) and v > 0:

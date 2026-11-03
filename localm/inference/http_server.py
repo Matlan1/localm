@@ -667,7 +667,7 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                         on_status: Optional[Callable[[str], None]] = None,
                         allow_embedding: bool = False,
                         reserve_ctx: Optional[int] = None,
-                        keep_others: bool = False) -> dict:
+                        keep_others: bool = False, own_pins: int = 0) -> dict:
     """Make model *name* resident and, with *activate*, the active model.
     An embedding-typed *name* (an embedding model, a reranker, a media text
     encoder) is refused with a 422 unless *allow_embedding*.
@@ -699,9 +699,11 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
     fresh VRAM reading is conclusive; an explicit switch reuses it as it is.
     During that reload an unnamed request still resolves to it. With
     *reserve_ctx*, a resident model whose context window is smaller and that
-    no request holds (``_context_grow_due``) is reloaded the same way with
-    that window reserved (``Engine.reserve_context``), and *on_status* gets
-    ``GROWING_CONTEXT_STATUS``.
+    no request other than the caller's own *own_pins* holds
+    (``_context_grow_due``) is reloaded the same way with that window reserved
+    (``Engine.reserve_context``), and *on_status* gets
+    ``GROWING_CONTEXT_STATUS``; when its files cannot be resolved it is used
+    as loaded.
 
     The ``unload_for_room`` setting decides whether other models are unloaded
     to make room (``_switch_unload_policy_step``): "always" unloads this
@@ -765,17 +767,25 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
         heal_budget = heal_probe = None
         resident = _engines.get(name)
         growing = (reserve_ctx is not None and _is_reusable(resident)
-                   and _context_grow_due(resident, reserve_ctx))
+                   and _context_grow_due(resident, reserve_ctx, own_pins))
+        previous_reserve = getattr(resident, "ctx_reserve", 0)
+        if growing:
+            try:
+                heal_budget = await loop.run_in_executor(None, _switch_load_budget, name)
+            except HTTPException as exc:
+                from localm.debuglog import logger as _dbg
+                _dbg.info("switch_engine: not reloading '%s' with a larger context "
+                          "window, it is used as loaded: %s", name, exc.detail)
+                growing = False
         if growing:
             if on_status is not None:
                 on_status(GROWING_CONTEXT_STATUS)
             resident.reserve_context(reserve_ctx)
-            heal_budget = await loop.run_in_executor(None, _switch_load_budget, name)
             if heal_budget is not None:
                 heal_budget = await _switch_with_backend_need(loop, heal_budget, resident)
                 heal_probe = await _switch_probe_vram(loop, heal_budget)
             if (_engines.get(name) is resident and _is_reusable(resident)
-                    and _context_grow_due(resident, reserve_ctx)):
+                    and _context_grow_due(resident, reserve_ctx, own_pins)):
                 from localm.debuglog import logger as _dbg
                 _dbg.info("switch_engine: reloading '%s' with a %s-token context "
                           "window (it has %s)", name, reserve_ctx,
@@ -784,6 +794,7 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                 was_active = _switch_detach_victim(name, resident, activate=False,
                                                    keep_sem=True)
             else:
+                resident.reserve_context(previous_reserve)
                 growing = False
                 heal_budget = heal_probe = None
         if healing is None and _is_reusable(resident):
@@ -1177,12 +1188,12 @@ _UNMEASURED_PROBE = switch_admission.VramProbe(
     free=None, probe_ok=False, process_scoped=False, shortfall=[], shares_adaptive=False)
 
 
-def _context_grow_due(engine, tokens: int) -> bool:
+def _context_grow_due(engine, tokens: int, own_pins: int = 0) -> bool:
     """Whether resident *engine* should be reloaded so its context window holds
     *tokens*: its backend reserves context windows (``Engine.can_reserve_context``),
-    its window (``Engine.context_capacity``) is smaller, and no request holds
-    it. Reads state only."""
-    if getattr(engine, "active_requests", 0) != 0:
+    its window (``Engine.context_capacity``) is smaller, and no request other
+    than the caller's own *own_pins* holds it. Reads state only."""
+    if getattr(engine, "active_requests", 0) > own_pins:
         return False
     can = getattr(engine, "can_reserve_context", None)
     if not callable(can) or not can():
@@ -1511,10 +1522,10 @@ async def _switch_unload_policy_step(loop, probe: switch_admission.VramProbe,
     ``switch_admission.unload_choice_confirm`` under "never" for an explicit
     switch. Under "ask": the ``_switch_confirm_before_eviction`` result when
     the load would not fit even after unloading everything, else
-    ``switch_admission.unload_ask_confirm`` naming the idle chat models, the
-    loaded shared models and other instances' models it would unload, or
-    ``_KEEP_FREEING`` when only busy models stand in the way (the busy-model
-    question of the eviction loop asks then). Unloads nothing."""
+    ``switch_admission.unload_ask_confirm`` naming every chat model it may
+    unload (a busy one marked so, since a confirmed switch stops its reply),
+    the loaded shared models and other instances' models, or
+    ``_KEEP_FREEING`` when nothing is there to unload. Unloads nothing."""
     from localm.debuglog import logger as _dbg
     if decision.vram_ok:
         _dbg.info("switch_engine: unload_for_room=%s, loading '%s' beside the "
@@ -1540,21 +1551,23 @@ async def _switch_unload_policy_step(loop, probe: switch_admission.VramProbe,
     ask = await _switch_confirm_before_eviction(loop, probe, budget)
     if ask is not None:
         return await _switch_wait_busy_before_asking(loop, probe, budget, ask)
-    idle = [n for n in switch_admission.evictable_residents(budget, _engines_lru, _engines)
-            if getattr(_engines.get(n), "active_requests", 0) == 0]
+    models = [n for n in switch_admission.evictable_residents(budget, _engines_lru, _engines)
+              if n in _engines]
+    busy = [n for n in models if getattr(_engines[n], "active_requests", 0) != 0]
     shared = await loop.run_in_executor(None, _shared_vram_holds)
     peers = await loop.run_in_executor(None, _peer_model_names)
-    if not (idle or shared.holds or shared.unknown or peers):
+    if not (models or shared.holds or shared.unknown or peers):
         return _KEEP_FREEING
-    engines = [_engines[n] for n in idle if n in _engines]
+    engines = [_engines[n] for n in models]
     holds = await loop.run_in_executor(
         None, lambda: [_resident_vram_hold(e) for e in engines])
     freed = sum(h for h in holds if h > 0) + sum(h for h in shared.holds if h > 0)
     _dbg.info("switch_engine: unload_for_room=ask, asking before unloading %s%s%s for '%s'",
-              idle, " and the shared models" if shared.holds or shared.unknown else "",
+              models, " and the shared models" if shared.holds or shared.unknown else "",
               f" and {peers}" if peers else "", budget.name)
     return switch_admission.unload_ask_confirm(
-        budget.name, idle, freed, shared=bool(shared.holds or shared.unknown), peers=peers)
+        budget.name, models, freed, shared=bool(shared.holds or shared.unknown),
+        peers=peers, busy=busy)
 
 
 def _peer_model_names() -> list:
@@ -6681,7 +6694,8 @@ async def _stream_sse_body(
             refusal = context_overflow_detail(
                 prompt_tokens, capacity,
                 encoder_decoder=_engine_is_encoder_decoder(engine),
-                reply_reserve=_engine_reply_reserve(engine))
+                reply_reserve=_engine_reply_reserve(engine),
+                limit=engine_context_limit(engine)[1])
         if refusal:
             if ctx is not None:
                 ctx.outcome = "error"
@@ -7383,14 +7397,21 @@ _CONTEXT_GROW_STEP = 4096
 
 async def grow_context_window(engine, tokens: int, *,
                               on_status: Optional[Callable[[str], None]] = None):
-    """Reload the resident model of pinned *engine* so its context window
-    holds *tokens* (rounded up to ``_CONTEXT_GROW_STEP``, at most
-    ``Engine.context_reserve_limit``), through ``switch_engine`` with
-    ``reserve_ctx``. Returns the engine that answers now, pinned: *engine*
-    itself, reloaded or not. Nothing is reloaded when *engine* cannot reserve
-    a window, its limit is already reached, it is not a resident model, or
-    another request holds it (``_context_grow_due``). The pin is released for
-    the reload and taken again before this returns or raises. Logs at INFO."""
+    """Reload the resident model of *engine*, which the calling request holds
+    pinned, so its context window holds *tokens* (rounded up to
+    ``_CONTEXT_GROW_STEP``, at most ``Engine.context_reserve_limit``), through
+    ``switch_engine`` with ``reserve_ctx`` and the request's own pin allowed.
+
+    Returns the engine that answers now, holding the request's pin: *engine*
+    itself, reloaded or not, or the engine registered under its name after a
+    reload that replaced it (the pin moves to it). Nothing is reloaded when
+    *engine* cannot reserve a window, its limit is already reached, it is not
+    a resident model, another request holds it (``_context_grow_due``), or an
+    earlier reload for at least that window did not grow it (the engine's
+    ``context_grow_failed``, set here). When the reload raises, *engine* is
+    registered again and loaded with its earlier window, and returned; the
+    error is raised only when that fails too. Logs at INFO (a failed reload
+    at WARNING)."""
     from localm.debuglog import logger as _dbg
     can = getattr(engine, "can_reserve_context", None)
     if not callable(can) or not can():
@@ -7403,18 +7424,43 @@ async def grow_context_window(engine, tokens: int, *,
     capacity = engine.context_capacity()
     if not (isinstance(capacity, int) and capacity < target):
         return engine
+    failed = getattr(engine, "context_grow_failed", None)
+    if isinstance(failed, int) and target >= failed:
+        return engine
     name = next((n for n, e in _engines.items() if e is engine), None)
     if name is None:
         return engine
     _dbg.info("context: '%s' has a %s-token window and a request needs %s; "
               "reloading it with a %s-token window", name, capacity, tokens, target)
-    _unpin(engine)
+    previous = getattr(engine, "ctx_reserve", 0)
     try:
         await switch_engine(name, None, preempt=False, activate=False,
-                            reserve_ctx=target, on_status=on_status)
-    finally:
-        _pin(engine)
-    return engine
+                            reserve_ctx=target, on_status=on_status, own_pins=1)
+    except Exception as exc:
+        _dbg.warning("context: reloading '%s' with a %s-token window failed (%s: %s); "
+                     "loading it again with its earlier window", name, target,
+                     type(exc).__name__, getattr(exc, "detail", exc))
+        reserve = getattr(engine, "reserve_context", None)
+        if callable(reserve):
+            reserve(previous)
+        engine.context_grow_failed = target
+        if _engines.get(name) is None:
+            engine.unloading = False
+            _engines[name] = engine
+        await switch_engine(name, None, preempt=False, activate=False, on_status=on_status)
+    answering = _engines.get(name)
+    if answering is None or not answering.loaded:
+        raise HTTPException(503, f"'{name}' could not be reloaded with a larger "
+                                 "context window; retry the request.")
+    if answering is not engine:
+        _unpin(engine)
+        _pin(answering)
+    new_capacity = answering.context_capacity()
+    if not (isinstance(new_capacity, int) and new_capacity > capacity):
+        answering.context_grow_failed = target
+        _dbg.info("context: reloading '%s' did not grow its %s-token window; not "
+                  "reloading it again for a window of %s or more", name, capacity, target)
+    return answering
 
 
 def _resolve_disconnect_poll(request):
