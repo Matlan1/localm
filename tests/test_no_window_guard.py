@@ -214,7 +214,7 @@ def test_except_exception_does_not_swallow_a_refusal(stop_spy):
 def test_startfile_and_webbrowser_are_refused(tmp_path):
     assert os.startfile is nw.startfile and webbrowser.open is nw.browser_open
     with pytest.raises(_Refused, match="os.startfile"):
-        os.startfile(str(tmp_path / "missing.txt"))
+        nw.startfile(str(tmp_path / "missing.txt"))
     with pytest.raises(_Refused, match="webbrowser.open"):
         webbrowser.open("http://127.0.0.1:9/")
     with pytest.raises(_Refused, match="webbrowser.open"):
