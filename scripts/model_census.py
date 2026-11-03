@@ -57,6 +57,7 @@ import socket
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -529,8 +530,7 @@ def _run(cmd: list[str], home: Path, timeout: float) -> tuple[int, str]:
 def make_home(work_dir: Path) -> Path:
     """A fresh throwaway LOCALM_HOME under *work_dir* whose config.json turns
     off the update check and bug-report uploads."""
-    home = work_dir / f"census-home-{os.getpid()}-{int(time.time())}"
-    home.mkdir(parents=True)
+    home = Path(tempfile.mkdtemp(prefix="census-home-", dir=work_dir))
     (home / "config.json").write_text(
         json.dumps({"update_url": "", "bugreport_upload_url": ""}), encoding="utf-8")
     return home

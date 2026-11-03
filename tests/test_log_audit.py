@@ -136,7 +136,7 @@ def test_downloads_errors_and_warnings_are_found(tmp_path):
     got = [(e.kind, e.subject[:40]) for e in events]
     assert got == [
         ("download", "CompendiumLabs/bge-small-en-v1.5-gguf/bg"),
-        ("download", "Qwen/Qwen3-0.6B-GGUF:Qwen3-0.6B-Q8_0.gguf"),
+        ("download", "Qwen/Qwen3-0.6B-GGUF:Qwen3-0.6B-Q8_0.ggu"),
         ("download", "model.safetensors"),
         ("error", "the model worker died: exit code 3"),
         ("error", "llama_model_load: error loading model: u"),

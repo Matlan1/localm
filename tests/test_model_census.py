@@ -186,7 +186,8 @@ def test_enumerate_skips_hidden_and_partial_and_groups_splits(tmp_path):
     big = next(e for e in entries if e.path.name.startswith("big"))
     assert len(big.parts) == 2
     assert sorted((p.name, why) for p, why in skipped) == [
-        (".cache", "hidden"), ("b.gguf.part", "partial download")]
+        (".cache", "hidden"), ("b.gguf.part", "partial download"),
+        ("notes.txt", "not a model file suffix (.txt)")]
 
 
 def _imp(kind, arch=None):

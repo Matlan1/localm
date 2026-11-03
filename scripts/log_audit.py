@@ -46,8 +46,8 @@ Manifest (JSON object; every key optional, any other key is an error):
       "toasts":    [{"match": "[toast /] Model switched to *"}]
     }
 
-Each entry is a glob (``fnmatch``, case-insensitive) matched against the whole
-event subject: the model name (file name without ``.gguf``) for model-load, the
+Each entry is a glob matched case-insensitively against the whole event subject;
+only ``*`` and ``?`` are wildcards, so ``[`` is literal (a toast starts with one): the model name (file name without ``.gguf``) for model-load, the
 repository/file or pull spec for download, the message text after the logger
 name for warning and error, and the text after ``gui: `` for toast.
 
@@ -278,7 +278,7 @@ def judge(events: list[Event], rules: dict[str, list[Rule]]) -> None:
     for ev in events:
         subject = ev.subject.lower()
         for rule in rules[KIND_KEYS[ev.kind]]:
-            if fnmatch.fnmatchcase(subject, rule.pattern.lower()):
+            if fnmatch.fnmatchcase(subject, rule.pattern.lower().replace("[", "[[]")):
                 ev.verdict = "EXPECTED"
                 ev.why = rule.why
                 ev.matched = rule.pattern
