@@ -196,9 +196,10 @@ def test_the_saved_file_is_exactly_what_a_single_dumps_wrote(big_collection):
 
 
 def test_a_large_index_reports_its_load_and_save(big_collection, tmp_path, monkeypatch):
+    from localm.rag import store
     from localm.rag._store import files
     monkeypatch.setattr(files, "_REPORT_EVERY_S", 0.0)
-    monkeypatch.setattr(files, "_REPORT_VECTORS_BYTES", 1)
+    monkeypatch.setattr(store, "_REPORT_VECTORS_BYTES", 1)
     docs = tmp_path / "docs"
     docs.mkdir()
     (docs / "new.txt").write_text("another document", encoding="utf-8")

@@ -138,7 +138,7 @@ class _ThreadCpu:
     clocks."""
 
     def __init__(self) -> None:
-        self._win = None
+        self._win: Optional[tuple] = None
         self._linux = sys.platform.startswith("linux") and hasattr(time, "pthread_getcpuclockid")
         if sys.platform == "win32":
             try:
@@ -153,8 +153,9 @@ class _ThreadCpu:
             except (OSError, AttributeError) as e:
                 logger.debug("stall watch: per-thread CPU unavailable: %s", e)
 
-    def _one_win(self, native_id: int) -> Optional[float]:
-        ctypes, wintypes, k32 = self._win
+    @staticmethod
+    def _one_win(win: tuple, native_id: int) -> Optional[float]:
+        ctypes, wintypes, k32 = win
         h = k32.OpenThread(0x0800, False, native_id)   # THREAD_QUERY_LIMITED_INFORMATION
         if not h:
             return None
@@ -186,7 +187,7 @@ class _ThreadCpu:
                 continue
             if self._win is not None:
                 nid = getattr(t, "native_id", None)
-                cpu = None if nid is None else self._one_win(nid)
+                cpu = None if nid is None else self._one_win(self._win, nid)
             else:
                 cpu = self._one_linux(t.ident)
             if cpu is not None:
@@ -198,7 +199,7 @@ class _Sink:
     """A file descriptor faulthandler writes into, read back in memory."""
 
     def __init__(self) -> None:
-        self._pipe = None
+        self._pipe: Optional[tuple] = None
         self._tmp = None
         self._read_off = 0
         if sys.platform == "win32":
@@ -299,32 +300,35 @@ class StallWatch:
         with self._lock:
             self._records.append(record)
 
-    def _arm(self) -> None:
+    def _arm(self, sink: _Sink) -> None:
         faulthandler.dump_traceback_later(self.threshold, repeat=False,
-                                          file=self._sink.fd, exit=False)
+                                          file=sink.fd, exit=False)
 
     def _run(self) -> None:
         """Each poll: drain the sink, then take a CPU reading and re-arm. A
         dump is attributed to the arm that fired it: the current one when
         *threshold* has passed since it, else the one before (a stall that
         began before the re-arm)."""
+        sink = self._sink
+        if sink is None:
+            return
         try:
             cur = (time.monotonic(), self._cpu.read())
-            self._arm()
+            self._arm(sink)
             prev = cur
             while not self._stop.wait(self.poll):
                 now = time.monotonic()
-                text = self._sink.drain()
+                text = sink.drain()
                 if text:
                     time.sleep(0.05)
-                    text += self._sink.drain()
+                    text += sink.drain()
                     fired = cur if now - cur[0] >= self.threshold else prev
                     self._gil_stall(text, now - fired[0], fired[1])
                 else:
                     self._check_loop()
                 cpu = self._cpu.read()
                 prev, cur = cur, (time.monotonic(), cpu)
-                self._arm()
+                self._arm(sink)
         except Exception:
             logger.warning("stall watch stopped after an error", exc_info=True)
         finally:
@@ -358,7 +362,7 @@ class StallWatch:
         if cpu_after:
             spent = {t: cpu_after[t] - cpu_before.get(t, 0.0)
                      for t in threads if t in cpu_after}
-            busiest = max(spent, key=spent.get, default=None)
+            busiest = max(spent, key=lambda t: spent[t], default=None)
             if busiest is not None and spent[busiest] >= 0.5 * away:
                 holder, seconds = busiest, spent[busiest]
         if holder is None:
@@ -388,7 +392,8 @@ class StallWatch:
                 self._loop_suspect = True
                 return
             if rec is None:
-                frame = sys._current_frames().get(self._loop_thread)
+                frame = (None if self._loop_thread is None
+                         else sys._current_frames().get(self._loop_thread))
                 frames = []
                 while frame is not None and len(frames) < _FRAMES_KEPT:
                     frames.append((frame.f_code.co_filename, frame.f_lineno,

@@ -24,7 +24,6 @@ _READ_BYTES = 1 << 20
 _HEADER_RE = re.compile(
     r'[ \t\n\r]*\{[ \t\n\r]*"dim"[ \t\n\r]*:[ \t\n\r]*(null|-?(?:0|[1-9][0-9]*))'
     r'[ \t\n\r]*,[ \t\n\r]*"vectors"[ \t\n\r]*:[ \t\n\r]*\[')
-_WS_RE = re.compile(r"[ \t\n\r]*")
 _DECODER = json.JSONDecoder()
 
 #: Returned by ``_parse_rows`` for a file that is valid so far but not in the
@@ -49,6 +48,14 @@ def vectors_json_pieces(dim: Optional[int], rows: list) -> Iterator[str]:
     """The pieces of ``counted_vectors_json_pieces`` alone."""
     for piece, _done in counted_vectors_json_pieces(dim, rows):
         yield piece
+
+
+def _ws_end(buf: str, i: int) -> int:
+    """Index of the first character at or after *i* that is not JSON whitespace."""
+    n = len(buf)
+    while i < n and buf[i] in " \t\n\r":
+        i += 1
+    return i
 
 
 class _Reader:
@@ -80,7 +87,7 @@ class _Reader:
         """Index of the first non-whitespace character at or after *i*,
         reading more as needed; ``len(buf)`` only at the end of the file."""
         while True:
-            i = _WS_RE.match(self.buf, i).end()
+            i = _ws_end(self.buf, i)
             if i < len(self.buf) or self.eof:
                 return i
             i = self.drop(i)
@@ -100,7 +107,7 @@ class _Reader:
             else:
                 if self.eof:
                     return value, end
-                nxt = _WS_RE.match(self.buf, end).end()
+                nxt = _ws_end(self.buf, end)
                 if nxt < len(self.buf) and self.buf[nxt] in ",]":
                     return value, end
             self.more(nbytes)

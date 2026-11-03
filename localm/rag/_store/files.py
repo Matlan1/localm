@@ -23,9 +23,6 @@ from .vectors import (_first_dim, _vectors_finite, _warn_numpy_degrade,
                       _well_formed_vectors)
 
 
-#: A vectors.json at least this large is announced before a load.
-_REPORT_VECTORS_BYTES = 32 << 20
-
 #: A vectors.json write of at least this many vector components is announced
 #: and reports its progress.
 _REPORT_VECTORS_COMPONENTS = 2_000_000
@@ -299,19 +296,6 @@ class _CollectionFiles:
         if self._vectors is not None and self._vec_dim:
             size += len(self._vectors) * self._vec_dim * 8
         return size
-
-    def _load_reporting(self, on_progress: Optional[ProgressFn]) -> None:
-        """``_load(use_cache=False)``, first telling *on_progress* that a
-        collection whose vectors.json is at least ``_REPORT_VECTORS_BYTES`` is
-        being loaded."""
-        if on_progress is not None:
-            try:
-                size = (self.dir / "vectors.json").stat().st_size
-            except OSError:
-                size = 0
-            if size >= _REPORT_VECTORS_BYTES:
-                on_progress(f"loading the collection ({size // (1 << 20)} MB of vectors)...")
-        self._load(use_cache=False)
 
     def _save(self, on_progress: Optional[ProgressFn] = None) -> None:
         """Write meta.json, chunks.jsonl and vectors.json from this instance's
