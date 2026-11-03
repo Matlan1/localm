@@ -57,8 +57,10 @@ def test_extract_raises_when_the_model_call_raises():
     assert isinstance(ei.value.__cause__, RuntimeError)
 
 
-def test_extract_on_an_unparseable_reply_is_still_empty():
-    assert extract(lambda p: "not json at all", "User: my name is Ada") == []
+def test_extract_on_an_unparseable_reply_raises_a_reply_error():
+    with pytest.raises(ConsolidationModelError) as err:
+        extract(lambda p: "not json at all", "User: my name is Ada")
+    assert type(err.value).__name__ == "ConsolidationReplyError"
 
 
 def test_summarize_session_raises_when_the_model_call_raises():

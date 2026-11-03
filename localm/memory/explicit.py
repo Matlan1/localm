@@ -15,60 +15,77 @@ from typing import Optional
 
 from .store import MAX_TEXT_LEN
 
+_GREETING = r"(?:(?:hey|hi|hello|hallo|ok|okay|so|also|and|und)[,!.]?\s+)?"
+_ASKING = (
+    r"(?:can|could|would|kannst|könntest|würdest)\s+(?:you|du)\s+(?:bitte\s+|please\s+)?"
+)
 _LEAD = (
-    r"^\s*(?:(?:hey|hi|hello|hallo|ok|okay|so|also|and|und)[,!.]?\s+)?"
-    r"(?:(?:can|could|would)\s+you\s+(?:please\s+)?|(?:kannst|k[oö]nntest|w[uü]rdest)\s+du\s+(?:bitte\s+)?"
-    r"|please\s+|bitte\s+)?"
+    r"^\s*" + _GREETING + r"(?:" + _ASKING
+    + r"|(?:i\s+want|i'd\s+like|i\s+would\s+like)\s+you\s+to\s+|please\s+|bitte\s+)?"
 )
 _EN_VERB = (
     r"(?P<verb>remember|memori[sz]e|make\s+a\s+note|note\s+down|keep\s+in\s+mind|"
     r"don'?t\s+forget|do\s+not\s+forget)"
 )
 _DE_VERB = (
-    r"(?P<verb>merk(?:e)?\s+dir|vergiss\s+nicht|denk(?:e)?\s+daran|"
-    r"behalte\s+im\s+kopf|notiere\s+dir)"
+    r"(?P<verb>merk'?\s+dir|merke\s+dir|dir\s+merken|vergiss\s+nicht|"
+    r"denk(?:e)?\s+(?:bitte\s+)?daran|erinnere\s+dich\s+daran|behalte\s+im\s+kopf|"
+    r"notiere\s+dir)"
 )
-_EN_RE = re.compile(_LEAD + _EN_VERB + r"(?P<rest>(?:\s*[:,]|\s)\s*\S.*)$",
-                    re.IGNORECASE | re.DOTALL)
-_DE_RE = re.compile(_LEAD + _DE_VERB + r"(?P<rest>(?:\s*[:,]|\s)\s*\S.*)$",
-                    re.IGNORECASE | re.DOTALL)
+_EN_RE = re.compile(_LEAD + _EN_VERB + r"(?P<rest>(?=[\s:,]).*)$", re.IGNORECASE | re.DOTALL)
+_DE_RE = re.compile(_LEAD + _DE_VERB + r"(?P<rest>(?=[\s:,]).*)$", re.IGNORECASE | re.DOTALL)
+_ASKED_RE = re.compile(r"^\s*" + _GREETING + _ASKING, re.IGNORECASE)
 
-_THAT_RE = re.compile(r"^(?:\s*[:,]\s*|\s+)that\b[\s:,]*", re.IGNORECASE)
-_DASS_RE = re.compile(r"^(?:\s*[:,]\s*|\s+)(?:bitte\s+)?(?:,\s*)?dass\b[\s:,]*", re.IGNORECASE)
-_BITTE_RE = re.compile(r"^\s*bitte\b\s*", re.IGNORECASE)
-_PUNCT_RE = re.compile(r"^\s*[:,]\s*")
+_CONNECT_RE = re.compile(
+    r"^(?:\s*(?:bitte|please)\b)?\s*(?P<punct>[:,])?\s*"
+    r"(?:(?P<kw>that(?![\w'’])|dass|daß|this(?=\s*:))[\s:,]*)?",
+    re.IGNORECASE)
 _FIRST_PERSON_RE = re.compile(
-    r"^(?:i|i'm|i've|i'll|i'd|my|me|we|we're|our|mine|ich|mein\w*|meine\w*|wir|unser\w*)\b",
+    r"^(?:i|i'm|i’m|i've|i'll|i'd|my|me|we|we're|our|mine|ich|mein\w*|meine\w*|wir|unser\w*)\b",
     re.IGNORECASE)
 _RECOLLECTION_RE = re.compile(
     r"^(?:time|day|night|moment|one\s+time|summer|winter|trip|conversation|chat)\b",
     re.IGNORECASE)
-_ASKED_RE = re.compile(
-    r"^\s*(?:(?:hey|hi|hello|hallo|ok|okay|so|also|and|und)[,!.]?\s+)?"
-    r"(?:can|could|would|kannst|k[oÃ¶]nntest|w[uÃ¼]rdest)\b", re.IGNORECASE)
-_SENTENCE_END_RE = re.compile(r"(?<=[.!?])\s+")
+_ADDRESSES_ASSISTANT_RE = re.compile(r"^(?:you|du)\b", re.IGNORECASE)
+_PARAGRAPH_RE = re.compile(r"\n\s*\n")
+_TERMINATOR_RE = re.compile(r"[.!?]+(?=\s|$)")
+_ABBREVIATIONS = frozenset((
+    "e.g i.e z.b d.h u.a z.t v.a u.s.w etc vs bzw usw ca inc ltd co corp dr mr mrs ms "
+    "prof st jr sr nr tel str evtl ggf bspw approx no").split())
 _MIN_FACT_CHARS = 6
 
 
 def _first_sentence(text: str) -> str:
-    """The first sentence of the first line of *text*, terminator kept."""
-    line = text.strip().splitlines()[0] if text.strip() else ""
-    return _SENTENCE_END_RE.split(line, maxsplit=1)[0].strip()
+    """The first sentence of the first paragraph of *text*, whitespace collapsed,
+    terminator kept. A full stop after an abbreviation ("Inc.", "z.B.") or before
+    a lower-case word does not end it."""
+    para = " ".join(_PARAGRAPH_RE.split(text.strip())[0].split())
+    for m in _TERMINATOR_RE.finditer(para):
+        words = para[:m.start()].split()
+        word = words[-1].lower().strip("\"'([") if words else ""
+        following = para[m.end():].lstrip()
+        if m.group().startswith(".") and (word in _ABBREVIATIONS
+                                          or following[:1].islower()):
+            continue
+        return para[:m.end()]
+    return para
 
 
 def explicit_fact(message: str) -> Optional[str]:
     """The fact a chat *message* asks to remember, or None when it is not such a
     request.
 
-    The message must open with the request (after an optional greeting or
-    "please"). English "remember"/"keep in mind"/"don't forget" need a "that" or a
-    colon before the fact, or a fact that starts with a first-person word ("remember
-    my dog is called Rex"); "remember to ...", "remember when ..." are not
-    requests. German "merk dir" takes the fact directly; "vergiss nicht" and
-    "denk daran" need "dass". A message ending in "?" is a request only when it
-    asks ("can you remember that ...?") and carries "that" or "dass". The fact is
-    the first sentence after the request, trailing punctuation removed, cut to
-    MAX_TEXT_LEN."""
+    The message must open with the request (after an optional greeting, "please"
+    or "can you"). English "remember"/"keep in mind"/"don't forget" need a "that",
+    "this:" or a colon before the fact, or a fact that starts with a first-person
+    word ("remember my dog is called Rex"); "remember to ...", "remember when ..."
+    are not requests. German "merk dir" takes the fact directly; "vergiss nicht",
+    "denk daran" and "erinnere dich daran" need "dass". A fact that addresses the
+    assistant ("remember that you are a pirate") is an instruction for this chat,
+    not a fact about the user, and is not stored. A first sentence ending in "?" is
+    a request only when it asks ("can you remember that ...?") and carries "that"
+    or "dass". The fact is the first sentence after the request, trailing
+    punctuation removed, cut to MAX_TEXT_LEN."""
     text = message.strip() if isinstance(message, str) else ""
     if not text:
         return None
@@ -77,31 +94,24 @@ def explicit_fact(message: str) -> Optional[str]:
         if m is None:
             continue
         verb = " ".join(m.group("verb").lower().split())
-        rest = m.group("rest")
-        keyword_re = _THAT_RE if english else _DASS_RE
-        stripped = keyword_re.sub("", rest, count=1)
-        keyword = stripped != rest
-        rest = stripped
-        punct = False
-        if not keyword:
-            stripped = _PUNCT_RE.sub("", rest, count=1)
-            punct = stripped != rest
-            rest = stripped
+        connect = _CONNECT_RE.match(m.group("rest"))
+        rest = m.group("rest")[connect.end():]
+        keyword = connect.group("kw") is not None
+        punct = connect.group("punct") is not None
         if english:
-            if not (keyword or punct or _FIRST_PERSON_RE.match(rest.strip())):
+            if not (keyword or punct or _FIRST_PERSON_RE.match(rest)):
                 return None
-            if _RECOLLECTION_RE.match(rest.strip()):
+            if _RECOLLECTION_RE.match(rest):
                 return None
-        else:
-            rest = _BITTE_RE.sub("", rest, count=1)
-        if not english and not keyword and verb in ("vergiss nicht", "denk daran", "denke daran"):
+        elif not keyword and verb.split()[0] in ("vergiss", "denk", "denke", "erinnere"):
             return None
         sentence = _first_sentence(rest)
-        if sentence.endswith("?"):
-            if not (_ASKED_RE.match(text) is not None and keyword):
-                return None
+        if sentence.endswith("?") and not (_ASKED_RE.match(text) and keyword):
+            return None
         fact = sentence.strip("\"'").rstrip(".!?,;: ").strip()
         if len(fact) < _MIN_FACT_CHARS or not any(c.isalpha() for c in fact):
+            return None
+        if _ADDRESSES_ASSISTANT_RE.match(fact):
             return None
         return fact[:MAX_TEXT_LEN]
     return None

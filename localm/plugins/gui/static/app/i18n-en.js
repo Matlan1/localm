@@ -184,6 +184,7 @@ export const I18N_EN = {
   "chat.memory": "Memory - remind the model what it knows about you",
   "chat.memory.exists": "Already in memory: {text}",
   "chat.memory.full": "Memory is full, so this was not saved. Delete a fact in Memory first.",
+  "chat.memory.off": "Not saved: memory is off (privacy mode, or the memory switch is off).",
   "chat.memory.saveFailed": "Could not save this to memory.",
   "chat.memory.saved": "Saved to memory: {text}",
   "chat.memory.title":

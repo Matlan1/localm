@@ -58,8 +58,10 @@ def test_extract_parses_json_behind_think_block():
     assert [f["text"] for f in facts] == ["User prefers metric units"]
 
 
-def test_extract_all_think_reply_yields_nothing():
-    assert extract(lambda p: THINK_ONLY, SESSION) == []
+def test_extract_all_think_reply_is_an_error_and_leaks_nothing():
+    from localm.memory import ConsolidationReplyError
+    with pytest.raises(ConsolidationReplyError, match="reasoning"):
+        extract(lambda p: THINK_ONLY, SESSION)
 
 
 def test_parse_json_object_balanced_span_fallback():
@@ -130,25 +132,28 @@ def test_webtool_final_answer_all_think_is_honest():
     assert "reasoning" in out and "truncated" in out
 
 
-def test_run_memory_reports_reasoning_only_replies(monkeypatch):
-    # When extraction finds nothing AND replies were empty after the strip,
-    # the job result must carry the caveat, not read as a clean no-op.
+def test_run_memory_fails_on_reasoning_only_replies(tmp_path, monkeypatch):
+    # A model reply that is all reasoning holds no fact list: the job fails with
+    # that reason instead of reading as a clean "no new durable facts".
     from localm.plugins.builtin.jobs import runner
-
-    def fake_synthesize(complete):
-        complete("extract prompt")           # exercises the wrapper's counter
-        return {"status": "ok", "added": 0, "facts": []}
-
     import localm.plugins.builtin.memory.plug as chat_plug
-    monkeypatch.setattr(chat_plug, "synthesize_memory", fake_synthesize)
+
+    monkeypatch.setenv("LOCALM_MODE", "log")
+    monkeypatch.setattr(chat_plug, "_home", lambda: tmp_path)
+    monkeypatch.setattr(chat_plug, "_memory_root", lambda: tmp_path / "memory")
+    monkeypatch.setattr(chat_plug, "_embed_fn", lambda: None)
+    (tmp_path / "sessions").mkdir()
+    rows = [{"type": "user", "data": {"content": "my name is Ada and I prefer metric"}}]
+    (tmp_path / "sessions" / "s.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in rows), encoding="utf-8")
 
     class _Eng:
         def chat_stream(self, messages, **kw):
             yield THINK_ONLY
 
     job = type("J", (), {"task_kind": "memory", "prompt": "", "model": None})()
-    out = runner._run_memory(job, engine=_Eng())
-    assert "only reasoning output" in out
+    with pytest.raises(RuntimeError, match="could not be read"):
+        runner._run_memory(job, engine=_Eng())
 
 
 # ------------------------------------------------------ compaction summary #

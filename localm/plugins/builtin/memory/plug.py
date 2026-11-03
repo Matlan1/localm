@@ -684,6 +684,7 @@ def _model_failed_detail(res: dict) -> str:
 _CONVERSATION_ASSISTANT_CHARS = 600
 _CONVERSATION_MAX_ROWS = 200
 _CONVERSATION_ROW_CHARS = 50_000
+_CONVERSATION_USER_CHARS = 2000
 
 
 def _message_text(message: dict) -> str:
@@ -705,8 +706,10 @@ def _conversation_text(messages, max_chars: int = 8000) -> str:
     ``_CONVERSATION_MAX_ROWS`` rows are read. A user row the client marked with an
     ``origin`` (web results, notes) is skipped: it is not the user's words. The
     assistant's reasoning is removed and each assistant row is cut to
-    ``_CONVERSATION_ASSISTANT_CHARS``, so a long reply cannot crowd out what the
-    user said; a row is read up to ``_CONVERSATION_ROW_CHARS``. "" when there is no usable turn."""
+    ``_CONVERSATION_ASSISTANT_CHARS`` and each user row to
+    ``_CONVERSATION_USER_CHARS``, so one long reply or paste cannot crowd out the
+    rest of what the user said; an assistant row is read up to
+    ``_CONVERSATION_ROW_CHARS`` before its reasoning is removed. "" when there is no usable turn."""
     from localm.inference.protocol import is_user_written, user_written_text
     from localm.textnorm import strip_think
     rows = [m for m in (messages or []) if isinstance(m, dict)][-_CONVERSATION_MAX_ROWS:]
@@ -717,7 +720,7 @@ def _conversation_text(messages, max_chars: int = 8000) -> str:
         if role == "user":
             if not is_user_written(m):
                 continue
-            who, text = "User", user_written_text(m)[:_CONVERSATION_ROW_CHARS]
+            who, text = "User", user_written_text(m)[:_CONVERSATION_USER_CHARS]
         elif role == "assistant":
             who = "Assistant"
             text = strip_think(_message_text(m)[:_CONVERSATION_ROW_CHARS])[:_CONVERSATION_ASSISTANT_CHARS]
@@ -1268,11 +1271,10 @@ def _auto_stamp(now: float) -> None:
         logger.debug("memory auto-consolidate: could not stamp marker: %s", e)
 
 
-def _auto_consolidate_bg(principal: str | None = None, conversation: str = "") -> None:
+def _auto_consolidate_bg(principal: str | None = None) -> None:
     """Run one consolidation pass in the background, binding the model to the
-    stashed engine, over *conversation* (the chat turn that triggered it) or, when
-    that is empty, the session logs. Never raises (a daemon thread); clears the
-    in-progress flag and stamps the marker when done."""
+    stashed engine. Never raises (a daemon thread); clears the in-progress flag and
+    stamps the marker when done."""
     global _auto_running
     from localm.debuglog import logger, debug_content_enabled
     deferred = False
@@ -1301,8 +1303,7 @@ def _auto_consolidate_bg(principal: str | None = None, conversation: str = "") -
         from localm.inference.http_server import driving_engine
         try:
             with driving_engine(eng):
-                res = synthesize_memory(complete, principal=principal,
-                                        conversation=conversation)
+                res = synthesize_memory(complete, principal=principal)
         except BackgroundYield:
             deferred = True
             logger.info("memory auto-consolidate: a chat request is waiting for the "
@@ -1331,7 +1332,7 @@ def _auto_consolidate_bg(principal: str | None = None, conversation: str = "") -
             _auto_running = False
 
 
-def _maybe_auto_consolidate(principal: str | None = None, conversation: str = "") -> None:
+def _maybe_auto_consolidate(principal: str | None = None) -> None:
     """Best-effort trigger for the debounced background consolidation. Cheap when
     not due (a timestamp compare under a lock); spawns at most one daemon thread.
     Gated on config + privacy + model-loaded so it never runs a write the mode
@@ -1373,8 +1374,7 @@ def _maybe_auto_consolidate(principal: str | None = None, conversation: str = ""
         # Stamp immediately so a burst of concurrent turns cannot each spawn a pass
         # before the first finishes (the finally-stamp refreshes it).
         _auto_stamp(now)
-    _threading.Thread(target=lambda: _auto_consolidate_bg(principal, conversation),
-                      daemon=True).start()
+    _threading.Thread(target=lambda: _auto_consolidate_bg(principal), daemon=True).start()
 
 
 # ------------------------------------------------------------------ #
@@ -1540,10 +1540,7 @@ def _memory_outlet(text, messages, ctx):
         # Owner (ADMIN scope) collapses to the shared "owner" namespace, matching
         # memory_principal on the request-based paths and the recall inlet. Shared with
         # _memory_inlet via _ctx_principal, so reads and writes use one namespace.
-        _maybe_auto_consolidate(
-            _ctx_principal(ctx),
-            _conversation_text([*messages, {"role": "assistant", "content": text}])
-            if isinstance(text, str) else _conversation_text(messages))
+        _maybe_auto_consolidate(_ctx_principal(ctx))
     except Exception as e:
         from localm.debuglog import logger
         logger.debug("memory outlet skipped: %s", e)
@@ -1598,12 +1595,31 @@ def _stash_memory_used(ctx, records, diag) -> None:
         logger.debug("memory stash skipped: %s", e)
 
 
+def _note_unsaved_request(messages, ctx) -> None:
+    """Record in ``ctx.state["memory_saved"]`` (status "off") that the latest user
+    message asked to remember something while memory is off (privacy mode or the
+    memory switch), so the reply says nothing was saved. Stores nothing."""
+    if ctx is None:
+        return
+    try:
+        from localm.inference.protocol import is_user_written, user_written_text
+        from localm.memory import explicit_fact
+        last = next((m for m in reversed(messages) if m.get("role") == "user"), None)
+        if last is not None and is_user_written(last):
+            fact = explicit_fact(user_written_text(last))
+            if fact:
+                ctx.state["memory_saved"] = {"text": fact, "status": "off"}
+    except Exception as e:
+        from localm.debuglog import logger
+        logger.debug("memory: could not check for a remember request: %s", e)
+
+
 def _remember_explicit(messages, ctx) -> None:
     """Store the fact the latest user message asks to remember ("remember that
     ...", "merk dir ..."), without the model. The outcome goes to
     ``ctx.state["memory_saved"]`` for the response header: ``{"text", "status"}``
     with status "saved", "exists" (the same fact is already stored) or "full" (the
-    store is at its cap). Only the user's own words count; a user row the client
+    store is at its cap); "off" and "failed" are set by the callers. Only the user's own words count; a user row the client
     marked with an ``origin`` is not examined. Blocking (embedder); the caller runs
     it off the loop. Nothing is stored in privacy mode."""
     if ctx is None or not _persist_enabled():
@@ -1646,9 +1662,12 @@ def _memory_inlet(messages, ctx, announce=None):
     ``RECALLING_MEMORY_STATUS`` just before the recall itself."""
     if ctx is not None and ctx.state.get("client_id") == "coder":
         return None
-    if not _recall_enabled():
-        return None
+    recall_on = _recall_enabled()
     writes_ok = _persist_enabled()
+    if not (recall_on and writes_ok):
+        _note_unsaved_request(messages, ctx)
+    if not recall_on:
+        return None
     # Privacy mode: fully off unless the user opted into read-only recall for chat.
     if not writes_ok and not _recall_in_privacy("chat"):
         return None

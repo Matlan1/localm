@@ -178,7 +178,7 @@ def test_privacy_mode_writes_nothing_and_never_calls_the_model(tmp_path, monkeyp
     assert chat.status_code == 200
     assert script.extract_prompts == []
     assert not (tmp_path / "memory").exists() or not _store(tmp_path).all()
-    assert chat.headers.get("X-Localm-Memory") is None
+    assert json.loads(chat.headers["X-Localm-Memory"])["saved"]["status"] == "off"
 
 
 def test_the_conversation_text_keeps_the_users_words_and_drops_the_rest():
@@ -196,6 +196,34 @@ def test_the_conversation_text_keeps_the_users_words_and_drops_the_rest():
     assert "secret" not in text and "WEB RESULT" not in text and "SYSTEM" not in text
     assert len(text) < 1200, "a long assistant reply does not crowd out the user"
     assert plug._conversation_text([]) == "" and plug._conversation_text(None) == ""
+
+
+def test_one_long_paste_does_not_drop_the_users_earlier_facts():
+    rows = [{"role": "user", "content": "I am Tom and i love rpg games"},
+            {"role": "assistant", "content": "hi"},
+            {"role": "user", "content": "z" * 9000},
+            {"role": "assistant", "content": "ok"}]
+    text = plug._conversation_text(rows)
+    assert "I am Tom and i love rpg games" in text
+    assert text.count("z") <= plug._CONVERSATION_USER_CHARS
+
+
+@pytest.mark.parametrize("reply", [
+    '{"facts": ["User loves RPG-style games"]}',
+    '{"facts": [{"text": "User loves RPG-style games", "confidence": 0.9}]}',
+], ids=["bare-strings", "text-key"])
+def test_common_small_model_fact_shapes_are_read(tmp_path, monkeypatch, reply):
+    app, hdr = _make(tmp_path, monkeypatch, Script(extract=(reply,)))
+    with TestClient(app) as c:
+        r = _consolidate(c, hdr)
+    assert r.status_code == 200 and r.json()["facts"] == ["User loves RPG-style games"]
+
+
+def test_a_fact_list_with_nothing_readable_in_it_is_a_failure(tmp_path, monkeypatch):
+    app, hdr = _make(tmp_path, monkeypatch, Script(extract=('{"facts": [42, null, {}]}',)))
+    with TestClient(app) as c:
+        r = _consolidate(c, hdr)
+    assert r.status_code == 500 and "could not be read" in r.json()["detail"]
 
 
 def test_the_conversation_text_keeps_the_newest_turns_within_the_cap():
@@ -305,6 +333,7 @@ def test_memory_off_stores_nothing(tmp_path, monkeypatch):
         r = _chat(c, "remember that i love to play rpg style games")
     assert r.status_code == 200
     assert not _store(tmp_path).all()
+    assert json.loads(r.headers["X-Localm-Memory"])["saved"]["status"] == "off"
 
 
 # -------------------------------------------------------- the phrase set ---- #
@@ -320,6 +349,18 @@ def test_memory_off_stores_nothing(tmp_path, monkeypatch):
     ("Merk dir, dass ich gerne RPGs spiele", "ich gerne RPGs spiele"),
     ("merk dir bitte meinen Namen: Tom", "meinen Namen: Tom"),
     ("Vergiss nicht, dass ich Vegetarier bin", "ich Vegetarier bin"),
+    ("remember that I love e.g. pasta. And pizza.", "I love e.g. pasta"),
+    ("remember that I work at Acme Inc. in Berlin", "I work at Acme Inc. in Berlin"),
+    ("merk dir, dass ich z.B. Kaffee mag", "ich z.B. Kaffee mag"),
+    ("remember that Dr. Smith is my doctor", "Dr. Smith is my doctor"),
+    ("merk dir bitte, dass ich Kaffee mag", "ich Kaffee mag"),
+    ("merk dir bitte: ich mag Tee", "ich mag Tee"),
+    ("remember that I love cats\nand dogs", "I love cats and dogs"),
+    ("I want you to remember that I like cats", "I like cats"),
+    ("remember this: I like cats", "I like cats"),
+    ("Kannst du dir merken, dass ich Tee mag?", "ich Tee mag"),
+    ("Erinnere dich daran, dass ich Tee mag", "ich Tee mag"),
+    ("Denk bitte daran, dass ich Tee mag", "ich Tee mag"),
 ])
 def test_explicit_fact_accepts(message, fact):
     assert explicit_fact(message) == fact
@@ -329,7 +370,8 @@ def test_explicit_fact_accepts(message, fact):
     "remember to buy milk", "remember when we went to Rome", "do you remember my name?",
     "denk daran den Muell rauszubringen", "remember that time we met", "remember?",
     "remember", "what do you remember?", "remember what I said", "", "   ", None, 42,
-    "I will remember that", "remember that?",
+    "I will remember that", "remember that?", "Remember that you are a pirate",
+    "remember that's my dog Rex", "denk daran, den Muell rauszubringen",
 ])
 def test_explicit_fact_rejects(message):
     assert explicit_fact(message) is None

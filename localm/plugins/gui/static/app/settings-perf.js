@@ -2195,7 +2195,7 @@ export async function rememberFact(fact) {
 export function memoryConversation(conv = currentConv()) {
   const rows = [];
   for (const m of (conv && conv.messages) || []) {
-    if (isToolEvent(m) || m.origin === "tool") continue;
+    if (isToolEvent(m) || m.origin === "tool" || m.bridge) continue;
     if (m.role === "user") {
       if (m.tag === "kb" || m.tag === "doc") continue;
       rows.push({ role: "user", content: msgText(m) });
@@ -3177,7 +3177,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   // show a "used N memories" chip (survives reload; opens the memory modal).
   if (memUsed && (memUsed.n > 0 || memUsed.saved)) reply.memory = memUsed;
   if (memUsed && memUsed.saved) {
-    toast(memorySavedText(memUsed.saved), memUsed.saved.status === "full" || memUsed.saved.status === "failed");
+    toast(memorySavedText(memUsed.saved), memUsed.saved.status !== "saved" && memUsed.saved.status !== "exists");
   }
   // Save usage on the reply itself, not just the DOM, so tok/s and the context
   // gauge survive a reload instead of only ever having existed on screen for

@@ -83,6 +83,7 @@
   "chat.memory": "Gedächtnis - das Modell an das erinnern, was es über Sie weiß",
   "chat.memory.exists": "Bereits im Gedächtnis: {text}",
   "chat.memory.full": "Das Gedächtnis ist voll, daher wurde nichts gespeichert. Löschen Sie zuerst einen Fakt unter Gedächtnis.",
+  "chat.memory.off": "Nicht gespeichert: Das Gedächtnis ist aus (Privatmodus oder der Gedächtnis-Schalter ist aus).",
   "chat.memory.saveFailed": "Das konnte nicht im Gedächtnis gespeichert werden.",
   "chat.memory.saved": "Im Gedächtnis gespeichert: {text}",
   "chat.memory.title": "Ruft Fakten ab, die localm über Sie gelernt hat, und fügt sie dem Prompt hinzu. Fakten hinzufügen mit /remember, ansehen und bearbeiten mit /memory. Im Privatmodus blockiert.",

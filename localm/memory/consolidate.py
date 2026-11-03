@@ -223,13 +223,12 @@ def extract(complete: Complete, session_text: str, *,
         raise ConsolidationReplyError(_unreadable_reason(raw))
     out: list[dict] = []
     for item in facts:
-        if not isinstance(item, dict):
-            continue
-        text = str(item.get("fact", "")).strip()[:MAX_TEXT_LEN]
+        text, confidence = _fact_item(item)
+        text = text.strip()[:MAX_TEXT_LEN]
         if not text:
             continue
         try:
-            conf = float(item.get("confidence", 0.5))
+            conf = float(confidence)
         except (TypeError, ValueError):
             conf = 0.5
         conf = 0.0 if conf < 0 else 1.0 if conf > 1 else conf
@@ -243,11 +242,28 @@ def extract(complete: Complete, session_text: str, *,
     return out
 
 
+def _fact_item(item) -> tuple:
+    """``(text, confidence)`` of one entry of a model's ``facts`` list: an object
+    with a "fact" (or "text") field, or a bare string. ``("", 0.5)`` for anything
+    else."""
+    if isinstance(item, str):
+        return item, 0.8
+    if isinstance(item, dict):
+        text = item.get("fact", item.get("text", ""))
+        return (text if isinstance(text, str) else str(text)), item.get("confidence", 0.5)
+    return "", 0.5
+
+
 def _fact_list(raw: str) -> Optional[list]:
-    """The ``facts`` list of a model reply, or None when the reply holds none."""
+    """The ``facts`` list of a model reply, or None when the reply holds none or
+    holds entries none of which has a readable fact text."""
     obj = _parse_json_object(strip_think(raw))
     facts = obj.get("facts") if isinstance(obj, dict) else None
-    return facts if isinstance(facts, list) else None
+    if not isinstance(facts, list):
+        return None
+    if facts and not any(_fact_item(item)[0].strip() for item in facts):
+        return None
+    return facts
 
 
 def _is_dup(text: str, existing: list[str], ratio: float = DEDUP_RATIO) -> bool:

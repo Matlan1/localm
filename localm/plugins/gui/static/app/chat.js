@@ -1813,7 +1813,7 @@ export function buildMemoryChip(mem) {
  *  "full" | "failed". */
 export function memorySavedText(saved) {
   const key = { saved: "chat.memory.saved", exists: "chat.memory.exists",
-                full: "chat.memory.full" }[saved && saved.status] || "chat.memory.saveFailed";
+                full: "chat.memory.full", off: "chat.memory.off" }[saved && saved.status] || "chat.memory.saveFailed";
   return t(key, { text: (saved && saved.text) || "" });
 }
 
