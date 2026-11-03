@@ -1441,17 +1441,30 @@ def _plan(root: Path, m: Optional[dict], *, purge_data: bool,
             items.append(it)
 
     # Things kept on purpose, reported so nothing setup did is silent.
-    if m and m.get("uv_shared_installed"):
-        where = shutil.which("uv") or "your user profile"
-        items.append(_Item(where, "report", "keep",
-                           "uv was installed by LocaLM setup; other programs may use it"))
-    if m and m.get("uv_exe") and not m.get("uv_shared_installed"):
-        items.append(_Item(m["uv_exe"], "report", "keep",
-                           "your own uv, which LocaLM setup used but did not install"))
+    from localm.uv_tool import shared_store_dir
+    store = shared_store_dir()
+    if m and not m.get("runtime_contained"):
+        recorded_uv = m.get("uv_exe") or m.get("uv_dir") or ""
+        if recorded_uv and _inside(recorded_uv, store):
+            items.append(_Item(recorded_uv, "report", "keep",
+                               "localm's own uv in its Shared folder; other Shared "
+                               "LocaLM installs may use it"))
+        elif m.get("uv_shared_installed"):
+            items.append(_Item(recorded_uv or "your user profile", "report", "keep",
+                               "uv was installed by LocaLM setup; other programs may use it"))
+        elif m.get("uv_exe"):
+            items.append(_Item(m["uv_exe"], "report", "keep",
+                               "your own uv, which LocaLM setup used but did not install"))
     if m and m.get("venv") and not m.get("runtime_contained"):
-        items.append(_Item("uv's Python and download cache in your user profile",
-                           "report", "keep",
-                           "shared setup - other programs and LocaLM folders may use them"))
+        python_dir = m.get("python_dir") or ""
+        if python_dir and _inside(python_dir, store):
+            items.append(_Item(str(Path(python_dir).parent), "report", "keep",
+                               "localm's Shared folder with its Python and download cache; "
+                               "other Shared LocaLM installs may use them"))
+        else:
+            items.append(_Item("uv's Python and download cache in your user profile",
+                               "report", "keep",
+                               "shared setup - other programs and LocaLM folders may use them"))
     if purge_data:
         for p in _webview_profiles(root):
             items.append(_Item(p, "report", "keep",

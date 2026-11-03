@@ -513,3 +513,28 @@ def test_a_model_outside_a_portable_install_is_registered_in_place(tmp_path, mon
     entry = config.load_registry()["mine"]
     assert _norm(entry["path"]) == _norm(model)
     assert model.is_file() and not (home / "models" / "mine.gguf").exists()
+
+
+@pytest.mark.parametrize("installed_here", [True, False])
+def test_a_shared_uninstall_reports_the_store_uv_never_a_uv_on_path(
+        monkeypatch, tmp_path, installed_here):
+    """The Shared uninstall report names the uv the install record holds in
+    localm's Shared folder, whatever uv PATH would find."""
+    store = tmp_path / "profile" / "localm" / "shared"
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "profile"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "profile"))
+    decoy = tmp_path / "onpath" / "uv.exe"
+    monkeypatch.setattr(install_manifest.shutil, "which", lambda *a, **k: str(decoy))
+    root = tmp_path / "install"
+    root.mkdir()
+    store_uv = store / "uv" / ("uv.exe" if os.name == "nt" else "uv")
+    m = {"venv": str(root / ".venv"), "runtime_contained": False,
+         "uv_exe": str(store_uv), "uv_dir": str(store / "uv"),
+         "python_dir": str(store / "python"), "cache_dir": str(store / "cache"),
+         "uv_shared_installed": installed_here}
+    items, _ = install_manifest._plan(root, m, purge_data=False, defer_runtime=False)
+    reports = [(i.path, i.reason) for i in items if i.kind == "report"]
+    assert (str(store_uv), "localm's own uv in its Shared folder; other Shared LocaLM "
+            "installs may use it") in reports, reports
+    assert any(p == str(store) and "Shared folder" in r for p, r in reports), reports
+    assert all(str(decoy) not in p and "your own uv" not in r for p, r in reports), reports
