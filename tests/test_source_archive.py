@@ -61,7 +61,7 @@ def test_fetch_writes_the_tree_and_its_record(monkeypatch, tmp_path):
     assert (tmp_path / "dest" / "sub" / "b.txt").read_text(encoding="utf-8") == "2\n"
     assert sa.tree_commit(tmp_path / "dest") == commit
     assert sa.tree_files(tmp_path / "dest") == files
-    assert [p.name for p in tmp_path.iterdir()] == sorted(["hub", "dest"])
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["dest", "hub"]
 
 
 def test_an_archive_of_another_commit_is_refused(monkeypatch, tmp_path):
@@ -86,12 +86,39 @@ def test_a_pinned_commit_with_the_wrong_sha256_is_refused(monkeypatch, tmp_path)
 
 def test_the_shipped_pins_carry_a_sha256():
     from localm.media import managed_comfy_fresh as fresh
-    assert fresh.COMFYUI_PINNED_COMMIT in sa.ARCHIVE_SHA256
-    for node in fresh.required_custom_nodes().nodes:
-        assert node.commit in sa.ARCHIVE_SHA256, node.name
+    pins = [(fresh.COMFYUI_REPO, fresh.COMFYUI_PINNED_COMMIT)]
+    pins += [(n.repo, n.commit) for n in fresh.required_custom_nodes().nodes]
+    missing = [sa.archive_url(repo, commit) for repo, commit in pins
+               if commit not in sa.ARCHIVE_SHA256]
+    assert missing == [], ("add the sha256 of each archive to ARCHIVE_SHA256 in "
+                           "localm/media/source_archive.py: " + ", ".join(missing))
 
 
-@pytest.mark.parametrize("bad", ["../evil.py", "/abs.py", "a/../../evil.py", "C:/x.py"])
+def test_a_cut_off_download_is_an_archive_error(monkeypatch, tmp_path):
+    import http.client
+
+    from localm import http_ssl
+    from localm.model_manager import pull
+
+    class _Body:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, *a):
+            raise http.client.IncompleteRead(b"partial", 100)
+
+    monkeypatch.setattr(pull, "_ssrf_resolve_final_url", lambda url: url)
+    monkeypatch.setattr(http_ssl, "verified_urlopen", lambda req, timeout=None: _Body())
+    with pytest.raises(sa.ArchiveError, match="IncompleteRead"):
+        sa.download("https://codeload.github.com/o/R/zip/" + "a" * 40, tmp_path / "a.zip")
+
+
+@pytest.mark.parametrize("bad", ["../evil.py", "/abs.py", "a/../../evil.py", "C:/x.py",
+                                 "a/D:/escaped.py", "a/..\\..\\evil.py",
+                                 ".git/HEAD", ".GIT/config"])
 def test_an_unsafe_path_is_refused(monkeypatch, tmp_path, bad):
     commit = fake_commit(bad)
     zpath = tmp_path / "a.zip"
@@ -218,3 +245,22 @@ def test_a_record_is_ignored_once_the_git_checkout_moved(tmp_path):
     (dot / "HEAD").write_text("3" * 40 + "\n", encoding="utf-8")
     assert sa.tree_commit(root) == "3" * 40
     assert sa.tree_files(root) is None
+
+
+@pytest.mark.parametrize("bad", ["a\\b.py", "a/x:y.py", "a/b\0.py", ".git/HEAD", ""])
+def test_safe_name_refuses_names_windows_reads_as_another_path(bad):
+    assert sa._safe_name(bad) is None
+    assert sa._safe_name("a/b.py") == "a/b.py"
+
+
+def test_a_file_renamed_by_case_only_keeps_its_new_name_and_rolls_back(tmp_path):
+    root = _tree(tmp_path, "root", {"Foo.py": "old", "main.py": "m"}, "1" * 40)
+    new = _tree(tmp_path, "new", {"foo.py": "new", "main.py": "m"}, "2" * 40)
+    change = sa.apply_tree(new, root, sa.tree_files(root), tmp_path / "backup")
+    names = sorted(p.name for p in root.iterdir())
+    assert names == sorted([sa.SOURCE_RECORD, "foo.py", "main.py"])
+    assert (root / "foo.py").read_text(encoding="utf-8") == "new"
+    assert change.rollback() == []
+    names = sorted(p.name for p in root.iterdir())
+    assert names == sorted([sa.SOURCE_RECORD, "Foo.py", "main.py"])
+    assert (root / "Foo.py").read_text(encoding="utf-8") == "old"

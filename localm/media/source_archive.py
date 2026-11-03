@@ -19,6 +19,7 @@ with no git program.
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -27,6 +28,7 @@ import struct
 import tempfile
 import urllib.request
 import zipfile
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Callable, Optional
@@ -79,8 +81,8 @@ def download(url: str, dest: Path) -> None:
             shutil.copyfileobj(r, f, 256 * 1024)
     except netpolicy.NetworkPolicyError as e:
         raise ArchiveError(f"the download was refused by the network policy: {e}") from None
-    except (OSError, ValueError) as e:
-        raise ArchiveError(f"downloading {url} failed: {e}") from None
+    except (OSError, ValueError, http.client.HTTPException) as e:
+        raise ArchiveError(f"downloading {url} failed: {e!r}") from None
 
 
 def _long(path: Path) -> Path:
@@ -95,9 +97,15 @@ def _long(path: Path) -> Path:
 
 def _safe_name(name: str) -> Optional[str]:
     """*name* (a path inside the archive, below its top folder) as a relative
-    POSIX path, or None when it is empty, absolute or climbs out."""
+    POSIX path, or None when it is empty, absolute, climbs out, lies inside a
+    ``.git`` folder, or has a part holding a drive colon, a backslash or a NUL
+    (each of which Windows reads as a path of its own)."""
     p = PurePosixPath(name)
-    if not name or p.is_absolute() or ".." in p.parts or ":" in p.parts[0]:
+    if not name or p.is_absolute() or ".." in p.parts or not p.parts:
+        return None
+    if p.parts[0].casefold() == ".git":
+        return None
+    if any(c in part for part in p.parts for c in (":", "\\", "\0")):
         return None
     return p.as_posix()
 
@@ -127,8 +135,12 @@ def _unpack(archive: Path, dest: Path, commit: str) -> list[str]:
                 raise ArchiveError(f"the source archive holds an unsafe path {info.filename!r}")
             out = base.joinpath(*rel.split("/"))
             out.parent.mkdir(parents=True, exist_ok=True)
-            with zf.open(info) as src, open(out, "wb") as dst:
-                shutil.copyfileobj(src, dst)
+            try:
+                with zf.open(info) as src, open(out, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+            except (zipfile.BadZipFile, zlib.error, EOFError) as e:
+                raise ArchiveError(f"the source archive is damaged at {info.filename!r}: "
+                                   f"{e}") from None
             mode = info.external_attr >> 16
             if os.name == "posix" and mode & 0o111:
                 out.chmod(0o755)
@@ -368,6 +380,7 @@ class TreeChange:
         for rel in self.saved:
             src, dst = self.backup / rel, self.root / rel
             try:
+                dst.unlink(missing_ok=True)
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, dst)
             except OSError:
@@ -383,7 +396,9 @@ def apply_tree(new: Path, root: Path, old_files: Optional[list[str]],
                backup: Path) -> TreeChange:
     """Make the source files of *root* those of the tree in *new*: every file of
     *new* is written into *root*, and every file of *old_files* (the files of the
-    tree *root* held) that *new* lacks is removed. Files that are in neither (a
+    tree *root* held) that *new* lacks is removed, before any file is written, so
+    a file renamed by case only ends with the new name on a case-insensitive
+    filesystem too. Files that are in neither (a
     venv, models, outputs, installed custom nodes) are not touched. Each file
     overwritten or removed is first copied to *backup*, which must not exist.
     When *root* is a git checkout, the record written into it also holds the
@@ -406,12 +421,12 @@ def apply_tree(new: Path, root: Path, old_files: Optional[list[str]],
                 change.saved.append(rel)
             elif rel not in removed:
                 change.created.append(rel)
+        for rel in removed:
+            (root / rel).unlink(missing_ok=True)
         for rel in written:
             target = root / rel
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(new / rel, target)
-        for rel in removed:
-            (root / rel).unlink(missing_ok=True)
         head = git_head(root)
         rec = read_record(root)
         if head is not None and rec is not None:

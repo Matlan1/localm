@@ -795,6 +795,28 @@ def test_a_dropped_comfy_snapshot_leaves_nothing_and_is_never_restored(tmp_path,
     assert (root / "main.py").read_text(encoding="utf-8") == "v1 patched\n"
 
 
+def test_a_comfy_snapshot_an_older_localm_kept_is_restored_without_git(tmp_path, home,
+                                                                       monkeypatch):
+    from localm.media import managed_comfy_fresh as f
+    root, old, new, _site = _comfy(home)
+    _git(root, "checkout", "-q", "--force", new)
+    hub = FakeGitHub(tmp_path / "hub").install(monkeypatch)
+    owner, repo = f.COMFYUI_REPO.removesuffix(".git").split("/")[-2:]
+    hub.add(owner, repo, {"main.py": "v1\n"}, commit=old)
+    src = tmp_path / "snap"
+    src.mkdir()
+    (src / "comfy.patch").write_text("diff --git a/main.py b/main.py\n", encoding="utf-8")
+    (src / "comfy-marker.json").write_text(json.dumps({"commit": old}), encoding="utf-8")
+    monkeypatch.setattr(uc, "_stop_comfy", lambda r, say: [])
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("a program was started"))
+    errors = uc._restore_comfy(root, src, {"commit": old, "nodes": {}}, lambda m: None)
+    assert errors == []
+    assert source_archive.tree_commit(root) == old
+    assert (root / "main.py").read_text(encoding="utf-8") == "v1\n"
+    assert json.loads((root / ".localm-comfy.json").read_text(encoding="utf-8")) == {"commit": old}
+    assert hub.requested == [source_archive.archive_url(f.COMFYUI_REPO, old)]
+
+
 def test_a_comfy_on_a_commit_the_user_chose_is_kept_and_named(tmp_path, home):
     root, old, new, _site = _comfy(home, version_label=None)
     staged = _write_tree(tmp_path / "s", _files("0.3.2", comfy=(new, "v0.43.0")))

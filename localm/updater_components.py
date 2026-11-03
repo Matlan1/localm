@@ -1057,6 +1057,54 @@ def _restore_tree(kept: Path, root: Path) -> list:
     return []
 
 
+def _restore_fetched(repo: str, commit: str, root: Path) -> list:
+    """Make the source files of the tree at *root* those of *commit* of the
+    GitHub repository *repo*, fetched as a source archive. Returns the
+    failures."""
+    from localm.media import managed_comfy as mc
+    from localm.media import source_archive
+    staging = root.parent / f".{root.name}-fetch-{os.getpid()}"
+    if staging.exists():
+        mc.rmtree_robust(staging)
+    try:
+        try:
+            source_archive.fetch_tree(repo, commit, staging)
+        except (source_archive.ArchiveError, OSError) as e:
+            return [f"{root}: could not fetch {commit[:12]}: {e}"]
+        return _restore_tree(staging, root)
+    finally:
+        if staging.exists():
+            mc.rmtree_robust(staging)
+
+
+def _restore_comfy_legacy(root: Path, info: dict) -> list:
+    """Put back the source of a managed ComfyUI kept by an older localm (its
+    commit and its custom nodes' commits, no copy of the files): each tree is
+    fetched at its commit and written over the current one, then localm's patch
+    set is applied again. Returns the failures."""
+    from localm.media import managed_comfy_fresh as fresh
+    from localm.media import source_archive
+    from localm.media.comfy_patches import apply_patches
+    errors = [f"managed ComfyUI: {e}"
+              for e in _restore_fetched(fresh.COMFYUI_REPO, info["commit"], root)]
+    if errors:
+        return errors
+    repos = {n.name: n.repo for n in fresh.required_custom_nodes().nodes}
+    for name, commit in (info.get("nodes") or {}).items():
+        node = root / "custom_nodes" / name
+        if not node.is_dir() or source_archive.tree_commit(node) == commit:
+            continue
+        if name not in repos:
+            errors.append(f"managed ComfyUI: custom node {name}: localm does not know where "
+                          f"to fetch {str(commit)[:12]} from")
+            continue
+        errors += [f"managed ComfyUI: custom node {name}: {e}"
+                   for e in _restore_fetched(repos[name], commit, node)]
+    errors += [f"managed ComfyUI: patch {o.name}: {o.detail}"
+               for o in apply_patches(root) if not o.ok]
+    return errors
+
+
 def _restore_comfy(root: Path, src: Path, info: dict, say: Callable) -> list:
     """Put the managed ComfyUI kept in *src* back at *root*: its source files,
     marker, custom nodes' source files and venv. Returns the failures."""
@@ -1071,10 +1119,14 @@ def _restore_comfy(root: Path, src: Path, info: dict, say: Callable) -> list:
         return [f"the managed ComfyUI was not restored: {busy}"]
     try:
         say(f"Restoring the managed ComfyUI ({info['commit'][:12]})...")
-        errors += [f"managed ComfyUI: {e}" for e in _restore_tree(src / "comfy-src", root)]
+        legacy = not (src / "comfy-src").exists() and (src / "comfy.patch").exists()
+        if legacy:
+            errors += _restore_comfy_legacy(root, info)
+        else:
+            errors += [f"managed ComfyUI: {e}" for e in _restore_tree(src / "comfy-src", root)]
         if errors:
             return errors
-        for name in (info.get("nodes") or {}):
+        for name in ({} if legacy else (info.get("nodes") or {})):
             node, kept = root / "custom_nodes" / name, src / "comfy-nodes" / name
             if node.is_dir() and kept.is_dir():
                 errors += [f"managed ComfyUI: custom node {name}: {e}"
@@ -1162,7 +1214,8 @@ def _drop_one(src: Path, name: str, info: Optional[dict]) -> None:
     elif (info or {}).get("venv_copy"):
         _warn("update: not removing %s: it is not a venv copy of %s",
               (info or {}).get("venv_copy"), src)
-    extra = {"uv": [_KEPT_UV], "comfyui": ["comfy-src", "comfy-nodes", "comfy-marker.json"]}.get(name, [])
+    extra = {"uv": [_KEPT_UV], "comfyui": ["comfy-src", "comfy-nodes", "comfy.patch",
+                                                        "comfy-marker.json"]}.get(name, [])
     for rel in extra:
         p = src / rel
         try:
