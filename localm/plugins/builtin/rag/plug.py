@@ -251,7 +251,7 @@ def _image_refusal_message(model: Optional[str], response, detail: str) -> str:
     routing: dict = {}
     try:
         routing = json.loads(response.headers.get("X-Localm-Model-Routing") or "{}")
-    except (ValueError, AttributeError):
+    except Exception:
         # A header that does not parse adds no detail; the refusal still carries
         # the server's own text.
         pass

@@ -257,6 +257,12 @@ class TestKnowledgeImageDescription:
         ragplug._make_self_describe_image(base, lambda: "plain")(
             b"\x89PNG\r\n\x1a\n" + b"0" * 16, "image/png")
         assert hs._resolve_unnamed_model_name() == "plain"
+        import requests
+        reply = requests.post(
+            f"{base}/chat/completions", timeout=30,
+            json={"messages": [{"role": "user", "content": "hi"}], "stream": False})
+        assert reply.status_code == 200, reply.text
+        assert engines["plain"].answered == 1
         assert engines["plain"].loaded
 
     def _describe_with_vision_models(self, live, monkeypatch, registry_edit):
