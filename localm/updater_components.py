@@ -1106,6 +1106,8 @@ def _restore_venv(copy: Path, venv: Path, *, own: bool = False, only=None) -> li
         d = pr.parent
         while d != venv_r and venv_r in d.parents:
             try:
+                if [e.name for e in d.iterdir()] == ["__pycache__"]:
+                    shutil.rmtree(d / "__pycache__", ignore_errors=True)
                 d.rmdir()
             except OSError:
                 break
@@ -1266,16 +1268,27 @@ def _snapshot_torch(installed_root: Path, dest: Path) -> dict:
 
 
 def _restore_torch(installed_root: Path, src: Path, info: dict, say: Callable) -> list:
+    """Put back what the PyTorch step changed (``"dists"``, every distribution
+    that differs when unrecorded). Nothing is stopped when nothing differs."""
+    copy = _own_copy(info, src)
+    if copy is None:
+        return [f"PyTorch stack: {info.get('venv_copy')} is not a venv copy of {src}"]
+    venv = installed_root / ".venv"
+    changed = venv_changes(copy, venv)
+    if changed is None:
+        return [f"could not find the packages of {venv} or of its copy {copy}"]
+    only = info.get("dists")
+    if isinstance(only, list):
+        changed = [n for n in changed if n in only]
+    if not changed:
+        return []
     left = _stop_torch_holders(installed_root, say)
     if left:
         from localm import updater_runtime
         return ["the PyTorch stack is in use, so it was not restored: "
                 + updater_runtime.describe_holders(left)]
     say("Restoring the PyTorch stack...")
-    copy = _own_copy(info, src)
-    if copy is None:
-        return [f"PyTorch stack: {info.get('venv_copy')} is not a venv copy of {src}"]
-    return _restore_venv(copy, installed_root / ".venv")
+    return _restore_venv(copy, venv, only=changed)
 
 
 def _touches_torch(copy: Path, venv: Path, changed: list) -> bool:
@@ -1299,37 +1312,42 @@ def _touches_torch(copy: Path, venv: Path, changed: list) -> bool:
     return False
 
 
-def record_deps_changes(src, root, *, backup_version: Optional[str] = None) -> None:
-    """Record, in the :data:`DEPS` entry of the snapshot *src*, the
-    distributions the dependency step changed in the venv of the install at
-    *root* (``"dists"``), so a rollback puts back only those and leaves what
-    was installed later (a plugin's packages), and the version the update
-    backup holds (*backup_version*, :func:`deps_snapshot_is_for`). Raises
-    OSError when it cannot be recorded."""
+def record_changes(src, name: str, root) -> None:
+    """Record, in the entry *name* (:data:`DEPS` or ``"pytorch"``) of the snapshot
+    *src*, the distributions that step changed in the venv of the install at
+    *root* (``"dists"``), so a rollback puts back only those and leaves what was
+    installed later (a plugin's packages). Raises OSError when it cannot be
+    recorded."""
     src = Path(src)
     state = _read_json(src / STATE_FILE)
-    info = (state or {}).get("components", {}).get(DEPS) if state else None
+    info = (state or {}).get("components", {}).get(name) if state else None
     copy = _own_copy(info, src)
     if info is None or copy is None:
-        raise OSError(f"{src} holds no venv copy")
-    changed = venv_changes(copy, Path(root) / ".venv", own=True)
+        raise OSError(f"{src} holds no venv copy for {name}")
+    changed = venv_changes(copy, Path(root) / ".venv", own=name == DEPS)
     if changed is None:
         raise OSError(f"could not read the packages of {Path(root) / '.venv'}")
     info["dists"] = changed
-    info["backup_version"] = backup_version
     (src / STATE_FILE).write_text(json.dumps(state), encoding="utf-8")
 
 
-def deps_snapshot_is_for(src, backup_version: Optional[str]) -> bool:
-    """Whether the :data:`DEPS` entry of the snapshot *src* belongs to the update
-    whose backup holds *backup_version*. False when it names another version:
-    a build without these snapshots applied a later update and replaced the
-    backup, so that venv copy is not what a rollback of that update puts back.
-    True when the entry names no version."""
-    state = _read_json(Path(src) / STATE_FILE) or {}
-    info = (state.get("components") or {}).get(DEPS) or {}
-    kept = info.get("backup_version")
-    return not kept or not backup_version or kept == backup_version
+def backup_version(backup_dir) -> Optional[str]:
+    """The version the update backup *backup_dir* holds, or None when it cannot
+    be read."""
+    try:
+        return (Path(backup_dir) / "VERSION").read_text(encoding="utf-8").strip() or None
+    except (OSError, ValueError):
+        return None
+
+
+def snapshot_is_for(src, version: Optional[str]) -> bool:
+    """Whether the snapshot *src* belongs to the update whose backup holds
+    *version*. False when it names another version: a build without these
+    snapshots applied a later update and replaced the backup, so what it keeps
+    is not what a rollback of that update puts back. True when either is
+    unknown."""
+    kept = (_read_json(Path(src) / STATE_FILE) or {}).get("backup_version")
+    return not kept or not version or kept == version
 
 
 def snapshot_readable(src) -> bool:
@@ -1440,14 +1458,16 @@ def _drop_one(src: Path, name: str, info: Optional[dict]) -> None:
             _warn("update: could not remove the kept %s: %s", p, e)
 
 
-def snapshot(names, dest, *, root, home=None, add: bool = False) -> dict:
+def snapshot(names, dest, *, root, home=None, add: bool = False,
+             for_backup: Optional[str] = None) -> dict:
     """Keep the components *names* of the install at *root* in *dest* and
     return the state :func:`restore` reads, also written to
     ``<dest>/state.json``. An earlier snapshot in *dest* is discarded first;
     with *add* it is kept instead and only the components it does not hold yet
     are added (what it already holds is the older state, the one a rollback
-    needs). Raises OSError; what this call kept is removed again when the
-    snapshot cannot be completed."""
+    needs). *for_backup* names the version the update backup holds
+    (:func:`snapshot_is_for`). Raises OSError; what this call kept is removed
+    again when the snapshot cannot be completed."""
     dest = Path(dest)
     root = Path(root)
     loaded = _read_json(dest / STATE_FILE) if add else None
@@ -1457,6 +1477,8 @@ def snapshot(names, dest, *, root, home=None, add: bool = False) -> dict:
         discard(dest)
     elif loaded is not None:
         state = loaded
+    if for_backup and not state.get("backup_version"):
+        state["backup_version"] = for_backup
     dest.mkdir(parents=True, exist_ok=True)
     added: list = []
     try:
@@ -1716,9 +1738,13 @@ def finish_pending(*, root=None, home=None, runner: Optional[Callable] = None,
         _write_status(status, root, installed_version)
         return status
 
-    snap = snapshot_dir(updater._backup_dir(create=True))
+    backup = updater._backup_dir(create=True)
+    snap = snapshot_dir(backup)
+    held_version = backup_version(backup)
+    if not snapshot_is_for(snap, held_version):
+        discard(snap)
     try:
-        snapshot(names, snap, root=root, home=home, add=True)
+        snapshot(names, snap, root=root, home=home, add=True, for_backup=held_version)
     except OSError as e:
         clear_pending()
         status.update(state="failed", error=f"could not keep a copy of the components: {e}",
@@ -1762,6 +1788,12 @@ def finish_pending(*, root=None, home=None, runner: Optional[Callable] = None,
         p["result"] = "updated"
     clear_pending()
     if problem is None:
+        if "pytorch" in names:
+            try:
+                record_changes(snap, "pytorch", root)
+            except OSError as e:
+                _warn("update: could not record which packages the PyTorch step changed: %s; "
+                      "a rollback puts back every package that differs", e)
         rest = summary([p for p in plans if not p["update"]])
         status.update(state="updated", note="; ".join(
             "updated the " + p["label"] + (f": {p['current']} -> {p['target']}"

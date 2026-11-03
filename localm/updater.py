@@ -1407,7 +1407,7 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
             try:
                 updater_components.snapshot(
                     [updater_components.DEPS], updater_components.snapshot_dir(backup_dir),
-                    root=target)
+                    root=target, for_backup=previous_version)
             except OSError as e:
                 _roll_back(f"could not keep a copy of the venv: {e}",
                            "keeping a copy of the dependencies failed",
@@ -1425,9 +1425,9 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
                 _roll_back(f"{cmd[0]} exited {rc}", "the post-update step failed",
                            "the post-update step failed; rolled back")
             try:
-                updater_components.record_deps_changes(
-                    updater_components.snapshot_dir(backup_dir), target,
-                    backup_version=previous_version)
+                updater_components.record_changes(
+                    updater_components.snapshot_dir(backup_dir), updater_components.DEPS,
+                    target)
             except OSError as e:
                 _apply_warn("could not record which packages the update changed: %s; a "
                             "rollback puts back every package that differs", e)
@@ -1468,11 +1468,9 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
         components_status, components_note = _apply_components(
             comp_plans, comp_update, klass=klass, target=target, version=new_version,
             defer=defer_runtime, runner=runner, say=say, roll_back=_roll_back)
-        from localm import updater_parts
-        if cmd:
-            updater_parts.clear_kept_records()
-        else:
-            updater_parts.note_kept_record(target, [previous_version, new_version])
+        if not cmd:
+            from localm import updater_parts
+            updater_parts.note_kept_record(target, previous_version, new_version)
         return {"applied": True, "version": new_version, "klass": klass,
                 "backup": str(backup_dir), "restart_needed": True,
                 "verified": verified, "verify_reason": verify_reason,
@@ -1718,7 +1716,7 @@ def rollback_info() -> dict:
     if available:
         try:
             version = (backup_dir / "VERSION").read_text(encoding="utf-8").strip() or None
-        except OSError:
+        except (OSError, ValueError):
             version = None
     return {"available": available,
             "backup": str(backup_dir) if available else None,
@@ -1738,10 +1736,11 @@ def _restore_all(target: Path, backup_dir: Path, names, *, say=None, components=
     runtime holder that is not this install's, or a runtime that cannot be
     restored raises LocalmError with nothing changed; a later failure puts
     the components and the runtime back as they were (RuntimeError when that
-    fails too). A venv copy kept for another backup than *backup_dir*
-    (``updater_components.deps_snapshot_is_for``) is not restored. Clears the
-    pending runtime and component updates and, with
-    *record*, records the rollback as their last status (:func:`_record_rollback`).
+    fails too). Components kept for another backup than *backup_dir*
+    (``updater_components.snapshot_is_for``) are not restored. Clears the
+    pending runtime and component updates and records the rollback as their
+    last status, with *record* False only over a status that is not a failure
+    (:func:`_record_rollback`).
     *say* receives each step as one line. *components*, when given, restricts
     the kept components restored to those names (``apply`` passes only the
     venv: a component step that failed has put its components back itself)."""
@@ -1758,13 +1757,9 @@ def _restore_all(target: Path, backup_dir: Path, names, *, say=None, components=
     comp_names = updater_components.installed_names(
         [n for n in updater_components.snapshot_names(comp_snap)
          if components is None or n in components], target)
-    if updater_components.DEPS in comp_names:
-        try:
-            backup_version = (backup_dir / "VERSION").read_text(encoding="utf-8").strip()
-        except OSError:
-            backup_version = None
-        if not updater_components.deps_snapshot_is_for(comp_snap, backup_version):
-            comp_names.remove(updater_components.DEPS)
+    if not updater_components.snapshot_is_for(comp_snap,
+                                              updater_components.backup_version(backup_dir)):
+        comp_names = []
     comp_keep = None
     if comp_names:
         comp_keep = comp_snap.with_name(comp_snap.name + "-current")
@@ -1842,32 +1837,45 @@ def _restore_all(target: Path, backup_dir: Path, names, *, say=None, components=
         updater_runtime.clear_pending()
     except OSError as e:
         _apply_warn("could not clear a pending runtime update after the rollback: %s", e)
-    if record:
-        _record_rollback(target)
+    _record_rollback(target, backup_dir, keep_failures=not record)
 
 
-def _record_rollback(target: Path) -> None:
+def _record_rollback(target: Path, backup_dir: Path, *, keep_failures: bool = False) -> None:
     """Record, as the last runtime and component update status, that the
     update was rolled back, so ``localm doctor`` and the GUI do not report the
-    state the rolled-back update left. A last status of ``failed`` or
-    ``waiting`` stays named in the new note as the reason. Best-effort: a status
-    that cannot be written is logged."""
+    state the rolled-back update left. A ``failed`` or ``waiting`` status written
+    since this update's backup was made stays named in the new note as the
+    reason; with *keep_failures* such a status is left as it is. Best-effort: a
+    status that cannot be written is logged."""
     from localm import updater_components, updater_runtime
     version = _version.read_version()
-    note = f"the update was rolled back; localm {version} and its parts were put back"
-    why = [st["note"] for st in (updater_runtime.last_status(),
-                                 updater_components.last_status())
-           if st and st.get("state") in ("failed", "waiting") and st.get("note")]
+    note = f"the update was rolled back to localm {version}"
+    runtime_last, comp_last = updater_runtime.last_status(), updater_components.last_status()
+
+    def failed_now(st) -> bool:
+        if not st or st.get("state") not in ("failed", "waiting") or not st.get("note"):
+            return False
+        try:
+            return float(st.get("at") or 0) >= backup_dir.stat().st_mtime
+        except (OSError, TypeError, ValueError):
+            return False
+    why = [(st or {}).get("note") for st in (runtime_last, comp_last) if failed_now(st)]
     if why:
         note += " (" + "; ".join(why) + ")"
+    write_runtime = not keep_failures or (runtime_last is not None
+                                          and not failed_now(runtime_last))
+    write_comp = not keep_failures or (comp_last is not None and not failed_now(comp_last))
     try:
         from localm import _apply_update as au
         from localm import setup_llama as sl
         build = sl._provisioned_build(Path(target) / au.RUNTIME_LIB)
     except Exception:
         build = None
-    updater_runtime._write_status({"state": "rolled_back", "backend": None, "from": None,
-                                   "to": build, "holders": [], "error": None, "note": note})
+    if write_runtime:
+        updater_runtime._write_status({"state": "rolled_back", "backend": None, "from": None,
+                                       "to": build, "holders": [], "error": None, "note": note})
+    if not write_comp:
+        return
     try:
         (_updates_dir() / updater_components.STATUS_FILE).write_text(_json.dumps(
             {"state": "rolled_back", "components": [], "note": note, "error": None,

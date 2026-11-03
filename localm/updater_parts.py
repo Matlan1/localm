@@ -45,35 +45,26 @@ def _kept_records() -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def note_kept_record(root, versions) -> None:
-    """Record that each of *versions* runs on the install record in the venv of
-    the install at *root* because an update kept the dependencies and did not
+def note_kept_record(root, previous: Optional[str], version: str) -> None:
+    """Record that *version* runs on the install record in the venv of the install
+    at *root* because an update from *previous* kept the dependencies and did not
     rewrite it (:func:`installed_parts` does not count that pair as a problem).
-    A failure is logged."""
+    Nothing is recorded when the record was already not *previous*'s (a real
+    mismatch stays visible). A failure is logged."""
     from localm import updater, updater_components as uc
     site = uc.site_packages(Path(root) / ".venv")
     record = (uc.dists(site).get("localm") or {}).get("version") if site else None
     if record is None:
         return
     data = _kept_records()
-    data.update({str(v): record for v in versions if v})
+    if _norm_version(record) != _norm_version(previous) and data.get(previous) != record:
+        return
+    data[str(version)] = record
     try:
         (updater._updates_dir() / KEPT_RECORD_FILE).write_text(json.dumps(data),
                                                                encoding="utf-8")
     except OSError as e:
         updater._apply_warn("could not record the kept install record: %s", e)
-
-
-def clear_kept_records() -> None:
-    """Forget :func:`note_kept_record` pairs: the install record was rewritten.
-    A failure is logged."""
-    from localm import updater
-    try:
-        (updater._updates_dir(create=False) / KEPT_RECORD_FILE).unlink()
-    except FileNotFoundError:
-        pass
-    except OSError as e:
-        updater._apply_warn("could not remove the kept install record note: %s", e)
 
 
 def _source_checkout(root: Path) -> bool:
@@ -248,7 +239,6 @@ def _reinstall_deps(root: Path, *, runner: Optional[Callable], say: Callable) ->
         except Exception as e:
             problem = f"could not run {cmd[0]}: {e}"
         if problem is None:
-            clear_kept_records()
             return "reinstalled localm and its dependencies"
         errors = uc.restore(snap, root=root, say=say)
         if errors:

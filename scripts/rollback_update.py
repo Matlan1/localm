@@ -95,66 +95,70 @@ def _load_apply_update(install_root: Path, code_root=None):
 
 
 def _restore_venv(install_root: Path, updates_dir: Path, code_root=None):
-    """Put back the venv the update kept before its dependency step (the ``venv``
-    entry of ``<updates>/backup-components``): every package that step changed and
-    localm's own install record, unless that copy belongs to another backup than
-    the one being restored. Returns ``(errors, undo)``: the failures (empty when
-    there is nothing to restore or it was restored) and a callable that puts the
-    venv back as it was before this call (None when nothing was changed)."""
+    """Put back the packages the update changed, kept in ``<updates>/backup-components``:
+    what its PyTorch step changed, then what its dependency step changed (localm's own
+    install record included), unless they were kept for another backup than the one
+    being restored. Returns ``(errors, undo)``: the failures (empty when there is
+    nothing to restore or it was restored) and a callable that puts the venv back as it
+    was before this call (None when nothing was changed)."""
     snap = updates_dir / "backup-components"
     state_file = snap / "state.json"
     if not state_file.exists():
         return [], None
     try:
         state = json.loads(state_file.read_text(encoding="utf-8"))
-        info = (state.get("components") or {}).get("venv")
+        comps = state.get("components") or {}
     except (OSError, ValueError, AttributeError) as e:
         return [f"the record of what the update replaced ({state_file}) cannot be read: "
                 f"{e}"], None
-    if not info:
+    deps, torch = comps.get("venv"), comps.get("pytorch")
+    if not deps and not torch:
         return [], None
     try:
         held = (updates_dir / "backup" / "VERSION").read_text(encoding="utf-8").strip()
-    except OSError:
+    except (OSError, ValueError):
         held = None
-    if info.get("backup_version") and held and info["backup_version"] != held:
+    if state.get("backup_version") and held and state["backup_version"] != held:
         return [], None
     uc = _load_helper(install_root, "updater_components", code_root)
     if uc is None or not hasattr(uc, "venv_changes"):
-        return [f"could not load the venv restore helper; the copy kept at "
-                f"{info.get('venv_copy')} holds the previous packages"], None
-    copy = uc._own_copy(info, snap)
-    if copy is None:
-        return [f"{info.get('venv_copy')} is not a venv copy this update kept"], None
+        return ["could not load the package restore helper; the copies kept beside the "
+                "venv hold the previous packages"], None
     venv = install_root / ".venv"
-    only = info.get("dists") if isinstance(info.get("dists"), list) else None
-    torch_copy = uc._own_copy((state.get("components") or {}).get("pytorch"), snap)
-    changed = uc.venv_changes(copy, venv, own=True)
-    if changed is None:
-        return [f"could not read the packages of {venv} or of {copy}"], None
-    if only is not None:
-        changed = [n for n in changed if n in only]
-    if not changed and torch_copy is None:
-        return [], None
+    steps = []
+    for info, own in ((torch, False), (deps, True)):
+        if not info:
+            continue
+        copy = uc._own_copy(info, snap)
+        if copy is None:
+            return [f"{info.get('venv_copy')} is not a venv copy this update kept"], None
+        steps.append((copy, own, info.get("dists") if isinstance(info.get("dists"), list)
+                      else None))
     now = snap.with_name(snap.name + "-before-rollback")
+    keep = uc._venv_copy_path(venv, now, "deps")
     try:
-        uc._clone_venv(venv, uc._venv_copy_path(venv, now, "deps"), now)
+        uc._clone_venv(venv, keep, now)
     except OSError as e:
         return [f"could not keep a copy of the current packages: {e}"], None
-    keep = uc._venv_copy_path(venv, now, "deps")
 
     def undo():
         return uc._restore_venv(keep, venv, own=True)
     undo.keep = keep
-    # The component step's PyTorch copy, then the dependency step's: reverse order.
-    errors = uc._restore_venv(torch_copy, venv) if torch_copy is not None else []
-    if not errors:
-        changed = uc.venv_changes(copy, venv, own=True) or []
+    errors, restored = [], False
+    for copy, own, only in steps:
+        changed = uc.venv_changes(copy, venv, own=own)
+        if changed is None:
+            errors = [f"could not read the packages of {venv} or of {copy}"]
+            break
         if only is not None:
             changed = [n for n in changed if n in only]
-        errors = uc._restore_venv(copy, venv, own=True, only=changed)
-    if errors:
-        back = undo()
+        if changed:
+            restored = True
+            errors = uc._restore_venv(copy, venv, own=own, only=changed)
+            if errors:
+                break
+    if errors or not restored:
+        back = undo() if errors else []
         import shutil
         shutil.rmtree(keep, ignore_errors=True)
         return errors + back, None
@@ -233,8 +237,9 @@ def main(argv=None, *, install_root: Path = INSTALL_ROOT, code_root=None) -> int
     if undo:
         import shutil
         shutil.rmtree(undo.keep, ignore_errors=True)
-    print("Rolled back to the previous version and its packages. Start localm again to "
-          "use it; Settings > Updates shows any other part that still differs.")
+    print("Rolled back to the previous version" + (" and its packages" if undo else "")
+          + ". Start localm again to use it; Settings > Updates shows any other part that "
+            "still differs.")
     return 0
 
 

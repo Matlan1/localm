@@ -837,8 +837,8 @@ def _check_installed_parts() -> None:
                       "dependencies satisfied")
         if parts["install_record_matches"] is False:
             console.print(f"     [dim]the record names another version than {app}; it is "
-                          "rewritten by the next dependency change or 'localm update "
-                          "--repair'[/dim]")
+                          "rewritten by the next update that changes the "
+                          "dependencies[/dim]")
     if parts["consistent"]:
         return
     console.print(f"  {_WARN_SYM}  parts of this install differ from localm {app}:")

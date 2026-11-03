@@ -302,6 +302,7 @@ def test_a_deps_snapshot_does_not_share_its_copy_with_the_pytorch_one(install):
     uc.snapshot(["pytorch"], snap, root=inst, add=True)
     state = json.loads((snap / uc.STATE_FILE).read_text(encoding="utf-8"))["components"]
     assert state[uc.DEPS]["venv_copy"] != state["pytorch"]["venv_copy"]
+    uc.record_changes(snap, uc.DEPS, inst)
     assert uc.installed_names(uc.snapshot_names(snap), inst) == ["pytorch", uc.DEPS]
     assert uc.restore(snap, root=inst) == []
     assert _state(site)["click"] == "8.0", "the older (pre-deps) copy wins"
@@ -383,7 +384,7 @@ def test_a_rollback_keeps_packages_installed_after_the_update(install, home):
     assert _state(site) == {"localm": "0.3.1", "click": "8.0", "plugin-dep": "1.0"}
 
 
-def test_a_backup_an_older_build_replaced_does_not_restore_the_kept_venv(install, home):
+def test_a_backup_an_older_build_replaced_does_not_restore_what_was_kept(install, home):
     inst, site = install
     data, sig = _release_032(sd=None)
     updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
@@ -437,15 +438,142 @@ def test_an_update_that_keeps_the_dependencies_leaves_the_parts_consistent(
     assert not [p for p in updater_parts.installed_parts(inst)["problems"] if "record" in p]
 
 
-def test_an_update_that_rewrites_the_record_forgets_the_kept_one(install, home):
+def test_a_kept_record_survives_a_later_update_that_is_rolled_back(install, home, monkeypatch):
     from localm import updater_parts
     inst, site = install
-    updater_parts.note_kept_record(inst, ["0.3.0"])
-    assert updater_parts._kept_records() == {"0.3.0": "0.3.1"}
+    updater_parts.note_kept_record(inst, "0.3.1", "0.3.2")
+    assert updater_parts._kept_records() == {"0.3.2": "0.3.1"}
+    monkeypatch.setattr(_version, "read_version", lambda: "0.3.2")
+    data, sig = _release(_files("0.3.3", ["click", "rich"]))
+    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                  runner=_deps_step(site))
+    updater.rollback_last(installed=inst)
+    assert _state(site)["localm"] == "0.3.1"
+    assert not [p for p in updater_parts.installed_parts(inst)["problems"] if "record" in p]
+
+
+def test_a_real_mismatch_is_not_hidden_by_a_later_update_that_keeps_the_dependencies(install):
+    from localm import updater_parts
+    inst, site = install
+    updater_parts.note_kept_record(inst, "0.1.5", "0.3.2")
+    assert updater_parts._kept_records() == {}, "the record was already not 0.1.5's"
+
+
+def test_a_stale_snapshot_is_replaced_by_the_component_step(install, home, monkeypatch):
+    inst, site = install
+    snap = uc.snapshot_dir(updater._backup_dir(create=True))
+    (updater._backup_dir() / "VERSION").write_text("0.1.5", encoding="utf-8")
+    uc.snapshot([uc.DEPS], snap, root=inst, for_backup="0.3.2")
+    assert not uc.snapshot_is_for(snap, "0.1.5") and uc.snapshot_is_for(snap, "0.3.2")
+    assert uc.snapshot_is_for(snap, None)
+    (inst / "VERSION").write_text("0.3.1", encoding="utf-8")
+    uc.write_pending([{"name": "sdcpp", "update": True}], root=inst, version="0.3.1")
+    uc._write_status({"state": "x"})
+    monkeypatch.setattr(uc, "plan", lambda root, inst_, home=None, deep=True: [
+        {"name": "sdcpp", "label": "sd", "update": True, "current": "a", "target": "b",
+         "items": [], "note": None, "kept": False, "installed": True}])
+    monkeypatch.setattr(uc, "_commands", lambda p, root: [])
+    monkeypatch.setattr(uc, "_verify", lambda p, root, home_: None)
+    assert uc.finish_pending(root=inst, runner=lambda c: 0)["state"] == "updated"
+    state = json.loads((snap / uc.STATE_FILE).read_text(encoding="utf-8"))
+    assert state["backup_version"] == "0.1.5" and list(state["components"]) == ["sdcpp"]
+
+
+def test_a_rollback_keeps_later_packages_with_a_pytorch_entry_too(install, tmp_path, monkeypatch):
+    inst, site = install
+    _dist(site, "transformers", "5.15", {"transformers/__init__.py": b"t"})
+    snap = tmp_path / "snap"
+    uc.snapshot(["pytorch"], snap, root=inst)
+    _uninstall(site, "transformers")
+    _dist(site, "transformers", "5.20", {"transformers/__init__.py": b"t2"})
+    uc.record_changes(snap, "pytorch", inst)
+    _dist(site, "plugin-dep", "1.0", {"plugin_dep/__init__.py": b"p"})
+    assert uc.restore(snap, root=inst) == []
+    assert _state(site)["transformers"] == "5.15" and _state(site)["plugin-dep"] == "1.0"
+
+
+def test_a_pytorch_copy_that_matches_needs_no_holder_stopped(install, tmp_path, monkeypatch):
+    inst, site = install
+    snap = tmp_path / "snap"
+    uc.snapshot(["pytorch"], snap, root=inst)
+    monkeypatch.setattr(uc, "_stop_torch_holders",
+                        lambda *a: pytest.fail("nothing differs, nothing to stop"))
+    assert uc.restore(snap, root=inst) == []
+
+
+def test_a_folder_with_only_bytecode_left_is_removed(install, tmp_path):
+    inst, site = install
+    snap = tmp_path / "snap"
+    uc.snapshot([uc.DEPS], snap, root=inst)
+    _deps_step(site)([str(_fake_uv(tmp_path))])
+    (site / "rich" / "__pycache__").mkdir()
+    (site / "rich" / "__pycache__" / "__init__.cpython-312.pyc").write_bytes(b"x")
+    assert uc.restore(snap, root=inst) == []
+    assert not (site / "rich").exists()
+
+
+def test_a_backup_version_that_is_not_text_counts_as_unknown(install, home):
+    (updater._backup_dir(create=True)).mkdir(parents=True, exist_ok=True)
+    (updater._backup_dir() / "VERSION").write_bytes(b"\xff\xfe")
+    assert uc.backup_version(updater._backup_dir()) is None
+    assert updater.rollback_info()["version"] is None
+
+
+def test_an_old_failure_is_not_named_as_the_reason(install, home):
+    inst, site = install
+    data, sig = _release_032(sd=None)
+    uc._write_status({"state": "failed", "note": "an old failure", "components": []})
+    status = json.loads((updater._updates_dir() / uc.STATUS_FILE).read_text(encoding="utf-8"))
+    status["at"] = 1.0
+    (updater._updates_dir() / uc.STATUS_FILE).write_text(json.dumps(status), encoding="utf-8")
+    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                  runner=_deps_step(site))
+    updater.rollback_last(installed=inst)
+    assert "an old failure" not in uc.last_status()["note"]
+
+
+def test_a_runtime_that_was_undone_does_not_stay_reported_as_updated(install, home, monkeypatch):
+    inst, site = install
+    data, sig = _release_032(sd=None)
+    updater_runtime._write_status({"state": "updated", "note": "re-provisioned a -> b"})
+    with pytest.raises(LocalmError):
+        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                      runner=_deps_step(site, rc=1))
+    assert updater_runtime.last_status()["state"] == "rolled_back"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="an open file blocks a move on Windows only")
+def test_a_rollback_refused_by_a_held_file_changes_nothing(install, home):
+    inst, site = install
     data, sig = _release_032(sd=None)
     updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
                   runner=_deps_step(site))
-    assert updater_parts._kept_records() == {}
+    with open(site / "rich" / "__init__.py", "rb"):
+        with pytest.raises(LocalmError) as ei:
+            updater.rollback_last(installed=inst)
+    assert "nothing was rolled back" in ei.value.summary
+    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.2"
+    assert _state(site) == {"localm": "0.3.2", "click": "8.1", "rich": "13.0"}
+
+
+def test_the_update_routes_really_hold_the_probes_while_they_run(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from localm import discover
+    from localm.inference.http_server import create_app
+    home = tmp_path / "h"
+    (home / "updates" / "backup").mkdir(parents=True)
+    (home / "updates" / "backup" / "VERSION").write_text("0.1.0", encoding="utf-8")
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    import localm.inference.http_server as hs
+    monkeypatch.setattr(hs, "caller_is_operator", lambda request: True)
+    monkeypatch.setattr(hs, "_request_restart", lambda **kw: None)
+    seen = []
+    monkeypatch.setattr(updater, "rollback_last",
+                        lambda: seen.append(discover._torch_probe_holds) or {"rolled_back": True})
+    with TestClient(create_app(None)) as c:
+        r = c.post("/api/update/rollback", headers={"host": "127.0.0.1"})
+    assert r.status_code == 200, r.text
+    assert seen == [1] and discover._torch_probe_holds == 0
 
 
 def test_the_update_routes_hold_the_torch_probes(monkeypatch):
