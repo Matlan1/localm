@@ -273,12 +273,19 @@ def test_blas_does_not_require_packs_without_rocm_kpack(tmp_path):
     assert setup_llama.blas_kernel_problems(d) == []
 
 
+def _libs(*names):
+    """Library file names *_is_wanted* copies on this platform."""
+    if sys.platform == "win32":
+        return [f"{n}.dll" for n in names]
+    return [f"lib{n}.dylib" if sys.platform == "darwin" else f"lib{n}.so" for n in names]
+
+
 @pytest.mark.parametrize("archive_packs", [True, False])
 def test_provisioning_copies_kernel_packs_and_marks_the_runtime(tmp_path, archive_packs):
     """The kernel packs are copied with their folder, and a runtime with
     rocm_kpack gets the marker that stops the updater re-provisioning it for
     packs, also when the archive brought none."""
-    src = _install(tmp_path / "src", ["llama.dll", "rocblas.dll", "rocm_kpack.dll"],
+    src = _install(tmp_path / "src", _libs("llama", "rocblas", "rocm_kpack"),
                    {"rocblas/library": 1})
     if archive_packs:
         _kpacks(src, ["blas_lib_gfx1030.kpack"])
@@ -293,7 +300,7 @@ def test_provisioning_copies_kernel_packs_and_marks_the_runtime(tmp_path, archiv
 
 
 def test_provisioning_without_rocm_kpack_writes_no_marker(tmp_path):
-    src = _install(tmp_path / "src", ["llama.dll", "ggml-vulkan.dll"])
+    src = _install(tmp_path / "src", _libs("llama", "ggml-vulkan"))
     dst = tmp_path / "dst"
     dst.mkdir()
     setup_llama._copy_binaries(src, dst)

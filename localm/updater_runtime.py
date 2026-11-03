@@ -240,7 +240,9 @@ def plan(staged_root, installed_root) -> dict:
                            + ", ".join(f"{p} {cuda[0].get(p, '?')} -> {v}"
                                        for p, v in sorted(cuda[1].items())
                                        if cuda[0].get(p) != v) + ")")
-        elif backend == "amd-rocm" and sl.kernel_packs_missing(lib):
+        elif backend == "amd-rocm" and sl.rocm_build_is_current(
+                lib, current, rocm_tag=pins.get("rocm_tag"), rocm_build_id=target,
+                cpu_tag=pins.get("rocm_cpu_tag")):
             out["kernel_packs"] = True
             out["note"] = (f"re-provisions the {backend} runtime {current} to add the ROCm "
                            "kernel packs an earlier setup left out")

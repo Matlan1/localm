@@ -172,6 +172,17 @@ def test_amd_rocm_at_the_pin_with_its_kernel_packs_needs_nothing(tmp_path, cfg, 
     assert p["reprovision"] is False and p["note"] is None and p["kernel_packs"] is False
 
 
+def test_a_failed_overlay_build_without_kernel_packs_is_a_kernel_pack_repair(tmp_path, cfg):
+    """b1355 with the overlay failed for this release's CPU tag counts as this
+    release's build, so the kernel packs are the only reason to re-provision."""
+    inst = _tree(tmp_path / "inst")
+    lib = _without_kernel_packs(_provision(inst, "amd-rocm", "b1355"))
+    (lib / ".localm-cpu-overlay-failed").write_text('{"tag": "b11908"}', encoding="utf-8")
+    p = updater_runtime.plan(_tree(tmp_path / "s"), inst)
+    assert (p["reprovision"], p["kernel_packs"], p["current"]) == (True, True, "b1355")
+    assert "to add the ROCm kernel packs" in p["note"]
+
+
 def test_an_older_build_without_kernel_packs_names_the_build_change(tmp_path, cfg):
     inst = _tree(tmp_path / "inst", _PINS_031)
     _without_kernel_packs(_provision(inst, "amd-rocm", "b1349-cpu-b11719"))
