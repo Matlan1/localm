@@ -230,6 +230,8 @@ def _run_bat(tmp_path, exit_code, args):
     assert stub in patched, "the localm invocation moved; this test is blind"
     bat = tmp_path / "probe.bat"
     bat.write_text(patched, encoding="utf-8")
+    (tmp_path / ".venv" / "Scripts").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".venv" / "Scripts" / "python.exe").write_bytes(b"")
     out = subprocess.run(["cmd", "/c", str(bat), *args], capture_output=True,
                          text=True, stdin=subprocess.DEVNULL, cwd=str(tmp_path))
     return "press any key" in (out.stdout or "").lower()

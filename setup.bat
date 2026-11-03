@@ -17,6 +17,25 @@ rem ===========================================================================
 cd /d "%~dp0"
 set "LOCALM_SETUP_ROOT=%CD%"
 setlocal EnableDelayedExpansion
+
+rem ---- only what localm brings ------------------------------------------------
+rem  Clears every inherited uv and pip setting and the Python variables that
+rem  change which code or config a Python loads, and LOCALM_HOME (the data
+rem  folder is the one this setup records), then sets the ones setup uses.
+rem  System programs run by their full path under %SystemRoot%.
+set "ComSpec=%SystemRoot%\System32\cmd.exe"
+set "SYS32=%SystemRoot%\System32"
+set "PSEXE=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
+for /f "delims==" %%v in ('set UV_ 2^>nul') do set "%%v="
+for /f "delims==" %%v in ('set PIP_ 2^>nul') do set "%%v="
+for %%v in (PYTHONPATH PYTHONHOME PYTHONSTARTUP PYTHONUSERBASE VIRTUAL_ENV CONDA_PREFIX LOCALM_HOME) do set "%%v="
+set "UV_NO_CONFIG=1"
+set "PIP_CONFIG_FILE=NUL"
+set "PYTHONNOUSERSITE=1"
+set "UV_PYTHON_PREFERENCE=only-managed"
+set "UV_INSTALLER_VERSION=0.13.6"
+set "UV_INSTALLER_SHA256=d00580051699bee58a2e2d9b925f45788b35f7e0fff7966fd5bedfc3c547dc7d"
+
 set LOCALM_SETUP=1
 title LocaLM setup
 set "HBSEQ=0"
@@ -79,10 +98,14 @@ rem  without "complete" was interrupted, whatever the cause. Run again, setup sa
 rem  where the last one stopped, reuses what finished and redoes the step that was
 rem  cut short. LOCALM_SETUP_ABORT_AFTER=<step> stops a run right after a step
 rem  ^(a testing aid^).
+rem  TEMP and TMP point at that folder for the rest of the run, so uv, Python and
+rem  every other program setup starts write their temporary files there too.
 set "STMP=.localm-setup-tmp"
 if not exist ".localm-setup-tmp" mkdir ".localm-setup-tmp" >nul 2>nul
+set "TEMP=!CD!\.localm-setup-tmp"
+set "TMP=!CD!\.localm-setup-tmp"
 set "TAB="
-for /f "delims=" %%T in ('powershell -NoProfile -Command "[char]9"') do set "TAB=%%T"
+for /f "delims=" %%T in ('%PSEXE% -NoProfile -Command "[char]9"') do set "TAB=%%T"
 set "JRON=1"
 if not defined TAB set "JRON=0"
 if "%JRON%"=="0" echo  [^^!] Could not set up the setup journal - if this setup is interrupted it cannot say where it stopped.
@@ -107,110 +130,72 @@ if exist "setup-gui.bat" (
     echo  it performs this same setup graphically. Otherwise, carry on here.
 )
 
-rem ---- portable vs shared: where localm's Python tooling lives ---------------
-rem  Portable pulls uv ITSELF (when we have to install it below), its managed
-rem  Python, and its wheel cache INTO this folder, so the clone is truly
-rem  self-contained (delete it and nothing is left behind) at the cost of a
-rem  per-clone re-download. Shared reuses (or installs) uv at its normal
-rem  per-user location and reuses its per-user Python + cache. Asked BEFORE the
-rem  uv bootstrap below so a Portable pick also confines uv's own binary to this
-rem  folder, not just the runtime it manages - silently installing a tool into
-rem  the user's profile without ever asking where is exactly the kind of
-rem  outside-the-root write this project forbids. The UV_* vars are set for
-rem  THIS setup process only (not setx / not global), so they never touch any
-rem  other uv project. --python-preference only-managed forces the contained
-rem  download instead of reusing a system Python.
+rem ---- portable vs shared: where localm's own Python tooling lives ----------
+rem  Both keep localm's own pinned uv, its managed Python and its download cache
+rem  in a folder localm owns: Portable in this folder (.uv .python .cache),
+rem  Shared in %LOCALAPPDATA%\localm\shared, reused by every Shared install of
+rem  this user. Every uv call below runs that uv by its full path, and uv uses
+rem  only the Python it downloaded into that folder.
 call :jr begin portable-choice
 echo.
 echo  Keep localm's Python tooling ^(uv itself, its runtime, and downloads^) inside this folder?
 echo    [1] Portable - everything in this folder (self-contained; re-downloads per clone)
-echo    [2] Shared   - reuse/install uv at its normal per-user location (faster; lives in your user profile)
+echo    [2] Shared   - one localm folder in your user profile, reused by every Shared install (faster)
 set "STOREPICK="
 call :flush
 rem SETUP-Q: tooling-store
 set /p "STOREPICK=  Pick 1 or 2 [1]: "
 if not defined STOREPICK set "STOREPICK=1"
 set "CONTAINED=0"
-set "PYPREF="
-set "UVDIR="
-if "%STOREPICK%"=="1" (
-    set "CONTAINED=1"
-    set "UV_PYTHON_INSTALL_DIR=!CD!\.python"
-    set "UV_CACHE_DIR=!CD!\.cache"
-    set "PYPREF=--python-preference only-managed"
+if "%STOREPICK%"=="1" set "CONTAINED=1"
+if not "%CONTAINED%"=="1" if not defined LOCALAPPDATA goto store_unavailable
+if "%CONTAINED%"=="1" (
+    set "UVDIR=!CD!\.uv"
+    set "PYDIR=!CD!\.python"
+    set "CACHEDIR=!CD!\.cache"
     echo  Portable: uv, Python, and downloads all under this folder
 ) else (
-    echo  Shared: reusing/installing uv and its Python + cache ^(outside this folder^).
+    set "UVDIR=!LOCALAPPDATA!\localm\shared\uv"
+    set "PYDIR=!LOCALAPPDATA!\localm\shared\python"
+    set "CACHEDIR=!LOCALAPPDATA!\localm\shared\cache"
+    echo  Shared: uv, Python, and downloads in !LOCALAPPDATA!\localm\shared
 )
+set "UVEXE=!UVDIR!\uv.exe"
+rem  uv keeps its credentials store (and its lock file) in UVDIR\credentials.
+set "UV_CREDENTIALS_DIR=!UVDIR!\credentials"
+set "UV_PYTHON_INSTALL_DIR=!PYDIR!"
+set "UV_CACHE_DIR=!CACHEDIR!"
+set "PYPREF=--python-preference only-managed"
 rem  What the install manifest records about this choice.
 set "UVSHARED="
 set "RCFLAG="
-set "PYDIR="
-set "CACHEDIR="
-if "%CONTAINED%"=="1" (
-    set "RCFLAG=--runtime-contained"
-    set "PYDIR=!CD!\.python"
-    set "CACHEDIR=!CD!\.cache"
-)
+if "%CONTAINED%"=="1" set "RCFLAG=--runtime-contained"
 call :step_done portable-choice || exit /b 99
 
-rem ---- uv is required; bootstrap it ourselves if it is missing --------------
-rem  uv (Astral's fast Python package manager) drives the whole install: it builds
-rem  the venv and resolves the GPU wheels. Rather than dead-ending with "go install
-rem  it yourself", fetch it via Astral's official installer, then make it callable in
-rem  THIS process. The installer updates the persistent USER PATH, but not the PATH
-rem  of a shell that was already running, so we prepend its install dir here. We do
-rem  not hide a bootstrap failure: we re-check that uv is actually callable and, if
-rem  it is not, say so and show the manual options.
-rem  Portable (CONTAINED=1) must not settle for whatever uv happens to already be
-rem  on PATH - that could be a Shared install, winget, or a different clone
-rem  entirely, and reusing it silently would break the "uv itself ... inside this
-rem  folder" promise the user just picked two prompts ago. So Portable checks ONLY
-rem  for ITS OWN confined copy at .\.uv; anything else on PATH is irrelevant to it
-rem  and falls through to the same bootstrap a genuinely-missing uv would trigger.
-rem  Shared keeps the original behaviour: any uv already on PATH is fine to reuse.
-if "%CONTAINED%"=="1" goto uv_check_portable
-where uv >nul 2>nul
-if not errorlevel 1 goto uv_ready
-goto uv_missing
-
-:uv_check_portable
-if "%RESUMING%"=="1" if not "!OPENSET:;uv-portable;=!"=="!OPENSET!" if exist ".uv" call :redo_uv
-if exist ".uv\uv.exe" (
-    set "PATH=!CD!\.uv;!PATH!"
-    set "UVDIR=!CD!\.uv"
-    goto uv_ready
-)
-
-:uv_missing
-echo  [^^!] uv (the Python package manager localm builds on) is not installed.
-set "GETUV="
-call :flush
-rem SETUP-Q: uv-install
-set /p "GETUV=  Install it now with Astral's official installer? [Y/n]: "
-if not defined GETUV set "GETUV=Y"
-if /i "!GETUV:~0,1!"=="N" goto uv_manual
+rem ---- uv: localm's own pinned copy --------------------------------------------
+rem  A uv already in UVDIR is used only when it reports the pinned version;
+rem  otherwise Astral's installer (pinned by version and checksum) puts that
+rem  version there. UV_UNMANAGED_INSTALL keeps the installer from changing the
+rem  user PATH or writing a receipt. No other uv is ever looked for.
+if "%RESUMING%"=="1" if "%CONTAINED%"=="1" if not "!OPENSET:;uv-portable;=!"=="!OPENSET!" if exist ".uv" call :redo_uv
+call :uv_version
+if "!UVOK!"=="1" goto uv_ready
 
 echo.
-echo  Installing uv ...
+echo  Installing uv %UV_INSTALLER_VERSION% ...
 set "UVSTEP=uv-bootstrap"
 if "%CONTAINED%"=="1" set "UVSTEP=uv-portable"
 call :jr begin %UVSTEP%
-if "%CONTAINED%"=="1" (
-    rem  Portable was picked: confine uv's OWN binary to this folder too, not just
-    rem  the Python runtime it manages - UV_INSTALL_DIR is Astral's own documented
-    rem  override for the installer's target dir. UV_UNMANAGED_INSTALL also
-    rem  stops it adding .\.uv to the user PATH and writing an install receipt
-    rem  under %LOCALAPPDATA%\uv.
-    set "UV_INSTALL_DIR=!CD!\.uv"
-    set "UV_UNMANAGED_INSTALL=!CD!\.uv"
-    set "UVDIR=!CD!\.uv"
-    echo  Portable: installing uv itself under .\.uv
-)
-set "UV_INSTALLER_VERSION=0.13.6"
-set "UV_INSTALLER_SHA256=d00580051699bee58a2e2d9b925f45788b35f7e0fff7966fd5bedfc3c547dc7d"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol=[Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; $f=$null; $t=$null; $w=$null; try { $d=$env:STMP; if ($d) { $d=[IO.Path]::GetFullPath($d); if (-not [IO.Directory]::Exists($d)) { exit 63 }; if ($d.IndexOfAny([char[]]'[]') -ge 0) { $w=Join-Path ([IO.Path]::GetTempPath()) ('localm-uv-'+[guid]::NewGuid()); try { $null=[IO.Directory]::CreateDirectory($w) } catch { $w=$null; exit 63 }; $d=$w } } else { $d=[IO.Path]::GetTempPath() }; $f=Join-Path $d ('uv-installer-'+[guid]::NewGuid()+'.ps1'); try { Invoke-WebRequest -UseBasicParsing -Uri ('https://github.com/astral-sh/uv/releases/download/'+$env:UV_INSTALLER_VERSION+'/uv-installer.ps1') -OutFile $f -ErrorAction Stop } catch { exit 61 }; $h=$null; $fs=$null; try { $fs=[IO.File]::Open($f,'Open','Read','Read'); $h=[BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($fs)).Replace('-','') } catch { }; if ($h -ne $env:UV_INSTALLER_SHA256) { exit 62 }; $t=Join-Path $d ('uv-tmp-'+[guid]::NewGuid()); try { $null=[IO.Directory]::CreateDirectory($t) } catch { $t=$null; exit 63 }; $env:TEMP=$t; $env:TMP=$t; $env:PSModulePath=$null; & powershell -NoProfile -ExecutionPolicy Bypass -File $f; exit $LASTEXITCODE } finally { if ($fs) { $fs.Dispose() }; if ($f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }; if ($t) { Remove-Item -LiteralPath $t -Recurse -Force -ErrorAction SilentlyContinue }; if ($w) { Remove-Item -LiteralPath $w -Recurse -Force -ErrorAction SilentlyContinue } }"
+if "%CONTAINED%"=="1" echo  Portable: installing uv itself under .\.uv
+set "UV_INSTALL_DIR=!UVDIR!"
+set "UV_UNMANAGED_INSTALL=!UVDIR!"
+rem  The installer's own Expand-Archive/Copy-Item/Remove-Item calls run as .NET
+rem  literal-path calls, so a [ or ] in this folder's path works. See
+rem  test_setup_bat_installs_uv_from_an_awkward_folder.
+"%PSEXE%" -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol=[Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; $f=$null; $t=$null; $fs=$null; try { $d=$env:STMP; if (-not $d) { exit 63 }; $d=[IO.Path]::GetFullPath($d); if (-not [IO.Directory]::Exists($d)) { exit 63 }; $f=[IO.Path]::Combine($d, ('uv-installer-'+[guid]::NewGuid()+'.ps1')); try { (New-Object Net.WebClient).DownloadFile('https://github.com/astral-sh/uv/releases/download/'+$env:UV_INSTALLER_VERSION+'/uv-installer.ps1', $f) } catch { exit 61 }; $h=$null; try { $fs=[IO.File]::Open($f,'Open','Read','Read'); $h=[BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($fs)).Replace('-','') } catch { }; if ($h -ne $env:UV_INSTALLER_SHA256) { exit 62 }; $t=[IO.Path]::Combine($d, ('uv-tmp-'+[guid]::NewGuid())); try { $null=[IO.Directory]::CreateDirectory($t) } catch { $t=$null; exit 63 }; $env:TEMP=$t; $env:TMP=$t; $env:PSModulePath=$null; $env:LOCALM_UV_INSTALLER=$f; $c='function Expand-Archive { param([string]$Path, [string]$DestinationPath) Add-Type -AssemblyName System.IO.Compression.FileSystem; [IO.Compression.ZipFile]::ExtractToDirectory($Path, $DestinationPath) }; function Copy-Item { [CmdletBinding()] param([Parameter(Position=0)][string]$Path, [string]$Destination) [IO.File]::Copy($Path, [IO.Path]::Combine($Destination, [IO.Path]::GetFileName($Path)), $true) }; function Remove-Item { [CmdletBinding()] param([Parameter(Position=0)][string]$Path, [switch]$Recurse, [switch]$Force) [IO.File]::Delete($Path) }; & ([ScriptBlock]::Create([IO.File]::ReadAllText($env:LOCALM_UV_INSTALLER))); exit $LASTEXITCODE'; & $env:PSEXE -NoProfile -ExecutionPolicy Bypass -Command $c; exit $LASTEXITCODE } finally { if ($fs) { $fs.Dispose() }; if ($f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }; if ($t) { Remove-Item -LiteralPath $t -Recurse -Force -ErrorAction SilentlyContinue } }"
 set "UVRC=%errorlevel%"
+set "UV_INSTALL_DIR="
+set "UV_UNMANAGED_INSTALL="
 if "%UVRC%"=="61" echo  [^^!] Could not download the uv %UV_INSTALLER_VERSION% installer.
 if "%UVRC%"=="62" echo  [^^!] The downloaded uv installer did not match its expected checksum, or could not be read to check it, and was not run.
 if "%UVRC%"=="63" echo  [^^!] Could not create a temporary folder in %STMP% for the uv installer.
@@ -218,34 +203,13 @@ if "%UVRC%"=="61" goto uv_refused
 if "%UVRC%"=="62" goto uv_refused
 if "%UVRC%"=="63" goto uv_refused
 if not "%CONTAINED%"=="1" set "UVSHARED=--uv-shared-installed"
-rem  Make the freshly installed uv callable for the rest of THIS run (the installer
-rem  updates the persistent USER PATH, not this already-running shell). Prepend every
-rem  dir Astral's installer might have used: an explicit %UV_INSTALL_DIR%, its
-rem  %USERPROFILE%\.local\bin default, the older .cargo\bin, and the domain
-rem  redirected-home %HOMEDRIVE%%HOMEPATH% form. If uv still is not found (an exotic
-rem  install dir), the honest "open a new terminal" fallback below recovers via the
-rem  persistent PATH the installer set.
-rem  Harmless caveat: under this file's EnableDelayedExpansion a `!` inside the
-rem  user's INHERITED PATH is dropped when PATH is re-assigned here.
-rem  Proven harmless: this runs only in the uv-missing branch, the change is
-rem  process-local (never the persistent PATH), and every OTHER tool the rest of
-rem  setup runs resolves via an explicit path (.venv\Scripts, System32). A dir
-rem  literally named with `!` in the inherited PATH is exotic, and a bulletproof-
-rem  preserving assignment needs fragile batch not worth it here.
-set "UVDIRS=%USERPROFILE%\.local\bin;%USERPROFILE%\.cargo\bin;%HOMEDRIVE%%HOMEPATH%\.local\bin"
-set "PATH=%UVDIRS%;%PATH%"
-rem  UV_INSTALL_DIR itself is prepended fresh from !CD! here rather than
-rem  read back - see test_uv_install_dir_is_actually_findable_on_path_after_a_bang_install.
-if defined UV_INSTALL_DIR set "PATH=!CD!\.uv;!PATH!"
-where uv >nul 2>nul
-if not errorlevel 1 goto uv_ready
+call :uv_version
+if "!UVOK!"=="1" goto uv_ready
 
 echo.
-echo  [^^!] uv still is not callable after the install attempt.
-echo      Open a NEW terminal (so the updated PATH applies) and run setup.bat again,
-echo      or install uv manually first, then re-run setup.bat:
-call :uv_manual_hint
-call :offer_report "localm setup could not install uv" "setup.bat tried Astral's installer but uv was still not callable afterwards."
+echo  [^^!] uv still is not callable after the install attempt: !UVEXE! did not
+echo      report uv %UV_INSTALLER_VERSION%. Check the internet connection, then run setup.bat again.
+call :offer_report "localm setup could not install uv" "setup.bat ran Astral's installer but its own uv did not report the pinned version afterwards."
 echo.
 pause
 exit /b 1
@@ -253,18 +217,16 @@ exit /b 1
 :uv_refused
 call :jr abandon %UVSTEP%
 echo.
-echo  uv was not installed. Install it yourself, then re-run setup.bat:
-call :uv_manual_hint
+echo  uv was not installed. Check the internet connection, then run setup.bat again.
 call :offer_report "localm setup could not install uv" "setup.bat refused the uv installer: it could not be downloaded or did not match its pinned checksum."
 echo.
 pause
 exit /b 1
 
-:uv_manual
+:store_unavailable
 echo.
-echo  Setup needs uv. Install it, then re-run setup.bat:
-call :uv_manual_hint
-echo.
+echo  [^^!] LOCALAPPDATA is not set, so the Shared folder in your user profile cannot be found.
+echo      Run setup.bat again and pick [1] Portable.
 pause
 exit /b 1
 
@@ -331,7 +293,7 @@ rem  like a hang.
 :venv_retry
 if exist "%STMP%\localm_uv_err.txt" del "%STMP%\localm_uv_err.txt"
 call :heartbeat_start 15 "  ... still creating the environment (this can take a few minutes on a slow connection)"
-uv venv --python %PYVER% %PYPREF% --clear .venv >"%STMP%\localm_uv_err.txt" 2>&1
+"!UVEXE!" venv --python %PYVER% %PYPREF% --clear .venv >"%STMP%\localm_uv_err.txt" 2>&1
 if not errorlevel 1 (
     call :heartbeat_stop
     goto venv_create_ok
@@ -342,7 +304,7 @@ rem  Failed silently so far. Only ever falls back once: if UV_SYSTEM_CERTS is
 rem  already empty, the fallback was already tried - show it for real below
 rem  instead of guessing again.
 if not defined UV_SYSTEM_CERTS goto venv_show_failure
-findstr /i "certificate" "%STMP%\localm_uv_err.txt" >nul 2>nul
+"%SYS32%\findstr.exe" /i "certificate" "%STMP%\localm_uv_err.txt" >nul 2>nul
 if errorlevel 1 goto venv_show_failure
 del "%STMP%\localm_uv_err.txt" 2>nul
 echo  [i] Your system's certificate store did not verify a required download
@@ -354,7 +316,7 @@ goto venv_retry
 
 :venv_show_failure
 type "%STMP%\localm_uv_err.txt" 2>nul
-findstr /c:"os error 5" /c:"os error 32" "%STMP%\localm_uv_err.txt" >nul 2>nul
+"%SYS32%\findstr.exe" /c:"os error 5" /c:"os error 32" "%STMP%\localm_uv_err.txt" >nul 2>nul
 set "VENVLOCKISH=0"
 if not errorlevel 1 set "VENVLOCKISH=1"
 del "%STMP%\localm_uv_err.txt" 2>nul
@@ -370,7 +332,7 @@ if "!VENVLOCKISH!"=="1" (
     rem  install, or how some packages ship their dist-info) makes Windows
     rem  refuse the delete with this exact error before anything is even
     rem  running. Clear it and retry once before looking for a process.
-    attrib -R -H ".venv\*.*" /S /D >nul 2>nul
+    "%SYS32%\attrib.exe" -R -H ".venv\*.*" /S /D >nul 2>nul
     if not defined VENV_ATTRIB_RETRIED (
         set "VENV_ATTRIB_RETRIED=1"
         goto venv_retry
@@ -389,9 +351,9 @@ if "!VENVLOCKISH!"=="1" (
         set /p "STOPPICK=  Stop them and retry now? [Y/n]: "
         if not defined STOPPICK set "STOPPICK=Y"
         if /i not "!STOPPICK:~0,1!"=="N" (
-            for /f "usebackq tokens=1,2 delims=|" %%a in ("%STMP%\localm_lockers.txt") do taskkill /PID %%a /T /F >nul 2>nul
+            for /f "usebackq tokens=1,2 delims=|" %%a in ("%STMP%\localm_lockers.txt") do "%SYS32%\taskkill.exe" /PID %%a /T /F >nul 2>nul
             del "%STMP%\localm_lockers.txt" 2>nul
-            timeout /t 2 /nobreak >nul 2>nul
+            "%SYS32%\timeout.exe" /t 2 /nobreak >nul 2>nul
             goto venv_retry
         )
         del "%STMP%\localm_lockers.txt" 2>nul
@@ -402,7 +364,7 @@ if "!VENVLOCKISH!"=="1" (
             echo  [i] .venv looks locked but nothing obvious owns it - it may be
             echo      a brief antivirus or search-indexer scan. Waiting a moment
             echo      and retrying once more ...
-            timeout /t 3 /nobreak >nul 2>nul
+            "%SYS32%\timeout.exe" /t 3 /nobreak >nul 2>nul
             goto venv_retry
         )
         set "VENVREASON=unknown_lock"
@@ -440,7 +402,7 @@ rem SETUP-Q: venv-retry
 set /p "RETRYPICK=  Try again? [Y/n]: "
 if not defined RETRYPICK set "RETRYPICK=Y"
 if /i "!RETRYPICK:~0,1!"=="N" (
-    echo  Setup aborted. Install Python %PYVER% if it is missing, or close processes and try again.
+    echo  Setup aborted. Close any LocaLM processes and try again.
     echo      ^(Double-click report-issue.bat to send a report about this.^)
     pause
     exit /b 1
@@ -454,8 +416,8 @@ rem  Record the environment now; the record at the end of setup repeats it.
 setlocal DisableDelayedExpansion
 .venv\Scripts\python -m localm.install_manifest record --root . --venv "%CD%\.venv" %RCFLAG% --python-dir "%PYDIR%" --cache-dir "%CACHEDIR%" --uv-dir "%UVDIR%" %UVSHARED% >nul 2>nul
 endlocal
-call :record_shared_uv
 :venv_done
+call :record_shared_uv
 call :step_done venv || exit /b 99
 
 rem ---- choose where data lives ----------------------------------------------
@@ -576,7 +538,7 @@ rem  line is overwritten by the redraw that follows it. Reported live as garbled
 rem  progress bars during the torch install. The heartbeat is ONLY correct where
 rem  uv's output is CAPTURED and the console would otherwise be silent - the ONE
 rem  such site is :venv_retry above. Do not copy it back here.
-uv pip install -p .venv -e ".[%EXTRAS%]"
+"!UVEXE!" pip install -p .venv -e ".[%EXTRAS%]"
 if not errorlevel 1 goto install_ok
 echo  [^^!] Install failed - see the error above.
 call :offer_report "localm install failed during setup" "uv pip install -e .[%EXTRAS%] failed - see the error output above."
@@ -594,7 +556,7 @@ rem ---- install the native-runtime wheel (self-contained inference) ----------
 rem  localm-llama-runtime carries llama.dll + ggml inside this venv so the
 rem  project never depends on a folder elsewhere on disk. Installed empty here;
 rem  `localm setup-llama` downloads/copies the actual binaries into it below.
-uv pip install -p .venv -e ".\runtime"
+"!UVEXE!" pip install -p .venv -e ".\runtime"
 
 rem ---- detect the GPU + recommended backend (the ONE tested policy) ----------
 rem  `python -m localm.hwdetect` prints "<vendor> <install-backend>" - the same
@@ -694,11 +656,11 @@ if not defined TORCHSPEC (
     rem  gfx103X (RX 6000): the bundled self-contained build carries torch + the HF
     rem  stack + the ROCm runtime; add audio (soundfile) for unified-audio models.
     echo  Installing PyTorch ^(AMD ROCm, gfx103X^) + transformers ...
-    uv pip install -p .venv -e ".[gpu,audio]" || echo  [^^!] ROCm torch install failed. GGUF chat still works. ^(see docs/gpu-setup.md^)
+    "!UVEXE!" pip install -p .venv -e ".[gpu,audio]" || echo  [^^!] ROCm torch install failed. GGUF chat still works. ^(see docs/gpu-setup.md^)
 ) else (
     echo  Installing PyTorch + transformers ...
-    uv pip install -p .venv %TORCHSPEC% || echo  [^^!] torch install failed. GGUF chat still works. ^(see docs/gpu-setup.md^)
-    uv pip install -p .venv -e ".[hf,audio]" || echo  [^^!] transformers install failed. GGUF chat still works. ^(see docs/gpu-setup.md^)
+    "!UVEXE!" pip install -p .venv %TORCHSPEC% || echo  [^^!] torch install failed. GGUF chat still works. ^(see docs/gpu-setup.md^)
+    "!UVEXE!" pip install -p .venv -e ".[hf,audio]" || echo  [^^!] transformers install failed. GGUF chat still works. ^(see docs/gpu-setup.md^)
 )
 call :step_done torch || exit /b 99
 
@@ -776,7 +738,7 @@ if "%SCPICK%"=="2" call :intend_shortcut
 if "%SCPICK%"=="1" (
     setlocal DisableDelayedExpansion
     set "SC_STILL_OPEN=1"
-    for /f "usebackq delims=" %%p in (`powershell -NoProfile -Command ^
+    for /f "usebackq delims=" %%p in (`%PSEXE% -NoProfile -Command ^
         "$ErrorActionPreference = 'Stop';" ^
         "$p = [Environment]::GetFolderPath('Desktop') + '\LocaLM.lnk';" ^
         "$s = (New-Object -ComObject WScript.Shell).CreateShortcut($p);" ^
@@ -794,7 +756,7 @@ if "%SCPICK%"=="1" (
 if "%SCPICK%"=="2" (
     setlocal DisableDelayedExpansion
     set "SC_STILL_OPEN=1"
-    for /f "usebackq delims=" %%p in (`powershell -NoProfile -Command ^
+    for /f "usebackq delims=" %%p in (`%PSEXE% -NoProfile -Command ^
         "$ErrorActionPreference = 'Stop';" ^
         "$p = [Environment]::GetFolderPath('Desktop') + '\LocaLM.lnk';" ^
         "$s = (New-Object -ComObject WScript.Shell).CreateShortcut($p);" ^
@@ -1007,9 +969,9 @@ if defined LEFTOVER exit /b 1
 exit /b 0
 
 rem ===========================================================================
-rem  :find_python - a Python that can run install_manifest: the clone's .venv,
-rem  then the clone's own .python, then the py launcher. Sets PYBIN (and
-rem  PYARGS for the launcher), or leaves PYBIN undefined.
+rem  :find_python - a Python localm brought that can run install_manifest: the
+rem  clone's .venv, then the clone's own .python, then the Shared folder's
+rem  Python. Sets PYBIN, or leaves PYBIN undefined.
 rem ===========================================================================
 :find_python
 set "PYBIN="
@@ -1018,8 +980,8 @@ if exist ".venv\Scripts\python.exe" call :try_python ".venv\Scripts\python.exe"
 if defined PYBIN goto :eof
 for /d %%p in (".python\cpython-3*") do if not defined PYBIN if exist "%%~p\python.exe" call :try_python "%%~p\python.exe"
 if defined PYBIN goto :eof
-where py >nul 2>nul
-if not errorlevel 1 call :try_python py -3
+if not defined LOCALAPPDATA goto :eof
+for /d %%p in ("!LOCALAPPDATA!\localm\shared\python\cpython-3*") do if not defined PYBIN if exist "%%~p\python.exe" call :try_python "%%~p\python.exe"
 goto :eof
 
 :try_python
@@ -1051,7 +1013,7 @@ if /i not "%DNAME%"==".venv" if /i not "%DNAME%"==".python" if /i not "%DNAME%"=
 if not exist "%DNAME%\" goto :eof
 set "DTRIES=0"
 :remove_deferred_retry
-attrib -R "%DNAME%\*" /S /D >nul 2>nul
+"%SYS32%\attrib.exe" -R "%DNAME%\*" /S /D >nul 2>nul
 rmdir /s /q "%DNAME%" >nul 2>nul
 if not exist "%DNAME%\" (
     echo    Removed .\%DNAME%
@@ -1059,7 +1021,7 @@ if not exist "%DNAME%\" (
 )
 set /a DTRIES+=1
 if %DTRIES% lss 5 (
-    ping -n 2 127.0.0.1 >nul
+    "%SYS32%\PING.EXE" -n 2 127.0.0.1 >nul
     goto remove_deferred_retry
 )
 echo  [^^!] Could not remove .\%DNAME% - close any LocaLM window and delete it by hand.
@@ -1126,7 +1088,7 @@ rem ===========================================================================
 set /a HBSEQ+=1
 set "HBFLAG=%STMP%\localm_setup_hb.%HBSEQ%.flag"
 if exist "%HBFLAG%" del "%HBFLAG%" >nul 2>nul
-start "" /b powershell -NoProfile -Command ^
+start "" /b "%PSEXE%" -NoProfile -Command ^
   "while (-not (Test-Path -LiteralPath '%HBFLAG%')) { Start-Sleep -Seconds %~1; if (-not (Test-Path -LiteralPath '%HBFLAG%')) { Write-Host '%~2' } }; Remove-Item -LiteralPath '%HBFLAG%' -ErrorAction SilentlyContinue"
 goto :eof
 
@@ -1151,22 +1113,34 @@ rmdir /s /q ".uv" >nul 2>nul
 goto :eof
 
 rem ===========================================================================
-rem  :record_shared_uv - Shared only: records the first uv on PATH as the
+rem  :record_shared_uv - Shared only: records the Shared folder's uv as the
 rem  install's uv (--uv-exe). Runs with delayed expansion off, so a "!" in the
 rem  path is kept.
 rem ===========================================================================
 :record_shared_uv
 if "%CONTAINED%"=="1" goto :eof
 setlocal DisableDelayedExpansion
-set "UVEXE="
-for /f "delims=" %%u in ('where uv 2^>nul') do if not defined UVEXE set "UVEXE=%%u"
-if defined UVEXE .venv\Scripts\python -m localm.install_manifest record --root . --uv-exe "%UVEXE%" >nul 2>nul
+.venv\Scripts\python -m localm.install_manifest record --root . --uv-exe "%UVEXE%" >nul 2>nul
 endlocal
+goto :eof
+
+rem ===========================================================================
+rem  :uv_version - sets UVOK=1 when UVEXE exists and its --version reports
+rem  UV_INSTALLER_VERSION, else UVOK=0. UVVER holds the version it reported.
+rem ===========================================================================
+:uv_version
+set "UVOK=0"
+set "UVVER="
+if not exist "!UVEXE!" goto :eof
+"!UVEXE!" --version > "%STMP%\localm_uvver.txt" 2>nul
+for /f "usebackq tokens=1,2" %%a in ("%STMP%\localm_uvver.txt") do if /i "%%a"=="uv" if not defined UVVER set "UVVER=%%b"
+del "%STMP%\localm_uvver.txt" >nul 2>nul
+if "!UVVER!"=="%UV_INSTALLER_VERSION%" set "UVOK=1"
 goto :eof
 
 :intend_shortcut
 set "DESKDIR="
-for /f "usebackq delims=" %%d in (`powershell -NoProfile -Command "[Environment]::GetFolderPath('Desktop')"`) do set "DESKDIR=%%d"
+for /f "usebackq delims=" %%d in (`%PSEXE% -NoProfile -Command "[Environment]::GetFolderPath('Desktop')"`) do set "DESKDIR=%%d"
 if defined DESKDIR .venv\Scripts\python -m localm.install_manifest journal --root . intend shortcut "!DESKDIR!\LocaLM.lnk" >nul 2>nul
 call :jr begin menu-entry
 set "SCSTEP=1"
@@ -1271,7 +1245,7 @@ rem  (no console - piped/CI), the prompt still works exactly as before, so this 
 rem  never block an install. Errors are swallowed for that reason only.
 rem ===========================================================================
 :flush
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $Host.UI.RawUI.FlushInputBuffer() } catch { }" >nul 2>nul
+"%PSEXE%" -NoProfile -ExecutionPolicy Bypass -Command "try { $Host.UI.RawUI.FlushInputBuffer() } catch { }" >nul 2>nul
 goto :eof
 
 rem ===========================================================================
@@ -1334,15 +1308,6 @@ echo  [^^!] Could not record the data folder; created .\home anyway.
 exit /b 0
 
 rem ===========================================================================
-rem  :uv_manual_hint - the manual uv-install command; used from two call sites
-rem  above (declined the auto-install, and the auto-install still failed).
-rem ===========================================================================
-:uv_manual_hint
-echo    winget install astral-sh.uv
-echo    or download uv from https://github.com/astral-sh/uv/releases
-goto :eof
-
-rem ===========================================================================
 rem  :find_venv_lockers - after a failed venv create/clear, look for processes
 rem  running from THIS folder's .venv. Matched by executable PATH, never by
 rem  process name alone, so a same-named process belonging to a DIFFERENT
@@ -1354,7 +1319,7 @@ rem ===========================================================================
 :find_venv_lockers
 set "LOCKERS="
 if exist "%STMP%\localm_lockers.txt" del "%STMP%\localm_lockers.txt"
-powershell -NoProfile -Command ^
+"%PSEXE%" -NoProfile -Command ^
     "$root = ($env:LOCALM_SETUP_ROOT + '\.venv\').ToLowerInvariant();" ^
     "Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.ToLowerInvariant().StartsWith($root) } | ForEach-Object { '{0}|{1}' -f $_.ProcessId, $_.Name }" ^
     >"%STMP%\localm_lockers.txt" 2>nul
@@ -1372,7 +1337,7 @@ rem  PowerShell probe itself fails.
 rem ===========================================================================
 :onedrive_root
 set "ONEDRIVE_ROOT="
-for /f "usebackq delims=" %%r in (`powershell -NoProfile -Command ^
+for /f "usebackq delims=" %%r in (`%PSEXE% -NoProfile -Command ^
     "$cwd = ($env:LOCALM_SETUP_ROOT + '\').ToLowerInvariant();" ^
     "foreach ($n in 'OneDrive','OneDriveConsumer','OneDriveCommercial') { $v = [Environment]::GetEnvironmentVariable($n); if ($v) { $p = ($v.TrimEnd('\') + '\').ToLowerInvariant(); if ($cwd.StartsWith($p)) { Write-Output $v; break } } }"`) do (
     set "ONEDRIVE_ROOT=%%r"

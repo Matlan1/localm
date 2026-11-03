@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 
 from localm import install_manifest as im
+from tests import _fake_uv as fake_uv
 
 ROOT = Path(__file__).resolve().parents[1]
 WINDOWS = os.name == "nt"
@@ -37,6 +38,8 @@ def venv_template(tmp_path_factory):
     d = tmp_path_factory.mktemp("uninstall-venv") / ".venv"
     subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(d)],
                    check=True, capture_output=True, timeout=300)
+    (d / "Lib" / "site-packages" / "localm_source.pth").write_text(str(ROOT) + "\n",
+                                                                  encoding="utf-8")
     return d
 
 
@@ -208,24 +211,25 @@ def test_finish_uninstall_removes_only_allowlisted_pending_names(tmp_path):
     assert not (clone / im.MANIFEST_NAME).exists()
 
 
-_UV_RUN = '"%UVEXE%" run --no-project --isolated --python 3.12 python "installer\\gui.py"'
+_UV_RUN = ('"%UVEXE%" run --no-project --isolated --python 3.12 --python-preference only-managed '
+           '"installer\\gui.py"')
+_STUB_UV: list = []
 
 
 def _gui_finish(clone: Path, tmp_path: Path, *, cwd: Path = None, code: int = 42):
     """Run the real setup-gui.bat from *clone*, with the setup window stood in
     for by a command that exits *code* (42: an uninstall finished in the
-    window). A uv stub on PATH keeps the uv installer from ever being reached."""
+    window). A stand-in uv reporting the pinned version in .\\.uv keeps the uv
+    installer from ever being reached."""
     text = (ROOT / "setup-gui.bat").read_text(encoding="utf-8")
     assert text.count(_UV_RUN) == 1, "the window launch line moved"
-    (clone / ".uv").mkdir(exist_ok=True)
-    (clone / ".uv" / "uv.exe").write_bytes(b"")
-    stub = tmp_path / "uvstub"
-    stub.mkdir(exist_ok=True)
-    (stub / "uv.cmd").write_text("@exit /b 1\r\n", encoding="ascii")
+    if not _STUB_UV:
+        _STUB_UV.append(fake_uv.build(tmp_path / "fakeuv"))
+    fake_uv.place(_STUB_UV[0], clone / ".uv")
     probe = clone / "setup-gui-probe.bat"
     probe.write_text(text.replace(_UV_RUN, f"cmd /c exit {code}").replace("\n", "\r\n"),
                      encoding="utf-8")
-    env = dict(os.environ, PATH=str(stub) + os.pathsep + os.environ.get("PATH", ""))
+    env = dict(os.environ)
     return subprocess.run(["cmd", "/c", str(probe)], cwd=str(cwd or clone), env=env,
                           capture_output=True, text=True, timeout=120,
                           stdin=subprocess.DEVNULL)

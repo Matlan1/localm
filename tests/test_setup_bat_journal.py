@@ -5,7 +5,8 @@ and keeps its scratch files inside the clone.
 The real script runs in a bare folder with ``LOCALM_SETUP_ABORT_AFTER`` set, which stops
 it right after the named step (exit 99) the way an interruption would, without
 installing anything. The journal it leaves is the file ``localm.install_manifest``
-reads. A stub ``uv.exe`` stands in for uv where a test needs setup to reach the
+reads. A stub ``uv.exe`` in the Shared folder (LOCALAPPDATA pointed at a scratch
+folder) stands in for localm's own uv where a test needs setup to reach the
 environment step.
 """
 
@@ -21,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from localm import install_manifest as im
+from tests import _fake_uv as fake_uv
 
 ROOT = Path(__file__).resolve().parents[1]
 SETUP_BAT = ROOT / "setup.bat"
@@ -36,14 +38,21 @@ def folder(tmp_path):
     return d
 
 
+def _shared_store(folder, uv_stub) -> str:
+    """A scratch LOCALAPPDATA beside *folder* whose Shared folder holds the stub uv."""
+    lad = folder.parent / (folder.name + ".localappdata")
+    fake_uv.place(Path(uv_stub) / "uv.exe", lad / "localm" / "shared" / "uv")
+    return str(lad)
+
+
 def _setup(folder, *, abort_after="portable-choice", answers="\n\n\n\n", extra_env=None,
-           path_prefix=None):
+           uv_stub=None):
     env = dict(os.environ)
     env.pop("LOCALM_SETUP_ABORT_AFTER", None)
     if abort_after:
         env["LOCALM_SETUP_ABORT_AFTER"] = abort_after
-    if path_prefix:
-        env["PATH"] = str(path_prefix) + os.pathsep + env["PATH"]
+    if uv_stub:
+        env["LOCALAPPDATA"] = _shared_store(folder, uv_stub)
     env.update(extra_env or {})
     captured = folder.parent / (folder.name + ".out.txt")
     with open(captured, "wb") as sink:
@@ -123,31 +132,10 @@ class TestAJournalThatCannotBeWritten:
         assert out.count("Could not write .localm-setup-journal") == 1
 
 
-_UV_STUB_SOURCE = r"""
-using System;
-using System.IO;
-public class Stub {
-    public static int Main(string[] a) {
-        string log = Environment.GetEnvironmentVariable("STUB_LOG");
-        if (log != null) File.AppendAllText(log, "uv " + string.Join(" ", a) + "\r\n");
-        if (a.Length > 0 && a[0] == "venv") Directory.CreateDirectory(Path.Combine(".venv", "Scripts"));
-        return 0;
-    }
-}
-"""
-
-
 @pytest.fixture(scope="module")
 def uv_stub_dir(tmp_path_factory):
     d = tmp_path_factory.mktemp("uvstub")
-    src = d / "stub.cs"
-    src.write_text(_UV_STUB_SOURCE, encoding="utf-8")
-    build = ("Add-Type -TypeDefinition (Get-Content -Raw -LiteralPath $env:STUB_SRC) "
-             "-OutputAssembly $env:STUB_OUT -OutputType ConsoleApplication")
-    r = subprocess.run(["powershell", "-NoProfile", "-Command", build],
-                       env={**os.environ, "STUB_SRC": str(src), "STUB_OUT": str(d / "uv.exe")},
-                       capture_output=True, text=True, timeout=120)
-    assert (d / "uv.exe").is_file(), r.stdout + r.stderr
+    fake_uv.build(d)
     return d
 
 
@@ -171,7 +159,7 @@ class TestACutShortVenv:
         answers = ("1\n" if marker else "") + "2\n\n\n\n\n"
         rc, out = _setup(folder, abort_after="venv", answers=answers,
                          extra_env={"STUB_LOG": str(log), "TEMP": str(temp),
-                                    "TMP": str(temp)}, path_prefix=stubs)
+                                    "TMP": str(temp)}, uv_stub=stubs)
         return rc, out, log.read_text(encoding="utf-8"), temp
 
     def test_a_venv_the_journal_says_was_cut_short_is_rebuilt(self, folder, tmp_path, uv_stub_dir):
@@ -219,7 +207,7 @@ class TestACutShortVenv:
         log.write_text("", encoding="utf-8")
         env = dict(os.environ, STUB_LOG=str(log))
         env.pop("LOCALM_SETUP_ABORT_AFTER", None)
-        env["PATH"] = str(uv_stub_dir) + os.pathsep + env["PATH"]
+        env["LOCALAPPDATA"] = _shared_store(folder, uv_stub_dir)
         captured = tmp_path / "interrupted.out.txt"
         with open(captured, "wb") as sink:
             proc = subprocess.Popen([os.environ.get("COMSPEC", "cmd.exe"), "/c", r".\setup.bat"],
@@ -236,12 +224,13 @@ class TestACutShortVenv:
                     time.sleep(0.1)
                 assert "Foreign .venv found" in text, text
             finally:
-                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                subprocess.run([os.path.join(os.environ["SystemRoot"], "System32", "taskkill.exe"),
+                                "/F", "/T", "/PID", str(proc.pid)],
                                capture_output=True, timeout=60)
                 proc.wait(timeout=60)
         assert b"begin\tvenv" not in _journal_bytes(folder).replace(b"\r\n", b"\n")
         rc, out = _setup(folder, abort_after="venv", answers="2\n\n\n\n\n",
-                         extra_env={"STUB_LOG": str(log)}, path_prefix=uv_stub_dir)
+                         extra_env={"STUB_LOG": str(log)}, uv_stub=uv_stub_dir)
         assert rc == 99, out
         assert "recreating it" not in out
         assert "uv venv" not in log.read_text(encoding="utf-8")
@@ -256,7 +245,7 @@ class TestACutShortVenv:
         log = tmp_path / "uv.log"
         log.write_text("", encoding="utf-8")
         rc, out = _setup(folder, abort_after="venv", answers="2\n\n\n\n\n",
-                         extra_env={"STUB_LOG": str(log)}, path_prefix=uv_stub_dir)
+                         extra_env={"STUB_LOG": str(log)}, uv_stub=uv_stub_dir)
         assert rc == 99, out
         assert "recreating it" not in out
         assert "uv venv" not in log.read_text(encoding="utf-8")
@@ -283,7 +272,7 @@ class TestAFolderWithABangInItsName:
         log = tmp_path / "uv.log"
         log.write_text("", encoding="utf-8")
         rc, out = _setup(clone, abort_after="venv", answers="2\n\n\n\n\n",
-                         extra_env={"STUB_LOG": str(log)}, path_prefix=uv_stub_dir)
+                         extra_env={"STUB_LOG": str(log)}, uv_stub=uv_stub_dir)
         assert rc == 99, out
         assert "cannot find the path" not in out.lower(), out
         assert "uv venv" in log.read_text(encoding="utf-8")
@@ -304,6 +293,7 @@ class TestTheScriptItself:
         reads = self.text.replace("$env:TEMP=$t", "").replace("$env:TMP=$t", "")
         assert "$env:TEMP" not in reads and "$env:TMP" not in reads
         assert "$d=$env:STMP" in self.text
+        assert "GetTempPath" not in self.text
 
     def test_every_step_that_begins_also_finishes(self):
         begun = re.findall(r"call :jr begin (\S+)", self.code)

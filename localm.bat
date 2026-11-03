@@ -5,11 +5,21 @@ rem to the CLI - needed because cmd.exe checks the current directory before
 rem PATH, so a bare "localm ..." typed from this folder would otherwise hit
 rem this file instead of the global shim and silently open chat.
 cd /d "%~dp0"
+setlocal
 title LocaLM
 
-rem Prefer this clone's own .venv (created by setup.bat) - self-contained
-set "PY=python"
-if exist ".venv\Scripts\python.exe" set "PY=.venv\Scripts\python.exe"
+rem Runs only this folder's own Python, with inherited uv, pip and Python
+rem settings and LOCALM_HOME cleared, so this install's own data folder
+rem choice (localm-home.cfg or .\home) decides where data lives.
+set "ComSpec=%SystemRoot%\System32\cmd.exe"
+for /f "delims==" %%v in ('set UV_ 2^>nul') do set "%%v="
+for /f "delims==" %%v in ('set PIP_ 2^>nul') do set "%%v="
+for %%v in (PYTHONPATH PYTHONHOME PYTHONSTARTUP PYTHONUSERBASE VIRTUAL_ENV CONDA_PREFIX LOCALM_HOME) do set "%%v="
+set "UV_NO_CONFIG=1"
+set "PIP_CONFIG_FILE=NUL"
+set "PYTHONNOUSERSITE=1"
+if not exist ".venv\Scripts\python.exe" goto :not_set_up
+set "PY=.venv\Scripts\python.exe"
 
 rem Forwarding must stay outside any ( ... ) block: cmd.exe expands
 rem %errorlevel% once at parse time, so a block would always report the
@@ -24,9 +34,8 @@ if not "%LOCALM_MODEL%"=="" (
 )
 
 rem Default: first model name from the registry.
-rem %PY% must stay unquoted here - usebackq strips the backtick command's
-rem leading quote, which mangles a quoted path. %PY% is always space-free
-rem ("python" or the relative .venv path), so this is safe.
+rem %PY% stays unquoted here: usebackq strips the backtick command's leading
+rem quote. %PY% is the space-free relative .venv path.
 for /f "usebackq delims=" %%m in (`%PY% -c "from localm.config import load_registry; r=load_registry(); print(sorted(r)[0] if r else '')"`) do set "MODEL=%%m"
 
 if "%MODEL%"=="" (
@@ -50,7 +59,7 @@ set "RC=%errorlevel%"
 if not "%RC%"=="0" goto :held
 rem Debug asks for the log to be readable, so the window is held even on a
 rem clean exit.
-echo %* | findstr /I /C:"--debug" >nul && goto :held
+echo %* | "%SystemRoot%\System32\findstr.exe" /I /C:"--debug" >nul && goto :held
 exit /b 0
 
 rem "if errorlevel 1" is a >= test against a SIGNED value, so a native fault's
@@ -60,3 +69,9 @@ rem compared as a string, which has no sign to get wrong.
 :held
 pause
 exit /b %RC%
+
+:not_set_up
+echo LocaLM is not set up in this folder yet: there is no .venv here.
+echo Run setup.bat first - it creates a private .venv in this folder.
+pause
+exit /b 1

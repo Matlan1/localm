@@ -12,9 +12,14 @@ Each real script runs from a throwaway clone with the system temp folder set to
 an empty directory. The pinned installer is served from a local directory
 through a file:// URL (Windows) or a stub ``curl`` (bash), and stands in for
 Astral's: it writes a partial archive into its temp folder, as the real one
-does, then either drops a uv where the real one would or fails. Each test
-asserts the end state: the installer's temp folder is gone and the system temp
-folder is empty. No network is used.
+does, then either installs a stand-in uv (tests/_fake_uv.py) where the real one
+would, through the same Expand-Archive / Copy-Item / Remove-Item calls (on
+Windows), or fails. Each test asserts the end state: the installer's temp
+folder is gone and the system temp folder is empty. No network is used.
+
+setup.bat also points TEMP and TMP at ``<install>\\.localm-setup-tmp`` for the
+whole run: the stand-in uv records the TEMP and TMP each ``uv venv`` and
+``uv pip install`` sees.
 """
 
 from __future__ import annotations
@@ -29,6 +34,7 @@ from pathlib import Path
 import pytest
 
 from localm import uv_tool
+from tests import _fake_uv as fake_uv
 
 ROOT = Path(__file__).resolve().parents[1]
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -64,16 +70,16 @@ _needs_bash = pytest.mark.skipif(
 
 _HOST = "https://github.com/astral-sh/uv/releases/download/"
 _PS_STUB = (
-    b"$tmp = Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid())\r\n"
-    b"$null = New-Item -ItemType Directory -Path $tmp\r\n"
-    b"[IO.File]::WriteAllText((Join-Path $tmp 'uv.zip'), 'partial download')\r\n"
-    b"Add-Content -LiteralPath $env:STUB_LOG -Value $tmp\r\n"
-    b"$null = Get-Item -Path (Join-Path $tmp 'uv.zip') -ErrorAction Stop\r\n"
+    b"$tmp = New-Item -ItemType Directory -Path (Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid()))\r\n"
+    b"$zip = \"$tmp\\uv.zip\"\r\n"
+    b"Add-Type -AssemblyName System.IO.Compression.FileSystem\r\n"
+    b"[IO.Compression.ZipFile]::CreateFromDirectory($env:STUB_UV_DIR, $zip)\r\n"
+    b"Add-Content -LiteralPath $env:STUB_LOG -Value \"$tmp\"\r\n"
     b"if ($env:STUB_FAIL -eq '1') { exit 3 }\r\n"
-    b"$dest = $env:UV_INSTALL_DIR\r\n"
-    b"if (-not $dest) { $dest = Join-Path $env:USERPROFILE '.local\\bin' }\r\n"
-    b"$null = New-Item -ItemType Directory -Force -Path $dest\r\n"
-    b"[IO.File]::WriteAllBytes((Join-Path $dest 'uv.exe'), [byte[]]@())\r\n"
+    b"Expand-Archive -Path $zip -DestinationPath \"$tmp\";\r\n"
+    b"$dest = New-Item -Force -ItemType Directory -Path $env:UV_INSTALL_DIR\r\n"
+    b"Copy-Item \"$tmp\\uv.exe\" -Destination \"$dest\" -ErrorAction Stop\r\n"
+    b"Remove-Item \"$tmp\\uv.exe\" -Recurse -Force -ErrorAction Stop\r\n"
 )
 _SH_STUB = (
     b'#!/bin/sh\n'
@@ -148,7 +154,15 @@ def _assert_nothing_left(scratch: Path, log: Path) -> None:
     assert sorted(p.name for p in scratch.iterdir()) == []
 
 
-def _windows_env(scratch: Path, home: Path, log: Path, fails: bool, **extra) -> dict:
+@pytest.fixture(scope="module")
+def stub_uv_dir(tmp_path_factory):
+    d = tmp_path_factory.mktemp("fakeuv")
+    fake_uv.build(d)
+    return d
+
+
+def _windows_env(scratch: Path, home: Path, log: Path, fails: bool, uv_dir: Path,
+                 **extra) -> dict:
     system32 = Path(os.environ["SystemRoot"]) / "System32"
     env = dict(os.environ)
     for var in ("LOCALM_SETUP_ABORT_AFTER", "LOCALM_GUI_STORE", "LOCALM_GUI_UV",
@@ -158,7 +172,8 @@ def _windows_env(scratch: Path, home: Path, log: Path, fails: bool, **extra) -> 
     env.update(PATH=os.pathsep.join([str(system32), str(system32 / "WindowsPowerShell" / "v1.0")]),
                TEMP=str(scratch), TMP=str(scratch), USERPROFILE=str(home),
                HOMEDRIVE=home.drive, HOMEPATH=str(home)[len(home.drive):], STUB_LOG=str(log),
-               STUB_FAIL="1" if fails else "0")
+               STUB_FAIL="1" if fails else "0", STUB_UV_DIR=str(uv_dir),
+               LOCALAPPDATA=str(home / "AppData" / "Local"))
     env.update(extra)
     return env
 
@@ -188,23 +203,29 @@ _AWKWARD_FOLDERS = [
     ("1", "uv-portable", Path(".uv") / "uv.exe"),
     ("2", "uv-bootstrap", None),
 ])
-def test_setup_bat_leaves_nothing_in_the_system_temp_folder(tmp_path, pick, step, uv_exe, fails):
-    _setup_bat_installs_uv(tmp_path, "clone", pick, step, uv_exe, fails)
+def test_setup_bat_leaves_nothing_in_the_system_temp_folder(tmp_path, stub_uv_dir, pick, step,
+                                                           uv_exe, fails):
+    _setup_bat_installs_uv(tmp_path, stub_uv_dir, "clone", pick, step, uv_exe, fails)
 
 
 @_needs_windows
 @pytest.mark.parametrize("fails", _OUTCOMES)
 @pytest.mark.parametrize("folder", _AWKWARD_FOLDERS)
-def test_setup_bat_installs_uv_from_an_awkward_folder(tmp_path, folder, fails):
-    _setup_bat_installs_uv(tmp_path, folder, "1", "uv-portable", Path(".uv") / "uv.exe", fails)
+def test_setup_bat_installs_uv_from_an_awkward_folder(tmp_path, stub_uv_dir, folder, fails):
+    _setup_bat_installs_uv(tmp_path, stub_uv_dir, folder, "1", "uv-portable",
+                           Path(".uv") / "uv.exe", fails)
 
 
-def _setup_bat_installs_uv(tmp_path, clone_name, pick, step, uv_exe, fails):
+def _shared_uv(home: Path) -> Path:
+    return home / "AppData" / "Local" / "localm" / "shared" / "uv" / "uv.exe"
+
+
+def _setup_bat_installs_uv(tmp_path, uv_dir, clone_name, pick, step, uv_exe, fails):
     clone, scratch, home, log = _layout(tmp_path, clone_name)
     _pinned_copy("setup.bat", clone, tmp_path / "releases", _PS_STUB, bat=True)
-    env = _windows_env(scratch, home, log, fails, LOCALM_SETUP_ABORT_AFTER=step)
-    rc, out = _cmd(clone / "setup.bat", clone, env, f"{pick}\nY\n\n\n")
-    installed = clone / uv_exe if uv_exe else home / ".local" / "bin" / "uv.exe"
+    env = _windows_env(scratch, home, log, fails, uv_dir, LOCALM_SETUP_ABORT_AFTER=step)
+    rc, out = _cmd(clone / "setup.bat", clone, env, f"{pick}\n\n\n")
+    installed = clone / uv_exe if uv_exe else _shared_uv(home)
     if fails:
         assert rc == 1 and "uv still is not callable" in out, out
         assert not installed.exists(), out
@@ -214,24 +235,54 @@ def _setup_bat_installs_uv(tmp_path, clone_name, pick, step, uv_exe, fails):
     _assert_nothing_left(scratch, log)
 
 
-_GUI_UV_RUN = '"%UVEXE%" run --no-project --isolated --python 3.12 python "installer\\gui.py"'
+@_needs_windows
+@pytest.mark.parametrize("pick", ["1", "2"])
+def test_setup_bat_runs_every_uv_call_with_setup_temp(tmp_path, stub_uv_dir, pick):
+    """setup.bat points TEMP and TMP at <install>\\.localm-setup-tmp before uv
+    runs: the stand-in uv in the store records them for ``uv venv`` and
+    ``uv pip install``. The venv's python is the same stand-in, which answers the
+    extras question, so the run reaches the localm install and stops after it."""
+    clone, scratch, home, log = _layout(tmp_path)
+    shutil.copy(ROOT / "setup.bat", clone / "setup.bat")
+    store = clone / ".uv" if pick == "1" else _shared_uv(home).parent
+    fake_uv.place(stub_uv_dir / "uv.exe", store)
+    uvlog = tmp_path / "uv.log"
+    env = _windows_env(scratch, home, log, False, stub_uv_dir,
+                       LOCALM_SETUP_ABORT_AFTER="install-localm", STUB_VENV_PYTHON="1")
+    env["STUB_LOG"] = str(uvlog)
+    rc, out = _cmd(clone / "setup.bat", clone, env, f"{pick}\n\n1\n\n\n")
+    assert rc == 99 and "stopping after 'install-localm'" in out, out
+    calls = uvlog.read_text(encoding="utf-8").splitlines()
+    venv = [c for c in calls if c.startswith("uv venv ")]
+    pip = [c for c in calls if c.startswith("uv pip install ")]
+    assert venv and pip, calls
+    setup_temp = str(clone / ".localm-setup-tmp")
+    for call in venv + pip:
+        assert call.endswith(f" TEMP={setup_temp} TMP={setup_temp}"), call
+    assert "--python-preference only-managed" in venv[0], venv
+    assert sorted(p.name for p in scratch.iterdir()) == []
+
+
+_GUI_UV_RUN = ('"%UVEXE%" run --no-project --isolated --python 3.12 --python-preference only-managed '
+               '"installer\\gui.py"')
 
 
 @_needs_windows
 @pytest.mark.parametrize("fails", _OUTCOMES)
 @pytest.mark.parametrize("pick,uv_exe", [("1", Path(".uv") / "uv.exe"), ("2", None)])
-def test_setup_gui_bat_leaves_nothing_in_the_system_temp_folder(tmp_path, pick, uv_exe, fails):
-    _setup_gui_bat_installs_uv(tmp_path, "clone", pick, uv_exe, fails)
+def test_setup_gui_bat_leaves_nothing_in_the_system_temp_folder(tmp_path, stub_uv_dir, pick,
+                                                               uv_exe, fails):
+    _setup_gui_bat_installs_uv(tmp_path, stub_uv_dir, "clone", pick, uv_exe, fails)
 
 
 @_needs_windows
 @pytest.mark.parametrize("fails", _OUTCOMES)
 @pytest.mark.parametrize("folder", _AWKWARD_FOLDERS)
-def test_setup_gui_bat_installs_uv_from_an_awkward_folder(tmp_path, folder, fails):
-    _setup_gui_bat_installs_uv(tmp_path, folder, "1", Path(".uv") / "uv.exe", fails)
+def test_setup_gui_bat_installs_uv_from_an_awkward_folder(tmp_path, stub_uv_dir, folder, fails):
+    _setup_gui_bat_installs_uv(tmp_path, stub_uv_dir, folder, "1", Path(".uv") / "uv.exe", fails)
 
 
-def _setup_gui_bat_installs_uv(tmp_path, clone_name, pick, uv_exe, fails):
+def _setup_gui_bat_installs_uv(tmp_path, uv_dir, clone_name, pick, uv_exe, fails):
     clone, scratch, home, log = _layout(tmp_path, clone_name)
     _pinned_copy("setup-gui.bat", clone, tmp_path / "releases", _PS_STUB, bat=True)
     script = clone / "setup-gui.bat"
@@ -239,8 +290,8 @@ def _setup_gui_bat_installs_uv(tmp_path, clone_name, pick, uv_exe, fails):
     assert text.count(_GUI_UV_RUN) == 1, "the window launch line moved"
     script.write_bytes(text.replace(_GUI_UV_RUN, "set UVEXE& cmd /c exit 0")
                        .encode("utf-8"))
-    rc, out = _cmd(script, clone, _windows_env(scratch, home, log, fails), f"{pick}\nY\n\n\n")
-    installed = clone / uv_exe if uv_exe else home / ".local" / "bin" / "uv.exe"
+    rc, out = _cmd(script, clone, _windows_env(scratch, home, log, fails, uv_dir), f"{pick}\n\n\n")
+    installed = clone / uv_exe if uv_exe else _shared_uv(home)
     if fails:
         assert rc == 1 and "uv still is not callable" in out, out
     else:
