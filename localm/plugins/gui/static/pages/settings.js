@@ -1520,6 +1520,22 @@ function confirmEmbeddingModelSwitch(model, report) {
  *  proceeds, re-PATCH the exact same body plus confirm:true - so the whole
  *  section's edits (not just embedding_model) land together, same as the
  *  single-step case, once confirmed. */
+/** The catalog key of the toast after a section save: the saved values that
+ *  changed decide it by their schema `applies` (restart wins over next_load,
+ *  which wins over live). A secret sent at all counts as changed. */
+export function savedToastKey(updates) {
+  const applies = new Set();
+  for (const { field } of _settingsControls) {
+    if (!(field.key in updates)) continue;
+    const changed = field.widget === "secret"
+      || JSON.stringify(updates[field.key]) !== JSON.stringify(field.default);
+    if (changed) applies.add(field.applies);
+  }
+  if (applies.has("restart")) return "settings.toast.savedRestart";
+  if (applies.has("next_load")) return "settings.toast.savedEngine";
+  return "settings.toast.saved";
+}
+
 export async function saveSettingsSection(secId) {
   const panel = $("settings-sec-" + secId);
   if (!panel) return;
@@ -1546,7 +1562,7 @@ export async function saveSettingsSection(secId) {
     data = await r.json().catch(() => ({}));
   }
   if (r.ok) {
-    toast(t("settings.toast.savedEngine"));
+    toast(t(savedToastKey(updates)));
     // A save may have moved "Show remote images in replies" (off / ask / on).
     // The route re-decides immediately, but an already-fetched image is held in
     // a page-lifetime blob cache and the reader's per-origin answers are held

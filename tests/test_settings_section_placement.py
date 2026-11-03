@@ -120,7 +120,7 @@ VISIBLE_FIELD_GROUP = {
     "browser_enabled": "Network", "browser_engine": "Network",
     "browser_headless": "Network", "browser_custom_domain_rules": "Network",
     "browser_allow": "Network", "browser_deny": "Network",
-    "browser_inline_live_view": "Network",
+    "browser_inline_live_view": "Coder",
     "voice_stt_model": "Voice", "voice_stt_language": "Voice",
 }
 
