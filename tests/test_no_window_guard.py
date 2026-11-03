@@ -172,29 +172,80 @@ def test_a_hidden_new_console_starts_with_create_no_window(stop_spy):
     assert flags & nw.CREATE_NO_WINDOW and not flags & nw.CREATE_NEW_CONSOLE
 
 
+def test_allow_window_nests_and_ends_with_its_block():
+    assert not nw.window_allowed()
+    with nw.allow_window():
+        assert nw.window_allowed()
+        with nw.allow_window():
+            assert nw.window_allowed()
+        assert nw.window_allowed()
+    assert not nw.window_allowed()
+
+
 @_needs_windows
-def test_allow_detached_lets_detached_through_on_its_own_thread_only(stop_spy):
-    detached = nw.DETACHED_PROCESS
+@pytest.mark.parametrize("flags", [nw.CREATE_NEW_CONSOLE, nw.DETACHED_PROCESS],
+                         ids=["new-console", "detached"])
+def test_allow_window_passes_a_console_request_through_unchanged_on_every_thread(
+        stop_spy, flags):
     other = []
 
     def elsewhere():
         try:
-            subprocess.run(["cmd", "/c", "exit 1"], creationflags=detached)
+            subprocess.run(["cmd", "/c", "exit 1"], creationflags=flags)
         except BaseException as exc:
             other.append(exc)
 
-    with nw.allow_detached():
+    with nw.allow_window():
         with pytest.raises(_Stop):
-            subprocess.run(["cmd", "/c", "exit 0"], creationflags=detached)
+            subprocess.run(["cmd", "/c", "exit 0"], creationflags=flags)
         t = threading.Thread(target=elsewhere)
         t.start()
         t.join(30)
-    assert _flags(_ours(stop_spy, "exit 0")) & nw.DETACHED_PROCESS
-    assert [c for c in stop_spy if "exit 1" in str(c[1])] == []
-    assert len(other) == 1 and isinstance(other[0], _Refused)
+    mine = _ours(stop_spy, "exit 0")
+    assert _flags(mine) & flags and not _flags(mine) & nw.CREATE_NO_WINDOW
+    assert not _hidden_startupinfo(mine)
+    assert _flags(_ours(stop_spy, "exit 1")) & flags
+    assert len(other) == 1 and isinstance(other[0], _Stop)
     with pytest.raises(_Refused):
-        subprocess.run(["cmd", "/c", "exit 2"], creationflags=detached)
+        subprocess.run(["cmd", "/c", "exit 2"], creationflags=flags)
     assert [c for c in stop_spy if "exit 2" in str(c[1])] == []
+
+
+@_needs_windows
+def test_allow_window_calls_the_real_startfile_and_browser(monkeypatch):
+    opened = []
+    monkeypatch.setattr(nw, "_real_startfile", lambda path, *a, **k: opened.append(("file", path)))
+    monkeypatch.setattr(nw, "_real_browser_open", lambda url, *a, **k: opened.append(("url", url)))
+    with nw.allow_window():
+        os.startfile("x.txt")
+        webbrowser.open("http://127.0.0.1:9/")
+    assert opened == [("file", "x.txt"), ("url", "http://127.0.0.1:9/")]
+    with pytest.raises(_Refused):
+        os.startfile("x.txt")
+    assert len(opened) == 2
+
+
+@_needs_windows
+def test_allow_window_lets_tk_windows_show(monkeypatch):
+    calls = []
+
+    class _Fake:
+        def withdraw(self):
+            calls.append("withdraw")
+
+    monkeypatch.setattr(nw, "_real_tk_init", lambda self, *a, **k: calls.append("tk"))
+    monkeypatch.setattr(nw, "_real_toplevel_init", lambda self, *a, **k: calls.append("top"))
+    monkeypatch.setattr(nw, "_real_deiconify", lambda self: calls.append("deiconify"))
+    with nw.allow_window():
+        nw.tk_init(_Fake())
+        nw.toplevel_init(_Fake())
+        nw.deiconify(_Fake())
+    assert calls == ["tk", "top", "deiconify"]
+    calls.clear()
+    nw.tk_init(_Fake())
+    nw.toplevel_init(_Fake())
+    nw.deiconify(_Fake())
+    assert calls == ["tk", "withdraw", "top", "withdraw"]
 
 
 @_needs_windows

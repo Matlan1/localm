@@ -1,18 +1,21 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Refuse, in the process that runs the tests on Windows, every request that
-would put a window on the desktop.
+would put a window on the desktop, unless the test asked for windows with
+``allow_window()``.
 
 ``arm()`` patches:
 
 * ``_winapi.CreateProcess``, which ``subprocess``, ``asyncio`` and
   ``multiprocessing`` all start a Windows process through. ``DETACHED_PROCESS``
-  is refused unless the call is inside ``allow_detached()``.
-  ``CREATE_NEW_CONSOLE`` is refused unless the STARTUPINFO hides the window,
-  and then becomes ``CREATE_NO_WINDOW``. Every call that goes ahead carries a
-  STARTUPINFO with ``STARTF_USESHOWWINDOW`` and ``SW_HIDE``.
+  is refused. ``CREATE_NEW_CONSOLE`` is refused unless the STARTUPINFO hides
+  the window, and then becomes ``CREATE_NO_WINDOW``. Every call that goes ahead
+  carries a STARTUPINFO with ``STARTF_USESHOWWINDOW`` and ``SW_HIDE``.
 * ``os.startfile`` and ``webbrowser.open``, which are refused.
 * ``tkinter.Tk`` and ``tkinter.Toplevel``, which start withdrawn, and
   ``deiconify``, which leaves a window withdrawn.
+
+Inside ``allow_window()`` every patch passes the call through unchanged, on
+every thread of the process.
 
 A refusal fails the test at the call with ``pytest.fail``, whose exception
 derives from ``BaseException``, so an ``except Exception`` in the code under
@@ -37,27 +40,35 @@ STARTF_USESHOWWINDOW = 0x00000001
 SW_HIDE = 0
 
 ADVICE = (
-    "  No test may put a window on the desktop of the person running the suite.\n"
+    "  No test may put a window on the desktop by accident.\n"
     "  Fake the spawn (monkeypatch subprocess.Popen, os.startfile or\n"
     "  webbrowser.open), or start the child hidden: CREATE_NO_WINDOW, or\n"
     "  CREATE_NEW_CONSOLE with a STARTUPINFO whose wShowWindow is SW_HIDE.\n"
-    "  A test that needs a console-less child starts it inside\n"
-    "  tests._no_window.allow_detached(), and that child starts nothing with a\n"
-    "  console of its own.")
+    "  A test that needs a window runs that part inside\n"
+    "  tests._no_window.allow_window().")
 
 _ARMED = False
-_detached_allowed = threading.local()
+_allowed = 0
+_allowed_lock = threading.Lock()
 
 
 @contextlib.contextmanager
-def allow_detached():
-    """Let ``DETACHED_PROCESS`` through on this thread while the block runs."""
-    previous = getattr(_detached_allowed, "on", False)
-    _detached_allowed.on = True
+def allow_window():
+    """Pass every window request through unchanged, on every thread, while the
+    block runs. Blocks may nest."""
+    global _allowed
+    with _allowed_lock:
+        _allowed += 1
     try:
         yield
     finally:
-        _detached_allowed.on = previous
+        with _allowed_lock:
+            _allowed -= 1
+
+
+def window_allowed() -> bool:
+    """True while any ``allow_window()`` block is running."""
+    return _allowed > 0
 
 
 def _hides(startupinfo) -> bool:
@@ -68,7 +79,7 @@ def _hides(startupinfo) -> bool:
                 and getattr(startupinfo, "wShowWindow", None) == SW_HIDE)
 
 
-def hidden(flags: int, startupinfo, *, detached_allowed: bool = False):
+def hidden(flags: int, startupinfo):
     """Return ``(flags, startupinfo, refusal)`` for one CreateProcess call.
 
     *refusal* is ``None`` when the call may go ahead with the returned *flags*
@@ -79,7 +90,7 @@ def hidden(flags: int, startupinfo, *, detached_allowed: bool = False):
     and ``SW_HIDE``; *startupinfo* itself is never modified (a copy is
     returned, or a new one when it is ``None``).
     """
-    if flags & DETACHED_PROCESS and not detached_allowed:
+    if flags & DETACHED_PROCESS:
         return flags, startupinfo, (
             "DETACHED_PROCESS leaves the child without a console, so every "
             "console program it starts opens a visible console window")
@@ -144,52 +155,72 @@ _real_create = None
 def create_process(application, command, proc_attrs, thread_attrs, inherit,
                    flags, env, cwd, startupinfo):
     """Stand-in for ``_winapi.CreateProcess``: applies ``hidden()``, then calls
-    ``_real_create`` with the result, or refuses."""
-    flags, startupinfo, refusal = hidden(
-        flags, startupinfo, detached_allowed=getattr(_detached_allowed, "on", False))
-    if refusal:
-        refuse(refusal, str(command)[:200])
+    ``_real_create`` with the result, or refuses. Inside ``allow_window()`` it
+    calls ``_real_create`` with the arguments as given."""
+    if not window_allowed():
+        flags, startupinfo, refusal = hidden(flags, startupinfo)
+        if refusal:
+            refuse(refusal, str(command)[:200])
     return _real_create(application, command, proc_attrs, thread_attrs, inherit,
                         flags, env, cwd, startupinfo)
 
 
+_real_startfile = None
+_real_browser_open = None
+
+
 def startfile(path, *args, **kwargs):
+    """Stand-in for ``os.startfile``: refuses, or calls it inside ``allow_window()``."""
+    if window_allowed():
+        return _real_startfile(path, *args, **kwargs)
     refuse("os.startfile opens a window", str(path)[:200])
 
 
 def browser_open(url, *args, **kwargs):
+    """Stand-in for ``webbrowser.open``: refuses, or calls it inside ``allow_window()``."""
+    if window_allowed():
+        return _real_browser_open(url, *args, **kwargs)
     refuse("webbrowser.open opens a browser window", str(url)[:200])
 
 
 _real_tk_init = None
 _real_toplevel_init = None
+_real_deiconify = None
 
 
 def tk_init(self, *args, **kwargs):
-    """``tkinter.Tk.__init__``, then ``withdraw()`` before any idle task runs."""
+    """``tkinter.Tk.__init__``, then ``withdraw()`` before any idle task runs,
+    except inside ``allow_window()``."""
     _real_tk_init(self, *args, **kwargs)
-    self.withdraw()
+    if not window_allowed():
+        self.withdraw()
 
 
 def toplevel_init(self, *args, **kwargs):
-    """``tkinter.Toplevel.__init__``, then ``withdraw()`` before any idle task runs."""
+    """``tkinter.Toplevel.__init__``, then ``withdraw()`` before any idle task
+    runs, except inside ``allow_window()``."""
     _real_toplevel_init(self, *args, **kwargs)
-    self.withdraw()
+    if not window_allowed():
+        self.withdraw()
 
 
 def deiconify(self):
-    """Stand-in for ``Wm.deiconify``: the window stays withdrawn."""
+    """Stand-in for ``Wm.deiconify``: the window stays withdrawn, except inside
+    ``allow_window()``."""
+    if window_allowed():
+        return _real_deiconify(self)
     return None
 
 
 def _arm_tk() -> None:
-    global _real_tk_init, _real_toplevel_init
+    global _real_tk_init, _real_toplevel_init, _real_deiconify
     try:
         import tkinter
     except ImportError:
         return
     _real_tk_init = tkinter.Tk.__init__
     _real_toplevel_init = tkinter.Toplevel.__init__
+    _real_deiconify = tkinter.Wm.wm_deiconify
     tkinter.Tk.__init__ = tk_init
     tkinter.Toplevel.__init__ = toplevel_init
     tkinter.Wm.deiconify = deiconify
@@ -202,13 +233,15 @@ def armed() -> bool:
 
 def arm() -> bool:
     """Install the patches once, on Windows only. Returns True when it did."""
-    global _ARMED, _real_create
+    global _ARMED, _real_create, _real_startfile, _real_browser_open
     if _ARMED or sys.platform != "win32":
         return False
     import _winapi
 
     _real_create = _winapi.CreateProcess
     _winapi.CreateProcess = create_process
+    _real_startfile = os.startfile
+    _real_browser_open = webbrowser.open
     os.startfile = startfile
     webbrowser.open = browser_open
     _arm_tk()
