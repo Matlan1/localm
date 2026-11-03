@@ -588,9 +588,11 @@ def _apply_correction(cid: str, accept: bool, request):
 @_router.post("/api/memory/consolidate")
 async def memory_consolidate(request: Request = None):
     """Manually distil durable facts from recent sessions into the store (the
-    opt-in consolidation trigger). Gated on privacy; needs a loaded model."""
+    opt-in consolidation trigger). Gated on privacy; needs a loaded model, which is
+    reloaded first when it is selected but its worker died."""
     _require_writable()
     principal = _request_principal(request)
+    await _reload_if_unloaded()
 
     # Off the loop: synthesize_memory drives a full blocking LLM generation per
     # candidate (complete(), below) plus _embed_fn() resolution, which can itself
@@ -626,6 +628,24 @@ async def memory_consolidate(request: Request = None):
         return res
 
     return await _off_loop(_do_consolidate)
+
+
+async def _reload_if_unloaded() -> None:
+    """Reload the selected model when it is still selected but no longer loaded
+    (its worker died), through ``http_server.get_engine``, the path a chat
+    request takes, so the load is admission-checked like one.
+
+    No-op when no model is selected (nothing was loaded, or it was unloaded on
+    request: the caller then answers "Load a model first") or when it is loaded.
+    Raises the HTTPException ``get_engine`` raises when the reload fails."""
+    eng = _live_engine()
+    if eng is None or getattr(eng, "loaded", False):
+        return
+    name = getattr(eng, "display_name", None)
+    if not name:
+        return
+    from localm.inference.http_server import get_engine
+    await get_engine(name)
 
 
 def _model_failed_detail(res: dict) -> str:

@@ -16,6 +16,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ### Fixed
 - **`localm comfy restart` and `localm comfy stop` refuse a held port at once.** When another program holds ComfyUI's port and accepts connections without answering, both commands used to spend about a minute waiting on it before printing that localm did not start it and will not stop it. They now print that message immediately and start nothing.
+- **Memory "Synthesize now" reloads a model that crashed.** After the model's worker died, the panel said the model would reload on the next request, but pressing Synthesize now again answered "Load a model first" until a chat message had reloaded it. Synthesize now reloads the model itself, as a chat message does, and says so if the reload fails.
 - **Setup installs uv from a folder whose path contains `[` or `]`.** Running `setup.bat` or `setup-gui.bat` from a folder such as `D:\apps\localm [test]` stopped at the uv step with uv not installed. The console and graphical setups now install uv from such a folder too, keeping the installer's temporary files in a short-lived folder that is removed afterwards.
 
 ## [0.3.2] - 2026-10-29
