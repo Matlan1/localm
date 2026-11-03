@@ -199,6 +199,7 @@ export const I18N_EN = {
   "chat.persona.save": "save…",
   "chat.persona.saveTitle": "Save the current system prompt and sampling values under a name",
   "chat.pinModel": "Pin this chat to",
+  "chat.pinModel.mismatch": "This chat is pinned to {pinned}, but {active} is loaded. Your next message loads {pinned} again.",
   "chat.pinModel.title": "Always answer this chat with this model, even when a request needs something it lacks (reading an image, tool calls, a longer conversation). Unpinned, such a request can be answered by an installed model that has it (see Model autoswitch in Settings).",
   "chat.privacyHint": "privacy mode - this session only",
   "chat.privacyHint.title":
@@ -1412,7 +1413,7 @@ export const I18N_EN = {
   "models.pull.store.move": "Move into library",
   "models.pull.store.registerInPlace": "Register in place",
   "models.pull.storeTitle":
-    "Only applies to a local folder/file path - a HuggingFace or URL download always lands in ~/.localm/models on its own.",
+    "Only applies to a local folder/file path - a HuggingFace, CivitAI or URL download always lands in ~/.localm/models on its own.",
   "models.pull.title": "Add a model",
   "models.pull.verifying": "verifying… {pct}%",
   "models.relocate.failed": "Relocate failed",
