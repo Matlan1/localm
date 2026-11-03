@@ -96,10 +96,10 @@ test("a second confirm after Load anyway asks the switch question and retries wi
     { model: "bge", as_chat: true },
     { model: "bge", force: true, as_chat: true },
   ]);
-  assert.deepEqual(win.__asks.map((a) => a.title), ["Not a chat model", "Confirm model switch"]);
+  assert.deepEqual(Array.from(win.__asks, (a) => a.title), ["Not a chat model", "Confirm model switch"]);
   assert.equal(win.__asks[1].label, "Switch anyway");
   assert.match(win.__asks[1].text, /needs to free 'q7'/);
-  assert.deepEqual(win.__switched, ["bge"]);
+  assert.deepEqual(Array.from(win.__switched), ["bge"]);
 });
 
 test("declining the second confirm after Load anyway claims no load", async () => {
@@ -108,7 +108,7 @@ test("declining the second confirm after Load anyway claims no load", async () =
   const select = await pickTwice(win, [true, false]);
 
   assert.deepEqual(calls, [{ model: "bge" }, { model: "bge", as_chat: true }]);
-  assert.deepEqual(win.__switched, [], "no model-switched event for a load that never happened");
+  assert.deepEqual(Array.from(win.__switched), [], "no model-switched event for a load that never happened");
   runScript(win, "window.__active = modelCache.active;");
   assert.equal(win.__active, "q7");
   assert.equal(select.value, "q7", "the dropdown returns to the loaded model");
@@ -121,7 +121,7 @@ test("a confirm repeated after its flag was sent is a failed load, not a loaded 
 
   assert.equal(calls.length, 3);
   assert.equal(win.__asks.length, 2, "the same question is not asked twice");
-  assert.deepEqual(win.__switched, []);
+  assert.deepEqual(Array.from(win.__switched), []);
   runScript(win, "window.__active = modelCache.active;");
   assert.equal(win.__active, "q7");
 });
