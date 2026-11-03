@@ -357,3 +357,46 @@ class TestMessages:
             "this keeps happening.")
         assert sa.inconclusive_restarting_refusal("m").startswith(
             "Cannot load 'm' right now: the server detected a stuck GPU check")
+
+
+class TestUnloadPolicy:
+    @pytest.mark.parametrize("value,expected", [
+        ("always", "always"), ("ask", "ask"), ("never", "never"),
+        (None, "always"), ("sometimes", "always"), (1, "always"),
+    ])
+    def test_the_setting_value(self, value, expected):
+        cfg = {} if value is None else {"unload_for_room": value}
+        assert sa.unload_policy(cfg) == expected
+
+    @pytest.mark.parametrize("policy,preempt,force,keep,expected", [
+        ("always", True, False, False, "always"),
+        ("ask", True, False, False, "ask"),
+        ("ask", False, False, False, "never"),
+        ("ask", True, True, False, "always"),
+        ("never", True, True, False, "always"),
+        ("always", True, False, True, "never"),
+        ("ask", True, True, True, "never"),
+        ("never", False, False, False, "never"),
+    ])
+    def test_the_policy_one_load_applies(self, policy, preempt, force, keep, expected):
+        assert sa.effective_unload_policy(policy, preempt=preempt, force=force,
+                                          keep_others=keep) == expected
+
+    def test_the_ask_question_names_everything_it_unloads(self):
+        result = sa.unload_ask_confirm("m", ["a", "b"], 5 * GB, shared=True,
+                                       peers=["'x' (port 1)"])
+        assert result["reason"] == "unload_ask" and result["freed_mb"] == 5 * 1024
+        assert result["detail"] == (
+            "Loading 'm' unloads 'a', 'b', the shared embedding, reranker and speech "
+            "models, 'x' (port 1) of another localm instance, which frees about "
+            "5120 MB of VRAM.")
+
+    def test_the_choice_names_the_models_and_the_figures(self):
+        budget = _budget("m", backend_need=9 * GB, backend_sized=True)
+        result = sa.unload_choice_confirm("m", budget, 3 * GB, ["a"])
+        assert (result["reason"], result["plan_mb"], result["free_mb"]) == (
+            "unload_choice", 9 * 1024, 3 * 1024)
+        assert result["detail"] == (
+            "'m' needs about 9216 MB of free VRAM to run every layer on the GPU and "
+            "about 3072 MB is free beside 'a'. Load it beside them, slower, or unload "
+            "them for this load.")

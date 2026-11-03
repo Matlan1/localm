@@ -2615,3 +2615,144 @@ class TestBusyReplyNothingFreedBeforeAsking:
 
         assert res == {"status": "loaded", "model": "model-b"}
         assert box.events[0] == "free-embedder"
+
+
+# --------------------------------------------------------------------------- #
+#  The unload_for_room setting                                                #
+# --------------------------------------------------------------------------- #
+
+class TestUnloadPolicy:
+    """At the default 10 GB with model-a resident, model-b does not fit beside
+    it, so the setting decides whether model-a is unloaded."""
+
+    def _setup(self, monkeypatch, policy):
+        import localm.config as cfg
+        real = cfg.load_config
+        monkeypatch.setattr("localm.config.load_config",
+                            lambda *a, **k: {**real(*a, **k), "unload_for_room": policy})
+        a = GatedEngine("model-a")
+        b = GatedEngine("model-b")
+        env = _install(monkeypatch, {"model-a": a, "model-b": b})
+        _seat("model-a", a, active=True)
+        return a, b, env
+
+    def _switch(self, env, **kw):
+        return asyncio.run(hs.switch_engine("model-b", env.factory, **kw))
+
+    def test_always_unloads_the_idle_model_without_asking(self, monkeypatch):
+        a, b, env = self._setup(monkeypatch, "always")
+
+        res = self._switch(env)
+
+        assert res["status"] == "loaded"
+        assert not a.loaded and a.unload_calls == 1 and b.loaded
+
+    def test_ask_asks_an_explicit_switch_and_unloads_nothing(self, monkeypatch):
+        a, b, env = self._setup(monkeypatch, "ask")
+
+        res = self._switch(env)
+
+        assert res["status"] == "confirm_required" and res["reason"] == "unload_ask"
+        assert res["unloaded"] == ["model-a"]
+        assert res["detail"] == "Loading 'model-b' unloads 'model-a'."
+        assert a.loaded and a.unload_calls == 0 and not b.loaded
+
+    def test_ask_confirmed_unloads_and_loads(self, monkeypatch):
+        a, b, env = self._setup(monkeypatch, "ask")
+
+        res = self._switch(env, force=True)
+
+        assert res["status"] == "loaded"
+        assert not a.loaded and b.loaded
+
+    def test_ask_never_unloads_for_a_load_nobody_can_be_asked_about(self, monkeypatch):
+        a, b, env = self._setup(monkeypatch, "ask")
+
+        res = self._switch(env, preempt=False, activate=False)
+
+        assert res["status"] == "loaded"
+        assert a.loaded and a.unload_calls == 0 and b.loaded
+
+    def test_never_offers_the_choice_on_an_explicit_switch(self, monkeypatch):
+        a, b, env = self._setup(monkeypatch, "never")
+
+        res = self._switch(env)
+
+        assert res["status"] == "confirm_required" and res["reason"] == "unload_choice"
+        assert res["unloaded"] == ["model-a"]
+        assert res["free_mb"] == (10 * GB - NEED) // MB
+        assert a.loaded and not b.loaded
+
+    def test_never_with_keep_others_loads_beside(self, monkeypatch):
+        a, b, env = self._setup(monkeypatch, "never")
+
+        res = self._switch(env, keep_others=True)
+
+        assert res["status"] == "loaded"
+        assert a.loaded and a.unload_calls == 0 and b.loaded
+        assert hs._active_model_name == "model-b"
+
+    def test_never_with_force_unloads_for_this_load_only(self, monkeypatch):
+        a, b, env = self._setup(monkeypatch, "never")
+
+        res = self._switch(env, force=True)
+
+        assert res["status"] == "loaded"
+        assert not a.loaded and b.loaded
+
+    def test_keep_others_loads_beside_whatever_the_setting(self, monkeypatch):
+        a, b, env = self._setup(monkeypatch, "always")
+
+        res = self._switch(env, keep_others=True)
+
+        assert res["status"] == "loaded"
+        assert a.loaded and b.loaded
+
+    def test_never_loads_beside_for_a_load_that_is_not_a_switch(self, monkeypatch):
+        a, b, env = self._setup(monkeypatch, "never")
+
+        res = self._switch(env, preempt=False, activate=False)
+
+        assert res["status"] == "loaded"
+        assert a.loaded and b.loaded
+
+
+class TestPeerModelsAreNeverUnloadedSilently:
+    def _setup(self, monkeypatch):
+        b = GatedEngine("model-b")
+        env = _install(monkeypatch, {"model-b": b}, total=4 * GB)
+        asked = []
+
+        def _ask(**kw):
+            asked.append(kw)
+            return len(asked) == 1
+
+        monkeypatch.setattr(hs, "_peer_model_names", lambda: ["'big' (port 9000)"])
+        monkeypatch.setattr(hs, "_peer_vram_holds", lambda: [3 * GB])
+        monkeypatch.setattr(hs, "_attempt_cooperative_unload", _ask)
+        return b, env, asked
+
+    def test_an_explicit_switch_asks_naming_the_instance(self, monkeypatch):
+        b, env, asked = self._setup(monkeypatch)
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert res["status"] == "confirm_required" and res["reason"] == "unload_ask"
+        assert res["peers"] == ["'big' (port 9000)"]
+        assert "'big' (port 9000) of another localm instance" in res["detail"]
+        assert asked == [] and not b.loaded
+
+    def test_a_confirmed_switch_asks_the_instance(self, monkeypatch):
+        b, env, asked = self._setup(monkeypatch)
+
+        asyncio.run(hs.switch_engine("model-b", env.factory, force=True))
+
+        assert len(asked) >= 1
+
+    def test_a_load_that_is_not_a_switch_never_asks_the_instance(self, monkeypatch):
+        b, env, asked = self._setup(monkeypatch)
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory, preempt=False,
+                                           activate=False))
+
+        assert res["status"] == "loaded" and asked == []
