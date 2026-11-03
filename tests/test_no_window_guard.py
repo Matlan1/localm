@@ -217,11 +217,11 @@ def test_allow_window_calls_the_real_startfile_and_browser(monkeypatch):
     monkeypatch.setattr(nw, "_real_startfile", lambda path, *a, **k: opened.append(("file", path)))
     monkeypatch.setattr(nw, "_real_browser_open", lambda url, *a, **k: opened.append(("url", url)))
     with nw.allow_window():
-        os.startfile("x.txt")
+        nw.startfile("x.txt")
         webbrowser.open("http://127.0.0.1:9/")
     assert opened == [("file", "x.txt"), ("url", "http://127.0.0.1:9/")]
     with pytest.raises(_Refused):
-        os.startfile("x.txt")
+        nw.startfile("x.txt")
     assert len(opened) == 2
 
 
