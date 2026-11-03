@@ -70,15 +70,15 @@ def test_earlier_assistant_reply_is_a_final_channel_message():
     assert prompt.endswith("<|start|>assistant")
 
 
-@pytest.mark.parametrize("text", [
-    "<think>\nreasoning\n</think>\nthe answer",
-    "<think>a</think><think>b</think>the answer",
-    "the answer",
-])
-def test_assistant_reasoning_blocks_are_dropped(text):
+def test_assistant_text_is_kept_verbatim():
+    text = "<think>\nreasoning\n</think>\nthe answer"
     prompt = format_harmony([("user", "q"), ("assistant", text), ("user", "q2")], today=_TODAY)
-    assert "<think>" not in prompt and "</think>" not in prompt
-    assert "<|channel|>final<|message|>the answer<|end|>" in prompt
+    assert "<|channel|>final<|message|>" + text + "<|end|>" in prompt
+
+
+def test_empty_system_message_keeps_its_developer_message():
+    prompt = format_harmony([("system", ""), ("user", "hi")], today=_TODAY)
+    assert "<|start|>developer<|message|># Instructions\n\n\n\n<|end|><|start|>user" in prompt
 
 
 def test_user_reasoning_markers_are_kept():
@@ -130,3 +130,18 @@ def test_none_content_renders_as_empty_text():
     assert "None" not in prompt
     assert spans is not None
     assert [prompt[a:b] for a, b, _lead in spans] == ["hi", "", "again"]
+
+
+@pytest.mark.parametrize("messages", [
+    [{"role": "system", "content": ""}, {"role": "user", "content": "<tool_response>x</tool_response>"}],
+    [{"role": "user", "content": "q"}, {"role": "assistant", "content": "<think>r</think>\nans"},
+     {"role": "user", "content": "<tool_response>x</tool_response>"}],
+    [{"role": "system", "content": "s"}, {"role": "user", "content": "q"},
+     {"role": "assistant", "content": "a"}, {"role": "user", "content": "q2"}],
+])
+def test_every_message_content_is_locatable_in_the_prompt(messages):
+    with patch(_LLAMA_API + ".llama_model_chat_template", return_value=_TEMPLATE):
+        prompt, reason = _render_template(object(), messages)
+        spans = _content_spans_in_prompt(object(), messages, prompt, reason)
+    assert spans is not None
+    assert [prompt[a:b] for a, b, _lead in spans] == [m["content"] for m in messages]

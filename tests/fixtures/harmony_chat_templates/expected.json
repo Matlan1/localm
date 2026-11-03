@@ -20,16 +20,6 @@
     "hi"
    ]
   ],
-  "empty_system": [
-   [
-    "system",
-    ""
-   ],
-   [
-    "user",
-    "hi"
-   ]
-  ],
   "multi_turn": [
    [
     "system",
@@ -109,7 +99,6 @@
   "gpt-oss-20b.jinja": {
    "assistant_last": "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: 2026-11-03\n\nReasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.<|end|><|start|>user<|message|>hi<|end|><|start|>assistant<|channel|>final<|message|>Hello<|end|><|start|>assistant",
    "developer_user": "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: 2026-11-03\n\nReasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.<|end|><|start|>developer<|message|># Instructions\n\nBe terse.\n\n<|end|><|start|>user<|message|>hi<|end|><|start|>assistant",
-   "empty_system": "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: 2026-11-03\n\nReasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.<|end|><|start|>user<|message|>hi<|end|><|start|>assistant",
    "multi_turn": "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: 2026-11-03\n\nReasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.<|end|><|start|>developer<|message|># Instructions\n\nBe terse.\n\n<|end|><|start|>user<|message|>hi<|end|><|start|>assistant<|channel|>final<|message|>Hello! How can I help?<|end|><|start|>user<|message|>tell me more<|end|><|start|>assistant",
    "multiline": "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: 2026-11-03\n\nReasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.<|end|><|start|>developer<|message|># Instructions\n\nLine one.\nLine two.\n\n<|end|><|start|>user<|message|>a\n\nb<|end|><|start|>assistant<|channel|>final<|message|>x\ny<|end|><|start|>user<|message|>z<|end|><|start|>assistant",
    "no_system_multi": "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: 2026-11-03\n\nReasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.<|end|><|start|>user<|message|>hi<|end|><|start|>assistant<|channel|>final<|message|>Hello<|end|><|start|>user<|message|>q2<|end|><|start|>assistant<|channel|>final<|message|>a2<|end|><|start|>user<|message|>q3<|end|><|start|>assistant",

@@ -10,7 +10,6 @@ markers, never executed.
 from __future__ import annotations
 
 import datetime
-import re
 from typing import Optional, Sequence
 
 # Characters trimmed from both ends of a message, the same set llama.cpp's
@@ -108,7 +107,6 @@ _HARMONY_SYSTEM = (
     "Knowledge cutoff: 2024-06\nCurrent date: {date}\n\nReasoning: medium\n\n"
     "# Valid channels: analysis, commentary, final. "
     "Channel must be included for every message.<|end|>")
-_HARMONY_THINK_BLOCK = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
 
 
 def is_harmony_template(template: Optional[str]) -> bool:
@@ -130,12 +128,13 @@ def format_harmony(messages: Sequence[tuple[str, str]], today: Optional[str] = N
       channels and carries the date *today* (``YYYY-MM-DD``, default the local
       date) and ``Reasoning: medium``.
     - A first message with role ``system`` or ``developer`` becomes the
-      ``developer`` message, headed ``# Instructions``.
+      ``developer`` message, headed ``# Instructions``, even when its text is
+      empty (the official template then omits it; keeping it keeps the prompt
+      locatable by the untrusted-span probe, which renders non-empty text).
     - A ``user`` message is ``<|start|>user<|message|>TEXT<|end|>``.
     - An ``assistant`` message is a ``final``-channel message,
-      ``<|start|>assistant<|channel|>final<|message|>TEXT<|end|>``; its
-      ``<think>...</think>`` blocks are dropped, as the template drops the
-      reasoning of every earlier turn.
+      ``<|start|>assistant<|channel|>final<|message|>TEXT<|end|>``, the text
+      verbatim: the caller sends the answer without its reasoning.
     - Any other role is ``<|start|>ROLE<|message|>TEXT<|end|>``.
     - The prompt ends ``<|start|>assistant``.
     """
@@ -144,14 +143,13 @@ def format_harmony(messages: Sequence[tuple[str, str]], today: Optional[str] = N
     out = [_HARMONY_SYSTEM.format(date=today)]
     loop = list(messages)
     if loop and loop[0][0] in ("system", "developer"):
-        if loop[0][1]:
-            out.append("<|start|>developer<|message|># Instructions\n\n"
-                       + loop[0][1] + "\n\n<|end|>")
+        out.append("<|start|>developer<|message|># Instructions\n\n"
+                   + loop[0][1] + "\n\n<|end|>")
         loop = loop[1:]
     for role, text in loop:
         if role == "assistant":
             out.append("<|start|>assistant<|channel|>final<|message|>"
-                       + _HARMONY_THINK_BLOCK.sub("", text) + "<|end|>")
+                       + text + "<|end|>")
         else:
             out.append("<|start|>" + role + "<|message|>" + text + "<|end|>")
     out.append("<|start|>assistant")
