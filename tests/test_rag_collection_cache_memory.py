@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import gc
 import json
+import os
 import random
 import threading
 import tracemalloc
@@ -44,17 +45,35 @@ def _query_vec(dim: int):
     return lambda texts: [[0.5] * dim for _ in texts]
 
 
-def _retained_by_cache(base: Path, names: list, dim: int) -> int:
+_TRACE_FRAMES = 8
+
+
+def _rag_traced_bytes() -> int:
+    prefix = os.path.normcase(str(Path(store.__file__).resolve().parent)) + os.sep
+    snap = tracemalloc.take_snapshot()
+    return sum(
+        stat.size for stat in snap.statistics("traceback")
+        if any(os.path.normcase(frame.filename).startswith(prefix)
+               for frame in stat.traceback))
+
+
+def _retained_by_cache(base: Path, names: list, dim: int, during=None) -> int:
+    """Bytes still live after the queries that were allocated under a
+    ``localm/rag`` frame; allocations by other threads in the process are
+    not counted. ``during`` runs inside the measured window before the
+    queries."""
     gc.collect()
-    tracemalloc.start()
+    tracemalloc.start(_TRACE_FRAMES)
     try:
-        before = tracemalloc.get_traced_memory()[0]
+        before = _rag_traced_bytes()
+        if during is not None:
+            during()
         for name in names:
             coll = Collection(name, base=base)
             coll.query(f"w0x1 w1x2 w{names.index(name)}x3", embed_fn=_query_vec(dim))
             del coll
         gc.collect()
-        return tracemalloc.get_traced_memory()[0] - before
+        return _rag_traced_bytes() - before
     finally:
         tracemalloc.stop()
 
@@ -76,6 +95,31 @@ class TestByteBudget:
             f"the cache retained {retained / 2**20:.1f} MiB against a "
             f"{budget / 2**20:.1f} MiB budget")
         assert store._COLLECTION_CACHE.total_bytes() <= budget
+
+    def test_measurement_ignores_allocations_by_other_threads(
+            self, tmp_path, monkeypatch):
+        budget = 6 * 2**20
+        monkeypatch.setattr(store, "_COLLECTION_CACHE_MAX_BYTES", budget, raising=False)
+        base = tmp_path / "rag"
+        names = [f"kb{i}" for i in range(3)]
+        for i, name in enumerate(names):
+            _build(base, name, seed=i)
+        store._COLLECTION_CACHE.clear()
+        foreign: list = []
+
+        def hog():
+            foreign.extend(bytearray(2**20) for _ in range(4 * 6))
+
+        def run_foreign_thread():
+            worker = threading.Thread(target=hog)
+            worker.start()
+            worker.join()
+
+        retained = _retained_by_cache(base, names, 32, during=run_foreign_thread)
+
+        assert sum(len(b) for b in foreign) > 3 * budget
+        assert retained <= budget, (
+            f"another thread's allocations were counted: {retained / 2**20:.1f} MiB")
 
     def test_estimate_tracks_real_retained_memory(self, tmp_path, monkeypatch):
         monkeypatch.setattr(store, "_COLLECTION_CACHE_MAX_BYTES", 2**30, raising=False)
