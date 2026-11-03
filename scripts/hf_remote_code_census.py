@@ -43,17 +43,20 @@ TASKS = ("text-generation", "image-text-to-text", "feature-extraction", "sentenc
          "fill-mask", "text2text-generation", "any-to-any", "audio-text-to-text",
          "token-classification", "zero-shot-image-classification", "image-classification")
 
-EXTRAS = ("hf", "gpu", "audio")
+EXTRAS = ("hf", "audio")
 
 # Modules the extras do not install and localm refuses early (the load names the
 # missing package and says localm cannot run the model). Reviewed at every release:
 # a new entry here is a decision to leave those models unsupported.
 _KERNELS = "CUDA kernel package PyPI publishes only as a source archive"
+_TORCH_BOUND = ("its binary parts must match the installed torch, which setup chooses per machine; "
+                "installed only by the Windows AMD [gpu] extra")
 _SOURCE_ONLY = "PyPI publishes only a source archive, which cannot be built reliably on a user machine"
 ACCEPTED_REFUSALS = {
     "flash_attn": _KERNELS, "mamba_ssm": _KERNELS, "causal_conv1d": _KERNELS, "apex": _KERNELS,
     "deepspeed": _KERNELS, "xformers": "its wheels exist for one torch build only, which localm does not pin",
     "vllm": "separate inference engine",
+    "torchaudio": _TORCH_BOUND, "timm": _TORCH_BOUND, "open_clip": _TORCH_BOUND,
     "fla": "needs triton, which localm does not install on Windows",
     "whisper": _SOURCE_ONLY, "minicpmo": _SOURCE_ONLY, "funasr": "depends on packages PyPI publishes only as source archives (jieba, oss2, crcmod)",
     "smirk": "requires transformers 4 (transformers<5)",
@@ -73,7 +76,7 @@ DIST_FOR_MODULE = {"PIL": "pillow", "yaml": "pyyaml", "sklearn": "scikit-learn",
 
 # Modules every transformers install provides through the packages below, which the
 # lock may not list under the module's own name.
-PROVIDED = {"transformers", "tokenizers", "torch", "huggingface_hub"}
+PROVIDED = {"transformers", "tokenizers", "torch", "torchvision", "huggingface_hub"}
 
 
 def _norm(name: str) -> str:

@@ -196,12 +196,15 @@ gpu = [
     "protobuf>=7.36.2",
     "einops>=0.8.2",
     "peft>=0.21.2",
-    "timm>=1.0.30",
+    # Their binary parts (torchvision, torchaudio) must match the installed torch, which is
+    # only pinned here on Windows (the AMD build); on other platforms the user's torch is
+    # chosen by setup, so these are left out of [hf]. See test_torch_coupled_packages_stay_out_of_hf.
+    "timm>=1.0.30; sys_platform == 'win32'",
     "librosa>=0.11.0",
     "addict>=2.4.0",
     "easydict>=1.13",
     "matplotlib>=3.11.2",
-    "open_clip_torch>=3.3.0",
+    "open_clip_torch>=3.3.0; sys_platform == 'win32'",
     "scipy>=1.18.1",
     "decord>=0.6.0; sys_platform != 'darwin'",
     "datasets>=5.1.0",
@@ -221,7 +224,6 @@ gpu = [
     "icecream>=2.2.0",
     "av>=19.0.2",
     "torchaudio==2.11.0+rocm7.13.0; sys_platform == 'win32'",
-    "torchaudio; sys_platform != 'win32'",
     "torch==2.11.0+rocm7.13.0; sys_platform == 'win32'",
     "torchvision==0.26.0+rocm7.13.0; sys_platform == 'win32'",
     "rocm; sys_platform == 'win32'",
@@ -248,12 +250,10 @@ hf = [
     "protobuf>=7.36.2",
     "einops>=0.8.2",
     "peft>=0.21.2",
-    "timm>=1.0.30",
     "librosa>=0.11.0",
     "addict>=2.4.0",
     "easydict>=1.13",
     "matplotlib>=3.11.2",
-    "open_clip_torch>=3.3.0",
     "scipy>=1.18.1",
     "decord>=0.6.0; sys_platform != 'darwin'",
     "datasets>=5.1.0",
@@ -272,7 +272,6 @@ hf = [
     "ftfy>=6.3.1",
     "icecream>=2.2.0",
     "av>=19.0.2",
-    "torchaudio",
 ]
 # Audio multimodal (Gemma4 unified audio)
 audio = [

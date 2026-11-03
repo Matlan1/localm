@@ -208,8 +208,8 @@ def test_load_reports_a_remote_code_import_error_without_pip(tmp_path, monkeypat
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CENSUS_PACKAGES = {"tiktoken": "tiktoken", "sentencepiece": "sentencepiece",
-                   "protobuf": "google", "einops": "einops", "peft": "peft", "timm": "timm",
-                   "librosa": "librosa", "scipy": "scipy", "torchaudio": "torchaudio",
+                   "protobuf": "google", "einops": "einops", "peft": "peft",
+                   "librosa": "librosa", "scipy": "scipy",
                    "scikit-learn": "sklearn", "opencv-python-headless": "cv2",
                    "datasets": "datasets", "matplotlib": "matplotlib"}
 
@@ -232,6 +232,14 @@ def test_hf_and_gpu_extras_ship_the_packages_transformers_repos_import():
                  for r in extras[extra]}
         missing = set(CENSUS_PACKAGES) - names
         assert not missing, f"[{extra}] must declare {sorted(missing)}"
+
+
+def test_torch_coupled_packages_stay_out_of_hf():
+    import tomllib
+    data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    names = {re.split(r"[<>=;\[ ]", r, maxsplit=1)[0].replace("_", "-").lower()
+             for r in data["project"]["optional-dependencies"]["hf"]}
+    assert not names & {"timm", "open-clip-torch", "torchaudio", "torchvision"}
 
 
 def test_the_shipped_packages_are_locked_and_the_census_agrees():

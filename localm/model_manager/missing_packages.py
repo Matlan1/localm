@@ -34,12 +34,12 @@ CONFIG_FILES = ("config.json", "tokenizer_config.json")
 # through a dependency. A module listed here that is missing from an install means
 # the install is incomplete, not that localm cannot run the model.
 SHIPPED_MODULES = frozenset({
-    "torch", "torchvision", "torchaudio", "transformers", "tokenizers", "accelerate",
+    "torch", "torchvision", "transformers", "tokenizers", "accelerate",
     "psutil", "num2words", "compressed_tensors", "kernels", "numpy", "packaging",
     "safetensors", "huggingface_hub", "regex", "requests", "yaml", "tqdm", "filelock",
     "PIL", "pydantic", "fsspec", "jinja2", "sympy", "networkx", "typing_extensions",
-    "tiktoken", "sentencepiece", "google", "einops", "peft", "timm", "librosa", "addict",
-    "easydict", "matplotlib", "open_clip", "scipy", "decord", "datasets", "backoff", "cv2",
+    "tiktoken", "sentencepiece", "google", "einops", "peft", "librosa", "addict",
+    "easydict", "matplotlib", "scipy", "decord", "datasets", "backoff", "cv2",
     "lmdb", "pretty_midi", "mir_eval", "sklearn", "monai", "onnxruntime", "x_transformers",
     "nltk", "g2p_en", "lightning", "ftfy", "icecream", "av", "soundfile",
 })
