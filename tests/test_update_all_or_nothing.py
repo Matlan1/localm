@@ -397,16 +397,16 @@ def test_a_corrupt_snapshot_refuses_the_rollback_with_nothing_changed(install, h
     assert _state(site)["localm"] == "0.3.2"
 
 
-def test_an_update_that_keeps_the_dependencies_leaves_the_parts_consistent(install, home):
+def test_an_update_that_keeps_the_dependencies_leaves_the_parts_consistent(
+        install, home, monkeypatch):
     from localm import updater_parts
     inst, site = install
     data, sig = _release(_files("0.3.2", ["click"], sd="master-1999-bbbbbbb"))
     updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
                   runner=lambda c: pytest.fail(f"no step runs: {c}"))
-    import localm._version as v
+    monkeypatch.setattr(_version, "read_version", lambda: "0.3.2")
     parts = updater_parts.installed_parts(inst)
-    assert parts["install_record"] == "0.3.1" and parts["install_record_matches"] is (
-        v.read_version() == "0.3.1")
+    assert parts["install_record"] == "0.3.1" and parts["install_record_matches"] is False
     assert not [p for p in parts["problems"] if "record" in p or "dependencies" in p]
 
 
