@@ -47,9 +47,11 @@ from .gguf import gguf_n_embd
 from .gguf import _gguf_recently_written
 from .gguf import first_split_part
 from .gguf import split_gguf_parts
-from .gguf import gguf_non_chat_model_type
+from .gguf import GGUF_TEXT_ENCODER_ARCHITECTURES, gguf_non_chat_model_type
 from .gguf import speech_route_available as _speech_route_available
 from .gguf import MEDIA_KIND_TYPES, gguf_media_component_type
+from .media_parts import (ACE_STEP, companion_part_of, hf_media_part,
+                          text_embedding_width)
 from .gguf import gguf_embedding_signal
 from .gguf import gguf_reranker_state
 from .gguf import gguf_is_mmproj
@@ -63,7 +65,7 @@ from .gguf import hub_snapshot_repo_id
 from .gguf import logical_model_path
 from .gguf import scan_hub_cache
 
-MODEL_TYPES = frozenset({'llm', 'mmproj', 'diffusion-unet', 'text-encoder', 'vae', 'lora', 'embedding', 'tts', 'upscaler', 'controlnet', 'textual-inversion', 'segmentation', 'unknown'})
+MODEL_TYPES = frozenset({'llm', 'mmproj', 'diffusion-unet', 'text-encoder', 'vae', 'lora', 'embedding', 'tts', 'upscaler', 'vocoder', 'planner', 'controlnet', 'textual-inversion', 'segmentation', 'unknown'})
 
 # HuggingFace architecture class-name suffixes that deterministically mark a text
 # generation (chat) model: LlamaForCausalLM, T5ForConditionalGeneration,
@@ -241,13 +243,13 @@ def projector_refusal(name: str, registry: dict) -> Optional[str]:
 
 # Registry types the chat Engine can never load: a request naming one is refused
 # before any model is evicted.
-NON_CHAT_TYPES = frozenset({"mmproj", "diffusion-unet", "text-encoder", "vae", "lora",
+NON_CHAT_TYPES = frozenset({"mmproj", "diffusion-unet", "text-encoder", "vae", "vocoder", "planner", "lora",
                             "upscaler", "controlnet", "textual-inversion", "segmentation", "tts"})
 
 # Registry types GET /v1/models leaves out: nothing under /v1 accepts one by name,
 # or (unknown) the type is not known to be a chat model. A 'tts' model stays
 # listed because POST /v1/audio/speech takes it as ``model``.
-UNLISTED_TYPES = frozenset({"mmproj", "diffusion-unet", "text-encoder", "vae", "lora",
+UNLISTED_TYPES = frozenset({"mmproj", "diffusion-unet", "text-encoder", "vae", "vocoder", "planner", "lora",
                             "upscaler", "controlnet", "textual-inversion", "segmentation", "unknown"})
 
 
@@ -262,35 +264,19 @@ def _no_backend_runs_file(path: str) -> bool:
             and backend_registry.backend_for(path) is None)
 
 
-MEDIA_TEXT_ENCODER_ARCHITECTURES = frozenset({"t5encoder", "t5"})
-
-
-def is_media_text_encoder_entry(entry) -> bool:
-    """True when a registry *entry* is an encoder-only text encoder that image,
-    video and music generation use: an ``embedding``-type entry whose recorded
-    ``architecture`` is in :data:`MEDIA_TEXT_ENCODER_ARCHITECTURES`."""
-    return (isinstance(entry, dict) and entry.get("model_type") == "embedding"
-            and entry.get("architecture") in MEDIA_TEXT_ENCODER_ARCHITECTURES)
-
-
 def is_unlisted_entry(entry) -> bool:
     """True when a registry *entry* is one GET /v1/models omits: its
-    ``model_type`` is in :data:`UNLISTED_TYPES`, or it is a media text encoder
-    (see :func:`is_media_text_encoder_entry`)."""
+    ``model_type`` is in :data:`UNLISTED_TYPES`."""
     return (isinstance(entry, dict) and isinstance(entry.get("model_type"), str)
-            and entry["model_type"] in UNLISTED_TYPES) or is_media_text_encoder_entry(entry)
+            and entry["model_type"] in UNLISTED_TYPES)
 
 
 def _embedding_refusal(name: str, entry: dict) -> str:
     """The message refusing to load or chat with the ``embedding``-type entry
-    *entry*: it names a media text encoder, a reranker or an embedding model, the
-    route that serves it, and the ``localm set-type`` command that makes it a chat
-    model anyway. A reranker check reads the model file (see
-    :func:`entry_is_reranker`)."""
+    *entry*: it names a reranker or an embedding model, the route that serves it,
+    and the ``localm set-type`` command that makes it a chat model anyway. A
+    reranker check reads the model file (see :func:`entry_is_reranker`)."""
     anyway = f" To chat with it anyway, run 'localm set-type {name} llm'."
-    if is_media_text_encoder_entry(entry):
-        return (f"'{name}' is a text encoder, not a model that can be loaded or chatted with. "
-                "It is a component of image, video or music generation." + anyway)
     if entry_is_reranker(name, entry):
         return (f"'{name}' is a reranker, not a model that can be loaded or chatted with. "
                 "It scores query and document pairs (POST /v1/rerank)." + anyway)
@@ -303,9 +289,7 @@ def embedding_load_prompt(name: str, entry: dict) -> str:
     ``embedding``-type entry *entry*: what the model is, that chatting with it
     gives gibberish, and that loading it anyway marks it as a chat model. A
     reranker check reads the model file (see :func:`entry_is_reranker`)."""
-    if is_media_text_encoder_entry(entry):
-        what = "a text encoder for image, video and music generation"
-    elif entry_is_reranker(name, entry):
+    if entry_is_reranker(name, entry):
         what = "a reranker, which scores how well documents match a question"
     else:
         what = "an embedding model, which turns text into numbers for search and memory"
@@ -518,6 +502,7 @@ def _is_sentence_transformers_folder(path: Path) -> bool:
 
 
 _MEDIA_KIND_TYPES = MEDIA_KIND_TYPES
+_MEDIA_PART_TYPES = frozenset({"diffusion-unet", "text-encoder", "vae", "vocoder", "unknown"})
 _MEDIA_COMPONENT_TYPES = frozenset({"diffusion-unet", "text-encoder", "vae", "lora",
                                     "controlnet", "textual-inversion", "upscaler"})
 
@@ -560,7 +545,8 @@ def _detect_local_model_type(path: Path, *, is_gguf: bool, is_hf: bool,
     llama.cpp text model -> 'llm'. An HF directory is classified from
     config.json: a LoRA/adapter dir -> 'lora'; a sentence-transformers folder
     (``modules.json`` with a Transformer and a Pooling module) or a single-score
-    ``*ForSequenceClassification`` cross-encoder -> 'embedding'; an ``architectures`` class ending
+    ``*ForSequenceClassification`` cross-encoder -> 'embedding'; a diffusers or encoder-only
+    pipeline part (``localm.model_manager.media_parts``) -> its part type; an ``architectures`` class ending
     in ForCausalLM / LMHeadModel / ForConditionalGeneration -> 'llm'; anything we
     cannot resolve -> 'unknown' (never a silent 'llm').
 
@@ -593,6 +579,9 @@ def _detect_local_model_type(path: Path, *, is_gguf: bool, is_hf: bool,
                 return "lora", {}
             if _is_sentence_transformers_folder(path) or hf_reranker_state(path):
                 return "embedding", {}
+            part = hf_media_part(path)
+            if part is not None:
+                return part.model_type, {"architecture": part.architecture}
             cfg_path = path / "config.json"
             if cfg_path.exists():
                 conf = json.loads(cfg_path.read_text(encoding="utf-8"))
@@ -1952,6 +1941,7 @@ def set_model_type(name: str, new_type: str) -> bool:
         e = r.get(name)
         if isinstance(e, dict):
             e["model_type"] = new_type
+            e["type_user_set"] = True
 
     # Atomic read-modify-write so a concurrent registry writer is not clobbered.
     _mm.update_registry(_apply)
@@ -2334,8 +2324,12 @@ def _register(
     context_length: Optional[int] = None,
     revision: Optional[str] = None,
     commit: Optional[str] = None,
+    type_user_set: bool = False,
 ) -> None:
-    """*mmproj*, when given, is a vision projector already verified and placed
+    """*type_user_set* records that *model_type* was chosen by the user (an
+    explicit ``--type``), so the registry sync never re-types the entry.
+
+    *mmproj*, when given, is a vision projector already verified and placed
     on disk (pull.py's job) and is recorded on the entry so get_model_mmproj
     finds it without depending on the directory-sibling fallback.
 
@@ -2370,6 +2364,8 @@ def _register(
         entry["revision"] = revision
         if commit:
             entry["commit"] = commit
+    if type_user_set:
+        entry["type_user_set"] = True
     if mmproj:
         entry["mmproj"] = str(logical_model_path(Path(mmproj)))
     if architecture is not None:
@@ -2393,6 +2389,12 @@ def _register(
         reranker = hf_reranker_state(path)
         if reranker is not None:
             entry["reranker"] = reranker
+    if model_type in _MEDIA_PART_TYPES and path.is_dir():
+        part = hf_media_part(path)
+        if part is not None:
+            entry.setdefault("architecture", part.architecture)
+            if part.part_of:
+                entry["part_of"] = part.part_of
     # Atomic read-modify-write so a concurrent registry writer (GUI thread,
     # a parallel pull, sync_models_dir) can't clobber this entry.
     _mm.update_registry(lambda reg: reg.__setitem__(name, entry))
@@ -2515,6 +2517,74 @@ def _unique_registry_name(reg: dict, base: str) -> str:
 
 
 
+def _media_retype(entry: dict, path: Path) -> Optional[str]:
+    """The type the stored *entry* for *path* takes when a fresh registration of
+    the same file gives a different media type, or None to leave it.
+
+    Covers an ``embedding`` GGUF of a text-encoder architecture without pooling
+    metadata (``text-encoder``), an ``unknown`` GGUF whose architecture names a
+    non-chat role, and an ``unknown`` Hugging Face folder that is a pipeline
+    part. An entry whose type the user set by hand (``type_user_set``) is left
+    alone."""
+    if entry.get("type_user_set"):
+        return None
+    mtype = entry.get("model_type")
+    arch = entry.get("architecture")
+    if path.suffix.lower() == ".gguf":
+        if mtype == "embedding" and arch in GGUF_TEXT_ENCODER_ARCHITECTURES and path.is_file():
+            return None if gguf_embedding_signal(path) else "text-encoder"
+        if mtype == "unknown":
+            role = gguf_non_chat_model_type(arch)
+            return role if role not in (None, "unknown") else None
+        return None
+    if mtype == "unknown" and path.is_dir():
+        part = hf_media_part(path)
+        return part.model_type if part is not None else None
+    return None
+
+
+def _fill_media_part(entry: dict, path: Path) -> None:
+    """Record the config class as ``architecture`` and the model a pipeline part
+    belongs to as ``part_of`` on the stored *entry* of a Hugging Face folder
+    that is a pipeline part, when they are missing."""
+    if entry.get("model_type") not in _MEDIA_PART_TYPES or not path.is_dir():
+        return
+    part = hf_media_part(path)
+    if part is None:
+        return
+    if not entry.get("architecture"):
+        entry["architecture"] = part.architecture
+    if part.part_of and not entry.get("part_of"):
+        entry["part_of"] = part.part_of
+
+
+def _tag_companion_parts(reg: dict) -> None:
+    """Set ``part_of`` on each text-encoder folder entry of *reg* whose hidden
+    size matches the text-embedding width of a registered ACE-Step transformer
+    folder (see ``media_parts.companion_part_of``)."""
+    def _folder(entry) -> Optional[Path]:
+        raw = _entry_path(entry)
+        return Path(raw) if raw is not None and Path(raw).is_dir() else None
+
+    widths = set()
+    for entry in reg.values():
+        if (isinstance(entry, dict) and entry.get("part_of") == ACE_STEP
+                and entry.get("model_type") == "diffusion-unet"):
+            folder = _folder(entry)
+            width = text_embedding_width(folder) if folder is not None else None
+            if width is not None:
+                widths.add(width)
+    if not widths:
+        return
+    for entry in reg.values():
+        if (isinstance(entry, dict) and entry.get("model_type") == "text-encoder"
+                and not entry.get("part_of")):
+            folder = _folder(entry)
+            part_of = companion_part_of(folder, frozenset(widths)) if folder is not None else None
+            if part_of:
+                entry["part_of"] = part_of
+
+
 class ModelSyncResult(NamedTuple):
     """Outcome of :func:`sync_models_dir`."""
 
@@ -2529,7 +2599,7 @@ class ModelSyncResult(NamedTuple):
     # from `backfilled` - see sync_models_dir's _MMPROJ_BACKFILL_CAP
     mmproj_backfilled: int = 0
     note: str = ""          # a warning to surface (e.g. autoprune guardrail tripped)
-    retyped: int = 0        # 'llm' entries whose GGUF is a text-to-speech model, now 'tts'
+    retyped: int = 0        # entries re-typed to the type a fresh registration gives (tts, text encoder, pipeline part)
 
     @property
     def changed(self) -> bool:
@@ -2784,6 +2854,11 @@ def sync_models_dir(prune: Optional[bool] = None, *,
                         and gguf_non_chat_model_type(entry.get("architecture")) == "tts"):
                     entry["model_type"] = "tts"
                     retyped += 1
+                new_type = _media_retype(entry, path)
+                if new_type is not None:
+                    entry["model_type"] = new_type
+                    retyped += 1
+                _fill_media_part(entry, path)
                 # Routing-capability backfill (tool_use / context_length), on
                 # the same bounded, opportunistic, self-correcting shape. Its
                 # OWN counter and cap rather than sharing _BACKFILL_CAP: the two
@@ -2864,6 +2939,8 @@ def sync_models_dir(prune: Optional[bool] = None, *,
             elif not entry.get("missing"):
                 entry["missing"] = True
                 flagged += 1
+
+        _tag_companion_parts(reg)
 
         if suspicious:
             note = (
@@ -3617,6 +3694,7 @@ def _register_with_dedup(
     refresh: bool = False,
     revision: Optional[str] = None,
     commit: Optional[str] = None,
+    type_user_set: bool = False,
 ) -> bool:
     """
     Register a model, detecting duplicates first.
@@ -3829,7 +3907,7 @@ def _register_with_dedup(
 
     _mm._register(model_name, p, source, sha256=digest, model_type=model_type,
                   mmproj=mmproj, architecture=architecture, expert_count=expert_count,
-                  revision=revision, commit=commit)
+                  revision=revision, commit=commit, type_user_set=type_user_set)
     console.print(f"[green]✓[/green] Registered [bold]{escape(model_name)}[/bold]")
     return True
 
@@ -5726,6 +5804,7 @@ def add_local(
     # its own header is worth reading.
     detected_type, gguf_metadata = _detect_local_model_type(
         p, is_gguf=is_gguf, is_hf=is_hf, is_blob=is_blob)
+    type_user_set = model_type is not None and model_type != detected_type
     if model_type is None:
         model_type = detected_type
 
@@ -5737,6 +5816,7 @@ def add_local(
         model_name, p, kind, on_duplicate=on_duplicate, digest=digest, size=size, model_type=model_type,
         mmproj=stored_mmproj if model_type in _PROJECTOR_TYPES else None,
         architecture=gguf_metadata.get("architecture"), expert_count=gguf_metadata.get("expert_count"),
+        type_user_set=type_user_set,
     )
     if not registered and moved_aliases:
         now_named = [n for n in find_aliases_by_path(p, _mm.load_registry())
