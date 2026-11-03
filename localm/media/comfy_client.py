@@ -1864,8 +1864,10 @@ def _kill_process_tree(proc) -> None:
         return
     if _sys.platform == "win32":
         try:
-            _sp.run(["taskkill", "/F", "/T", "/PID", str(pid)],
-                    capture_output=True, timeout=15)
+            from localm.config import require_windows_system_program
+            _sp.run([require_windows_system_program("taskkill.exe"), "/F", "/T", "/PID",
+                     str(pid)], capture_output=True, timeout=15,
+                    stdin=_sp.DEVNULL, creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0))
         except Exception:
             try:
                 proc.kill()
@@ -2230,7 +2232,11 @@ def _launch_and_wait(api_url: str, launch_cmd: Optional[str],
     if _sys.platform == "win32":
         argv = [a.strip('"\'') for a in argv]
         if argv and (argv[0].lower().endswith(".bat") or argv[0].lower().endswith(".cmd")):
-            argv = ["cmd", "/d", "/c"] + argv
+            from localm.config import windows_system_program
+            cmd_exe = windows_system_program("cmd.exe")
+            if cmd_exe is None:
+                return False, "Could not launch ComfyUI: cmd.exe is not in the Windows system folder."
+            argv = [cmd_exe, "/d", "/c"] + argv
     # Redirect the launcher's own stdout+stderr to a log file instead of
     # discarding them, so a ComfyUI that fails to start leaves its reason on
     # disk for the user (and for --debug-discoverable). Best-effort: fall back

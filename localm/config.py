@@ -1581,6 +1581,15 @@ def windows_system_program(name: str) -> Optional[str]:
     return path if os.path.isfile(path) else None
 
 
+def require_windows_system_program(name: str) -> str:
+    """:func:`windows_system_program`, or FileNotFoundError when *name* is not in
+    the Windows system folder."""
+    path = windows_system_program(name)
+    if path is None:
+        raise FileNotFoundError(2, f"{name} is not in the Windows system folder", name)
+    return path
+
+
 def restrict_file_perms(path: Path, *, mode: int = 0o600) -> bool:
     """Best-effort: restrict *path* to the current user (POSIX chmod *mode*, or
     Windows icacls - which grants sole full control regardless of *mode*, since

@@ -472,8 +472,11 @@ def _kill_tree(proc) -> None:
         pass
     if sys.platform == "win32":
         try:
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                           capture_output=True, timeout=10)
+            from localm.config import require_windows_system_program
+            subprocess.run([require_windows_system_program("taskkill.exe"), "/F", "/T",
+                            "/PID", str(proc.pid)], capture_output=True, timeout=10,
+                           stdin=subprocess.DEVNULL,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         except Exception:
             pass
     for child in children:
