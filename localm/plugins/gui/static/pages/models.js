@@ -3,9 +3,9 @@
 "use strict";
 
 // --- ES module imports ---
-import { clearRecentGuiErrors, onRecentGuiErrorsChange, recentGuiErrors } from "../app/client-log.js";
+import { clearRecentGuiErrors, dismissRecentGuiError, onRecentGuiErrorsChange, recentGuiErrors } from "../app/client-log.js";
 import { pickDirectory } from "../app/picker.js";
-import { $, GIB, authHeaders, cancelJob, confirmDanger, confirmDangerAsync, downloadRate, el, fmtBytes, fmtDuration, openModal, promptText, renderMarkdown, showInlineError, streamJob, toast, setBusy, whileBusy } from "../app/helpers.js";
+import { $, GIB, authHeaders, cancelJob, confirmDanger, confirmDangerAsync, downloadRate, el, fmtBytes, fmtDuration, openModal, promptText, readSSE, renderMarkdown, showInlineError, streamJob, toast, setBusy, whileBusy } from "../app/helpers.js";
 import { t, tn } from "../app/i18n.js";
 import { onServerUnreachable } from "../app/init.js";
 import { emptyState, iconEl } from "../app/icons.js";
@@ -750,6 +750,12 @@ export async function refreshModelsPage() {
         };
         actions.appendChild(reload);
       }
+      if (m.packages && m.packages.installable) {
+        const pkgBtn = el("button", "primary", t("models.action.packages"));
+        pkgBtn.title = t("models.packages.hint", { packages: m.packages.addable.join(", ") });
+        pkgBtn.onclick = () => installModelPackages(m.name, pkgBtn);
+        actions.appendChild(pkgBtn);
+      }
       const aliasBtn = el("button", "secondary", t("models.action.alias"));
       aliasBtn.onclick = async () => {
         const name = await promptText(t("models.alias.prompt", { name: m.name }));
@@ -868,6 +874,107 @@ export async function refreshModelsPage() {
   if (myGen !== _modelsRenderGen) return;
   // One call, so the old table stays on screen until the new one is ready.
   box.replaceChildren(...(hiddenOther ? [otherHiddenNote(hiddenOther), table] : [table]));
+}
+
+/** Ask the user to agree to the packages localm would install for *plan*
+ *  (from /api/models/packages/plan). Resolves true only on Install. */
+function confirmPackages(name, plan) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let watch = null;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      if (watch) clearInterval(watch);
+      $("modal").style.display = "none";
+      resolve(value);
+    };
+    openModal(t("models.packages.title", { name }), (body) => {
+      body.appendChild(el("p", "", t("models.packages.intro",
+                                     { packages: (plan.packages || []).join(", ") })));
+      if ((plan.adds || []).length) {
+        const list = el("ul", "packages-plan");
+        for (const a of plan.adds) {
+          const li = el("li", "");
+          li.appendChild(el("span", "mono", `${a.name} ${a.version}`));
+          li.appendChild(el("span", "sub", " " + t("models.packages.from", { source: a.source })));
+          list.appendChild(li);
+        }
+        body.appendChild(list);
+      } else {
+        body.appendChild(el("p", "sub", t("models.packages.nothingNew")));
+      }
+      const row = el("div", "actions");
+      const cancel = el("button", "btn-secondary", t("common.modal.cancel"));
+      cancel.onclick = () => finish(false);
+      const ok = el("button", "btn-secondary", t("models.packages.confirmLabel"));
+      ok.onclick = () => finish(true);
+      row.appendChild(cancel);
+      row.appendChild(ok);
+      body.appendChild(row);
+    });
+    watch = setInterval(() => {
+      if ($("modal").style.display === "none") finish(false);
+    }, 200);
+  });
+}
+
+/** List what installing the packages model *name* needs would add, ask, then
+ *  install exactly that list on the host and follow its progress on *btn*. */
+export async function installModelPackages(name, btn) {
+  const prevLabel = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = t("models.packages.planning");
+  let plan;
+  try {
+    const r = await fetch("/api/models/packages/plan", {
+      method: "POST", headers: authHeaders(), body: JSON.stringify({ model: name }),
+    });
+    plan = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      toast(plan.detail || t("models.packages.failed", { message: r.status }), true);
+      return;
+    }
+  } catch (e) {
+    toast(t("models.packages.failed", { message: e.message }), true);
+    return;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = prevLabel;
+  }
+  if (!(await confirmPackages(name, plan))) return;
+  btn.disabled = true;
+  btn.textContent = t("models.packages.working", { name });
+  let end = null;
+  try {
+    const r = await fetch("/api/models/packages/install", {
+      method: "POST", headers: authHeaders(), body: JSON.stringify({ plan_id: plan.plan_id }),
+    });
+    const started = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      toast(started.detail || t("models.packages.failed", { message: r.status }), true);
+      return;
+    }
+    const stream = await fetch("/api/models/packages/install/events", { headers: authHeaders() });
+    if (stream.ok) {
+      await readSSE(stream, (payload) => {
+        let ev;
+        try { ev = JSON.parse(payload); } catch { return; }
+        if (ev.type === "log" && ev.line) btn.title = ev.line;
+        if (ev.type === "end") end = ev;
+      });
+    }
+  } catch (e) {
+    toast(t("models.packages.failed", { message: e.message }), true);
+    return;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = prevLabel;
+    refreshModelsPage();
+  }
+  if (end && end.ok) toast(t("models.packages.toast", { name }));
+  else if (end) toast(t("models.packages.failed", { message: end.error || "" }), true);
+  else toast(t("models.packages.incomplete"), true);
 }
 
 export async function showModelDetail(name) {
@@ -2082,7 +2189,12 @@ export function renderRecentErrors(list = recentGuiErrors()) {
     const report = el("button", "btn-secondary", t("settings.recentErrors.report"));
     report.type = "button";
     report.onclick = () => reportGuiErrorEntry(entry);
-    actions.append(copy, report);
+    const dismiss = el("button", "btn-secondary recent-error-dismiss", "\u00d7");
+    dismiss.type = "button";
+    dismiss.title = t("settings.recentErrors.dismiss");
+    dismiss.setAttribute("aria-label", t("settings.recentErrors.dismiss"));
+    dismiss.onclick = () => dismissRecentGuiError(entry);
+    actions.append(copy, report, dismiss);
     li.append(meta, text, actions);
     box.appendChild(li);
   }
