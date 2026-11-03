@@ -63,3 +63,34 @@ class FakeGitHub:
 
         monkeypatch.setattr(source_archive, "download", _download)
         return self
+
+
+def assert_shipped_pins_carry_a_sha256(root: Path) -> None:
+    """Run ``test_the_shipped_pins_carry_a_sha256`` against the
+    ``managed_comfy_fresh.py`` and ``source_archive.py`` under
+    ``root/localm/media`` in place of the installed ones. Raises its
+    AssertionError when a pin there has no sha256."""
+    import importlib.util
+    import sys
+
+    import pytest
+
+    from localm.media import managed_comfy_fresh as fresh
+    from localm.media import source_archive
+    from tests.test_source_archive import test_the_shipped_pins_carry_a_sha256
+
+    with pytest.MonkeyPatch.context() as mp:
+        loaded = {}
+        for name in ("managed_comfy_fresh", "source_archive"):
+            mod_name = f"_bumped_{name}"
+            spec = importlib.util.spec_from_file_location(
+                mod_name, root / "localm" / "media" / f"{name}.py")
+            mod = importlib.util.module_from_spec(spec)
+            mp.setitem(sys.modules, mod_name, mod)
+            spec.loader.exec_module(mod)
+            loaded[name] = mod
+        mp.setattr(source_archive, "ARCHIVE_SHA256", loaded["source_archive"].ARCHIVE_SHA256)
+        mp.setattr(fresh, "COMFYUI_PINNED_COMMIT",
+                   loaded["managed_comfy_fresh"].COMFYUI_PINNED_COMMIT)
+        mp.setattr(fresh, "CLASS_TYPE_TO_NODE", loaded["managed_comfy_fresh"].CLASS_TYPE_TO_NODE)
+        test_the_shipped_pins_carry_a_sha256()
