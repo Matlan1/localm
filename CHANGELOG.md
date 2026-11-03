@@ -16,6 +16,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ### Fixed
 - **Unloading a model that runs entirely on the CPU is instant on a PC with a GPU.** A model loaded with 0 GPU layers frees no video memory, yet unloading it (Unload, Unload all, or being replaced by another model) waited 10 to 18 seconds for video memory to be released, with the status pill reading "unloading". localm no longer waits when the unloaded model held none; a model that uses the GPU is still waited for.
+- **`localm comfy restart` and `localm comfy stop` refuse a held port at once.** When another program holds ComfyUI's port and accepts connections without answering, both commands used to spend about a minute waiting on it before printing that localm did not start it and will not stop it. They now print that message immediately and start nothing.
 - **Setup installs uv from a folder whose path contains `[` or `]`.** Running `setup.bat` or `setup-gui.bat` from a folder such as `D:\apps\localm [test]` stopped at the uv step with uv not installed. The console and graphical setups now install uv from such a folder too, keeping the installer's temporary files in a short-lived folder that is removed afterwards.
 
 ## [0.3.2] - 2026-10-29
