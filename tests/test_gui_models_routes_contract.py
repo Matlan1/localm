@@ -60,6 +60,9 @@ EXPECTED_ROUTES = {
     ("POST", "/api/models/relocate"): S.MODELS_WRITE,
     ("GET", "/api/discover/search"): S.MODELS_READ,
     ("GET", "/api/discover/files"): S.MODELS_READ,
+    ("POST", "/api/models/packages/plan"): S.PLUGINS_ADMIN,
+    ("POST", "/api/models/packages/install"): S.PLUGINS_ADMIN,
+    ("GET", "/api/models/packages/install/events"): S.PLUGINS_ADMIN,
 }
 
 # Routes that ALSO require host filesystem access (an inline require_fs_host

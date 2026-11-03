@@ -13,6 +13,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ### Added
 - **A model can be reloaded from the interface.** The running model's row on the Models page has a **reload** button (also on a loaded model whose adapter change is waiting for a reload), Settings > Runtime & GPU has **Save and reload model** beside Save, and Settings > Live tuning has **Reload model** for the settings that save immediately. A plain save still never reloads; the buttons appear only while a model is loaded.
+- **localm can add the packages a model's own code needs.** When a trusted Hugging Face model's code needs a package localm can add on this machine (timm, open_clip, torchaudio, and flash-linear-attention on Linux), the Models page shows **install packages** and `localm install-packages <model>` does the same. Both list every package and version that would be installed, and where it comes from, before anything is downloaded, and install nothing unless you agree. Only packages localm has reviewed are installed, as ready-built packages, without changing any package localm already uses. A package localm cannot add is named with the reason.
 
 ### Changed
 - **Settings shows each action's result at its button.** The result of Check for runtime update used to appear several lines above the button, under the section description. It now appears directly below the button row, the button shows a busy state while a check or rebuild runs, and the result lines are announced to screen readers.
