@@ -126,7 +126,7 @@ def _read_disk() -> list:
         return []
     try:
         data = json.loads(raw)
-    except ValueError as e:
+    except (ValueError, RecursionError) as e:
         logger.warning("%s is not valid JSON: %s", path, e)
         return []
     items = data.get("issues") if isinstance(data, dict) else None
@@ -166,10 +166,8 @@ def record_filed(number, title: str = "") -> bool:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps({"issues": items[-MAX_RECORDED:]}),
                             encoding="utf-8")
-            try:
-                path.chmod(0o600)
-            except OSError:
-                pass
+            from localm.config import restrict_file_perms
+            restrict_file_perms(path)
             return True
         except Exception as e:
             logger.warning("could not record filed issue #%s: %s", entry["number"], e)

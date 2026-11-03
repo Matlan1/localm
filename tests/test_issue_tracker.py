@@ -295,3 +295,12 @@ def test_issues_route_under_net_mode_off_reports_and_sends_nothing(monkeypatch, 
     assert data["available"] is True
     assert "net_mode = off" in data["issues"][0]["error"]
     assert "state" not in data["issues"][0]
+
+
+def test_deeply_nested_record_is_read_as_empty_and_logged(monkeypatch, fresh_record, caplog):
+    _mode(monkeypatch, "log")
+    _record_file().parent.mkdir(parents=True, exist_ok=True)
+    _record_file().write_text("[" * 200000 + "]" * 200000, encoding="utf-8")
+    with caplog.at_level("WARNING"):
+        assert issue_tracker.recorded() == []
+    assert "not valid JSON" in caplog.text
