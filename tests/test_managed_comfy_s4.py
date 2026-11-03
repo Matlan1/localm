@@ -515,6 +515,7 @@ def test_update_reports_a_mixed_tree_when_a_file_cannot_be_put_back(home, tmp_pa
 
     _hub, repo, c1, c2, _c3 = _build_update_remote(tmp_path, monkeypatch)
     root = _install_managed_from(repo, c1)
+    real_copy2 = source_archive.shutil.copy2
     refused = _refuse_main_py_writes(monkeypatch)
 
     result = upd.update_managed_comfy(
@@ -529,6 +530,14 @@ def test_update_reports_a_mixed_tree_when_a_file_cannot_be_put_back(home, tmp_pa
     assert len(kept) == 1 and str(kept[0]) in result.message
     assert (kept[0] / "main.py").read_text(encoding="utf-8") == "print('comfy')\n"
     assert not (root / "main.py").exists()
+
+    monkeypatch.setattr(source_archive.shutil, "copy2", real_copy2)
+    again = upd.update_managed_comfy(
+        comfyui_repo=repo, target_commit=c2, reinstall_requirements=False)
+    assert again.ok, again.message
+    assert source_archive.tree_commit(root) == c2
+    assert [p for p in root.parent.iterdir() if "-backup-" in p.name] == kept
+    assert (kept[0] / "main.py").read_text(encoding="utf-8") == "print('comfy')\n"
 
 
 def test_update_retries_a_restore_that_failed_once_and_rolls_back_cleanly(home, tmp_path,
