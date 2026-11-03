@@ -522,6 +522,16 @@ def _update_to(updater, version: str, *, yes: bool, allow_unverified: bool) -> N
                       "[dim](undo: localm update --rollback)[/dim]")
 
 
+def _catch_up_after_rollback() -> None:
+    """Bring the native runtime and the components to the pins of the version a
+    rollback restored, as a server's restart does: an older version's own start
+    may not (``cli/_core.py``). Prints each outcome; a failure is printed and
+    stays visible to ``localm doctor``."""
+    from localm.cli import _core
+    _core._finish_pending_runtime_update("gui")
+    _core._finish_pending_component_update("gui")
+
+
 def _update_repair() -> None:
     """``localm update --repair``: print the parts that differ from the installed
     version, then repair them (``updater_parts.repair``)."""
@@ -639,6 +649,7 @@ def update_cmd(check_only: bool, yes: bool, do_rollback: bool, list_only: bool,
             console.print(f"[yellow]{escape(e.summary)}[/yellow] ({escape(e.reason)}).")
             sys.exit(1)
         console.print("[green]Rolled back.[/green] Restart localm to load the previous build.")
+        _catch_up_after_rollback()
         return
 
     if not updater.available():
