@@ -216,6 +216,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                 "architecture": entry.get("architecture"),
                 "expert_count": entry.get("expert_count"),
             }
+            if entry.get("part_of"):
+                row_out["part_of"] = str(entry["part_of"])
             # Vision capability as true / false / KEY ABSENT. It is measured from the
             # model's own files on every request, so a model on an unmounted drive or
             # a dead UNC share yields no evidence and the key is omitted. A client

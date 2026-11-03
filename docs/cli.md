@@ -285,22 +285,26 @@ localm add D:\models\mymodel.gguf --store move   # relocate into <data dir>/mode
 Every registered model has a type, detected deterministically from the file
 itself, never from fuzzy tag matching: a GGUF or Ollama blob is classified from
 its own metadata (an adapter signal makes it `lora`, a vision-projector signal
-makes it `mmproj`, an embedding/pooling signal makes it `embedding`, otherwise it
-is an `llm`); a HuggingFace directory is read from its `config.json`
-architectures (or `adapter_config.json` for a `lora`). Anything without a hard
+makes it `mmproj`, an embedding/pooling signal makes it `embedding`, an encoder-only
+T5 or UMT5 file without pooling metadata (the text encoder of an image or video
+model) makes it `text-encoder`, otherwise it is an `llm`); a HuggingFace directory
+is read from its `config.json` architectures (or `adapter_config.json` for a
+`lora`), and a diffusers part of an image, video or music model (transformer,
+autoencoder, vocoder, text encoder) takes its part type and, for ACE-Step, says
+which model it belongs to. Anything without a hard
 signal is left as `unknown` rather than guessed. The types are `llm`, `mmproj`, `diffusion-unet`,
-`text-encoder`, `vae`, `lora`, `embedding`, `tts`, `upscaler`, `controlnet`,
-`textual-inversion`, `segmentation`, and `unknown`.
+`text-encoder`, `vae`, `vocoder`, `planner`, `lora`, `embedding`, `tts`, `upscaler`,
+`controlnet`, `textual-inversion`, `segmentation`, and `unknown`.
 
 An `unknown` model still runs when you name it explicitly (`localm run NAME`, or an
 API request naming it), but is never auto-picked as the default chat model. Neither
 is an `embedding`, `tts` or component model (`mmproj`, `diffusion-unet`, `text-encoder`,
-`vae`, `lora`, `upscaler`, `controlnet`, `textual-inversion`, `segmentation`), so a diffusion checkpoint
+`vae`, `vocoder`, `planner`, `lora`, `upscaler`, `controlnet`, `textual-inversion`, `segmentation`), so a diffusion checkpoint
 or a text encoder cannot get loaded as if it were a chat model.
 Correct a misdetected or `unknown` type at any time:
 
 ```bash
-localm set-type MODEL llm        # types: llm mmproj diffusion-unet text-encoder vae lora embedding tts upscaler controlnet textual-inversion segmentation unknown
+localm set-type MODEL llm        # types: llm mmproj diffusion-unet text-encoder vae vocoder planner lora embedding tts upscaler controlnet textual-inversion segmentation unknown
 ```
 
 Registering a lone `.safetensors` file scans its parent directory: if that folder
@@ -1241,8 +1245,7 @@ localm update --to 0.3.0        # install that release, older or newer than your
 localm update --to 0.3.0 -y --allow-unverified   # non-interactive, even if its signature does not verify
 localm bug-report -m "..."      # generate an editable bug report and offer to send it to the maintainer
 localm bug-report -m "what I did" -e "what I expected" -w "what happened" --send   # non-interactive, send immediately
-localm issues [NUMBER]          # list the project's issues, or show one by number
-localm issues --state open      # open | closed | all (default all)
+localm issues [NUMBER]          # list the bug reports this install filed, or show one by number
 ```
 
 `bug-report` asks three questions (what you were doing, what you expected, what actually happened; Enter skips one) when run in a terminal without `-m`/`-e`/`-w`, and needs at least `-m` or `-w`. It attaches the tail of this run's debug log when one exists (`--no-log` to leave it out), never chat content. `issues` is read-only and needs the bug-report proxy to be configured.

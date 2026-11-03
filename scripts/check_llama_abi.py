@@ -28,9 +28,9 @@ The two enum outcomes are DISTINCT:
 
 IT ALSO CHECKS THE LIBMTMD SPEECH GENERATION BINDING (``mtmd_gen.py``) against
 ``tools/mtmd/mtmd.h`` and ``tools/mtmd/mtmd-helper.h`` at the same ref: the
-interface is read from the headers (``mtmd_helper_gen_audio_next_is_text``
-declared = state_v2, else ``mtmd_gen_state_init`` declared = state, else
-legacy), every struct localm allocates must match field for field with the
+interface is read from the headers (``mtmd_gen_audio_voice_name`` declared =
+state_v3, else ``mtmd_helper_gen_audio_next_is_text`` declared = state_v2,
+else ``mtmd_gen_state_init`` declared = state, else legacy), every struct localm allocates must match field for field with the
 same total size, and every function localm binds must take as many arguments as
 localm declares, with the same structs passed or returned by value.
 
@@ -68,11 +68,12 @@ LLAMA_ABI_REF = LLAMA_ABI_REFS["v3"]
 _REPO = "ggml-org/llama.cpp"
 
 # One upstream ref per libmtmd speech generation interface localm binds
-# (localm.inference.backends.llamacpp.mtmd_gen). The default run checks all three.
+# (localm.inference.backends.llamacpp.mtmd_gen). The default run checks all four.
 MTMD_SPEECH_REFS = {
     "legacy": "b11757",    # stateless: seed and state_data in mtmd_gen_inp/out
     "state": "b11908",     # mtmd_gen_state, 4-argument mtmd_gen_audio_process
     "state_v2": "b11941",  # n_past/out_mode/voice in the helper input, penalty pair in mtmd_gen_inp
+    "state_v3": "b12061",  # no voice in the helper input, n_voices in mtmd_gen_audio_info
 }
 _MTMD_HEADERS = ("tools/mtmd/mtmd.h", "tools/mtmd/mtmd-helper.h")
 
@@ -726,7 +727,8 @@ def check_speech(mtmd_text: str, label: str, seen: set) -> int:
           f"[interface: {interface}] ############")
     if interface is None:
         print("  FAIL  no speech generation interface localm binds is declared "
-              "(none of mtmd_helper_gen_audio_next_is_text, mtmd_gen_state_init "
+              "(none of mtmd_gen_audio_voice_name, "
+              "mtmd_helper_gen_audio_next_is_text, mtmd_gen_state_init "
               "or mtmd_gen_inp_default); speech is refused on this runtime")
         return 1
     seen.add(interface)
@@ -810,7 +812,7 @@ def main() -> int:
             and seen_speech != set(MTMD_SPEECH_REFS)):
         print(f"\nFAIL: expected to check every speech generation interface, only "
               f"saw {sorted(seen_speech)} - the refs in MTMD_SPEECH_REFS no longer "
-              "cover all three.")
+              "cover all four.")
         total += 1
 
     # Both layout axes must have been exercised.

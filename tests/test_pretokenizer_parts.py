@@ -17,6 +17,13 @@ from localm.inference.backends.base import PretokenizerUnsafeInputError
 _CAP = guard.UNSAFE_PRE_TYPES["tekken"].max_chars
 
 
+@pytest.fixture(autouse=True)
+def _windows_limits(monkeypatch):
+    """The limits this file pins are the table's (measured on Windows); the
+    Linux limits have their own tests."""
+    monkeypatch.setattr(guard, "_LINUX", False)
+
+
 def _prose(n: int) -> str:
     return ("the quick brown fox jumps over it. " * (n // 34 + 1))[:n]
 

@@ -410,6 +410,9 @@ def _capture_stdio():
                 os.unlink(p)
 
 
+# LLAMA_VOCAB_TYPE_BPE from llama.h
+_VOCAB_TYPE_BPE = 2
+
 # LLAMA_DEFAULT_SEED from llama.h
 _DEFAULT_SEED = 0xFFFF_FFFF
 
@@ -424,6 +427,8 @@ class _Tokenizer:
     # The texts check() cuts input at; empty until a load reads them.
     _separators: tuple = ()
     _separators_untrusted: tuple = ()
+    # Whether a text may be tokenised in chunks; False until a load decides.
+    _chunkable: bool = False
 
     def __init__(self, model_ptr: int, ctx_ptr: int) -> None:
         self._vocab = api.llama_model_get_vocab(model_ptr)
@@ -436,13 +441,48 @@ class _Tokenizer:
         if pretokenizer_guard.policy_for(self._pre_type) is not None:
             self._separators, self._separators_untrusted = (
                 pretokenizer_guard.read_separators(self._vocab, api))
+        # Cutting a text needs the special tokens known: without them a cut
+        # could land beside one.
+        self._chunkable = (
+            pretokenizer_guard.policy_for(self._pre_type) is not None
+            and bool(self._separators)
+            and self._tokens_join_across_cuts(model_ptr))
         hazard = pretokenizer_guard.hazard_note(self._pre_type)
         if hazard is not None:
             from localm.debuglog import logger
+            if self._chunkable:
+                logger.info(
+                    "tokenizer: this model declares tokenizer.ggml.pre=%r, whose "
+                    "pre-tokenizer regex %s. Longer text is tokenised in parts.",
+                    self._pre_type, hazard)
+            else:
+                logger.warning(
+                    "tokenizer: this model declares tokenizer.ggml.pre=%r, whose "
+                    "pre-tokenizer regex %s. Such input will be refused rather "
+                    "than tokenised.", self._pre_type, hazard)
+
+    def _tokens_join_across_cuts(self, model_ptr) -> bool:
+        """True when tokenizing a text in consecutive chunks and joining the
+        tokens gives the whole text's tokens: a BPE vocabulary that adds no end
+        token and no space or metaspace at the start of each call. Anything else
+        keeps the unchunked path."""
+        try:
+            if api.llama_vocab_type(self._vocab) != _VOCAB_TYPE_BPE:
+                return False
+            if api.llama_vocab_get_add_eos(self._vocab) is not False:
+                return False
+            if not api.has_model_meta_api():
+                return False
+            prefix = api.llama_model_meta_val_str(model_ptr, "tokenizer.ggml.add_space_prefix")
+            scheme = api.llama_model_meta_val_str(
+                model_ptr, "tokenizer.ggml.metaspace_prepend_scheme")
+            return prefix in (None, "", "false") and scheme in (None, "", "never")
+        except Exception as exc:
+            from localm.debuglog import logger
             logger.warning(
-                "tokenizer: this model declares tokenizer.ggml.pre=%r, whose "
-                "pre-tokenizer regex %s. Such input will be refused rather "
-                "than tokenised.", self._pre_type, hazard)
+                "tokenizer: could not tell whether long text can be tokenised in "
+                "parts (%s: %s); it will be refused instead", type(exc).__name__, exc)
+            return False
 
     def encode(self, text: str, add_bos: bool = True, untrusted_ranges=()) -> list[int]:
         """Tokenise *text*, parsing control tokens everywhere except untrusted ranges.
@@ -457,22 +497,42 @@ class _Tokenizer:
         which is how a chat template's role markers are registered. Whether it
         also covers every non-control added token has not been established here.
 
-        With no ranges this issues the single call it always did.
+        With no ranges this issues the single call it always did, unless the
+        model's pre-tokenizer cannot take the text in one piece: then the text is
+        tokenised in chunks (see :meth:`_plan`) and the tokens joined.
         """
-        self.check(text, untrusted_ranges)
-        if not untrusted_ranges:
+        plan = self._plan(text, untrusted_ranges)
+        if not untrusted_ranges and len(plan) == 1:
             return self._encode_segment(text, add_bos, True)
 
         tokens: list[int] = []
         want_bos = add_bos
-        for segment, is_untrusted in split_by_trust(text, untrusted_ranges):
+        for segment, parse_special in plan:
             if not segment:
                 continue
-            tokens.extend(self._encode_segment(segment, want_bos, not is_untrusted))
+            tokens.extend(self._encode_segment(segment, want_bos, parse_special))
             want_bos = False
         if want_bos and add_bos:
             return self._encode_segment(text, add_bos, True)
         return tokens
+
+    def _plan(self, text: str, untrusted_ranges=()) -> list[tuple[str, bool]]:
+        """``(chunk, parse_special)`` pairs to tokenize in order for *text*,
+        each trust segment cut by :func:`pretokenizer_guard.plan_chunks` into
+        chunks that join to the same tokens. Raises
+        ``PretokenizerUnsafeInputError`` when a chunk is one the pre-tokenizer
+        must not see."""
+        if not untrusted_ranges:
+            return [(c, True) for c in pretokenizer_guard.plan_chunks(
+                self._pre_type, text, self._separators, chunkable=self._chunkable)]
+        plan: list[tuple[str, bool]] = []
+        for segment, is_untrusted in split_by_trust(text, untrusted_ranges):
+            if not segment:
+                continue
+            seps = self._separators_untrusted if is_untrusted else self._separators
+            plan.extend((c, not is_untrusted) for c in pretokenizer_guard.plan_chunks(
+                self._pre_type, segment, seps, chunkable=self._chunkable))
+        return plan
 
     def check(self, text: str, untrusted_ranges=()) -> None:
         """Raise ``PretokenizerUnsafeInputError`` when a piece of *text* that

@@ -241,6 +241,10 @@ def upload_report(title: str, body: str, *, url: Optional[str] = None,
             hint=(f"The bug-report server rejected the report (HTTP {status}). This is "
                   f"likely a temporary server-side issue, not your connection."))
     try:
-        return _json.loads(raw) if raw.strip() else {}
+        result = _json.loads(raw) if raw.strip() else {}
     except (ValueError, RecursionError):
         return {"raw": raw[:300]}
+    if isinstance(result, dict) and result.get("number") is not None:
+        from localm import issue_tracker
+        issue_tracker.record_filed(result["number"], title)
+    return result

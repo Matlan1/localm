@@ -83,3 +83,36 @@ test("a FAILED issues fetch still says it could not load - not 'no issues'", asy
   assert.match(out.textContent, /Could not load/);
   assert.match(out.textContent, /upstream refused/);
 });
+
+test("an Issues row whose lookup failed says so and never shows a state", async () => {
+  const { window } = loadAppWithPages({
+    fetchImpl: makeFetch({ issues: [
+      { number: 11, title: "ok one", state: "closed", closed_at: "2026-10-02T10:00:00Z" },
+      { number: 12, title: "unreachable one", error: "net_mode = off" },
+    ] }),
+  });
+  await window.issuesRefresh();
+  const rows = [...window.document.getElementById("issues-list").children]
+    .filter((d) => /^#\d+/.test(d.textContent));
+  assert.equal(rows.length, 2);
+  assert.match(rows[0].textContent, /#11 closed 2026-10-02/);
+  assert.match(rows[1].textContent, /unreachable one/);
+  assert.match(rows[1].textContent, /could not check: net_mode = off/);
+  assert.doesNotMatch(rows[1].textContent, /closed|open/);
+});
+
+test("the Issues list always links to all issues on GitHub", async () => {
+  const { window } = loadAppWithPages({
+    fetchImpl: makeFetch({ issues: [{ number: 1, title: "t", state: "open" }] }),
+  });
+  await window.issuesRefresh();
+  const links = [...window.document.getElementById("issues-list").querySelectorAll("a")];
+  assert.ok(links.some((a) => /github\.com\/Matlan1\/localm\/issues$/.test(a.href)));
+});
+
+test("an empty Issues list also links to all issues", async () => {
+  const { window } = loadAppWithPages({ fetchImpl: makeFetch({ issues: [] }) });
+  await window.issuesRefresh();
+  const links = [...window.document.getElementById("issues-list").querySelectorAll("a")];
+  assert.equal(links.length, 1);
+});
