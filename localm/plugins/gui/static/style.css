@@ -3187,6 +3187,23 @@ div:has(> .data-table) { overflow-x: auto; }
    the flex gap does that job, so the first one is not indented off the edge. */
 .models-view-opts .inline-check { margin-left: 0; }
 
+/* Text filter above the Registered-models table. */
+.models-search-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.models-search-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+.models-search-row input[type="search"] { flex: 1 1 auto; min-width: 0; }
+
 /* Rule-5 note: what the All tab is leaving out, and where it went. */
 .models-other-note {
   margin: 0 0 10px;
