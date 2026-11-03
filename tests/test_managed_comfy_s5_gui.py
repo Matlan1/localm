@@ -314,7 +314,8 @@ def test_repair_never_touches_the_managed_models_folder(home, app, no_subprocess
 
 def _install_managed_at(commit: str, *, git: bool = True) -> mc.ManagedComfyPaths:
     """An installed managed ComfyUI whose marker records *commit*, optionally without
-    a .git dir (the non-git copy-fallback install, which cannot take a pinned update)."""
+    a source record (the non-git copy-fallback install, which cannot take a pinned
+    update)."""
     import json as _json
     from localm.media.managed_comfy_provision import MARKER_FILENAME
     paths = _install_managed()
@@ -322,7 +323,9 @@ def _install_managed_at(commit: str, *, git: bool = True) -> mc.ManagedComfyPath
         _json.dumps({"commit": commit, "comfyui_version": "v-installed"}),
         encoding="utf-8")
     if git:
-        (paths.root / ".git").mkdir(parents=True, exist_ok=True)
+        from localm.media import source_archive
+        source_archive.write_record(paths.root, "https://github.com/o/ComfyUI.git",
+                                    "c" * 40, ["main.py"])
     return paths
 
 
@@ -485,7 +488,7 @@ def test_status_non_git_install_is_not_updatable_and_says_why(home, app):
     with TestClient(app) as client:
         body = client.get("/api/comfy/managed-status").json()
     assert body["updatable"] is False
-    assert "no git history" in body["update_blocked_reason"]
+    assert "no recorded source commit" in body["update_blocked_reason"]
     assert "set it up again" in body["update_blocked_reason"]
 
 

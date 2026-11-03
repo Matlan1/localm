@@ -54,21 +54,40 @@ function setCoderState(stateKey) {
   node.className = "job-state" + (spec.cls ? " " + spec.cls : "");
 }
 
-// Updates the busy pill with the seconds elapsed since the active session's
-// last SSE frame (a token, a tool event, or a keepalive comment), so a long
-// silent generation still visibly changes instead of sitting on a static
-// "working…" label, and with the model's latest status (loading the model,
-// processing the prompt) until the next event. No-op unless the active
-// session is busy and its pill is currently showing the running state.
+const CODER_STALL_SECS = 30;
+
+export function formatCoderElapsed(totalSecs) {
+  const n = Math.max(0, Math.floor(totalSecs));
+  if (n < 60) return n + "s";
+  const m = Math.floor(n / 60);
+  const sec = String(n % 60).padStart(2, "0");
+  if (m < 60) return m + "m " + sec + "s";
+  return Math.floor(m / 60) + "h " + String(m % 60).padStart(2, "0") + "m";
+}
+
+// Updates the busy pill with the time since the active session's current
+// phase began (the busy state, or the model's latest status such as loading
+// the model or processing the prompt). Keepalive comments do not touch it.
+// Once no real event (token, tool event, status) has arrived for
+// CODER_STALL_SECS, a "no output for" readout is appended. No-op unless the
+// active session is busy and its pill is currently showing the running state.
 export function tickCoderBusyIndicator() {
   const s = activeSession();
-  if (!s || !s.busy || typeof s.lastEventAt !== "number") return;
+  if (!s || !s.busy || typeof s.phaseStartedAt !== "number") return;
   const node = $("coder-state");
   if (!node.classList.contains("st-running")) return;
-  const secs = Math.max(0, Math.floor((Date.now() - s.lastEventAt) / 1000));
-  node.textContent = s.statusText
-    ? t("coder.state.workingStatus", { status: s.statusText, secs })
-    : t("coder.state.workingElapsed", { secs });
+  const now = Date.now();
+  const time = formatCoderElapsed((now - s.phaseStartedAt) / 1000);
+  let text = s.statusText
+    ? t("coder.state.workingStatus", { status: s.statusText, time })
+    : t("coder.state.workingElapsed", { time });
+  if (typeof s.lastEventAt === "number") {
+    const quiet = (now - s.lastEventAt) / 1000;
+    if (quiet >= CODER_STALL_SECS) {
+      text += t("coder.state.noOutput", { time: formatCoderElapsed(quiet) });
+    }
+  }
+  node.textContent = text;
 }
 setInterval(tickCoderBusyIndicator, 1000);
 
@@ -421,7 +440,9 @@ export function registerSession(info, { replay }) {
     info,
     feedEl,
     busy: info.busy || false,
-    lastEventAt: null,   // set on every SSE frame received, including a keepalive
+    lastEventAt: null,   // last real event (token, tool, status); keepalive comments excluded
+    phaseStartedAt: info.busy ? Date.now() : null,   // start of the current busy phase
+    phaseKey: "",
     liveBody: null,
     liveText: "",
     liveReasoning: "",   // H4: thinking model's reasoning, streamed via "reasoning" events
@@ -722,6 +743,11 @@ export function buildConfirmCard(s, ev) {
 }
 
 export function handleCoderEvent(s, ev) {
+  const now = Date.now();
+  const phaseKey = ev.type === "status" ? (ev.code || ev.text || "") : "";
+  if (!s.busy || phaseKey !== (s.phaseKey || "")) s.phaseStartedAt = now;
+  s.phaseKey = phaseKey;
+  s.lastEventAt = now;
   // Keep a light event log (no token/reasoning spam) so "export" can rebuild
   // the session as markdown without another server round-trip.
   if (ev.type !== "token" && ev.type !== "reasoning" && ev.type !== "status") {
@@ -930,7 +956,7 @@ export async function streamSession(s, replay) {
         let ev;
         try { ev = JSON.parse(payload); } catch { return; }
         if (coder.sessions.has(s.info.id)) handleCoderEvent(s, ev);
-      }, () => { s.lastEventAt = Date.now(); });
+      });
     } catch {
       if (!coder.sessions.has(s.info.id) || s.closed) return;
       await new Promise((res) => setTimeout(res, 1500));
@@ -1330,6 +1356,8 @@ export async function sendCoderTask() {
       toast(t("coder.task.queuedToast"));
     } else {
       s.busy = true;
+      s.phaseStartedAt = s.lastEventAt = Date.now();
+      s.phaseKey = "";
       setCoderState("working");
       renderSessionSelect();
     }
