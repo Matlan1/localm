@@ -14,6 +14,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ### Added
 - **A model can be reloaded from the interface.** The running model's row on the Models page has a **reload** button (also on a loaded model whose adapter change is waiting for a reload), Settings > Runtime & GPU has **Save and reload model** beside Save, and Settings > Live tuning has **Reload model** for the settings that save immediately. A plain save still never reloads; the buttons appear only while a model is loaded.
 
+### Changed
+- **The debug log's `loop_lag` now shows real loop stalls.** It used to read `0.00s` on nearly every request, whatever happened. Each request line now reports the longest stretch the server was frozen while that request was in flight (a slow request with `loop_lag` near 0 was just waiting; one with a large `loop_lag` had the server blocked). `/debug/stacks` reports the longest stall of the last minute.
+
 ### Fixed
 - **The launcher no longer flashes a console window when you add a model.** Adding a model file or importing a folder in the launcher window ran `localm add` in a visible console window for a moment; it now runs hidden.
 - **localm's own ComfyUI no longer needs git.** Setting up, updating and repairing the ComfyUI localm installs, its custom nodes, and keeping it safe during a localm update stopped with "git was not found ... install git and try again" on a PC without git. localm now downloads the pinned ComfyUI and custom node versions from GitHub and checks each download against the version it asked for, so no git is needed. A ComfyUI that an earlier localm installed keeps updating and rolling back as before.
