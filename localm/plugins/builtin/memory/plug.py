@@ -1685,7 +1685,8 @@ def _memory_inlet(messages, ctx, announce=None):
         except Exception as e:
             from localm.debuglog import logger
             logger.warning("memory: could not store a remember request: %s", e)
-            ctx.state["memory_saved"] = {"text": "", "status": "failed"}
+            if ctx is not None:
+                ctx.state["memory_saved"] = {"text": "", "status": "failed"}
     try:
         from localm import memory as _mem
         query = _recall_query(messages)

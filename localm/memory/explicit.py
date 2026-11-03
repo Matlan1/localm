@@ -95,6 +95,8 @@ def explicit_fact(message: str) -> Optional[str]:
             continue
         verb = " ".join(m.group("verb").lower().split())
         connect = _CONNECT_RE.match(m.group("rest"))
+        if connect is None:
+            return None
         rest = m.group("rest")[connect.end():]
         keyword = connect.group("kw") is not None
         punct = connect.group("punct") is not None
