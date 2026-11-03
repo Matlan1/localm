@@ -625,6 +625,10 @@ def _arm_installer_guard() -> bool:
 
 _arm_installer_guard()
 
+from tests import _no_console_window  # noqa: E402
+
+_no_console_window.arm()
+
 
 _INSTALLER_ADVICE = (
     "  A test must never install packages into the interpreter it is running on.\n"
