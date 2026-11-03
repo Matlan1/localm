@@ -25,6 +25,7 @@ export let _perfEstTimer = null;
 const PERF_ESTIMATE_AFTER_RELOAD_MS = 4000;
 const PERF_ESTIMATE_LOADING_POLL_MS = 2000;
 export async function refreshPerfEstimate() {
+  syncPerfReloadButton();
   const gl = $("perf-gpu-layers"), ctx = $("perf-ctx"), out = $("perf-estimate");
   if (!gl || !ctx || !out) return;
   try {
@@ -75,6 +76,57 @@ export function syncPerfCtxHelp() {
     document.createTextNode(t("settings.perf.ctxHelpSuffix")));
 }
 
+/** i18n keys for the toasts of a reload that follows a save in Settings. */
+export const SAVED_RELOAD_KEYS = {
+  start: "settings.perf.reloadingToast", busy: "settings.perf.reloadBusyToast",
+  cancelled: "settings.perf.savedNextLoad", failed: "settings.perf.reloadFailedToast",
+};
+
+/** i18n keys for the toasts of a reload that saves nothing (Models tab, Live tuning "Reload model"). */
+export const PLAIN_RELOAD_KEYS = {
+  start: "models.reload.reloadingToast", busy: "models.reload.busyToast",
+  cancelled: "models.reload.cancelledToast", failed: "models.reload.failedToast",
+};
+
+/** Reload *model* (unload, then load with the saved settings) and toast the outcome
+ *  with the messages named by *keys* (SAVED_RELOAD_KEYS or PLAIN_RELOAD_KEYS).
+ *  Returns the reloadModel() result, or {status: "failed", model} when the reload
+ *  threw (already toasted). */
+export async function reloadWithToasts(model, keys) {
+  toast(t(keys.start, { model }));
+  try {
+    const res = await reloadModel(model);
+    if (res.status === "in_use") toast(t(keys.busy, { model }), true);
+    else if (res.status === "cancelled" || res.status === "superseded") toast(t(keys.cancelled, { model }));
+    else toastLoadResult(res, model);
+    return res;
+  } catch (e) {
+    toast(t(keys.failed, { model, message: e.message }), true);
+    return { status: "failed", model };
+  }
+}
+
+/** After a successful save in Settings: reload the active model so it picks the
+ *  saved values up. With no model loaded the values simply apply on the next load. */
+export async function reloadActiveModelAfterSave() {
+  const model = modelCache.active;
+  if (!model) { toast(t("settings.perf.savedNextLoad")); return null; }
+  const res = await reloadWithToasts(model, SAVED_RELOAD_KEYS);
+  // Re-reads the estimate once the free-VRAM reading has caught up with the reload.
+  setTimeout(refreshPerfEstimate, PERF_ESTIMATE_AFTER_RELOAD_MS);
+  return res;
+}
+
+/** Show the reload offers in Settings (Live tuning "Reload model" and every
+ *  section's "Save and reload model") only while a model is loaded. */
+export function syncPerfReloadButton() {
+  const btn = $("perf-reload");
+  if (btn) btn.hidden = !modelCache.active;
+  for (const b of document.querySelectorAll(".settings-section-save-reload")) {
+    b.hidden = !modelCache.active;
+  }
+}
+
 export function setupPerfCard() {
   const gl = $("perf-gpu-layers"), ctx = $("perf-ctx");
   if (!gl || !ctx) return;
@@ -102,20 +154,19 @@ export function setupPerfCard() {
       toast(t("settings.perf.saveFailedToast", { message: e.message }), true);
       return;
     }
-    const model = modelCache.active;
-    if (!model) { toast(t("settings.perf.savedNextLoad")); return; }
-    toast(t("settings.perf.reloadingToast", { model }));
-    try {
-      const res = await reloadModel(model);
-      if (res.status === "in_use") toast(t("settings.perf.reloadBusyToast", { model }), true);
-      else if (res.status === "cancelled" || res.status === "superseded") toast(t("settings.perf.savedNextLoad"));
-      else toastLoadResult(res, model);
-    } catch (e) {
-      toast(t("settings.perf.reloadFailedToast", { model, message: e.message }), true);
-    }
-    // Re-reads the estimate once the free-VRAM reading has caught up with the reload.
-    setTimeout(refreshPerfEstimate, PERF_ESTIMATE_AFTER_RELOAD_MS);
+    await reloadActiveModelAfterSave();
   };
+  const reload = $("perf-reload");
+  if (reload) reload.onclick = async () => {
+    const model = modelCache.active;
+    if (!model) return;
+    reload.disabled = true;
+    try {
+      await reloadWithToasts(model, PLAIN_RELOAD_KEYS);
+      setTimeout(refreshPerfEstimate, PERF_ESTIMATE_AFTER_RELOAD_MS);
+    } finally { reload.disabled = false; }
+  };
+  syncPerfReloadButton();
   // Seed slider positions from the current config, then estimate.
   fetch("/v1/config", { headers: authHeaders() })
     .then((r) => (r.ok ? r.json() : {}))

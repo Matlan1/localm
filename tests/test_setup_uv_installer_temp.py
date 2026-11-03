@@ -164,10 +164,22 @@ def _windows_env(scratch: Path, home: Path, log: Path, fails: bool, **extra) -> 
 
 
 def _cmd(script: Path, clone: Path, env: dict, answers: str) -> tuple[int, str]:
-    r = subprocess.run([os.environ.get("COMSPEC", "cmd.exe"), "/c", str(script)], cwd=str(clone),
+    r = subprocess.run([os.environ.get("COMSPEC", "cmd.exe"), "/c", ".\\" + script.name], cwd=str(clone),
                        env=env, input=answers.replace("\n", "\r\n").encode("utf-8"),
                        capture_output=True, timeout=180, creationflags=_NO_WINDOW)
     return r.returncode, r.stdout.decode("utf-8", "replace") + r.stderr.decode("utf-8", "replace")
+
+
+_AWKWARD_FOLDERS = [
+    pytest.param("clone [x]", id="brackets"),
+    pytest.param("clone]x", id="closing-bracket"),
+    pytest.param("[a] b", id="leading-bracket"),
+    pytest.param("it's here", id="apostrophe"),
+    pytest.param("a&b", id="ampersand"),
+    pytest.param("pct%y", id="percent"),
+    pytest.param("bang!x", id="bang"),
+    pytest.param("a^b (c)", id="caret-and-parens"),
+]
 
 
 @_needs_windows
@@ -177,7 +189,18 @@ def _cmd(script: Path, clone: Path, env: dict, answers: str) -> tuple[int, str]:
     ("2", "uv-bootstrap", None),
 ])
 def test_setup_bat_leaves_nothing_in_the_system_temp_folder(tmp_path, pick, step, uv_exe, fails):
-    clone, scratch, home, log = _layout(tmp_path)
+    _setup_bat_installs_uv(tmp_path, "clone", pick, step, uv_exe, fails)
+
+
+@_needs_windows
+@pytest.mark.parametrize("fails", _OUTCOMES)
+@pytest.mark.parametrize("folder", _AWKWARD_FOLDERS)
+def test_setup_bat_installs_uv_from_an_awkward_folder(tmp_path, folder, fails):
+    _setup_bat_installs_uv(tmp_path, folder, "1", "uv-portable", Path(".uv") / "uv.exe", fails)
+
+
+def _setup_bat_installs_uv(tmp_path, clone_name, pick, step, uv_exe, fails):
+    clone, scratch, home, log = _layout(tmp_path, clone_name)
     _pinned_copy("setup.bat", clone, tmp_path / "releases", _PS_STUB, bat=True)
     env = _windows_env(scratch, home, log, fails, LOCALM_SETUP_ABORT_AFTER=step)
     rc, out = _cmd(clone / "setup.bat", clone, env, f"{pick}\nY\n\n\n")
@@ -198,19 +221,30 @@ _GUI_UV_RUN = '"%UVEXE%" run --no-project --isolated --python 3.12 python "insta
 @pytest.mark.parametrize("fails", _OUTCOMES)
 @pytest.mark.parametrize("pick,uv_exe", [("1", Path(".uv") / "uv.exe"), ("2", None)])
 def test_setup_gui_bat_leaves_nothing_in_the_system_temp_folder(tmp_path, pick, uv_exe, fails):
-    clone, scratch, home, log = _layout(tmp_path)
+    _setup_gui_bat_installs_uv(tmp_path, "clone", pick, uv_exe, fails)
+
+
+@_needs_windows
+@pytest.mark.parametrize("fails", _OUTCOMES)
+@pytest.mark.parametrize("folder", _AWKWARD_FOLDERS)
+def test_setup_gui_bat_installs_uv_from_an_awkward_folder(tmp_path, folder, fails):
+    _setup_gui_bat_installs_uv(tmp_path, folder, "1", Path(".uv") / "uv.exe", fails)
+
+
+def _setup_gui_bat_installs_uv(tmp_path, clone_name, pick, uv_exe, fails):
+    clone, scratch, home, log = _layout(tmp_path, clone_name)
     _pinned_copy("setup-gui.bat", clone, tmp_path / "releases", _PS_STUB, bat=True)
     script = clone / "setup-gui.bat"
     text = script.read_bytes().decode("utf-8")
     assert text.count(_GUI_UV_RUN) == 1, "the window launch line moved"
-    script.write_bytes(text.replace(_GUI_UV_RUN, "echo WINDOW-UV=%UVEXE%& cmd /c exit 0")
+    script.write_bytes(text.replace(_GUI_UV_RUN, "set UVEXE& cmd /c exit 0")
                        .encode("utf-8"))
     rc, out = _cmd(script, clone, _windows_env(scratch, home, log, fails), f"{pick}\nY\n\n\n")
     installed = clone / uv_exe if uv_exe else home / ".local" / "bin" / "uv.exe"
     if fails:
         assert rc == 1 and "uv still is not callable" in out, out
     else:
-        assert f"WINDOW-UV={installed}" in out, out
+        assert f"UVEXE={installed}" in out, out
     _assert_nothing_left(scratch, log)
     assert not (clone / ".localm-setup-tmp").exists()
 
@@ -247,10 +281,15 @@ def _assert_stub_curl_ran(tmp_path: Path, out: str) -> None:
     assert _curl_log(tmp_path).is_file(), f"the script ran a curl other than the stub\n{out}"
 
 
+_SH_FOLDERS = [pytest.param("clone", id="plain"), pytest.param("clone [x]", id="brackets"),
+               pytest.param("it's a&b", id="apostrophe-ampersand")]
+
+
 @_needs_bash
 @pytest.mark.parametrize("fails", _OUTCOMES)
-def test_setup_sh_leaves_nothing_in_the_system_temp_folder(tmp_path, fails):
-    clone, scratch, home, log = _layout(tmp_path)
+@pytest.mark.parametrize("folder", _SH_FOLDERS)
+def test_setup_sh_leaves_nothing_in_the_system_temp_folder(tmp_path, folder, fails):
+    clone, scratch, home, log = _layout(tmp_path, folder)
     releases = tmp_path / "releases"
     _pinned_copy("setup.sh", clone, releases, _SH_STUB, bat=False)
     env = _bash_env(tmp_path, scratch, home, log, releases, fails)
@@ -271,8 +310,9 @@ def test_setup_sh_leaves_nothing_in_the_system_temp_folder(tmp_path, fails):
 
 @_needs_bash
 @pytest.mark.parametrize("fails", _OUTCOMES)
-def test_setup_gui_sh_leaves_nothing_in_the_system_temp_folder(tmp_path, fails):
-    clone, scratch, home, log = _layout(tmp_path)
+@pytest.mark.parametrize("folder", _SH_FOLDERS)
+def test_setup_gui_sh_leaves_nothing_in_the_system_temp_folder(tmp_path, folder, fails):
+    clone, scratch, home, log = _layout(tmp_path, folder)
     releases = tmp_path / "releases"
     _pinned_copy("setup-gui.sh", clone, releases, _SH_STUB, bat=False)
     env = _bash_env(tmp_path, scratch, home, log, releases, fails)

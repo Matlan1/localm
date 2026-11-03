@@ -8,10 +8,10 @@ import { $, applyChatBackground, authHeaders, clearImageProxyCache, confirmDange
 import { refreshCtxLimit } from "../app/chat.js";
 import { t, tn, tOr, tOrFirst } from "../app/i18n.js";
 import { emptyState } from "../app/icons.js";
-import { loginWithKey } from "../app/models-sidebar.js";
+import { loginWithKey, modelCache } from "../app/models-sidebar.js";
 import { showView } from "../app/tabs.js";
 import { nativeModelSelect } from "../app/native-models.js";
-import { applyServerTtsConfig, browserVoiceOverride, caps, capsReady, clearBrowserVoiceOverride, refreshBackendInfo, refreshPerfEstimate, syncIndexSpaceHint, syncPerfCtxHelp, ttsProvider } from "../app/settings-perf.js";
+import { applyServerTtsConfig, browserVoiceOverride, caps, capsReady, clearBrowserVoiceOverride, refreshBackendInfo, refreshPerfEstimate, reloadActiveModelAfterSave, syncIndexSpaceHint, syncPerfCtxHelp, ttsProvider } from "../app/settings-perf.js";
 
 /* ================================================================ */
 /*  Settings page                                                    */
@@ -1530,7 +1530,7 @@ export async function saveSettingsSection(secId) {
     if (value === undefined) continue;     // untouched secret / blank number
     updates[field.key] = value;
   }
-  if (!Object.keys(updates).length) { toast(t("settings.toast.nothingChanged")); return; }
+  if (!Object.keys(updates).length) { toast(t("settings.toast.nothingChanged")); return false; }
   let r = await fetch("/v1/config", {
     method: "PATCH", headers: authHeaders(),
     body: JSON.stringify(updates),
@@ -1538,7 +1538,7 @@ export async function saveSettingsSection(secId) {
   let data = await r.json().catch(() => ({}));
   if (r.ok && data.needs_confirm) {
     const proceed = await confirmEmbeddingModelSwitch(data.model, data);
-    if (!proceed) { toast(t("settings.toast.cancelled")); return; }
+    if (!proceed) { toast(t("settings.toast.cancelled")); return false; }
     r = await fetch("/v1/config", {
       method: "PATCH", headers: authHeaders(),
       body: JSON.stringify({ ...updates, confirm: true }),
@@ -1558,9 +1558,10 @@ export async function saveSettingsSection(secId) {
     refreshSettingsPage();   // re-render to reflect server-normalized values
     // Re-reads the session mode and the other chat values a save can change.
     refreshCtxLimit();
-  } else {
-    toast(data.detail || t("settings.toast.saveFailed"), true);
+    return true;
   }
+  toast(data.detail || t("settings.toast.saveFailed"), true);
+  return false;
 }
 
 /** The browser plugin's entry in /api/capabilities ({installed, enabled,
@@ -1873,6 +1874,17 @@ export async function refreshSettingsPage() {
     save.dataset.sec = sec.id;
     save.onclick = () => savingState(save, () => saveSettingsSection(sec.id));
     actions.appendChild(save);
+    if (sec.label === "Engine") {
+      const saveReload = el("button", "btn-secondary settings-section-save-reload",
+        t("settings.saveReload.button"));
+      saveReload.title = t("settings.saveReload.title");
+      saveReload.dataset.sec = sec.id;
+      saveReload.hidden = !modelCache.active;
+      saveReload.onclick = () => whileBusy(saveReload, t("settings.saveReload.working"), async () => {
+        if (await saveSettingsSection(sec.id)) await reloadActiveModelAfterSave();
+      });
+      actions.appendChild(saveReload);
+    }
     panel.appendChild(actions);
     form.appendChild(panel);
   }
