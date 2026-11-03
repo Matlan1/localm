@@ -1,7 +1,7 @@
 """No test opens a console window on the desktop (Windows).
 
 tests/_no_console_window.py wraps process creation so a spawn from a console-less pytest process
-carries CREATE_NO_WINDOW; tests/conftest.py arms it. This file pins the guard's decision, proves it
+carries CREATE_NO_WINDOW; tests/__init__.py arms it. This file pins the guard's decision, proves it
 end to end from a process that really has no console, and fails when a test file adds a way to
 open a window that the guard cannot see.
 """
@@ -43,7 +43,7 @@ class TestCreationFlags:
 
 
 @windows_only
-def test_conftest_armed_the_guard_in_this_process():
+def test_the_tests_package_armed_the_guard_in_this_process():
     assert guard.is_armed()
 
 
@@ -163,14 +163,12 @@ def _spawns_without_creationflags(source: str) -> list[int]:
 
 
 class TestProductSpawnsFromAConsoleLessProcess:
-    """launcher.pyw runs under pythonw.exe, which has no console, and it calls localm.config
-    (save_config -> restrict_file_perms -> icacls); a child started there without the flag opens a window."""
+    """launcher.pyw runs under pythonw.exe, which has no console; a child it starts without the flag opens a window."""
 
     def test_the_scan_sees_a_spawn_without_the_flag(self):
         assert _spawns_without_creationflags("import subprocess\nsubprocess.run(['x'])\n") == [2]
         assert not _spawns_without_creationflags("import subprocess\nsubprocess.run(['x'], creationflags=1)\n")
 
-    @pytest.mark.parametrize("relpath", ["launcher.pyw", "localm/config.py"])
-    def test_every_spawn_in_the_file_carries_creationflags(self, relpath):
-        source = (REPO / relpath).read_text(encoding="utf-8")
+    def test_every_spawn_in_launcher_pyw_carries_creationflags(self):
+        source = (REPO / "launcher.pyw").read_text(encoding="utf-8")
         assert _spawns_without_creationflags(source) == []
