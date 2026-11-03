@@ -212,7 +212,7 @@ _HEARTBEAT_INTERVAL_S = 0.1
 _STALL_RECORD_MIN_S = 0.05
 _LOOP_LAG_WINDOW_S = 60.0
 _hb_monotonic: Optional[float] = None
-_hb_stalls: "collections.deque[tuple[float, float]]" = collections.deque(maxlen=512)
+_hb_stalls: collections.deque[tuple[float, float]] = collections.deque(maxlen=512)
 
 
 def _loop_stall_between(start: float, end: float) -> Optional[float]:
