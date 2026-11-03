@@ -248,10 +248,12 @@ def test_tk_windows_start_withdrawn_and_stay_withdrawn():
     assert tkinter.Wm.deiconify is nw.deiconify and tkinter.Wm.wm_deiconify is nw.deiconify
     root = build_tk_root(tkinter.Tk)
     try:
+        assert root.state() == "withdrawn"
         top = tkinter.Toplevel(root)
-        root.update_idletasks()
+        assert top.state() == "withdrawn"
         root.deiconify()
         top.deiconify()
+        assert root.state() == "withdrawn" and top.state() == "withdrawn"
         root.update()
         assert root.state() == "withdrawn" and top.state() == "withdrawn"
         assert not root.winfo_ismapped() and not top.winfo_ismapped()
