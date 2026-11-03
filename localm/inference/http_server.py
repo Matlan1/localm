@@ -1196,7 +1196,7 @@ def _context_grow_due(engine, tokens: int, own_pins: int = 0) -> bool:
     if getattr(engine, "active_requests", 0) > own_pins:
         return False
     can = getattr(engine, "can_reserve_context", None)
-    if not callable(can) or not can():
+    if not callable(can) or can() is not True:
         return False
     capacity = engine.context_capacity()
     return isinstance(capacity, int) and 0 < capacity < tokens
@@ -7411,12 +7411,13 @@ def engine_context_limit(engine) -> tuple[Optional[int], Optional[str]]:
     if not callable(limit):
         return None, None
     try:
-        return limit()
+        answer = limit()
     except Exception as exc:
         from localm.debuglog import logger as _dbg
         _dbg.debug("context: limit of %s unreadable (%s: %s)",
                    getattr(engine, "display_name", engine), type(exc).__name__, exc)
         return None, None
+    return answer if isinstance(answer, tuple) and len(answer) == 2 else (None, None)
 
 
 # Growth targets round up to whole multiples of this many tokens.
@@ -7442,7 +7443,7 @@ async def grow_context_window(engine, tokens: int, *,
     at WARNING)."""
     from localm.debuglog import logger as _dbg
     can = getattr(engine, "can_reserve_context", None)
-    if not callable(can) or not can():
+    if not callable(can) or can() is not True:
         return engine
     loop = asyncio.get_running_loop()
     limit, _reason = await loop.run_in_executor(None, engine_context_limit, engine)

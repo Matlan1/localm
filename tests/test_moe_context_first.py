@@ -124,10 +124,10 @@ class TestOffloadNeeds:
         b = _backend(_moe_model(tmp_path), ctx_reserve=RESERVE)
         with _Vram(10**9):
             full, low = b.gpu_offload_needs()
+            assert b.full_offload_vram_bytes() == full
         assert full == b._vram_model_bytes(0) + RESERVE * KV_PER_TOKEN + OVERHEAD
         assert low == (b._vram_model_bytes(len(EXPERT_BYTES))
                        + N_CTX * KV_PER_TOKEN + OVERHEAD)
-        assert b.full_offload_vram_bytes() == full
 
     def test_a_dense_model_has_one_figure(self, tmp_path):
         b = _backend(_dense_model(tmp_path), ctx_reserve=RESERVE)
@@ -234,6 +234,18 @@ class TestTwoGpuPlanKeepsEveryLayer:
     """The placement planner for two or more GPUs falls back to an n_ctx KV
     cache when the reserved window does not fit beside every layer."""
 
+    def _model(self, tmp_path):
+        # gguf_split_layout reads the vocabulary size from the token list.
+        from tests.test_implicit_split_fit import _write_gguf
+        tensors = [("token_embd.weight", 5_000), ("output.weight", 5_000)]
+        for il, size in enumerate(EXPERT_BYTES):
+            tensors += [(f"blk.{il}.attn_q.weight", 2_000),
+                        (f"blk.{il}.ffn_gate_exps.weight", size)]
+        extra = [("expert_count", 8), ("expert_used_count", 2), ("embedding_length", 64),
+                 ("attention.head_count", 4), ("attention.head_count_kv", 4)]
+        return _write_gguf(tmp_path / "two.gguf", arch="testmoe", block_count=4,
+                           vocab=8, tensors=tensors, extra_kv=extra)
+
     def _plan(self, b, free_each):
         devices = [{"slot": i, "index": i, "name": f"gpu{i}", "free": free_each,
                     "total": free_each * 2} for i in range(2)]
@@ -245,13 +257,13 @@ class TestTwoGpuPlanKeepsEveryLayer:
             return b._plan_gpu_placement()
 
     def test_a_window_that_never_fits_keeps_every_layer_on_the_gpus(self, tmp_path):
-        b = _backend(_moe_model(tmp_path), ctx_reserve=10**6)
+        b = _backend(self._model(tmp_path), ctx_reserve=10**6)
         placement = self._plan(b, 400_000)
         assert placement is not None
         assert placement.full_offload and placement.fits
 
     def test_a_window_that_fits_is_kept(self, tmp_path):
-        b = _backend(_moe_model(tmp_path), ctx_reserve=RESERVE)
+        b = _backend(self._model(tmp_path), ctx_reserve=RESERVE)
         placement = self._plan(b, 10**8)
         assert placement.full_offload and placement.fits
         kv = sum(d.kv for d in placement.loads)

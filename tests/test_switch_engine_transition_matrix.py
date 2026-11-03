@@ -1091,7 +1091,7 @@ class TestLoadPlacementLog:
         ({"gpu_layers_offloaded": 30, "gpu_layers_total": 30, "degraded": True,
           "moe_cpu_layers": 6},
          {"mode": "configured", "layers": 99, "n_ctx": 4096, "n_cpu_moe": 6,
-          "n_cpu_moe_auto": True}, "WARNING"),
+          "n_cpu_moe_auto": True}, "INFO"),
         ({"gpu_layers_offloaded": 0, "gpu_layers_total": 30, "degraded": True},
          {"mode": "unmeasurable", "layers": 0, "n_ctx": 4096, "n_cpu_moe": 0,
           "n_cpu_moe_auto": False}, "WARNING"),
@@ -1113,7 +1113,7 @@ class TestLoadPlacementLog:
         assert line.startswith(
             f"switch_engine: loaded 'model-b': {placement['gpu_layers_offloaded']}/30 "
             "layers on the GPU, the rest on the CPU" if placement["gpu_layers_offloaded"] < 30
-            else "switch_engine: loaded 'model-b': 30/30 layers on the GPU, routed experts")
+            else "switch_engine: loaded 'model-b': 30/30 layers on the GPU, the routed experts")
 
     def test_an_already_resident_model_logs_no_load_line(self, monkeypatch, caplog):
         a = PlacementEngine("model-a")
@@ -1695,10 +1695,10 @@ class TestBackendSizedAdmission:
         a, env, result = self._beside_a(monkeypatch, b, preempt=True)
 
         assert not a.loaded and "model-b" not in hs._engines and b.load_calls == 0
-        assert result == _estimate_confirm("model-b", 12 * GB, ["model-a"], needed=13 * GB)
+        assert result == _estimate_confirm("model-b", 12 * GB, needed=13 * GB)
         assert result["detail"] == (
             "'model-b' does not fit: every layer on the GPU needs about 13312 MB of "
-            "free VRAM, and about 12288 MB would be free after unloading 'model-a'. "
+            "free VRAM, and about 12288 MB is free. "
             "Loading it anyway runs some of its layers on the CPU, which is slower.")
 
     def test_a_moe_model_whose_expert_plan_fits_loads_without_asking(self, monkeypatch):
@@ -1727,8 +1727,11 @@ class TestBackendSizedAdmission:
     def test_a_moe_model_whose_expert_plan_does_not_fit_asks_with_both_figures(
             self, monkeypatch):
         b = _MoeSizedEngine("model-b", 25 * GB, 13 * GB)
+        a = _SizedResident("model-a")
+        env = _install(monkeypatch, {"model-a": a, "model-b": b}, total=12 * GB)
+        _seat("model-a", a, active=True)
 
-        a, env, result = self._beside_a(monkeypatch, b, preempt=True)
+        result = asyncio.run(hs.switch_engine("model-b", env.factory, activate=False))
 
         assert a.loaded and b.load_calls == 0
         assert result["status"] == "confirm_required" and result["moe"] is True
@@ -2099,7 +2102,7 @@ class TestTooBigEvenAfterEviction:
 
         res = asyncio.run(hs.switch_engine("model-b", env.factory))
 
-        assert res == _estimate_confirm("model-b", _TOO_SMALL)
+        assert res == _estimate_confirm("model-b", _TOO_SMALL, ["model-a"])
         assert a.unload_calls == 0 and a.loaded and a.unloading is False
         assert env.release_waits == [], "no eviction ran before asking"
         assert env.cancelled == [] and not b.loaded
@@ -2151,7 +2154,7 @@ class TestTooBigEvenAfterEviction:
         res = asyncio.run(hs.switch_engine("model-b", env.factory))
 
         assert waited == [1], "the switch waited for the reply"
-        assert res == _estimate_confirm("model-b", _TOO_SMALL)
+        assert res == _estimate_confirm("model-b", _TOO_SMALL, ["model-a"])
         assert env.cancelled == [], "the reply was not cut"
         assert a.unload_calls == 0 and a.loaded
         assert hs._engines == {"model-a": a} and hs._active_model_name == "model-a"
@@ -2207,7 +2210,7 @@ class TestTooBigEvenAfterEviction:
 
         res = asyncio.run(hs.switch_engine("model-b", env.factory))
 
-        assert res == _estimate_confirm("model-b", _TOO_SMALL)
+        assert res == _estimate_confirm("model-b", _TOO_SMALL, ["model-a"])
         assert a.unload_calls == 0 and hs._active_model_name == "model-a"
 
     def test_a_measured_hold_wins_over_the_sized_one(self, monkeypatch):
@@ -2312,7 +2315,7 @@ class TestTooBigEvenAfterEviction:
 
         res = asyncio.run(hs.switch_engine("model-b", env.factory))
 
-        assert res == _estimate_confirm("model-b", _TOO_SMALL + 100 * MB)
+        assert res == _estimate_confirm("model-b", _TOO_SMALL + 100 * MB, ["model-a"], peers=True)
         assert a.unload_calls == 0
 
 
@@ -2422,7 +2425,7 @@ class TestSharedModelsCountedBeforeEviction:
 
         res = asyncio.run(hs.switch_engine("model-b", env.factory))
 
-        assert res == _estimate_confirm("model-b", _TOO_SMALL)
+        assert res == _estimate_confirm("model-b", _TOO_SMALL, ["model-a"], shared=True)
         assert a.unload_calls == 0 and a.loaded and env.release_waits == []
         assert box.events == [], "nothing was freed before asking"
         assert box.loaded == {kind}
@@ -2560,7 +2563,7 @@ class TestBusyReplyNothingFreedBeforeAsking:
 
         res = asyncio.run(hs.switch_engine("model-b", env.factory))
 
-        assert res == _estimate_confirm("model-b", _TOO_SMALL)
+        assert res == _estimate_confirm("model-b", _TOO_SMALL, ["model-a"], shared=True)
         assert box.events == ["reply-finished"], "no free or peer ask before asking"
         assert env.cancelled == [] and a.unload_calls == 0 and a.loaded
         assert box.loaded == {"embedder"}
@@ -2574,7 +2577,7 @@ class TestBusyReplyNothingFreedBeforeAsking:
 
         res = asyncio.run(hs.switch_engine("model-b", env.factory))
 
-        assert res == _estimate_confirm("model-b", _TOO_SMALL)
+        assert res == _estimate_confirm("model-b", _TOO_SMALL, shared=True)
         assert box.events == [] and box.loaded == {"embedder"} and not b.loaded
 
     def test_an_idle_model_beside_a_busy_one_waits_for_the_reply_before_asking(
@@ -2602,7 +2605,7 @@ class TestBusyReplyNothingFreedBeforeAsking:
 
         res = asyncio.run(hs.switch_engine("model-b", env.factory))
 
-        assert res == _estimate_confirm("model-b", _TOO_SMALL)
+        assert res == _estimate_confirm("model-b", _TOO_SMALL, ["model-a", "model-c"])
         assert events == ["reply-finished"], "the reply was waited for first"
         assert a.unload_calls == 0 and c.unload_calls == 0 and env.cancelled == []
 

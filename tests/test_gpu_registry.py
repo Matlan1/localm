@@ -239,7 +239,7 @@ class TestSwitchEngineCooperativeUnload:
         async def scenario():
             await hs.switch_engine("model-a", _make_engine)
             hs._engines["model-a"].active_requests = 1
-            return await hs.switch_engine("model-b", _make_engine)
+            return await hs.switch_engine("model-b", _make_engine, force=True)
 
         result = asyncio.run(scenario())
         assert result["status"] == "loaded"
@@ -407,7 +407,7 @@ class TestSwitchEngineBusyEviction:
         async def scenario():
             await hs.switch_engine("model-a", _make_engine)
             hs._engines["model-a"].active_requests = 1
-            return await hs.switch_engine("model-b", _make_engine)
+            return await hs.switch_engine("model-b", _make_engine, force=True)
 
         result = asyncio.run(scenario())
         assert result["status"] == "loaded"

@@ -63,7 +63,7 @@ class TestGenerationBudget:
         from localm.inference.backends.base import ContextCapacityExceededError
 
         llm = _llm(n_ctx_max=8192)
-        with pytest.raises(ContextCapacityExceededError, match="n_ctx_max"):
+        with pytest.raises(ContextCapacityExceededError, match="8192-token context window"):
             llm._fit_generation_budget(8190, 1024)
 
     def test_unlimited_never_clamps(self):
@@ -361,7 +361,7 @@ class TestGenerateImageContextSizing:
         with patch("localm.inference.backends.llamacpp.llama.api", MagicMock()), \
              patch("localm.inference.backends.llamacpp.llama._apply_model_template",
                    return_value=("prompt text", None)):
-            with pytest.raises(ContextCapacityExceededError, match="n_ctx_max"):
+            with pytest.raises(ContextCapacityExceededError, match="8192-token context window"):
                 list(llm._generate_image(
                     messages, max_new_tokens=1024, temperature=0.8, top_k=40,
                     top_p=0.95, repeat_penalty=1.1))

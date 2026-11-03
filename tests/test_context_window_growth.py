@@ -186,8 +186,13 @@ class TestWanted:
 class TestGrowthSafety:
     def test_a_reload_that_does_not_grow_the_window_is_not_repeated(self):
         backend = _GrowableBackend(capacity=100)
-        backend.load = lambda: setattr(backend, "loads", backend.loads + 1)
-        backend._loaded = True
+
+        def _load_without_growing():
+            backend._loaded = True
+            backend.unloaded = False
+            backend.loads += 1
+
+        backend.load = _load_without_growing
         client = TestClient(create_app(_EngineWithBackend(backend)))
 
         first = _post_chat(client, "x" * 150)
