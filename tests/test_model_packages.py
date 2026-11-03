@@ -377,6 +377,25 @@ def test_folder_state_sorts_the_missing_packages(tmp_path, trusted, monkeypatch)
                                "installable": False}
 
 
+def test_folder_state_scans_the_code_again_only_after_it_changed(tmp_path, trusted, monkeypatch):
+    calls = []
+    real = mp.folder_third_party_imports
+
+    def counting(folder):
+        calls.append(folder)
+        return real(folder)
+    monkeypatch.setattr(mp, "folder_third_party_imports", counting)
+    monkeypatch.setattr(mp, "is_importable", lambda m: m != "timm")
+    folder = _model(tmp_path, "import timm\n")
+    assert mpk.folder_state(folder).missing == ["timm"]
+    assert mpk.folder_state(folder).missing == ["timm"]
+    assert len(calls) == 1
+    (folder / "modeling_x.py").write_text("import timm\nimport open_clip\n", encoding="utf-8")
+    monkeypatch.setattr(mp, "is_importable", lambda m: m not in ("timm", "open_clip"))
+    assert mpk.folder_state(folder).missing == ["open_clip", "timm"]
+    assert len(calls) == 2
+
+
 def test_folder_state_checks_nothing_while_custom_code_is_not_trusted(tmp_path, monkeypatch):
     monkeypatch.setattr(hf_backend, "_trust_remote_code_enabled", lambda: False)
     state = mpk.folder_state(_model(tmp_path, "import timm\n"))

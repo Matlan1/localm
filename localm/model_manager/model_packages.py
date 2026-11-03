@@ -45,6 +45,8 @@ _TORCH_LABEL = re.compile(r"^(?:cpu|cu\d+|rocm\d+(?:\.\d+)*|xpu)$")
 _PLAN_TTL_S = 15 * 60
 _IMPORT_TIMEOUT_S = 600
 _INSTALL_TIMEOUT_S = 1800
+_PLAN_TIMEOUT_S = 300
+_SCAN_CACHE_MAX = 256
 
 ProgressCb = Optional[Callable[[str], None]]
 
@@ -63,7 +65,7 @@ class OnDemand:
 ON_DEMAND: dict[str, OnDemand] = {
     "timm": OnDemand("timm", "1.0.30"),
     "open_clip": OnDemand("open-clip-torch", "3.3.0"),
-    "torchaudio": OnDemand("torchaudio", "2.11.0"),
+    "torchaudio": OnDemand("torchaudio", "2.0"),
     "fla": OnDemand("flash-linear-attention", "0.6.0", platforms=("linux",), needs=("triton",)),
 }
 
@@ -266,7 +268,7 @@ def plan(modules: list, *, run: Callable = subprocess.run) -> Plan:
                "--no-header", "--no-annotate", "--quiet", *_index_args(backend)]
         try:
             proc = run(cmd, input=requested, capture_output=True, text=True,
-                       timeout=_INSTALL_TIMEOUT_S, **{k: v for k, v in _run_kwargs().items()
+                       timeout=_PLAN_TIMEOUT_S, **{k: v for k, v in _run_kwargs().items()
                                                       if k != "stdin"})
         except (OSError, subprocess.TimeoutExpired) as e:
             raise PlanError(f"uv could not resolve the packages: {e}") from e
@@ -470,14 +472,55 @@ def folder_state(folder: Path) -> FolderState:
     install lacks, sorted into ones localm ships (the install is incomplete),
     ones it cannot add here, and ones it can add. Never touches the network."""
     from localm.inference.backends.hf import _declares_custom_code, _trust_remote_code_enabled
-    from localm.model_manager.missing_packages import SHIPPED_MODULES, missing_modules
+    from localm.model_manager.missing_packages import SHIPPED_MODULES, is_importable
     if not folder.is_dir() or not _declares_custom_code(str(folder)):
         return FolderState(True, [], [], [], [])
     if not _trust_remote_code_enabled():
         return FolderState(False, [], [], [], [])
-    missing = missing_modules(folder)
+    missing = sorted(m for m in _folder_imports(folder) if not is_importable(m))
     shipped = [m for m in missing if m in SHIPPED_MODULES]
     others = [m for m in missing if m not in SHIPPED_MODULES]
     blocked = [m for m in others if not installable(m)]
     addable = [m for m in others if installable(m)]
     return FolderState(True, missing, shipped, blocked, addable)
+
+
+_scan_cache: dict = {}
+_scan_lock = threading.Lock()
+
+
+def _scan_key(folder: Path) -> tuple:
+    from localm.model_manager.missing_packages import CONFIG_FILES
+    parts = []
+    for f in sorted(folder.glob("*.py")) + [folder / n for n in CONFIG_FILES]:
+        try:
+            st = f.stat()
+            parts.append((f.name, st.st_mtime_ns, st.st_size))
+        except OSError:
+            parts.append((f.name, None, None))
+    return tuple(parts)
+
+
+def _folder_imports(folder: Path) -> frozenset:
+    """The third-party modules the bundled code of *folder* imports, scanned
+    again only when one of its ``.py`` or config files changed. Empty when the
+    folder cannot be read."""
+    from localm.model_manager.missing_packages import folder_third_party_imports
+    try:
+        key = _scan_key(folder)
+    except OSError:
+        return frozenset()
+    name = str(folder)
+    with _scan_lock:
+        hit = _scan_cache.get(name)
+    if hit is not None and hit[0] == key:
+        return hit[1]
+    try:
+        found = frozenset(folder_third_party_imports(folder))
+    except (OSError, ValueError, RecursionError):
+        return frozenset()
+    with _scan_lock:
+        if len(_scan_cache) >= _SCAN_CACHE_MAX:
+            _scan_cache.clear()
+        _scan_cache[name] = (key, found)
+    return found
