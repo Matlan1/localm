@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import contextlib
 import copy
+import functools
 import json
 import os
 import socket
@@ -180,11 +181,12 @@ def portable_install(root: Optional[Path] = None) -> bool:
     return bool(install_record(root).get("runtime_contained"))
 
 
+@functools.lru_cache(maxsize=16)
 def _account_wide_env_value(name: str) -> Optional[str]:
     """The value of the environment variable *name* stored for the whole user
     account or machine (Windows: ``HKCU\\Environment``, then the machine
     environment), with ``%VAR%`` references expanded; None when it is stored in
-    neither or on another operating system."""
+    neither or on another operating system. Read once per process and name."""
     if sys.platform != "win32":
         return None
     import winreg
