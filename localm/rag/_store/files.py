@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 import time
 import weakref
-from typing import Optional
+from typing import Iterable, Optional
 
 from localm.debuglog import logger as _log
 from localm.jsonl import dumps_lines
@@ -451,7 +451,7 @@ class _CollectionFiles:
             self._atomic_write("meta.json", json.dumps(self._meta, indent=2))
         self._snapshot_ref = None
 
-    def _atomic_write(self, filename: str, content) -> None:
+    def _atomic_write(self, filename: str, content: str | Iterable[str]) -> None:
         # storekit.atomic_write: unique temp name plus a Windows PermissionError
         # retry.
         _st._storekit_atomic_write(self.dir / filename, content)
