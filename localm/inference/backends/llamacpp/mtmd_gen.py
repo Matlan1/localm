@@ -366,7 +366,8 @@ _INTERFACE_STRUCTS = {
 }
 
 
-def _state_signatures(helper_input, gen_inp, gen_audio_info=_GenAudioInfo) -> dict:
+def _state_signatures(helper_input, gen_inp,
+                      gen_audio_info: type[ctypes.Structure] = _GenAudioInfo) -> dict:
     return {
         "mtmd_gen_audio_get_info": (gen_audio_info, [ctypes.c_void_p]),
         "mtmd_gen_inp_default": (gen_inp, [ctypes.c_void_p]),
