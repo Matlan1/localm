@@ -10,7 +10,7 @@ import { addMessageRow, lsSetScoped, statusLabel } from "./chat.js";
 import { $, authHeaders, autoGrow, confirmDanger, confirmDangerAsync, el, nearBottom, openModal, readSSE, renderMarkdown, toast } from "./helpers.js";
 import { t, tn } from "./i18n.js";
 import { emptyState, iconEl } from "./icons.js";
-import { modelCache, refreshModels } from "./models-sidebar.js";
+import { confirmLoadText, modelCache, refreshModels } from "./models-sidebar.js";
 import { pickDirectory } from "./picker.js";
 import { composerEnterToSend, saveTextFile } from "./settings-perf.js";
 import { execCoderCommand, handleSlashSubmit } from "./slash.js";
@@ -1044,7 +1044,7 @@ function _needsModelConfirm(r, data) {
 // Asks with the same dialog the sidebar model picker uses. Resolves true to go ahead.
 function _confirmModelLoad(detail) {
   return confirmDangerAsync(
-    t("models.switch.confirmTitle"), detail.detail || "", t("models.switch.confirmLabel"));
+    t("models.switch.confirmTitle"), confirmLoadText(detail), t("models.switch.confirmLabel"));
 }
 
 // The server's error text, whether detail is a string or a {detail} object.

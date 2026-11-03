@@ -1653,6 +1653,41 @@ export function confirmDangerAsync(title, message, confirmLabel) {
   });
 }
 
+/** Ask with the in-page modal and resolve to the key of the button chosen,
+ *  or null when the dialog was cancelled or dismissed (x / backdrop).
+ *  *choices* are ``{key, label, danger}`` in display order; a Cancel button
+ *  comes first. */
+export function chooseAsync(title, message, choices) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let watch = null;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      if (watch) clearInterval(watch);
+      $("modal").style.display = "none";
+      resolve(value);
+    };
+    openModal(title, (body) => {
+      body.appendChild(el("p", "", message));
+      const row = el("div", "actions");
+      const cancel = el("button", "btn-secondary", t("common.modal.cancel"));
+      cancel.onclick = () => finish(null);
+      row.appendChild(cancel);
+      for (const choice of choices) {
+        const btn = el("button", choice.danger ? "btn-secondary btn-danger" : "btn-secondary",
+          choice.label);
+        btn.onclick = () => finish(choice.key);
+        row.appendChild(btn);
+      }
+      body.appendChild(row);
+    });
+    watch = setInterval(() => {
+      if ($("modal").style.display === "none") finish(null);
+    }, 200);
+  });
+}
+
 /** In-page text-input equivalent of confirmDanger, for the free-text half of
  *  the same NET-1 class: window.prompt() is suppressed in the same mobile/PWA
  *  browsers confirmDanger's own comment names, so a raw prompt() call goes

@@ -184,8 +184,9 @@ def build(engines: EngineCache) -> dict[str, dict]:
         # refusing.
         placement = getattr(engine, "gpu_placement", None)
         if placement and placement.get("degraded"):
-            from localm.inference.engine import describe_gpu_placement
-            msg += f" ({describe_gpu_placement(placement)} - slower)"
+            from localm.inference.engine import describe_gpu_placement, placement_moves_layers
+            slower = " - slower" if placement_moves_layers(placement) else ""
+            msg += f" ({describe_gpu_placement(placement)}{slower})"
         return _text_result(msg)
 
     def setup_embeddings(args: dict) -> dict:

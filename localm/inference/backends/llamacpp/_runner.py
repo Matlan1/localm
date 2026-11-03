@@ -901,6 +901,12 @@ class ModelRunner:
     def is_alive(self) -> bool:
         return self._proc is not None and self._proc.is_alive()
 
+    @property
+    def pid(self) -> Optional[int]:
+        """The worker process's pid while it is alive, else None."""
+        proc = self._proc
+        return proc.pid if proc is not None and proc.is_alive() else None
+
     def _native_crash_trace(self) -> str:
         """This child's captured native-fault trace, consumed and removed, or ""
         when there is none.

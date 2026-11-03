@@ -111,8 +111,8 @@ class TestPreDispatchContextCapacityGuard:
         )
         assert resp.status_code == 413
         assert f"{expected_tokens} tokens" in resp.json()["detail"]
-        assert "100 tokens" in resp.json()["detail"]
-        assert "localm config n_ctx_max" in resp.json()["detail"]
+        assert "100-token context window" in resp.json()["detail"]
+        assert "localm config" not in resp.json()["detail"]
         assert backend.loaded is True
         assert backend.unloaded is False
 
@@ -135,7 +135,7 @@ class TestPreDispatchContextCapacityGuard:
         # Rejected up front with 413, not 200 SSE stream
         assert resp.status_code == 413
         assert f"{expected_tokens} tokens" in resp.json()["detail"]
-        assert "100 tokens" in resp.json()["detail"]
+        assert "100-token context window" in resp.json()["detail"]
         assert backend.loaded is True
 
     def test_completions_non_streaming_rejects_oversized_prompt(self):
@@ -162,7 +162,7 @@ class TestPreDispatchContextCapacityGuard:
         )
         assert resp.status_code == 413
         assert f"{expected_tokens} tokens" in resp.json()["detail"]
-        assert "100 tokens" in resp.json()["detail"]
+        assert "100-token context window" in resp.json()["detail"]
         assert backend.loaded is True
 
     def test_completions_streaming_rejects_oversized_prompt_before_stream(self):
@@ -184,7 +184,7 @@ class TestPreDispatchContextCapacityGuard:
         )
         assert resp.status_code == 413
         assert f"{expected_tokens} tokens" in resp.json()["detail"]
-        assert "100 tokens" in resp.json()["detail"]
+        assert "100-token context window" in resp.json()["detail"]
         assert backend.loaded is True
 
     def test_normal_prompt_within_capacity_succeeds(self):
@@ -236,8 +236,8 @@ class TestWorkerNonCrashingOnContextOverflow:
 
         err_msg = str(excinfo.value)
         assert "4686 tokens" in err_msg
-        assert "n_ctx_max=4096" in err_msg
-        assert "localm config n_ctx_max 32768" in err_msg
+        assert "4096-token context window" in err_msg
+        assert "localm config" not in err_msg
 
     def test_gguf_backend_does_not_unload_on_context_capacity_exceeded(self):
         from localm.inference.backends.gguf import GgufBackend

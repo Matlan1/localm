@@ -39,6 +39,12 @@ REFUSE_SPLIT_SHORTFALL = "refuse_split_shortfall"   # a static split share is sh
 CONFIRM_DEGRADED_LOAD = "confirm_degraded_load"     # explicit switch: ask before a partial offload
 DEFER_TO_BACKEND = "defer_to_backend"               # load and let the backend size itself
 
+# unload_for_room setting values.
+UNLOAD_ALWAYS = "always"   # unload this instance's idle models without asking
+UNLOAD_ASK = "ask"         # ask before unloading anything
+UNLOAD_NEVER = "never"     # load beside the other models with what is left
+UNLOAD_POLICIES = (UNLOAD_ALWAYS, UNLOAD_ASK, UNLOAD_NEVER)
+
 # EvictionStep kinds.
 REPROBE = "reprobe"            # something was freed or retried: take a new reading
 PROCEED_TO_LOAD = "proceed"    # stop evicting and load
@@ -61,8 +67,14 @@ class LoadBudget:
     such a load, like a GGUF one, is sized by its backend before the first
     eviction pass.
     ``backend_need`` is the free VRAM the backend's own sizing needs to put
-    every layer on the GPU (``Engine.full_offload_vram_bytes``), or None when
-    it is not known.
+    every layer on the GPU (``Engine.gpu_offload_needs``), or None when
+    it is not known. ``backend_sized`` is True when ``backend_need`` is the
+    load's complete need, its compute overhead included (a GGUF load), so it
+    replaces the whole-model estimate. ``min_need`` is the free VRAM the
+    backend's least demanding placement that keeps every layer on the GPU
+    needs (a Mixture-of-Experts model with its routed experts in system RAM),
+    or None when it is not known or equals ``backend_need``.
+    ``unload_policy`` is the ``unload_for_room`` setting (``UNLOAD_POLICIES``).
     """
 
     name: str
@@ -73,14 +85,38 @@ class LoadBudget:
     check_split_fit: bool
     backend_need: Optional[int] = None
     plugin_backend: bool = False
+    backend_sized: bool = False
+    min_need: Optional[int] = None
+    unload_policy: str = UNLOAD_ALWAYS
 
     @property
     def needed_bytes(self) -> int:
-        """The larger of ``vram_required + headroom`` and ``backend_need``: the
-        free VRAM a load must see to be admitted beside resident models, and
-        the bar every other free-VRAM comparison uses, except the split's
-        per-device check (``split_share_bytes``)."""
+        """The free VRAM a load must see to be admitted beside resident models
+        with every layer and every expert on the GPU: ``backend_need`` when
+        ``backend_sized``, else the larger of ``vram_required + headroom`` and
+        ``backend_need``. The bar every other free-VRAM comparison uses, except
+        the split's per-device check (``split_share_bytes``) and
+        ``plan_bytes``."""
+        if self.backend_sized and self.backend_need:
+            return self.backend_need
         return max(self.vram_required + self.headroom, self.backend_need or 0)
+
+    @property
+    def plan_bytes(self) -> int:
+        """The free VRAM below which the load moves layers to the CPU:
+        ``min_need`` when it is known and below ``needed_bytes`` (between the
+        two, the backend keeps routed experts in system RAM and every layer on
+        the GPU), else ``needed_bytes``."""
+        if self.min_need is not None and 0 < self.min_need < self.needed_bytes:
+            return self.min_need
+        return self.needed_bytes
+
+    @property
+    def keeps_experts_in_ram(self) -> bool:
+        """True when ``plan_bytes`` is below ``needed_bytes``: some free VRAM
+        between them loads every layer on the GPU with routed experts in system
+        RAM."""
+        return self.plan_bytes < self.needed_bytes
 
     @property
     def split_share_bytes(self) -> int:
@@ -189,6 +225,29 @@ class EvictionStep:
     victim: Optional[str] = None
     force_busy: bool = False
     result: Optional[dict] = None
+
+
+def unload_policy(cfg: Mapping) -> str:
+    """The ``unload_for_room`` setting of *cfg*: one of ``UNLOAD_POLICIES``,
+    ``UNLOAD_ALWAYS`` when unset or not one of them."""
+    value = cfg.get("unload_for_room") if isinstance(cfg, Mapping) else None
+    return value if value in UNLOAD_POLICIES else UNLOAD_ALWAYS
+
+
+def effective_unload_policy(policy: str, *, preempt: bool, force: bool,
+                            keep_others: bool) -> str:
+    """The unload policy one load applies: ``UNLOAD_NEVER`` when the caller
+    chose to load beside the other models (*keep_others*); ``UNLOAD_ALWAYS``
+    after the user confirmed unloading (*force*); ``UNLOAD_NEVER`` for an
+    ``UNLOAD_ASK`` load that is not an explicit switch (*preempt*), which has
+    nobody to ask; else *policy*."""
+    if keep_others:
+        return UNLOAD_NEVER
+    if force:
+        return UNLOAD_ALWAYS
+    if policy == UNLOAD_ASK and not preempt:
+        return UNLOAD_NEVER
+    return policy
 
 
 def decide_admission(probe: VramProbe, budget: LoadBudget, lru: Iterable[str],
@@ -307,6 +366,16 @@ def free_after_eviction(probe: VramProbe, holds: Iterable[int]) -> Optional[int]
     return probe.free + sum(holds)
 
 
+def experts_in_ram_fit(probe: VramProbe, budget: LoadBudget) -> bool:
+    """True when the load fits *probe* with routed experts in system RAM and
+    every layer on the GPU (``budget.keeps_experts_in_ram`` and a trusted
+    device-wide reading of at least ``budget.plan_bytes`` free, with no split
+    shortfall), so it may load without freeing more."""
+    return (budget.keeps_experts_in_ram and probe.probe_ok and probe.free is not None
+            and not probe.process_scoped and not probe.shortfall
+            and probe.free >= budget.plan_bytes)
+
+
 def final_exhaustion_verdict(probe: VramProbe, *, preempt: bool, force: bool) -> str:
     """With local, peer and busy eviction all exhausted on a measurable reading:
 
@@ -332,25 +401,88 @@ def split_shortfall_refusal(name: str, shortfall: Iterable[Mapping]) -> str:
             f"device(s) to load '{name}' ({detail}).")
 
 
-def degraded_load_confirm(name: str, needed: int, free: int,
-                          *, moe: bool = False) -> dict:
-    """The confirm_required result asking before a partial-offload load.
-    *needed* is the free VRAM the load was admitted against
-    (``LoadBudget.needed_bytes``, safety margin included). *moe* is True for a
-    mixture-of-experts model, whose experts the backend moves to system RAM
-    before it moves any layer off the GPU."""
-    plan = (
-        "keep the experts in system RAM (and move layers to the CPU too if "
-        "that is still too large)" if moe
-        else "fall back to partial CPU offload")
+def degraded_load_confirm(name: str, budget: LoadBudget, free: int,
+                          unloaded: Iterable[str] = (), *, shared: bool = False,
+                          peers: bool = False) -> dict:
+    """The confirm_required result asking before a load that moves layers to
+    the CPU: *free* is the free VRAM the load would see, after unloading the
+    models named in *unloaded*, the shared embedding, reranker and speech
+    models (*shared*) and other localm instances' models (*peers*) when any
+    of those is given. The detail names the free VRAM every layer on the GPU
+    needs (``budget.plan_bytes``) and, for a Mixture-of-Experts model
+    (``budget.keeps_experts_in_ram``), what every expert on the GPU too would
+    need (``budget.needed_bytes``).
+
+    Besides ``detail``, the result carries ``reason`` "degraded_load",
+    ``plan_mb``, ``full_mb``, ``free_mb``, ``moe``, ``unloaded`` (a list),
+    ``unloads_shared`` and ``unloads_peers`` for a client that words the
+    question itself."""
+    unloaded = list(unloaded)
+    moe = budget.keeps_experts_in_ram
+    plan_mb, full_mb, free_mb = (budget.plan_bytes // _MB, budget.needed_bytes // _MB,
+                                 max(0, free) // _MB)
+    what = [repr(n) for n in unloaded]
+    if shared:
+        what.append("the shared embedding, reranker and speech models")
+    if peers:
+        what.append("the models of other localm instances")
+    where = (f"about {free_mb} MB would be free after unloading {', '.join(what)}"
+             if what else f"about {free_mb} MB is free")
+    if moe:
+        need = (f"even with its experts in system RAM, every layer on the GPU "
+                f"needs about {plan_mb} MB of free VRAM (about {full_mb} MB with "
+                f"every expert on the GPU too)")
+    else:
+        need = f"every layer on the GPU needs about {plan_mb} MB of free VRAM"
     return {
-        "status": "confirm_required", "model": name,
-        "detail": (
-            f"'{name}' does not fit the estimated free VRAM "
-            f"(needs ~{needed // _MB} MB free including a safety margin, "
-            f"{free // _MB} MB free) even after "
-            f"eviction; loading it anyway will let the backend {plan}, "
-            "which is slower"),
+        "status": "confirm_required", "model": name, "reason": "degraded_load",
+        "plan_mb": plan_mb, "full_mb": full_mb, "free_mb": free_mb, "moe": moe,
+        "unloaded": unloaded, "unloads_shared": shared, "unloads_peers": peers,
+        "detail": (f"'{name}' does not fit: {need}, and {where}. Loading it "
+                   "anyway runs some of its layers on the CPU, which is slower."),
+    }
+
+
+def unload_ask_confirm(name: str, models: Iterable[str], freed: int, *,
+                       shared: bool = False, peers: Iterable[str] = ()) -> dict:
+    """The confirm_required result of the "ask" unload policy: loading *name*
+    unloads the models named in *models*, the shared embedding, reranker and
+    speech models (*shared*) and the models of the other localm instances named
+    in *peers*, which together free about *freed* bytes (0 when unknown).
+    Carries ``reason`` "unload_ask", ``unloaded``, ``unloads_shared``,
+    ``peers`` and ``freed_mb`` besides ``detail``."""
+    models, peers = list(models), list(peers)
+    what = [repr(n) for n in models]
+    if shared:
+        what.append("the shared embedding, reranker and speech models")
+    what += [f"{p} of another localm instance" for p in peers]
+    frees = f", which frees about {freed // _MB} MB of VRAM" if freed > 0 else ""
+    return {
+        "status": "confirm_required", "model": name, "reason": "unload_ask",
+        "unloaded": models, "unloads_shared": shared, "peers": peers,
+        "freed_mb": max(0, freed) // _MB,
+        "detail": f"Loading '{name}' unloads {', '.join(what)}{frees}.",
+    }
+
+
+def unload_choice_confirm(name: str, budget: LoadBudget, free: int,
+                          models: Iterable[str]) -> dict:
+    """The confirm_required result of the "never" unload policy for an
+    explicit switch that does not fit beside the loaded models: *free* bytes
+    are free with *models* still loaded. The caller offers three answers: load
+    beside them with what is left (``keep_others``), unload them for this load
+    only (``force``), or cancel. Carries ``reason`` "unload_choice",
+    ``unloaded``, ``plan_mb``, ``free_mb`` and ``moe`` besides ``detail``."""
+    models = list(models)
+    plan_mb, free_mb = budget.plan_bytes // _MB, max(0, free) // _MB
+    named = ", ".join(repr(n) for n in models) or "the other models"
+    return {
+        "status": "confirm_required", "model": name, "reason": "unload_choice",
+        "unloaded": models, "plan_mb": plan_mb, "free_mb": free_mb,
+        "moe": budget.keeps_experts_in_ram,
+        "detail": (f"'{name}' needs about {plan_mb} MB of free VRAM to run every "
+                   f"layer on the GPU and about {free_mb} MB is free beside {named}. "
+                   "Load it beside them, slower, or unload them for this load."),
     }
 
 

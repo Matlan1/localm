@@ -372,6 +372,10 @@ class LoadModelRequest(BaseModel):
     # "not_chat_model"}: marks an embedding, reranker or text-encoder model as a
     # chat model (type 'llm') and loads it.
     as_chat: bool = False
+    # Set on the retry after {"status": "confirm_required", "reason":
+    # "unload_choice"} when the user chose to load beside the other models:
+    # nothing is unloaded and the model gets the VRAM that is left.
+    keep_others: bool = False
 
 
 class PullRequest(BaseModel):

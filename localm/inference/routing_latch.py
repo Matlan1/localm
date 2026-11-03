@@ -38,7 +38,7 @@ BACKOFF_MAX_S = 6 * 3600.0
 REASON_MAX_CHARS = 160
 
 LOAD_CONFIG_KEYS = (
-    "n_ctx", "n_ctx_max", "n_ctx_grow", "ctx_auto",
+    "n_ctx", "n_ctx_max", "n_ctx_grow", "ctx_auto", "ctx_reserve",
     "n_gpu_layers", "n_gpu_layers_auto", "n_cpu_moe", "use_mmap", "kv_cache_type", "mtp_enabled",
     "mtp_draft_tokens", "spec_source", "spec_draft_tokens", "spec_draft_model",
     "vram_overhead_mb", "moe_cache_mib", "gpu_split_ratios", "gpu_split_indices",

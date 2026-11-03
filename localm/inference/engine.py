@@ -241,6 +241,17 @@ def resolve_spec_draft_model(cfg: dict, override: Optional[str] = None) -> Optio
     return os.path.abspath(name) if os.path.exists(name) else None
 
 
+def _resolve_ctx_reserve(cfg: dict, override: Optional[int]) -> int:
+    """The context window a GGUF load keeps usable: the ``ctx_reserve`` config
+    value (0 when unset or not a non-negative int), raised to *override* when
+    that is larger."""
+    raw = cfg.get("ctx_reserve", 0)
+    value = raw if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0 else 0
+    if isinstance(override, int) and not isinstance(override, bool) and override > value:
+        value = override
+    return value
+
+
 def create_backend(
     model_path: str,
     *,
@@ -253,6 +264,7 @@ def create_backend(
     spec_source: Optional[str] = None,
     spec_draft_tokens: Optional[int] = None,
     spec_draft_model: Optional[str] = None,
+    ctx_reserve: Optional[int] = None,
 ) -> BaseBackend:
     """
     Return the appropriate backend for the given model path, without loading it.
@@ -275,6 +287,8 @@ def create_backend(
                   overrides it the same way.
     spec_draft_model: None reads the ``spec_draft_model`` config key; a name
                   or path overrides it the same way.
+    ctx_reserve:  None reads the ``ctx_reserve`` config key; an int raises it
+                  for this backend only (the larger of the two applies).
     """
     cfg = load_config()
 
@@ -311,6 +325,7 @@ def create_backend(
             vram_overhead_bytes=_resolve_vram_overhead_bytes(cfg),
             moe_cache_mib=_resolve_moe_cache_mib(cfg),
             parallel_slots=resolve_parallel_slots(cfg),
+            ctx_reserve=_resolve_ctx_reserve(cfg, ctx_reserve),
         )
 
     raise ValueError(
@@ -367,22 +382,44 @@ def model_display_name(model_path: str) -> str:
     return p.stem
 
 
+def moe_ram_read_text(read_bytes: int) -> str:
+    """The per-token system RAM read of a Mixture-of-Experts load with routed
+    experts in system RAM, as every message shows it:
+    ``"each token reads only its active experts there (about X.XX GB)"``,
+    with GB as 1024 ** 3 bytes."""
+    return (f"each token reads only its active experts there "
+            f"(about {read_bytes / 1024 ** 3:.2f} GB)")
+
+
+def placement_moves_layers(placement: Optional[dict]) -> bool:
+    """True when an ``Engine.gpu_placement`` dict reports fewer layers on the
+    GPU than the model has (some layers run on the CPU). False for a
+    placement that only keeps routed experts in system RAM, and for None."""
+    if not isinstance(placement, dict):
+        return False
+    offloaded = placement.get("gpu_layers_offloaded")
+    total = placement.get("gpu_layers_total")
+    return isinstance(offloaded, int) and isinstance(total, int) and offloaded < total
+
+
 def describe_gpu_placement(placement: dict) -> str:
     """One phrase naming an ``Engine.gpu_placement`` dict's placement:
     ``"<offloaded>/<total> layers on the GPU"``, followed by ``", the rest on
-    the CPU"`` when fewer than all landed there and by ``", routed experts of
-    <n> layers in system RAM"`` when it carries ``moe_cpu_layers``."""
+    the CPU"`` when fewer than all landed there and by ``", the routed experts
+    of <n> of <total> layers in system RAM"`` when it carries
+    ``moe_cpu_layers``, with ``moe_ram_read_text`` when it carries
+    ``moe_ram_read_bytes``."""
     offloaded = placement.get("gpu_layers_offloaded")
     total = placement.get("gpu_layers_total")
     text = f"{offloaded}/{total} layers on the GPU"
-    if isinstance(offloaded, int) and isinstance(total, int) and offloaded < total:
+    if placement_moves_layers(placement):
         text += ", the rest on the CPU"
     moe = placement.get("moe_cpu_layers")
     if isinstance(moe, int) and moe > 0:
-        text += f", routed experts of {moe} layers in system RAM"
+        text += f", the routed experts of {moe} of {total} layers in system RAM"
         read = placement.get("moe_ram_read_bytes")
         if isinstance(read, int) and read > 0:
-            text += f" (about {read / 1024 ** 3:.2f} GB read from RAM per token)"
+            text += f"; {moe_ram_read_text(read)}"
     return text
 
 
@@ -412,6 +449,7 @@ class Engine:
         spec_source: Optional[str] = None,
         spec_draft_tokens: Optional[int] = None,
         spec_draft_model: Optional[str] = None,
+        ctx_reserve: Optional[int] = None,
     ) -> None:
         self.model_path = model_path
         self.display_name = display_name or model_display_name(model_path)
@@ -431,6 +469,7 @@ class Engine:
             spec_source=spec_source,
             spec_draft_tokens=spec_draft_tokens,
             spec_draft_model=spec_draft_model,
+            ctx_reserve=ctx_reserve,
         )
         self._backend = create_backend(model_path, **self._backend_args)
         self._backend_fresh = True
@@ -607,6 +646,73 @@ class Engine:
         GPU reading."""
         size = getattr(self._backend, "full_offload_vram_bytes", None)
         return size() if callable(size) else None
+
+    def worker_vram_bytes(self) -> Optional[int]:
+        """Dedicated VRAM the loaded model's worker process holds now
+        (``gpu_usage.process_gpu_memory`` of the backend's worker), or None
+        when the backend runs no worker process, the platform has no
+        per-process counter (anything but Windows), or the reading fails.
+        Blocking: queries the OS performance counters."""
+        runner = getattr(self._backend, "_runner", None)
+        pid = getattr(runner, "pid", None) if runner is not None else None
+        if type(pid) is not int:
+            return None
+        from localm import gpu_usage
+        reading = gpu_usage.process_gpu_memory(pid)
+        if reading is None or reading[0] <= 0:
+            return None
+        return int(reading[0])
+
+    def gpu_offload_needs(self) -> Optional[tuple[int, int]]:
+        """``(full, minimum)`` free VRAM the next load needs: every layer on
+        the GPU as the backend plans it, and the least demanding placement
+        that still keeps every layer there (a Mixture-of-Experts model with
+        every expert in system RAM; the full figure for any other model). From
+        the backend's ``gpu_offload_needs``; for a backend with only
+        ``full_offload_vram_bytes``, that figure twice; None when neither
+        answers. Blocking: reads the model file and may take a GPU reading."""
+        needs = getattr(self._backend, "gpu_offload_needs", None)
+        if callable(needs):
+            return needs()
+        full = self.full_offload_vram_bytes()
+        return (full, full) if full is not None else None
+
+    @property
+    def ctx_reserve(self) -> int:
+        """Tokens of context the backend's next load keeps usable (its
+        ``ctx_reserve``), 0 for a backend without that setting."""
+        value = getattr(self._backend, "ctx_reserve", 0)
+        return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+    def can_reserve_context(self) -> bool:
+        """True when the backend sizes its load for a reserved context window
+        (a GGUF backend that keeps a KV cache), so :meth:`reserve_context`
+        changes its next load."""
+        backend = self._backend
+        if not callable(getattr(backend, "ctx_reserve_limit", None)):
+            return False
+        no_kv = getattr(backend, "_keeps_no_kv_cache", None)
+        return not (callable(no_kv) and no_kv())
+
+    def context_reserve_limit(self) -> tuple[Optional[int], Optional[str]]:
+        """``(tokens, reason)`` from the backend's ``ctx_reserve_limit``: the
+        largest window a load may keep usable and what sets it ("trained",
+        "n_ctx_max" or "auto_cap"); ``(None, None)`` for a backend without it.
+        Reads the model file's header."""
+        limit = getattr(self._backend, "ctx_reserve_limit", None)
+        return limit() if callable(limit) else (None, None)
+
+    def reserve_context(self, tokens: int) -> None:
+        """Make the next load keep at least *tokens* of context usable: the
+        backend's ``ctx_reserve`` is raised to *tokens* now (so its sizing
+        answers for that window) and when it is rebuilt at its next load. Does
+        not reload a loaded model."""
+        args = getattr(self, "_backend_args", None)
+        if args is not None:
+            args["ctx_reserve"] = int(tokens)
+        if hasattr(self._backend, "ctx_reserve"):
+            self._backend.ctx_reserve = int(tokens)
+        self._backend_fresh = False
 
     @property
     def live_context(self) -> Optional[dict]:

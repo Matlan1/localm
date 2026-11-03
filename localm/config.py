@@ -564,6 +564,9 @@ DEFAULT_CONFIG: dict = {
     "n_ctx": 4096,         # initial context window (grows on demand)
     "n_ctx_max": 16384,    # ceiling the window may grow to (0 = unlimited)
     "n_ctx_grow": 4096,    # growth step - window expands in multiples of this
+    # Context window every load keeps usable (tokens); a Mixture-of-Experts
+    # model keeps more experts in system RAM to hold it on the GPU.
+    "ctx_reserve": 16384,
     # Size ctx ceiling from free VRAM at load (clamped 4k-64k); window still
     # starts at n_ctx and grows on demand. False = use fixed n_ctx_max.
     "ctx_auto": True,
@@ -575,6 +578,10 @@ DEFAULT_CONFIG: dict = {
     # layer moves to the CPU. Only affects Mixture-of-Experts models; a dense
     # model has no expert tensors to move, so any value is a no-op there.
     "n_cpu_moe": 0,
+    # Whether a model switch unloads other models to make room: "always"
+    # (this instance's idle models, without asking), "ask" or "never" (load
+    # beside them with the VRAM that is left).
+    "unload_for_room": "always",
     "moe_cache_mib": 0,    # MB of VRAM caching MoE experts kept in system RAM; 0 = off
     # Memory-map the model file: "auto" (the loader decides), "on" (only the
     # pages a run touches are resident, so a model that may not fit in

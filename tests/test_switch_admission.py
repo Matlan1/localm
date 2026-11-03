@@ -20,10 +20,12 @@ NEED = residency.required_vram_bytes(4 * GB)
 HEADROOM = residency.DEFAULT_HEADROOM_BYTES
 
 
-def _budget(name="model-new", *, cap=None, pinned=(), split=False, backend_need=None):
+def _budget(name="model-new", *, cap=None, pinned=(), split=False, backend_need=None,
+            backend_sized=False, min_need=None):
     return sa.LoadBudget(name=name, vram_required=NEED, headroom=HEADROOM,
                          resident_cap=cap, pinned=frozenset(pinned),
-                         check_split_fit=split, backend_need=backend_need)
+                         check_split_fit=split, backend_need=backend_need,
+                         backend_sized=backend_sized, min_need=min_need)
 
 
 def _probe(free=20 * GB, *, ok=True, process_scoped=False, shortfall=(),
@@ -61,6 +63,49 @@ class TestLoadBudget:
         assert budget.needed_bytes == NEED + HEADROOM
         assert budget.whole_model_bytes == NEED
         assert budget.split_share_bytes == NEED + HEADROOM
+
+    def test_a_backend_sized_need_replaces_the_file_estimate_and_its_headroom(self):
+        budget = _budget(backend_need=NEED // 2, backend_sized=True)
+        assert budget.needed_bytes == NEED // 2
+        assert budget.plan_bytes == NEED // 2
+        assert budget.keeps_experts_in_ram is False
+        assert budget.split_share_bytes == NEED + HEADROOM
+
+    def test_backend_sized_without_a_figure_keeps_the_file_estimate(self):
+        assert _budget(backend_sized=True).needed_bytes == NEED + HEADROOM
+
+    def test_the_plan_bar_is_the_expert_offload_minimum_when_it_is_lower(self):
+        budget = _budget(backend_need=20 * GB, backend_sized=True, min_need=3 * GB)
+        assert budget.needed_bytes == 20 * GB
+        assert budget.plan_bytes == 3 * GB
+        assert budget.keeps_experts_in_ram is True
+
+    @pytest.mark.parametrize("min_need", [None, 0, 20 * GB, 21 * GB])
+    def test_a_minimum_not_below_the_full_need_changes_nothing(self, min_need):
+        budget = _budget(backend_need=20 * GB, backend_sized=True, min_need=min_need)
+        assert budget.plan_bytes == 20 * GB
+        assert budget.keeps_experts_in_ram is False
+
+
+class TestExpertsInRamFit:
+    MOE = dict(backend_need=20 * GB, backend_sized=True, min_need=3 * GB)
+
+    def test_free_vram_between_the_two_bars_fits(self):
+        assert sa.experts_in_ram_fit(_probe(free=3 * GB), _budget(**self.MOE)) is True
+
+    def test_free_vram_below_the_minimum_does_not(self):
+        assert sa.experts_in_ram_fit(_probe(free=3 * GB - 1), _budget(**self.MOE)) is False
+
+    def test_a_dense_model_never_fits_this_way(self):
+        budget = _budget(backend_need=20 * GB, backend_sized=True)
+        assert sa.experts_in_ram_fit(_probe(free=19 * GB), budget) is False
+
+    @pytest.mark.parametrize("probe", [
+        _probe(free=None), _probe(ok=False), _probe(process_scoped=True),
+        _probe(shortfall=[{"index": 1, "needed": GB, "free": 0}]),
+    ], ids=["unmeasurable", "inconclusive", "process-scoped", "split-shortfall"])
+    def test_an_untrusted_reading_never_fits(self, probe):
+        assert sa.experts_in_ram_fit(probe, _budget(**self.MOE)) is False
 
 
 class TestVramProbe:
@@ -273,18 +318,27 @@ class TestMessages:
                "1024 MB free).")
 
     def test_degraded_load_confirm(self):
-        assert sa.degraded_load_confirm("m", 4800 * MB, 3000 * MB) == {
-            "status": "confirm_required", "model": "m",
-            "detail": ("'m' does not fit the estimated free VRAM (needs ~4800 MB "
-                       "free including a safety margin, 3000 MB free) even after "
-                       "eviction; loading it anyway will "
-                       "let the backend fall back to partial CPU offload, which "
-                       "is slower")}
+        budget = _budget("m", backend_need=4800 * MB, backend_sized=True)
+        assert sa.degraded_load_confirm("m", budget, 3000 * MB) == {
+            "status": "confirm_required", "model": "m", "reason": "degraded_load",
+            "plan_mb": 4800, "full_mb": 4800, "free_mb": 3000, "moe": False,
+            "unloaded": [], "unloads_shared": False, "unloads_peers": False,
+            "detail": ("'m' does not fit: every layer on the GPU needs about 4800 MB "
+                       "of free VRAM, and about 3000 MB is free. Loading it anyway "
+                       "runs some of its layers on the CPU, which is slower.")}
 
-    def test_degraded_load_confirm_for_a_moe_model_names_the_experts(self):
-        detail = sa.degraded_load_confirm("m", 4800 * MB, 3000 * MB, moe=True)["detail"]
-        assert "keep the experts in system RAM" in detail
-        assert "partial CPU offload" not in detail
+    def test_degraded_load_confirm_for_a_moe_model_names_both_figures(self):
+        budget = _budget("m", backend_need=25570 * MB, backend_sized=True,
+                         min_need=4200 * MB)
+        result = sa.degraded_load_confirm("m", budget, 3000 * MB, ["big"], shared=True)
+        assert (result["plan_mb"], result["full_mb"], result["moe"]) == (4200, 25570, True)
+        assert result["detail"] == (
+            "'m' does not fit: even with its experts in system RAM, every layer on "
+            "the GPU needs about 4200 MB of free VRAM (about 25570 MB with every "
+            "expert on the GPU too), and about 3000 MB would be free after unloading "
+            "'big', the shared embedding, reranker and speech models. Loading it "
+            "anyway runs some of its layers on the CPU, which is slower.")
+        assert "localm config" not in result["detail"]
 
     def test_busy_victim_confirm(self):
         assert sa.busy_victim_confirm("m", "v", "still in use") == {

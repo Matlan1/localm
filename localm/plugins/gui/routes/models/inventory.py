@@ -422,9 +422,12 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             # across the suite still implements the older single-arg
             # contract. Passing force=True is still forwarded when a caller
             # actually asks for it.
-            result = await (
-                switch_model(req.model, force=True) if req.force
-                else switch_model(req.model))
+            if req.keep_others:
+                result = await switch_model(req.model, keep_others=True)
+            else:
+                result = await (
+                    switch_model(req.model, force=True) if req.force
+                    else switch_model(req.model))
         except Exception as e:
             raise HTTPException(500, f"Failed to load {req.model}: {e}") from e
         # A switch_model that does not report a status (a minimal/legacy callable)

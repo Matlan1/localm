@@ -196,12 +196,15 @@ def _inconclusive_refusal(name, attempts):
         r"report if this keeps happening\.")
 
 
-def _estimate_confirm_detail(name, free_bytes):
-    return (f"'{name}' does not fit the estimated free VRAM "
-            f"(needs ~{(NEED + HEADROOM) // MB} MB free including a safety margin, "
-            f"{free_bytes // MB} MB free) even after "
-            "eviction; loading it anyway will let the backend fall back to "
-            "partial CPU offload, which is slower")
+def _estimate_confirm(name, free_bytes, unloaded=(), *, shared=False, peers=False,
+                      needed=NEED + HEADROOM):
+    """The degraded-load confirmation for *name* sized at the whole-model
+    estimate (*needed*), the fake engines having no backend sizing."""
+    from localm.inference import switch_admission as sa
+    budget = sa.LoadBudget(name=name, vram_required=needed - HEADROOM, headroom=HEADROOM,
+                           resident_cap=None, pinned=frozenset(), check_split_fit=True)
+    return sa.degraded_load_confirm(name, budget, free_bytes, list(unloaded),
+                                    shared=shared, peers=peers)
 
 
 # --------------------------------------------------------------------------- #
@@ -665,8 +668,7 @@ class TestPinnedVictim:
 
         res = asyncio.run(hs.switch_engine("model-b", env.factory))
 
-        assert res == {"status": "confirm_required", "model": "model-b",
-                       "detail": _estimate_confirm_detail("model-b", 10 * GB - NEED)}
+        assert res == _estimate_confirm("model-b", 10 * GB - NEED)
         assert env.built == ["model-b"] and env.cancelled == []
         assert hs._engines == {"model-a": a} and a.unload_calls == 0
         assert hs._active_model_name == "model-a"
@@ -991,8 +993,7 @@ class TestSplitShortfall:
         res = asyncio.run(hs.switch_engine("model-a", env.factory))
         forced = asyncio.run(hs.switch_engine("model-a", env.factory, force=True))
 
-        assert res == {"status": "confirm_required", "model": "model-a",
-                       "detail": _estimate_confirm_detail("model-a", 20 * GB)}
+        assert res == _estimate_confirm("model-a", 20 * GB)
         assert forced == {"status": "loaded", "model": "model-a"}
 
     def test_a_device_shortfall_drives_eviction_until_it_clears(self, monkeypatch):
@@ -1547,6 +1548,20 @@ class _BackendSizedEngine(_SizedEngine):
         return self._need
 
 
+class _MoeSizedEngine(_BackendSizedEngine):
+    """_BackendSizedEngine for a Mixture-of-Experts model whose backend also
+    reports *low* bytes for every layer on the GPU with its experts in system
+    RAM (``Engine.gpu_offload_needs``)."""
+
+    def __init__(self, name, need, low):
+        super().__init__(name, need)
+        self._low = low
+
+    def gpu_offload_needs(self):
+        self.need_calls += 1
+        return self._need, self._low
+
+
 class TestBackendSizedAdmission:
     """At 12 GB total with model-a resident, 7.2 GB is free: enough for the
     whole-model estimate (NEED + HEADROOM), so the backend's own full-offload
@@ -1639,30 +1654,47 @@ class TestBackendSizedAdmission:
         a, env, result = self._beside_a(monkeypatch, b, preempt=True)
 
         assert not a.loaded and "model-b" not in hs._engines and b.load_calls == 0
-        assert result == {
-            "status": "confirm_required", "model": "model-b",
-            "detail": ("'model-b' does not fit the estimated free VRAM "
-                       f"(needs ~{13 * 1024} MB free including a safety margin, "
-                       f"{12 * 1024} MB free) even after "
-                       "eviction; loading it anyway will let the backend "
-                       "fall back to partial CPU offload, which is slower")}
+        assert result == _estimate_confirm("model-b", 12 * GB, ["model-a"], needed=13 * GB)
+        assert result["detail"] == (
+            "'model-b' does not fit: every layer on the GPU needs about 13312 MB of "
+            "free VRAM, and about 12288 MB would be free after unloading 'model-a'. "
+            "Loading it anyway runs some of its layers on the CPU, which is slower.")
 
-    def test_the_ask_for_a_moe_model_says_its_experts_go_to_system_ram(self, monkeypatch):
-        b = _BackendSizedEngine("model-b", 13 * GB)
+    def test_a_moe_model_whose_expert_plan_fits_loads_without_asking(self, monkeypatch):
+        b = _MoeSizedEngine("model-b", 25 * GB, 4 * GB)
+
+        a, env, result = self._beside_a(monkeypatch, b, preempt=True)
+
+        assert result["status"] == "loaded"
+        assert b.load_calls == 1 and hs._engines == {"model-b": b}
+        assert not a.loaded, "the idle model still makes room for more experts"
+
+    def test_a_moe_model_whose_expert_plan_fits_beside_a_busy_model_does_not_stop_it(
+            self, monkeypatch):
+        b = _MoeSizedEngine("model-b", 25 * GB, 4 * GB)
         a = GatedEngine("model-a")
         env = _install(monkeypatch, {"model-a": a, "model-b": b}, total=12 * GB)
-        _seat("model-a", a, active=True)
-        import localm.config as cfg
-        registry = cfg.load_registry()
-        registry["model-b"] = dict(registry["model-b"], expert_count=128)
-        monkeypatch.setattr("localm.config.load_registry", lambda: registry)
+        _seat("model-a", a, active=True, busy=1)
 
         result = asyncio.run(hs.switch_engine("model-b", env.factory, preempt=True,
                                               activate=False))
 
-        assert result["status"] == "confirm_required"
-        assert "keep the experts in system RAM" in result["detail"]
-        assert "partial CPU offload" not in result["detail"]
+        assert result["status"] == "loaded"
+        assert a.loaded and env.cancelled == []
+        assert hs._engines == {"model-a": a, "model-b": b}
+
+    def test_a_moe_model_whose_expert_plan_does_not_fit_asks_with_both_figures(
+            self, monkeypatch):
+        b = _MoeSizedEngine("model-b", 25 * GB, 13 * GB)
+
+        a, env, result = self._beside_a(monkeypatch, b, preempt=True)
+
+        assert a.loaded and b.load_calls == 0
+        assert result["status"] == "confirm_required" and result["moe"] is True
+        assert (result["plan_mb"], result["full_mb"], result["free_mb"]) == (
+            13 * 1024, 25 * 1024, 12 * 1024)
+        assert result["unloaded"] == ["model-a"]
+        assert "even with its experts in system RAM" in result["detail"]
 
     def test_a_registered_engine_evicted_while_it_is_sized_is_not_committed(
             self, monkeypatch):
@@ -2026,8 +2058,7 @@ class TestTooBigEvenAfterEviction:
 
         res = asyncio.run(hs.switch_engine("model-b", env.factory))
 
-        assert res == {"status": "confirm_required", "model": "model-b",
-                       "detail": _estimate_confirm_detail("model-b", _TOO_SMALL)}
+        assert res == _estimate_confirm("model-b", _TOO_SMALL)
         assert a.unload_calls == 0 and a.loaded and a.unloading is False
         assert env.release_waits == [], "no eviction ran before asking"
         assert env.cancelled == [] and not b.loaded
@@ -2079,8 +2110,7 @@ class TestTooBigEvenAfterEviction:
         res = asyncio.run(hs.switch_engine("model-b", env.factory))
 
         assert waited == [1], "the switch waited for the reply"
-        assert res == {"status": "confirm_required", "model": "model-b",
-                       "detail": _estimate_confirm_detail("model-b", _TOO_SMALL)}
+        assert res == _estimate_confirm("model-b", _TOO_SMALL)
         assert env.cancelled == [], "the reply was not cut"
         assert a.unload_calls == 0 and a.loaded
         assert hs._engines == {"model-a": a} and hs._active_model_name == "model-a"
@@ -2136,8 +2166,7 @@ class TestTooBigEvenAfterEviction:
 
         res = asyncio.run(hs.switch_engine("model-b", env.factory))
 
-        assert res == {"status": "confirm_required", "model": "model-b",
-                       "detail": _estimate_confirm_detail("model-b", _TOO_SMALL)}
+        assert res == _estimate_confirm("model-b", _TOO_SMALL)
         assert a.unload_calls == 0 and hs._active_model_name == "model-a"
 
     def test_a_measured_hold_wins_over_the_sized_one(self, monkeypatch):
@@ -2242,8 +2271,7 @@ class TestTooBigEvenAfterEviction:
 
         res = asyncio.run(hs.switch_engine("model-b", env.factory))
 
-        assert res == {"status": "confirm_required", "model": "model-b",
-                       "detail": _estimate_confirm_detail("model-b", _TOO_SMALL + 100 * MB)}
+        assert res == _estimate_confirm("model-b", _TOO_SMALL + 100 * MB)
         assert a.unload_calls == 0
 
 
@@ -2353,8 +2381,7 @@ class TestSharedModelsCountedBeforeEviction:
 
         res = asyncio.run(hs.switch_engine("model-b", env.factory))
 
-        assert res == {"status": "confirm_required", "model": "model-b",
-                       "detail": _estimate_confirm_detail("model-b", _TOO_SMALL)}
+        assert res == _estimate_confirm("model-b", _TOO_SMALL)
         assert a.unload_calls == 0 and a.loaded and env.release_waits == []
         assert box.events == [], "nothing was freed before asking"
         assert box.loaded == {kind}
@@ -2492,8 +2519,7 @@ class TestBusyReplyNothingFreedBeforeAsking:
 
         res = asyncio.run(hs.switch_engine("model-b", env.factory))
 
-        assert res == {"status": "confirm_required", "model": "model-b",
-                       "detail": _estimate_confirm_detail("model-b", _TOO_SMALL)}
+        assert res == _estimate_confirm("model-b", _TOO_SMALL)
         assert box.events == ["reply-finished"], "no free or peer ask before asking"
         assert env.cancelled == [] and a.unload_calls == 0 and a.loaded
         assert box.loaded == {"embedder"}
@@ -2507,8 +2533,7 @@ class TestBusyReplyNothingFreedBeforeAsking:
 
         res = asyncio.run(hs.switch_engine("model-b", env.factory))
 
-        assert res == {"status": "confirm_required", "model": "model-b",
-                       "detail": _estimate_confirm_detail("model-b", _TOO_SMALL)}
+        assert res == _estimate_confirm("model-b", _TOO_SMALL)
         assert box.events == [] and box.loaded == {"embedder"} and not b.loaded
 
     def test_an_idle_model_beside_a_busy_one_waits_for_the_reply_before_asking(
@@ -2536,8 +2561,7 @@ class TestBusyReplyNothingFreedBeforeAsking:
 
         res = asyncio.run(hs.switch_engine("model-b", env.factory))
 
-        assert res == {"status": "confirm_required", "model": "model-b",
-                       "detail": _estimate_confirm_detail("model-b", _TOO_SMALL)}
+        assert res == _estimate_confirm("model-b", _TOO_SMALL)
         assert events == ["reply-finished"], "the reply was waited for first"
         assert a.unload_calls == 0 and c.unload_calls == 0 and env.cancelled == []
 
