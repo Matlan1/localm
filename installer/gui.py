@@ -312,8 +312,11 @@ def existing_install(root: Path) -> bool:
 def _tooling_fields(root: Path, portable: bool = True) -> dict:
     """install_manifest.record() keywords for the store folders (store_dirs)
     that exist: python_dir, cache_dir and uv_dir, plus runtime_contained=True
-    for a Portable store. Empty when none exists or the Shared store cannot be
-    found."""
+    for a Portable store. Empty when none exists, when the Shared store cannot
+    be found, or for Shared when *root* still holds a .python, .cache or .uv of
+    its own (an earlier Portable setup), whose record then stays as it is."""
+    if not portable and any((Path(root) / n).exists() for n in (".python", ".cache", ".uv")):
+        return {}
     try:
         store = store_dirs(portable, root)
     except StepFailed:
@@ -485,6 +488,7 @@ def _env_for(plan: Optional[Plan] = None) -> dict:
     UV_PYTHON_INSTALL_DIR, UV_CACHE_DIR and UV_CREDENTIALS_DIR at *plan*'s
     store (store_dirs; the
     launcher's answer when *plan* is None), UV_PYTHON_PREFERENCE=only-managed,
+    UV_PYTHON_INSTALL_BIN=0 and UV_PYTHON_INSTALL_REGISTRY=0,
     UV_SYSTEM_CERTS=1 until a certificate error turned it off, and the folder
     of localm's own uv first on PATH when that uv exists. Raises StepFailed
     when the Shared store cannot be found."""
@@ -494,7 +498,9 @@ def _env_for(plan: Optional[Plan] = None) -> dict:
                       UV_PYTHON_INSTALL_DIR=str(store["python"]),
                       UV_CACHE_DIR=str(store["cache"]),
                       UV_CREDENTIALS_DIR=str(store["credentials"]),
-                      UV_PYTHON_PREFERENCE="only-managed")
+                      UV_PYTHON_PREFERENCE="only-managed",
+                      UV_PYTHON_INSTALL_BIN="0",
+                      UV_PYTHON_INSTALL_REGISTRY="0")
     if _CERTS["system"]:
         env["UV_SYSTEM_CERTS"] = "1"
     exe = find_uv(ROOT, portable)
@@ -724,10 +730,25 @@ def uv_installer_argv(script: Path, env: dict) -> list[str]:
     return [sh, str(script)]
 
 
+def system_path() -> str:
+    """A PATH of only the operating-system folders: on Windows System32, its
+    WindowsPowerShell\\v1.0 and the Windows folder; elsewhere
+    POSIX_SYSTEM_DIRS."""
+    if IS_WINDOWS:
+        sysdir = windows_system_dir()
+        if sysdir is None:
+            return ""
+        return os.pathsep.join(str(d) for d in (
+            sysdir, sysdir / "WindowsPowerShell" / "v1.0", sysdir.parent))
+    return os.pathsep.join(POSIX_SYSTEM_DIRS)
+
+
 def _run_uv_installer(script: Path, env: dict, emit: Callable[[str], None]) -> int:
-    """Run Astral's uv installer *script* with *env* (PSModulePath removed),
-    streaming its output into the log; returns its exit code."""
-    env = {k: v for k, v in env.items() if k.upper() != "PSMODULEPATH"}
+    """Run Astral's uv installer *script* with *env* (PSModulePath removed and
+    PATH set to system_path()), streaming its output into the log; returns its
+    exit code."""
+    env = {k: v for k, v in env.items() if k.upper() not in ("PSMODULEPATH", "PATH")}
+    env["PATH"] = system_path()
     argv = uv_installer_argv(script, env)
     proc = subprocess.Popen(argv, env=env, cwd=str(script.parent),
                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,

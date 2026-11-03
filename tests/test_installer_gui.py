@@ -270,6 +270,7 @@ def test_a_poisoned_inherited_environment_never_reaches_a_step(gui, tmp_path,
     assert env["UV_PYTHON_INSTALL_DIR"] == str(store["python"])
     assert env["UV_CREDENTIALS_DIR"] == str(store["uv"] / "credentials")
     assert env["UV_PYTHON_PREFERENCE"] == "only-managed"
+    assert env["UV_PYTHON_INSTALL_BIN"] == env["UV_PYTHON_INSTALL_REGISTRY"] == "0"
     assert env["UV_NO_CONFIG"] == "1"
     assert env["PIP_CONFIG_FILE"] == os.devnull
     assert env["PYTHONNOUSERSITE"] == "1"
@@ -1934,8 +1935,11 @@ def _fake_system32(gui, tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 class TestNoBareProgram:
-    """Every child process the installer starts names its program by full
-    path: subprocess is replaced at the module boundary and argv[0] checked."""
+    """Every child process the install steps, the uv step and the Windows
+    helpers start names its program by full path: subprocess is replaced at the
+    module boundary and argv[0] checked. In-process code the window imports
+    (localm.hwdetect for the backend recommendation, the uninstall) is not
+    covered here."""
 
     @pytest.fixture()
     def spawned(self, gui, tmp_path, monkeypatch):
@@ -2041,10 +2045,15 @@ class TestNoBareProgram:
         gui.uv_version(exe)
         script = tmp_path / "uv-installer.ps1"
         script.write_bytes(b"")
+        monkeypatch.setenv("PATH", str(tmp_path / "poisoned"))
         gui._run_uv_installer(script, gui._helper_env(TEMP=str(tmp_path)), lambda s: None)
+        assert len(spawned) == 2, spawned
         for argv, kw in spawned:
             assert os.path.isabs(argv[0]), argv
             assert kw.get("creationflags") == gui._NO_WINDOW, argv
+        installer_env = spawned[1][1]["env"]
+        assert installer_env["PATH"] == gui.system_path()
+        assert str(tmp_path / "poisoned") not in installer_env["PATH"]
 
 
 @pytest.mark.skipif(os.name != "nt", reason="runs Windows PowerShell")
@@ -2136,3 +2145,50 @@ class TestSetupTemp:
     def test_the_apps_own_temp_is_left_alone_otherwise(self, gui, tmp_path, monkeypatch):
         monkeypatch.setenv("TEMP", str(tmp_path / "usertemp"))
         assert gui.launch_env(gui.Plan())["TEMP"] == str(tmp_path / "usertemp")
+
+
+# --------------------------------------------------------------------------- #
+#  Locations the user picks                                                    #
+# --------------------------------------------------------------------------- #
+
+def test_a_custom_data_folder_anywhere_is_used_as_picked(gui, tmp_path):
+    """A folder the user picks outside the install, even with [ ] and spaces in
+    its name, is recorded as picked and the started app's temp goes there."""
+    picked = tmp_path.parent / f"{tmp_path.name}-my data [x]" / "localm"
+    plan = gui.Plan(portable_data=False, data_path=str(picked), backend="own")
+    _step(gui, plan, "Recording where data lives").run(lambda s: None)
+    assert Path(_record(tmp_path)["data_dir"]) == picked
+    assert picked.is_dir()
+    env = gui.launch_env(plan)
+    assert "LOCALM_HOME" not in env
+
+
+def test_the_own_build_folder_is_passed_as_picked(gui, tmp_path, monkeypatch):
+    picked = str(tmp_path.parent / f"{tmp_path.name}-builds [x]" / "llama")
+    seen = []
+    monkeypatch.setattr(gui, "_run", lambda cmd, emit, plan, **kw: seen.append(
+        [str(c) for c in cmd]) or 0)
+    _step(gui, gui.Plan(backend="own", own_build_dir=picked),
+          "Copying in your own llama.cpp build").run(lambda s: None)
+    assert seen[0][seen[0].index("--from") + 1] == picked
+
+
+def test_a_shared_rerun_keeps_the_folders_own_tooling_recorded(gui, tmp_path, monkeypatch):
+    """A folder set up Portable and then again Shared: its own .python, .cache
+    and .uv stay in the record, so uninstall still removes them, and nothing in
+    the Shared store is claimed by this folder."""
+    for name in (".python", ".cache", ".uv"):
+        (tmp_path / name).mkdir()
+    gui.install_manifest().record(tmp_path, **gui._tooling_fields(tmp_path, True))
+    for d in gui.store_dirs(False).values():
+        d.mkdir(parents=True, exist_ok=True)
+    seen = []
+    monkeypatch.setattr(gui, "_run", lambda cmd, emit, plan, **kw: seen.append(
+        [str(c) for c in cmd]) or 0)
+    _step(gui, gui.Plan(backend="own", portable_store=False),
+          "Writing the install record").run(lambda s: None)
+    rec = seen[0]
+    assert "--python-dir" not in rec and "--runtime-contained" not in rec
+    record = _record(tmp_path)
+    assert Path(record["python_dir"]) == (tmp_path / ".python").resolve()
+    assert record["runtime_contained"] is True
