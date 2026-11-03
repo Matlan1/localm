@@ -1923,6 +1923,11 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
   background: color-mix(in srgb, var(--cat-amber) 15%, transparent); }
 .type-badge.type-vae { color: var(--cat-green); border-color: var(--cat-green);
   background: color-mix(in srgb, var(--cat-green) 15%, transparent); }
+.type-badge.type-vocoder { color: var(--cat-green); border-color: var(--cat-green);
+  background: color-mix(in srgb, var(--cat-green) 15%, transparent); }
+.type-badge.type-planner { color: var(--cat-violet); border-color: var(--cat-violet);
+  background: color-mix(in srgb, var(--cat-violet) 15%, transparent); }
+.role-hint { font-size: 11px; color: var(--text-dim); margin-top: 2px; white-space: normal; }
 .type-badge.type-lora { color: var(--cat-cyan); border-color: var(--cat-cyan);
   background: color-mix(in srgb, var(--cat-cyan) 15%, transparent); }
 .type-badge.type-unknown { color: var(--yellow); border-color: var(--yellow);

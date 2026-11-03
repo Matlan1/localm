@@ -48,8 +48,16 @@ export const GROUP_BY_TYPE_KEY = "localm.modelsGroupByType";
 // (keep in sync). Powers the per-row one-click set-type control, and gives the
 // group-by-type headings a stable order for a type the tab strip does not name.
 const MODEL_TYPE_OPTIONS =
-  ["llm", "embedding", "mmproj", "tts", "diffusion-unet", "text-encoder", "vae", "lora", "upscaler",
-   "controlnet", "textual-inversion", "segmentation", "unknown"];
+  ["llm", "embedding", "mmproj", "tts", "diffusion-unet", "text-encoder", "vae", "vocoder", "planner",
+   "lora", "upscaler", "controlnet", "textual-inversion", "segmentation", "unknown"];
+
+// Types whose purpose is not obvious from the name: what the model is for, shown
+// under the type pill and in its tooltip.
+const TYPE_HINT_KEYS = {
+  "text-encoder": "models.typeHint.textEncoder",
+  "vocoder": "models.typeHint.vocoder",
+  "planner": "models.typeHint.planner",
+};
 
 // The type reported for a registry entry with no recorded model_type. The route
 // still sends `model_type: "llm"` for such an entry, plus
@@ -554,6 +562,9 @@ export async function refreshModelsPage() {
     if (m.architecture) {
       nameLine.appendChild(el("span", "arch-badge", m.architecture));
     }
+    if (m.part_of) {
+      nameLine.appendChild(el("span", "arch-badge", t("models.partOf", { model: m.part_of })));
+    }
     if (m.expert_count > 0) {
       nameLine.appendChild(el("span", "moe-badge moe-confirmed", t(MOE_LABEL.confirmed)));
     }
@@ -586,9 +597,10 @@ export async function refreshModelsPage() {
     // chosen type, then re-renders (so an unknown->llm switch reveals
     // use/alias).
     const typeSel = el("select", "model-type-select type-badge type-" + roleType);
+    const typeHint = TYPE_HINT_KEYS[roleType] ? t(TYPE_HINT_KEYS[roleType]) : "";
     typeSel.title = untagged
       ? t("models.typeSelect.titleUnset")
-      : t("models.typeSelect.titleChange");
+      : (typeHint ? typeHint + ". " : "") + t("models.typeSelect.titleChange");
     typeSel.setAttribute("aria-label", t("models.typeSelect.ariaLabel", { name: m.name }));
     if (untagged) {
       // A placeholder, not a value: "not set" is not a MODEL_TYPES member and
@@ -621,6 +633,7 @@ export async function refreshModelsPage() {
       } finally { typeSel.disabled = false; }
     };
     roleTd.appendChild(typeSel);
+    if (typeHint) roleTd.appendChild(el("div", "role-hint", typeHint));
     tr.appendChild(roleTd);
 
     // The source clips to an ellipsis, with the full value on hover.
