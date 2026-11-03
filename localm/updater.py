@@ -27,7 +27,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
-from typing import Optional
+from typing import NoReturn, Optional
 
 from localm import _version
 
@@ -1387,7 +1387,7 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
                         "`update --rollback` will fall back to the backup listing and cannot "
                         "remove brand-new top-level entries this update added", manifest_path, e)
 
-        def _roll_back(why, step, rolled_back, *, reason=None):
+        def _roll_back(why, step, rolled_back, *, reason=None) -> NoReturn:
             # Every part back (components and venv, runtime, code), then raise.
             # A failure of the recovery ITSELF raises rather than reporting a
             # clean rollback over a broken install.

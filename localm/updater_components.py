@@ -1309,7 +1309,7 @@ def record_deps_changes(src, root) -> None:
     state = _read_json(src / STATE_FILE)
     info = (state or {}).get("components", {}).get(DEPS) if state else None
     copy = _own_copy(info, src)
-    if copy is None:
+    if info is None or copy is None:
         raise OSError(f"{src} holds no venv copy")
     changed = venv_changes(copy, Path(root) / ".venv", own=True)
     if changed is None:

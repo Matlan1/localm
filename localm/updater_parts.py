@@ -40,7 +40,7 @@ def _deps_extras() -> list:
     import re
 
     from localm import _apply_update as au
-    spec = au.post_swap_command("deps", uv="uv")[-1]
+    spec = (au.post_swap_command("deps", uv="uv") or [""])[-1]
     m = re.search(r"\[([^\]]*)\]", spec)
     return [e.strip() for e in m.group(1).split(",") if e.strip()] if m else []
 
@@ -111,7 +111,7 @@ def installed_parts(root=None) -> dict:
                             f"{app} needs: " + ", ".join(deps_problems[:5])
                             + (f" (and {len(deps_problems) - 5} more)"
                                if len(deps_problems) > 5 else ""))
-    runtime = {"backend": None, "current": None, "target": None, "matches": None}
+    runtime: dict = {"backend": None, "current": None, "target": None, "matches": None}
     try:
         from localm import updater_runtime
         p = updater_runtime.plan(root, root)
@@ -178,7 +178,7 @@ def _reinstall_deps(root: Path, *, runner: Optional[Callable], say: Callable) ->
     from localm import _apply_update as au
     from localm import updater, updater_components as uc
     from localm.bugreport import LocalmError
-    cmd = au.post_swap_command("deps", uv=updater._uv_for_deps(root))
+    cmd = list(au.post_swap_command("deps", uv=updater._uv_for_deps(root)) or [])
     updater._require_runnable(cmd, "deps")
     snap = updater._updates_dir() / REPAIR_SNAPSHOT
     try:
