@@ -48,6 +48,7 @@ def pytest_sessionfinish(session, exitstatus):
     _cleanup_test_home()
     _report_system_path_touches(session)
     _report_installer_runs(session)
+    _report_visible_windows(session)
     _report_wrong_temp_root(session)
 
 
@@ -671,7 +672,41 @@ def _report_installer_runs(session):
 
 
 # --------------------------------------------------------------------------- #
-#  Resource-gated integration markers (V2)                                     #
+#  No window on the desktop (Windows): every process the suite starts runs     #
+#  hidden, and a request for a visible console, os.startfile or                #
+#  webbrowser.open fails the test that made it. See tests/_no_window.py.       #
+# --------------------------------------------------------------------------- #
+
+from tests import _no_window  # noqa: E402
+
+_no_window.arm()
+
+
+@pytest.fixture(autouse=True)
+def _no_visible_window(request):
+    """Fail the test that asked for a window, even when the code under test
+    swallowed the refusal."""
+    before = dict(_no_window.HITS)
+    yield
+    new = {k: v - before.get(k, 0) for k, v in _no_window.HITS.items()
+           if v > before.get(k, 0)}
+    if new:
+        pytest.fail("this test asked for a window on the desktop:\n"
+                    + _no_window.format_hits(new) + "\n" + _no_window.ADVICE)
+
+
+def _report_visible_windows(session):
+    """Backstop for a refusal at import or collection time, before any test ran."""
+    if not _no_window.HITS:
+        return
+    print("\nA WINDOW WAS REQUESTED ON THE DESKTOP:\n"
+          + _no_window.format_hits(_no_window.HITS) + "\n" + _no_window.ADVICE)
+    if getattr(session, "exitstatus", 0) == 0:
+        session.exitstatus = 1
+
+
+# --------------------------------------------------------------------------- #
+#  Resource-gated integration markers (V2)                                   #
 #                                                                              #
 #  A test tagged real_gguf / real_comfy / real_browser is skipped, never       #
 #  failed, when its resource is absent. A resource that is present but        #
