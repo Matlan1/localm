@@ -578,6 +578,7 @@ export async function requestEnhancedPrompt({ media, prompt, family = "", family
   });
   let data = null;
   try { data = await r.json(); } catch { /* reported below by status */ }
+  if (r.ok && !modelCache.active) await refreshModels();
   if (!r.ok) {
     const detail = data && data.detail
       ? (typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail)) : r.statusText;
