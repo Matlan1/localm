@@ -5,7 +5,7 @@
 // --- ES module imports ---
 import { clearRecentGuiErrors, onRecentGuiErrorsChange, recentGuiErrors } from "../app/client-log.js";
 import { pickDirectory } from "../app/picker.js";
-import { $, GIB, authHeaders, cancelJob, confirmDanger, confirmDangerAsync, downloadRate, el, fmtBytes, fmtDuration, openModal, promptText, renderMarkdown, showInlineError, streamJob, toast, whileBusy } from "../app/helpers.js";
+import { $, GIB, authHeaders, cancelJob, confirmDanger, confirmDangerAsync, downloadRate, el, fmtBytes, fmtDuration, openModal, promptText, renderMarkdown, showInlineError, streamJob, toast, setBusy, whileBusy } from "../app/helpers.js";
 import { t, tn } from "../app/i18n.js";
 import { onServerUnreachable } from "../app/init.js";
 import { emptyState, iconEl } from "../app/icons.js";
@@ -48,8 +48,16 @@ export const GROUP_BY_TYPE_KEY = "localm.modelsGroupByType";
 // (keep in sync). Powers the per-row one-click set-type control, and gives the
 // group-by-type headings a stable order for a type the tab strip does not name.
 const MODEL_TYPE_OPTIONS =
-  ["llm", "embedding", "mmproj", "tts", "diffusion-unet", "text-encoder", "vae", "lora", "upscaler",
-   "controlnet", "textual-inversion", "segmentation", "unknown"];
+  ["llm", "embedding", "mmproj", "tts", "diffusion-unet", "text-encoder", "vae", "vocoder", "planner",
+   "lora", "upscaler", "controlnet", "textual-inversion", "segmentation", "unknown"];
+
+// Types whose purpose is not obvious from the name: what the model is for, shown
+// under the type pill and in its tooltip.
+const TYPE_HINT_KEYS = {
+  "text-encoder": "models.typeHint.textEncoder",
+  "vocoder": "models.typeHint.vocoder",
+  "planner": "models.typeHint.planner",
+};
 
 // The type reported for a registry entry with no recorded model_type. The route
 // still sends `model_type: "llm"` for such an entry, plus
@@ -65,6 +73,19 @@ export const UNTAGGED_TYPE = "(not set)";
 export function modelTypeOf(m) {
   if (m && m.model_type_recorded === false) return UNTAGGED_TYPE;
   return (m && m.model_type) || "llm";
+}
+
+// The text typed in the installed-models search box. Narrows the TABLE (and its
+// tab counts) only; the HuggingFace search is a separate control.
+let currentSearchQuery = "";
+
+// A model matches when the query is a case-insensitive substring of its name,
+// source, type or architecture. An empty query matches everything.
+export function modelMatchesQuery(m, query) {
+  const q = String(query || "").trim().toLowerCase();
+  if (!q) return true;
+  const fields = [m && m.name, modelSourceText(m), modelTypeOf(m), m && m.architecture];
+  return fields.some((f) => f && String(f).toLowerCase().includes(q));
 }
 
 // Which types have a tab of their own, read from the tab strip itself rather
@@ -444,8 +465,10 @@ export async function refreshModelsPage() {
   }
 
   if (myGen !== _modelsRenderGen) return;
-  // Counts come from the WHOLE registry, so a tab keeps showing how many it
-  // holds while a different one is active.
+  // Counts come from the WHOLE registry (narrowed by the search text), so a tab
+  // keeps showing how many it holds while a different one is active.
+  const searching = currentSearchQuery.trim() !== "";
+  if (searching) models = models.filter((m) => modelMatchesQuery(m, currentSearchQuery));
   syncTabCounts(models);
   _syncViewOptControls();
 
@@ -473,7 +496,12 @@ export async function refreshModelsPage() {
   if (!models.length) {
     // The hidden-rows note when the registry is not empty and All is merely
     // hiding all of it; the empty state otherwise.
-    if (hiddenOther) {
+    if (searching) {
+      const noMatch = el("div", "sub models-no-match",
+        t("models.search.noMatch", { query: currentSearchQuery.trim() }));
+      noMatch.setAttribute("role", "status");
+      box.replaceChildren(...(hiddenOther ? [otherHiddenNote(hiddenOther), noMatch] : [noMatch]));
+    } else if (hiddenOther) {
       box.replaceChildren(otherHiddenNote(hiddenOther));
     } else {
       box.replaceChildren(emptyState("models", t("models.empty.text"), t("models.empty.hint")));
@@ -554,6 +582,9 @@ export async function refreshModelsPage() {
     if (m.architecture) {
       nameLine.appendChild(el("span", "arch-badge", m.architecture));
     }
+    if (m.part_of) {
+      nameLine.appendChild(el("span", "arch-badge", t("models.partOf", { model: m.part_of })));
+    }
     if (m.expert_count > 0) {
       nameLine.appendChild(el("span", "moe-badge moe-confirmed", t(MOE_LABEL.confirmed)));
     }
@@ -586,9 +617,10 @@ export async function refreshModelsPage() {
     // chosen type, then re-renders (so an unknown->llm switch reveals
     // use/alias).
     const typeSel = el("select", "model-type-select type-badge type-" + roleType);
+    const typeHint = TYPE_HINT_KEYS[roleType] ? t(TYPE_HINT_KEYS[roleType]) : "";
     typeSel.title = untagged
       ? t("models.typeSelect.titleUnset")
-      : t("models.typeSelect.titleChange");
+      : (typeHint ? typeHint + ". " : "") + t("models.typeSelect.titleChange");
     typeSel.setAttribute("aria-label", t("models.typeSelect.ariaLabel", { name: m.name }));
     if (untagged) {
       // A placeholder, not a value: "not set" is not a MODEL_TYPES member and
@@ -621,6 +653,7 @@ export async function refreshModelsPage() {
       } finally { typeSel.disabled = false; }
     };
     roleTd.appendChild(typeSel);
+    if (typeHint) roleTd.appendChild(el("div", "role-hint", typeHint));
     tr.appendChild(roleTd);
 
     // The source clips to an ellipsis, with the full value on hover.
@@ -2095,7 +2128,7 @@ export function renderUpdateNotes(notes) {
   box.classList.remove("collapsed");
   if (moreRow) moreRow.hidden = true;
   if (!text) { box.hidden = true; return; }
-  renderMarkdown(box, text, { imageScope: "update-notes" });
+  renderMarkdown(box, text, { imageScope: "update-notes", document: true });
   box.hidden = false;
   const long = text.length > UPDATE_NOTES_SHORT_CHARS
     || text.split("\n").length > UPDATE_NOTES_SHORT_LINES;
@@ -2122,7 +2155,7 @@ export async function updateCheck() {
   const checkBtn = $("update-check");
   if (out) { out.hidden = false; out.textContent = t("settings.update.checking"); }
   renderUpdateNotes("");
-  if (checkBtn) checkBtn.disabled = true;
+  setBusy(checkBtn, true);
   try {
     const r = await fetch("/api/update/check", { headers: authHeaders() });
     const d = await r.json().catch(() => ({}));
@@ -2155,7 +2188,7 @@ export async function updateCheck() {
     if (out) out.hidden = false;
     showInlineError(out, t("settings.update.checkFailed", { message: e.message }));
   } finally {
-    if (checkBtn) checkBtn.disabled = false;
+    setBusy(checkBtn, false);
   }
 }
 window.__localmUpdateCheck = updateCheck;
@@ -2394,7 +2427,7 @@ if ($("update-rollback")) $("update-rollback").onclick = updateRollback;
 // structured result rather than streaming progress, so there is no job.
 export async function rebuildLauncher() {
   const out = $("rebuild-launcher-status"), btn = $("rebuild-launcher");
-  if (btn) btn.disabled = true;
+  setBusy(btn, true);
   if (out) { out.hidden = false; out.textContent = t("settings.launcher.rebuilding"); }
   try {
     const r = await fetch("/api/app/rebuild-launcher?force=true",
@@ -2415,7 +2448,7 @@ export async function rebuildLauncher() {
   } catch (e) {
     showInlineError(out, t("settings.launcher.failed", { message: e.message }));
   } finally {
-    if (btn) btn.disabled = false;
+    setBusy(btn, false);
   }
 }
 if ($("rebuild-launcher")) $("rebuild-launcher").onclick = rebuildLauncher;
@@ -2580,8 +2613,9 @@ async function confirmBackendHardware(wanted, proceed) {
 }
 
 export async function runtimeUpdateCheck() {
-  const out = $("runtime-update-status");
+  const out = $("runtime-update-status"), checkBtn = $("runtime-update-check");
   if (out) { out.hidden = false; out.textContent = t("settings.runtime.checking"); }
+  setBusy(checkBtn, true);
   try {
     const d = await fetchRuntimeCheck();
     runtimeCheckState = d;
@@ -2602,6 +2636,8 @@ export async function runtimeUpdateCheck() {
     runtimeCheckState = null;
     if (out) out.hidden = false;
     showInlineError(out, t("settings.runtime.checkFailed", { message: e.message }));
+  } finally {
+    setBusy(checkBtn, false);
   }
   syncRuntimeApply();
   syncRuntimeRollback();
@@ -2628,8 +2664,8 @@ export async function runtimeProvision(backend, tag, rollback) {
   const out = $("runtime-update-status"), btn = $("runtime-update-apply");
   const rbBtn = $("runtime-rollback");
   const log = $("runtime-update-log");
-  if (btn) btn.disabled = true;
-  if (rbBtn) rbBtn.disabled = true;
+  setBusy(btn, true);
+  setBusy(rbBtn, true);
   if (out) {
     out.hidden = false;
     out.textContent = rollback
@@ -2645,8 +2681,8 @@ export async function runtimeProvision(backend, tag, rollback) {
         ? t("settings.runtime.rollbackFailed", { message: e.message })
         : t("settings.runtime.updateFailed", { message: e.message });
     }
-    if (btn) btn.disabled = false;
-    if (rbBtn) rbBtn.disabled = false;
+    setBusy(btn, false);
+    setBusy(rbBtn, false);
     if (log) log.style.display = "none";
     return;
   }
@@ -2663,8 +2699,8 @@ export async function runtimeProvision(backend, tag, rollback) {
       ? (rollback ? t("settings.runtime.rolledBack") : t("settings.runtime.provisioned"))
       : (tail.join(" ").trim() || t("settings.runtime.didNotFinish"));
   }
-  if (btn) btn.disabled = false;
-  if (rbBtn) rbBtn.disabled = false;
+  setBusy(btn, false);
+  setBusy(rbBtn, false);
   if (ok) {
     // The request has been carried out, so clear the selection.
     if ($("runtime-backend")) $("runtime-backend").value = "";
@@ -2735,14 +2771,15 @@ export async function showChangelog() {
         if (!r.ok) throw new Error(d.detail || r.statusText);
         if (!d.available) { md.textContent = t("settings.changelog.none"); return; }
         md.textContent = "";
-        renderMarkdown(md, d.markdown || "");
+        renderMarkdown(md, d.markdown || "", { document: true });
       })
       .catch((e) => { showInlineError(md, t("settings.changelog.failed", { message: e.message })); });
   });
 }
 if ($("changelog-show")) $("changelog-show").onclick = showChangelog;
 
-// Issues: read-only list (textContent only - never raw innerHTML for proxy data).
+// Issues: the bug reports this install filed, each looked up by number
+// (textContent only - never raw innerHTML for proxy data).
 export async function issuesRefresh() {
   const out = $("issues-list");
   if (out) out.textContent = t("settings.issues.loading");
@@ -2753,17 +2790,32 @@ export async function issuesRefresh() {
     if (!out) return;
     if (d.error) { showInlineError(out, t("settings.issues.loadError", { error: d.error })); return; }
     const list = d.issues || [];
+    const allLink = () => {
+      const a = document.createElement("a");
+      a.href = d.issues_url || "https://github.com/Matlan1/localm/issues";
+      a.target = "_blank"; a.rel = "noopener";
+      a.textContent = t("settings.issues.allLink");
+      return a;
+    };
     // Reached only on a SUCCESSFUL fetch of an empty list; the error paths above
     // and below say "could not load" instead.
     if (!list.length) {
       out.replaceChildren(emptyState("book", t("settings.issues.emptyTitle"),
-        t("settings.issues.emptyBody")));
+        t("settings.issues.emptyBody")), allLink());
       return;
     }
     out.textContent = "";
     for (const it of list) {
       const row = document.createElement("div");
-      row.textContent = "#" + it.number + " " + (it.state || "?") + "  " + (it.title || "");
+      const head = "#" + it.number + " ";
+      const title = it.title || "";
+      if (it.error) {
+        row.textContent = head + title + "  " + t("settings.issues.rowError", { error: it.error });
+      } else {
+        const closed = it.state === "closed" && it.closed_at
+          ? " " + String(it.closed_at).slice(0, 10) : "";
+        row.textContent = head + (it.state || "?") + closed + "  " + title;
+      }
       if (it.html_url) {
         const a = document.createElement("a");
         a.href = it.html_url; a.target = "_blank"; a.rel = "noopener";
@@ -2772,6 +2824,12 @@ export async function issuesRefresh() {
       }
       out.appendChild(row);
     }
+    if (d.persisted === false) {
+      const note = document.createElement("div");
+      note.textContent = t("settings.issues.sessionOnly");
+      out.appendChild(note);
+    }
+    out.appendChild(allLink());
   } catch (e) { showInlineError(out, t("settings.issues.loadFailed", { message: e.message })); }
 }
 if ($("issues-refresh")) $("issues-refresh").onclick = issuesRefresh;
@@ -2783,7 +2841,7 @@ if ($("logs-export")) {
     const dest = await pickDirectory(t("settings.logs.pickTitle"));
     if (!dest) return;                       // dismissed
     const btn = $("logs-export");
-    btn.disabled = true;
+    setBusy(btn, true);
     try {
       const r = await fetch("/api/logs/export", {
         method: "POST",
@@ -2806,7 +2864,7 @@ if ($("logs-export")) {
     } catch (e) {
       toast(t("settings.logs.failed", { message: e.message }), true);
     } finally {
-      btn.disabled = false;
+      setBusy(btn, false);
     }
   };
 }
@@ -2890,7 +2948,7 @@ if ($("upload-send")) {
     const headers = authHeaders();
     delete headers["Content-Type"];   // let the browser set the multipart boundary
     const btn = $("upload-send");
-    btn.disabled = true;
+    setBusy(btn, true);
     try {
       const r = await fetch("/api/upload", { method: "POST", headers, body: fd });
       const data = await r.json().catch(() => ({}));
@@ -2910,7 +2968,7 @@ if ($("upload-send")) {
     } catch (e) {
       toast(t("settings.uploads.uploadFailed", { message: e.message }), true);
     } finally {
-      btn.disabled = false;
+      setBusy(btn, false);
     }
   };
 }
@@ -3283,6 +3341,34 @@ if (tabNav) {
       refreshModelsPage();
     };
   }
+}
+
+// Installed-models search box: filters as the user types (debounced, since each
+// render re-reads the registry), Escape or the Clear button empties it.
+const searchInput = $("models-search");
+const searchClear = $("models-search-clear");
+if (searchInput) {
+  let searchTimer = null;
+  const applySearch = (immediate) => {
+    currentSearchQuery = searchInput.value;
+    if (searchClear) searchClear.hidden = searchInput.value === "";
+    clearTimeout(searchTimer);
+    if (immediate) refreshModelsPage();
+    else searchTimer = setTimeout(refreshModelsPage, 120);
+  };
+  const clearSearch = () => {
+    searchInput.value = "";
+    applySearch(true);
+    searchInput.focus();
+  };
+  searchInput.addEventListener("input", () => applySearch(false));
+  searchInput.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && searchInput.value !== "") {
+      e.preventDefault();
+      clearSearch();
+    }
+  });
+  if (searchClear) searchClear.addEventListener("click", clearSearch);
 }
 
 // Both display toggles: reflect the stored value on load, write it back on

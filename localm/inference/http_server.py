@@ -15,6 +15,7 @@ Start programmatically:
 from __future__ import annotations
 
 import asyncio
+import collections
 import dataclasses
 import functools
 import hashlib
@@ -188,65 +189,57 @@ _hang_alarm_instance = None
 # - _hb_monotonic) means the single event loop has stopped making progress,
 # i.e. something is blocking it - the off-loop watchdog thread compares this
 # raw gap against its own multi-second threshold (hang_watchdog_threshold(),
-# 10s by default) and is unaffected by the note below.
+# 10s by default).
 #
 # The heartbeat TASK's own startup (lifespan, below) is gated only on
 # "pytest" not in sys.modules - NOT on the watchdog thread's privacy/env gate.
 # It is pure in-memory bookkeeping (no I/O, nothing persisted or observable
-# outside this process), so it carries none of the privacy considerations
-# that gate the stack-dump-to-disk thread, and every reader below needs it
-# regardless of which of them is actually active.
-#
-# _loop_lag_seconds() (below) answers a DIFFERENT question and must be used
-# for anything reported to a human. Raw (now - _hb_monotonic) saws between 0
-# and ~_HEARTBEAT_INTERVAL_S on a perfectly healthy loop - that is just how
-# far into the current tick cycle "now" happens to land, not evidence of lag.
-# Subtracting the interval turns it into a real scheduling-delay figure: ~0
-# when healthy, and positive only when a tick itself was late, i.e. something
-# actually blocked the loop.
+# outside this process), so every reader below needs it regardless of which of
+# them is actually active.
 #
 # None (not a time.monotonic() value) UNTIL THE HEARTBEAT TASK'S OWN FIRST
-# TICK, and never seeded at import time. _hang_heartbeat_loop() is only created
-# once lifespan() starts, and only updates this on its first actual turn on the
-# loop; an import-time seed makes "now - _hb_monotonic" measure
-# elapsed-since-import across the cold-start window (import -> first tick,
-# which a slow startup/model-load can stretch to a minute-plus), a number that
-# grows with wall-clock time regardless of what the loop is doing. Both readers
-# below (_loop_lag_seconds, the watchdog thread) treat None as "no reading
-# yet" - report None / skip the check - rather than inventing a number from a
-# timestamp that was never real.
-_HEARTBEAT_INTERVAL_S = 1.0
+# TICK, and never seeded at import time: an import-time seed would make
+# "now - _hb_monotonic" grow with wall-clock time across the cold-start window.
+# Every reader treats None as "no reading yet".
+#
+# Loop stalls are measured by the tick that ran late: a tick that wakes more
+# than _STALL_RECORD_MIN_S after its expected time appends the interval
+# (expected wake, actual wake) to _hb_stalls. Timer wake-up jitter on a healthy
+# loop is a few milliseconds, up to ~16 ms with the Windows timer resolution, so
+# lateness below _STALL_RECORD_MIN_S is not recorded. 0.1 s ticks cost ten
+# trivial wakeups per second.
+_HEARTBEAT_INTERVAL_S = 0.1
+_STALL_RECORD_MIN_S = 0.05
+_LOOP_LAG_WINDOW_S = 60.0
 _hb_monotonic: Optional[float] = None
+_hb_stalls: collections.deque[tuple[float, float]] = collections.deque(maxlen=512)
+
+
+def _loop_stall_between(start: float, end: float) -> Optional[float]:
+    """Longest event-loop stall, in seconds, that overlapped the monotonic
+    interval [start, end]; only the overlapping part of a stall counts. 0.0 when
+    the loop kept ticking on time, None before the heartbeat's first tick.
+
+    Includes the tick still overdue at ``end``: while the loop is blocked, the
+    late tick has not run yet, so it is not in _hb_stalls. Call on the event
+    loop (the heartbeat appends to _hb_stalls there)."""
+    hb = _hb_monotonic
+    if hb is None:
+        return None
+    worst = max(0.0, end - max(hb + _HEARTBEAT_INTERVAL_S, start))
+    for expected, actual in tuple(_hb_stalls):
+        overlap = min(actual, end) - max(expected, start)
+        if overlap > worst:
+            worst = overlap
+    return worst
 
 
 def _loop_lag_seconds() -> Optional[float]:
-    """Real event-loop scheduling delay, in seconds - NOT time-since-last-
-    heartbeat-tick (see the comment above _hb_monotonic). ~0.0 on a healthy
-    loop; grows only when a heartbeat tick was itself delayed, meaning
-    something blocked the loop. This is what gets reported to a human (the
-    debug request log, /debug/stacks); the raw gap is for the watchdog's own
-    large-threshold hang detection only.
-
-    RESOLUTION LIMIT, by construction: a stall shorter than
-    _HEARTBEAT_INTERVAL_S (currently 1.0s) reads as exactly 0.0, identical to
-    a perfectly healthy loop - a 1Hz heartbeat cannot see a sub-interval
-    block. "loop_lag=0.0" therefore means "no stall LONGER than the
-    heartbeat interval was detected", not "the loop was never blocked at
-    all". A finer-grained sampler would close this gap at the cost of a
-    second background task and more wakeups purely for a diagnostic counter,
-    which is not worth it: the hang watchdog (large-threshold, above) already
-    owns detecting a real freeze; this value is for correlating a slow
-    request with a preceding stall, not for catching sub-second ones.
-
-    COLD START, before the heartbeat task's first tick (_hb_monotonic is
-    still None): returns None, never 0.0, which is the same reading as
-    "healthy". Every caller must render None as explicitly unavailable and
-    never reuse the "0.0 = no stall longer than the interval" reading for a
-    state that has no reading at all - see the debug request log and
-    /debug/stacks call sites."""
-    if _hb_monotonic is None:
-        return None
-    return max(0.0, (time.monotonic() - _hb_monotonic) - _HEARTBEAT_INTERVAL_S)
+    """Longest event-loop stall in the last _LOOP_LAG_WINDOW_S seconds (see
+    _loop_stall_between); None before the heartbeat's first tick. Reported by
+    GET /debug/stacks."""
+    now = time.monotonic()
+    return _loop_stall_between(now - _LOOP_LAG_WINDOW_S, now)
 
 def _default_engine_factory(name: str) -> Engine:
     from localm.config import load_registry
@@ -566,6 +559,13 @@ _INCONCLUSIVE_LOAD_RETRY_DELAY = 1.5
 # model to finish its requests, so that model can be evicted instead of the new
 # one loading beside it on whatever VRAM is left.
 _BUSY_VICTIM_IDLE_WAIT_S = 30.0
+
+# Status for a load that goes ahead beside resident models because none could be
+# evicted for it (``pinned_models``, or a model still busy): the load then takes
+# whatever VRAM is left and the rest runs on the CPU.
+LOADING_BESIDE_STATUS = ("Loading '{model}' beside {resident}, which could not be "
+                         "unloaded: not enough GPU memory is free, so part of it "
+                         "will run on the CPU (slower)...")
 # How often that wait checks whether a busy native media runtime's job ended.
 _BUSY_MEDIA_POLL_S = 0.25
 
@@ -1204,6 +1204,11 @@ async def _switch_exhaustion_ladder(loop, probe: switch_admission.VramProbe,
         "to the backend's own load-time sizing instead of refusing",
         budget.name, budget.needed_bytes // 1024 ** 2, probe.free // 1024 ** 2)
     attempt.deferred_to_backend = True
+    beside = [n for n, e in list(_engines.items())
+              if n != budget.name and getattr(e, "loaded", False)]
+    if beside and on_status is not None:
+        on_status(LOADING_BESIDE_STATUS.format(
+            model=budget.name, resident=", ".join(f"'{n}'" for n in beside)))
     return step(switch_admission.PROCEED_TO_LOAD)
 
 
@@ -2155,14 +2160,41 @@ def _describe_load_placement(name: str, engine, evictions=()) -> str:
     return "; ".join(parts)
 
 
+def _placement_as_configured(placement: dict, sizing) -> bool:
+    """Whether *placement* (``Engine.gpu_placement``) is exactly what the
+    configuration asked for: *sizing* (``Engine.gpu_sizing``) has mode
+    ``"configured"`` (auto off or an explicit n_gpu_layers), at least
+    ``min(configured layers, total)`` layers (every layer for a negative or
+    "everything" value) were offloaded, and any routed experts in system RAM
+    come from a configured n_cpu_moe, not one auto sizing chose."""
+    if not (isinstance(sizing, dict) and sizing.get("mode") == "configured"):
+        return False
+    offloaded = placement.get("gpu_layers_offloaded")
+    total = placement.get("gpu_layers_total")
+    layers = sizing.get("layers")
+    if not (isinstance(offloaded, int) and isinstance(total, int)
+            and isinstance(layers, int)):
+        return False
+    if offloaded < (total if layers < 0 else min(layers, total)):
+        return False
+    moe = placement.get("moe_cpu_layers", 0)
+    if moe and (sizing.get("n_cpu_moe_auto")
+                or moe > int(sizing.get("n_cpu_moe") or 0)):
+        return False
+    return True
+
+
 def _log_switch_placement(name: str, engine, evictions=()) -> None:
     """Log ``_describe_load_placement`` for a load switch_engine just
-    committed: at WARNING when fewer than all layers landed on the GPU, else
+    committed: at WARNING when fewer than all layers landed on the GPU and
+    that is not the configured placement (``_placement_as_configured``), else
     at INFO."""
     from localm.debuglog import logger as _dbg
     placement = getattr(engine, "gpu_placement", None)
     line = "switch_engine: " + _describe_load_placement(name, engine, evictions)
-    if isinstance(placement, dict) and placement.get("degraded"):
+    if (isinstance(placement, dict) and placement.get("degraded")
+            and not _placement_as_configured(placement,
+                                             getattr(engine, "gpu_sizing", None))):
         _dbg.warning(line)
     else:
         _dbg.info(line)
@@ -2200,7 +2232,7 @@ def _model_is_pinned(model_name: str | None) -> bool:
 
 def plan_capability_route(model_name: str | None, messages: list,
                           required_capabilities=None, *, pin_model=None,
-                          min_context=None):
+                          min_context=None, autoswitch=None):
     """The capability-routing decision for one request, without applying it.
 
     Blocking (registry read plus per-candidate capability probes), so an async
@@ -2216,7 +2248,9 @@ def plan_capability_route(model_name: str | None, messages: list,
     Needs are derived from the request wherever the request already states them
     - an image part means vision, the prompt's estimated size means a context
     window - plus *required_capabilities* and *min_context* for what nothing in
-    an OpenAI-shaped request can express. A loaded engine confirmed to accept
+    an OpenAI-shaped request can express. *autoswitch*, one of the autoswitch
+    modes, replaces the ``model_autoswitch`` setting for this request; None
+    leaves the setting in force. A loaded engine confirmed to accept
     images does not count vision as a gap, whatever the registry records.
 
     Models with an accepted peer route count as resident, since answering with
@@ -2258,7 +2292,7 @@ def plan_capability_route(model_name: str | None, messages: list,
 
     return _cr.plan_route(current, needs, pinned=pinned, resident=resident,
                           current_known=known, skip=skip_set,
-                          mode=_cr.configured_mode())
+                          mode=_cr.coerce_autoswitch_mode(autoswitch) or _cr.configured_mode())
 
 
 async def get_engine(model_name: str | None, *, load: bool = True,
@@ -3402,11 +3436,17 @@ async def _mmproj_backfill_once() -> None:
 async def _hang_heartbeat_loop() -> None:
     """Bump _hb_monotonic every _HEARTBEAT_INTERVAL_S so the off-loop watchdog
     thread can tell when the single event loop has stopped making progress (a
-    hang), and so _loop_lag_seconds() can report a real scheduling-delay
-    figure. The ONLY steady-state cost is one wakeup per interval."""
+    hang), and records every late tick in _hb_stalls so a request can report the
+    loop stall that overlapped it. The ONLY steady-state cost is one wakeup per
+    interval."""
     global _hb_monotonic
+    expected = None
     while True:
-        _hb_monotonic = time.monotonic()
+        now = time.monotonic()
+        if expected is not None and now - expected > _STALL_RECORD_MIN_S:
+            _hb_stalls.append((expected, now))
+        _hb_monotonic = now
+        expected = now + _HEARTBEAT_INTERVAL_S
         await asyncio.sleep(_HEARTBEAT_INTERVAL_S)
 
 
@@ -7523,19 +7563,26 @@ def _capability_route_header(route, placement=None) -> dict:
 def _memory_used_header(ctx) -> dict:
     """Observability: render the memory plugin's per-turn recall (stashed in
     ``ctx.state`` by its inlet) into a response-header dict so a client can show a
-    "used N memories" chip and the recall degrade reason. Empty when memory did
-    not run for this turn (plugin disabled, privacy mode, recall off). The value is
+    "used N memories" chip and the recall degrade reason, and the outcome of a
+    "remember ..." request in the turn's message. Empty when memory did not run
+    for this turn (plugin disabled, privacy mode, recall off). The value is
     compact ASCII JSON, header-safe: ``{"n":<int>,"degrade":<reason|null>,"items":
-    [{"id","text","source","kind"}...]}`` - json.dumps(ensure_ascii=True) escapes
-    newlines and non-ASCII, so the blob is a single header-legal line."""
+    [{"id","text","source","kind"}...],"saved":{"text","status"}}`` (``saved`` only
+    when the message asked to remember something) - json.dumps(ensure_ascii=True)
+    escapes newlines and non-ASCII, so the blob is a single header-legal line."""
     if ctx is None:
         return {}
-    used = getattr(ctx, "state", {}).get("memory_used")
-    if used is None:
+    state = getattr(ctx, "state", {})
+    used = state.get("memory_used")
+    saved = state.get("memory_saved")
+    if used is None and saved is None:
         return {}
+    used = used or []
     payload = {"n": len(used),
-               "degrade": ctx.state.get("memory_degrade_reason"),
+               "degrade": state.get("memory_degrade_reason"),
                "items": used}
+    if saved is not None:
+        payload["saved"] = saved
     try:
         blob = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
     except (TypeError, ValueError):

@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """scripts/bump_comfyui_pin.py: the mechanical half of advancing the ComfyUI pin.
 
-Direct structural sibling of test_bump_llama_pin.py, adapted for a git-clone
-pin (one file, two constants, no sha256 table, no MTP-style derived set).
+Direct structural sibling of test_bump_llama_pin.py, adapted for a commit pin
+fetched as a source archive (two constants plus the archive's ARCHIVE_SHA256
+entry, no MTP-style derived set). Archives are served by an offline fake.
 
-Covers the three properties that make this bump safe to script:
+Covers the properties that make this bump safe to script:
 
   * COMFYUI_PINNED_COMMIT and COMFYUI_PINNED_VERSION move together in one
     rewrite, and nothing else in the file changes (COMFYUI_REPO,
@@ -13,18 +14,23 @@ Covers the three properties that make this bump safe to script:
     BOTH the target tag AND commit with PASS on every required check;
   * forward-only - a same-or-older tag is refused, never silently applied or
     silently treated as a no-op;
-  * unlike bump_llama_pin.py, this script makes NO network calls at all (the
-    receipt already carries the cross-checked commit) - proven directly, not
-    just claimed in the docstring.
+  * the ARCHIVE_SHA256 entry of the old commit is replaced by the sha256 of
+    the new commit's downloaded archive, so the shipped-pins test in
+    test_source_archive.py passes on the bumped tree;
+  * the only network access is that archive download.
 """
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
+import shutil
 from pathlib import Path
 
 import pytest
+
+from tests._source_archives import FakeGitHub, assert_shipped_pins_carry_a_sha256
 
 _ROOT = Path(__file__).resolve().parent.parent
 _BUMP = _ROOT / "scripts" / "bump_comfyui_pin.py"
@@ -44,6 +50,19 @@ def bump():
 
 OLD_COMMIT = "fe4195f7f4275f2626cbafc703acc3ddde1e5490"
 NEW_COMMIT = "1234567890abcdef1234567890abcdef12345678"
+GGUF_COMMIT = "6ea2651e7df66d7585f6ffee804b20e92fb38b8a"
+
+ARCHIVE_FIXTURE = f'''"""Source trees."""
+
+ARCHIVE_SHA256 = {{
+    "{OLD_COMMIT}":
+        "{"1" * 64}",
+    "{GGUF_COMMIT}":
+        "{"2" * 64}",
+}}
+
+OTHER = 2
+'''
 
 CONSTANTS_FIXTURE = f'''# header
 COMFYUI_REPO = "https://github.com/comfyanonymous/ComfyUI.git"
@@ -184,7 +203,31 @@ def test_a_malformed_commit_is_refused_before_anything_is_read(bump, tmp_path, c
 # --------------------------------------------------------------------------- #
 
 @pytest.fixture
-def tree(bump, tmp_path, monkeypatch):
+def github(tmp_path, monkeypatch):
+    """Offline GitHub archives; NEW_COMMIT of ComfyUI is served."""
+    fake = FakeGitHub(tmp_path / "archives").install(monkeypatch)
+    fake.add("comfyanonymous", "ComfyUI", {"main.py": "print('comfy')\n"}, commit=NEW_COMMIT)
+    return fake
+
+
+def _archive_url(commit=NEW_COMMIT):
+    return f"https://codeload.github.com/comfyanonymous/ComfyUI/zip/{commit}"
+
+
+def _served_sha256(github, commit=NEW_COMMIT):
+    return hashlib.sha256(github.archives[_archive_url(commit)].read_bytes()).hexdigest()
+
+
+@pytest.fixture
+def archive_file(tmp_path):
+    path = tmp_path / "localm" / "media" / "source_archive.py"
+    path.parent.mkdir(parents=True)
+    path.write_text(ARCHIVE_FIXTURE, encoding="utf-8", newline="\n")
+    return path
+
+
+@pytest.fixture
+def tree(bump, tmp_path, monkeypatch, github, archive_file):
     constants = tmp_path / "managed_comfy_fresh.py"
     constants.write_text(CONSTANTS_FIXTURE, encoding="utf-8")
     monkeypatch.setattr(bump, "CONSTANTS_PATH", constants)
@@ -192,15 +235,19 @@ def tree(bump, tmp_path, monkeypatch):
     return constants
 
 
-def test_dry_run_writes_nothing_and_write_needs_a_receipt(bump, tree, capsys):
+def test_dry_run_writes_nothing_and_write_needs_a_receipt(bump, tree, archive_file, github,
+                                                        capsys):
     assert bump.main(["--tag", "v0.32.0", "--commit", NEW_COMMIT]) == 0
     out = capsys.readouterr().out
     assert "no receipt given" in out
     assert f'+COMFYUI_PINNED_COMMIT = "{NEW_COMMIT}"' in out
     assert '+COMFYUI_PINNED_VERSION = "v0.32.0"' in out
+    assert f'-    "{OLD_COMMIT}":' in out and f'+    "{NEW_COMMIT}":' in out
+    assert f'+        "{_served_sha256(github)}",' in out
     assert "dry run: nothing written" in out
     assert "REMAINING STEPS" in out
     assert tree.read_text(encoding="utf-8") == CONSTANTS_FIXTURE
+    assert archive_file.read_text(encoding="utf-8") == ARCHIVE_FIXTURE
 
     assert bump.main(["--tag", "v0.32.0", "--commit", NEW_COMMIT, "--write"]) == 1
     assert "REFUSED" in capsys.readouterr().out
@@ -277,21 +324,90 @@ def test_checklist_mentions_reinstall_requirements_only_when_the_receipt_says_so
 
 
 # --------------------------------------------------------------------------- #
-#  No network calls, anywhere - the property that distinguishes this from     #
-#  bump_llama_pin.py (which still needs the GitHub API for the sha256 table)  #
+#  The source archive sha256                                                   #
 # --------------------------------------------------------------------------- #
 
-def test_never_touches_the_network(bump, tree, tmp_path, monkeypatch):
-    """urllib.request.urlopen is patched to explode if called at all - both a
-    dry run and a --write must complete without ever reaching it, since the
-    receipt already carries the cross-checked commit."""
+def test_write_replaces_the_old_commits_archive_sha256_in_place(bump, tree, archive_file,
+                                                                github, tmp_path, capsys):
+    receipt = _receipt(tmp_path, "v0.32.0", NEW_COMMIT, _all_pass())
+    assert bump.main(["--tag", "v0.32.0", "--commit", NEW_COMMIT,
+                      "--receipt", str(receipt), "--write"]) == 0
+    out = capsys.readouterr().out
+    assert "wrote localm/media/source_archive.py" in out
+    expected = ARCHIVE_FIXTURE.replace(f'"{OLD_COMMIT}":\n        "{"1" * 64}"',
+                                       f'"{NEW_COMMIT}":\n        "{_served_sha256(github)}"')
+    assert expected != ARCHIVE_FIXTURE
+    assert archive_file.read_text(encoding="utf-8") == expected
+
+
+def test_the_only_network_access_is_the_target_commits_archive(bump, tree, github, tmp_path,
+                                                               monkeypatch):
     import urllib.request
 
     def _boom(*a, **k):
-        raise AssertionError("bump_comfyui_pin.py must never open a network connection")
+        raise AssertionError("bump_comfyui_pin.py opened a connection outside the archive download")
     monkeypatch.setattr(urllib.request, "urlopen", _boom)
 
     assert bump.main(["--tag", "v0.32.0", "--commit", NEW_COMMIT]) == 0
     receipt = _receipt(tmp_path, "v0.32.0", NEW_COMMIT, _all_pass())
     assert bump.main(["--tag", "v0.32.0", "--commit", NEW_COMMIT,
                       "--receipt", str(receipt), "--write"]) == 0
+    assert github.requested == [_archive_url(), _archive_url()]
+
+
+@pytest.mark.parametrize("case", ["another commit", "missing"])
+def test_an_unusable_archive_refuses_and_edits_nothing(bump, tree, archive_file, github,
+                                                       tmp_path, capsys, case):
+    if case == "another commit":
+        github.add("comfyanonymous", "ComfyUI", {"main.py": "x\n"}, commit=NEW_COMMIT,
+                   comment=OLD_COMMIT)
+        fragment = f"is of commit '{OLD_COMMIT}'"
+    else:
+        del github.archives[_archive_url()]
+        fragment = "could not be fetched"
+    receipt = _receipt(tmp_path, "v0.32.0", NEW_COMMIT, _all_pass())
+    assert bump.main(["--tag", "v0.32.0", "--commit", NEW_COMMIT,
+                      "--receipt", str(receipt), "--write"]) == 1
+    out = capsys.readouterr().out
+    assert "REFUSED" in out and fragment in out
+    assert tree.read_text(encoding="utf-8") == CONSTANTS_FIXTURE
+    assert archive_file.read_text(encoding="utf-8") == ARCHIVE_FIXTURE
+
+
+def test_set_archive_sha256_drops_a_stale_entry_and_appends_when_the_old_one_is_absent(bump):
+    sha = "3" * 64
+    stale = ARCHIVE_FIXTURE.replace("}\n\nOTHER", f'    "{NEW_COMMIT}":\n        "{"4" * 64}",\n}}\n\nOTHER')
+    assert stale.count(NEW_COMMIT) == 1
+    once = bump.set_archive_sha256(stale, OLD_COMMIT, NEW_COMMIT, sha)
+    assert once.count(NEW_COMMIT) == 1 and OLD_COMMIT not in once and "4" * 64 not in once
+    assert once.index(NEW_COMMIT) < once.index(GGUF_COMMIT), "the entry keeps the old one's place"
+
+    appended = bump.set_archive_sha256(ARCHIVE_FIXTURE, "f" * 40, NEW_COMMIT, sha)
+    assert OLD_COMMIT in appended and appended.index(GGUF_COMMIT) < appended.index(NEW_COMMIT)
+
+    with pytest.raises(bump.Refused, match="found 0"):
+        bump.set_archive_sha256("x = 1\n", OLD_COMMIT, NEW_COMMIT, sha)
+
+
+def test_a_simulated_bump_of_the_real_tree_passes_the_shipped_pins_test(bump, tmp_path,
+                                                                        github, monkeypatch):
+    media = tmp_path / "localm" / "media"
+    media.mkdir(parents=True)
+    for name in ("managed_comfy_fresh.py", "source_archive.py"):
+        shutil.copyfile(_ROOT / "localm" / "media" / name, media / name)
+    constants = media / "managed_comfy_fresh.py"
+    monkeypatch.setattr(bump, "CONSTANTS_PATH", constants)
+    monkeypatch.setattr(bump, "REPO", tmp_path)
+    original = constants.read_bytes()
+
+    constants.write_text(bump.set_commit(original.decode("utf-8"), NEW_COMMIT), encoding="utf-8")
+    with pytest.raises(AssertionError, match=_archive_url()):
+        assert_shipped_pins_carry_a_sha256(tmp_path)
+    constants.write_bytes(original)
+
+    receipt = _receipt(tmp_path, "v99.0.0", NEW_COMMIT, _all_pass())
+    assert bump.main(["--tag", "v99.0.0", "--commit", NEW_COMMIT,
+                      "--receipt", str(receipt), "--write"]) == 0
+    assert_shipped_pins_carry_a_sha256(tmp_path)
+    text = (media / "source_archive.py").read_text(encoding="utf-8")
+    assert f'"{NEW_COMMIT}":\n        "{_served_sha256(github)}",' in text

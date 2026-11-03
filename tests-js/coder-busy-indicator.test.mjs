@@ -80,7 +80,7 @@ test("readSSE invokes onAnyFrame once per parsed frame, including a bare comment
   assert.deepEqual(payloads, [JSON.stringify({ a: 1 })], "onData must still fire only for data: lines");
 });
 
-test("a keepalive-only SSE frame marks the session's last-activity timestamp before any data event arrives", async () => {
+test("a keepalive-only SSE frame does not touch the session's activity clocks", async () => {
   const { fetchImpl, releaseGate } = makeGatedSseFetch({
     before: [": keepalive\n\n", ": keepalive\n\n"],
     after: [`data: ${JSON.stringify({ type: "turn", turn: 1, total_tokens: 0 })}\n\n`],
@@ -90,22 +90,17 @@ test("a keepalive-only SSE frame marks the session's last-activity timestamp bef
   runScript(window, `
     const feedEl = document.createElement("div");
     window.__s = { info: { id: "sid1", cwd: "Z:/proj" }, feedEl, busy: false,
-      lastEventAt: null, liveBody: null, liveText: "", liveReasoning: "",
+      lastEventAt: null, phaseStartedAt: null, liveBody: null, liveText: "", liveReasoning: "",
       pendingCards: [], confirmCards: new Map(), closed: false };
     coder.sessions.set("sid1", window.__s);
     coder.activeId = "sid1";
     streamSession(window.__s, false);
   `);
 
-  const midDeadline = Date.now() + 2000;
-  while (window.__s.lastEventAt == null && Date.now() < midDeadline) {
-    await new Promise((r) => setTimeout(r, 5));
-  }
-  assert.ok(window.__s.lastEventAt, "a keepalive comment must register as received activity");
-  // The data frame is still held behind the gate at this point - it cannot
-  // have reached streamSession yet, so this is not a timing race.
-  assert.equal(window.__s.busy, false,
-    "no data event has arrived yet, so a keepalive alone must not mark the session busy");
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(window.__s.lastEventAt, null, "a keepalive comment is not a real event");
+  assert.equal(window.__s.phaseStartedAt, null, "a keepalive comment must not start or reset the phase clock");
+  assert.equal(window.__s.busy, false);
 
   releaseGate();
   const doneDeadline = Date.now() + 2000;
@@ -113,13 +108,14 @@ test("a keepalive-only SSE frame marks the session's last-activity timestamp bef
     await new Promise((r) => setTimeout(r, 5));
   }
   assert.equal(window.__s.busy, true, "the turn event must still arrive normally after the keepalive-only period");
+  assert.equal(typeof window.__s.phaseStartedAt, "number", "the turn event starts the phase clock");
 });
 
-test("tickCoderBusyIndicator shows elapsed seconds since the last frame while the active session is busy", () => {
+test("tickCoderBusyIndicator shows elapsed time since the phase began while the active session is busy", () => {
   const { window } = loadApp({ fetchImpl: okFetch() });
   runScript(window, `
     coder.activeId = "sid1";
-    coder.sessions.set("sid1", { info: { id: "sid1" }, busy: true, lastEventAt: Date.now() - 12000 });
+    coder.sessions.set("sid1", { info: { id: "sid1" }, busy: true, phaseStartedAt: Date.now() - 12000, lastEventAt: Date.now() });
     const node = document.getElementById("coder-state");
     node.textContent = "working…";
     node.className = "job-state st-running";
@@ -135,7 +131,7 @@ test("tickCoderBusyIndicator leaves the pill alone when the active session is no
   const { window } = loadApp({ fetchImpl: okFetch() });
   runScript(window, `
     coder.activeId = "sid1";
-    coder.sessions.set("sid1", { info: { id: "sid1" }, busy: false, lastEventAt: Date.now() - 12000 });
+    coder.sessions.set("sid1", { info: { id: "sid1" }, busy: false, phaseStartedAt: Date.now() - 12000, lastEventAt: Date.now() });
     const node = document.getElementById("coder-state");
     node.textContent = "idle";
     node.className = "job-state st-pending";
@@ -144,25 +140,25 @@ test("tickCoderBusyIndicator leaves the pill alone when the active session is no
   assert.equal(window.document.getElementById("coder-state").textContent, "idle");
 });
 
-test("tickCoderBusyIndicator leaves the pill alone when no frame has been received yet for the busy session", () => {
+test("tickCoderBusyIndicator leaves the pill alone when no phase has started yet for the busy session", () => {
   const { window } = loadApp({ fetchImpl: okFetch() });
   runScript(window, `
     coder.activeId = "sid1";
-    coder.sessions.set("sid1", { info: { id: "sid1" }, busy: true, lastEventAt: null });
+    coder.sessions.set("sid1", { info: { id: "sid1" }, busy: true, phaseStartedAt: null, lastEventAt: null });
     const node = document.getElementById("coder-state");
     node.textContent = "working…";
     node.className = "job-state st-running";
   `);
   window.tickCoderBusyIndicator();
   assert.equal(window.document.getElementById("coder-state").textContent, "working…",
-    "with no lastEventAt yet there is nothing to count from, so the base label is left untouched");
+    "with no phaseStartedAt yet there is nothing to count from, so the base label is left untouched");
 });
 
 test("a status event shows in the busy pill until the next event", () => {
   const { window } = loadApp({ fetchImpl: okFetch() });
   runScript(window, `
     coder.activeId = "sid1";
-    window.__s = { info: { id: "sid1" }, busy: true, lastEventAt: Date.now() };
+    window.__s = { info: { id: "sid1" }, busy: true, phaseStartedAt: Date.now(), lastEventAt: Date.now() };
     coder.sessions.set("sid1", window.__s);
     const node = document.getElementById("coder-state");
     node.textContent = "working…";
@@ -178,4 +174,62 @@ test("a status event shows in the busy pill until the next event", () => {
   assert.match(pill(), /^working… \d+s$/, "the status clears once the model answers");
   assert.ok(!(window.__s.eventLog || []).some((e) => e.type === "status"),
     "statuses are not kept in the exported event log");
+});
+
+function busyPill(window, fields) {
+  runScript(window, `
+    coder.activeId = "sid1";
+    window.__s = Object.assign({ info: { id: "sid1" }, busy: true }, ${JSON.stringify(fields)});
+    coder.sessions.set("sid1", window.__s);
+    const node = document.getElementById("coder-state");
+    node.textContent = "working…";
+    node.className = "job-state st-running";
+  `);
+  return () => window.document.getElementById("coder-state").textContent;
+}
+
+test("the counter keeps climbing past 15 s while only keepalive frames arrive", () => {
+  const { window } = loadApp({ fetchImpl: okFetch() });
+  const now = Date.now();
+  const pill = busyPill(window, { phaseStartedAt: now - 20000, lastEventAt: now - 20000 });
+  window.tickCoderBusyIndicator();
+  assert.match(pill(), /^working… (19|20|21)s$/);
+  runScript(window, `window.__s.phaseStartedAt -= 25000; window.__s.lastEventAt -= 25000;`);
+  window.tickCoderBusyIndicator();
+  assert.match(pill(), /^working… 45s \(no output for 45s\)$|^working… 4[5-6]s \(no output for 4[5-6]s\)$/);
+});
+
+test("no stall note while real events are recent; it appears at 30 s of silence", () => {
+  const { window } = loadApp({ fetchImpl: okFetch() });
+  const now = Date.now();
+  const pill = busyPill(window, { phaseStartedAt: now - 90000, lastEventAt: now - 5000 });
+  window.tickCoderBusyIndicator();
+  assert.match(pill(), /^working… 1m 30s$/, "long durations read as minutes and seconds, no stall note");
+  runScript(window, `window.__s.lastEventAt = Date.now() - 40000;`);
+  window.tickCoderBusyIndicator();
+  assert.match(pill(), /^working… 1m 30s \(no output for 4\ds\)$/);
+});
+
+test("formatCoderElapsed formats seconds, minutes and hours", () => {
+  const { window } = loadApp({ fetchImpl: okFetch() });
+  assert.equal(window.formatCoderElapsed(0), "0s");
+  assert.equal(window.formatCoderElapsed(59.9), "59s");
+  assert.equal(window.formatCoderElapsed(65), "1m 05s");
+  assert.equal(window.formatCoderElapsed(3725), "1h 02m");
+});
+
+test("a status change restarts the phase clock; same-phase events and repeated statuses do not", () => {
+  const { window } = loadApp({ fetchImpl: okFetch() });
+  const old = Date.now() - 50000;
+  busyPill(window, { phaseStartedAt: old, lastEventAt: old, phaseKey: "" });
+  window.handleCoderEvent(window.__s, { type: "some_later_event" });
+  assert.equal(window.__s.phaseStartedAt, old, "an event in the same phase leaves the clock alone");
+  window.handleCoderEvent(window.__s, { type: "status", text: "Loading model...", code: "loading_model" });
+  const loadStart = window.__s.phaseStartedAt;
+  assert.ok(loadStart > old + 40000, "a new status starts a new phase");
+  window.__s.phaseStartedAt = old;
+  window.handleCoderEvent(window.__s, { type: "status", text: "Loading model...", code: "loading_model" });
+  assert.equal(window.__s.phaseStartedAt, old, "the same status again is the same phase");
+  window.handleCoderEvent(window.__s, { type: "some_later_event" });
+  assert.ok(window.__s.phaseStartedAt > old + 40000, "the status clearing starts a new phase");
 });

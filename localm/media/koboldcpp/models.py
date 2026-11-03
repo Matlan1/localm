@@ -65,7 +65,7 @@ ARCHITECTURES = {
 
 # component -> the localm registry type its GGUF registers as.
 REGISTRY_TYPES = {
-    "lm": "unknown",
+    "lm": "planner",
     "text_encoder": "text-encoder",
     "dit": "diffusion-unet",
     "vae": "vae",

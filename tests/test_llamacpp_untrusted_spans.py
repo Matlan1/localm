@@ -490,12 +490,12 @@ def test_the_pretokenizer_guard_still_refuses_when_ranges_are_supplied():
 
     tok = _tokenizer()
     tok._pre_type = "gpt-4o"
-    hostile = "A" * 500                       # one unbroken letter run, over the cap
+    hostile = "A" * 20000                     # one unbroken letter run, over every platform's limit
     native = FakeNative()
 
     with native.patches()[2]:
         with pytest.raises(PretokenizerUnsafeInputError):
-            tok.encode(hostile, add_bos=False, untrusted_ranges=((0, 500),))
+            tok.encode(hostile, add_bos=False, untrusted_ranges=((0, 20000),))
         with pytest.raises(PretokenizerUnsafeInputError):
             tok.encode(hostile, add_bos=False)
 

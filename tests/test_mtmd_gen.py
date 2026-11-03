@@ -46,7 +46,7 @@ class TestAbiGate:
             g.bind_generation_api(lib)
 
     @pytest.mark.parametrize("interface", [g.INTERFACE_LEGACY, g.INTERFACE_STATE,
-                                           g.INTERFACE_STATE_V2])
+                                           g.INTERFACE_STATE_V2, g.INTERFACE_STATE_V3])
     def test_an_mtmd_missing_a_helper_function_is_refused(self, interface):
         lib = _FakeLib(_exports(interface) - {"mtmd_helper_gen_audio_step_gen"})
         with pytest.raises(g.SpeechUnavailable, match="lacks a speech generation function"):
@@ -59,6 +59,11 @@ class TestAbiGate:
 
     def test_a_state_v2_marker_without_the_state_functions_is_refused(self):
         lib = _FakeLib(_exports(g.INTERFACE_LEGACY) | {g._STATE_V2_MARKER})
+        with pytest.raises(g.SpeechUnavailable, match="lacks a speech generation function"):
+            g.bind_generation_api(lib)
+
+    def test_a_state_v3_marker_without_the_state_functions_is_refused(self):
+        lib = _FakeLib(_exports(g.INTERFACE_LEGACY) | {g._STATE_V3_MARKER})
         with pytest.raises(g.SpeechUnavailable, match="lacks a speech generation function"):
             g.bind_generation_api(lib)
 
@@ -100,6 +105,37 @@ class TestAbiGate:
         assert ns.mtmd_gen_state_init.argtypes == [ctypes.c_void_p, g._GenStateParams]
         assert ns.mtmd_helper_gen_audio_next_is_text.restype is ctypes.c_bool
 
+    def test_an_mtmd_with_the_state_v3_marker_binds_the_state_v3_interface(self):
+        ns = g.bind_generation_api(_FakeLib(_exports(g.INTERFACE_STATE_V3)))
+        assert ns.interface == g.INTERFACE_STATE_V3
+        assert ns.helper_input is g._HelperInputV3
+        assert ns.mtmd_gen_audio_get_info.restype is g._GenAudioInfoV3
+        assert ns.mtmd_gen_audio_process.argtypes == [
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(g._GenInpV2),
+            ctypes.POINTER(g._GenOut)]
+        assert ns.mtmd_gen_inp_default.restype is g._GenInpV2
+        assert ns.mtmd_helper_gen_audio_set_input.argtypes[1] is ctypes.POINTER(
+            g._HelperInputV3)
+        assert ns.mtmd_helper_gen_audio_next_is_text.restype is ctypes.c_bool
+        assert ns.mtmd_gen_audio_voice_name.restype is ctypes.c_char_p
+
+    @pytest.mark.parametrize("interface", [g.INTERFACE_LEGACY, g.INTERFACE_STATE,
+                                           g.INTERFACE_STATE_V2])
+    def test_the_audio_info_of_an_older_interface_has_no_voice_count(self, interface):
+        ns = g.bind_generation_api(_FakeLib(_exports(interface)))
+        assert ns.mtmd_gen_audio_get_info.restype is g._GenAudioInfo
+
+    def test_the_state_v3_marker_wins_over_the_state_v2_marker(self):
+        exports = _exports(g.INTERFACE_STATE_V2) | _exports(g.INTERFACE_STATE_V3)
+        assert g.bind_generation_api(_FakeLib(exports)).interface == g.INTERFACE_STATE_V3
+
+    def test_a_state_v2_mtmd_without_the_v3_marker_stays_on_the_state_v2_interface(self):
+        exports = _exports(g.INTERFACE_STATE_V3) - {g._STATE_V3_MARKER}
+        ns = g.bind_generation_api(_FakeLib(exports))
+        assert ns.interface == g.INTERFACE_STATE_V2
+        assert ns.helper_input is g._HelperInputV2
+        assert ns.mtmd_gen_audio_get_info.restype is g._GenAudioInfo
+
     def test_the_state_v2_marker_wins_over_the_state_marker(self):
         exports = _exports(g.INTERFACE_STATE) | _exports(g.INTERFACE_STATE_V2)
         assert g.bind_generation_api(_FakeLib(exports)).interface == g.INTERFACE_STATE_V2
@@ -136,6 +172,19 @@ class TestAbiGate:
             "out_mode": 28, "speaker_ref": 32, "lang": 40, "voice": 48, "top_k": 56,
             "top_p": 60, "seed": 64, "out_type": 68}
         assert ctypes.sizeof(g._HelperInputV2) == 72
+        assert _offsets(g._HelperInputV3) == {
+            "stream": 0, "seq_id": 4, "prompt": 8, "prompt_len": 16, "n_past": 24,
+            "out_mode": 28, "speaker_ref": 32, "lang": 40, "top_k": 48,
+            "top_p": 52, "seed": 56, "out_type": 60}
+        assert ctypes.sizeof(g._HelperInputV3) == 64
+
+    def test_the_audio_infos_match_the_c_layouts(self):
+        assert _offsets(g._GenAudioInfo) == {"type": 0, "sample_rate": 4,
+                                             "model_variant": 8}
+        assert ctypes.sizeof(g._GenAudioInfo) == 16
+        assert _offsets(g._GenAudioInfoV3) == {"type": 0, "sample_rate": 4,
+                                               "model_variant": 8, "n_voices": 16}
+        assert ctypes.sizeof(g._GenAudioInfoV3) == 24
 
     def test_the_gen_structs_match_the_c_layouts(self):
         assert _offsets(g._GenInpLegacy) == {
@@ -295,7 +344,7 @@ class _FakeMtmd:
         self.calls.append("bitmap_free")
 
     def mtmd_gen_inp_default(self, ctx):
-        if self.interface == g.INTERFACE_STATE_V2:
+        if self.interface in (g.INTERFACE_STATE_V2, g.INTERFACE_STATE_V3):
             return g._GenInpV2()
         if self.interface == g.INTERFACE_STATE:
             return g._GenInp()
@@ -331,7 +380,8 @@ class _FakeProjector:
         return True
 
 
-@pytest.fixture(params=[g.INTERFACE_STATE, g.INTERFACE_STATE_V2, g.INTERFACE_LEGACY])
+@pytest.fixture(params=[g.INTERFACE_STATE, g.INTERFACE_STATE_V2,
+                        g.INTERFACE_STATE_V3, g.INTERFACE_LEGACY])
 def synth(monkeypatch, request):
     calls = []
     api = g.api
@@ -428,6 +478,16 @@ class TestSynthesisLoop:
         sent = synth._m.inputs[0]
         assert (sent["n_past"], sent["out_mode"], sent["voice"]) == (0, 0, None)
         assert sent["lang"] == b"english" and sent["top_k"] == 40
+
+    def test_the_state_v3_input_asks_for_a_new_sequence_with_the_default_output(
+            self, synth):
+        if synth._m.interface != g.INTERFACE_STATE_V3:
+            pytest.skip("the state_v3 interface only")
+        synth.synthesize("hello", language="en", seed=3)
+        sent = synth._m.inputs[0]
+        assert (sent["n_past"], sent["out_mode"], sent["voice"]) == (0, 0, None)
+        assert sent["lang"] == b"english" and sent["top_k"] == 40
+        assert not hasattr(sent["layout"], "voice")
 
     def test_a_repeated_seed_resets_the_legacy_generator_before_the_request(self, synth):
         if synth._m.interface != g.INTERFACE_LEGACY:

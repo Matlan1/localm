@@ -280,6 +280,8 @@ def register(app: FastAPI, ctx) -> None:
                         detail += (" An installed model that can read images "
                                    "could not be loaded: "
                                    + "; ".join(route.load_errors))
+                    if route.skipped:
+                        detail += f" {route.describe_skipped()}."
                     raise HTTPException(400, detail, headers={_hs.MEDIA_REFUSAL_HEADER: "image",
                                                               **_capability_route_header(route)})
 
@@ -572,7 +574,7 @@ def register(app: FastAPI, ctx) -> None:
             None, functools.partial(
                 _hs.plan_capability_route, req.model, messages,
                 req.required_capabilities, pin_model=req.pin_model,
-                min_context=req.min_context))
+                min_context=req.min_context, autoswitch=req.model_autoswitch))
 
         # An empty model means "no preference" and resolves the same way the None
         # default does. Still a 400 when there is nothing to resolve to.

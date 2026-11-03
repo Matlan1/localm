@@ -203,6 +203,14 @@ export async function refreshCsrf() {
   }
 }
 
+/** Mark *btn* busy (disabled, aria-busy="true") or idle again. No-op without a button. */
+export function setBusy(btn, busy) {
+  if (!btn) return;
+  btn.disabled = !!busy;
+  if (busy) btn.setAttribute("aria-busy", "true");
+  else btn.removeAttribute("aria-busy");
+}
+
 /** Run the async *work* with *btn* disabled and showing *label*; the button's
  *  text and enabled state are restored afterwards, also when *work* throws, and
  *  left alone when the button has left the page. With no button, runs *work*
@@ -369,21 +377,36 @@ marked.setOptions({ breaks: true });
 /** Split leading <think>…</think> reasoning from the visible reply.
  *  Handles a still-open block during streaming. */
 export function splitThink(text) {
-  const m = /<think>([\s\S]*?)(?:<\/think>([\s\S]*)|$)/.exec(text || "");
-  if (!m) return { think: null, open: false, rest: text || "" };
-  const closed = m[2] !== undefined;
-  const before = text.slice(0, m.index);
+  const src = text || "";
+  const m = /<think>([\s\S]*?)(<\/think>|$)/.exec(maskCode(src));
+  if (!m) return { think: null, open: false, rest: src };
+  const closed = m[2] !== "";
+  const end = m.index + m[0].length;
   return {
-    think: m[1].trim(),
+    think: src.slice(m.index + 7, end - m[2].length).trim(),
     open: !closed,
-    rest: before + (closed ? m[2] : ""),
+    rest: src.slice(0, m.index) + src.slice(end),
   };
+}
+
+/** *text* with every fenced block and inline code span overwritten by spaces
+ *  (same length), so a tag inside code is never mistaken for a real one. */
+function maskCode(text) {
+  return text.replace(/(`{3,})[\s\S]*?(?:\1|$)|(`+)[^`\n][\s\S]*?\2(?!`)/g, (m) => " ".repeat(m.length));
 }
 
 /** Reply text with reasoning blocks removed - what gets sent back to the
  *  model on later turns. */
 export function stripThink(text) {
-  return (text || "").replace(/<think>[\s\S]*?(<\/think>|$)/g, "").trim();
+  const src = text || "";
+  const masked = maskCode(src);
+  let out = "";
+  let last = 0;
+  for (const m of masked.matchAll(/<think>[\s\S]*?(<\/think>|$)/g)) {
+    out += src.slice(last, m.index);
+    last = m.index + m[0].length;
+  }
+  return (out + src.slice(last)).trim();
 }
 
 /** Regex source of one tool-call wrapper tag: `<tool_call>`, `</tool_call>`, the
@@ -907,6 +930,9 @@ export function protectMath(text) {
  *
  *  opts.final          this is a SETTLED render (a reload or a post-stream
  *                      rebuild), not a live streaming shell.
+ *  opts.document       the text is a document (changelog, update notes), not a
+ *                      model reply: no reasoning split, marker scrub or
+ *                      tool-call rewriting.
  *  opts.imageScope     which conversation this render belongs to. Remote-image
  *                      consent is remembered per origin WITHIN this string, so
  *                      a caller that renders separate conversations must pass a
@@ -914,8 +940,9 @@ export function protectMath(text) {
  *                      one shared unnamed scope - correct only where there is a
  *                      single stream of content per page session. */
 export function renderMarkdown(target, text, opts = {}) {
-  const { think, open, rest: rawRest } = splitThink(scrubMarkers(text));
-  const rest = formatToolCalls(rawRest);
+  const { think, open, rest } = opts.document
+    ? { think: null, open: false, rest: text || "" }
+    : (({ think, open, rest }) => ({ think, open, rest: formatToolCalls(rest) }))(splitThink(scrubMarkers(text)));
 
   // Think block: update IN PLACE rather than rebuild every token. Recreating the
   // <details> per chunk reset its open/closed state each tick, so the reasoning

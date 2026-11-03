@@ -120,54 +120,27 @@ test("non-error routing is untouched", async () => {
   assert.equal(unauth.status, 401, "a wrong/absent secret still 401s first");
 });
 
-const FIXTURE = join(dirname(fileURLToPath(import.meta.url)),
-  "..", "tests", "fixtures", "bugreport_contract", "automatic_report.md");
-const REPORT_ENV = { GITHUB_TOKEN: "g", TARGET_REPO: "a/b" };
+// A minimal body with every line localm's reporter always writes.
+const SKELETON = [
+  "# localm bug report: it froze", "", "## What I was doing", "chatting", "",
+  "## What happened", "it froze", "", "## App state", "- Model: tiny (loaded)", "",
+  "## Environment", "- localm: 0.3.3", "",
+].join("\n");
 
-// POST a report to the Worker with GitHub stubbed; returns the response, its JSON
-// body, and every request the Worker sent upstream.
-async function postReport(worker, payload) {
-  const realFetch = globalThis.fetch;
-  const upstream = [];
-  globalThis.fetch = async (u, init) => {
-    upstream.push({ url: String(u), body: init && init.body ? JSON.parse(init.body) : null });
-    return new Response(JSON.stringify({ html_url: "https://github.com/a/b/issues/1", number: 1 }),
-      { status: 201, headers: { "Content-Type": "application/json" } });
-  };
+test("with the GitHub App configured, a body localm did not build makes no GitHub call at all", async () => {
+  const worker = await loadWorker();
+  const realLog = console.log;
+  console.log = () => {};
   try {
-    const res = await worker.fetch(new Request("https://proxy.example/", {
+    const request = new Request("https://proxy.example/", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload) }), REPORT_ENV);
-    return { res, body: await res.json(), upstream };
+      body: JSON.stringify({ title: "0", body: "/tmp/pp-fuzz/probe" }) });
+    const { res, upstream } = await callWithApp(worker, request, appEnv(106));
+    assert.equal(res.status, 202);
+    assert.equal(upstream.length, 0, "not even the installation token is requested");
   } finally {
-    globalThis.fetch = realFetch;
+    console.log = realLog;
   }
-}
-
-test("a body without the report's sections is still filed, flagged in the note", async () => {
-  const worker = await loadWorker();
-  for (const payload of [{ title: "%n", body: "%s%s%s" }, { title: "A".repeat(128), body: "name" }]) {
-    const { res, upstream } = await postReport(worker, payload);
-    assert.equal(res.status, 201, "a report is never refused for its shape");
-    assert.equal(upstream.length, 1);
-    const filed = upstream[0].body.body;
-    assert.ok(filed.startsWith("> Submitted by a localm user through the built-in bug reporter."), filed.slice(0, 120));
-    assert.match(filed, /does not have the sections a report built by localm contains/);
-    assert.ok(filed.endsWith(payload.body));
-  }
-});
-
-test("a report built by localm is filed, prefixed with the reporter note", async () => {
-  const worker = await loadWorker();
-  const report = readFileSync(FIXTURE, "utf8");
-  const { res, body, upstream } = await postReport(worker, { title: "localm bug report", body: report });
-  assert.equal(res.status, 201);
-  assert.equal(body.number, 1);
-  assert.equal(upstream.length, 1);
-  const filed = upstream[0].body.body;
-  assert.ok(filed.startsWith("> Submitted by a localm user through the built-in bug reporter."), filed.slice(0, 120));
-  assert.ok(filed.endsWith(report), "the report follows the note unchanged");
-  assert.doesNotMatch(filed, /does not have the sections/, "a real report is not flagged");
 });
 // --- GitHub App identity for the issue routes ---------------------------------
 
@@ -214,7 +187,7 @@ async function callWithApp(worker, request, env, tokenStatus = 201) {
 
 const reportRequest = () => new Request("https://proxy.example/", {
   method: "POST", headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ title: "t", body: "b" }) });
+  body: JSON.stringify({ title: "t", body: SKELETON }) });
 
 function jwtParts(header) {
   const jwt = header.replace(/^Bearer /, "");
