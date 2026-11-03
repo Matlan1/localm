@@ -20,6 +20,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from localm import _apply_update as au
 from localm import _version, updater, updater_components as uc, updater_runtime, uv_tool
 from localm.bugreport import LocalmError
+from localm.media import source_archive
+from tests._source_archives import FakeGitHub
 from localm.media.sdcpp.runtime import platform_key
 from tests._net_config import set_config
 from tests._update_signing import envelope, keyset
@@ -745,9 +747,9 @@ def test_managed_comfy_is_updated_and_rolled_back_with_its_edits_and_venv(
             "--reinstall-requirements"] in calls
     assert stopped, "the managed ComfyUI is stopped before it is replaced"
     assert res["components"]["state"] == "updated", res["components"]
-    assert _git(root, "rev-parse", "HEAD") == new
+    assert source_archive.tree_commit(root) == new
     updater.rollback_last(installed=inst)
-    assert _git(root, "rev-parse", "HEAD") == old
+    assert source_archive.tree_commit(root) == old
     assert (root / "main.py").read_text(encoding="utf-8") == "v1 patched\n"
     marker = json.loads((root / ".localm-comfy.json").read_text(encoding="utf-8"))
     assert marker["comfyui_version"] == "v0.42.1"
@@ -764,7 +766,7 @@ def test_a_failed_comfy_update_puts_it_back_and_rolls_back_the_code(tmp_path, ho
     with pytest.raises(LocalmError):
         updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
                       runner=_comfy_update_child(root, new, site, rc=1))
-    assert _git(root, "rev-parse", "HEAD") == old
+    assert source_archive.tree_commit(root) == old
     assert (root / "main.py").read_text(encoding="utf-8") == "v1 patched\n"
     assert uc.dists(site)["torch"]["version"] == "2.9.1+rocm7.13.0"
     assert _v(inst) == "0.3.1"
@@ -800,31 +802,36 @@ def test_comfy_at_the_pin_still_updates_a_changed_torch_or_custom_node(tmp_path,
 
 
 def test_comfy_update_moves_installed_custom_nodes_to_their_pin(tmp_path, home, monkeypatch):
+    """A custom node an older localm cloned with git is moved to its pin from a
+    source archive, with no git program; the move can be put back."""
     from localm.media import managed_comfy_fresh as f
     from localm.media import managed_comfy_update as upd
-    src = tmp_path / "node-src"
-    src.mkdir()
-    _git(src, "init", "-q")
-    _git(src, "config", "user.email", "t@example.invalid")
-    _git(src, "config", "user.name", "t")
-    (src / "n.py").write_text("1", encoding="utf-8")
-    _git(src, "add", "-A")
-    _git(src, "commit", "-qm", "a")
-    first = _git(src, "rev-parse", "HEAD")
-    (src / "n.py").write_text("2", encoding="utf-8")
-    _git(src, "commit", "-qam", "b")
-    pinned = _git(src, "rev-parse", "HEAD")
+    hub = FakeGitHub(tmp_path / "hub").install(monkeypatch)
+    repo, pinned = hub.add("o", "N", {"n.py": "2"})
     root = tmp_path / "comfy"
-    (root / "custom_nodes").mkdir(parents=True)
-    subprocess.run(["git", "clone", "-q", str(src), str(root / "custom_nodes" / "N")],
-                   check=True)
-    _git(root / "custom_nodes" / "N", "checkout", "-q", first)
-    pin = f.CustomNodePin(name="N", repo=str(src), commit=pinned)
+    node = root / "custom_nodes" / "N"
+    node.mkdir(parents=True)
+    _git(node, "init", "-q")
+    _git(node, "config", "user.email", "t@example.invalid")
+    _git(node, "config", "user.name", "t")
+    (node / "n.py").write_text("1", encoding="utf-8")
+    (node / "old.py").write_text("old", encoding="utf-8")
+    _git(node, "add", "-A")
+    _git(node, "commit", "-qm", "a")
+    first = _git(node, "rev-parse", "HEAD")
+    pin = f.CustomNodePin(name="N", repo=repo, commit=pinned)
     monkeypatch.setattr(f, "required_custom_nodes", lambda: f.RequiredNodes((pin,), ()))
-    assert upd._node_heads(root) == {"N": first}
-    ok, detail = upd._sync_custom_nodes(root, None, lambda m: None)
+    monkeypatch.setattr(upd, "_run", lambda *a, **k: pytest.fail("a program was started"))
+    assert source_archive.tree_commit(node) == first
+    changes = []
+    ok, detail = upd._sync_custom_nodes(root, None, lambda m: None, changes)
     assert ok, detail
-    assert _git(root / "custom_nodes" / "N", "rev-parse", "HEAD") == pinned
+    assert source_archive.tree_commit(node) == pinned
+    assert (node / "n.py").read_text(encoding="utf-8") == "2"
+    assert not (node / "old.py").exists()
+    assert changes[0].rollback() == []
+    assert (node / "n.py").read_text(encoding="utf-8") == "1"
+    assert (node / "old.py").is_file()
 
 
 def test_comfy_update_installs_the_pinned_torch_only_when_it_differs(tmp_path, monkeypatch):

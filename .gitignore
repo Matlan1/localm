@@ -61,6 +61,7 @@ localm-home.cfg
 .localm-uninstall-pending
 .localm-setup-journal
 .localm-setup-tmp/
+.localm-tmp/
 
 # Personal ComfyUI workflows (which models/encoders we use stays private -
 # the committed *.example.json templates use the vanilla public stack)

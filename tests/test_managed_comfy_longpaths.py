@@ -1,49 +1,38 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""A managed-ComfyUI git clone must not fail with Windows' legacy 260-char
+"""A managed-ComfyUI source fetch must not fail with Windows' legacy 260-char
 MAX_PATH limit.
 
-Cloning a custom node under a sufficiently-nested LOCALM_HOME fails with
-"fatal: cannot write keep file '...pack-<sha>.keep': Filename too long" /
-"fatal: fetch-pack: invalid index-pack output" - the destination path plus a
-40-char pack object name pushes it past 260 characters.
-``-c core.longpaths=true`` (a per-invocation override, not a global git config
-change) makes git use the long-path-safe Win32 API internally regardless of the
-OS-level LongPathsEnabled policy.
+A custom node under a sufficiently nested LOCALM_HOME puts some of its files past
+260 characters. The archive is unpacked and applied through extended-length
+paths, so that works whatever the OS-level LongPathsEnabled policy is.
 """
 
 from __future__ import annotations
 
+import os
 
 from localm.media import managed_comfy_fresh as fresh
-from localm.media import managed_comfy_provision as prov
+from localm.media import source_archive
+from tests._source_archives import FakeGitHub
 
 
-def _record_run(monkeypatch, target_module):
-    calls = []
+def test_a_tree_deeper_than_max_path_is_fetched_and_replaced(monkeypatch, tmp_path):
+    deep_rel = "/".join(["a_rather_long_folder_name_for_testing"] * 6) + "/leaf.py"
+    hub = FakeGitHub(tmp_path / "hub").install(monkeypatch)
+    repo, commit = hub.add("o", "Node", {"__init__.py": "x\n", deep_rel: "deep\n"})
+    dest = tmp_path / ("n" * 40) / "custom_nodes" / "Node"
+    assert len(str(dest / deep_rel)) > 260
+    ok, out = fresh._fetch_at_commit(repo, dest, commit, on_progress=None)
+    assert ok, out
+    assert os.path.isfile(source_archive._long(dest / deep_rel))
 
-    def _fake_run(cmd, **kwargs):
-        calls.append(cmd)
-        return True, ""
-
-    monkeypatch.setattr(target_module, "_run", _fake_run)
-    return calls
-
-
-def test_clone_at_commit_uses_longpaths(monkeypatch, tmp_path):
-    calls = _record_run(monkeypatch, fresh)
-    fresh._clone_at_commit("https://example/repo.git", tmp_path / "dest",
-                          "abc123", on_progress=None)
-    clone_call = calls[0]
-    assert clone_call[0] == "git"
-    assert clone_call[1:3] == ["-c", "core.longpaths=true"]
-    assert "clone" in clone_call
-
-
-def test_clone_source_uses_longpaths(monkeypatch, tmp_path):
-    calls = _record_run(monkeypatch, prov)
-    prov._clone_source(tmp_path / "user_workdir", tmp_path / "managed",
-                       "abc123", on_progress=None)
-    clone_call = calls[0]
-    assert clone_call[0] == "git"
-    assert clone_call[1:3] == ["-c", "core.longpaths=true"]
-    assert "clone" in clone_call
+    repo2, commit2 = hub.add("o", "Node", {"__init__.py": "y\n", deep_rel: "deeper\n"})
+    new = tmp_path / ("m" * 40) / "new"
+    source_archive.fetch_tree(repo2, commit2, new)
+    change = source_archive.apply_tree(new, dest, source_archive.tree_files(dest),
+                                       tmp_path / ("b" * 40) / "backup")
+    with open(source_archive._long(dest / deep_rel), encoding="utf-8") as f:
+        assert f.read() == "deeper\n"
+    assert change.rollback() == []
+    with open(source_archive._long(dest / deep_rel), encoding="utf-8") as f:
+        assert f.read() == "deep\n"

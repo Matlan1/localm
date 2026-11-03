@@ -138,13 +138,119 @@ def _read_home_cfg(path: Path) -> str:
     return lines[0].strip() if lines else ""
 
 
+INSTALL_RECORD_NAME = ".localm-install.json"
+_install_record_cache: dict = {}
+_warned_ignored_home: set = set()
+
+
+def install_root() -> Path:
+    """The folder this localm runs from (one level above the package)."""
+    return Path(__file__).resolve().parents[1]
+
+
+def install_record(root: Optional[Path] = None) -> dict:
+    """The install record setup wrote in *root* (default: :func:`install_root`),
+    or ``{}`` when there is none or it cannot be read. Read straight from the
+    file: this runs while ``localm.config`` is still being imported."""
+    path = Path(root if root is not None else install_root()) / INSTALL_RECORD_NAME
+    try:
+        st = path.stat()
+    except OSError:
+        return {}
+    key = (str(path), st.st_mtime_ns, st.st_size)
+    if key not in _install_record_cache:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, RecursionError):
+            data = {}
+        _install_record_cache.clear()
+        _install_record_cache[key] = data if isinstance(data, dict) else {}
+    return _install_record_cache[key]
+
+
+def setup_install(root: Optional[Path] = None) -> bool:
+    """Whether *root* (default: this install) is an install setup made: it holds
+    an install record."""
+    return (Path(root if root is not None else install_root()) / INSTALL_RECORD_NAME).is_file()
+
+
+def portable_install(root: Optional[Path] = None) -> bool:
+    """Whether the install record of *root* (default: this install) says its
+    Python tooling is Portable (``runtime_contained``)."""
+    return bool(install_record(root).get("runtime_contained"))
+
+
+def _account_wide_env_value(name: str) -> Optional[str]:
+    """The value of the environment variable *name* stored for the whole user
+    account or machine (Windows: ``HKCU\\Environment``, then the machine
+    environment), with ``%VAR%`` references expanded; None when it is stored in
+    neither or on another operating system."""
+    if sys.platform != "win32":
+        return None
+    import winreg
+    places = ((winreg.HKEY_CURRENT_USER, r"Environment"),
+              (winreg.HKEY_LOCAL_MACHINE,
+               r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"))
+    for hive, sub in places:
+        try:
+            with winreg.OpenKey(hive, sub) as key:
+                value, kind = winreg.QueryValueEx(key, name)
+        except OSError:
+            continue
+        if isinstance(value, str):
+            return os.path.expandvars(value) if kind == winreg.REG_EXPAND_SZ else value
+    return None
+
+
+def _same_text_path(a: str, b: str) -> bool:
+    return (os.path.normcase(os.path.normpath(os.path.expanduser(a.strip().strip('"'))))
+            == os.path.normcase(os.path.normpath(os.path.expanduser(b.strip().strip('"')))))
+
+
+def _localm_env(name: str) -> Optional[str]:
+    """The stripped value of the localm environment variable *name*, or None
+    when it is unset or empty.
+
+    In a Portable install (:func:`portable_install`) a value equal to the one
+    stored for the whole user account or machine (:func:`_account_wide_env_value`)
+    is ignored, with a warning on stderr. A value set only for this process (a
+    script, a test, one console) is used."""
+    env = os.environ.get(name, "").strip()
+    if not env:
+        return None
+    if portable_install():
+        stored = _account_wide_env_value(name)
+        if stored and _same_text_path(stored, env):
+            if (name, env) not in _warned_ignored_home:
+                _warned_ignored_home.add((name, env))
+                print(f"[localm] {name}={env} is set for this whole user account; "
+                      "this portable install ignores it and keeps its own folders.",
+                      file=sys.stderr)
+            return None
+    return env
+
+
+def home_override() -> Optional[str]:
+    """The ``LOCALM_HOME`` value that chooses the data folder, or None
+    (:func:`_localm_env`)."""
+    return _localm_env("LOCALM_HOME")
+
+
+def portable_containment() -> bool:
+    """Whether this process keeps everything inside a Portable install: the
+    install record says Portable and no ``LOCALM_HOME`` set for this process
+    points the data folder elsewhere (:func:`home_override`)."""
+    return portable_install() and home_override() is None
+
+
 def _detect_home() -> Path:
     """
     Resolve the localm data directory (config, registry, models, logs,
     sessions, generated images/music).
 
     Priority - each install is self-contained and agnostic of others:
-      1. LOCALM_HOME env var (explicit override / custom install location)
+      1. LOCALM_HOME env var (explicit override / custom install location),
+         as :func:`home_override` decides it
       2. Portable mode: a checkout carrying its own data - when this package
          sits in a source tree (pyproject.toml next to it) that contains a
          ``localm-home.cfg`` (one line: the data path) or a ``home``
@@ -156,7 +262,7 @@ def _detect_home() -> Path:
          so it is surfaced, and it NEVER silently falls back to a shared
          ~/.localm outside the install.
     """
-    env = os.environ.get("LOCALM_HOME", "").strip()
+    env = home_override()
     if env:
         return Path(env).expanduser()
 
@@ -248,8 +354,10 @@ def contained_pip_env(base: Optional[dict] = None) -> dict:
     ``UV_CACHE_DIR`` are set here - pinning only one still leaks via the other. Both
     OVERRIDE any ambient value (see ``cache_dir()``). Callers pass the returned dict
     as ``subprocess``'s ``env=``; a subprocess that runs neither tool simply ignores
-    the two extra vars."""
-    env = dict(os.environ if base is None else base)
+    the two extra vars. The rest of the environment is :func:`isolated_tool_env`
+    of *base*, so no inherited uv, pip or Python setting and no uv or pip
+    configuration file applies."""
+    env = isolated_tool_env(base)
     env["PIP_CACHE_DIR"] = str(pip_cache_dir())
     env["UV_CACHE_DIR"] = str(uv_cache_dir())
     return env
@@ -297,27 +405,46 @@ def hf_cache_user_placement(base: Optional[dict] = None) -> dict:
     return out
 
 
-def contained_hf_env(base: Optional[dict] = None) -> dict:
+_HF_TOKEN_PIN_MARKER = "LOCALM_PINNED_HF_TOKEN_PATH"
+
+
+def contained_hf_env(base: Optional[dict] = None, *,
+                     portable: Optional[bool] = None) -> dict:
     """An environment with ``HF_HOME`` pinned inside the data dir.
 
-    *base* defaults to a copy of the current process environment. ``HF_HOME``
-    moves the xet cache and logs, the hub cache and every other Hugging Face
-    cache that localm's downloads write; ``HF_HUB_CACHE`` / ``HF_XET_CACHE``
-    follow it unless set separately. A location the user set (``HF_HOME`` other
-    than localm's own earlier pin) is left exactly as set, as are an explicit
-    ``HF_HUB_CACHE`` / ``HF_XET_CACHE``.
+    *base* defaults to a copy of the current process environment; *portable*
+    defaults to :func:`portable_containment`. ``HF_HOME`` moves the xet cache
+    and logs, the hub cache and every other Hugging Face cache that localm's
+    downloads write; ``HF_HUB_CACHE`` / ``HF_XET_CACHE`` follow it unless set
+    separately.
 
-    When localm pins ``HF_HOME``, ``HF_TOKEN_PATH`` is pinned to where the saved
-    Hugging Face login lives by default (unless the user set it), so a
-    ``huggingface-cli login`` made outside localm keeps authenticating
-    downloads. The login is read from there and never moved or copied."""
+    Not *portable*: a location the user set (``HF_HOME`` other than localm's own
+    earlier pin) is left exactly as set, as are an explicit ``HF_HUB_CACHE`` /
+    ``HF_XET_CACHE``. When localm pins ``HF_HOME``, ``HF_TOKEN_PATH`` is pinned
+    to where the saved Hugging Face login lives by default (unless the user set
+    it), so a ``huggingface-cli login`` made outside localm keeps authenticating
+    downloads. The login is read from there and never moved or copied.
+
+    *portable*: ``HF_HOME`` is pinned whatever the user set, every other cache
+    placement variable (``hf_cache_user_placement``) is removed so it follows
+    ``HF_HOME``, and ``HF_TOKEN_PATH`` is pinned to ``<HF_HOME>/token``."""
     env = dict(os.environ if base is None else base)
-    pinned = env.get(_HF_PIN_MARKER)
-    if env.get("HF_HOME") not in (None, pinned):
-        return env
-    if "HF_TOKEN_PATH" not in env:
-        env["HF_TOKEN_PATH"] = _default_hf_token_path(env)
+    if portable is None:
+        portable = portable_containment()
     home = os.path.abspath(str(hf_home_dir()))
+    if portable:
+        for var in _HF_USER_PLACEMENT_VARS:
+            env.pop(var, None)
+        token = os.path.join(home, "token")
+        env["HF_TOKEN_PATH"] = token
+        env[_HF_TOKEN_PIN_MARKER] = token
+    else:
+        pinned = env.get(_HF_PIN_MARKER)
+        if env.get("HF_HOME") not in (None, pinned):
+            return env
+        if env.get("HF_TOKEN_PATH") in (None, env.get(_HF_TOKEN_PIN_MARKER)):
+            env.pop(_HF_TOKEN_PIN_MARKER, None)
+            env["HF_TOKEN_PATH"] = _default_hf_token_path(env)
     env["HF_HOME"] = home
     env[_HF_PIN_MARKER] = home
     return env
@@ -330,8 +457,11 @@ def contain_hf_cache() -> None:
     huggingface_hub reads ``HF_HOME`` once, when it is first imported, so this
     runs when ``localm.config`` is imported, ahead of any localm import of it."""
     env = contained_hf_env()
-    for key in ("HF_HOME", "HF_TOKEN_PATH", _HF_PIN_MARKER):
-        if key in env and os.environ.get(key) != env[key]:
+    for key in _HF_USER_PLACEMENT_VARS + ("HF_TOKEN_PATH", _HF_PIN_MARKER,
+                                          _HF_TOKEN_PIN_MARKER):
+        if key not in env:
+            os.environ.pop(key, None)
+        elif os.environ.get(key) != env[key]:
             os.environ[key] = env[key]
     pinned = os.environ.get(_HF_PIN_MARKER)
     if pinned and os.environ.get("HF_HOME") == pinned:
@@ -354,6 +484,20 @@ _GPU_CACHE_PINS = (
     ("CUDA_CACHE_PATH", "cuda"),
     ("TORCH_EXTENSIONS_DIR", "torch_extensions"),
 )
+
+# Library and tool caches that default to the user profile, as (env var,
+# subfolder of cache_dir()), pinned the same way as _GPU_CACHE_PINS.
+_TOOL_CACHE_PINS = (
+    ("TORCH_HOME", "torch"),
+    ("TORCHINDUCTOR_CACHE_DIR", "torchinductor"),
+    ("PYTORCH_KERNEL_CACHE_PATH", "torch/kernels"),
+    ("TRITON_CACHE_DIR", "triton"),
+    ("MPLCONFIGDIR", "matplotlib"),
+    ("NUMBA_CACHE_DIR", "numba"),
+    ("XDG_CACHE_HOME", "xdg"),
+    ("PLAYWRIGHT_BROWSERS_PATH", "ms-playwright"),
+)
+_CACHE_PINS = _GPU_CACHE_PINS + _TOOL_CACHE_PINS
 
 
 def _gpu_pin_marker(var: str) -> str:
@@ -378,16 +522,33 @@ def gpu_cache_dirs() -> dict:
     return {var: cache_dir().joinpath(*sub.split("/")) for var, sub in _GPU_CACHE_PINS}
 
 
-def contained_gpu_cache_env(base: Optional[dict] = None) -> dict:
-    """An environment with the GPU driver cache variables pinned inside the data dir.
+def tool_cache_dirs() -> dict:
+    """localm's OWN library and tool caches, ``{env var: path}``, inside the data
+    dir: PyTorch's hub checkpoints (``TORCH_HOME``), its compiled kernels
+    (``TORCHINDUCTOR_CACHE_DIR``, ``PYTORCH_KERNEL_CACHE_PATH``), Triton's kernel
+    cache, matplotlib's config and font cache, Numba's cache, the XDG cache root
+    and the browsers playwright downloads. Each defaults to a folder in the user
+    profile when its variable is unset."""
+    return {var: cache_dir().joinpath(*sub.split("/")) for var, sub in _TOOL_CACHE_PINS}
 
-    *base* defaults to a copy of the current process environment. A variable the user
+
+def contained_gpu_cache_env(base: Optional[dict] = None, *,
+                            portable: Optional[bool] = None) -> dict:
+    """An environment with the GPU driver cache variables (:func:`gpu_cache_dirs`)
+    and the library and tool cache variables (:func:`tool_cache_dirs`) pinned
+    inside the data dir.
+
+    *base* defaults to a copy of the current process environment; *portable*
+    defaults to :func:`portable_containment`. Not *portable*, a variable the user
     set (other than localm's own earlier pin of it) is left exactly as set;
-    ``AMD_COMGR_CACHE`` (the on/off switch) is never touched."""
+    *portable*, every variable is pinned. ``AMD_COMGR_CACHE`` (the on/off switch)
+    is never touched."""
     env = dict(os.environ if base is None else base)
-    for var, path in gpu_cache_dirs().items():
+    if portable is None:
+        portable = portable_containment()
+    for var, path in {**gpu_cache_dirs(), **tool_cache_dirs()}.items():
         marker = _gpu_pin_marker(var)
-        if env.get(var) not in (None, env.get(marker)):
+        if not portable and env.get(var) not in (None, env.get(marker)):
             continue
         value = os.path.abspath(str(path))
         env[var] = value
@@ -399,7 +560,7 @@ def contain_gpu_caches() -> None:
     """Apply ``contained_gpu_cache_env`` to THIS process, so in-process HIP use (the
     llama.cpp ROCm runtime) and every child process (the torch ROCm worker) inherit it."""
     env = contained_gpu_cache_env()
-    for var, _ in _GPU_CACHE_PINS:
+    for var, _ in _CACHE_PINS:
         for key in (var, _gpu_pin_marker(var)):
             if key in env and os.environ.get(key) != env[key]:
                 os.environ[key] = env[key]
@@ -409,26 +570,93 @@ def user_command_env(base: Optional[dict] = None) -> dict:
     """*base* (default: a copy of the process environment) without the cache
     locations localm pinned for itself, for a command the USER asked to run.
 
-    Drops ``HF_HOME`` and ``HF_TOKEN_PATH`` when localm set them (``HF_HOME``
-    equal to the pin marker, ``HF_TOKEN_PATH`` equal to the default login
-    location localm pinned it to), each GPU cache variable equal to its pin
-    marker, and the markers. A value the user set is left exactly as set, so a
-    command sees the caches and login it would see outside localm."""
+    Drops each cache variable equal to its pin marker, ``HF_HOME`` when localm
+    set it (equal to its pin marker), ``HF_TOKEN_PATH`` when it is the login
+    location localm pinned (its pin marker, or the default login location), and
+    the markers. A value the user set is left exactly as set, so a command sees
+    the caches and login it would see outside localm. When
+    :func:`isolate_tool_env` ran, the variables it set are dropped where they
+    still hold its value, and the values it removed are put back where *base*
+    does not set them."""
     env = dict(os.environ if base is None else base)
+    if _tool_env_isolated:
+        for key, value in tool_env_settings().items():
+            if env.get(key) == value:
+                del env[key]
+        for key, value in _dropped_tool_env.items():
+            env.setdefault(key, value)
+    for var, _ in _CACHE_PINS:
+        pin = env.pop(_gpu_pin_marker(var), None)
+        if pin is not None and env.get(var) == pin:
+            del env[var]
+    token_pin = env.pop(_HF_TOKEN_PIN_MARKER, None)
+    if token_pin is not None and env.get("HF_TOKEN_PATH") == token_pin:
+        del env["HF_TOKEN_PATH"]
     hf_pin = env.pop(_HF_PIN_MARKER, None)
     if hf_pin is not None and env.get("HF_HOME") == hf_pin:
         del env["HF_HOME"]
         if env.get("HF_TOKEN_PATH") == _default_hf_token_path(env):
             del env["HF_TOKEN_PATH"]
-    for var, _ in _GPU_CACHE_PINS:
-        pin = env.pop(_gpu_pin_marker(var), None)
-        if pin is not None and env.get(var) == pin:
-            del env[var]
     return env
 
 
 TEMP_DIR_ENV = "LOCALM_TMPDIR"
 TEMP_LOCATION_KEY = "temp_location"
+PORTABLE_TEMP_NAME = ".localm-tmp"
+
+# Inherited variables that make Python, pip or uv load code or configuration
+# from outside the install: removed for child processes by isolate_tool_env.
+_TOOL_ENV_DROP_PREFIXES = ("UV_", "PIP_")
+_TOOL_ENV_DROP = ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONUSERBASE",
+                  "VIRTUAL_ENV", "CONDA_PREFIX")
+_dropped_tool_env: dict = {}
+_tool_env_isolated = False
+
+
+def tool_env_settings() -> dict:
+    """The variables :func:`isolated_tool_env` sets: uv reads no configuration
+    file, pip reads none (``PIP_CONFIG_FILE`` is the null device), Python adds no
+    user site folder, uv trusts the system certificate store as setup does, and
+    uv keeps its credentials store (``UV_CREDENTIALS_DIR``, default
+    ``%APPDATA%\\uv\\credentials`` / ``~/.local/share/uv/credentials``) and the
+    Python executables it installs (``UV_PYTHON_BIN_DIR``, default
+    ``~/.local/bin``) under :func:`cache_dir`."""
+    return {"UV_NO_CONFIG": "1", "PIP_CONFIG_FILE": os.devnull, "PYTHONNOUSERSITE": "1",
+            "UV_SYSTEM_CERTS": "1",
+            "UV_CREDENTIALS_DIR": os.path.abspath(str(cache_dir() / "uv-credentials")),
+            "UV_PYTHON_BIN_DIR": os.path.abspath(str(cache_dir() / "uv-python-bin"))}
+
+
+def _dropped_by_isolation(name: str) -> bool:
+    upper = name.upper()
+    return upper.startswith(_TOOL_ENV_DROP_PREFIXES) or upper in _TOOL_ENV_DROP
+
+
+def isolated_tool_env(base: Optional[dict] = None) -> dict:
+    """*base* (default: a copy of the process environment) without any ``UV_*``
+    or ``PIP_*`` variable, ``PYTHONPATH``, ``PYTHONHOME``, ``PYTHONSTARTUP``,
+    ``PYTHONUSERBASE``, ``VIRTUAL_ENV`` or ``CONDA_PREFIX``, and with
+    :func:`tool_env_settings` set."""
+    env = {k: v for k, v in dict(os.environ if base is None else base).items()
+           if not _dropped_by_isolation(k)}
+    env.update(tool_env_settings())
+    return env
+
+
+def isolate_tool_env() -> None:
+    """Apply :func:`isolated_tool_env` to THIS process's environment, so every
+    child process inherits it, in an install setup made (:func:`setup_install`).
+    Does nothing in a source checkout without an install record. The removed
+    values are kept for :func:`user_command_env`. Runs when ``localm.config`` is
+    imported."""
+    global _tool_env_isolated
+    if not setup_install():
+        return
+    for key in [k for k in os.environ if _dropped_by_isolation(k)]:
+        _dropped_tool_env.setdefault(key, os.environ.pop(key))
+    for key, value in tool_env_settings().items():
+        os.environ[key] = value
+    _tool_env_isolated = True
 
 
 def _is_portable_home(home: Path) -> bool:
@@ -473,11 +701,15 @@ def temp_dir(home: Optional[Path] = None, warn: bool = True) -> Optional[Path]:
     setting (``data`` = ``<data dir>/tmp``, ``system`` = the system temp folder, or
     an absolute folder path); then ``auto`` (the default), which keeps temp files
     in ``<data dir>/tmp`` for a self-contained checkout and leaves the system temp
-    folder for any other install. A ``temp_location`` that is neither of those words
-    nor an absolute path is reported on stderr (unless *warn* is False) and treated as
-    ``auto``."""
+    folder for any other install. In a Portable install
+    (:func:`portable_containment`) ``auto`` keeps temp files inside the install:
+    ``<data dir>/tmp`` when the data folder is inside it, else
+    ``<install>/.localm-tmp`` (:data:`PORTABLE_TEMP_NAME`). ``LOCALM_TMPDIR`` is
+    read through :func:`_localm_env`. A ``temp_location`` that is neither of those
+    words nor an absolute path is reported on stderr (unless *warn* is False) and
+    treated as ``auto``."""
     home = Path(home) if home is not None else home_dir()
-    override = os.environ.get(TEMP_DIR_ENV, "").strip()
+    override = _localm_env(TEMP_DIR_ENV)
     if override:
         folder = _absolute_folder(override)
         if folder is not None:
@@ -498,6 +730,13 @@ def temp_dir(home: Optional[Path] = None, warn: bool = True) -> Optional[Path]:
             print(f"[localm] WARNING: temp_location {choice!r} in config.json is not "
                   "'auto', 'data', 'system' or an absolute folder; using 'auto'.",
                   file=sys.stderr)
+    if portable_containment():
+        root = install_root()
+        try:
+            Path(home).resolve().relative_to(root)
+        except (OSError, ValueError):
+            return root / PORTABLE_TEMP_NAME
+        return home / "tmp"
     return home / "tmp" if _is_portable_home(home) else None
 
 
@@ -537,6 +776,7 @@ HOME_DIR = _detect_home()
 MODELS_DIR = HOME_DIR / "models"
 REGISTRY_FILE = HOME_DIR / "registry.json"
 CONFIG_FILE = HOME_DIR / "config.json"
+isolate_tool_env()
 contain_hf_cache()
 contain_gpu_caches()
 contain_temp_dir()
@@ -1326,6 +1566,21 @@ def _perm_warn(path: Path, why: str) -> None:
         pass
 
 
+def windows_system_program(name: str) -> Optional[str]:
+    """Full path of *name* in the Windows system folder (``System32``, as
+    ``GetSystemDirectoryW`` reports it), or None when it is not there or this is
+    not Windows. PATH is never searched."""
+    if sys.platform != "win32":
+        return None
+    import ctypes
+    buf = ctypes.create_unicode_buffer(520)
+    n = ctypes.windll.kernel32.GetSystemDirectoryW(buf, len(buf))
+    if not 0 < n < len(buf):
+        return None
+    path = os.path.join(buf.value, name)
+    return path if os.path.isfile(path) else None
+
+
 def restrict_file_perms(path: Path, *, mode: int = 0o600) -> bool:
     """Best-effort: restrict *path* to the current user (POSIX chmod *mode*, or
     Windows icacls - which grants sole full control regardless of *mode*, since
@@ -1359,12 +1614,17 @@ def restrict_file_perms(path: Path, *, mode: int = 0o600) -> bool:
             if not user:
                 _perm_warn(path, "no USERNAME/USER in the environment")
                 return False
+            icacls = windows_system_program("icacls.exe")
+            if icacls is None:
+                _perm_warn(path, "icacls.exe was not found in the Windows system folder")
+                return False
             # /inheritance:r drops the inherited ACEs (BUILTIN\Users et al) and
             # /grant:r replaces any existing grant for this user, so the result
             # is an explicit, sole full-control ACE.
             r = subprocess.run(
-                ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:F"],
-                capture_output=True, check=False)
+                [icacls, str(path), "/inheritance:r", "/grant:r", f"{user}:F"],
+                capture_output=True, check=False, stdin=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             if r.returncode != 0:
                 # icacls FAILS without raising (access denied, an unresolvable
                 # principal, a non-NTFS volume), so a non-zero exit is reported

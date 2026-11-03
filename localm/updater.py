@@ -1504,20 +1504,31 @@ def _record_contained_uv(target: Path, installed) -> None:
 
 
 def _deps_env(target: Path) -> dict:
-    """The environment for the dependency step: the current one, with uv's cache
-    and Python folders pointed at the install's own when it recorded them as
-    contained and the caller has not set them."""
-    import os
-    env = dict(os.environ)
+    """The environment for the dependency step: the current one without
+    inherited uv, pip and Python search settings (``config.isolated_tool_env``),
+    with uv's cache and Python folders pointed at the install's own store.
+
+    A Portable install (``runtime_contained``) uses its own ``.cache`` and
+    ``.python`` (the recorded folders when they lie inside *target*); any other
+    install uses the folders its record names. uv then uses only its managed
+    Pythons (``UV_PYTHON_PREFERENCE=only-managed``) when a Python folder is set."""
+    from localm import config
+    env = config.isolated_tool_env()
     try:
         from localm import install_manifest
         m = install_manifest.load(target) or {}
     except Exception:
         m = {}
-    if m.get("runtime_contained"):
-        for var, key in (("UV_CACHE_DIR", "cache_dir"), ("UV_PYTHON_INSTALL_DIR", "python_dir")):
-            if m.get(key) and var not in env:
-                env[var] = str(m[key])
+    for var, key in (("UV_CACHE_DIR", "cache_dir"), ("UV_PYTHON_INSTALL_DIR", "python_dir")):
+        value = str(m.get(key) or "")
+        if m.get("runtime_contained"):
+            own = target / install_manifest.RUNTIME_DIRS[key]
+            if not value or not install_manifest._inside(value, target):
+                value = str(own)
+        if value:
+            env[var] = value
+    if env.get("UV_PYTHON_INSTALL_DIR"):
+        env["UV_PYTHON_PREFERENCE"] = "only-managed"
     return env
 
 

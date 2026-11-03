@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Finding, and if need be installing, the uv an install runs.
 
-An install uses one of three uv setups: a contained copy in ``<root>/.uv``, the
-user's own uv somewhere else, or none at all (uv was only ever needed by setup).
-The updater's dependency step and the graphical installer both need the uv the
-install actually uses, so the lookup lives here once.
+An install runs only a uv localm brought: a contained copy in ``<root>/.uv``
+(Portable) or the copy in localm's Shared store (:func:`shared_store_dir`) its
+install record names. A uv on PATH or in the user profile is never used. The
+updater's dependency step, plugin installs and the graphical installer all need
+the uv the install actually uses, so the lookup lives here once.
 
 Stdlib only: ``installer/gui.py`` imports this module before any virtual
 environment exists.
@@ -46,48 +47,59 @@ def usable(path) -> bool:
     return p.is_file() and (IS_WINDOWS or os.access(p, os.X_OK))
 
 
-def _recorded(root: Path) -> tuple[Optional[Path], Optional[Path]]:
-    """(contained uv, shared uv) as the install record names them. A recorded
-    contained folder outside *root* (the install was copied or moved) is ignored."""
+def shared_store_dir() -> Path:
+    """The folder a Shared install keeps localm's own uv, managed Python and
+    download cache in, one for every Shared localm install of this user:
+    ``%LOCALAPPDATA%\\localm\\shared`` on Windows,
+    ``${XDG_DATA_HOME:-~/.local/share}/localm/shared`` elsewhere."""
+    if IS_WINDOWS:
+        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+    else:
+        base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+    return Path(base) / "localm" / "shared"
+
+
+def _recorded(root: Path) -> tuple[Optional[Path], list[Path]]:
+    """(contained uv folder, shared store uvs) as the install record names them.
+    A recorded contained folder outside *root* (the install was copied or moved)
+    is ignored, and so is a recorded uv outside :func:`shared_store_dir`."""
     try:
         from localm import install_manifest
         m = install_manifest.load(root) or {}
     except Exception:
-        return None, None
+        return None, []
     contained = None
-    if m.get("uv_dir") and is_inside(m["uv_dir"], root):
-        contained = Path(str(m["uv_dir"])) / UV_NAME
-    shared = Path(str(m["uv_exe"])) if m.get("uv_exe") else None
-    return contained, shared
+    store = []
+    store_dir = shared_store_dir()
+    if m.get("uv_dir"):
+        if is_inside(m["uv_dir"], root):
+            contained = Path(str(m["uv_dir"]))
+        elif is_inside(m["uv_dir"], store_dir):
+            store += [Path(str(m["uv_dir"])) / UV_NAME, Path(str(m["uv_dir"])) / "bin" / UV_NAME]
+    if m.get("uv_exe") and is_inside(m["uv_exe"], store_dir):
+        store.insert(0, Path(str(m["uv_exe"])))
+    return contained, store
 
 
-def search_places(root) -> tuple[list[Path], list[Path]]:
-    """The places a uv is looked for, as (before PATH, after PATH). PATH itself
-    is searched between the two lists. A contained copy in the folder comes
-    first, then the shared uv the install record names."""
+def search_places(root) -> list[Path]:
+    """The places a uv is looked for, in order: the uv folder the install record
+    names inside *root*, ``<root>/.uv`` (and its ``bin``), then the uv in the
+    Shared store (:func:`shared_store_dir`) the install record names. PATH and
+    the user profile are never searched."""
     root = Path(root)
-    home = Path.home()
-    contained, shared = _recorded(root)
-    before = [p for p in (contained,) if p]
-    before += [root / CONTAINED_DIR / UV_NAME, root / CONTAINED_DIR / "bin" / UV_NAME]
-    before += [p for p in (shared,) if p]
-    return before, [home / ".local" / "bin" / UV_NAME, home / ".cargo" / "bin" / UV_NAME]
+    contained, store = _recorded(root)
+    places = []
+    if contained is not None:
+        places += [contained / UV_NAME, contained / "bin" / UV_NAME]
+    places += [root / CONTAINED_DIR / UV_NAME, root / CONTAINED_DIR / "bin" / UV_NAME]
+    places += store
+    return list(dict.fromkeys(places))
 
 
 def find_uv(root) -> Optional[str]:
-    """Full path of the uv this install runs, or None.
-
-    Order: the contained ``.uv`` copy, the shared uv the install record names, a
-    uv on PATH, then Astral's default install directories (a shell started
-    before the installer ran does not have those on PATH yet)."""
-    before, after = search_places(root)
-    for candidate in before:
-        if usable(candidate):
-            return str(candidate)
-    on_path = shutil.which("uv")
-    if on_path:
-        return on_path
-    for candidate in after:
+    """Full path of the uv this install runs (the first usable entry of
+    :func:`search_places`), or None."""
+    for candidate in search_places(root):
         if usable(candidate):
             return str(candidate)
     return None
@@ -95,9 +107,7 @@ def find_uv(root) -> Optional[str]:
 
 def describe_search(root) -> str:
     """What find_uv looked at, for an error message."""
-    before, after = search_places(root)
-    places = [str(p) for p in before] + ["every folder on PATH"] + [str(p) for p in after]
-    return "; ".join(places)
+    return "; ".join(str(p) for p in search_places(root))
 
 
 def _uv_in(folder) -> Optional[Path]:
@@ -242,3 +252,59 @@ def bootstrap_uv(root, *, download: Optional[Callable[[str, Path], None]] = None
     if found is None:
         raise UvBootstrapError(f"the uv installer finished but no {UV_NAME} appeared in {target}")
     return found
+
+
+def bootstrap_dest(root) -> Path:
+    """Where :func:`ensure_uv` installs the pinned uv for the install at *root*:
+    ``<root>/.uv`` for a Portable install (or one with no install record), the
+    ``uv`` folder of :func:`shared_store_dir` for a Shared one."""
+    try:
+        from localm import install_manifest
+        m = install_manifest.load(root)
+    except Exception:
+        m = None
+    if m is not None and not m.get("runtime_contained"):
+        return shared_store_dir() / "uv"
+    return Path(root) / CONTAINED_DIR
+
+
+def ensure_uv(root, *, emit: Callable[[str], None] = lambda s: None) -> str:
+    """Full path of the uv the install at *root* runs (:func:`find_uv`); when
+    there is none, installs the pinned uv into :func:`bootstrap_dest`, notes it in
+    the install record, and returns it. Raises UvBootstrapError when the install
+    fails."""
+    found = find_uv(root)
+    if found:
+        return found
+    dest = bootstrap_dest(root)
+    installed = bootstrap_uv(root, emit=emit, dest=dest)
+    try:
+        from localm import install_manifest
+        if install_manifest.load(root) is not None:
+            if is_inside(dest, root):
+                install_manifest.record(root, uv_dir=str(installed.parent))
+            else:
+                install_manifest.record(root, uv_exe=str(installed))
+    except (OSError, ValueError) as e:
+        emit(f"installed uv into {installed.parent} but could not note it in the install "
+             f"record: {e}")
+    return str(installed)
+
+
+def uv_for_installs(root, *, emit: Callable[[str], None] = lambda s: None) -> Optional[str]:
+    """The uv localm's own package installs run for the install at *root*: in an
+    install setup made (it has an install record), :func:`ensure_uv`; elsewhere
+    (a source checkout), :func:`find_uv`. None, with the reason passed to *emit*,
+    when there is none."""
+    try:
+        from localm import install_manifest
+        made_by_setup = install_manifest.load(root) is not None
+    except Exception:
+        made_by_setup = False
+    if not made_by_setup:
+        return find_uv(root)
+    try:
+        return ensure_uv(root, emit=emit)
+    except UvBootstrapError as e:
+        emit(f"uv could not be installed: {e}")
+        return None

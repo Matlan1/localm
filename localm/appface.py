@@ -272,9 +272,14 @@ def _window_start_kwargs() -> dict:
     """The webview.start() arguments that decide where the app window keeps its
     profile: a folder in the data folder on Windows and Linux, private mode when
     that folder cannot be used. pywebview's macOS backend has no storage path
-    option, so there the window keeps pywebview's own default store."""
+    option, so there the window keeps pywebview's own default store, except in a
+    Portable install (``config.portable_containment``), where it runs in private
+    mode."""
+    from localm import config
     kwargs = {"icon": icon_path(), "private_mode": False}
-    if sys.platform != "darwin":
+    if sys.platform == "darwin" and config.portable_containment():
+        kwargs["private_mode"] = True
+    elif sys.platform != "darwin":
         profile = _window_profile_dir()
         if profile is None:
             kwargs["private_mode"] = True

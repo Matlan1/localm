@@ -270,6 +270,11 @@ def test_run_pip_never_runs_a_bare_uv_when_none_is_found(monkeypatch):
     calls, lines = [], []
     monkeypatch.setattr(deps.uv_tool, "find_uv", lambda root: None)
 
+    def no_bootstrap(*a, **k):
+        raise deps.uv_tool.UvBootstrapError("offline in this test")
+
+    monkeypatch.setattr(deps.uv_tool, "bootstrap_uv", no_bootstrap)
+
     def fake_popen(cmd, **kw):
         calls.append(cmd)
         return _FakeProc(["installed x\n"], 0)

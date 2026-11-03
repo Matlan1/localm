@@ -255,5 +255,10 @@ def test_runtime_wheel_install_runs_the_found_uv_by_path_and_never_a_bare_one(mo
 
     seen.clear()
     monkeypatch.setattr(setup_llama.runtime_dir.uv_tool, "find_uv", lambda root: None)
+
+    def no_bootstrap(*a, **k):
+        raise setup_llama.runtime_dir.uv_tool.UvBootstrapError("offline in this test")
+
+    monkeypatch.setattr(setup_llama.runtime_dir.uv_tool, "bootstrap_uv", no_bootstrap)
     assert setup_llama._install_runtime_wheel(Path("some/pkg/dir")) is True
     assert seen[0][:3] == [sys.executable, "-m", "pip"] and len(seen) == 1

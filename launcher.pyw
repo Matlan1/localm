@@ -27,13 +27,14 @@ REPO_DIR = Path(__file__).resolve().parent
 
 def _settings_file() -> Path:
     """Launcher settings live in the localm data dir (LOCALM_HOME / portable
-    home/ folder / ~/.localm) so each checkout stays self-contained."""
+    home/ folder), or in ``home/`` inside this folder when ``localm.config``
+    cannot be imported, so each checkout stays self-contained."""
     try:
         sys.path.insert(0, str(REPO_DIR))
         from localm.config import HOME_DIR
         return HOME_DIR / "launcher.json"
     except Exception:
-        return Path.home() / ".localm" / "launcher.json"
+        return REPO_DIR / "home" / "launcher.json"
 
 
 SETTINGS_FILE = _settings_file()

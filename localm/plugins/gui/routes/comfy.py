@@ -106,15 +106,15 @@ def register(app: FastAPI, ctx) -> None:
         """The update-availability half of the status, so the GUI can offer Update
         only when there is something to update TO and can say WHY when it cannot.
 
-        CHEAP and side-effect-free: it reads the provisioning marker and tests for
-        a `.git` dir. It does NOT shell out to git; this runs on the event loop on
-        every settings-page poll.
+        CHEAP and side-effect-free: it reads the provisioning marker and the source
+        tree's recorded commit (``source_archive.tree_commit``: a few small files).
+        It starts no process; this runs on the event loop on every settings-page
+        poll.
 
         ``updatable`` is an ADVISORY pre-flight, not the gate. The authoritative
-        refusal lives in update_managed_comfy(), which resolves HEAD with real git
+        refusal lives in update_managed_comfy(), which resolves the same commit
         and returns its own message; this only lets the GUI say so BEFORE the user
-        starts a job that would fail minutes later. A `.git` dir present but
-        unusable still reaches that real check unchanged."""
+        starts a job that would fail minutes later."""
         from localm.media.managed_comfy_fresh import (COMFYUI_PINNED_COMMIT,
                                                       COMFYUI_PINNED_VERSION)
         from localm.media.managed_comfy_provision import MARKER_FILENAME
@@ -132,7 +132,8 @@ def register(app: FastAPI, ctx) -> None:
             # "up to date", which would hide a genuinely available update.
             pass
 
-        updatable = (root / ".git").exists()
+        from localm.media import source_archive
+        updatable = source_archive.tree_commit(root) is not None
         return {
             "pinned_commit": COMFYUI_PINNED_COMMIT,
             "pinned_version": COMFYUI_PINNED_VERSION,
@@ -145,7 +146,7 @@ def register(app: FastAPI, ctx) -> None:
             "updatable": updatable,
             "update_blocked_reason": (
                 "" if updatable else
-                "This managed ComfyUI has no git history (it was installed via the "
+                "This managed ComfyUI has no recorded source commit (it was installed via the "
                 "non-git copy fallback), so a pinned-version update is not possible. "
                 "Remove it and set it up again to move to the version localm ships."),
         }
@@ -235,19 +236,19 @@ def register(app: FastAPI, ctx) -> None:
 
         ``reinstall_requirements`` forwards `--reinstall-requirements`. Off by
         default, matching the CLI: a partial pip upgrade is not reliably
-        rollback-able, so only the git source rollback is guaranteed. It is
+        rollback-able, so only the source rollback is guaranteed. It is
         reachable from here because a pin that advances across a dependency change
         otherwise leaves a checkout that moved without its new deps.
 
         ``commit`` forwards `--commit <sha>`, the CLI's own "advanced: update to a
         specific ComfyUI commit instead of the shipped pin" testing knob
         (localm/cli/comfy.py). Not validated here: update_managed_comfy() resolves
-        and checks out whatever it is given and reports a bad ref through the job's
+        and fetches whatever it is given and reports a bad commit through the job's
         own output.
 
         Refuses (409) when nothing is installed, when an update is already running, or
         while a setup/repair job is still in flight - never two writers on one checkout.
-        The non-git refusal is NOT duplicated here: update_managed_comfy() owns it and
+        The no-recorded-commit refusal is NOT duplicated here: update_managed_comfy() owns it and
         reports it through the job's own output (the GUI also pre-warns from
         managed-status's advisory ``updatable``)."""
         from localm.media.managed_comfy import is_managed_comfy_installed
