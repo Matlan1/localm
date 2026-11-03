@@ -190,7 +190,7 @@ jobs:
       # pull torch / ROCm / llama-cpp wheels and are never installed in CI;
       # tests needing those extras skip themselves (importorskip).
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
       - name: Install
         shell: bash
         run: |
@@ -274,7 +274,7 @@ jobs:
       # dependency change without a matching `uv lock` cannot silently rot the lock
       # into a stale claim. `uv lock --check` fails on drift.
       - name: Install uv (for the lockfile check)
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
       - name: Verify uv.lock matches pyproject (DEP-1, no silent drift)
         run: uv lock --check
 
@@ -443,7 +443,7 @@ jobs:
       - name: Put the venv on PATH
         run: echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
       # The optional stacks are installed so basedpyright type-checks the modules
       # that use torch, transformers, av, pywebview and playwright against their
       # real types. torch comes first, from the CPU index.
@@ -516,7 +516,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install uv (for the lockfile check)
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
       - name: Verify uv.lock matches pyproject (no silent drift)
         run: uv lock --check
 
@@ -572,7 +572,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
       - name: Install
         shell: bash
         run: |
@@ -753,7 +753,7 @@ jobs:
         run: echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
       - name: Install
         run: |
           uv export --quiet --locked --no-emit-project --extra dev -o "$RUNNER_TEMP/requirements.txt"
@@ -972,7 +972,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
       - name: Install
         run: |
           uv export --quiet --locked --no-emit-project -o "$RUNNER_TEMP/requirements.txt"
@@ -1069,7 +1069,7 @@ jobs:
 
       - name: Install uv
         if: steps.scope.outputs.run == 'true'
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
       - name: Install the voice extra
         if: steps.scope.outputs.run == 'true'
         run: |
@@ -1138,7 +1138,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
       # torch first, from the CPU index, so no later install pulls a CUDA build.
       - name: Install the optional stacks
         run: |
