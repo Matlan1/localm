@@ -2381,6 +2381,7 @@ export const I18N_EN = {
   "settings.recentErrors.empty": "No errors so far.",
   "settings.recentErrors.clear": "Clear",
   "settings.recentErrors.copy": "Copy",
+  "settings.recentErrors.dismiss": "Dismiss this error",
   "settings.recentErrors.copied": "Copied",
   "settings.recentErrors.report": "Report this error",
   "settings.recentErrors.reportDescription": "The GUI showed this error (page {page}, {time}).",

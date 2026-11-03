@@ -84,6 +84,16 @@ export function clearRecentGuiErrors() {
   _guiErrChanged();
 }
 
+/** Remove the entry with the same text and source as *entry* (from
+ *  recentGuiErrors()), keeping the order of the others. */
+export function dismissRecentGuiError(entry) {
+  if (!entry) return;
+  const i = _guiErrRecent.findIndex((e) => e.text === entry.text && e.source === entry.source);
+  if (i < 0) return;
+  _guiErrRecent.splice(i, 1);
+  _guiErrChanged();
+}
+
 /** Set where the list is kept: *store* ({ save(list) }) persists it, null keeps
  *  it in memory only. */
 export function setRecentGuiErrorStore(store) {

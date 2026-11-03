@@ -12,6 +12,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Each entry in Settings > Recent errors can be dismissed on its own.** Every error now has an **x** button ("Dismiss this error") beside Copy and Report this error; Clear still empties the whole list.
 - **A model can be reloaded from the interface.** The running model's row on the Models page has a **reload** button (also on a loaded model whose adapter change is waiting for a reload), Settings > Runtime & GPU has **Save and reload model** beside Save, and Settings > Live tuning has **Reload model** for the settings that save immediately. A plain save still never reloads; the buttons appear only while a model is loaded.
 
 ### Changed
