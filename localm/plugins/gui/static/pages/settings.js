@@ -1522,13 +1522,15 @@ function confirmEmbeddingModelSwitch(model, report) {
  *  single-step case, once confirmed. */
 /** The catalog key of the toast after a section save: the saved values that
  *  changed decide it by their schema `applies` (restart wins over next_load,
- *  which wins over live). A secret sent at all counts as changed. */
+ *  which wins over live). A secret sent at all counts as changed; blank, null
+ *  and a missing value compare equal. */
 export function savedToastKey(updates) {
+  const blankAsNull = (v) => (v === undefined || v === null || v === "" ? null : v);
   const applies = new Set();
   for (const { field } of _settingsControls) {
     if (!(field.key in updates)) continue;
     const changed = field.widget === "secret"
-      || JSON.stringify(updates[field.key]) !== JSON.stringify(field.default);
+      || JSON.stringify(blankAsNull(updates[field.key])) !== JSON.stringify(blankAsNull(field.default));
     if (changed) applies.add(field.applies);
   }
   if (applies.has("restart")) return "settings.toast.savedRestart";

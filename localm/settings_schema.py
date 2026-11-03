@@ -311,9 +311,9 @@ CORE_FIELDS: list = [
     # number box would not show device names/VRAM. Still accepted by PATCH
     # /v1/config (and `localm config main_gpu_index N`) like any other field.
     SettingField("main_gpu_index", Widget.HIDDEN, "Main GPU",
-                 "GPU for a HuggingFace model, the embedder and the vision projector. A "
-                 "GGUF chat model spreads over every GPU unless Split across GPUs "
-                 "names some. Blank uses device 0.",
+                 "GPU for HuggingFace models, the embedder, the vision projector and "
+                 "localm's own ComfyUI. A GGUF chat model spreads over every GPU "
+                 "unless Split across GPUs names some. Blank uses device 0.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=0,
                  max=MAX_GPU_SPLIT_INDEX),
     # HIDDEN: rendered by a "Split across GPUs" checkbox row next to the Main
@@ -901,8 +901,8 @@ CORE_FIELDS: list = [
     SettingField("coder_index_timeout", Widget.NUMBER,
                  "Coder project-scan timeout (s)",
                  "Wall-clock cap on the coder's startup project-map scan (0 = no time "
-                 "limit). The scan also stops after 20,000 files whatever this is. "
-                 "Raise it if the map says the scan ran out of time.",
+                 "limit). The scan also stops after 20,000 files whatever this is, so "
+                 "raising it helps only with a slow walk, not a large one.",
                  group="Coder", owner="coder", min=0, step=5),
     SettingField("coder_grep_max_per_file", Widget.NUMBER,
                  "Coder grep matches per file",
@@ -1044,8 +1044,8 @@ CORE_FIELDS: list = [
     # attacker-chosen workdir still reaches execution.
     SettingField("comfy_workdir", Widget.FOLDER, "ComfyUI folder",
                  "Your ComfyUI install folder. localm runs it from here and "
-                 "auto-detects a launcher inside. Not used while ComfyUI to use is own "
-                 "and localm's own ComfyUI is installed.",
+                 "auto-detects a launcher inside. While ComfyUI to use is own and "
+                 "localm's own ComfyUI is installed, it is not started from here.",
                  group="Media", owner="image", admin_only=True),
     SettingField("comfy_launch_cmd", Widget.TEXT, "ComfyUI launch command",
                  "Launcher script (.bat/.sh) that starts ComfyUI. Blank "
@@ -1933,9 +1933,9 @@ MEDIA_PLUGIN_FIELDS: list = [
                options=["auto", "native", "comfy"], plugins=_NATIVE, default="auto"),
     MediaField("native_model", ("native", "model"), "", Widget.TEXT,
                "Native model",
-               "Registered model name or file path: a full checkpoint, or a diffusion "
-               "model (its encoders and VAE come from the native fields, else from "
-               "your registered models). Blank uses the recommended model.",
+               "Registered name or file path: a full checkpoint, or a diffusion model "
+               "(encoders and VAE from the native fields, else your registered "
+               "models). Blank uses the recommended model once downloaded.",
                plugins=_NATIVE, admin_only=True),
     MediaField("native_runtime", ("native", "runtime"), "", Widget.SELECT,
                "Native runtime",

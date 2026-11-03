@@ -11,6 +11,12 @@ const FIELDS = [
     owner: "core", applies: "restart", default: 8642 },
   { key: "mdns_name", widget: "text", label: "Network name", help: "", group: "Server",
     owner: "core", applies: "restart", default: "localm" },
+  { key: "bind_host", widget: "text", label: "Bind address", help: "", group: "Server",
+    owner: "core", applies: "restart", default: "" },
+  { key: "idle_unload_seconds", widget: "number", label: "Idle unload", help: "", group: "Engine",
+    owner: "core", applies: "live", default: 0 },
+  { key: "spec_draft_model", widget: "text", label: "Draft model", help: "", group: "Engine",
+    owner: "core", applies: "next_load", default: "" },
   { key: "n_ctx", widget: "number", label: "Context window", help: "", group: "Engine",
     owner: "core", applies: "next_load", default: 4096 },
   { key: "temperature", widget: "number", label: "Temperature", help: "", group: "Chat",
@@ -64,6 +70,12 @@ test("a changed next-load field says it applies on the next model load", async (
 test("a changed live field just says Saved", async () => {
   const text = await saveWith("temperature", 0.5, "core-Chat");
   assert.equal(text.trim(), "Saved");
+});
+
+test("a blank text field left blank does not count as changed", async () => {
+  const text = await saveWith("idle_unload_seconds", 30, "core-Engine");
+  assert.equal(text.trim(), "Saved",
+    "the untouched blank Draft model box in the same card must not make it a next-load save");
 });
 
 test("an unchanged restart field does not ask for a restart", async () => {

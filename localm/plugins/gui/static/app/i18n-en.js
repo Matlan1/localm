@@ -1692,7 +1692,7 @@ export const I18N_EN = {
   "settings.field.coderConfirmTimeout.label": "Coder approval timeout (s)",
   "settings.field.coderConfirmTimeout.help": "Seconds a coder approval card waits for an answer before it is auto-rejected and the agent moves on (0 = wait forever).",
   "settings.field.coderIndexTimeout.label": "Coder project-scan timeout (s)",
-  "settings.field.coderIndexTimeout.help": "Wall-clock cap on the coder's startup project-map scan (0 = no time limit). The scan also stops after 20,000 files whatever this is. Raise it if the map says the scan ran out of time.",
+  "settings.field.coderIndexTimeout.help": "Wall-clock cap on the coder's startup project-map scan (0 = no time limit). The scan also stops after 20,000 files whatever this is, so raising it helps only with a slow walk, not a large one.",
   "settings.field.coderGrepMaxPerFile.label": "Coder grep matches per file",
   "settings.field.coderGrepMaxPerFile.help": "How many matches the coder's grep shows per file before it summarises the rest (0 = show all). Matches beyond the cap are still counted and reported, never hidden.",
   "settings.field.coderGrepMaxOutputLines.label": "Coder grep output lines",
@@ -1774,7 +1774,7 @@ export const I18N_EN = {
 
   // Settings > schema fields: Media
   "settings.field.comfyWorkdir.label": "ComfyUI folder",
-  "settings.field.comfyWorkdir.help": "Your ComfyUI install folder. localm runs it from here and auto-detects a launcher inside. Not used while ComfyUI to use is own and localm's own ComfyUI is installed.",
+  "settings.field.comfyWorkdir.help": "Your ComfyUI install folder. localm runs it from here and auto-detects a launcher inside. While ComfyUI to use is own and localm's own ComfyUI is installed, it is not started from here.",
   "settings.field.comfyLaunchCmd.label": "ComfyUI launch command",
   "settings.field.comfyLaunchCmd.help": "Launcher script (.bat/.sh) that starts ComfyUI. Blank auto-detects one inside the ComfyUI folder. Not used while ComfyUI to use is own and localm's own ComfyUI is installed.",
   "settings.field.comfyApiUrl.label": "ComfyUI API URL",
@@ -1864,7 +1864,7 @@ export const I18N_EN = {
   "settings.field.music.backend.label": "Music backend",
   "settings.field.music.backend.help": "auto = ComfyUI when it is set up, else native; native = built-in ACE-Step 1.5 (KoboldCpp); comfy = ComfyUI.",
   "settings.field.media.nativeModel.label": "Native model",
-  "settings.field.media.nativeModel.help": "Registered model name or file path: a full checkpoint, or a diffusion model (its encoders and VAE come from the native fields, else from your registered models). Blank uses the recommended model.",
+  "settings.field.media.nativeModel.help": "Registered name or file path: a full checkpoint, or a diffusion model (encoders and VAE from the native fields, else your registered models). Blank uses the recommended model once downloaded.",
   "settings.field.media.nativeRuntime.label": "Native runtime",
   "settings.field.media.nativeRuntime.help": "stable-diffusion.cpp build to use. auto picks the best one for this machine.",
   "settings.field.music.nativeRuntime.help": "Compute backend for native music. auto picks the best one for this machine and falls back to Vulkan, then CPU.",
@@ -2247,7 +2247,7 @@ export const I18N_EN = {
   "settings.perf.saveFailedToast": "Could not save: {message}",
   "settings.perf.gpuLayersRangeToast": "GPU layers must be between 0 and 999",
   "settings.perf.mainGpuLabel": "Main GPU",
-  "settings.perf.mainGpuHelp": "GPU for a HuggingFace model, the embedder and the vision projector; a GGUF chat model spreads over every GPU unless Split across GPUs names some. Saves immediately; applies on the next model load.",
+  "settings.perf.mainGpuHelp": "GPU for HuggingFace models, the embedder, the vision projector and localm's own ComfyUI; a GGUF chat model spreads over every GPU unless Split across GPUs names some. Saves immediately; applies on the next model load.",
   "settings.perf.splitLabel": "Split across GPUs",
   "settings.perf.splitHelp":
     "Check one GPU to load a model on that GPU only, or 2 or more to spread a model too large for one card over them (overrides Main GPU); leave all unchecked for automatic placement. The checked cards are filled in the order you check them: the first one gets the first layers. Each card's share follows its free VRAM at load time, unless pinned below. Saves immediately; applies on the next model load.",
