@@ -375,15 +375,28 @@ class TestAdmission:
 
 
 class TestCatalogGate:
-    def test_exllama_is_not_listed_as_available(self, tmp_path):
+    def test_exllama_is_not_listed_without_an_nvidia_linux_machine(self, tmp_path, monkeypatch):
+        from localm.plugins import catalog
         from localm.plugins.engine import PluginManager
+        monkeypatch.setattr(catalog, "_nvidia_linux", lambda: False)
         mgr = PluginManager(FastAPI(), installed_root=tmp_path / "installed")
         names = {p["name"] for p in mgr.api_state()["plugins"]}
         assert "exllama" not in names
         assert "memory" in names
 
-    def test_an_explicit_install_still_works(self, tmp_path):
+    def test_exllama_is_listed_as_available_on_an_nvidia_linux_machine(self, tmp_path, monkeypatch):
+        from localm.plugins import catalog
         from localm.plugins.engine import PluginManager
+        monkeypatch.setattr(catalog, "_nvidia_linux", lambda: True)
+        mgr = PluginManager(FastAPI(), installed_root=tmp_path / "installed")
+        rows = {p["name"]: p for p in mgr.api_state()["plugins"]}
+        assert rows["exllama"]["available"] is True
+        assert rows["exllama"]["installed"] is False
+
+    def test_an_explicit_install_still_works(self, tmp_path, monkeypatch):
+        from localm.plugins import catalog
+        from localm.plugins.engine import PluginManager
+        monkeypatch.setattr(catalog, "_nvidia_linux", lambda: False)
         mgr = PluginManager(FastAPI(), installed_root=tmp_path / "installed")
         mgr.discover()
         mgr.install("exllama")
@@ -391,11 +404,35 @@ class TestCatalogGate:
         names = {p["name"] for p in mgr.api_state()["plugins"] if p["installed"]}
         assert "exllama" in names
 
-    def test_setup_all_leaves_it_out(self):
+    def test_offered_follows_the_machine(self, monkeypatch):
         from localm.plugins import catalog
+        monkeypatch.setattr(catalog, "_nvidia_linux", lambda: False)
         assert catalog.offered("exllama") is False
+        monkeypatch.setattr(catalog, "_nvidia_linux", lambda: True)
+        assert catalog.offered("exllama") is True
         assert catalog.offered("memory") is True
         assert catalog.offered("not-in-the-catalog") is True
+
+    def test_the_description_states_the_untested_gpu_fact(self):
+        from localm.plugins import catalog
+        e = catalog.get("exllama")
+        assert "without a GPU" in e.description and "bug reports welcome" in e.description
+        assert e.opt_in is True
+
+    @pytest.mark.parametrize("plat,vendors,expected", [
+        ("linux", ["nvidia"], True), ("linux", ["amd"], False), ("linux", [], False),
+        ("win32", ["nvidia"], False), ("darwin", ["apple"], False)])
+    def test_the_runtime_check_needs_linux_and_nvidia(self, monkeypatch, plat, vendors, expected):
+        from localm import hwdetect
+        from localm.plugins import catalog
+        monkeypatch.setattr(hwdetect, "platform_key", lambda: plat)
+        monkeypatch.setattr(hwdetect, "detect",
+                            lambda: hwdetect.Detection(vendors=vendors, recommended="cpu", source="t"))
+        catalog._nvidia_linux.cache_clear()
+        try:
+            assert catalog._nvidia_linux() is expected
+        finally:
+            catalog._nvidia_linux.cache_clear()
 
 
 class TestRunnerTypedLoadRefusal:

@@ -19,6 +19,7 @@ This module holds NO plugin code and imports nothing heavy; it is just data.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 
 # Base for first-party plugin repos. Left blank until the plugins are published
 # to their own repos; the install fallback only tries GitHub when a repo is set
@@ -38,6 +39,8 @@ class CatalogEntry:
     offered: bool = True          # listed as available to install; False keeps
                                   # it out of every listing while an explicit
                                   # `localm plugin install <name>` still works
+    opt_in: bool = False          # never part of "install everything"
+    needs_nvidia_linux: bool = False  # listed only on Linux with an NVIDIA GPU
 
     def source_url(self) -> str:
         """Repo to fetch from when the plugin is missing from the bundled store."""
@@ -74,10 +77,9 @@ CATALOG: tuple = (
                  commands=("mcp",)),
     CatalogEntry("jobs", "Scheduled recurring tasks",
                  commands=("job",)),
-    # Not offered until a real load and reply on an NVIDIA CUDA GPU has passed;
-    # set offered=True in the change that records that run.
-    CatalogEntry("exllama", "Run EXL2 and EXL3 models with ExLlama (NVIDIA GPU, Linux)",
-                 extra="exllama", offered=False),
+    CatalogEntry("exllama", "Run EXL2 and EXL3 models with ExLlama (NVIDIA GPU, Linux). "
+                 "Tested by the project without a GPU so far; bug reports welcome",
+                 extra="exllama", opt_in=True, needs_nvidia_linux=True),
 )
 
 _BY_NAME = {e.name: e for e in CATALOG}
@@ -120,11 +122,30 @@ def names() -> tuple:
     return tuple(_BY_NAME)
 
 
+@lru_cache(maxsize=1)
+def _nvidia_linux() -> bool:
+    """Whether this machine is Linux with an NVIDIA GPU detected (cached for the
+    process; hwdetect never raises)."""
+    from localm import hwdetect
+    return hwdetect.platform_key() == "linux" and "nvidia" in hwdetect.detect().vendors
+
+
+def runnable_here(entry: CatalogEntry) -> bool:
+    """False when *entry* needs hardware or a platform this machine lacks."""
+    return not entry.needs_nvidia_linux or _nvidia_linux()
+
+
+def offered_entry(entry: CatalogEntry) -> bool:
+    """Whether *entry* is listed as available to install on this machine."""
+    return entry.offered and runnable_here(entry)
+
+
 def offered(name: str) -> bool:
-    """False for a catalog entry marked not offered; True for every other name,
-    including one the catalog does not list."""
+    """False for a catalog entry that is not offered or cannot run on this
+    machine; True for every other name, including one the catalog does not
+    list."""
     entry = _BY_NAME.get(name)
-    return entry is None or entry.offered
+    return entry is None or offered_entry(entry)
 
 
 def preinstalled() -> tuple:

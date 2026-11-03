@@ -171,14 +171,45 @@ def test_interactive_none_skips_without_reprompt(home_env, monkeypatch, answer):
     assert _installed() in (set(), {"chat"})
 
 
-def test_all_installs_what_setup_spec_offers_and_nothing_withheld(home_env):
+def test_all_installs_what_setup_spec_offers_except_opt_in(home_env, monkeypatch):
     from localm.cli import main
     from localm import setup_spec
+    from localm.plugins import catalog
+    monkeypatch.setattr(catalog, "_nvidia_linux", lambda: True)
+    offered = {n for n, _ in setup_spec.setup_plugins()}
+    assert "exllama" in offered
     r = CliRunner().invoke(main, ["plugin", "setup", "--no-deps", "--all"])
     assert r.exit_code == 0, r.output
-    offered = {n for n, _ in setup_spec.setup_plugins()}
-    assert offered <= _installed()
-    assert "exllama" not in offered and "exllama" not in _installed()
+    assert offered - {"exllama"} <= _installed()
+    assert "exllama" not in _installed()
+
+
+def test_interactive_all_excludes_opt_in(monkeypatch):
+    from localm.cli import plugins as cli_plugins
+    from localm.plugins import catalog
+    monkeypatch.setattr(catalog, "_nvidia_linux", lambda: True)
+    available = [e for e in catalog.CATALOG if not e.preinstalled]
+    got = cli_plugins._parse_plugin_selection("all", available)
+    assert "exllama" not in got and "coder" in got
+
+
+def test_an_explicit_choice_installs_the_opt_in_plugin(home_env, monkeypatch):
+    from localm.cli import main
+    from localm.plugins import catalog
+    monkeypatch.setattr(catalog, "_nvidia_linux", lambda: True)
+    r = CliRunner().invoke(main, ["plugin", "setup", "--no-deps", "--plugins", "exllama"])
+    assert r.exit_code == 0, r.output
+    assert "exllama" in _installed()
+
+
+def test_setup_offers_exllama_only_where_it_can_run(monkeypatch):
+    from localm import setup_spec
+    from localm.plugins import catalog
+    monkeypatch.setattr(catalog, "_nvidia_linux", lambda: False)
+    assert "exllama" not in [n for n, _ in setup_spec.setup_plugins()]
+    monkeypatch.setattr(catalog, "_nvidia_linux", lambda: True)
+    names = [n for n, _ in setup_spec.setup_plugins()]
+    assert "exllama" in names and "exllama" not in setup_spec.RECOMMENDED_PLUGINS
 
 
 @pytest.mark.parametrize("flag,saved", [("--no-deps", False), ("--with-deps", True)])
