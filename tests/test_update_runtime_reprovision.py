@@ -252,14 +252,18 @@ def test_update_reprovisions_the_runtime_to_the_new_pin(install, tmp_path):
     assert "b1349-cpu-b11719 -> b1355-cpu-b11908" in res["runtime_note"]
 
 
-def test_deps_and_runtime_both_run_in_that_order(install, monkeypatch):
-    monkeypatch.setattr(updater, "_uv_for_deps", lambda t: "/x/uv")
+def test_deps_and_runtime_both_run_in_that_order(install, tmp_path, monkeypatch):
+    uv = tmp_path / "uvbin" / ("uv.exe" if sys.platform == "win32" else "uv")
+    uv.parent.mkdir()
+    uv.write_bytes(b"")
+    uv.chmod(0o755)
+    monkeypatch.setattr(updater, "_uv_for_deps", lambda t: str(uv))
     data, sig = _release(deps='"click", "httpx"')
     calls = []
     res = updater.apply(1, signature=sig, installed=install,
                         download_opener=_download(data),
                         runner=_fake_setup_llama(install, "b1355-cpu-b11908", calls=calls))
-    assert [c[0] for c in calls] == ["/x/uv", sys.executable]
+    assert [c[0] for c in calls] == [str(uv), sys.executable]
     assert res["runtime"]["state"] == "updated"
 
 

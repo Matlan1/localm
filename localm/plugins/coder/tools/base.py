@@ -472,8 +472,8 @@ def _kill_tree(proc) -> None:
         pass
     if sys.platform == "win32":
         try:
-            from localm.config import require_windows_system_program
-            subprocess.run([require_windows_system_program("taskkill.exe"), "/F", "/T",
+            from localm.sysprog import require_system
+            subprocess.run([require_system("taskkill"), "/F", "/T",
                             "/PID", str(proc.pid)], capture_output=True, timeout=10,
                            stdin=subprocess.DEVNULL,
                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))

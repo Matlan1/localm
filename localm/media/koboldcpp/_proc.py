@@ -169,9 +169,12 @@ def kill(mp: ManagedProcess, *, grace: float = 5.0) -> None:
                 pass
             mp._job = None
         if proc.poll() is None:
+            from localm import sysprog
+            taskkill = sysprog.find("taskkill")
             try:
-                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                               capture_output=True, timeout=15)
+                if taskkill:
+                    subprocess.run([taskkill, "/F", "/T", "/PID", str(proc.pid)],
+                                   capture_output=True, timeout=15)
             except (OSError, subprocess.SubprocessError):
                 pass
     else:

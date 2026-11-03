@@ -147,7 +147,10 @@ class NvidiaInfo:
 
 def _nvidia_smi(*args: str) -> str:
     """Combined nvidia-smi output, or "" if it is not present/usable."""
-    exe = shutil.which("nvidia-smi") or "nvidia-smi"
+    from localm import sysprog
+    exe = sysprog.find("nvidia-smi")
+    if not exe:
+        return ""
     try:
         r = subprocess.run([exe, *args], capture_output=True, text=True, timeout=8)
         return (r.stdout or "") + (r.stderr or "")

@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from localm import discover
+from tests._sysprog_fakes import _nvidia_smi_found  # noqa: F401
 # Imported at collection time so TestListGpus's patch.dict(sys.modules, {"torch":
 # ...}) has nothing to evict. discover imports gpu_usage lazily (inside
 # _apply_device_global_free); an eviction would leave a stale module object bound

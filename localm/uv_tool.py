@@ -105,9 +105,31 @@ def find_uv(root) -> Optional[str]:
     return None
 
 
+def bundled_uv() -> Optional[str]:
+    """Full path of the uv the ``uv`` Python package installed into the running
+    interpreter's environment, or None when that package or its binary is absent
+    or the binary its lookup returns lies outside this environment
+    (``sys.prefix``)."""
+    try:
+        from uv import find_uv_bin
+        path = find_uv_bin()
+    except (ImportError, OSError):
+        return None
+    if not (os.path.isabs(path) and usable(path) and is_inside(path, sys.prefix)):
+        return None
+    return path
+
+
+def own_uv(root) -> Optional[str]:
+    """Full path of the uv to run for the install at *root* from inside its own
+    environment: :func:`bundled_uv`, else :func:`find_uv`."""
+    return bundled_uv() or find_uv(root)
+
+
 def describe_search(root) -> str:
-    """What find_uv looked at, for an error message."""
-    return "; ".join(str(p) for p in search_places(root))
+    """What :func:`own_uv` looked at, for an error message."""
+    return "; ".join(["the uv Python package in this environment"]
+                     + [str(p) for p in search_places(root)])
 
 
 def _uv_in(folder) -> Optional[Path]:
@@ -176,11 +198,16 @@ def _download(url: str, dest: Path, timeout: float = 120.0) -> None:
 
 
 def _run_installer(script: Path, env: dict) -> int:
+    from localm import sysprog
+    shell = sysprog.find("powershell" if IS_WINDOWS else "sh")
+    if not shell:
+        raise FileNotFoundError(
+            f"{'powershell' if IS_WINDOWS else 'sh'} was not found in the system folders or on PATH")
     if IS_WINDOWS:
         env = {k: v for k, v in env.items() if k.upper() != "PSMODULEPATH"}
-        argv = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)]
+        argv = [shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)]
     else:
-        argv = ["sh", str(script)]
+        argv = [shell, str(script)]
     return subprocess.run(argv, env=env, stdin=subprocess.DEVNULL).returncode
 
 
@@ -292,17 +319,18 @@ def ensure_uv(root, *, emit: Callable[[str], None] = lambda s: None) -> str:
 
 
 def uv_for_installs(root, *, emit: Callable[[str], None] = lambda s: None) -> Optional[str]:
-    """The uv localm's own package installs run for the install at *root*: in an
-    install setup made (it has an install record), :func:`ensure_uv`; elsewhere
-    (a source checkout), :func:`find_uv`. None, with the reason passed to *emit*,
+    """The uv localm's own package installs run for the install at *root*:
+    :func:`bundled_uv`, else, in an install setup made (it has an install record),
+    :func:`ensure_uv`, and elsewhere (a source checkout) :func:`find_uv`. None, with the reason passed to *emit*,
     when there is none."""
     try:
         from localm import install_manifest
         made_by_setup = install_manifest.load(root) is not None
     except Exception:
         made_by_setup = False
-    if not made_by_setup:
-        return find_uv(root)
+    bundled = bundled_uv()
+    if bundled or not made_by_setup:
+        return bundled or find_uv(root)
     try:
         return ensure_uv(root, emit=emit)
     except UvBootstrapError as e:

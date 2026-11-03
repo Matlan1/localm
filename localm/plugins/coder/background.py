@@ -516,9 +516,9 @@ class ShellJob(BackgroundJob):
     def _terminate_tree_windows(self) -> None:
         # taskkill /T walks the child tree; /F is its only reliable mode.
         try:
-            from localm.config import require_windows_system_program
+            from localm.sysprog import require_system
             done = subprocess.run(
-                [require_windows_system_program("taskkill.exe"), "/F", "/T", "/PID",
+                [require_system("taskkill"), "/F", "/T", "/PID",
                  str(self.pid)],
                 capture_output=True, timeout=10, stdin=subprocess.DEVNULL,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),

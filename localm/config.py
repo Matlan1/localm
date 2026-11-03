@@ -1568,30 +1568,6 @@ def _perm_warn(path: Path, why: str) -> None:
         pass
 
 
-def windows_system_program(name: str) -> Optional[str]:
-    """Full path of *name* in the Windows system folder (``System32``, as
-    ``GetSystemDirectoryW`` reports it), or None when it is not there or this is
-    not Windows. PATH is never searched."""
-    if sys.platform != "win32":
-        return None
-    import ctypes
-    buf = ctypes.create_unicode_buffer(520)
-    n = ctypes.windll.kernel32.GetSystemDirectoryW(buf, len(buf))
-    if not 0 < n < len(buf):
-        return None
-    path = os.path.join(buf.value, name)
-    return path if os.path.isfile(path) else None
-
-
-def require_windows_system_program(name: str) -> str:
-    """:func:`windows_system_program`, or FileNotFoundError when *name* is not in
-    the Windows system folder."""
-    path = windows_system_program(name)
-    if path is None:
-        raise FileNotFoundError(2, f"{name} is not in the Windows system folder", name)
-    return path
-
-
 def restrict_file_perms(path: Path, *, mode: int = 0o600) -> bool:
     """Best-effort: restrict *path* to the current user (POSIX chmod *mode*, or
     Windows icacls - which grants sole full control regardless of *mode*, since
@@ -1625,13 +1601,14 @@ def restrict_file_perms(path: Path, *, mode: int = 0o600) -> bool:
             if not user:
                 _perm_warn(path, "no USERNAME/USER in the environment")
                 return False
-            icacls = windows_system_program("icacls.exe")
-            if icacls is None:
-                _perm_warn(path, "icacls.exe was not found in the Windows system folder")
-                return False
             # /inheritance:r drops the inherited ACEs (BUILTIN\Users et al) and
             # /grant:r replaces any existing grant for this user, so the result
             # is an explicit, sole full-control ACE.
+            from localm import sysprog
+            icacls = sysprog.find_system("icacls")
+            if not icacls:
+                _perm_warn(path, "icacls was not found in the Windows system folder")
+                return False
             r = subprocess.run(
                 [icacls, str(path), "/inheritance:r", "/grant:r", f"{user}:F"],
                 capture_output=True, check=False, stdin=subprocess.DEVNULL,

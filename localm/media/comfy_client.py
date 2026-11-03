@@ -1864,8 +1864,8 @@ def _kill_process_tree(proc) -> None:
         return
     if _sys.platform == "win32":
         try:
-            from localm.config import require_windows_system_program
-            _sp.run([require_windows_system_program("taskkill.exe"), "/F", "/T", "/PID",
+            from localm.sysprog import require_system
+            _sp.run([require_system("taskkill"), "/F", "/T", "/PID",
                      str(pid)], capture_output=True, timeout=15,
                     stdin=_sp.DEVNULL, creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0))
         except Exception:
@@ -1911,10 +1911,19 @@ def stop_comfy(api_url: Optional[str] = None) -> tuple[bool, str]:
     """Stop ComfyUI. Always aborts the in-flight render + clears the queue and
     frees VRAM first (graceful). Then, IF localm launched this ComfyUI,
     terminates the process tree localm spawned; if localm did NOT launch it, the
-    process is left alone (only our own are killed) and the caller is told so."""
+    process is left alone (only our own are killed) and the caller is told so.
+
+    A port that localm did not launch and whose holder accepts connections but
+    does not answer as ComfyUI is refused at once as ``(False, <held-port
+    message>)``, before any abort request is sent: nothing is signalled and
+    nothing is waited on."""
     api_url = (api_url or default_api_url()).rstrip("/")
     mark_comfy_dead(api_url)   # about to stop it either way - the next check must be real
     clear_comfy_device_error(api_url)
+    if spawned_pid(api_url) is None and not _comfy_alive(api_url):
+        holder = comfy_port_holder(api_url)
+        if holder is not None:
+            return False, comfy_port_held_message(api_url, holder)
     interrupt_comfy(api_url)                       # abort render + clear queue
     try:
         free_comfy_vram(api_url)
@@ -1961,7 +1970,9 @@ def restart_comfy(api_url: Optional[str] = None, on_progress=None,
     """Stop the ComfyUI localm launched (if any), then launch a fresh one. When
     the target was not launched by localm and is still running after the
     stop, nothing is relaunched - only meaningful when localm has a launch
-    command configured."""
+    command configured. A port held by a process localm did not launch that
+    accepts connections but does not answer as ComfyUI is refused at once with
+    ``(False, <held-port message>)``."""
     url = (api_url or default_api_url()).rstrip("/")
     # Also serializes this against a concurrent restart_comfy() on the same
     # url - without it, one caller's ownership read can race the other's
@@ -1969,7 +1980,9 @@ def restart_comfy(api_url: Optional[str] = None, on_progress=None,
     # same non-reentrant lock itself.
     with _launch_lock_for(url):
         launched_by_us = spawned_pid(url) is not None
-        stop_comfy(url)
+        stopped, stop_message = stop_comfy(url)
+        if not launched_by_us and not stopped:
+            return False, stop_message
         if launched_by_us:
             _wait_for_port_release(url)
         not_ours_and_still_alive = not launched_by_us and is_comfy_confirmed(url)
@@ -2232,8 +2245,8 @@ def _launch_and_wait(api_url: str, launch_cmd: Optional[str],
     if _sys.platform == "win32":
         argv = [a.strip('"\'') for a in argv]
         if argv and (argv[0].lower().endswith(".bat") or argv[0].lower().endswith(".cmd")):
-            from localm.config import windows_system_program
-            cmd_exe = windows_system_program("cmd.exe")
+            from localm.sysprog import find_system
+            cmd_exe = find_system("cmd")
             if cmd_exe is None:
                 return False, "Could not launch ComfyUI: cmd.exe is not in the Windows system folder."
             argv = [cmd_exe, "/d", "/c"] + argv

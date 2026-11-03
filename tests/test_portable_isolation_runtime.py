@@ -427,9 +427,10 @@ def test_icacls_runs_by_full_path_without_a_window(monkeypatch, tmp_path):
 def test_a_bare_name_on_path_never_stands_in_for_a_system_program(monkeypatch, tmp_path):
     (tmp_path / "icacls.exe").write_bytes(b"MZ")
     monkeypatch.setenv("PATH", str(tmp_path))
-    found = config.windows_system_program("icacls.exe")
+    from localm import sysprog
+    found = sysprog.find_system("icacls")
     assert found and _norm(Path(found).parent) != _norm(tmp_path)
-    assert config.windows_system_program("localm-no-such-program.exe") is None
+    assert sysprog.find_system("localm-no-such-program") is None
 
 
 # --------------------------------------------------------------------------- #
