@@ -176,7 +176,7 @@ def _parse_plugin_selection(raw, available):
     if not raw.strip():
         return []
     if raw.strip().lower() == "all":
-        return [e.name for e in available]
+        return [e.name for e in available if not e.opt_in]
     by_idx = {str(i): e.name for i, e in enumerate(available, 1)}
     names = {e.name for e in available}
     out = []
@@ -241,7 +241,7 @@ def plugin_setup(plugins_csv, install_all, install_defaults, with_deps=None,
     interactive = False
 
     if install_all:
-        chosen = [e.name for e in available]
+        chosen = [e.name for e in available if not e.opt_in]
     elif plugins_csv is not None:
         chosen = _parse_plugin_selection(plugins_csv, available)
         # Non-interactive: a non-empty --plugins that resolved to NOTHING is a
