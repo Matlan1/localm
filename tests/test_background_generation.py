@@ -126,6 +126,13 @@ def test_background_complete_turns_thinking_off_and_caps_the_reply():
     assert call["messages"] == [{"role": "user", "content": "decide this"}]
 
 
+def test_background_complete_can_leave_thinking_to_the_model_for_a_waited_on_call():
+    eng = _Engine(reply="the answer")
+    assert background_complete(eng, "extract", max_tokens=4096, thinking=None) == "the answer"
+    (call,) = eng.calls
+    assert call["thinking"] is None and call["max_tokens"] == 4096
+
+
 def test_background_complete_stops_between_tokens_once_a_request_is_waiting():
     eng = _Engine(chunks=list("abcdefgh"))
     eng.wait_after = 2

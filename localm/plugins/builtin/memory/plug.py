@@ -630,8 +630,10 @@ async def memory_consolidate(req: MemoryConsolidate | None = None,
             from localm.debuglog import debug_content_enabled, logger
             if debug_content_enabled():
                 logger.debug("memory consolidate prompt:\n%s", prompt)
-            from localm.inference.background_generation import background_complete
-            out = strip_think(background_complete(eng, prompt)).strip()
+            from localm.inference.background_generation import (
+                REASONING_MAX_TOKENS, background_complete)
+            out = strip_think(background_complete(
+                eng, prompt, max_tokens=REASONING_MAX_TOKENS, thinking=None)).strip()
             if debug_content_enabled():
                 logger.debug("memory consolidate response:\n%s", out)
             return out
@@ -640,9 +642,13 @@ async def memory_consolidate(req: MemoryConsolidate | None = None,
         # WHOLE synthesis pass, not per-completion, so idle-unload cannot evict the
         # model in a gap between candidates.
         from localm.inference.http_server import driving_engine
+        requested = _add_requested_facts(principal, req.messages if req else None)
         with driving_engine(eng):
             res = synthesize_memory(complete, principal=principal,
                                     conversation=conversation)
+        if requested:
+            res["added"] = res.get("added", 0) + len(requested)
+            res["facts"] = requested + (res.get("facts") or [])
         if res.get("status") == "error":
             raise HTTPException(500, _model_failed_detail(res))
         return res
@@ -1622,18 +1628,59 @@ def _note_unsaved_request(messages, ctx) -> None:
         logger.debug("memory: could not check for a remember request: %s", e)
 
 
+def _add_requested_facts(principal: str | None, messages) -> list[str]:
+    """Store every fact a user row of *messages* asked to remember ("remember that
+    ...") that the store does not hold yet, before the model pass, so the pass
+    compares what it extracts against them. Returns the facts newly stored. Nothing
+    is stored in privacy mode."""
+    from localm.inference.protocol import is_user_written, user_written_text
+    from localm.memory import explicit_fact
+    if not _persist_enabled():
+        return []
+    requested: list[str] = []
+    for m in messages or []:
+        if isinstance(m, dict) and m.get("role") == "user" and is_user_written(m):
+            fact = explicit_fact(user_written_text(m)[:_CONVERSATION_USER_CHARS])
+            if fact and fact not in requested:
+                requested.append(fact)
+    if not requested:
+        return []
+    store = _chat_store(principal)
+    _migrate_legacy(store)
+    embed_fn = _embed_fn()
+    return [fact for fact in requested
+            if _add_explicit_fact(store, fact, embed_fn) == "saved"]
+
+
+def _add_explicit_fact(store, fact: str, embed_fn) -> str:
+    """Add *fact* as a user-typed record unless the store already holds it or is at
+    its cap. Returns "saved", "exists" or "full". Blocking (embedder)."""
+    from localm.memory import N_MAX, MemoryRecord
+    key = " ".join(fact.casefold().split())
+    with store.lock():
+        store._load()
+        if any(" ".join(r.text.casefold().split()) == key for r in store.all()):
+            return "exists"
+        if len(store) >= N_MAX:
+            return "full"
+        store.add(MemoryRecord(text=fact, kind="semantic", source="user",
+                               importance=0.8), embed_fn=embed_fn)
+        return "saved"
+
+
 def _remember_explicit(messages, ctx) -> None:
     """Store the fact the latest user message asks to remember ("remember that
     ...", "merk dir ..."), without the model. The outcome goes to
     ``ctx.state["memory_saved"]`` for the response header: ``{"text", "status"}``
     with status "saved", "exists" (the same fact is already stored) or "full" (the
-    store is at its cap); "off" and "failed" are set by the callers. Only the user's own words count; a user row the client
-    marked with an ``origin`` is not examined. Blocking (embedder); the caller runs
-    it off the loop. Nothing is stored in privacy mode."""
+    store is at its cap); "off" and "failed" are set by the callers. Only the user's
+    own words count; a user row the client marked with an ``origin`` is not
+    examined. Blocking (embedder); the caller runs it off the loop. Nothing is
+    stored in privacy mode."""
     if ctx is None or not _persist_enabled():
         return
     from localm.inference.protocol import is_user_written, user_written_text
-    from localm.memory import N_MAX, MemoryRecord, explicit_fact
+    from localm.memory import explicit_fact
     last = next((m for m in reversed(messages) if m.get("role") == "user"), None)
     if last is None or not is_user_written(last):
         return
@@ -1642,18 +1689,7 @@ def _remember_explicit(messages, ctx) -> None:
         return
     store = _chat_store(_ctx_principal(ctx))
     _migrate_legacy(store)
-    key = " ".join(fact.casefold().split())
-    embed_fn = _embed_fn()
-    with store.lock():
-        store._load()
-        if any(" ".join(r.text.casefold().split()) == key for r in store.all()):
-            status = "exists"
-        elif len(store) >= N_MAX:
-            status = "full"
-        else:
-            store.add(MemoryRecord(text=fact, kind="semantic", source="user",
-                                   importance=0.8), embed_fn=embed_fn)
-            status = "saved"
+    status = _add_explicit_fact(store, fact, _embed_fn())
     ctx.state["memory_saved"] = {"text": fact, "status": status}
     from localm.debuglog import logger
     logger.debug("memory: explicit remember request handled (%s)", status)
