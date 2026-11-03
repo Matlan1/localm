@@ -502,6 +502,14 @@
                     data-i18n="models.unloadAll.button" data-i18n-title="models.unloadAll.title"
                     title="Release every currently-loaded model from GPU/CPU memory">Unload all</button>
           </div>
+          <div class="models-search-row">
+            <label for="models-search" class="models-search-label" data-i18n="models.search.label">Search your models</label>
+            <input type="search" id="models-search" autocomplete="off" spellcheck="false"
+                   placeholder="Search your models…" data-i18n-placeholder="models.search.placeholder">
+            <button type="button" class="btn-secondary" id="models-search-clear" hidden
+                    aria-label="Clear search" data-i18n-aria-label="models.search.clear"
+                    data-i18n="models.search.clear">Clear search</button>
+          </div>
           <div id="models-table"></div>
         </div>
       </div>

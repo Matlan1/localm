@@ -1465,6 +1465,10 @@ export const I18N_EN = {
   "models.sizeUnknown": "size unknown",
   "models.splitHint":
     "may not fit on one GPU, but may fit split across your {count} GPUs - see Settings > Split across GPUs",
+  "models.search.clear": "Clear search",
+  "models.search.label": "Search your models",
+  "models.search.noMatch": "No models match \"{query}\"",
+  "models.search.placeholder": "Search your models…",
   "models.switch.confirmLabel": "Switch anyway",
   "models.switch.confirmTitle": "Confirm model switch",
   "models.switch.mmapFromDisk": "running from disk-backed memory, first tokens slower",
