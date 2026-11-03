@@ -17,6 +17,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 
 ### Changed
 - **Settings > Issues lists only the bug reports you sent from this install.** It used to show the project's latest 30 issues, including junk titles. localm now remembers the issue number of each report it sends (in memory only, until you quit, in privacy mode) and looks up each one by number, showing its state and a link; a report that cannot be checked says so instead of looking closed. `localm issues` lists the same reports, and a link leads to all issues on GitHub. Nothing that identifies the install is sent.
+- **Settings > Updates: "Choose a version" is easy to find.** It now sits beside "Check for updates", with a line saying what it does, instead of below the update settings.
 - **Settings shows each action's result at its button.** The result of Check for runtime update used to appear several lines above the button, under the section description. It now appears directly below the button row, the button shows a busy state while a check or rebuild runs, and the result lines are announced to screen readers.
 - **The debug log's `loop_lag` now shows real loop stalls.** It used to read `0.00s` on nearly every request, whatever happened. Each request line now reports the longest stretch the server was frozen while that request was in flight (a slow request with `loop_lag` near 0 was just waiting; one with a large `loop_lag` had the server blocked). `/debug/stacks` reports the longest stall of the last minute.
 

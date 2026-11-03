@@ -2474,6 +2474,7 @@ export const I18N_EN = {
   "settings.update.nothingToApply": "Nothing to apply.",
   "settings.update.applyFailed": "Update failed: {message}",
   "settings.update.versionsButton": "Choose a version",
+  "settings.update.versionsHelp": "Install a specific release, older or newer. A downgrade asks first and backs up your settings and data.",
   "settings.update.versionLabel": "Version to install",
   "settings.update.installVersionButton": "Install this version",
   "settings.update.versionsLoading": "Loading the releases…",
