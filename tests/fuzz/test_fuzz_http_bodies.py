@@ -50,7 +50,8 @@ _CHAT_FIELDS = {
     "max_tokens": _json, "temperature": _json, "top_p": _json, "top_k": _json,
     "repeat_penalty": _json, "grammar": _json, "grammar_lazy": _json,
     "grammar_triggers": _json, "seed": _json, "required_capabilities": _json,
-    "pin_model": _json, "min_context": _json, "chat_template_kwargs": _json,
+    "pin_model": _json, "min_context": _json, "model_autoswitch": _json,
+    "chat_template_kwargs": _json,
 }
 
 

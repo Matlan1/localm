@@ -647,6 +647,38 @@ class TestVisionMismatchReconciliation:
         assert blob["routed"] is True and blob["resolved"] == "seer"
         assert blob["unmet"] == ["tool_use"]
 
+    def test_the_request_can_override_an_autoswitch_setting_of_off(
+            self, vision_server, monkeypatch):
+        """The chat autoswitch setting is a chat preference; a request that
+        carries its own mode is routed under that one."""
+        client, engines, _ = vision_server
+        monkeypatch.setattr(cr, "configured_mode", lambda: "off")
+        refused = client.post("/v1/chat/completions",
+                              json={"messages": _IMAGE_MSG, "stream": False})
+        assert refused.status_code == 400
+        assert _answering_model(engines) == []
+        r = client.post("/v1/chat/completions",
+                        json={"messages": _IMAGE_MSG, "stream": False,
+                              "model_autoswitch": "image"})
+        assert r.status_code == 200
+        assert _answering_model(engines) == ["seer"]
+
+    def test_an_override_never_moves_a_pinned_model(self, vision_server):
+        client, engines, _ = vision_server
+        r = client.post("/v1/chat/completions",
+                        json={"model": "plain", "messages": _IMAGE_MSG,
+                              "stream": False, "model_autoswitch": "eager"})
+        assert r.status_code == 400
+        assert _answering_model(engines) == []
+
+    def test_an_unknown_override_is_rejected(self, vision_server):
+        client, _, _ = vision_server
+        r = client.post("/v1/chat/completions",
+                        json={"messages": _IMAGE_MSG, "stream": False,
+                              "model_autoswitch": "sometimes"})
+        assert r.status_code == 422
+        assert "model_autoswitch" in r.text
+
     def test_unpinned_image_request_with_no_capable_model_still_400s(
             self, vision_server, monkeypatch):
         """The honest fallback: with nowhere to route, the shipped refusal

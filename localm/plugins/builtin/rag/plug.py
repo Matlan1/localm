@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 from pathlib import Path
 
 from typing import Optional
@@ -235,11 +236,42 @@ _DESCRIBE_TIMEOUT_S = 180
 _QUERY_CONTEXT_CHARS = 600
 
 
+def _image_refusal_message(model: Optional[str], response, detail: str) -> str:
+    """Why an image could not be described, from what the server reported: the
+    installed vision models, and for each one tried the error its load gave.
+
+    *model* is the loaded chat model that was preferred, *response* the 400 and
+    *detail* its body text."""
+    from localm.model_manager import vision_capable_models
+    head = f"{model or 'The loaded model'} cannot read images"
+    installed = vision_capable_models()
+    if not installed:
+        return (f"{head} and no installed model is known to read images "
+                "(pull a vision model, or give a model its projector, to index images).")
+    routing: dict = {}
+    try:
+        routing = json.loads(response.headers.get("X-Localm-Model-Routing") or "{}")
+    except (ValueError, AttributeError):
+        # A header that does not parse adds no detail; the refusal still carries
+        # the server's own text.
+        pass
+    problems = [str(e) for e in routing.get("load_errors") or []]
+    problems += [f"{s.get('model')} was skipped because its last load failed ({s.get('reason')})"
+                 for s in routing.get("skipped") or [] if isinstance(s, dict)]
+    names = ", ".join(installed)
+    if problems:
+        return (f"{head}, and the installed vision models ({names}) could not be "
+                f"used: {'; '.join(problems)}")
+    return (f"{head}, and the installed vision models ({names}) were not used: "
+            f"{detail}")
+
+
 def _make_self_describe_image(self_url: str, active_model):
     """Describe image via this server's own /chat/completions (vision support).
 
     The active model is only preferred: when it cannot read images the server
-    answers with an installed model that can."""
+    answers with an installed model that can, whatever the chat model autoswitch
+    setting is."""
     def _self_describe_image(image_bytes: bytes, mime_type: str) -> Optional[str]:
         from localm.selfclient import self_request
         b64 = base64.b64encode(image_bytes).decode("utf-8")
@@ -249,6 +281,7 @@ def _make_self_describe_image(self_url: str, active_model):
                          json={
                              "model": active_model() or "localm",
                              "pin_model": False,
+                             "model_autoswitch": "image",
                              "messages": [{
                                  "role": "user",
                                  "content": [
@@ -286,10 +319,7 @@ def _make_self_describe_image(self_url: str, active_model):
         if ("cannot accept image input" in err_detail
                 or "UnsupportedInputError" in err_detail
                 or "vision" in err_detail):
-            raise RuntimeError(
-                "Active model does not support vision and no installed model "
-                "that can read images was available (pull a vision model, or "
-                "give a model its projector, to index images).")
+            raise RuntimeError(_image_refusal_message(active_model(), r, err_detail))
         raise RuntimeError(err_detail or f"HTTP {r.status_code}")
     return _self_describe_image
 

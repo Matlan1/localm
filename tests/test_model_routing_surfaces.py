@@ -234,6 +234,70 @@ class TestKnowledgeImageDescription:
         assert text == "answered-by-seer"
         assert _answering(engines) == ["seer"]
 
+    @pytest.mark.parametrize("mode", ["off", "ask", "loaded", "image", "auto"])
+    def test_the_chat_autoswitch_setting_does_not_stop_the_description(
+            self, live, monkeypatch, mode):
+        import localm.selfclient as selfclient
+        from localm.plugins.builtin.rag import plug as ragplug
+        base, engines, _ = live
+        monkeypatch.setattr(cr, "configured_mode", lambda: mode)
+        monkeypatch.setattr(selfclient, "get_api_key", lambda: None, raising=False)
+        describe = ragplug._make_self_describe_image(base, lambda: "plain")
+        text = describe(b"\x89PNG\r\n\x1a\n" + b"0" * 16, "image/png")
+        assert text == "answered-by-seer"
+        assert _answering(engines) == ["seer"]
+
+    def test_the_chat_model_is_still_the_chat_model_afterwards(
+            self, live, monkeypatch):
+        import localm.selfclient as selfclient
+        from localm.plugins.builtin.rag import plug as ragplug
+        base, engines, _ = live
+        monkeypatch.setattr(cr, "configured_mode", lambda: "off")
+        monkeypatch.setattr(selfclient, "get_api_key", lambda: None, raising=False)
+        ragplug._make_self_describe_image(base, lambda: "plain")(
+            b"\x89PNG\r\n\x1a\n" + b"0" * 16, "image/png")
+        assert hs._resolve_unnamed_model_name() == "plain"
+        assert engines["plain"].loaded
+
+    def _describe_with_vision_models(self, live, monkeypatch, registry_edit):
+        import localm.selfclient as selfclient
+        from localm.config import load_registry
+        from localm.plugins.builtin.rag import plug as ragplug
+        base, engines, _ = live
+        monkeypatch.setattr(cr, "configured_mode", lambda: "off")
+        monkeypatch.setattr(selfclient, "get_api_key", lambda: None, raising=False)
+        reg = dict(load_registry())
+        registry_edit(reg, engines)
+        monkeypatch.setattr("localm.config.load_registry", lambda: reg)
+        monkeypatch.setattr("localm.model_manager.load_registry", lambda: reg)
+        describe = ragplug._make_self_describe_image(base, lambda: "plain")
+        with pytest.raises(RuntimeError) as exc:
+            describe(b"\x89PNG\r\n\x1a\n" + b"0" * 16, "image/png")
+        return str(exc.value), engines
+
+    def test_with_no_vision_model_installed_the_message_says_so(
+            self, live, monkeypatch):
+        msg, engines = self._describe_with_vision_models(
+            live, monkeypatch, lambda reg, eng: reg.pop("seer"))
+        assert msg.startswith("plain cannot read images and no installed model")
+        assert "pull a vision model" in msg
+        assert _answering(engines) == []
+
+    def test_a_vision_model_that_fails_to_load_is_named_with_its_error(
+            self, live, monkeypatch):
+        class _Broken(_Engine):
+            def load(self):
+                raise OSError("projector file is corrupt")
+
+        def edit(reg, engines):
+            engines["seer"] = _Broken("seer", images=True)
+
+        msg, engines = self._describe_with_vision_models(live, monkeypatch, edit)
+        assert "no installed model" not in msg
+        assert "installed vision models (seer)" in msg
+        assert "seer" in msg and "projector file is corrupt" in msg
+        assert _answering(engines) == []
+
 
 # --------------------------------------------------------------------------- #
 #  Scheduled chat jobs run by the server                                       #
