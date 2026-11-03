@@ -139,6 +139,58 @@ def test_amd_rocm_whose_overlay_failed_for_the_staged_tag_is_current(tmp_path, c
     assert updater_runtime.plan(_tree(tmp_path / "s"), inst)["reprovision"] is True
 
 
+def _without_kernel_packs(lib: Path) -> Path:
+    """The amd-rocm layout an earlier setup left: rocm_kpack.dll, no .kpack/."""
+    (lib / "rocm_kpack.dll").write_bytes(b"kpack")
+    return lib
+
+
+def test_amd_rocm_at_the_pin_without_kernel_packs_is_reprovisioned(tmp_path, cfg):
+    inst = _tree(tmp_path / "inst")
+    _without_kernel_packs(_provision(inst, "amd-rocm", "b1355-cpu-b11908"))
+    p = updater_runtime.plan(_tree(tmp_path / "s"), inst)
+    assert (p["reprovision"], p["kernel_packs"], p["current"], p["target"]) == (
+        True, True, "b1355-cpu-b11908", "b1355-cpu-b11908")
+    assert p["note"] == ("re-provisions the amd-rocm runtime b1355-cpu-b11908 to add the "
+                         "ROCm kernel packs an earlier setup left out")
+
+
+@pytest.mark.parametrize("state", ["packs", "marker", "no rocm_kpack"])
+def test_amd_rocm_at_the_pin_with_its_kernel_packs_needs_nothing(tmp_path, cfg, state):
+    """Packs present, a setup that already copied them (its marker), or a build
+    without rocm_kpack."""
+    inst = _tree(tmp_path / "inst")
+    lib = _provision(inst, "amd-rocm", "b1355-cpu-b11908")
+    if state != "no rocm_kpack":
+        _without_kernel_packs(lib)
+    if state == "packs":
+        (lib / ".kpack").mkdir()
+        (lib / ".kpack" / "blas_lib_gfx1030.kpack").write_bytes(b"pack")
+    elif state == "marker":
+        (lib / ".localm-kernel-packs").write_text("1\n", encoding="utf-8")
+    p = updater_runtime.plan(_tree(tmp_path / "s"), inst)
+    assert p["reprovision"] is False and p["note"] is None and p["kernel_packs"] is False
+
+
+def test_a_failed_overlay_build_without_kernel_packs_is_a_kernel_pack_repair(tmp_path, cfg):
+    """b1355 with the overlay failed for this release's CPU tag counts as this
+    release's build, so the kernel packs are the only reason to re-provision."""
+    inst = _tree(tmp_path / "inst")
+    lib = _without_kernel_packs(_provision(inst, "amd-rocm", "b1355"))
+    (lib / ".localm-cpu-overlay-failed").write_text('{"tag": "b11908"}', encoding="utf-8")
+    p = updater_runtime.plan(_tree(tmp_path / "s"), inst)
+    assert (p["reprovision"], p["kernel_packs"], p["current"]) == (True, True, "b1355")
+    assert "to add the ROCm kernel packs" in p["note"]
+
+
+def test_an_older_build_without_kernel_packs_names_the_build_change(tmp_path, cfg):
+    inst = _tree(tmp_path / "inst", _PINS_031)
+    _without_kernel_packs(_provision(inst, "amd-rocm", "b1349-cpu-b11719"))
+    p = updater_runtime.plan(_tree(tmp_path / "s"), inst)
+    assert (p["reprovision"], p["kernel_packs"]) == (True, False)
+    assert "b1349-cpu-b11719 to b1355-cpu-b11908" in p["note"]
+
+
 def test_a_user_pin_is_kept_and_named(tmp_path, cfg):
     cfg["llama_runtime_pin"] = "b11600"
     inst = _tree(tmp_path / "inst", _PINS_031)
@@ -588,6 +640,46 @@ def test_first_start_brings_a_runtime_an_old_updater_left_behind_to_the_pin(
     calls.clear()
     _start(inst, monkeypatch, calls=calls)
     assert calls == [], "a current runtime is left alone"
+
+
+@pytest.mark.parametrize("archive_has_packs", [True, False])
+def test_first_start_adds_missing_kernel_packs_once(tmp_path, cfg, monkeypatch,
+                                                   archive_has_packs):
+    """A runtime at this release's build whose setup left out .kpack/ is
+    re-provisioned at the first start, and never again afterwards, also when the
+    archive brought no packs."""
+    monkeypatch.setattr(_version, "read_version", lambda: "0.3.2")
+    inst = _tree(tmp_path / "inst", _PINS_032, "0.3.2")
+    lib = _without_kernel_packs(_provision(inst, "amd-rocm", "b1355-cpu-b11908"))
+    fake = _fake_setup_llama(inst, "b1355-cpu-b11908")
+    calls = []
+
+    def setup_llama(cmd):
+        calls.append(list(cmd))
+        rc = fake(cmd)
+        (lib / "rocm_kpack.dll").write_bytes(b"kpack")
+        (lib / ".localm-kernel-packs").write_text("1\n", encoding="utf-8")
+        if archive_has_packs:
+            (lib / ".kpack").mkdir(exist_ok=True)
+            (lib / ".kpack" / "blas_lib_gfx1030.kpack").write_bytes(b"pack")
+        return rc
+
+    from localm.cli import _core
+    monkeypatch.setattr(updater, "repo_root", lambda: inst)
+    monkeypatch.delenv("LOCALM_RESTART_IN_PROGRESS", raising=False)
+    monkeypatch.setattr(subprocess, "run",
+                        lambda cmd, **kw: subprocess.CompletedProcess(cmd, setup_llama(cmd)))
+    printed = []
+    monkeypatch.setattr(_core.console, "print", lambda *a, **kw: printed.append(str(a[0])))
+    _core._finish_pending_runtime_update("gui")
+    out = "\n".join(printed)
+    assert [c for c in calls if "setup-llama" in c], calls
+    assert "add the ROCm kernel packs an earlier setup left out" in out
+    assert "is installed; updating it" not in out
+    assert updater_runtime.last_status()["state"] == "updated"
+    calls.clear()
+    _core._finish_pending_runtime_update("gui")
+    assert calls == [], "a runtime that went through the new setup is left alone"
 
 
 def test_first_start_retries_after_a_failure_and_keeps_the_old_runtime(

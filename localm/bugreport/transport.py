@@ -148,7 +148,9 @@ def upload_report(title: str, body: str, *, url: Optional[str] = None,
 
     Only the report text (plus an optional shared secret) is sent; the GitHub
     token lives at the proxy. Raises :class:`LocalmError` on any failure - no
-    endpoint, a network error, or a non-2xx response - so a failed send is NEVER
+    endpoint, a network error, a non-2xx response, or a reply that says the
+    report was not filed (``"filed": false``, stage ``not_filed``) - so a failed
+    send is NEVER
     reported as success (we do not hide problems). *opener* is injectable for
     tests (defaults to urllib)."""
     import json as _json
@@ -241,6 +243,18 @@ def upload_report(title: str, body: str, *, url: Optional[str] = None,
             hint=(f"The bug-report server rejected the report (HTTP {status}). This is "
                   f"likely a temporary server-side issue, not your connection."))
     try:
-        return _json.loads(raw) if raw.strip() else {}
+        result = _json.loads(raw) if raw.strip() else {}
     except (ValueError, RecursionError):
         return {"raw": raw[:300]}
+    if isinstance(result, dict) and result.get("filed") is False:
+        raise LocalmError(
+            "the bug-report server did not file the report",
+            reason=f"HTTP {status}: not filed",
+            stage="not_filed",
+            hint=("The bug-report server received the report but did not file it, "
+                  "because it is missing the sections localm writes into every report. "
+                  f"Send the saved report by email to {MAINTAINER_EMAIL} instead."))
+    if isinstance(result, dict) and result.get("number") is not None:
+        from localm import issue_tracker
+        issue_tracker.record_filed(result["number"], title)
+    return result

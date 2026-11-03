@@ -39,8 +39,8 @@ def _open_mode(monkeypatch):
 def test_issues_endpoint_lists(monkeypatch):
     _open_mode(monkeypatch)
     monkeypatch.setattr(issue_tracker, "available", lambda: True)
-    monkeypatch.setattr(issue_tracker, "list_issues",
-                        lambda state="all": [{"number": 5, "state": "open", "title": "t"}])
+    monkeypatch.setattr(issue_tracker, "filed_status",
+                        lambda **kw: [{"number": 5, "state": "open", "title": "t"}])
     r = _get(create_app(_engine()), "/api/issues")
     assert r.status_code == 200
     data = r.json()
@@ -54,17 +54,14 @@ def test_issues_endpoint_unconfigured(monkeypatch):
     assert r.json()["available"] is False
 
 
-def test_issues_endpoint_error_surfaced(monkeypatch):
+def test_issues_endpoint_row_error_surfaced(monkeypatch):
     _open_mode(monkeypatch)
-    from localm.bugreport import LocalmError
     monkeypatch.setattr(issue_tracker, "available", lambda: True)
-
-    def boom(state="all"):
-        raise LocalmError("could not reach the localm proxy", reason="timeout")
-
-    monkeypatch.setattr(issue_tracker, "list_issues", boom)
+    monkeypatch.setattr(issue_tracker, "filed_status", lambda **kw: [
+        {"number": 5, "title": "t", "error": "could not reach the localm proxy"}])
     data = _get(create_app(_engine()), "/api/issues").json()
-    assert "error" in data and "could not reach" in data["error"]
+    assert data["issues"][0]["error"] == "could not reach the localm proxy"
+    assert "state" not in data["issues"][0]
 
 
 # --------------------------- update check -------------------------------

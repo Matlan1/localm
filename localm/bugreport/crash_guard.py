@@ -175,7 +175,7 @@ def arm_crash_guard(context: Optional[dict] = None, home=None,
     import json
     import os
 
-    from localm.debuglog import logger
+    from localm.debuglog import fault_trace_all_threads, logger
     try:
         d = _br._crash_dir(home)
         diagnostics = _br._diagnostics_allowed()
@@ -184,7 +184,7 @@ def arm_crash_guard(context: Optional[dict] = None, home=None,
                                    encoding="utf-8")
             _br._crash_trace_instance_id = instance_id
             try:
-                faulthandler.enable(file=_br._crash_trace_fh, all_threads=True)
+                faulthandler.enable(file=_br._crash_trace_fh, all_threads=fault_trace_all_threads())
                 if not faulthandler.is_enabled():
                     # enable() can return without raising yet still not actually
                     # be armed on some platforms/file-object shapes - is_enabled()

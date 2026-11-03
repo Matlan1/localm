@@ -710,10 +710,8 @@ def update_cmd(check_only: bool, yes: bool, do_rollback: bool, list_only: bool,
 
 @main.command("issues")
 @click.argument("number", required=False, type=int)
-@click.option("--state", type=click.Choice(["open", "closed", "all"]), default="all",
-              show_default=True, help="Which issues to list.")
-def issues_cmd(number, state) -> None:
-    """List the project's issues (open/closed), or show one by NUMBER.
+def issues_cmd(number) -> None:
+    """Show the bug reports this install filed, or one issue by NUMBER.
 
     Read-only, through the bug-report proxy - no GitHub account needed. Lets a tester
     see whether a bug they filed is acknowledged or fixed. Requires the proxy to be
@@ -741,17 +739,18 @@ def issues_cmd(number, state) -> None:
             if it.get("html_url"):
                 console.print(f"[dim]{escape(str(it['html_url']))}[/dim]")
             return
-        issues = issue_tracker.list_issues(state)
+        issues = issue_tracker.filed_status()
     except LocalmError as e:
         console.print(
             f"[yellow]Could not load issues:[/yellow] {escape(e.summary)} ({escape(e.reason)}).")
         return
 
     if not issues:
-        console.print("[dim]No issues.[/dim]")
+        console.print("[dim]This install has not filed any bug reports. "
+                      f"All issues: {issue_tracker.ISSUES_URL}[/dim]")
         return
     for it in issues:
-        st = it.get("state", "?")
+        st = it.get("state") or it.get("error") or "?"
         color = "green" if st == "closed" else "yellow"
         # No literal square brackets around dynamic text - rich would parse them as
         # markup tags and drop them. The interpolated data (number/state/title) is
@@ -760,4 +759,5 @@ def issues_cmd(number, state) -> None:
         console.print(
             f"  [{color}]#{escape(str(it.get('number')))} {escape(str(st))}[/{color}]  "
             f"{escape(str(it.get('title', '')))}")
-    console.print(f"[dim]{len(issues)} issue(s). Detail: localm issues <number>.[/dim]")
+    console.print(f"[dim]{len(issues)} issue(s). Detail: localm issues <number>. "
+                  f"All issues: {issue_tracker.ISSUES_URL}[/dim]")
