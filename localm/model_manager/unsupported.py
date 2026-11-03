@@ -305,14 +305,18 @@ def diffusers_refusal(folder: Path) -> Optional[str]:
 
 def hf_folder_refusal(folder: Path) -> Optional[str]:
     """The reason the HuggingFace-style *folder* cannot be loaded (MLX-quantized,
-    quantized for a runtime localm lacks, an OpenVINO export or a CTranslate2
-    export), or None."""
+    quantized for a runtime localm lacks, an OpenVINO export, a CTranslate2
+    export, or bundled code that imports a package this install lacks), or None."""
     openvino = openvino_refusal(folder)
     if openvino is not None:
         return openvino
     ctranslate2 = ctranslate2_refusal(folder)
     if ctranslate2 is not None:
         return ctranslate2
+    from .missing_packages import folder_refusal
+    missing = folder_refusal(folder)
+    if missing is not None:
+        return missing
     config = _read_config(folder)
     if config is None:
         return None
