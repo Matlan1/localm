@@ -461,7 +461,7 @@ class _Tokenizer:
                     "pre-tokenizer regex %s. Such input will be refused rather "
                     "than tokenised.", self._pre_type, hazard)
 
-    def _tokens_join_across_cuts(self, model_ptr: int) -> bool:
+    def _tokens_join_across_cuts(self, model_ptr) -> bool:
         """True when tokenizing a text in consecutive chunks and joining the
         tokens gives the whole text's tokens: a BPE vocabulary that adds no end
         token and no space or metaspace at the start of each call. Anything else
