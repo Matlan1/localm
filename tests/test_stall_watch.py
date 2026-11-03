@@ -199,6 +199,21 @@ def test_short_path_keeps_no_machine_part(path, short):
     assert sw.short_path(path) == short
 
 
+@pytest.mark.parametrize("line", [
+    "", "  ", 'File "', '  File "x"', '  File "x", line', '  File "x", line 3', '  File "x", line y in f',
+    "  <unknown>", "Timeout (0:00:01)!",
+])
+def test_a_line_that_is_not_a_frame_is_ignored(line):
+    assert sw._parse_frame(line) is None
+
+
+def test_parsing_a_hostile_frame_line_is_linear():
+    line = '  File "' + '", line 0 in ' * 200_000
+    t0 = time.perf_counter()
+    sw._parse_frame(line)
+    assert time.perf_counter() - t0 < 1.0
+
+
 def test_parse_dump_reads_threads_and_frames():
     text = ("Timeout (0:00:01)!\nThread 0x0000abcd (most recent call first):\n"
             '  File "/x/localm/a.py", line 3 in f\n  File "/x/localm/b.py", line 9 in g\n\n'

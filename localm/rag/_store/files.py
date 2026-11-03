@@ -302,8 +302,9 @@ class _CollectionFiles:
         state, as one change to the collection's files (``_files_changing``).
 
         *on_progress* is told about a vectors.json write of at least
-        ``_REPORT_VECTORS_COMPONENTS`` components: once when it starts and then
-        every ``_REPORT_EVERY_S`` seconds with phase/done/total/unit."""
+        ``_REPORT_VECTORS_COMPONENTS`` components: once when it starts, every
+        ``_REPORT_EVERY_S`` seconds and once at the end with
+        phase/done/total/unit."""
         with _files_changing(self.dir):
             self._write_files(on_progress)
         self._snapshot_ref = None
@@ -325,6 +326,8 @@ class _CollectionFiles:
                 on_progress(f"saving the index: {done}/{total} vectors",
                             phase="saving the index", done=done, total=total,
                             unit="vectors")
+        on_progress(f"saving the index: {total}/{total} vectors",
+                    phase="saving the index", done=total, total=total, unit="vectors")
 
     def _write_files(self, on_progress: Optional[ProgressFn] = None) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)

@@ -217,6 +217,16 @@ def test_a_large_index_reports_its_load_and_save(big_collection, tmp_path, monke
     assert dones == sorted(dones) and dones[-1] == _ROWS + 1
 
 
+def test_a_large_save_always_ends_on_its_total(big_collection, monkeypatch):
+    from localm.rag._store import files
+    monkeypatch.setattr(files, "_REPORT_EVERY_S", 3600.0)
+    calls = []
+    coll = Collection("big", base=big_collection, cache=False)
+    coll._save(lambda text, **kw: calls.append(kw))
+    structured = [kw for kw in calls if kw]
+    assert [(kw["done"], kw["total"]) for kw in structured] == [(_ROWS, _ROWS)]
+
+
 def test_a_small_index_reports_neither(tmp_path):
     base = tmp_path / "collections"
     base.mkdir()

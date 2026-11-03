@@ -48,7 +48,6 @@ _KEEP = 8
 _FRAMES_KEPT = 12
 
 _THREAD_RE = re.compile(r"^(?:Current thread|Thread) (0x[0-9a-fA-F]+)")
-_FRAME_RE = re.compile(r'^\s+File "(.*)", line (\d+) in (.*)$')
 
 #: (file name, function) of stdlib frames a thread sits in while it waits with
 #: the GIL released.
@@ -88,6 +87,19 @@ def short_path(path: str) -> str:
     return p[i + 1:] if keep else p[i + len(marker):]
 
 
+def _parse_frame(line: str) -> Optional[tuple]:
+    """(file, line, function) for a dump line ``  File "x", line N in f``, else
+    None."""
+    body = line.lstrip()
+    if not body.startswith('File "'):
+        return None
+    path, sep, rest = body[6:].rpartition('", line ')
+    number, sep2, func = rest.partition(" in ")
+    if not sep or not sep2 or not number.isdecimal():
+        return None
+    return path, int(number), func
+
+
 def parse_dump(text: str) -> dict:
     """{thread ident: [(file, line, function), ...] innermost first} for a
     faulthandler dump."""
@@ -98,9 +110,9 @@ def parse_dump(text: str) -> dict:
         if m:
             current = threads.setdefault(int(m.group(1), 16), [])
             continue
-        m = _FRAME_RE.match(line)
-        if m and current is not None:
-            current.append((m.group(1), int(m.group(2)), m.group(3)))
+        frame = _parse_frame(line)
+        if frame is not None and current is not None:
+            current.append(frame)
     return threads
 
 
