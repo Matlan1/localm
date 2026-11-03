@@ -1056,8 +1056,10 @@ class VramSizingMixin:
         embedder's expected footprint is shared among them
         (``Placement.max_ctx``), clamped to ``_AUTO_CTX_MAX`` unless
         n_ctx_max is 0, floored at ``_AUTO_CTX_MIN`` and rounded down to whole
-        KiB of tokens; without ctx_auto, n_ctx_max as configured. None for a
-        model that keeps no KV cache."""
+        KiB of tokens; without ctx_auto, n_ctx_max as configured. A placement
+        that leaves layers on the CPU is also held to the window whose KV
+        cache for those layers fits free system RAM (:meth:`_ram_ctx_tokens`).
+        None for a model that keeps no KV cache."""
         if self._keeps_no_kv_cache():
             return None
         n_ctx_max = getattr(self, "n_ctx_max", None)
@@ -1068,13 +1070,30 @@ class VramSizingMixin:
         tokens = placement.max_ctx(self.n_ctx, reserve_each=share)
         if tokens is None:
             tokens = self._AUTO_CTX_FALLBACK
+        source = "from the free VRAM of each GPU"
+        if not placement.full_offload:
+            units = self._placement_units()
+            if units is not None:
+                start = max(0, min(units.n_layer,
+                                   placement.n_layer + 1 - placement.n_gpu_layers))
+                cpu_per_token = sum(int(t) for t in units.kv_per_token[:start])
+            else:
+                cpu_per_token = (self._kv_bytes_per_token()
+                                 - sum(d.kv_per_token for d in placement.loads))
+            if cpu_per_token > 0:
+                ram = self._ram_ctx_tokens(placement.n_gpu_layers, cpu_per_token)
+                if ram is None:
+                    source += "; free RAM not measurable"
+                else:
+                    tokens = min(tokens, ram)
+                    source += " and free RAM"
         tokens = (tokens // 1024) * 1024
         if not unlimited:
             tokens = min(self._AUTO_CTX_MAX, tokens)
         tokens = int(max(self._AUTO_CTX_MIN, tokens))
         extra = "; no max (n_ctx_max=0)" if unlimited else ""
         console.print(f"[dim]  ctx auto : window may grow to {tokens:,} tokens "
-                      f"(from the free VRAM of each GPU{extra})[/dim]")
+                      f"({source}{extra})[/dim]")
         return tokens
 
     @staticmethod
@@ -2035,55 +2054,172 @@ class VramSizingMixin:
         ``split_budget`` = ``(free, devices)``, when given, replaces that
         reading: the free VRAM summed over the devices the load uses and how
         many there are (the implicit split fit's kept devices).
+
+        The budget follows where llama.cpp puts the KV cache
+        (:meth:`_kv_vram_share`): a load with every layer on the GPU is sized
+        from free VRAM alone as above; a load with no layer on the GPU (or with
+        ``runtime_has_no_gpu`` set: the native runtime ships no GPU backend)
+        from free system RAM alone, without reading VRAM; a partial offload from both, each
+        share against its own memory, and the smaller window wins. See
+        :meth:`_auto_ctx_sized`.
         """
-        if split_budget is not None:
-            free, split_devices = split_budget
-        else:
-            free, _split_total, split_devices = self._split_free_total_bytes()
-        if free is None:
-            free = self._free_vram_bytes()
-            split_devices = 1   # single-device reading - the flat overhead
-        if free is None:
-            return self._AUTO_CTX_FALLBACK
-        # An n_cpu_moe load's pinned expert weights never draw on this budget.
-        model = self._effective_model_bytes_for_vram()
-        # The draft source's KV per token joins the main one; only its fixed
-        # part (weights, compute buffers) comes off the budget.
-        spec_per_token = self._spec_kv_per_token()
-        spec_fixed = max(0, self._spec_extra_vram_bytes() - self.n_ctx * spec_per_token)
-        budget = (free - model - self._split_overhead_bytes(split_devices)
-                  - embedder_ctx_reservation_bytes()
-                  - spec_fixed
-                  - self._recurrent_state_vram_bytes())
+        return self._auto_ctx_sized(capped=capped, split_budget=split_budget)[0]
+
+    def _ctx_gpu_layers(self) -> int:
+        """The n_gpu_layers this load uses: ``effective_gpu_layers`` once
+        resolved, else the configured ``n_gpu_layers`` (99 when absent)."""
+        gpu_layers = getattr(self, "effective_gpu_layers", None)
+        if gpu_layers is None:
+            gpu_layers = getattr(self, "n_gpu_layers", None)
+        return self._DEFAULT_GPU_LAYERS if gpu_layers is None else int(gpu_layers)
+
+    def _kv_shares(self, gpu_layers: int) -> tuple[float, float]:
+        """``(vram, ram)``: the shares of this load's KV cache llama.cpp places
+        in VRAM and in system RAM with *gpu_layers* on the GPU. ``(1, 0)`` when
+        every layer is offloaded (99 or more, or negative), ``(0, 1)`` for 0,
+        else the repeating blocks at or above ``n_layer + 1 - gpu_layers`` over
+        the block count for VRAM and the rest for RAM. When the block count is
+        unknown (:meth:`_cached_layer_count` None) the VRAM share is estimated
+        from ``_ASSUMED_LAYERS`` and the RAM share is 1."""
+        if gpu_layers < 0 or gpu_layers >= self._DEFAULT_GPU_LAYERS:
+            return 1.0, 0.0
+        if gpu_layers == 0:
+            return 0.0, 1.0
+        layers = self._cached_layer_count()
+        if not layers:
+            return min(1.0, (gpu_layers - 1) / self._ASSUMED_LAYERS), 1.0
+        vram = min(layers, gpu_layers - 1) / layers
+        return vram, 1.0 - vram
+
+    def _ram_ctx_tokens(self, gpu_layers: int, ram_per_token: int) -> Optional[int]:
+        """Tokens of context whose system-RAM share (*ram_per_token* bytes each)
+        fits available system RAM (``sysstats.system_ram``) beside the weights a
+        load with *gpu_layers* on the GPU keeps there
+        (:meth:`_cpu_held_weight_bytes`, the whole file when that count fails,
+        plus :meth:`_cpu_draft_weight_bytes`; with no block on the GPU also the
+        recurrent state) and :data:`HOST_RAM_HEADROOM_BYTES`. 0 when they leave
+        no room; None when available RAM cannot be read."""
+        from localm.sysstats import system_ram
+        _total, available = system_ram()
+        if available is None:
+            return None
+        held = self._cpu_held_weight_bytes(gpu_layers)
+        if held is None:
+            held = self._model_bytes()
+        held += self._cpu_draft_weight_bytes(gpu_layers > 0)
+        if gpu_layers <= 1:
+            held += self._recurrent_state_vram_bytes()
+        budget = available - held - HOST_RAM_HEADROOM_BYTES
+        return max(0, budget) // max(1, ram_per_token)
+
+    def _auto_ctx_sized(self, capped: bool = True,
+                        split_budget: Optional[tuple[int, int]] = None
+                        ) -> tuple[int, str]:
+        """``(ceiling, source)``: the ctx_auto ceiling (see :meth:`_auto_ctx_max`)
+        and a phrase naming where it came from: ``"from free VRAM"``,
+        ``"from free RAM"`` or ``"from free VRAM and RAM"``, with
+        ``"; free <memory> not measurable"`` appended when one share could not
+        be read, or ``"free <memory> not measurable, default"`` when the
+        ceiling is ``_AUTO_CTX_FALLBACK`` because no budget could be read.
+
+        The shares come from :meth:`_kv_shares`; ``runtime_has_no_gpu`` True
+        counts every layer as on the CPU. RAM side: :meth:`_ram_ctx_tokens` for
+        the KV bytes per token of the blocks on the CPU; with no layer on the GPU the draft source's KV per
+        token is charged there too, and VRAM is not read. VRAM side of a
+        partial offload: as for a full offload, but charged only the weights
+        not kept in system RAM and the KV bytes per token of the blocks on the
+        GPU. Each share is divided by its own bytes per token; the smaller
+        window wins."""
+        gpu_layers = self._ctx_gpu_layers()
+        if getattr(self, "runtime_has_no_gpu", False):
+            gpu_layers = 0
+        share, ram_share = self._kv_shares(gpu_layers)
+        free = None
+        split_devices = 1
+        if share > 0:
+            if split_budget is not None:
+                free, split_devices = split_budget
+            else:
+                free, _split_total, split_devices = self._split_free_total_bytes()
+            if free is None:
+                free = self._free_vram_bytes()
+                split_devices = 1   # single-device reading - the flat overhead
+            if free is None and share >= 1.0:
+                return self._AUTO_CTX_FALLBACK, "free VRAM not measurable, default"
         per_token = self._kv_bytes_per_token()
-        if budget <= 0 or per_token <= 0:
-            return max(self.n_ctx, self._AUTO_CTX_MIN)
-        auto = budget // (per_token + spec_per_token)
+        if per_token <= 0:
+            return max(self.n_ctx, self._AUTO_CTX_MIN), (
+                "from free RAM" if share <= 0 else "from free VRAM")
+        spec_per_token = self._spec_kv_per_token()
+        limits = []
+        read = []
+        unread = []
+        if free is None:
+            if share > 0:
+                unread.append("VRAM")
+        else:
+            read.append("VRAM")
+            # An n_cpu_moe load's pinned expert weights never draw on this budget.
+            model = self._effective_model_bytes_for_vram()
+            if ram_share > 0:
+                held = self._cpu_held_weight_bytes(gpu_layers)
+                if held is not None:
+                    model = max(0, self._model_bytes() - held)
+            # The draft source's KV per token joins the main one; only its fixed
+            # part (weights, compute buffers) comes off the budget.
+            spec_fixed = max(0, self._spec_extra_vram_bytes() - self.n_ctx * spec_per_token)
+            budget = (free - model - self._split_overhead_bytes(split_devices)
+                      - embedder_ctx_reservation_bytes()
+                      - spec_fixed
+                      - self._recurrent_state_vram_bytes())
+            gpu_per_token = max(1, int(per_token * share) + spec_per_token)
+            limits.append(max(0, budget) // gpu_per_token)
+        if ram_share > 0:
+            ram_per_token = (per_token if ram_share >= 1.0
+                             else per_token - int(per_token * share))
+            if share <= 0:
+                ram_per_token += spec_per_token
+            tokens = self._ram_ctx_tokens(gpu_layers, ram_per_token)
+            if tokens is None:
+                unread.append("RAM")
+            else:
+                read.append("RAM")
+                limits.append(tokens)
+        if not limits:
+            return (self._AUTO_CTX_FALLBACK,
+                    f"free {' and '.join(unread)} not measurable, default")
+        source = "from free " + " and ".join(read)
+        if unread:
+            source += f"; free {' and '.join(unread)} not measurable"
+        auto = min(limits)
+        if auto <= 0:
+            return max(self.n_ctx, self._AUTO_CTX_MIN), source
         auto = (auto // 1024) * 1024
         hi = auto if not capped else min(self._AUTO_CTX_MAX, auto)
-        return int(max(self._AUTO_CTX_MIN, hi))
+        return int(max(self._AUTO_CTX_MIN, hi)), source
 
     def _effective_ctx_max(self, split_budget: Optional[tuple[int, int]] = None
                            ) -> Optional[int]:
         """The context ceiling to use for this load (auto or configured).
 
-        ctx_auto sizes the ceiling from free VRAM. n_ctx_max==0 means the user
-        asked for NO fixed ceiling ("grow until VRAM"); combined with ctx_auto
-        that lifts the conservative _AUTO_CTX_MAX safety clamp so the window can
-        use the full VRAM-derived budget. When ctx_auto is off, n_ctx_max is used
-        verbatim (0/None already mean unlimited downstream). ``split_budget`` is
-        passed to :meth:`_auto_ctx_max`. A model that keeps no KV cache (a
-        diffusion model) gets None: its fixed window is reported by the worker
-        at load."""
+        ctx_auto sizes the ceiling from the free memory the KV cache lands in
+        (:meth:`_auto_ctx_sized`) and prints where it came from. n_ctx_max==0
+        means the user asked for NO fixed ceiling; combined with ctx_auto that
+        lifts the conservative _AUTO_CTX_MAX safety clamp so the window can use
+        the full budget. When ctx_auto is off, n_ctx_max is used verbatim
+        (0/None already mean unlimited downstream). ``split_budget`` is passed
+        to :meth:`_auto_ctx_max`. A model that keeps no KV cache (a diffusion
+        model) gets None: its fixed window is reported by the worker at load."""
         if self._keeps_no_kv_cache():
             return None
         if self.ctx_auto:
             unlimited = (self.n_ctx_max == 0)
-            auto = self._auto_ctx_max(capped=not unlimited, split_budget=split_budget)
+            auto, source = self._auto_ctx_sized(capped=not unlimited,
+                                                split_budget=split_budget)
             extra = "; no max (n_ctx_max=0)" if unlimited else ""
             console.print(
                 f"[dim]  ctx auto : window may grow to {auto:,} tokens "
-                f"(from free VRAM{extra})[/dim]"
+                f"({source}{extra})[/dim]"
             )
             return auto
         return self.n_ctx_max
