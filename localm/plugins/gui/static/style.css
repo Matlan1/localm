@@ -939,6 +939,13 @@ pre:hover .canvas-btn { opacity: 1; }
 .composer .send:disabled { background: var(--border); cursor: default; }
 .composer .send.stop { background: var(--red); }
 
+.pin-mismatch {
+  max-width: var(--thread-max);
+  margin: 6px auto 0;
+  font-size: 12px;
+  color: var(--warn, #f59e0b);
+}
+
 .composer-row {
   max-width: var(--thread-max);
   margin: 8px auto 0;
@@ -2333,6 +2340,7 @@ div:has(> .data-table) { overflow-x: auto; }
   border-radius: 8px; font-size: 11px; padding: 2px 8px; cursor: pointer;
 }
 .msg-meta button.mem-chip:hover { color: var(--accent); border-color: var(--accent); }
+.msg-meta .mem-saved { color: var(--accent); font-size: 12px; align-self: center; }
 
 /* model-autoswitch "ask": offers the better model (chat.js buildRoutedChip). */
 .msg-meta button.routed-suggest {

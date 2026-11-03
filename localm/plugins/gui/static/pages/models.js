@@ -5,7 +5,7 @@
 // --- ES module imports ---
 import { clearRecentGuiErrors, onRecentGuiErrorsChange, recentGuiErrors } from "../app/client-log.js";
 import { pickDirectory } from "../app/picker.js";
-import { $, GIB, authHeaders, cancelJob, confirmDanger, confirmDangerAsync, downloadRate, el, fmtBytes, fmtDuration, openModal, promptText, renderMarkdown, showInlineError, streamJob, toast, whileBusy } from "../app/helpers.js";
+import { $, GIB, authHeaders, cancelJob, confirmDanger, confirmDangerAsync, downloadRate, el, fmtBytes, fmtDuration, openModal, promptText, renderMarkdown, showInlineError, streamJob, toast, setBusy, whileBusy } from "../app/helpers.js";
 import { t, tn } from "../app/i18n.js";
 import { onServerUnreachable } from "../app/init.js";
 import { emptyState, iconEl } from "../app/icons.js";
@@ -2108,7 +2108,7 @@ export function renderUpdateNotes(notes) {
   box.classList.remove("collapsed");
   if (moreRow) moreRow.hidden = true;
   if (!text) { box.hidden = true; return; }
-  renderMarkdown(box, text, { imageScope: "update-notes" });
+  renderMarkdown(box, text, { imageScope: "update-notes", document: true });
   box.hidden = false;
   const long = text.length > UPDATE_NOTES_SHORT_CHARS
     || text.split("\n").length > UPDATE_NOTES_SHORT_LINES;
@@ -2135,7 +2135,7 @@ export async function updateCheck() {
   const checkBtn = $("update-check");
   if (out) { out.hidden = false; out.textContent = t("settings.update.checking"); }
   renderUpdateNotes("");
-  if (checkBtn) checkBtn.disabled = true;
+  setBusy(checkBtn, true);
   try {
     const r = await fetch("/api/update/check", { headers: authHeaders() });
     const d = await r.json().catch(() => ({}));
@@ -2168,7 +2168,7 @@ export async function updateCheck() {
     if (out) out.hidden = false;
     showInlineError(out, t("settings.update.checkFailed", { message: e.message }));
   } finally {
-    if (checkBtn) checkBtn.disabled = false;
+    setBusy(checkBtn, false);
   }
 }
 window.__localmUpdateCheck = updateCheck;
@@ -2407,7 +2407,7 @@ if ($("update-rollback")) $("update-rollback").onclick = updateRollback;
 // structured result rather than streaming progress, so there is no job.
 export async function rebuildLauncher() {
   const out = $("rebuild-launcher-status"), btn = $("rebuild-launcher");
-  if (btn) btn.disabled = true;
+  setBusy(btn, true);
   if (out) { out.hidden = false; out.textContent = t("settings.launcher.rebuilding"); }
   try {
     const r = await fetch("/api/app/rebuild-launcher?force=true",
@@ -2428,7 +2428,7 @@ export async function rebuildLauncher() {
   } catch (e) {
     showInlineError(out, t("settings.launcher.failed", { message: e.message }));
   } finally {
-    if (btn) btn.disabled = false;
+    setBusy(btn, false);
   }
 }
 if ($("rebuild-launcher")) $("rebuild-launcher").onclick = rebuildLauncher;
@@ -2593,8 +2593,9 @@ async function confirmBackendHardware(wanted, proceed) {
 }
 
 export async function runtimeUpdateCheck() {
-  const out = $("runtime-update-status");
+  const out = $("runtime-update-status"), checkBtn = $("runtime-update-check");
   if (out) { out.hidden = false; out.textContent = t("settings.runtime.checking"); }
+  setBusy(checkBtn, true);
   try {
     const d = await fetchRuntimeCheck();
     runtimeCheckState = d;
@@ -2615,6 +2616,8 @@ export async function runtimeUpdateCheck() {
     runtimeCheckState = null;
     if (out) out.hidden = false;
     showInlineError(out, t("settings.runtime.checkFailed", { message: e.message }));
+  } finally {
+    setBusy(checkBtn, false);
   }
   syncRuntimeApply();
   syncRuntimeRollback();
@@ -2641,8 +2644,8 @@ export async function runtimeProvision(backend, tag, rollback) {
   const out = $("runtime-update-status"), btn = $("runtime-update-apply");
   const rbBtn = $("runtime-rollback");
   const log = $("runtime-update-log");
-  if (btn) btn.disabled = true;
-  if (rbBtn) rbBtn.disabled = true;
+  setBusy(btn, true);
+  setBusy(rbBtn, true);
   if (out) {
     out.hidden = false;
     out.textContent = rollback
@@ -2658,8 +2661,8 @@ export async function runtimeProvision(backend, tag, rollback) {
         ? t("settings.runtime.rollbackFailed", { message: e.message })
         : t("settings.runtime.updateFailed", { message: e.message });
     }
-    if (btn) btn.disabled = false;
-    if (rbBtn) rbBtn.disabled = false;
+    setBusy(btn, false);
+    setBusy(rbBtn, false);
     if (log) log.style.display = "none";
     return;
   }
@@ -2676,8 +2679,8 @@ export async function runtimeProvision(backend, tag, rollback) {
       ? (rollback ? t("settings.runtime.rolledBack") : t("settings.runtime.provisioned"))
       : (tail.join(" ").trim() || t("settings.runtime.didNotFinish"));
   }
-  if (btn) btn.disabled = false;
-  if (rbBtn) rbBtn.disabled = false;
+  setBusy(btn, false);
+  setBusy(rbBtn, false);
   if (ok) {
     // The request has been carried out, so clear the selection.
     if ($("runtime-backend")) $("runtime-backend").value = "";
@@ -2748,7 +2751,7 @@ export async function showChangelog() {
         if (!r.ok) throw new Error(d.detail || r.statusText);
         if (!d.available) { md.textContent = t("settings.changelog.none"); return; }
         md.textContent = "";
-        renderMarkdown(md, d.markdown || "");
+        renderMarkdown(md, d.markdown || "", { document: true });
       })
       .catch((e) => { showInlineError(md, t("settings.changelog.failed", { message: e.message })); });
   });
@@ -2796,7 +2799,7 @@ if ($("logs-export")) {
     const dest = await pickDirectory(t("settings.logs.pickTitle"));
     if (!dest) return;                       // dismissed
     const btn = $("logs-export");
-    btn.disabled = true;
+    setBusy(btn, true);
     try {
       const r = await fetch("/api/logs/export", {
         method: "POST",
@@ -2819,7 +2822,7 @@ if ($("logs-export")) {
     } catch (e) {
       toast(t("settings.logs.failed", { message: e.message }), true);
     } finally {
-      btn.disabled = false;
+      setBusy(btn, false);
     }
   };
 }
@@ -2903,7 +2906,7 @@ if ($("upload-send")) {
     const headers = authHeaders();
     delete headers["Content-Type"];   // let the browser set the multipart boundary
     const btn = $("upload-send");
-    btn.disabled = true;
+    setBusy(btn, true);
     try {
       const r = await fetch("/api/upload", { method: "POST", headers, body: fd });
       const data = await r.json().catch(() => ({}));
@@ -2923,7 +2926,7 @@ if ($("upload-send")) {
     } catch (e) {
       toast(t("settings.uploads.uploadFailed", { message: e.message }), true);
     } finally {
-      btn.disabled = false;
+      setBusy(btn, false);
     }
   };
 }

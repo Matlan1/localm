@@ -1,5 +1,5 @@
 version: 2
-# The AMD wheel index the win32 torch, torchvision and ROCm SDK wheels in uv.lock
+# The AMD wheel index the win32 torch, torchvision, torchaudio and ROCm SDK wheels in uv.lock
 # come from. Anonymous; declared so update jobs may reach the host.
 registries:
   amd-rocm-wheels:
@@ -39,6 +39,7 @@ updates:
       # against the AMD index.
       - dependency-name: "torch"
       - dependency-name: "torchvision"
+      - dependency-name: "torchaudio"
       - dependency-name: "rocm"
       - dependency-name: "rocm-sdk-core"
       - dependency-name: "rocm-sdk-libraries-gfx103x-all"
