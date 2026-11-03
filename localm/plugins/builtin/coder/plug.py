@@ -578,6 +578,9 @@ async def _ensure_model_loaded(request: Request, model: str, *,
     switch_model = getattr(request.app.state, "switch_model", None)
     if switch_model is None:
         raise HTTPException(503, "Model switching needs the localm GUI server.")
+    from localm.inference.http_server import request_context_window
+    from localm.plugins.coder.backends.http import HTTPBackend
+    request_context_window(model, HTTPBackend.AGENT_CONTEXT_RESERVE)
     try:
         if keep_others:
             res = await switch_model(model, keep_others=True)

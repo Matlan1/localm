@@ -845,6 +845,7 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                 sized = _engines.get(name)
                 if sized is None:
                     built = sized = await loop.run_in_executor(None, _engine_factory, name)
+                _apply_requested_context(name, sized, reserve_ctx)
                 reading = _FirstPassReading.open()
                 budget = await _switch_with_backend_need(loop, budget, sized,
                                                          reading=reading)
@@ -884,6 +885,8 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
             else:
                 new_engine = built if built is not None else await loop.run_in_executor(
                     None, _engine_factory, name)
+            if healing is None:
+                _apply_requested_context(name, new_engine, reserve_ctx)
             interrupted = await _switch_load(loop, name, new_engine, preempt=preempt,
                                              reading=reading)
             if interrupted is not None:
@@ -1180,6 +1183,28 @@ async def _switch_probe_vram(loop, budget: switch_admission.LoadBudget, *,
         free=free, probe_ok=probe_status == discover.GPU_PROBE_OK,
         process_scoped=process_scoped, shortfall=shortfall,
         shares_adaptive=shares_adaptive, implicit_split=implicit is not None)
+
+
+# Context windows callers asked the next load of a model to keep usable
+# (request_context_window), by model name.
+_requested_context: dict = {}
+
+
+def request_context_window(name: str, tokens: int) -> None:
+    """Ask the next load of model *name* to keep a context window of at least
+    *tokens* usable. A resident model is not reloaded for this; a request that
+    needs the window grows it (``grow_context_window``)."""
+    _requested_context[name] = max(int(tokens), _requested_context.get(name, 0))
+
+
+def _apply_requested_context(name: str, engine, reserve_ctx: Optional[int]) -> None:
+    """Before *engine* loads as model *name*: reserve the larger of
+    *reserve_ctx* and the window ``request_context_window`` asked for, and
+    forget that request. No effect on an engine that cannot reserve a window."""
+    tokens = max(reserve_ctx or 0, _requested_context.pop(name, 0))
+    can = getattr(engine, "can_reserve_context", None)
+    if tokens > 0 and callable(can) and can() is True:
+        engine.reserve_context(tokens)
 
 
 # A reading that carries no free-VRAM figure: a reload freed against it does not

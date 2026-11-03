@@ -43,7 +43,7 @@ class _GrowableBackend(_MockBackend):
 @pytest.fixture(autouse=True)
 def _clean_registries():
     yield
-    for d in (hs._engines, hs._engines_lru, hs._inference_sems):
+    for d in (hs._engines, hs._engines_lru, hs._inference_sems, hs._requested_context):
         d.clear()
 
 
@@ -252,3 +252,47 @@ class TestGrowthSafety:
         assert resp.status_code == 413, resp.text
         assert calls == [hs._CONTEXT_GROW_STEP, 0]
         assert hs._engines["test-cap-model"].loaded
+
+
+class TestRequestedWindowSizesTheLoad:
+    def test_the_next_load_reserves_the_requested_window_once(self):
+        engine = _EngineWithBackend(_GrowableBackend(capacity=100))
+        hs.request_context_window("m", 32768)
+        hs.request_context_window("m", 4096)
+
+        hs._apply_requested_context("m", engine, None)
+
+        assert engine.ctx_reserve == 32768
+        engine._backend.ctx_reserve = 0
+        hs._apply_requested_context("m", engine, None)
+        assert engine.ctx_reserve == 0, "the request is used once"
+
+    def test_an_engine_that_cannot_reserve_ignores_it(self):
+        engine = _EngineWithBackend(_MockBackend(capacity=100))
+        hs.request_context_window("m", 32768)
+
+        hs._apply_requested_context("m", engine, None)
+
+        assert not hasattr(engine._backend, "ctx_reserve")
+        assert "m" not in hs._requested_context
+
+    def test_switch_engine_applies_it_before_the_load(self):
+        engine = _EngineWithBackend(_GrowableBackend(capacity=100))
+        engine._backend._loaded = False
+        seen = []
+        real_load = engine._backend.load
+
+        def _load():
+            seen.append(engine._backend.ctx_reserve)
+            real_load()
+
+        engine._backend.load = _load
+        hs.request_context_window("m", 8192)
+
+        from unittest.mock import patch
+        with patch("localm.config.load_registry", return_value={}), \
+                patch("localm.model_manager.get_model_info", return_value=None):
+            asyncio.run(hs.switch_engine("m", lambda name: engine))
+
+        assert seen == [8192]
+        assert engine.context_capacity() == 8192
