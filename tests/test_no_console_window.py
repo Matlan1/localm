@@ -68,7 +68,9 @@ _DETACHED_PARENT = textwrap.dedent(
     try:
         child = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True)
         out["child_console_window"] = child.stdout.strip()
+        before_system = len(seen)
         os.system("exit 0")
+        out["system_spawns"] = len(seen) - before_system
         out["flags"] = seen
     except RuntimeError as e:
         out["error"] = str(e)
@@ -98,7 +100,22 @@ def test_a_console_less_process_starts_children_without_a_window(tmp_path):
     assert out["console_before"] is False, out
     assert out["flags"] and all(f & guard.CREATE_NO_WINDOW for f in out["flags"]), out
     assert out["child_console_window"] == "0", out
+    assert out["system_spawns"] >= 1, out
     assert done.returncode == 0
+
+
+def _console_flag_uses(value: ast.expr, lineno: int) -> list[str]:
+    """A creationflags expression that names, or numerically contains, DETACHED_PROCESS or CREATE_NEW_CONSOLE."""
+    found = []
+    text = ast.unparse(value)
+    for bad in ("CREATE_NEW_CONSOLE", "DETACHED_PROCESS"):
+        if bad in text:
+            found.append(f"line {lineno}: creationflags uses {bad}")
+    for sub in ast.walk(value):
+        if isinstance(sub, ast.Constant) and isinstance(sub.value, int) and not isinstance(sub.value, bool) \
+                and sub.value & (guard.DETACHED_PROCESS | guard.CREATE_NEW_CONSOLE):
+            found.append(f"line {lineno}: creationflags uses the literal {sub.value:#x}")
+    return found
 
 
 def _window_openers(source: str) -> list[str]:
@@ -115,14 +132,18 @@ def _window_openers(source: str) -> list[str]:
             name = ast.unparse(node.func)
             if name == "os.startfile" or name.rsplit(".", 1)[-1] in {
                 "ShellExecute", "ShellExecuteW", "ShellExecuteExW", "CreateProcessW", "CreateProcessA", "WinExec",
+                "CreateProcess", "CreateProcessAsUserW", "CreateProcessAsUserA", "CreateProcessWithLogonW",
+                "CreateProcessWithTokenW",
             }:
                 found.append(f"line {node.lineno}: {name}()")
             for kw in node.keywords:
                 if kw.arg == "creationflags":
-                    text = ast.unparse(kw.value)
-                    for bad in ("CREATE_NEW_CONSOLE", "DETACHED_PROCESS"):
-                        if bad in text:
-                            found.append(f"line {node.lineno}: creationflags uses {bad}")
+                    found.extend(_console_flag_uses(kw.value, node.lineno))
+        elif isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Subscript) and isinstance(t.slice, ast.Constant) and t.slice.value == "creationflags"
+            for t in node.targets
+        ):
+            found.extend(_console_flag_uses(node.value, node.lineno))
         elif (isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings
               and "creationflags" in node.value and re.search(r"\bimport\b|Popen\(", node.value)):
             text = node.value
@@ -144,6 +165,10 @@ class TestWindowOpenersSentinel:
         "import subprocess\nsubprocess.Popen(['x'], creationflags=subprocess.CREATE_NEW_CONSOLE)\n",
         "import subprocess\nsubprocess.Popen(['x'], creationflags=subprocess.DETACHED_PROCESS | 8)\n",
         "import subprocess\nsubprocess.run(['cmd', '/c', 'start', 'x'])\n",
+        "import subprocess\nsubprocess.Popen(['x'], creationflags=0x10)\n",
+        "import subprocess\nsubprocess.Popen(['x'], creationflags=16)\n",
+        "kw = {}\nkw['creationflags'] = subprocess.DETACHED_PROCESS\n",
+        "import ctypes\nctypes.windll.advapi32.CreateProcessWithLogonW(0)\n",
         "SCRIPT = \"kw['creationflags'] = 0x00000008\\nsubprocess.Popen([sys.executable, '-c', code], **kw)\"\n",
     ])
     def test_the_scan_sees_each_way_to_open_a_window(self, snippet):

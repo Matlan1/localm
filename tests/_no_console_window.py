@@ -61,9 +61,9 @@ def arm() -> bool:
                            creation_flags_for(flags, has_console()), *rest)
 
     def system(command):
-        if has_console():
+        if not isinstance(command, str) or has_console():
             return real_system(command)
-        return subprocess.call(command, shell=True)
+        return subprocess.call(f'"{os.environ.get("COMSPEC", "cmd.exe")}" /c {command}')
 
     _winapi.CreateProcess = create_process
     os.system = system
