@@ -1,26 +1,27 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Keep every process the test suite starts on Windows off the desktop.
+"""Refuse, in the process that runs the tests on Windows, every request that
+would put a window on the desktop.
 
-``arm()`` patches, in the process that runs the tests:
+``arm()`` patches:
 
-* ``_winapi.CreateProcess``, the one call ``subprocess``, ``asyncio`` and
-  ``multiprocessing`` all start a Windows process through. Every child gets
-  ``CREATE_NO_WINDOW`` (its own console, with no window) and a STARTUPINFO
-  that asks for ``SW_HIDE``. A request for ``DETACHED_PROCESS``, or for
-  ``CREATE_NEW_CONSOLE`` without a STARTUPINFO that hides it, is refused.
-* ``subprocess.Popen._get_handles``, so a child started with no redirection
-  still writes to this process's standard handles rather than to its own
-  hidden console.
-* ``os.startfile`` and ``webbrowser.open``, which are refused, and
-  ``os.system``, which runs through ``subprocess`` and so through the first patch.
+* ``_winapi.CreateProcess``, which ``subprocess``, ``asyncio`` and
+  ``multiprocessing`` all start a Windows process through. ``DETACHED_PROCESS``
+  is refused unless the call is inside ``allow_detached()``.
+  ``CREATE_NEW_CONSOLE`` is refused unless the STARTUPINFO hides the window,
+  and then becomes ``CREATE_NO_WINDOW``. Every call that goes ahead carries a
+  STARTUPINFO with ``STARTF_USESHOWWINDOW`` and ``SW_HIDE``.
+* ``os.startfile`` and ``webbrowser.open``, which are refused.
+* ``tkinter.Tk`` and ``tkinter.Toplevel``, which start withdrawn, and
+  ``deiconify``, which leaves a window withdrawn.
 
 A refusal raises ``RuntimeError`` at the call and is recorded in ``HITS``,
-keyed by ``(reason, origin)``, so a caller that swallows the error still
-fails the test (see the fixture in ``tests/conftest.py``).
+keyed by ``(reason, origin)``, so a test whose code under test swallows the
+error still fails (the autouse fixture in ``tests/conftest.py``).
 """
 
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
 import sys
@@ -40,9 +41,24 @@ ADVICE = (
     "  No test may put a window on the desktop of the person running the suite.\n"
     "  Fake the spawn (monkeypatch subprocess.Popen, os.startfile or\n"
     "  webbrowser.open), or start the child hidden: CREATE_NO_WINDOW, or\n"
-    "  CREATE_NEW_CONSOLE with a STARTUPINFO whose wShowWindow is SW_HIDE.")
+    "  CREATE_NEW_CONSOLE with a STARTUPINFO whose wShowWindow is SW_HIDE.\n"
+    "  A test that needs a console-less child starts it inside\n"
+    "  tests._no_window.allow_detached(), and that child starts nothing with a\n"
+    "  console of its own.")
 
 _ARMED = False
+_detached_allowed = threading.local()
+
+
+@contextlib.contextmanager
+def allow_detached():
+    """Let ``DETACHED_PROCESS`` through on this thread while the block runs."""
+    previous = getattr(_detached_allowed, "on", False)
+    _detached_allowed.on = True
+    try:
+        yield
+    finally:
+        _detached_allowed.on = previous
 
 
 def _hides(startupinfo) -> bool:
@@ -53,18 +69,18 @@ def _hides(startupinfo) -> bool:
                 and getattr(startupinfo, "wShowWindow", None) == SW_HIDE)
 
 
-def hidden(flags: int, startupinfo):
+def hidden(flags: int, startupinfo, *, detached_allowed: bool = False):
     """Return ``(flags, startupinfo, refusal)`` for one CreateProcess call.
 
     *refusal* is ``None`` when the call may go ahead with the returned *flags*
     and *startupinfo*, else a sentence naming what would have shown a window
     (then the other two are returned unchanged). ``CREATE_NEW_CONSOLE`` with a
-    hiding STARTUPINFO becomes ``CREATE_NO_WINDOW``; any other allowed call
-    gains ``CREATE_NO_WINDOW``. The returned STARTUPINFO always carries
-    ``STARTF_USESHOWWINDOW`` and ``SW_HIDE``; *startupinfo* itself is never
-    modified (a copy is returned, or a new one when it is ``None``).
+    hiding STARTUPINFO becomes ``CREATE_NO_WINDOW``; other flags are returned
+    as given. The returned STARTUPINFO always carries ``STARTF_USESHOWWINDOW``
+    and ``SW_HIDE``; *startupinfo* itself is never modified (a copy is
+    returned, or a new one when it is ``None``).
     """
-    if flags & DETACHED_PROCESS:
+    if flags & DETACHED_PROCESS and not detached_allowed:
         return flags, startupinfo, (
             "DETACHED_PROCESS leaves the child without a console, so every "
             "console program it starts opens a visible console window")
@@ -73,11 +89,10 @@ def hidden(flags: int, startupinfo):
             return flags, startupinfo, (
                 "CREATE_NEW_CONSOLE without a STARTUPINFO that hides it opens a "
                 "visible console window")
-        flags &= ~CREATE_NEW_CONSOLE
-    flags |= CREATE_NO_WINDOW
+        flags = (flags & ~CREATE_NEW_CONSOLE) | CREATE_NO_WINDOW
     if startupinfo is None:
         startupinfo = subprocess.STARTUPINFO() if sys.platform == "win32" else _Info()
-    elif hasattr(startupinfo, "copy"):
+    else:
         startupinfo = startupinfo.copy()
     startupinfo.dwFlags = getattr(startupinfo, "dwFlags", 0) | STARTF_USESHOWWINDOW
     startupinfo.wShowWindow = SW_HIDE
@@ -124,39 +139,19 @@ def format_hits(hits) -> str:
                      for (reason, origin), count in sorted(hits.items()))
 
 
-def _base_popen() -> type:
-    for cls in subprocess.Popen.__mro__:
-        if cls.__module__ == "subprocess" and cls.__name__ == "Popen":
-            return cls
-    return subprocess.Popen
-
-
 _real_create = None
-_real_get_handles = None
 
 
 def create_process(application, command, proc_attrs, thread_attrs, inherit,
                    flags, env, cwd, startupinfo):
     """Stand-in for ``_winapi.CreateProcess``: applies ``hidden()``, then calls
     ``_real_create`` with the result, or refuses."""
-    flags, startupinfo, refusal = hidden(flags, startupinfo)
+    flags, startupinfo, refusal = hidden(
+        flags, startupinfo, detached_allowed=getattr(_detached_allowed, "on", False))
     if refusal:
         refuse(refusal, str(command)[:200])
     return _real_create(application, command, proc_attrs, thread_attrs, inherit,
                         flags, env, cwd, startupinfo)
-
-
-def get_handles(self, stdin, stdout, stderr):
-    """Stand-in for ``Popen._get_handles``: with no redirection at all, hand the
-    child this process's stdin, stdout and stderr explicitly. Falls back to no
-    handles when fd 2 is not open."""
-    handles = _real_get_handles(self, stdin, stdout, stderr)
-    if handles == (-1, -1, -1, -1, -1, -1):
-        try:
-            handles = _real_get_handles(self, None, None, 2)
-        except OSError:
-            pass
-    return handles
 
 
 def startfile(path, *args, **kwargs):
@@ -167,11 +162,39 @@ def browser_open(url, *args, **kwargs):
     refuse("webbrowser.open opens a browser window", str(url)[:200])
 
 
-def system(command):
-    """``os.system`` run through ``subprocess`` as ``%COMSPEC% /c <command>``;
-    returns the exit code."""
-    comspec = os.environ.get("COMSPEC", "cmd.exe")
-    return subprocess.run(f'"{comspec}" /c {command}').returncode
+_real_tk_init = None
+_real_toplevel_init = None
+
+
+def tk_init(self, *args, **kwargs):
+    """``tkinter.Tk.__init__``, then ``withdraw()`` before any idle task runs."""
+    _real_tk_init(self, *args, **kwargs)
+    self.withdraw()
+
+
+def toplevel_init(self, *args, **kwargs):
+    """``tkinter.Toplevel.__init__``, then ``withdraw()`` before any idle task runs."""
+    _real_toplevel_init(self, *args, **kwargs)
+    self.withdraw()
+
+
+def deiconify(self):
+    """Stand-in for ``Wm.deiconify``: the window stays withdrawn."""
+    return None
+
+
+def _arm_tk() -> None:
+    global _real_tk_init, _real_toplevel_init
+    try:
+        import tkinter
+    except ImportError:
+        return
+    _real_tk_init = tkinter.Tk.__init__
+    _real_toplevel_init = tkinter.Toplevel.__init__
+    tkinter.Tk.__init__ = tk_init
+    tkinter.Toplevel.__init__ = toplevel_init
+    tkinter.Wm.deiconify = deiconify
+    tkinter.Wm.wm_deiconify = deiconify
 
 
 def armed() -> bool:
@@ -180,18 +203,15 @@ def armed() -> bool:
 
 def arm() -> bool:
     """Install the patches once, on Windows only. Returns True when it did."""
-    global _ARMED, _real_create, _real_get_handles
+    global _ARMED, _real_create
     if _ARMED or sys.platform != "win32":
         return False
     import _winapi
 
     _real_create = _winapi.CreateProcess
     _winapi.CreateProcess = create_process
-    popen = _base_popen()
-    _real_get_handles = popen._get_handles
-    popen._get_handles = get_handles
     os.startfile = startfile
     webbrowser.open = browser_open
-    os.system = system
+    _arm_tk()
     _ARMED = True
     return True

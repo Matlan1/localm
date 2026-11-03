@@ -672,9 +672,9 @@ def _report_installer_runs(session):
 
 
 # --------------------------------------------------------------------------- #
-#  No window on the desktop (Windows): every process the suite starts runs     #
-#  hidden, and a request for a visible console, os.startfile or                #
-#  webbrowser.open fails the test that made it. See tests/_no_window.py.       #
+#  No window on the desktop (Windows): a request for a visible console,       #
+#  os.startfile or webbrowser.open fails the test that made it, and Tk         #
+#  windows stay withdrawn. See tests/_no_window.py.                            #
 # --------------------------------------------------------------------------- #
 
 from tests import _no_window  # noqa: E402
@@ -706,7 +706,7 @@ def _report_visible_windows(session):
 
 
 # --------------------------------------------------------------------------- #
-#  Resource-gated integration markers (V2)                                   #
+#  Resource-gated integration markers (V2)                                     #
 #                                                                              #
 #  A test tagged real_gguf / real_comfy / real_browser is skipped, never       #
 #  failed, when its resource is absent. A resource that is present but        #
