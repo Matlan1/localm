@@ -469,12 +469,15 @@ def register(app: FastAPI, ctx) -> None:
         """Which version each part of the install is at against the installed
         localm version (``updater_parts.installed_parts``): ``{app,
         install_record, install_record_matches, deps_problems, runtime,
-        components, problems, consistent}``. Read-only. ``problems`` is
-        path-scrubbed for a caller other than the local operator."""
+        components, problems, consistent, last_steps}``. Read-only.
+        ``problems`` and each ``last_steps`` note are path-scrubbed for a caller
+        other than the local operator."""
         from localm import updater_parts
         parts = await asyncio.to_thread(updater_parts.installed_parts)
         fmt = _hs.path_formatter(request)
         parts["problems"] = [fmt(p) for p in parts["problems"]]
+        for step in parts["last_steps"]:
+            step["note"] = fmt(step["note"])
         return parts
 
     @app.post("/api/update/repair", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])

@@ -2524,6 +2524,7 @@ export const I18N_EN = {
   "settings.parts.repaired": "Repaired. Restarting...",
   "settings.parts.repairedNoRestart": "Repaired.",
   "settings.parts.failed": "Repair failed: {message}",
+  "settings.parts.lastSteps": "Last runtime and component updates:",
 
   // ---- Settings > Updates > App launcher ----
   "settings.launcher.subHead": "App launcher",

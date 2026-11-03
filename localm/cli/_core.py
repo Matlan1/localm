@@ -518,11 +518,55 @@ def main() -> None:
     # semantics. No-op unless the env var is set.
     honor_env_debug()
     bugreport.install_global_handlers()
-    command = click.get_current_context().invoked_subcommand
+    _update_steps_at_start(click.get_current_context().invoked_subcommand)
+
+
+def _update_steps_at_start(command) -> None:
+    """The update steps at the start of *command*: none in a process a restart
+    of this localm re-executed (it carried them out; ``LOCALM_UPDATE_STEPS_DONE``,
+    removed here), one later restart in a server a restart by an older localm
+    re-executed (:func:`_defer_update_steps_to_a_restart`), else the pending or
+    caught-up runtime and component updates now."""
+    import os
+    if os.environ.pop("LOCALM_UPDATE_STEPS_DONE", None):
+        return
+    if os.environ.get("LOCALM_RESTART_IN_PROGRESS") and command in _SERVER_COMMANDS:
+        _defer_update_steps_to_a_restart()
+        return
     _finish_pending_runtime_update(command)
     _finish_pending_component_update(command)
+
+
+# Commands whose process a restart re-executes (a server).
+_SERVER_COMMANDS = frozenset({"gui", "serve"})
+
+
+def _defer_update_steps_to_a_restart() -> None:
+    """In a server a restart by an older localm re-executed (one whose restart
+    does not carry out the update steps, so ``LOCALM_UPDATE_STEPS_DONE`` is
+    unset): when a runtime or component update is pending, or this version's
+    pins differ from what is installed, set ``LOCALM_FINISH_UPDATE_AFTER_START``
+    so the server restarts itself once it is answering, and that restart (this
+    version's) carries the steps out with its models unloaded
+    (``http_server._finish_pending_runtime_update``). The server first answers,
+    so an older build's update watchdog sees it come up. Never raises."""
     import os
-    os.environ.pop("LOCALM_UPDATE_STEPS_DONE", None)
+    try:
+        from localm import updater, updater_components, updater_runtime
+        root = updater.repo_root()
+        needed = (updater_runtime.read_pending() is not None
+                  or updater_components.read_pending() is not None
+                  or updater_runtime.plan(root, root).get("reprovision")
+                  or any(p["update"] for p in updater_components.plan(root, root, deep=False)))
+    except Exception as e:
+        console.print(f"[yellow]Could not check whether this localm version's runtime and "
+                      f"components are installed ({e}); they are checked on the next start."
+                      "[/yellow]")
+        return
+    if needed:
+        os.environ["LOCALM_FINISH_UPDATE_AFTER_START"] = "1"
+        console.print("[dim]This localm version's native runtime or components are not "
+                      "installed yet; localm restarts once to install them.[/dim]")
 
 
 def _finish_pending_runtime_update(command) -> None:
@@ -530,16 +574,15 @@ def _finish_pending_runtime_update(command) -> None:
     the runtime re-provision the last update left pending, or one
     ``updater_runtime.catch_up`` finds needed because the installed runtime is
     not the build this release pins (``updater_runtime.finish_pending``), and
-    print its outcome. Skipped for every other command and in a process
-    re-executed by a restart of this localm that carried out the pending update
-    steps already (``LOCALM_UPDATE_STEPS_DONE``); a restart by an older build
-    that has no such steps does not skip it. A failure is printed, the previous
-    runtime stays in use, the command still runs, and the next start tries
-    again."""
-    import os
+    print its outcome. Skipped for every other command. The start-up hook skips
+    it in a process a restart re-executed: a restart of this localm carried the
+    steps out already (``LOCALM_UPDATE_STEPS_DONE``), and after a restart by an
+    older build the server restarts once to carry them out
+    (:func:`_defer_update_steps_to_a_restart`). A failure is printed, the
+    previous runtime stays in use, the command still runs, and the next start
+    tries again."""
     from localm import updater_runtime
-    if command not in updater_runtime.RUNTIME_COMMANDS or os.environ.get(
-            "LOCALM_UPDATE_STEPS_DONE"):
+    if command not in updater_runtime.RUNTIME_COMMANDS:
         return
     try:
         from rich.markup import escape
@@ -576,14 +619,12 @@ def _finish_pending_component_update(command) -> None:
     component (the sd.cpp or KoboldCpp runtime, the managed ComfyUI, the uv
     inside localm) is not at the pin this release ships
     (``updater_components.finish_pending``), and print each step and the
-    outcome. Skipped for every other command and in a process re-executed by a
-    restart that carried out the pending update steps already
-    (``LOCALM_UPDATE_STEPS_DONE``). A failure is printed, the previous versions
-    stay in use, the command still runs, and the next start tries again."""
-    import os
+    outcome. Skipped for every other command, and by the start-up hook in a
+    process a restart re-executed (see :func:`_finish_pending_runtime_update`).
+    A failure is printed, the previous versions stay in use, the command still
+    runs, and the next start tries again."""
     from localm import updater_components
-    if command not in updater_components.COMPONENT_COMMANDS or os.environ.get(
-            "LOCALM_UPDATE_STEPS_DONE"):
+    if command not in updater_components.COMPONENT_COMMANDS:
         return
     from rich.markup import escape
     try:

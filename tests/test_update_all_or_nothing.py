@@ -421,18 +421,72 @@ def test_the_restart_holds_torch_probes_during_the_update_steps(monkeypatch):
 
 # ------------------------------- upgrade again -------------------------------
 
-def test_a_restart_by_an_older_build_does_not_skip_the_startup_catch_up(monkeypatch):
+def test_a_restart_by_an_older_build_leaves_the_steps_to_one_restart(monkeypatch):
     from localm.cli import _core
-    asked = []
+    ran = []
+    monkeypatch.setattr(_core, "_finish_pending_runtime_update", lambda c: ran.append(c))
+    monkeypatch.setattr(_core, "_finish_pending_component_update", lambda c: ran.append(c))
     monkeypatch.setattr(updater_runtime, "read_pending", lambda: None)
-    monkeypatch.setattr(updater_runtime, "catch_up", lambda: asked.append(1))
+    monkeypatch.setattr(uc, "read_pending", lambda: None)
+    monkeypatch.setattr(updater_runtime, "plan", lambda s, t: {"reprovision": True})
+    monkeypatch.setattr(uc, "plan", lambda s, t, deep=True: [])
     monkeypatch.setenv("LOCALM_RESTART_IN_PROGRESS", "1")
     monkeypatch.delenv("LOCALM_UPDATE_STEPS_DONE", raising=False)
-    _core._finish_pending_runtime_update("gui")
-    assert asked == [1]
+    monkeypatch.setenv("LOCALM_FINISH_UPDATE_AFTER_START", "")
+    _core._update_steps_at_start("gui")
+    assert ran == [] and os.environ["LOCALM_FINISH_UPDATE_AFTER_START"] == "1"
+    monkeypatch.setattr(updater_runtime, "plan", lambda s, t: {"reprovision": False})
+    monkeypatch.setenv("LOCALM_FINISH_UPDATE_AFTER_START", "")
+    _core._update_steps_at_start("gui")
+    assert os.environ["LOCALM_FINISH_UPDATE_AFTER_START"] == "", "nothing to install: no restart"
     monkeypatch.setenv("LOCALM_UPDATE_STEPS_DONE", "1")
-    _core._finish_pending_runtime_update("gui")
-    assert asked == [1], "this version's restart did the steps already"
+    _core._update_steps_at_start("gui")
+    assert ran == [] and "LOCALM_UPDATE_STEPS_DONE" not in os.environ
+    monkeypatch.delenv("LOCALM_RESTART_IN_PROGRESS")
+    _core._update_steps_at_start("gui")
+    assert ran == ["gui", "gui"], "a fresh start runs the steps itself"
+
+
+def test_the_server_restarts_once_for_the_deferred_steps(monkeypatch):
+    import localm.inference.http_server as hs
+    asked = []
+    monkeypatch.setattr(hs, "_request_restart", lambda **kw: asked.append(kw))
+
+    class _App:
+        class state:
+            instance_port, instance_id = 8123, "abc"
+    monkeypatch.setenv("LOCALM_FINISH_UPDATE_AFTER_START", "1")
+    hs._restart_for_pending_update_steps(_App)
+    assert asked == [{"delay": hs.UPDATE_STEPS_RESTART_DELAY_S, "port": 8123,
+                      "instance_id": "abc"}]
+    assert "LOCALM_FINISH_UPDATE_AFTER_START" not in os.environ
+    hs._restart_for_pending_update_steps(_App)
+    assert len(asked) == 1
+
+
+def test_the_restart_catches_up_a_runtime_nothing_left_pending(install, monkeypatch):
+    import localm.inference.http_server as hs
+    import localm.inference.backends.llamacpp._loader as loader
+    inst, _site = install
+    monkeypatch.setattr(updater, "repo_root", lambda: inst)
+    monkeypatch.setattr(loader, "stop_probe_daemon", lambda *a, **k: None)
+    monkeypatch.setattr(updater_runtime, "plan", lambda s, t: {
+        "reprovision": True, "backend": "vulkan", "current": "b1", "target": "b2",
+        "source": "release", "pins": {}, "note": "re-provisions"})
+    done = []
+    monkeypatch.setattr(updater_runtime, "finish_pending", lambda **kw: done.append(
+        updater_runtime.read_pending()) or {"state": "failed", "note": "offline"})
+    monkeypatch.setattr(updater, "rollback_last", lambda **kw: pytest.fail("rolled back"))
+    hs._finish_pending_runtime_update()
+    assert done and done[0]["repair"] is True and done[0]["target"] == "b2"
+
+
+def test_installed_parts_shows_the_last_update_steps(install, monkeypatch):
+    from localm import updater_parts
+    inst, _site = install
+    updater_runtime._write_status({"state": "updated", "note": "re-provisioned the cpu runtime"})
+    steps = updater_parts.installed_parts(inst)["last_steps"]
+    assert [s["note"] for s in steps] == ["re-provisioned the cpu runtime"]
 
 
 def test_this_versions_restart_marks_the_update_steps_done(monkeypatch):

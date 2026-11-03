@@ -854,12 +854,13 @@ def last_status() -> Optional[dict]:
     return _read_json(_updates_dir(create=False) / STATUS_FILE)
 
 
-def catch_up(root=None) -> Optional[list]:
+def catch_up(root=None, *, repair: bool = False) -> Optional[list]:
     """Record a pending component update when none is pending and a component
     installed for the install at *root* (default the running install) is not
     at the pin that install's own release ships (:func:`plan` of the install
-    against itself). Returns the plans when it recorded one, else None. Raises
-    OSError when the marker cannot be written.
+    against itself); *repair* marks it as in :func:`write_pending`. Returns the
+    plans when it recorded one, else None. Raises OSError when the marker cannot
+    be written.
 
     Checks once per install root and version: after the components were found
     at their pins (:func:`finish_pending` or this check) it returns None at
@@ -883,7 +884,7 @@ def catch_up(root=None) -> Optional[list]:
     if not any(p["update"] for p in plans):
         _mark_checked(root, version)
         return None
-    write_pending(plans, root=root, version=version)
+    write_pending(plans, root=root, version=version, repair=repair)
     return plans
 
 

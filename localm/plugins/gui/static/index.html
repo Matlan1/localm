@@ -1251,14 +1251,17 @@
                 <div id="update-rollback-status" class="sub" role="status" aria-live="polite" hidden></div>
               </div>
 
-              <!-- The GUI half of `localm update --repair`. Revealed only when a part
-                   of the install differs from the installed version (GET
-                   /api/update/parts). -->
+              <!-- The GUI half of `localm update --repair`, and the results of the
+                   runtime and component updates of the last day. Revealed only
+                   when a part of the install differs from the installed version
+                   or such a result exists (GET /api/update/parts). -->
               <div class="update-subsection" id="app-parts-block" hidden>
                 <h4 class="update-sub-head" data-i18n="settings.parts.subHead">Installed parts</h4>
-                <div class="sub" data-i18n="settings.parts.help">Some parts of this install are not at the installed localm version. Repair brings each one to it, then restarts.</div>
+                <div class="sub" id="update-parts-help" data-i18n="settings.parts.help">Some parts of this install are not at the installed localm version. Repair brings each one to it, then restarts.</div>
                 <ul id="update-parts-list" class="sub"></ul>
-                <div class="actions">
+                <div class="sub" id="update-parts-steps-head" data-i18n="settings.parts.lastSteps" hidden>Last runtime and component updates:</div>
+                <ul id="update-parts-steps" class="sub"></ul>
+                <div class="actions" id="update-repair-actions">
                   <button class="btn-secondary" id="update-repair" data-i18n="settings.parts.repairButton">Repair</button>
                 </div>
                 <div id="update-repair-status" class="sub" role="status" aria-live="polite" hidden></div>

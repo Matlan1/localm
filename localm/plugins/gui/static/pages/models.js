@@ -2396,15 +2396,21 @@ export async function updatePartsCheck() {
   try {
     const r = await fetch("/api/update/parts", { headers: authHeaders() });
     const d = await r.json().catch(() => ({}));
-    if (!r.ok || d.consistent !== false) { block.hidden = true; return; }
+    const steps = (r.ok && d.last_steps) || [];
+    const differs = r.ok && d.consistent === false;
+    if (!differs && !steps.length) { block.hidden = true; return; }
     block.hidden = false;
-    if (list) {
-      list.replaceChildren(...(d.problems || []).map((p) => {
-        const li = document.createElement("li");
-        li.textContent = p;
-        return li;
-      }));
+    const item = (text) => {
+      const li = document.createElement("li");
+      li.textContent = text;
+      return li;
+    };
+    for (const id of ["update-parts-help", "update-repair-actions"]) {
+      if ($(id)) $(id).hidden = !differs;
     }
+    if (list) list.replaceChildren(...(differs ? d.problems || [] : []).map(item));
+    if ($("update-parts-steps-head")) $("update-parts-steps-head").hidden = !steps.length;
+    if ($("update-parts-steps")) $("update-parts-steps").replaceChildren(...steps.map((s) => item(s.note)));
   } catch (e) {
     block.hidden = true;
     console.warn("could not read the installed parts:", e);

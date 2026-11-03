@@ -5198,11 +5198,18 @@ def _finish_pending_update_steps() -> None:
     """The body of :func:`_finish_pending_runtime_update`: the pending runtime
     re-provision, then the pending component update; when either fails, the
     whole update is rolled back (:func:`_roll_back_during_restart`), unless a
-    repair recorded it (``updater_parts.repair``), which is only logged. Raises
-    on an unexpected failure."""
+    repair recorded it (``updater_parts.repair``), which is only logged. When
+    none is pending but this version pins another runtime build or other
+    component versions than the installed ones (``catch_up``, after an update
+    by an older localm), they are recorded as a repair and carried out the same
+    way. Raises on an unexpected failure."""
     from localm import updater_components, updater_runtime
     from localm.debuglog import logger as _dbg
     pending = updater_runtime.read_pending()
+    if pending is None and updater_runtime.catch_up(repair=True) is not None:
+        pending = updater_runtime.read_pending()
+        _dbg.info("runtime update during restart: this version pins another runtime build "
+                  "than the installed one; installing it")
     if pending is not None:
         try:
             from localm.inference.backends.llamacpp._loader import stop_probe_daemon
@@ -5224,6 +5231,10 @@ def _finish_pending_update_steps() -> None:
         if status is not None:
             _dbg.info("runtime update during restart: %s", status["note"])
     comp_pending = updater_components.read_pending()
+    if comp_pending is None and updater_components.catch_up(repair=True) is not None:
+        comp_pending = updater_components.read_pending()
+        _dbg.info("component update during restart: this version pins other component "
+                  "versions than the installed ones; installing them")
     if comp_pending is None:
         return
     status = updater_components.finish_pending(
@@ -5256,6 +5267,30 @@ def _roll_back_during_restart() -> None:
         _dbg.error("rollback during restart: the update could not be rolled back (%s: %s); "
                    "localm %s is installed and Settings > Updates shows which parts "
                    "disagree", e.summary, e.reason, _version.read_version())
+
+
+# Seconds a server started by a restart of an older localm answers before it
+# restarts itself to carry out this version's update steps (see
+# _restart_for_pending_update_steps): long enough for that build's update
+# watchdog, which polls every 2 s, to see it come up.
+UPDATE_STEPS_RESTART_DELAY_S = 10.0
+
+
+def _restart_for_pending_update_steps(app) -> None:
+    """When ``LOCALM_FINISH_UPDATE_AFTER_START`` is set (``cli/_core.py``: a
+    restart by an older localm re-executed this server and this version's
+    runtime or components are not installed yet), remove it and request a
+    restart :data:`UPDATE_STEPS_RESTART_DELAY_S` seconds from now, which
+    carries the steps out (:func:`_finish_pending_runtime_update`)."""
+    import os
+    if not os.environ.pop("LOCALM_FINISH_UPDATE_AFTER_START", None):
+        return
+    from localm.debuglog import logger as _dbg
+    _dbg.info("restarting in %.0f s to install this version's native runtime and "
+              "components", UPDATE_STEPS_RESTART_DELAY_S)
+    _request_restart(delay=UPDATE_STEPS_RESTART_DELAY_S,
+                     port=getattr(app.state, "instance_port", None),
+                     instance_id=getattr(app.state, "instance_id", None))
 
 
 def _execv_restart(port: Optional[int], instance_id: Optional[str]) -> None:
@@ -5582,6 +5617,8 @@ def _make_lifespan():
         # than during the synchronous CLI startup sequence so a per-candidate
         # HF lookup never delays accepting connections. Best-effort, logged
         # only; skipped under pytest like its siblings above.
+        _restart_for_pending_update_steps(app)
+
         mmproj_task = None
         if "pytest" not in sys.modules:
             try:

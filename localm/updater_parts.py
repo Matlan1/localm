@@ -56,7 +56,8 @@ def installed_parts(root=None) -> dict:
     at, against this localm version. Read-only, never raises.
 
     Returns ``{"app", "install_record", "install_record_matches",
-    "deps_problems", "runtime", "components", "problems", "consistent"}``:
+    "deps_problems", "runtime", "components", "problems", "consistent",
+    "last_steps"}``:
     ``app`` the code's version, ``install_record`` the venv's localm record
     version (None when there is none to compare: no venv, a source checkout,
     or a pip install) and whether it is ``app``, ``deps_problems`` each declared
@@ -65,7 +66,9 @@ def installed_parts(root=None) -> dict:
     cannot be told), ``components`` ``[{"name", "label", "current",
     "target", "matches"}]`` for every installed component the shallow plan can
     compare, and ``problems`` one user-facing line per part that disagrees.
-    ``consistent`` is True when ``problems`` is empty."""
+    ``consistent`` is True when ``problems`` is empty. ``last_steps`` holds
+    the runtime and component update results of the last day
+    (:func:`_last_steps`)."""
     from localm import _version, updater
     root = Path(root) if root else updater.repo_root()
     app = _version.read_version()
@@ -114,9 +117,36 @@ def installed_parts(root=None) -> dict:
     except Exception as e:
         problems.append(f"could not compare the components with this version: {e}")
     return {"app": app, "install_record": record, "install_record_matches": record_matches,
-            "deps_problems": deps_problems,
+            "deps_problems": deps_problems, "last_steps": _last_steps(),
             "runtime": runtime, "components": components, "problems": problems,
             "consistent": not problems}
+
+
+# Seconds a runtime or component update result stays in :func:`installed_parts`.
+LAST_STEPS_S = 24 * 3600.0
+
+
+def _last_steps() -> list:
+    """The results of the runtime and component updates of the last
+    :data:`LAST_STEPS_S` seconds: ``[{"part", "state", "note", "at"}]``."""
+    import time
+    out = []
+    try:
+        from localm import updater_components, updater_runtime
+        for part, st in (("runtime", updater_runtime.last_status()),
+                         ("components", updater_components.last_status())):
+            if not st or not st.get("note"):
+                continue
+            try:
+                at = float(st.get("at") or 0)
+            except (TypeError, ValueError):
+                continue
+            if time.time() - at < LAST_STEPS_S:
+                out.append({"part": part, "state": st.get("state"), "note": st["note"],
+                            "at": at})
+    except Exception:
+        return out
+    return out
 
 
 def _reinstall_deps(root: Path, *, runner: Optional[Callable], say: Callable) -> str:

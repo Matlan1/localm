@@ -2137,6 +2137,7 @@
   "settings.privacyData.title": "Ihre Daten",
   "settings.rollback.availableBase": "Dies stellt {version} wieder her",
   "settings.parts.failed": "Reparatur fehlgeschlagen: {message}",
+  "settings.parts.lastSteps": "Letzte Aktualisierungen von Laufzeit und Komponenten:",
   "settings.parts.help": "Einige Teile dieser Installation entsprechen nicht der installierten localm-Version. Reparieren bringt jeden Teil auf diese Version und startet dann neu.",
   "settings.parts.repairButton": "Reparieren",
   "settings.parts.repaired": "Repariert. Wird neu gestartet...",

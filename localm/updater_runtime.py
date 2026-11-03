@@ -619,11 +619,12 @@ def read_pending() -> Optional[dict]:
     return data
 
 
-def catch_up(root=None) -> Optional[dict]:
+def catch_up(root=None, *, repair: bool = False) -> Optional[dict]:
     """Record a pending re-provision when none is pending and the runtime
     installed at *root* (default the running install) is not the build that
     install's own release pins for its backend, the user having chosen neither
-    a pin nor "latest" (:func:`plan` of the install against itself). Covers an
+    a pin nor "latest" (:func:`plan` of the install against itself); *repair*
+    marks it as in :func:`write_pending`. Covers an
     install updated by an updater from before this check, setup re-run over an
     older runtime, and a copied install. Returns the plan when it recorded one,
     else None. Raises OSError when the marker cannot be written."""
@@ -634,7 +635,7 @@ def catch_up(root=None) -> Optional[dict]:
     p = plan(root, root)
     if not p["reprovision"]:
         return None
-    write_pending(p, root=root, version=_version.read_version())
+    write_pending(p, root=root, version=_version.read_version(), repair=repair)
     return p
 
 
@@ -647,8 +648,10 @@ def clear_pending() -> None:
 
 
 def _write_status(status: dict) -> None:
+    import time
     try:
-        (_updates_dir() / STATUS_FILE).write_text(json.dumps(status), encoding="utf-8")
+        (_updates_dir() / STATUS_FILE).write_text(json.dumps(dict(status, at=time.time())),
+                                                  encoding="utf-8")
     except OSError as e:
         from localm.debuglog import logger
         logger.warning("update: could not record the runtime update result: %s", e)
