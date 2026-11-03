@@ -72,11 +72,15 @@ _VALID = [
     '{"dim": 1, "vectors": [1.5 , 12e3\n, 7]}',
     '[]',
     '{}',
+    # Longer than the reader's first read, so rows cross read boundaries.
+    '{"dim": 1, "vectors": [' + ", ".join(["1.5", "12e3", "-0.5e-2", "1234567", "null"] * 500) + "]}",
+    json.dumps({"dim": 3, "vectors": _rows(300, 3, holes={1, 150})}),
+    '{"dim": 2, "vectors": [' + " ,\n ".join(["[1.5, 2]"] * 900) + ' ]\n}\n',
 ]
 
 
 @pytest.mark.parametrize("read_bytes", [1, 7, 1 << 20])
-@pytest.mark.parametrize("text", _VALID)
+@pytest.mark.parametrize("text", _VALID, ids=[str(i) for i in range(len(_VALID))])
 def test_reader_returns_what_json_loads_returns(tmp_path, monkeypatch, text, read_bytes):
     monkeypatch.setattr(vecfile, "_READ_BYTES", read_bytes)
     p = tmp_path / "vectors.json"
@@ -91,13 +95,15 @@ _INVALID = [
     '{"dim": 3, "vectors": [[1, 2, 3]]',
     '{"dim": 3, "vectors": [[1, 2, 3]]} x',
     '{"dim": 3, "vectors": [nul]}',
+    '{"dim": 2, "vectors": [' + ", ".join(["[1.5, 2]"] * 900) + ', [3, ',
+    '{"dim": 2, "vectors": [' + ", ".join(["[1.5, 2]"] * 900) + ' [3, 4]]}',
     '﻿{"dim": 3, "vectors": []}',
     '',
 ]
 
 
 @pytest.mark.parametrize("read_bytes", [1, 1 << 20])
-@pytest.mark.parametrize("text", _INVALID)
+@pytest.mark.parametrize("text", _INVALID, ids=[str(i) for i in range(len(_INVALID))])
 def test_reader_rejects_what_json_loads_rejects(tmp_path, monkeypatch, text, read_bytes):
     monkeypatch.setattr(vecfile, "_READ_BYTES", read_bytes)
     p = tmp_path / "vectors.json"
