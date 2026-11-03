@@ -193,6 +193,14 @@ def _isolated_env() -> dict:
     return env
 
 
+def git_argv(*args: str) -> list:
+    """``git`` *args* as an argv, git named by its full path
+    (:func:`localm.sysprog.find`). The program is ``""`` when git is not
+    installed; :func:`_run` reports that without starting anything."""
+    from localm import sysprog
+    return [sysprog.find("git") or "", *args]
+
+
 def _run(cmd: list, *, cwd: Optional[Path] = None, on_progress: ProgressCb = None,
          timeout: Optional[int] = None) -> tuple[bool, str]:
     """Run *cmd*, streaming its combined output to *on_progress* AS EACH LINE ARRIVES
@@ -212,6 +220,8 @@ def _run(cmd: list, *, cwd: Optional[Path] = None, on_progress: ProgressCb = Non
     and calls the best-effort progress sink (``_emit``, which never raises); the
     timeout is enforced in THIS thread via ``proc.wait(timeout=...)``, so a hung child
     is killed."""
+    if not cmd[0]:
+        return False, "git was not found in the system folders or on PATH; install git and try again"
     _emit(on_progress, "$ " + " ".join(str(c) for c in cmd))
     try:
         proc = subprocess.Popen(
@@ -264,8 +274,11 @@ def read_user_comfy_commit(workdir: Path) -> Optional[str]:
     merely sits inside some other git repo is treated as non-git (we must not clone the
     wrong outer repo)."""
     def _g(*args: str) -> Optional[str]:
+        argv = git_argv("-C", str(workdir), *args)
+        if not argv[0]:
+            return None
         try:
-            p = subprocess.run(["git", "-C", str(workdir), *args],
+            p = subprocess.run(argv,
                                capture_output=True, text=True, timeout=15,
                                encoding="utf-8", errors="replace")
         except (FileNotFoundError, OSError, subprocess.SubprocessError):
@@ -445,12 +458,12 @@ def _clone_source(user_workdir: Path, managed_root: Path, commit: str,
     # object's path past Windows' legacy 260-char MAX_PATH, failing clone with
     # "Filename too long" / "invalid index-pack output".
     # A per-invocation -c override, not a global git config change.
-    ok, out = _run(["git", "-c", "core.longpaths=true", "clone", "--quiet",
-                    str(user_workdir), str(managed_root)],
+    ok, out = _run(git_argv("-c", "core.longpaths=true", "clone", "--quiet",
+                    str(user_workdir), str(managed_root)),
                    on_progress=on_progress, timeout=600)
     if not ok:
         return False, out
-    ok2, out2 = _run(["git", "-C", str(managed_root), "checkout", "--quiet", commit],
+    ok2, out2 = _run(git_argv("-C", str(managed_root), "checkout", "--quiet", commit),
                      on_progress=on_progress, timeout=120)
     return ok2, out + "\n" + out2
 

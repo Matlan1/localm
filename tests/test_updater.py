@@ -472,7 +472,10 @@ def _fake_uv(directory):
 
 @pytest.fixture
 def no_uv(tmp_path, monkeypatch):
-    """A machine with no uv on PATH and none in the home directory."""
+    """A machine with no uv on PATH, none in the home directory and none bundled
+    in the running environment."""
+    from localm import uv_tool
+    monkeypatch.setattr(uv_tool, "bundled_uv", lambda: None)
     home = tmp_path / "userhome"
     home.mkdir()
     monkeypatch.setattr(pathlib.Path, "home", classmethod(lambda cls: home))
@@ -627,6 +630,96 @@ def test_apply_deps_names_the_uv_it_could_not_start(tmp_path, monkeypatch, sig_e
         updater.apply(5, installed=inst, signature=sig, download_opener=op, runner=runner)
     assert f"could not start {uv}" in ei.value.reason
     assert (inst / "VERSION").read_text().strip() == "0.1.0"
+
+
+def test_apply_deps_prefers_the_uv_bundled_in_the_environment(tmp_path, monkeypatch, sig_env, no_uv):
+    """The uv package's own binary wins over the install's .uv copy and PATH."""
+    _config(monkeypatch, tmp_path)
+    inst = _fake_install(tmp_path, deps=("click",))
+    _fake_uv(inst / ".uv")
+    monkeypatch.setenv("PATH", str(_fake_uv(tmp_path / "pathbin").parent))
+    bundled = _fake_uv(tmp_path / "venv" / "Scripts")
+    from localm import uv_tool
+    monkeypatch.setattr(uv_tool, "bundled_uv", lambda: str(bundled))
+    ran = []
+    op, sig = _signed_build("0.2.0", ["click", "httpx"])
+    updater.apply(5, installed=inst, signature=sig, download_opener=op,
+                  runner=lambda c: ran.append(c) or 0)
+    assert ran[0][0] == str(bundled)
+
+
+def _counting_swaps(monkeypatch):
+    from localm import _apply_update as au
+    swaps = []
+    real = au.swap_with_backup
+    monkeypatch.setattr(au, "swap_with_backup", lambda *a, **k: swaps.append(a) or real(*a, **k))
+    return swaps
+
+
+@pytest.mark.parametrize("program, says", [
+    ("missing", "was not found"),
+    ("uv", "is not a full path"),
+])
+def test_apply_refuses_before_swapping_when_the_deps_program_cannot_run(
+        tmp_path, monkeypatch, sig_env, no_uv, program, says):
+    """A deps update whose uv cannot be started is refused before any file moves:
+    no swap, no post-swap run, no rollback, and the message says how to repair."""
+    _config(monkeypatch, tmp_path)
+    inst = _fake_install(tmp_path, deps=("click",))
+    uv = str(tmp_path / "gone" / _UV_NAME) if program == "missing" else program
+    monkeypatch.setattr(updater, "_uv_for_deps", lambda target: uv)
+    swaps = _counting_swaps(monkeypatch)
+    from localm.bugreport import LocalmError
+    ran = []
+    op, sig = _signed_build("0.2.0", ["click", "httpx"])
+    with pytest.raises(LocalmError) as ei:
+        updater.apply(5, installed=inst, signature=sig, download_opener=op,
+                      runner=lambda c: ran.append(c) or 0)
+    assert swaps == [] and ran == []
+    assert "nothing was changed" in ei.value.summary and "deps" in ei.value.summary
+    assert uv in ei.value.reason and says in ei.value.reason and "setup" in ei.value.reason
+    assert (inst / "VERSION").read_text().strip() == "0.1.0"
+
+
+def _plan_a_runtime_reprovision(monkeypatch):
+    """Make apply() plan a runtime re-provision; returns the list of stop calls."""
+    from localm import updater_runtime
+    stopped = []
+    monkeypatch.setattr(updater_runtime, "plan", lambda staged, installed: {
+        "reprovision": True, "source": "release", "backend": "cpu", "current": "b1",
+        "target": "b2", "pins": {}, "note": "the cpu runtime is re-provisioned (b1 -> b2)"})
+    monkeypatch.setattr(updater_runtime, "stop_own_holders",
+                        lambda *a, **k: stopped.append(a) or [])
+    return stopped
+
+
+def test_apply_refuses_before_stopping_or_swapping_when_the_runtime_interpreter_is_missing(
+        tmp_path, monkeypatch, sig_env):
+    """The runtime step runs this interpreter again; when it is gone the update is
+    refused before any process is stopped and before the swap."""
+    _config(monkeypatch, tmp_path)
+    inst = _fake_install(tmp_path, deps=("click",))
+    stopped = _plan_a_runtime_reprovision(monkeypatch)
+    gone = str(tmp_path / "no-python" / "python.exe")
+    monkeypatch.setattr(sys, "executable", gone)
+    swaps = _counting_swaps(monkeypatch)
+    from localm.bugreport import LocalmError
+    op, sig = _signed_build("0.2.0", ["click"])
+    with pytest.raises(LocalmError) as ei:
+        updater.apply(5, installed=inst, signature=sig, download_opener=op, defer_runtime=True)
+    assert swaps == [] and stopped == []
+    assert "runtime" in ei.value.summary and gone in ei.value.reason
+    assert (inst / "VERSION").read_text().strip() == "0.1.0"
+
+
+def test_apply_with_the_interpreter_present_goes_on_to_the_runtime_step(tmp_path, monkeypatch, sig_env):
+    """Control for the refusal above: the same planned re-provision applies."""
+    _config(monkeypatch, tmp_path)
+    inst = _fake_install(tmp_path, deps=("click",))
+    stopped = _plan_a_runtime_reprovision(monkeypatch)
+    op, sig = _signed_build("0.2.0", ["click"])
+    res = updater.apply(5, installed=inst, signature=sig, download_opener=op, defer_runtime=True)
+    assert res["applied"] is True and res["klass"] == "runtime" and len(stopped) == 1
 
 
 def test_deps_env_points_a_contained_install_at_its_own_cache(tmp_path, monkeypatch):

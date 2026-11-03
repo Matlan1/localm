@@ -34,7 +34,7 @@ def test_clone_at_commit_uses_longpaths(monkeypatch, tmp_path):
     fresh._clone_at_commit("https://example/repo.git", tmp_path / "dest",
                           "abc123", on_progress=None)
     clone_call = calls[0]
-    assert clone_call[0] == "git"
+    assert clone_call[0] == prov.git_argv()[0]
     assert clone_call[1:3] == ["-c", "core.longpaths=true"]
     assert "clone" in clone_call
 
@@ -44,6 +44,6 @@ def test_clone_source_uses_longpaths(monkeypatch, tmp_path):
     prov._clone_source(tmp_path / "user_workdir", tmp_path / "managed",
                        "abc123", on_progress=None)
     clone_call = calls[0]
-    assert clone_call[0] == "git"
+    assert clone_call[0] == prov.git_argv()[0]
     assert clone_call[1:3] == ["-c", "core.longpaths=true"]
     assert "clone" in clone_call

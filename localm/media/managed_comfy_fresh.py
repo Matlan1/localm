@@ -43,7 +43,7 @@ from localm.media import managed_comfy as mc
 from localm.media import managed_comfy_provision as _prov
 from localm.media.comfy_patches import apply_patches as _apply_localm_patches
 from localm.media.managed_comfy_provision import (
-    MARKER_FILENAME, ProgressCb, ProvisionResult, _emit, _probe_pip, _run, _tail)
+    MARKER_FILENAME, ProgressCb, ProvisionResult, _emit, _probe_pip, _run, _tail, git_argv)
 
 # --------------------------------------------------------------------------- #
 #  Pinned ComfyUI (decision 4/7)                                              #
@@ -318,11 +318,11 @@ def _clone_at_commit(repo: str, dest: Path, commit: str,
     object's path past Windows' legacy 260-char MAX_PATH, failing clone with
     "Filename too long" / "invalid index-pack output". A per-invocation -c
     override, not a global git config change."""
-    ok, out = _run(["git", "-c", "core.longpaths=true", "clone", "--quiet", repo, str(dest)],
+    ok, out = _run(git_argv("-c", "core.longpaths=true", "clone", "--quiet", repo, str(dest)),
                    on_progress=on_progress, timeout=1800)
     if not ok:
         return False, out
-    ok2, out2 = _run(["git", "-C", str(dest), "checkout", "--quiet", commit],
+    ok2, out2 = _run(git_argv("-C", str(dest), "checkout", "--quiet", commit),
                      on_progress=on_progress, timeout=300)
     return ok2, out + "\n" + out2
 

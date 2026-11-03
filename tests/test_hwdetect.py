@@ -629,3 +629,12 @@ def test_main_unknown_subcommand_prints_vendor_line(monkeypatch, capsys):
                                           gpu_names="rx 6800"))
     assert hwdetect.main(["wat"]) == 0
     assert capsys.readouterr().out.strip() == "amd vulkan"
+
+
+def test_run_ok_does_not_start_a_program_that_is_not_installed(monkeypatch):
+    """A probe whose program sysprog could not find did not run, and nothing is
+    started under a bare name in its place."""
+    started = []
+    monkeypatch.setattr(hwdetect.subprocess, "run", lambda *a, **k: started.append(a))
+    assert hwdetect._run_ok([None, "-m"]) == ("", False)
+    assert started == []

@@ -38,7 +38,7 @@ from localm.media.managed_comfy import _update_lock_path as _update_lock_path
 from localm.media.managed_comfy_fresh import (
     COMFYUI_PINNED_COMMIT, COMFYUI_PINNED_VERSION, COMFYUI_REPO)
 from localm.media.managed_comfy_provision import (
-    MARKER_FILENAME, ProgressCb, ProvisionResult, _emit, _run, _tail)
+    MARKER_FILENAME, ProgressCb, ProvisionResult, _emit, _run, _tail, git_argv)
 
 
 # --------------------------------------------------------------------------- #
@@ -55,7 +55,7 @@ def _rev_parse_head(root: Path) -> Optional[str]:
     """The managed checkout's HEAD sha, or None when *root* is not a git checkout
     (e.g. installed via the non-git copytree fallback). None is the signal that a
     pin update is not possible - we never fake one."""
-    ok, out = _run(["git", "-C", str(root), "rev-parse", "HEAD"], timeout=30)
+    ok, out = _run(git_argv("-C", str(root), "rev-parse", "HEAD"), timeout=30)
     return out.strip() if ok else None
 
 
@@ -63,8 +63,8 @@ def _requirements_changed(root: Path, prev: str, target: str) -> bool:
     """True when requirements.txt differs between *prev* and *target*. ``git diff
     --quiet`` exits 0 for no change, non-zero for a change; a git error is treated
     as 'changed', so update warns rather than skipping a real dep bump."""
-    ok, _out = _run(["git", "-C", str(root), "diff", "--quiet", prev, target,
-                     "--", "requirements.txt"], timeout=60)
+    ok, _out = _run(git_argv("-C", str(root), "diff", "--quiet", prev, target,
+                     "--", "requirements.txt"), timeout=60)
     return not ok
 
 
@@ -119,11 +119,11 @@ def _sync_custom_nodes(root: Path, on_progress: ProgressCb, say) -> tuple:
         if head is None or head == node.commit:
             continue
         say(f"Moving custom node {node.name} to {node.commit[:12]} (from {head[:12]}) ...")
-        ok, out = _run(["git", "-C", str(d), "fetch", "--quiet", node.repo, node.commit],
+        ok, out = _run(git_argv("-C", str(d), "fetch", "--quiet", node.repo, node.commit),
                        on_progress=on_progress, timeout=1800)
         if ok:
-            ok, out = _run(["git", "-C", str(d), "checkout", "--force", "--quiet",
-                            node.commit], on_progress=on_progress, timeout=300)
+            ok, out = _run(git_argv("-C", str(d), "checkout", "--force", "--quiet",
+                            node.commit), on_progress=on_progress, timeout=300)
         if not ok:
             return False, f"custom node {node.name}: {_tail(out)}"
     return True, ""
@@ -207,14 +207,14 @@ def update_managed_comfy(cfg: Optional[dict] = None, *, on_progress: ProgressCb 
         tree."""
         note = ""
         for name, head in prev_nodes.items():
-            n_ok, n_out = _run(["git", "-C", str(root / "custom_nodes" / name), "checkout",
-                                "--force", "--quiet", head], on_progress=on_progress,
+            n_ok, n_out = _run(git_argv("-C", str(root / "custom_nodes" / name), "checkout",
+                                "--force", "--quiet", head), on_progress=on_progress,
                                timeout=300)
             if not n_ok:
                 note += (f" Custom node {name} could not be moved back to {head[:12]} "
                          f"({_tail(n_out)}).")
-        ok, out = _run(["git", "-C", str(root), "checkout", "--force", "--quiet",
-                        prev_commit], on_progress=on_progress, timeout=300)
+        ok, out = _run(git_argv("-C", str(root), "checkout", "--force", "--quiet",
+                        prev_commit), on_progress=on_progress, timeout=300)
         if ok:
             # Re-apply the prior patch set on the restored source. The --force checkout
             # discarded our patch edits (they are re-applied here), so a FAILED re-apply
@@ -253,14 +253,14 @@ def update_managed_comfy(cfg: Optional[dict] = None, *, on_progress: ProgressCb 
         # i.e. git has the commit object but not the tree it points at. GitHub
         # allows fetching an exact sha (uploadpack.allowReachableSHA1InWant),
         # which is both precise and smaller than pulling every branch.
-        ok, out = _run(["git", "-C", str(root), "fetch", "--quiet", repo, target],
+        ok, out = _run(git_argv("-C", str(root), "fetch", "--quiet", repo, target),
                        on_progress=on_progress, timeout=1800)
         if not ok:
             # A server that refuses a by-sha fetch is a normal configuration, not
             # an error - fall back to everything, tags included, so a pin that
             # lives on a tag or a non-default branch still resolves.
-            ok, out2 = _run(["git", "-C", str(root), "fetch", "--quiet", "--tags",
-                             repo, "+refs/heads/*:refs/remotes/comfy-upstream/*"],
+            ok, out2 = _run(git_argv("-C", str(root), "fetch", "--quiet", "--tags",
+                             repo, "+refs/heads/*:refs/remotes/comfy-upstream/*"),
                             on_progress=on_progress, timeout=1800)
             out = out + "\n" + out2
         if not ok:
@@ -271,8 +271,8 @@ def update_managed_comfy(cfg: Optional[dict] = None, *, on_progress: ProgressCb 
         # discovering an incomplete object graph from the checkout itself means
         # the working tree has already been disturbed. Resolving the commit's own
         # tree is the cheap check that the pack really arrived.
-        ok, out = _run(["git", "-C", str(root), "rev-parse", "--quiet", "--verify",
-                        f"{target}^{{tree}}"], on_progress=None, timeout=60)
+        ok, out = _run(git_argv("-C", str(root), "rev-parse", "--quiet", "--verify",
+                        f"{target}^{{tree}}"), on_progress=None, timeout=60)
         if not ok:
             return _rollback(
                 f"ComfyUI {target[:12]} did not download completely - its contents "
@@ -289,7 +289,7 @@ def update_managed_comfy(cfg: Optional[dict] = None, *, on_progress: ProgressCb 
             _say(f"Already at the pinned ComfyUI ({target[:12]}); re-verifying patches ...")
         else:
             _say(f"Checking out ComfyUI {target[:12]} (from {prev_commit[:12]}) ...")
-        ok, out = _run(["git", "-C", str(root), "checkout", "--force", "--quiet", target],
+        ok, out = _run(git_argv("-C", str(root), "checkout", "--force", "--quiet", target),
                        on_progress=on_progress, timeout=300)
         if not ok:
             return _rollback(f"Could not check out ComfyUI {target[:12]}: {_tail(out)}")

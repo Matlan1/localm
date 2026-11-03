@@ -241,9 +241,12 @@ def _make_executable(path: Path) -> None:
 
 def _kill_tree(proc: subprocess.Popen) -> None:
     if sys.platform == "win32":
+        from localm import sysprog
+        taskkill = sysprog.find("taskkill")
         try:
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                           capture_output=True, timeout=15)
+            if taskkill:
+                subprocess.run([taskkill, "/F", "/T", "/PID", str(proc.pid)],
+                               capture_output=True, timeout=15)
         except (OSError, subprocess.SubprocessError):
             pass
     else:
