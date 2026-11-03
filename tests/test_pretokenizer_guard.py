@@ -672,11 +672,12 @@ class TestScannerCacheKeysAreDistinct:
         # A shared key would silently apply one policy's scanner to another's
         # text, which reads as the guard working.
         pairs = set()
-        for p in guard.UNSAFE_PRE_TYPES.values():
-            if p.char_class is not None:
-                pairs.add((p.char_class, p.max_run))
-            if p.newline_run is not None:
-                pairs.add((guard._CLASS_NEWLINE, p.newline_run))
+        for table_policy in guard.UNSAFE_PRE_TYPES.values():
+            for p in (table_policy, guard._linux_policy(table_policy)):
+                if p.char_class is not None:
+                    pairs.add((p.char_class, p.max_run))
+                if p.newline_run is not None:
+                    pairs.add((guard._CLASS_NEWLINE, p.newline_run))
         assert len(guard._SCANNERS) == len(pairs)
         for cls, limit in pairs:
             scanner = guard._SCANNERS[(cls, limit)]
