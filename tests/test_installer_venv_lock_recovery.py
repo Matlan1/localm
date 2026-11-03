@@ -82,6 +82,7 @@ class TestFindVenvLockers:
         probe = tmp_path / "probe.bat"
         probe.write_text(
             "@echo off\r\nsetlocal EnableDelayedExpansion\r\n"
+            'set "PSEXE=%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"\r\n'
             f'set "STMP={tmp_path}\\.localm-setup-tmp"\r\n'
             'mkdir "%STMP%" 2>nul\r\n'
             f'cd /d "{tmp_path}"\r\n'
@@ -145,6 +146,7 @@ class TestOnedriveRoot:
         probe = tmp_path / "probe_od.bat"
         probe.write_text(
             "@echo off\r\nsetlocal EnableDelayedExpansion\r\n"
+            'set "PSEXE=%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"\r\n'
             f'cd /d "{tmp_path}"\r\n'
             'set "LOCALM_SETUP_ROOT=%CD%"\r\n'
             + "\r\n".join(env_lines) + "\r\n"

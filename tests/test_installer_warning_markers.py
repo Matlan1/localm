@@ -48,13 +48,13 @@ def test_no_unescaped_bang_marker_remains(bat):
 
 def test_every_known_site_uses_the_double_caret_escape(bat):
     sites = [
-        'echo  [^^!] uv (the Python package manager localm builds on) is not installed.',
-        'echo  [^^!] uv still is not callable after the install attempt.',
+        "echo  [^^!] LOCALAPPDATA is not set, so the Shared folder in your user profile",
+        'echo  [^^!] uv still is not callable after the install attempt:',
         'echo  [^^!] Could not create the environment.',
         'echo  [^^!] Install failed - see the error above.',
-        'uv pip install -p .venv -e ".[gpu,audio]" || echo  [^^!] ROCm torch install failed.',
-        'uv pip install -p .venv %TORCHSPEC% || echo  [^^!] torch install failed.',
-        'uv pip install -p .venv -e ".[hf,audio]" || echo  [^^!] transformers install failed.',
+        '"!UVEXE!" pip install -p .venv -e ".[gpu,audio]" || echo  [^^!] ROCm torch install failed.',
+        '"!UVEXE!" pip install -p .venv %TORCHSPEC% || echo  [^^!] torch install failed.',
+        '"!UVEXE!" pip install -p .venv -e ".[hf,audio]" || echo  [^^!] transformers install failed.',
         'echo  [^^!] !PFDETAIL!',
         'if "%RUNTIME_OK%"=="0" echo  [^^!] No model can load yet - the native llama.cpp runtime did not finish',
         'if "%BKSWAP%"=="1" echo  [^^!] The %BACKEND% runtime did not load here;',
@@ -119,11 +119,10 @@ class TestBangSurvivesEveryStructuralShape:
                               input=stdin_input, timeout=15, cwd=str(tmp_path))
 
     def test_flat_toplevel_line_no_other_bang(self, bat, tmp_path):
-        line = _line_containing(
-            bat, "uv (the Python package manager localm builds on) is not installed.")
+        line = _line_containing(bat, "LOCALAPPDATA is not set, so the Shared folder")
         out = self._run(tmp_path, "", line)
-        assert "[!] uv (the Python package manager localm builds on) is not installed." \
-            in out.stdout, (out.stdout, out.stderr)
+        assert "[!] LOCALAPPDATA is not set, so the Shared folder" in out.stdout, (
+            out.stdout, out.stderr)
 
     def test_single_line_if_errorlevel_no_parens(self, bat, tmp_path):
         line = _line_containing(bat, "Could not build LocaLM.exe")
