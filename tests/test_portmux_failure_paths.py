@@ -373,6 +373,10 @@ def test_the_watchdog_writes_no_log_file_outside_debug_mode(spawn, monkeypatch):
     (["serve", "--port", "8000", "--no-browser"], 8443,
      ["serve", "--no-browser", "-p", "8443"]),
     (["serve", "--port=8000", "-p8001"], 8443, ["serve", "-p", "8443"]),
+    (["serve", "--port=8000", "--no-browser"], 8443, ["serve", "--no-browser", "-p", "8443"]),
+    (["serve", "-p8001", "--no-browser"], 8443, ["serve", "--no-browser", "-p", "8443"]),
+    (["serve", "-p7", "--no-browser"], 8443, ["serve", "--no-browser", "-p", "8443"]),
+    (["run", "--ctx", "4096", "-pq"], 8443, ["run", "--ctx", "4096", "-pq", "-p", "8443"]),
     (["serve", "-p", "8000"], None, ["serve", "-p", "8000"]),
     (["gui", "--no-model"], 0, ["gui", "--no-model"]),
 ])

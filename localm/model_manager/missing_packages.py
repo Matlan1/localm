@@ -273,8 +273,12 @@ def package_label(module: str) -> str:
 
 def refusal_for(model_name: str, modules: list[str]) -> str:
     """The sentence that says model *model_name* needs the packages behind
-    *modules*, which this install lacks. A module localm ships on other platforms
-    but not on this one is named as not available for this platform."""
+    *modules*, which this install lacks, and what the user can do about it:
+    repair the install (a package localm ships), add them with
+    ``localm install-packages`` or the Models page (every other package localm
+    can add here), or nothing (a package localm cannot add, with the reason, or
+    one it ships on other platforms but not on this one)."""
+    from localm.model_manager import model_packages
     labels = ", ".join(package_label(m) for m in modules)
     noun = "package" if len(modules) == 1 else "packages"
     elsewhere = [m for m in modules if m in SHIPPED_MODULES and not shipped_here(m)]
@@ -290,9 +294,25 @@ def refusal_for(model_name: str, modules: list[str]) -> str:
         return (f"{model_name} cannot be loaded: its code needs the Python {noun} "
                 f"{labels}, which localm normally includes but this install is "
                 "missing. Update localm, or run its setup again, to restore it.")
-    return (f"{model_name} cannot be loaded: its own code needs the Python {noun} "
-            f"{labels}, which localm does not include, and localm cannot add "
-            "packages to its environment. localm cannot run this model.")
+    others = [m for m in modules if m not in SHIPPED_MODULES]
+    blocked = [(m, model_packages.unavailable_reason(m)) for m in others]
+    blocked = [(m, why) for m, why in blocked if why is not None]
+    if blocked:
+        reasons = "; ".join(f"{package_label(m)}: {why}" for m, why in blocked)
+        return (f"{model_name} cannot be loaded: its own code needs the Python {noun} "
+                f"{labels}, and localm cannot add "
+                f"{'it' if len(blocked) == 1 else 'them'} to its environment ({reasons}). "
+                "localm cannot run this model.")
+    them = "it" if len(others) == 1 else "them"
+    noun = "package" if len(others) == 1 else "packages"
+    labels = ", ".join(package_label(m) for m in others)
+    repair = (" It also needs " + ", ".join(package_label(m) for m in shipped)
+              + ", which localm normally includes: update localm or run its setup again first."
+              if shipped else "")
+    return (f"{model_name} cannot be loaded yet: its own code needs the Python {noun} "
+            f"{labels}, which localm can add to its own environment. Add {them} with "
+            f"`localm install-packages {model_name}`, or with Install packages on the "
+            f"Models page.{repair}")
 
 
 def folder_refusal(folder: Path) -> Optional[str]:
@@ -344,6 +364,5 @@ def strip_pip_instructions(text: str) -> str:
     mentions pip afterwards is replaced by a sentence that names no tool."""
     stripped = " ".join(_PIP_SENTENCE.sub("", text).split())
     if re.search(r"\bpip\b", stripped, re.IGNORECASE):
-        return ("The model needs a Python package this install does not have, and localm "
-                "cannot add packages to its environment.")
+        return "The model needs a Python package this install does not have."
     return stripped

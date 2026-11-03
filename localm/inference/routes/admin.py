@@ -248,19 +248,18 @@ def register(app: FastAPI, ctx) -> None:
         return result
 
     @app.get("/api/issues", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
-    async def issues_ep(state: str = "all"):
-        """Read-only list of the project's issues via the proxy (no GitHub account
-        needed), so a tester can see whether a filed bug is acknowledged or fixed.
-        A proxy failure is surfaced as ``error`` (never a fake empty success)."""
+    async def issues_ep():
+        """The bug reports this install filed, each looked up by number through
+        the proxy. Rows are ``{number, title, state, closed_at, html_url}``; a row
+        whose lookup failed carries ``error`` instead of ``state``. ``persisted``
+        is False when the record is kept in memory only (privacy mode)."""
         from localm import issue_tracker
-        from localm.bugreport import LocalmError
         if not issue_tracker.available():
             return {"available": False, "issues": []}
-        try:
-            issues = await asyncio.to_thread(issue_tracker.list_issues, state)
-            return {"available": True, "issues": issues}
-        except LocalmError as e:
-            return {"available": True, "issues": [], "error": format_localm_error(e)}
+        issues = await asyncio.to_thread(issue_tracker.filed_status)
+        return {"available": True, "issues": issues,
+                "persisted": issue_tracker.persists(),
+                "issues_url": issue_tracker.ISSUES_URL}
 
     @app.get("/api/update/check", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
     async def update_check_ep():

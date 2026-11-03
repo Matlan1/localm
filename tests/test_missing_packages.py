@@ -249,7 +249,7 @@ def test_a_dynamic_module_import_failure_is_not_a_missing_package():
 
 def test_text_that_still_mentions_pip_is_replaced_by_a_neutral_sentence():
     out = mp.strip_pip_instructions("You can install it with pip: see the docs")
-    assert "pip" not in out.lower() and "localm cannot add packages" in out
+    assert "pip" not in out.lower() and "needs a Python package this install does not have" in out
 
 
 def test_unrelated_failures_are_not_reworded():

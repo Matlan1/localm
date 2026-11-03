@@ -5,7 +5,7 @@
 // --- ES module imports ---
 import { clearRecentGuiErrors, onRecentGuiErrorsChange, recentGuiErrors } from "../app/client-log.js";
 import { pickDirectory } from "../app/picker.js";
-import { $, GIB, authHeaders, cancelJob, confirmDanger, confirmDangerAsync, downloadRate, el, fmtBytes, fmtDuration, openModal, promptText, renderMarkdown, showInlineError, streamJob, toast, setBusy, whileBusy } from "../app/helpers.js";
+import { $, GIB, authHeaders, cancelJob, confirmDanger, confirmDangerAsync, downloadRate, el, fmtBytes, fmtDuration, openModal, promptText, readSSE, renderMarkdown, showInlineError, streamJob, toast, setBusy, whileBusy } from "../app/helpers.js";
 import { t, tn } from "../app/i18n.js";
 import { onServerUnreachable } from "../app/init.js";
 import { emptyState, iconEl } from "../app/icons.js";
@@ -73,6 +73,19 @@ export const UNTAGGED_TYPE = "(not set)";
 export function modelTypeOf(m) {
   if (m && m.model_type_recorded === false) return UNTAGGED_TYPE;
   return (m && m.model_type) || "llm";
+}
+
+// The text typed in the installed-models search box. Narrows the TABLE (and its
+// tab counts) only; the HuggingFace search is a separate control.
+let currentSearchQuery = "";
+
+// A model matches when the query is a case-insensitive substring of its name,
+// source, type or architecture. An empty query matches everything.
+export function modelMatchesQuery(m, query) {
+  const q = String(query || "").trim().toLowerCase();
+  if (!q) return true;
+  const fields = [m && m.name, modelSourceText(m), modelTypeOf(m), m && m.architecture];
+  return fields.some((f) => f && String(f).toLowerCase().includes(q));
 }
 
 // Which types have a tab of their own, read from the tab strip itself rather
@@ -452,8 +465,10 @@ export async function refreshModelsPage() {
   }
 
   if (myGen !== _modelsRenderGen) return;
-  // Counts come from the WHOLE registry, so a tab keeps showing how many it
-  // holds while a different one is active.
+  // Counts come from the WHOLE registry (narrowed by the search text), so a tab
+  // keeps showing how many it holds while a different one is active.
+  const searching = currentSearchQuery.trim() !== "";
+  if (searching) models = models.filter((m) => modelMatchesQuery(m, currentSearchQuery));
   syncTabCounts(models);
   _syncViewOptControls();
 
@@ -481,7 +496,12 @@ export async function refreshModelsPage() {
   if (!models.length) {
     // The hidden-rows note when the registry is not empty and All is merely
     // hiding all of it; the empty state otherwise.
-    if (hiddenOther) {
+    if (searching) {
+      const noMatch = el("div", "sub models-no-match",
+        t("models.search.noMatch", { query: currentSearchQuery.trim() }));
+      noMatch.setAttribute("role", "status");
+      box.replaceChildren(...(hiddenOther ? [otherHiddenNote(hiddenOther), noMatch] : [noMatch]));
+    } else if (hiddenOther) {
       box.replaceChildren(otherHiddenNote(hiddenOther));
     } else {
       box.replaceChildren(emptyState("models", t("models.empty.text"), t("models.empty.hint")));
@@ -730,6 +750,12 @@ export async function refreshModelsPage() {
         };
         actions.appendChild(reload);
       }
+      if (m.packages && m.packages.installable) {
+        const pkgBtn = el("button", "primary", t("models.action.packages"));
+        pkgBtn.title = t("models.packages.hint", { packages: m.packages.addable.join(", ") });
+        pkgBtn.onclick = () => installModelPackages(m.name, pkgBtn);
+        actions.appendChild(pkgBtn);
+      }
       const aliasBtn = el("button", "secondary", t("models.action.alias"));
       aliasBtn.onclick = async () => {
         const name = await promptText(t("models.alias.prompt", { name: m.name }));
@@ -848,6 +874,107 @@ export async function refreshModelsPage() {
   if (myGen !== _modelsRenderGen) return;
   // One call, so the old table stays on screen until the new one is ready.
   box.replaceChildren(...(hiddenOther ? [otherHiddenNote(hiddenOther), table] : [table]));
+}
+
+/** Ask the user to agree to the packages localm would install for *plan*
+ *  (from /api/models/packages/plan). Resolves true only on Install. */
+function confirmPackages(name, plan) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let watch = null;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      if (watch) clearInterval(watch);
+      $("modal").style.display = "none";
+      resolve(value);
+    };
+    openModal(t("models.packages.title", { name }), (body) => {
+      body.appendChild(el("p", "", t("models.packages.intro",
+                                     { packages: (plan.packages || []).join(", ") })));
+      if ((plan.adds || []).length) {
+        const list = el("ul", "packages-plan");
+        for (const a of plan.adds) {
+          const li = el("li", "");
+          li.appendChild(el("span", "mono", `${a.name} ${a.version}`));
+          li.appendChild(el("span", "sub", " " + t("models.packages.from", { source: a.source })));
+          list.appendChild(li);
+        }
+        body.appendChild(list);
+      } else {
+        body.appendChild(el("p", "sub", t("models.packages.nothingNew")));
+      }
+      const row = el("div", "actions");
+      const cancel = el("button", "btn-secondary", t("common.modal.cancel"));
+      cancel.onclick = () => finish(false);
+      const ok = el("button", "btn-secondary", t("models.packages.confirmLabel"));
+      ok.onclick = () => finish(true);
+      row.appendChild(cancel);
+      row.appendChild(ok);
+      body.appendChild(row);
+    });
+    watch = setInterval(() => {
+      if ($("modal").style.display === "none") finish(false);
+    }, 200);
+  });
+}
+
+/** List what installing the packages model *name* needs would add, ask, then
+ *  install exactly that list on the host and follow its progress on *btn*. */
+export async function installModelPackages(name, btn) {
+  const prevLabel = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = t("models.packages.planning");
+  let plan;
+  try {
+    const r = await fetch("/api/models/packages/plan", {
+      method: "POST", headers: authHeaders(), body: JSON.stringify({ model: name }),
+    });
+    plan = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      toast(plan.detail || t("models.packages.failed", { message: r.status }), true);
+      return;
+    }
+  } catch (e) {
+    toast(t("models.packages.failed", { message: e.message }), true);
+    return;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = prevLabel;
+  }
+  if (!(await confirmPackages(name, plan))) return;
+  btn.disabled = true;
+  btn.textContent = t("models.packages.working", { name });
+  let end = null;
+  try {
+    const r = await fetch("/api/models/packages/install", {
+      method: "POST", headers: authHeaders(), body: JSON.stringify({ plan_id: plan.plan_id }),
+    });
+    const started = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      toast(started.detail || t("models.packages.failed", { message: r.status }), true);
+      return;
+    }
+    const stream = await fetch("/api/models/packages/install/events", { headers: authHeaders() });
+    if (stream.ok) {
+      await readSSE(stream, (payload) => {
+        let ev;
+        try { ev = JSON.parse(payload); } catch { return; }
+        if (ev.type === "log" && ev.line) btn.title = ev.line;
+        if (ev.type === "end") end = ev;
+      });
+    }
+  } catch (e) {
+    toast(t("models.packages.failed", { message: e.message }), true);
+    return;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = prevLabel;
+    refreshModelsPage();
+  }
+  if (end && end.ok) toast(t("models.packages.toast", { name }));
+  else if (end) toast(t("models.packages.failed", { message: end.error || "" }), true);
+  else toast(t("models.packages.incomplete"), true);
 }
 
 export async function showModelDetail(name) {
@@ -2758,7 +2885,8 @@ export async function showChangelog() {
 }
 if ($("changelog-show")) $("changelog-show").onclick = showChangelog;
 
-// Issues: read-only list (textContent only - never raw innerHTML for proxy data).
+// Issues: the bug reports this install filed, each looked up by number
+// (textContent only - never raw innerHTML for proxy data).
 export async function issuesRefresh() {
   const out = $("issues-list");
   if (out) out.textContent = t("settings.issues.loading");
@@ -2769,17 +2897,32 @@ export async function issuesRefresh() {
     if (!out) return;
     if (d.error) { showInlineError(out, t("settings.issues.loadError", { error: d.error })); return; }
     const list = d.issues || [];
+    const allLink = () => {
+      const a = document.createElement("a");
+      a.href = d.issues_url || "https://github.com/Matlan1/localm/issues";
+      a.target = "_blank"; a.rel = "noopener";
+      a.textContent = t("settings.issues.allLink");
+      return a;
+    };
     // Reached only on a SUCCESSFUL fetch of an empty list; the error paths above
     // and below say "could not load" instead.
     if (!list.length) {
       out.replaceChildren(emptyState("book", t("settings.issues.emptyTitle"),
-        t("settings.issues.emptyBody")));
+        t("settings.issues.emptyBody")), allLink());
       return;
     }
     out.textContent = "";
     for (const it of list) {
       const row = document.createElement("div");
-      row.textContent = "#" + it.number + " " + (it.state || "?") + "  " + (it.title || "");
+      const head = "#" + it.number + " ";
+      const title = it.title || "";
+      if (it.error) {
+        row.textContent = head + title + "  " + t("settings.issues.rowError", { error: it.error });
+      } else {
+        const closed = it.state === "closed" && it.closed_at
+          ? " " + String(it.closed_at).slice(0, 10) : "";
+        row.textContent = head + (it.state || "?") + closed + "  " + title;
+      }
       if (it.html_url) {
         const a = document.createElement("a");
         a.href = it.html_url; a.target = "_blank"; a.rel = "noopener";
@@ -2788,6 +2931,12 @@ export async function issuesRefresh() {
       }
       out.appendChild(row);
     }
+    if (d.persisted === false) {
+      const note = document.createElement("div");
+      note.textContent = t("settings.issues.sessionOnly");
+      out.appendChild(note);
+    }
+    out.appendChild(allLink());
   } catch (e) { showInlineError(out, t("settings.issues.loadFailed", { message: e.message })); }
 }
 if ($("issues-refresh")) $("issues-refresh").onclick = issuesRefresh;
@@ -3299,6 +3448,34 @@ if (tabNav) {
       refreshModelsPage();
     };
   }
+}
+
+// Installed-models search box: filters as the user types (debounced, since each
+// render re-reads the registry), Escape or the Clear button empties it.
+const searchInput = $("models-search");
+const searchClear = $("models-search-clear");
+if (searchInput) {
+  let searchTimer = null;
+  const applySearch = (immediate) => {
+    currentSearchQuery = searchInput.value;
+    if (searchClear) searchClear.hidden = searchInput.value === "";
+    clearTimeout(searchTimer);
+    if (immediate) refreshModelsPage();
+    else searchTimer = setTimeout(refreshModelsPage, 120);
+  };
+  const clearSearch = () => {
+    searchInput.value = "";
+    applySearch(true);
+    searchInput.focus();
+  };
+  searchInput.addEventListener("input", () => applySearch(false));
+  searchInput.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && searchInput.value !== "") {
+      e.preventDefault();
+      clearSearch();
+    }
+  });
+  if (searchClear) searchClear.addEventListener("click", clearSearch);
 }
 
 // Both display toggles: reflect the stored value on load, write it back on
