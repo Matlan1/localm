@@ -19,14 +19,15 @@ from tests.test_update_path_runs_no_bare_program import (
 ROOT = Path(__file__).resolve().parents[1]
 
 _CODER_USER_TOOLS = "the coder runs the user's own tools in the user's project"
+_CODER_GIT = "the coder's git, which still comes from PATH"
 _ARGUMENTS = "an argument list for a program chosen elsewhere, not a command"
 
 # ``module:qualname`` -> why a bare program there is right.
 ALLOWED = {
-    "localm.plugins.coder.doctor:_git": _CODER_USER_TOOLS,
-    "localm.plugins.coder.tools.git:tool_git_diff": _ARGUMENTS,
-    "localm.plugins.coder.tools.git:tool_git_log": _ARGUMENTS,
-    "localm.plugins.coder.tools.git:tool_git_push": _ARGUMENTS,
+    "localm.plugins.coder.doctor:_git": _CODER_GIT,
+    "localm.plugins.coder.tools.git:tool_git_diff": _CODER_GIT,
+    "localm.plugins.coder.tools.git:tool_git_log": _CODER_GIT,
+    "localm.plugins.coder.tools.git:tool_git_push": _CODER_GIT,
     "localm.plugins.coder.shell_guard:classify_git_push": _ARGUMENTS,
     "localm.plugins.coder.tools.shell:_detect_test_runner": _CODER_USER_TOOLS,
     "localm.plugins.coder.tools.shell:tool_run_tests": _CODER_USER_TOOLS,
