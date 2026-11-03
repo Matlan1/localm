@@ -344,9 +344,9 @@ def _imports_fail(modules: list) -> Optional[str]:
 
 
 def install(p: Plan, *, on_progress: ProgressCb = None) -> InstallResult:
-    """Install exactly what plan *p* lists, then check every requested module
-    imports. When one does not, the distributions this call added are removed
-    again. One install runs at a time per process; a second is refused."""
+    """Install exactly what plan *p* lists, then check every requested module,
+    and torchvision or torchaudio when the plan adds them, imports. When one
+    does not, the distributions this call added are removed again. One install runs at a time per process; a second is refused."""
     if not _INSTALL_LOCK.acquire(blocking=False):
         return InstallResult(ok=False, error="another package install is running")
     try:
@@ -376,8 +376,10 @@ def _install(p: Plan, on_progress: ProgressCb) -> InstallResult:
         if rc != 0:
             return InstallResult(ok=False, error="uv could not install the packages: " + _tail(out))
     importlib.invalidate_caches()
-    _emit(on_progress, "Checking that " + ", ".join(p.modules) + " import...")
-    failed = _imports_fail(p.modules)
+    check = list(p.modules) + [m for m in ("torchvision", "torchaudio")
+                               if m in {_canon(n) for n in names} and m not in p.modules]
+    _emit(on_progress, "Checking that " + ", ".join(check) + " import...")
+    failed = _imports_fail(check)
     if failed is not None:
         error = f"the packages were installed but do not import: {failed}"
         if names:

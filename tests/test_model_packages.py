@@ -260,6 +260,15 @@ def test_install_removes_what_it_added_when_a_module_does_not_import(fake_uv):
     assert fake_uv.recorded == []
 
 
+def test_an_added_torchvision_must_import_too(fake_uv, monkeypatch):
+    checked = []
+    monkeypatch.setattr(mpk, "_imports_fail", lambda modules: checked.append(modules) or None)
+    p = mpk.Plan(modules=["timm"], adds=[("timm", "1.0.30"), ("torchvision", "0.24.0")],
+                 requirements="x\n")
+    assert mpk.install(p).ok
+    assert checked == [["timm", "torchvision"]]
+
+
 def test_a_failed_uv_install_is_reported_and_nothing_recorded(fake_uv):
     fake_uv.rc = 2
     result = mpk.install(_plan())
