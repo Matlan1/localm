@@ -329,11 +329,12 @@ def test_provision_copy_end_to_end(home, fake_user_comfy, monkeypatch):
     assert result.ok, result.message
 
     paths = mc.managed_comfy_paths()
-    # 1) ComfyUI checkout at the SAME commit.
+    # 1) ComfyUI source at the SAME commit, copied with no git program.
     assert paths.main_py.is_file()
-    managed_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(paths.root),
-                                  capture_output=True, text=True, check=True).stdout.strip()
-    assert managed_head == fake_user_comfy.commit
+    from localm.media import source_archive
+    assert source_archive.tree_commit(paths.root) == fake_user_comfy.commit
+    assert not (paths.root / ".git").exists()
+    assert sorted(source_archive.tree_files(paths.root)) == [".gitignore", "main.py"]
     # 2) A FRESH localm venv (its own directory tree, NOT the user's). Compare the
     # venv-relative paths, not resolve() through them: on POSIX, `python -m venv`
     # symlinks the venv's python back to the shared BASE interpreter, so two

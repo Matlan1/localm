@@ -202,7 +202,7 @@ def test_watchdog_resumes_normal_checking_once_ticked_after_a_cold_start(tmp_pat
 
 
 @pytest.mark.anyio
-async def test_real_heartbeat_transitions_from_cold_start_to_a_real_reading(monkeypatch):
+async def test_real_heartbeat_transitions_from_cold_start_to_a_real_reading(monkeypatch, clean_stalls):
     """End-to-end with the REAL heartbeat coroutine, not a manually-set value:
     force a genuinely cold _hb_monotonic (the module-level global otherwise
     persists real values across earlier tests in this process), confirm
@@ -344,78 +344,62 @@ def test_lifespan_shutdown_clears_the_hang_alarm_instance(tmp_path, monkeypatch)
 
 
 # --------------------------------------------------------------------------- #
-# _loop_lag_seconds() reports a scheduling-delay figure, not the raw time since
-# the last heartbeat tick (which saws 0..1s on a healthy loop depending on where
-# now falls in the heartbeat's cycle).
+# _loop_stall_between(start, end) reports the longest event-loop stall that
+# overlapped [start, end], measured from the heartbeat ticks that ran late.
 # --------------------------------------------------------------------------- #
 
-def test_loop_lag_seconds_is_real_scheduling_delay_not_time_since_tick(monkeypatch):
-    """Deterministic formula check: 0.0 at every point in a healthy cycle,
-    including right at the next tick boundary, and the real overshoot only when
-    a tick was genuinely late."""
+@pytest.fixture
+def clean_stalls(monkeypatch):
+    from localm.inference import http_server as hs
+    monkeypatch.setattr(hs, "_hb_stalls", type(hs._hb_stalls)(maxlen=512))
+
+
+def test_loop_stall_between_formula(monkeypatch, clean_stalls):
+    """Deterministic: a tick still overdue at `end` counts, a recorded late
+    tick counts only for the part inside the interval, a healthy cycle is 0."""
     from localm.inference import http_server as hs
 
+    iv = hs._HEARTBEAT_INTERVAL_S
     monkeypatch.setattr(hs, "_hb_monotonic", 100.0)
+    assert hs._loop_stall_between(99.0, 100.0 + iv * 0.5) == 0.0
+    assert hs._loop_stall_between(99.0, 100.0 + iv) == 0.0
+    assert hs._loop_stall_between(99.0, 100.0 + iv + 4.2) == pytest.approx(4.2)
+    assert hs._loop_stall_between(100.0 + iv + 1.0, 100.0 + iv + 4.2) == pytest.approx(3.2)
 
-    for now, why in (
-        (100.0, "just ticked"),
-        (100.0 + hs._HEARTBEAT_INTERVAL_S * 0.5, "mid-cycle"),
-        (100.0 + hs._HEARTBEAT_INTERVAL_S, "exactly at the next tick boundary"),
-    ):
-        monkeypatch.setattr(hs.time, "monotonic", lambda now=now: now)
-        assert hs._loop_lag_seconds() == 0.0, why
+    hs._hb_stalls.append((50.0, 52.0))
+    assert hs._loop_stall_between(49.0, 53.0) == pytest.approx(2.0)
+    assert hs._loop_stall_between(51.0, 53.0) == pytest.approx(1.0)
+    assert hs._loop_stall_between(52.5, 53.0) == 0.0
+    assert hs._loop_stall_between(40.0, 45.0) == 0.0
 
-    # A tick that really was late (the loop was blocked) reports the actual
-    # overshoot, not the inflated raw gap.
-    late_by = 4.2
-    monkeypatch.setattr(
-        hs.time, "monotonic",
-        lambda: 100.0 + hs._HEARTBEAT_INTERVAL_S + late_by)
-    assert hs._loop_lag_seconds() == pytest.approx(late_by)
+
+def test_loop_stall_between_is_none_before_the_first_tick(monkeypatch, clean_stalls):
+    from localm.inference import http_server as hs
+
+    monkeypatch.setattr(hs, "_hb_monotonic", None)
+    hs._hb_stalls.append((50.0, 52.0))
+    assert hs._loop_stall_between(0.0, 1_000_000.0) is None
 
 
 @pytest.mark.anyio
-async def test_loop_lag_seconds_stays_at_floor_within_a_measured_safe_window():
-    """End-to-end, driving the REAL heartbeat coroutine rather than a manually
-    staled _hb_monotonic: every sample taken while LESS than one full interval
-    has MEASURABLY elapsed since a confirmed real tick reads exactly 0.0.
-
-    NOT a wall-clock threshold like `max(samples) < 0.5`, which would flake
-    under load. Each sample is gated on MEASURED elapsed time since the last
-    confirmed tick, so the assertion follows from _loop_lag_seconds' own
-    floor(0, gap - interval) formula whatever the scheduling jitter; a slow box
-    yields fewer safe samples, never a false failure."""
+async def test_heartbeat_records_a_real_block_and_ignores_a_healthy_loop(clean_stalls):
+    """The REAL heartbeat coroutine: an awaiting loop records nothing, a
+    time.sleep() block is recorded at about its length. time.sleep blocks the OS
+    thread whatever the asyncio load, so the block can only run longer."""
     from localm.inference import http_server as hs
 
     hb = asyncio.create_task(hs._hang_heartbeat_loop())
     try:
-        # Wait for a confirmed real tick (not a stale global from an earlier
-        # test / module import).
-        before = hs._hb_monotonic
-        wait_deadline = time.monotonic() + 3.0
-        while hs._hb_monotonic == before and time.monotonic() < wait_deadline:
-            await asyncio.sleep(0.01)
-        assert hs._hb_monotonic != before, "heartbeat task never ticked"
-        tick_at = hs._hb_monotonic
-
-        # Only samples provably within one interval of that confirmed tick are
-        # asserted on; safe_until is a measured bound.
-        safe_until = tick_at + hs._HEARTBEAT_INTERVAL_S * 0.9
-        checked = 0
-        while time.monotonic() < safe_until:
-            lag = hs._loop_lag_seconds()
-            now = time.monotonic()
-            if now < safe_until and hs._hb_monotonic == tick_at:
-                assert lag == 0.0, (
-                    f"lag={lag:.3f}s only {now - tick_at:.3f}s after a "
-                    f"confirmed tick, well under the "
-                    f"{hs._HEARTBEAT_INTERVAL_S}s interval")
-                checked += 1
-            await asyncio.sleep(0.03)
-        assert checked >= 3, (
-            f"only {checked} sample(s) fell within the measured-safe window - "
-            "the box may be too loaded for this test to say anything; not a "
-            "false pass, but worth knowing")
+        await asyncio.sleep(0.3)
+        t0 = time.monotonic()
+        await asyncio.sleep(0.5)
+        assert (hs._loop_stall_between(t0, time.monotonic()) or 0.0) < 0.3
+        t1 = time.monotonic()
+        time.sleep(0.6)
+        await asyncio.sleep(0.2)
+        stall = hs._loop_stall_between(t1, time.monotonic())
+        assert 0.6 - hs._HEARTBEAT_INTERVAL_S - 0.02 <= stall <= 1.5, stall
+        assert hs._loop_lag_seconds() >= 0.45
     finally:
         hb.cancel()
         try:
@@ -424,31 +408,64 @@ async def test_loop_lag_seconds_stays_at_floor_within_a_measured_safe_window():
             pass
 
 
-@pytest.mark.anyio
-async def test_loop_lag_seconds_is_clearly_positive_after_a_real_stall():
-    """The other half of the property: a genuine event-loop block (not
-    mid-cycle sampling) produces a clearly positive value. time.sleep() blocks
-    the real OS thread regardless of asyncio contention, so the block can only
-    run LONGER than requested, never shorter, and the margin (interval + 0.8s
-    block, asserting only > 0.3s of reported lag) holds under load."""
+def _request_loop_lags(tmp_path, monkeypatch, caplog, paths):
+    """Serve `paths` from a real app with the real heartbeat running (pytest
+    hidden from the lifespan gate) and return {path: logged loop_lag seconds}."""
+    import localm.config as cfg
     from localm.inference import http_server as hs
 
-    hb = asyncio.create_task(hs._hang_heartbeat_loop())
-    try:
-        await asyncio.sleep(0.1)                         # let the first tick land
-        block_for = hs._HEARTBEAT_INTERVAL_S + 0.8
-        time.sleep(block_for)                            # BLOCK the real event loop
-        lag = hs._loop_lag_seconds()
-        assert lag > 0.3, (
-            f"a real ~{block_for:.1f}s block reported lag={lag:.3f}s - the "
-            "fix must surface a genuine stall, not just read zero "
-            "unconditionally")
-    finally:
-        hb.cancel()
-        try:
-            await hb
-        except asyncio.CancelledError:
-            pass
+    home = tmp_path / ".localm"
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    monkeypatch.setenv("LOCALM_DEBUG", "1")
+    monkeypatch.setattr(cfg, "HOME_DIR", home)
+    monkeypatch.setattr(cfg, "CONFIG_FILE", home / "config.json")
+    monkeypatch.setattr(cfg, "REGISTRY_FILE", home / "registry.json")
+    monkeypatch.setattr(hs, "_hb_monotonic", None)
+    monkeypatch.setattr(hs, "_hb_stalls", type(hs._hb_stalls)(maxlen=512))
+    monkeypatch.delitem(sys.modules, "pytest", raising=False)
+
+    app = create_app(None, api_landing=True)
+
+    async def _block(secs: float):
+        time.sleep(secs)
+        return {"ok": True}
+
+    async def _wait(secs: float):
+        await asyncio.sleep(secs)
+        return {"ok": True}
+
+    app.add_api_route("/_t/block/{secs}", _block)
+    app.add_api_route("/_t/wait/{secs}", _wait)
+    out = {}
+    with caplog.at_level("DEBUG", logger="localm"):
+        with TestClient(app) as c:
+            deadline = time.monotonic() + 3.0
+            while hs._hb_monotonic is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert hs._hb_monotonic is not None, "heartbeat never ticked"
+            time.sleep(0.3)
+            for path in paths:
+                caplog.clear()
+                r = c.get(path, headers={"Authorization": f"Bearer {app.state.shell_token}"})
+                assert r.status_code == 200, (path, r.status_code, r.text)
+                lines = [rec.getMessage() for rec in caplog.records
+                         if f"GET {path} " in rec.getMessage()]
+                assert lines, (path, [rec.getMessage() for rec in caplog.records])
+                m = re.search(r"loop_lag=(\d+\.\d{2})s", lines[-1])
+                assert m, lines[-1]
+                out[path] = float(m.group(1))
+    return out
+
+
+def test_request_log_reports_the_stall_that_overlapped_the_request(tmp_path, monkeypatch, caplog):
+    lags = _request_loop_lags(
+        tmp_path, monkeypatch, caplog,
+        ["/_t/block/0.5", "/_t/block/2", "/_t/wait/2"])
+    interval = 0.1
+    assert 0.5 - interval - 0.02 <= lags["/_t/block/0.5"] <= 1.5, lags
+    assert 2.0 - interval - 0.02 <= lags["/_t/block/2"] <= 3.0, lags
+    assert lags["/_t/wait/2"] <= 0.3, lags
 
 
 # --------------------------------------------------------------------------- #
@@ -520,7 +537,7 @@ def test_debug_stacks_renders_cold_start_as_json_null_not_zero(app, monkeypatch)
     assert body["loop_lag_s"] is None, body
 
 
-def test_debug_stacks_renders_a_real_reading_as_before(app, monkeypatch):
+def test_debug_stacks_renders_a_real_reading_as_before(app, monkeypatch, clean_stalls):
     from localm.inference import http_server as hs
     app.state.bind_host = "127.0.0.1"
     with TestClient(app) as c:

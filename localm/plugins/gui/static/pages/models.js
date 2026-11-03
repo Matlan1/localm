@@ -2095,7 +2095,7 @@ export function renderUpdateNotes(notes) {
   box.classList.remove("collapsed");
   if (moreRow) moreRow.hidden = true;
   if (!text) { box.hidden = true; return; }
-  renderMarkdown(box, text, { imageScope: "update-notes" });
+  renderMarkdown(box, text, { imageScope: "update-notes", document: true });
   box.hidden = false;
   const long = text.length > UPDATE_NOTES_SHORT_CHARS
     || text.split("\n").length > UPDATE_NOTES_SHORT_LINES;
@@ -2738,7 +2738,7 @@ export async function showChangelog() {
         if (!r.ok) throw new Error(d.detail || r.statusText);
         if (!d.available) { md.textContent = t("settings.changelog.none"); return; }
         md.textContent = "";
-        renderMarkdown(md, d.markdown || "");
+        renderMarkdown(md, d.markdown || "", { document: true });
       })
       .catch((e) => { showInlineError(md, t("settings.changelog.failed", { message: e.message })); });
   });
