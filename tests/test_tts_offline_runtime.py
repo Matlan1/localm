@@ -39,14 +39,13 @@ def _shipped_wasm_paths() -> str:
 def test_the_shipped_default_points_at_the_vendored_runtime():
     """A blank default is how this regresses, so assert the value AND the files.
 
-    Blank is not neutral any more: the bundle's own fallback is the CDN origin,
-    which the CSP now refuses, so shipping "" would mean no neural voice at all
-    rather than "use the upstream default".
+    tts.js maps a blank value to the vendored copy too, but the shipped template
+    must still name it so a client that reads the template sees where it is.
     """
     value = _shipped_wasm_paths()
     assert value, (
-        "tts.example.json ships a blank wasm_paths. Blank falls through to the "
-        "bundle's cdn.jsdelivr.net default, which the CSP no longer admits."
+        "tts.example.json ships a blank wasm_paths; it must name the vendored "
+        "onnxruntime folder."
     )
     assert value.endswith("/"), (
         f"wasm_paths={value!r} has no trailing slash. onnxruntime concatenates "

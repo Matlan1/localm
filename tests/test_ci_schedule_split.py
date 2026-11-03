@@ -251,6 +251,8 @@ def test_the_proxy_tests_run_on_a_pull_request_only_for_proxy_changes():
     scope = next(s for s in steps if s.get("id") == "scope")
     assert steps[0]["with"]["fetch-depth"] == 2
     assert "tools/bugreport-proxy/" in scope["run"]
+    for path in (r"localm/bugreport/assembly\.py", "tests/fixtures/bugreport_contract/"):
+        assert path in scope["run"], path
     run = next(s for s in steps if s.get("name") == "Proxy tests")
     assert run["if"] == "steps.scope.outputs.run == 'true'"
     assert "tools/bugreport-proxy/worker.test.mjs" in run["run"]

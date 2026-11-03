@@ -130,7 +130,8 @@
         "x_is_mapped_network_drive": "549556af77c9",
         "x_is_unc_or_device_path": "b7c1fdff60d5",
         "x_is_windows_device_name": "5952b6a61b49",
-        "x_reject_unsafe_path_string": "907ae80e80ab"
+        "x_reject_unsafe_path_string": "907ae80e80ab",
+        "x_resolve_keeping_mapped_drive": "467b7a8cf3fb"
       },
       "mutants": {
         "localm.pathsafe.x__confined_parts__mutmut_1": "killed",
@@ -405,7 +406,31 @@
         "localm.pathsafe.x_reject_unsafe_path_string__mutmut_6": "killed",
         "localm.pathsafe.x_reject_unsafe_path_string__mutmut_7": "killed",
         "localm.pathsafe.x_reject_unsafe_path_string__mutmut_8": "killed",
-        "localm.pathsafe.x_reject_unsafe_path_string__mutmut_9": "killed"
+        "localm.pathsafe.x_reject_unsafe_path_string__mutmut_9": "killed",
+        "localm.pathsafe.x_resolve_keeping_mapped_drive__mutmut_1": "killed",
+        "localm.pathsafe.x_resolve_keeping_mapped_drive__mutmut_10": {
+          "equivalent": "the mutation run executes on Linux, where os.name != 'nt' is True, so the `or` returns before its right operand, the only code this mutant changes, is evaluated"
+        },
+        "localm.pathsafe.x_resolve_keeping_mapped_drive__mutmut_2": "killed",
+        "localm.pathsafe.x_resolve_keeping_mapped_drive__mutmut_3": "killed",
+        "localm.pathsafe.x_resolve_keeping_mapped_drive__mutmut_4": {
+          "equivalent": "the mutation run executes on Linux, where os.path.abspath returns a path starting with '/', so ntpath.splitdrive never yields a two-character X: drive; whichever branch the mutated first test takes, the resolved path is returned unchanged"
+        },
+        "localm.pathsafe.x_resolve_keeping_mapped_drive__mutmut_5": {
+          "equivalent": "the mutation run executes on Linux, where os.path.abspath returns a path starting with '/', so ntpath.splitdrive never yields a two-character X: drive; whichever branch the mutated first test takes, the resolved path is returned unchanged"
+        },
+        "localm.pathsafe.x_resolve_keeping_mapped_drive__mutmut_6": {
+          "equivalent": "the mutation run executes on Linux, where os.name is 'posix', which differs from the mutated literal as from 'nt', so the first test is True and the resolved path is returned as before"
+        },
+        "localm.pathsafe.x_resolve_keeping_mapped_drive__mutmut_7": {
+          "equivalent": "the mutation run executes on Linux, where os.name is 'posix', which differs from the mutated literal as from 'nt', so the first test is True and the resolved path is returned as before"
+        },
+        "localm.pathsafe.x_resolve_keeping_mapped_drive__mutmut_8": {
+          "equivalent": "the mutation run executes on Linux, where os.name != 'nt' is True, so the `or` returns before its right operand, the only code this mutant changes, is evaluated"
+        },
+        "localm.pathsafe.x_resolve_keeping_mapped_drive__mutmut_9": {
+          "equivalent": "the mutation run executes on Linux, where os.name != 'nt' is True, so the `or` returns before its right operand, the only code this mutant changes, is evaluated"
+        }
       },
       "mutant_hashes": {
         "localm.pathsafe.x_check_plain_name__mutmut_6": "c8bc382fe4ae",
@@ -419,7 +444,14 @@
         "localm.pathsafe.x_is_unc_or_device_path__mutmut_6": "eb04fd625d21",
         "localm.pathsafe.x_is_windows_device_name__mutmut_10": "9fafc865b605",
         "localm.pathsafe.x_is_windows_device_name__mutmut_7": "5b844407cb9a",
-        "localm.pathsafe.x_reject_unsafe_path_string__mutmut_5": "843a2d8194b8"
+        "localm.pathsafe.x_reject_unsafe_path_string__mutmut_5": "843a2d8194b8",
+        "localm.pathsafe.x_resolve_keeping_mapped_drive__mutmut_10": "2a3ff54a86fd",
+        "localm.pathsafe.x_resolve_keeping_mapped_drive__mutmut_4": "e6ea953ecfd7",
+        "localm.pathsafe.x_resolve_keeping_mapped_drive__mutmut_5": "508339af4034",
+        "localm.pathsafe.x_resolve_keeping_mapped_drive__mutmut_6": "a2ff3d925771",
+        "localm.pathsafe.x_resolve_keeping_mapped_drive__mutmut_7": "7a66b7c4696d",
+        "localm.pathsafe.x_resolve_keeping_mapped_drive__mutmut_8": "2e375f1126bd",
+        "localm.pathsafe.x_resolve_keeping_mapped_drive__mutmut_9": "e9074ade8ed4"
       }
     },
     "localm/netpolicy.py": {
@@ -2569,7 +2601,7 @@
       }
     },
     "localm/config.py": {
-      "score_floor": 95.79,
+      "score_floor": 95.86,
       "function_hashes": {
         "x__absolute_folder": "5302283cc7e3",
         "x__atomic_write_json": "bb2c0f778029",
@@ -2615,9 +2647,11 @@
         "x_load_config": "020f50f9ef11",
         "x_load_config_checked": "bc3dcf3618d8",
         "x_load_registry": "4c9e1f1c16a7",
+        "x_peek_registry": "c9b778a48870",
         "x_pick_port": "7f91beeeacd3",
         "x_port_in_use": "31df66b9e8a2",
-        "x_restrict_file_perms": "1df2c99fd745",
+        "x_registry_lock_busy": "3c8531844249",
+        "x_restrict_file_perms": "2969be55950a",
         "x_save_config": "c64acd967276",
         "x_save_registry": "0a84dd5c9432",
         "x_temp_dir": "68a032dce86a",
@@ -3294,9 +3328,24 @@
         },
         "localm.config.x_load_registry__mutmut_4": "killed",
         "localm.config.x_load_registry__mutmut_5": "killed",
+        "localm.config.x_peek_registry__mutmut_1": "killed",
+        "localm.config.x_peek_registry__mutmut_2": "killed",
+        "localm.config.x_peek_registry__mutmut_3": {
+          "equivalent": "_read_json returns the default only when no registry could be read, and the isinstance check returns {} for None as for {}"
+        },
+        "localm.config.x_peek_registry__mutmut_4": "killed",
+        "localm.config.x_peek_registry__mutmut_5": "killed",
         "localm.config.x_pick_port__mutmut_1": "survived",
         "localm.config.x_pick_port__mutmut_2": "survived",
         "localm.config.x_port_in_use__mutmut_1": "survived",
+        "localm.config.x_registry_lock_busy__mutmut_1": "killed",
+        "localm.config.x_registry_lock_busy__mutmut_2": "killed",
+        "localm.config.x_registry_lock_busy__mutmut_3": "killed",
+        "localm.config.x_registry_lock_busy__mutmut_4": "killed",
+        "localm.config.x_registry_lock_busy__mutmut_5": "killed",
+        "localm.config.x_registry_lock_busy__mutmut_6": "killed",
+        "localm.config.x_registry_lock_busy__mutmut_7": "killed",
+        "localm.config.x_registry_lock_busy__mutmut_8": "killed",
         "localm.config.x_restrict_file_perms__mutmut_1": "killed",
         "localm.config.x_restrict_file_perms__mutmut_2": "killed",
         "localm.config.x_restrict_file_perms__mutmut_3": "killed",
@@ -3452,7 +3501,8 @@
         "localm.config.x_gpu_cache_dirs__mutmut_1": "da8e96e1ce7f",
         "localm.config.x_gpu_cache_dirs__mutmut_2": "d5e6e9eb35e6",
         "localm.config.x_keep_diagnostics_enabled__mutmut_8": "21864608ad6b",
-        "localm.config.x_load_registry__mutmut_3": "54672f99c877"
+        "localm.config.x_load_registry__mutmut_3": "54672f99c877",
+        "localm.config.x_peek_registry__mutmut_3": "f19457b0f64f"
       }
     },
     "localm/tls.py": {
@@ -4025,7 +4075,7 @@
       }
     },
     "localm/portmux.py": {
-      "score_floor": 88.34,
+      "score_floor": 88.88,
       "function_hashes": {
         "x__cancel_inflight_conns": "d8aba94270b7",
         "x__crash_watchdog_disabled": "279fd0b74c86",
@@ -4046,10 +4096,11 @@
         "x__serve": "d66c44d653a6",
         "x__serve_async": "b37123f864ce",
         "x__serve_async_plain": "f2f9456978ff",
-        "x__spawn_crash_recovery_watchdog": "c368be2159c9",
+        "x__spawn_crash_recovery_watchdog": "2144341b8a70",
         "x__start_stop_waker": "bc5a6ba10aa6",
         "x__track_conn_task": "11c680e87a0a",
         "x__track_server": "59ccf15647bc",
+        "x_argv_with_port": "48c8a352032a",
         "x_run_server": "d492aaedb3ac"
       },
       "mutants": {
@@ -4412,20 +4463,18 @@
         "localm.portmux.x__serve_async_plain__mutmut_9": "killed",
         "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_1": "killed",
         "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_10": "killed",
-        "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_100": {
-          "equivalent": "subprocess defines CREATE_NO_WINDOW and CREATE_NEW_PROCESS_GROUP only on Windows, as 0x08000000 and 0x00000200, which are the fallback literals; a lookup that misses yields the same value"
-        },
+        "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_100": "killed",
         "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_101": "killed",
         "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_102": "killed",
         "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_103": "killed",
         "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_104": "killed",
-        "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_105": "killed",
+        "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_105": {
+          "equivalent": "subprocess defines CREATE_NO_WINDOW and CREATE_NEW_PROCESS_GROUP only on Windows, as 0x08000000 and 0x00000200, which are the fallback literals; a lookup that misses yields the same value"
+        },
         "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_106": {
           "equivalent": "subprocess defines CREATE_NO_WINDOW and CREATE_NEW_PROCESS_GROUP only on Windows, as 0x08000000 and 0x00000200, which are the fallback literals; a lookup that misses yields the same value"
         },
-        "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_107": {
-          "equivalent": "subprocess defines CREATE_NO_WINDOW and CREATE_NEW_PROCESS_GROUP only on Windows, as 0x08000000 and 0x00000200, which are the fallback literals; a lookup that misses yields the same value"
-        },
+        "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_107": "killed",
         "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_108": "killed",
         "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_109": "killed",
         "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_11": "killed",
@@ -4441,7 +4490,6 @@
         "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_119": "killed",
         "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_12": "killed",
         "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_120": "killed",
-        "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_121": "killed",
         "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_13": "killed",
         "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_14": "killed",
         "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_15": "killed",
@@ -4483,14 +4531,14 @@
         "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_48": "killed",
         "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_49": "killed",
         "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_5": "killed",
-        "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_50": "killed",
-        "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_51": {
-          "equivalent": "the default is read only when the variable is unset; None and '' are both false, so the same branch runs"
+        "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_50": {
+          "equivalent": "restart_history is only read by truth value, for which None and '' are the same"
         },
-        "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_52": "killed",
-        "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_53": {
-          "equivalent": "the default is read only when the variable is unset; None and '' are both false, so the same branch runs"
+        "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_51": "killed",
+        "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_52": {
+          "equivalent": "restart_history is only read by truth value, for which None and '' are the same"
         },
+        "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_53": "killed",
         "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_54": "killed",
         "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_55": "killed",
         "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_56": "killed",
@@ -4531,22 +4579,24 @@
         "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_88": "killed",
         "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_89": "killed",
         "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_9": "killed",
-        "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_90": "killed",
-        "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_91": {
+        "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_90": {
           "equivalent": "subprocess defines CREATE_NO_WINDOW and CREATE_NEW_PROCESS_GROUP only on Windows, as 0x08000000 and 0x00000200, which are the fallback literals; a lookup that misses yields the same value"
         },
+        "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_91": "killed",
         "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_92": "killed",
         "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_93": "killed",
         "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_94": "killed",
         "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_95": "killed",
-        "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_96": "killed",
+        "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_96": {
+          "equivalent": "subprocess defines CREATE_NO_WINDOW and CREATE_NEW_PROCESS_GROUP only on Windows, as 0x08000000 and 0x00000200, which are the fallback literals; a lookup that misses yields the same value"
+        },
         "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_97": {
           "equivalent": "subprocess defines CREATE_NO_WINDOW and CREATE_NEW_PROCESS_GROUP only on Windows, as 0x08000000 and 0x00000200, which are the fallback literals; a lookup that misses yields the same value"
         },
-        "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_98": {
+        "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_98": "killed",
+        "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_99": {
           "equivalent": "subprocess defines CREATE_NO_WINDOW and CREATE_NEW_PROCESS_GROUP only on Windows, as 0x08000000 and 0x00000200, which are the fallback literals; a lookup that misses yields the same value"
         },
-        "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_99": "killed",
         "localm.portmux.x__start_stop_waker__mutmut_1": "killed",
         "localm.portmux.x__start_stop_waker__mutmut_10": "killed",
         "localm.portmux.x__start_stop_waker__mutmut_11": "killed",
@@ -4599,6 +4649,41 @@
         "localm.portmux.x__track_server__mutmut_7": "killed",
         "localm.portmux.x__track_server__mutmut_8": "killed",
         "localm.portmux.x__track_server__mutmut_9": "killed",
+        "localm.portmux.x_argv_with_port__mutmut_1": "killed",
+        "localm.portmux.x_argv_with_port__mutmut_10": "killed",
+        "localm.portmux.x_argv_with_port__mutmut_11": "killed",
+        "localm.portmux.x_argv_with_port__mutmut_12": "killed",
+        "localm.portmux.x_argv_with_port__mutmut_13": "killed",
+        "localm.portmux.x_argv_with_port__mutmut_14": "killed",
+        "localm.portmux.x_argv_with_port__mutmut_15": "killed",
+        "localm.portmux.x_argv_with_port__mutmut_16": "killed",
+        "localm.portmux.x_argv_with_port__mutmut_17": "killed",
+        "localm.portmux.x_argv_with_port__mutmut_18": "killed",
+        "localm.portmux.x_argv_with_port__mutmut_19": "killed",
+        "localm.portmux.x_argv_with_port__mutmut_2": "killed",
+        "localm.portmux.x_argv_with_port__mutmut_20": "killed",
+        "localm.portmux.x_argv_with_port__mutmut_21": "killed",
+        "localm.portmux.x_argv_with_port__mutmut_22": "killed",
+        "localm.portmux.x_argv_with_port__mutmut_23": "killed",
+        "localm.portmux.x_argv_with_port__mutmut_24": "killed",
+        "localm.portmux.x_argv_with_port__mutmut_25": "killed",
+        "localm.portmux.x_argv_with_port__mutmut_26": "killed",
+        "localm.portmux.x_argv_with_port__mutmut_27": "killed",
+        "localm.portmux.x_argv_with_port__mutmut_28": "killed",
+        "localm.portmux.x_argv_with_port__mutmut_29": "killed",
+        "localm.portmux.x_argv_with_port__mutmut_3": "killed",
+        "localm.portmux.x_argv_with_port__mutmut_30": "killed",
+        "localm.portmux.x_argv_with_port__mutmut_31": "killed",
+        "localm.portmux.x_argv_with_port__mutmut_4": {
+          "equivalent": "skip_value is only read by truth value, for which None and False are the same"
+        },
+        "localm.portmux.x_argv_with_port__mutmut_5": "killed",
+        "localm.portmux.x_argv_with_port__mutmut_6": {
+          "equivalent": "skip_value is only read by truth value, for which None and False are the same"
+        },
+        "localm.portmux.x_argv_with_port__mutmut_7": "killed",
+        "localm.portmux.x_argv_with_port__mutmut_8": "killed",
+        "localm.portmux.x_argv_with_port__mutmut_9": "killed",
         "localm.portmux.x_run_server__mutmut_1": "killed",
         "localm.portmux.x_run_server__mutmut_10": "killed",
         "localm.portmux.x_run_server__mutmut_11": "killed",
@@ -4667,17 +4752,19 @@
       },
       "mutant_hashes": {
         "localm.portmux.x__deliver_woken_stops__mutmut_4": "739f6355981f",
-        "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_100": "1af5e242affb",
-        "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_106": "a039a482183c",
-        "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_107": "a7dd385734d6",
-        "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_51": "fcecb6b45cc6",
-        "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_53": "7fa11642a127",
-        "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_91": "8fa8a6c26caf",
-        "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_97": "6fc391002ad4",
-        "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_98": "34afe8b32b74",
+        "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_105": "fe7a4083c967",
+        "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_106": "9f3488c71c5f",
+        "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_50": "e16b2c46284d",
+        "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_52": "15ffacb94b3f",
+        "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_90": "eb482946841e",
+        "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_96": "3768ec68515d",
+        "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_97": "0486af8f23a9",
+        "localm.portmux.x__spawn_crash_recovery_watchdog__mutmut_99": "318480246059",
         "localm.portmux.x__start_stop_waker__mutmut_32": "585e92314aeb",
         "localm.portmux.x__start_stop_waker__mutmut_33": "eb3b8ed019d6",
-        "localm.portmux.x__start_stop_waker__mutmut_8": "02a3ff46c352"
+        "localm.portmux.x__start_stop_waker__mutmut_8": "02a3ff46c352",
+        "localm.portmux.x_argv_with_port__mutmut_4": "490391446435",
+        "localm.portmux.x_argv_with_port__mutmut_6": "c54599ebb826"
       }
     }
   },

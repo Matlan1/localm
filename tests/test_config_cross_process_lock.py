@@ -164,6 +164,54 @@ def test_a_lock_timeout_is_a_config_lock_timeout(home, monkeypatch):
         lockpath.unlink()
 
 
+def _foreign_registry_lock(monkeypatch):
+    monkeypatch.setattr(cfg, "_CROSS_LOCK_STALE_AGE", 3600.0)
+    monkeypatch.setattr(cfg, "_CROSS_LOCK_TIMEOUT", 30.0)
+    lockpath = cfg.REGISTRY_FILE.with_name(cfg.REGISTRY_FILE.name + ".lock")
+    lockpath.write_text("12345:foreign", encoding="utf-8")
+    return lockpath
+
+
+def test_registry_lock_busy_is_false_when_nobody_holds_the_lock(home):
+    lockpath = cfg.REGISTRY_FILE.with_name(cfg.REGISTRY_FILE.name + ".lock")
+
+    assert cfg.registry_lock_busy() is False
+    assert not lockpath.exists()
+    assert not cfg.REGISTRY_FILE.exists()
+
+
+def test_registry_lock_busy_waits_half_a_second_by_default_for_another_holder(
+        home, monkeypatch):
+    lockpath = _foreign_registry_lock(monkeypatch)
+
+    started = time.monotonic()
+    busy = cfg.registry_lock_busy()
+    elapsed = time.monotonic() - started
+
+    assert busy is True
+    assert 0.4 <= elapsed < 1.4
+    assert lockpath.read_text(encoding="utf-8") == "12345:foreign"
+
+
+def test_registry_lock_busy_waits_only_the_given_time(home, monkeypatch):
+    _foreign_registry_lock(monkeypatch)
+
+    started = time.monotonic()
+    busy = cfg.registry_lock_busy(wait=0.05)
+    elapsed = time.monotonic() - started
+
+    assert busy is True
+    assert elapsed < 1.0
+
+
+def test_registry_lock_busy_is_false_when_the_lock_cannot_be_attempted(home, monkeypatch):
+    missing = home / "missing-dir"
+    monkeypatch.setattr(cfg, "REGISTRY_FILE", missing / "registry.json")
+
+    assert cfg.registry_lock_busy() is False
+    assert not missing.exists()
+
+
 def test_settings_write_blocked_by_another_process_answers_busy_not_500(
         home, monkeypatch, caplog):
     """PATCH /v1/config while another localm process holds config.json.lock
