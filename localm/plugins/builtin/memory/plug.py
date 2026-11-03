@@ -1563,7 +1563,7 @@ def _memory_inlet(messages, ctx, announce=None):
                 announce(DOWNLOADING_EMBEDDER_STATUS if downloading
                          else RECALLING_MEMORY_STATUS)
             embed_fn = _embed_fn()
-            if downloading:
+            if announce is not None and downloading:
                 announce(RECALLING_MEMORY_STATUS)
         diag: dict = {}
         block_records = store.recall(query, k=_mem.MAX_INJECT,
