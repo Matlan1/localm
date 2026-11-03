@@ -17,6 +17,8 @@ for _var in $(compgen -e); do
 done
 unset PYTHONPATH PYTHONHOME PYTHONSTARTUP PYTHONUSERBASE VIRTUAL_ENV CONDA_PREFIX LOCALM_HOME
 export UV_NO_CONFIG=1 PIP_CONFIG_FILE=/dev/null PYTHONNOUSERSITE=1
+# apt's own downloader (Debian and Ubuntu), used when neither curl nor wget is there.
+APT_HELPER="/usr/lib/apt/apt-helper"
 cd "$(dirname "$0")"
 ROOT="$(pwd)"
 # Every temporary file of this run, the setup window's included, goes to
@@ -42,10 +44,8 @@ sys_prog() {  # sys_prog NAME  ->  prints NAME's full path in the fixed system f
     done
     return 1
 }
-download() {  # download URL DEST  ->  0 when DEST holds URL, fetched with the system curl, else wget
+download() {  # download URL DEST  ->  0 when DEST holds URL, fetched with the system curl, else wget, else $APT_HELPER
     local url="$1" dest="$2" dirs="$LOCALM_SYSDIRS" d
-    # macOS: a download tool may also come from /usr/local/bin or /opt/homebrew/bin.
-    if [ "$(uname -s 2>/dev/null)" = Darwin ]; then dirs="$dirs:/usr/local/bin:/opt/homebrew/bin"; fi
     local IFS=:
     for d in $dirs; do
         if [ -x "$d/curl" ] && [ ! -d "$d/curl" ]; then "$d/curl" -fsSL -o "$dest" "$url"; return; fi
@@ -53,7 +53,21 @@ download() {  # download URL DEST  ->  0 when DEST holds URL, fetched with the s
     for d in $dirs; do
         if [ -x "$d/wget" ] && [ ! -d "$d/wget" ]; then "$d/wget" -q -O "$dest" "$url"; return; fi
     done
+    if [ -x "$APT_HELPER" ]; then "$APT_HELPER" download-file "$url" "$dest" >/dev/null; return; fi
     return 1
+}
+installer_path() {  # installer_path DIR  ->  PATH for Astral's installer: $PATH, with DIR/bin first
+    # holding a wget that downloads with $APT_HELPER when neither curl nor wget is there
+    if sys_prog curl >/dev/null || sys_prog wget >/dev/null || [ ! -x "$APT_HELPER" ]; then
+        printf '%s\n' "$PATH"; return 0
+    fi
+    mkdir -p "$1/bin" || return 1
+    {
+        printf '%s\n' '#!/bin/sh' 'url=""; dest=""' 'while [ $# -gt 0 ]; do'
+        printf '%s\n' '  case "$1" in -O) dest="$2"; shift 2 ;; --header) shift 2 ;; -*) shift ;; *) url="$1"; shift ;; esac'
+        printf '%s\n' 'done' "exec \"$APT_HELPER\" download-file \"\$url\" \"\$dest\""
+    } > "$1/bin/wget" && chmod +x "$1/bin/wget" || return 1
+    printf '%s\n' "$1/bin:$PATH"
 }
 # The uv release this setup installs; its installer script runs only when its
 # sha256 matches UV_INSTALLER_SHA256.
@@ -106,7 +120,8 @@ run_uv_installer() {  # the pinned, checksum-verified Astral installer into $UV_
     # stay in ./.localm-setup-tmp/uv-installer.<pid>.
     UVTMP="$STMP/uv-installer.$$"
     if ! { mkdir -p "$UVTMP/tmp" && fetch_uv_installer "$UVTMP/uv-installer.sh" \
-            && TMPDIR="$UVTMP/tmp" sh "$UVTMP/uv-installer.sh"; }; then
+            && IPATH="$(installer_path "$UVTMP")" \
+            && PATH="$IPATH" TMPDIR="$UVTMP/tmp" sh "$UVTMP/uv-installer.sh"; }; then
         rm -rf "$UVTMP"
         echo
         echo "  [!] Could not download or run Astral's uv installer."

@@ -210,3 +210,17 @@ def test_the_isolation_block_clears_a_poisoned_environment(tmp_path, name):
     assert seen["PYTHONNOUSERSITE"] == "1"
     if name in FIXED_PATH:
         assert seen["PATH"] == "/usr/bin:/bin:/usr/sbin:/sbin"
+
+
+@pytest.mark.parametrize("name", ("setup.sh", "setup-gui.sh", "install.sh"))
+def test_curl_and_wget_come_only_from_the_fixed_system_folders(name):
+    """A fresh macOS ships /usr/bin/curl and every distro ships curl or wget in
+    /usr/bin, so the download helper looks nowhere else (no Homebrew or
+    /usr/local folder)."""
+    text = (ROOT / name).read_text(encoding="utf-8")
+    start = text.index("download() {")
+    body = text[start:text.index("\n}\n", start)]
+    assert "/usr/local" not in body and "homebrew" not in body.lower(), body
+    assert "uname" not in body, body
+    assert re.search(r"\$LOCALM_SYSDIRS|sys_prog (curl|wget)", body), body
+    assert text.count(SYSDIRS_LINE) == 1

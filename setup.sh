@@ -21,6 +21,8 @@ for _var in $(compgen -e); do
 done
 unset PYTHONPATH PYTHONHOME PYTHONSTARTUP PYTHONUSERBASE VIRTUAL_ENV CONDA_PREFIX LOCALM_HOME
 export UV_NO_CONFIG=1 PIP_CONFIG_FILE=/dev/null PYTHONNOUSERSITE=1
+# apt's own downloader (Debian and Ubuntu), used when neither curl nor wget is there.
+APT_HELPER="/usr/lib/apt/apt-helper"
 cd "$(dirname "$0")"
 export LOCALM_SETUP=1
 ROOT="$(pwd)"
@@ -85,10 +87,8 @@ sys_prog() {  # sys_prog NAME  ->  prints NAME's full path in the fixed system f
   done
   return 1
 }
-download() {  # download URL DEST  ->  0 when DEST holds URL, fetched with the system curl, else wget
+download() {  # download URL DEST  ->  0 when DEST holds URL, fetched with the system curl, else wget, else $APT_HELPER
   local url="$1" dest="$2" dirs="$LOCALM_SYSDIRS" d
-  # macOS: a download tool may also come from /usr/local/bin or /opt/homebrew/bin.
-  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then dirs="$dirs:/usr/local/bin:/opt/homebrew/bin"; fi
   local IFS=:
   for d in $dirs; do
     if [ -x "$d/curl" ] && [ ! -d "$d/curl" ]; then "$d/curl" -fsSL -o "$dest" "$url"; return; fi
@@ -96,7 +96,21 @@ download() {  # download URL DEST  ->  0 when DEST holds URL, fetched with the s
   for d in $dirs; do
     if [ -x "$d/wget" ] && [ ! -d "$d/wget" ]; then "$d/wget" -q -O "$dest" "$url"; return; fi
   done
+  if [ -x "$APT_HELPER" ]; then "$APT_HELPER" download-file "$url" "$dest" >/dev/null; return; fi
   return 1
+}
+installer_path() {  # installer_path DIR  ->  PATH for Astral's installer: $PATH, with DIR/bin first
+  # holding a wget that downloads with $APT_HELPER when neither curl nor wget is there
+  if sys_prog curl >/dev/null || sys_prog wget >/dev/null || [ ! -x "$APT_HELPER" ]; then
+    printf '%s\n' "$PATH"; return 0
+  fi
+  mkdir -p "$1/bin" || return 1
+  {
+    printf '%s\n' '#!/bin/sh' 'url=""; dest=""' 'while [ $# -gt 0 ]; do'
+    printf '%s\n' '  case "$1" in -O) dest="$2"; shift 2 ;; --header) shift 2 ;; -*) shift ;; *) url="$1"; shift ;; esac'
+    printf '%s\n' 'done' "exec \"$APT_HELPER\" download-file \"\$url\" \"\$dest\""
+  } > "$1/bin/wget" && chmod +x "$1/bin/wget" || return 1
+  printf '%s\n' "$1/bin:$PATH"
 }
 # The uv release this setup installs; its installer script runs only when its
 # sha256 matches UV_INSTALLER_SHA256.
@@ -531,8 +545,9 @@ if ! uv_is_pinned; then
   # The installer script and everything Astral's installer downloads stay in
   # ./.localm-setup-tmp/uv-installer.<pid>.
   UVTMP="$STMP/uv-installer.$$"
-  if mkdir -p "$UVTMP/tmp" && fetch_uv_installer "$UVTMP/uv-installer.sh"; then
-    TMPDIR="$UVTMP/tmp" sh "$UVTMP/uv-installer.sh" || true
+  if mkdir -p "$UVTMP/tmp" && fetch_uv_installer "$UVTMP/uv-installer.sh" \
+      && IPATH="$(installer_path "$UVTMP")"; then
+    PATH="$IPATH" TMPDIR="$UVTMP/tmp" sh "$UVTMP/uv-installer.sh" || true
   else
     jr abandon "$UVSTEP"
   fi
@@ -791,18 +806,8 @@ if [ -z "$EXTRAS" ]; then
 fi
 if [ "$wpick" = 2 ]; then
   if [ "$(uname -s)" = "Linux" ]; then
-    # No apt/dnf/pacman step needed here on purpose - verified live (a real,
-    # fully isolated venv, zero system packages, zero sudo) that pip alone
-    # gets a working window through pywebview's Qt backend. The one
-    # residual gap, also verified live rather than assumed: the underlying
-    # Qt/XCB windowing layer can still want a couple of small base system
-    # libraries (e.g. libxcb-cursor0) that no Python package provides -
-    # commonly already present on a real desktop install, not on a
-    # minimal/headless one.
-    say "  [i] On Linux the app window needs a couple of small base Qt/X11"
-    say "      runtime libraries (e.g. libxcb-cursor0) that are commonly"
-    say "      already present on a desktop install. If the window fails to"
-    say "      open, localm gui still works - just via the browser."
+    say "  [i] If the app window cannot open on this system, localm gui opens"
+    say "      in your browser instead."
   fi
 fi
 
@@ -838,21 +843,16 @@ say "  Installing localm into .venv ..."
 # script does not depend on the entry point, so this warns and continues rather
 # than aborting the whole setup over it.
 if [ ! -x .venv/bin/localm ]; then
-  say "  [!] .venv/bin/localm did not get installed - retrying once ..."
-  # || true: the retry itself failing must not abort setup here either - the
-  # STILL-missing branch right below is what reports it (loudly, with the manual
-  # fix), and the rest of this script does not depend on the entry point (see the
-  # block comment above). Without this guard, a non-zero retry under
-  # `set -euo pipefail` kills setup mid-way and that warning never prints.
-  "$UVEXE" pip install -p .venv -e ".[${EXTRAS}]" || true
+  say "  [!] .venv/bin/localm did not get installed - reinstalling once ..."
+  # A failed reinstall is reported by the STILL-missing branch below; setup
+  # carries on without the entry point.
+  "$UVEXE" pip install -p .venv -e ".[${EXTRAS}]" --reinstall || true
   if [ ! -x .venv/bin/localm ]; then
     say ""
-    say "  [!!] .venv/bin/localm is STILL missing after a retry."
+    say "  [!!] .venv/bin/localm is STILL missing after a reinstall."
     say "       The CLI (.venv/bin/localm ...) and ./localm.sh will not work until"
     say "       this is fixed; the graphical launcher (./localm-launcher.sh) is"
-    say "       unaffected."
-    say "       Fix it yourself with:"
-    say "         \"$UVEXE\" pip install -p .venv -e \".[${EXTRAS}]\" --reinstall"
+    say "       unaffected. Running  bash setup.sh  again repairs it."
     say "       Seen specifically on a WSL2 clone under a Windows-drive mount"
     say "       (/mnt/c, /mnt/d, ...) - cloning into a native Linux path (e.g."
     say "       ~/localm) instead avoids that filesystem bridge entirely."
@@ -1004,24 +1004,19 @@ if [ -n "$TORCHSPEC" ]; then
   # in-place redraw rather than reassure anyone.
   # TORCHSPEC is a multi-token pip arg list (e.g. "torch torchvision --torch-backend=...");
   # it is intentionally left unquoted so the words split into separate arguments.
+  # Each install is tried twice before it is reported.
   # shellcheck disable=SC2086
   "$UVEXE" pip install -p .venv $TORCHSPEC \
-    || say "  [!] torch install failed - install a matching torch manually (see docs/gpu-setup.md)."
-  "$UVEXE" pip install -p .venv -e ".[hf,audio]" || true
+    || "$UVEXE" pip install -p .venv $TORCHSPEC \
+    || say "  [!] PyTorch could not be installed. GGUF chat still works; running setup again retries it."
+  "$UVEXE" pip install -p .venv -e ".[hf,audio]" \
+    || "$UVEXE" pip install -p .venv -e ".[hf,audio]" \
+    || say "  [!] transformers could not be installed. GGUF chat still works; running setup again retries it."
 else
   say ""
   say "  Skipping the PyTorch/transformers stack (not needed for GGUF chat)."
-  say "  You picked the '$BACKEND' runtime, so no vendor GPU torch was auto-installed."
-  say "  For HuggingFace transformers models, add PyTorch later (see docs/gpu-setup.md):"
-  say "    CPU (any machine): \"$UVEXE\" pip install -p .venv torch torchvision --torch-backend=cpu"
-  # NVIDIA CUDA's wheel line depends on GPU generation (Blackwell and newer need
-  # a different index than older cards - see hwdetect.pytorch_index_url), so ask
-  # localm's own detector for THIS machine's actual line instead of hardcoding
-  # one that would silently install kernel-less torch on a Blackwell card.
-  cudaspec="$(.venv/bin/python -m localm.hwdetect torch-args cuda 2>/dev/null)"
-  say "    NVIDIA CUDA:       \"$UVEXE\" pip install -p .venv ${cudaspec:-torch torchvision --torch-backend=cu126}"
-  say "    AMD ROCm (Linux):  \"$UVEXE\" pip install -p .venv torch torchvision --torch-backend=rocm6.2"
-  say "    Intel Arc / XPU:   \"$UVEXE\" pip install -p .venv torch torchvision --torch-backend=xpu"
+  say "  The '$BACKEND' runtime runs without it; setup installs it with a GPU runtime"
+  say "  for HuggingFace transformers models."
 fi
 
 step_done torch
@@ -1201,16 +1196,11 @@ else
   say "    ./localm-launcher.sh    graphical launcher - works now (does not need it)"
   say "    ./localm.sh <args>      will NOT work until it is fixed"
   say "    .venv/bin/localm ...    will NOT work until it is fixed"
-  say "  Fix it with:  \"$UVEXE\" pip install -p .venv -e \".[${EXTRAS}]\" --reinstall"
+  say "  Running  bash setup.sh  again repairs it."
 fi
 if [ -n "$SHORTCUT" ]; then
   say "    A LocaLM entry was also added to your application menu."
 fi
-say ""
-say "  The GUI launcher uses Tk; localm's bundled Python includes it, so it"
-say "  normally works out of the box. If the launcher ever reports Tk missing"
-say "  (e.g. a system Python without it), install your distro's python3-tk."
-say "  The web GUI itself needs only a browser."
 say ""
 say "  To uninstall later:  bash setup.sh --uninstall"
 say ""

@@ -175,6 +175,17 @@ _CLEARED_NAMES = ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONUSERBASE",
 
 # The folders a POSIX system program is looked for in, in this order.
 POSIX_SYSTEM_DIRS = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
+# apt's own downloader (Debian and Ubuntu), for a system with neither curl nor wget.
+APT_HELPER = "/usr/lib/apt/apt-helper"
+# A wget for Astral's installer (it calls `wget [--header H] URL -O DEST`) that
+# downloads with APT_HELPER.
+_APT_WGET = """#!/bin/sh
+url=""; dest=""
+while [ $# -gt 0 ]; do
+  case "$1" in -O) dest="$2"; shift 2 ;; --header) shift 2 ;; -*) shift ;; *) url="$1"; shift ;; esac
+done
+exec "{helper}" download-file "$url" "$dest"
+"""
 
 # Passed to every child process: no console window opens on Windows.
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -749,6 +760,9 @@ def _run_uv_installer(script: Path, env: dict, emit: Callable[[str], None]) -> i
     exit code."""
     env = {k: v for k, v in env.items() if k.upper() not in ("PSMODULEPATH", "PATH")}
     env["PATH"] = system_path()
+    shim = installer_download_shim(script.parent)
+    if shim:
+        env["PATH"] = shim + os.pathsep + env["PATH"]
     argv = uv_installer_argv(script, env)
     proc = subprocess.Popen(argv, env=env, cwd=str(script.parent),
                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -758,6 +772,23 @@ def _run_uv_installer(script: Path, env: dict, emit: Callable[[str], None]) -> i
     for line in proc.stdout:
         emit(line.rstrip())
     return proc.wait()
+
+
+def installer_download_shim(folder: Path) -> Optional[str]:
+    """On a POSIX system with neither curl nor wget in POSIX_SYSTEM_DIRS but with
+    APT_HELPER, write ``folder/bin/wget`` (a wget for Astral's installer that
+    downloads with APT_HELPER) and return ``folder/bin``; otherwise None, writing
+    nothing. Raises OSError when the file cannot be written."""
+    if IS_WINDOWS or system_program("curl") or system_program("wget"):
+        return None
+    if not (os.path.isfile(APT_HELPER) and os.access(APT_HELPER, os.X_OK)):
+        return None
+    bindir = folder / "bin"
+    bindir.mkdir(parents=True, exist_ok=True)
+    wget = bindir / "wget"
+    wget.write_text(_APT_WGET.replace("{helper}", APT_HELPER), encoding="utf-8", newline="\n")
+    wget.chmod(0o755)
+    return str(bindir)
 
 
 def _download(url: str, dest: Path) -> None:
