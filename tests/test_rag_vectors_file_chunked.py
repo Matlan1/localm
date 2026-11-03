@@ -121,6 +121,30 @@ def test_reader_rejects_invalid_utf8(tmp_path):
         load_vectors_json(p)
 
 
+_DEEP = "[" * 200_000 + "]" * 200_000
+
+
+@pytest.mark.parametrize("text", [
+    '{"dim": 1, "vectors": [' + _DEEP + "]}",
+    '{"vectors": [' + _DEEP + '], "dim": 1}',
+], ids=["written-shape", "other-shape"])
+def test_hostile_nesting_degrades_the_collection_instead_of_raising(tmp_path, text):
+    base = tmp_path / "collections"
+    base.mkdir()
+    coll = Collection("deep", base=base, cache=False)
+    coll.create()
+    coll._load(use_cache=False)
+    coll._chunks = [{"text": "t", "source": "upload:a", "format": "text"}]
+    coll._meta["docs"]["upload:a"] = {"size": 1, "hash": "h", "chunks": 1, "uploaded": True}
+    coll._save()
+    (base / "deep" / "vectors.json").write_text(text, encoding="utf-8")
+    with pytest.raises(RecursionError):
+        load_vectors_json(base / "deep" / "vectors.json")
+    reopened = Collection("deep", base=base, cache=False)
+    assert reopened._vectors is None
+    assert "unreadable (RecursionError)" in reopened.vector_degrade_reason
+
+
 _DIM = 384
 _ROWS = 6000
 
