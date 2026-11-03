@@ -1298,7 +1298,7 @@
   "models.pull.store.copy": "Copiar a la biblioteca",
   "models.pull.store.move": "Mover a la biblioteca",
   "models.pull.store.registerInPlace": "Registrar en su sitio",
-  "models.pull.storeTitle": "Solo se aplica a la ruta de una carpeta o archivo local - una descarga de HuggingFace, de CivitAI o de una URL siempre va a ~/.localm/models por sí sola.",
+  "models.pull.storeTitle": "Solo se aplica a la ruta de una carpeta o archivo local - una descarga de HuggingFace o de una URL siempre va a ~/.localm/models por sí sola, y una descarga de CivitAI va a las carpetas de modelos de tu ComfyUI si hay un ComfyUI configurado, y si no a ~/.localm/models.",
   "models.pull.title": "Añadir un modelo",
   "models.pull.verifying": "verificando… {pct}%",
   "models.reload.busyToast": "{model} está ocupado - no se recargó",

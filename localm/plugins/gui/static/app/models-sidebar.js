@@ -1152,9 +1152,13 @@ export async function switchModel(model, { local = false } = {}) {
     if (routed) return routed;
     _peerSelected = null;
     setStatus("busy", t("sidebar.status.loading", { model }));
+    let force = false;
+    let asChat = false;
     data = await _postLoad(model, false);
-    if (data.status === "confirm_required") {
+    while (data.status === "confirm_required") {
       const notChat = data.reason === "not_chat_model";
+      // A confirm the server repeats after its flag was already sent is a failed load.
+      if (notChat ? asChat : force) throw new Error(data.detail || t("sidebar.status.loadFailed"));
       const confirmed = await confirmDangerAsync(
         t(notChat ? "models.notChat.title" : "models.switch.confirmTitle"), data.detail,
         t(notChat ? "models.notChat.confirmLabel" : "models.switch.confirmLabel"));
@@ -1164,8 +1168,10 @@ export async function switchModel(model, { local = false } = {}) {
         refreshModels().then(_showServedModel);
         return { status: "cancelled", reason: "declined by user", model };
       }
+      if (notChat) asChat = true;
+      else force = true;
       setStatus("busy", t("sidebar.status.loading", { model }));
-      data = notChat ? await _postLoad(model, false, true) : await _postLoad(model, true);
+      data = await _postLoad(model, force, asChat);
     }
   } catch (e) {
     // A failed load ends the busy pill and re-reads the server's model state.

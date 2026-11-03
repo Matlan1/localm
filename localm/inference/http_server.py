@@ -2635,11 +2635,17 @@ async def unload_all_models(*, force: bool = False, media: bool = False) -> dict
 
     cpu_only_names = {n for n, e in list(_engines.items())
                       if e.loaded and _holds_no_vram(e)}
-    if await _only_cpu_only_chat_loaded(loop, cpu_only_names, media):
-        before, before_fresh, before_scope = None, True, None
-    else:
-        before, before_fresh, before_scope = await loop.run_in_executor(
-            None, _vram_free_reading)
+    reading: list = []
+    if not await _only_cpu_only_chat_loaded(loop, cpu_only_names, media):
+        reading.append(await loop.run_in_executor(None, _vram_free_reading))
+
+    async def _before_vram_release() -> None:
+        # Takes the free-VRAM reading before the first release that can free
+        # VRAM, when the CPU-only check skipped it. See
+        # test_a_model_holding_vram_loaded_during_the_check_still_waits.
+        if not reading:
+            reading.append(await loop.run_in_executor(None, _vram_free_reading))
+
     unloaded_models = []
     skipped_in_use = []
     unloaded_other: list[str] = []
@@ -2661,7 +2667,8 @@ async def unload_all_models(*, force: bool = False, media: bool = False) -> dict
         embedder_was_loaded = await _unload_engines_and_embedder(
             loop, _embedder_mod, unloaded_models, skipped_in_use,
             confirm_required=confirm_required, unloaded_other=unloaded_other,
-            force=force)
+            force=force, cpu_only_names=cpu_only_names,
+            before_vram_release=_before_vram_release)
     except asyncio.CancelledError:
         # The caller stopped waiting: an engine already unloaded above still
         # gets the pointer reset the normal path does below.
@@ -2678,7 +2685,10 @@ async def unload_all_models(*, force: bool = False, media: bool = False) -> dict
     media_left_running: dict[str, str] = {}
     media_stopped = False
     if media:
-        from localm.vram import MEDIA_STOPPED, stop_idle_native_media
+        from localm.vram import (MEDIA_STOPPED, loaded_native_media_runtimes,
+                                 stop_idle_native_media)
+        if not reading and await loop.run_in_executor(None, loaded_native_media_runtimes):
+            await _before_vram_release()
         outcomes = await loop.run_in_executor(None, stop_idle_native_media)
         for kind, outcome in outcomes.items():
             if outcome == MEDIA_STOPPED:
@@ -2691,6 +2701,7 @@ async def unload_all_models(*, force: bool = False, media: bool = False) -> dict
     released_anything = bool(unloaded_models) or embedder_was_loaded or media_stopped
     freed_vram = (embedder_was_loaded or media_stopped
                   or any(n not in cpu_only_names for n in unloaded_models))
+    before, before_fresh, before_scope = reading[0] if reading else (None, True, None)
     if before is not None and freed_vram:
         released, after = await loop.run_in_executor(
             None, lambda: wait_for_vram_release(_free, before_bytes=before))
@@ -2727,7 +2738,9 @@ async def _unload_engines_and_embedder(loop, _embedder_mod, unloaded_models,
                                        skipped_in_use, *,
                                        confirm_required: dict,
                                        unloaded_other: list,
-                                       force: bool = False) -> bool:
+                                       force: bool = False,
+                                       cpu_only_names: frozenset | set = frozenset(),
+                                       before_vram_release=None) -> bool:
     """The releasing half of ``unload_all_models``: unload every loaded chat
     engine that is idle, or every one with *force* (appending to
     *unloaded_models* / *skipped_in_use* / *confirm_required*), then the
@@ -2741,7 +2754,11 @@ async def _unload_engines_and_embedder(loop, _embedder_mod, unloaded_models,
     engine's generations (``residency.cancel_all``) before unloading it, and
     stops a busy embedding, reranker or speech model (``reset_*(force=True)``:
     its worker is stopped and its requests in flight fail). Returns whether
-    anything other than a chat engine was released."""
+    anything other than a chat engine was released.
+
+    *before_vram_release*, when given, is awaited before each release that can
+    free VRAM: a chat engine not named in *cpu_only_names*, and the embedding,
+    reranker and speech models."""
     if not force:
         busy = [e for e in list(_engines.values())
                 if e.loaded and _has_requests_in_flight(e)]
@@ -2751,6 +2768,10 @@ async def _unload_engines_and_embedder(loop, _embedder_mod, unloaded_models,
         engine = _engines[name]
         if not engine.loaded:
             continue
+        if before_vram_release is not None and name not in cpu_only_names:
+            await before_vram_release()
+            if not engine.loaded:
+                continue
         if _has_requests_in_flight(engine):
             if not force:
                 skipped_in_use.append(name)
@@ -2788,6 +2809,8 @@ async def _unload_engines_and_embedder(loop, _embedder_mod, unloaded_models,
     # coroutine. Executor-offloading them, like every other blocking call in
     # this function, keeps the wait local to this one coroutine instead.
     async def _release(kind: str, active_fn, reset_fn) -> None:
+        if before_vram_release is not None:
+            await before_vram_release()
         if await loop.run_in_executor(
                 None, functools.partial(reset_fn, force=force)):
             unloaded_other.append(kind)
