@@ -741,7 +741,7 @@ DEFAULT_CONFIG: dict = {
     # loca-lm (Loca white + LM blue), localm (lowercase, m blue). Console
     # command, app icon, and shortcut are fixed regardless.
     "logo_style": "local-m",
-    # Interface language for the web GUI, as a LANGUAGE_IDS id ("en", "de").
+    # Interface language for the web GUI, as a LANGUAGE_IDS id ("en", "de", "es", "fr").
     # The GUI reads it at boot and loads static/i18n/<id>.json; English is
     # built in and is the fallback for anything a catalog does not carry.
     "language": "en",

@@ -36,7 +36,7 @@ MAX_WORKFLOWS = 500
 MAX_MODEL_NAME = 200
 
 SOURCE_MODEL_TYPES = ("diffusion-unet", "text-encoder", "vae", "lora", "llm", "unknown",
-                      "embedding", "upscaler")
+                      "embedding", "upscaler", "planner")
 
 _SHA256_RE = re.compile(r"\A[0-9a-f]{64}\Z")
 _PULL_NAME_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")

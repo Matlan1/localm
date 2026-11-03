@@ -1032,6 +1032,21 @@ def _report_success(rich_msg: str, plain_msg: str) -> None:
 
 
 
+def _spec_for_log(spec: str) -> str:
+    """*spec* for a log line: an ``http(s)`` URL loses its user info, query and
+    fragment; any other spec is returned unchanged."""
+    if not spec.startswith(("http://", "https://")):
+        return spec
+    from urllib.parse import urlsplit
+    try:
+        parts = urlsplit(spec)
+        host = parts.hostname or ""
+        port = f":{parts.port}" if parts.port else ""
+    except ValueError:
+        return "<unparseable URL>"
+    return f"{parts.scheme}://{host}{port}{parts.path}"
+
+
 def pull_model(
     model_spec: str,
     name: Optional[str] = None,
@@ -1108,6 +1123,7 @@ def pull_model(
         local_type = None if model_type == "auto" else model_type
         return _mm.add_local(str(local), name=name, model_type=local_type, store=store)
 
+    logger.info("pull: downloading %s", _spec_for_log(spec))
     from . import pending_pulls
     with pending_pulls.tracking({
             "spec": model_spec, "name": name, "sha256": expected_sha256,
@@ -2150,7 +2166,8 @@ def _non_chat_detection_note(architecture) -> str:
 
 
 _MEDIA_TYPE_WORDS = {"lora": "a LoRA", "diffusion-unet": "an image or video diffusion model",
-                     "vae": "a VAE", "text-encoder": "a text encoder",
+                     "vae": "a VAE", "text-encoder": "a text encoder", "vocoder": "a vocoder",
+                     "planner": "a music planner model",
                      "controlnet": "a ControlNet", "textual-inversion": "a textual-inversion embedding",
                      "upscaler": "an upscaler"}
 
@@ -2474,6 +2491,7 @@ def _pull_gguf_file(
                                  mmproj=mmproj_path, architecture=gguf_meta.get("architecture"),
                                  expert_count=gguf_meta.get("expert_count"),
                                  refresh=_revision_record_differs(model_name, revision),
+                                 type_user_set=not type_is_auto,
                                  **_register_revision(revision))
         return True
 
@@ -2704,6 +2722,7 @@ def _pull_gguf_file(
                   sha256=verify_digest, model_type=reg_type, mmproj=mmproj_path,
                   architecture=gguf_meta.get("architecture"),
                   expert_count=gguf_meta.get("expert_count"),
+                  type_user_set=not type_is_auto,
                   **_register_revision(revision))
         # model_name is _sanitize_name()-derived (A-Za-z0-9._- only) and is
         # escaped anyway.

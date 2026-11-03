@@ -179,6 +179,32 @@ def test_a_rate_limited_send_is_reported_not_claimed(client, monkeypatch):
     assert body["retry_after"] == 12
 
 
+def test_a_report_the_server_did_not_file_is_reported_not_claimed(client, monkeypatch):
+    c, hdrs, _, _ = client
+    data = _save(c, hdrs)
+    sent = []
+    from localm.bugreport import transport
+
+    def _held(url, payload, headers, timeout):
+        sent.append(payload)
+        return 202, '{"ok": true, "filed": false}'
+
+    def _upload(title, body, **kw):
+        return transport.upload_report(title, body, url="https://proxy.example",
+                                       token="t", opener=_held)
+
+    monkeypatch.setattr(bugreport, "upload_report", _upload)
+    r = c.post("/api/bug-report/send", headers=hdrs,
+               json={"filename": data["filename"], "sha256": data["report_sha256"]})
+    assert len(sent) == 1
+    assert r.status_code == 200
+    body = r.json()
+    assert body["uploaded"] is False
+    assert body["upload_stage"] == "not_filed"
+    assert "did not file" in body["upload_message"]
+    assert "issue_url" not in body
+
+
 def test_a_saved_report_that_is_not_utf8_is_a_read_error(client):
     c, hdrs, uploads, _ = client
     data = _save(c, hdrs)

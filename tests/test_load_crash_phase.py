@@ -69,6 +69,27 @@ class TestCrashPhaseFromTrace:
                  '  File "C:\\x\\llama.py", line 1242 in __init__\n')
         assert crash_phase_from_trace(trace) == "context"
 
+    def test_windows_single_thread_trace_shape(self):
+        trace = ("Windows fatal exception: access violation\n\n"
+                 "Stack (most recent call first):\n"
+                 '  File "C:\\x\\_api.py", line 169 in llama_init_from_model\n'
+                 '  File "C:\\x\\llama.py", line 1242 in __init__\n')
+        assert crash_phase_from_trace(trace) == "context"
+
+    def test_a_real_trace_in_the_shape_localm_arms_names_the_phase(self, tmp_path):
+        import faulthandler
+
+        from localm.debuglog import fault_trace_all_threads
+
+        path = tmp_path / "trace.txt"
+
+        def llama_init_from_model():
+            with open(path, "w", encoding="utf-8") as fh:
+                faulthandler.dump_traceback(file=fh, all_threads=fault_trace_all_threads())
+
+        llama_init_from_model()
+        assert crash_phase_from_trace(path.read_text(encoding="utf-8")) == "context"
+
 
 class TestLoadFailureMessage:
     def test_context_crash_gives_context_advice_and_no_runtime_repair(self):
