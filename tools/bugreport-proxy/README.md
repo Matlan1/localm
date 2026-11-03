@@ -85,6 +85,11 @@ cannot do safely. (Free Worker tier is far more than enough for 1-2 testers.)
 ## Spam / abuse control
 
 - Set `SHARED_SECRET` so random scanners that find the URL cannot file issues.
+- Only a body with the structure localm's reporter writes is filed: the
+  `# localm bug report:` title line, then `## What I was doing`, `## What happened`,
+  `## App state` followed by its `- Model:` line, and `## Environment` followed by
+  its `- localm:` line. Anything else gets a 202 and is not filed; each one is
+  counted by a `report held: not built by localm` line in the Workers logs.
 - Add a Cloudflare **Rate limiting rule** (dashboard -> your Worker -> Security ->
   Rate limiting) capping requests per IP if you want a hard ceiling.
 - Issues are created by the token's identity (with the GitHub App below, the app's
@@ -121,6 +126,8 @@ the app surfaces honestly (a failed action is never reported as success).
 
 ```
 POST /                      { "title", "body" }   -> 201 { ok, url, number }
+                               202 { ok, filed: false } when the body is not a
+                               report built by localm (not filed, not echoed)
 GET  /issues[?state=all|open|closed][&per_page=N] -> 200 { ok, issues: [...] }
 GET  /issues?number=N                             -> 200 { ok, issue }
 GET  /update                -> 200 { ok, version, notes, published_at, asset:{id,name,size} }

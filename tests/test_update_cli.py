@@ -119,7 +119,7 @@ def test_update_rollback(monkeypatch):
 
 def test_issues_list(monkeypatch):
     monkeypatch.setattr(issue_tracker, "available", lambda: True)
-    monkeypatch.setattr(issue_tracker, "list_issues", lambda state="all": [
+    monkeypatch.setattr(issue_tracker, "filed_status", lambda **kw: [
         {"number": 5, "state": "open", "title": "bug a"},
         {"number": 6, "state": "closed", "title": "bug b"}])
     r = CliRunner().invoke(main, ["issues"])

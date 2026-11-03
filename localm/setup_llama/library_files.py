@@ -79,7 +79,11 @@ def _is_wanted(f: Path) -> bool:
 # gfx1100 kernels only, so this target never had usable data. Both names stay
 # listed because the same code provisions the gfx110X/gfx120X archives too, and
 # a missing directory is already a no-op here.
-_BLAS_LIBRARY_DIRS = ("rocblas", "hipblaslt")
+#
+# ".kpack" holds the ROCm kernel packs (blas_lib_<gfx>.kpack and friends) that
+# rocm_kpack resolves from beside the libraries; it is copied and cleared the
+# same way.
+_BLAS_LIBRARY_DIRS = ("rocblas", "hipblaslt", ".kpack")
 
 
 # Of those, the ones whose kernel data is genuinely REQUIRED by an install that
@@ -145,11 +149,35 @@ def blas_kernel_problems(target: Path) -> list[str]:
             if n == 0:
                 problems.append(f"{name} is installed but its {name}/ kernel "
                                 f"directory is empty")
+        if _sl._has_vendor_library(target, "rocm_kpack"):
+            packs = target / ".kpack"
+            if not packs.is_dir() or not any(p.is_file() for p in packs.rglob("*.kpack")):
+                problems.append("rocm_kpack is installed but its .kpack/ kernel "
+                                "pack directory is missing or empty")
     except OSError as e:
         # Cannot read the install: say so rather than returning "no problems",
         # which is what an unreadable directory would otherwise look like.
         problems.append(f"could not inspect BLAS kernel data: {e}")
     return problems
+
+
+KERNEL_PACKS_MARKER = ".localm-kernel-packs"
+
+
+def kernel_packs_missing(target: Path) -> bool:
+    """True when *target* holds the rocm_kpack library but no ``.kpack/`` kernel
+    pack, and was provisioned by a localm that did not copy kernel packs (no
+    ``KERNEL_PACKS_MARKER``). False for every runtime without rocm_kpack and
+    when *target* cannot be read. Never raises."""
+    try:
+        if not target.is_dir() or not _sl._has_vendor_library(target, "rocm_kpack"):
+            return False
+        if (target / KERNEL_PACKS_MARKER).is_file():
+            return False
+        packs = target / ".kpack"
+        return not (packs.is_dir() and any(p.is_file() for p in packs.rglob("*.kpack")))
+    except OSError:
+        return False
 
 
 def _copy_blas_library_dirs(src_dir: Path, target: Path) -> int:
@@ -249,6 +277,8 @@ def _copy_binaries(src_dir: Path, target: Path) -> int:
     # rocBLAS/hipBLASLt Tensile kernel data (see _BLAS_LIBRARY_DIRS) - a no-op
     # on every non-ROCm backend, since src_dir then has no rocblas/hipblaslt dir.
     n += _copy_blas_library_dirs(src_dir, target)
+    if n and _sl._has_vendor_library(target, "rocm_kpack"):
+        (target / KERNEL_PACKS_MARKER).write_text("1\n", encoding="utf-8")
     # MIT requires the license to accompany the binaries; capture it (or a
     # bundled fallback) alongside them whenever we actually placed binaries.
     if n:

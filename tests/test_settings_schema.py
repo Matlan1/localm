@@ -734,13 +734,14 @@ def test_the_gui_shows_the_schema_text_for_every_tts_setting():
     assert not bad, f"GUI label/help missing or different from the schema: {bad}"
 
 
-def test_every_settings_field_entry_has_a_german_translation():
+@pytest.mark.parametrize("lang", [lang for lang in ss.LANGUAGE_IDS if lang != "en"])
+def test_every_settings_field_entry_has_a_translation(lang):
     from pathlib import Path
 
-    de = json.loads((Path(ss.__file__).parent / "plugins" / "gui" / "static"
-                     / "i18n" / "de.json").read_text(encoding="utf-8"))
-    missing = sorted(k for k in _gui_catalog() if not de.get(k))
-    assert not missing, f"no German text for: {missing}"
+    catalog = json.loads((Path(ss.__file__).parent / "plugins" / "gui" / "static"
+                          / "i18n" / f"{lang}.json").read_text(encoding="utf-8"))
+    missing = sorted(k for k in _gui_catalog() if not catalog.get(k))
+    assert not missing, f"no {lang} text for: {missing}"
 
 
 @pytest.mark.parametrize("text, expected", [

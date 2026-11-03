@@ -458,8 +458,10 @@ def test_no_variant_hardcodes_the_plugin_set():
     assert cli_plugins._SETUP_DEFAULTS is spec.RECOMMENDED_PLUGINS
 
 
-def test_the_plugin_list_is_the_catalog_filtered_by_offered(tmp_path, monkeypatch):
+@pytest.mark.parametrize("nvidia_linux", [False, True])
+def test_the_plugin_list_is_the_catalog_filtered_by_offered(tmp_path, monkeypatch, nvidia_linux):
     from localm.plugins import catalog
+    monkeypatch.setattr(catalog, "_nvidia_linux", lambda: nvidia_linux)
     expected = [n for n in catalog.names()
                 if catalog.offered(n) and n not in catalog.preinstalled()]
     assert [n for n, _ in spec.setup_plugins()] == expected

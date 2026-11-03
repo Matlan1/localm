@@ -231,7 +231,8 @@ macOS; no llama-cpp-python). Key behaviour:
 
 - **Dynamic context window**: contexts start at `n_ctx` and are rebuilt
   larger in `n_ctx_grow` steps, capped at `n_ctx_max`; `ctx_auto` sizes the
-  cap from free VRAM at load. Prefill is always chunked to `n_batch`.
+  cap at load from the free memory the KV cache lands in (VRAM for the
+  layers on the GPU, system RAM for the layers on the CPU). Prefill is always chunked to `n_batch`.
 - **KV prefix reuse**: between calls the common token prefix with the
   previous request stays in the KV cache (llama_memory_* API, probed at
   runtime); only the new suffix is prefilled.

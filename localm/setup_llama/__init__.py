@@ -104,6 +104,7 @@ from localm.setup_llama.download import (
 from localm.setup_llama.library_files import (
     _is_wanted, _BLAS_LIBRARY_DIRS, _BLAS_DIRS_REQUIRING_KERNELS, _has_vendor_library,
     blas_kernel_problems, _copy_blas_library_dirs, _LLAMA_CPP_MIT_NOTICE,
+    KERNEL_PACKS_MARKER, kernel_packs_missing,
     _LICENSE_NAME_PREFIXES, _copy_license_files, _safe_is_file, _copy_binaries,
 )
 from localm.setup_llama.runtime_dir import (
@@ -177,6 +178,7 @@ __all__ = [
     "ArtifactError", "_ASSET_MATCH", "_auto_backend", "_BACKEND_MARKER", "BACKENDS",
     "_BLACKWELL_MIN_CAP", "_BLAS_DIRS_REQUIRING_KERNELS", "blas_kernel_problems",
     "_BLAS_LIBRARY_DIRS", "_bundle_missing_native_deps", "check_runtime_update",
+    "KERNEL_PACKS_MARKER", "kernel_packs_missing",
     "_clear_target", "_clear_target_or_refuse", "_clearable_files", "console",
     "_replace_target", "_staging_path",
     "STAGED_NOTE", "IMAGE_TAG_FOR_LINE", "CUDA_CHECK_FAILED", "record_staged_cuda",

@@ -489,6 +489,13 @@ def hang_trace_path() -> Path:
 _crash_trace_counter = itertools.count()
 
 
+def fault_trace_all_threads() -> bool:
+    """The ``all_threads`` value for every ``faulthandler.enable`` localm makes:
+    False on Windows (the trace holds only the faulting thread), True
+    elsewhere. See test_windows_fault_trace_survives_handled_exceptions."""
+    return sys.platform != "win32"
+
+
 def child_crash_trace_path(tag: str) -> Path:
     """A fresh per-child native-fault trace file under the logs dir.
     *tag* names the kind of child (e.g. "gguf-worker") so a leftover file says
