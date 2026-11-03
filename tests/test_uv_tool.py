@@ -53,12 +53,11 @@ class TestFindUv:
         exe = _uv(root / ".uv" / "bin")
         assert uv_tool.find_uv(root) == str(exe)
 
-    def test_a_uv_on_path_is_returned_as_a_full_path(self, machine, tmp_path, monkeypatch):
+    def test_a_uv_on_path_is_never_used(self, machine, tmp_path, monkeypatch):
         root, _ = machine
         on_path = _uv(tmp_path / "bin")
         monkeypatch.setenv("PATH", str(on_path.parent))
-        found = uv_tool.find_uv(root)
-        assert Path(found).is_absolute() and Path(found).samefile(on_path)
+        assert uv_tool.find_uv(root) is None
 
     def test_the_contained_copy_beats_one_on_path(self, machine, tmp_path, monkeypatch):
         root, _ = machine
@@ -66,25 +65,27 @@ class TestFindUv:
         exe = _uv(root / ".uv")
         assert uv_tool.find_uv(root) == str(exe)
 
-    def test_astral_default_directories_when_path_lacks_uv(self, machine):
-        root, home = machine
-        exe = _uv(home / ".local" / "bin")
-        assert uv_tool.find_uv(root) == str(exe)
-
-    def test_path_beats_the_default_directories(self, machine, tmp_path, monkeypatch):
+    def test_astral_default_directories_are_never_used(self, machine):
         root, home = machine
         _uv(home / ".local" / "bin")
-        on_path = _uv(tmp_path / "bin")
-        monkeypatch.setenv("PATH", str(on_path.parent))
-        assert Path(uv_tool.find_uv(root)).samefile(on_path)
+        _uv(home / ".cargo" / "bin")
+        assert uv_tool.find_uv(root) is None
 
-    def test_the_recorded_shared_uv_beats_path_and_defaults(self, machine, tmp_path, monkeypatch):
+    def test_the_recorded_shared_store_uv_beats_path_and_defaults(self, machine, tmp_path,
+                                                                  monkeypatch):
         root, home = machine
-        own = _uv(tmp_path / "mine")
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "lad"))
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "lad"))
+        own = _uv(uv_tool.shared_store_dir() / "uv")
         monkeypatch.setenv("PATH", str(_uv(tmp_path / "bin").parent))
         _uv(home / ".local" / "bin")
         _record(root, uv_exe=str(own))
         assert uv_tool.find_uv(root) == str(own)
+
+    def test_a_recorded_uv_outside_the_shared_store_is_not_used(self, machine, tmp_path):
+        root, _ = machine
+        _record(root, uv_exe=str(_uv(tmp_path / "mine")))
+        assert uv_tool.find_uv(root) is None
 
     def test_a_recorded_uv_that_is_gone_falls_through(self, machine, tmp_path):
         root, _ = machine
@@ -118,13 +119,16 @@ class TestFindUv:
         own = _uv(root / ".uv")
         assert uv_tool.find_uv(root) == str(own)
 
-    def test_describe_search_names_every_place(self, machine, tmp_path):
+    def test_describe_search_names_every_place(self, machine, tmp_path, monkeypatch):
         root, home = machine
-        _record(root, uv_exe=str(tmp_path / "mine" / UV))
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "lad"))
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "lad"))
+        store_uv = uv_tool.shared_store_dir() / "uv" / UV
+        _record(root, uv_exe=str(store_uv))
         text = uv_tool.describe_search(root)
-        for part in (str(tmp_path / "mine" / UV), str(root / ".uv" / UV), "PATH",
-                     str(home / ".local" / "bin" / UV)):
+        for part in (str(store_uv), str(root / ".uv" / UV)):
             assert part in text
+        assert "PATH" not in text and str(home / ".local") not in text
 
 
 class TestPin:
@@ -236,10 +240,19 @@ class TestBundledUv:
         monkeypatch.setitem(sys.modules, "uv", module)
 
     def test_the_package_binary_is_returned_by_full_path(self, tmp_path, monkeypatch):
+        import sys
         exe = _uv(tmp_path / "venv" / "Scripts")
         self._package(monkeypatch, lambda: str(exe))
         monkeypatch.setenv("PATH", str(tmp_path / "emptypath"))
+        monkeypatch.setattr(sys, "prefix", str(tmp_path / "venv"))
         assert uv_tool.bundled_uv() == str(exe)
+
+    def test_a_package_binary_outside_this_environment_is_not_used(self, tmp_path, monkeypatch):
+        import sys
+        exe = _uv(tmp_path / "userprofile" / "Scripts")
+        self._package(monkeypatch, lambda: str(exe))
+        monkeypatch.setattr(sys, "prefix", str(tmp_path / "venv"))
+        assert uv_tool.bundled_uv() is None
 
     def test_no_package_means_none(self, monkeypatch):
         import sys

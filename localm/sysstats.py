@@ -658,11 +658,16 @@ def _gpu_util_probe() -> None:
     global _gpu_util_inflight, _gpu_util_last, _gpu_util_last_at
     import subprocess
     pct = None
+    from localm import sysprog
     try:
+        smi = sysprog.find("nvidia-smi")
+        if smi is None:
+            raise FileNotFoundError("nvidia-smi")
         p = subprocess.run(
-            ["nvidia-smi", "--query-gpu=utilization.gpu",
+            [smi, "--query-gpu=utilization.gpu",
              "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=4,
+            capture_output=True, text=True, timeout=4, stdin=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         if p.returncode == 0 and p.stdout.strip():
             pct = round(float(p.stdout.strip().splitlines()[0].strip()), 1)

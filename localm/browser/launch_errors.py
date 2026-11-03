@@ -87,9 +87,10 @@ def _ldd_missing(path: str) -> list:
     ``ldd`` cannot be run."""
     if not sys.platform.startswith("linux") or not os.path.isfile(path):
         return []
+    from localm import sysprog
     try:
-        done = subprocess.run(["ldd", path], capture_output=True, text=True,
-                              timeout=10, check=False)
+        done = subprocess.run([sysprog.require_system("ldd"), path], capture_output=True,
+                              text=True, timeout=10, check=False)
     except (OSError, subprocess.SubprocessError):
         return []
     return _LDD_MISSING.findall(done.stdout)
