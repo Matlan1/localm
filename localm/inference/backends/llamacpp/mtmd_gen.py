@@ -10,15 +10,17 @@ codebook-0 token for every frame with the sampler chain llama.cpp's
 ``llama-tts`` uses, and drives the helper one frame at a time so a caller can
 report progress and stop between frames.
 
-Three generation interfaces are bound: the legacy one (builds exporting
+Four generation interfaces are bound: the legacy one (builds exporting
 ``mtmd_gen_inp_default`` but not ``mtmd_gen_state_init``), the state one (builds
 exporting ``mtmd_gen_state_init``, whose helper input starts with a ``stream``
-flag and whose ``mtmd_gen_audio_process`` takes a generation state) and the
+flag and whose ``mtmd_gen_audio_process`` takes a generation state), the
 state_v2 one (builds also exporting ``mtmd_helper_gen_audio_next_is_text``,
 whose helper input adds ``n_past``, ``out_mode`` and ``voice`` and whose
-generation input adds the code repetition penalty). An mtmd exporting none of
-the three markers lays the input struct out differently and is refused with
-:class:`SpeechUnavailable`.
+generation input adds the code repetition penalty) and the state_v3 one (builds
+also exporting ``mtmd_gen_audio_voice_name``, whose helper input drops
+``voice`` and whose ``mtmd_gen_audio_info`` adds ``n_voices``). An mtmd
+exporting none of the four markers lays the input struct out differently and is
+refused with :class:`SpeechUnavailable`.
 
 Runs inside the isolated speech worker (``localm/inference/_speech_runner.py``),
 never in the server process.
@@ -148,9 +150,18 @@ class SpeechResult:
 
 
 class _GenAudioInfo(ctypes.Structure):
+    """``mtmd_gen_audio_info`` of the legacy, state and state_v2 interfaces."""
     _fields_ = [("type", ctypes.c_int),
                 ("sample_rate", ctypes.c_int32),
                 ("model_variant", ctypes.c_char_p)]
+
+
+class _GenAudioInfoV3(ctypes.Structure):
+    """``mtmd_gen_audio_info`` of the state_v3 interface."""
+    _fields_ = [("type", ctypes.c_int),
+                ("sample_rate", ctypes.c_int32),
+                ("model_variant", ctypes.c_char_p),
+                ("n_voices", ctypes.c_int32)]
 
 
 _HELPER_INPUT_FIELDS = [("seq_id", ctypes.c_int32),
@@ -187,6 +198,24 @@ class _HelperInputV2(ctypes.Structure):
                 ("speaker_ref", ctypes.c_void_p),
                 ("lang", ctypes.c_char_p),
                 ("voice", ctypes.c_char_p),
+                ("top_k", ctypes.c_int32),
+                ("top_p", ctypes.c_float),
+                ("seed", ctypes.c_uint32),
+                ("out_type", ctypes.c_int)]
+
+
+class _HelperInputV3(ctypes.Structure):
+    """``mtmd_helper_gen_audio_inp`` of the state_v3 interface. ``n_past`` 0
+    (a new sequence) and ``out_mode`` 0 (``MTMD_HELPER_GEN_AUDIO_OUT_AUTO``) are
+    upstream's defaults and what a zeroed input holds."""
+    _fields_ = [("stream", ctypes.c_bool),
+                ("seq_id", ctypes.c_int32),
+                ("prompt", ctypes.c_char_p),
+                ("prompt_len", ctypes.c_size_t),
+                ("n_past", ctypes.c_int32),
+                ("out_mode", ctypes.c_int),
+                ("speaker_ref", ctypes.c_void_p),
+                ("lang", ctypes.c_char_p),
                 ("top_k", ctypes.c_int32),
                 ("top_p", ctypes.c_float),
                 ("seed", ctypes.c_uint32),
@@ -286,18 +315,23 @@ _FloatPtr = ctypes.POINTER(ctypes.c_float)
 # The speech generation interfaces: "legacy" (stateless, the projector keeps
 # the RNG across calls and reseeds when the seed changes), "state" (each
 # generation runs on an mtmd_gen_state the helper creates per request from its
-# seed) and "state_v2" (the state interface with the structs of llama.cpp
+# seed), "state_v2" (the state interface with the structs of llama.cpp
 # b11941: n_past, out_mode and voice in the helper input, the repetition
-# penalty pair in the generation input). A library has the first interface in
-# _INTERFACE_MARKERS whose marker it exports; the v2 marker is a function added
-# by the same upstream change as the v2 struct fields.
+# penalty pair in the generation input) and "state_v3" (the structs of llama.cpp
+# b12061: no voice in the helper input, n_voices in mtmd_gen_audio_info). A
+# library has the first interface in _INTERFACE_MARKERS whose marker it exports;
+# the v2 and v3 markers are functions added by the same upstream changes as the
+# struct fields.
 INTERFACE_LEGACY = "legacy"
 INTERFACE_STATE = "state"
 INTERFACE_STATE_V2 = "state_v2"
+INTERFACE_STATE_V3 = "state_v3"
+_STATE_V3_MARKER = "mtmd_gen_audio_voice_name"
 _STATE_V2_MARKER = "mtmd_helper_gen_audio_next_is_text"
 _STATE_MARKER = "mtmd_gen_state_init"
 _LEGACY_MARKER = "mtmd_gen_inp_default"
-_INTERFACE_MARKERS = ((_STATE_V2_MARKER, INTERFACE_STATE_V2),
+_INTERFACE_MARKERS = ((_STATE_V3_MARKER, INTERFACE_STATE_V3),
+                      (_STATE_V2_MARKER, INTERFACE_STATE_V2),
                       (_STATE_MARKER, INTERFACE_STATE),
                       (_LEGACY_MARKER, INTERFACE_LEGACY))
 
@@ -322,11 +356,19 @@ _INTERFACE_STRUCTS = {
         "mtmd_gen_out": _GenOut,
         "mtmd_gen_state_params": _GenStateParams,
     },
+    INTERFACE_STATE_V3: {
+        "mtmd_gen_audio_info": _GenAudioInfoV3,
+        "mtmd_helper_gen_audio_inp": _HelperInputV3,
+        "mtmd_gen_inp": _GenInpV2,
+        "mtmd_gen_out": _GenOut,
+        "mtmd_gen_state_params": _GenStateParams,
+    },
 }
 
 
-def _state_signatures(helper_input, gen_inp) -> dict:
+def _state_signatures(helper_input, gen_inp, gen_audio_info=_GenAudioInfo) -> dict:
     return {
+        "mtmd_gen_audio_get_info": (gen_audio_info, [ctypes.c_void_p]),
         "mtmd_gen_inp_default": (gen_inp, [ctypes.c_void_p]),
         "mtmd_gen_audio_process": (ctypes.c_int32, [
             ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(gen_inp),
@@ -342,6 +384,7 @@ def _state_signatures(helper_input, gen_inp) -> dict:
 
 _INTERFACE_SIGNATURES = {
     INTERFACE_LEGACY: {
+        "mtmd_gen_audio_get_info": (_GenAudioInfo, [ctypes.c_void_p]),
         "mtmd_gen_inp_default": (_GenInpLegacy, [ctypes.c_void_p]),
         "mtmd_gen_audio_process": (ctypes.c_int32, [
             ctypes.c_void_p, ctypes.POINTER(_GenInpLegacy),
@@ -354,10 +397,14 @@ _INTERFACE_SIGNATURES = {
         **_state_signatures(_HelperInputV2, _GenInpV2),
         "mtmd_helper_gen_audio_next_is_text": (ctypes.c_bool, [ctypes.c_void_p]),
     },
+    INTERFACE_STATE_V3: {
+        **_state_signatures(_HelperInputV3, _GenInpV2, _GenAudioInfoV3),
+        "mtmd_helper_gen_audio_next_is_text": (ctypes.c_bool, [ctypes.c_void_p]),
+        "mtmd_gen_audio_voice_name": (ctypes.c_char_p, [ctypes.c_void_p, ctypes.c_int32]),
+    },
 }
 
 _SIGNATURES = {
-    "mtmd_gen_audio_get_info": (_GenAudioInfo, [ctypes.c_void_p]),
     "mtmd_support_audio": (ctypes.c_bool, [ctypes.c_void_p]),
     "mtmd_get_audio_sample_rate": (ctypes.c_int, [ctypes.c_void_p]),
     "mtmd_bitmap_init_from_audio": (ctypes.c_void_p, [ctypes.c_size_t, _FloatPtr]),
@@ -381,8 +428,9 @@ class GenerationApi:
     function object: the signatures declared here never change, or depend on,
     the library's shared attributes that other bindings set.
 
-    :attr:`interface` is :data:`INTERFACE_LEGACY`, :data:`INTERFACE_STATE` or
-    :data:`INTERFACE_STATE_V2`; :attr:`helper_input` is the
+    :attr:`interface` is :data:`INTERFACE_LEGACY`, :data:`INTERFACE_STATE`,
+    :data:`INTERFACE_STATE_V2` or :data:`INTERFACE_STATE_V3`;
+    :attr:`helper_input` is the
     ``mtmd_helper_gen_audio_inp`` structure of that interface. The
     ``mtmd_gen_state_*`` functions are bound on the state interfaces only."""
 
@@ -407,6 +455,7 @@ class GenerationApi:
     mtmd_helper_gen_audio_step_gen: Any
     mtmd_helper_gen_audio_get_output: Any
     mtmd_helper_gen_audio_next_is_text: Any
+    mtmd_gen_audio_voice_name: Any
 
 
 _bind_lock = threading.Lock()
@@ -415,7 +464,8 @@ _bound: dict[int, tuple] = {}
 
 def bind_generation_api(m) -> GenerationApi:
     """The speech generation functions of the loaded mtmd library *m*, bound
-    for the interface it exports: state_v2 when it exports
+    for the interface it exports: state_v3 when it exports
+    ``mtmd_gen_audio_voice_name``, else state_v2 when it exports
     ``mtmd_helper_gen_audio_next_is_text``, else state when it exports
     ``mtmd_gen_state_init``, else legacy when it exports
     ``mtmd_gen_inp_default``.
