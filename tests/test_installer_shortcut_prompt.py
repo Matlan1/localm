@@ -25,12 +25,14 @@ from pathlib import Path
 
 import pytest
 
+from tests import _fake_uv as fake_uv
+
 ROOT = Path(__file__).resolve().parents[1]
 BAT = ROOT / "setup.bat"
 
 # The whole PowerShell -Command payload of a shortcut block, from the literal
 # start of the invocation through the closing quote of its last fragment.
-_POWERSHELL_BODY_RE = re.compile(r'powershell -NoProfile -Command \^.*?Write-Output \$p"', re.DOTALL)
+_POWERSHELL_BODY_RE = re.compile(r'%PSEXE% -NoProfile -Command \^.*?Write-Output \$p"', re.DOTALL)
 
 
 @pytest.fixture(scope="module")
@@ -160,7 +162,7 @@ class TestShortcutBlockDerivesScmadeFromThePath:
     def _stubbed_block(self, bat):
         block, _ = _shortcut_blocks(bat)
         substituted, n = _POWERSHELL_BODY_RE.subn(
-            'powershell -NoProfile -Command "x"', block, count=1)
+            '%PSEXE% -NoProfile -Command "x"', block, count=1)
         assert n == 1, "the placeholder regex no longer matches the shipped block"
         assert "WScript.Shell" not in substituted
         assert ".Save()" not in substituted
@@ -193,7 +195,7 @@ class TestShortcutBlockDerivesScmadeFromThePath:
 
     def _run(self, probe_bat, stub_dir):
         env = dict(os.environ)
-        env["PATH"] = str(stub_dir) + ";" + env.get("PATH", "")
+        env["PSEXE"] = str(stub_dir / "powershell.bat")
         return subprocess.run(["cmd", "/c", str(probe_bat)], capture_output=True,
                               text=True, stdin=subprocess.DEVNULL, timeout=15, env=env)
 
@@ -309,7 +311,7 @@ class TestShortcutSurvivesBangInInstallPath:
 
     def _run(self, probe, stub_dir, cwd):
         env = dict(os.environ)
-        env["PATH"] = str(stub_dir) + ";" + env.get("PATH", "")
+        env["PSEXE"] = str(stub_dir / "powershell.bat")
         return subprocess.run(["cmd", "/c", str(probe)], capture_output=True,
                               text=True, stdin=subprocess.DEVNULL, timeout=15,
                               env=env, cwd=str(cwd))
@@ -551,39 +553,26 @@ def _top_install_message_block(bat_text):
 
 
 def _uv_dirs_block(bat_text):
-    """The `if "%STOREPICK%"=="1" ( ... ) else ( ... )` block that provisions
-    uv's managed-Python-install and cache dirs."""
-    start = bat_text.index('if "%STOREPICK%"=="1" (')
-    end = bat_text.index('rem ---- uv is required', start)
+    """The `if "%CONTAINED%"=="1" ( ... ) else ( ... )` block that names the
+    store folders, through the UVEXE/UV_* lines that follow it."""
+    start = bat_text.index('if "%CONTAINED%"=="1" (\n    set "UVDIR=')
+    end = bat_text.index('rem  What the install manifest records', start)
     return bat_text[start:end]
 
 
-def _uv_check_portable_block(bat_text):
-    """The `:uv_check_portable` reuse-an-existing-portable-uv block."""
-    start = bat_text.index(':uv_check_portable')
-    end = bat_text.index(':uv_missing', start)
+def _uv_install_dir_lines(bat_text):
+    """The two lines that point Astral's installer at UVDIR."""
+    start = bat_text.index('set "UV_INSTALL_DIR=!UVDIR!"')
+    end = bat_text.index('\n', bat_text.index('set "UV_UNMANAGED_INSTALL=!UVDIR!"', start))
     return bat_text[start:end]
 
 
-def _uv_missing_contained_block(bat_text):
-    """The CONTAINED-mode `if "%CONTAINED%"=="1" ( ... )` block inside
-    `:uv_missing` that confines uv's own binary under .\\.uv."""
-    marker = bat_text.index("rem  Portable was picked: confine uv's OWN binary")
-    start = bat_text.rindex('if "%CONTAINED%"=="1" (', 0, marker)
-    end = bat_text.index('powershell -NoProfile -ExecutionPolicy Bypass', start)
-    return bat_text[start:end]
-
-
-def _uv_missing_full_sequence(bat_text):
-    """The CONTAINED-mode block through the `where uv` / `goto uv_ready`
-    check that follows the (stubbed-out, by the caller) Astral installer
-    call - covers the UVDIRS/PATH rebuild that consumes UV_INSTALL_DIR a few
-    lines after it is set."""
-    marker = bat_text.index("rem  Portable was picked: confine uv's OWN binary")
-    start = bat_text.rindex('if "%CONTAINED%"=="1" (', 0, marker)
-    end = bat_text.index('if not errorlevel 1 goto uv_ready', start)
-    end = bat_text.index('\n', end)
-    return bat_text[start:end]
+def _uv_version_subroutine(bat_text):
+    """The real `:uv_version` subroutine."""
+    m = re.search(r"(?m)^:uv_version\s*$", bat_text)
+    assert m, "the :uv_version label moved or was renamed"
+    end = bat_text.index('\ngoto :eof', m.start()) + len('\ngoto :eof')
+    return bat_text[m.start():end]
 
 
 def _pathdir_cmdshim_lines(bat_text):
@@ -591,19 +580,6 @@ def _pathdir_cmdshim_lines(bat_text):
     start = bat_text.index('if "!GCRC!"=="0" set "PATHMOD=--path-modified"')
     marker = 'if "!GCRC!"=="20" set "CMDSHIM='
     end = bat_text.index('\n', bat_text.index(marker, start))
-    return bat_text[start:end]
-
-
-def _pydir_cachedir_block(bat_text):
-    """The CONTAINED-mode `if "%CONTAINED%"=="1" ( ... )` block that computes
-    PYDIR/CACHEDIR for the install manifest. Ends at its own closing `)`, NOT
-    at the manifest-record line - that line's own `setlocal
-    DisableDelayedExpansion` wrap (a separate fix) sits between the two and
-    must not be swept into this block, or it leaks into the caller as an
-    unmatched setlocal."""
-    marker = bat_text.index('set "RCFLAG="\nset "PYDIR="\nset "CACHEDIR="')
-    start = bat_text.index('if "%CONTAINED%"=="1" (', marker)
-    end = bat_text.index('\n)\n', start) + len('\n)')
     return bat_text[start:end]
 
 
@@ -665,10 +641,7 @@ def test_cd_derived_set_statements_escape_the_bang_before_delayed_expansion_scan
 
     for extractor in (
             _uv_dirs_block,
-            _uv_check_portable_block,
-            _uv_missing_contained_block,
             _pathdir_cmdshim_lines,
-            _pydir_cachedir_block,
     ):
         block = extractor(bat)
         assert "!CD!" in block, extractor.__name__
@@ -729,97 +702,43 @@ class TestCdDerivedVarsSurviveBangInInstallPath:
         bangdir = tmp_path / "bang!dir"
         bangdir.mkdir()
         pairs = [("UPI", "UV_PYTHON_INSTALL_DIR"), ("UCD", "UV_CACHE_DIR")]
-        out = self._run(bangdir, 'set "STOREPICK=1"\r\n', block,
+        out = self._run(bangdir, 'set "CONTAINED=1"\r\n', block,
                          self._protected_readback(pairs) + self._bang_readback(pairs))
         assert f"UPI=[{bangdir}\\.python]" in out.stdout, out.stdout
         assert f"UCD=[{bangdir}\\.cache]" in out.stdout, out.stdout
         assert f"UPI_BANG=[{bangdir}\\.python]" in out.stdout, out.stdout
         assert f"UCD_BANG=[{bangdir}\\.cache]" in out.stdout, out.stdout
 
-    def test_uv_check_portable_dirs_survive_a_bang_in_the_install_path(self, bat, tmp_path):
-        block = _uv_check_portable_block(bat)
+    @pytest.mark.parametrize("reported,ok", [(None, "1"), ("0.0.1", "0")])
+    def test_uv_version_finds_the_store_uv_in_a_bang_path(self, bat, tmp_path, reported, ok):
+        """The store block names UVEXE under a `!` path, and :uv_version runs
+        exactly that uv: UVOK=1 only when it reports the pinned version."""
         bangdir = tmp_path / "bang!dir"
         bangdir.mkdir()
-        (bangdir / ".uv").mkdir()
-        (bangdir / ".uv" / "uv.exe").write_text("stub", encoding="utf-8")
-        pairs = [("UVDIR", "UVDIR")]
-        probe = bangdir / "probe.bat"
-        probe.write_text(
-            "@echo off\r\nsetlocal EnableDelayedExpansion\r\n"
-            f"{block}\r\n"
-            'echo NOT_REACHED_IF_GOTO_FAILED\r\n'
-            ":uv_ready\r\n"
-            f"{self._protected_readback(pairs)}"
-            f"{self._bang_readback(pairs)}"
-            'echo PATH_HAS=[%PATH%]\r\n'
-            "exit /b 0\r\n",
-            encoding="utf-8")
-        out = subprocess.run(["cmd", "/c", str(probe)], capture_output=True, text=True,
-                              stdin=subprocess.DEVNULL, timeout=15, cwd=str(bangdir))
-        assert "NOT_REACHED_IF_GOTO_FAILED" not in out.stdout, out.stdout
-        assert f"{bangdir}\\.uv" in out.stdout, out.stdout
-        assert f"UVDIR=[{bangdir}\\.uv]" in out.stdout, out.stdout
-        assert f"UVDIR_BANG=[{bangdir}\\.uv]" in out.stdout, out.stdout
+        (bangdir / ".localm-setup-tmp").mkdir()
+        fake_uv.place(fake_uv.build(tmp_path / "build"), bangdir / ".uv")
+        pairs = [("UVEXE", "UVEXE")]
+        preamble = ('set "CONTAINED=1"\r\nset "STMP=.localm-setup-tmp"\r\n'
+                    f'set "UV_INSTALLER_VERSION={fake_uv.pinned_version()}"\r\n')
+        env_version = f'set "STUB_UV_VERSION={reported}"\r\n' if reported else ""
+        block = _uv_dirs_block(bat) + "\r\n" + env_version + "call :uv_version\r\n"
+        out = self._run(bangdir, preamble, block,
+                        self._protected_readback(pairs) + self._bang_readback(pairs)
+                        + "echo UVOK=[!UVOK!]\r\nexit /b 0\r\n" + _uv_version_subroutine(bat)
+                        + "\r\n")
+        assert f"UVEXE=[{bangdir}\\.uv\\uv.exe]" in out.stdout, out.stdout
+        assert f"UVEXE_BANG=[{bangdir}\\.uv\\uv.exe]" in out.stdout, out.stdout
+        assert f"UVOK=[{ok}]" in out.stdout, (out.stdout, out.stderr)
 
-    def test_uv_missing_contained_dirs_survive_a_bang_in_the_install_path(self, bat, tmp_path):
-        block = _uv_missing_contained_block(bat)
+    def test_uv_install_dir_survives_a_bang_in_the_install_path(self, bat, tmp_path):
         bangdir = tmp_path / "bang!dir"
         bangdir.mkdir()
-        pairs = [("UID", "UV_INSTALL_DIR"), ("UVDIR", "UVDIR")]
+        pairs = [("UID", "UV_INSTALL_DIR"), ("UUI", "UV_UNMANAGED_INSTALL")]
+        block = _uv_dirs_block(bat) + "\r\n" + _uv_install_dir_lines(bat)
         out = self._run(bangdir, 'set "CONTAINED=1"\r\n', block,
                          self._protected_readback(pairs) + self._bang_readback(pairs))
-        assert f"UID=[{bangdir}\\.uv]" in out.stdout, out.stdout
-        assert f"UVDIR=[{bangdir}\\.uv]" in out.stdout, out.stdout
-        assert f"UID_BANG=[{bangdir}\\.uv]" in out.stdout, out.stdout
-        assert f"UVDIR_BANG=[{bangdir}\\.uv]" in out.stdout, out.stdout
-
-    def test_uv_install_dir_is_actually_findable_on_path_after_a_bang_install(
-            self, bat, tmp_path):
-        """UV_INSTALL_DIR surviving its OWN `set` (the test above) is not
-        enough: a few lines later setup.bat rebuilds PATH from it so `where
-        uv` can find the freshly-installed binary. Reading UV_INSTALL_DIR
-        back there via an ordinary %-substitution corrupts it AGAIN, the
-        same way a bare %CD% would - confirmed directly: the first draft of
-        this fix read `%UV_INSTALL_DIR%` at that point and `where uv` failed
-        to find a real, just-created uv.exe at the correct (bang-preserving)
-        location. The PATH entry is prepended fresh from !CD! instead.
-        A minimal PATH (just enough to resolve `where`/`powershell`) rules
-        out a real, pre-existing system `uv` masking the check."""
-        block = _uv_missing_full_sequence(bat)
-        install_target = next(
-            (ln for ln in block.splitlines()
-             if ln.startswith('powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference')),
-            None)
-        assert install_target, "the Astral install invocation text moved; update this test"
-        stub_install = (
-            'powershell -NoProfile -Command '
-            '"New-Item -ItemType Directory -Force $env:UV_INSTALL_DIR | Out-Null; '
-            'New-Item -ItemType File -Force (Join-Path $env:UV_INSTALL_DIR \'uv.exe\') | Out-Null"'
-        )
-        block = block.replace(install_target, stub_install, 1)
-        bangdir = tmp_path / "bang!dir"
-        bangdir.mkdir()
-        system_root = Path(r"C:\Windows\System32")
-        minimal_path = "{};{}".format(
-            system_root, system_root / "WindowsPowerShell" / "v1.0")
-        probe = bangdir / "probe.bat"
-        probe.write_text(
-            "@echo off\r\nsetlocal EnableDelayedExpansion\r\n"
-            'set "CONTAINED=1"\r\n'
-            f'set "PATH={minimal_path}"\r\n'
-            f"{block}\r\n"
-            'echo NOT_REACHED_IF_GOTO_FAILED\r\n'
-            ":uv_ready\r\n"
-            'where uv\r\n'
-            "exit /b 0\r\n",
-            encoding="utf-8")
-        out = subprocess.run(["cmd", "/c", str(probe)], capture_output=True, text=True,
-                              stdin=subprocess.DEVNULL, timeout=15, cwd=str(bangdir))
-        assert "NOT_REACHED_IF_GOTO_FAILED" not in out.stdout, out.stdout
-        expected_uv = str(bangdir / ".uv" / "uv.exe")
-        assert expected_uv in out.stdout.splitlines(), (
-            "where uv did not find the just-installed binary at the real "
-            f"bang-preserving location: {out.stdout}", out.stderr)
+        for label in ("UID", "UUI", "UID_BANG", "UUI_BANG"):
+            assert f"{label}=[{bangdir}\\.uv]" in out.stdout, out.stdout
 
     @pytest.mark.parametrize("gcrc", ["0", "20"])
     def test_pathdir_cmdshim_survive_a_bang_in_the_install_path(self, bat, tmp_path, gcrc):
@@ -847,7 +766,7 @@ class TestCdDerivedVarsSurviveBangInInstallPath:
         assert "CMDSHIM=[]" in out.stdout, out.stdout
 
     def test_pydir_cachedir_survive_a_bang_in_the_install_path(self, bat, tmp_path):
-        block = _pydir_cachedir_block(bat)
+        block = _uv_dirs_block(bat)
         bangdir = tmp_path / "bang!dir"
         bangdir.mkdir()
         pairs = [("PYDIR", "PYDIR"), ("CACHEDIR", "CACHEDIR")]
@@ -883,13 +802,11 @@ class TestCdDerivedVarsSurviveBangInInstallPath:
             target, "echo MANIFEST_ARGS", 1)
         script = (
             "@echo off\r\nsetlocal EnableDelayedExpansion\r\n"
-            'set "STOREPICK=1"\r\n' + _uv_dirs_block(bat) + "\r\n"
+            'set "CONTAINED=1"\r\n' + _uv_dirs_block(bat) + "\r\n"
             'set "GCRC=0"\r\nset "PATHDIR="\r\nset "CMDSHIM="\r\n'
             + _pathdir_cmdshim_lines(bat) + "\r\n"
-            'set "CONTAINED=1"\r\nset "PYDIR="\r\nset "CACHEDIR="\r\n'
-            + _pydir_cachedir_block(bat) + "\r\n"
             'set "SCPATH=C:\\FakeDesktop\\LocaLM.lnk"\r\n'
-            'set "UVDIR=!CD!\\.uv"\r\nset "PATHMOD=--path-modified"\r\n'
+            'set "PATHMOD=--path-modified"\r\n'
             + echoed + "\r\n"
             "exit /b 0\r\n" + _JOURNAL_LABELS)
         probe = bangdir / "probe.bat"

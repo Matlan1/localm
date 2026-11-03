@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""setup.bat's :record_shared_uv records the uv a Shared install used, keeping
-a "!" in its path, and records nothing on Portable. The real subroutine runs
-under cmd.exe with delayed expansion on (as setup.bat runs), a uv.exe placed in
-a folder named with "!", and a stub .venv python that writes its arguments."""
+"""setup.bat's :record_shared_uv records the uv a Shared install used (the
+Shared folder's own uv, UVEXE), keeping a "!" in its path, never a uv on PATH,
+and records nothing on Portable. The real subroutine runs under cmd.exe with
+delayed expansion on (as setup.bat runs), UVEXE in a folder named with "!", a
+decoy uv.exe on PATH, and a stand-in .venv python.exe (tests/_fake_uv.py) that
+writes its arguments."""
 
 from __future__ import annotations
 
@@ -12,6 +14,8 @@ import sys
 from pathlib import Path
 
 import pytest
+
+from tests import _fake_uv as fake_uv
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="runs a setup.bat block")
 
@@ -30,22 +34,26 @@ def test_the_shared_uv_is_recorded_with_its_bang(tmp_path, contained, recorded):
     uvdir = tmp_path / "tools!x"
     uvdir.mkdir()
     (uvdir / "uv.exe").write_bytes(b"")
+    decoy = tmp_path / "pathuv"
+    decoy.mkdir()
+    (decoy / "uv.exe").write_bytes(b"")
     scripts = tmp_path / ".venv" / "Scripts"
-    scripts.mkdir(parents=True)
+    built = fake_uv.place(fake_uv.build(tmp_path / "build"), scripts)
+    built.rename(scripts / "python.exe")
     out = tmp_path / "args.txt"
-    (scripts / "python.bat").write_bytes(
-        f'@echo off\r\nsetlocal DisableDelayedExpansion\r\necho %*> "{out}"\r\n'.encode())
     driver = tmp_path / "driver.bat"
-    driver.write_bytes(("@echo off\nsetlocal EnableDelayedExpansion\n"
+    driver.write_bytes(("@echo off\nsetlocal DisableDelayedExpansion\n"
+                        f'set "UVEXE={uvdir / "uv.exe"}"\nsetlocal EnableDelayedExpansion\n'
                         f'set "CONTAINED={contained}"\ncall :record_shared_uv\nexit /b 0\n'
                         + _subroutine()).replace("\n", "\r\n").encode("utf-8"))
-    env = {**os.environ, "PATH": f"{uvdir};{os.environ['SystemRoot']}\\System32"}
+    env = {**os.environ, "PATH": f"{decoy};{os.environ['SystemRoot']}\\System32",
+           "STUB_LOG": str(out)}
     done = subprocess.run(["cmd.exe", "/d", "/c", str(driver)], cwd=tmp_path, env=env,
                           capture_output=True, text=True, timeout=60)
     assert done.returncode == 0, done.stderr
     if recorded:
         args = out.read_text(encoding="utf-8")
-        assert f'--uv-exe "{uvdir / "uv.exe"}"' in args, args
+        assert f' --uv-exe {uvdir / "uv.exe"} ' in args, args
     else:
         assert not out.exists()
 

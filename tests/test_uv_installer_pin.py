@@ -211,9 +211,12 @@ def test_both_bat_scripts_carry_the_same_installer_checksum():
             == _bat_pin("setup-gui.bat", "UV_INSTALLER_SHA256"))
 
 
+_RUN = "ReadAllText($env:LOCALM_UV_INSTALLER)"
+
+
 def _bat_install_line(name: str) -> str:
     lines = [ln for ln in _text(name).splitlines()
-             if ln.startswith('powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference')]
+             if ln.startswith('"%PSEXE%" -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference')]
     assert len(lines) == 1, f"{name} has {len(lines)} uv installer invocations"
     return lines[0]
 
@@ -237,9 +240,9 @@ def test_the_bat_installer_runs_only_after_the_checksum_comparison(name):
     line = _bat_install_line(name)
     compare = line.index("$h -ne $env:UV_INSTALLER_SHA256")
     refuse = line.index("exit 62", compare)
-    run = line.index("-File $f")
+    run = line.index(_RUN)
     assert compare < refuse < run
-    assert line.count("-File $f") == 1
+    assert line.count(_RUN) == 1
 
 
 @pytest.mark.parametrize("name", BATS)
@@ -247,17 +250,22 @@ def test_the_bat_installer_is_hashed_through_a_handle_that_stays_open_until_it_h
     line = _bat_install_line(name)
     opened = line.index("[IO.File]::Open($f,'Open','Read','Read')")
     hashed = line.index("ComputeHash($fs)")
-    run = line.index("-File $f")
+    run = line.index(_RUN)
     released = line.index("$fs.Dispose()")
     assert opened < hashed < run < released
 
 
 def _bat_block(name: str) -> list[str]:
-    """The pin, the download-verify-run line and the refusal branches of *name*."""
+    """The pin lines, then the download-verify-run line through the refusal
+    branches of *name*."""
     lines = _text(name).splitlines()
-    start = next(i for i, ln in enumerate(lines) if ln.lstrip().startswith('set "UV_INSTALLER_VERSION='))
+    pins = [ln.strip() for ln in lines
+            if ln.lstrip().startswith(('set "UV_INSTALLER_VERSION=', 'set "UV_INSTALLER_SHA256=',
+                                       'set "PSEXE='))]
+    assert len(pins) == 3, pins
+    start = lines.index(_bat_install_line(name))
     end = next(i for i, ln in enumerate(lines) if ln.startswith('if "%UVRC%"=="62" goto uv_refused'))
-    return [ln.strip() for ln in lines[start:end + 1]]
+    return pins + [ln.strip() for ln in lines[start:end + 1]]
 
 
 _STUB_INSTALLER = (
@@ -309,8 +317,9 @@ def _run_bat_block(tmp_path: Path, name: str, *, release_files: dict[str, bytes]
     work.mkdir()
     scratch.mkdir()
     probe = work / "probe.bat"
+    (work / ".localm-setup-tmp").mkdir()
     probe.write_bytes(("@echo off\r\nsetlocal EnableExtensions " + ("EnableDelayedExpansion" if delayed else "DisableDelayedExpansion") + "\r\n"
-                       'cd /d "%~dp0"\r\n' + joined + "\r\n"
+                       'cd /d "%~dp0"\r\nset "STMP=.localm-setup-tmp"\r\n' + joined + "\r\n"
                        "echo REACHED rc=%UVRC%\r\nexit /b 0\r\n"
                        ":uv_refused\r\necho REFUSED rc=%UVRC%\r\nexit /b 1\r\n").encode("utf-8"))
     env = dict(os.environ)
@@ -318,9 +327,10 @@ def _run_bat_block(tmp_path: Path, name: str, *, release_files: dict[str, bytes]
                 "STUB_MARKER": str(tmp_path / "marker.txt")})
     if ps_module_path:
         env["PSModulePath"] = ps_module_path
-    r = subprocess.run(["cmd", "/c", str(probe)], capture_output=True, text=True,
-                       env=env, timeout=120, stdin=subprocess.DEVNULL)
-    leftovers = list(scratch.glob("uv-installer-*"))
+    r = subprocess.run([os.path.join(os.environ["SystemRoot"], "System32", "cmd.exe"), "/c",
+                        str(probe)], capture_output=True, text=True, env=env, timeout=120,
+                       stdin=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    leftovers = list(scratch.iterdir()) + list((work / ".localm-setup-tmp").iterdir())
     return r, (tmp_path / "marker.txt").exists(), leftovers
 
 
@@ -370,7 +380,7 @@ def test_a_powershell_7_parent_does_not_break_the_installer(tmp_path, name):
 
 
 _TAMPER_STUB = (
-    "try { [IO.File]::WriteAllText($PSCommandPath, 'tampered'); $r = 'overwritten' }\n"
+    "try { [IO.File]::WriteAllText($env:LOCALM_UV_INSTALLER, 'tampered'); $r = 'overwritten' }\n"
     "catch { $r = 'blocked' }\n"
     "Set-Content -LiteralPath $env:STUB_MARKER -Value $r\n")
 

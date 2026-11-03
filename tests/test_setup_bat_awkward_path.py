@@ -235,21 +235,11 @@ def test_the_locker_probe_finds_a_process_running_from_the_venv(tmp_path, bat_te
         child.wait()
 
 
-def test_prepending_the_portable_uv_keeps_a_caret_in_the_inherited_path(tmp_path, bat_text):
-    lines = [ln.strip() for ln in bat_text.splitlines() if 'set "PATH=!CD!\\.uv;' in ln]
-    assert len(lines) == 2, lines
-    folder = _awkward_dir(tmp_path, "proj")
-    caret_dir = r"D:\x\a^b\bin"
-    for line in lines:
-        out_file = tmp_path / "path.txt"
-        stmt = line.split("set ", 1)[1]
-        probe = ("setlocal EnableDelayedExpansion\nset UV_INSTALL_DIR=x\n"
-                 f"set {stmt}\nsetlocal DisableDelayedExpansion\n"
-                 f'(set PATH) > "{out_file}"\n')
-        r = _run_probe(folder, probe, {"PATH": caret_dir + ";" + os.environ.get("PATH", "")})
-        got = _decode(out_file.read_bytes())
-        assert caret_dir in got, (line, got[:300], _decode(r.stdout + r.stderr))
-        assert f"{folder}\\.uv;" in got, (line, got[:300])
+def test_setup_never_rewrites_the_inherited_path(bat_text):
+    """setup.bat runs uv by its full path, so it never rebuilds PATH (where a
+    caret or bang in an inherited entry could be lost)."""
+    code = [ln for ln in bat_text.splitlines() if not ln.strip().lower().startswith("rem")]
+    assert [ln for ln in code if re.search(r'\bset "?PATH=', ln, re.I)] == []
 
 
 def test_no_path_is_pasted_into_a_single_quoted_powershell_string(bat_text):

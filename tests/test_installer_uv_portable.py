@@ -3,7 +3,8 @@
 asking. The portable/shared choice is asked BEFORE uv is ever installed, and a
 Portable pick sets Astral's own UV_INSTALL_DIR override so uv itself lands
 inside the clone too, tracked in the install manifest for a symmetric
-uninstall."""
+uninstall. setup.bat installs localm's own uv without asking whether to: a
+Shared pick puts it in localm's Shared folder."""
 
 from pathlib import Path
 
@@ -18,14 +19,16 @@ def _sh() -> str:
     return (ROOT / "setup.sh").read_text(encoding="utf-8")
 
 
+_BAT_INSTALLER = '"%PSEXE%" -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference'
+
+
 def test_bat_asks_portable_vs_shared_before_installing_uv():
     text = _bat()
     ask_idx = text.index("Keep localm's Python tooling")
-    install_prompt_idx = text.index(
-        "uv (the Python package manager localm builds on) is not installed")
-    assert ask_idx < install_prompt_idx, (
-        "setup.bat must ask where to keep uv/Python tooling BEFORE offering to "
-        "install uv, so a Portable pick can confine uv's own binary to the clone")
+    assert ask_idx < text.index(_BAT_INSTALLER), (
+        "setup.bat must ask where to keep uv/Python tooling BEFORE installing uv, "
+        "so a Portable pick can confine uv's own binary to the clone")
+    assert "Install it now with Astral's official installer" not in text
 
 
 def test_sh_asks_portable_vs_shared_before_installing_uv():
@@ -41,18 +44,13 @@ def test_sh_asks_portable_vs_shared_before_installing_uv():
 def test_bat_sets_uv_install_dir_before_the_installer_when_contained():
     text = _bat()
     # See TestCdDerivedVarsSurviveBangInInstallPath.
-    contained_set_idx = text.index('set "UV_INSTALL_DIR=!CD!\\.uv"')
-    # Match the real invocation, not the install-it-yourself messages that echo
-    # the identical URL as plain text: the `-NoProfile ... -Command` prefix is
-    # carried only by the real invocation.
-    installer_idx = text.index(
-        'powershell -NoProfile -ExecutionPolicy Bypass -Command '
-        '"$ProgressPreference')
-    assert contained_set_idx < installer_idx, (
-        "UV_INSTALL_DIR must be set before invoking Astral's installer, or a "
-        "Portable pick has no effect on where uv itself lands")
-    # Only set inside the CONTAINED branch, not unconditionally.
-    assert 'if "%CONTAINED%"=="1" (' in text
+    installer_idx = text.index(_BAT_INSTALLER)
+    for line in ('set "UV_INSTALL_DIR=!UVDIR!"', 'set "UV_UNMANAGED_INSTALL=!UVDIR!"'):
+        assert text.index(line) < installer_idx, (
+            f"{line} must come before Astral's installer, or the store choice has "
+            "no effect on where uv itself lands")
+    contained = text[text.index('if "%CONTAINED%"=="1" (\n'):]
+    assert contained.index('set "UVDIR=!CD!\\.uv"') < contained.index(") else (")
 
 
 def test_sh_sets_uv_install_dir_before_the_installer_when_contained():
@@ -80,8 +78,8 @@ def test_sh_records_and_passes_uv_dir_to_the_manifest():
     assert "--uv-dir" in text
 
 
-def test_bat_uv_install_dir_is_a_documented_astral_override_not_invented():
-    # UV_INSTALL_DIR is already read elsewhere in the SAME file, by the
-    # PATH-prepend after installing.
+def test_bat_shared_installs_uv_into_localm_own_shared_folder():
     text = _bat()
-    assert "if defined UV_INSTALL_DIR" in text
+    shared = text[text.index('if "%CONTAINED%"=="1" (\n'):]
+    shared = shared[shared.index(") else (\n"):shared.index("\n)\n")]
+    assert 'set "UVDIR=!LOCALAPPDATA!\\localm\\shared\\uv"' in shared
