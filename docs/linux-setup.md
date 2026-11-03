@@ -24,9 +24,9 @@ native llama.cpp library and a few setup scripts differ from Windows.
 curl -fsSL https://raw.githubusercontent.com/Matlan1/localm/master/install.sh | bash
 ```
 
-Needs `git` and `curl`. This clones localm (shallow) to `~/localm` - an
-existing clone there is updated with `git pull --ff-only` instead - and runs
-`bash setup.sh --yes`, which takes the default at every question: the Portable
+This downloads localm as a source archive from GitHub to `~/localm` with the
+system `curl` or `wget` (no git needed; a folder that already holds localm is
+set up again instead of downloaded) and runs `bash setup.sh --yes`, which takes the default at every question: the Portable
 choice (uv, its Python and its download cache stay inside the clone), a private
 `.venv`, data in `./home`, the GUI in a browser tab, on Linux an
 application-menu entry (a `.desktop` file in `~/.local/share/applications`),
@@ -54,10 +54,11 @@ cd localm
 bash setup.sh
 ```
 
-`setup.sh` is interactive. In order, it asks whether uv, its Python and its
-download cache stay inside the clone (Portable, the default) or use uv's normal
-per-user locations (Shared); installs `uv` if it is missing (into `./.uv` for
-Portable); asks whether to use a detected GPU; creates `.venv` (Python 3.12);
+`setup.sh` is interactive. In order, it asks whether localm's own uv, its Python
+and its download cache stay inside the clone (Portable, the default) or in one
+localm folder in your user profile reused by every Shared install
+(`${XDG_DATA_HOME:-~/.local/share}/localm/shared`); installs its own pinned uv
+there (never a uv, Python or uv/pip setting already on the machine); asks whether to use a detected GPU; creates `.venv` (Python 3.12);
 asks where data should live (`./home`, or a custom path recorded in
 `localm-home.cfg`); asks whether the GUI opens in a browser tab or an app window
 (the app window adds the `desktop` extra); installs localm (extras `coder`,

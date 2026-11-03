@@ -115,7 +115,7 @@ It performs the same install as the console setup below and covers the same choi
 
 ### Recommended (Windows): self-contained setup
 
-Clone anywhere and double-click `setup.bat`. It asks whether uv (the Python package manager it builds on), its Python and its download cache stay inside the clone (Portable, the default) or use uv's normal per-user locations (Shared), offers to install its own copy of `uv` into the clone (Portable) or uses the one on your PATH if present (Shared), creates a private `.venv` inside the clone (always Python 3.12), and asks where data should live:
+Clone anywhere and double-click `setup.bat`. It asks whether localm's own copy of uv (the Python package manager it builds on), its Python and its download cache stay inside the clone (Portable, the default) or in one localm folder in your user profile that every Shared install of yours reuses (Shared, fewer downloads). Either way setup installs its own pinned uv there and uses only that uv and the Python it downloads, never a uv, Python or uv/pip setting already on your PC, and asks you nothing about installing uv. It then creates a private `.venv` inside the clone (always Python 3.12), and asks where data should live:
 
 - **inside the clone** (`.\home`) - fully portable and self-contained; multiple clones on one machine are completely independent (this is the default), or
 - **a custom path** (recorded in `localm-home.cfg`) - e.g. a shared models drive.
@@ -130,7 +130,7 @@ The same self-contained install, one command:
 curl -fsSL https://raw.githubusercontent.com/Matlan1/localm/master/install.sh | bash
 ```
 
-This needs `git` and `curl`. It clones localm to `~/localm` (or updates the clone already there), runs `bash setup.sh --yes` to create a private `.venv` with uv and Python kept inside the clone, detects your GPU, and provisions the matching backend, taking the default at every question. Piped from `curl`, it skips the plugin picker; run `localm plugin setup` afterwards. `localm` is not put on your PATH (see the Quick start note). For the interactive version (`bash setup.sh` from a clone; the same prompts as `setup.bat` above, with an application-menu entry in place of the desktop shortcut), GPU-backend details, and macOS's experimental status, see [docs/linux-setup.md](docs/linux-setup.md).
+It downloads localm into `~/localm` with the system `curl` or `wget` (no git needed; a folder that already holds localm is set up again instead of downloaded), runs `bash setup.sh --yes` to create a private `.venv` with uv and Python kept inside the clone, detects your GPU, and provisions the matching backend, taking the default at every question. Piped from `curl`, it skips the plugin picker; run `localm plugin setup` afterwards. `localm` is not put on your PATH (see the Quick start note). For the interactive version (`bash setup.sh` from a clone; the same prompts as `setup.bat` above, with an application-menu entry in place of the desktop shortcut), GPU-backend details, and macOS's experimental status, see [docs/linux-setup.md](docs/linux-setup.md).
 
 ### `pip install localm` (no clone needed)
 
@@ -169,9 +169,8 @@ The API is served over HTTPS with localm's built-in certificate. See [docs/docke
 <details>
 <summary>Expand for the direct <code>uv</code> commands (advanced/CI path)</summary>
 
-This path uses `uv` directly, so it assumes `uv` is installed (the `setup.bat` /
-`setup.sh` installers add it for you; standalone: `winget install astral-sh.uv` on
-Windows, or download it from https://github.com/astral-sh/uv/releases).
+This path runs a `uv` you already have; the `setup.bat` / `setup.sh` installers
+bring their own and need none of this.
 
 ```bash
 # Portable (default, self-contained): keeps uv's downloaded Python runtime AND
@@ -187,10 +186,9 @@ uv pip install -p .venv -e ".[coder,voice,monitor,gpu,audio]"   # AMD RDNA2 (RX 
 
 (`voice` adds the GUI mic's Whisper speech-to-text; drop it if you do not want it. The block is POSIX shell syntax: on Windows set the two `UV_*` variables with `set` / `$env:` first and use `.venv\Scripts\localm` for `.venv/bin/localm`.)
 
-To instead reuse a Python + package cache already on your system (faster, one
-download shared across every uv project on the machine, but no longer
-self-contained - the same tradeoff `setup.bat`/`setup.sh`'s "Shared" choice
-describes), just drop the `UV_PYTHON_INSTALL_DIR`/`UV_CACHE_DIR`/
+To instead reuse your uv's own Python + package cache (faster, one download
+shared across every uv project on the machine, but no longer self-contained),
+just drop the `UV_PYTHON_INSTALL_DIR`/`UV_CACHE_DIR`/
 `--python-preference` and run the plain `uv venv --python 3.12 .venv`.
 
 The base line above works on NVIDIA, Intel, and CPU; only AMD RDNA2 users add `[gpu]` (the ROCm torch stack). `localm setup-llama` (run as `.venv/bin/localm`, or `localm` once the venv is activated) is required after a manual install to fetch the native backend (`setup.bat` and `setup.sh` do this for you). NVIDIA users who also want HuggingFace/torch models install CUDA torch separately - the index depends on GPU generation (Blackwell and newer need a different one than older cards), so ask localm's own detector rather than guessing: `uv pip install -p .venv $(.venv/bin/python -m localm.hwdetect torch-args cuda)` (see [docs/gpu-setup.md](docs/gpu-setup.md#huggingface-transformers-pytorch) for the full table and Windows form), then `uv pip install -p .venv -e ".[hf]"` adds the Transformers stack on top of it (the installers run `.[hf,audio]`).
