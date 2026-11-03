@@ -68,8 +68,8 @@ APP_NAME = "LocaLM"
 PYVER = "3.12"
 
 # Set by setup-gui.bat / setup-gui.sh from the tooling question they ask:
-# "portable" or "shared", the full path of the uv they ran the window with, and
-# "1" when they installed localm's own uv in the Shared store.
+# "portable" or "shared", and "1" when they installed localm's own uv in the
+# Shared store. UV_ENV names a uv path the window never reads.
 STORE_ENV = "LOCALM_GUI_STORE"
 UV_ENV = "LOCALM_GUI_UV"
 UV_INSTALLED_ENV = "LOCALM_GUI_UV_INSTALLED"

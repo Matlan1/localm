@@ -7,7 +7,9 @@ Shared from the localm store in the user profile
 (``${XDG_DATA_HOME:-$HOME/.local/share}/localm/shared/uv``). A uv there is
 reused only when it reports the pinned version; otherwise the pinned installer
 puts it there. A uv on PATH is never used. The answer reaches the window as
-LOCALM_GUI_STORE, the uv as LOCALM_GUI_UV, and Shared as LOCALM_GUI_UV_INSTALLED=1.
+LOCALM_GUI_STORE and Shared as LOCALM_GUI_UV_INSTALLED=1; LOCALM_GUI_UV is not
+set. uv keeps its credentials store in the store's uv folder and writes no
+Python shim or registry entry.
 The window runs with inherited uv / pip / Python settings cleared, with
 only-managed Python, and with every temporary file in ./.localm-setup-tmp.
 
@@ -47,6 +49,8 @@ _REPORT_BODY = ('echo "WINDOW-UV=$0"\necho "WINDOW-ARGS=$*"\n'
                 'echo "WINDOW-POISON=${UV_INDEX_URL:-}${PIP_INDEX_URL:-}${PYTHONPATH:-}'
                 '${UV_PYTHON_INSTALL_MIRROR:-}${LOCALM_HOME:-}"\n'
                 'echo "WINDOW-CRED=${UV_CREDENTIALS_DIR:-}"\n'
+                'echo "WINDOW-BIN=${UV_PYTHON_INSTALL_BIN:-}"\n'
+                'echo "WINDOW-REG=${UV_PYTHON_INSTALL_REGISTRY:-}"\n'
                 'exit 0\n')
 _REPORT = fake_uv_script(_REPORT_BODY)
 
@@ -114,7 +118,8 @@ def _run(tmp_path: Path, *, answers: str, system_uv: bool = True, contained_uv: 
                HOME=bash_path(home), UV_INDEX_URL="http://poison.invalid/uv",
                PIP_INDEX_URL="http://poison.invalid/pip", PYTHONPATH=str(tmp_path),
                UV_PYTHON_INSTALL_MIRROR="http://poison.invalid/mirror",
-               LOCALM_HOME=str(tmp_path / "elsewhere"))
+               LOCALM_HOME=str(tmp_path / "elsewhere"), UV_PYTHON_INSTALL_BIN="1",
+               UV_PYTHON_INSTALL_REGISTRY="1")
     for var in ("LOCALM_GUI_STORE", "LOCALM_GUI_UV", "LOCALM_GUI_UV_INSTALLED",
                 "UV_PYTHON_INSTALL_DIR", "UV_CACHE_DIR", "UV_INSTALL_DIR",
                 "UV_UNMANAGED_INSTALL", "XDG_DATA_HOME"):
@@ -158,6 +163,7 @@ def _assert_isolated_window(out, clone: Path) -> None:
     assert _field(out, "WINDOW-NOCONFIG") == "1"
     assert _field(out, "WINDOW-PIPCONFIG") == "/dev/null"
     assert _field(out, "WINDOW-POISON") == ""
+    assert _field(out, "WINDOW-BIN") == "0" and _field(out, "WINDOW-REG") == "0"
     tmp = str(clone / ".localm-setup-tmp")
     assert _path_field(out, "WINDOW-TMPDIR") == tmp and _path_field(out, "WINDOW-TMP") == tmp
     assert not (clone / ".localm-setup-tmp").exists(), "the setup temp folder was left behind"
@@ -168,7 +174,7 @@ def test_portable_with_a_pinned_contained_uv_still_asks_the_question_and_uses_it
     assert QUESTION in out.stdout, (out.stdout, out.stderr)
     assert "INSTALLER-RAN" not in out.stdout
     assert _path_field(out, "WINDOW-UV") == str(clone / ".uv" / "uv")
-    assert _path_field(out, "WINDOW-GUIUV") == str(clone / ".uv" / "uv")
+    assert _field(out, "WINDOW-GUIUV") == ""
     assert _field(out, "WINDOW-STORE") == "portable"
     assert _path_field(out, "WINDOW-PYDIR") == str(clone / ".python")
     assert _path_field(out, "WINDOW-CACHE") == str(clone / ".cache")
@@ -209,7 +215,7 @@ def test_shared_never_uses_the_system_uv_and_installs_into_the_localm_store(tmp_
     assert QUESTION in out.stdout, (out.stdout, out.stderr)
     assert _installer_dirs(out)[:2] == [str(store / "uv")] * 2
     assert _path_field(out, "WINDOW-UV") == str(store / "uv" / "uv")
-    assert _path_field(out, "WINDOW-GUIUV") == str(store / "uv" / "uv")
+    assert _field(out, "WINDOW-GUIUV") == ""
     assert _field(out, "WINDOW-STORE") == "shared"
     assert _path_field(out, "WINDOW-PYDIR") == str(store / "python")
     assert _path_field(out, "WINDOW-CACHE") == str(store / "cache")

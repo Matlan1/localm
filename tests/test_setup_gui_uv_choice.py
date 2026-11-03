@@ -7,8 +7,11 @@ localm's own pinned uv in its store: Portable .\\.uv\\uv.exe, Shared
 %LOCALAPPDATA%\\localm\\shared\\uv\\uv.exe. A uv there is used when it reports
 the pinned version; otherwise the pinned installer puts it there, without
 asking. A uv on PATH is never used. The answer reaches the window as
-LOCALM_GUI_STORE, the uv as LOCALM_GUI_UV, and an install into the Shared
-folder as LOCALM_GUI_UV_INSTALLED=1.
+LOCALM_GUI_STORE and an install into the Shared folder as
+LOCALM_GUI_UV_INSTALLED=1; LOCALM_GUI_UV is not set (the window finds the
+store's uv itself). uv keeps its credentials store in the store's uv folder and
+writes no Python shim or registry entry (UV_PYTHON_INSTALL_BIN=0,
+UV_PYTHON_INSTALL_REGISTRY=0).
 
 The real script runs from a throwaway clone with the uv installer and the
 window each replaced by a probe line, a stub installer that copies a stand-in
@@ -37,7 +40,9 @@ _PS_PREFIX = '"%PSEXE%" -NoProfile -ExecutionPolicy Bypass -Command'
 _WINDOW = ("echo WINDOW-UV=%UVEXE%& echo WINDOW-STORE=%LOCALM_GUI_STORE%& "
            "echo WINDOW-PYDIR=%UV_PYTHON_INSTALL_DIR%& echo WINDOW-CACHE=%UV_CACHE_DIR%& "
            "echo WINDOW-GUIUV=%LOCALM_GUI_UV%& echo WINDOW-INSTALLED=%LOCALM_GUI_UV_INSTALLED%& "
-           "echo WINDOW-TEMP=%TEMP%& echo WINDOW-PREF=%UV_PYTHON_PREFERENCE%& cmd /c exit 0")
+           "echo WINDOW-TEMP=%TEMP%& echo WINDOW-PREF=%UV_PYTHON_PREFERENCE%& "
+           "echo WINDOW-CRED=%UV_CREDENTIALS_DIR%& echo WINDOW-BIN=%UV_PYTHON_INSTALL_BIN%& "
+           "echo WINDOW-REG=%UV_PYTHON_INSTALL_REGISTRY%& cmd /c exit 0")
 _STUB_INSTALLER = (
     "@echo off\r\n"
     'if not "%STUB_CREATES%"=="1" exit /b 0\r\n'
@@ -97,7 +102,9 @@ def _run(tmp_path: Path, stub_uv: Path, *, answers: str, contained_uv: str | Non
                STUB_INSTALLER=str(installer), STUB_UV_EXE=str(stub_uv),
                STUB_CREATES="1" if installer_creates_uv else "0",
                UV_PYTHON_INSTALL_DIR=str(tmp_path / "inherited-python"),
-               UV_CACHE_DIR=str(tmp_path / "inherited-cache"))
+               UV_CACHE_DIR=str(tmp_path / "inherited-cache"),
+               UV_CREDENTIALS_DIR=str(tmp_path / "inherited-cred"),
+               UV_PYTHON_INSTALL_BIN="1", UV_PYTHON_INSTALL_REGISTRY="1")
     wrong = {v for v in versions.values() if v}
     assert len(wrong) <= 1, "one reported version per run"
     if wrong:
@@ -134,7 +141,7 @@ def test_portable_with_a_pinned_contained_uv_still_asks_the_question_and_uses_it
     assert "INSTALLER-RAN" not in out.stdout
     contained = str(clone / ".uv" / "uv.exe")
     assert _field(out, "WINDOW-UV") == contained
-    assert _field(out, "WINDOW-GUIUV") == contained
+    assert _field(out, "WINDOW-GUIUV") == ""
     assert _field(out, "WINDOW-STORE") == "portable"
     assert _field(out, "WINDOW-PYDIR") == str(clone / ".python")
     assert _field(out, "WINDOW-CACHE") == str(clone / ".cache")
@@ -177,7 +184,7 @@ def test_shared_uses_the_shared_folder_uv_and_says_so_to_the_window(tmp_path, st
     assert "INSTALLER-RAN" not in out.stdout and not (clone / ".uv").exists(), out.stdout
     uv = str(shared / "uv" / "uv.exe")
     assert _field(out, "WINDOW-UV") == uv
-    assert _field(out, "WINDOW-GUIUV") == uv
+    assert _field(out, "WINDOW-GUIUV") == ""
     assert _field(out, "WINDOW-STORE") == "shared"
     assert _field(out, "WINDOW-PYDIR") == str(shared / "python")
     assert _field(out, "WINDOW-CACHE") == str(shared / "cache")
@@ -200,11 +207,22 @@ def test_no_uv_and_shared_installs_into_the_shared_folder(tmp_path, stub_uv):
         f"INSTALLER-RAN INSTALL_DIR=[{shared / 'uv'}] UNMANAGED=[{shared / 'uv'}]")
     uv = str(shared / "uv" / "uv.exe")
     assert _field(out, "WINDOW-UV") == uv
-    assert _field(out, "WINDOW-GUIUV") == uv
+    assert _field(out, "WINDOW-GUIUV") == ""
     assert _field(out, "WINDOW-STORE") == "shared"
     assert _field(out, "WINDOW-INSTALLED") == "1"
     assert not (clone / ".uv").exists()
     assert out.returncode == 0, (out.stdout, out.stderr)
+
+
+@pytest.mark.parametrize("store", ["1", "2"])
+def test_uv_keeps_its_credentials_in_the_store_and_writes_no_shim_or_registry_entry(
+        tmp_path, stub_uv, store):
+    clone, shared, out = _run(tmp_path, stub_uv, answers=f"{store}\n")
+    uvdir = clone / ".uv" if store == "1" else shared / "uv"
+    assert _field(out, "WINDOW-CRED") == str(uvdir / "credentials")
+    assert _field(out, "WINDOW-BIN") == "0"
+    assert _field(out, "WINDOW-REG") == "0"
+    assert _field(out, "WINDOW-GUIUV") == ""
 
 
 @pytest.mark.parametrize("store", ["1", "2"])

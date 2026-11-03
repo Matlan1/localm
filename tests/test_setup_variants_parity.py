@@ -451,6 +451,59 @@ def test_every_variant_records_the_uv_it_used(name):
     assert "--uv-exe" in text
 
 
+# Each script's uv settings, as the line that sets them.
+_UV_STORE_SETTINGS = {
+    "setup.bat": ('set "UV_CREDENTIALS_DIR=!UVDIR!\\credentials"',
+                  'set "UV_PYTHON_INSTALL_BIN=0"', 'set "UV_PYTHON_INSTALL_REGISTRY=0"'),
+    "setup-gui.bat": ('set "UV_CREDENTIALS_DIR=%UVDIR%\\credentials"',
+                      'set "UV_PYTHON_INSTALL_BIN=0"', 'set "UV_PYTHON_INSTALL_REGISTRY=0"'),
+    "setup.sh": ('export UV_CREDENTIALS_DIR="$STORE_UV/credentials"',
+                 "export UV_PYTHON_INSTALL_BIN=0 UV_PYTHON_INSTALL_REGISTRY=0"),
+    "setup-gui.sh": ('export UV_CREDENTIALS_DIR="$STORE_UV/credentials"',
+                     "export UV_PYTHON_INSTALL_BIN=0 UV_PYTHON_INSTALL_REGISTRY=0"),
+}
+_FIRST_UV_CALL = {".bat": re.compile(r'call :uv_version|"[%!]UVEXE[%!]"'),
+                  ".sh": re.compile(r'uv_is_pinned\b(?!\(\))|"\$UVEXE"')}
+
+
+@pytest.mark.parametrize("name", SCRIPTS)
+def test_every_script_sets_the_uv_store_settings_before_the_first_uv_call(name):
+    """uv's credentials store in the store's uv folder, no Python shims in a user
+    folder and no Python registry entry, set once the store is chosen and before
+    any uv runs."""
+    lines = [ln.strip() for ln in _lines(name)]
+    call = _FIRST_UV_CALL[Path(name).suffix]
+    first = next(i for i, ln in enumerate(lines)
+                 if call.search(ln.split(" #")[0]) and not ln.startswith(("rem ", "#")))
+    for setting in _UV_STORE_SETTINGS[name]:
+        at = [i for i, ln in enumerate(lines) if ln == setting]
+        assert len(at) == 1, f"{name}: {setting!r} set {len(at)} times"
+        assert at[0] < first, f"{name}: {setting!r} is set after the first uv call"
+
+
+@pytest.mark.parametrize("portable", [True, False])
+def test_the_window_sets_the_same_uv_store_settings(tmp_path, monkeypatch, portable):
+    gui = _gui_module(tmp_path, monkeypatch)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "lad"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setenv("UV_PYTHON_INSTALL_BIN", "1")
+    monkeypatch.setenv("UV_PYTHON_INSTALL_REGISTRY", "1")
+    monkeypatch.setenv("UV_CREDENTIALS_DIR", str(tmp_path / "inherited"))
+    plan = gui.Plan(backend="cpu", portable_store=portable)
+    env = gui._env_for(plan)
+    store = gui.store_dirs(portable)
+    assert env["UV_CREDENTIALS_DIR"] == str(store["uv"] / "credentials")
+    assert env["UV_PYTHON_INSTALL_BIN"] == "0"
+    assert env["UV_PYTHON_INSTALL_REGISTRY"] == "0"
+
+
+@pytest.mark.parametrize("name", ("setup-gui.bat", "setup-gui.sh"))
+def test_the_launchers_tell_the_window_the_store_and_nothing_about_a_uv_path(name):
+    text = (ROOT / name).read_text(encoding="utf-8")
+    assert "LOCALM_GUI_STORE=portable" in text and "LOCALM_GUI_STORE=shared" in text
+    assert not re.search(r"LOCALM_GUI_UV=", text), f"{name} passes LOCALM_GUI_UV"
+
+
 def test_no_variant_hardcodes_the_plugin_set():
     text = (ROOT / "installer" / "gui.py").read_text(encoding="utf-8")
     assert '"coder", "rag"' not in text and "'coder', 'rag'" not in text

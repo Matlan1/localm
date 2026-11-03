@@ -89,9 +89,9 @@ echo
 
 # ---- portable vs shared: where localm's Python tooling lives ----------------
 # The question setup.sh asks, asked once, here. The window reads the answer from
-# LOCALM_GUI_STORE (portable or shared), the uv in use from LOCALM_GUI_UV, and
-# LOCALM_GUI_UV_INSTALLED=1 for Shared (the store's uv is one localm setup
-# installed). Both choices use only localm's own uv, the pinned release, from
+# LOCALM_GUI_STORE (portable or shared) and LOCALM_GUI_UV_INSTALLED=1 for Shared
+# (the store's uv is one localm setup installed); it finds the store's uv
+# itself. Both choices use only localm's own uv, the pinned release, from
 # the store: ./.uv for Portable, $SHARED_STORE/uv for Shared. It is installed
 # there when it is missing or reports another version.
 uv_is_pinned() {  # uv_is_pinned UV  ->  true when UV runs and reports the pinned release
@@ -139,6 +139,10 @@ else
     echo "  Shared: localm's uv, Python and downloads in $SHARED_STORE"
 fi
 UVEXE="$STORE_UV/uv"
+# uv keeps its credentials store in the store's uv folder, and puts no Python
+# shim in a user folder and no Python registry entry.
+export UV_CREDENTIALS_DIR="$STORE_UV/credentials"
+export UV_PYTHON_INSTALL_BIN=0 UV_PYTHON_INSTALL_REGISTRY=0
 if ! uv_is_pinned "$UVEXE"; then
     echo "  Installing localm's uv ${UV_INSTALLER_VERSION} into $STORE_UV ..."
     export UV_INSTALL_DIR="$STORE_UV"
@@ -168,11 +172,9 @@ if [ "$(uname -s)" != "Darwin" ] && [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DIS
     exit 1
 fi
 
-export LOCALM_GUI_UV="$UVEXE"
 echo "  Opening the setup window ..."
 export UV_PYTHON_INSTALL_DIR="$STORE_PY"
 export UV_CACHE_DIR="$STORE_CACHE"
-export UV_CREDENTIALS_DIR="$STORE_UV/credentials"
 export UV_PYTHON_PREFERENCE=only-managed
 export UV_SYSTEM_CERTS=1
 rc=0

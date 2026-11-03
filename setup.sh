@@ -479,7 +479,10 @@ else
 fi
 export UV_PYTHON_INSTALL_DIR="$PYDIR"
 export UV_CACHE_DIR="$CACHEDIR"
+# uv keeps its credentials store in the store's uv folder, and puts no Python
+# shim in a user folder and no Python registry entry.
 export UV_CREDENTIALS_DIR="$STORE_UV/credentials"
+export UV_PYTHON_INSTALL_BIN=0 UV_PYTHON_INSTALL_REGISTRY=0
 export UV_PYTHON_PREFERENCE=only-managed
 PYPREF="--python-preference only-managed"
 UVDIR="$STORE_UV"

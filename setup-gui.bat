@@ -43,9 +43,9 @@ echo.
 
 rem ---- portable vs shared: where localm's own Python tooling lives ----------
 rem  The question setup.bat asks, asked once, here. The window reads the answer
-rem  from LOCALM_GUI_STORE (portable or shared), the uv in use from LOCALM_GUI_UV,
-rem  and LOCALM_GUI_UV_INSTALLED=1 when this run installed uv into the Shared
-rem  folder. Portable keeps uv, Python and downloads in .\.uv .\.python .\.cache;
+rem  from LOCALM_GUI_STORE (portable or shared) and LOCALM_GUI_UV_INSTALLED=1
+rem  when this run installed uv into the Shared folder; it finds the store's uv
+rem  itself. Portable keeps uv, Python and downloads in .\.uv .\.python .\.cache;
 rem  Shared in %LOCALAPPDATA%\localm\shared\uv, \python and \cache.
 echo  Keep localm's Python tooling ^(uv itself, its runtime, and downloads^) inside this folder?
 echo    [1] Portable - everything in this folder (self-contained; re-downloads per clone)
@@ -71,8 +71,11 @@ set "CACHEDIR=%CD%\.cache"
 echo  Portable: uv, Python, and downloads all under this folder
 :store_chosen
 set "UVEXE=%UVDIR%\uv.exe"
-rem  uv keeps its credentials store (and its lock file) in UVDIR\credentials.
+rem  uv keeps its credentials store (and its lock file) in UVDIR\credentials,
+rem  and puts no Python shim in a user folder and no Python registry entry.
 set "UV_CREDENTIALS_DIR=%UVDIR%\credentials"
+set "UV_PYTHON_INSTALL_BIN=0"
+set "UV_PYTHON_INSTALL_REGISTRY=0"
 
 rem ---- uv: localm's own pinned copy --------------------------------------------
 rem  A uv already in UVDIR is used only when it reports the pinned version;
@@ -104,7 +107,6 @@ call :uv_version
 if not "%UVOK%"=="1" goto uv_not_callable
 
 :have_uv
-set "LOCALM_GUI_UV=%UVEXE%"
 echo  Using "%UVEXE%"
 goto open_window
 

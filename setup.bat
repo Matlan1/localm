@@ -161,8 +161,11 @@ if "%CONTAINED%"=="1" (
     echo  Shared: uv, Python, and downloads in !LOCALAPPDATA!\localm\shared
 )
 set "UVEXE=!UVDIR!\uv.exe"
-rem  uv keeps its credentials store (and its lock file) in UVDIR\credentials.
+rem  uv keeps its credentials store (and its lock file) in UVDIR\credentials,
+rem  and puts no Python shim in a user folder and no Python registry entry.
 set "UV_CREDENTIALS_DIR=!UVDIR!\credentials"
+set "UV_PYTHON_INSTALL_BIN=0"
+set "UV_PYTHON_INSTALL_REGISTRY=0"
 set "UV_PYTHON_INSTALL_DIR=!PYDIR!"
 set "UV_CACHE_DIR=!CACHEDIR!"
 set "PYPREF=--python-preference only-managed"
