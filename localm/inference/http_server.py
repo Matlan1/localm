@@ -2172,7 +2172,8 @@ def _placement_as_configured(placement: dict, sizing) -> bool:
     offloaded = placement.get("gpu_layers_offloaded")
     total = placement.get("gpu_layers_total")
     layers = sizing.get("layers")
-    if not all(type(v) is int for v in (offloaded, total, layers)):
+    if not (isinstance(offloaded, int) and isinstance(total, int)
+            and isinstance(layers, int)):
         return False
     if offloaded < (total if layers < 0 else min(layers, total)):
         return False

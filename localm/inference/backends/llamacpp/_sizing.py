@@ -2154,9 +2154,10 @@ class VramSizingMixin:
         limits = []
         read = []
         unread = []
-        if share > 0 and free is None:
-            unread.append("VRAM")
-        elif share > 0:
+        if free is None:
+            if share > 0:
+                unread.append("VRAM")
+        else:
             read.append("VRAM")
             # An n_cpu_moe load's pinned expert weights never draw on this budget.
             model = self._effective_model_bytes_for_vram()
