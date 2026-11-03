@@ -906,9 +906,12 @@ export async function refreshModels() {
       const willServe = modelCache.active || modelCache.resumable || "";
       const placeholder = document.createElement("option");
       placeholder.value = "";
-      placeholder.textContent = t("sidebar.noModelLoaded");
+      const notLoaded = !modelCache.active && !!modelCache.resumable && !peerRoute;
+      placeholder.textContent = notLoaded
+        ? t("sidebar.modelNotLoaded", { model: modelCache.resumable })
+        : t("sidebar.noModelLoaded");
       placeholder.disabled = true;
-      if (!willServe) placeholder.selected = true;
+      if (!willServe || notLoaded) placeholder.selected = true;
       modelSelect.appendChild(placeholder);
       for (const m of modelCache.models) {
         const opt = document.createElement("option");
@@ -916,7 +919,7 @@ export async function refreshModels() {
         const size = m.size_bytes ? ` (${(m.size_bytes / GIB).toFixed(1)} GB)` : "";
         opt.textContent = m.name + size;
         if (peerRoute ? m.name === _peerSelected
-            : (m.active || (!modelCache.active && m.name === willServe))) opt.selected = true;
+            : m.active) opt.selected = true;
         modelSelect.appendChild(opt);
       }
     }
@@ -1110,7 +1113,13 @@ let _peerSelected = null;
 // message (the active one, else the resumable one), or at the "No model
 // loaded" placeholder when there is none, even while the dropdown has focus.
 function _showServedModel() {
-  const shown = modelCache.active || modelCache.resumable || "";
+  const shown = modelCache.active || "";
+  const placeholder = [...modelSelect.options].find((o) => o.value === "" && o.disabled);
+  if (placeholder) {
+    placeholder.textContent = !shown && modelCache.resumable
+      ? t("sidebar.modelNotLoaded", { model: modelCache.resumable })
+      : t("sidebar.noModelLoaded");
+  }
   modelSelect.value = shown;
   if (modelSelect.value !== shown) modelSelect.value = "";
 }
