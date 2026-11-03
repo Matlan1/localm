@@ -1170,8 +1170,7 @@ def _pull_remote(model_spec: str, spec: str, name: Optional[str],
     # civitai:<versionId> or civitai:<versionId>:<fileId>: a distinct provider,
     # dispatched before the HF-oriented type auto-detect below - its type comes
     # from CivitAI's own model type (sources.CIVITAI_TYPE_MAP), never from an
-    # HF pipeline-tag probe, and it always routes to the ComfyUI-subfoldered
-    # tree rather than an explicit dest_dir.
+    # HF pipeline-tag probe, and it never takes an explicit dest_dir.
     if spec.startswith("civitai:"):
         if dest_dir is not None:
             console.print(
@@ -2167,7 +2166,8 @@ def _non_chat_detection_note(architecture) -> str:
 
 
 _MEDIA_TYPE_WORDS = {"lora": "a LoRA", "diffusion-unet": "an image or video diffusion model",
-                     "vae": "a VAE", "text-encoder": "a text encoder",
+                     "vae": "a VAE", "text-encoder": "a text encoder", "vocoder": "a vocoder",
+                     "planner": "a music planner model",
                      "controlnet": "a ControlNet", "textual-inversion": "a textual-inversion embedding",
                      "upscaler": "an upscaler"}
 
@@ -2491,6 +2491,7 @@ def _pull_gguf_file(
                                  mmproj=mmproj_path, architecture=gguf_meta.get("architecture"),
                                  expert_count=gguf_meta.get("expert_count"),
                                  refresh=_revision_record_differs(model_name, revision),
+                                 type_user_set=not type_is_auto,
                                  **_register_revision(revision))
         return True
 
@@ -2721,6 +2722,7 @@ def _pull_gguf_file(
                   sha256=verify_digest, model_type=reg_type, mmproj=mmproj_path,
                   architecture=gguf_meta.get("architecture"),
                   expert_count=gguf_meta.get("expert_count"),
+                  type_user_set=not type_is_auto,
                   **_register_revision(revision))
         # model_name is _sanitize_name()-derived (A-Za-z0-9._- only) and is
         # escaped anyway.
@@ -4868,10 +4870,14 @@ def _pull_civitai_file(
     model_type: str = "auto",
     include_legacy_formats: bool = False,
 ) -> bool:
-    """Download one file from a CivitAI model VERSION id into the
-    ComfyUI-subfoldered tree for whichever ComfyUI instance is currently
-    active (managed or external - see media.managed_comfy.comfy_models_dest_dir),
-    and register it into localm's own registry.json eagerly.
+    """Download one file from a CivitAI model VERSION id and register it into
+    localm's own registry.json eagerly.
+
+    The file goes into the ComfyUI-subfoldered tree of whichever ComfyUI
+    instance is currently active (managed or external - see
+    media.managed_comfy.comfy_models_dest_dir), and into localm's own models
+    folder when no ComfyUI is set up, where the native media backends find it
+    through the registry.
 
     *file_id*, when given, selects one file among the version's files (see
     sources.CivitAISource.resolve_download); otherwise the primary file (or
@@ -4879,7 +4885,8 @@ def _pull_civitai_file(
     "auto" takes the registry type CivitAI's own model type maps to
     (sources.CIVITAI_TYPE_MAP); an explicit value overrides only the registry
     label, never the ComfyUI subfolder the file is physically routed to,
-    which always follows CivitAI's own type.
+    which always follows CivitAI's own type (and is unused in localm's own
+    models folder).
 
     The download redirect (a time-boxed pre-signed URL) is resolved and
     fetched through the same per-hop SSRF-guarded path _pull_url uses
@@ -4910,12 +4917,7 @@ def _pull_civitai_file(
 
     dest_dir = comfy_models_dest_dir(resolved.comfy_subfolder)
     if dest_dir is None:
-        console.print(
-            "[red]No ComfyUI folder is configured to download into.[/red] Set "
-            "a ComfyUI workdir (localm config comfy_workdir <path>), or enable "
-            "the managed ComfyUI instance, then retry."
-        )
-        return False
+        dest_dir = _mm.MODELS_DIR
 
     safe = _safe_models_filename(resolved.filename, dest_dir)
     if safe is None:

@@ -559,6 +559,13 @@ _INCONCLUSIVE_LOAD_RETRY_DELAY = 1.5
 # model to finish its requests, so that model can be evicted instead of the new
 # one loading beside it on whatever VRAM is left.
 _BUSY_VICTIM_IDLE_WAIT_S = 30.0
+
+# Status for a load that goes ahead beside resident models because none could be
+# evicted for it (``pinned_models``, or a model still busy): the load then takes
+# whatever VRAM is left and the rest runs on the CPU.
+LOADING_BESIDE_STATUS = ("Loading '{model}' beside {resident}, which could not be "
+                         "unloaded: not enough GPU memory is free, so part of it "
+                         "will run on the CPU (slower)...")
 # How often that wait checks whether a busy native media runtime's job ended.
 _BUSY_MEDIA_POLL_S = 0.25
 
@@ -1197,6 +1204,11 @@ async def _switch_exhaustion_ladder(loop, probe: switch_admission.VramProbe,
         "to the backend's own load-time sizing instead of refusing",
         budget.name, budget.needed_bytes // 1024 ** 2, probe.free // 1024 ** 2)
     attempt.deferred_to_backend = True
+    beside = [n for n, e in list(_engines.items())
+              if n != budget.name and getattr(e, "loaded", False)]
+    if beside and on_status is not None:
+        on_status(LOADING_BESIDE_STATUS.format(
+            model=budget.name, resident=", ".join(f"'{n}'" for n in beside)))
     return step(switch_admission.PROCEED_TO_LOAD)
 
 
@@ -2193,7 +2205,7 @@ def _model_is_pinned(model_name: str | None) -> bool:
 
 def plan_capability_route(model_name: str | None, messages: list,
                           required_capabilities=None, *, pin_model=None,
-                          min_context=None):
+                          min_context=None, autoswitch=None):
     """The capability-routing decision for one request, without applying it.
 
     Blocking (registry read plus per-candidate capability probes), so an async
@@ -2209,7 +2221,9 @@ def plan_capability_route(model_name: str | None, messages: list,
     Needs are derived from the request wherever the request already states them
     - an image part means vision, the prompt's estimated size means a context
     window - plus *required_capabilities* and *min_context* for what nothing in
-    an OpenAI-shaped request can express. A loaded engine confirmed to accept
+    an OpenAI-shaped request can express. *autoswitch*, one of the autoswitch
+    modes, replaces the ``model_autoswitch`` setting for this request; None
+    leaves the setting in force. A loaded engine confirmed to accept
     images does not count vision as a gap, whatever the registry records.
 
     Models with an accepted peer route count as resident, since answering with
@@ -2251,7 +2265,7 @@ def plan_capability_route(model_name: str | None, messages: list,
 
     return _cr.plan_route(current, needs, pinned=pinned, resident=resident,
                           current_known=known, skip=skip_set,
-                          mode=_cr.configured_mode())
+                          mode=_cr.coerce_autoswitch_mode(autoswitch) or _cr.configured_mode())
 
 
 async def get_engine(model_name: str | None, *, load: bool = True,
@@ -7522,19 +7536,26 @@ def _capability_route_header(route, placement=None) -> dict:
 def _memory_used_header(ctx) -> dict:
     """Observability: render the memory plugin's per-turn recall (stashed in
     ``ctx.state`` by its inlet) into a response-header dict so a client can show a
-    "used N memories" chip and the recall degrade reason. Empty when memory did
-    not run for this turn (plugin disabled, privacy mode, recall off). The value is
+    "used N memories" chip and the recall degrade reason, and the outcome of a
+    "remember ..." request in the turn's message. Empty when memory did not run
+    for this turn (plugin disabled, privacy mode, recall off). The value is
     compact ASCII JSON, header-safe: ``{"n":<int>,"degrade":<reason|null>,"items":
-    [{"id","text","source","kind"}...]}`` - json.dumps(ensure_ascii=True) escapes
-    newlines and non-ASCII, so the blob is a single header-legal line."""
+    [{"id","text","source","kind"}...],"saved":{"text","status"}}`` (``saved`` only
+    when the message asked to remember something) - json.dumps(ensure_ascii=True)
+    escapes newlines and non-ASCII, so the blob is a single header-legal line."""
     if ctx is None:
         return {}
-    used = getattr(ctx, "state", {}).get("memory_used")
-    if used is None:
+    state = getattr(ctx, "state", {})
+    used = state.get("memory_used")
+    saved = state.get("memory_saved")
+    if used is None and saved is None:
         return {}
+    used = used or []
     payload = {"n": len(used),
-               "degrade": ctx.state.get("memory_degrade_reason"),
+               "degrade": state.get("memory_degrade_reason"),
                "items": used}
+    if saved is not None:
+        payload["saved"] = saved
     try:
         blob = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
     except (TypeError, ValueError):

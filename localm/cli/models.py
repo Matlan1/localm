@@ -749,7 +749,8 @@ def pull(model_spec, name, sha256, redownload, mmproj, type, store,
     \b
     CivitAI model VERSION id (checkpoints/LoRAs/VAEs for image generation;
     find one with `localm search --source civitai`). Lands in the active
-    ComfyUI's models/<type> folder, not <data dir>/models:
+    ComfyUI's models/<type> folder, or in <data dir>/models when no ComfyUI
+    is set up:
       localm pull civitai:135867
       localm pull civitai:135867:99264
 

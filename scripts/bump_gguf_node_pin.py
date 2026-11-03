@@ -13,6 +13,11 @@ nothing is touched):
   localm/media/managed_comfy_fresh.py
     _GGUF_NODE             the commit of the CustomNodePin only; its name and
                            repository URL are never touched
+  localm/media/source_archive.py
+    ARCHIVE_SHA256         the entry of the old commit is replaced, in place,
+                           by one for the new commit holding the sha256 of its
+                           downloaded source archive (``archive_sha256`` and
+                           ``set_archive_sha256`` of bump_comfyui_pin.py)
 
 WHAT IT CHECKS BEFORE WRITING:
   * ``--tag`` is a full 40-character commit sha and differs from the pinned one;
@@ -22,7 +27,8 @@ WHAT IT CHECKS BEFORE WRITING:
     reports it ahead with nothing behind and the pinned commit as merge base);
   * the commit is reachable from the repository's default branch, so a commit
     that only exists in a fork or an unmerged pull request is refused;
-  * the edited region is found exactly once.
+  * the downloaded source archive names the commit in its zip comment;
+  * each edited region is found exactly once.
 
 WHAT IT LEAVES TO A PERSON, printed as the remaining checklist: the upstream
 commit list and changed files, the targeted tests, whether the node still works
@@ -31,6 +37,10 @@ GGUF image generation.
 
 Exit codes: 0 when the edit was applied or the dry run completed; 1 when
 refused.
+
+Network: the GitHub API reads above, then the source archive of the new
+commit, downloaded with ``localm.media.source_archive.download`` from
+``source_archive.archive_url``, in a dry run too.
 
 Environment: GITHUB_TOKEN is sent as a bearer token to the GitHub API.
 
@@ -43,6 +53,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import importlib.util
 import json
 import os
 import re
@@ -66,6 +77,18 @@ _PIN_RE = re.compile(
     r'(?P<sha>[0-9a-f]{40})(?P<tail>")', re.M | re.S)
 _REPO_RE = re.compile(r'repo="https://github\.com/(?P<slug>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?"')
 _COMFY_VERSION_RE = re.compile(r'^COMFYUI_PINNED_VERSION\s*=\s*"([^"]+)"', re.M)
+
+
+def _load_archive_helpers():
+    """scripts/bump_comfyui_pin.py, loaded by path for its source archive helpers."""
+    path = Path(__file__).resolve().parent / "bump_comfyui_pin.py"
+    spec = importlib.util.spec_from_file_location("bump_comfyui_pin_archive", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_ARCHIVE = _load_archive_helpers()
 
 
 class Refused(Exception):
@@ -178,9 +201,10 @@ def rewrite(text: str, commit: str) -> str:
     return text[:m.start("sha")] + commit + text[m.end("sha"):]
 
 
-def find_mentions(root: Path, old: str, skip: Path) -> list:
+def find_mentions(root: Path, old: str, skip: tuple) -> list:
     """``path:line: text`` for every line under the scanned directories that
-    names the old commit, full or as a 7-character prefix, outside *skip*."""
+    names the old commit, full or as a 7-character prefix, outside the paths
+    in *skip*."""
     pattern = re.compile(re.escape(old[:7]) + r"[0-9a-f]*")
     out = []
     for name in SCAN_DIRS:
@@ -188,7 +212,7 @@ def find_mentions(root: Path, old: str, skip: Path) -> list:
         if not base.is_dir():
             continue
         for path in sorted(base.rglob("*")):
-            if (not path.is_file() or path.suffix not in SCAN_SUFFIXES or path == skip
+            if (not path.is_file() or path.suffix not in SCAN_SUFFIXES or path in skip
                     or any(part in ("node_modules", "__pycache__", ".git") for part in path.parts)
                     or path.stat().st_size > MAX_SCAN_BYTES):
                 continue
@@ -261,20 +285,30 @@ def main(argv=None, *, fetch_json_fn=fetch_json) -> int:
         cmp = verify_descendant(slug, old, new, fetch_json_fn)
         print(f"  descendant of the pin, reachable from {cmp['_default_branch']}")
         new_text = rewrite(text, new)
-        mentions = find_mentions(REPO, old, pin_path)
-    except Refused as e:
+        archive_path = REPO / _ARCHIVE.SOURCE_ARCHIVE_REL
+        archive_text, archive_newline = _read(archive_path)
+        sha256 = _ARCHIVE.archive_sha256(f"https://github.com/{slug}", new)
+        print(f"  source archive sha256 of {new[:12]}: {sha256}")
+        new_archive_text = _ARCHIVE.set_archive_sha256(archive_text, old, new, sha256)
+        mentions = find_mentions(REPO, old, (pin_path, archive_path))
+    except (Refused, _ARCHIVE.Refused) as e:
         print(f"REFUSED: {e}")
         return 1
 
     print(summarise(cmp, old, new, slug))
     print()
-    if args.write:
-        _write(pin_path, new_text, newline)
-        print(f"wrote {PIN_REL}")
-    else:
-        sys.stdout.writelines(difflib.unified_diff(
-            text.splitlines(keepends=True), new_text.splitlines(keepends=True),
-            fromfile=f"a/{PIN_REL}", tofile=f"b/{PIN_REL}"))
+    edits = ((PIN_REL, pin_path, text, new_text, newline),
+             (_ARCHIVE.SOURCE_ARCHIVE_REL, archive_path, archive_text, new_archive_text,
+              archive_newline))
+    for rel, path, before, after, nl in edits:
+        if args.write:
+            _write(path, after, nl)
+            print(f"wrote {rel}")
+        else:
+            sys.stdout.writelines(difflib.unified_diff(
+                before.splitlines(keepends=True), after.splitlines(keepends=True),
+                fromfile=f"a/{rel}", tofile=f"b/{rel}"))
+    if not args.write:
         print("\n(dry run: nothing written; add --write to apply)")
     comfy = _COMFY_VERSION_RE.search(text)
     print()

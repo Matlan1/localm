@@ -57,8 +57,10 @@ def test_extract_raises_when_the_model_call_raises():
     assert isinstance(ei.value.__cause__, RuntimeError)
 
 
-def test_extract_on_an_unparseable_reply_is_still_empty():
-    assert extract(lambda p: "not json at all", "User: my name is Ada") == []
+def test_extract_on_an_unparseable_reply_raises_a_reply_error():
+    with pytest.raises(ConsolidationModelError) as err:
+        extract(lambda p: "not json at all", "User: my name is Ada")
+    assert type(err.value).__name__ == "ConsolidationReplyError"
 
 
 def test_summarize_session_raises_when_the_model_call_raises():
@@ -90,10 +92,12 @@ def test_run_consolidation_reports_a_failed_extract_and_writes_nothing(tmp_path)
     assert res["added"] == 0
 
 
-def test_run_consolidation_on_an_unparseable_reply_is_still_ok(tmp_path):
-    res = run_consolidation(_store(tmp_path), "User: my name is Ada",
-                            lambda p: "not json", now=NOW)
-    assert res["status"] == "ok" and res["added"] == 0 and "error" not in res
+def test_run_consolidation_on_an_unparseable_reply_is_an_error(tmp_path):
+    store = _store(tmp_path)
+    res = run_consolidation(store, "User: my name is Ada", lambda p: "not json", now=NOW)
+    assert res["status"] == "error" and res["reason"] == "unreadable_reply"
+    assert res["added"] == 0 and "JSON" in res["error"]
+    assert store.all() == []
 
 
 def test_run_consolidation_reports_a_failed_decide_and_writes_nothing(tmp_path):

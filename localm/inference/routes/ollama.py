@@ -158,13 +158,11 @@ def _file_facts(entry: dict) -> tuple[int, Optional[float], str]:
 
 
 def _listed_models(registry: dict) -> dict[str, dict]:
-    """Registry entries Ollama clients may see: chat and embedding models (not
-    a media text encoder), plus the startup model when it is not registered."""
-    from localm.model_manager.registry import is_media_text_encoder_entry
+    """Registry entries Ollama clients may see: chat and embedding models, plus
+    the startup model when it is not registered."""
     out = {name: entry for name, entry in registry.items()
            if isinstance(entry, dict)
-           and entry.get("model_type", "llm") in _LISTED_MODEL_TYPES
-           and not is_media_text_encoder_entry(entry)}
+           and entry.get("model_type", "llm") in _LISTED_MODEL_TYPES}
     default = _hs._default_model_name
     if default and default not in registry:
         startup = getattr(_hs._engine, "model_path", "")
