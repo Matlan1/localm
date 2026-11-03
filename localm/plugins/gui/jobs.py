@@ -796,8 +796,11 @@ def _terminate_process_tree(proc, *, grace: float = _CHILD_GRACE_S) -> None:
         return
     if sys.platform == "win32":
         try:
-            done = subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
-                                  capture_output=True, timeout=10)
+            from localm.sysprog import require_system
+            done = subprocess.run([require_system("taskkill"), "/F", "/T",
+                                   "/PID", str(pid)], capture_output=True, timeout=10,
+                                  stdin=subprocess.DEVNULL,
+                                  creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             if done.returncode == 0:
                 return
             if logger is not None:

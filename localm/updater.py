@@ -1496,52 +1496,69 @@ def _uv_for_deps(target: Path) -> str:
     Takes the uv the ``uv`` package installed into this environment
     (:func:`localm.uv_tool.bundled_uv`), else the install's own uv
     (:func:`localm.uv_tool.find_uv`); when there is neither, installs the pinned
-    uv into ``<target>/.uv``. Raises LocalmError, naming every place looked at
-    and why the install failed, when nothing works. Called before the swap, so
-    a refusal changes nothing."""
+    uv into :func:`localm.uv_tool.bootstrap_dest` (``<target>/.uv``, or the
+    Shared store for a Shared install). Raises LocalmError, naming every place
+    looked at and why the install failed, when nothing works. Called before the
+    swap, so a refusal changes nothing."""
     from localm import uv_tool
     from localm.bugreport import LocalmError
     found = uv_tool.own_uv(target)
     if found:
         return found
     searched = uv_tool.describe_search(target)
+    dest = uv_tool.bootstrap_dest(target)
     try:
-        installed = uv_tool.bootstrap_uv(target)
+        installed = uv_tool.bootstrap_uv(target, dest=dest)
         _record_contained_uv(target, installed)
         return str(installed)
     except uv_tool.UvBootstrapError as e:
         raise LocalmError(
             "this update needs uv to reinstall the dependencies, and uv could not be found or installed",
             reason=f"looked for uv in: {searched}. Installing the pinned uv into "
-                   f"{target / uv_tool.CONTAINED_DIR} failed: {e}") from None
+                   f"{dest} failed: {e}") from None
 
 
 def _record_contained_uv(target: Path, installed) -> None:
-    """Note the uv just installed in the install record, so uninstall removes it.
-    A record that cannot be written is logged and does not fail the update."""
+    """Note the uv just installed in the install record (``uv_dir`` when it lies
+    inside *target*, else ``uv_exe``), so it is found again and uninstall knows
+    it. A record that cannot be written is logged and does not fail the update."""
     try:
-        from localm import install_manifest
-        install_manifest.record(target, uv_dir=str(Path(installed).parent))
+        from localm import install_manifest, uv_tool
+        if uv_tool.is_inside(installed, target):
+            install_manifest.record(target, uv_dir=str(Path(installed).parent))
+        else:
+            install_manifest.record(target, uv_exe=str(installed))
     except (OSError, ValueError) as e:
         _apply_warn("installed uv into %s but could not note it in the install record: %s; "
                     "uninstall will not remove that folder", Path(installed).parent, e)
 
 
 def _deps_env(target: Path) -> dict:
-    """The environment for the dependency step: the current one, with uv's cache
-    and Python folders pointed at the install's own when it recorded them as
-    contained and the caller has not set them."""
-    import os
-    env = dict(os.environ)
+    """The environment for the dependency step: the current one without
+    inherited uv, pip and Python search settings (``config.isolated_tool_env``),
+    with uv's cache and Python folders pointed at the install's own store.
+
+    A Portable install (``runtime_contained``) uses its own ``.cache`` and
+    ``.python`` (the recorded folders when they lie inside *target*); any other
+    install uses the folders its record names. uv then uses only its managed
+    Pythons (``UV_PYTHON_PREFERENCE=only-managed``) when a Python folder is set."""
+    from localm import config
+    env = config.isolated_tool_env()
     try:
         from localm import install_manifest
         m = install_manifest.load(target) or {}
     except Exception:
         m = {}
-    if m.get("runtime_contained"):
-        for var, key in (("UV_CACHE_DIR", "cache_dir"), ("UV_PYTHON_INSTALL_DIR", "python_dir")):
-            if m.get(key) and var not in env:
-                env[var] = str(m[key])
+    for var, key in (("UV_CACHE_DIR", "cache_dir"), ("UV_PYTHON_INSTALL_DIR", "python_dir")):
+        value = str(m.get(key) or "")
+        if m.get("runtime_contained"):
+            own = target / install_manifest.RUNTIME_DIRS[key]
+            if not value or not install_manifest._inside(value, target):
+                value = str(own)
+        if value:
+            env[var] = value
+    if env.get("UV_PYTHON_INSTALL_DIR"):
+        env["UV_PYTHON_PREFERENCE"] = "only-managed"
     return env
 
 

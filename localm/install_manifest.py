@@ -57,6 +57,7 @@ MANIFEST_NAME = ".localm-install.json"
 PENDING_NAME = ".localm-uninstall-pending"
 JOURNAL_NAME = ".localm-setup-journal"
 SETUP_TMP_NAME = ".localm-setup-tmp"
+PORTABLE_TEMP_NAME = ".localm-tmp"
 DATA_MARKER = ".localm-data"
 HOME_CFG_NAME = "localm-home.cfg"
 PORTABLE_HOME = "home"
@@ -1399,6 +1400,11 @@ def _plan(root: Path, m: Optional[dict], *, purge_data: bool,
     scratch = root / SETUP_TMP_NAME
     if scratch.exists() or _is_link(scratch):
         items.append(_Item(scratch, "data-entry", "remove"))
+
+    # Temporary files a Portable install keeps in the folder while it runs.
+    run_tmp = root / PORTABLE_TEMP_NAME
+    if run_tmp.exists() or _is_link(run_tmp):
+        items.append(_Item(run_tmp, "data-entry", "remove"))
 
     # uv's own entries that point into this folder: PATH, shell files, receipt.
     uv_item = next((i for i in items if _same(i.path, root / ".uv")), None)

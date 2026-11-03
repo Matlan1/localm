@@ -273,6 +273,9 @@ LDD_OUTPUT = (
     "\tlibasound.so.2 => not found\n")
 
 
+_LDD = "/usr/bin/ldd"
+
+
 def _pretend_linux(monkeypatch, output: str):
     calls = []
 
@@ -280,8 +283,10 @@ def _pretend_linux(monkeypatch, output: str):
         calls.append(cmd)
         return subprocess.CompletedProcess(cmd, 0, stdout=output, stderr="")
 
+    from localm import sysprog
     monkeypatch.setattr(launch_errors, "sys", types.SimpleNamespace(platform="linux"))
     monkeypatch.setattr(launch_errors.subprocess, "run", fake_run)
+    monkeypatch.setattr(sysprog, "require_system", lambda name: _LDD if name == "ldd" else None)
     return calls
 
 
@@ -302,7 +307,7 @@ def test_every_library_ldd_reports_missing_is_named(tmp_path, monkeypatch):
     assert kind == launch_errors.MISSING_LIBRARIES
     assert "Missing: libnspr4.so, libnss3.so, libnssutil3.so, libasound.so.2." in message
     assert len(calls) == 1, "the same executable was inspected twice"
-    assert calls[0] == ["ldd", str(binary)]
+    assert calls[0] == [_LDD, str(binary)]
 
 
 def test_ldd_is_not_asked_about_a_file_that_is_not_there(tmp_path, monkeypatch):
@@ -355,7 +360,7 @@ def test_an_executable_path_with_spaces_is_inspected_whole(tmp_path, monkeypatch
 
     launch_errors.missing_libraries(raw)
 
-    assert calls == [["ldd", str(binary)]]
+    assert calls == [[_LDD, str(binary)]]
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="ldd is Linux only")

@@ -24,9 +24,10 @@ def test_a_system_folder_program_is_found_with_an_empty_path(tmp_path, monkeypat
     assert sysprog.find("tool") == str(want)
 
 
-def test_path_is_the_last_place_looked(tmp_path, monkeypatch):
+def test_path_is_the_last_place_looked_in_a_source_checkout(tmp_path, monkeypatch):
     on_path = _exe(tmp_path / "bin" / ("tool.exe" if sysprog.IS_WINDOWS else "tool"))
     monkeypatch.setattr(sysprog, "system_candidates", lambda name: [str(tmp_path / "none")])
+    monkeypatch.setattr(sysprog, "setup_install", lambda: False)
     monkeypatch.setenv("PATH", str(on_path.parent))
     found = sysprog.find("tool")
     assert found is not None and os.path.isabs(found) and Path(found).samefile(on_path)
@@ -53,36 +54,44 @@ def test_posix_sh_is_found_without_path(monkeypatch):
     assert found and os.path.isabs(found) and os.path.dirname(found) in sysprog.posix_system_dirs()
 
 
-def test_comfy_git_steps_report_a_missing_git_without_starting_anything(monkeypatch):
-    import subprocess
-
-    from localm.media import managed_comfy_provision as prov
-    monkeypatch.setattr(sysprog, "find", lambda name: None)
-    started = []
-    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: started.append(a))
-    ok, out = prov._run(prov.git_argv("status"))
-    assert not ok and "git was not found" in out and started == []
-
-
-def test_comfy_git_steps_run_git_by_its_full_path(monkeypatch, tmp_path):
-    from localm.media import managed_comfy_provision as prov
-    git = str(tmp_path / ("git.exe" if sysprog.IS_WINDOWS else "git"))
-    monkeypatch.setattr(sysprog, "find", lambda name: git if name == "git" else None)
-    assert prov.git_argv("-C", "x", "status") == [git, "-C", "x", "status"]
+def test_a_setup_install_never_takes_a_program_from_path(tmp_path, monkeypatch):
+    on_path = _exe(tmp_path / "bin" / ("tool.exe" if sysprog.IS_WINDOWS else "tool"))
+    monkeypatch.setattr(sysprog, "system_candidates", lambda name: [str(tmp_path / "none")])
+    monkeypatch.setattr(sysprog, "setup_install", lambda: True)
+    monkeypatch.setenv("PATH", str(on_path.parent))
+    assert sysprog.find("tool") is None
+    assert sysprog.find_system("tool") is None
+    with pytest.raises(FileNotFoundError, match="tool"):
+        sysprog.require_system("tool")
 
 
-def test_component_updates_raise_file_not_found_when_git_is_missing(monkeypatch, tmp_path):
-    from localm import updater_components as uc
-    monkeypatch.setattr(sysprog, "find", lambda name: None)
-    with pytest.raises(FileNotFoundError, match="git was not found"):
-        uc._git(tmp_path, "status")
+def test_a_gpu_driver_tool_comes_from_the_driver_folder_first(tmp_path, monkeypatch):
+    name = "nvidia-smi"
+    driver = _exe(tmp_path / "driver" / (name + (".exe" if sysprog.IS_WINDOWS else "")))
+    on_path = _exe(tmp_path / "bin" / driver.name)
+    monkeypatch.setattr(sysprog, "system_candidates", lambda n: [str(tmp_path / "none")])
+    monkeypatch.setattr(sysprog, "setup_install", lambda: True)
+    monkeypatch.setenv("PATH", str(on_path.parent))
+    monkeypatch.setattr(sysprog, "driver_candidates", lambda n: [str(driver)])
+    assert sysprog.find(name) == str(driver)
+    monkeypatch.setattr(sysprog, "driver_candidates", lambda n: [])
+    assert Path(sysprog.find(name)).samefile(on_path)
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="icacls is the Windows path")
+def test_the_driver_folders_name_only_driver_tools():
+    assert sysprog.driver_candidates("git") == []
+    assert sysprog.driver_candidates("taskkill") == []
+
+
+def test_setup_install_reads_the_install_record_beside_the_package():
+    root = Path(sysprog.__file__).resolve().parents[1]
+    assert sysprog.setup_install() == (root / ".localm-install.json").is_file()
+
+
 def test_restricting_a_file_without_icacls_reports_failure(monkeypatch, tmp_path):
     from localm import config
     target = tmp_path / "secret.key"
     target.write_text("x", encoding="utf-8")
-    monkeypatch.setattr(sysprog, "find", lambda name: None)
+    monkeypatch.setattr(sysprog, "find_system", lambda name: None)
     monkeypatch.setenv("USERNAME", "someone")
     assert config.restrict_file_perms(target) is False

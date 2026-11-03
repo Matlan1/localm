@@ -15,6 +15,7 @@ from collections import namedtuple
 from unittest.mock import patch
 
 from localm import sysstats
+from tests._sysprog_fakes import _nvidia_smi_found  # noqa: F401
 from localm.discover import FREE_SCOPE_DEVICE, GPU_PROBE_OK
 from localm.sysstats import _clamped_field_deltas, _CpuMeter, _cpu_ram, _vram
 

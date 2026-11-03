@@ -171,7 +171,8 @@ def _tail(text: str, limit: int = 600) -> str:
 
 def _run_pip(reqs: list, *, on_progress: ProgressCb = None):
     """Install *reqs* into the CURRENT interpreter's environment. Tries ``uv pip
-    install`` (the uv :func:`localm.uv_tool.find_uv` finds, run by full path) first, then ``pip``, streaming output to *on_progress*. Returns
+    install`` (the uv :func:`localm.uv_tool.uv_for_installs` returns, run by full
+    path) first, then ``pip``, streaming output to *on_progress*. Returns
     ``(ok, combined_output)``. ``--python sys.executable`` pins uv to this venv
     regardless of the ambient VIRTUAL_ENV.
 
@@ -180,7 +181,7 @@ def _run_pip(reqs: list, *, on_progress: ProgressCb = None):
     OUTSIDE the data dir when left to its default. See
     ``config.contained_pip_env``."""
     env = config.contained_pip_env()
-    uv = uv_tool.find_uv(uv_tool.install_root())
+    uv = uv_tool.uv_for_installs(uv_tool.install_root(), emit=lambda m: _emit(on_progress, m))
     attempts = [[sys.executable, "-m", "pip", "install", *reqs]]
     if uv:
         attempts.insert(0, [uv, "pip", "install", "--python", sys.executable, *reqs])

@@ -178,9 +178,10 @@ def parse_netstat(text: str) -> list:
 
 
 def _macos_listeners() -> Optional[list]:
+    from localm import sysprog
     try:
-        proc = subprocess.run(["netstat", "-an", "-p", "tcp"], capture_output=True,
-                              text=True, timeout=5)
+        proc = subprocess.run([sysprog.require_system("netstat"), "-an", "-p", "tcp"],
+                              capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.SubprocessError) as e:
         logger.debug("listeners: netstat unavailable: %s", e)
         return None
@@ -241,8 +242,10 @@ def parse_lsof_listen_owners(text: str) -> list:
 
 
 def _macos_listener_owners() -> Optional[list]:
+    from localm import sysprog
     try:
-        proc = subprocess.run(["lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-Fun"],
+        proc = subprocess.run([sysprog.require_system("lsof"), "-nP", "-iTCP",
+                               "-sTCP:LISTEN", "-Fun"],
                               capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.SubprocessError) as e:
         logger.debug("listeners: lsof unavailable: %s", e)

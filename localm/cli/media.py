@@ -42,10 +42,10 @@ def _open_file(path: Path) -> None:
     try:
         if sys.platform == "win32":
             _os.startfile(str(path))  # type: ignore[attr-defined]
-        elif sys.platform == "darwin":
-            _sp.Popen(["open", str(path)])
         else:
-            _sp.Popen(["xdg-open", str(path)])
+            from localm import sysprog
+            opener = "open" if sys.platform == "darwin" else "xdg-open"
+            _sp.Popen([sysprog.require_system(opener), str(path)])
     except Exception as e:
         console.print(f"[dim]Could not open it automatically: {escape(str(e))}[/dim]")
 

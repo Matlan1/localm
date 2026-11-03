@@ -1454,7 +1454,7 @@ def test_a_failed_taskkill_after_a_clock_step_is_not_an_identity_mismatch(
     handle_calls = []
 
     def _taskkill_exits_255(args, *a, **kw):
-        if args and args[0] == "taskkill":
+        if args and Path(str(args[0])).name.lower() == "taskkill.exe":
             return subprocess.CompletedProcess(
                 args, 255, b"", b"ERROR: There is no running instance of the task.")
         return real_run(args, *a, **kw)
