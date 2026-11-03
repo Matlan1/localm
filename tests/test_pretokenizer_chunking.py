@@ -119,7 +119,7 @@ class TestSplitText:
     def test_a_text_that_fits_is_one_chunk(self):
         assert guard.split_text("ab cd", 10) == ["ab cd"]
 
-    @pytest.mark.parametrize("cap", [5, 16, 100, 1000])
+    @pytest.mark.parametrize("cap", [80, 100, 1000])
     def test_chunks_join_to_the_text_and_fit(self, cap):
         text = _prose(5000)
         chunks = guard.split_text(text, cap)

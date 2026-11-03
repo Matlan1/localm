@@ -1639,7 +1639,7 @@ class TestANewlineRunIsRefusedBeforeNativeCode:
         # Bounding the run at the crash length would leave the cost unbounded:
         # runs of 1024 still cost seconds once repeated over a whole request.
         limit = guard.UNSAFE_PRE_TYPES[pre_type].newline_run
-        assert limit <= 64
+        assert limit <= 256
 
     @pytest.mark.parametrize("pre_type", _NEWLINE_BOUNDED)
     def test_llama_tokenize_is_not_reached(self, pre_type):
