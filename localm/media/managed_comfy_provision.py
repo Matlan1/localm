@@ -7,7 +7,7 @@ Builds a managed ComfyUI by REPLICATING a user's existing ComfyUI stack:
   1. Read the user's ComfyUI repo state: its git commit when comfy_workdir is a git
      checkout (else a version marker), plus a pip-freeze of THEIR venv (which pins
      the exact torch build via its local version label).
-  2. Provision localm's managed ComfyUI under <LOCALM_HOME>/comfyui: clone that same
+  2. Provision localm's managed ComfyUI under <LOCALM_HOME>/comfyui: copy that same
      commit, create a FRESH localm venv, and pip-install the SAME versions into it.
      The user's venv is never byte-copied: venvs are not portable (absolute paths in
      pyvenv.cfg / Scripts launchers, platform wheels).
@@ -15,7 +15,7 @@ Builds a managed ComfyUI by REPLICATING a user's existing ComfyUI stack:
   4. Models are shared via S1's extra_model_paths.yaml: the managed ComfyUI sees the
      user's models dir AND localm's managed models dir, no copy.
 
-The user's own ComfyUI is READ ONLY here - cloned/frozen, never modified. When no
+The user's own ComfyUI is READ ONLY here - copied/frozen, never modified. When no
 usable user ComfyUI exists, this module is not used: the setup dispatcher
 (managed_comfy_fresh.setup_managed_comfy) runs the FRESH hardware-matched install
 (stage S3, managed_comfy_fresh.py) instead.
@@ -38,6 +38,7 @@ from localm.config import load_config
 from localm.debuglog import logger
 from localm.media import managed_comfy as mc
 from localm.media.comfy_patches import apply_patches as _apply_localm_patches
+from localm.media import source_archive
 
 
 class ProgressEvent(str):
@@ -79,8 +80,8 @@ ProgressCb = Optional[Callable[[ProgressEvent], None]]
 MARKER_FILENAME = ".localm-comfy.json"
 
 # Dirs that are the user's DATA / ENV, never part of the ComfyUI source to replicate.
-# Used only on the non-git copy fallback; a git clone already excludes these via the
-# user's .gitignore.
+# Used only on the non-git copy fallback; the git-checkout copy takes only tracked
+# files, which already excludes these via the user's .gitignore.
 _NON_SOURCE_DIRS = (
     "venv", ".venv", "models", "custom_nodes", "output", "input", "temp",
     "__pycache__", ".git",
@@ -112,7 +113,7 @@ class UserComfyStack:
     """A user's existing ComfyUI, discovered and ready to replicate."""
     workdir: Path
     venv_python: Path
-    commit: Optional[str]        # git rev-parse HEAD, or None when not a git checkout
+    commit: Optional[str]        # the git checkout's HEAD, or None when not a git checkout
     version_marker: str          # "git:<sha>" | "comfyui_version:<v>" | "unknown"
 
 
@@ -178,7 +179,7 @@ def _isolated_env() -> dict:
     Left unset, that child's pip caches to the per-user default OUTSIDE the data dir.
     This is THE choke point: every pip subprocess in both provisioning paths (``_run``
     here and in managed_comfy_fresh, which imports it, plus ``read_user_freeze`` below)
-    builds its env from this function. The git/venv subprocesses that also run through
+    builds its env from this function. The venv subprocesses that also run through
     here ignore it.
 
     ``subprocess.run`` inherits the full parent environment by default, and
@@ -193,21 +194,12 @@ def _isolated_env() -> dict:
     return env
 
 
-def git_argv(*args: str) -> list:
-    """``git`` *args* as an argv, git named by its full path
-    (:func:`localm.sysprog.find`). The program is ``""`` when git is not
-    installed; :func:`_run` reports that without starting anything."""
-    from localm import sysprog
-    return [sysprog.find("git") or "", *args]
-
-
 def _run(cmd: list, *, cwd: Optional[Path] = None, on_progress: ProgressCb = None,
          timeout: Optional[int] = None) -> tuple[bool, str]:
     """Run *cmd*, streaming its combined output to *on_progress* AS EACH LINE ARRIVES
     (not only after the whole command exits). This is the one shared helper behind
-    every git/pip/venv step in both provisioning pipelines and `comfy update`, where a
-    single step can be a multi-minute `pip install` of a hardware-matched torch wheel
-    or a full `git clone`.
+    every pip/venv step in both provisioning pipelines and `comfy update`, where a
+    single step can be a multi-minute `pip install` of a hardware-matched torch wheel.
 
     A missing executable or a timeout is still a clean (False, reason), never a
     raise - the caller turns it into an honest ProvisionResult. Runs with
@@ -220,8 +212,6 @@ def _run(cmd: list, *, cwd: Optional[Path] = None, on_progress: ProgressCb = Non
     and calls the best-effort progress sink (``_emit``, which never raises); the
     timeout is enforced in THIS thread via ``proc.wait(timeout=...)``, so a hung child
     is killed."""
-    if not cmd[0]:
-        return False, "git was not found in the system folders or on PATH; install git and try again"
     _emit(on_progress, "$ " + " ".join(str(c) for c in cmd))
     try:
         proc = subprocess.Popen(
@@ -270,30 +260,10 @@ def _find_user_venv_python(workdir: Path) -> Optional[Path]:
 
 def read_user_comfy_commit(workdir: Path) -> Optional[str]:
     """The user ComfyUI's HEAD commit, or None when *workdir* is not the root of its
-    OWN git checkout. Verifies the repo toplevel IS *workdir* first, so a ComfyUI that
-    merely sits inside some other git repo is treated as non-git (we must not clone the
-    wrong outer repo)."""
-    def _g(*args: str) -> Optional[str]:
-        argv = git_argv("-C", str(workdir), *args)
-        if not argv[0]:
-            return None
-        try:
-            p = subprocess.run(argv,
-                               capture_output=True, text=True, timeout=15,
-                               encoding="utf-8", errors="replace")
-        except (FileNotFoundError, OSError, subprocess.SubprocessError):
-            return None
-        return p.stdout.strip() if p.returncode == 0 else None
-
-    top = _g("rev-parse", "--show-toplevel")
-    if not top:
-        return None
-    try:
-        if Path(top).resolve() != Path(workdir).resolve():
-            return None
-    except OSError:
-        return None
-    return _g("rev-parse", "HEAD") or None
+    OWN git checkout (a ComfyUI that merely sits inside some other git repo is
+    treated as non-git). Read from the checkout's ``.git`` folder with no git
+    program (:func:`localm.media.source_archive.git_head`)."""
+    return source_archive.git_head(Path(workdir))
 
 
 def _version_marker(workdir: Path, commit: Optional[str]) -> str:
@@ -449,23 +419,33 @@ def _unresolvable_packages(pip_output: str) -> list:
 
 def _clone_source(user_workdir: Path, managed_root: Path, commit: str,
                   on_progress: ProgressCb) -> tuple[bool, str]:
-    """Local git clone of the user's ComfyUI into *managed_root*, then pin the exact
-    commit. A local clone is offline and brings ONLY tracked source - the user's
-    .gitignore keeps venv/models/custom_nodes/outputs out - so the managed checkout
-    is a clean copy at the same history, without dragging the un-portable venv."""
-    # core.longpaths: without it, a deeply-nested LOCALM_HOME (a long username, a
-    # OneDrive-redirected profile, a nested custom data dir) can push a pack
-    # object's path past Windows' legacy 260-char MAX_PATH, failing clone with
-    # "Filename too long" / "invalid index-pack output".
-    # A per-invocation -c override, not a global git config change.
-    ok, out = _run(git_argv("-c", "core.longpaths=true", "clone", "--quiet",
-                    str(user_workdir), str(managed_root)),
-                   on_progress=on_progress, timeout=600)
-    if not ok:
-        return False, out
-    ok2, out2 = _run(git_argv("-C", str(managed_root), "checkout", "--quiet", commit),
-                     on_progress=on_progress, timeout=120)
-    return ok2, out + "\n" + out2
+    """Copy the files the user's ComfyUI git checkout tracks (its index, read with
+    no git program) into *managed_root* and record *commit* as the tree's commit.
+    Only tracked source is copied - the user's .gitignore keeps venv/models/
+    custom_nodes/outputs out - and the copy is offline. A tracked file the user
+    edited is copied as it is on disk."""
+    files = source_archive.git_tracked_files(Path(user_workdir))
+    if files is None:
+        return False, f"could not read the git index of {user_workdir}"
+    staging = managed_root.with_name(managed_root.name + ".copying")
+    try:
+        shutil.rmtree(staging, ignore_errors=True)
+        copied = []
+        for rel in files:
+            src = Path(user_workdir) / rel
+            if not src.is_file():
+                continue
+            dst = staging / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            copied.append(rel)
+        staging.mkdir(parents=True, exist_ok=True)
+        source_archive.write_record(staging, str(user_workdir), commit, copied)
+        os.replace(staging, managed_root)
+    except OSError as e:
+        shutil.rmtree(staging, ignore_errors=True)
+        return False, str(e)
+    return True, f"copied {len(copied)} tracked files of {commit[:12]} to {managed_root}"
 
 
 def _copytree_source(user_workdir: Path, managed_root: Path,
@@ -606,7 +586,7 @@ def _write_marker(managed_root: Path, stack: UserComfyStack,
 def provision_by_copy(stack: UserComfyStack, cfg: Optional[dict] = None, *,
                       copy_custom_nodes: bool,
                       on_progress: ProgressCb = None) -> ProvisionResult:
-    """Replicate *stack* into localm's managed ComfyUI dir. Steps: clone the source
+    """Replicate *stack* into localm's managed ComfyUI dir. Steps: copy the source
     at the same commit, make a fresh venv, install the same packages, optionally copy
     custom nodes, write extra_model_paths.yaml, drop a provenance marker, and verify
     the result actually reads as installed. Returns an honest ProvisionResult; a
@@ -650,7 +630,7 @@ def provision_by_copy(stack: UserComfyStack, cfg: Optional[dict] = None, *,
     try:
         # 1) Source at the same commit.
         if stack.commit:
-            _say(f"Cloning your ComfyUI ({stack.commit[:12]}) into {root} ...",
+            _say(f"Copying your ComfyUI ({stack.commit[:12]}) into {root} ...",
                 phase="clone")
             ok, out = _clone_source(stack.workdir, root, stack.commit, on_progress)
         else:

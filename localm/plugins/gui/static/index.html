@@ -194,6 +194,7 @@
                     title="Enter to send · Shift+Enter for a new line" data-i18n-title="chat.inputTitle"></textarea>
           <button class="send" id="chat-send" data-icon="send" title="Send" data-i18n-title="chat.send"></button>
         </div>
+        <div id="pin-mismatch" class="pin-mismatch" role="status" hidden></div>
         <div class="composer-row">
           <span>
             <button id="toggle-params" class="composer-action" data-i18n="chat.parameters"><span class="btn-ic" data-icon="sliders"></span>parameters</button>
@@ -1140,7 +1141,7 @@
                 <button class="btn-secondary" id="bug-retry" hidden data-i18n="settings.bug.retryButton">Retry send</button>
                 <button class="btn-secondary" id="bug-download" hidden data-i18n="settings.bug.downloadButton">Download report</button>
               </div>
-              <div id="bug-result" class="sub" hidden></div>
+              <div id="bug-result" class="sub" role="status" aria-live="polite" hidden></div>
               <!-- Shown by "Send to maintainer": the saved report's full text.
                    Nothing is sent until bug-confirm-send is pressed. -->
               <div id="bug-review" hidden>
@@ -1195,7 +1196,7 @@
                   <button class="btn-secondary" id="update-check" data-i18n="settings.update.checkButton">Check for updates</button>
                   <button class="btn-primary" id="update-apply" hidden data-i18n="settings.update.applyButton">Update now</button>
                 </div>
-                <div id="update-status" class="sub" hidden></div>
+                <div id="update-status" class="sub" role="status" aria-live="polite" hidden></div>
                 <!-- The offered release's notes, rendered by renderUpdateNotes
                      (pages/models.js) through the sanitizing Markdown path. -->
                 <div id="update-notes" class="update-notes" hidden></div>
@@ -1230,7 +1231,7 @@
                     <button class="btn-secondary" id="update-install-version" data-i18n="settings.update.installVersionButton">Install this version</button>
                   </div>
                 </div>
-                <div id="update-version-status" class="sub" hidden></div>
+                <div id="update-version-status" class="sub" role="status" aria-live="polite" hidden></div>
               </div>
 
               <!-- The GUI half of `localm update --rollback`. Its OWN sub-block, not
@@ -1248,7 +1249,7 @@
                 <div class="actions">
                   <button class="btn-secondary" id="update-rollback" data-i18n="settings.rollback.rollbackButton">Roll back</button>
                 </div>
-                <div id="update-rollback-status" class="sub" hidden></div>
+                <div id="update-rollback-status" class="sub" role="status" aria-live="polite" hidden></div>
               </div>
 
               <!-- The GUI form of `localm make-launcher`. Its OWN sub-block, not part
@@ -1267,7 +1268,7 @@
                 <div class="actions">
                   <button class="btn-secondary" id="rebuild-launcher" data-i18n="settings.launcher.rebuildButton">Rebuild launcher</button>
                 </div>
-                <div id="rebuild-launcher-status" class="sub" hidden></div>
+                <div id="rebuild-launcher-status" class="sub" role="status" aria-live="polite" hidden></div>
               </div>
 
               <!-- The inference runtime: install it, switch backend, or move to a
@@ -1286,7 +1287,6 @@
                 backend, or install one on a machine that has none yet. You always start it -
                 it never re-provisions on its own. A build that fails to load on this machine
                 is never kept: setup-llama walks back to an older one that does.</div>
-                <div id="runtime-update-status" class="sub" hidden></div>
                 <div id="runtime-choice" class="key-warn" hidden>
                   <span id="runtime-choice-text"></span>
                   <div class="actions">
@@ -1330,7 +1330,8 @@
                        on neither of them and needs no field filled in first. -->
                   <button class="btn-secondary" id="runtime-rollback" hidden data-i18n="settings.runtime.rollbackButton">Roll back</button>
                 </div>
-                <div id="runtime-rollback-status" class="sub" hidden></div>
+                <div id="runtime-update-status" class="sub" role="status" aria-live="polite" hidden></div>
+                <div id="runtime-rollback-status" class="sub" role="status" aria-live="polite" hidden></div>
                 <pre id="runtime-update-log" class="comfy-managed-log" style="display:none"></pre>
               </div>
             </section>
@@ -1358,7 +1359,7 @@
               <div class="actions">
                 <button class="btn-secondary" id="doctor-run" data-i18n="settings.diagnostics.runButton">Run diagnostics</button>
               </div>
-              <div id="doctor-status" class="sub" hidden></div>
+              <div id="doctor-status" class="sub" role="status" aria-live="polite" hidden></div>
               <div id="doctor-checks" class="doctor-checks"></div>
             </section>
 
@@ -1382,7 +1383,7 @@
               <div class="actions">
                 <button class="btn-secondary" id="logs-export" data-i18n="settings.logs.exportButton">Export logs to a folder…</button>
               </div>
-              <div id="logs-result" class="sub" hidden></div>
+              <div id="logs-result" class="sub" role="status" aria-live="polite" hidden></div>
             </section>
 
             <section class="card settings-section" id="sec-uploads" data-group="system" data-sec-label="Upload files">
@@ -1398,7 +1399,7 @@
                 <button class="btn-primary" id="upload-send" data-i18n="settings.uploads.uploadButton">Upload</button>
               </div>
               <div id="upload-selected" class="sub"></div>
-              <div id="upload-result" class="sub" hidden></div>
+              <div id="upload-result" class="sub" role="status" aria-live="polite" hidden></div>
               <ul id="upload-list" class="upload-list"></ul>
             </section>
           </div>

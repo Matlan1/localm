@@ -469,6 +469,9 @@ class TestMemoryInletAnnouncesRecall:
         order = []
 
         class _Store:
+            def all(self):
+                return [object()]
+
             def recall(self, query, **kw):
                 order.append("recall")
                 return []
@@ -492,6 +495,9 @@ class TestMemoryInletAnnouncesRecall:
         order = []
 
         class _Store:
+            def all(self):
+                return [object()]
+
             def recall(self, query, **kw):
                 order.append("recall")
                 return []

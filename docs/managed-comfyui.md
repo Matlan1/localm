@@ -36,7 +36,8 @@ localm comfy setup                 # provision localm's own ComfyUI - media rout
 
 - **Copy your stack.** If you already have a working ComfyUI (`comfy_workdir` set,
   with a venv under it), localm replicates it: it reads your ComfyUI repo commit
-  and a freeze of your ComfyUI venv, clones that same commit into the data folder,
+  and a freeze of your ComfyUI venv, copies the files your checkout tracks at that
+  commit into the data folder,
   makes a **fresh** localm venv, and installs the same package versions. It does
   not byte-copy your venv (venvs are not portable). You are asked before any of
   your custom nodes are copied, since a clean ComfyUI is a legitimate choice; pass
@@ -49,7 +50,8 @@ localm comfy setup                 # provision localm's own ComfyUI - media rout
   folder setting (Settings -> Media, or `comfy_workdir` in config) and run `localm
   comfy setup` again to install the fresh, hardware-matched path below instead.
 - **Fresh, hardware-matched install.** If you have no ComfyUI to copy, localm
-  installs one: it clones a pinned ComfyUI version, makes a localm venv, installs
+  installs one: it downloads a pinned ComfyUI version from GitHub (no git needed),
+  makes a localm venv, installs
   the PyTorch build for your GPU (the same hardware detection that picks your
   llama.cpp backend selects the torch variant: CUDA for NVIDIA, ROCm for AMD, XPU
   for Intel, CPU otherwise - CPU torch runs but is impractically slow for the
@@ -208,9 +210,10 @@ localm comfy update --reinstall-requirements # also refresh ComfyUI's Python dep
 localm comfy update --commit <sha>           # advanced: test a specific commit first
 ```
 
-Update is safe: on any failure it rolls the managed ComfyUI back to its previous
-version with git. It only touches the managed instance. By default it stays within
-that git rollback and does not reinstall ComfyUI's Python requirements (a partial
+Update is safe: it downloads the new ComfyUI source from GitHub (no git needed),
+and on any failure it puts every source file it changed back, returning the managed
+ComfyUI to its previous version. It only touches the managed instance. By default it
+stays within that source rollback and does not reinstall ComfyUI's Python requirements (a partial
 dependency upgrade cannot be rolled back exactly); pass `--reinstall-requirements`
 when a new pin changed them.
 
