@@ -748,8 +748,14 @@ def scan_hub_cache(d: Path) -> Optional[HubCacheScan]:
 _GGUF_EMBEDDING_ARCHITECTURES = frozenset({
     "bert", "modern-bert", "nomic-bert", "nomic-bert-moe", "neo-bert",
     "jina-bert-v2", "jina-bert-v3", "eurobert", "gemma-embedding",
-    "t5encoder", "llama-embed", "gemma-embedding2",
+    "llama-embed", "gemma-embedding2",
 })
+
+# Encoder-only architectures that are the text encoder of an image, video or
+# music model unless the file also carries a pooling configuration, which marks
+# a retrieval embedder (see gguf_embedding_signal). Read by
+# localm.discover.classify_hf_metadata as well.
+GGUF_TEXT_ENCODER_ARCHITECTURES = frozenset({"t5encoder"})
 
 # llama.cpp's diffusion language models: chat models that denoise a whole reply
 # canvas with bidirectional attention instead of decoding token by token, and
@@ -796,6 +802,9 @@ _GGUF_IMAGE_ARCHITECTURES = frozenset({
 })
 _GGUF_NON_CHAT_ARCHITECTURES.update(
     {arch: "an image or video generation model" for arch in _GGUF_IMAGE_ARCHITECTURES})
+_GGUF_NON_CHAT_ARCHITECTURES.update(
+    {arch: "a text encoder for image, video and music generation"
+     for arch in GGUF_TEXT_ENCODER_ARCHITECTURES})
 
 # general.architecture values of the ACE-Step music generation components
 # (acestep.cpp's converter), each with its registry type.
@@ -803,7 +812,7 @@ _GGUF_MUSIC_ARCHITECTURES = {
     "acestep-dit": "diffusion-unet",
     "acestep-vae": "vae",
     "acestep-text-enc": "text-encoder",
-    "acestep-lm": "unknown",
+    "acestep-lm": "planner",
 }
 _GGUF_NON_CHAT_ARCHITECTURES.update(
     {arch: "a music generation model component" for arch in _GGUF_MUSIC_ARCHITECTURES})
@@ -813,10 +822,15 @@ def gguf_non_chat_model_type(architecture: Optional[str]) -> Optional[str]:
     """The registry type for a GGUF whose ``general.architecture`` is not a chat
     model (``diffusion-unet`` for image/video checkpoints, the component's type
     for ACE-Step music components, ``tts`` for the text-to-speech models localm
-    synthesizes with, ``unknown`` for the other non-chat roles), or None when it
-    may be a chat model."""
+    synthesizes with, ``text-encoder`` for an encoder-only T5/UMT5 text encoder,
+    ``planner`` for the ACE-Step planner, ``unknown`` for the other non-chat
+    roles), or None when it may be a chat
+    model. A text-encoder architecture that carries a pooling configuration is an
+    embedding model: callers check ``gguf_embedding_signal`` first."""
     if architecture in _GGUF_IMAGE_ARCHITECTURES:
         return "diffusion-unet"
+    if architecture in GGUF_TEXT_ENCODER_ARCHITECTURES:
+        return "text-encoder"
     if architecture in _GGUF_MUSIC_ARCHITECTURES:
         return _GGUF_MUSIC_ARCHITECTURES[architecture]
     if architecture in GGUF_TTS_ARCHITECTURES:
@@ -2277,7 +2291,8 @@ def _gguf_metadata_probe(path: Path) -> dict:
             # precede the tokenizer arrays remain worth reading.
             if (key.startswith("tokenizer.ggml.")
                     and (has_pooling_type
-                         or architecture in _GGUF_EMBEDDING_ARCHITECTURES)):
+                         or architecture in _GGUF_EMBEDDING_ARCHITECTURES
+                         or architecture in GGUF_TEXT_ENCODER_ARCHITECTURES)):
                 break
             (vtype,) = struct.unpack_from("<I", buf, off)
             off += 4

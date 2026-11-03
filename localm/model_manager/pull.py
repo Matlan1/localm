@@ -2150,7 +2150,8 @@ def _non_chat_detection_note(architecture) -> str:
 
 
 _MEDIA_TYPE_WORDS = {"lora": "a LoRA", "diffusion-unet": "an image or video diffusion model",
-                     "vae": "a VAE", "text-encoder": "a text encoder",
+                     "vae": "a VAE", "text-encoder": "a text encoder", "vocoder": "a vocoder",
+                     "planner": "a music planner model",
                      "controlnet": "a ControlNet", "textual-inversion": "a textual-inversion embedding",
                      "upscaler": "an upscaler"}
 
@@ -2474,6 +2475,7 @@ def _pull_gguf_file(
                                  mmproj=mmproj_path, architecture=gguf_meta.get("architecture"),
                                  expert_count=gguf_meta.get("expert_count"),
                                  refresh=_revision_record_differs(model_name, revision),
+                                 type_user_set=not type_is_auto,
                                  **_register_revision(revision))
         return True
 
@@ -2704,6 +2706,7 @@ def _pull_gguf_file(
                   sha256=verify_digest, model_type=reg_type, mmproj=mmproj_path,
                   architecture=gguf_meta.get("architecture"),
                   expert_count=gguf_meta.get("expert_count"),
+                  type_user_set=not type_is_auto,
                   **_register_revision(revision))
         # model_name is _sanitize_name()-derived (A-Za-z0-9._- only) and is
         # escaped anyway.

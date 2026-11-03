@@ -182,6 +182,11 @@ export const I18N_EN = {
     "Knowledge - ground replies in an indexed collection (manage on the Knowledge page)",
   "chat.maxTokens": "Max tokens",
   "chat.memory": "Memory - remind the model what it knows about you",
+  "chat.memory.exists": "Already in memory: {text}",
+  "chat.memory.full": "Memory is full, so this was not saved. Delete a fact in Memory first.",
+  "chat.memory.off": "Not saved: memory is off (privacy mode, or the memory switch is off).",
+  "chat.memory.saveFailed": "Could not save this to memory.",
+  "chat.memory.saved": "Saved to memory: {text}",
   "chat.memory.title":
     "Recalls facts localm has learned about you and adds them to the prompt. Add facts with /remember, view/edit with /memory. Blocked in privacy mode.",
   "chat.mic":
@@ -1460,6 +1465,10 @@ export const I18N_EN = {
   "models.sizeUnknown": "size unknown",
   "models.splitHint":
     "may not fit on one GPU, but may fit split across your {count} GPUs - see Settings > Split across GPUs",
+  "models.search.clear": "Clear search",
+  "models.search.label": "Search your models",
+  "models.search.noMatch": "No models match \"{query}\"",
+  "models.search.placeholder": "Search your models…",
   "models.switch.confirmLabel": "Switch anyway",
   "models.switch.confirmTitle": "Confirm model switch",
   "models.switch.mmapFromDisk": "running from disk-backed memory, first tokens slower",
@@ -1478,6 +1487,10 @@ export const I18N_EN = {
   "models.tag.loaded": "loaded",
   "models.tag.missing": "missing",
   "models.title": "Models",
+  "models.partOf": "part of {model}",
+  "models.typeHint.planner": "Planner (language model used by music models)",
+  "models.typeHint.textEncoder": "Text encoder (used by image and video models)",
+  "models.typeHint.vocoder": "Vocoder (turns music latents into audio)",
   "models.typeSelect.ariaLabel": "Model type for {name}",
   "models.typeSelect.notSet": "not set",
   "models.typeSelect.titleChange": "Change this model's type",
@@ -2599,13 +2612,16 @@ export const I18N_EN = {
 
   // ---- Settings > Issues ----
   "settings.issues.title": "Issues",
-  "settings.issues.help": "Open and resolved issues for this project (read-only) - see whether a bug you reported has been fixed.",
+  "settings.issues.help": "The bug reports you sent from this install (read-only) - see whether one has been fixed.",
   "settings.issues.refreshButton": "Refresh",
   "settings.issues.loading": "Loading ...",
   "settings.issues.loadError": "Could not load: {error}",
-  "settings.issues.emptyTitle": "No open issues",
-  "settings.issues.emptyBody": "Reported bugs that are still open show up here.",
-  "settings.issues.openSuffix": " (open)",
+  "settings.issues.emptyTitle": "No reports sent from this install",
+  "settings.issues.emptyBody": "Bugs you report from here show up on this list.",
+  "settings.issues.openSuffix": " (view)",
+  "settings.issues.allLink": "All issues on GitHub",
+  "settings.issues.rowError": "(could not check: {error})",
+  "settings.issues.sessionOnly": "Privacy mode: this list is kept only until localm quits.",
   "settings.issues.loadFailed": "Could not load issues: {message}",
 
   // ---- Settings > Logs ----
