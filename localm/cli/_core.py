@@ -548,7 +548,7 @@ def _finish_pending_runtime_update(command) -> None:
             found = updater_runtime.catch_up()
             if found is None:
                 return
-            if found["current"] == found["target"]:
+            if found.get("kernel_packs"):
                 console.print(f"[dim]This localm release {escape(str(found['note']))} "
                               "...[/dim]")
             else:

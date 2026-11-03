@@ -273,6 +273,34 @@ def test_blas_does_not_require_packs_without_rocm_kpack(tmp_path):
     assert setup_llama.blas_kernel_problems(d) == []
 
 
+@pytest.mark.parametrize("archive_packs", [True, False])
+def test_provisioning_copies_kernel_packs_and_marks_the_runtime(tmp_path, archive_packs):
+    """The kernel packs are copied with their folder, and a runtime with
+    rocm_kpack gets the marker that stops the updater re-provisioning it for
+    packs, also when the archive brought none."""
+    src = _install(tmp_path / "src", ["llama.dll", "rocblas.dll", "rocm_kpack.dll"],
+                   {"rocblas/library": 1})
+    if archive_packs:
+        _kpacks(src, ["blas_lib_gfx1030.kpack"])
+    dst = tmp_path / "dst"
+    dst.mkdir()
+    setup_llama._copy_binaries(src, dst)
+    assert (dst / ".kpack" / "blas_lib_gfx1030.kpack").is_file() is archive_packs
+    assert (dst / setup_llama.KERNEL_PACKS_MARKER).is_file()
+    assert setup_llama.kernel_packs_missing(dst) is False
+    (dst / setup_llama.KERNEL_PACKS_MARKER).unlink()
+    assert setup_llama.kernel_packs_missing(dst) is not archive_packs
+
+
+def test_provisioning_without_rocm_kpack_writes_no_marker(tmp_path):
+    src = _install(tmp_path / "src", ["llama.dll", "ggml-vulkan.dll"])
+    dst = tmp_path / "dst"
+    dst.mkdir()
+    setup_llama._copy_binaries(src, dst)
+    assert not (dst / setup_llama.KERNEL_PACKS_MARKER).exists()
+    assert setup_llama.kernel_packs_missing(dst) is False
+
+
 def test_blas_ignores_a_path_that_is_not_a_directory(tmp_path):
     f = tmp_path / "not-a-dir"
     f.write_bytes(b"\x00")

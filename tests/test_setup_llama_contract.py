@@ -666,7 +666,7 @@ def test_windows_amd_rocm_provision_keeps_blas_kernel_layout(world, pin, note):
               f"CPU backend: ggml-cpu-haswell from llama.cpp {sl._ROCM_CPU_TAG} (SIMD), "
               "replacing the amd-rocm build's own", "OK - amd-rocm runtime loads on this machine.")
     assert world.files() == [".kpack/blas_lib_gfx1030.kpack", ".localm-backend",
-                             ".localm-cpu-overlay", "LICENSE.llama-cpp",
+                             ".localm-cpu-overlay", ".localm-kernel-packs", "LICENSE.llama-cpp",
                              "ggml-cpu.dll", "ggml-hip.dll", "libomp.dll", "llama.dll",
                              "rocblas.dll", "rocblas/library/Kernels.so-000-gfx1030.hsaco",
                              "rocblas/library/TensileLibrary_gfx1030.dat", "rocm_kpack.dll"]

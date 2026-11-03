@@ -149,8 +149,8 @@ def test_amd_rocm_at_the_pin_without_kernel_packs_is_reprovisioned(tmp_path, cfg
     inst = _tree(tmp_path / "inst")
     _without_kernel_packs(_provision(inst, "amd-rocm", "b1355-cpu-b11908"))
     p = updater_runtime.plan(_tree(tmp_path / "s"), inst)
-    assert (p["reprovision"], p["current"], p["target"]) == (
-        True, "b1355-cpu-b11908", "b1355-cpu-b11908")
+    assert (p["reprovision"], p["kernel_packs"], p["current"], p["target"]) == (
+        True, True, "b1355-cpu-b11908", "b1355-cpu-b11908")
     assert p["note"] == ("re-provisions the amd-rocm runtime b1355-cpu-b11908 to add the "
                          "ROCm kernel packs an earlier setup left out")
 
@@ -169,7 +169,15 @@ def test_amd_rocm_at_the_pin_with_its_kernel_packs_needs_nothing(tmp_path, cfg, 
     elif state == "marker":
         (lib / ".localm-kernel-packs").write_text("1\n", encoding="utf-8")
     p = updater_runtime.plan(_tree(tmp_path / "s"), inst)
-    assert p["reprovision"] is False and p["note"] is None
+    assert p["reprovision"] is False and p["note"] is None and p["kernel_packs"] is False
+
+
+def test_an_older_build_without_kernel_packs_names_the_build_change(tmp_path, cfg):
+    inst = _tree(tmp_path / "inst", _PINS_031)
+    _without_kernel_packs(_provision(inst, "amd-rocm", "b1349-cpu-b11719"))
+    p = updater_runtime.plan(_tree(tmp_path / "s"), inst)
+    assert (p["reprovision"], p["kernel_packs"]) == (True, False)
+    assert "b1349-cpu-b11719 to b1355-cpu-b11908" in p["note"]
 
 
 def test_a_user_pin_is_kept_and_named(tmp_path, cfg):
