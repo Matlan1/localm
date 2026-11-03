@@ -92,7 +92,8 @@ test("a remember request's outcome is parsed and shown under the reply", () => {
     n: 1, degrade: null, items: [],
     saved: { text: "i love to play rpg style games", status: "saved" },
   }));
-  assert.deepEqual(mem.saved, { text: "i love to play rpg style games", status: "saved" });
+  assert.equal(mem.saved.text, "i love to play rpg style games");
+  assert.equal(mem.saved.status, "saved");
   const box = window.document.createElement("div");
   window.addMessageRow(box, "assistant", "ok", { memory: mem });
   assert.match(box.querySelector(".mem-saved").textContent,

@@ -181,6 +181,18 @@ def test_privacy_mode_writes_nothing_and_never_calls_the_model(tmp_path, monkeyp
     assert json.loads(chat.headers["X-Localm-Memory"])["saved"]["status"] == "off"
 
 
+def test_privacy_mode_never_stores_a_remember_request(tmp_path, monkeypatch):
+    script = Script()
+    app, hdr = _make(tmp_path, monkeypatch, script, mode="privacy")
+    with TestClient(app) as c:
+        chat = c.post("/v1/chat/completions", json={
+            "model": "m", "messages": [{"role": "user",
+                                        "content": "remember that i love rpg games"}]})
+    assert chat.status_code == 200
+    assert not (tmp_path / "memory").exists() or not _store(tmp_path).all()
+    assert json.loads(chat.headers["X-Localm-Memory"])["saved"]["status"] == "off"
+
+
 def test_the_conversation_text_keeps_the_users_words_and_drops_the_rest():
     long_reply = "x" * 5000
     rows = [{"role": "user", "content": "remember that i love rpg games"},

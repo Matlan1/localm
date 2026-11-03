@@ -82,7 +82,7 @@ test("Synthesize now sends the conversation on screen, not web results or reason
       { role: "user", content: "web result text", origin: "tool" },
       { role: "user", content: "attached doc", tag: "doc" },
     ] }];
-    chat.currentId = "c1";
+    chat.activeId = "c1";
   `);
   await window.synthesizeMemoryNow({ textContent: "" });
   assert.equal(bodies.length, 1);
