@@ -521,6 +521,8 @@ def main() -> None:
     command = click.get_current_context().invoked_subcommand
     _finish_pending_runtime_update(command)
     _finish_pending_component_update(command)
+    import os
+    os.environ.pop("LOCALM_UPDATE_STEPS_DONE", None)
 
 
 def _finish_pending_runtime_update(command) -> None:
@@ -528,14 +530,16 @@ def _finish_pending_runtime_update(command) -> None:
     the runtime re-provision the last update left pending, or one
     ``updater_runtime.catch_up`` finds needed because the installed runtime is
     not the build this release pins (``updater_runtime.finish_pending``), and
-    print its outcome. Skipped for every other command and in a process a
-    restart re-executed (the restart attempted it already). A failure is
-    printed, the previous runtime stays in use, the command still runs, and the
-    next start tries again."""
+    print its outcome. Skipped for every other command and in a process
+    re-executed by a restart of this localm that carried out the pending update
+    steps already (``LOCALM_UPDATE_STEPS_DONE``); a restart by an older build
+    that has no such steps does not skip it. A failure is printed, the previous
+    runtime stays in use, the command still runs, and the next start tries
+    again."""
     import os
     from localm import updater_runtime
     if command not in updater_runtime.RUNTIME_COMMANDS or os.environ.get(
-            "LOCALM_RESTART_IN_PROGRESS"):
+            "LOCALM_UPDATE_STEPS_DONE"):
         return
     try:
         from rich.markup import escape
@@ -572,13 +576,14 @@ def _finish_pending_component_update(command) -> None:
     component (the sd.cpp or KoboldCpp runtime, the managed ComfyUI, the uv
     inside localm) is not at the pin this release ships
     (``updater_components.finish_pending``), and print each step and the
-    outcome. Skipped for every other command and in a process a restart
-    re-executed. A failure is printed, the previous versions stay in use, the
-    command still runs, and the next start tries again."""
+    outcome. Skipped for every other command and in a process re-executed by a
+    restart that carried out the pending update steps already
+    (``LOCALM_UPDATE_STEPS_DONE``). A failure is printed, the previous versions
+    stay in use, the command still runs, and the next start tries again."""
     import os
     from localm import updater_components
     if command not in updater_components.COMPONENT_COMMANDS or os.environ.get(
-            "LOCALM_RESTART_IN_PROGRESS"):
+            "LOCALM_UPDATE_STEPS_DONE"):
         return
     from rich.markup import escape
     try:

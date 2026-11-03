@@ -461,6 +461,47 @@ def register(app: FastAPI, ctx) -> None:
         return res
 
     # -----------------------------------------------------------------------
+    #  Installed parts: which version each part is at, and the repair
+    # -----------------------------------------------------------------------
+
+    @app.get("/api/update/parts", dependencies=[Depends(require_scope(scopes.CONFIG_READ))])
+    async def update_parts_ep(request: Request):
+        """Which version each part of the install is at against the installed
+        localm version (``updater_parts.installed_parts``): ``{app,
+        install_record, install_record_matches, deps_problems, runtime,
+        components, problems, consistent}``. Read-only. ``problems`` is
+        path-scrubbed for a caller other than the local operator."""
+        from localm import updater_parts
+        parts = await asyncio.to_thread(updater_parts.installed_parts)
+        fmt = _hs.path_formatter(request)
+        parts["problems"] = [fmt(p) for p in parts["problems"]]
+        return parts
+
+    @app.post("/api/update/repair", dependencies=[Depends(require_scope(scopes.CONFIG_WRITE))])
+    async def update_repair_ep(request: Request):
+        """Bring every part of the install to the installed localm version
+        (``updater_parts.repair``): the dependencies now, the native runtime and
+        the components during the restart that follows. OWNER-only. Returns
+        ``{repaired, notes, restarting}``, or ``{repaired: false, error}`` when a
+        step failed (the dependencies are put back as they were)."""
+        from localm import updater_parts
+        from localm.bugreport import LocalmError
+        if not _hs.caller_is_operator(request):
+            raise HTTPException(
+                403, "Repairing the install requires an owner (admin) key: it reinstalls "
+                "localm's packages and native runtime.")
+        try:
+            res = await asyncio.to_thread(updater_parts.repair, defer=True)
+        except LocalmError as e:
+            return {"repaired": False, "error": format_localm_error(e)}
+        out = {"repaired": True, "notes": res["notes"], "restarting": False}
+        if res["restart_needed"]:
+            _request_restart(port=getattr(app.state, "instance_port", None),
+                             instance_id=getattr(app.state, "instance_id", None))
+            out["restarting"] = True
+        return out
+
+    # -----------------------------------------------------------------------
     #  Update rollback: restore the previous build (owner-only)
     # -----------------------------------------------------------------------
     # Both routes are gated on the same owner check as the admin_only settings in
@@ -499,10 +540,9 @@ def register(app: FastAPI, ctx) -> None:
         watchdog's failure action IS a rollback, so arming it here would answer a
         failed rollback with another one.
 
-        LIMIT: this restores the previous build's FILES, the same as the CLI. It
-        does not undo a deps-class update's package installs, and the class of the
-        last apply is not recorded anywhere, so it cannot warn about that case.
-        Only open mode or an owner key reaches this route, so its reply (including
+        Restores every part the update replaced, the same as the CLI: the files,
+        the venv as it was before the update's dependency step, the native runtime
+        and the components (``updater.rollback_last``). Only open mode or an owner key reaches this route, so its reply (including
         the ``backup`` path and error texts) is never path-scrubbed."""
         from localm import updater
         from localm.bugreport import LocalmError

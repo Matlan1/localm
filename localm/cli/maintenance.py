@@ -522,6 +522,34 @@ def _update_to(updater, version: str, *, yes: bool, allow_unverified: bool) -> N
                       "[dim](undo: localm update --rollback)[/dim]")
 
 
+def _update_repair() -> None:
+    """``localm update --repair``: print the parts that differ from the installed
+    version, then repair them (``updater_parts.repair``)."""
+    from localm import updater_parts
+    from localm.bugreport import LocalmError
+    from rich.markup import escape
+    parts = updater_parts.installed_parts()
+    if parts["consistent"]:
+        console.print(f"[green]Every part of localm {escape(parts['app'])} matches.[/green]")
+        return
+    console.print(f"[bold]Parts that differ from localm {escape(parts['app'])}:[/bold]")
+    for line in parts["problems"]:
+        console.print(f"  - {escape(line)}")
+    try:
+        res = updater_parts.repair(say=_say_step)
+    except LocalmError as e:
+        console.print(f"[red]Repair failed:[/red] {escape(e.summary)} ({escape(e.reason)}).")
+        sys.exit(1)
+    for note in res["notes"]:
+        console.print(f"[dim]{escape(note)}[/dim]")
+    after = updater_parts.installed_parts()
+    if after["consistent"]:
+        console.print("[green]Repaired.[/green] Restart localm to use it.")
+    else:
+        console.print("[yellow]Still differs:[/yellow] " + escape("; ".join(after["problems"])))
+        sys.exit(1)
+
+
 def _say_step(text: str) -> None:
     """Print one step of an update or rollback."""
     from rich.markup import escape
@@ -562,8 +590,11 @@ def _print_update_extras(res: dict) -> None:
 @click.option("--allow-unverified", is_flag=True,
               help="With --to and --yes: install the release even when its signature "
                    "does not verify.")
+@click.option("--repair", "do_repair", is_flag=True,
+              help="Bring every part of the install (dependencies, native runtime, "
+                   "components) to the installed localm version.")
 def update_cmd(check_only: bool, yes: bool, do_rollback: bool, list_only: bool,
-               to_version, allow_unverified: bool) -> None:
+               to_version, allow_unverified: bool, do_repair: bool = False) -> None:
     """Check for a newer localm build and apply it. You always initiate it - localm
     never updates itself automatically.
 
@@ -575,14 +606,21 @@ def update_cmd(check_only: bool, yes: bool, do_rollback: bool, list_only: bool,
     including an older one (a downgrade). Before a downgrade localm copies your
     settings, model registry, coder sessions, memory and plugins to a dated folder
     under the data dir's updates/. A release whose signature does not verify is
-    installed only after you confirm a warning that says why."""
+    installed only after you confirm a warning that says why.
+
+    --repair shows which parts of the install differ from the installed version
+    (its dependencies, the native runtime, the components) and brings them to it."""
     from localm import updater
     from localm.bugreport import LocalmError
     from rich.markup import escape
 
-    if sum(map(bool, (do_rollback, list_only, to_version, check_only))) > 1:
-        console.print("[yellow]Use only one of --check, --rollback, --list and --to.[/yellow]")
+    if sum(map(bool, (do_rollback, list_only, to_version, check_only, do_repair))) > 1:
+        console.print("[yellow]Use only one of --check, --rollback, --list, --to and "
+                      "--repair.[/yellow]")
         sys.exit(2)
+    if do_repair:
+        _update_repair()
+        return
     if list_only or to_version:
         if not updater.available():
             console.print("[yellow]The updater is not configured.[/yellow] Set the update "

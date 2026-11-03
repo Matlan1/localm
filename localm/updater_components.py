@@ -31,6 +31,10 @@ links in a folder beside the venv; the uv folder. A component that fails
 restores every component this run replaced, and a later rollback of the update
 restores them too (:func:`restore`). A new runtime directory of sd.cpp or
 KoboldCpp never replaces the old one, which stays in place for a rollback.
+
+The same snapshot keeps the venv as it was before the update's dependency step
+(:data:`DEPS`), so a rollback also puts back every dependency and the install
+record of localm itself.
 """
 
 from __future__ import annotations
@@ -64,6 +68,10 @@ COMPONENT_COMMANDS = frozenset({"run", "serve", "gui", "image", "music", "video"
 
 # The order components are updated in.
 ORDER = ("pytorch", "sdcpp", "koboldcpp", "comfyui", "uv")
+# The snapshot entry for the whole venv as it was before an update's
+# dependency step (dependencies and the install's own install record). Kept
+# and restored like a component, never planned or updated as one.
+DEPS = "venv"
 
 LABELS = {"pytorch": "PyTorch stack",
           "sdcpp": "stable-diffusion.cpp image runtime",
@@ -776,11 +784,14 @@ def _updates_dir(create: bool = True) -> Path:
     return updater._updates_dir(create=create)
 
 
-def write_pending(plans, *, root, version: str) -> None:
+def write_pending(plans, *, root, version: str, repair: bool = False) -> None:
     """Record that the components of *plans* (:func:`needs_finish`) must be
-    finished in the install at *root*, for :func:`finish_pending`. Raises OSError."""
+    finished in the install at *root*, for :func:`finish_pending`; *repair*
+    marks a repair of the installed version (a failure rolls nothing back).
+    Raises OSError."""
     data = {"root": str(Path(root).resolve()), "version": version,
-            "components": [p["name"] for p in plans if p["update"] or p.get("check")]}
+            "components": [p["name"] for p in plans if p["update"] or p.get("check")],
+            "repair": bool(repair)}
     path = _updates_dir() / PENDING_FILE
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(data), encoding="utf-8")
@@ -885,10 +896,11 @@ def snapshot_dir(backup_dir) -> Path:
     return backup_dir.with_name(backup_dir.name + "-components")
 
 
-def _venv_copy_path(venv: Path, dest: Path) -> Path:
+def _venv_copy_path(venv: Path, dest: Path, kind: str = "") -> Path:
     """Where the snapshot *dest* keeps its copy of the venv at *venv*: a folder
-    beside the venv (same volume, so its files are hard links)."""
-    return venv.parent / f".{venv.name}-{dest.name}"
+    beside the venv (same volume, so its files are hard links). *kind* ``"deps"``
+    names the copy :data:`DEPS` keeps, apart from the PyTorch one."""
+    return venv.parent / (f".{venv.name}-{dest.name}" + (f"-{kind}" if kind else ""))
 
 
 def _link(src: Path, dst: Path) -> None:
@@ -915,7 +927,8 @@ def _own_copy(info: Optional[dict], src: Path) -> Optional[Path]:
     if not raw:
         return None
     copy = Path(str(raw))
-    if not copy.name.startswith(".") or not copy.name.endswith(f"-{src.name}"):
+    if not copy.name.startswith(".") or not (copy.name.endswith(f"-{src.name}")
+                                             or copy.name.endswith(f"-{src.name}-deps")):
         return None
     try:
         owner = _copy_owner(copy)
@@ -958,45 +971,112 @@ def _inside(path: Path, root: Path) -> bool:
     return True
 
 
-def _restore_venv(copy: Path, venv: Path) -> list:
+def _same_file(a: Path, b: Path) -> bool:
+    """Whether *a* and *b* are one file or hold the same bytes. False when
+    either cannot be read."""
+    try:
+        if os.path.samefile(a, b):
+            return True
+        if a.stat().st_size != b.stat().st_size:
+            return False
+        with open(a, "rb") as fa, open(b, "rb") as fb:
+            while True:
+                ca, cb = fa.read(1 << 20), fb.read(1 << 20)
+                if ca != cb:
+                    return False
+                if not ca:
+                    return True
+    except OSError:
+        return False
+
+
+def _in_use(p: Path) -> bool:
+    """Windows: whether the file *p* cannot be opened for writing (another
+    process holds it, or it is read-only). Always False elsewhere, where a held
+    file can be replaced."""
+    if sys.platform != "win32":
+        return False
+    try:
+        with open(p, "r+b"):
+            return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def venv_changes(copy: Path, venv: Path, *, own: bool = False) -> Optional[list]:
+    """The canonical names of the distributions whose installed version in
+    *venv* differs from the one kept in *copy* (by :func:`_clone_venv`), added
+    or removed ones included; the install's own package only with *own*. None
+    when either side's packages cannot be found."""
+    site_now, site_was = site_packages(venv), site_packages(copy)
+    if site_now is None or site_was is None:
+        return None
+    now, was = dists(site_now), dists(site_was)
+    return [name for name in sorted(set(now) | set(was))
+            if (own or name not in _OWN_DISTS)
+            and (now.get(name) or {}).get("dir") != (was.get(name) or {}).get("dir")]
+
+
+def _restore_venv(copy: Path, venv: Path, *, own: bool = False) -> list:
     """Put back, in *venv*, every distribution whose installed version differs
     from the one kept in *copy* (by :func:`_clone_venv`), removing ones added
     since: first every changed distribution's files are removed, then every
     kept one's files are put back, so a file two distributions share ends up
-    restored. The install's own package is left alone, and nothing outside
-    *venv* is removed. Returns the failures."""
+    restored. A file both versions hold with the same bytes is left in place.
+    The install's own package (its install record, entry points and editable
+    path file) is restored only with *own*. Nothing outside *venv* is removed.
+
+    Refuses, with nothing changed, when a file it would replace is in use
+    (:func:`_in_use`). Returns the failures."""
     site_now, site_was = site_packages(venv), site_packages(copy)
-    if site_now is None or site_was is None:
+    changed = venv_changes(copy, venv, own=own)
+    if site_now is None or site_was is None or changed is None:
         return [f"could not find the packages of {venv} or of its copy {copy}"]
     now, was = dists(site_now), dists(site_was)
-    errors = []
-    changed = [name for name in sorted(set(now) | set(was))
-               if name not in _OWN_DISTS
-               and (now.get(name) or {}).get("dir") != (was.get(name) or {}).get("dir")]
-    for name in changed:
-        if name in now:
-            for rel in _record(site_now, now[name]["dir"]):
-                p = (site_now / rel)
-                if _inside(p, venv) and p.is_file():
-                    try:
-                        p.unlink()
-                    except OSError as e:
-                        errors.append(f"remove {rel}: {e}")
-            shutil.rmtree(site_now / now[name]["dir"], ignore_errors=True)
+    copy_r, venv_r = copy.resolve(), venv.resolve()
+    keep = {}
     for name in changed:
         if name in was:
             for rel in _record(site_was, was[name]["dir"]):
-                src = (site_was / rel)
-                if not _inside(src, copy) or not src.is_file():
+                src = site_was / rel
+                if _inside(src, copy) and src.is_file():
+                    keep[(venv_r / src.resolve().relative_to(copy_r))] = src
+    remove = []
+    for name in changed:
+        if name in now:
+            for rel in _record(site_now, now[name]["dir"]):
+                p = site_now / rel
+                if not (_inside(p, venv) and p.is_file()):
                     continue
-                dst = venv / src.resolve().relative_to(copy.resolve())
-                try:
-                    dst.parent.mkdir(parents=True, exist_ok=True)
-                    if dst.exists():
-                        dst.unlink()
-                    _link(src, dst)
-                except OSError as e:
-                    errors.append(f"restore {rel}: {e}")
+                kept = keep.get(p.resolve())
+                if kept is not None and _same_file(p, kept):
+                    keep.pop(p.resolve())
+                    continue
+                remove.append((rel, p))
+    held = [rel for rel, p in remove if _in_use(p)]
+    held += [str(dst.relative_to(venv_r)) for dst in keep if dst.exists() and _in_use(dst)]
+    if held:
+        return [f"{venv}: not restored, {len(held)} file(s) are in use (first: {held[0]}); "
+                "close every localm process and run the rollback again"]
+    errors = []
+    for rel, p in remove:
+        try:
+            p.unlink()
+        except OSError as e:
+            errors.append(f"remove {rel}: {e}")
+    for name in changed:
+        if name in now:
+            shutil.rmtree(site_now / now[name]["dir"], ignore_errors=True)
+    for dst, src in keep.items():
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if dst.exists():
+                dst.unlink()
+            _link(src, dst)
+        except OSError as e:
+            errors.append(f"restore {dst.relative_to(venv_r)}: {e}")
     return [f"{venv}: " + "; ".join(errors[:5])] if errors else []
 
 
@@ -1164,6 +1244,57 @@ def _restore_torch(installed_root: Path, src: Path, info: dict, say: Callable) -
     return _restore_venv(copy, installed_root / ".venv")
 
 
+def _touches_torch(copy: Path, venv: Path, changed: list) -> bool:
+    """Whether any of the distributions *changed* has a file in a folder the
+    PyTorch stack's processes hold (:data:`_TORCH_HELD`, :data:`_TORCH_HELD_GLOB`)
+    in *venv* or in its copy *copy*."""
+    import fnmatch
+    for site in (site_packages(venv), site_packages(copy)):
+        if site is None:
+            continue
+        d = dists(site)
+        for name in changed:
+            if name not in d:
+                continue
+            for rel in _record(site, d[name]["dir"]):
+                rel = rel.replace("\\", "/")
+                top = rel.split("/", 1)[0]
+                if any(rel.startswith(h + "/") for h in _TORCH_HELD) or fnmatch.fnmatch(
+                        top, _TORCH_HELD_GLOB):
+                    return True
+    return False
+
+
+def _restore_deps(installed_root: Path, src: Path, info: dict, say: Callable) -> list:
+    """Put the venv kept before the update's dependency step back: every
+    dependency and the install's own install record. Stops this install's
+    processes holding the PyTorch stack first when a PyTorch library changes."""
+    copy = _own_copy(info, src)
+    if copy is None:
+        return [f"dependencies: {info.get('venv_copy')} is not a venv copy of {src}"]
+    venv = installed_root / ".venv"
+    changed = venv_changes(copy, venv, own=True)
+    if changed is None:
+        return [f"could not find the packages of {venv} or of its copy {copy}"]
+    if not changed:
+        return []
+    if _touches_torch(copy, venv, changed):
+        left = _stop_torch_holders(installed_root, say)
+        if left:
+            from localm import updater_runtime
+            return ["the dependencies are in use, so they were not restored: "
+                    + updater_runtime.describe_holders(left)]
+    say("Restoring the previous dependencies...")
+    return _restore_venv(copy, venv, own=True)
+
+
+def _snapshot_deps(installed_root: Path, dest: Path) -> dict:
+    venv = installed_root / ".venv"
+    copy = _venv_copy_path(venv, dest, "deps")
+    _clone_venv(venv, copy, dest)
+    return {"venv_copy": str(copy)}
+
+
 def _snapshot_uv(installed_root: Path, dest: Path) -> dict:
     shutil.copytree(installed_root / ".uv", dest / _KEPT_UV)
     return {}
@@ -1255,6 +1386,8 @@ def snapshot(names, dest, *, root, home=None, add: bool = False) -> dict:
                 state["components"][name] = _snapshot_comfy(comfy_root(home), dest)
             elif name == "pytorch":
                 state["components"][name] = _snapshot_torch(root, dest)
+            elif name == DEPS:
+                state["components"][name] = _snapshot_deps(root, dest)
             elif name == "uv":
                 state["components"][name] = _snapshot_uv(root, dest)
             else:
@@ -1268,7 +1401,8 @@ def snapshot(names, dest, *, root, home=None, add: bool = False) -> dict:
                 _drop_one(dest, name, state["components"].pop(name, None)
                           or {"venv_copy": str(_venv_copy_path(
                               (comfy_root(home) / "venv") if name == "comfyui"
-                              else root / ".venv", dest))})
+                              else root / ".venv", dest,
+                              "deps" if name == DEPS else ""))})
             try:
                 (dest / STATE_FILE).write_text(json.dumps(state), encoding="utf-8")
             except OSError as w:
@@ -1292,7 +1426,9 @@ def restore(src, *, root, home=None, say: Optional[Callable] = None,
     errors = []
     comps = {k: v for k, v in (state.get("components") or {}).items()
              if names is None or k in names}
-    if "pytorch" in comps:
+    if DEPS in comps:
+        errors += _restore_deps(Path(root), src, comps[DEPS], say)
+    elif "pytorch" in comps:
         errors += _restore_torch(Path(root), src, comps["pytorch"], say)
     if "comfyui" in comps:
         errors += _restore_comfy(comfy_root(home), src, comps["comfyui"], say)
@@ -1302,9 +1438,9 @@ def restore(src, *, root, home=None, say: Optional[Callable] = None,
 
 
 def snapshot_names(src) -> list:
-    """The components a snapshot at *src* holds."""
+    """The components a snapshot at *src* holds, :data:`DEPS` included."""
     state = _read_json(Path(src) / STATE_FILE) or {}
-    return [n for n in ORDER if n in (state.get("components") or {})]
+    return [n for n in ORDER + (DEPS,) if n in (state.get("components") or {})]
 
 
 def installed_names(names, root, *, home=None) -> list:
@@ -1317,9 +1453,11 @@ def installed_names(names, root, *, home=None) -> list:
             continue
         if n == "uv" and uv_tool.contained_uv(root) is None:
             continue
-        if n == "pytorch" and site_packages(Path(root) / ".venv") is None:
+        if n in ("pytorch", DEPS) and site_packages(Path(root) / ".venv") is None:
             continue
         out.append(n)
+    if DEPS in out and "pytorch" in out:
+        out.remove("pytorch")
     return out
 
 

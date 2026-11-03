@@ -67,20 +67,53 @@ def _detect_home(install_root: Path) -> Path:
     return install_root / "home"
 
 
-def _load_apply_update(install_root: Path):
-    """Load ``localm/_apply_update.py`` BY FILE PATH (bypassing the ``localm`` package
-    __init__), so the rollback works even if the rest of localm is broken. Returns the
-    module, or None when it cannot be loaded (the caller then prints manual guidance)."""
-    path = install_root / "localm" / "_apply_update.py"
-    if not path.is_file():
-        return None
+def _load_helper(install_root: Path, name: str, code_root=None):
+    """Load ``localm/<name>.py`` BY FILE PATH (bypassing the ``localm`` package
+    __init__), so the rollback works even if the rest of localm is broken: from
+    *code_root* (the code of the build that applied the update) when given and it
+    has the file, else from *install_root*. Returns the module, or None when it
+    cannot be loaded."""
+    roots = [Path(code_root)] if code_root else []
+    for root in dict.fromkeys(roots + [install_root]):
+        path = root / "localm" / f"{name}.py"
+        if not path.is_file():
+            continue
+        try:
+            spec = importlib.util.spec_from_file_location(f"_localm_{name}_standalone", path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+        except Exception:
+            return None   # a corrupt helper takes the manual-recovery path
+    return None
+
+
+def _load_apply_update(install_root: Path, code_root=None):
+    """``localm/_apply_update.py`` (:func:`_load_helper`), or None (the caller then
+    prints manual guidance)."""
+    return _load_helper(install_root, "_apply_update", code_root)
+
+
+def _restore_venv(install_root: Path, updates_dir: Path, code_root=None) -> list:
+    """Put back the venv the update kept before its dependency step (the ``venv``
+    entry of ``<updates>/backup-components``): every dependency and localm's own
+    install record. Returns the failures (empty when there is nothing to restore)."""
+    snap = updates_dir / "backup-components"
     try:
-        spec = importlib.util.spec_from_file_location("_localm_apply_update_standalone", path)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        return mod
-    except Exception:
-        return None   # a corrupt helper takes the manual-recovery path
+        state = json.loads((snap / "state.json").read_text(encoding="utf-8"))
+        info = (state.get("components") or {}).get("venv")
+    except (OSError, ValueError):
+        return []
+    if not info:
+        return []
+    uc = _load_helper(install_root, "updater_components", code_root)
+    if uc is None or not hasattr(uc, "venv_changes"):
+        return [f"could not load the venv restore helper; the copy kept at "
+                f"{info.get('venv_copy')} holds the previous packages"]
+    copy = uc._own_copy(info, snap)
+    if copy is None:
+        return [f"{info.get('venv_copy')} is not a venv copy this update kept"]
+    return uc._restore_venv(copy, install_root / ".venv", own=True)
 
 
 def _read_names(updates_dir: Path, backup_dir: Path) -> list:
@@ -102,7 +135,10 @@ def _read_names(updates_dir: Path, backup_dir: Path) -> list:
     return [p.name for p in backup_dir.iterdir()]
 
 
-def main(argv=None, *, install_root: Path = INSTALL_ROOT) -> int:
+def main(argv=None, *, install_root: Path = INSTALL_ROOT, code_root=None) -> int:
+    """Run the rollback. *code_root*, when given, is the localm tree of the build
+    that applied the update (its update backup); the restore helpers are loaded
+    from it before the install's own."""
     ap = argparse.ArgumentParser(
         description="Restore the previous localm build after a bad update.")
     ap.add_argument("-y", "--yes", action="store_true",
@@ -127,11 +163,17 @@ def main(argv=None, *, install_root: Path = INSTALL_ROOT) -> int:
             print("Not rolled back.")
             return 1
 
-    au = _load_apply_update(install_root)
+    au = _load_apply_update(install_root, code_root)
     if au is None:
         print("Could not load the rollback helper (localm/_apply_update.py). The backup "
               f"is intact at {backup_dir}: to recover by hand, copy each entry there back "
               f"into {install_root}, overwriting the current files.", file=sys.stderr)
+        return 2
+    errors = _restore_venv(install_root, updates_dir, code_root)
+    if errors:
+        print("Rollback FAILED: the previous packages could not be put back: "
+              + "; ".join(errors) + f"\nNothing else was changed; the backup is kept at "
+              f"{backup_dir}.", file=sys.stderr)
         return 2
     try:
         au.rollback(backup_dir, install_root, names)
@@ -139,7 +181,8 @@ def main(argv=None, *, install_root: Path = INSTALL_ROOT) -> int:
         print(f"Rollback FAILED: {e}\nThe backup is kept at {backup_dir} for a manual "
               "restore; nothing was reported recovered that was not.", file=sys.stderr)
         return 2
-    print("Rolled back to the previous version. Start localm again to use it.")
+    print("Rolled back to the previous version and its packages. Start localm again to "
+          "use it; Settings > Updates shows any other part that still differs.")
     return 0
 
 

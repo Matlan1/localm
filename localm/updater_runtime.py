@@ -319,7 +319,7 @@ def holders(lib) -> list:
                 from localm.debuglog import logger
                 logger.warning("update: could not ask which process holds the runtime: %s", e)
                 found = []
-            return found or [{"pid": None, "name": f"an unidentified process ({held[0].name})"}]
+            return found or [{"pid": None, "name": f"an unidentified process ({held[0]})"}]
         if sys.platform.startswith("linux") and lib.is_dir():
             return _proc_holders(lib)
         return []
@@ -519,9 +519,11 @@ def stop_own_holders(lib, root, *, home=None, say: Optional[Callable] = None,
     terminated, its registry entry removed and its crash marker cleared, then
     this waits up to *wait* seconds for the OS to release the files.
 
-    Stops nothing when any holder is not this install's. *say* receives each
-    step as one line of text. With *stop* False nothing is stopped and only the
-    holders that are not this install's are returned.
+    Stops nothing when any holder is not this install's. A holder Windows
+    cannot name (pid None, usually a process that is exiting) is waited out for
+    up to *wait* seconds before it counts as one. *say* receives each step as
+    one line of text. With *stop* False nothing is stopped and only the holders
+    that are not this install's are returned.
 
     Returns the holders left: empty when the runtime is free, else the holders
     that are not this install's or did not exit. Never raises."""
@@ -533,6 +535,14 @@ def stop_own_holders(lib, root, *, home=None, say: Optional[Callable] = None,
         if not found:
             return []
         tops, foreign = classify_holders(found, root, home=home)
+        unnamed_until = time.monotonic() + max(0.5, wait)
+        while foreign and all(not h.get("pid") for h in foreign) and (
+                time.monotonic() < unnamed_until):
+            time.sleep(0.25)
+            found = holders(lib)
+            if not found:
+                return []
+            tops, foreign = classify_holders(found, root, home=home)
         if foreign or not stop:
             return foreign
         deadline = time.monotonic() + max(0.5, wait)
@@ -577,12 +587,14 @@ def _updates_dir() -> Path:
     return updater._updates_dir(create=True)
 
 
-def write_pending(p: dict, *, root, version: str) -> None:
+def write_pending(p: dict, *, root, version: str, repair: bool = False) -> None:
     """Record the re-provision :func:`plan` decided for the install at *root*,
-    for :func:`finish_pending`. Raises OSError when it cannot be written."""
+    for :func:`finish_pending`; *repair* marks one a repair of the installed
+    version recorded (not an update, so a failure rolls nothing back). Raises
+    OSError when it cannot be written."""
     data = {"root": str(Path(root).resolve()), "version": version,
             "backend": p["backend"], "from": p["current"], "target": p["target"],
-            "pins": p["pins"]}
+            "pins": p["pins"], "repair": bool(repair)}
     path = _updates_dir() / PENDING_FILE
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(data), encoding="utf-8")

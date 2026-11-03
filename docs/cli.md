@@ -1239,6 +1239,7 @@ localm update --rollback        # restore the previous build from the last updat
 localm update --list            # list every release you can install
 localm update --to 0.3.0        # install that release, older or newer than yours
 localm update --to 0.3.0 -y --allow-unverified   # non-interactive, even if its signature does not verify
+localm update --repair          # bring the dependencies, native runtime and components to the installed version
 localm bug-report -m "..."      # generate an editable bug report and offer to send it to the maintainer
 localm bug-report -m "what I did" -e "what I expected" -w "what happened" --send   # non-interactive, send immediately
 localm issues [NUMBER]          # list the project's issues, or show one by number
@@ -1264,6 +1265,13 @@ example a release from before 0.3.0, signed with a retired key), localm says why
 installs it only if you confirm; with `-y`, add `--allow-unverified`. A version you go
 back to this way can still update to newer releases. Settings > Updates > Choose a
 version does the same in the GUI.
+
+An update and `--rollback` move every part of the install together: the code, the
+packages in its environment (localm's own install record included), the native
+runtime and the components. When a step fails, every part is put back to the version
+you had. `localm doctor` and Settings > Updates list any part that differs from the
+installed version (for example after an older version's own rollback), and
+`localm update --repair` or Settings > Updates > Repair brings each one to it.
 
 `localm bug-report` needs a working localm. When localm will not start at all (a
 failed install, a broken venv, setup itself failing), use the standalone reporter

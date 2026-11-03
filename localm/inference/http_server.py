@@ -4809,9 +4809,13 @@ def set_restart_ui(ui: Optional[str]) -> None:
 def _set_restart_env() -> None:
     """Set the environment a restart's re-exec'd process inherits:
     LOCALM_RESTART_IN_PROGRESS to the surface recorded by set_restart_ui, or to
-    "1" when none is recorded, and LOCALM_RESTART_GUI_MOUNTED to "1" when the
-    GUI was mounted live onto this process's API-only app (removed otherwise)."""
+    "1" when none is recorded, LOCALM_RESTART_GUI_MOUNTED to "1" when the
+    GUI was mounted live onto this process's API-only app (removed otherwise),
+    and LOCALM_UPDATE_STEPS_DONE to "1": this restart carried out the pending
+    update steps (:func:`_finish_pending_runtime_update`), so the re-exec'd
+    process does not repeat them at its start."""
     os.environ["LOCALM_RESTART_IN_PROGRESS"] = _restart_ui or "1"
+    os.environ["LOCALM_UPDATE_STEPS_DONE"] = "1"
     if _gui_mounted_live:
         os.environ[_GUI_MOUNTED_ENV] = "1"
     else:
@@ -5176,44 +5180,82 @@ def _finish_pending_runtime_update() -> None:
 
     Then the component update the applied update left pending
     (``updater_components.finish_pending``: sd.cpp, KoboldCpp, the managed
-    ComfyUI, uv), with the same rollback when a component cannot be updated."""
+    ComfyUI, uv), with the same rollback when a component cannot be updated.
+
+    While it runs, the GPU meter spawns no torch probe child
+    (``discover.torch_probes_held``, which also waits for running ones), so no
+    process of this install holds PyTorch's libraries for it."""
     try:
-        from localm import updater_components, updater_runtime
-        from localm.debuglog import logger as _dbg
-        if updater_runtime.read_pending() is not None:
-            try:
-                from localm.inference.backends.llamacpp._loader import stop_probe_daemon
-                stop_probe_daemon()
-            except Exception:
-                _dbg_swallow("stopping the runtime probe daemon before the runtime update "
-                             "failed", level="warning")
-            status = updater_runtime.finish_pending(
-                say=lambda m: _dbg.info("runtime update during restart: %s", m))
-            if status is not None and status["state"] not in ("updated", "current"):
-                _dbg.warning("runtime update during restart: %s; rolling the update back",
-                             status["note"])
-                updater_components.clear_pending()
-                from localm import updater
-                updater.rollback_last()
-                return
-            if status is not None:
-                _dbg.info("runtime update during restart: %s", status["note"])
-        if updater_components.read_pending() is None:
-            return
-        status = updater_components.finish_pending(
-            say=lambda m: _dbg.info("component update during restart: %s", m))
-        if status is None:
-            return
-        if status["state"] in ("updated", "current"):
-            _dbg.info("component update during restart: %s", status["note"])
-            return
-        _dbg.warning("component update during restart: %s; rolling the update back",
-                     status["note"])
-        from localm import updater
-        updater.rollback_last()
+        from localm import discover
+        with discover.torch_probes_held():
+            _finish_pending_update_steps()
     except Exception:
         _dbg_swallow("the pending runtime update or its rollback could not be carried out "
                      "during the restart", level="warning")
+
+
+def _finish_pending_update_steps() -> None:
+    """The body of :func:`_finish_pending_runtime_update`: the pending runtime
+    re-provision, then the pending component update; when either fails, the
+    whole update is rolled back (:func:`_roll_back_during_restart`), unless a
+    repair recorded it (``updater_parts.repair``), which is only logged. Raises
+    on an unexpected failure."""
+    from localm import updater_components, updater_runtime
+    from localm.debuglog import logger as _dbg
+    pending = updater_runtime.read_pending()
+    if pending is not None:
+        try:
+            from localm.inference.backends.llamacpp._loader import stop_probe_daemon
+            stop_probe_daemon()
+        except Exception:
+            _dbg_swallow("stopping the runtime probe daemon before the runtime update "
+                         "failed", level="warning")
+        status = updater_runtime.finish_pending(
+            say=lambda m: _dbg.info("runtime update during restart: %s", m))
+        if status is not None and status["state"] not in ("updated", "current"):
+            if pending.get("repair"):
+                _dbg.warning("runtime repair during restart: %s", status["note"])
+            else:
+                _dbg.warning("runtime update during restart: %s; rolling the update back",
+                             status["note"])
+                updater_components.clear_pending()
+                _roll_back_during_restart()
+                return
+        if status is not None:
+            _dbg.info("runtime update during restart: %s", status["note"])
+    comp_pending = updater_components.read_pending()
+    if comp_pending is None:
+        return
+    status = updater_components.finish_pending(
+        say=lambda m: _dbg.info("component update during restart: %s", m))
+    if status is None:
+        return
+    if status["state"] in ("updated", "current"):
+        _dbg.info("component update during restart: %s", status["note"])
+        return
+    if comp_pending.get("repair"):
+        _dbg.warning("component repair during restart: %s", status["note"])
+        return
+    _dbg.warning("component update during restart: %s; rolling the update back",
+                 status["note"])
+    _roll_back_during_restart()
+
+
+def _roll_back_during_restart() -> None:
+    """Roll the applied update back (``updater.rollback_last``: components and
+    venv, runtime, code). A rollback that cannot be done is logged at ERROR
+    with what it left; the restart still proceeds."""
+    from localm import _version, updater
+    from localm.bugreport import LocalmError
+    from localm.debuglog import logger as _dbg
+    try:
+        updater.rollback_last(say=lambda m: _dbg.info("rollback during restart: %s", m))
+        _dbg.info("rollback during restart: localm %s and its parts were put back",
+                  _version.read_version())
+    except LocalmError as e:
+        _dbg.error("rollback during restart: the update could not be rolled back (%s: %s); "
+                   "localm %s is installed and Settings > Updates shows which parts "
+                   "disagree", e.summary, e.reason, _version.read_version())
 
 
 def _execv_restart(port: Optional[int], instance_id: Optional[str]) -> None:

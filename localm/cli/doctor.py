@@ -817,6 +817,32 @@ def _check_components() -> None:
                       f"{escape(str(last.get('note')))}[/dim]")
 
 
+def _check_installed_parts() -> None:
+    """Show the installed localm version against the venv's install record of
+    localm and the dependencies it declares, and, when any part of the install
+    differs from that version (``updater_parts.installed_parts``), list each one
+    and the repair command."""
+    from rich.markup import escape
+    try:
+        from localm import updater_parts
+        parts = updater_parts.installed_parts()
+    except Exception as e:  # noqa: BLE001 - a check must not fail doctor; surface why.
+        console.print(f"  {_WARN_SYM}  could not compare the parts of the install with this "
+                      f"version [dim]({escape(str(e))})[/dim]")
+        return
+    app = escape(str(parts["app"]))
+    if parts["install_record_matches"] and not parts["deps_problems"]:
+        console.print(f"  {_OK_SYM}  install record: localm {escape(parts['install_record'])}, "
+                      "dependencies satisfied")
+    if parts["consistent"]:
+        return
+    console.print(f"  {_WARN_SYM}  parts of this install differ from localm {app}:")
+    for line in parts["problems"]:
+        console.print(f"       - {escape(line)}")
+    console.print("     [dim]repair: localm update --repair (or Settings > Updates > "
+                  "Repair)[/dim]")
+
+
 @main.command()
 def doctor():
     """Check system requirements and report any issues.
@@ -840,6 +866,8 @@ def doctor():
       - Enabled plugins have their pip extras installed
       - Speech-to-text can decode a recording with the installed PyAV (when
         the voice extra is installed)
+      - Every part of the install (the venv's install record and dependencies,
+        the native runtime, the components) is at the installed localm version
     Also surfaces a one-line discovery hint for the opt-in managed ComfyUI.
     """
     # Resolve find_binary_dir from the package at call time so tests that
@@ -870,3 +898,4 @@ def doctor():
     _check_voice_decode()
     _check_managed_comfy()
     _check_components()
+    _check_installed_parts()
