@@ -554,14 +554,14 @@ def register_all(python: str, root: Path, entries: list[Entry], home: Path,
     call did not register with its own ``localm add``. Returns, keyed by
     normalised path, the output of each per-entry call that still registered
     nothing."""
-    _run([python, "-m", "localm", "add", str(root), "--fast", "--on-duplicate", "skip"],
+    _run([python, "-m", "localm", "add", str(root), "--no-hash", "--on-duplicate", "skip"],
          home, timeout)
     registered = {_norm(e.get("path", "")) for e in load_registry_file(home).values()}
     refused: dict[str, str] = {}
     for ent in entries:
         if _norm(ent.path) in registered:
             continue
-        code, out = _run([python, "-m", "localm", "add", str(ent.path), "--fast",
+        code, out = _run([python, "-m", "localm", "add", str(ent.path), "--no-hash",
                           "--on-duplicate", "skip"], home, timeout)
         registered = {_norm(e.get("path", "")) for e in load_registry_file(home).values()}
         if _norm(ent.path) not in registered:

@@ -348,19 +348,22 @@ def test_kill_tree_stops_grandchildren(tmp_path):
 
 @pytest.mark.integration
 def test_real_localm_add_and_api_models(tmp_path):
-    """The census against the real ``localm add`` and a real GUI server: a chat
-    GGUF and an embedding GGUF pass, a diffusion text encoder GGUF is reported
-    against what localm assigns it, and a non-model file cannot pass."""
+    """The census against the real ``localm add`` and a real GUI server: a chat,
+    an embedding and a reranker GGUF all pass, two of them being the same size,
+    and a loose file localm refuses is reported as not registered."""
     models = tmp_path / "models"
     models.mkdir()
     write_gguf(models / "tiny-chat.gguf", llm_kv("llama"),
                ("token_embd.weight", "output.weight", "blk.0.attn_q.weight"))
     write_gguf(models / "tiny-embed.gguf", {**llm_kv("bert"), "bert.pooling_type": 2})
     write_gguf(models / "tiny-reranker.gguf", {**llm_kv(), "qwen3.pooling_type": 4})
+    assert (models / "tiny-embed.gguf").stat().st_size == (models / "tiny-reranker.gguf").stat().st_size
+    (models / "refused.pth").write_bytes(pickle.dumps({"text_model.encoder.layers.0.mlp.fc1.weight": 0}))
     rows, info = mc.census(models, sys.executable, tmp_path / "work", 300, False, False)
     verdicts = {r.entry: (r.verdict, r.registry_type, r.api_type) for r in rows}
     assert verdicts["tiny-chat.gguf"] == ("PASS", "llm", "llm"), rows
     assert verdicts["tiny-embed.gguf"] == ("PASS", "embedding", "embedding"), rows
     assert verdicts["tiny-reranker.gguf"][0] == "PASS", rows
+    assert verdicts["refused.pth"][0] == "NOT-REGISTERED", rows
     assert info["home_deleted"] is True
     shutil.rmtree(tmp_path / "work", ignore_errors=True)
