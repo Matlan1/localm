@@ -1379,6 +1379,10 @@ export const I18N_EN = {
   "activity.interruptedPill.other": "{count} interrupted downloads",
   "activity.interruptedHead": "Interrupted downloads",
   "activity.nothingRunning": "Nothing running.",
+  "activity.stallPill": "Server was blocked",
+  "activity.stallsHead": "Recent server stalls",
+  "activity.stall.gil": "The server was blocked for {seconds} s: Python was busy in {where}",
+  "activity.stall.loop": "The server was blocked for {seconds} s: its event loop was busy in {where}",
   "models.pull.disconnectedStatus": "connection lost - it may still be running",
   "models.pull.disconnectedToast":
     "Lost connection to the pull - it may still be running in the background. Check the Models list in a moment.",

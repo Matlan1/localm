@@ -213,9 +213,11 @@ class Collection(_CollectionFiles, _CollectionSidecar, _CollectionIndexing,
                  _CollectionResync, _CollectionSearch, _CollectionEmbedding,
                  _CollectionIntrospection):
     def __init__(self, name: str, base: Optional[Path] = None, *,
-                 cache: bool = True) -> None:
+                 cache: bool = True, load: bool = True) -> None:
         """*cache* False loads straight from disk and never stores the result
-        in the process-wide collection cache."""
+        in the process-wide collection cache. *load* False reads nothing: the
+        instance is empty until a method that loads under the collection's
+        lock (``add_paths``, ``add_uploads``, ...) runs."""
         self.name = _check_name(name)
         self.dir = (base or rag_dir()) / self.name
         self._use_cache = cache
@@ -255,7 +257,7 @@ class Collection(_CollectionFiles, _CollectionSidecar, _CollectionIndexing,
         # vector_degrade_reason, which is also set by query-time degrades (a
         # failed query embedding, partial coverage).
         self._vectors_file_rejected: bool = False
-        if self.exists():
+        if load and self.exists():
             self._load()
 
     def exists(self) -> bool:
@@ -324,7 +326,7 @@ class Collection(_CollectionFiles, _CollectionSidecar, _CollectionIndexing,
         # latest committed state under the lock. The _load() must happen INSIDE
         # both locks.
         with _collection_lock(self.name), self._write_lock("an index", on_progress):
-            self._load(use_cache=False)
+            self._load_reporting(on_progress)
             return self._add_paths_locked(
                 paths, embed_fn=embed_fn, classify_fn=classify_fn,
                 describe_image_fn=describe_image_fn,
@@ -374,7 +376,7 @@ class Collection(_CollectionFiles, _CollectionSidecar, _CollectionIndexing,
         None when it is fine).
         """
         with _collection_lock(self.name), self._write_lock("a re-sync", on_progress):
-            self._load(use_cache=False)
+            self._load_reporting(on_progress)
             return self._resync_locked(
                 embed_fn=embed_fn, classify_fn=classify_fn,
                 describe_image_fn=describe_image_fn, on_progress=on_progress,
@@ -407,7 +409,7 @@ class Collection(_CollectionFiles, _CollectionSidecar, _CollectionIndexing,
         the first time this collection is actually embedded.
         """
         with _collection_lock(self.name), self._write_lock("an upload", on_progress):
-            self._load(use_cache=False)
+            self._load_reporting(on_progress)
             return self._add_uploads_locked(
                 uploads, embed_fn=embed_fn, classify_fn=classify_fn,
                 describe_image_fn=describe_image_fn,
@@ -430,7 +432,7 @@ class Collection(_CollectionFiles, _CollectionSidecar, _CollectionIndexing,
         vector set is held in memory during the run.
         """
         with _collection_lock(self.name), self._write_lock("reembed", on_progress):
-            self._load(use_cache=False)
+            self._load_reporting(on_progress)
             return self._reembed_locked(
                 embed_fn=embed_fn, model_name=model_name,
                 on_progress=on_progress, batch=batch)

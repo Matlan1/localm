@@ -515,3 +515,75 @@ test("pollActivity: only queued operations read as queued, never as running", as
   const text = win.document.getElementById("activity-pill").textContent;
   assert.equal(text, "2 queued");
 });
+
+// --------------------------------------------------------------------------- //
+//  server stall records (the "stalls" list of /api/activity)                 //
+// --------------------------------------------------------------------------- //
+
+function makeStallFetch(bodies) {
+  let call = 0;
+  const fetchImpl = async (url) => {
+    if (String(url) === "/api/activity") {
+      const b = bodies[Math.min(call, bodies.length - 1)];
+      call++;
+      return { ok: true, status: 200, json: async () => b };
+    }
+    return { ok: true, status: 200, json: async () => ({}), text: async () => "" };
+  };
+  return { fetchImpl };
+}
+
+const STALL = { id: 7, at: 1000, seconds: 74, kind: "gil", ongoing: false,
+  where: "json/encoder.py:258 in iterencode, called from localm/rag/_store/files.py:320 in _write_files",
+  frames: ["json/encoder.py:258 in iterencode", "localm/rag/_store/files.py:320 in _write_files"] };
+
+test("stalls: a new stall is toasted once, shows the pill, and is listed in the details", async () => {
+  const before = { operations: [], now: 1050, stalls: [] };
+  const after = { operations: [], now: 1080, stalls: [STALL] };
+  const { fetchImpl } = makeStallFetch([before, before, after]);
+  const { window: win } = loadApp({ fetchImpl });
+  await tick(); await tick(); await tick();
+  await win.pollActivity();
+  const toastEl = win.document.getElementById("toast");
+  assert.doesNotMatch(toastEl.textContent, /blocked/);
+  await win.pollActivity();
+  assert.match(toastEl.textContent, /The server was blocked for 74 s: Python was busy in json\/encoder\.py:258/);
+  const pill = win.document.getElementById("activity-pill");
+  assert.notEqual(pill.style.display, "none");
+  assert.match(pill.textContent, /Server was blocked/);
+
+  toastEl.textContent = "";
+  await win.pollActivity();
+  assert.equal(toastEl.textContent, "");
+
+  win.showActivityDetails();
+  const body = win.document.getElementById("modal-body").textContent;
+  assert.match(body, /Recent server stalls/);
+  assert.match(body, /localm\/rag\/_store\/files\.py:320 in _write_files/);
+  assert.equal(pill.style.display, "none");
+});
+
+test("stalls: a stall that ended long before the first read is listed but not toasted", async () => {
+  const old = { operations: [], now: 1000 + 74 + 3600, stalls: [STALL] };
+  const { fetchImpl } = makeStallFetch([old]);
+  const { window: win } = loadApp({ fetchImpl });
+  await tick(); await tick(); await tick();
+  await win.pollActivity();
+  assert.doesNotMatch(win.document.getElementById("toast").textContent, /blocked/);
+  assert.equal(win.document.getElementById("activity-pill").style.display, "none");
+  win.showActivityDetails();
+  assert.match(win.document.getElementById("modal-body").textContent, /blocked for 74 s/);
+});
+
+test("stalls: an ongoing stall is not toasted until it has ended", async () => {
+  const ongoing = { operations: [], now: 1050, stalls: [{ ...STALL, kind: "loop", ongoing: true }] };
+  const ended = { operations: [], now: 1090, stalls: [{ ...STALL, kind: "loop", ongoing: false }] };
+  const { fetchImpl } = makeStallFetch([{ operations: [], now: 1000, stalls: [] }, ongoing, ended]);
+  const { window: win } = loadApp({ fetchImpl });
+  await tick(); await tick(); await tick();
+  await win.pollActivity();
+  const toastEl = win.document.getElementById("toast");
+  assert.doesNotMatch(toastEl.textContent, /blocked/);
+  await win.pollActivity();
+  assert.match(toastEl.textContent, /its event loop was busy in json\/encoder\.py:258/);
+});

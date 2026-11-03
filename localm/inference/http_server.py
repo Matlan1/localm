@@ -3450,6 +3450,23 @@ async def _hang_heartbeat_loop() -> None:
         await asyncio.sleep(_HEARTBEAT_INTERVAL_S)
 
 
+def _stall_trace_writer(path_fn):
+    """A ``StallWatch`` trace sink appending each native dump to one hang trace
+    file, ``path_fn()`` called once, on the first dump."""
+    state: dict = {}
+
+    def _write(text: str) -> None:
+        path = state.get("path")
+        if path is None:
+            path = state["path"] = path_fn()
+        with open(path, "a", encoding="utf-8", errors="backslashreplace") as fh:
+            fh.write(f"\n===== LOCALM STALL WATCH: native dump while Python was "
+                     f"blocked (pid {os.getpid()}, "
+                     f"{time.strftime('%Y-%m-%d %H:%M:%S')}) =====\n")
+            fh.write(text)
+    return _write
+
+
 def _start_hang_watchdog(threshold: float, trace_path, *, poll: float = 1.0):
     """Start a plain (NON-async) daemon thread that watches the heartbeat. When
     the event loop has not ticked in `threshold`s it is blocked, so dump ALL
@@ -5436,7 +5453,7 @@ def _make_lifespan():
         # diagnostics (_diagnostics_allowed) or explicitly forced it on
         # (LOCALM_HANG_WATCHDOG=1). LOCALM_HANG_WATCHDOG=0 opts out entirely.
         # Skipped under pytest so no thread lingers.
-        hang_stop = hang_thread = None
+        hang_stop = hang_thread = hang_path = None
         from localm.debuglog import (
             hang_watchdog_active as _hw_active,
             hang_watchdog_verbose as _hw_verbose,
@@ -5446,7 +5463,8 @@ def _make_lifespan():
         if (_hw_active() and (_hw_verbose() or _diagnostics_allowed())
                 and "pytest" not in sys.modules):
             try:
-                hang_stop, hang_thread = _start_hang_watchdog(_hw_secs(), _hw_path())
+                hang_path = _hw_path()
+                hang_stop, hang_thread = _start_hang_watchdog(_hw_secs(), hang_path)
                 if _hw_verbose():
                     # Explicit opt-in extras: asyncio debug logs any single callback
                     # that hogs the loop past the threshold (names the culprit at a
@@ -5458,6 +5476,30 @@ def _make_lifespan():
             except Exception as e:
                 from localm.debuglog import logger as _dbg
                 _dbg.debug("hang watchdog startup failed (continuing): %s", e)
+
+        # Stall watch: a native dump on a GIL-held stall plus an in-memory record
+        # of every stall (kind, length, code location) for GET /api/activity.
+        # The raw dump goes to the hang trace file only under the stack-dump
+        # thread's gate above; otherwise it stays in memory. Skipped under pytest
+        # and with LOCALM_HANG_WATCHDOG=0.
+        stall_watch = None
+        if _hw_active() and "pytest" not in sys.modules:
+            try:
+                from localm.inference import _stall_watch as _sw
+                trace_sink = (_stall_trace_writer(
+                    (lambda: hang_path) if hang_path is not None else _hw_path)
+                    if (_hw_verbose() or _diagnostics_allowed()) else None)
+                stall_watch = _sw.StallWatch(
+                    threshold=_hw_secs(),
+                    heartbeat_gap=lambda: (
+                        None if _hb_monotonic is None
+                        else time.monotonic() - _hb_monotonic),
+                    loop_thread=threading.get_ident(),
+                    trace_sink=trace_sink).start()
+                _sw.set_active(stall_watch)
+            except Exception as e:
+                from localm.debuglog import logger as _dbg
+                _dbg.warning("stall watch startup failed (continuing without it): %s", e)
 
         # Executor thread-pool saturation watch: a separate off-loop daemon
         # thread, always on (unlike the hang watchdog it sits beside, it logs
@@ -5613,6 +5655,10 @@ def _make_lifespan():
                 sat_stop.set()
                 if sat_thread is not None:
                     sat_thread.join(timeout=2)
+            if stall_watch is not None:
+                from localm.inference import _stall_watch as _sw
+                _sw.set_active(None)
+                stall_watch.stop(timeout=2)
             if hang_alarm is not None:
                 hang_alarm.stop()
                 # Retire this lifespan's alarm as the process's restart authority.

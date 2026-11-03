@@ -198,6 +198,42 @@ let _activityKnown = false;
 const _ACTIVITY_STALE_AFTER_READS = 3;
 let _activityStaleReads = 0;
 const _ACTIVITY_MODAL_TITLE = "Activity";
+// Server stall records from the last /api/activity read, and the ids already
+// toasted. On the first read, a stall that ended more than
+// _STALL_TOAST_RECENT_S before the server's "now" counts as already seen.
+let _activityStalls = [];
+const _seenStallIds = new Set();
+let _stallsPrimed = false;
+const _STALL_TOAST_RECENT_S = 120;
+
+// True while a stall that ended in the last _STALL_PILL_S seconds has not been
+// seen in the Activity window yet.
+const _STALL_PILL_S = 600;
+let _stallsShownUpTo = 0;
+function _unseenStall() {
+  if (typeof _activityServerNow !== "number") return false;
+  return _activityStalls.some((s) => !s.ongoing && s.id > _stallsShownUpTo
+    && _activityServerNow - ((s.at || 0) + (s.seconds || 0)) < _STALL_PILL_S);
+}
+
+function _stallText(s) {
+  return t(s.kind === "loop" ? "activity.stall.loop" : "activity.stall.gil",
+    { seconds: Math.round(s.seconds), where: s.where });
+}
+
+// Toast each stall that has ended and was not toasted before.
+function _noteStalls(stalls, serverNow) {
+  _activityStalls = stalls;
+  for (const s of stalls) {
+    if (s.ongoing || _seenStallIds.has(s.id)) continue;
+    _seenStallIds.add(s.id);
+    const ended = (s.at || 0) + (s.seconds || 0);
+    if (!_stallsPrimed && typeof serverNow === "number"
+        && serverNow - ended > _STALL_TOAST_RECENT_S) continue;
+    toast(_stallText(s), true);
+  }
+  _stallsPrimed = true;
+}
 
 export function isActivityBusy() {
   return _activityOps.some((op) => op.status === "running");
@@ -253,6 +289,10 @@ export function renderActivityPill(ops) {
       pill.style.display = "";
       pill.title = "Click for details";
       pill.textContent = tn("activity.interruptedPill", interrupted);
+    } else if (_unseenStall()) {
+      pill.style.display = "";
+      pill.title = "Click for details";
+      pill.textContent = t("activity.stallPill");
     } else {
       pill.style.display = "none";
     }
@@ -345,6 +385,19 @@ function _buildActivityBody(body) {
     body.appendChild(el("h4", "", t("activity.interruptedHead")));
     body.appendChild(list);
   }
+  if (_activityStalls.length) {
+    body.appendChild(el("h4", "", t("activity.stallsHead")));
+    for (const s of _activityStalls.slice().reverse()) {
+      const row = el("div", "job-row");
+      row.appendChild(el("div", "", _stallText(s)));
+      if (Array.isArray(s.frames) && s.frames.length) {
+        const pre = el("pre", "job-log");
+        pre.textContent = s.frames.join("\n");
+        row.appendChild(pre);
+      }
+      body.appendChild(row);
+    }
+  }
 }
 
 onInterruptedChange(() => {
@@ -353,6 +406,8 @@ onInterruptedChange(() => {
 });
 
 export function showActivityDetails() {
+  for (const s of _activityStalls) _stallsShownUpTo = Math.max(_stallsShownUpTo, s.id);
+  renderActivityPill(_activityOps);
   openModal(_ACTIVITY_MODAL_TITLE, _buildActivityBody);
 }
 if ($("activity-pill")) $("activity-pill").onclick = showActivityDetails;
@@ -393,6 +448,7 @@ async function _readActivity() {
     _activityServerNow = typeof data.now === "number" ? data.now : null;
     _activityKnown = true;
     _activityStaleReads = 0;
+    _noteStalls(Array.isArray(data.stalls) ? data.stalls : [], _activityServerNow);
     renderActivityPill(ops);
     _refreshActivityModalIfOpen();
     return ops;

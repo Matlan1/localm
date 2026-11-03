@@ -5,6 +5,7 @@ vectors.json, and the ``_stats_cache`` block in meta.json."""
 from __future__ import annotations
 
 import json
+import time
 import weakref
 from typing import Optional
 
@@ -15,8 +16,22 @@ from localm.rag import store as _st
 from .cache import (_COLLECTION_CACHE, _Snapshot, _cache_key, _copy_json,
                     _files_changing, _freeze_snapshot)
 from .sidecar import _REJECTED_VECTORS
+from .types import ProgressFn
+from .vecfile import (counted_vectors_json_pieces, load_vectors_json,
+                      vectors_json_pieces)
 from .vectors import (_first_dim, _vectors_finite, _warn_numpy_degrade,
                       _well_formed_vectors)
+
+
+#: A vectors.json at least this large is announced before a load.
+_REPORT_VECTORS_BYTES = 32 << 20
+
+#: A vectors.json write of at least this many vector components is announced
+#: and reports its progress.
+_REPORT_VECTORS_COMPONENTS = 2_000_000
+
+#: Seconds between progress reports of one vectors.json write.
+_REPORT_EVERY_S = 2.0
 
 
 #: Warn-once keys already logged in THIS process: vector degrades
@@ -189,7 +204,7 @@ class _CollectionFiles:
             # vectors.json PRESENT but unusable is handled on its own path, never
             # collapsed into "simply absent".
             try:
-                data = json.loads(vec_file.read_text(encoding="utf-8"))
+                data = load_vectors_json(vec_file)
                 if not isinstance(data, dict):
                     raise ValueError("vectors.json is not an object")
                 vectors = data.get("vectors", [])
@@ -285,14 +300,49 @@ class _CollectionFiles:
             size += len(self._vectors) * self._vec_dim * 8
         return size
 
-    def _save(self) -> None:
+    def _load_reporting(self, on_progress: Optional[ProgressFn]) -> None:
+        """``_load(use_cache=False)``, first telling *on_progress* that a
+        collection whose vectors.json is at least ``_REPORT_VECTORS_BYTES`` is
+        being loaded."""
+        if on_progress is not None:
+            try:
+                size = (self.dir / "vectors.json").stat().st_size
+            except OSError:
+                size = 0
+            if size >= _REPORT_VECTORS_BYTES:
+                on_progress(f"loading the collection ({size // (1 << 20)} MB of vectors)...")
+        self._load(use_cache=False)
+
+    def _save(self, on_progress: Optional[ProgressFn] = None) -> None:
         """Write meta.json, chunks.jsonl and vectors.json from this instance's
-        state, as one change to the collection's files (``_files_changing``)."""
+        state, as one change to the collection's files (``_files_changing``).
+
+        *on_progress* is told about a vectors.json write of at least
+        ``_REPORT_VECTORS_COMPONENTS`` components: once when it starts and then
+        every ``_REPORT_EVERY_S`` seconds with phase/done/total/unit."""
         with _files_changing(self.dir):
-            self._write_files()
+            self._write_files(on_progress)
         self._snapshot_ref = None
 
-    def _write_files(self) -> None:
+    def _vector_pieces(self, rows: list, on_progress: Optional[ProgressFn]):
+        """``vectors_json_pieces`` for *rows*, reporting progress as above."""
+        total = len(rows)
+        if (on_progress is None or not self._vec_dim
+                or total * self._vec_dim < _REPORT_VECTORS_COMPONENTS):
+            yield from vectors_json_pieces(self._vec_dim, rows)
+            return
+        on_progress(f"saving the index ({total} vectors)...")
+        due = time.monotonic() + _REPORT_EVERY_S
+        for piece, done in counted_vectors_json_pieces(self._vec_dim, rows):
+            yield piece
+            now = time.monotonic()
+            if now >= due:
+                due = now + _REPORT_EVERY_S
+                on_progress(f"saving the index: {done}/{total} vectors",
+                            phase="saving the index", done=done, total=total,
+                            unit="vectors")
+
+    def _write_files(self, on_progress: Optional[ProgressFn] = None) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
         self._atomic_write("meta.json", json.dumps(self._meta, indent=2))
         # dumps_lines escapes the line-break-alikes json.dumps(ensure_ascii=False)
@@ -317,8 +367,8 @@ class _CollectionFiles:
         complete = self._vector_index_complete()
         if self._vectors is not None and any(v for v in self._vectors):
             self._vec_dim = _first_dim(self._vectors)
-            self._atomic_write("vectors.json", json.dumps(
-                {"dim": self._vec_dim, "vectors": _plain_rows(self._vectors)}))
+            self._atomic_write("vectors.json", self._vector_pieces(
+                _plain_rows(self._vectors), on_progress))
         else:
             # Nothing usable to write. A REJECTED file was already moved out of
             # the way above.
@@ -401,7 +451,7 @@ class _CollectionFiles:
             self._atomic_write("meta.json", json.dumps(self._meta, indent=2))
         self._snapshot_ref = None
 
-    def _atomic_write(self, filename: str, content: str) -> None:
+    def _atomic_write(self, filename: str, content) -> None:
         # storekit.atomic_write: unique temp name plus a Windows PermissionError
         # retry.
         _st._storekit_atomic_write(self.dir / filename, content)
