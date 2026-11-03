@@ -231,6 +231,15 @@ function activityAge(op) {
   return op.status === "running" ? d : `${d} ago`;
 }
 
+// "2 running", "1 running, 1 queued" or "2 queued" for the running-status
+// *ops*, counting an op still waiting its turn as queued.
+function activityCountText(ops) {
+  const queued = ops.filter((op) => activityState(op) === "queued").length;
+  const active = ops.length - queued;
+  return [active ? `${active} running` : "", queued ? `${queued} queued` : ""]
+    .filter(Boolean).join(", ");
+}
+
 export function renderActivityPill(ops) {
   const pill = $("activity-pill");
   if (!pill) return;
@@ -262,7 +271,7 @@ export function renderActivityPill(ops) {
     pill.classList.remove("st-running");
     pill.title = "Could not reach the server for an activity update - showing the last known state.";
     const label = running.length === 1 ? activityLabel(running[0])
-      : running.length > 1 ? `${running.length} running` : null;
+      : running.length > 1 ? activityCountText(running) : null;
     pill.textContent = label ? `${label} - status unknown` : "Status unknown";
     return;
   }
@@ -275,7 +284,7 @@ export function renderActivityPill(ops) {
     pill.textContent = activityLabel(op) +
       (activityState(op) === "queued" ? " - queued" : pct);
   } else {
-    pill.textContent = `${running.length} running`;
+    pill.textContent = activityCountText(running);
   }
 }
 

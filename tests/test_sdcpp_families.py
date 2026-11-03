@@ -681,6 +681,26 @@ def test_z_image_with_only_the_music_dit_reports_the_missing_text_encoder(z_imag
     assert "llm" not in out["components"]
 
 
+def test_a_chat_model_that_fits_the_slot_is_named_not_reported_as_none_registered(
+        z_image_with_music):
+    te = write_gguf(z_image_with_music / "z_chat.gguf", QWEN3_4B_GGUF, "qwen3")
+    _register("z-chat", te, "llm", architecture="qwen3")
+    out = pairing.preview("image", "z")
+    assert [m["slot"] for m in out["missing"]] == ["llm"]
+    assert out["missing"][0]["chat_models"] == ["z-chat"]
+    assert "None is registered" not in out["error"]
+    assert "'z-chat'" in out["error"] and "choose it in the image page" in out["error"]
+    offered = pairing.native_options("image", family="z-image")["slots"]["llm"]
+    assert [o["name"] for o in offered if o["fits"]] == ["z-chat"]
+
+
+def test_with_no_encoder_registered_at_all_the_message_still_says_none_is_registered(
+        z_image_with_music):
+    out = pairing.preview("image", "z")
+    assert out["missing"][0]["chat_models"] == []
+    assert "None is registered on this machine" in out["error"]
+
+
 def test_the_music_dit_chosen_as_the_image_model_is_refused(z_image_with_music):
     with pytest.raises(ModelFileError, match="is a music generation model, not an image model"):
         image_native.resolve_models({"native": {"model": "acestep-v15-turbo-Q4_K_M"}})

@@ -639,3 +639,30 @@ test("a pinned chat's image refusal never offers another model", async () => {
   await window.runCompletion(conv);
   assert.equal(doc.querySelector(".media-offer"), null);
 });
+
+const ALL_IMAGES_REMOVED = /all images in this conversation were removed/;
+
+for (const [name, opts] of [
+  ["suggested model", { routing: ASK_ROUTING }],
+  ["no suggestion", { routing: { ...ASK_ROUTING, suggested: undefined } }],
+  ["pinned chat", { routing: ASK_ROUTING, pinned: true }],
+]) {
+  test(`an image refusal toast says every image was removed (${name})`, async () => {
+    const { window, doc, conv } = setupRefusal(opts);
+    await window.runCompletion(conv);
+    const text = doc.getElementById("toast").textContent;
+    assert.match(text, ALL_IMAGES_REMOVED, text);
+    assert.doesNotMatch(text, /removed the image\b/, text);
+  });
+}
+
+test("an image refusal removes the images of earlier turns too, as the toast says", async () => {
+  const { window, conv, image } = setupRefusal({ routing: ASK_ROUTING });
+  conv.messages.unshift(
+    { role: "user", content: [{ type: "text", text: "first" }, image] },
+    { role: "assistant", content: "ok" });
+  await window.runCompletion(conv);
+  const left = conv.messages.filter((m) => Array.isArray(m.content)
+    && m.content.some((p) => p.type === "image_url"));
+  assert.equal(left.length, 0);
+});

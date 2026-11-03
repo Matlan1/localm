@@ -727,6 +727,16 @@ def _list_gpus_double(gpus, status):
     return _inner
 
 
+def _list_gpus_joinable(gpus):
+    """list_gpus() double with a probe in flight: BUSY for a caller that does not
+    join it, a fresh OK reading for one that passes ``wait_for_inflight``."""
+    def _inner(*, deadline=None, return_status=False, wait_for_inflight=False):
+        served = [dict(g) for g in gpus]
+        status = GPU_PROBE_OK if wait_for_inflight else GPU_PROBE_BUSY
+        return (served, status) if return_status else served
+    return _inner
+
+
 def _vram_info_double(payload, status=GPU_PROBE_OK):
     """Faithful double of vram_info()'s two-shape contract: a bare dict, or
     ``(payload, status)`` when return_status=True. /api/discover/* routes now
@@ -1045,6 +1055,19 @@ class TestVramEstimate:
                 data = client.get("/api/vram-estimate").json()
         assert data["free"] is None
         assert data["fits"] is None
+
+    def test_estimate_joins_a_probe_already_in_flight_and_reports_free(self, gui_app):
+        """Another caller (the stats heartbeat) holding the probe makes a non-joining
+        read answer BUSY, which is never trusted: free -> None and the panel read
+        'free VRAM unknown' although the reading was on its way."""
+        app, _ = gui_app
+        busy_unless_joining = _list_gpus_joinable([_DEVICE_GPU])
+        with patch("localm.config.load_registry", return_value={}), \
+             patch("localm.discover.list_gpus", side_effect=busy_unless_joining):
+            with TestClient(app) as client:
+                data = client.get("/api/vram-estimate").json()
+        assert data["free"] == 20 * _GB
+        assert data["fits"] is not None
 
     def test_estimate_uses_the_real_kv_shape_for_a_sparse_moe_gguf(
             self, gui_app, tmp_path):

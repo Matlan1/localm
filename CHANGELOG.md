@@ -21,6 +21,11 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **Setup installs uv from a folder whose path contains `[` or `]`.** Running `setup.bat` or `setup-gui.bat` from a folder such as `D:\apps\localm [test]` stopped at the uv step with uv not installed. The console and graphical setups now install uv from such a folder too, keeping the installer's temporary files in a short-lived folder that is removed afterwards.
 - **An update reinstalls dependencies with the uv localm installed for itself.** The `uv` package is now one of localm's dependencies, so the uv an update runs lives in localm's own environment and is found without PATH or the install folder's `.uv` copy.
 - **An update checks it can run every step before it changes anything.** If the uv that reinstalls dependencies, or the Python that updates the native runtime, cannot be found, the update is refused before any file is replaced or any process is stopped, with a message naming the program and saying to re-run setup. The other programs an update starts (the hardware checks, git for the managed ComfyUI, `ps`, `taskkill`, `icacls`, `nvidia-smi`) are run by their full path from the system folders first, so a program of the same name in the localm folder or early on PATH is not run instead.
+- **The image refusal message says what was removed.** When a model cannot read images, every image in the conversation is removed, and the message now says so instead of mentioning one image.
+- **A Qwen-Image or similar model whose text encoder is a registered chat model no longer reads "None is registered".** The Images and Video pages now name the chat model that fits and say to choose it, since a chat model is never picked automatically.
+- **"Still generating" after Unload all is no longer an error.** Models that were busy and stayed loaded show a normal message that fades by itself and is no longer added to Settings > Recent errors.
+- **The Activity pill counts queued jobs separately.** With several jobs it reads, for example, "1 running, 1 queued" instead of counting the queued job as running.
+- **Live tuning shows the free VRAM instead of "free VRAM unknown".** The memory estimate under Settings > Live tuning, and the fit badges on the Discover page, now wait for a GPU reading already in progress instead of giving up on it.
 
 ## [0.3.2] - 2026-10-29
 

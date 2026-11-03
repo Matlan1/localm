@@ -287,9 +287,9 @@ export const I18N_EN = {
   "chat.topP": "Top-p",
   "chat.variant.next": "Next variant",
   "chat.variant.previous": "Previous variant",
-  "chat.vision.rejectedNoModel": "{model} cannot read images - removed the image. No other model answered instead (Settings > Model > Model autoswitch decides when one does). You can keep chatting (text only).",
-  "chat.vision.rejectedPinned": "This chat is pinned to {model}, which cannot read images - removed the image. Unpin the chat to let a model that can read images answer, or keep chatting (text only).",
-  "chat.vision.rejectedSuggest": "{model} cannot read images - removed the image. Use the button below to answer with {suggest}, or keep chatting (text only).",
+  "chat.vision.rejectedNoModel": "{model} cannot read images - all images in this conversation were removed. No other model answered instead (Settings > Model > Model autoswitch decides when one does). You can keep chatting (text only).",
+  "chat.vision.rejectedPinned": "This chat is pinned to {model}, which cannot read images - all images in this conversation were removed. Unpin the chat to let a model that can read images answer, or keep chatting (text only).",
+  "chat.vision.rejectedSuggest": "{model} cannot read images - all images in this conversation were removed. Use the button below to answer with {suggest}, or keep chatting (text only).",
   "chat.voice": "Voice",
   "chat.voice.hint": "(this browser)",
   "chat.voice.title":
