@@ -298,29 +298,67 @@ def test_get_engine_refuses_an_embedding_entry_unless_embeddings_asks(served, na
     assert engine is engines[name]
 
 
-@pytest.mark.parametrize("name", list(EMBEDDING_ENTRIES))
-def test_gui_load_route_refuses_an_embedding_entry_with_422(monkeypatch, name):
+GUI_PROMPT_WORDS = {
+    "emb": "an embedding model",
+    "emb-rerank": "a reranker",
+    "emb-t5": "a text encoder for image, video and music generation",
+}
+
+
+def _gui_client(monkeypatch):
     reg = _registry()
     monkeypatch.setattr("localm.config.load_registry", lambda: reg)
     switched = []
+    retyped = []
 
     async def switch_model(model, **kw):
         switched.append(model)
         return {"status": "loaded", "model": model}
 
+    monkeypatch.setattr("localm.model_manager.registry.set_model_type",
+                        lambda name, kind: retyped.append((name, kind)) or True)
     app = FastAPI()
     attach_gui(app, self_url="http://127.0.0.1:9/v1",
                switch_model=switch_model, active_model=lambda: "aaa-working")
-    with TestClient(app) as client:
+    return TestClient(app), switched, retyped
+
+
+@pytest.mark.parametrize("name", list(EMBEDDING_ENTRIES))
+def test_gui_load_route_asks_before_loading_an_embedding_entry(monkeypatch, name):
+    client, switched, retyped = _gui_client(monkeypatch)
+    with client:
         r = client.post("/api/models/load", json={"model": name})
-    assert r.status_code == 422
-    assert EMBEDDING_ENTRIES[name] in r.json()["detail"]
-    assert switched == []
+    body = r.json()
+    assert r.status_code == 200
+    assert body["status"] == "confirm_required" and body["reason"] == "not_chat_model"
+    assert GUI_PROMPT_WORDS[name] in body["detail"] and "gibberish" in body["detail"]
+    assert switched == [] and retyped == []
+
+
+@pytest.mark.parametrize("name", list(EMBEDDING_ENTRIES))
+def test_gui_load_route_loads_an_embedding_entry_as_chat_once_confirmed(monkeypatch, name):
+    client, switched, retyped = _gui_client(monkeypatch)
+    with client:
+        r = client.post("/api/models/load", json={"model": name, "as_chat": True})
+    assert r.status_code == 200 and r.json()["status"] == "loaded"
+    assert retyped == [(name, "llm")]
+    assert switched == [name]
+
+
+def test_gui_load_route_does_not_load_when_marking_as_chat_fails(monkeypatch):
+    client, switched, _ = _gui_client(monkeypatch)
+    monkeypatch.setattr("localm.model_manager.registry.set_model_type",
+                        lambda name, kind: False)
+    with client:
+        r = client.post("/api/models/load", json={"model": "emb", "as_chat": True})
+    assert r.status_code == 500 and switched == []
 
 
 def test_embedding_refusals_name_the_route_that_serves_the_entry():
     reg = _registry()
     assert "/v1/embeddings" in chat_load_refusal("emb", reg)
+    for name in EMBEDDING_ENTRIES:
+        assert f"localm set-type {name} llm" in chat_load_refusal(name, reg)
     assert "/v1/rerank" in chat_load_refusal("emb-rerank", reg)
     assert "image, video or music generation" in chat_load_refusal("emb-t5", reg)
     for name in EMBEDDING_ENTRIES:

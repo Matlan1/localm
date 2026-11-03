@@ -283,17 +283,35 @@ def is_unlisted_entry(entry) -> bool:
 
 def _embedding_refusal(name: str, entry: dict) -> str:
     """The message refusing to load or chat with the ``embedding``-type entry
-    *entry*: it names a media text encoder, a reranker or an embedding model and
-    the route that serves it. A reranker check reads the model file (see
+    *entry*: it names a media text encoder, a reranker or an embedding model, the
+    route that serves it, and the ``localm set-type`` command that makes it a chat
+    model anyway. A reranker check reads the model file (see
     :func:`entry_is_reranker`)."""
+    anyway = f" To chat with it anyway, run 'localm set-type {name} llm'."
     if is_media_text_encoder_entry(entry):
         return (f"'{name}' is a text encoder, not a model that can be loaded or chatted with. "
-                "It is a component of image, video or music generation.")
+                "It is a component of image, video or music generation." + anyway)
     if entry_is_reranker(name, entry):
         return (f"'{name}' is a reranker, not a model that can be loaded or chatted with. "
-                "It scores query and document pairs (POST /v1/rerank).")
+                "It scores query and document pairs (POST /v1/rerank)." + anyway)
     return (f"'{name}' is an embedding model, not a model that can be loaded or chatted with. "
-            "Use it with POST /v1/embeddings.")
+            "Use it with POST /v1/embeddings." + anyway)
+
+
+def embedding_load_prompt(name: str, entry: dict) -> str:
+    """The text of the GUI's "not a chat model" confirmation for the
+    ``embedding``-type entry *entry*: what the model is, that chatting with it
+    gives gibberish, and that loading it anyway marks it as a chat model. A
+    reranker check reads the model file (see :func:`entry_is_reranker`)."""
+    if is_media_text_encoder_entry(entry):
+        what = "a text encoder for image, video and music generation"
+    elif entry_is_reranker(name, entry):
+        what = "a reranker, which scores how well documents match a question"
+    else:
+        what = "an embedding model, which turns text into numbers for search and memory"
+    return (f"\"{name}\" is {what}. It cannot write replies, so chatting with it would "
+            "only produce gibberish. If you load it anyway, it is marked as a chat model; "
+            "you can change its type again on the Models page.")
 
 
 def chat_load_refusal(name: str, registry: dict, *, allow_embedding: bool = False) -> Optional[str]:
@@ -308,7 +326,7 @@ def chat_load_refusal(name: str, registry: dict, *, allow_embedding: bool = Fals
     file system and the backend registry."""
     entry = registry.get(name)
     kind = entry.get("model_type") if isinstance(entry, dict) else None
-    if kind == "embedding":
+    if kind == "embedding" and isinstance(entry, dict):
         return None if allow_embedding else _embedding_refusal(name, entry)
     if kind == "unknown":
         path = _entry_path(entry)

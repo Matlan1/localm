@@ -1451,6 +1451,8 @@ export const I18N_EN = {
   "models.scan.registering": "Registering model {done} of {total}{name}",
   "models.scan.result": "Scan complete. Added {added} models, skipped {skipped} existing.",
   "models.scan.scanning": "Scanning ComfyUI model folders…",
+  "models.notChat.confirmLabel": "Load anyway",
+  "models.notChat.title": "Not a chat model",
   "models.setType.failed": "Set type failed",
   "models.setType.toast": "Set '{name}' type to {type}",
   "models.sizeUnknown": "size unknown",

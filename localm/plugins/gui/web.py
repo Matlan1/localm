@@ -368,6 +368,10 @@ class LoadModelRequest(BaseModel):
     # instead of proceeding. Setting this on a retry makes it proceed
     # regardless of what is running or how badly the load would fit.
     force: bool = False
+    # Set on the retry after {"status": "confirm_required", "reason":
+    # "not_chat_model"}: marks an embedding, reranker or text-encoder model as a
+    # chat model (type 'llm') and loads it.
+    as_chat: bool = False
 
 
 class PullRequest(BaseModel):

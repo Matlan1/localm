@@ -1105,11 +1105,11 @@ function _showServedModel() {
   if (modelSelect.value !== shown) modelSelect.value = "";
 }
 
-async function _postLoad(model, force) {
+async function _postLoad(model, force, asChat = false) {
   const r = await fetch("/api/models/load", {
     method: "POST",
     headers: authHeaders(),
-    body: JSON.stringify(force ? { model, force: true } : { model }),
+    body: JSON.stringify({ model, ...(force ? { force: true } : {}), ...(asChat ? { as_chat: true } : {}) }),
   });
   if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
   return await r.json().catch(() => ({ status: "loaded", model }));
@@ -1144,8 +1144,10 @@ export async function switchModel(model, { local = false } = {}) {
     setStatus("busy", t("sidebar.status.loading", { model }));
     data = await _postLoad(model, false);
     if (data.status === "confirm_required") {
+      const notChat = data.reason === "not_chat_model";
       const confirmed = await confirmDangerAsync(
-        t("models.switch.confirmTitle"), data.detail, t("models.switch.confirmLabel"));
+        t(notChat ? "models.notChat.title" : "models.switch.confirmTitle"), data.detail,
+        t(notChat ? "models.notChat.confirmLabel" : "models.switch.confirmLabel"));
       if (!confirmed) {
         setStatus("ok", modelCache.active || t("sidebar.status.noModel"));
         _showServedModel();
@@ -1153,7 +1155,7 @@ export async function switchModel(model, { local = false } = {}) {
         return { status: "cancelled", reason: "declined by user", model };
       }
       setStatus("busy", t("sidebar.status.loading", { model }));
-      data = await _postLoad(model, true);
+      data = notChat ? await _postLoad(model, false, true) : await _postLoad(model, true);
     }
   } catch (e) {
     // A failed load ends the busy pill and re-reads the server's model state.

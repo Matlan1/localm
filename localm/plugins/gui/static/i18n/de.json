@@ -1305,6 +1305,8 @@
   "models.scan.registering": "Registriere Modell {done} von {total}{name}",
   "models.scan.result": "Scan abgeschlossen. {added} Modelle hinzugefügt, {skipped} vorhandene übersprungen.",
   "models.scan.scanning": "ComfyUI-Modellordner werden gescannt…",
+  "models.notChat.confirmLabel": "Trotzdem laden",
+  "models.notChat.title": "Kein Chat-Modell",
   "models.setType.failed": "Typ setzen fehlgeschlagen",
   "models.setType.toast": "Typ von '{name}' auf {type} gesetzt",
   "models.sizeUnknown": "Größe unbekannt",
