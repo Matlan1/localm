@@ -82,11 +82,9 @@ def test_a_plain_spawn_keeps_its_flags_and_gains_sw_hide():
     assert si.dwFlags & nw.STARTF_USESHOWWINDOW and si.wShowWindow == nw.SW_HIDE
 
 
-def test_detached_process_is_refused_unless_allowed():
+def test_detached_process_is_refused():
     _, _, refusal = nw.hidden(nw.DETACHED_PROCESS, None)
     assert refusal and "DETACHED_PROCESS" in refusal
-    flags, _, refusal = nw.hidden(nw.DETACHED_PROCESS, None, detached_allowed=True)
-    assert refusal is None and flags == nw.DETACHED_PROCESS
 
 
 def test_a_visible_new_console_is_refused():
