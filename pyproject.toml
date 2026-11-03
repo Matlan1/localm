@@ -187,6 +187,41 @@ gpu = [
     "psutil>=7.2.2",
     "num2words>=0.5.14",
     "compressed-tensors>=0.15.0",
+    # Packages the tokenizers and bundled modeling code of the most downloaded
+    # transformers repos import (scripts/hf_remote_code_census.py), each installable on
+    # every platform uv.lock covers (decord has no macOS wheel). See
+    # test_hf_and_gpu_extras_ship_the_packages_transformers_repos_import.
+    "tiktoken>=0.14.0",
+    "sentencepiece>=0.2.2",
+    "protobuf>=7.36.2",
+    "einops>=0.8.2",
+    "peft>=0.21.2",
+    "timm>=1.0.30",
+    "librosa>=0.11.0",
+    "addict>=2.4.0",
+    "easydict>=1.13",
+    "matplotlib>=3.11.2",
+    "open_clip_torch>=3.3.0",
+    "scipy>=1.18.1",
+    "decord>=0.6.0; sys_platform != 'darwin'",
+    "datasets>=5.1.0",
+    "backoff>=2.2.1",
+    "opencv-python-headless>=5.0.0.93",
+    "lmdb>=3.0.0",
+    "pretty_midi>=0.2.11.post0",
+    "mir_eval>=0.8.2",
+    "scikit-learn>=1.9.1",
+    "monai>=1.6.1",
+    "onnxruntime>=1.31.0",
+    "x-transformers>=2.31.11",
+    "nltk>=3.10.4",
+    "g2p-en>=2.1.0",
+    "lightning>=2.6.6",
+    "ftfy>=6.3.1",
+    "icecream>=2.2.0",
+    "av>=19.0.2",
+    "torchaudio==2.11.0+rocm7.13.0; sys_platform == 'win32'",
+    "torchaudio; sys_platform != 'win32'",
     "torch==2.11.0+rocm7.13.0; sys_platform == 'win32'",
     "torchvision==0.26.0+rocm7.13.0; sys_platform == 'win32'",
     "rocm; sys_platform == 'win32'",
@@ -204,6 +239,40 @@ hf = [
     "psutil>=7.2.2",
     "num2words>=0.5.14",
     "compressed-tensors>=0.15.0",
+    # Packages the tokenizers and bundled modeling code of the most downloaded
+    # transformers repos import (scripts/hf_remote_code_census.py), each installable on
+    # every platform uv.lock covers (decord has no macOS wheel). See
+    # test_hf_and_gpu_extras_ship_the_packages_transformers_repos_import.
+    "tiktoken>=0.14.0",
+    "sentencepiece>=0.2.2",
+    "protobuf>=7.36.2",
+    "einops>=0.8.2",
+    "peft>=0.21.2",
+    "timm>=1.0.30",
+    "librosa>=0.11.0",
+    "addict>=2.4.0",
+    "easydict>=1.13",
+    "matplotlib>=3.11.2",
+    "open_clip_torch>=3.3.0",
+    "scipy>=1.18.1",
+    "decord>=0.6.0; sys_platform != 'darwin'",
+    "datasets>=5.1.0",
+    "backoff>=2.2.1",
+    "opencv-python-headless>=5.0.0.93",
+    "lmdb>=3.0.0",
+    "pretty_midi>=0.2.11.post0",
+    "mir_eval>=0.8.2",
+    "scikit-learn>=1.9.1",
+    "monai>=1.6.1",
+    "onnxruntime>=1.31.0",
+    "x-transformers>=2.31.11",
+    "nltk>=3.10.4",
+    "g2p-en>=2.1.0",
+    "lightning>=2.6.6",
+    "ftfy>=6.3.1",
+    "icecream>=2.2.0",
+    "av>=19.0.2",
+    "torchaudio",
 ]
 # Audio multimodal (Gemma4 unified audio)
 audio = [
@@ -322,7 +391,7 @@ Changelog = "https://github.com/Matlan1/localm/blob/master/CHANGELOG.md"
 [tool.uv]
 # Locks win32, linux and darwin as separate resolutions. See test_non_windows_resolutions_reach_no_rocm_artefact.
 environments = ["sys_platform == 'win32'", "sys_platform == 'linux'", "sys_platform == 'darwin'"]
-exclude-newer-package = { rocm = false, rocm-sdk-core = false, rocm-sdk-libraries-gfx103x-all = false, torch = false, torchvision = false, transformers = false }
+exclude-newer-package = { rocm = false, rocm-sdk-core = false, rocm-sdk-libraries-gfx103x-all = false, torch = false, torchvision = false, torchaudio = false, transformers = false }
 # ctranslate2's win32/darwin wheel metadata resolves an older setuptools than its
 # Linux wheel does (CVE-2026-59890, sdist MANIFEST.in exclusion bypass, fixed in
 # 83.0.0) even though ctranslate2 itself declares no upper bound - force the floor
@@ -343,6 +412,9 @@ torch = [
 ]
 torchvision = [
   { url = "https://repo.amd.com/rocm/whl/gfx103X-all/torchvision-0.26.0%2Brocm7.13.0-cp312-cp312-win_amd64.whl", marker = "sys_platform == 'win32' and python_version == '3.12'" },
+]
+torchaudio = [
+  { url = "https://repo.amd.com/rocm/whl/gfx103X-all/torchaudio-2.11.0%2Brocm7.13.0-cp312-cp312-win_amd64.whl", marker = "sys_platform == 'win32' and python_version == '3.12'" },
 ]
 rocm = [
   { index = "rocm-gfx1030", marker = "sys_platform == 'win32'" },
