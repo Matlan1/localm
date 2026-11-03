@@ -218,14 +218,14 @@ def test_a_setup_install_clears_inherited_settings_for_its_children(monkeypatch)
 def test_a_source_checkout_without_a_record_is_left_alone(monkeypatch):
     _isolate(monkeypatch, made_by_setup=False)
     for key, value in _POISON.items():
-        assert os.environ[key] == value
+        assert os.environ[key.upper() if os.name == "nt" else key] == value
 
 
 def test_a_users_own_command_gets_the_cleared_settings_back(monkeypatch):
     _isolate(monkeypatch, made_by_setup=True)
-    env = config.user_command_env()
+    env = {k.upper(): v for k, v in config.user_command_env().items()}
     for key, value in _POISON.items():
-        assert env.get(key) == value, key
+        assert env.get(key.upper()) == value, key
     for key in ("UV_NO_CONFIG", "PYTHONNOUSERSITE", "UV_CREDENTIALS_DIR"):
         assert key not in env
 

@@ -522,25 +522,33 @@ def test_apply_deps_uses_the_contained_uv_that_is_not_on_path(tmp_path, monkeypa
     assert (inst / "VERSION").read_text().strip() == "0.2.0"
 
 
-def test_apply_deps_uses_the_uv_on_path_when_the_install_has_none(tmp_path, monkeypatch, sig_env, no_uv):
+def test_apply_deps_never_runs_a_uv_on_path(tmp_path, monkeypatch, sig_env, no_uv):
+    """An install without its own uv gets the pinned uv installed; a uv on PATH
+    is never run."""
     _config(monkeypatch, tmp_path)
     inst = _fake_install(tmp_path, deps=("click",))
     on_path = _fake_uv(tmp_path / "somebin")
     monkeypatch.setenv("PATH", str(on_path.parent))
+    from localm import uv_tool
+    monkeypatch.setattr(uv_tool, "bootstrap_uv",
+                        lambda root, **kw: _fake_uv(pathlib.Path(root) / ".uv"))
     ran = []
     op, sig = _signed_build("0.2.0", ["click", "httpx"])
     updater.apply(5, installed=inst, signature=sig, download_opener=op,
                   runner=lambda c: ran.append(c) or 0)
-    assert pathlib.Path(ran[0][0]).samefile(on_path)
-    assert not (inst / ".uv").exists()
+    assert ran[0][0] == str(inst / ".uv" / _UV_NAME)
+    assert not pathlib.Path(ran[0][0]).samefile(on_path)
 
 
 def test_apply_deps_uses_the_shared_uv_the_install_record_names(tmp_path, monkeypatch, sig_env, no_uv):
-    """A user's own uv, chosen at setup and recorded: found by its recorded path
-    even though it is on no PATH, and preferred over a different uv on PATH."""
+    """The uv in localm's Shared store, recorded at setup: found by its recorded
+    path even though it is on no PATH, and preferred over a different uv on PATH."""
     _config(monkeypatch, tmp_path)
     inst = _fake_install(tmp_path, deps=("click",))
-    own = _fake_uv(tmp_path / "my-uv-home")
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "lad"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "lad"))
+    from localm import uv_tool
+    own = _fake_uv(uv_tool.shared_store_dir() / "uv")
     other = _fake_uv(tmp_path / "otherbin")
     monkeypatch.setenv("PATH", str(other.parent))
     (inst / ".localm-install.json").write_text(
@@ -591,7 +599,8 @@ def test_apply_deps_without_any_uv_refuses_before_swapping_and_says_what_it_trie
                       runner=lambda c: ran.append(c) or 0)
     text = f"{ei.value.summary} {ei.value.reason}"
     assert "uv" in ei.value.summary and "Errno" not in text
-    assert str(inst / ".uv") in text and "PATH" in text and "offline" in text
+    assert str(inst / ".uv") in text and "offline" in text
+    assert "PATH" not in text
     assert ran == []
     assert (inst / "VERSION").read_text().strip() == "0.1.0"
     assert (inst / "localm" / "__init__.py").read_text() == "# 0.1.0"
@@ -636,10 +645,10 @@ def test_deps_env_points_a_contained_install_at_its_own_cache(tmp_path, monkeypa
         "schema": 3, "runtime_contained": True,
         "cache_dir": str(inst / ".cache"), "python_dir": str(inst / ".python")}), encoding="utf-8")
     monkeypatch.delenv("UV_CACHE_DIR", raising=False)
-    monkeypatch.setenv("UV_PYTHON_INSTALL_DIR", "kept-as-set")
+    monkeypatch.setenv("UV_PYTHON_INSTALL_DIR", "not-the-store")
     env = updater._deps_env(inst)
     assert env["UV_CACHE_DIR"] == str(inst / ".cache")
-    assert env["UV_PYTHON_INSTALL_DIR"] == "kept-as-set"
+    assert env["UV_PYTHON_INSTALL_DIR"] == str(inst / ".python")
     (inst / ".localm-install.json").write_text(json.dumps({"schema": 3}), encoding="utf-8")
     assert "UV_CACHE_DIR" not in updater._deps_env(inst)
 

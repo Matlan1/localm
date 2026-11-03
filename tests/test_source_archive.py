@@ -144,7 +144,8 @@ def test_head_and_index_match_real_git(tmp_path, index_version):
     _git(repo, "init", "-q")
     _git(repo, "add", "-A")
     if index_version == "3":
-        _git(repo, "update-index", "--intent-to-add", "--", "a.py")
+        (repo / "ita.txt").write_text("later", encoding="utf-8")
+        _git(repo, "add", "--intent-to-add", "--", "ita.txt")
     _git(repo, "update-index", "--index-version", index_version)
     _git(repo, "commit", "-qm", "x")
     _git(repo, "pack-refs", "--all")
