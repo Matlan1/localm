@@ -1161,15 +1161,16 @@ async function _postLoad(model, force, asChat = false, activate = true) {
 // On a failed load or peer route it sets the pill to "load failed", starts a
 // refreshModels(), and rethrows; the caller only reports the error.
 //
-// With activate false the model is loaded without becoming the active model:
-// modelCache.active is left as it is, no localm:model-switched is dispatched,
-// and the status line returns to the active model once modelCache is re-read.
-export async function switchModel(model, { local = false, activate = true } = {}) {
+// *activate* false asks the server to load the model without making it the
+// active model. *select* false leaves this tab's selection as it is: the peer
+// route and modelCache.active are kept, no localm:model-switched is dispatched,
+// and the status line returns to the selected model once modelCache is re-read.
+export async function switchModel(model, { local = false, activate = true, select = true } = {}) {
   let data;
   try {
     const routed = local ? null : await _maybeRoutePeer(model);
     if (routed) return routed;
-    _peerSelected = null;
+    if (select) _peerSelected = null;
     setStatus("busy", t("sidebar.status.loading", { model }));
     data = await _postLoad(model, false, false, activate);
     if (data.status === "confirm_required") {
@@ -1194,7 +1195,7 @@ export async function switchModel(model, { local = false, activate = true } = {}
     throw e;
   }
   if (data.status === "superseded" || data.status === "cancelled") return data;
-  if (!activate) {
+  if (!select) {
     await refreshModels();
     setStatus("ok", modelCache.active || modelCache.resumable || t("sidebar.status.noModel"));
     _showServedModel();
@@ -1222,10 +1223,14 @@ export async function switchModel(model, { local = false, activate = true } = {}
 // saved load settings. Asks before unloading a model that is in use. Returns the
 // switchModel() result, or {status: "cancelled"} when the user declined, or
 // {status: "in_use"} when the model is busy and was not unloaded.
-// Reloading a model that is not the active one leaves the active model as it
-// is, also when the reload fails or is cancelled.
+// Reloading a model that is not the active one leaves the active model, and
+// this tab's selection, as they are, also when the reload fails or is cancelled.
+// Whether *model* is the server's active model is read from its modelCache
+// entry; whether it is this tab's selection, from modelCache.active.
 export async function reloadModel(model) {
   const wasActive = model === modelCache.active;
+  const entry = (modelCache.models || []).find((m) => m.name === model);
+  const serverActive = entry && typeof entry.active === "boolean" ? entry.active : wasActive;
   const idleStatus = () => (wasActive ? model
     : modelCache.active || modelCache.resumable || t("sidebar.status.noModel"));
   setStatus("busy", t("sidebar.status.unloading", { model }));
@@ -1252,7 +1257,7 @@ export async function reloadModel(model) {
   }
   let res;
   try {
-    res = await switchModel(model, { local: true, activate: wasActive });
+    res = await switchModel(model, { local: true, activate: serverActive, select: wasActive });
   } catch (e) {
     if (wasActive) _markUnloaded(model);
     throw e;
@@ -1273,7 +1278,8 @@ function _markUnloaded(model) {
   _publishActiveChange(model);
 }
 
-// Toast the outcome of a switchModel() call. A model too big to fully fit
+// Toast the outcome of a switchModel() call, headed by *head* ("Model switched
+// to <model>" by default). A model too big to fully fit
 // VRAM still loads (the backend deliberately defers to a partial/zero GPU
 // offload rather than refusing), so a plain "switched" toast would read as
 // success even when the load quietly fell back to (slow) CPU layers -
@@ -1285,7 +1291,7 @@ function _markUnloaded(model) {
 // res.mmap_ram_short marks a use_mmap off load larger than available RAM; its
 // warning is res.mmap_note. A res.mmap_cpu_from_disk load with
 // res.mmap_cpu_read_bytes and res.mmap_ram_available_bytes names both sizes.
-export function toastLoadResult(res, model) {
+export function toastLoadResult(res, model, head = "Model switched to " + model) {
   const fromDisk = !!(res && res.mmap_from_disk);
   const cpuFromDisk = !!(res && res.mmap_cpu_from_disk);
   const gib = (n) => (n / 1024 ** 3).toFixed(1);
@@ -1307,13 +1313,13 @@ export function toastLoadResult(res, model) {
     }
     const slow = `${parts.join(", ") || "partly on CPU"} - slower`;
     const extra = fromDisk ? `; ${diskNote}` : (res.mmap_ram_short && res.mmap_note ? `; ${res.mmap_note}` : "");
-    toast(`Model switched to ${model} (${slow}${extra})`, true);
+    toast(`${head} (${slow}${extra})`, true);
   } else if (res && res.mmap_ram_short && res.mmap_note) {
-    toast(`Model switched to ${model} (${res.mmap_note})`, true);
+    toast(`${head} (${res.mmap_note})`, true);
   } else if (fromDisk) {
-    toast(`Model switched to ${model} (${diskNote})`, true);
+    toast(`${head} (${diskNote})`, true);
   } else {
-    toast("Model switched to " + model);
+    toast(head);
   }
 }
 

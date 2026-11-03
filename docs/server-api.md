@@ -93,7 +93,7 @@ stable id): `waiting` (another request is running on this model), `compacting`
 download), `chat_hooks` (chat plugins' inlet hooks are running),
 `checking_grammar`, `generating` and `loading_beside` (the model loads beside
 models that could not be unloaded, so part of it runs on the CPU; its delta also
-carries `status_args` with `model` and `resident`, the quoted names of those
+carries `status_args` with `model`, the name of the model, and `resident`, the quoted names of those
 models). A streaming request that is compacted
 carries `X-Localm-Context-Compacted: 1`; if the conversation still does not fit
 after compaction, the refusal arrives in the stream as the reply text with

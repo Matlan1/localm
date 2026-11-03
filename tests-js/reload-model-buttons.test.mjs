@@ -45,7 +45,10 @@ function makeFetch(s, calls) {
     }
     if (u.endsWith("/v1/config") && method === "PATCH") return json({});
     if (u.endsWith("/v1/config")) return json({ n_ctx: 4096, n_gpu_layers: 99 });
-    if (u.startsWith("/api/models")) return json({ models: s.models, active: s.active || "" });
+    if (u.startsWith("/api/models") && s.hangModels) return new Promise(() => {});
+    if (u.startsWith("/api/models")) {
+      return json({ models: s.models, active: s.active || "", peer_routes: s.peerRoutes || {} });
+    }
     return json({ models: [], active: "", conversations: [], plugins: [] });
   };
 }
@@ -183,12 +186,28 @@ test("Models tab: a failed reload of a model that is not active keeps the active
   const s = { ...PENDING(), loadFails: true };
   const { window, toasts } = await boot(s);
   await showModels(window);
+  s.hangModels = true;
   await reloadButton(window, "base").onclick();
   assert.ok(toasts.some((x) => x.isErr && /Reloading base failed: boom/.test(x.msg)),
     JSON.stringify(toasts));
   const after = activeModel(window);
   assert.equal(after.active, "other");
   assert.notEqual(after.resumable, "base");
+});
+
+test("Models tab: reloading the server's active model keeps this tab's peer-route selection", async () => {
+  const s = { active: "run", peerRoutes: { peer: { host: "10.0.0.2", port: 8642 } },
+              models: [LLM("run", { active: true, loaded: true })] };
+  const { window, calls } = await boot(s);
+  runScript(window, "_peerSelected = 'peer';");
+  await window.refreshModels();
+  assert.equal(activeModel(window).active, "peer", "precondition: the peer route is selected");
+  await showModels(window);
+  await reloadButton(window, "run").onclick();
+  assert.equal("activate" in loadBody(calls), false, JSON.stringify(loadBody(calls)));
+  runScript(window, "window.__peer = _peerSelected;");
+  assert.equal(window.__peer, "peer");
+  assert.equal(activeModel(window).active, "peer");
 });
 
 test("Models tab: a failed reload of the active model leaves it to reload on the next message", async () => {

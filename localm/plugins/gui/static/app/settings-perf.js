@@ -98,7 +98,7 @@ export async function reloadWithToasts(model, keys) {
     const res = await reloadModel(model);
     if (res.status === "in_use") toast(t(keys.busy, { model }), true);
     else if (res.status === "cancelled" || res.status === "superseded") toast(t(keys.cancelled, { model }));
-    else if (model !== modelCache.active) toast(t("models.reload.doneToast", { model }), !!res.degraded);
+    else if (model !== modelCache.active) toastLoadResult(res, model, t("models.reload.doneToast", { model }));
     else toastLoadResult(res, model);
     return res;
   } catch (e) {
@@ -3065,6 +3065,8 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   // marker is added at render time only, in chat.js, so the model never sees
   // that literal marker in its own prior turn on the next request).
   const answeredBy = (routing && routing.routed && routing.resolved) || modelName;
+  // The server loaded another model to answer: re-read which model is active.
+  if (answeredBy && answeredBy !== modelCache.active) refreshModels();
   const routedNote = routing && routing.routed
     ? { from: routing.requested || modelName, gaps: routing.gaps,
         ...(routing.placement ? { placement: routing.placement } : {}) }
@@ -3203,8 +3205,6 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   conv.messages.push(reply);
   saveConversations(conv);
   renderChat();
-  // The server loaded another model to answer: re-read which model is active.
-  if (answeredBy && answeredBy !== modelCache.active) refreshModels();
   // A cut-off reply is partial: it is never spoken or parsed for tool calls.
   if (reply.cut) return outcome;
 
