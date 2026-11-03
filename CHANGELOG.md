@@ -12,6 +12,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **The interface can now be shown in Spanish and French.** Pick Español or Français under Settings > Appearance, or run `localm config language es` / `localm config language fr`. They cover everything the German interface covers, and a string that is not translated yet shows in English rather than as a blank or a raw key.
 - **"Remember that ..." in a chat message is saved to memory.** A message such as "remember that I love RPG-style games" or "merk dir, dass ich gerne Rollenspiele spiele" stores that fact right away, without the model having to do anything, and the reply shows "Saved to memory: ..." (or "Already in memory"). It works whenever memory is on and the session mode is log or full; in privacy mode nothing is stored. A question or a recollection ("remember to buy milk", "do you remember my name?") is not saved.
 - **The ExLlama plugin can be installed from setup and the Plugins page (NVIDIA, Linux).** It runs EXL2 and EXL3 models. It is listed only on a Linux PC with an NVIDIA GPU, is never part of "install everything" or the recommended set, and is so far tested by the project without a GPU; bug reports are welcome.
 - **The Models page has a search box for your registered models.** Type to narrow the list by name, source, type or architecture; it works together with the type tabs, the tab counts follow the matches, and Escape or **Clear search** empties it. This is separate from the search for models to download.
