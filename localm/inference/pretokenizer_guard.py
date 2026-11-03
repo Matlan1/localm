@@ -51,6 +51,7 @@ backtracks linearly and cannot itself blow up on hostile input.
 
 from __future__ import annotations
 
+import bisect
 from typing import NamedTuple, Optional
 
 import regex
@@ -114,6 +115,13 @@ class Policy(NamedTuple):
                      when a newline run does not throw for this pre-tokenizer.
     ``cost_budget``  cap on ``len(text)`` multiplied by the longest run carrying
                      no ASCII whitespace, or ``None`` when unbounded.
+    ``cuts``         where a text longer than ``max_chars`` may be cut so the two
+                     halves tokenize to the same tokens as the whole: ``"words"``
+                     (at spaces and after line breaks; right when the pattern
+                     list assigns every character to a match), ``"digits"`` (at
+                     the edges of a number: the list splits only there) or
+                     ``"newlines"`` (after a line break: the list gives each
+                     one its own match and leaves other text in unmatched runs).
     ``unusable``     ``True`` when ``max_run`` over ``char_class`` falls inside
                      ordinary prose, so a model declaring this pre-tokenizer
                      cannot hold a conversation; ``load_refusal`` then refuses
@@ -127,6 +135,7 @@ class Policy(NamedTuple):
     newline_run: Optional[int] = None
     cost_budget: Optional[int] = None
     unusable: bool = False
+    cuts: str = "words"
 
 
 _LETTER_RUN_LIMIT = 64
@@ -139,7 +148,7 @@ _TOTAL_LIMIT = 65536
 # under that length rather than just below it, because the cost of runs SHORTER
 # than the one that throws still accumulates over the whole text. The length
 # that throws is pinned as TestCalibration.MEASURED_NEWLINE_CRASH.
-_NEWLINE_RUN_LIMIT = 64
+_NEWLINE_RUN_LIMIT = 256
 _WHITESPACE_RUN_LIMIT = 1024
 _COST_BUDGET = 512 * _TOTAL_LIMIT
 
@@ -172,7 +181,8 @@ UNSAFE_PRE_TYPES: dict[str, Policy] = {
     # LLAMA_VOCAB_PRE_TYPE_GRANITE_EMB_MULTI.
     "granite-embed-multi-97m": _letters("granite-embed-multi-97m"),
     # LLAMA_VOCAB_PRE_TYPE_SUPERBPE. Digits, not letters.
-    "superbpe": Policy(_CLASS_DIGIT, _DIGIT_RUN_LIMIT, _TOTAL_LIMIT, "superbpe"),
+    "superbpe": Policy(_CLASS_DIGIT, _DIGIT_RUN_LIMIT, _TOTAL_LIMIT, "superbpe",
+                       cuts="digits"),
     # LLAMA_VOCAB_PRE_TYPE_TINY_AYA and _YOUTU.
     "tiny_aya": _letters("tiny_aya"),
     "cohere2moe": _letters("cohere2moe"),
@@ -186,7 +196,42 @@ UNSAFE_PRE_TYPES: dict[str, Policy] = {
     # characters outside its patterns' classes was measured not to bound the
     # cost at all. The budget is the whole guard for this one.
     "deepseek-llm": Policy(None, None, _TOTAL_LIMIT, "deepseek-llm",
-                           cost_budget=_COST_BUDGET),
+                           cost_budget=_COST_BUDGET, cuts="newlines"),
+}
+
+
+# Places a text can be cut so that tokenizing the two halves separately gives
+# the same tokens as tokenizing the whole, by Policy.cuts. Pinned against the
+# real tokenizer, with a vocabulary that merges across every kind of boundary,
+# by tests/test_pretokenizer_chunking.py.
+#
+# "words": positions where every pattern list that gives each character a match
+# ends a match whatever follows:
+#   * right before an ASCII space whose previous character is not whitespace:
+#     no pattern lets a match carry a space out of a non-space (a space only
+#     opens a match, as the optional lead of a word or punctuation run, or
+#     starts a whitespace run);
+#   * right after the last line break of a whitespace run that is followed by a
+#     visible character other than "/": the `\s*[\r\n]+` branch consumes the
+#     run up to its last line break, and the `[\r\n/]*` tail of the
+#     punctuation branch cannot reach past it unless a "/" follows.
+# "digits": the edges of a run of numbers, the only place the pattern list
+# splits; the text between two runs is one match, spaces included.
+# "newlines": after a line break, which the first pattern makes a match of its
+# own; later patterns run inside the pieces on either side.
+# Characters outside Python's idea of visible are never used as the neighbour,
+# which can only remove cuts.
+_CUT_AT = {
+    "words": "a space or line break",
+    "digits": "a number",
+    "newlines": "a line break",
+}
+_CUT_STYLES = {
+    "words": regex.compile(
+        r"(?<=[^\s\p{Z}\p{C}]) (?!\Z)"
+        r"|(?<=[\r\n])(?=[ \t]*[^\s\p{Z}\p{C}/])"),
+    "digits": regex.compile(r"(?<=[^\p{N}])(?=[0-9])|(?<=[0-9])(?=[^\p{N}])"),
+    "newlines": regex.compile(r"(?<=[\r\n])(?!\Z)"),
 }
 
 
@@ -209,6 +254,8 @@ def _validate_table() -> None:
         # load rather than one request.
         if p.char_class is not None and p.char_class not in _RUN_KIND:
             raise ValueError(f"{name}: char_class missing from _RUN_KIND")
+        if p.cuts not in _CUT_STYLES:
+            raise ValueError(f"{name}: unknown cuts style {p.cuts!r}")
         # load_refusal names the class and the limit in its message.
         if p.unusable and (p.char_class is None or p.max_run is None):
             raise ValueError(f"{name}: unusable without char_class and max_run")
@@ -267,9 +314,10 @@ def hazard_note(pre_type: Optional[str]) -> Optional[str]:
     crashes, slows = [], []
     if policy.char_class is not None:
         where = slows if policy.char_class in _COST_ONLY_CLASSES else crashes
-        where.append("a long unbroken run of " + _RUN_KIND[policy.char_class])
+        where.append(f"an unbroken run of more than {policy.max_run} "
+                     + _RUN_KIND[policy.char_class])
     if policy.newline_run is not None:
-        crashes.append("a long unbroken run of line breaks")
+        crashes.append(f"an unbroken run of more than {policy.newline_run} line breaks")
     if policy.cost_budget is not None:
         slows.append("a long block of text carrying no spaces or line breaks")
     parts = []
@@ -408,7 +456,121 @@ def check_parts(pre_type: Optional[str], text: str, separators=()) -> None:
         check_text(pre_type, piece, part=True)
 
 
-def check_text(pre_type: Optional[str], text: str, *, part: bool = False) -> None:
+_BLANK_CHAR = regex.compile(r"[\s\p{Z}\p{C}]")
+_BLANK_RUN = regex.compile(r"[\s\p{Z}\p{C}]+")
+
+
+def chunk_cuts(text: str, separators=(), style: str = "words") -> list[int]:
+    """Offsets in *text* at which it can be cut into chunks that tokenize to
+    the same tokens as the whole (see ``_CUT_STYLES``), ascending.
+
+    No cut lies inside an occurrence of any of *separators* (the special
+    tokens llama.cpp recognises in the text), and none lies in, or next to, a
+    run of blank characters that reaches one: a special token can strip the
+    whitespace on either side of it, and parsing the token depends on the
+    characters around it. *style* is a :attr:`Policy.cuts` value."""
+    cuts = [m.start() for m in _CUT_STYLES[style].finditer(text)]
+    if not cuts or not separators:
+        return cuts
+    blocked: list[tuple[int, int]] = []
+    for sep in separators:
+        if not sep or sep not in text:
+            continue
+        pos = text.find(sep)
+        while pos != -1:
+            blocked.append((pos, pos + len(sep)))
+            pos = text.find(sep, pos + 1)
+    if not blocked:
+        return cuts
+    blocked.sort()
+    merged: list[list[int]] = []
+    for s, e in blocked:
+        if merged and s <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+    starts = [m[0] for m in merged]
+    edges = sorted({edge for m in merged for edge in m})
+    out = []
+    for c in cuts:
+        i = bisect.bisect_right(starts, c) - 1
+        if i >= 0 and c <= merged[i][1]:
+            continue
+        lo = c
+        while lo > 0 and _BLANK_CHAR.match(text, lo - 1):
+            lo -= 1
+        hit = _BLANK_RUN.match(text, c)
+        hi = hit.end() if hit else c
+        n = bisect.bisect_left(edges, lo)
+        if n < len(edges) and edges[n] <= hi:
+            continue
+        out.append(c)
+    return out
+
+
+def split_text(text: str, max_chars: int, separators=(), style: str = "words") -> list[str]:
+    """*text* as consecutive chunks of at most *max_chars* characters, cut only
+    at :func:`chunk_cuts` offsets. A stretch with no cut inside the limit
+    becomes a chunk longer than *max_chars* (cut at the next offset, or not at
+    all); the caller checks every chunk. A text that fits is one chunk."""
+    if len(text) <= max_chars:
+        return [text]
+    cuts = chunk_cuts(text, separators, style)
+    chunks: list[str] = []
+    start = 0
+    while len(text) - start > max_chars:
+        i = bisect.bisect_right(cuts, start + max_chars) - 1
+        if i >= 0 and cuts[i] > start:
+            end = cuts[i]
+        else:
+            j = bisect.bisect_right(cuts, start + max_chars)
+            if j >= len(cuts):
+                break
+            end = cuts[j]
+        chunks.append(text[start:end])
+        start = end
+    chunks.append(text[start:])
+    return chunks
+
+
+def plan_chunks(pre_type: Optional[str], text: str, separators=(), *,
+                chunkable: bool = True) -> list[str]:
+    """The strings to hand the tokenizer one by one, concatenating their tokens,
+    for *text*: ``[text]`` when it passes :func:`check_parts`, else *text* cut
+    at :func:`chunk_cuts` when every chunk then passes.
+
+    Raises :class:`PretokenizerUnsafeInputError` when a chunk still carries a
+    run past a limit, or a stretch longer than the length limit with nothing to
+    cut at. *chunkable* False (a vocabulary whose tokens depend on the whole
+    text, or one that adds an end token) disables the cutting, which leaves
+    :func:`check_parts`."""
+    policy = policy_for(pre_type)
+    if policy is None:
+        return [text]
+    try:
+        check_parts(pre_type, text, separators)
+        return [text]
+    except PretokenizerUnsafeInputError:
+        if not chunkable or policy.unusable or not policy.max_chars:
+            raise
+        target = policy.max_chars // (8 if policy.cost_budget is not None else 1)
+        chunks = split_text(text, target, separators, policy.cuts)
+        if len(chunks) <= 1 and len(text) <= policy.max_chars:
+            raise
+    for chunk in chunks:
+        _check_chunk(pre_type, chunk, separators)
+    return chunks
+
+
+def _check_chunk(pre_type: Optional[str], chunk: str, separators) -> None:
+    """:func:`check_parts` for one chunk, naming a too-long stretch as one."""
+    pieces = split_at_separators(chunk, separators) if separators else [chunk]
+    for piece in pieces:
+        check_text(pre_type, piece, stretch=True)
+
+
+def check_text(pre_type: Optional[str], text: str, *, part: bool = False,
+               stretch: bool = False) -> None:
     """Raise :class:`PretokenizerUnsafeInputError` if *text* must not be handed
     to the pre-tokenizer named by *pre_type*; return ``None`` otherwise. With
     *part*, *text* is one piece of a larger input and the total-length refusal
@@ -429,6 +591,14 @@ def check_text(pre_type: Optional[str], text: str, *, part: bool = False) -> Non
     if policy is None:
         return
     if policy.max_chars is not None and len(text) > policy.max_chars:
+        if stretch:
+            cut_at = _CUT_AT[policy.cuts]
+            raise PretokenizerUnsafeInputError(
+                f"This model's pre-tokenizer ({policy.label}) cannot safely handle "
+                f"more than {policy.max_chars} characters in a row without {cut_at}; "
+                f"this input has {len(text)} in a row. Put {cut_at} in it, or send "
+                f"less text per request."
+            )
         if part:
             raise PretokenizerUnsafeInputError(
                 f"This model's pre-tokenizer ({policy.label}) cannot safely handle "
@@ -505,6 +675,9 @@ class Refusal(NamedTuple):
 _RE_REFUSAL_CHARS = regex.compile(
     r"pre-tokenizer \([^)]*\) cannot safely handle more than (\d+) characters "
     r"(at once; this input|in one message; one message in this input) is (\d+)")
+_RE_REFUSAL_STRETCH = regex.compile(
+    r"pre-tokenizer \([^)]*\) cannot safely handle more than (\d+) characters in a "
+    r"row without [^;]+; this input has (\d+) in a row")
 _RE_REFUSAL_RUN = regex.compile(
     r"pre-tokenizer \([^)]*\) (?:crashes on|becomes extremely slow on) an unbroken "
     r"run of more than (\d+) ([a-z ]+?); this input has a run of (\d+)")
@@ -523,6 +696,9 @@ def parse_refusal(message: str) -> Optional[Refusal]:
     if m is not None:
         return Refusal("chars", int(m.group(1)), int(m.group(3)),
                        part=m.group(2).startswith("in one message"))
+    m = _RE_REFUSAL_STRETCH.search(text)
+    if m is not None:
+        return Refusal("chars", int(m.group(1)), int(m.group(2)), part=True)
     m = _RE_REFUSAL_RUN.search(text)
     if m is not None:
         return Refusal("run", int(m.group(1)), int(m.group(3)), run_kind=m.group(2))
