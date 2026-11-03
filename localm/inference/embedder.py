@@ -411,7 +411,23 @@ def resolve_embedding_model_path(*, allow_download: Optional[bool] = None,
         _record_resolve_success(spec)
         return str(p)
 
-    # 2. A registered model name. A hit that does not resolve to a single FILE
+    # 2. A registered model name. A text encoder (a component of image, video and
+    #    music generation) is never an embedding model.
+    try:
+        from localm.config import load_registry
+        _entry = load_registry().get(spec)
+    except Exception as e:
+        logger.debug("could not read the registry for %s: %s", spec, e)
+        _entry = None
+    if isinstance(_entry, dict) and _entry.get("model_type") == "text-encoder":
+        _record_resolve_failure(
+            spec,
+            f"embedding_model '{spec}' is a text encoder for image, video and music "
+            "generation, not an embedding model. Use a known key "
+            f"{tuple(KNOWN_EMBEDDING_MODELS)}, a registered embedding model, or a "
+            "local GGUF path.")
+        return None
+    #    A registered hit that does not resolve to a single FILE
     #    is reported as a distinct outcome from not being registered at all; a
     #    HuggingFace-format model lands as a DIRECTORY, and get_model_info's
     #    contract is exists (file or directory), not is-a-loadable-GGUF.

@@ -12,7 +12,7 @@ to the user. Rich renders these as:
 across ``localm/cli/*.py``:
 `localm issues` / `localm issues <n>` print an issue's ``title``/``html_url``/
 ``state`` fetched LIVE from the GitHub API through the bug-report proxy
-(``issue_tracker.get_issue``/``list_issues``, whose own docstring says
+(``issue_tracker.get_issue``/``filed_status``, whose own docstring says
 "trimmed", never sanitized) - genuinely externally-controlled content, not
 merely a local filesystem path. ``localm update`` and ``localm bug-report``
 also interpolate proxy-sourced text (release notes, HTTP error bodies via
@@ -123,8 +123,8 @@ class TestIssuesListMarkupEscaping:
         from localm import issue_tracker
         monkeypatch.setattr(issue_tracker, "available", lambda: True)
         monkeypatch.setattr(
-            issue_tracker, "list_issues",
-            lambda state, **_: [{"number": 3, "state": "open",
+            issue_tracker, "filed_status",
+            lambda **_: [{"number": 3, "state": "open",
                                  "title": BRACKET_DROP, "html_url": ""}])
 
         r = cli_runner.invoke(issues_cmd, [])
@@ -136,8 +136,8 @@ class TestIssuesListMarkupEscaping:
         from localm import issue_tracker
         monkeypatch.setattr(issue_tracker, "available", lambda: True)
         monkeypatch.setattr(
-            issue_tracker, "list_issues",
-            lambda state, **_: [{"number": 4, "state": "closed",
+            issue_tracker, "filed_status",
+            lambda **_: [{"number": 4, "state": "closed",
                                  "title": BRACKET_STYLE, "html_url": ""}])
 
         r = cli_runner.invoke(issues_cmd, [])
@@ -146,22 +146,33 @@ class TestIssuesListMarkupEscaping:
 
 
 class TestIssuesLoadErrorMarkupEscaping:
-    def test_summary_and_reason_survive_verbatim(self, cli_runner, monkeypatch):
-        """Simulates the LocalmError _proxy.request() raises on a bad HTTP
-        response, whose `reason` is built from the raw response BODY
-        (`f"HTTP {status}: {text[:300]}"`) - genuinely attacker/server-
-        controlled text, confirmed by reading localm/_proxy.py directly."""
+    def test_row_error_survives_verbatim(self, cli_runner, monkeypatch):
+        """A row whose lookup failed carries the LocalmError summary, which
+        _proxy.request() builds from the raw response BODY - genuinely
+        server-controlled text."""
+        from localm.cli.maintenance import issues_cmd
+        from localm import issue_tracker
+        monkeypatch.setattr(issue_tracker, "available", lambda: True)
+        monkeypatch.setattr(
+            issue_tracker, "filed_status",
+            lambda **_: [{"number": 9, "title": "t", "error": BRACKET_STYLE}])
+
+        r = cli_runner.invoke(issues_cmd, [])
+        assert r.exit_code == 0, r.output
+        assert BRACKET_STYLE in r.output, r.output
+
+    def test_single_lookup_summary_and_reason_survive_verbatim(self, cli_runner, monkeypatch):
         from localm.cli.maintenance import issues_cmd
         from localm import issue_tracker
         from localm.bugreport import LocalmError
 
-        def _raise(state, **_):
+        def _raise(n, **_):
             raise LocalmError(f"the proxy failed: {BRACKET_DROP}",
                               reason=f"HTTP 500: {BRACKET_STYLE}")
         monkeypatch.setattr(issue_tracker, "available", lambda: True)
-        monkeypatch.setattr(issue_tracker, "list_issues", _raise)
+        monkeypatch.setattr(issue_tracker, "get_issue", _raise)
 
-        r = cli_runner.invoke(issues_cmd, [])
+        r = cli_runner.invoke(issues_cmd, ["1"])
         assert r.exit_code == 0, r.output
         assert BRACKET_DROP in r.output, r.output
         assert BRACKET_STYLE in r.output, r.output

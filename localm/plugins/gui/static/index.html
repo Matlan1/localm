@@ -435,7 +435,7 @@
               <option value="" data-i18n="models.pull.noVisionProjector">No vision projector</option>
             </select>
             <input type="text" id="pull-sha256" data-i18n-placeholder="models.pull.sha256Placeholder" placeholder="sha256 (optional)" spellcheck="false" maxlength="64" style="max-width:180px" data-i18n-title="models.pull.sha256Title" title="Expected SHA256. Verified against the downloaded (or local) file; refused on a mismatch. Not supported for a full HuggingFace repo or a local folder - both are many files with no single digest.">
-            <select id="pull-store" style="max-width:180px" data-i18n-title="models.pull.storeTitle" title="Only applies to a local folder/file path - a HuggingFace or URL download always lands in ~/.localm/models on its own.">
+            <select id="pull-store" style="max-width:180px" data-i18n-title="models.pull.storeTitle" title="Only applies to a local folder/file path - a HuggingFace, CivitAI or URL download always lands in ~/.localm/models on its own.">
               <option value="" data-i18n="models.pull.store.registerInPlace">Register in place</option>
               <option value="copy" data-i18n="models.pull.store.copy">Copy into library</option>
               <option value="move" data-i18n="models.pull.store.move">Move into library</option>
@@ -501,6 +501,14 @@
             <button class="btn-secondary" id="models-unload-all-btn"
                     data-i18n="models.unloadAll.button" data-i18n-title="models.unloadAll.title"
                     title="Release every currently-loaded model from GPU/CPU memory">Unload all</button>
+          </div>
+          <div class="models-search-row">
+            <label for="models-search" class="models-search-label" data-i18n="models.search.label">Search your models</label>
+            <input type="search" id="models-search" autocomplete="off" spellcheck="false"
+                   placeholder="Search your models…" data-i18n-placeholder="models.search.placeholder">
+            <button type="button" class="btn-secondary" id="models-search-clear" hidden
+                    aria-label="Clear search" data-i18n-aria-label="models.search.clear"
+                    data-i18n="models.search.clear">Clear search</button>
           </div>
           <div id="models-table"></div>
         </div>
@@ -1366,8 +1374,8 @@
             <section class="card settings-section" id="sec-issues" data-group="system" data-sec-label="Issues" hidden>
               <div class="card-head"><span class="ic cat-ic cat-slate" data-icon="book"></span>
                 <div class="card-head-text"><h3 data-i18n="settings.issues.title">Issues</h3></div></div>
-              <div class="sub" data-i18n="settings.issues.help">Open and resolved issues for this project (read-only) - see
-              whether a bug you reported has been fixed.</div>
+              <div class="sub" data-i18n="settings.issues.help">The bug reports you sent from this install (read-only) - see
+              whether one has been fixed.</div>
               <div class="actions">
                 <button class="btn-secondary" id="issues-refresh" data-i18n="settings.issues.refreshButton">Refresh</button>
               </div>
