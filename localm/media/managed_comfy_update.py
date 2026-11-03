@@ -85,8 +85,10 @@ def _replace_source(root: Path, repo: str, commit: str, changes: list,
     """Make the source tree at *root* that of *commit* of *repo*: fetch it as an
     archive beside *root*, then :func:`source_archive.apply_tree` it over the
     files *root*'s tree holds. Appends the :class:`source_archive.TreeChange` to
-    *changes*. Returns ``(ok, detail, deps_changed)``; on failure *root* is
-    unchanged."""
+    *changes*. Returns ``(ok, detail, deps_changed)``. On failure *root* is
+    unchanged, except when a file could not be put back: the failed change is
+    then appended to *changes* too, so a rollback of *changes* tries it again and
+    reports what still could not be put back."""
     old_files = source_archive.tree_files(root)
     if old_files is None:
         return False, f"the files of the source tree at {root} could not be read", False
@@ -101,6 +103,9 @@ def _replace_source(root: Path, repo: str, commit: str, changes: list,
         try:
             changes.append(source_archive.apply_tree(new, root, old_files,
                                                      _staging(root, "backup")))
+        except source_archive.TreeRollbackError as e:
+            changes.append(e.change)
+            return False, f"could not write the new source into {root}: {e.cause}", False
         except OSError as e:
             return False, f"could not write the new source into {root}: {e}", False
         return True, "", deps_changed
@@ -231,8 +236,12 @@ def update_managed_comfy(cfg: Optional[dict] = None, *, on_progress: ProgressCb 
         the restored source - say so rather than report a clean tree."""
         note = ""
         failed_files = []
+        kept = []
         for change in reversed(changes):
-            failed_files += change.rollback()
+            failed = change.rollback()
+            if failed:
+                failed_files += failed
+                kept.append(source_archive.plain_path(change.backup))
         if not failed_files:
             failed = [o for o in apply_patches(root) if not o.ok]
             if failed:
@@ -251,7 +260,8 @@ def update_managed_comfy(cfg: Optional[dict] = None, *, on_progress: ProgressCb 
             note = (f" The rollback to {prev_commit[:12]} ALSO failed ({len(failed_files)} "
                     f"file(s) could not be put back, e.g. {failed_files[0]}); the managed "
                     "ComfyUI may be in a mixed state - reinstall it with 'localm comfy "
-                    "remove' then 'localm comfy setup'.")
+                    "remove' then 'localm comfy setup'. The original files are kept in "
+                    f"{', '.join(kept)}.")
         return _result(False, "error", reason + note)
 
     try:

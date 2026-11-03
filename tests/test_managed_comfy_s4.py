@@ -491,6 +491,66 @@ def test_update_rollback_surfaces_failed_patch_reapply(home, tmp_path, monkeypat
     assert "simulated re-apply failure" in result.message
 
 
+def _refuse_main_py_writes(monkeypatch, times=None):
+    """Make every copy onto the managed tree's main.py fail (its write and its
+    restore), or only the first *times* of them; copies into the backup folder
+    still work. Returns the list of refused destinations."""
+    real = source_archive.shutil.copy2
+    refused = []
+
+    def flaky(src, dst, *a, **k):
+        if (str(dst).endswith("main.py") and "-backup-" not in str(dst)
+                and (times is None or len(refused) < times)):
+            refused.append(str(dst))
+            raise OSError("main.py is in use")
+        return real(src, dst, *a, **k)
+
+    monkeypatch.setattr(source_archive.shutil, "copy2", flaky)
+    return refused
+
+
+def test_update_reports_a_mixed_tree_when_a_file_cannot_be_put_back(home, tmp_path,
+                                                                    monkeypatch):
+    from localm.media import managed_comfy_update as upd
+
+    _hub, repo, c1, c2, _c3 = _build_update_remote(tmp_path, monkeypatch)
+    root = _install_managed_from(repo, c1)
+    refused = _refuse_main_py_writes(monkeypatch)
+
+    result = upd.update_managed_comfy(
+        comfyui_repo=repo, target_commit=c2, reinstall_requirements=False)
+
+    assert len(refused) == 3
+    assert not result.ok
+    assert "main.py is in use" in result.message
+    assert "ALSO failed" in result.message and "main.py" in result.message
+    assert "mixed state" in result.message
+    kept = [p for p in root.parent.iterdir() if "-backup-" in p.name]
+    assert len(kept) == 1 and str(kept[0]) in result.message
+    assert (kept[0] / "main.py").read_text(encoding="utf-8") == "print('comfy')\n"
+    assert not (root / "main.py").exists()
+
+
+def test_update_retries_a_restore_that_failed_once_and_rolls_back_cleanly(home, tmp_path,
+                                                                         monkeypatch):
+    from localm.media import managed_comfy_update as upd
+
+    _hub, repo, c1, c2, _c3 = _build_update_remote(tmp_path, monkeypatch)
+    root = _install_managed_from(repo, c1)
+    refused = _refuse_main_py_writes(monkeypatch, times=2)
+
+    result = upd.update_managed_comfy(
+        comfyui_repo=repo, target_commit=c2, reinstall_requirements=False)
+
+    assert len(refused) == 2
+    assert not result.ok
+    assert "main.py is in use" in result.message and "ALSO failed" not in result.message
+    assert (root / "main.py").read_text(encoding="utf-8") == "print('comfy')\n"
+    assert source_archive.tree_commit(root) == c1
+    assert mc.is_managed_comfy_installed()
+    assert [p.name for p in root.parent.iterdir() if "-backup-" in p.name] == []
+
+
 @pytest.mark.skipif(not _git_available(), reason="git builds the older-localm checkout")
 def test_a_checkout_an_older_localm_cloned_updates_without_git(home, tmp_path, monkeypatch):
     """A managed ComfyUI made by ``git clone`` (older localm) is read through its
