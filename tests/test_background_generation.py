@@ -257,7 +257,8 @@ def test_the_automatic_pass_stops_when_a_chat_request_is_waiting(memhome, monkey
     assert plug.MEMORY_AUTO_RETRY_AFTER - 5 <= due_in <= plug.MEMORY_AUTO_RETRY_AFTER + 5
 
 
-def test_the_manual_route_runs_without_reasoning_and_does_not_yield(memhome, monkeypatch):
+def test_the_manual_route_lets_the_model_reason_and_does_not_yield(memhome, monkeypatch):
+    from localm.inference.background_generation import REASONING_MAX_TOKENS
     eng = _Engine(reply=_FACTS)
     eng.streams_waiting = 1
     monkeypatch.setattr(plug, "_live_engine", lambda: eng)
@@ -265,7 +266,8 @@ def test_the_manual_route_runs_without_reasoning_and_does_not_yield(memhome, mon
     res = asyncio.run(plug.memory_consolidate(request=None))
 
     assert res["status"] == "ok"
-    assert eng.calls and all(c["thinking"] is False for c in eng.calls)
+    assert eng.calls and all(c["thinking"] is None for c in eng.calls)
+    assert all(c["max_tokens"] == REASONING_MAX_TOKENS for c in eng.calls)
     assert any("Ada" in r.text for r in plug._chat_store().all())
 
 
