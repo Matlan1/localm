@@ -1193,6 +1193,22 @@ The events route replays the whole log and then follows it as server-sent events
 "installed", "failed", "error"}`, with `: keepalive` comments between; it is a 404
 when no install was ever started for that plugin.
 
+### `POST /api/models/packages/plan` / `POST /api/models/packages/install` / `GET /api/models/packages/install/events`
+
+`PLUGINS_ADMIN` scope, and a 403 on a server bound beyond loopback. These add the
+Python packages a trusted Hugging Face model's own code needs (the HTTP sibling of
+`localm install-packages`). A row of `GET /api/models` carries `packages: {"missing",
+"addable", "installable"}` when its code needs packages this install lacks.
+
+`plan` takes `{"model": <registered name>}` and returns `{"model", "plan_id", "modules",
+"packages", "adds": [{"name", "version", "source"}]}`, the exact distributions an install
+would add; nothing is installed. An unregistered name is a 404, and a model that needs
+nothing, needs a package localm cannot add, or whose resolution fails is a 409 with the
+reason in `detail`. `install` takes `{"plan_id"}` and installs exactly that plan in the
+background; a plan works once and expires after 15 minutes (404), and a second install while
+one runs is a 409. The events route streams the log in the same shape as the plugin
+dependency route above, for the running or last finished install.
+
 ## API key endpoints
 
 Scope: `keys:admin`.

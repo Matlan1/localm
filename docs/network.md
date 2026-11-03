@@ -245,6 +245,13 @@ coding agent's shell access, so you can grant one without the other.
   the DNS-rebinding pin. The
   coder's network reviewer (a cloud model or an off-machine URL) is checked
   the same way, and falls back to the local model when refused.
+- **Packages a model's own code needs** (`localm install-packages`, or
+  **install packages** on the Models page). A deliberate action you agree to
+  after seeing the list. Before resolving and before installing, localm calls
+  `check_url` for `pypi.org`, `files.pythonhosted.org` and, when the installed
+  PyTorch has a build label, `download.pytorch.org`, so `off` and the domain
+  lists refuse it; the transfer itself is made by uv, which follows redirects
+  on its own, without the per-hop check or the DNS-rebinding pin.
 - **Bug-report upload.** A deliberate, one-off action you trigger yourself
   (see [privacy.md](privacy.md)); it does not call `check_url` and is not
   subject to the domain lists.
