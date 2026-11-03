@@ -2742,7 +2742,8 @@ export async function showChangelog() {
 }
 if ($("changelog-show")) $("changelog-show").onclick = showChangelog;
 
-// Issues: read-only list (textContent only - never raw innerHTML for proxy data).
+// Issues: the bug reports this install filed, each looked up by number
+// (textContent only - never raw innerHTML for proxy data).
 export async function issuesRefresh() {
   const out = $("issues-list");
   if (out) out.textContent = t("settings.issues.loading");
@@ -2753,17 +2754,32 @@ export async function issuesRefresh() {
     if (!out) return;
     if (d.error) { showInlineError(out, t("settings.issues.loadError", { error: d.error })); return; }
     const list = d.issues || [];
+    const allLink = () => {
+      const a = document.createElement("a");
+      a.href = d.issues_url || "https://github.com/Matlan1/localm/issues";
+      a.target = "_blank"; a.rel = "noopener";
+      a.textContent = t("settings.issues.allLink");
+      return a;
+    };
     // Reached only on a SUCCESSFUL fetch of an empty list; the error paths above
     // and below say "could not load" instead.
     if (!list.length) {
       out.replaceChildren(emptyState("book", t("settings.issues.emptyTitle"),
-        t("settings.issues.emptyBody")));
+        t("settings.issues.emptyBody")), allLink());
       return;
     }
     out.textContent = "";
     for (const it of list) {
       const row = document.createElement("div");
-      row.textContent = "#" + it.number + " " + (it.state || "?") + "  " + (it.title || "");
+      const head = "#" + it.number + " ";
+      const title = it.title || "";
+      if (it.error) {
+        row.textContent = head + title + "  " + t("settings.issues.rowError", { error: it.error });
+      } else {
+        const closed = it.state === "closed" && it.closed_at
+          ? " " + String(it.closed_at).slice(0, 10) : "";
+        row.textContent = head + (it.state || "?") + closed + "  " + title;
+      }
       if (it.html_url) {
         const a = document.createElement("a");
         a.href = it.html_url; a.target = "_blank"; a.rel = "noopener";
@@ -2772,6 +2788,12 @@ export async function issuesRefresh() {
       }
       out.appendChild(row);
     }
+    if (d.persisted === false) {
+      const note = document.createElement("div");
+      note.textContent = t("settings.issues.sessionOnly");
+      out.appendChild(note);
+    }
+    out.appendChild(allLink());
   } catch (e) { showInlineError(out, t("settings.issues.loadFailed", { message: e.message })); }
 }
 if ($("issues-refresh")) $("issues-refresh").onclick = issuesRefresh;
