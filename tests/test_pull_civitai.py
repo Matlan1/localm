@@ -287,11 +287,14 @@ class TestPullCivitaiFile:
 
     def test_no_comfy_folder_names_no_comfyui_in_its_output(
             self, fake_registry, monkeypatch, capsys):
+        _, models_dir = fake_registry
         _wire_real_destination(monkeypatch, _resolved(), {})
 
         assert _pull_civitai_file("135867", None) is True
 
-        assert "comfy" not in capsys.readouterr().out.lower()
+        shown = " ".join(capsys.readouterr().out.split())
+        shown = shown.replace(" ".join(str(models_dir).split()), "")
+        assert "comfy" not in shown.lower()
 
     def test_a_comfy_workdir_still_receives_the_file_in_its_subfolder(
             self, fake_registry, tmp_path, monkeypatch):
