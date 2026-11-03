@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Chat prompt formats localm renders itself for template families that
-llama.cpp's built-in ``llama_chat_apply_template`` matcher does not recognise.
+llama.cpp's built-in ``llama_chat_apply_template`` matcher does not recognise
+(Gemma 4) or renders differently from the official template (harmony, gpt-oss).
 
 Each renderer is a plain string builder over ``(role, text)`` pairs: the
 embedded Jinja template is only inspected for its family signature and variant
@@ -8,6 +9,8 @@ markers, never executed.
 """
 from __future__ import annotations
 
+import datetime
+import re
 from typing import Optional, Sequence
 
 # Characters trimmed from both ends of a message, the same set llama.cpp's
@@ -100,10 +103,67 @@ def format_gemma4(messages: Sequence[tuple[str, str]], template: str) -> str:
     return "".join(out)
 
 
+_HARMONY_SYSTEM = (
+    "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\n"
+    "Knowledge cutoff: 2024-06\nCurrent date: {date}\n\nReasoning: medium\n\n"
+    "# Valid channels: analysis, commentary, final. "
+    "Channel must be included for every message.<|end|>")
+_HARMONY_THINK_BLOCK = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
+
+
+def is_harmony_template(template: Optional[str]) -> bool:
+    """True when *template* (a chat template's Jinja source) is a harmony
+    (gpt-oss) template: it renders a ``developer`` message and an assistant
+    reply in the ``final`` channel."""
+    if not template:
+        return False
+    return ("<|start|>developer<|message|>" in template
+            and "<|channel|>final<|message|>" in template)
+
+
+def format_harmony(messages: Sequence[tuple[str, str]], today: Optional[str] = None) -> str:
+    """Render *messages*, ``(role, text)`` pairs, as a harmony (gpt-oss) prompt
+    with the generation prompt appended, as the official gpt-oss chat template
+    renders a conversation without tools.
+
+    - The prompt starts with the ``system`` message that names the valid
+      channels and carries the date *today* (``YYYY-MM-DD``, default the local
+      date) and ``Reasoning: medium``.
+    - A first message with role ``system`` or ``developer`` becomes the
+      ``developer`` message, headed ``# Instructions``.
+    - A ``user`` message is ``<|start|>user<|message|>TEXT<|end|>``.
+    - An ``assistant`` message is a ``final``-channel message,
+      ``<|start|>assistant<|channel|>final<|message|>TEXT<|end|>``; its
+      ``<think>...</think>`` blocks are dropped, as the template drops the
+      reasoning of every earlier turn.
+    - Any other role is ``<|start|>ROLE<|message|>TEXT<|end|>``.
+    - The prompt ends ``<|start|>assistant``.
+    """
+    if today is None:
+        today = datetime.date.today().isoformat()
+    out = [_HARMONY_SYSTEM.format(date=today)]
+    loop = list(messages)
+    if loop and loop[0][0] in ("system", "developer"):
+        if loop[0][1]:
+            out.append("<|start|>developer<|message|># Instructions\n\n"
+                       + loop[0][1] + "\n\n<|end|>")
+        loop = loop[1:]
+    for role, text in loop:
+        if role == "assistant":
+            out.append("<|start|>assistant<|channel|>final<|message|>"
+                       + _HARMONY_THINK_BLOCK.sub("", text) + "<|end|>")
+        else:
+            out.append("<|start|>" + role + "<|message|>" + text + "<|end|>")
+    out.append("<|start|>assistant")
+    return "".join(out)
+
+
 def render_known_family(template: Optional[str],
                         messages: Sequence[tuple[str, str]]) -> Optional[str]:
     """The prompt for *messages* when *template* belongs to a family rendered
     here, else ``None``."""
     if is_gemma4_template(template):
         return format_gemma4(messages, template or "")
+    if is_harmony_template(template):
+        return format_harmony(messages)
     return None
