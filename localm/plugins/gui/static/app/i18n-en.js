@@ -1465,6 +1465,10 @@ export const I18N_EN = {
   "models.sizeUnknown": "size unknown",
   "models.splitHint":
     "may not fit on one GPU, but may fit split across your {count} GPUs - see Settings > Split across GPUs",
+  "models.search.clear": "Clear search",
+  "models.search.label": "Search your models",
+  "models.search.noMatch": "No models match \"{query}\"",
+  "models.search.placeholder": "Search your models…",
   "models.switch.confirmLabel": "Switch anyway",
   "models.switch.confirmTitle": "Confirm model switch",
   "models.switch.mmapFromDisk": "running from disk-backed memory, first tokens slower",
@@ -2608,13 +2612,16 @@ export const I18N_EN = {
 
   // ---- Settings > Issues ----
   "settings.issues.title": "Issues",
-  "settings.issues.help": "Open and resolved issues for this project (read-only) - see whether a bug you reported has been fixed.",
+  "settings.issues.help": "The bug reports you sent from this install (read-only) - see whether one has been fixed.",
   "settings.issues.refreshButton": "Refresh",
   "settings.issues.loading": "Loading ...",
   "settings.issues.loadError": "Could not load: {error}",
-  "settings.issues.emptyTitle": "No open issues",
-  "settings.issues.emptyBody": "Reported bugs that are still open show up here.",
-  "settings.issues.openSuffix": " (open)",
+  "settings.issues.emptyTitle": "No reports sent from this install",
+  "settings.issues.emptyBody": "Bugs you report from here show up on this list.",
+  "settings.issues.openSuffix": " (view)",
+  "settings.issues.allLink": "All issues on GitHub",
+  "settings.issues.rowError": "(could not check: {error})",
+  "settings.issues.sessionOnly": "Privacy mode: this list is kept only until localm quits.",
   "settings.issues.loadFailed": "Could not load issues: {message}",
 
   // ---- Settings > Logs ----

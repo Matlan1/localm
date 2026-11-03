@@ -502,6 +502,14 @@
                     data-i18n="models.unloadAll.button" data-i18n-title="models.unloadAll.title"
                     title="Release every currently-loaded model from GPU/CPU memory">Unload all</button>
           </div>
+          <div class="models-search-row">
+            <label for="models-search" class="models-search-label" data-i18n="models.search.label">Search your models</label>
+            <input type="search" id="models-search" autocomplete="off" spellcheck="false"
+                   placeholder="Search your models…" data-i18n-placeholder="models.search.placeholder">
+            <button type="button" class="btn-secondary" id="models-search-clear" hidden
+                    aria-label="Clear search" data-i18n-aria-label="models.search.clear"
+                    data-i18n="models.search.clear">Clear search</button>
+          </div>
           <div id="models-table"></div>
         </div>
       </div>
@@ -1366,8 +1374,8 @@
             <section class="card settings-section" id="sec-issues" data-group="system" data-sec-label="Issues" hidden>
               <div class="card-head"><span class="ic cat-ic cat-slate" data-icon="book"></span>
                 <div class="card-head-text"><h3 data-i18n="settings.issues.title">Issues</h3></div></div>
-              <div class="sub" data-i18n="settings.issues.help">Open and resolved issues for this project (read-only) - see
-              whether a bug you reported has been fixed.</div>
+              <div class="sub" data-i18n="settings.issues.help">The bug reports you sent from this install (read-only) - see
+              whether one has been fixed.</div>
               <div class="actions">
                 <button class="btn-secondary" id="issues-refresh" data-i18n="settings.issues.refreshButton">Refresh</button>
               </div>
