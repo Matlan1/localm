@@ -16,7 +16,7 @@ localm installs a fresh one, matched to the machine's GPU, under LOCALM_HOME.
      class_types, each mapped to a PINNED repo+commit. Today that is exactly
      {UnetLoaderGGUFAdvanced -> city96/ComfyUI-GGUF}. A shipped-workflow class_type
      that is neither known-core nor mapped is SURFACED, never silently missing.
-  3. ``provision_fresh()`` clones a PINNED ComfyUI, makes a fresh localm venv, installs
+  3. ``provision_fresh()`` fetches a PINNED ComfyUI (a source archive), makes a fresh localm venv, installs
      the hardware-matched torch + ComfyUI's requirements + the derived pinned nodes,
      shares models via S1's extra_model_paths.yaml, drops a marker, and verifies the
      result. A failed base step rolls the partial install back.
@@ -41,14 +41,15 @@ from localm.config import load_config
 from localm.debuglog import logger
 from localm.media import managed_comfy as mc
 from localm.media import managed_comfy_provision as _prov
+from localm.media import source_archive
 from localm.media.comfy_patches import apply_patches as _apply_localm_patches
 from localm.media.managed_comfy_provision import (
-    MARKER_FILENAME, ProgressCb, ProvisionResult, _emit, _probe_pip, _run, _tail, git_argv)
+    MARKER_FILENAME, ProgressCb, ProvisionResult, _emit, _probe_pip, _run, _tail)
 
 # --------------------------------------------------------------------------- #
 #  Pinned ComfyUI (decision 4/7)                                              #
 # --------------------------------------------------------------------------- #
-# A tagged, known-version ComfyUI to clone fresh. A fixed CONSTANT here; advancing
+# A tagged, known-version ComfyUI to fetch fresh. A fixed CONSTANT here; advancing
 # it and carrying localm's own patches on top of it is stage S4's job.
 COMFYUI_REPO = "https://github.com/comfyanonymous/ComfyUI.git"
 COMFYUI_PINNED_COMMIT = "426f5eea52a7ece1dd599fff4cb6cd1f352ddd24"
@@ -188,7 +189,7 @@ def comfy_torch_install_args(spec: ComfyTorchSpec) -> list:
 class CustomNodePin:
     """A pinned custom-node repo a shipped workflow needs."""
     name: str      # dir name under custom_nodes/
-    repo: str      # git URL
+    repo: str      # GitHub repository URL
     commit: str    # pinned commit
 
 
@@ -288,7 +289,7 @@ def required_custom_nodes(workflow_files=None) -> RequiredNodes:
     """Derive the custom-node repos a fresh ComfyUI needs from localm's shipped
     workflows (decision 5). A class_type in CLASS_TYPE_TO_NODE -> its pinned repo; a
     known-core node -> nothing; anything else -> unclassified (surfaced). Deduped by
-    repo so each is cloned once, in first-seen order."""
+    repo so each is fetched once, in first-seen order."""
     files = workflow_files if workflow_files is not None else _shipped_workflow_files()
     seen: set = set()
     for f in files:
@@ -309,22 +310,19 @@ def required_custom_nodes(workflow_files=None) -> RequiredNodes:
 #  Fresh provisioning                                                         #
 # --------------------------------------------------------------------------- #
 
-def _clone_at_commit(repo: str, dest: Path, commit: str,
+def _fetch_at_commit(repo: str, dest: Path, commit: str,
                      on_progress: ProgressCb) -> tuple:
-    """git clone *repo* into *dest*, then check out *commit*. Returns (ok, output).
-
-    core.longpaths: without it, a deeply-nested LOCALM_HOME (a long username, a
-    OneDrive-redirected profile, a nested custom data dir) can push a pack
-    object's path past Windows' legacy 260-char MAX_PATH, failing clone with
-    "Filename too long" / "invalid index-pack output". A per-invocation -c
-    override, not a global git config change."""
-    ok, out = _run(git_argv("-c", "core.longpaths=true", "clone", "--quiet", repo, str(dest)),
-                   on_progress=on_progress, timeout=1800)
-    if not ok:
-        return False, out
-    ok2, out2 = _run(git_argv("-C", str(dest), "checkout", "--quiet", commit),
-                     on_progress=on_progress, timeout=300)
-    return ok2, out + "\n" + out2
+    """Fetch *commit* of the GitHub repository *repo* into the new folder *dest*
+    as a source archive (:func:`localm.media.source_archive.fetch_tree`), with
+    no git program. Returns (ok, output)."""
+    try:
+        files = source_archive.fetch_tree(repo, commit, dest,
+                                          on_progress=lambda m: _emit(on_progress, m))
+    except source_archive.ArchiveError as e:
+        return False, str(e)
+    except OSError as e:
+        return False, f"could not write {dest}: {e}"
+    return True, f"fetched {len(files)} files of {commit[:12]} into {dest}"
 
 
 def _pip_install(managed_python: Path, args: list, on_progress: ProgressCb,
@@ -336,7 +334,7 @@ def _pip_install(managed_python: Path, args: list, on_progress: ProgressCb,
 
 def _install_custom_nodes(managed_root: Path, nodes, managed_python: Path,
                           on_progress: ProgressCb) -> tuple:
-    """Clone each pinned custom node into custom_nodes/<name> at its commit and pip
+    """Fetch each pinned custom node into custom_nodes/<name> at its commit and pip
     install its requirements.txt when present. Returns (installed_count, failures),
     failures a list of "name: reason". A node that cannot be installed is SURFACED,
     not silently dropped, but does NOT abort the base install - it only breaks the
@@ -347,9 +345,9 @@ def _install_custom_nodes(managed_root: Path, nodes, managed_python: Path,
     failures: list = []
     for pin in nodes:
         target = dst / pin.name
-        ok, out = _clone_at_commit(pin.repo, target, pin.commit, on_progress)
+        ok, out = _fetch_at_commit(pin.repo, target, pin.commit, on_progress)
         if not ok:
-            failures.append(f"{pin.name}: clone failed ({_tail(out)})")
+            failures.append(f"{pin.name}: fetch failed ({_tail(out)})")
             continue
         req = target / "requirements.txt"
         if req.is_file():
@@ -393,7 +391,7 @@ def provision_fresh(cfg: Optional[dict] = None, *, on_progress: ProgressCb = Non
                     install_torch: bool = True) -> ProvisionResult:
     """Install a FRESH, hardware-matched ComfyUI under LOCALM_HOME (decisions 4 + 5).
 
-    Steps: clone ComfyUI at the pinned commit, make a fresh localm venv, install the
+    Steps: fetch ComfyUI at the pinned commit, make a fresh localm venv, install the
     hardware-matched torch FIRST (so ComfyUI's unpinned torch requirement is already
     satisfied and pip does not replace it), then ComfyUI's requirements and the derived
     pinned custom nodes, write extra_model_paths.yaml (S1), drop a marker, and verify
@@ -444,11 +442,11 @@ def provision_fresh(cfg: Optional[dict] = None, *, on_progress: ProgressCb = Non
                      "(localm comfy remove), then run setup again."))
 
     try:
-        # 1) Clone ComfyUI at the pinned commit.
-        _say(f"Cloning ComfyUI ({commit[:12]}) into {root} ...")
-        ok, out = _clone_at_commit(repo, root, commit, on_progress)
+        # 1) Fetch ComfyUI at the pinned commit.
+        _say(f"Fetching ComfyUI ({commit[:12]}) into {root} ...")
+        ok, out = _fetch_at_commit(repo, root, commit, on_progress)
         if not ok:
-            return _fail(f"Could not clone ComfyUI: {_tail(out)}")
+            return _fail(f"Could not fetch ComfyUI: {_tail(out)}")
 
         # 2) Fresh localm venv (same base Python as localm; torch wheels are
         #    Python-version specific, and localm's interpreter is the known-good one).
