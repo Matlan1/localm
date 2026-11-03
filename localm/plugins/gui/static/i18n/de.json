@@ -1548,6 +1548,7 @@
   "settings.recentErrors.empty": "Bisher keine Fehler.",
   "settings.recentErrors.clear": "Leeren",
   "settings.recentErrors.copy": "Kopieren",
+  "settings.recentErrors.dismiss": "Diesen Fehler verwerfen",
   "settings.recentErrors.copied": "Kopiert",
   "settings.recentErrors.report": "Diesen Fehler melden",
   "settings.recentErrors.reportDescription": "Die Oberfläche hat diesen Fehler angezeigt (Seite {page}, {time}).",

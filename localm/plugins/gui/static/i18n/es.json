@@ -2338,6 +2338,7 @@
   "settings.recentErrors.clear": "Borrar",
   "settings.recentErrors.copied": "Copiado",
   "settings.recentErrors.copy": "Copiar",
+  "settings.recentErrors.dismiss": "Descartar este error",
   "settings.recentErrors.empty": "Ningún error por ahora.",
   "settings.recentErrors.help": "Los últimos cinco mensajes de error que mostró esta página, del más reciente al más antiguo. En modo privado, la lista solo se conserva hasta que se recarga la página.",
   "settings.recentErrors.report": "Informar de este error",
