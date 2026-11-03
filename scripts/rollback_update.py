@@ -97,9 +97,10 @@ def _load_apply_update(install_root: Path, code_root=None):
 def _restore_venv(install_root: Path, updates_dir: Path, code_root=None):
     """Put back the venv the update kept before its dependency step (the ``venv``
     entry of ``<updates>/backup-components``): every package that step changed and
-    localm's own install record. Returns ``(errors, undo)``: the failures (empty
-    when there is nothing to restore or it was restored) and a callable that puts
-    the venv back as it was before this call (None when nothing was changed)."""
+    localm's own install record, unless that copy belongs to another backup than
+    the one being restored. Returns ``(errors, undo)``: the failures (empty when
+    there is nothing to restore or it was restored) and a callable that puts the
+    venv back as it was before this call (None when nothing was changed)."""
     snap = updates_dir / "backup-components"
     state_file = snap / "state.json"
     if not state_file.exists():
@@ -111,6 +112,12 @@ def _restore_venv(install_root: Path, updates_dir: Path, code_root=None):
         return [f"the record of what the update replaced ({state_file}) cannot be read: "
                 f"{e}"], None
     if not info:
+        return [], None
+    try:
+        held = (updates_dir / "backup" / "VERSION").read_text(encoding="utf-8").strip()
+    except OSError:
+        held = None
+    if info.get("backup_version") and held and info["backup_version"] != held:
         return [], None
     uc = _load_helper(install_root, "updater_components", code_root)
     if uc is None or not hasattr(uc, "venv_changes"):

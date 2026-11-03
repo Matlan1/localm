@@ -1426,7 +1426,8 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
                            "the post-update step failed; rolled back")
             try:
                 updater_components.record_deps_changes(
-                    updater_components.snapshot_dir(backup_dir), target)
+                    updater_components.snapshot_dir(backup_dir), target,
+                    backup_version=previous_version)
             except OSError as e:
                 _apply_warn("could not record which packages the update changed: %s; a "
                             "rollback puts back every package that differs", e)
@@ -1737,7 +1738,9 @@ def _restore_all(target: Path, backup_dir: Path, names, *, say=None, components=
     runtime holder that is not this install's, or a runtime that cannot be
     restored raises LocalmError with nothing changed; a later failure puts
     the components and the runtime back as they were (RuntimeError when that
-    fails too). Clears the pending runtime and component updates and, with
+    fails too). A venv copy kept for another backup than *backup_dir*
+    (``updater_components.deps_snapshot_is_for``) is not restored. Clears the
+    pending runtime and component updates and, with
     *record*, records the rollback as their last status (:func:`_record_rollback`).
     *say* receives each step as one line. *components*, when given, restricts
     the kept components restored to those names (``apply`` passes only the
@@ -1755,6 +1758,13 @@ def _restore_all(target: Path, backup_dir: Path, names, *, say=None, components=
     comp_names = updater_components.installed_names(
         [n for n in updater_components.snapshot_names(comp_snap)
          if components is None or n in components], target)
+    if updater_components.DEPS in comp_names:
+        try:
+            backup_version = (backup_dir / "VERSION").read_text(encoding="utf-8").strip()
+        except OSError:
+            backup_version = None
+        if not updater_components.deps_snapshot_is_for(comp_snap, backup_version):
+            comp_names.remove(updater_components.DEPS)
     comp_keep = None
     if comp_names:
         comp_keep = comp_snap.with_name(comp_snap.name + "-current")

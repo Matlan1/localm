@@ -383,6 +383,30 @@ def test_a_rollback_keeps_packages_installed_after_the_update(install, home):
     assert _state(site) == {"localm": "0.3.1", "click": "8.0", "plugin-dep": "1.0"}
 
 
+def test_a_backup_an_older_build_replaced_does_not_restore_the_kept_venv(install, home):
+    inst, site = install
+    data, sig = _release_032(sd=None)
+    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                  runner=_deps_step(site))
+    backup = updater._backup_dir()
+    (backup / "VERSION").write_text("0.1.5", encoding="utf-8")
+    updater.rollback_last(installed=inst)
+    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.1.5", "the code is restored"
+    assert _state(site)["localm"] == "0.3.2", "the venv copy belongs to another backup"
+
+
+def test_the_standalone_rollback_skips_a_venv_kept_for_another_backup(install, home, monkeypatch):
+    inst, site = install
+    data, sig = _release_032(sd=None)
+    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                  runner=_deps_step(site))
+    (updater._backup_dir() / "VERSION").write_text("0.1.5", encoding="utf-8")
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    rb = _load_script("rollback_update")
+    assert rb.main(["--yes"], install_root=inst, code_root=Path(__file__).resolve().parents[1]) == 0
+    assert _state(site)["localm"] == "0.3.2"
+
+
 def test_a_corrupt_snapshot_refuses_the_rollback_with_nothing_changed(install, home):
     inst, site = install
     data, sig = _release_032(sd=None)

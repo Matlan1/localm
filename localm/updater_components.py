@@ -1299,12 +1299,13 @@ def _touches_torch(copy: Path, venv: Path, changed: list) -> bool:
     return False
 
 
-def record_deps_changes(src, root) -> None:
+def record_deps_changes(src, root, *, backup_version: Optional[str] = None) -> None:
     """Record, in the :data:`DEPS` entry of the snapshot *src*, the
     distributions the dependency step changed in the venv of the install at
     *root* (``"dists"``), so a rollback puts back only those and leaves what
-    was installed later (a plugin's packages). Raises OSError when it cannot
-    be recorded."""
+    was installed later (a plugin's packages), and the version the update
+    backup holds (*backup_version*, :func:`deps_snapshot_is_for`). Raises
+    OSError when it cannot be recorded."""
     src = Path(src)
     state = _read_json(src / STATE_FILE)
     info = (state or {}).get("components", {}).get(DEPS) if state else None
@@ -1315,7 +1316,20 @@ def record_deps_changes(src, root) -> None:
     if changed is None:
         raise OSError(f"could not read the packages of {Path(root) / '.venv'}")
     info["dists"] = changed
+    info["backup_version"] = backup_version
     (src / STATE_FILE).write_text(json.dumps(state), encoding="utf-8")
+
+
+def deps_snapshot_is_for(src, backup_version: Optional[str]) -> bool:
+    """Whether the :data:`DEPS` entry of the snapshot *src* belongs to the update
+    whose backup holds *backup_version*. False when it names another version:
+    a build without these snapshots applied a later update and replaced the
+    backup, so that venv copy is not what a rollback of that update puts back.
+    True when the entry names no version."""
+    state = _read_json(Path(src) / STATE_FILE) or {}
+    info = (state.get("components") or {}).get(DEPS) or {}
+    kept = info.get("backup_version")
+    return not kept or not backup_version or kept == backup_version
 
 
 def snapshot_readable(src) -> bool:
