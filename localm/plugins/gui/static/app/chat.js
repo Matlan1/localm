@@ -1203,6 +1203,13 @@ export function syncPinModelToggle(conv) {
   const pinned = conv && conv.pinnedModel;
   box.checked = !!pinned;
   if (label) label.textContent = pinned || modelSelect.value || modelCache.active || "";
+  const note = $("pin-mismatch");
+  if (note) {
+    const active = modelCache.active;
+    const mismatch = !!pinned && !!active && pinned !== active;
+    note.hidden = !mismatch;
+    note.textContent = mismatch ? t("chat.pinModel.mismatch", { pinned, active }) : "";
+  }
 }
 
 /** Pins the conversation on screen to the model selected in the sidebar, or

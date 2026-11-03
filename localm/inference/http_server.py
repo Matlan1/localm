@@ -566,6 +566,13 @@ _INCONCLUSIVE_LOAD_RETRY_DELAY = 1.5
 # model to finish its requests, so that model can be evicted instead of the new
 # one loading beside it on whatever VRAM is left.
 _BUSY_VICTIM_IDLE_WAIT_S = 30.0
+
+# Status for a load that goes ahead beside resident models because none could be
+# evicted for it (``pinned_models``, or a model still busy): the load then takes
+# whatever VRAM is left and the rest runs on the CPU.
+LOADING_BESIDE_STATUS = ("Loading '{model}' beside {resident}, which could not be "
+                         "unloaded: not enough GPU memory is free, so part of it "
+                         "will run on the CPU (slower)...")
 # How often that wait checks whether a busy native media runtime's job ended.
 _BUSY_MEDIA_POLL_S = 0.25
 
@@ -1204,6 +1211,11 @@ async def _switch_exhaustion_ladder(loop, probe: switch_admission.VramProbe,
         "to the backend's own load-time sizing instead of refusing",
         budget.name, budget.needed_bytes // 1024 ** 2, probe.free // 1024 ** 2)
     attempt.deferred_to_backend = True
+    beside = [n for n, e in list(_engines.items())
+              if n != budget.name and getattr(e, "loaded", False)]
+    if beside and on_status is not None:
+        on_status(LOADING_BESIDE_STATUS.format(
+            model=budget.name, resident=", ".join(f"'{n}'" for n in beside)))
     return step(switch_admission.PROCEED_TO_LOAD)
 
 
