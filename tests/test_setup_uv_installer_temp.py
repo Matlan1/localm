@@ -430,7 +430,7 @@ _UV_RECORDER = (
     '  echo "CRED=${UV_CREDENTIALS_DIR:-}";\n'
     '  echo "PIPCONFIG=${PIP_CONFIG_FILE:-}"; echo "NOUSERSITE=${PYTHONNOUSERSITE:-}";\n'
     '  echo "POISON=${UV_INDEX_URL:-}${PIP_INDEX_URL:-}${UV_PYTHON_INSTALL_MIRROR:-}'
-    '${PYTHONPATH:-}${PYTHONHOME:-}${VIRTUAL_ENV:-}${LOCALM_HOME:-}"; } >> "$UV_LOG"\n'
+    '${PYTHONPATH:-}${PYTHONHOME:-}${VIRTUAL_ENV:-}${LOCALM_HOME:-}"; } >> "$STUB_UV_LOG"\n'
     'if [ "$1" = venv ]; then mkdir -p .venv/bin; fi\n'
     'exit 0\n')
 
@@ -452,7 +452,7 @@ def _setup_sh_venv_step(tmp_path: Path, pick: str):
                 "UV_UNMANAGED_INSTALL", "UV_PYTHON_INSTALL_DIR", "UV_CACHE_DIR"):
         env.pop(var, None)
     env.update(TMPDIR=scratch.as_posix(), TEMP=str(scratch), TMP=str(scratch),
-               HOME=bash_path(home), UV_LOG=log.as_posix(), LOCALM_SETUP_ABORT_AFTER="venv",
+               HOME=bash_path(home), STUB_UV_LOG=log.as_posix(), LOCALM_SETUP_ABORT_AFTER="venv",
                UV_INDEX_URL="http://poison.invalid/uv", PIP_INDEX_URL="http://poison.invalid/pip",
                UV_PYTHON_INSTALL_MIRROR="http://poison.invalid/mirror", PYTHONPATH=str(tmp_path),
                PYTHONHOME=str(tmp_path), VIRTUAL_ENV=str(tmp_path), LOCALM_HOME=str(tmp_path))
@@ -475,13 +475,13 @@ def test_setup_sh_runs_uv_with_its_temp_folder_and_nothing_inherited(tmp_path, p
     assert any(a.startswith("venv --python 3.12 --python-preference only-managed")
                for a in seen["ARGS"]), seen["ARGS"]
     for key in ("TMPDIR", "TMP", "TEMP"):
-        assert {_native(v) for v in seen[key]} == {stmp}, (key, seen[key])
+        assert {str(Path(_native(v))) for v in seen[key]} == {stmp}, (key, seen[key])
     store = clone if pick == "1" else home / ".local" / "share" / "localm" / "shared"
     py, cache = (".python", ".cache") if pick == "1" else ("python", "cache")
-    assert {_native(v) for v in seen["PYDIR"]} == {str(store / py)}
-    assert {_native(v) for v in seen["CACHE"]} == {str(store / cache)}
+    assert {str(Path(_native(v))) for v in seen["PYDIR"]} == {str(store / py)}
+    assert {str(Path(_native(v))) for v in seen["CACHE"]} == {str(store / cache)}
     uv_dir = clone / ".uv" if pick == "1" else store / "uv"
-    assert {_native(v) for v in seen["CRED"]} == {str(uv_dir / "credentials")}
+    assert {str(Path(_native(v))) for v in seen["CRED"]} == {str(uv_dir / "credentials")}
     assert set(seen["PREF"]) == {"only-managed"} and set(seen["NOCONFIG"]) == {"1"}
     assert set(seen["PIPCONFIG"]) == {"/dev/null"} and set(seen["NOUSERSITE"]) == {"1"}
     assert set(seen["POISON"]) == {""}

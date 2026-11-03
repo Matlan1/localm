@@ -46,7 +46,7 @@ BANNED = ("uv", "python", "python3", "py", "curl", "wget", "git")
 
 # What a command may be preceded by on a line: start, a separator, a keyword.
 _CMD_START = (r"(?:^|[;&|(!{]|\$\(|\b(?:then|do|else|elif|if|while|until|exec|time|nice|env)\s)"
-              r"\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*")
+              r"\s*(?:[A-Za-z_][A-Za-z0-9_]*=(?:\"[^\"]*\"|'[^']*'|[^\s\"']*)\s+)*")
 _BARE = re.compile(_CMD_START + r"(" + "|".join(BANNED) + r")(?=\s|$|;|\))")
 
 
@@ -101,7 +101,8 @@ def test_no_user_tool_folder_goes_on_path(name):
 @pytest.mark.parametrize("name", SCRIPTS)
 def test_no_system_temp_folder(name):
     hits = [(i, ln) for i, ln in enumerate(_text(name).splitlines(), 1)
-            if not ln.lstrip().startswith("#") and re.search(r"/tmp\b|\bmktemp\b", ln)]
+            if not ln.lstrip().startswith("#")
+            and re.search(r"(?<![\w$}])/tmp\b|\bmktemp\b", ln)]
     assert hits == [], f"{name}: uses the system temp folder: {hits}"
 
 
