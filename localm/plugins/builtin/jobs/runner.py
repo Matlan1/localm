@@ -441,17 +441,10 @@ def _run_memory(job: Job, *, engine=None) -> str:
         BackgroundYield, background_complete)
     from localm.textnorm import strip_think
 
-    # Track when a reply was ALL reasoning (empty after the strip), so the no-facts
-    # result carries a caveat instead of reading as a clean no-op.
-    state = {"empty_replies": 0}
-
     def complete(prompt: str) -> str:
         raw = background_complete(eng, prompt, yield_to_foreground=True).strip()
         # strip_think: memory must never ingest the reasoning channel.
-        text = strip_think(raw).strip()
-        if raw and not text:
-            state["empty_replies"] += 1
-        return text
+        return strip_think(raw).strip()
 
     # Pin the engine busy and touch its activity clock for the WHOLE synthesis pass
     # (synthesize_memory can call complete() several times), so idle-unload cannot
@@ -476,11 +469,6 @@ def _run_memory(job: Job, *, engine=None) -> str:
               "memory panel" % pending) if pending else ""
     facts = result.get("facts") or []
     if not facts:
-        if state["empty_replies"]:
-            return ("memory synthesis: no facts extracted - the model produced "
-                    "only reasoning output (%d reply/replies were empty after "
-                    "removing the think channel; likely truncated by the "
-                    "completion limit)" % state["empty_replies"]) + suffix
         return "memory synthesis: no new durable facts found" + suffix
     return ("memory synthesis: added %d fact(s):\n" % result["added"]) + \
            "\n".join(f"- {f}" for f in facts) + suffix

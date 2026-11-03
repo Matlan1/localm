@@ -385,13 +385,14 @@ with an installed model that has it when it does not. **A model you named is
 never swapped out from under you** - naming one pins it, gap or no gap, unless
 you also send `"pin_model": false`.
 
-Three localm extensions on the request body steer this:
+Four localm extensions on the request body steer this:
 
 | Field | Meaning |
 |---|---|
 | `pin_model` | `false`: `model` is only the preferred model, which routing may replace. `true`: whatever answers is never replaced, named or not. Unset: a named model is pinned, an unnamed one is not. |
 | `required_capabilities` | Capabilities the answering model must have, any of `vision`, `audio_input`, `tool_use`, `reasoning`. Vision, audio input and context length never need listing: an image part, an audio part and the prompt's size already say so. |
 | `min_context` | Tokens the answering model's trained context window must hold. The larger of this and what the prompt's own size implies applies. |
+| `model_autoswitch` | One of `off`, `image`, `ask`, `loaded`, `auto`, `eager`: the autoswitch mode this one request is routed under, in place of the `model_autoswitch` setting. Unset: the setting applies. A pinned request is never moved whatever the mode. |
 
 Only installed chat models whose file is present are candidates (never an
 embedding, diffusion, VAE, LoRA or projector entry), a candidate is only

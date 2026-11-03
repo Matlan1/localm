@@ -4748,14 +4748,6 @@
                 }
             },
             {
-                "code": "reportOptionalCall",
-                "range": {
-                    "startColumn": 12,
-                    "endColumn": 45,
-                    "lineCount": 1
-                }
-            },
-            {
                 "code": "reportAssignmentType",
                 "range": {
                     "startColumn": 15,
