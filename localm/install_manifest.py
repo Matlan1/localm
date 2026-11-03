@@ -467,6 +467,29 @@ def record(root, *, venv="", lib_dir="", home_cfg="", data_dir="",
     return _write(root, data)
 
 
+def record_model_packages(root, entries: Iterable[dict]) -> Optional[Path]:
+    """Add *entries* (``{"project", "version", "for_modules"}``) to the
+    ``model_packages`` list of the manifest under *root*, replacing an entry for
+    the same project. Does nothing and returns None when *root* has no manifest
+    (a source checkout).
+
+    Raises ValueError when the existing manifest is newer than this code, and
+    OSError when it cannot be written."""
+    root = Path(root).resolve()
+    old = load(root)
+    if old is None:
+        return None
+    if (old.get("schema") or 0) > SCHEMA_VERSION:
+        raise ValueError(f"install record schema {old.get('schema')!r} is newer "
+                         "than this localm understands")
+    kept = [e for e in old.get("model_packages") or [] if isinstance(e, dict)]
+    for entry in entries:
+        kept = [e for e in kept if e.get("project") != entry.get("project")]
+        kept.append(dict(entry))
+    data = dict(old)
+    data["model_packages"] = kept
+    return _write(root, data)
+
 def refresh_lib(lib_dir) -> Optional[Path]:
     """Re-snapshot *lib_dir* (``<clone>/runtime/localm_llama_runtime/lib``) into
     the install record of the clone that holds it. Returns the manifest path,
