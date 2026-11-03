@@ -1951,7 +1951,7 @@ export async function sendReviewedBugReport(isRetry = false, rep = _reviewedBugR
     }
     const sent = !!data.uploaded;
     const uploadFailed = !sent && data.upload_error && !data.rate_limited;
-    _showBugActions({ retry: !sent, download: !sent && !!_lastBugReport });
+    _showBugActions({ retry: !sent && data.upload_stage !== "not_filed", download: !sent && !!_lastBugReport });
     if (out) {
       out.hidden = false;
       if (sent) {

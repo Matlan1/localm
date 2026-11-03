@@ -6,10 +6,14 @@ config from source, and the report body."""
 
 from __future__ import annotations
 
+import http.server
 import importlib.util
+import json
 import os
+import re
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -290,6 +294,14 @@ def test_post_report_non_2xx_raises():
         ri.post_report("https://proxy", "tok", "t", "b", opener=opener)
 
 
+@pytest.mark.parametrize("status", [422, 200])
+def test_post_report_not_filed_reply_raises(status):
+    def opener(u, data, hdrs, to):
+        return status, '{"error": "report not filed", "filed": false}'
+    with pytest.raises(RuntimeError):
+        ri.post_report("https://proxy", "tok", "t", "b", opener=opener)
+
+
 def test_post_report_network_error_raises():
     def opener(u, data, hdrs, to):
         raise RuntimeError("could not reach the server: timed out")
@@ -345,6 +357,25 @@ def test_main_yes_send_failure_returns_1_and_does_not_claim_success(tmp_path, mo
         raise RuntimeError("HTTP 502: bad gateway")
     monkeypatch.setattr(ri, "post_report", _fail)
     rc = ri.main(["--yes", "--summary", "x"])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "Sent to the maintainer" not in out
+    assert "Could not send" in out
+
+
+def test_main_yes_not_filed_saves_and_does_not_claim_success(tmp_path, monkeypatch, capsys):
+    _no_tty(monkeypatch)
+    monkeypatch.setattr(ri, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(ri, "read_proxy", lambda: ("https://proxy", "tok"))
+    real_post = ri.post_report
+
+    def _held(url, token, title, body):
+        return real_post(url, token, title, body,
+                         opener=lambda *a: (200, '{"filed": false}'))
+
+    monkeypatch.setattr(ri, "post_report", _held)
+    rc = ri.main(["--yes", "--summary", "x"])
+    assert list((tmp_path / "home" / "bug-reports").glob("*.md")), "the report text is kept"
     assert rc == 1
     out = capsys.readouterr().out
     assert "Sent to the maintainer" not in out
@@ -566,3 +597,97 @@ def test_powershell_reporter_scrubs_credential_named_assignments():
     assert r"(?<=[?&])" in text
     assert r"(?<![A-Za-z0-9])" in text
     assert r"(?<=[A-Za-z0-9])[_-](?:api[_-]?key" in text
+
+
+# ------------------- the shapes the bug-report proxy files ------------------ #
+
+_FIXTURES = Path(__file__).parent / "fixtures" / "bugreport_contract"
+
+
+def _fixture(name: str) -> str:
+    return (_FIXTURES / name).read_text(encoding="utf-8").replace("\r\n", "\n")
+
+
+def test_python_reporter_writes_the_shape_the_proxy_tests_use():
+    diag = {"localm_version": "0.0.0+contract", "python": "3.12.0",
+            "platform": "TestOS-1.0-contract", "machine": "testarch", "venv_present": True}
+    body = ri.build_body("it would not start", "setup failed", diag, None, "")
+    assert body == _fixture("standalone_report.md").replace("{{MAINTAINER_EMAIL}}", ri.MAINTAINER_EMAIL)
+
+
+def test_powershell_reporter_writes_the_shape_the_proxy_tests_use():
+    text = (_MOD_PATH.parent / "report_issue.ps1").read_text(encoding="utf-8").replace("\r\n", "\n")
+    block = re.search(r'^\$body = ((?:"[^\n]*"(?: \+\n\s*)?)+)$', text, re.M)
+    assert block, "the $body assignment moved"
+    body = "".join(re.findall(r'"([^\n]*?)"(?: \+|$)', block.group(1), re.M)).replace("`n", "\n")
+    body = (body.replace("$summary", "it would not start").replace("$detail", "setup failed")
+            .replace("$os", "{{OS}}").replace("$($PSVersionTable.PSVersion)", "{{POWERSHELL}}"))
+    assert body == _fixture("standalone_powershell_report.md")
+
+
+def test_curl_reporter_writes_the_shape_the_proxy_tests_use():
+    text = (_MOD_PATH.parent.parent / "report-issue.sh").read_text(encoding="utf-8")
+    line = re.search(r'^body="([^"\n]*)"$', text, re.M)
+    assert line, "the body assignment moved"
+    body = line.group(1).replace("${os}", "{{OS}}").replace("${summary}", "it would not start")
+    assert body == _fixture("standalone_curl_report.md").strip()
+
+
+class _ProxyStandIn(http.server.BaseHTTPRequestHandler):
+    reply = (422, b'{"error": "report not filed", "filed": false}')
+    received: list = []
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        type(self).received.append(json.loads(self.rfile.read(length)))
+        self.send_response(self.reply[0])
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(self.reply[1])
+
+    def log_message(self, *args):
+        pass
+
+
+@pytest.mark.skipif(os.name != "nt",
+                    reason="the PowerShell fallback reporter only runs on Windows")
+@pytest.mark.parametrize("reply, rc, sent", [
+    ((422, b'{"error": "report not filed", "filed": false}'), 1, False),
+    ((202, b'{"ok": true, "filed": false}'), 1, False),
+    ((201, b'{"ok": true, "url": "https://example.invalid/issues/1", "number": 1}'), 0, True),
+], ids=["held-422", "held-2xx", "filed"])
+def test_powershell_reporter_outcome_when_actually_executed(tmp_path, monkeypatch, reply, rc, sent):
+    """Runs the reporter's full flow against a loopback stand-in; LOCALM_BUGREPORT_URL
+    wins over any config, so nothing can reach a real endpoint. The body it posted is
+    the shape the proxy tests use."""
+    pwsh = shutil.which("powershell") or shutil.which("pwsh")
+    if not pwsh:
+        pytest.skip("no PowerShell on this machine")
+    ps1 = _copy_ps1_reporter_to_isolated_dir(tmp_path)
+    monkeypatch.setattr(_ProxyStandIn, "reply", reply)
+    monkeypatch.setattr(_ProxyStandIn, "received", [])
+    server = http.server.HTTPServer(("127.0.0.1", 0), _ProxyStandIn)
+    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    env = {**os.environ, "LOCALM_BUGREPORT_URL": f"http://127.0.0.1:{server.server_port}/"}
+    env.pop("LOCALM_BUGREPORT_TOKEN", None)
+    try:
+        proc = subprocess.run(
+            [pwsh, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(ps1),
+             "--summary", "it would not start", "--detail", "setup failed", "--yes"],
+            capture_output=True, text=True, timeout=120, env=env,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    finally:
+        server.shutdown()
+        worker.join(timeout=10)
+        server.server_close()
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert len(_ProxyStandIn.received) == 1, out
+    posted = _ProxyStandIn.received[0]["body"]
+    posted = re.sub(r"(?m)^- OS: .*$", "- OS: {{OS}}", posted)
+    posted = re.sub(r"(?m)^- PowerShell: .*$", "- PowerShell: {{POWERSHELL}}", posted)
+    assert posted == _fixture("standalone_powershell_report.md")
+    assert list((ps1.parents[1] / "home" / "bug-reports").glob("*.md")), "the report text is kept"
+    assert proc.returncode == rc, out
+    assert ("Sent to the maintainer" in out) == sent, out
+    assert ("Could not send" in out) == (not sent), out

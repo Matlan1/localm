@@ -191,6 +191,7 @@ if ($tok) { $headers['X-Localm-Token'] = $tok }
 $payload = @{ title = (Scrub $summary); body = $body } | ConvertTo-Json -Depth 4
 try {
   $resp = Invoke-RestMethod -Uri $url -Method Post -Headers $headers -Body $payload -TimeoutSec 20
+  if ($resp -and $resp.filed -eq $false) { throw 'the server did not file the report' }
   Save-Local | Out-Null
   $link = $null; if ($resp -and $resp.url) { $link = $resp.url }
   if ($link) { Write-Host "  Sent to the maintainer. Thank you! Tracking issue: $link" }
