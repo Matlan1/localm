@@ -14,6 +14,9 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ### Added
 - **A model can be reloaded from the interface.** The running model's row on the Models page has a **reload** button (also on a loaded model whose adapter change is waiting for a reload), Settings > Runtime & GPU has **Save and reload model** beside Save, and Settings > Live tuning has **Reload model** for the settings that save immediately. A plain save still never reloads; the buttons appear only while a model is loaded.
 
+### Changed
+- **The debug log's `loop_lag` now shows real loop stalls.** It used to read `0.00s` on nearly every request, whatever happened. Each request line now reports the longest stretch the server was frozen while that request was in flight (a slow request with `loop_lag` near 0 was just waiting; one with a large `loop_lag` had the server blocked). `/debug/stacks` reports the longest stall of the last minute.
+
 ### Fixed
 - **Unloading a model that runs entirely on the CPU is instant on a PC with a GPU.** A model loaded with 0 GPU layers frees no video memory, yet unloading it (Unload, Unload all, or being replaced by another model) waited 10 to 18 seconds for video memory to be released, with the status pill reading "unloading". localm no longer waits when the unloaded model held none; a model that uses the GPU is still waited for.
 - **`localm comfy restart` and `localm comfy stop` refuse a held port at once.** When another program holds ComfyUI's port and accepts connections without answering, both commands used to spend about a minute waiting on it before printing that localm did not start it and will not stop it. They now print that message immediately and start nothing.
