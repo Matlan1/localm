@@ -245,3 +245,32 @@ test("updateStatusIndicator falls back to the raw English text for an unrecogniz
     body.remove();
   });
 
+const BESIDE_EN = "Loading 'b' beside 'a', which could not be unloaded: not enough GPU memory " +
+  "is free, so part of it will run on the CPU (slower)...";
+
+test("updateStatusIndicator localizes the load-beside status from its args, with the warning style",
+  async () => {
+    const window = await loadGerman();
+    const doc = window.document;
+    const body = doc.createElement("div");
+    body.className = "msg-body";
+    doc.body.appendChild(body);
+
+    window.updateStatusIndicator(body, BESIDE_EN, "loading_beside", { model: "b", resident: "'a'" });
+    const ind = body.querySelector(".msg-status-indicator");
+    const label = ind.querySelector(".status-text").textContent;
+    assert.equal(label, "'b' wird neben 'a' geladen (nicht entladbar): Es ist nicht genug " +
+      "GPU-Speicher frei, daher läuft ein Teil auf der CPU (langsamer)…");
+    assert.ok(ind.classList.contains("st-warn"), "loading_beside uses the warning style");
+
+    window.removeStatusIndicator(body);
+    body.remove();
+  });
+
+test("statusLabel keeps the server text when a status code's args are missing", async () => {
+  const window = await loadGerman();
+  assert.equal(window.statusLabel(BESIDE_EN, "loading_beside"), BESIDE_EN);
+  assert.equal(window.statusLabel(BESIDE_EN, "loading_beside", { model: "b" }), BESIDE_EN);
+  assert.equal(window.statusLabel("Loading model...", "loading_model"), "Modell wird geladen…");
+});
+

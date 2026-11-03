@@ -18,8 +18,8 @@ class ModelRouteContext:
     """The services ``attach_gui`` hands the model route groups.
 
     ``active_model`` returns the name of the model currently serving requests
-    ("" when none is). ``switch_model(name, *, force=False)`` is the
-    coordinator that swaps the active engine and returns its status dict (or
+    ("" when none is). ``switch_model(name, *, force=False, activate=True)``
+    is the coordinator that loads a model and, with *activate*, swaps the active engine, and returns its status dict (or
     None for a minimal callable). ``jobs`` is the background-job manager the
     pull, scan, remove and warm-up routes start work on.
     """

@@ -577,6 +577,15 @@ class TestLoad:
             c.post("/api/models/load", json={"model": "m-b", "force": False})
         assert harness.state.switch_calls == [("m-b", {"force": True}), ("m-b", {})]
 
+    def test_activate_false_is_forwarded_only_when_asked(self, harness):
+        with TestClient(harness.app) as c:
+            c.post("/api/models/load", json={"model": "m-b", "activate": False})
+            c.post("/api/models/load", json={"model": "m-b", "activate": True})
+            c.post("/api/models/load", json={"model": "m-b", "activate": False, "force": True})
+        assert harness.state.switch_calls == [
+            ("m-b", {"activate": False}), ("m-b", {}),
+            ("m-b", {"force": True, "activate": False})]
+
     def test_a_status_less_switch_still_reports_loaded(self, harness):
         harness.state.switch_result = None
         with TestClient(harness.app) as c:
