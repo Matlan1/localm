@@ -480,40 +480,39 @@ print(json.dumps(run(sys.argv[1], json.loads(sys.argv[2]), int(sys.argv[3]))))
 '''
 
 
-@pytest.fixture(scope="module")
-def oracle_result(tmp_path_factory):
-    from tests._real_gguf import require_native_runtime
-    require_native_runtime()
-    directory = tmp_path_factory.mktemp("minivocab")
-    for pre in _CHUNKABLE:
-        (directory / f"{pre}.gguf").write_bytes(_mini_gguf(pre))
-    repo = Path(__file__).resolve().parent.parent
-    env = {**os.environ, "PYTHONPATH": str(repo), "PYTHONIOENCODING": "utf-8"}
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    proc = subprocess.run(
-        [sys.executable, "-c", _ORACLE, str(directory), json.dumps(_CHUNKABLE), "400"],
-        capture_output=True, text=True, encoding="utf-8", errors="replace", env=env,
-        timeout=600, creationflags=flags)
-    assert proc.returncode == 0, proc.stderr[-2000:]
-    return json.loads(proc.stdout.strip().splitlines()[-1])
-
-
 @pytest.mark.real_gguf
 class TestChunkedTokensEqualWholeTokens:
     """Whole against chunked, through llama.cpp's own tokenizer, for every
     pre-type the guard bounds that a model can be loaded with."""
 
+    @pytest.fixture(scope="class")
+    def result(self, tmp_path_factory):
+        from tests._real_gguf import require_native_runtime
+        require_native_runtime()
+        directory = tmp_path_factory.mktemp("minivocab")
+        for pre in _CHUNKABLE:
+            (directory / f"{pre}.gguf").write_bytes(_mini_gguf(pre))
+        repo = Path(__file__).resolve().parent.parent
+        env = {**os.environ, "PYTHONPATH": str(repo), "PYTHONIOENCODING": "utf-8"}
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        proc = subprocess.run(
+            [sys.executable, "-c", _ORACLE, str(directory), json.dumps(_CHUNKABLE), "400"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", env=env,
+            timeout=600, creationflags=flags)
+        assert proc.returncode == 0, proc.stderr[-2000:]
+        return json.loads(proc.stdout.strip().splitlines()[-1])
+
     @pytest.mark.parametrize("pre_type", _CHUNKABLE)
-    def test_chunked_tokens_equal_whole_tokens(self, oracle_result, pre_type):
-        compared, mismatched, cuts_made = oracle_result[pre_type][:3]
+    def test_chunked_tokens_equal_whole_tokens(self, result, pre_type):
+        compared, mismatched, cuts_made = result[pre_type][:3]
         assert compared > 100 and cuts_made > 200
         assert mismatched == 0
 
     @pytest.mark.parametrize("pre_type", _CHUNKABLE)
-    def test_the_comparison_fails_for_a_cut_that_is_not_safe(self, oracle_result, pre_type):
+    def test_the_comparison_fails_for_a_cut_that_is_not_safe(self, result, pre_type):
         # The same comparison with a cut at every offset must find differences,
         # or "no mismatches" above says nothing.
-        bad_compared, bad_mismatched = oracle_result[pre_type][3:]
+        bad_compared, bad_mismatched = result[pre_type][3:]
         assert bad_compared > 20
         assert bad_mismatched > 0
 
