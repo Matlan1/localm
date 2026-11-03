@@ -1754,6 +1754,7 @@ function _offerModelDownload(missingModel, log, plugin) {
               body: JSON.stringify({
                 spec: source.spec, name: source.name || null,
                 sha256: source.sha256 || null, model_type: source.model_type,
+                type_is_hint: true,
               }),
             })
             : await fetch("/api/models/pull-comfy-source", {

@@ -3,12 +3,14 @@
 pipeline, register with their own types instead of ``embedding`` / ``unknown``.
 
 Headers and configs are built by the tests; one test reads a real encoder GGUF
-from the central models folder, read-only, when it exists."""
+named by LOCALM_TEST_UMT5_GGUF, read-only, when that is set."""
 
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -68,10 +70,10 @@ class TestGgufTextEncoder:
         for arch in GGUF_TEXT_ENCODER_ARCHITECTURES:
             assert gguf_non_chat_model_type(arch) == "text-encoder"
 
-    def test_real_umt5_encoder_from_the_central_folder(self):
-        real = Path("D:/projects/localm/home/models/umt5-xxl-encoder-Q4_K_M.gguf")
+    def test_a_real_umt5_encoder(self):
+        real = Path(os.environ.get("LOCALM_TEST_UMT5_GGUF") or "")
         if not real.is_file():
-            pytest.skip("the central models folder has no UMT5 encoder")
+            pytest.skip("LOCALM_TEST_UMT5_GGUF names no UMT5 encoder GGUF")
         assert _detect_local_model_type(real, is_gguf=True, is_hf=False)[0] == "text-encoder"
 
 
@@ -197,6 +199,14 @@ class TestSyncMigration:
                             model_type="text-encoder") is True
         assert "type_user_set" not in _entry(home, "te")
 
+    def test_an_unreadable_header_leaves_an_embedding_entry_alone(self, home):
+        f = home / "models" / "torn.gguf"
+        f.write_bytes(b"not a gguf header")
+        _put(home / "registry.json", "torn", path=str(f), source="local",
+             model_type="embedding", architecture="t5encoder")
+        assert mm.sync_models_dir(backfill_mmproj=False).retyped == 0
+        assert _entry(home, "torn")["model_type"] == "embedding"
+
     def test_the_sync_is_idempotent(self, home):
         f = _gguf(home / "models" / "umt5.gguf", "t5encoder")
         _put(home / "registry.json", "umt5", path=str(f), source="local",
@@ -242,6 +252,137 @@ class TestSyncMigration:
         assert Path(entry["path"]) == d
 
 
+# ------------------------------------------------- a type given to a pull
+
+class _UrlResponse:
+    status_code = 200
+
+    def __init__(self, content: bytes):
+        self.content = content
+        self.headers = {"content-length": str(len(content))}
+
+    def raise_for_status(self):
+        pass
+
+    def iter_content(self, n):
+        yield self.content
+
+
+def _serve_url(monkeypatch, content: bytes) -> None:
+    monkeypatch.setattr("socket.getaddrinfo",
+                        lambda *a, **k: [(2, 1, 6, "", ("93.184.216.34", 0))])
+    monkeypatch.setattr("localm.netpolicy.pinned_request",
+                        lambda method, url, **k: _UrlResponse(content))
+    monkeypatch.setattr(mm, "_check_disk_space", lambda d, b: True)
+
+
+def _serve_snapshot(monkeypatch, config: dict) -> None:
+    import huggingface_hub
+    raw = json.dumps(config).encode("utf-8")
+    siblings = [SimpleNamespace(rfilename="config.json", size=len(raw), lfs=None)]
+
+    class _Api:
+        def __init__(self, *a, **kw):
+            pass
+
+        def model_info(self, repo_id, files_metadata=True):
+            return SimpleNamespace(siblings=siblings, sha="a" * 40)
+
+    def _download(repo_id, local_dir, **kw):
+        d = Path(local_dir)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "config.json").write_bytes(raw)
+        return str(d)
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", _Api)
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", _download)
+    monkeypatch.setattr("localm.model_manager.pull._hf_endpoint_refusal", lambda: None)
+
+
+class TestATypeGivenToAPull:
+    def _encoder_bytes(self, tmp_path) -> bytes:
+        return _gguf(tmp_path / "src.gguf", "t5encoder").read_bytes()
+
+    def test_a_url_pull_keeps_an_explicit_type_through_the_sync(self, home, tmp_path, monkeypatch):
+        _serve_url(monkeypatch, self._encoder_bytes(tmp_path))
+        assert mm.pull_model("https://x.test/enc.gguf", name="enc", model_type="embedding") is True
+        assert _entry(home, "enc")["type_user_set"] is True
+        assert mm.sync_models_dir(backfill_mmproj=False).retyped == 0
+        assert _entry(home, "enc")["model_type"] == "embedding"
+
+    def test_a_url_pull_with_a_hint_is_corrected_by_the_sync(self, home, tmp_path, monkeypatch):
+        _serve_url(monkeypatch, self._encoder_bytes(tmp_path))
+        assert mm.pull_model("https://x.test/enc.gguf", name="enc", model_type="embedding",
+                             type_is_hint=True) is True
+        assert "type_user_set" not in _entry(home, "enc")
+        assert _entry(home, "enc")["model_type"] == "embedding"
+        mm.sync_models_dir(backfill_mmproj=False)
+        assert _entry(home, "enc")["model_type"] == "text-encoder"
+
+    def test_a_url_pull_without_a_type_records_no_choice(self, home, tmp_path, monkeypatch):
+        _serve_url(monkeypatch, self._encoder_bytes(tmp_path))
+        assert mm.pull_model("https://x.test/enc.gguf", name="enc") is True
+        assert "type_user_set" not in _entry(home, "enc")
+
+    def test_a_snapshot_pull_keeps_an_explicit_type_through_the_sync(self, home, monkeypatch):
+        _serve_snapshot(monkeypatch, ACE_TRANSFORMER)
+        assert mm.pull_model("o/ace", name="ace", model_type="unknown") is True
+        assert _entry(home, "ace")["type_user_set"] is True
+        assert _entry(home, "ace")["model_type"] == "unknown"
+        assert mm.sync_models_dir(backfill_mmproj=False).retyped == 0
+        assert _entry(home, "ace")["model_type"] == "unknown"
+
+    def test_a_snapshot_pull_with_a_hint_is_corrected_by_the_sync(self, home, monkeypatch):
+        _serve_snapshot(monkeypatch, ACE_TRANSFORMER)
+        assert mm.pull_model("o/ace", name="ace", model_type="unknown", type_is_hint=True) is True
+        assert "type_user_set" not in _entry(home, "ace")
+        mm.sync_models_dir(backfill_mmproj=False)
+        assert _entry(home, "ace")["model_type"] == "diffusion-unet"
+
+    def test_a_snapshot_already_on_disk_records_the_explicit_type(self, home, monkeypatch):
+        _serve_snapshot(monkeypatch, ACE_TRANSFORMER)
+        assert mm.pull_model("o/ace", name="ace", model_type="unknown", type_is_hint=True) is True
+        assert "type_user_set" not in _entry(home, "ace")
+        assert mm.pull_model("o/ace", name="ace", model_type="unknown") is True
+        assert _entry(home, "ace")["type_user_set"] is True
+
+    def test_a_single_file_pull_with_a_hint_records_no_choice(self, monkeypatch):
+        seen = {}
+
+        def fake(spec, name, **kw):
+            seen.update(kw)
+            return True
+
+        monkeypatch.setattr(mm, "_pull_gguf_file", fake)
+        monkeypatch.setattr("localm.model_manager.pull._hf_endpoint_refusal", lambda: None)
+        assert mm.pull_model("o/r:f.gguf", model_type="embedding", type_is_hint=True) is True
+        assert seen["type_user_set"] is False
+        assert mm.pull_model("o/r:f.gguf", model_type="embedding") is True
+        assert seen["type_user_set"] is True
+        assert mm.pull_model("o/r:f.gguf") is True
+        assert seen["type_user_set"] is False
+
+    def test_the_cli_hint_flag_reaches_the_pull(self, monkeypatch):
+        from click.testing import CliRunner
+
+        import localm.cli as cli_pkg
+        import localm.cli.models as cli_models
+        seen = {}
+
+        def fake(spec, name=None, **kw):
+            seen.update(kw)
+            return True
+
+        monkeypatch.setattr(cli_models, "pull_model", fake)
+        runner = CliRunner()
+        assert runner.invoke(cli_pkg.main, ["pull", "--type", "embedding", "--type-hint",
+                                            "--", "o/r:f.gguf"]).exit_code == 0
+        assert seen["type_is_hint"] is True
+        assert runner.invoke(cli_pkg.main, ["pull", "--type", "embedding",
+                                            "--", "o/r:f.gguf"]).exit_code == 0
+        assert seen["type_is_hint"] is False
+
+
 # ------------------------------------------------------- the embedder refuses
 
 class TestEmbedderNeverUsesATextEncoder:
@@ -263,3 +404,27 @@ class TestEmbedderNeverUsesATextEncoder:
     def test_the_same_file_typed_embedding_still_resolves(self, monkeypatch, tmp_path):
         embedder, f = self._setup(monkeypatch, tmp_path, "embedding")
         assert embedder.resolve_embedding_model_path(allow_download=False) == str(f)
+
+
+class TestChoosingATextEncoderForEmbeddings:
+    OWNER_KEY = "owner-key-text-encoder-choice"
+
+    def test_the_job_says_what_the_model_is(self, home, tmp_path, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        from localm.inference.http_server import create_app
+        from localm.plugins.engine import PluginManager
+        f = _gguf(tmp_path / "te.gguf", "t5encoder")
+        _put(home / "registry.json", "my-encoder", path=str(f), source="local",
+             model_type="text-encoder", architecture="t5encoder")
+        monkeypatch.setenv("LOCALM_API_KEY", self.OWNER_KEY)
+        app = create_app(None)
+        PluginManager(app, external_root=tmp_path / "noplugins").install("rag")
+        headers = {"Authorization": f"Bearer {self.OWNER_KEY}"}
+        with TestClient(app) as c:
+            r = c.post("/api/rag/embedding", headers=headers,
+                       json={"model": "my-encoder", "confirm": True})
+            assert r.status_code == 200, r.text
+            events = c.get(f"/api/jobs/{r.json()['job_id']}/events", headers=headers).text
+        assert "is a text encoder" in events
+        assert "not a known embedding key" not in events

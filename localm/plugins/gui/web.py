@@ -389,6 +389,9 @@ class PullRequest(BaseModel):
     # or the single Type checkbox the user narrowed to. Bypasses pull-time HF
     # guessing; None lets the pull auto-detect.
     model_type: str | None = None
+    # True when model_type is that suggestion and not the user's own choice, so
+    # the registry sync may still correct it.
+    type_is_hint: bool = False
 
 
 class PullDiscardRequest(BaseModel):

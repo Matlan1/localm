@@ -444,6 +444,20 @@ def _entry_path(entry, field: str = "path") -> Optional[str]:
     return p
 
 
+def _entry_is_folder(entry) -> bool:
+    """Whether the registered path of *entry* is a directory. A malformed,
+    missing, unreadable, network or device path reads as not a directory, and a
+    network or device path is never touched."""
+    from localm.pathsafe import is_unc_or_device_path
+    raw = _entry_path(entry)
+    if not raw or is_unc_or_device_path(raw):
+        return False
+    try:
+        return Path(raw).is_dir()
+    except OSError:
+        return False
+
+
 def _hf_folder_has_chat_template(folder: Path) -> bool:
     """Whether the Hugging Face model folder *folder* carries a chat template: a
     ``chat_template.jinja`` or ``chat_template.json`` file, or a non-empty
@@ -2532,7 +2546,9 @@ def _media_retype(entry: dict, path: Path) -> Optional[str]:
     arch = entry.get("architecture")
     if path.suffix.lower() == ".gguf":
         if mtype == "embedding" and arch in GGUF_TEXT_ENCODER_ARCHITECTURES and path.is_file():
-            return None if gguf_embedding_signal(path) else "text-encoder"
+            # An unreadable header says nothing about pooling: leave the entry.
+            meta = _gguf_metadata_probe(path)
+            return "text-encoder" if meta and not gguf_embedding_signal(path, meta=meta) else None
         if mtype == "unknown":
             role = gguf_non_chat_model_type(arch)
             return role if role not in (None, "unknown") else None

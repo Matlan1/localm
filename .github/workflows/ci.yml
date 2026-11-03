@@ -576,7 +576,7 @@ jobs:
       - name: Install
         shell: bash
         run: |
-          uv export --quiet --locked --no-emit-project --extra monitor -o "$RUNNER_TEMP/requirements.txt"
+          uv export --quiet --locked --no-emit-project --extra monitor --extra dev -o "$RUNNER_TEMP/requirements.txt"
           pip install --require-hashes --no-deps -r "$RUNNER_TEMP/requirements.txt"
           pip install --no-deps -e .
 
@@ -590,6 +590,8 @@ jobs:
       # plain runner). setup-llama load-tests it, which runs verify_abi; the
       # explicit report below fails the job on a proven mismatch.
       - name: Provision cpu prebuilt and verify ABI against the real binary
+        id: provision
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           python -m localm setup-llama --backend cpu --yes
@@ -603,7 +605,26 @@ jobs:
           sys.exit(1 if v.status == "mismatch" else 0)
           PY
 
-      # The step above proves the pinned build LOADS. This one proves it
+      # Long text is tokenized in chunks; this class compares that with the whole
+      # text through the pinned build's own tokenizer. It skips without a runtime
+      # and this is the only job with one, so a skip here fails the step.
+      - name: Chunked tokens equal whole tokens on the pinned build
+        if: ${{ !cancelled() && steps.provision.outcome == 'success' }}
+        shell: bash
+        run: |
+          python -m pytest "tests/test_pretokenizer_chunking.py::TestChunkedTokensEqualWholeTokens" \
+            -q -rs -p no:cacheprovider --junitxml="$RUNNER_TEMP/chunked-tokens.xml"
+          python - "$RUNNER_TEMP/chunked-tokens.xml" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+          root = ET.parse(sys.argv[1]).getroot()
+          suite = root if root.tag == "testsuite" else root[0]
+          tests, skipped = int(suite.get("tests", 0)), int(suite.get("skipped", 0))
+          print(f"{tests} tests, {skipped} skipped")
+          sys.exit(1 if tests == 0 or skipped else 0)
+          PY
+
+      # The provisioning step above proves the pinned build LOADS. This one proves it
       # GENERATES, which is a different claim and the one that matters: "it loads
       # so it will be fine" is what shipped a runtime our own gate then refused.
       #
