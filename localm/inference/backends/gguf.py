@@ -294,7 +294,8 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         self.moe_cpu_layers = 0
         # The multi-GPU split distribution the last load applied
         # ({"source": "auto"|"pinned"|"equal", "devices": [{"index", "share"}, ...]}),
-        # or None when no split applied. Set in _load_native.
+        # or None when no split applied; each index is the GPU number
+        # ``localm gpus`` and the GUI show. Set in _load_native.
         self.applied_gpu_split: Optional[dict] = None
         # The GPU (list_gpus numbering) the last load ran on alone, or None when
         # it did not run on one GPU chosen by a 1-entry gpu_split_indices or the
@@ -969,7 +970,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         elif isinstance(worker_split, dict) and placement is None:
             self.applied_gpu_split = {
                 "source": "auto",
-                "devices": [{"index": i, "share": s}
+                "devices": [{"index": self._fit_source_index.get(i, i), "share": s}
                             for i, s in worker_split.items()],
             } if len(worker_split) >= 2 else None
         elif len(_pairs) >= 2:

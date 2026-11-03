@@ -312,20 +312,28 @@ def _migrate_legacy(store) -> None:
     hold the namespace lock across the WHOLE batch (a reload + loop + one final
     save). The per-call add()/delete() lock is not enough: it serialises each
     individual append, not the read-then-decide-then-write-once shape of a
-    batch."""
+    batch.
+
+    The embedder is resolved only when a bullet actually needs embedding: an
+    absent, empty or already-imported legacy file loads no model."""
     marker = store.path.with_suffix(".legacy-imported")
     if marker.exists() or not _persist_enabled():
         return
     try:
         from localm.memory import MemoryRecord
-        ef = _embed_fn()
+        bullets = _legacy_bullets()
+        ef = None
+        ef_resolved = False
+        added = False
         with store.lock():
             store._load()
             existing = {r.text.casefold() for r in store.all()}
-            added = False
-            for bullet in _legacy_bullets():
+            for bullet in bullets:
                 if bullet.casefold() in existing:
                     continue
+                if not ef_resolved:
+                    ef = _embed_fn()
+                    ef_resolved = True
                 store.add(MemoryRecord(text=bullet, kind="semantic",
                                        source="import", importance=0.7),
                           embed_fn=ef, save=False)
@@ -1539,15 +1547,6 @@ def _memory_inlet(messages, ctx, announce=None):
         from localm.inference.protocol import (
             DOWNLOADING_EMBEDDER_STATUS, RECALLING_MEMORY_STATUS,
         )
-        downloading = False
-        if announce is not None:
-            from localm.inference.embedder import will_download_on_first_use
-            downloading = will_download_on_first_use()
-            announce(DOWNLOADING_EMBEDDER_STATUS if downloading
-                     else RECALLING_MEMORY_STATUS)
-        embed_fn = _embed_fn()
-        if downloading:
-            announce(RECALLING_MEMORY_STATUS)
         # Resolve the SAME namespace the write path and the outlet write to
         # (ADMIN/owner -> "owner"), so an owner's saved memories are recalled in
         # protected mode.
@@ -1555,6 +1554,17 @@ def _memory_inlet(messages, ctx, announce=None):
 
         if writes_ok:
             _migrate_legacy(store)                 # migration is a write
+        embed_fn = None
+        if store.all():
+            downloading = False
+            if announce is not None:
+                from localm.inference.embedder import will_download_on_first_use
+                downloading = will_download_on_first_use()
+                announce(DOWNLOADING_EMBEDDER_STATUS if downloading
+                         else RECALLING_MEMORY_STATUS)
+            embed_fn = _embed_fn()
+            if announce is not None and downloading:
+                announce(RECALLING_MEMORY_STATUS)
         diag: dict = {}
         block_records = store.recall(query, k=_mem.MAX_INJECT,
                                      embed_fn=embed_fn, reinforce=writes_ok,
