@@ -7,7 +7,7 @@
 
 // --- ES module imports (auto-generated boundary; bodies unchanged) ---
 import { iconEl } from "./icons.js";
-import { COMPACT_KEEP, addMessageRow, audioPart, chat, chatBusy, chatParams, compactConversation, currentConv, elideAudioForWire, elideImagesForWire, isToolEvent, latestTurnHasAudio, latestTurnIsAudioOnly, lsSetScoped, maybeCompactConversation, modelCannotHearAudio, mountStatusIndicator, msgAudioClips, msgImages, msgText, newConversation, newToolEvent, noteLabel, persistChatParams, refreshWebPolicy, removeStatusIndicator, renderAttachChips, renderChat, renderConvList, saveConversations, scopedKeyPrivate, setConversationPin, stripUserAudio, stripUserImages, syncPinModelToggle, updateStatusIndicator, wireHasImageAndAudio, wireParts } from "./chat.js";
+import { COMPACT_KEEP, addMessageRow, audioPart, chat, chatBusy, chatParams, compactConversation, currentConv, elideAudioForWire, elideImagesForWire, isToolEvent, latestTurnHasAudio, latestTurnIsAudioOnly, lsSetScoped, maybeCompactConversation, memorySavedText, modelCannotHearAudio, mountStatusIndicator, msgAudioClips, msgImages, msgText, newConversation, newToolEvent, noteLabel, persistChatParams, refreshWebPolicy, removeStatusIndicator, renderAttachChips, renderChat, renderConvList, saveConversations, scopedKeyPrivate, setConversationPin, stripUserAudio, stripUserImages, syncPinModelToggle, updateStatusIndicator, wireHasImageAndAudio, wireParts } from "./chat.js";
 import { $, CHAT_SURFACE_HEADERS, GIB, TOOL_CALL_DELIM, authHeaders, autoGrow, confirmDanger, el, nearBottom, openModal, promptText, readSSE, refreshPreviewButtons, renderMarkdown, revealFilledAdvanced, safeStorageGet, setPreviewAllowed, splitThink, streamJob, stripAsrPrefix, stripThink, toast } from "./helpers.js";
 import { t } from "./i18n.js";
 import { modelCache, modelSelect, reloadModel, toastLoadResult } from "./models-sidebar.js";
@@ -2189,14 +2189,34 @@ export async function rememberFact(fact) {
   }
 }
 
+/** The open conversation as `{role, content}` rows for the memory pass: what
+ *  the user typed and what the model answered, without web results, knowledge
+ *  excerpts, attached documents or reasoning. */
+export function memoryConversation(conv = currentConv()) {
+  const rows = [];
+  for (const m of (conv && conv.messages) || []) {
+    if (isToolEvent(m) || m.origin === "tool" || m.bridge) continue;
+    if (m.role === "user") {
+      if (m.tag === "kb" || m.tag === "doc") continue;
+      rows.push({ role: "user", content: msgText(m) });
+    } else if (m.role === "assistant") {
+      rows.push({ role: "assistant", content: typeof m.content === "string"
+        ? assistantHistoryText(m.content, false) : msgText(m) });
+    }
+  }
+  return rows;
+}
+
 export async function synthesizeMemoryNow(statusEl) {
   // Manual trigger of the same consolidation the background pass runs, for
   // immediate feedback (a tester can chat, then click this and watch facts
-  // appear). Needs a loaded model; the route 503s otherwise.
-  if (statusEl) statusEl.textContent = "Distilling facts from recent chats...";
+  // appear). Reads the conversation on screen; needs a loaded model (the route
+  // 503s otherwise).
+  if (statusEl) statusEl.textContent = "Distilling facts from your chat...";
   try {
     const r = await fetch("/api/memory/consolidate", {
       method: "POST", headers: authHeaders(),
+      body: JSON.stringify({ messages: memoryConversation() }),
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
@@ -2579,10 +2599,14 @@ export function parseMemoryHeader(resp) {
     if (!raw) return null;
     const data = JSON.parse(raw);
     if (!data || typeof data.n !== "number") return null;
+    const saved = data.saved && typeof data.saved === "object"
+      && typeof data.saved.status === "string"
+      ? { text: String(data.saved.text || ""), status: data.saved.status } : null;
     return {
       n: data.n,
       degrade: data.degrade ?? null,
       items: Array.isArray(data.items) ? data.items : [],
+      ...(saved ? { saved } : {}),
     };
   } catch { return null; }
 }
@@ -3061,7 +3085,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
         stopped: true,
       };
       if (routedNote) reply.routed = routedNote;
-      if (memUsed && memUsed.n > 0) reply.memory = memUsed;
+      if (memUsed && (memUsed.n > 0 || memUsed.saved)) reply.memory = memUsed;
       conv.messages.push(reply);
       saveConversations(conv);
       renderChat();
@@ -3151,7 +3175,11 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   }
   // F11: record which remembered facts steered this reply so the transcript can
   // show a "used N memories" chip (survives reload; opens the memory modal).
-  if (memUsed && memUsed.n > 0) reply.memory = memUsed;
+  if (memUsed && (memUsed.n > 0 || memUsed.saved)) reply.memory = memUsed;
+  if (memUsed && memUsed.saved) {
+    toast(memorySavedText(memUsed.saved), memUsed.saved.status !== "saved" && memUsed.saved.status !== "exists");
+    if (memUsed.saved.status === "saved") refreshMemory();
+  }
   // Save usage on the reply itself, not just the DOM, so tok/s and the context
   // gauge survive a reload instead of only ever having existed on screen for
   // the session that generated them. renderChat() below reads it back off the
