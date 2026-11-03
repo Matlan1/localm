@@ -1,21 +1,21 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Detect a server-wide stall and keep a small in-memory record of where it was.
 
-Two kinds of stall stop the server from answering:
+Two kinds of stall are recorded:
 
 * GIL: one thread holds the interpreter lock inside a long C call (a large
-  ``json.dumps``, a native library called without releasing it). No Python
-  thread runs, so a Python watchdog thread cannot see it until it is over.
-* LOOP: the event loop thread runs one long piece of Python code, or waits,
-  while other threads keep running.
+  ``json.dumps``, a native library called without releasing it) and no other
+  Python thread runs.
+* LOOP: the event loop thread runs one long piece of code while other threads
+  keep running.
 
 A keeper thread re-arms ``faulthandler.dump_traceback_later`` every *poll*
-seconds. The dump runs on faulthandler's own native thread, which needs no
-GIL, so it fires only when the keeper could not re-arm it for *threshold*
-seconds: a GIL stall. The dump goes to an in-memory sink (an anonymous pipe on
-Windows, an unnamed temporary file elsewhere) and is parsed when the keeper
-runs again. A LOOP stall is seen by the keeper itself, from the heartbeat
-gap, and the loop thread's frames are read with ``sys._current_frames()``.
+seconds. The dump runs on faulthandler's own native thread without the GIL and
+fires only when the keeper could not re-arm it for *threshold* seconds: a GIL
+stall. The dump goes to an in-memory sink (an anonymous pipe on Windows, an
+unnamed temporary file elsewhere) and is parsed when the keeper runs again. A
+LOOP stall is read by the keeper from the heartbeat gap, with the loop
+thread's frames from ``sys._current_frames()``.
 
 Each record holds the stall's length, its kind and code locations only
 (module-relative file paths, line numbers and function names), never a
@@ -60,6 +60,12 @@ _WAIT_SITES = frozenset({
 })
 
 _ids = itertools.count(1)
+_BOOT = f"{os.getpid()}-{int(time.time())}"
+
+
+def _new_id() -> str:
+    """A record id unique across processes and restarts."""
+    return f"{_BOOT}-{next(_ids)}"
 
 
 def short_path(path: str) -> str:
@@ -127,15 +133,18 @@ def describe(frames: list) -> str:
 
 class _ThreadCpu:
     """CPU seconds per Python thread, where the platform can tell; ``read``
-    returns {} where it cannot."""
+    returns {} where it cannot. Every call keeps the GIL: Windows calls go
+    through ``ctypes.PyDLL``, Linux reads ``time.pthread_getcpuclockid``
+    clocks."""
 
     def __init__(self) -> None:
         self._win = None
+        self._linux = sys.platform.startswith("linux") and hasattr(time, "pthread_getcpuclockid")
         if sys.platform == "win32":
             try:
                 import ctypes
                 from ctypes import wintypes
-                k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+                k32 = ctypes.PyDLL("kernel32")
                 k32.OpenThread.restype = wintypes.HANDLE
                 k32.OpenThread.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
                 k32.GetThreadTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
@@ -161,24 +170,25 @@ class _ThreadCpu:
             k32.CloseHandle(h)
 
     @staticmethod
-    def _one_linux(native_id: int) -> Optional[float]:
+    def _one_linux(ident: int) -> Optional[float]:
         try:
-            with open(f"/proc/self/task/{native_id}/stat", "rb") as fh:
-                fields = fh.read().rsplit(b")", 1)[1].split()
-            return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
-        except (OSError, ValueError, IndexError):
+            return time.clock_gettime(time.pthread_getcpuclockid(ident))
+        except (OSError, OverflowError):
             return None
 
     def read(self) -> dict:
         """{thread ident: CPU seconds} for every live ``threading`` thread."""
-        if self._win is None and not sys.platform.startswith("linux"):
+        if self._win is None and not self._linux:
             return {}
         out = {}
         for t in threading.enumerate():
-            nid = getattr(t, "native_id", None)
-            if t.ident is None or nid is None:
+            if t.ident is None:
                 continue
-            cpu = self._one_win(nid) if self._win is not None else self._one_linux(nid)
+            if self._win is not None:
+                nid = getattr(t, "native_id", None)
+                cpu = None if nid is None else self._one_win(nid)
+            else:
+                cpu = self._one_linux(t.ident)
             if cpu is not None:
                 out[t.ident] = cpu
         return out
@@ -190,6 +200,7 @@ class _Sink:
     def __init__(self) -> None:
         self._pipe = None
         self._tmp = None
+        self._read_off = 0
         if sys.platform == "win32":
             import _winapi
             import msvcrt
@@ -201,7 +212,8 @@ class _Sink:
             self.fd = self._tmp.fileno()
 
     def drain(self) -> str:
-        """Everything written since the last drain."""
+        """Everything written since the last drain. The POSIX file is never
+        truncated or seeked: faulthandler writes at its own offset."""
         if self._pipe is not None:
             handle, rfd, winapi = self._pipe
             chunks = []
@@ -213,10 +225,10 @@ class _Sink:
             data = b"".join(chunks)
         else:
             size = os.fstat(self.fd).st_size
-            data = os.pread(self.fd, size, 0) if size else b""
-            if size:
-                os.ftruncate(self.fd, 0)
-                os.lseek(self.fd, 0, os.SEEK_SET)
+            data = b""
+            if size > self._read_off:
+                data = os.pread(self.fd, size - self._read_off, self._read_off)
+                self._read_off += len(data)
         return data.decode("utf-8", "backslashreplace")
 
     def close(self) -> None:
@@ -359,7 +371,7 @@ class StallWatch:
         where = describe(frames)
         if others:
             where += f" (or one of {others} other running thread{'s' if others > 1 else ''})"
-        self._add({"id": next(_ids), "at": time.time() - seconds,
+        self._add({"id": _new_id(), "at": time.time() - seconds,
                    "seconds": round(seconds, 1), "kind": "gil", "where": where,
                    "frames": [_frame_text(f) for f in frames[:_FRAMES_KEPT]],
                    "ongoing": False})
@@ -382,7 +394,7 @@ class StallWatch:
                     frames.append((frame.f_code.co_filename, frame.f_lineno,
                                    frame.f_code.co_name))
                     frame = frame.f_back
-                rec = {"id": next(_ids), "at": time.time() - gap,
+                rec = {"id": _new_id(), "at": time.time() - gap,
                        "seconds": round(gap, 1), "kind": "loop",
                        "where": describe(frames),
                        "frames": [_frame_text(f) for f in frames], "ongoing": True}

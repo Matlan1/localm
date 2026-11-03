@@ -209,10 +209,10 @@ const _STALL_TOAST_RECENT_S = 120;
 // True while a stall that ended in the last _STALL_PILL_S seconds has not been
 // seen in the Activity window yet.
 const _STALL_PILL_S = 600;
-let _stallsShownUpTo = 0;
+const _stallsShown = new Set();
 function _unseenStall() {
   if (typeof _activityServerNow !== "number") return false;
-  return _activityStalls.some((s) => !s.ongoing && s.id > _stallsShownUpTo
+  return _activityStalls.some((s) => !s.ongoing && !_stallsShown.has(s.id)
     && _activityServerNow - ((s.at || 0) + (s.seconds || 0)) < _STALL_PILL_S);
 }
 
@@ -406,7 +406,7 @@ onInterruptedChange(() => {
 });
 
 export function showActivityDetails() {
-  for (const s of _activityStalls) _stallsShownUpTo = Math.max(_stallsShownUpTo, s.id);
+  for (const s of _activityStalls) _stallsShown.add(s.id);
   renderActivityPill(_activityOps);
   openModal(_ACTIVITY_MODAL_TITLE, _buildActivityBody);
 }

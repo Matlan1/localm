@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""vectors.json serialised and parsed a few rows at a time.
+"""vectors.json serialised and parsed a few rows per C call.
 
-The file is ``{"dim": <int or null>, "vectors": [<row>, ...]}``. One
-``json.dumps`` or ``json.loads`` over the whole file is a single C call that
-holds the GIL for its full length, seconds on a large collection, which stops
-the event loop and every other thread. These helpers produce and accept the
-same bytes while returning to the interpreter between small batches of rows.
+The file is ``{"dim": <int or null>, "vectors": [<row>, ...]}``. The writer
+produces the same bytes as one ``json.dumps`` of that object and the reader
+returns the same value as one ``json.loads``, each returning to the
+interpreter between small batches of rows.
 """
 
 from __future__ import annotations
@@ -61,10 +60,10 @@ class _Reader:
         self.buf = ""
         self.eof = False
 
-    def more(self, nbytes: int = _READ_BYTES) -> None:
-        """Append the next *nbytes*, decoded, to ``buf``; sets ``eof`` at the
-        end of the file."""
-        raw = self._fh.read(nbytes)
+    def more(self, nbytes: Optional[int] = None) -> None:
+        """Append the next *nbytes* (default ``_READ_BYTES``), decoded, to
+        ``buf``; sets ``eof`` at the end of the file."""
+        raw = self._fh.read(_READ_BYTES if nbytes is None else nbytes)
         if raw:
             self.buf += self._dec.decode(raw)
         else:
@@ -88,9 +87,9 @@ class _Reader:
             self.more()
 
     def value(self, i: int):
-        """(value, end) of the JSON value starting at *i*, reading more while
-        the value may be unfinished. Raises json.JSONDecodeError at the end of
-        the file."""
+        """(value, end) of the JSON value starting at *i*, reading more until
+        the value is followed by "," or "]" or the file ends. Raises
+        json.JSONDecodeError at the end of the file."""
         nbytes = _READ_BYTES
         while True:
             try:
@@ -99,7 +98,10 @@ class _Reader:
                 if self.eof:
                     raise
             else:
-                if end < len(self.buf) or self.eof:
+                if self.eof:
+                    return value, end
+                nxt = _WS_RE.match(self.buf, end).end()
+                if nxt < len(self.buf) and self.buf[nxt] in ",]":
                     return value, end
             self.more(nbytes)
             nbytes *= 2
