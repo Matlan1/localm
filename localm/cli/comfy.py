@@ -465,7 +465,7 @@ def comfy_setup(copy_custom_nodes) -> None:
               help="Also reinstall ComfyUI's requirements into the managed venv "
                    "(use when the new pin changed ComfyUI's dependencies). Off by "
                    "default: a partial dependency upgrade cannot be rolled back "
-                   "exactly, so update stays within the safe git rollback unless "
+                   "exactly, so update stays within the safe source rollback unless "
                    "you ask.")
 @click.option("--commit", "commit", default=None,
               help="Advanced: update to a specific ComfyUI commit instead of the "
