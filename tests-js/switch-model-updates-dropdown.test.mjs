@@ -151,6 +151,19 @@ test("the pin notice clears once the pinned chat's message has loaded its model"
   assert.equal(note.hidden, true, note.textContent);
 });
 
+test("the pin notice clears when the user stops the reply that loaded the pinned model", async () => {
+  const { win, note } = await pinnedToGemmaWhileCoderLoaded();
+  win.__state.loadOnChat = true;
+  win.readSSE = async () => { throw Object.assign(new Error("aborted"), { name: "AbortError" }); };
+
+  const outcome = await win.runCompletion(win.__testConv);
+  await settle();
+
+  assert.equal(outcome.stopped, true, "precondition: the turn was stopped");
+  assert.equal(win.__state.active, "gemma", "precondition: the server loaded gemma to answer");
+  assert.equal(note.hidden, true, note.textContent);
+});
+
 test("the pin notice clears after the sidebar unload", async () => {
   const { win, note } = await pinnedToGemmaWhileCoderLoaded();
 
