@@ -567,7 +567,7 @@ DEFAULT_CONFIG: dict = {
     # Context window every load keeps usable (tokens); a Mixture-of-Experts
     # model keeps more experts in system RAM to hold it on the GPU.
     "ctx_reserve": 16384,
-    # Size ctx ceiling from free VRAM at load (clamped 4k-64k); window still
+    # Size ctx ceiling from free VRAM/RAM at load (clamped 4k-64k); window still
     # starts at n_ctx and grows on demand. False = use fixed n_ctx_max.
     "ctx_auto": True,
     "n_gpu_layers": 99,    # 99 = offload everything to GPU
@@ -748,7 +748,7 @@ DEFAULT_CONFIG: dict = {
     # loca-lm (Loca white + LM blue), localm (lowercase, m blue). Console
     # command, app icon, and shortcut are fixed regardless.
     "logo_style": "local-m",
-    # Interface language for the web GUI, as a LANGUAGE_IDS id ("en", "de").
+    # Interface language for the web GUI, as a LANGUAGE_IDS id ("en", "de", "es", "fr").
     # The GUI reads it at boot and loads static/i18n/<id>.json; English is
     # built in and is the fallback for anything a catalog does not carry.
     "language": "en",

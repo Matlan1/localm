@@ -171,6 +171,47 @@ def test_upload_report_non_2xx_raises():
     assert "502" in (ei.value.reason or "")
 
 
+def test_upload_report_not_filed_reply_raises():
+    def opener(url, data, headers, timeout):
+        return 202, '{"ok": true, "filed": false}'
+
+    try:
+        bugreport.upload_report("t", "b", url="https://proxy.example", opener=opener)
+    except bugreport.LocalmError as e:
+        caught = e
+    else:
+        caught = None
+    assert caught is not None, "a report the server did not file was returned as sent"
+    assert caught.stage == "not_filed"
+    assert "202" in (caught.reason or "")
+    assert bugreport.MAINTAINER_EMAIL in caught.hint
+
+
+@pytest.mark.parametrize("raw", ['{"ok": true, "url": "u", "number": 3}', '{"filed": true}', "{}", ""])
+def test_upload_report_filed_or_plain_reply_is_returned(raw):
+    def opener(url, data, headers, timeout):
+        return 201, raw
+
+    out = bugreport.upload_report("t", "b", url="https://proxy.example", opener=opener)
+    assert isinstance(out, dict)
+
+
+def test_cli_send_menu_does_not_offer_a_retry_for_a_report_that_was_not_filed(monkeypatch):
+    from localm.bugreport import consent
+    calls, asked = [], []
+
+    def _held(*a, **kw):
+        calls.append(a)
+        raise bugreport.LocalmError("the bug-report server did not file the report",
+                                    stage="not_filed", hint="not filed")
+
+    monkeypatch.setattr(bugreport, "upload_report", _held)
+    consent._upload_with_retries("t", "b", "https://proxy.example", None,
+                                 lambda prompt: asked.append(prompt) or "y", "the file")
+    assert len(calls) == 1
+    assert asked == []
+
+
 def test_upload_report_429_raises_rate_limited():
     # A 429 raises the distinct RateLimitedError carrying retry_after (parsed from the
     # body), so callers can count down and retry instead of failing outright.
