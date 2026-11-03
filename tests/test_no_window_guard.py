@@ -260,6 +260,14 @@ def test_except_exception_does_not_swallow_a_refusal(stop_spy):
 
 
 @_needs_windows
+def test_a_refusal_imports_nothing_when_pytest_is_gone_from_sys_modules(monkeypatch):
+    monkeypatch.delitem(sys.modules, "pytest")
+    with pytest.raises(_Refused, match="os.startfile"):
+        nw.startfile("x.txt")
+    assert "pytest" not in sys.modules
+
+
+@_needs_windows
 def test_startfile_and_webbrowser_are_refused(tmp_path):
     assert os.startfile is nw.startfile and webbrowser.open is nw.browser_open
     with pytest.raises(_Refused, match="os.startfile"):

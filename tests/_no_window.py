@@ -19,7 +19,8 @@ every thread of the process.
 
 A refusal fails the test at the call with ``pytest.fail``, whose exception
 derives from ``BaseException``, so an ``except Exception`` in the code under
-test does not swallow it. In a process without pytest a refusal raises
+test does not swallow it. ``pytest.fail`` is looked up once, by ``arm()``, so a
+refusal imports nothing. In a process without pytest a refusal raises
 ``RuntimeError``.
 """
 
@@ -32,15 +33,6 @@ import sys
 import threading
 import traceback
 import webbrowser
-import time as _ttime
-
-
-def _trace(kind, detail, t0):
-    secs = _ttime.perf_counter() - t0
-    if secs > 0.02 or kind == "refuse":
-        sys.__stderr__.write(f"NOWIN-TRACE {kind} {secs:.3f}s thread={threading.current_thread().name} {detail[:150]}\n")
-        sys.__stderr__.flush()
-
 
 CREATE_NO_WINDOW = 0x08000000
 CREATE_NEW_CONSOLE = 0x00000010
@@ -147,26 +139,17 @@ def _origin() -> str:
 
 def refuse(reason: str, what: str) -> None:
     """Fail the current test with ``pytest.fail``, naming *reason*, *what* and
-    the call site; raise ``RuntimeError`` with the same text where pytest is
-    not importable."""
-    _t0 = _ttime.perf_counter()
-    try:
-        _refuse(reason, what)
-    finally:
-        _trace("refuse", reason + " | " + what, _t0)
-
-
-def _refuse(reason, what):
+    the call site; raise ``RuntimeError`` with the same text where pytest was
+    not importable when ``arm()`` ran."""
     message = ("BLOCKED by tests/_no_window.py: " + reason + "\n    " + what
                + "\n    from " + _origin() + "\n" + ADVICE)
-    try:
-        import pytest
-    except ImportError:
-        raise RuntimeError(message) from None
-    pytest.fail(message, pytrace=False)
+    if _fail is None:
+        raise RuntimeError(message)
+    _fail(message, pytrace=False)
 
 
 _real_create = None
+_fail = None
 
 
 def create_process(application, command, proc_attrs, thread_attrs, inherit,
@@ -174,16 +157,12 @@ def create_process(application, command, proc_attrs, thread_attrs, inherit,
     """Stand-in for ``_winapi.CreateProcess``: applies ``hidden()``, then calls
     ``_real_create`` with the result, or refuses. Inside ``allow_window()`` it
     calls ``_real_create`` with the arguments as given."""
-    _t0 = _ttime.perf_counter()
     if not window_allowed():
         flags, startupinfo, refusal = hidden(flags, startupinfo)
         if refusal:
             refuse(refusal, str(command)[:200])
-    try:
-        return _real_create(application, command, proc_attrs, thread_attrs, inherit,
-                            flags, env, cwd, startupinfo)
-    finally:
-        _trace("spawn", str(command), _t0)
+    return _real_create(application, command, proc_attrs, thread_attrs, inherit,
+                        flags, env, cwd, startupinfo)
 
 
 _real_startfile = None
@@ -254,21 +233,22 @@ def armed() -> bool:
 
 def arm() -> bool:
     """Install the patches once, on Windows only. Returns True when it did."""
-    global _ARMED, _real_create, _real_startfile, _real_browser_open
+    global _ARMED, _real_create, _real_startfile, _real_browser_open, _fail
     if _ARMED or sys.platform != "win32":
         return False
     import _winapi
+    try:
+        import pytest
+        _fail = pytest.fail
+    except ImportError:
+        _fail = None
 
-    _t0 = _ttime.perf_counter()
     _real_create = _winapi.CreateProcess
     _winapi.CreateProcess = create_process
     _real_startfile = os.startfile
     _real_browser_open = webbrowser.open
     os.startfile = startfile
     webbrowser.open = browser_open
-    _t1 = _ttime.perf_counter()
     _arm_tk()
-    _trace("arm_tk", "import tkinter + patch", _t1)
-    _trace("arm", "total", _t0)
     _ARMED = True
     return True
