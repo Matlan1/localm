@@ -149,6 +149,8 @@ _KIND_WORDS = {
     "diffusion-unet": "an image or video checkpoint",
     "text-encoder": "a text encoder",
     "vae": "a VAE",
+    "vocoder": "a vocoder",
+    "planner": "a music planner model",
     "lora": "a LoRA adapter",
     "upscaler": "an upscaler",
     "controlnet": "a ControlNet",

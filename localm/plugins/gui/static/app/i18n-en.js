@@ -182,6 +182,11 @@ export const I18N_EN = {
     "Knowledge - ground replies in an indexed collection (manage on the Knowledge page)",
   "chat.maxTokens": "Max tokens",
   "chat.memory": "Memory - remind the model what it knows about you",
+  "chat.memory.exists": "Already in memory: {text}",
+  "chat.memory.full": "Memory is full, so this was not saved. Delete a fact in Memory first.",
+  "chat.memory.off": "Not saved: memory is off (privacy mode, or the memory switch is off).",
+  "chat.memory.saveFailed": "Could not save this to memory.",
+  "chat.memory.saved": "Saved to memory: {text}",
   "chat.memory.title":
     "Recalls facts localm has learned about you and adds them to the prompt. Add facts with /remember, view/edit with /memory. Blocked in privacy mode.",
   "chat.mic":
@@ -1413,7 +1418,7 @@ export const I18N_EN = {
   "models.pull.store.move": "Move into library",
   "models.pull.store.registerInPlace": "Register in place",
   "models.pull.storeTitle":
-    "Only applies to a local folder/file path - a HuggingFace or URL download always lands in ~/.localm/models on its own.",
+    "Only applies to a local folder/file path - a HuggingFace, CivitAI or URL download always lands in ~/.localm/models on its own.",
   "models.pull.title": "Add a model",
   "models.pull.verifying": "verifying… {pct}%",
   "models.relocate.failed": "Relocate failed",
@@ -1478,6 +1483,10 @@ export const I18N_EN = {
   "models.tag.loaded": "loaded",
   "models.tag.missing": "missing",
   "models.title": "Models",
+  "models.partOf": "part of {model}",
+  "models.typeHint.planner": "Planner (language model used by music models)",
+  "models.typeHint.textEncoder": "Text encoder (used by image and video models)",
+  "models.typeHint.vocoder": "Vocoder (turns music latents into audio)",
   "models.typeSelect.ariaLabel": "Model type for {name}",
   "models.typeSelect.notSet": "not set",
   "models.typeSelect.titleChange": "Change this model's type",

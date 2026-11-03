@@ -1815,6 +1815,23 @@ export function buildMemoryChip(mem) {
   return chip;
 }
 
+/** The sentence for the outcome of a "remember ..." request the server handled
+ *  for a message: `saved` is `{ text, status }`, status "saved" | "exists" |
+ *  "full" | "failed". */
+export function memorySavedText(saved) {
+  const key = { saved: "chat.memory.saved", exists: "chat.memory.exists",
+                full: "chat.memory.full", off: "chat.memory.off" }[saved && saved.status] || "chat.memory.saveFailed";
+  return t(key, { text: (saved && saved.text) || "" });
+}
+
+/** The confirmation line under a reply whose message asked to remember
+ *  something, so the user sees it was stored. */
+export function buildMemorySavedNote(saved) {
+  const note = el("span", "mem-saved", memorySavedText(saved));
+  note.setAttribute("role", "status");
+  return note;
+}
+
 // A stable per-label mark with no external asset and no network fetch: the
 // same label always derives the same letters and the same hue. Two or more
 // hyphen/underscore/space/dot-separated words give one initial each (e.g.
@@ -2039,6 +2056,7 @@ export function addMessageRow(container, role, text, opts = {}) {
     btn.onclick = () => fn(btn);
     meta.appendChild(btn);
   }
+  if (opts.memory && opts.memory.saved) meta.appendChild(buildMemorySavedNote(opts.memory.saved));
   if (opts.memory && opts.memory.n > 0) meta.appendChild(buildMemoryChip(opts.memory));
   if (opts.routed) meta.appendChild(buildRoutedChip(opts.routed));
   row.appendChild(meta);

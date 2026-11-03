@@ -36,6 +36,7 @@ from ._hf_runner import (
 from .base import (
     BaseBackend,
     EmbedBatchTooLargeError,
+    ModelRefusedError,
     UnsupportedInputError,
     UnsupportedModelRoleError,
     image_unsupported_message,
@@ -116,6 +117,20 @@ def _check_custom_code_allowed(model_path: str) -> None:
         "If you trust the source of this model, enable it with:\n"
         "  localm config hf_trust_remote_code true\n"
         "Only do that for a model you obtained from a source you trust.")
+
+
+def _without_pip_advice(model_path: str, err: RuntimeError) -> RuntimeError:
+    """*err* itself, or the load failure it reports re-worded for a localm user
+    when it is a missing-package ImportError or tells the reader to run pip."""
+    from localm.model_manager.missing_packages import rewrite_import_error, strip_pip_instructions
+    text = str(err)
+    sentence = rewrite_import_error(Path(model_path).name, text)
+    if sentence is not None:
+        return ModelRefusedError(sentence)
+    stripped = strip_pip_instructions(text)
+    if stripped == " ".join(text.split()):
+        return err
+    return type(err)(stripped)
 
 
 def _check_format_supported(model_path: str) -> None:
@@ -340,7 +355,13 @@ class HFBackend(BaseBackend):
             order = hf_gpu_order()
             if order:
                 params["gpu_order"] = order
-        meta = self._runner.spawn_and_load(params, timeout=self._load_timeout_seconds())
+        try:
+            meta = self._runner.spawn_and_load(params, timeout=self._load_timeout_seconds())
+        except RuntimeError as e:
+            plain = _without_pip_advice(self.model_path, e)
+            if plain is e:
+                raise
+            raise plain from e
         self.rerank_labels = [str(n) for n in (meta.get("rerank_labels") or [])]
         device_name = meta.get("device")
         self.loaded_device = device_name if isinstance(device_name, str) else None

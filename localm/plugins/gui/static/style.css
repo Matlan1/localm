@@ -1923,6 +1923,11 @@ input.auto-detected, select.auto-detected { color: var(--text-dim); font-style: 
   background: color-mix(in srgb, var(--cat-amber) 15%, transparent); }
 .type-badge.type-vae { color: var(--cat-green); border-color: var(--cat-green);
   background: color-mix(in srgb, var(--cat-green) 15%, transparent); }
+.type-badge.type-vocoder { color: var(--cat-green); border-color: var(--cat-green);
+  background: color-mix(in srgb, var(--cat-green) 15%, transparent); }
+.type-badge.type-planner { color: var(--cat-violet); border-color: var(--cat-violet);
+  background: color-mix(in srgb, var(--cat-violet) 15%, transparent); }
+.role-hint { font-size: 11px; color: var(--text-dim); margin-top: 2px; white-space: normal; }
 .type-badge.type-lora { color: var(--cat-cyan); border-color: var(--cat-cyan);
   background: color-mix(in srgb, var(--cat-cyan) 15%, transparent); }
 .type-badge.type-unknown { color: var(--yellow); border-color: var(--yellow);
@@ -2335,6 +2340,7 @@ div:has(> .data-table) { overflow-x: auto; }
   border-radius: 8px; font-size: 11px; padding: 2px 8px; cursor: pointer;
 }
 .msg-meta button.mem-chip:hover { color: var(--accent); border-color: var(--accent); }
+.msg-meta .mem-saved { color: var(--accent); font-size: 12px; align-self: center; }
 
 /* model-autoswitch "ask": offers the better model (chat.js buildRoutedChip). */
 .msg-meta button.routed-suggest {
