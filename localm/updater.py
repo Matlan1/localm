@@ -1366,6 +1366,7 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
         # swap_with_backup backs up to run_backup_dir first, then swaps, rolling
         # back from it and re-raising on failure. run_dir is left in place on
         # failure, so run_backup_dir survives for a manual recovery.
+        previous_version = _version.read_version()
         names = au.swap_with_backup(root, target, run_backup_dir)
         # Promote this run's backup to the stable path before the manifest write or
         # the post-swap command's own rollback touches `backup_dir`, so both use the
@@ -1466,6 +1467,11 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
         components_status, components_note = _apply_components(
             comp_plans, comp_update, klass=klass, target=target, version=new_version,
             defer=defer_runtime, runner=runner, say=say, roll_back=_roll_back)
+        from localm import updater_parts
+        if cmd:
+            updater_parts.clear_kept_records()
+        else:
+            updater_parts.note_kept_record(target, [previous_version, new_version])
         return {"applied": True, "version": new_version, "klass": klass,
                 "backup": str(backup_dir), "restart_needed": True,
                 "verified": verified, "verify_reason": verify_reason,

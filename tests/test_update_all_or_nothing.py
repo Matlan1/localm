@@ -408,6 +408,33 @@ def test_an_update_that_keeps_the_dependencies_leaves_the_parts_consistent(
     parts = updater_parts.installed_parts(inst)
     assert parts["install_record"] == "0.3.1" and parts["install_record_matches"] is False
     assert not [p for p in parts["problems"] if "record" in p or "dependencies" in p]
+    updater.rollback_last(installed=inst)
+    monkeypatch.setattr(_version, "read_version", lambda: "0.3.1")
+    assert not [p for p in updater_parts.installed_parts(inst)["problems"] if "record" in p]
+
+
+def test_an_update_that_rewrites_the_record_forgets_the_kept_one(install, home):
+    from localm import updater_parts
+    inst, site = install
+    updater_parts.note_kept_record(inst, ["0.3.0"])
+    assert updater_parts._kept_records() == {"0.3.0": "0.3.1"}
+    data, sig = _release_032(sd=None)
+    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                  runner=_deps_step(site))
+    assert updater_parts._kept_records() == {}
+
+
+def test_the_update_routes_hold_the_torch_probes(monkeypatch):
+    import ast
+    src = (Path(__file__).resolve().parents[1] / "localm" / "inference" / "routes"
+           / "admin.py").read_text(encoding="utf-8")
+    calls = [n for n in ast.walk(ast.parse(src))
+             if isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "to_thread"]
+    held = {ast.unparse(c.args[1]) for c in calls
+            if ast.unparse(c.args[0]) == "_probes_held"}
+    assert held == {"updater.apply", "updater_parts.repair", "updater.rollback_last"}
+    assert not [c for c in calls if ast.unparse(c.args[0]) in (
+        "updater.apply", "updater_parts.repair", "updater.rollback_last")]
 
 
 def test_a_venv_without_localm_is_a_problem_and_repair_reinstalls(install):
@@ -648,11 +675,10 @@ def test_installed_parts_names_an_install_record_of_another_version(install, mon
     _uninstall(site, "localm")
     _localm_dist(site, "0.1.5")
     parts = updater_parts.installed_parts(inst)
-    assert parts["install_record_matches"] is False and parts["consistent"] is True, \
-        "a record of another version alone is not a problem"
+    assert parts["consistent"] is False and parts["install_record_matches"] is False
+    assert any("install record is localm 0.1.5, but localm 0.3.1" in p for p in parts["problems"])
     _uninstall(site, "click")
     parts = updater_parts.installed_parts(inst)
-    assert parts["consistent"] is False
     assert any("click missing" in p for p in parts["problems"])
 
 

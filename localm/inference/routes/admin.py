@@ -317,6 +317,15 @@ def register(app: FastAPI, ctx) -> None:
         info["available"] = True
         return info
 
+    def _probes_held(fn, *args, **kwargs):
+        """Call *fn* with the GPU meter's torch probe children held
+        (``discover.torch_probes_held``): while an update or rollback replaces the
+        install's files, a probe child would run from a half-replaced tree and
+        hold PyTorch's libraries. Blocks: call it off the event loop."""
+        from localm import discover
+        with discover.torch_probes_held():
+            return fn(*args, **kwargs)
+
     def _restart_after_apply(res: dict) -> None:
         """Restart in place after a successful apply so the swapped code loads,
         except for a setup-class update, which needs setup.bat re-run by the user.
@@ -385,7 +394,7 @@ def register(app: FastAPI, ctx) -> None:
             raise HTTPException(400, "This release has no downloadable build attached.")
         try:
             res = await asyncio.to_thread(
-                updater.apply, asset["id"], signature=rel.get("signature"),
+                _probes_held, updater.apply, asset["id"], signature=rel.get("signature"),
                 target_version=rel["version"], allow_unverified=allow_unverified,
                 expect_sha256=sha256, defer_runtime=True)
         except updater.UnverifiedBuild as e:
@@ -446,7 +455,7 @@ def register(app: FastAPI, ctx) -> None:
             raise HTTPException(400, "This release has no downloadable build attached.")
         try:
             res = await asyncio.to_thread(
-                updater.apply, asset["id"], signature=info.get("signature"),
+                _probes_held, updater.apply, asset["id"], signature=info.get("signature"),
                 defer_runtime=True)
         except LocalmError as e:
             # apply() already rolled back; report the failure, do not fake success.
@@ -493,7 +502,7 @@ def register(app: FastAPI, ctx) -> None:
                 403, "Repairing the install requires an owner (admin) key: it reinstalls "
                 "localm's packages and native runtime.")
         try:
-            res = await asyncio.to_thread(updater_parts.repair, defer=True)
+            res = await asyncio.to_thread(_probes_held, updater_parts.repair, defer=True)
         except LocalmError as e:
             return {"repaired": False, "error": format_localm_error(e)}
         out = {"repaired": True, "notes": res["notes"], "restarting": False}
@@ -557,7 +566,7 @@ def register(app: FastAPI, ctx) -> None:
         # back. rollback_info() is read-only and never calls rollback_last.
         target_version = (await asyncio.to_thread(updater.rollback_info)).get("version")
         try:
-            res = await asyncio.to_thread(updater.rollback_last)
+            res = await asyncio.to_thread(_probes_held, updater.rollback_last)
         except LocalmError as e:
         # A precondition failure, so nothing was touched: either there is no backup,
         # or an update/rollback already holds the single-flight lock. Kept distinct

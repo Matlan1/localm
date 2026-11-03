@@ -14,11 +14,15 @@ or, in a server, during its restart.
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 from typing import Callable, Optional
 
 REPAIR_SNAPSHOT = "repair-venv"
+# Which localm versions run on which install record because an update kept the
+# dependencies and so did not rewrite it: {version: record version}.
+KEPT_RECORD_FILE = "kept-install-record.json"
 
 
 def _norm_version(v: Optional[str]) -> Optional[str]:
@@ -29,6 +33,47 @@ def _norm_version(v: Optional[str]) -> Optional[str]:
         return str(Version(v))
     except Exception:
         return v.strip()
+
+
+def _kept_records() -> dict:
+    from localm import updater
+    try:
+        data = json.loads((updater._updates_dir(create=False) / KEPT_RECORD_FILE)
+                          .read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def note_kept_record(root, versions) -> None:
+    """Record that each of *versions* runs on the install record in the venv of
+    the install at *root* because an update kept the dependencies and did not
+    rewrite it (:func:`installed_parts` does not count that pair as a problem).
+    A failure is logged."""
+    from localm import updater, updater_components as uc
+    site = uc.site_packages(Path(root) / ".venv")
+    record = (uc.dists(site).get("localm") or {}).get("version") if site else None
+    if record is None:
+        return
+    data = _kept_records()
+    data.update({str(v): record for v in versions if v})
+    try:
+        (updater._updates_dir() / KEPT_RECORD_FILE).write_text(json.dumps(data),
+                                                               encoding="utf-8")
+    except OSError as e:
+        updater._apply_warn("could not record the kept install record: %s", e)
+
+
+def clear_kept_records() -> None:
+    """Forget :func:`note_kept_record` pairs: the install record was rewritten.
+    A failure is logged."""
+    from localm import updater
+    try:
+        (updater._updates_dir(create=False) / KEPT_RECORD_FILE).unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        updater._apply_warn("could not remove the kept install record note: %s", e)
 
 
 def _source_checkout(root: Path) -> bool:
@@ -77,8 +122,8 @@ def installed_parts(root=None) -> dict:
     ``app`` the code's version, ``install_record`` the venv's localm record
     version (None when there is none to compare: no venv, a source checkout,
     or a pip install) and whether it is ``app`` (False also when the venv has
-    no record at all, which is a problem; a record of another version alone is
-    not, since an update that keeps the dependencies keeps the record),
+    no record at all). A record of another version is a problem unless an
+    update that kept the dependencies left it (:func:`note_kept_record`),
     ``deps_problems`` each dependency the venv does not satisfy (a problem),
     ``runtime``
     ``{"backend", "current", "target", "matches"}`` (``matches`` None when it
@@ -106,6 +151,9 @@ def installed_parts(root=None) -> dict:
                             "installed in it")
         elif record is not None:
             record_matches = _norm_version(record) == _norm_version(app)
+            if not record_matches and _kept_records().get(app) != record:
+                problems.append(f"the venv's install record is localm {record}, but localm "
+                                f"{app} is installed")
         if deps_problems:
             problems.append("the venv does not have the dependencies localm "
                             f"{app} needs: " + ", ".join(deps_problems[:5])
@@ -196,6 +244,7 @@ def _reinstall_deps(root: Path, *, runner: Optional[Callable], say: Callable) ->
         except Exception as e:
             problem = f"could not run {cmd[0]}: {e}"
         if problem is None:
+            clear_kept_records()
             return "reinstalled localm and its dependencies"
         errors = uc.restore(snap, root=root, say=say)
         if errors:
