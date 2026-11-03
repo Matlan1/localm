@@ -2,7 +2,7 @@
 """GUI model routes: registry list/load, VRAM estimate, pull/remove/alias, and
 HuggingFace/CivitAI discovery.
 
-The routes are registered in four groups by responsibility:
+The routes are registered in five groups by responsibility:
 
 - ``inventory``: what is registered and resident (list, scan, roles,
   shortcuts, load, unload, embedder warm-up, VRAM estimate, GPUs);
@@ -10,7 +10,8 @@ The routes are registered in four groups by responsibility:
   redemption, pull, media preflight, curated ComfyUI downloads);
 - ``mutation``: changing a registration in place (remove, alias, rename,
   type, relocate);
-- ``discovery``: searching HuggingFace and CivitAI.
+- ``discovery``: searching HuggingFace and CivitAI;
+- ``packages``: adding the Python packages a model's own code needs.
 
 ``register`` is the facade ``attach_gui`` calls; each group's own ``register``
 takes the typed :class:`ModelRouteContext` built here from the shared ``ctx``.
@@ -21,7 +22,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 
 from localm.plugins.gui.routes.models import (acquisition, discovery,
-                                              inventory, mutation)
+                                              inventory, mutation, packages)
 from localm.plugins.gui.routes.models._context import ModelRouteContext
 
 __all__ = ["ModelRouteContext", "register"]
@@ -35,3 +36,4 @@ def register(app: FastAPI, ctx) -> None:
     acquisition.register(app, context)
     mutation.register(app, context)
     discovery.register(app, context)
+    packages.register(app, context)
