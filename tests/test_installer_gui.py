@@ -40,11 +40,22 @@ def _load():
 
 @pytest.fixture()
 def gui(tmp_path, monkeypatch):
-    """The installer module with its ROOT pointed at a throwaway directory, so
-    no test can write into the real clone."""
+    """The installer module with its ROOT pointed at a throwaway directory, and
+    the Shared store (LOCALAPPDATA, XDG_DATA_HOME) at another, so no test can
+    write into the real clone or the real user profile."""
     mod = _load()
     monkeypatch.setattr(mod, "ROOT", tmp_path)
+    profile = tmp_path.parent / f"{tmp_path.name}-profile"
+    monkeypatch.setenv("LOCALAPPDATA", str(profile))
+    monkeypatch.setenv("XDG_DATA_HOME", str(profile))
+    _fake_system32(mod, tmp_path, monkeypatch)
+    for name in (mod.STORE_ENV, mod.UV_ENV, mod.UV_INSTALLED_ENV):
+        monkeypatch.delenv(name, raising=False)
     return mod
+
+
+def _shared_store(gui):
+    return gui.shared_store_root()
 
 
 def _record(root):
@@ -218,41 +229,85 @@ def test_no_uv_leaves_the_path_alone(gui, tmp_path, monkeypatch):
     assert env["PATH"] == str(tmp_path / "nothing")
 
 
-def test_a_shared_install_drops_the_launchers_own_containment(gui, tmp_path,
-                                                             monkeypatch):
-    """The launcher points uv at the clone for the window's own interpreter.
-    A shared install must not inherit that, or the answer never takes effect."""
-    monkeypatch.setenv("UV_PYTHON_INSTALL_DIR", str(tmp_path / ".python"))
-    monkeypatch.setenv("UV_CACHE_DIR", str(tmp_path / ".cache"))
-    env = gui._env_for(gui.Plan(portable_store=False))
-    assert "UV_PYTHON_INSTALL_DIR" not in env
-    assert "UV_CACHE_DIR" not in env
+@pytest.mark.parametrize("portable", [True, False], ids=["portable", "shared"])
+def test_a_poisoned_inherited_environment_never_reaches_a_step(gui, tmp_path,
+                                                              monkeypatch, portable):
+    """Whatever uv, pip and Python settings the PC has, a step sees only
+    localm's own: the inherited ones are dropped, D2/D3/D4 values are set."""
+    poison = {
+        "UV_INDEX_URL": "https://evil.example/simple",
+        "PIP_INDEX_URL": "https://evil.example/simple",
+        "PIP_EXTRA_INDEX_URL": "https://evil.example/extra",
+        "PYTHONPATH": str(tmp_path / "evil"),
+        "PYTHONHOME": str(tmp_path / "evilhome"),
+        "PYTHONSTARTUP": str(tmp_path / "evil.py"),
+        "PYTHONUSERBASE": str(tmp_path / "eviluser"),
+        "VIRTUAL_ENV": str(tmp_path / "othervenv"),
+        "CONDA_PREFIX": str(tmp_path / "conda"),
+        "UV_CACHE_DIR": str(tmp_path / "usercache"),
+        "UV_PYTHON_INSTALL_DIR": str(tmp_path / "userpythons"),
+        "UV_PYTHON": str(tmp_path / "python.exe"),
+        "UV_PYTHON_PREFERENCE": "only-system",
+        "UV_NO_CACHE": "1",
+        "UV_CONFIG_FILE": str(tmp_path / "uv.toml"),
+        "UV_PYTHON_INSTALL_MIRROR": "https://evil.example/python",
+        "UV_PYTHON_DOWNLOADS_JSON_URL": "https://evil.example/pythons.json",
+        "UV_CREDENTIALS_DIR": str(tmp_path / "usercreds"),
+        "LOCALM_HOME": str(tmp_path / "otherhome"),
+        "TEMP": str(tmp_path / "systemp"), "TMP": str(tmp_path / "systemp"),
+        "TMPDIR": str(tmp_path / "systemp"),
+    }
+    for key, value in poison.items():
+        monkeypatch.setenv(key, value)
+    env = gui._env_for(gui.Plan(portable_store=portable))
+    store = gui.store_dirs(portable)
+    for key in ("UV_INDEX_URL", "PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "PYTHONPATH",
+                "PYTHONHOME", "PYTHONSTARTUP", "PYTHONUSERBASE", "VIRTUAL_ENV",
+                "CONDA_PREFIX", "UV_PYTHON", "UV_NO_CACHE", "UV_CONFIG_FILE",
+                "UV_PYTHON_INSTALL_MIRROR", "UV_PYTHON_DOWNLOADS_JSON_URL", "LOCALM_HOME"):
+        assert key not in env, f"{key} from the PC reached a step"
+    assert env["UV_CACHE_DIR"] == str(store["cache"])
+    assert env["UV_PYTHON_INSTALL_DIR"] == str(store["python"])
+    assert env["UV_CREDENTIALS_DIR"] == str(store["uv"] / "credentials")
+    assert env["UV_PYTHON_PREFERENCE"] == "only-managed"
+    assert env["UV_NO_CONFIG"] == "1"
+    assert env["PIP_CONFIG_FILE"] == os.devnull
+    assert env["PYTHONNOUSERSITE"] == "1"
+    tmp = str(tmp_path / ".localm-setup-tmp")
+    assert env["TEMP"] == env["TMP"] == env["TMPDIR"] == tmp
+    if portable:
+        assert store["cache"] == tmp_path / ".cache"
+    else:
+        assert store["cache"] == _shared_store(gui) / "cache"
+        assert _shared_store(gui) == Path(os.environ["LOCALAPPDATA" if gui.IS_WINDOWS
+                                                     else "XDG_DATA_HOME"]) / "localm" / "shared"
 
 
-def test_a_shared_install_keeps_a_directory_the_user_chose(gui, tmp_path,
-                                                           monkeypatch):
-    """Only the launcher's own value is dropped. A machine-wide choice is the
-    user's and is left alone."""
-    monkeypatch.setenv("UV_PYTHON_INSTALL_DIR", "D:/elsewhere/pythons")
-    env = gui._env_for(gui.Plan(portable_store=False))
-    assert env["UV_PYTHON_INSTALL_DIR"] == "D:/elsewhere/pythons"
+def test_inherited_names_are_dropped_whatever_their_case(gui):
+    env = gui.isolated_environ({"uv_index_url": "x", "Pip_Index_Url": "y",
+                                "PythonPath": "z", "Path": "keep", "LOCALM_GUI_STORE": "shared"})
+    assert set(env) == {"Path", "LOCALM_GUI_STORE", "UV_NO_CONFIG", "PIP_CONFIG_FILE",
+                        "PYTHONNOUSERSITE"}
+
+
+def test_shared_without_a_profile_folder_fails_the_step(gui, monkeypatch):
+    """No LOCALAPPDATA on Windows: the Shared store is not guessed."""
+    monkeypatch.setattr(gui, "IS_WINDOWS", True)
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    with pytest.raises(gui.StepFailed, match="LOCALAPPDATA"):
+        gui._env_for(gui.Plan(portable_store=False))
 
 
 def test_portable_store_contains_uv_inside_the_install(gui, tmp_path):
-    """Portable means nothing is written to the user profile: uv's managed
-    interpreter and its wheel cache both land inside the install.
-
-    Non-portable does not CLEAR an inherited UV_* setting (setup.bat does not
-    either - a machine-wide choice is the user's), it simply does not point
-    them into the install, so the assertion is about the install-local paths
-    rather than the keys being absent."""
+    """Portable: uv's managed interpreter and its wheel cache land inside the
+    install. Shared: in localm's own folder in the profile, never the folder."""
     env = gui._env_for(gui.Plan(portable_store=True))
     assert env["UV_PYTHON_INSTALL_DIR"] == str(tmp_path / ".python")
     assert env["UV_CACHE_DIR"] == str(tmp_path / ".cache")
 
     plain = gui._env_for(gui.Plan(portable_store=False))
-    assert plain.get("UV_PYTHON_INSTALL_DIR") != str(tmp_path / ".python")
-    assert plain.get("UV_CACHE_DIR") != str(tmp_path / ".cache")
+    assert plain["UV_PYTHON_INSTALL_DIR"] == str(_shared_store(gui) / "python")
+    assert plain["UV_CACHE_DIR"] == str(_shared_store(gui) / "cache")
 
 
 # --------------------------------------------------------------------------- #
@@ -287,29 +342,21 @@ def test_setup_bat_still_sets_the_native_certificate_store():
 # --------------------------------------------------------------------------- #
 
 class TestUvResolution:
-    """The installer runs before anything is installed, so uv is the one tool
-    it cannot assume. setup-gui.bat bootstraps a portable copy into ./.uv when
-    the machine has none, and Astral's installer updates the PERSISTENT PATH
-    rather than the shell that is already running - so on a fresh clone uv is
-    routinely present in the folder and absent from PATH.
-
-    What is pinned here is that the entry check and the steps resolve the SAME
-    uv. When they disagreed, the window opened and died on its first command
-    with "could not start uv: [WinError 2]"."""
+    """Every uv command is localm's own uv in the store the tooling answer
+    picked; a uv on PATH or in the user profile is never run."""
 
     @pytest.fixture()
     def machine(self, gui, tmp_path, monkeypatch):
-        """A machine with no uv at all: none on PATH, none in the clone, and a
-        home directory that cannot contain one either."""
+        """A machine with a uv on PATH and in the user profile only."""
         home = tmp_path / "home"
-        home.mkdir()
+        for d in (home / ".local" / "bin", home / ".cargo" / "bin", tmp_path / "sysbin"):
+            self._uv_in(gui, d)
         monkeypatch.setattr(gui.Path, "home", classmethod(lambda cls: home))
-        monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+        monkeypatch.setenv("PATH", str(tmp_path / "sysbin"))
         return gui
 
     @staticmethod
-    def _portable_uv(gui, root):
-        d = root / ".uv"
+    def _uv_in(gui, d):
         d.mkdir(parents=True, exist_ok=True)
         exe = d / ("uv.exe" if gui.IS_WINDOWS else "uv")
         exe.write_bytes(b"")
@@ -340,67 +387,41 @@ class TestUvResolution:
                 pass
         return seen
 
-    def test_the_steps_run_the_portable_uv_when_it_is_not_on_path(
-            self, machine, tmp_path, monkeypatch):
-        """The reported failure: a fresh clone whose uv lives in ./.uv."""
-        exe = self._portable_uv(machine, tmp_path)
+    def test_the_steps_run_the_portable_uv(self, machine, tmp_path, monkeypatch):
+        exe = self._uv_in(machine, tmp_path / ".uv")
         venv_cmd = self._commands(machine, monkeypatch)[0]
-        assert venv_cmd[0] == str(exe), (
-            f"the install ran {venv_cmd[0]!r}, which is not the uv that exists")
+        assert venv_cmd[0] == str(exe)
         assert venv_cmd[1:3] == ["venv", "--python"]
 
+    def test_the_steps_run_the_shared_store_uv(self, machine, tmp_path, monkeypatch):
+        self._uv_in(machine, tmp_path / ".uv")
+        exe = self._uv_in(machine, _shared_store(machine) / "uv")
+        for cmd in self._commands(machine, monkeypatch, machine.Plan(portable_store=False)):
+            if cmd[1:2] in (["venv"], ["pip"]):
+                assert cmd[0] == str(exe), cmd
+
     def test_no_step_invokes_a_bare_uv(self, machine, tmp_path, monkeypatch):
-        """Swept across every step, not only the one that was reported: a bare
-        'uv' resolves through PATH, which is exactly where it is not."""
-        self._portable_uv(machine, tmp_path)
+        self._uv_in(machine, tmp_path / ".uv")
         for cmd in self._commands(
                 machine, monkeypatch,
                 machine.Plan(app_window=True, add_to_path=True, shortcut="gui")):
-            assert cmd[0] != "uv", f"{cmd} searches PATH for uv"
+            assert os.path.isabs(cmd[0]), f"{cmd} searches PATH for {cmd[0]}"
 
-    def test_the_entry_check_and_the_steps_agree(
-            self, machine, tmp_path, monkeypatch):
-        """One resolver, so a uv good enough to OPEN the window is always a uv
-        the steps can run."""
-        exe = self._portable_uv(machine, tmp_path)
-        assert machine.find_uv(tmp_path) == str(exe)
-        assert self._commands(machine, monkeypatch)[0][0] == machine.find_uv(tmp_path)
-
-
-
-    def test_the_portable_uv_wins_over_one_on_path(
-            self, machine, tmp_path, monkeypatch):
-        """Portable means the install uses its own copy, not the machine's."""
-        exe = self._portable_uv(machine, tmp_path)
-        onpath = tmp_path / "sysbin"
-        onpath.mkdir()
-        (onpath / ("uv.exe" if machine.IS_WINDOWS else "uv")).write_bytes(b"")
-        monkeypatch.setenv("PATH", str(onpath))
-        assert machine.find_uv(tmp_path) == str(exe)
-
-
-    def test_a_machine_with_no_uv_reports_it_instead_of_running_nothing(
-            self, machine, tmp_path, monkeypatch):
-        """No uv anywhere is a step that FAILS, never a command handed to the
-        OS that cannot start."""
-        assert machine.find_uv(tmp_path) is None
+    @pytest.mark.parametrize("portable", [True, False], ids=["portable", "shared"])
+    def test_a_uv_on_path_or_in_the_profile_is_never_found(
+            self, machine, tmp_path, monkeypatch, portable):
+        assert machine.find_uv(tmp_path, portable) is None
         with pytest.raises(machine.StepFailed) as excinfo:
-            self._commands(machine, monkeypatch)
-        assert "uv was not found" in str(excinfo.value)
+            self._commands(machine, monkeypatch, machine.Plan(portable_store=portable))
+        assert "localm's own uv was not found" in str(excinfo.value)
+        assert str(machine.store_dirs(portable)["uv"]) in str(excinfo.value)
 
-    def test_a_uv_only_on_path_is_still_found(
+    def test_the_launchers_uv_is_never_taken_on_its_word(
             self, machine, tmp_path, monkeypatch):
-        """The launcher puts the uv it used on PATH for this process, so one
-        that lives nowhere the search looks is still reachable."""
-        onpath = tmp_path / "sysbin"
-        onpath.mkdir()
-        exe = onpath / ("uv.exe" if machine.IS_WINDOWS else "uv")
-        exe.write_bytes(b"")
-        exe.chmod(0o755)
-        monkeypatch.setenv("PATH", str(onpath))
-        found = machine.find_uv(tmp_path)
-        assert found is not None
-        assert self._commands(machine, monkeypatch)[0][0] == found
+        monkeypatch.setenv(machine.UV_ENV, str(tmp_path / "sysbin" / "uv.exe"))
+        assert machine.find_uv(tmp_path) is None
+        exe = self._uv_in(machine, tmp_path / ".uv")
+        assert machine.find_uv(tmp_path) == str(exe)
 
 
 # --------------------------------------------------------------------------- #
@@ -425,7 +446,7 @@ def _commands_for(gui, monkeypatch, plan, spec="torch", code_for=None):
         return 0
 
     monkeypatch.setattr(gui, "_run", fake_run)
-    monkeypatch.setattr(gui, "find_uv", lambda root: "uv")
+    monkeypatch.setattr(gui, "find_uv", lambda root, portable=None: "uv")
     # make_shortcut does NOT go through _run: it shells out to PowerShell on
     # Windows and writes under Path.home() elsewhere, so stubbing _run alone
     # lets it touch the real machine.
@@ -460,7 +481,7 @@ class TestInstallParity:
     def test_the_venv_marker_is_written(self, gui, tmp_path, monkeypatch):
         """uninstall removes .venv only when this marker says setup made it."""
         monkeypatch.setattr(gui, "_run", _creates_venv(tmp_path))
-        monkeypatch.setattr(gui, "find_uv", lambda root: "uv")
+        monkeypatch.setattr(gui, "find_uv", lambda root, portable=None: "uv")
         step = _step(gui, gui.Plan(), "Creating the Python environment")
         step.run(lambda s: None)
         assert (tmp_path / ".venv" / ".localm-venv").is_file()
@@ -512,7 +533,7 @@ class TestInstallParity:
         """An install that stops later can then still be uninstalled."""
         (tmp_path / ".python").mkdir()
         monkeypatch.setattr(gui, "_run", _creates_venv(tmp_path))
-        monkeypatch.setattr(gui, "find_uv", lambda root: "uv")
+        monkeypatch.setattr(gui, "find_uv", lambda root, portable=None: "uv")
         _step(gui, gui.Plan(), "Creating the Python environment").run(lambda s: None)
         rec = _record(tmp_path)
         assert Path(rec["venv"]) == (tmp_path / ".venv").resolve()
@@ -560,26 +581,39 @@ class TestInstallParity:
 
     def test_a_shared_install_never_records_tooling_left_in_the_folder(
             self, gui, tmp_path, monkeypatch):
-        """setup.bat's Shared choice records no tooling inside the folder, so a
-        .python or .uv left by an earlier Portable install is not claimed."""
+        """A .python or .uv left by an earlier Portable install is not claimed by
+        a Shared one."""
         (tmp_path / ".python").mkdir()
         (tmp_path / ".uv").mkdir()
         cmds = _commands_for(gui, monkeypatch,
                              gui.Plan(backend="own", portable_store=False))
         rec = [c for c in cmds if "localm.install_manifest" in c][0]
         assert "--runtime-contained" not in rec
-        assert "--python-dir" not in rec and "--uv-dir" not in rec
+        assert str(tmp_path / ".python") not in rec and str(tmp_path / ".uv") not in rec
 
-    def test_nothing_outside_the_folder_is_ever_claimed(
+    def test_a_shared_install_records_the_shared_store_as_shared(
             self, gui, tmp_path, monkeypatch):
-        """Uninstall must never delete a runtime other installs share, so a
-        folder holding none of its own tooling records none."""
+        """The store folders are recorded (D7) without --runtime-contained, which
+        uninstall keeps as used by other installs."""
+        store = gui.store_dirs(False)
+        for d in store.values():
+            d.mkdir(parents=True)
         cmds = _commands_for(gui, monkeypatch,
                              gui.Plan(backend="own", portable_store=False))
         rec = [c for c in cmds if "localm.install_manifest" in c][0]
         assert "--runtime-contained" not in rec
-        assert "--python-dir" not in rec
-        assert "--cache-dir" not in rec
+        assert rec[rec.index("--python-dir") + 1] == str(store["python"])
+        assert rec[rec.index("--cache-dir") + 1] == str(store["cache"])
+        assert rec[rec.index("--uv-dir") + 1] == str(store["uv"])
+
+    def test_nothing_outside_the_folder_is_ever_claimed(
+            self, gui, tmp_path, monkeypatch):
+        """Uninstall must never delete a runtime other installs share: a Shared
+        install never records --runtime-contained."""
+        cmds = _commands_for(gui, monkeypatch,
+                             gui.Plan(backend="own", portable_store=False))
+        rec = [c for c in cmds if "localm.install_manifest" in c][0]
+        assert "--runtime-contained" not in rec
 
     def test_the_hf_stack_comes_from_the_hf_extra_not_an_inline_pin(
             self, gui, monkeypatch):
@@ -621,29 +655,22 @@ class TestGlobalCommandExitCodes:
     def test_a_real_failure_still_reaches_the_summary(
             self, gui, tmp_path, monkeypatch):
         monkeypatch.setattr(gui, "_run", lambda *a, **k: 1)
-        monkeypatch.setattr(gui, "find_uv", lambda root: "uv")
+        monkeypatch.setattr(gui, "find_uv", lambda root, portable=None: "uv")
         with pytest.raises(gui.StepFailed):
             _step(gui, gui.Plan(add_to_path=True, backend="own"),
                   "Adding 'localm'").run(lambda s: None)
 
 
 class TestToolingLocation:
-    """setup.sh and setup.bat pass --python-preference only-managed only for a
-    contained install, so a shared one may reuse an existing Python."""
+    """Both choices build the environment on uv's managed Python only."""
 
-    def test_a_contained_install_forces_the_managed_python(
-            self, gui, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("portable", [True, False], ids=["portable", "shared"])
+    def test_the_environment_is_built_on_a_managed_python(
+            self, gui, tmp_path, monkeypatch, portable):
         venv_cmd = _commands_for(gui, monkeypatch,
-                                 gui.Plan(backend="own", portable_store=True))[0]
-        assert "--python-preference" in venv_cmd
+                                 gui.Plan(backend="own", portable_store=portable))[0]
+        assert venv_cmd[1] == "venv"
         assert venv_cmd[venv_cmd.index("--python-preference") + 1] == "only-managed"
-
-    def test_sharing_the_tooling_lets_uv_reuse_an_existing_python(
-            self, gui, tmp_path, monkeypatch):
-        venv_cmd = _commands_for(gui, monkeypatch,
-                                 gui.Plan(backend="own", portable_store=False))[0]
-        assert "--python-preference" not in venv_cmd, (
-            "the shared choice never reaches uv, so it always downloads one")
 
 
 class TestHonestFailures:
@@ -676,7 +703,7 @@ class TestHonestFailures:
         """It used to scroll past in the log and end on an unqualified success."""
         monkeypatch.setattr(gui, "torch_spec_for", lambda b: ("torch", ""))
         monkeypatch.setattr(gui, "_run", lambda *a, **k: 1)
-        monkeypatch.setattr(gui, "find_uv", lambda root: "uv")
+        monkeypatch.setattr(gui, "find_uv", lambda root, portable=None: "uv")
         with pytest.raises(gui.StepFailed) as e:
             _step(gui, gui.Plan(backend="cuda"), "Installing PyTorch").run(
                 lambda s: None)
@@ -684,7 +711,7 @@ class TestHonestFailures:
 
     def test_a_failed_path_step_reaches_the_summary(self, gui, monkeypatch):
         monkeypatch.setattr(gui, "_run", lambda *a, **k: 1)
-        monkeypatch.setattr(gui, "find_uv", lambda root: "uv")
+        monkeypatch.setattr(gui, "find_uv", lambda root, portable=None: "uv")
         with pytest.raises(gui.StepFailed):
             _step(gui, gui.Plan(add_to_path=True, backend="own"),
                   "Adding 'localm'").run(lambda s: None)
@@ -813,6 +840,7 @@ class TestPosixShortcut:
         fails to parse. A folder under a name like O'Brien reaches this."""
         if not gui.IS_WINDOWS:
             monkeypatch.setattr(gui, "IS_WINDOWS", True)
+        _fake_system32(gui, tmp_path, monkeypatch)
         root = tmp_path / "O'Brien" / "localm"
         root.mkdir(parents=True)
         monkeypatch.setattr(gui, "ROOT", root)
@@ -1730,9 +1758,9 @@ def test_the_title_bar_setting_reaches_the_real_window(gui, dark):
         root.destroy()
 
 
-class TestContainedUv:
-    """Portable means uv itself lives in the folder (setup.bat's wording), whatever
-    uv the launcher used to open the window."""
+class TestStoreUv:
+    """The first step puts localm's own pinned uv in the store the tooling
+    answer picked, whatever uv the launcher used to open the window."""
 
     @staticmethod
     def _uv(directory, gui):
@@ -1742,58 +1770,108 @@ class TestContainedUv:
         exe.chmod(0o755)
         return exe
 
-    def test_portable_with_only_an_outside_uv_installs_the_contained_one_first(
-            self, gui, tmp_path, monkeypatch):
-        monkeypatch.setenv("PATH", str(self._uv(tmp_path / "sysbin", gui).parent))
-        steps = gui.all_steps(gui.Plan(backend="own", portable_store=True))
-        assert steps[0].label == "Installing uv into this folder"
-        assert steps[0].key == "uv-portable" and steps[0].fatal
+    @staticmethod
+    def _pin(gui, tmp_path, installer=b"installer"):
+        import hashlib
+        sha = hashlib.sha256(installer).hexdigest()
+        for name in ("setup.bat", "setup-gui.bat", "setup.sh", "setup-gui.sh"):
+            (tmp_path / name).write_text(
+                f'set "UV_INSTALLER_VERSION=0.13.6"\nset "UV_INSTALLER_SHA256={sha}"\n',
+                encoding="utf-8")
+        return installer
+
+    @pytest.mark.parametrize("portable,key", [(True, "uv-portable"), (False, "uv-bootstrap")])
+    def test_every_install_starts_with_the_uv_step(self, gui, portable, key):
+        steps = gui.all_steps(gui.Plan(backend="own", portable_store=portable))
+        assert steps[0].key == key and steps[0].fatal
         assert [s.label for s in steps[1:]] == [s.label for s in gui.build_steps(
-            gui.Plan(backend="own", portable_store=True))]
+            gui.Plan(backend="own", portable_store=portable))]
 
-    def test_the_step_installs_into_the_folder_and_reports_a_failure(
-            self, gui, tmp_path, monkeypatch):
-        calls = []
-        tool = gui.uv_tool()
+    @pytest.mark.parametrize("portable", [True, False], ids=["portable", "shared"])
+    def test_a_pinned_uv_already_in_the_store_is_kept(self, gui, tmp_path, monkeypatch,
+                                                      portable):
+        self._pin(gui, tmp_path)
+        exe = self._uv(gui.store_dirs(portable)["uv"], gui)
+        monkeypatch.setattr(gui, "uv_version", lambda e: "0.13.6")
+        monkeypatch.setattr(gui, "install_store_uv",
+                            lambda *a, **k: pytest.fail("reinstalled a pinned uv"))
+        logged = []
+        gui.uv_store_step(gui.Plan(portable_store=portable)).run(logged.append)
+        assert any(str(exe) in line for line in logged)
 
-        def fake(root, **kw):
-            calls.append(Path(root))
-            return self._uv(Path(root) / ".uv", gui)
+    @pytest.mark.parametrize("portable", [True, False], ids=["portable", "shared"])
+    def test_a_wrong_version_or_missing_uv_is_installed_into_the_store(
+            self, gui, tmp_path, monkeypatch, portable):
+        self._pin(gui, tmp_path)
+        self._uv(tmp_path / "sysbin", gui)
+        monkeypatch.setenv("PATH", str(tmp_path / "sysbin"))
+        installed = []
+        monkeypatch.setattr(gui, "install_store_uv",
+                            lambda plan, emit: installed.append(plan.portable_store) or "x")
+        gui.uv_store_step(gui.Plan(portable_store=portable)).run(lambda s: None)
+        self._uv(gui.store_dirs(portable)["uv"], gui)
+        monkeypatch.setattr(gui, "uv_version", lambda e: "0.12.0")
+        gui.uv_store_step(gui.Plan(portable_store=portable)).run(lambda s: None)
+        assert installed == [portable, portable]
 
-        monkeypatch.setattr(tool, "bootstrap_uv", fake)
-        gui.all_steps(gui.Plan(portable_store=True))[0].run(lambda s: None)
-        assert calls == [tmp_path]
+    @pytest.mark.parametrize("portable", [True, False], ids=["portable", "shared"])
+    def test_the_installer_puts_uv_in_the_store_with_nothing_outside(
+            self, gui, tmp_path, monkeypatch, portable):
+        installer = self._pin(gui, tmp_path)
+        target = gui.store_dirs(portable)["uv"]
+        seen = {}
 
-        def failing(root, **kw):
-            raise tool.UvBootstrapError("offline")
+        def run(script, env, emit):
+            seen.update(env)
+            seen["script"] = script
+            self._uv(Path(env["UV_INSTALL_DIR"]), gui)
+            return 0
 
-        monkeypatch.setattr(tool, "bootstrap_uv", failing)
-        shutil.rmtree(tmp_path / ".uv")
-        with pytest.raises(gui.StepFailed, match="offline"):
-            gui.all_steps(gui.Plan(portable_store=True))[0].run(lambda s: None)
+        monkeypatch.setattr(gui, "uv_version", lambda e: "0.13.6")
+        exe = gui.install_store_uv(gui.Plan(portable_store=portable), lambda s: None,
+                                   download=lambda u, d: d.write_bytes(installer),
+                                   run_installer=run)
+        assert exe == target / ("uv.exe" if gui.IS_WINDOWS else "uv")
+        assert seen["UV_INSTALL_DIR"] == seen["UV_UNMANAGED_INSTALL"] == str(target)
+        tmp = Path(seen["TEMP"])
+        assert seen["TMP"] == seen["TMPDIR"] == str(tmp)
+        assert tmp.parent.parent == tmp_path / ".localm-setup-tmp"
+        assert seen["script"].parent.parent == tmp_path / ".localm-setup-tmp"
+        assert not tmp.exists() and not seen["script"].exists()
+        assert seen["UV_NO_CONFIG"] == "1" and "PYTHONPATH" not in seen
 
-    def test_no_step_when_the_contained_uv_is_already_there(self, gui, tmp_path):
-        self._uv(tmp_path / ".uv", gui)
-        assert gui.contained_uv_step(gui.Plan(portable_store=True)) is None
+    def test_a_tampered_installer_is_never_run(self, gui, tmp_path, monkeypatch):
+        self._pin(gui, tmp_path)
+        with pytest.raises(gui.StepFailed, match="checksum"):
+            gui.install_store_uv(gui.Plan(), lambda s: None,
+                                 download=lambda u, d: d.write_bytes(b"tampered"),
+                                 run_installer=lambda *a: pytest.fail("ran it"))
 
-    def test_no_step_for_the_shared_choice(self, gui, tmp_path, monkeypatch):
-        monkeypatch.setenv("PATH", str(self._uv(tmp_path / "sysbin", gui).parent))
-        assert gui.contained_uv_step(gui.Plan(portable_store=False)) is None
-        assert [s.label for s in gui.all_steps(gui.Plan(portable_store=False))] == [
-            s.label for s in gui.build_steps(gui.Plan(portable_store=False))]
+    def test_an_installed_uv_of_another_version_is_a_failure(self, gui, tmp_path,
+                                                            monkeypatch):
+        installer = self._pin(gui, tmp_path)
+        monkeypatch.setattr(gui, "uv_version", lambda e: "0.11.0")
 
-    def test_a_uv_outside_the_folder_is_reported_as_shared(self, gui, tmp_path, monkeypatch):
-        own = self._uv(tmp_path.parent / (tmp_path.name + "-outside") / "sysbin", gui)
-        monkeypatch.setenv("PATH", str(own.parent))
-        assert Path(gui.shared_uv()).samefile(own)
-        self._uv(tmp_path / ".uv", gui)
-        assert gui.shared_uv() is None, "a contained uv wins and is not a shared one"
+        def run(script, env, emit):
+            self._uv(Path(env["UV_INSTALL_DIR"]), gui)
+            return 0
 
-    def test_a_shared_uv_is_recorded_by_its_full_path(self, gui, tmp_path, monkeypatch):
-        own = tmp_path / "sysbin" / "uv"
-        monkeypatch.setattr(gui, "shared_uv", lambda: str(own))
-        cmds = _commands_for(gui, monkeypatch, gui.Plan(backend="own", portable_store=False))
-        rec = [c for c in cmds if "localm.install_manifest" in c][0]
+        with pytest.raises(gui.StepFailed, match="not the pinned 0.13.6"):
+            gui.install_store_uv(gui.Plan(), lambda s: None,
+                                 download=lambda u, d: d.write_bytes(installer),
+                                 run_installer=run)
+
+    def test_a_shared_store_uv_is_recorded_by_its_full_path(self, gui, tmp_path,
+                                                           monkeypatch):
+        own = self._uv(gui.store_dirs(False)["uv"], gui)
+        self._uv(tmp_path / "sysbin", gui)
+        monkeypatch.setenv("PATH", str(tmp_path / "sysbin"))
+        seen = []
+        monkeypatch.setattr(gui, "_run", lambda cmd, emit, plan, **kw: seen.append(
+            [str(c) for c in cmd]) or 0)
+        _step(gui, gui.Plan(backend="own", portable_store=False),
+              "Writing the install record").run(lambda s: None)
+        rec = seen[0]
         assert rec[rec.index("--uv-exe") + 1] == str(own)
 
     def test_a_contained_uv_is_recorded_as_uv_dir_and_not_as_a_shared_one(
@@ -1808,13 +1886,6 @@ class TestContainedUv:
         assert gui.STORE_ENV == "LOCALM_GUI_STORE"
         monkeypatch.setenv(gui.STORE_ENV, "shared")
         assert os.environ.get(gui.STORE_ENV) == "shared"
-
-    def test_a_missing_uv_names_every_place_it_looked(self, gui, tmp_path, monkeypatch):
-        monkeypatch.setenv("PATH", str(tmp_path / "empty"))
-        monkeypatch.setattr(gui.Path, "home", classmethod(lambda cls: tmp_path / "nohome"))
-        with pytest.raises(gui.StepFailed) as ei:
-            gui.uv_argv("venv")
-        assert str(tmp_path / ".uv") in str(ei.value) and "PATH" in str(ei.value)
 
 
 class TestLauncherStorePreset:
@@ -1845,3 +1916,223 @@ class TestLauncherStorePreset:
             assert wizard.current_plan().portable_store is False
         finally:
             root.destroy()
+
+
+def _fake_system32(gui, tmp_path, monkeypatch):
+    """A Windows system folder holding powershell, attrib, taskkill and cmd."""
+    sysdir = tmp_path.parent / f"{tmp_path.name}-System32"
+    (sysdir / "WindowsPowerShell" / "v1.0").mkdir(parents=True, exist_ok=True)
+    (sysdir / "WindowsPowerShell" / "v1.0" / "powershell.exe").write_bytes(b"")
+    for name in ("attrib", "taskkill", "cmd"):
+        (sysdir / f"{name}.exe").write_bytes(b"")
+    monkeypatch.setattr(gui, "windows_system_dir", lambda: sysdir)
+    return sysdir
+
+
+# --------------------------------------------------------------------------- #
+#  Every program by its full path                                              #
+# --------------------------------------------------------------------------- #
+
+class TestNoBareProgram:
+    """Every child process the installer starts names its program by full
+    path: subprocess is replaced at the module boundary and argv[0] checked."""
+
+    @pytest.fixture()
+    def spawned(self, gui, tmp_path, monkeypatch):
+        calls = []
+
+        class Proc:
+            returncode = 0
+            stdout: list = []
+            stdin = None
+
+            def __init__(self, argv):
+                self.argv = argv
+
+            def wait(self):
+                return 0
+
+        def record(argv, **kw):
+            calls.append(([str(a) for a in argv], kw))
+            return Proc(argv)
+
+        monkeypatch.setattr(gui.subprocess, "run", record)
+        monkeypatch.setattr(gui.subprocess, "Popen", record)
+        return calls
+
+    @staticmethod
+    def _uv(directory, gui):
+        directory.mkdir(parents=True, exist_ok=True)
+        exe = directory / ("uv.exe" if gui.IS_WINDOWS else "uv")
+        exe.write_bytes(b"")
+        exe.chmod(0o755)
+        return exe
+
+    @pytest.mark.parametrize("portable", [True, False], ids=["portable", "shared"])
+    def test_every_install_step_runs_a_full_path(self, gui, tmp_path, monkeypatch,
+                                                 spawned, portable):
+        self._uv(gui.store_dirs(portable)["uv"], gui)
+        monkeypatch.setattr(gui, "make_shortcut",
+                            lambda plan, emit: str(tmp_path / "LocaLM.lnk"))
+        plan = gui.Plan(backend="vulkan", app_window=True, add_to_path=True,
+                        portable_store=portable, plugins=("coder",))
+        for step in gui.build_steps(plan):
+            if step.label.startswith("Creating the Python environment"):
+                (tmp_path / ".venv").mkdir(exist_ok=True)
+            try:
+                step.run(lambda s: None)
+            except gui.StepFailed:
+                pass
+        assert spawned, "nothing was started"
+        for argv, kw in spawned:
+            assert os.path.isabs(argv[0]), f"{argv} searches PATH for {argv[0]}"
+            assert kw.get("creationflags") == gui._NO_WINDOW, argv
+            env = kw.get("env")
+            assert env is not None and env.get("UV_NO_CONFIG") == "1", argv
+
+    def test_the_windows_helpers_run_from_the_system_folder(self, gui, tmp_path,
+                                                             monkeypatch, spawned):
+        monkeypatch.setattr(gui, "IS_WINDOWS", True)
+        sysdir = _fake_system32(gui, tmp_path, monkeypatch)
+        gui.find_venv_lockers(tmp_path)
+        gui.intended_shortcut_path()
+        try:
+            gui.make_shortcut(gui.Plan(shortcut="launcher"), lambda s: None)
+        except Exception:
+            pass
+        gui.run_system("attrib", "-R")
+        gui.run_system("taskkill", "/PID", "1")
+        names = [a[0] for a, _ in spawned]
+        ps = str(sysdir / "WindowsPowerShell" / "v1.0" / "powershell.exe")
+        assert names.count(ps) >= 3, names
+        assert str(sysdir / "attrib.exe") in names and str(sysdir / "taskkill.exe") in names
+        assert all(os.path.isabs(n) for n in names), names
+
+    def test_a_missing_system_program_is_never_looked_up_on_path(self, gui, tmp_path,
+                                                                  monkeypatch, spawned):
+        monkeypatch.setattr(gui, "IS_WINDOWS", True)
+        monkeypatch.setattr(gui, "windows_system_dir", lambda: tmp_path / "nothing")
+        with pytest.raises(FileNotFoundError):
+            gui.run_system("attrib", "-R")
+        assert gui.find_venv_lockers(tmp_path) == []
+        assert spawned == []
+
+    def test_posix_programs_come_from_the_fixed_system_folders(self, gui, tmp_path,
+                                                                monkeypatch):
+        monkeypatch.setattr(gui, "IS_WINDOWS", False)
+        first, second = tmp_path / "usr-bin", tmp_path / "bin"
+        for d in (first, second):
+            d.mkdir()
+        tool = second / "sh"
+        tool.write_bytes(b"")
+        tool.chmod(0o755)
+        monkeypatch.setattr(gui, "POSIX_SYSTEM_DIRS", (str(first), str(second)))
+        monkeypatch.setenv("PATH", str(tmp_path / "elsewhere"))
+        if os.name == "nt":
+            monkeypatch.setattr(gui.os, "access", lambda p, m: True)
+        assert gui.system_program("sh") == str(tool)
+        assert gui.system_program("curl") is None
+
+    @pytest.mark.parametrize("portable", [True, False], ids=["portable", "shared"])
+    def test_the_uv_version_probe_and_installer_run_full_paths(self, gui, tmp_path,
+                                                                monkeypatch, spawned,
+                                                                portable):
+        exe = self._uv(gui.store_dirs(portable)["uv"], gui)
+        gui.uv_version(exe)
+        script = tmp_path / "uv-installer.ps1"
+        script.write_bytes(b"")
+        gui._run_uv_installer(script, gui._helper_env(TEMP=str(tmp_path)), lambda s: None)
+        for argv, kw in spawned:
+            assert os.path.isabs(argv[0]), argv
+            assert kw.get("creationflags") == gui._NO_WINDOW, argv
+
+
+@pytest.mark.skipif(os.name != "nt", reason="runs Windows PowerShell")
+@pytest.mark.parametrize("folder", ["clone", "clone [x]"], ids=["plain", "brackets"])
+def test_the_installer_runs_from_a_bracketed_folder(gui, tmp_path, monkeypatch, folder):
+    """A stand-in for Astral's installer that makes its temp folder from
+    GetTempPath, unpacks with Expand-Archive -Path and moves the binary with
+    positional Copy-Item / Remove-Item, as the pinned installer does; it
+    installs from a folder whose path holds [ ] with nothing written outside."""
+    root = tmp_path / folder
+    root.mkdir()
+    monkeypatch.setattr(gui, "ROOT", root)
+    real_ps = os.path.join(os.environ["SystemRoot"], "System32", "WindowsPowerShell",
+                           "v1.0", "powershell.exe")
+    monkeypatch.setattr(gui, "system_program",
+                        lambda name: real_ps if name == "powershell" else None)
+    stub = (
+        b"$ErrorActionPreference = 'Stop'\r\n"
+        b"$parent = [System.IO.Path]::GetTempPath()\r\n"
+        b"$tmp = New-Item -ItemType Directory -Path (Join-Path $parent ([guid]::NewGuid()))\r\n"
+        b"Add-Content -LiteralPath $env:STUB_LOG -Value $tmp\r\n"
+        b"$dir_path = \"$tmp\\uv.zip\"\r\n"
+        b"Add-Type -AssemblyName System.IO.Compression.FileSystem\r\n"
+        b"$src = Join-Path $tmp 'src'\r\n"
+        b"$null = [IO.Directory]::CreateDirectory($src)\r\n"
+        b"[IO.File]::WriteAllText((Join-Path $src 'uv.exe'), 'fake')\r\n"
+        b"[IO.Compression.ZipFile]::CreateFromDirectory($src, $dir_path)\r\n"
+        b"[IO.Directory]::Delete($src, $true)\r\n"
+        b"Expand-Archive -Path $dir_path -DestinationPath \"$tmp\";\r\n"
+        b"$dest_dir = New-Item -Force -ItemType Directory -Path $env:UV_INSTALL_DIR\r\n"
+        b"Copy-Item \"$tmp\\uv.exe\" -Destination \"$dest_dir\" -ErrorAction Stop\r\n"
+        b"Remove-Item \"$tmp\\uv.exe\" -Recurse -Force -ErrorAction Stop\r\n"
+    )
+    TestStoreUv._pin(gui, root, stub)
+    log = tmp_path / "stub.log"
+    monkeypatch.setenv("STUB_LOG", str(log))
+    monkeypatch.setattr(gui, "uv_version", lambda e: "0.13.6")
+    lines = []
+    exe = gui.install_store_uv(gui.Plan(), lines.append,
+                               download=lambda u, d: d.write_bytes(stub))
+    assert exe == root / ".uv" / "uv.exe" and exe.is_file(), lines
+    temps = log.read_text(encoding="utf-8").splitlines()
+    assert temps and all(Path(t).is_relative_to(root / ".localm-setup-tmp") for t in temps)
+    assert not any(Path(t).exists() for t in temps)
+
+
+# --------------------------------------------------------------------------- #
+#  The setup temp folder                                                       #
+# --------------------------------------------------------------------------- #
+
+class TestSetupTemp:
+    class _Window:
+        def __init__(self, gui):
+            import queue
+            self.lines = queue.Queue()
+            self.logged = []
+            self._emit = self.logged.append
+
+    def _run_worker(self, gui, steps):
+        window = self._Window(gui)
+        gui.Wizard._worker(window, steps)
+        return window
+
+    def test_a_run_that_reaches_its_end_removes_it(self, gui, tmp_path):
+        def step(emit):
+            gui._ensure_setup_temp()
+            (gui.setup_temp() / "uv-setuptools-x.lock").write_bytes(b"")
+        self._run_worker(gui, [gui.Step("one", step)])
+        assert not (tmp_path / ".localm-setup-tmp").exists()
+
+    def test_a_run_stopped_by_a_required_step_keeps_it(self, gui, tmp_path):
+        def step(emit):
+            gui._ensure_setup_temp()
+            raise gui.StepFailed("broken")
+        self._run_worker(gui, [gui.Step("one", step)])
+        assert (tmp_path / ".localm-setup-tmp").is_dir()
+
+    def test_the_app_started_after_setup_never_gets_the_removed_folder(
+            self, gui, tmp_path, monkeypatch):
+        inside = str(tmp_path / ".localm-setup-tmp")
+        for key in ("TEMP", "TMP", "TMPDIR"):
+            monkeypatch.setenv(key, inside)
+        monkeypatch.setenv("LOCALM_HOME", str(tmp_path / "otherhome"))
+        monkeypatch.setenv("PYTHONPATH", str(tmp_path / "evil"))
+        env = gui.launch_env(gui.Plan(portable_data=True))
+        assert env["TEMP"] == env["TMP"] == env["TMPDIR"] == str(tmp_path / "home" / "tmp")
+        assert "LOCALM_HOME" not in env and "PYTHONPATH" not in env
+
+    def test_the_apps_own_temp_is_left_alone_otherwise(self, gui, tmp_path, monkeypatch):
+        monkeypatch.setenv("TEMP", str(tmp_path / "usertemp"))
+        assert gui.launch_env(gui.Plan())["TEMP"] == str(tmp_path / "usertemp")
