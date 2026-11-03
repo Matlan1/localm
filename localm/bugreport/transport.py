@@ -254,4 +254,7 @@ def upload_report(title: str, body: str, *, url: Optional[str] = None,
             hint=("The bug-report server received the report but did not file it, "
                   "because it is missing the sections localm writes into every report. "
                   f"Send the saved report by email to {MAINTAINER_EMAIL} instead."))
+    if isinstance(result, dict) and result.get("number") is not None:
+        from localm import issue_tracker
+        issue_tracker.record_filed(result["number"], title)
     return result

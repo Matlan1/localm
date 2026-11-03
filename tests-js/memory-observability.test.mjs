@@ -85,3 +85,26 @@ test("F11: renderChat surfaces the chip from a persisted assistant message", () 
   assert.equal(chips.length, 1);
   assert.equal(chips[0].textContent, "1");
 });
+
+test("a remember request's outcome is parsed and shown under the reply", () => {
+  const { window } = loadApp({});
+  const mem = window.parseMemoryHeader(headerResp({
+    n: 1, degrade: null, items: [],
+    saved: { text: "i love to play rpg style games", status: "saved" },
+  }));
+  assert.equal(mem.saved.text, "i love to play rpg style games");
+  assert.equal(mem.saved.status, "saved");
+  const box = window.document.createElement("div");
+  window.addMessageRow(box, "assistant", "ok", { memory: mem });
+  assert.match(box.querySelector(".mem-saved").textContent,
+    /Saved to memory: i love to play rpg style games/);
+
+  for (const [status, re] of [["exists", /Already in memory/], ["full", /Memory is full/],
+                              ["failed", /Could not save/]]) {
+    const b = window.document.createElement("div");
+    window.addMessageRow(b, "assistant", "ok",
+      { memory: { n: 0, items: [], saved: { text: "t", status } } });
+    assert.match(b.querySelector(".mem-saved").textContent, re);
+  }
+  assert.equal(window.parseMemoryHeader(headerResp({ n: 0, items: [] })).saved, undefined);
+});
