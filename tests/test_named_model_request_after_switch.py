@@ -7,6 +7,8 @@ it is evicted and the named model loads on the GPU, instead of the named model
 loading beside it with whatever VRAM is left.
 """
 
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -17,6 +19,8 @@ GIB = 1024 ** 3
 
 
 class FakeEngine:
+    load_delay = 0.0
+
     def __init__(self, name, vram):
         self.display_name = name
         self._loaded = False
@@ -34,6 +38,7 @@ class FakeEngine:
         pass
 
     def load(self):
+        time.sleep(self.load_delay)
         self._loaded = True
         self.held = self._vram["want"][self.display_name]
         self._vram["free"] -= self.held
@@ -140,6 +145,7 @@ def test_reloading_a_resident_model_keeps_the_active_one_unless_asked(
 
     client, engines, vram = two_models
     vram["want"]["b"] = 2 * GIB
+    vram["free"] = 12 * GIB
     asyncio.run(hs.switch_engine("b", None, activate=False))
     assert engines["a"].loaded and engines["b"].loaded
     assert hs._active_model_name == "a"
@@ -161,6 +167,7 @@ def test_the_load_beside_status_streams_its_code_and_args(two_models, monkeypatc
     client, engines, vram = two_models
     monkeypatch.setattr("localm.config.load_config",
                         lambda *a, **k: {"pinned_models": ["a"]})
+    monkeypatch.setattr(FakeEngine, "load_delay", hs.PREP_STATUS_GRACE_S * 2)
 
     r = client.post("/v1/chat/completions",
                     json={"model": "b", "stream": True, "pin_model": True,
