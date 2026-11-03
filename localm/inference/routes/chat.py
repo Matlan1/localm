@@ -406,7 +406,7 @@ def register(app: FastAPI, ctx) -> None:
                     # The executor re-raises in this coroutine, so every arm
                     # below still catches exactly what it caught before.
                     await asyncio.get_running_loop().run_in_executor(
-                        None, lambda: engine.validate_grammar(
+                        None, lambda e=engine: e.validate_grammar(
                             grammar, lazy=bool(grammar_lazy)))
                 except GrammarUnsupportedError as e:
                     # The backend cannot apply a grammar at all. Separate from the

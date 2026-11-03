@@ -435,6 +435,10 @@ class Engine:
         engine.unload()
     """
 
+    # The reserved context window a reload of this engine did not reach
+    # (http_server.grow_context_window); growth to it or more is not tried again.
+    context_grow_failed: Optional[int] = None
+
     def __init__(
         self,
         model_path: str,
@@ -673,7 +677,8 @@ class Engine:
         answers. Blocking: reads the model file and may take a GPU reading."""
         needs = getattr(self._backend, "gpu_offload_needs", None)
         if callable(needs):
-            return needs()
+            answer = needs()
+            return answer if isinstance(answer, tuple) else None
         full = self.full_offload_vram_bytes()
         return (full, full) if full is not None else None
 
@@ -700,7 +705,8 @@ class Engine:
         "n_ctx_max" or "auto_cap"); ``(None, None)`` for a backend without it.
         Reads the model file's header."""
         limit = getattr(self._backend, "ctx_reserve_limit", None)
-        return limit() if callable(limit) else (None, None)
+        answer = limit() if callable(limit) else None
+        return answer if isinstance(answer, tuple) else (None, None)
 
     def reserve_context(self, tokens: int) -> None:
         """Make the next load keep at least *tokens* of context usable: the
@@ -710,8 +716,9 @@ class Engine:
         args = getattr(self, "_backend_args", None)
         if args is not None:
             args["ctx_reserve"] = int(tokens)
-        if hasattr(self._backend, "ctx_reserve"):
-            self._backend.ctx_reserve = int(tokens)
+        backend: Any = self._backend
+        if hasattr(backend, "ctx_reserve"):
+            backend.ctx_reserve = int(tokens)
         self._backend_fresh = False
 
     @property
@@ -910,7 +917,8 @@ class Engine:
             return eff
         if eff == 0 and getattr(b, "n_ctx_max", None) == 0:
             trained = getattr(b, "_trained_ctx", None)
-            return trained() if callable(trained) else None
+            window = trained() if callable(trained) else None
+            return window if isinstance(window, int) else None
         for attr in ("n_ctx_max", "_n_ctx_max", "n_ctx", "_n_ctx"):
             v = getattr(b, attr, None)
             if isinstance(v, int) and v > 0:

@@ -777,7 +777,7 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
                 _dbg.info("switch_engine: not reloading '%s' with a larger context "
                           "window, it is used as loaded: %s", name, exc.detail)
                 growing = False
-        if growing:
+        if growing and resident is not None and reserve_ctx is not None:
             if on_status is not None:
                 on_status(GROWING_CONTEXT_STATUS)
             resident.reserve_context(reserve_ctx)
@@ -1291,7 +1291,7 @@ async def _switch_exhaustion_ladder(loop, probe: switch_admission.VramProbe,
         _dbg.info("switch_engine: '%s' loads with some of its experts in system RAM "
                   "(every layer on the GPU needs ~%s MB free, %s MB free; ~%s MB "
                   "for every expert on the GPU too)", budget.name,
-                  budget.plan_bytes // 1024 ** 2, probe.free // 1024 ** 2,
+                  budget.plan_bytes // 1024 ** 2, (probe.free or 0) // 1024 ** 2,
                   budget.needed_bytes // 1024 ** 2)
         return step(switch_admission.PROCEED_TO_LOAD)
 
@@ -1341,13 +1341,13 @@ async def _switch_exhaustion_ladder(loop, probe: switch_admission.VramProbe,
     if final == switch_admission.CONFIRM_DEGRADED_LOAD:
         return step(switch_admission.RETURN_RESULT,
                     result=switch_admission.degraded_load_confirm(
-                        budget.name, budget, probe.free))
+                        budget.name, budget, probe.free or 0))
     from localm.debuglog import logger as _dbg
     _dbg.info(
         "switch_engine: '%s' does not fit the free VRAM after eviction "
         "(every layer on the GPU needs ~%s MB free, %s MB free) - deferring "
         "to the backend's own load-time sizing instead of refusing",
-        budget.name, budget.plan_bytes // 1024 ** 2, probe.free // 1024 ** 2)
+        budget.name, budget.plan_bytes // 1024 ** 2, (probe.free or 0) // 1024 ** 2)
     attempt.deferred_to_backend = True
     beside = [n for n, e in list(_engines.items())
               if n != budget.name and getattr(e, "loaded", False)]
@@ -1526,15 +1526,17 @@ def _switch_inconclusive_failure(name: str,
     return HTTPException(503, switch_admission.inconclusive_refusal(name, attempts, elapsed))
 
 
-# _switch_unload_policy_step's answer when the normal eviction loop goes on.
-_KEEP_FREEING = object()
+# _switch_unload_policy_step's answer when the normal eviction loop goes on
+# (compared by identity).
+_KEEP_FREEING: dict = {}
 
 
 async def _switch_unload_policy_step(loop, probe: switch_admission.VramProbe,
                                      budget: switch_admission.LoadBudget,
                                      decision: switch_admission.AdmissionDecision,
                                      mode: str, *, preempt: bool, keep_others: bool,
-                                     attempt: switch_admission.EvictionAttempt):
+                                     attempt: switch_admission.EvictionAttempt
+                                     ) -> Optional[dict]:
     """What a load that does not fit beside the loaded models does under the
     "ask" or "never" unload policy (*mode*), instead of evicting.
 
@@ -1563,16 +1565,16 @@ async def _switch_unload_policy_step(loop, probe: switch_admission.VramProbe,
     if switch_admission.experts_in_ram_fit(probe, budget):
         if mode == switch_admission.UNLOAD_ASK and others:
             return switch_admission.unload_choice_confirm(
-                budget.name, budget, probe.free, others)
+                budget.name, budget, probe.free or 0, others)
         _dbg.info("switch_engine: unload_for_room=%s, '%s' loads beside the resident "
                   "models with some of its experts in system RAM (~%s MB needed, "
                   "%s MB free)", mode, budget.name, budget.plan_bytes // 1024 ** 2,
-                  probe.free // 1024 ** 2)
+                  (probe.free or 0) // 1024 ** 2)
         return None
     if mode == switch_admission.UNLOAD_NEVER:
         if preempt and not keep_others and probe.measurable and others:
             return switch_admission.unload_choice_confirm(
-                budget.name, budget, probe.free, others)
+                budget.name, budget, probe.free or 0, others)
         _dbg.info("switch_engine: unload_for_room=never%s: loading '%s' beside %s with "
                   "the VRAM that is left", " (chosen for this load)" if keep_others else "",
                   budget.name, others or "nothing")
@@ -2450,7 +2452,7 @@ def _log_switch_placement(name: str, engine, evictions=()) -> None:
     from localm.inference.engine import placement_moves_layers
     line = "switch_engine: " + _describe_load_placement(name, engine, evictions)
     placement = getattr(engine, "gpu_placement", None)
-    if (placement_moves_layers(placement)
+    if (isinstance(placement, dict) and placement_moves_layers(placement)
             and not _placement_as_configured(placement,
                                              getattr(engine, "gpu_sizing", None))):
         _dbg.warning(line)
