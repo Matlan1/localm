@@ -831,9 +831,13 @@ def _check_installed_parts() -> None:
                       f"version [dim]({escape(str(e))})[/dim]")
         return
     app = escape(str(parts["app"]))
-    if parts["install_record_matches"] and not parts["deps_problems"]:
+    if parts["install_record"] is not None and not parts["deps_problems"]:
         console.print(f"  {_OK_SYM}  install record: localm {escape(parts['install_record'])}, "
                       "dependencies satisfied")
+        if parts["install_record_matches"] is False:
+            console.print(f"     [dim]the record names another version than {app}; it is "
+                          "rewritten by the next dependency change or 'localm update "
+                          "--repair'[/dim]")
     if parts["consistent"]:
         return
     console.print(f"  {_WARN_SYM}  parts of this install differ from localm {app}:")

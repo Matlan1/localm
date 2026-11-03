@@ -4810,12 +4810,8 @@ def _set_restart_env() -> None:
     """Set the environment a restart's re-exec'd process inherits:
     LOCALM_RESTART_IN_PROGRESS to the surface recorded by set_restart_ui, or to
     "1" when none is recorded, LOCALM_RESTART_GUI_MOUNTED to "1" when the
-    GUI was mounted live onto this process's API-only app (removed otherwise),
-    and LOCALM_UPDATE_STEPS_DONE to "1": this restart carried out the pending
-    update steps (:func:`_finish_pending_runtime_update`), so the re-exec'd
-    process does not repeat them at its start."""
+    GUI was mounted live onto this process's API-only app (removed otherwise)."""
     os.environ["LOCALM_RESTART_IN_PROGRESS"] = _restart_ui or "1"
-    os.environ["LOCALM_UPDATE_STEPS_DONE"] = "1"
     if _gui_mounted_live:
         os.environ[_GUI_MOUNTED_ENV] = "1"
     else:
@@ -5165,7 +5161,7 @@ def _do_restart(*, update_watchdog: Optional[dict] = None,
                 pass
 
     _set_restart_env()
-    _execv_restart(port, instance_id)
+    _execv_restart(port, instance_id, update_steps_done=True)
 
 
 def _finish_pending_runtime_update() -> None:
@@ -5293,14 +5289,22 @@ def _restart_for_pending_update_steps(app) -> None:
                      instance_id=getattr(app.state, "instance_id", None))
 
 
-def _execv_restart(port: Optional[int], instance_id: Optional[str]) -> None:
+def _execv_restart(port: Optional[int], instance_id: Optional[str], *,
+                   update_steps_done: bool = False) -> None:
     """Remove this instance's own registry entry, then re-exec this server with
     os.execv. The re-exec'd process registers under a new instance id. When
-    os.execv raises, the entry is written back and the error re-raised."""
+    os.execv raises, the entry is written back and the error re-raised.
+
+    With *update_steps_done* (this restart carried out the pending update
+    steps, :func:`_finish_pending_runtime_update`), ``LOCALM_UPDATE_STEPS_DONE``
+    is set to the installed version for the re-exec'd process, whose start-up
+    then does not repeat them; it is removed again when os.execv raises."""
     import os
     import sys
 
-    from localm import instances
+    from localm import _version, instances
+    if update_steps_done:
+        os.environ["LOCALM_UPDATE_STEPS_DONE"] = _version.read_version()
     removed = None
     try:
         removed = instances.unregister_own(instance_id)
@@ -5311,6 +5315,7 @@ def _execv_restart(port: Optional[int], instance_id: Optional[str]) -> None:
     try:
         os.execv(sys.executable, _execv_argv(_restart_argv(port)))
     except BaseException:
+        os.environ.pop("LOCALM_UPDATE_STEPS_DONE", None)
         try:
             instances.restore_own(removed)
         except Exception:

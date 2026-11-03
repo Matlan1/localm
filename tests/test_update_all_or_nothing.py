@@ -9,7 +9,6 @@ steps of a restart are not held up by this install's own PyTorch probe."""
 import io
 import json
 import os
-import stat
 import subprocess
 import sys
 import zipfile
@@ -284,35 +283,118 @@ def test_a_deps_snapshot_does_not_share_its_copy_with_the_pytorch_one(install):
     assert not Path(state[uc.DEPS]["venv_copy"]).exists()
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="the in-use probe is Windows-only")
+@pytest.mark.skipif(sys.platform != "win32", reason="an open file blocks a move on Windows only")
 def test_a_file_in_use_refuses_the_venv_restore_with_nothing_changed(install, tmp_path):
     inst, site = install
     snap = tmp_path / "snap"
     uc.snapshot([uc.DEPS], snap, root=inst)
     _deps_step(site)([str(_fake_uv(tmp_path))])
-    held = site / "rich" / "__init__.py"
-    os.chmod(held, stat.S_IREAD)
-    try:
+    before = sorted(str(f.relative_to(inst)) for f in (inst / ".venv").rglob("*"))
+    with open(site / "rich" / "__init__.py", "rb"):
         errors = uc.restore(snap, root=inst)
-        assert errors and "in use" in errors[0] and "rich" in errors[0]
-        assert _state(site) == {"localm": "0.3.2", "click": "8.1", "rich": "13.0"}
-    finally:
-        os.chmod(held, stat.S_IWRITE | stat.S_IREAD)
+    assert errors and "in use" in errors[0] and "nothing was changed" in errors[0]
+    assert _state(site) == {"localm": "0.3.2", "click": "8.1", "rich": "13.0"}
+    assert sorted(str(f.relative_to(inst)) for f in (inst / ".venv").rglob("*")) == before
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="the in-use probe is Windows-only")
+@pytest.mark.skipif(sys.platform != "win32", reason="an open file blocks a move on Windows only")
 def test_a_file_both_versions_hold_unchanged_is_left_in_place(install, tmp_path):
     inst, site = install
     snap = tmp_path / "snap"
     uc.snapshot([uc.DEPS], snap, root=inst)
     _deps_step(site)([str(_fake_uv(tmp_path))])
-    exe = inst / ".venv" / "Scripts" / "localm.exe"
-    os.chmod(exe, stat.S_IREAD)
-    try:
+    with open(inst / ".venv" / "Scripts" / "localm.exe", "rb"):
         assert uc.restore(snap, root=inst) == []
-        _assert_venv_is_031(site)
-    finally:
-        os.chmod(exe, stat.S_IWRITE | stat.S_IREAD)
+    _assert_venv_is_031(site)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="a loaded module cannot be deleted on Windows")
+def test_a_module_this_process_loaded_is_replaced(install, tmp_path):
+    import ctypes
+    import shutil
+    inst, site = install
+    snap = tmp_path / "snap"
+    uc.snapshot([uc.DEPS], snap, root=inst)
+    _deps_step(site)([str(_fake_uv(tmp_path))])
+    dll = site / "rich" / "_native.dll"
+    shutil.copy2(Path(sys.base_prefix) / "DLLs" / "sqlite3.dll", dll)
+    record = next(site.glob("rich-*.dist-info")) / "RECORD"
+    record.write_text(record.read_text(encoding="utf-8") + "rich/_native.dll,,\n",
+                      encoding="utf-8")
+    ctypes.WinDLL(str(dll))
+    with pytest.raises(OSError):
+        dll.unlink()
+    assert uc.restore(snap, root=inst) == []
+    _assert_venv_is_031(site)
+    assert not dll.exists()
+
+
+def test_a_file_two_changed_distributions_share_is_restored(install, tmp_path):
+    inst, site = install
+    for name in ("alpha", "beta"):
+        _dist(site, name, "1.0", {f"{name}/__init__.py": b"1", "shared/x.txt": b"same"})
+    snap = tmp_path / "snap"
+    uc.snapshot([uc.DEPS], snap, root=inst)
+    for name in ("alpha", "beta"):
+        _uninstall(site, name)
+    for name in ("alpha", "beta"):
+        _dist(site, name, "2.0", {f"{name}/__init__.py": b"2", "shared/x.txt": b"same"})
+    assert uc.restore(snap, root=inst) == []
+    assert _state(site)["alpha"] == _state(site)["beta"] == "1.0"
+    assert (site / "shared" / "x.txt").read_bytes() == b"same"
+
+
+def test_a_rollback_keeps_packages_installed_after_the_update(install, home):
+    inst, site = install
+    data, sig = _release_032(sd=None)
+    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                  runner=_deps_step(site))
+    state = json.loads((uc.snapshot_dir(updater._backup_dir()) / uc.STATE_FILE)
+                       .read_text(encoding="utf-8"))
+    assert sorted(state["components"][uc.DEPS]["dists"]) == ["click", "localm", "rich"]
+    _dist(site, "plugin-dep", "1.0", {"plugin_dep/__init__.py": b"p"})
+    updater.rollback_last(installed=inst)
+    assert _state(site) == {"localm": "0.3.1", "click": "8.0", "plugin-dep": "1.0"}
+
+
+def test_a_corrupt_snapshot_refuses_the_rollback_with_nothing_changed(install, home):
+    inst, site = install
+    data, sig = _release_032(sd=None)
+    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                  runner=_deps_step(site))
+    (uc.snapshot_dir(updater._backup_dir()) / uc.STATE_FILE).write_text("{not json",
+                                                                         encoding="utf-8")
+    with pytest.raises(LocalmError) as ei:
+        updater.rollback_last(installed=inst)
+    assert "cannot be read, so nothing was rolled back" in ei.value.summary
+    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.2"
+    assert _state(site)["localm"] == "0.3.2"
+
+
+def test_an_update_that_keeps_the_dependencies_leaves_the_parts_consistent(install, home):
+    from localm import updater_parts
+    inst, site = install
+    data, sig = _release(_files("0.3.2", ["click"], sd="master-1999-bbbbbbb"))
+    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                  runner=lambda c: pytest.fail(f"no step runs: {c}"))
+    import localm._version as v
+    parts = updater_parts.installed_parts(inst)
+    assert parts["install_record"] == "0.3.1" and parts["install_record_matches"] is (
+        v.read_version() == "0.3.1")
+    assert not [p for p in parts["problems"] if "record" in p or "dependencies" in p]
+
+
+def test_a_venv_without_localm_is_a_problem_and_repair_reinstalls(install):
+    from localm import updater_parts
+    inst, site = install
+    _uninstall(site, "localm")
+    parts = updater_parts.installed_parts(inst)
+    assert parts["install_record_matches"] is False
+    assert any("no install record of localm" in p for p in parts["problems"])
+    ran = []
+    updater_parts.repair(installed=inst, runner=lambda c: ran.append(c) or _localm_dist(
+        site, "0.3.1") or 0)
+    assert ran and updater_parts.installed_parts(inst)["install_record_matches"] is True
 
 
 # ----------------------- the running process's own code ----------------------
@@ -402,11 +484,20 @@ def test_held_torch_probes_spawn_nothing_and_wait_for_running_ones(monkeypatch):
                         lambda *a, **k: spawned.append(a) or pytest.fail("spawned"))
     running = _Proc([None, None, 0])
     monkeypatch.setattr(discover, "_torch_probe_procs", {running})
+    for latch in ("_isolated_torch_unavailable", "_isolated_torch_broken_warned",
+                  "_isolated_torch_unanswered"):
+        monkeypatch.setattr(discover, latch, False)
+    monkeypatch.setattr(discover, "_isolated_torch_retry_at", 0.0)
+    monkeypatch.setattr(discover, "_torch_gpus_resident",
+                        lambda: pytest.fail("torch imported in this process"))
     with discover.torch_probes_held(wait=5.0):
         assert running.poll() == 0, "entry waited for the running probe to exit"
         assert discover._torch_gpus_isolated() is None
+        assert discover._torch_gpus_isolated_once() == []
     assert spawned == []
     assert discover._torch_probe_holds == 0
+    assert discover._isolated_torch_unanswered is True
+    assert discover._isolated_torch_broken_warned is False, "no false 'please report' warning"
 
 
 def test_the_restart_holds_torch_probes_during_the_update_steps(monkeypatch):
@@ -489,13 +580,35 @@ def test_installed_parts_shows_the_last_update_steps(install, monkeypatch):
     assert [s["note"] for s in steps] == ["re-provisioned the cpu runtime"]
 
 
-def test_this_versions_restart_marks_the_update_steps_done(monkeypatch):
+def test_this_versions_restart_marks_the_update_steps_done_with_its_version(monkeypatch):
     import localm.inference.http_server as hs
+    from localm import instances
     monkeypatch.setenv("LOCALM_UPDATE_STEPS_DONE", "")
-    monkeypatch.setenv("LOCALM_RESTART_IN_PROGRESS", "")
-    monkeypatch.setenv(hs._GUI_MOUNTED_ENV, "")
-    hs._set_restart_env()
-    assert os.environ.get("LOCALM_UPDATE_STEPS_DONE") == "1"
+    monkeypatch.delenv("LOCALM_UPDATE_STEPS_DONE")
+    monkeypatch.setattr(instances, "unregister_own", lambda iid: None)
+    monkeypatch.setattr(instances, "restore_own", lambda removed: None)
+    seen = []
+
+    def execv(exe, argv):
+        seen.append(os.environ.get("LOCALM_UPDATE_STEPS_DONE"))
+        raise OSError("not in a test")
+    monkeypatch.setattr(os, "execv", execv)
+    with pytest.raises(OSError):
+        hs._execv_restart(None, None, update_steps_done=True)
+    with pytest.raises(OSError):
+        hs._execv_restart(None, None)
+    assert seen == [_version.read_version(), None]
+    assert "LOCALM_UPDATE_STEPS_DONE" not in os.environ
+
+
+def test_a_marker_carried_through_an_older_build_does_not_skip_the_steps(monkeypatch):
+    from localm.cli import _core
+    deferred = []
+    monkeypatch.setattr(_core, "_defer_update_steps_to_a_restart", lambda: deferred.append(1))
+    monkeypatch.setenv("LOCALM_RESTART_IN_PROGRESS", "1")
+    monkeypatch.setenv("LOCALM_UPDATE_STEPS_DONE", "0.1.5")
+    _core._update_steps_at_start("gui")
+    assert deferred == [1] and "LOCALM_UPDATE_STEPS_DONE" not in os.environ
 
 
 # ------------------------------- installed parts ------------------------------
@@ -508,10 +621,12 @@ def test_installed_parts_names_an_install_record_of_another_version(install, mon
     assert parts["install_record"] == "0.3.1" and parts["install_record_matches"] is True
     _uninstall(site, "localm")
     _localm_dist(site, "0.1.5")
+    parts = updater_parts.installed_parts(inst)
+    assert parts["install_record_matches"] is False and parts["consistent"] is True, \
+        "a record of another version alone is not a problem"
     _uninstall(site, "click")
     parts = updater_parts.installed_parts(inst)
-    assert parts["consistent"] is False and parts["install_record_matches"] is False
-    assert any("install record is localm 0.1.5, but localm 0.3.1" in p for p in parts["problems"])
+    assert parts["consistent"] is False
     assert any("click missing" in p for p in parts["problems"])
 
 
@@ -601,6 +716,23 @@ def test_the_standalone_rollback_puts_the_venv_back_too(install, home, monkeypat
     assert rb.main(["--yes"], install_root=inst, code_root=repo) == 0
     _assert_venv_is_031(site)
     assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1"
+
+
+def test_the_standalone_rollback_puts_the_packages_back_when_the_code_fails(
+        install, home, monkeypatch, capsys):
+    inst, site = install
+    data, sig = _release_032(sd=None)
+    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                  runner=_deps_step(site))
+    manifest = updater._updates_dir() / "applied_names.json"
+    manifest.write_text(json.dumps(json.loads(manifest.read_text(encoding="utf-8"))
+                                   + ["../outside"]), encoding="utf-8")
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    repo = Path(__file__).resolve().parents[1]
+    rb = _load_script("rollback_update")
+    assert rb.main(["--yes"], install_root=inst, code_root=repo) == 2
+    assert "The packages were put back as they were" in capsys.readouterr().err
+    assert _state(site) == {"localm": "0.3.2", "click": "8.1", "rich": "13.0"}
 
 
 def test_the_watchdog_runs_the_rollback_of_the_code_root(tmp_path, monkeypatch):

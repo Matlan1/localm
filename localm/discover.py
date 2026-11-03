@@ -1899,19 +1899,21 @@ def _torch_gpus_isolated_once() -> list:
     ``_ISOLATED_TORCH_RETRY_MAX``. A round inside the wait is handled exactly as
     a round whose child could not answer. Any answer from the child clears the
     wait."""
-    global _isolated_torch_unavailable
+    global _isolated_torch_unavailable, _isolated_torch_unanswered
     global _isolated_torch_retry_wait, _isolated_torch_retry_at
     with _gpu_probe_lock:
         if _isolated_torch_unavailable:
             return []
         waiting = time.monotonic() < _isolated_torch_retry_at
         held = _torch_probe_holds > 0
+    if held:
+        logger.debug("list_gpus: torch probes are held (an update step needs "
+                     "PyTorch's libraries free); not spawning one")
+        with _gpu_probe_lock:
+            _isolated_torch_unanswered = True
+        return []
     try:
-        if held:
-            logger.debug("list_gpus: torch probes are held (an update step needs "
-                         "PyTorch's libraries free); not spawning one")
-            devices = None
-        elif waiting:
+        if waiting:
             logger.debug("list_gpus: isolated probe failed recently; not "
                          "spawning it again before the retry wait ends")
             devices = None
@@ -1942,7 +1944,7 @@ def _torch_gpus_isolated_once() -> list:
                     _ISOLATED_TORCH_PROBE_TIMEOUT)
         return []
     if devices is None:
-        global _isolated_torch_broken_warned, _isolated_torch_unanswered
+        global _isolated_torch_broken_warned
         with _gpu_probe_lock:
             first = not _isolated_torch_broken_warned
             _isolated_torch_broken_warned = True

@@ -94,26 +94,56 @@ def _load_apply_update(install_root: Path, code_root=None):
     return _load_helper(install_root, "_apply_update", code_root)
 
 
-def _restore_venv(install_root: Path, updates_dir: Path, code_root=None) -> list:
+def _restore_venv(install_root: Path, updates_dir: Path, code_root=None):
     """Put back the venv the update kept before its dependency step (the ``venv``
-    entry of ``<updates>/backup-components``): every dependency and localm's own
-    install record. Returns the failures (empty when there is nothing to restore)."""
+    entry of ``<updates>/backup-components``): every package that step changed and
+    localm's own install record. Returns ``(errors, undo)``: the failures (empty
+    when there is nothing to restore or it was restored) and a callable that puts
+    the venv back as it was before this call (None when nothing was changed)."""
     snap = updates_dir / "backup-components"
+    state_file = snap / "state.json"
+    if not state_file.exists():
+        return [], None
     try:
-        state = json.loads((snap / "state.json").read_text(encoding="utf-8"))
+        state = json.loads(state_file.read_text(encoding="utf-8"))
         info = (state.get("components") or {}).get("venv")
-    except (OSError, ValueError):
-        return []
+    except (OSError, ValueError, AttributeError) as e:
+        return [f"the record of what the update replaced ({state_file}) cannot be read: "
+                f"{e}"], None
     if not info:
-        return []
+        return [], None
     uc = _load_helper(install_root, "updater_components", code_root)
     if uc is None or not hasattr(uc, "venv_changes"):
         return [f"could not load the venv restore helper; the copy kept at "
-                f"{info.get('venv_copy')} holds the previous packages"]
+                f"{info.get('venv_copy')} holds the previous packages"], None
     copy = uc._own_copy(info, snap)
     if copy is None:
-        return [f"{info.get('venv_copy')} is not a venv copy this update kept"]
-    return uc._restore_venv(copy, install_root / ".venv", own=True)
+        return [f"{info.get('venv_copy')} is not a venv copy this update kept"], None
+    venv = install_root / ".venv"
+    only = info.get("dists") if isinstance(info.get("dists"), list) else None
+    changed = uc.venv_changes(copy, venv, own=True)
+    if changed is None:
+        return [f"could not read the packages of {venv} or of {copy}"], None
+    if only is not None:
+        changed = [n for n in changed if n in only]
+    if not changed:
+        return [], None
+    now = snap.with_name(snap.name + "-before-rollback")
+    try:
+        uc._clone_venv(venv, uc._venv_copy_path(venv, now, "deps"), now)
+    except OSError as e:
+        return [f"could not keep a copy of the current packages: {e}"], None
+    keep = uc._venv_copy_path(venv, now, "deps")
+    errors = uc._restore_venv(copy, venv, own=True, only=changed)
+
+    def undo():
+        return uc._restore_venv(keep, venv, own=True, only=changed)
+    undo.keep = keep
+    if errors:
+        import shutil
+        shutil.rmtree(keep, ignore_errors=True)
+        return errors, None
+    return [], undo
 
 
 def _read_names(updates_dir: Path, backup_dir: Path) -> list:
@@ -169,7 +199,7 @@ def main(argv=None, *, install_root: Path = INSTALL_ROOT, code_root=None) -> int
               f"is intact at {backup_dir}: to recover by hand, copy each entry there back "
               f"into {install_root}, overwriting the current files.", file=sys.stderr)
         return 2
-    errors = _restore_venv(install_root, updates_dir, code_root)
+    errors, undo = _restore_venv(install_root, updates_dir, code_root)
     if errors:
         print("Rollback FAILED: the previous packages could not be put back: "
               + "; ".join(errors) + f"\nNothing else was changed; the backup is kept at "
@@ -178,9 +208,16 @@ def main(argv=None, *, install_root: Path = INSTALL_ROOT, code_root=None) -> int
     try:
         au.rollback(backup_dir, install_root, names)
     except Exception as e:
-        print(f"Rollback FAILED: {e}\nThe backup is kept at {backup_dir} for a manual "
-              "restore; nothing was reported recovered that was not.", file=sys.stderr)
+        back = undo() if undo else []
+        packages = ("the packages were put back as they were" if not back else
+                    "putting the packages back ALSO failed: " + "; ".join(back))
+        print(f"Rollback FAILED: {e}\n{packages.capitalize()}. The backup is kept at "
+              f"{backup_dir} for a manual restore; nothing was reported recovered that "
+              "was not.", file=sys.stderr)
         return 2
+    if undo:
+        import shutil
+        shutil.rmtree(undo.keep, ignore_errors=True)
     print("Rolled back to the previous version and its packages. Start localm again to "
           "use it; Settings > Updates shows any other part that still differs.")
     return 0

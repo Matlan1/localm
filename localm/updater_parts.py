@@ -35,20 +35,36 @@ def _source_checkout(root: Path) -> bool:
     return (root / ".git").exists()
 
 
+def _deps_extras() -> list:
+    """The extras the dependency step installs (``_apply_update.post_swap_command``)."""
+    import re
+
+    from localm import _apply_update as au
+    spec = au.post_swap_command("deps", uv="uv")[-1]
+    m = re.search(r"\[([^\]]*)\]", spec)
+    return [e.strip() for e in m.group(1).split(",") if e.strip()] if m else []
+
+
 def _deps(root: Path) -> dict:
-    """The venv half: ``{"record", "problems"}``. ``record`` is the version of
-    localm's install record (None when there is no venv or no record);
-    ``problems`` lists each declared dependency the venv does not satisfy."""
+    """The venv half: ``{"venv", "record", "problems"}``. ``venv`` is whether
+    the install has a venv, ``record`` the version of localm's install record
+    in it (None when there is none), ``problems`` each dependency the venv does
+    not satisfy, of the declared ones and of the extras the dependency step
+    installs."""
     from localm import updater, updater_components as uc
     site = uc.site_packages(root / ".venv")
     if site is None:
-        return {"record": None, "problems": []}
+        return {"venv": False, "record": None, "problems": []}
     installed = uc.dists(site)
     record = (installed.get("localm") or {}).get("version")
     data = updater._read_toml(root / "pyproject.toml")
     proj = data.get("project", {}) if isinstance(data, dict) else {}
     reqs = [str(r) for r in proj.get("dependencies", []) or []]
-    return {"record": record, "problems": uc.unsatisfied(reqs, installed)}
+    extras = proj.get("optional-dependencies", {}) or {}
+    for extra in _deps_extras():
+        reqs += [str(r) for r in extras.get(extra, []) or []
+                 if not str(r).startswith("localm")]
+    return {"venv": True, "record": record, "problems": uc.unsatisfied(reqs, installed)}
 
 
 def installed_parts(root=None) -> dict:
@@ -60,8 +76,11 @@ def installed_parts(root=None) -> dict:
     "last_steps"}``:
     ``app`` the code's version, ``install_record`` the venv's localm record
     version (None when there is none to compare: no venv, a source checkout,
-    or a pip install) and whether it is ``app``, ``deps_problems`` each declared
-    dependency the venv does not satisfy, ``runtime``
+    or a pip install) and whether it is ``app`` (False also when the venv has
+    no record at all, which is a problem; a record of another version alone is
+    not, since an update that keeps the dependencies keeps the record),
+    ``deps_problems`` each dependency the venv does not satisfy (a problem),
+    ``runtime``
     ``{"backend", "current", "target", "matches"}`` (``matches`` None when it
     cannot be told), ``components`` ``[{"name", "label", "current",
     "target", "matches"}]`` for every installed component the shallow plan can
@@ -75,16 +94,18 @@ def installed_parts(root=None) -> dict:
     problems: list = []
     record, record_matches, deps_problems = None, None, []
     if not _source_checkout(root) and not updater.is_site_packages_install(root):
+        d = {"venv": False}
         try:
             d = _deps(root)
             record, deps_problems = d["record"], d["problems"]
         except Exception as e:
             problems.append(f"could not read the venv's packages: {e}")
-        record_matches = None if record is None else (
-            _norm_version(record) == _norm_version(app))
-        if record_matches is False:
-            problems.append(f"the venv's install record is localm {record}, but localm "
-                            f"{app} is installed")
+        if d.get("venv") and record is None:
+            record_matches = False
+            problems.append("the venv has no install record of localm, so localm is not "
+                            "installed in it")
+        elif record is not None:
+            record_matches = _norm_version(record) == _norm_version(app)
         if deps_problems:
             problems.append("the venv does not have the dependencies localm "
                             f"{app} needs: " + ", ".join(deps_problems[:5])
@@ -211,9 +232,7 @@ def repair(*, installed=None, defer: bool = False, runner: Optional[Callable] = 
     with updater._apply_lock("repair"):
         parts = installed_parts(root)
         version = _version.read_version()
-        if parts["install_record"] is not None and (
-                _norm_version(parts["install_record"]) != _norm_version(version)
-                or parts["deps_problems"]):
+        if parts["install_record_matches"] is False or parts["deps_problems"]:
             notes.append(_reinstall_deps(root, runner=runner, say=say))
             restart = True
         rt = updater_runtime.plan(root, root)

@@ -523,12 +523,16 @@ def main() -> None:
 
 def _update_steps_at_start(command) -> None:
     """The update steps at the start of *command*: none in a process a restart
-    of this localm re-executed (it carried them out; ``LOCALM_UPDATE_STEPS_DONE``,
-    removed here), one later restart in a server a restart by an older localm
-    re-executed (:func:`_defer_update_steps_to_a_restart`), else the pending or
-    caught-up runtime and component updates now."""
+    of this localm re-executed (it carried them out; ``LOCALM_UPDATE_STEPS_DONE``
+    names this version, and is removed here whatever it names), one later
+    restart in a server a restart by an older localm re-executed
+    (:func:`_defer_update_steps_to_a_restart`), else the pending or caught-up
+    runtime and component updates now. A marker naming another version was
+    carried through an older build's restart and does not count."""
     import os
-    if os.environ.pop("LOCALM_UPDATE_STEPS_DONE", None):
+    from localm import _version
+    done = os.environ.pop("LOCALM_UPDATE_STEPS_DONE", None)
+    if done and done == _version.read_version():
         return
     if os.environ.get("LOCALM_RESTART_IN_PROGRESS") and command in _SERVER_COMMANDS:
         _defer_update_steps_to_a_restart()

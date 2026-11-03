@@ -991,21 +991,6 @@ def _same_file(a: Path, b: Path) -> bool:
         return False
 
 
-def _in_use(p: Path) -> bool:
-    """Windows: whether the file *p* cannot be opened for writing (another
-    process holds it, or it is read-only). Always False elsewhere, where a held
-    file can be replaced."""
-    if sys.platform != "win32":
-        return False
-    try:
-        with open(p, "r+b"):
-            return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-
-
 def venv_changes(copy: Path, venv: Path, *, own: bool = False) -> Optional[list]:
     """The canonical names of the distributions whose installed version in
     *venv* differs from the one kept in *copy* (by :func:`_clone_venv`), added
@@ -1020,21 +1005,47 @@ def venv_changes(copy: Path, venv: Path, *, own: bool = False) -> Optional[list]
             and (now.get(name) or {}).get("dir") != (was.get(name) or {}).get("dir")]
 
 
-def _restore_venv(copy: Path, venv: Path, *, own: bool = False) -> list:
+# The folder beside a venv that a venv restore moves replaced files into
+# before deleting them (a file a running process has loaded can be moved,
+# not deleted).
+_MOVED_ASIDE = ".localm-replaced"
+
+
+def _move_aside_dir(venv: Path) -> Path:
+    return venv.parent / f"{venv.name}{_MOVED_ASIDE}"
+
+
+def _clear_moved_aside(venv: Path) -> None:
+    """Delete what earlier venv restores moved aside; a file still in use is
+    left for the next one."""
+    d = _move_aside_dir(venv)
+    if d.is_dir():
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _restore_venv(copy: Path, venv: Path, *, own: bool = False, only=None) -> list:
     """Put back, in *venv*, every distribution whose installed version differs
     from the one kept in *copy* (by :func:`_clone_venv`), removing ones added
-    since: first every changed distribution's files are removed, then every
-    kept one's files are put back, so a file two distributions share ends up
-    restored. A file both versions hold with the same bytes is left in place.
-    The install's own package (its install record, entry points and editable
-    path file) is restored only with *own*. Nothing outside *venv* is removed.
+    since, or only those of them named in *only*: the changed distributions'
+    files are moved aside, then the kept ones' files are put back, so a file
+    two distributions share ends up restored. A file both versions hold with
+    the same bytes is left in place. The install's own package (its install
+    record, entry points and editable path file) is restored only with *own*.
+    Nothing outside *venv* is touched.
 
-    Refuses, with nothing changed, when a file it would replace is in use
-    (:func:`_in_use`). Returns the failures."""
+    A file is moved aside (``<venv>.localm-replaced``, deleted afterwards),
+    never deleted in place, so a module a running process has loaded (this
+    one included) can be replaced. When a file cannot be moved, every file
+    already moved is moved back and the restore is refused with nothing
+    changed. Returns the failures."""
+    import uuid
     site_now, site_was = site_packages(venv), site_packages(copy)
     changed = venv_changes(copy, venv, own=own)
     if site_now is None or site_was is None or changed is None:
         return [f"could not find the packages of {venv} or of its copy {copy}"]
+    if only is not None:
+        wanted = {_canon(n) for n in only}
+        changed = [n for n in changed if n in wanted]
     now, was = dists(site_now), dists(site_was)
     copy_r, venv_r = copy.resolve(), venv.resolve()
     keep = {}
@@ -1044,40 +1055,54 @@ def _restore_venv(copy: Path, venv: Path, *, own: bool = False) -> list:
                 src = site_was / rel
                 if _inside(src, copy) and src.is_file():
                     keep[(venv_r / src.resolve().relative_to(copy_r))] = src
-    remove = []
+    unchanged, remove = set(), {}
     for name in changed:
         if name in now:
             for rel in _record(site_now, now[name]["dir"]):
                 p = site_now / rel
                 if not (_inside(p, venv) and p.is_file()):
                     continue
-                kept = keep.get(p.resolve())
-                if kept is not None and _same_file(p, kept):
-                    keep.pop(p.resolve())
+                pr = p.resolve()
+                kept = keep.get(pr)
+                if kept is not None and (pr in unchanged or _same_file(p, kept)):
+                    unchanged.add(pr)
                     continue
-                remove.append((rel, p))
-    held = [rel for rel, p in remove if _in_use(p)]
-    held += [str(dst.relative_to(venv_r)) for dst in keep if dst.exists() and _in_use(dst)]
-    if held:
-        return [f"{venv}: not restored, {len(held)} file(s) are in use (first: {held[0]}); "
-                "close every localm process and run the rollback again"]
+                remove[pr] = rel
+    remove.update({dst: str(dst.relative_to(venv_r)) for dst in keep
+                   if dst not in unchanged and dst not in remove and dst.exists()})
+    aside = _move_aside_dir(venv) / uuid.uuid4().hex
+    moved = []
+    try:
+        for pr in remove:
+            target = aside / f"{len(moved)}-{pr.name}"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(pr, target)
+            moved.append((pr, target))
+    except OSError as e:
+        back = []
+        for pr, target in reversed(moved):
+            try:
+                os.replace(target, pr)
+            except OSError as be:
+                back.append(f"{pr}: {be}")
+        if back:
+            return [f"{venv}: a file could not be replaced ({e}) AND putting the moved files "
+                    "back failed: " + "; ".join(back[:5])]
+        return [f"{venv}: not restored, a file is in use ({e}); nothing was changed. Close "
+                "every localm process and run the rollback again"]
     errors = []
-    for rel, p in remove:
-        try:
-            p.unlink()
-        except OSError as e:
-            errors.append(f"remove {rel}: {e}")
     for name in changed:
         if name in now:
             shutil.rmtree(site_now / now[name]["dir"], ignore_errors=True)
     for dst, src in keep.items():
+        if dst in unchanged:
+            continue
         try:
             dst.parent.mkdir(parents=True, exist_ok=True)
-            if dst.exists():
-                dst.unlink()
             _link(src, dst)
         except OSError as e:
             errors.append(f"restore {dst.relative_to(venv_r)}: {e}")
+    _clear_moved_aside(venv)
     return [f"{venv}: " + "; ".join(errors[:5])] if errors else []
 
 
@@ -1266,10 +1291,41 @@ def _touches_torch(copy: Path, venv: Path, changed: list) -> bool:
     return False
 
 
+def record_deps_changes(src, root) -> None:
+    """Record, in the :data:`DEPS` entry of the snapshot *src*, the
+    distributions the dependency step changed in the venv of the install at
+    *root* (``"dists"``), so a rollback puts back only those and leaves what
+    was installed later (a plugin's packages). Raises OSError when it cannot
+    be recorded."""
+    src = Path(src)
+    state = _read_json(src / STATE_FILE)
+    info = (state or {}).get("components", {}).get(DEPS) if state else None
+    copy = _own_copy(info, src)
+    if copy is None:
+        raise OSError(f"{src} holds no venv copy")
+    changed = venv_changes(copy, Path(root) / ".venv", own=True)
+    if changed is None:
+        raise OSError(f"could not read the packages of {Path(root) / '.venv'}")
+    info["dists"] = changed
+    (src / STATE_FILE).write_text(json.dumps(state), encoding="utf-8")
+
+
+def snapshot_readable(src) -> bool:
+    """False when the snapshot *src* has a state file that cannot be read (what
+    it keeps cannot be restored); True when it is readable or absent."""
+    path = Path(src) / STATE_FILE
+    if not path.exists():
+        return True
+    state = _read_json(path)
+    return isinstance(state, dict) and isinstance(state.get("components"), dict)
+
+
 def _restore_deps(installed_root: Path, src: Path, info: dict, say: Callable) -> list:
     """Put the venv kept before the update's dependency step back: every
-    dependency and the install's own install record. Stops this install's
-    processes holding the PyTorch stack first when a PyTorch library changes."""
+    distribution that step changed (``"dists"``, every one that differs when
+    unrecorded), the install's own install record included. Stops this
+    install's processes holding the PyTorch stack first when a PyTorch library
+    changes."""
     copy = _own_copy(info, src)
     if copy is None:
         return [f"dependencies: {info.get('venv_copy')} is not a venv copy of {src}"]
@@ -1277,6 +1333,9 @@ def _restore_deps(installed_root: Path, src: Path, info: dict, say: Callable) ->
     changed = venv_changes(copy, venv, own=True)
     if changed is None:
         return [f"could not find the packages of {venv} or of its copy {copy}"]
+    only = info.get("dists")
+    if isinstance(only, list):
+        changed = [n for n in changed if n in only]
     if not changed:
         return []
     if _touches_torch(copy, venv, changed):
@@ -1286,7 +1345,7 @@ def _restore_deps(installed_root: Path, src: Path, info: dict, say: Callable) ->
             return ["the dependencies are in use, so they were not restored: "
                     + updater_runtime.describe_holders(left)]
     say("Restoring the previous dependencies...")
-    return _restore_venv(copy, venv, own=True)
+    return _restore_venv(copy, venv, own=True, only=changed)
 
 
 def _snapshot_deps(installed_root: Path, dest: Path) -> dict:

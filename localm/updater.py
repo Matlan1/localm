@@ -1419,6 +1419,12 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
                            reason=what)
             if rc != 0:
                 _roll_back(f"{cmd[0]} exited {rc}", "the post-update step failed;")
+            try:
+                updater_components.record_deps_changes(
+                    updater_components.snapshot_dir(backup_dir), target)
+            except OSError as e:
+                _apply_warn("could not record which packages the update changed: %s; a "
+                            "rollback puts back every package that differs", e)
         runtime_status, runtime_note = None, rt_plan["note"]
         if not rt_plan["reprovision"]:
             try:
@@ -1728,6 +1734,12 @@ def _restore_all(target: Path, backup_dir: Path, names, *, say=None, components=
     from localm import updater_components, updater_runtime
     from localm.bugreport import LocalmError
     comp_snap = updater_components.snapshot_dir(backup_dir)
+    if not updater_components.snapshot_readable(comp_snap):
+        raise LocalmError("the copy this update kept of the parts it replaced cannot be "
+                          "read, so nothing was rolled back",
+                          reason=f"{comp_snap / updater_components.STATE_FILE}; run "
+                                 "localm update --repair to bring every part to the "
+                                 "installed version")
     comp_names = updater_components.installed_names(
         [n for n in updater_components.snapshot_names(comp_snap)
          if components is None or n in components], target)
