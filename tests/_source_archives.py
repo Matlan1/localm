@@ -69,7 +69,9 @@ def assert_shipped_pins_carry_a_sha256(root: Path) -> None:
     """Run ``test_the_shipped_pins_carry_a_sha256`` against the
     ``managed_comfy_fresh.py`` and ``source_archive.py`` under
     ``root/localm/media`` in place of the installed ones. Raises its
-    AssertionError when a pin there has no sha256."""
+    AssertionError when a pin there has no sha256. Writes no ``.pyc`` there;
+    a ``.pyc`` already under *root* could be loaded in place of an edited file
+    of the same size and modification second."""
     import importlib.util
     import sys
 
@@ -80,6 +82,9 @@ def assert_shipped_pins_carry_a_sha256(root: Path) -> None:
     from tests.test_source_archive import test_the_shipped_pins_carry_a_sha256
 
     with pytest.MonkeyPatch.context() as mp:
+        # No .pyc is written under *root*, so every call compiles the files as they
+        # are on disk. See test_a_simulated_bump_of_the_real_tree_passes_the_shipped_pins_test.
+        mp.setattr(sys, "dont_write_bytecode", True)
         loaded = {}
         for name in ("managed_comfy_fresh", "source_archive"):
             mod_name = f"_bumped_{name}"
