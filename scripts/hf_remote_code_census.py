@@ -7,8 +7,8 @@ several tasks, plus the repositories localm's shortcuts offer, list the packages
 their bundled modeling and tokenizer code imports (the ``auto_map`` modules, as
 transformers' own import check reads them) and the packages their tokenizer
 files need, and check each against what localm's extras install (resolved from
-``uv.lock``). A package that is neither installed by the extras nor listed in
-``ACCEPTED_REFUSALS`` is a gap: exit status 1.
+``uv.lock``). A package that is neither installed by the extras, added on
+request (``ON_DEMAND``) nor listed in ``ACCEPTED_REFUSALS`` is a gap: exit status 1.
 
     python scripts/hf_remote_code_census.py --limit 150
     python scripts/hf_remote_code_census.py --repo moonshotai/Kimi-Linear-48B-A3B-Instruct
@@ -37,6 +37,7 @@ from localm.model_manager.missing_packages import (  # noqa: E402
     package_label,
     third_party_imports,
 )
+from localm.model_manager.model_packages import ON_DEMAND, REFUSED  # noqa: E402
 
 TASKS = ("text-generation", "image-text-to-text", "feature-extraction", "sentence-similarity",
          "automatic-speech-recognition", "text-to-speech", "text-classification",
@@ -45,26 +46,10 @@ TASKS = ("text-generation", "image-text-to-text", "feature-extraction", "sentenc
 
 EXTRAS = ("hf", "audio")
 
-# Modules the extras do not install and localm refuses early (the load names the
-# missing package and says localm cannot run the model). Reviewed at every release:
-# a new entry here is a decision to leave those models unsupported.
-_KERNELS = "CUDA kernel package PyPI publishes only as a source archive"
-_TORCH_BOUND = ("its binary parts must match the installed torch, which setup chooses per machine; "
-                "installed only by the Windows AMD [gpu] extra")
-_SOURCE_ONLY = "PyPI publishes only a source archive, which cannot be built reliably on a user machine"
-ACCEPTED_REFUSALS = {
-    "flash_attn": _KERNELS, "mamba_ssm": _KERNELS, "causal_conv1d": _KERNELS, "apex": _KERNELS,
-    "deepspeed": _KERNELS, "xformers": "its wheels exist for one torch build only, which localm does not pin",
-    "vllm": "separate inference engine",
-    "torchaudio": _TORCH_BOUND, "timm": _TORCH_BOUND, "open_clip": _TORCH_BOUND,
-    "fla": "needs triton, which localm does not install on Windows",
-    "whisper": _SOURCE_ONLY, "minicpmo": _SOURCE_ONLY, "funasr": "depends on packages PyPI publishes only as source archives (jieba, oss2, crcmod)",
-    "smirk": "requires transformers 4 (transformers<5)",
-    "ebfm": "the PyPI package of that name is an unrelated project",
-    "fairseq_signals_backbone": "not on PyPI",
-    "configuration_robobrain_audio": "a module the model's repository does not contain",
-    "distutils": "removed from Python 3.12",
-}
+# Modules the extras do not install: ON_DEMAND are added on the user's request, the
+# rest are refused early with the reason REFUSED gives. Reviewed at every release: a
+# new REFUSED entry is a decision to leave those models unsupported.
+ACCEPTED_REFUSALS = REFUSED
 
 # Importable module name -> distribution name where they differ.
 DIST_FOR_MODULE = {"PIL": "pillow", "yaml": "pyyaml", "sklearn": "scikit-learn",
@@ -306,6 +291,10 @@ def main() -> int:
     for module, users in sorted(need.items(), key=lambda kv: -len(kv[1])):
         if module_is_shipped(module, shipped):
             status = "shipped"
+        elif module in ON_DEMAND:
+            entry = ON_DEMAND[module]
+            where = f", {'/'.join(entry.platforms)} only" if entry.platforms else ""
+            status = f"added on request ({entry.project}{where})"
         elif module in ACCEPTED_REFUSALS:
             status = f"refused early: {ACCEPTED_REFUSALS[module]}"
         else:
@@ -317,9 +306,9 @@ def main() -> int:
               f"{errors[0]['error']}: FAIL")
         return 1
     if gaps:
-        print(f"\n{gaps} package(s) neither shipped nor accepted as refused: FAIL")
+        print(f"\n{gaps} package(s) neither shipped, added on request nor refused: FAIL")
         return 1
-    print("\nEvery imported package is shipped or refused early: PASS")
+    print("\nEvery imported package is shipped, added on request or refused early: PASS")
     return 0
 
 
