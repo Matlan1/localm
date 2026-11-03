@@ -8,6 +8,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import worker from "./worker.js";
+import { readFileSync, readdirSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 
 const ENV = { GITHUB_TOKEN: "ght_issue", TARGET_REPO: "Matlan1/localm" };
 const ENV_UP = { ...ENV, SHARED_SECRET: "s3cret", UPDATE_GITHUB_TOKEN: "ght_update" };
@@ -27,6 +30,32 @@ function stubFetch(impl) {
   return () => { globalThis.fetch = orig; };
 }
 
+const FIXTURE_DIR = join(dirname(fileURLToPath(import.meta.url)),
+  "..", "..", "tests", "fixtures", "bugreport_contract");
+const REPORT_FIXTURES = readdirSync(FIXTURE_DIR).filter((n) => n.endsWith(".md"));
+
+// A minimal body with every line localm's reporter always writes.
+const SKELETON = [
+  "# localm bug report: it froze", "", "## What I was doing", "chatting", "",
+  "## What happened", "it froze", "", "## App state", "- Model: tiny (loaded)", "",
+  "## Environment", "- localm: 0.3.3", "",
+].join("\n");
+
+// POST a report to the Worker with GitHub stubbed; returns the response, its JSON
+// body, and every request the Worker sent upstream.
+async function postReport(payload) {
+  const upstream = [];
+  const restore = stubFetch(async (u, init) => {
+    upstream.push({ url: String(u), body: init && init.body ? JSON.parse(init.body) : null });
+    return new Response(JSON.stringify({ html_url: "https://github.com/a/b/issues/1", number: 1 }),
+      { status: 201, headers: { "Content-Type": "application/json" } });
+  });
+  try {
+    const res = await worker.fetch(req(payload), ENV);
+    return { res, body: await res.json(), upstream };
+  } finally { restore(); }
+}
+
 // ------------------------------ routing ---------------------------------
 
 test("unknown route (GET /) -> 404", async () => {
@@ -43,7 +72,7 @@ test("CORS preflight (OPTIONS) is allowed", async () => {
 // --------------------------- bug report ---------------------------------
 
 test("report: misconfigured proxy (no token) fails closed", async () => {
-  const r = await worker.fetch(req({ title: "t", body: "b" }), { TARGET_REPO: "x/y" });
+  const r = await worker.fetch(req({ title: "t", body: SKELETON }), { TARGET_REPO: "x/y" });
   assert.equal(r.status, 500);
 });
 
@@ -92,7 +121,7 @@ test("report: under the rate limit proceeds to file the issue", async () => {
     { status: 201 }));
   const limiter = { limit: async () => ({ success: true }) };
   try {
-    const r = await worker.fetch(req({ title: "t", body: "b" }), { ...ENV, RATE_LIMIT: limiter });
+    const r = await worker.fetch(req({ title: "t", body: SKELETON }), { ...ENV, RATE_LIMIT: limiter });
     assert.equal(r.status, 201);
   } finally { restore(); }
 });
@@ -106,7 +135,7 @@ test("report: happy path creates the issue with the ISSUE token", async () => {
       { status: 201 });
   });
   try {
-    const r = await worker.fetch(req({ title: "froze", body: "## report" }), ENV);
+    const r = await worker.fetch(req({ title: "froze", body: SKELETON }), ENV);
     assert.equal(r.status, 201);
     const out = await r.json();
     assert.equal(out.url, "https://github.com/Matlan1/localm/issues/7");
@@ -118,9 +147,84 @@ test("report: happy path creates the issue with the ISSUE token", async () => {
 test("report: a GitHub error becomes a 502", async () => {
   const restore = stubFetch(async () => new Response("forbidden", { status: 403 }));
   try {
-    const r = await worker.fetch(req({ title: "t", body: "b" }), ENV);
+    const r = await worker.fetch(req({ title: "t", body: SKELETON }), ENV);
     assert.equal(r.status, 502);
   } finally { restore(); }
+});
+
+// Bodies localm never builds: the two observed probes, a body with only the two
+// headings the earlier check looked for, and skeletons with one marker missing,
+// moved or emptied.
+const NOT_LOCALM = [
+  { title: "0", body: "/tmp/pp-fuzz/probe" },
+  { title: "localm bug report", body: "0" },
+  { title: "%n", body: "%s%s%s" },
+  { title: "t", body: "## What happened\nx\n## Environment\nx" },
+  { title: "t", body: SKELETON.replace("# localm bug report: it froze", "# bug report: it froze") },
+  { title: "t", body: "intro\n" + SKELETON },
+  { title: "t", body: SKELETON.replace("## What I was doing\n", "") },
+  { title: "t", body: SKELETON.replace("- Model: tiny (loaded)", "tiny") },
+  { title: "t", body: SKELETON.replace("- localm: 0.3.3", "- localm: ") },
+  { title: "t", body: SKELETON.replace("## App state\n- Model: tiny (loaded)\n\n", "")
+      .replace("## Environment", "## Environment\n- localm: 0.3.3\n\n## App state\n- Model: tiny (loaded)") },
+  { title: "t", body: SKELETON.replace("## Environment\n- localm: 0.3.3", "## Environment\n\n- localm: 0.3.3") },
+];
+
+test("a body localm did not build makes no GitHub call and gets a 202 that does not echo it", async () => {
+    const realLog = console.log;
+  const logged = [];
+  console.log = (...args) => logged.push(args.map(String).join(" "));
+  try {
+    for (const payload of NOT_LOCALM) {
+      logged.length = 0;
+      const { res, body, upstream } = await postReport(payload);
+      assert.equal(upstream.length, 0, `forwarded to GitHub: ${JSON.stringify(payload).slice(0, 120)}`);
+      assert.equal(res.status, 202);
+      assert.deepEqual(body, { ok: true, filed: false });
+      assert.equal(logged.length, 1, "each held report is counted in one log line");
+      assert.match(logged[0], /^report held: not built by localm /);
+      assert.ok(!logged[0].includes(payload.body), "the log line does not carry the body");
+    }
+  } finally {
+    console.log = realLog;
+  }
+});
+
+test("every report localm builds is filed once, prefixed with the reporter note", async () => {
+    assert.ok(REPORT_FIXTURES.length >= 5, REPORT_FIXTURES.join(", "));
+  for (const name of REPORT_FIXTURES) {
+    const report = readFileSync(join(FIXTURE_DIR, name), "utf8");
+    const { res, body, upstream } = await postReport({ title: "localm bug report", body: report });
+    assert.equal(res.status, 201, name);
+    assert.equal(body.number, 1);
+    assert.equal(upstream.length, 1, name);
+    const filed = upstream[0].body.body;
+    assert.equal(filed, "> Submitted by a localm user through the built-in bug reporter.\n\n" + report, name);
+  }
+});
+
+test("a localm report is filed with CRLF line ends, a BOM, no environment, or user text that repeats the headings", async () => {
+  const variants = [
+    SKELETON.replace(/\n/g, "\r\n"),
+    "\uFEFF" + SKELETON,
+    SKELETON.replace("- localm: 0.3.3", "(could not collect environment)"),
+    SKELETON.replace("chatting", "chatting\n## What happened\n## App state\n## Environment\n- localm: x"),
+    SKELETON.replace("## What happened\nit froze", "## What I expected\nan answer\n\n## What happened\nit froze"),
+  ];
+  for (const report of variants) {
+    const { res, upstream } = await postReport({ title: "t", body: report });
+    assert.equal(res.status, 201, JSON.stringify(report).slice(0, 160));
+    assert.equal(upstream.length, 1);
+  }
+});
+
+test("a localm report longer than the filed limit is filed, cut to 60000 characters", async () => {
+  const report = SKELETON.replace("it froze\n\n## App state", "x".repeat(70000) + "\n\n## App state");
+  const { res, upstream } = await postReport({ title: "t", body: report });
+  assert.equal(res.status, 201);
+  assert.equal(upstream.length, 1);
+  assert.equal(upstream[0].body.body,
+    "> Submitted by a localm user through the built-in bug reporter.\n\n" + report.slice(0, 60000));
 });
 
 // ----------------------------- issues -----------------------------------

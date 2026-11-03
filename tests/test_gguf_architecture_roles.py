@@ -65,7 +65,7 @@ CHAT_ARCHITECTURES = [
 ]
 EMBEDDING_ARCHITECTURES = [
     "bert", "modern-bert", "nomic-bert", "nomic-bert-moe", "neo-bert", "jina-bert-v2",
-    "jina-bert-v3", "eurobert", "gemma-embedding", "gemma-embedding2", "t5encoder",
+    "jina-bert-v3", "eurobert", "gemma-embedding", "gemma-embedding2",
     "llama-embed",
 ]
 NON_CHAT_ARCHITECTURES = [
@@ -83,7 +83,7 @@ IMAGE_ARCHITECTURES = [
 
 MUSIC_ARCHITECTURES = [
     ("acestep-dit", "diffusion-unet"), ("acestep-vae", "vae"),
-    ("acestep-text-enc", "text-encoder"), ("acestep-lm", "unknown"),
+    ("acestep-text-enc", "text-encoder"), ("acestep-lm", "planner"),
 ]
 
 

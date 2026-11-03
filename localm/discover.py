@@ -84,7 +84,8 @@ from localm.vram import VRAM_WEIGHT_FACTOR as _WEIGHT_FACTOR
 # post-download registration never disagree about the SAME architecture value.
 # No cycle: gguf.py (and the model_manager package it lives in) never imports
 # discover, only the reverse (verified live before wiring this in).
-from localm.model_manager.gguf import _GGUF_EMBEDDING_ARCHITECTURES
+from localm.model_manager.gguf import (_GGUF_EMBEDDING_ARCHITECTURES,
+                                       GGUF_TEXT_ENCODER_ARCHITECTURES)
 
 # Quantization label inside a GGUF filename, e.g. Q4_K_M, Q8_0, IQ4_XS,
 # Q6_K, F16, BF16, MXFP4_MOE, TQ1_0. Matched case-insensitively on word-ish
@@ -200,7 +201,10 @@ def classify_hf_metadata(pipeline_tag: Optional[str], library_name: Optional[str
       falls through to the pipeline_tag/tagset checks below rather than
       misclassifying anything. POSITIVE-EMBEDDING ONLY - there is no matching
       "these architectures mean llm" list, so a non-embedding architecture
-      abstains and falls through to the tag layer.
+      abstains and falls through to the tag layer. An encoder-only T5 family
+      architecture (``GGUF_TEXT_ENCODER_ARCHITECTURES``) is the text encoder of
+      an image, video or music model, and only an exact retrieval pipeline_tag or
+      tag (feature-extraction, sentence-similarity) makes it an embedding.
 
     KNOWN FAILURE MODE of the architecture check: ``_GGUF_EMBEDDING_ARCHITECTURES``
     was built (and is verified) against llama.cpp's OWN ``LLM_ARCH_NAMES`` strings,
@@ -233,6 +237,9 @@ def classify_hf_metadata(pipeline_tag: Optional[str], library_name: Optional[str
         return "text-encoder"
     if arch in _GGUF_EMBEDDING_ARCHITECTURES:
         return "embedding"
+    if arch in GGUF_TEXT_ENCODER_ARCHITECTURES:
+        retrieval = tag in ("feature-extraction", "sentence-similarity") or tagset & _EMBEDDING_TAGS
+        return "embedding" if retrieval else "text-encoder"
     # Media / diffusion signal, checked after the exact tag tokens above (a
     # LoRA/VAE repo commonly also carries its base model's diffusion pipeline_tag).
     if tag in ("text-to-image", "image-to-image", "text-to-audio", "audio-to-audio"):

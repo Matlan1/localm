@@ -551,6 +551,50 @@ def test_a_fault_after_a_clean_stop_began_is_reported_once(tmp_path, monkeypatch
     assert len(calls) == 1, "the same stop was reported twice"
 
 
+def test_a_reported_prior_crash_is_logged_with_its_report_path(
+        tmp_path, monkeypatch, caplog):
+    """The recovering run's debug log names the prior crash and its report."""
+    _pin_mode(monkeypatch, "log")
+    monkeypatch.setattr(instances, "pid_alive", lambda pid: False)
+    _record_reports(monkeypatch, tmp_path)
+    _write_marker(tmp_path / "run", "crashed-hard", 4242)
+
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        bugreport.check_and_report_prior_crash(home=str(tmp_path))
+
+    lines = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("server-crash.crashed-hard.marker" in m and str(tmp_path / "r.md") in m
+               for m in lines), lines
+
+
+def test_a_reported_fault_while_stopping_is_logged_with_its_report_path(
+        tmp_path, monkeypatch, caplog):
+    _pin_mode(monkeypatch, "log")
+    monkeypatch.setattr(instances, "pid_alive", lambda pid: False)
+    _record_reports(monkeypatch, tmp_path)
+    _write_stopping(tmp_path / "run", "stop-faulted", 424242, _FATAL_TRACE)
+
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        bugreport.check_and_report_prior_crash(home=str(tmp_path))
+
+    lines = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("server-crash.stop-faulted.stopping" in m and str(tmp_path / "r.md") in m
+               for m in lines), lines
+
+
+def test_an_unreported_prior_crash_logs_no_report_warning(tmp_path, monkeypatch, caplog):
+    _pin_mode(monkeypatch, "privacy")
+    monkeypatch.setattr(instances, "pid_alive", lambda pid: False)
+    _record_reports(monkeypatch, tmp_path)
+    _write_marker(tmp_path / "run", "private-crash", 4242)
+
+    with caplog.at_level(logging.WARNING, logger="localm"):
+        assert bugreport.check_and_report_prior_crash(home=str(tmp_path)) is None
+
+    assert not [r for r in caplog.records
+                if r.levelno == logging.WARNING and "crash report:" in r.getMessage()]
+
+
 @pytest.mark.parametrize("text", ["", _FIRST_CHANCE_TRACE])
 def test_a_clean_stop_that_ended_before_releasing_its_trace_is_only_cleaned_up(
         tmp_path, monkeypatch, text):

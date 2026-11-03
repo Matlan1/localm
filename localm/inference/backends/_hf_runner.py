@@ -223,10 +223,10 @@ def _arm_native_crash_trace(path) -> None:
     if path is None:
         return
     import faulthandler
-    from localm.debuglog import logger
+    from localm.debuglog import fault_trace_all_threads, logger
     try:
         _crash_trace_fh = open(path, "w", encoding="utf-8")
-        faulthandler.enable(file=_crash_trace_fh, all_threads=True)
+        faulthandler.enable(file=_crash_trace_fh, all_threads=fault_trace_all_threads())
         if not faulthandler.is_enabled():
             logger.warning(
                 "hf worker: faulthandler.enable() returned without raising "
