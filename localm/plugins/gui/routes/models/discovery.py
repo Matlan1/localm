@@ -58,7 +58,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         from localm.sysstats import _vram_reading_trusted
         loop = asyncio.get_running_loop()
         info, status = await loop.run_in_executor(
-            get_plugin_executor(), lambda: vram_capacity(return_status=True))
+            get_plugin_executor(),
+            lambda: vram_capacity(return_status=True, wait_for_inflight=True))
         vram = {"total": info.get("total")}
         if _vram_reading_trusted(info, status):
             vram["free"] = info.get("free")

@@ -175,3 +175,33 @@ test("unload-all offers force only for the chat model beside a busy media runtim
   }, { status: "unloaded", model: "chat-a", unloaded_models: ["chat-a"] });
   assert.deepEqual(calls, [{}, { force: true }]);
 });
+
+async function unloadAllToast(reply) {
+  const { window } = loadAppWithPages({ fetchImpl: makeForceFlowFetch(reply, {}, []) });
+  const doc = window.document;
+  doc.getElementById("models-unload-all-btn").click();
+  await flush();
+  return { cls: doc.getElementById("toast").className, text: doc.getElementById("toast").textContent,
+    window };
+}
+
+test("unload-all with a model still generating is a status toast, not an error", async () => {
+  const { cls, text, window } = await unloadAllToast({
+    status: "in_use", model: "none", unloaded_models: [], unloaded_other: [],
+    embedder_unloaded: false, skipped_in_use: ["native image/video worker"],
+    media_left_running: { "native image/video worker": "busy" },
+  });
+  assert.match(text, /still generating/);
+  assert.notEqual(cls, "error", "a busy model is not an error");
+  assert.equal(window.recentGuiErrors().filter((e) => /still generating/.test(e.text)).length, 0,
+    "not recorded in Recent errors");
+});
+
+test("unload-all that could not stop a media runtime stays an error toast", async () => {
+  const { cls } = await unloadAllToast({
+    status: "in_use", model: "none", unloaded_models: [], unloaded_other: [],
+    embedder_unloaded: false, skipped_in_use: ["native image/video worker"],
+    media_left_running: { "native image/video worker": "failed" },
+  });
+  assert.equal(cls, "error");
+});

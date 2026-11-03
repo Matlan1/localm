@@ -287,9 +287,9 @@ class Pairing:
     """The companion files picked for a diffusion model.
 
     ``chosen``: slot -> ``{"name", "path", "auto"}``; ``missing``: slots no
-    file fills, each with its ``download`` (or None); ``mismatched``: explicit
-    choices that do not look right for the family or that it does not use, as
-    user-facing notes."""
+    file fills, each with its ``download`` (or None) and the ``chat_models`` that
+    fit it; ``mismatched``: explicit choices that do not look right for the
+    family or that it does not use, as user-facing notes."""
     chosen: dict
     missing: list
     mismatched: list
@@ -334,7 +334,9 @@ def pair_components(info: FileInfo, explicit: dict, cands: list[Candidate]) -> P
             if family == "wan2.2" and req.slot == "vae" and variant == "5b":
                 dl = _WAN22_VAE
             missing.append({"slot": req.slot, "label": slot_label(req.slot, family),
-                            "download": dl.as_dict() if dl else None})
+                            "download": dl.as_dict() if dl else None,
+                            "chat_models": [c.name for c in
+                                            fitting(req.slot, family, cands, variant)]})
     return Pairing(chosen, missing, mismatched)
 
 
@@ -809,7 +811,10 @@ def describe_components(components: dict) -> str:
 def missing_message(model_label: str, family: Optional[str], missing: list,
                     where: str) -> str:
     """The user-facing reason a model cannot load because *missing* slots
-    have no file, with how to get each."""
+    have no file, with how to get each. A slot entry with ``chat_models`` (the
+    registered chat models that fit it, which are offered for an explicit
+    choice and never picked automatically) names them instead of saying none
+    is registered."""
     fam = families.FAMILY_LABELS.get(family or "", family or "this")
     parts = []
     for m in missing:
@@ -817,5 +822,10 @@ def missing_message(model_label: str, family: Optional[str], missing: list,
         how = (f"download it with 'localm pull {dl['pull_args']}'"
                if dl else f"set it in {where}")
         parts.append(f"a {m['label']} ({how})")
-    return (f"{model_label} is a {fam} model and needs " + "; ".join(parts)
-            + f". None is registered on this machine. Or choose one in {where}.")
+    head = f"{model_label} is a {fam} model and needs " + "; ".join(parts)
+    chat = [n for m in missing for n in m.get("chat_models", [])]
+    if chat:
+        names = ", ".join(f"'{n}'" for n in dict.fromkeys(chat))
+        return (head + f". {names} registered as a chat model fits but is not picked "
+                f"automatically: choose it in {where}.")
+    return head + f". None is registered on this machine. Or choose one in {where}."

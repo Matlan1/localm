@@ -3664,7 +3664,7 @@ if (unloadAllBtn) {
       const data = await r.json().catch(() => ({}));
       if (!r.ok) { toast(data.detail || t("models.unload.failed"), true); return; }
       const { n, skipped, forceable, failed } = unloadAllCounts(data);
-      toast(unloadAllMessage(n, skipped, failed), skipped.length > 0 || failed.length > 0);
+      toast(unloadAllMessage(n, skipped, failed), failed.length > 0);
       refreshModelsPage();
       refreshPerfEstimate();
       // Offer to force through whatever force can stop - the owner's
@@ -3683,8 +3683,7 @@ if (unloadAllBtn) {
           const data2 = await r2.json().catch(() => ({}));
           if (!r2.ok) { toast(data2.detail || t("models.unload.failed"), true); return; }
           const after = unloadAllCounts(data2);
-          toast(unloadAllMessage(after.n, after.skipped, after.failed),
-            after.skipped.length > 0 || after.failed.length > 0);
+          toast(unloadAllMessage(after.n, after.skipped, after.failed), after.failed.length > 0);
           refreshModelsPage();
           refreshPerfEstimate();
         }

@@ -623,7 +623,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         from localm.sysstats import _vram_reading_trusted
         loop = asyncio.get_running_loop()
         info, status = await loop.run_in_executor(
-            get_plugin_executor(), lambda: vram_capacity(return_status=True))
+            get_plugin_executor(),
+            lambda: vram_capacity(return_status=True, wait_for_inflight=True))
         total = info.get("total")
         free = info.get("free") if _vram_reading_trusted(info, status) else None
         held = None
