@@ -264,7 +264,33 @@ def test_the_restart_rollback_puts_every_part_back(install, home, monkeypatch):
     _assert_venv_is_031(site)
     assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1"
     assert uc.read_pending() is None
-    assert uc.last_status()["state"] == "rolled_back"
+    status = uc.last_status()
+    assert status["state"] == "rolled_back"
+    assert "setup-sdcpp exited 1" in status["note"], "the reason stays named"
+
+
+def test_a_failure_inside_apply_keeps_the_failed_status(install, home):
+    inst, site = install
+    data, sig = _release_032()
+    with pytest.raises(LocalmError):
+        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                      runner=_children(home, site, sd_rc=1))
+    assert uc.last_status()["state"] == "failed"
+
+
+def test_a_rollback_undoes_the_pytorch_step_and_the_deps_step_in_order(install, tmp_path):
+    inst, site = install
+    snap = tmp_path / "snap"
+    _dist(site, "transformers", "5.15", {"transformers/__init__.py": b"t 5.15"})
+    uc.snapshot([uc.DEPS], snap, root=inst)
+    _deps_step(site)([str(_fake_uv(tmp_path))])
+    uc.record_deps_changes(snap, inst)
+    uc.snapshot(["pytorch"], snap, root=inst, add=True)
+    _uninstall(site, "transformers")
+    _dist(site, "transformers", "5.20", {"transformers/__init__.py": b"t 5.20"})
+    assert uc.restore(snap, root=inst) == []
+    assert _state(site) == {"localm": "0.3.1", "click": "8.0", "transformers": "5.15"}
+    assert (site / "transformers" / "__init__.py").read_bytes() == b"t 5.15"
 
 
 def test_a_deps_snapshot_does_not_share_its_copy_with_the_pytorch_one(install):
@@ -276,7 +302,7 @@ def test_a_deps_snapshot_does_not_share_its_copy_with_the_pytorch_one(install):
     uc.snapshot(["pytorch"], snap, root=inst, add=True)
     state = json.loads((snap / uc.STATE_FILE).read_text(encoding="utf-8"))["components"]
     assert state[uc.DEPS]["venv_copy"] != state["pytorch"]["venv_copy"]
-    assert uc.installed_names(uc.snapshot_names(snap), inst) == [uc.DEPS]
+    assert uc.installed_names(uc.snapshot_names(snap), inst) == ["pytorch", uc.DEPS]
     assert uc.restore(snap, root=inst) == []
     assert _state(site)["click"] == "8.0", "the older (pre-deps) copy wins"
     uc.discard(snap)

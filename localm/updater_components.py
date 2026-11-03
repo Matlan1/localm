@@ -1031,7 +1031,7 @@ def _restore_venv(copy: Path, venv: Path, *, own: bool = False, only=None) -> li
     two distributions share ends up restored. A file both versions hold with
     the same bytes is left in place. The install's own package (its install
     record, entry points and editable path file) is restored only with *own*.
-    Nothing outside *venv* is touched.
+    A folder left empty is removed. Nothing outside *venv* is touched.
 
     A file is moved aside (``<venv>.localm-replaced``, deleted afterwards),
     never deleted in place, so a module a running process has loaded (this
@@ -1102,6 +1102,14 @@ def _restore_venv(copy: Path, venv: Path, *, own: bool = False, only=None) -> li
             _link(src, dst)
         except OSError as e:
             errors.append(f"restore {dst.relative_to(venv_r)}: {e}")
+    for pr, _target in moved:
+        d = pr.parent
+        while d != venv_r and venv_r in d.parents:
+            try:
+                d.rmdir()
+            except OSError:
+                break
+            d = d.parent
     _clear_moved_aside(venv)
     return [f"{venv}: " + "; ".join(errors[:5])] if errors else []
 
@@ -1477,7 +1485,9 @@ def restore(src, *, root, home=None, say: Optional[Callable] = None,
     them in *names*, back in the install at *root*. Returns the failures as
     strings (empty on success, or when *src* holds nothing). sd.cpp and
     KoboldCpp need nothing: their earlier runtime directories are never
-    replaced."""
+    replaced. The PyTorch copy, taken after the dependency step, is restored
+    before the :data:`DEPS` copy taken before it, so the two steps are undone in
+    reverse order."""
     say = say or (lambda _m: None)
     src = Path(src)
     state = _read_json(src / STATE_FILE)
@@ -1486,10 +1496,10 @@ def restore(src, *, root, home=None, say: Optional[Callable] = None,
     errors = []
     comps = {k: v for k, v in (state.get("components") or {}).items()
              if names is None or k in names}
+    if "pytorch" in comps:
+        errors += _restore_torch(Path(root), src, comps["pytorch"], say)
     if DEPS in comps:
         errors += _restore_deps(Path(root), src, comps[DEPS], say)
-    elif "pytorch" in comps:
-        errors += _restore_torch(Path(root), src, comps["pytorch"], say)
     if "comfyui" in comps:
         errors += _restore_comfy(comfy_root(home), src, comps["comfyui"], say)
     if "uv" in comps:
@@ -1516,8 +1526,6 @@ def installed_names(names, root, *, home=None) -> list:
         if n in ("pytorch", DEPS) and site_packages(Path(root) / ".venv") is None:
             continue
         out.append(n)
-    if DEPS in out and "pytorch" in out:
-        out.remove("pytorch")
     return out
 
 

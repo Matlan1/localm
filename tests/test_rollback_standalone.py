@@ -94,7 +94,7 @@ def test_rollback_restore_failure_exits_2_and_keeps_backup(tmp_path, monkeypatch
         def rollback(backup, installed, names):
             raise RuntimeError("disk full mid-restore")
 
-    monkeypatch.setattr(rb, "_load_apply_update", lambda _ir: _BoomAu)
+    monkeypatch.setattr(rb, "_load_apply_update", lambda *_a: _BoomAu)
     assert rb.main(["--yes"], install_root=inst) == 2
     assert (home / "updates" / "backup" / "existing.txt").exists()   # backup kept
 

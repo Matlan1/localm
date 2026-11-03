@@ -121,12 +121,13 @@ def _restore_venv(install_root: Path, updates_dir: Path, code_root=None):
         return [f"{info.get('venv_copy')} is not a venv copy this update kept"], None
     venv = install_root / ".venv"
     only = info.get("dists") if isinstance(info.get("dists"), list) else None
+    torch_copy = uc._own_copy((state.get("components") or {}).get("pytorch"), snap)
     changed = uc.venv_changes(copy, venv, own=True)
     if changed is None:
         return [f"could not read the packages of {venv} or of {copy}"], None
     if only is not None:
         changed = [n for n in changed if n in only]
-    if not changed:
+    if not changed and torch_copy is None:
         return [], None
     now = snap.with_name(snap.name + "-before-rollback")
     try:
@@ -134,15 +135,22 @@ def _restore_venv(install_root: Path, updates_dir: Path, code_root=None):
     except OSError as e:
         return [f"could not keep a copy of the current packages: {e}"], None
     keep = uc._venv_copy_path(venv, now, "deps")
-    errors = uc._restore_venv(copy, venv, own=True, only=changed)
 
     def undo():
-        return uc._restore_venv(keep, venv, own=True, only=changed)
+        return uc._restore_venv(keep, venv, own=True)
     undo.keep = keep
+    # The component step's PyTorch copy, then the dependency step's: reverse order.
+    errors = uc._restore_venv(torch_copy, venv) if torch_copy is not None else []
+    if not errors:
+        changed = uc.venv_changes(copy, venv, own=True) or []
+        if only is not None:
+            changed = [n for n in changed if n in only]
+        errors = uc._restore_venv(copy, venv, own=True, only=changed)
     if errors:
+        back = undo()
         import shutil
         shutil.rmtree(keep, ignore_errors=True)
-        return errors, None
+        return errors + back, None
     return [], undo
 
 

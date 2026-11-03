@@ -1130,8 +1130,8 @@ def _apply_components(plans, needed: bool, *, klass: str, target: Path, version:
     """The component half of :func:`apply`, after the swap: record the pending
     component update (``updater_components.write_pending``) and, unless
     *defer* or the ``setup`` class, carry it out now. When it fails,
-    *roll_back* (``why, failed``) puts every part of the update back (code,
-    venv, the native runtime it re-provisioned) and raises LocalmError.
+    *roll_back* (``why, step, rolled_back``) puts every part of the update back
+    (code, venv, the native runtime it re-provisioned) and raises LocalmError.
     Returns ``(status, note)``: the status of the component update (None when
     none ran) and a one-line summary (None when there is nothing to say)."""
     from localm import updater_components
@@ -1161,7 +1161,8 @@ def _apply_components(plans, needed: bool, *, klass: str, target: Path, version:
         status = {"state": "failed", "note": f"the component update crashed: {e}"}
     if status is not None and status["state"] in ("failed", "waiting"):
         updater_components.clear_pending()
-        roll_back(status["note"], "a component could not be updated, so the update was")
+        roll_back(status["note"], "a component update failed",
+                  "a component could not be updated, so the update was rolled back")
     return status, (status["note"] if status is not None else note)
 
 
@@ -1386,19 +1387,19 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
                         "`update --rollback` will fall back to the backup listing and cannot "
                         "remove brand-new top-level entries this update added", manifest_path, e)
 
-        def _roll_back(why, failed, *, reason=None):
+        def _roll_back(why, step, rolled_back, *, reason=None):
             # Every part back (components and venv, runtime, code), then raise.
             # A failure of the recovery ITSELF raises rather than reporting a
             # clean rollback over a broken install.
             try:
                 _restore_all(target, backup_dir, names, say=say,
-                             components=[updater_components.DEPS])
+                             components=[updater_components.DEPS], record=False)
             except Exception as rb:
                 raise LocalmError(
-                    f"{failed} AND rolling the update back failed - manual recovery needed",
+                    f"{step} AND rollback failed - manual recovery needed",
                     reason=f"{why}; rollback: {rb}; restore from {backup_dir}") from None
             unpin()
-            raise LocalmError(f"{failed} rolled back", reason=reason or why)
+            raise LocalmError(rolled_back, reason=reason or why)
 
         cmd = post_cmd
         if cmd:
@@ -1408,17 +1409,20 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
                     root=target)
             except OSError as e:
                 _roll_back(f"could not keep a copy of the venv: {e}",
-                           "the dependencies could not be kept before the update, so it was")
+                           "keeping a copy of the dependencies failed",
+                           "the dependencies could not be kept before the update, so it was "
+                           "rolled back")
             run = runner or (lambda c: subprocess.run(
                 c, cwd=str(target), env=_deps_env(target)).returncode)
             try:
                 rc = int(run(cmd))
             except Exception as e:
                 what = f"could not start {cmd[0]}: {e}" if isinstance(e, OSError) else str(e)
-                _roll_back(f"post-update step crashed: {what}", "the post-update step crashed;",
-                           reason=what)
+                _roll_back(f"post-update step crashed: {what}", "the post-update step crashed",
+                           "the post-update step crashed; rolled back", reason=what)
             if rc != 0:
-                _roll_back(f"{cmd[0]} exited {rc}", "the post-update step failed;")
+                _roll_back(f"{cmd[0]} exited {rc}", "the post-update step failed",
+                           "the post-update step failed; rolled back")
             try:
                 updater_components.record_deps_changes(
                     updater_components.snapshot_dir(backup_dir), target)
@@ -1454,8 +1458,9 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
                             "failed", "waiting"):
                         updater_runtime.clear_pending()
                         updater_components.clear_pending()
-                        _roll_back(runtime_status["note"],
-                                   "the native runtime could not be updated, so the update was")
+                        _roll_back(runtime_status["note"], "the native runtime update failed",
+                                   "the native runtime could not be updated, so the update "
+                                   "was rolled back")
                     if runtime_status is not None:
                         runtime_note = runtime_status["note"]
         components_status, components_note = _apply_components(
@@ -1714,7 +1719,8 @@ def rollback_info() -> dict:
             "current": _version.read_version()}
 
 
-def _restore_all(target: Path, backup_dir: Path, names, *, say=None, components=None) -> None:
+def _restore_all(target: Path, backup_dir: Path, names, *, say=None, components=None,
+                 record: bool = True) -> None:
     """Put back every part of the install the update whose backup is
     *backup_dir* replaced: the components and the venv as it was before the
     dependency step (``updater_components.snapshot_dir``), the native runtime
@@ -1725,11 +1731,11 @@ def _restore_all(target: Path, backup_dir: Path, names, *, say=None, components=
     runtime holder that is not this install's, or a runtime that cannot be
     restored raises LocalmError with nothing changed; a later failure puts
     the components and the runtime back as they were (RuntimeError when that
-    fails too). Clears the pending runtime and component updates and records
-    the rollback as their last status. *say* receives each step as one line.
-    *components*, when given, restricts the kept components restored to those
-    names (``apply`` passes only the venv: a component step that failed has put
-    its components back itself)."""
+    fails too). Clears the pending runtime and component updates and, with
+    *record*, records the rollback as their last status (:func:`_record_rollback`).
+    *say* receives each step as one line. *components*, when given, restricts
+    the kept components restored to those names (``apply`` passes only the
+    venv: a component step that failed has put its components back itself)."""
     from localm import _apply_update as au
     from localm import updater_components, updater_runtime
     from localm.bugreport import LocalmError
@@ -1820,17 +1826,24 @@ def _restore_all(target: Path, backup_dir: Path, names, *, say=None, components=
         updater_runtime.clear_pending()
     except OSError as e:
         _apply_warn("could not clear a pending runtime update after the rollback: %s", e)
-    _record_rollback(target)
+    if record:
+        _record_rollback(target)
 
 
 def _record_rollback(target: Path) -> None:
     """Record, as the last runtime and component update status, that the
     update was rolled back, so ``localm doctor`` and the GUI do not report the
-    state the rolled-back update left. Best-effort: a status that cannot be
-    written is logged."""
+    state the rolled-back update left. A last status of ``failed`` or
+    ``waiting`` stays named in the new note as the reason. Best-effort: a status
+    that cannot be written is logged."""
     from localm import updater_components, updater_runtime
     version = _version.read_version()
     note = f"the update was rolled back; localm {version} and its parts were put back"
+    why = [st["note"] for st in (updater_runtime.last_status(),
+                                 updater_components.last_status())
+           if st and st.get("state") in ("failed", "waiting") and st.get("note")]
+    if why:
+        note += " (" + "; ".join(why) + ")"
     try:
         from localm import _apply_update as au
         from localm import setup_llama as sl
