@@ -52,6 +52,7 @@ backtracks linearly and cannot itself blow up on hostile input.
 from __future__ import annotations
 
 import bisect
+import sys
 from typing import NamedTuple, Optional
 
 import regex
@@ -235,6 +236,32 @@ _CUT_STYLES = {
 }
 
 
+# On Linux (libstdc++) none of these pre-tokenizers throws on a run of letters,
+# line breaks or whitespace of any length tried up to 32768 characters, and one
+# unbroken run of 65536 aborts the worker with a segmentation fault (measured
+# between 40000 and 45000 for the gpt-4o pattern). The table's limits are the
+# ones measured on Windows (MSVC std::regex); on Linux a run may be this long
+# instead, a quarter below the length that was measured clean. Digit runs
+# (superbpe goes quadratic: seconds at 4096) and the cost-bounded entries keep
+# the table's limits. Pinned by tests/test_pretokenizer_guard.py::TestLinuxLimits.
+_LINUX = sys.platform.startswith("linux")
+_LINUX_RUN_LIMIT = 16384
+
+
+def _linux_policy(policy: Policy) -> Policy:
+    """*policy* with the run and line-break limits of a Linux runtime."""
+    changes = {}
+    if policy.char_class in (_CLASS_LETTER, _CLASS_WHITESPACE):
+        changes["max_run"] = _LINUX_RUN_LIMIT
+    if policy.newline_run is not None:
+        changes["newline_run"] = _LINUX_RUN_LIMIT
+    return policy._replace(**changes) if changes else policy
+
+
+def _platform_policy(policy: Policy) -> Policy:
+    return _linux_policy(policy) if _LINUX else policy
+
+
 def _validate_table() -> None:
     """Reject a policy whose limits cannot be compiled into a scanner.
 
@@ -265,11 +292,12 @@ _validate_table()
 
 
 def _run_scanner_keys():
-    for p in UNSAFE_PRE_TYPES.values():
-        if p.char_class is not None:
-            yield (p.char_class, p.max_run)
-        if p.newline_run is not None:
-            yield (_CLASS_NEWLINE, p.newline_run)
+    for table_policy in UNSAFE_PRE_TYPES.values():
+        for p in (table_policy, _linux_policy(table_policy)):
+            if p.char_class is not None:
+                yield (p.char_class, p.max_run)
+            if p.newline_run is not None:
+                yield (_CLASS_NEWLINE, p.newline_run)
 
 
 # One compiled scanner per distinct (class, limit) pair, built once at import.
@@ -297,7 +325,8 @@ def policy_for(pre_type: Optional[str]) -> Optional[Policy]:
     *pre_type* is ``None``, i.e. the model declares no pre-tokenizer)."""
     if not pre_type:
         return None
-    return UNSAFE_PRE_TYPES.get(pre_type)
+    policy = UNSAFE_PRE_TYPES.get(pre_type)
+    return None if policy is None else _platform_policy(policy)
 
 
 def hazard_note(pre_type: Optional[str]) -> Optional[str]:
