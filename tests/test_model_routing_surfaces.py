@@ -283,6 +283,24 @@ class TestKnowledgeImageDescription:
         assert "pull a vision model" in msg
         assert _answering(engines) == []
 
+    def test_the_fallback_message_leaves_out_the_chat_advice(self, monkeypatch):
+        from localm.plugins.builtin.rag import plug as ragplug
+
+        class _Refused:
+            headers: dict = {}
+
+        monkeypatch.setattr("localm.model_manager.vision_capable_models",
+                            lambda: ["seer"])
+        msg = ragplug._image_refusal_message(
+            "plain", _Refused(),
+            "This model cannot accept image input (it is text-only). A "
+            "vision-capable model is already in your library: seer. Switch to "
+            "it (e.g. `localm run seer`, or pick it in the GUI) and attach the "
+            "image again.")
+        assert "installed vision models (seer) were not used" in msg
+        assert "cannot accept image input" in msg
+        assert "Switch to it" not in msg and "localm run" not in msg
+
     def test_a_vision_model_that_fails_to_load_is_named_with_its_error(
             self, live, monkeypatch):
         class _Broken(_Engine):

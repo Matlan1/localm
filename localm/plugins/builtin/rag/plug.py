@@ -262,8 +262,9 @@ def _image_refusal_message(model: Optional[str], response, detail: str) -> str:
     if problems:
         return (f"{head}, and the installed vision models ({names}) could not be "
                 f"used: {'; '.join(problems)}")
+    reason = detail.split(" Switch to it", 1)[0]
     return (f"{head}, and the installed vision models ({names}) were not used: "
-            f"{detail}")
+            f"{reason}")
 
 
 def _make_self_describe_image(self_url: str, active_model):
