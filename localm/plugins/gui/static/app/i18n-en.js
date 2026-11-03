@@ -182,6 +182,10 @@ export const I18N_EN = {
     "Knowledge - ground replies in an indexed collection (manage on the Knowledge page)",
   "chat.maxTokens": "Max tokens",
   "chat.memory": "Memory - remind the model what it knows about you",
+  "chat.memory.exists": "Already in memory: {text}",
+  "chat.memory.full": "Memory is full, so this was not saved. Delete a fact in Memory first.",
+  "chat.memory.saveFailed": "Could not save this to memory.",
+  "chat.memory.saved": "Saved to memory: {text}",
   "chat.memory.title":
     "Recalls facts localm has learned about you and adds them to the prompt. Add facts with /remember, view/edit with /memory. Blocked in privacy mode.",
   "chat.mic":

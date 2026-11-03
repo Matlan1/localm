@@ -114,6 +114,13 @@ class MemoryAppend(BaseModel):
     text: str
 
 
+class MemoryConsolidate(BaseModel):
+    """Body of POST /api/memory/consolidate: the conversation the client holds,
+    as ``{role, content}`` rows. Optional: without it the pass reads the session
+    logs on disk."""
+    messages: list[dict] | None = None
+
+
 class MemoryPatch(BaseModel):
     text: str | None = None
     importance: float | None = None
@@ -586,12 +593,16 @@ def _apply_correction(cid: str, accept: bool, request):
 
 
 @_router.post("/api/memory/consolidate")
-async def memory_consolidate(request: Request = None):
-    """Manually distil durable facts from recent sessions into the store (the
-    opt-in consolidation trigger). Gated on privacy; needs a loaded model, which is
-    reloaded first when it is selected but its worker died."""
+async def memory_consolidate(req: MemoryConsolidate | None = None,
+                             request: Request = None):
+    """Manually distil durable facts into the store (the opt-in consolidation
+    trigger). Reads the conversation in *req* when it holds one, else the recent
+    session logs on disk. Gated on privacy; needs a loaded model, which is
+    reloaded first when it is selected but its worker died. A reply the model
+    gave that holds no fact list answers 500, never "no new facts"."""
     _require_writable()
     principal = _request_principal(request)
+    conversation = _conversation_text(req.messages) if req and req.messages else ""
     await _reload_if_unloaded()
 
     # Off the loop: synthesize_memory drives a full blocking LLM generation per
@@ -622,7 +633,8 @@ async def memory_consolidate(request: Request = None):
         # model in a gap between candidates.
         from localm.inference.http_server import driving_engine
         with driving_engine(eng):
-            res = synthesize_memory(complete, principal=principal)
+            res = synthesize_memory(complete, principal=principal,
+                                    conversation=conversation)
         if res.get("status") == "error":
             raise HTTPException(500, _model_failed_detail(res))
         return res
@@ -650,9 +662,13 @@ async def _reload_if_unloaded() -> None:
 
 def _model_failed_detail(res: dict) -> str:
     """The user-facing message for a synthesize_memory result whose model call
-    failed, naming the new facts saved before the failure."""
+    failed or whose reply could not be read, naming the new facts saved before the
+    failure."""
     added = res.get("added", 0)
     saved = f" {added} new fact(s) were saved before it failed." if added else ""
+    if res.get("reason") == "unreadable_reply":
+        return (f"The model answered, but its reply could not be read as a list of "
+                f"facts ({res.get('error')}), so nothing was saved.{saved}")
     return f"The model call failed ({res.get('error')}), so this run did not finish.{saved}"
 
 
@@ -664,6 +680,59 @@ def _model_failed_detail(res: dict) -> str:
 # task, POST /api/memory/consolidate, or the debounced auto pass), never in the chat
 # hot path. Only log/full sessions exist to read, and the write path is gated on
 # _persist_enabled().
+
+_CONVERSATION_ASSISTANT_CHARS = 600
+_CONVERSATION_MAX_ROWS = 200
+_CONVERSATION_ROW_CHARS = 50_000
+
+
+def _message_text(message: dict) -> str:
+    """The text of one ``{role, content}`` chat row: a string content whole, a
+    parts list as its text parts joined by a space; "" for anything else."""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(p.get("text", "") for p in content
+                        if isinstance(p, dict) and p.get("type") == "text"
+                        and isinstance(p.get("text"), str))
+    return ""
+
+
+def _conversation_text(messages, max_chars: int = 8000) -> str:
+    """The ``User:`` / ``Assistant:`` transcript of a conversation as the client
+    holds it, newest turns kept within *max_chars*, oldest first. Only the last
+    ``_CONVERSATION_MAX_ROWS`` rows are read. A user row the client marked with an
+    ``origin`` (web results, notes) is skipped: it is not the user's words. The
+    assistant's reasoning is removed and each assistant row is cut to
+    ``_CONVERSATION_ASSISTANT_CHARS``, so a long reply cannot crowd out what the
+    user said; a row is read up to ``_CONVERSATION_ROW_CHARS``. "" when there is no usable turn."""
+    from localm.inference.protocol import is_user_written, user_written_text
+    from localm.textnorm import strip_think
+    rows = [m for m in (messages or []) if isinstance(m, dict)][-_CONVERSATION_MAX_ROWS:]
+    pieces: list[str] = []
+    total = 0
+    for m in reversed(rows):
+        role = m.get("role")
+        if role == "user":
+            if not is_user_written(m):
+                continue
+            who, text = "User", user_written_text(m)[:_CONVERSATION_ROW_CHARS]
+        elif role == "assistant":
+            who = "Assistant"
+            text = strip_think(_message_text(m)[:_CONVERSATION_ROW_CHARS])[:_CONVERSATION_ASSISTANT_CHARS]
+        else:
+            continue
+        text = text.strip()
+        if not text:
+            continue
+        piece = f"{who}: {text}"
+        if total + len(piece) + 1 > max_chars:
+            break
+        pieces.insert(0, piece)
+        total += len(piece) + 1
+    return "\n".join(pieces)
+
 
 def _recent_sessions_text(max_chars: int = 8000) -> str:
     """User+assistant content from the newest session JSONL logs (written only in
@@ -720,8 +789,14 @@ def _recent_sessions_text(max_chars: int = 8000) -> str:
 
 
 def synthesize_memory(complete, *, principal: str | None = None, max_facts: int = 12,
-                      max_chars: int = 8000) -> dict:
-    """Distil durable user facts from recent sessions into the structured store.
+                      max_chars: int = 8000, conversation: str = "") -> dict:
+    """Distil durable user facts from the recent conversation into the structured
+    store.
+
+    *conversation* is the transcript of the chat the caller holds (see
+    ``_conversation_text``); it is read in place of the session logs, which exist
+    only in log/full mode and can lag what the user sees. Without one the newest
+    session logs on disk are read.
 
     *complete* is an injected ``(prompt: str) -> str`` model call (the jobs runner
     binds it to the engine; tests pass a fake). Delegates to the memory
@@ -737,7 +812,8 @@ def synthesize_memory(complete, *, principal: str | None = None, max_facts: int 
     if not _persist_enabled():
         logger.debug("memory synthesis skipped: privacy mode active")
         return {"status": "skipped", "reason": "privacy", "added": 0}
-    sessions = _recent_sessions_text(max_chars=max_chars)
+    sessions = ((conversation or "").strip()[-max_chars:]
+                or _recent_sessions_text(max_chars=max_chars))
     if not sessions.strip():
         logger.debug("memory synthesis skipped: no session history found")
         return {"status": "skipped", "reason": "no_sessions", "added": 0}
@@ -765,7 +841,8 @@ def synthesize_memory(complete, *, principal: str | None = None, max_facts: int 
     if res.get("status") == "error":
         model_errors.append(res.get("error") or "the model call failed")
     episodic = _store_episodes(store, complete, embed_fn=embed_fn, errors=model_errors,
-                               model_answered=res.get("status") != "error")
+                               model_answered=(res.get("status") != "error"
+                                               or res.get("reason") == "unreadable_reply"))
     pruned = _prune_trivial_episodes(store, complete)
     # Backfill vectors for records stored before an embedder was available, so
     # semantic recall turns on retroactively. Bounded per pass; a large store fills
@@ -786,7 +863,8 @@ def synthesize_memory(complete, *, principal: str | None = None, max_facts: int 
            "pending": len(store.corrections()),
            "episodic": episodic, "pruned": pruned, "facts": new_facts}
     if model_errors:
-        out.update(status="error", reason="model_failed", error=model_errors[0])
+        reason = res.get("reason") if res.get("status") == "error" else None
+        out.update(status="error", reason=reason or "model_failed", error=model_errors[0])
     return out
 
 
@@ -1190,10 +1268,11 @@ def _auto_stamp(now: float) -> None:
         logger.debug("memory auto-consolidate: could not stamp marker: %s", e)
 
 
-def _auto_consolidate_bg(principal: str | None = None) -> None:
+def _auto_consolidate_bg(principal: str | None = None, conversation: str = "") -> None:
     """Run one consolidation pass in the background, binding the model to the
-    stashed engine. Never raises (a daemon thread); clears the in-progress flag and
-    stamps the marker when done."""
+    stashed engine, over *conversation* (the chat turn that triggered it) or, when
+    that is empty, the session logs. Never raises (a daemon thread); clears the
+    in-progress flag and stamps the marker when done."""
     global _auto_running
     from localm.debuglog import logger, debug_content_enabled
     deferred = False
@@ -1222,7 +1301,8 @@ def _auto_consolidate_bg(principal: str | None = None) -> None:
         from localm.inference.http_server import driving_engine
         try:
             with driving_engine(eng):
-                res = synthesize_memory(complete, principal=principal)
+                res = synthesize_memory(complete, principal=principal,
+                                        conversation=conversation)
         except BackgroundYield:
             deferred = True
             logger.info("memory auto-consolidate: a chat request is waiting for the "
@@ -1251,7 +1331,7 @@ def _auto_consolidate_bg(principal: str | None = None) -> None:
             _auto_running = False
 
 
-def _maybe_auto_consolidate(principal: str | None = None) -> None:
+def _maybe_auto_consolidate(principal: str | None = None, conversation: str = "") -> None:
     """Best-effort trigger for the debounced background consolidation. Cheap when
     not due (a timestamp compare under a lock); spawns at most one daemon thread.
     Gated on config + privacy + model-loaded so it never runs a write the mode
@@ -1293,7 +1373,8 @@ def _maybe_auto_consolidate(principal: str | None = None) -> None:
         # Stamp immediately so a burst of concurrent turns cannot each spawn a pass
         # before the first finishes (the finally-stamp refreshes it).
         _auto_stamp(now)
-    _threading.Thread(target=lambda: _auto_consolidate_bg(principal), daemon=True).start()
+    _threading.Thread(target=lambda: _auto_consolidate_bg(principal, conversation),
+                      daemon=True).start()
 
 
 # ------------------------------------------------------------------ #
@@ -1459,7 +1540,10 @@ def _memory_outlet(text, messages, ctx):
         # Owner (ADMIN scope) collapses to the shared "owner" namespace, matching
         # memory_principal on the request-based paths and the recall inlet. Shared with
         # _memory_inlet via _ctx_principal, so reads and writes use one namespace.
-        _maybe_auto_consolidate(_ctx_principal(ctx))
+        _maybe_auto_consolidate(
+            _ctx_principal(ctx),
+            _conversation_text([*messages, {"role": "assistant", "content": text}])
+            if isinstance(text, str) else _conversation_text(messages))
     except Exception as e:
         from localm.debuglog import logger
         logger.debug("memory outlet skipped: %s", e)
@@ -1514,6 +1598,43 @@ def _stash_memory_used(ctx, records, diag) -> None:
         logger.debug("memory stash skipped: %s", e)
 
 
+def _remember_explicit(messages, ctx) -> None:
+    """Store the fact the latest user message asks to remember ("remember that
+    ...", "merk dir ..."), without the model. The outcome goes to
+    ``ctx.state["memory_saved"]`` for the response header: ``{"text", "status"}``
+    with status "saved", "exists" (the same fact is already stored) or "full" (the
+    store is at its cap). Only the user's own words count; a user row the client
+    marked with an ``origin`` is not examined. Blocking (embedder); the caller runs
+    it off the loop. Nothing is stored in privacy mode."""
+    if ctx is None or not _persist_enabled():
+        return
+    from localm.inference.protocol import is_user_written, user_written_text
+    from localm.memory import N_MAX, MemoryRecord, explicit_fact
+    last = next((m for m in reversed(messages) if m.get("role") == "user"), None)
+    if last is None or not is_user_written(last):
+        return
+    fact = explicit_fact(user_written_text(last))
+    if not fact:
+        return
+    store = _chat_store(_ctx_principal(ctx))
+    _migrate_legacy(store)
+    key = " ".join(fact.casefold().split())
+    embed_fn = _embed_fn()
+    with store.lock():
+        store._load()
+        if any(" ".join(r.text.casefold().split()) == key for r in store.all()):
+            status = "exists"
+        elif len(store) >= N_MAX:
+            status = "full"
+        else:
+            store.add(MemoryRecord(text=fact, kind="semantic", source="user",
+                                   importance=0.8), embed_fn=embed_fn)
+            status = "saved"
+    ctx.state["memory_saved"] = {"text": fact, "status": status}
+    from localm.debuglog import logger
+    logger.debug("memory: explicit remember request handled (%s)", status)
+
+
 def _memory_inlet(messages, ctx, announce=None):
     """Inject recalled memories into the system message. Off when the `memory_enabled`
     recall knob is off. In privacy mode it is off too UNLESS the user opted into
@@ -1531,6 +1652,13 @@ def _memory_inlet(messages, ctx, announce=None):
     # Privacy mode: fully off unless the user opted into read-only recall for chat.
     if not writes_ok and not _recall_in_privacy("chat"):
         return None
+    if writes_ok:
+        try:
+            _remember_explicit(messages, ctx)
+        except Exception as e:
+            from localm.debuglog import logger
+            logger.warning("memory: could not store a remember request: %s", e)
+            ctx.state["memory_saved"] = {"text": "", "status": "failed"}
     try:
         from localm import memory as _mem
         query = _recall_query(messages)

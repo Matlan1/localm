@@ -60,3 +60,36 @@ test("F7: Synthesize now reports when nothing new was found", async () => {
   await window.synthesizeMemoryNow(status);
   assert.match(status.textContent, /No new durable facts/);
 });
+
+test("Synthesize now sends the conversation on screen, not web results or reasoning", async () => {
+  const bodies = [];
+  const { window } = loadAppWithPages({
+    fetchImpl: async (url, opts = {}) => {
+      if (String(url) === "/api/memory/consolidate") {
+        bodies.push(JSON.parse(opts.body));
+        return { ok: true, status: 200, text: async () => "",
+          json: async () => ({ status: "ok", added: 1, facts: ["x"] }) };
+      }
+      return { ok: true, status: 200, text: async () => "",
+        json: async () => ({ text: "", writable: true, items: [], models: [], active: "",
+          conversations: [], plugins: [] }) };
+    },
+  });
+  window.eval(`
+    chat.conversations = [{ id: "c1", branches: [], messages: [
+      { role: "user", content: "remember that i love to play rpg style games" },
+      { role: "assistant", content: "<think>hidden</think>Sounds fun!" },
+      { role: "user", content: "web result text", origin: "tool" },
+      { role: "user", content: "attached doc", tag: "doc" },
+    ] }];
+    chat.currentId = "c1";
+  `);
+  await window.synthesizeMemoryNow({ textContent: "" });
+  assert.equal(bodies.length, 1);
+  const rows = bodies[0].messages;
+  assert.equal(rows[0].role, "user");
+  assert.equal(rows[0].content, "remember that i love to play rpg style games");
+  assert.equal(rows[1].role, "assistant");
+  assert.doesNotMatch(rows[1].content, /hidden/);
+  assert.equal(rows.length, 2, "tool and document rows are left out");
+});

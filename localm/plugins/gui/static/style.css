@@ -2328,6 +2328,7 @@ div:has(> .data-table) { overflow-x: auto; }
   border-radius: 8px; font-size: 11px; padding: 2px 8px; cursor: pointer;
 }
 .msg-meta button.mem-chip:hover { color: var(--accent); border-color: var(--accent); }
+.msg-meta .mem-saved { color: var(--accent); font-size: 12px; align-self: center; }
 
 /* model-autoswitch "ask": offers the better model (chat.js buildRoutedChip). */
 .msg-meta button.routed-suggest {
