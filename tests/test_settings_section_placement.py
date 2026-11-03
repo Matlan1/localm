@@ -215,7 +215,7 @@ def test_no_two_settings_cards_share_a_heading():
     static = _static_card_headings()
     assert len(static) > 10, "static cards were not found in index.html"
     seen = {}
-    for card_id, top, head in cards + static:
+    for card_id, _top, head in cards + static:
         assert head, f"{card_id} has no English heading"
         assert head not in seen, f"{card_id} and {seen.get(head)} are both headed {head!r}"
         seen[head] = card_id
