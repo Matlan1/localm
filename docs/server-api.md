@@ -1002,7 +1002,7 @@ present on a headless `localm serve` with no plugins installed, not only under
 
 | Route | Scope | Purpose |
 |---|---|---|
-| `GET /api/issues` | `config:read` | List the project's issues through the bug-report proxy. Takes `?state=` (`open`, `closed` or `all`; default and fallback `all`). Returns `{"available": bool, "issues": [...]}`, with `available` false when no tracker is configured, and an `error` string when the proxy fails. |
+| `GET /api/issues` | `config:read` | List the bug reports this install filed, newest first (up to 30), each looked up by number through the bug-report proxy. Takes no parameters. Returns `{"available": true, "issues": [...], "persisted": bool, "issues_url": "..."}`, or `{"available": false, "issues": []}` when no tracker is configured. Each row is `{number, title, state, closed_at, html_url}`; a row whose lookup failed or found nothing carries an `error` string instead of `state`. `persisted` is false when the record of filed numbers is kept in memory only (privacy mode). |
 | `GET /api/update/check` | `config:read` | Ask whether a newer build is available. Does not apply anything. Returns `{"available": true, "current", "latest", "newer", "comparable", "notes", "published_at", "asset", "signature"}`; `{"available": false}` when no updater is configured; `{"available": true, "error": "..."}` when the check fails. |
 | `GET /api/changelog` | `config:read` | Return the shipped `CHANGELOG.md`. Local file read, no network call, works offline. Returns `{"available": true, "version", "markdown"}` with the released history and without the `[Unreleased]` section, or `{"available": false}` when the file is absent from this build. |
 | `POST /api/update/apply` | `config:write` | Apply an available update. See [SECURITY.md](https://github.com/Matlan1/localm/blob/master/SECURITY.md) for the signing and rollback model. Returns `{"applied": false, "reason": "already up to date", "current"}` when there is nothing newer, `{"applied": false, "error": "..."}` when the apply failed and was rolled back, and otherwise `{"applied": true, "version", "klass", "backup", "restart_needed", "available": true}` plus `"restarting": true` for every class except a setup-class update. 400 when the updater is not configured or the release has no downloadable build; 502 when the check for the latest release fails. The `backup` path and any `error` text carry the full path for the owner and open mode, and a scrubbed one (data dir as `<data>`, file name kept) for a scoped key. |
@@ -1011,17 +1011,20 @@ present on a headless `localm serve` with no plugins installed, not only under
 | `POST /api/bug-report` | `config:write` | Generate and save a bug report for review. |
 | `POST /api/bug-report/send` | `config:write` | File a saved, reviewed bug report. |
 
-**A proxy failure is reported in the body, not the status.** `GET /api/issues`
-and `GET /api/update/check` answer `200` with an `error` string when the proxy
-cannot be reached, rather than a 5xx. Check for `error` rather than branching on
-the status code alone. They are not blanket "always 200" routes though: the
-scope dependency still rejects an unauthorised caller before the handler runs.
+**A proxy failure is reported in the body, not the status.** `GET /api/update/check`
+answers `200` with an `error` string when the proxy cannot be reached, rather than
+a 5xx. `GET /api/issues` answers `200` too, with the `error` on the row whose
+lookup failed (the other rows are unaffected). Check for `error` rather than
+branching on the status code alone. They are not blanket "always 200" routes
+though: the scope dependency still rejects an unauthorised caller before the
+handler runs.
 
-**`net_mode: off` stops `GET /api/issues` and `GET /api/update/check`.** Each
-answers 200 with an `error` naming the setting (the update check still runs when
-the owner-only `update_ignore_net_policy` is on), and `POST /api/update/apply`
-fails with its 502 for the same reason. `GET /api/changelog` makes no network
-call at all.
+**`net_mode: off` stops the proxy lookups.** `GET /api/update/check` answers 200
+with an `error` naming the setting (the update check still runs when the
+owner-only `update_ignore_net_policy` is on). `GET /api/issues` makes no request,
+and every row it returns carries that `error` instead of a state.
+`POST /api/update/apply` fails with its 502 for the same reason.
+`GET /api/changelog` makes no network call at all.
 
 ### `GET /metrics`
 
@@ -1195,6 +1198,22 @@ The events route replays the whole log and then follows it as server-sent events
 `data: {"type": "log", "line": "..."}` per line, then `data: {"type": "end", "ok",
 "installed", "failed", "error"}`, with `: keepalive` comments between; it is a 404
 when no install was ever started for that plugin.
+
+### `POST /api/models/packages/plan` / `POST /api/models/packages/install` / `GET /api/models/packages/install/events`
+
+`PLUGINS_ADMIN` scope, and a 403 on a server bound beyond loopback. These add the
+Python packages a trusted Hugging Face model's own code needs (the HTTP sibling of
+`localm install-packages`). A row of `GET /api/models` carries `packages: {"missing",
+"addable", "installable"}` when its code needs packages this install lacks.
+
+`plan` takes `{"model": <registered name>}` and returns `{"model", "plan_id", "modules",
+"packages", "adds": [{"name", "version", "source"}]}`, the exact distributions an install
+would add; nothing is installed. An unregistered name is a 404, and a model that needs
+nothing, needs a package localm cannot add, or whose resolution fails is a 409 with the
+reason in `detail`. `install` takes `{"plan_id"}` and installs exactly that plan in the
+background; a plan works once and expires after 15 minutes (404), and a second install while
+one runs is a 409. The events route streams the log in the same shape as the plugin
+dependency route above, for the running or last finished install.
 
 ## API key endpoints
 

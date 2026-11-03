@@ -2170,14 +2170,41 @@ def _describe_load_placement(name: str, engine, evictions=()) -> str:
     return "; ".join(parts)
 
 
+def _placement_as_configured(placement: dict, sizing) -> bool:
+    """Whether *placement* (``Engine.gpu_placement``) is exactly what the
+    configuration asked for: *sizing* (``Engine.gpu_sizing``) has mode
+    ``"configured"`` (auto off or an explicit n_gpu_layers), at least
+    ``min(configured layers, total)`` layers (every layer for a negative or
+    "everything" value) were offloaded, and any routed experts in system RAM
+    come from a configured n_cpu_moe, not one auto sizing chose."""
+    if not (isinstance(sizing, dict) and sizing.get("mode") == "configured"):
+        return False
+    offloaded = placement.get("gpu_layers_offloaded")
+    total = placement.get("gpu_layers_total")
+    layers = sizing.get("layers")
+    if not (isinstance(offloaded, int) and isinstance(total, int)
+            and isinstance(layers, int)):
+        return False
+    if offloaded < (total if layers < 0 else min(layers, total)):
+        return False
+    moe = placement.get("moe_cpu_layers", 0)
+    if moe and (sizing.get("n_cpu_moe_auto")
+                or moe > int(sizing.get("n_cpu_moe") or 0)):
+        return False
+    return True
+
+
 def _log_switch_placement(name: str, engine, evictions=()) -> None:
     """Log ``_describe_load_placement`` for a load switch_engine just
-    committed: at WARNING when fewer than all layers landed on the GPU, else
+    committed: at WARNING when fewer than all layers landed on the GPU and
+    that is not the configured placement (``_placement_as_configured``), else
     at INFO."""
     from localm.debuglog import logger as _dbg
     placement = getattr(engine, "gpu_placement", None)
     line = "switch_engine: " + _describe_load_placement(name, engine, evictions)
-    if isinstance(placement, dict) and placement.get("degraded"):
+    if (isinstance(placement, dict) and placement.get("degraded")
+            and not _placement_as_configured(placement,
+                                             getattr(engine, "gpu_sizing", None))):
         _dbg.warning(line)
     else:
         _dbg.info(line)
