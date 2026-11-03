@@ -31,11 +31,10 @@ def test_bat_asks_portable_vs_shared_before_installing_uv():
 def test_sh_asks_portable_vs_shared_before_installing_uv():
     text = _sh()
     ask_idx = text.index("Keep localm's Python tooling")
-    install_prompt_idx = text.index(
-        "uv (the Python package manager localm builds on) is not installed")
-    assert ask_idx < install_prompt_idx, (
-        "setup.sh must ask where to keep uv/Python tooling BEFORE offering to "
-        "install uv, so a Portable pick can confine uv's own binary to the clone")
+    install_idx = text.index('fetch_uv_installer "$UVTMP/uv-installer.sh"')
+    assert ask_idx < install_idx, (
+        "setup.sh must ask where to keep uv/Python tooling BEFORE installing uv, "
+        "so the pick decides the folder uv itself lands in")
 
 
 def test_bat_sets_uv_install_dir_before_the_installer_when_contained():
@@ -55,16 +54,15 @@ def test_bat_sets_uv_install_dir_before_the_installer_when_contained():
     assert 'if "%CONTAINED%"=="1" (' in text
 
 
-def test_sh_sets_uv_install_dir_before_the_installer_when_contained():
+def test_sh_sets_uv_install_dir_before_the_installer_in_both_modes():
     text = _sh()
-    contained_set_idx = text.index('export UV_INSTALL_DIR="$(pwd)/.uv"')
-    # Match the real invocation, not the install-it-yourself messages carrying
-    # the manual command as plain text.
+    assert 'STORE_UV="$ROOT/.uv"' in text and 'STORE_UV="$SHARED_STORE/uv"' in text
+    set_idx = text.index('export UV_INSTALL_DIR="$STORE_UV"')
+    unmanaged_idx = text.index('export UV_UNMANAGED_INSTALL="$STORE_UV"')
     installer_idx = text.index('sh "$UVTMP/uv-installer.sh" || true')
-    assert contained_set_idx < installer_idx, (
-        "UV_INSTALL_DIR must be exported before invoking Astral's installer, or "
-        "a Portable pick has no effect on where uv itself lands")
-    assert 'if [ "$CONTAINED" = 1 ]; then' in text
+    assert set_idx < installer_idx and unmanaged_idx < installer_idx, (
+        "UV_INSTALL_DIR and UV_UNMANAGED_INSTALL must be exported before invoking "
+        "Astral's installer, or uv lands outside localm's own store")
 
 
 def test_bat_records_and_passes_uv_dir_to_the_manifest():

@@ -172,6 +172,7 @@ export LOCALM_GUI_UV="$UVEXE"
 echo "  Opening the setup window ..."
 export UV_PYTHON_INSTALL_DIR="$STORE_PY"
 export UV_CACHE_DIR="$STORE_CACHE"
+export UV_CREDENTIALS_DIR="$STORE_UV/credentials"
 export UV_PYTHON_PREFERENCE=only-managed
 export UV_SYSTEM_CERTS=1
 rc=0

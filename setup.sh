@@ -479,6 +479,7 @@ else
 fi
 export UV_PYTHON_INSTALL_DIR="$PYDIR"
 export UV_CACHE_DIR="$CACHEDIR"
+export UV_CREDENTIALS_DIR="$STORE_UV/credentials"
 export UV_PYTHON_PREFERENCE=only-managed
 PYPREF="--python-preference only-managed"
 UVDIR="$STORE_UV"
@@ -818,7 +819,7 @@ say "  Installing localm into .venv ..."
 # the create_venv retry loop above. Do not copy it back here.
 "$UVEXE" pip install -p .venv -e ".[${EXTRAS}]" || {
   say "  [!] Installing localm failed - see the error above."
-  offer_report "localm install failed during setup" "uv pip install -e .[${EXTRAS}] failed - see the error output above."
+  offer_report "localm install failed during setup" "installing localm .[${EXTRAS}] into .venv failed - see the error output above."
   exit 1
 }
 

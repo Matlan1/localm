@@ -81,7 +81,7 @@ def test_no_heartbeat_over_a_command_that_writes_live_to_the_console(
     offenders = []
     for start_line, covered in regions:
         for cmd in covered:
-            if cmd.startswith("uv ") and not _captures_output(cmd):
+            if cmd.startswith(("uv ", '"$UVEXE" ')) and not _captures_output(cmd):
                 offenders.append(f"{path.name}:{start_line} guards live command: {cmd}")
 
     assert not offenders, (
@@ -100,7 +100,7 @@ def test_the_only_heartbeat_left_is_the_captured_venv_creation(
         "(the captured `uv venv` retry). A new one is only correct if that "
         "command's output is captured - see this module's docstring.")
     covered = " ".join(regions[0][1])
-    assert "uv venv" in covered, (
+    assert "uv venv" in covered or '"$UVEXE" venv' in covered, (
         f"{path.name}: the surviving heartbeat no longer guards `uv venv`")
 
 
@@ -111,9 +111,9 @@ def test_the_torch_and_base_installs_print_their_own_progress():
                'uv pip install -p .venv -e ".[gpu,audio]"',
                'uv pip install -p .venv -e ".[hf,audio]"',
                "uv pip install -p .venv %TORCHSPEC%"]),
-        (SH, ['uv pip install -p .venv -e ".[${EXTRAS}]"',
-              'uv pip install -p .venv -e ".[hf,audio]"',
-              "uv pip install -p .venv $TORCHSPEC"]),
+        (SH, ['"$UVEXE" pip install -p .venv -e ".[${EXTRAS}]"',
+              '"$UVEXE" pip install -p .venv -e ".[hf,audio]"',
+              '"$UVEXE" pip install -p .venv $TORCHSPEC']),
     ):
         text = path.read_text(encoding="utf-8", errors="replace")
         for cmd in installs:

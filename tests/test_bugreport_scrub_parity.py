@@ -22,6 +22,7 @@ import pytest
 
 from localm import pathscrub
 from localm.bugreport import scrub as br_scrub
+from tests._posix_sysdirs import sys_prog_function, sysdirs_for
 
 _REPO = Path(__file__).resolve().parents[1]
 _RI_PATH = _REPO / "scripts" / "report_issue.py"
@@ -192,7 +193,7 @@ def _sh_scrub_function() -> str:
     text = _SH_PATH.read_text(encoding="utf-8")
     start = text.index("\nscrub() {\n") + 1
     end = text.index("\n}\n", start) + 3
-    return text[start:end]
+    return sysdirs_for("perl") + sys_prog_function(text) + text[start:end]
 
 
 def _bash_with_perl():

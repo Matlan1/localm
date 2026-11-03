@@ -23,6 +23,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._posix_sysdirs import bash_path, sys_prog_function
+
 ROOT = Path(__file__).resolve().parents[1]
 SETUP_SH = ROOT / "setup.sh"
 
@@ -51,6 +53,12 @@ def _function_body(name: str) -> str:
     return src[start:end]
 
 
+def _sysprog(bin_dir: Path) -> str:
+    """setup.sh's sys_prog function, with its fixed system folders set to *bin_dir*."""
+    return (f'LOCALM_SYSDIRS="{bash_path(bin_dir)}"\n'
+            + sys_prog_function(SETUP_SH.read_text(encoding="utf-8")))
+
+
 def _mark_executable(path: Path) -> None:
     """os.chmod()/Path.chmod() cannot set a real POSIX execute bit on NTFS -
     it silently no-ops the S_IEXEC/S_IXGRP/S_IXOTH bits, which some Git-Bash/
@@ -73,7 +81,7 @@ def _run_detect_gpu(tmp_path: Path, *, stub_names: list[str]) -> str:
     bin_dir.mkdir()
     for name in stub_names:
         _make_stub(bin_dir, name)
-    script = _function_body("detect_gpu") + "\ndetect_gpu\n"
+    script = _sysprog(bin_dir) + _function_body("detect_gpu") + "\ndetect_gpu\n"
     env = dict(os.environ)
     env["PATH"] = str(bin_dir)   # isolate: no real nvidia-smi/rocminfo must leak in
     result = subprocess.run([_bash(), "-c", script], capture_output=True,
@@ -222,6 +230,7 @@ def _run_rec(tmp_path: Path, *, hw: str | None, hint: str | None = "vulkan|cuda|
         'say() { printf "%s\\n" "$*"; }\n'
         f'ask() {{ echo "ASKED $1" >&2; echo {answer}; }}\n'
         f'YES={1 if yes else 0}\nIS_MACOS={is_macos}\n'
+        + _sysprog(bin_dir)
         + _function_body("detect_gpu")
         + _rec_block()
         + '\nprintf "REC=%s\\n" "$REC"\n'
@@ -450,7 +459,7 @@ def _run_detect_gpu_with_uname(tmp_path: Path, *, os_name: str, arch: str,
     for name in stub_names or []:
         _make_stub(bin_dir, name)
     _make_uname_stub(bin_dir, os_name=os_name, arch=arch)
-    script = _function_body("detect_gpu") + "\ndetect_gpu\n"
+    script = _sysprog(bin_dir) + _function_body("detect_gpu") + "\ndetect_gpu\n"
     env = dict(os.environ)
     env["PATH"] = str(bin_dir)   # isolate: no real nvidia-smi/rocminfo/uname must leak in
     result = subprocess.run([_bash(), "-c", script], capture_output=True,
