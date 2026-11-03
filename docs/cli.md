@@ -280,6 +280,18 @@ localm add D:\models\mymodel.gguf --store move   # relocate into <data dir>/mode
 
 `--store` moves/copies a split GGUF's every part and a sibling mmproj vision-projector file together with the model, so multi-part loading and vision capability survive the move. It refuses (no changes made) if a different file already occupies that name in `<data dir>/models`, if there isn't enough free disk space, or if a copy's SHA256 doesn't match the original afterward.
 
+### Packages a model's own code needs
+
+A Hugging Face model with `hf_trust_remote_code` on runs Python from its own folder, and that code can import a package localm does not include. localm refuses such a model when you add it and before a load starts, and names the package. When it is one localm can add on this machine (timm, open_clip, torchaudio, and flash-linear-attention on Linux), add it here or with **install packages** on the Models page:
+
+```bash
+localm install-packages mymodel          # lists what would be installed, then asks
+localm install-packages mymodel --yes    # installs without asking (the list is still printed)
+localm install-packages --list           # the packages added for models in this install
+```
+
+Only packages on a list localm has reviewed are installed, each from the project that list names, never a project guessed from what a model's code imports. Every installed package stays at its version and only ready-built packages are used; when that is impossible nothing is installed and the message says why. Packages that must be compiled from source are not installed. After installing, localm imports them in a new process and removes what it added if that fails. They live in localm's own environment, so uninstalling localm removes them; running setup again may too, and the model then offers the install again.
+
 ### Model type
 
 Every registered model has a type, detected deterministically from the file
@@ -596,12 +608,12 @@ The context window starts at `n_ctx` (default 4096) and grows automatically when
 ```bash
 localm config n_ctx_max 32768    # raise the ceiling
 localm config n_ctx_grow 8192    # grow in bigger steps (fewer rebuilds)
-localm config ctx_auto false     # use the fixed n_ctx_max ceiling instead of VRAM sizing
+localm config ctx_auto false     # use the fixed n_ctx_max ceiling instead of memory sizing
 ```
 
-`ctx_auto` is **on by default**: it sizes the ceiling from free VRAM at load time (clamped to 4k-64k; `n_ctx_max 0` lifts the 64k clamp), overriding a non-zero `n_ctx_max`. When a conversation reaches the ceiling, replies shorten to fit; when even that is impossible you get a clear error instead of an out-of-memory crash. An explicit `-c/--ctx` larger than the ceiling always wins.
+`ctx_auto` is **on by default**: it sizes the ceiling at load time from the free memory the KV cache lands in: free VRAM when every layer is on the GPU, free system RAM for a CPU-only load (`-g 0`, or a runtime with no GPU backend), and both for a partial offload, each share against its own memory (clamped to 4k-64k; `n_ctx_max 0` lifts the 64k clamp), overriding a non-zero `n_ctx_max`. When a conversation reaches the ceiling, replies shorten to fit; when even that is impossible you get a clear error instead of an out-of-memory crash. An explicit `-c/--ctx` larger than the ceiling always wins.
 
-When free VRAM cannot be measured (for example on a CPU-only machine), `ctx_auto` falls back to a fixed 16384-token ceiling (set `ctx_auto false` and raise `n_ctx_max` to change it).
+When the memory it needs cannot be measured (for example free VRAM on a GPU runtime that cannot read it), `ctx_auto` falls back to a fixed 16384-token ceiling (set `ctx_auto false` and raise `n_ctx_max` to change it).
 
 Long chats compact automatically before they collide with the ceiling. See [docs/architecture.md](architecture.md) for the compaction and VRAM-sizing details.
 

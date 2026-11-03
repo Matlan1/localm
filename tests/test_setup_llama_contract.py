@@ -150,7 +150,8 @@ MAC_METAL = {"build/bin/libllama.dylib": b"libllama", "build/bin/libggml-metal.d
 AMD_ROCM = {"llama.dll": b"llama@rocm", "ggml-hip.dll": b"ggml-hip", "rocblas.dll": b"rocblas",
             "ggml-cpu.dll": b"ggml-cpu@rocm",
             "rocblas/library/TensileLibrary_gfx1030.dat": b"tensile",
-            "rocblas/library/Kernels.so-000-gfx1030.hsaco": b"kernels"}
+            "rocblas/library/Kernels.so-000-gfx1030.hsaco": b"kernels",
+            "rocm_kpack.dll": b"kpack", ".kpack/blas_lib_gfx1030.kpack": b"blas-pack"}
 
 
 # --------------------------------------------------------------------------- #
@@ -664,10 +665,12 @@ def test_windows_amd_rocm_provision_keeps_blas_kernel_layout(world, pin, note):
               f"Downloading {urls[name]}", f"Downloading {cpu_url}",
               f"CPU backend: ggml-cpu-haswell from llama.cpp {sl._ROCM_CPU_TAG} (SIMD), "
               "replacing the amd-rocm build's own", "OK - amd-rocm runtime loads on this machine.")
-    assert world.files() == [".localm-backend", ".localm-cpu-overlay", "LICENSE.llama-cpp",
+    assert world.files() == [".kpack/blas_lib_gfx1030.kpack", ".localm-backend",
+                             ".localm-cpu-overlay", ".localm-kernel-packs", "LICENSE.llama-cpp",
                              "ggml-cpu.dll", "ggml-hip.dll", "libomp.dll", "llama.dll",
                              "rocblas.dll", "rocblas/library/Kernels.so-000-gfx1030.hsaco",
-                             "rocblas/library/TensileLibrary_gfx1030.dat"]
+                             "rocblas/library/TensileLibrary_gfx1030.dat", "rocm_kpack.dll"]
+    assert (world.lib / ".kpack" / "blas_lib_gfx1030.kpack").read_bytes() == b"blas-pack"
     assert (world.lib / "ggml-cpu.dll").read_bytes() == b"cpu-haswell"
     assert (world.lib / "libomp.dll").read_bytes() == b"openmp"
     assert json.loads((world.lib / ".localm-cpu-overlay").read_text(encoding="utf-8")) == {

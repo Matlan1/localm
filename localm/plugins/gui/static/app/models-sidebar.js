@@ -722,13 +722,11 @@ export function applyInstallUI(env) {
   hint.style.display = "none";
   if (env.standalone) {
     if (env.certUntrusted) {
-      hint.textContent = "This device no longer trusts this server's certificate. "
-        + "Open localm-ca.crt from the server (/localm-ca.crt) and install it, "
-        + "then reload.";
+      hint.textContent = t("settings.companion.hintCertUntrusted");
       hint.style.display = "";
       return;
     }
-    hint.textContent = "Running as an installed app.";
+    hint.textContent = t("settings.companion.hintInstalled");
     hint.style.display = "";
     return;
   }
@@ -738,8 +736,7 @@ export function applyInstallUI(env) {
     // On HTTPS the service worker only registers behind a TRUSTED certificate;
     // without it the browser can only make a plain shortcut, not an installed
     // app. Point the user at the certificate step instead of the generic hint.
-    hint.textContent = "To install localm as an app, trust this device's "
-      + "certificate first (the “Install certificate” step above), then reload.";
+    hint.textContent = t("settings.companion.hintTrustCert");
     hint.style.display = "";
     return;
   }

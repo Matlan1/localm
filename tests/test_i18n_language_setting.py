@@ -58,13 +58,13 @@ def test_a_catalog_on_disk_is_offered_in_the_picker():
         "with no catalog cannot be loaded")
 
 
-@pytest.mark.parametrize("lang", ["en", "de"])
+@pytest.mark.parametrize("lang", ss.LANGUAGE_IDS)
 def test_a_known_language_is_accepted(lang):
     assert ss.validate_update({"language": lang}) == {"language": lang}
 
 
 @pytest.mark.parametrize("bad", [
-    "fr",                    # not shipped
+    "it",                    # not shipped
     "../../etc/passwd",      # the value becomes part of a fetch path in the GUI
     "..%2fde",
     "de/../../secret",
