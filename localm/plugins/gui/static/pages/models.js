@@ -75,6 +75,19 @@ export function modelTypeOf(m) {
   return (m && m.model_type) || "llm";
 }
 
+// The text typed in the installed-models search box. Narrows the TABLE (and its
+// tab counts) only; the HuggingFace search is a separate control.
+let currentSearchQuery = "";
+
+// A model matches when the query is a case-insensitive substring of its name,
+// source, type or architecture. An empty query matches everything.
+export function modelMatchesQuery(m, query) {
+  const q = String(query || "").trim().toLowerCase();
+  if (!q) return true;
+  const fields = [m && m.name, modelSourceText(m), modelTypeOf(m), m && m.architecture];
+  return fields.some((f) => f && String(f).toLowerCase().includes(q));
+}
+
 // Which types have a tab of their own, read from the tab strip itself rather
 // than from a second list here.
 export function typesWithOwnTab() {
@@ -452,8 +465,10 @@ export async function refreshModelsPage() {
   }
 
   if (myGen !== _modelsRenderGen) return;
-  // Counts come from the WHOLE registry, so a tab keeps showing how many it
-  // holds while a different one is active.
+  // Counts come from the WHOLE registry (narrowed by the search text), so a tab
+  // keeps showing how many it holds while a different one is active.
+  const searching = currentSearchQuery.trim() !== "";
+  if (searching) models = models.filter((m) => modelMatchesQuery(m, currentSearchQuery));
   syncTabCounts(models);
   _syncViewOptControls();
 
@@ -481,7 +496,12 @@ export async function refreshModelsPage() {
   if (!models.length) {
     // The hidden-rows note when the registry is not empty and All is merely
     // hiding all of it; the empty state otherwise.
-    if (hiddenOther) {
+    if (searching) {
+      const noMatch = el("div", "sub models-no-match",
+        t("models.search.noMatch", { query: currentSearchQuery.trim() }));
+      noMatch.setAttribute("role", "status");
+      box.replaceChildren(...(hiddenOther ? [otherHiddenNote(hiddenOther), noMatch] : [noMatch]));
+    } else if (hiddenOther) {
       box.replaceChildren(otherHiddenNote(hiddenOther));
     } else {
       box.replaceChildren(emptyState("models", t("models.empty.text"), t("models.empty.hint")));
@@ -3321,6 +3341,34 @@ if (tabNav) {
       refreshModelsPage();
     };
   }
+}
+
+// Installed-models search box: filters as the user types (debounced, since each
+// render re-reads the registry), Escape or the Clear button empties it.
+const searchInput = $("models-search");
+const searchClear = $("models-search-clear");
+if (searchInput) {
+  let searchTimer = null;
+  const applySearch = (immediate) => {
+    currentSearchQuery = searchInput.value;
+    if (searchClear) searchClear.hidden = searchInput.value === "";
+    clearTimeout(searchTimer);
+    if (immediate) refreshModelsPage();
+    else searchTimer = setTimeout(refreshModelsPage, 120);
+  };
+  const clearSearch = () => {
+    searchInput.value = "";
+    applySearch(true);
+    searchInput.focus();
+  };
+  searchInput.addEventListener("input", () => applySearch(false));
+  searchInput.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && searchInput.value !== "") {
+      e.preventDefault();
+      clearSearch();
+    }
+  });
+  if (searchClear) searchClear.addEventListener("click", clearSearch);
 }
 
 // Both display toggles: reflect the stored value on load, write it back on
