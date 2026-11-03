@@ -2205,7 +2205,7 @@ def _model_is_pinned(model_name: str | None) -> bool:
 
 def plan_capability_route(model_name: str | None, messages: list,
                           required_capabilities=None, *, pin_model=None,
-                          min_context=None):
+                          min_context=None, autoswitch=None):
     """The capability-routing decision for one request, without applying it.
 
     Blocking (registry read plus per-candidate capability probes), so an async
@@ -2221,7 +2221,9 @@ def plan_capability_route(model_name: str | None, messages: list,
     Needs are derived from the request wherever the request already states them
     - an image part means vision, the prompt's estimated size means a context
     window - plus *required_capabilities* and *min_context* for what nothing in
-    an OpenAI-shaped request can express. A loaded engine confirmed to accept
+    an OpenAI-shaped request can express. *autoswitch*, one of the autoswitch
+    modes, replaces the ``model_autoswitch`` setting for this request; None
+    leaves the setting in force. A loaded engine confirmed to accept
     images does not count vision as a gap, whatever the registry records.
 
     Models with an accepted peer route count as resident, since answering with
@@ -2263,7 +2265,7 @@ def plan_capability_route(model_name: str | None, messages: list,
 
     return _cr.plan_route(current, needs, pinned=pinned, resident=resident,
                           current_known=known, skip=skip_set,
-                          mode=_cr.configured_mode())
+                          mode=_cr.coerce_autoswitch_mode(autoswitch) or _cr.configured_mode())
 
 
 async def get_engine(model_name: str | None, *, load: bool = True,
