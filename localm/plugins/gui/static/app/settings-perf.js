@@ -3178,6 +3178,7 @@ export async function runCompletion(conv, webDepth = 0, web = null) {
   if (memUsed && (memUsed.n > 0 || memUsed.saved)) reply.memory = memUsed;
   if (memUsed && memUsed.saved) {
     toast(memorySavedText(memUsed.saved), memUsed.saved.status !== "saved" && memUsed.saved.status !== "exists");
+    if (memUsed.saved.status === "saved") refreshMemory();
   }
   // Save usage on the reply itself, not just the DOM, so tok/s and the context
   // gauge survive a reload instead of only ever having existed on screen for

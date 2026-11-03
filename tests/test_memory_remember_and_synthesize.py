@@ -132,8 +132,8 @@ def test_synthesize_without_a_conversation_still_reads_the_session_logs(
 @pytest.mark.parametrize("reply, wanted", [
     ("I'm sorry, I can't help with that.", "not a JSON object"),
     ("", "empty"),
-    ("<|channel|>analysis<|message|>We need to think about the facts and", "reasoning"),
-    ("<think>still thinking about {the} user", "reasoning"),
+    ("<|channel|>analysis<|message|>We need to think about the facts and", "only the model's reasoning"),
+    ("<think>still thinking about {the} user", "only the model's reasoning"),
 ], ids=["prose", "empty", "harmony-cut", "think-cut"])
 def test_an_unreadable_reply_is_a_failure_not_no_new_facts(
         tmp_path, monkeypatch, reply, wanted):
@@ -328,8 +328,8 @@ def test_a_full_store_is_reported_not_silently_dropped(tmp_path, monkeypatch):
 
 def test_memory_off_stores_nothing(tmp_path, monkeypatch):
     app, hdr = _make(tmp_path, monkeypatch, Script())
-    monkeypatch.setattr(plug, "_recall_enabled", lambda: False)
     with TestClient(app) as c:
+        assert c.patch("/v1/config", headers=hdr, json={"memory_enabled": False}).status_code == 200
         r = _chat(c, "remember that i love to play rpg style games")
     assert r.status_code == 200
     assert not _store(tmp_path).all()

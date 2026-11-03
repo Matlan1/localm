@@ -92,10 +92,12 @@ def test_run_consolidation_reports_a_failed_extract_and_writes_nothing(tmp_path)
     assert res["added"] == 0
 
 
-def test_run_consolidation_on_an_unparseable_reply_is_still_ok(tmp_path):
-    res = run_consolidation(_store(tmp_path), "User: my name is Ada",
-                            lambda p: "not json", now=NOW)
-    assert res["status"] == "ok" and res["added"] == 0 and "error" not in res
+def test_run_consolidation_on_an_unparseable_reply_is_an_error(tmp_path):
+    store = _store(tmp_path)
+    res = run_consolidation(store, "User: my name is Ada", lambda p: "not json", now=NOW)
+    assert res["status"] == "error" and res["reason"] == "unreadable_reply"
+    assert res["added"] == 0 and "JSON" in res["error"]
+    assert store.all() == []
 
 
 def test_run_consolidation_reports_a_failed_decide_and_writes_nothing(tmp_path):

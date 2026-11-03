@@ -76,7 +76,8 @@ _EXTRACT_PROMPT = (
     "projects, tools, stable preferences (what they love, like, dislike or "
     "prefer), hobbies, recurring goals. A fact the user states about themselves "
     "counts even when it is said in passing, and anything they ask to be "
-    'remembered ("remember that ...") always counts. IGNORE one-off questions, '
+    'remembered ("remember that ...") always counts. List EVERY such fact, not '
+    "only the most important one. IGNORE one-off questions, "
     "transient details, and pleasantries. Write each fact as one short sentence "
     'about the user, e.g. "User loves playing RPG-style games".\n'
     'Respond with JSON ONLY, no prose: {"facts": [{"fact": "<short fact>", '
@@ -185,10 +186,8 @@ class ConsolidationReplyError(ConsolidationModelError):
 def _unreadable_reason(raw: str) -> str:
     """Why *raw*, a model reply, holds no fact list, for the message the user
     sees."""
-    if not (raw or "").strip():
-        return "the reply was empty"
-    if not strip_think(raw).strip():
-        return "the reply held only the model's reasoning (it was cut off before an answer)"
+    if not strip_think(raw or "").strip():
+        return "the reply was empty, or held only the model's reasoning with no answer after it"
     return "the reply was not a JSON object with a \"facts\" list"
 
 
