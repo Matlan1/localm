@@ -1279,7 +1279,7 @@
   "models.pull.store.copy": "In die Bibliothek kopieren",
   "models.pull.store.move": "In die Bibliothek verschieben",
   "models.pull.store.registerInPlace": "An Ort und Stelle registrieren",
-  "models.pull.storeTitle": "Gilt nur für einen lokalen Ordner-/Dateipfad - ein HuggingFace- oder URL-Download landet immer automatisch in ~/.localm/models.",
+  "models.pull.storeTitle": "Gilt nur für einen lokalen Ordner-/Dateipfad - ein HuggingFace-, CivitAI- oder URL-Download landet immer automatisch in ~/.localm/models.",
   "models.pull.title": "Modell hinzufügen",
   "models.pull.verifying": "prüfe… {pct}%",
   "models.relocate.failed": "Verschieben fehlgeschlagen",

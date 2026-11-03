@@ -1245,8 +1245,7 @@ localm update --to 0.3.0        # install that release, older or newer than your
 localm update --to 0.3.0 -y --allow-unverified   # non-interactive, even if its signature does not verify
 localm bug-report -m "..."      # generate an editable bug report and offer to send it to the maintainer
 localm bug-report -m "what I did" -e "what I expected" -w "what happened" --send   # non-interactive, send immediately
-localm issues [NUMBER]          # list the project's issues, or show one by number
-localm issues --state open      # open | closed | all (default all)
+localm issues [NUMBER]          # list the bug reports this install filed, or show one by number
 ```
 
 `bug-report` asks three questions (what you were doing, what you expected, what actually happened; Enter skips one) when run in a terminal without `-m`/`-e`/`-w`, and needs at least `-m` or `-w`. It attaches the tail of this run's debug log when one exists (`--no-log` to leave it out), never chat content. `issues` is read-only and needs the bug-report proxy to be configured.

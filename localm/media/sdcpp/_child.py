@@ -105,11 +105,11 @@ def _arm_crash_trace(path) -> None:
     if path is None:
         return
     import faulthandler
-    from localm.debuglog import logger
+    from localm.debuglog import fault_trace_all_threads, logger
     try:
         fh = open(path, "w", encoding="utf-8")
         _State.crash_fh = fh
-        faulthandler.enable(file=fh, all_threads=True)
+        faulthandler.enable(file=fh, all_threads=fault_trace_all_threads())
     except Exception as e:  # noqa: BLE001
         logger.warning("sd.cpp worker: could not arm the native-fault trace (%s: %s)",
                        type(e).__name__, e)
