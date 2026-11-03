@@ -377,9 +377,10 @@ def check_and_report_prior_crash(home=None, interactive: bool = False):
     instance simply still running (see the per-instance-scoping note in
     crash_guard.py) and is left untouched: not reported, not deleted. Then handle every
     stopping record left by a run that began a clean stop and ended before
-    releasing its trace (see _report_one_stopping_record). Returns the last
-    report path filed, or None if nothing was reported. Never raises into the
-    caller."""
+    releasing its trace (see _report_one_stopping_record). Each report filed is
+    also logged at WARNING with its path. Returns the last report path filed,
+    or None if nothing was reported. Never raises into the caller."""
+    from localm.debuglog import logger
     try:
         d = _br._crash_dir(home)
         markers = _all_crash_markers(d)
@@ -390,6 +391,8 @@ def check_and_report_prior_crash(home=None, interactive: bool = False):
         result = _report_one_crash_marker(d, marker, home, interactive)
         if result is not None:
             filed = result
+            logger.warning("bugreport: the previous run ended in a hard crash (%s); "
+                           "crash report: %s", marker.name, result)
     try:
         records = _all_crash_stopping_records(d)
     except Exception:
@@ -398,4 +401,6 @@ def check_and_report_prior_crash(home=None, interactive: bool = False):
         result = _report_one_stopping_record(d, record, home, interactive)
         if result is not None:
             filed = result
+            logger.warning("bugreport: the previous run crashed while stopping (%s); "
+                           "crash report: %s", record.name, result)
     return filed
