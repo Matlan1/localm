@@ -9,14 +9,14 @@ set. It NEVER auto-advances - update only ever targets the shipped pin (or an
 explicit ``--commit`` for an advanced/test override).
 
 Safety: update records the current commit first and, on ANY failure, ROLLS BACK -
-it returns the managed source to that prior commit and re-applies the patch set, so
-a failed update leaves the working prior install exactly as it was, not a broken
-in-between state. The rollback is git-based (the managed ComfyUI is a git
-checkout), so it is cheap and exact; the venv is not touched by an update, so there
-is nothing to restore there.
+it puts every source file it overwrote or removed back from a backup and re-applies
+the patch set, so a failed update leaves the working prior install exactly as it
+was, not a broken in-between state. The new source comes as a GitHub source archive
+(:mod:`localm.media.source_archive`), with no git program; the venv is not touched
+by an update, so there is nothing to restore there.
 
 Requirements are NOT reinstalled by default: a partial pip upgrade cannot be rolled
-back exactly, so update stays within the guaranteeable git rollback. When the pinned
+back exactly, so update stays within the guaranteeable source rollback. When the pinned
 commit changes ComfyUI's requirements.txt, update SAYS SO and points at
 ``--reinstall-requirements`` (opt-in); passing it reinstalls into the existing venv,
 and a failure there still rolls the source back and reports the failure.
@@ -25,6 +25,7 @@ and a failure there still rolls the source back and reports the failure.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -35,6 +36,7 @@ from localm.media.comfy_patches import apply_patches
 from localm.media.managed_comfy import _LOCK_OWNER as _LOCK_OWNER
 from localm.media.managed_comfy import _acquire_update_lock, _release_update_lock
 from localm.media.managed_comfy import _update_lock_path as _update_lock_path
+from localm.media import source_archive
 from localm.media.managed_comfy_fresh import (
     COMFYUI_PINNED_COMMIT, COMFYUI_PINNED_VERSION, COMFYUI_REPO)
 from localm.media.managed_comfy_provision import (
@@ -52,20 +54,59 @@ from localm.media.managed_comfy_provision import (
 
 
 def _rev_parse_head(root: Path) -> Optional[str]:
-    """The managed checkout's HEAD sha, or None when *root* is not a git checkout
-    (e.g. installed via the non-git copytree fallback). None is the signal that a
-    pin update is not possible - we never fake one."""
-    ok, out = _run(["git", "-C", str(root), "rev-parse", "HEAD"], timeout=30)
-    return out.strip() if ok else None
+    """The commit of the managed source tree at *root*
+    (:func:`localm.media.source_archive.tree_commit`), or None when it has no
+    source record and is not a git checkout (e.g. installed via the non-git
+    copytree fallback). None is the signal that a pin update is not possible -
+    we never fake one."""
+    return source_archive.tree_commit(root)
 
 
-def _requirements_changed(root: Path, prev: str, target: str) -> bool:
-    """True when requirements.txt differs between *prev* and *target*. ``git diff
-    --quiet`` exits 0 for no change, non-zero for a change; a git error is treated
-    as 'changed', so update warns rather than skipping a real dep bump."""
-    ok, _out = _run(["git", "-C", str(root), "diff", "--quiet", prev, target,
-                     "--", "requirements.txt"], timeout=60)
-    return not ok
+def _requirements_changed(root: Path, new_tree: Path) -> bool:
+    """True when requirements.txt of the tree at *new_tree* differs from the one
+    at *root*; an unreadable file counts as changed, so update warns rather than
+    skipping a real dep bump."""
+    try:
+        return (root / "requirements.txt").read_bytes() != (new_tree / "requirements.txt").read_bytes()
+    except OSError:
+        return True
+
+
+def _staging(root: Path, what: str) -> Path:
+    """A fresh, absent folder beside *root* for *what* (a download or a backup)."""
+    path = root.parent / f".{root.name}-{what}-{os.getpid()}"
+    if path.exists():
+        mc.rmtree_robust(path)
+    return path
+
+
+def _replace_source(root: Path, repo: str, commit: str, changes: list,
+                    on_progress: ProgressCb) -> tuple:
+    """Make the source tree at *root* that of *commit* of *repo*: fetch it as an
+    archive beside *root*, then :func:`source_archive.apply_tree` it over the
+    files *root*'s tree holds. Appends the :class:`source_archive.TreeChange` to
+    *changes*. Returns ``(ok, detail, deps_changed)``; on failure *root* is
+    unchanged."""
+    old_files = source_archive.tree_files(root)
+    if old_files is None:
+        return False, f"the files of the source tree at {root} could not be read", False
+    new = _staging(root, "download")
+    try:
+        try:
+            source_archive.fetch_tree(repo, commit, new,
+                                      on_progress=lambda m: _emit(on_progress, m))
+        except (source_archive.ArchiveError, OSError) as e:
+            return False, str(e), False
+        deps_changed = _requirements_changed(root, new)
+        try:
+            changes.append(source_archive.apply_tree(new, root, old_files,
+                                                     _staging(root, "backup")))
+        except OSError as e:
+            return False, f"could not write the new source into {root}: {e}", False
+        return True, "", deps_changed
+    finally:
+        if new.exists():
+            mc.rmtree_robust(new)
 
 
 def _update_marker(root: Path, target_commit: str, target_version: Optional[str],
@@ -96,21 +137,9 @@ def _update_marker(root: Path, target_commit: str, target_version: Optional[str]
         logger.debug("could not write managed-comfy update marker: %s", e)
 
 
-def _node_heads(root: Path) -> dict:
-    """``{name: commit}`` of the pinned custom nodes installed under *root*."""
-    from localm.media.managed_comfy_fresh import required_custom_nodes
-    out = {}
-    for node in required_custom_nodes().nodes:
-        d = root / "custom_nodes" / node.name
-        if d.is_dir():
-            head = _rev_parse_head(d)
-            if head:
-                out[node.name] = head
-    return out
-
-
-def _sync_custom_nodes(root: Path, on_progress: ProgressCb, say) -> tuple:
-    """Move every installed pinned custom node to its pinned commit. Returns
+def _sync_custom_nodes(root: Path, on_progress: ProgressCb, say, changes: list) -> tuple:
+    """Move every installed pinned custom node to its pinned commit, appending
+    each :class:`source_archive.TreeChange` to *changes*. Returns
     ``(ok, detail)``."""
     from localm.media.managed_comfy_fresh import required_custom_nodes
     for node in required_custom_nodes().nodes:
@@ -119,13 +148,9 @@ def _sync_custom_nodes(root: Path, on_progress: ProgressCb, say) -> tuple:
         if head is None or head == node.commit:
             continue
         say(f"Moving custom node {node.name} to {node.commit[:12]} (from {head[:12]}) ...")
-        ok, out = _run(["git", "-C", str(d), "fetch", "--quiet", node.repo, node.commit],
-                       on_progress=on_progress, timeout=1800)
-        if ok:
-            ok, out = _run(["git", "-C", str(d), "checkout", "--force", "--quiet",
-                            node.commit], on_progress=on_progress, timeout=300)
+        ok, detail, _ = _replace_source(d, node.repo, node.commit, changes, on_progress)
         if not ok:
-            return False, f"custom node {node.name}: {_tail(out)}"
+            return False, f"custom node {node.name}: {detail}"
     return True, ""
 
 
@@ -185,42 +210,30 @@ def update_managed_comfy(cfg: Optional[dict] = None, *, on_progress: ProgressCb 
     prev_commit = _rev_parse_head(root)
     if prev_commit is None:
         return _result(False, "error",
-                       "The managed ComfyUI has no git history (it was installed via "
-                       "the non-git copy fallback), so a pinned-version update is not "
+                       "The managed ComfyUI has no recorded source commit (it was installed "
+                       "via the non-git copy fallback), so a pinned-version update is not "
                        "possible. Reinstall it: 'localm comfy remove' then "
                        "'localm comfy setup'.")
 
-    # Everything from here on MUTATES the working tree (fetch, checkout, patch, and
-    # the rollback's own checkout+patch). Take the single-flight lock first; a second
+    # Everything from here on MUTATES the working tree (source replace, patch, and
+    # the rollback's own restore+patch). Take the single-flight lock first; a second
     # update is refused honestly rather than interleaved. Read-only refusals above
-    # (not installed, no git history) never take it.
+    # (not installed, no recorded commit) never take it.
     acquired, busy = _acquire_update_lock()
     if not acquired:
         return _result(False, "busy", busy)
-    prev_nodes = _node_heads(root) if reinstall_requirements else {}
+    changes: list = []
 
     def _rollback(reason: str) -> ProvisionResult:
-        """Return the managed source to prev_commit and re-apply the patch set, then
-        report *reason*. Rolls back the git source exactly; if even the rollback
-        checkout fails - OR the checkout succeeds but the localm patch set cannot be
-        re-applied on the restored source - say so rather than report a clean
-        tree."""
+        """Put back every source file the update overwrote or removed (ComfyUI and
+        its custom nodes) and re-apply the patch set, then report *reason*. If a
+        file cannot be put back - OR the localm patch set cannot be re-applied on
+        the restored source - say so rather than report a clean tree."""
         note = ""
-        for name, head in prev_nodes.items():
-            n_ok, n_out = _run(["git", "-C", str(root / "custom_nodes" / name), "checkout",
-                                "--force", "--quiet", head], on_progress=on_progress,
-                               timeout=300)
-            if not n_ok:
-                note += (f" Custom node {name} could not be moved back to {head[:12]} "
-                         f"({_tail(n_out)}).")
-        ok, out = _run(["git", "-C", str(root), "checkout", "--force", "--quiet",
-                        prev_commit], on_progress=on_progress, timeout=300)
-        if ok:
-            # Re-apply the prior patch set on the restored source. The --force checkout
-            # discarded our patch edits (they are re-applied here), so a FAILED re-apply
-            # leaves the install UNPATCHED (the __func__ fix gone, ACE-Step music broken)
-            # while the tree otherwise reads as the prior install. Surface it in the note
-            # instead of reporting a clean rollback.
+        failed_files = []
+        for change in reversed(changes):
+            failed_files += change.rollback()
+        if not failed_files:
             failed = [o for o in apply_patches(root) if not o.ok]
             if failed:
                 detail = "; ".join(f"{o.name}: {o.detail}" for o in failed)
@@ -229,79 +242,41 @@ def update_managed_comfy(cfg: Optional[dict] = None, *, on_progress: ProgressCb 
                         "it with 'localm comfy remove' then 'localm comfy setup'.")
                 _emit(on_progress, f"Rolled back to the previous ComfyUI "
                       f"({prev_commit[:12]}), but re-applying localm's patches failed.")
-            else:
+            elif changes:
                 _emit(on_progress,
                       f"Rolled back to the previous ComfyUI ({prev_commit[:12]}).")
+            for change in changes:
+                change.discard()
         else:
-            note = (f" The rollback to {prev_commit[:12]} ALSO failed ({_tail(out)}); the "
-                    "managed ComfyUI may be in a mixed state - reinstall it with "
-                    "'localm comfy remove' then 'localm comfy setup'.")
+            note = (f" The rollback to {prev_commit[:12]} ALSO failed ({len(failed_files)} "
+                    f"file(s) could not be put back, e.g. {failed_files[0]}); the managed "
+                    "ComfyUI may be in a mixed state - reinstall it with 'localm comfy "
+                    "remove' then 'localm comfy setup'.")
         return _result(False, "error", reason + note)
 
     try:
-        # 1) Make the target commit available (a pin can be newer than the clone; for
-        #    the S2 copy path 'origin' is the user's local dir, so fetch the canonical
-        #    ComfyUI repo explicitly). A fetch failure is not yet destructive.
-        _say(f"Fetching ComfyUI updates from {repo} ...")
-        # ASK FOR THE COMMIT BY NAME. A bare `git fetch <url>` uses the default
-        # refspec, which brings the remote's current branch tip and nothing else -
-        # no tags, and no guarantee the PINNED commit is in the resulting pack.
-        # Such a fetch reports success and the checkout then fails mid-update with
-        #
-        #     fatal: unable to read tree (fe4195f7f427...)
-        #
-        # i.e. git has the commit object but not the tree it points at. GitHub
-        # allows fetching an exact sha (uploadpack.allowReachableSHA1InWant),
-        # which is both precise and smaller than pulling every branch.
-        ok, out = _run(["git", "-C", str(root), "fetch", "--quiet", repo, target],
-                       on_progress=on_progress, timeout=1800)
-        if not ok:
-            # A server that refuses a by-sha fetch is a normal configuration, not
-            # an error - fall back to everything, tags included, so a pin that
-            # lives on a tag or a non-default branch still resolves.
-            ok, out2 = _run(["git", "-C", str(root), "fetch", "--quiet", "--tags",
-                             repo, "+refs/heads/*:refs/remotes/comfy-upstream/*"],
-                            on_progress=on_progress, timeout=1800)
-            out = out + "\n" + out2
-        if not ok:
-            return _rollback(f"Could not fetch ComfyUI updates: {_tail(out)}")
-
-        # PROVE the target is completely present BEFORE anything destructive runs.
-        # `checkout --force` discards our patch edits on its way to failing, so
-        # discovering an incomplete object graph from the checkout itself means
-        # the working tree has already been disturbed. Resolving the commit's own
-        # tree is the cheap check that the pack really arrived.
-        ok, out = _run(["git", "-C", str(root), "rev-parse", "--quiet", "--verify",
-                        f"{target}^{{tree}}"], on_progress=None, timeout=60)
-        if not ok:
-            return _rollback(
-                f"ComfyUI {target[:12]} did not download completely - its contents "
-                f"are missing from the local clone, so the update was not started. "
-                f"Your ComfyUI is untouched. Re-run the update to try again."
-            )
-
-        # Heads-up (before we move) when the pin changes ComfyUI's dependencies.
-        deps_changed = _requirements_changed(root, prev_commit, target)
-
-        # 2) Move to the target pin. --force discards our patch edits to tracked files
-        #    (they are re-applied below); untracked venv/models/custom_nodes are kept.
+        # 1) Move to the target pin: fetch its source archive beside the install and
+        #    write its files over the current ones (venv/models/custom_nodes/outputs
+        #    are not source files and are kept). Nothing changes before the archive
+        #    is downloaded and verified.
+        deps_changed = False
         if target == prev_commit:
             _say(f"Already at the pinned ComfyUI ({target[:12]}); re-verifying patches ...")
         else:
-            _say(f"Checking out ComfyUI {target[:12]} (from {prev_commit[:12]}) ...")
-        ok, out = _run(["git", "-C", str(root), "checkout", "--force", "--quiet", target],
-                       on_progress=on_progress, timeout=300)
-        if not ok:
-            return _rollback(f"Could not check out ComfyUI {target[:12]}: {_tail(out)}")
+            _say(f"Fetching ComfyUI {target[:12]} (from {prev_commit[:12]}) from {repo} ...")
+            ok, detail, deps_changed = _replace_source(root, repo, target, changes,
+                                                       on_progress)
+            if not ok:
+                return _rollback(f"Could not update ComfyUI to {target[:12]}: {detail}")
 
-        # 3) Optional dependency reinstall (opt-in: a partial pip upgrade is not exactly
+        # 2) Optional dependency reinstall (opt-in: a partial pip upgrade is not exactly
         #    rollback-able, so it is off by default and only the source rollback is
         #    guaranteed).
         if reinstall_requirements:
             ok, detail = _sync_pinned_torch(paths.venv_python, on_progress, _say)
             if not ok:
                 return _rollback(f"Installing the pinned PyTorch failed: {detail}")
-            ok, detail = _sync_custom_nodes(root, on_progress, _say)
+            ok, detail = _sync_custom_nodes(root, on_progress, _say, changes)
             if not ok:
                 return _rollback(f"Updating a pinned custom node failed: {detail}")
             req = root / "requirements.txt"
@@ -314,7 +289,7 @@ def update_managed_comfy(cfg: Optional[dict] = None, *, on_progress: ProgressCb 
                     return _rollback(
                         f"Reinstalling ComfyUI requirements failed: {_tail(out)}")
 
-        # 4) Re-apply the localm patch set at the new pin. A FAILED patch (could not be
+        # 3) Re-apply the localm patch set at the new pin. A FAILED patch (could not be
         #    applied safely) rolls back; a SKIPPED patch (upstream already fixed it) is
         #    fine and expected as the pin advances past the bug.
         outcomes = apply_patches(root)
@@ -325,13 +300,15 @@ def update_managed_comfy(cfg: Optional[dict] = None, *, on_progress: ProgressCb 
         for o in outcomes:
             _say(f"patch {o.name}: {o.status} ({o.detail})")
 
-        # 5) Prove it still reads as installed, or roll back.
+        # 4) Prove it still reads as installed, or roll back.
         if not mc.is_managed_comfy_installed():
             return _rollback("After the update the managed ComfyUI does not read as "
                              "installed (main.py or venv missing at the new pin).")
 
-        # 6) Record provenance.
+        # 5) Record provenance.
         _update_marker(root, target, target_version, prev_commit, outcomes)
+        for change in changes:
+            change.discard()
 
         if target == prev_commit:
             msg = (f"localm's managed ComfyUI is already at the pinned ComfyUI "

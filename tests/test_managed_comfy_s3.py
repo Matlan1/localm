@@ -13,10 +13,10 @@ FRESH, hardware-matched ComfyUI under LOCALM_HOME:
     {UnetLoaderGGUFAdvanced -> city96/ComfyUI-GGUF}.
 
 The heavy end-to-end test exercises the FRESH mechanism against a MINIMAL fake:
-a tiny throwaway git "ComfyUI" (stub main.py plus a requirements.txt holding one
-tiny `name @ file://` wheel, NO torch) and a tiny git "custom node", with the
-torch step skipped. It covers clone-at-pin, a fresh venv, pip -r requirements
-and the custom-node clone-at-pin, offline. The multi-GB hardware-matched torch
+a tiny "ComfyUI" source archive (stub main.py plus a requirements.txt holding one
+tiny `name @ file://` wheel, NO torch) and a tiny "custom node" archive, served
+without a network, with the torch step skipped. It covers fetch-at-pin with no
+git program, a fresh venv, pip -r requirements and the custom-node fetch-at-pin. The multi-GB hardware-matched torch
 install is a manual/integration check; the torch-map unit test covers that map.
 """
 
@@ -33,6 +33,8 @@ import pytest
 
 import localm.config as cfg
 from localm.media import managed_comfy as mc
+from localm.media import source_archive
+from tests._source_archives import FakeGitHub
 
 
 # --------------------------------------------------------------------------- #
@@ -49,14 +51,6 @@ def home(tmp_path, monkeypatch):
     monkeypatch.setattr(cfg, "REGISTRY_FILE", h / "registry.json")
     monkeypatch.delenv("FLUX_API_URL", raising=False)
     return h
-
-
-def _git_available() -> bool:
-    try:
-        subprocess.run(["git", "--version"], capture_output=True, timeout=10)
-        return True
-    except Exception:
-        return False
 
 
 def _venv_python(venv_dir: Path) -> Path:
@@ -85,29 +79,6 @@ def _build_tiny_wheel(dest_dir: Path, name: str, version: str) -> Path:
         for arcname, content in files.items():
             z.writestr(arcname, content)
     return whl
-
-
-def _make_git_repo(workdir: Path, files: dict) -> str:
-    """Write *files* into *workdir*, git-init + commit, return the HEAD sha. Uses a
-    hermetic git config (no user global/system config, gpg off)."""
-    workdir.mkdir(parents=True, exist_ok=True)
-    for rel, content in files.items():
-        p = workdir / rel
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content, encoding="utf-8")
-    env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
-    ident = ["-c", "user.email=s3@localhost", "-c", "user.name=s3-test",
-             "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"]
-
-    def _git(*args):
-        subprocess.run(["git", *ident, *args], cwd=str(workdir), env=env,
-                       check=True, capture_output=True, text=True)
-
-    _git("init")
-    _git("add", "-A")
-    _git("commit", "-m", "init")
-    return subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(workdir),
-                          capture_output=True, text=True, check=True).stdout.strip()
 
 
 def _freeze(venv_python: Path) -> list:
@@ -400,30 +371,27 @@ def test_shipped_workflow_files_ignores_personal_overrides(tmp_path):
 # =========================================================================== #
 @pytest.fixture(scope="session")
 def fake_fresh_sources(tmp_path_factory):
-    """A minimal fake 'ComfyUI' git repo (stub main.py + requirements.txt holding one
-    tiny `name @ file://` wheel) and a tiny fake custom-node git repo. Built once."""
-    if not _git_available():
-        pytest.skip("git not on PATH (S3 fresh path clones ComfyUI + custom nodes)")
+    """A minimal fake 'ComfyUI' source archive (stub main.py + requirements.txt
+    holding one tiny `name @ file://` wheel) and a tiny fake custom-node archive.
+    Built once; each test serves them with ``hub.install(monkeypatch)``."""
     root = tmp_path_factory.mktemp("fresh_src")
+    hub = FakeGitHub(root / "hub")
 
     pkg_name, pkg_version = "localms3pkg", "0.0.1"
     whl = _build_tiny_wheel(root, pkg_name, pkg_version)
 
-    comfy = root / "ComfyUI"
-    comfy_commit = _make_git_repo(comfy, {
+    comfy, comfy_commit = hub.add("fake", "ComfyUI", {
         "main.py": "# fake ComfyUI entry point\nprint('comfy')\n",
         "requirements.txt": f"{pkg_name} @ {whl.as_uri()}\n",
         ".gitignore": "venv/\n.venv/\nmodels/\ncustom_nodes/\noutput/\n",
     })
-
-    node = root / "FakeGGUFNode"
-    node_commit = _make_git_repo(node, {
+    node, node_commit = hub.add("fake", "FakeGGUFNode", {
         "__init__.py": "# fake custom node\nNODE_CLASS_MAPPINGS = {}\n",
     })
 
     return types.SimpleNamespace(
-        comfy=comfy, comfy_commit=comfy_commit, node=node, node_commit=node_commit,
-        pkg_name=pkg_name, pkg_version=pkg_version)
+        hub=hub, comfy=comfy, comfy_commit=comfy_commit, node=node,
+        node_commit=node_commit, pkg_name=pkg_name, pkg_version=pkg_version)
 
 
 def _yaml_base_paths(yaml_path: Path) -> set:
@@ -434,12 +402,13 @@ def _yaml_base_paths(yaml_path: Path) -> set:
 
 
 def test_provision_fresh_end_to_end(home, fake_fresh_sources, monkeypatch):
-    """Fresh install against the minimal fake: clone at the pinned commit, a fresh
-    localm venv, ComfyUI requirements installed, the pinned custom node cloned, and
+    """Fresh install against the minimal fake: fetch at the pinned commit, a fresh
+    localm venv, ComfyUI requirements installed, the pinned custom node fetched, and
     routing now targeting the managed instance. The torch install is SKIPPED (the
     map is unit-tested separately); everything else runs for real and offline."""
     from localm.media import managed_comfy_fresh as fresh
     monkeypatch.setenv("PIP_NO_INDEX", "1")
+    hub = fake_fresh_sources.hub.install(monkeypatch)
 
     node_pin = fresh.CustomNodePin(
         name="FakeGGUFNode", repo=str(fake_fresh_sources.node),
@@ -453,21 +422,19 @@ def test_provision_fresh_end_to_end(home, fake_fresh_sources, monkeypatch):
     assert result.ok, result.message
 
     paths = mc.managed_comfy_paths()
-    # 1) ComfyUI checkout at the pinned commit.
+    # 1) ComfyUI source at the pinned commit, fetched as an archive.
     assert paths.main_py.is_file()
-    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(paths.root),
-                          capture_output=True, text=True, check=True).stdout.strip()
-    assert head == fake_fresh_sources.comfy_commit
+    assert source_archive.tree_commit(paths.root) == fake_fresh_sources.comfy_commit
+    assert not (paths.root / ".git").exists()
+    assert len(hub.requested) == 2
     # 2) A fresh localm venv.
     assert paths.venv_python.is_file()
     # 3) ComfyUI requirements installed (the tiny wheel is present -> pip -r ran).
     assert any(fake_fresh_sources.pkg_name in ln for ln in _freeze(paths.venv_python))
-    # 4) The derived custom node cloned at its pin.
+    # 4) The derived custom node fetched at its pin.
     node_dir = paths.root / "custom_nodes" / "FakeGGUFNode"
     assert (node_dir / "__init__.py").is_file()
-    node_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(node_dir),
-                               capture_output=True, text=True, check=True).stdout.strip()
-    assert node_head == fake_fresh_sources.node_commit
+    assert source_archive.tree_commit(node_dir) == fake_fresh_sources.node_commit
     # 5) extra_model_paths.yaml written, pointing at localm's managed models dir.
     assert paths.extra_model_paths.is_file()
     assert str(paths.models_dir) in _yaml_base_paths(paths.extra_model_paths)
@@ -484,9 +451,11 @@ def test_provision_fresh_end_to_end(home, fake_fresh_sources, monkeypatch):
     assert target.workdir == str(paths.root)
 
 
-def test_provision_fresh_refuses_when_managed_dir_exists(home, fake_fresh_sources):
+def test_provision_fresh_refuses_when_managed_dir_exists(home, fake_fresh_sources,
+                                                        monkeypatch):
     """A pre-existing managed dir is never silently overwritten (matches S2)."""
     from localm.media import managed_comfy_fresh as fresh
+    fake_fresh_sources.hub.install(monkeypatch)
     paths = mc.managed_comfy_paths()
     paths.root.mkdir(parents=True)
     (paths.root / "sentinel").write_text("keep me\n", encoding="utf-8")
@@ -499,11 +468,12 @@ def test_provision_fresh_refuses_when_managed_dir_exists(home, fake_fresh_source
     assert (paths.root / "sentinel").is_file()   # untouched
 
 
-def test_provision_fresh_rolls_back_on_clone_failure(home):
-    """A failed clone leaves NOTHING that reads as installed."""
+def test_provision_fresh_rolls_back_on_clone_failure(home, tmp_path, monkeypatch):
+    """A failed source fetch leaves NOTHING that reads as installed."""
     from localm.media import managed_comfy_fresh as fresh
+    FakeGitHub(tmp_path / "hub").install(monkeypatch)
     result = fresh.provision_fresh(
-        comfyui_repo=str(home / "does-not-exist-repo"),
+        comfyui_repo="https://github.com/fake/does-not-exist.git",
         comfyui_commit="0" * 40, custom_nodes=[], install_torch=False)
     assert result.ok is False
     assert mc.is_managed_comfy_installed() is False

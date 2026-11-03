@@ -16,7 +16,8 @@ would put a window on the desktop.
 
 A refusal fails the test at the call with ``pytest.fail``, whose exception
 derives from ``BaseException``, so an ``except Exception`` in the code under
-test does not swallow it.
+test does not swallow it. In a process without pytest a refusal raises
+``RuntimeError``.
 """
 
 from __future__ import annotations
@@ -28,8 +29,6 @@ import sys
 import threading
 import traceback
 import webbrowser
-
-import pytest
 
 CREATE_NO_WINDOW = 0x08000000
 CREATE_NEW_CONSOLE = 0x00000010
@@ -128,9 +127,15 @@ def _origin() -> str:
 
 def refuse(reason: str, what: str) -> None:
     """Fail the current test with ``pytest.fail``, naming *reason*, *what* and
-    the call site."""
-    pytest.fail("BLOCKED by tests/_no_window.py: " + reason + "\n    " + what
-                + "\n    from " + _origin() + "\n" + ADVICE, pytrace=False)
+    the call site; raise ``RuntimeError`` with the same text where pytest is
+    not importable."""
+    message = ("BLOCKED by tests/_no_window.py: " + reason + "\n    " + what
+               + "\n    from " + _origin() + "\n" + ADVICE)
+    try:
+        import pytest
+    except ImportError:
+        raise RuntimeError(message) from None
+    pytest.fail(message, pytrace=False)
 
 
 _real_create = None

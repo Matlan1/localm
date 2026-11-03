@@ -770,9 +770,9 @@ def register(app: FastAPI, ctx) -> None:
         # embeds via the dedicated small embedder, so only a can_embed backend needs
         # a real load. resolved_model equals req.model when the client named one, and
         # is None otherwise.
-        engine = await _hs.get_engine(resolved_model, load=False)
+        engine = await _hs.get_engine(resolved_model, load=False, allow_embedding=True)
         if getattr(getattr(engine, "_backend", None), "can_embed", True):
-            engine = await _hs.get_engine(resolved_model)
+            engine = await _hs.get_engine(resolved_model, allow_embedding=True)
         _touch_activity(engine.display_name)
 
         # encoding_format: "float" returns plain JSON arrays, "base64" returns each

@@ -92,7 +92,6 @@ _TORCH_HELD_GLOB = "_rocm_sdk_*"
 
 # Seconds a stopped ComfyUI process may take to exit.
 _STOP_WAIT_S = 10.0
-_GIT_TIMEOUT_S = 300
 _ASK_TIMEOUT_S = 300
 
 
@@ -427,23 +426,11 @@ def _plan_tagged(name: str, staged: Optional[dict], installed_pin: Optional[dict
     return out
 
 
-def _git(root: Path, *args, timeout: float = _GIT_TIMEOUT_S) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True,
-                          encoding="utf-8", errors="replace", timeout=timeout,
-                          stdin=subprocess.DEVNULL)
-
-
-def _git_bytes(root: Path, *args) -> subprocess.CompletedProcess[bytes]:
-    return subprocess.run(["git", "-C", str(root), *args], capture_output=True,
-                          timeout=_GIT_TIMEOUT_S, stdin=subprocess.DEVNULL)
-
-
 def _git_head(root: Path) -> Optional[str]:
-    try:
-        r = _git(root, "rev-parse", "HEAD", timeout=60)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
+    """The commit of the source tree at *root*
+    (:func:`localm.media.source_archive.tree_commit`), or None."""
+    from localm.media import source_archive
+    return source_archive.tree_commit(root)
 
 
 def comfy_root(home=None) -> Path:
@@ -504,7 +491,7 @@ def _plan_comfy(staged: Optional[dict], home, tree: Path, deep: bool) -> dict:
         return out
     if _git_head(root) is None:
         if head != staged["commit"]:
-            out["note"] = (f"the managed ComfyUI has no git history, so it was left as it "
+            out["note"] = (f"the managed ComfyUI has no recorded source commit, so it was left as it "
                            f"is; this release ships {shown} (to install it: localm comfy "
                            "remove, then localm comfy setup)")
         return out
@@ -1013,39 +1000,114 @@ def _restore_venv(copy: Path, venv: Path) -> list:
     return [f"{venv}: " + "; ".join(errors[:5])] if errors else []
 
 
-def _snapshot_comfy(root: Path, dest: Path) -> dict:
-    """Keep the managed ComfyUI's commit, its edits to tracked files (the localm
-    patch set), its marker, its custom nodes' commits and its venv. Raises
-    OSError when any of them cannot be read or written."""
+def _snapshot_tree(root: Path, dest: Path) -> dict:
+    """Copy the source files of the tree at *root* (``source_archive.tree_files``,
+    as they are on disk, the localm patch set included) and its source record into
+    *dest*. Returns ``{"commit", "files"}``. Raises OSError when the tree's files
+    cannot be read or a copy fails."""
+    from localm.media import source_archive
     head = _git_head(root)
-    if head is None:
-        raise OSError(f"could not read the commit of the managed ComfyUI at {root}")
-    try:
-        r = _git_bytes(root, "diff", "--binary", "HEAD")
-    except (OSError, subprocess.SubprocessError) as e:
-        raise OSError(f"could not read the edits of the managed ComfyUI: {e}") from None
-    if r.returncode != 0:
-        raise OSError("could not read the edits of the managed ComfyUI: "
-                      + r.stderr.decode("utf-8", "replace").strip()[-300:])
-    (dest / "comfy.patch").write_bytes(r.stdout)
+    files = source_archive.tree_files(root)
+    if head is None or files is None:
+        raise OSError(f"could not read the source tree of {root}")
+    kept = []
+    for rel in files:
+        src = root / rel
+        if src.is_file():
+            out = dest / rel
+            out.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, out)
+            kept.append(rel)
+    rec = source_archive.read_record(root) or {}
+    source_archive.write_record(dest, rec.get("repo") or str(root), head, kept)
+    return {"commit": head, "files": kept}
+
+
+def _snapshot_comfy(root: Path, dest: Path) -> dict:
+    """Keep the managed ComfyUI's source files (with the localm patch set), its
+    marker, its custom nodes' source files and its venv. Raises OSError when any
+    of them cannot be read or written."""
+    src = _snapshot_tree(root, dest / "comfy-src")
     shutil.copy2(root / _COMFY_MARKER, dest / "comfy-marker.json")
     nodes = {}
     nodes_dir = root / "custom_nodes"
     if nodes_dir.is_dir():
         for d in sorted(nodes_dir.iterdir()):
-            if d.is_dir() and (d / ".git").exists():
-                h = _git_head(d)
-                if h:
-                    nodes[d.name] = h
+            if d.is_dir() and _git_head(d):
+                nodes[d.name] = _snapshot_tree(d, dest / "comfy-nodes" / d.name)["commit"]
     venv = _comfy_venv(root)
     copy = _venv_copy_path(venv, dest)
     _clone_venv(venv, copy, dest)
-    return {"commit": head, "nodes": nodes, "venv_copy": str(copy)}
+    return {"commit": src["commit"], "nodes": nodes, "venv_copy": str(copy)}
+
+
+def _restore_tree(kept: Path, root: Path) -> list:
+    """Make the source files of the tree at *root* those kept in *kept* by
+    :func:`_snapshot_tree`. Returns the failures."""
+    from localm.media import source_archive
+    if source_archive.read_record(kept) is None:
+        return [f"{root}: the kept copy of its source at {kept} cannot be read"]
+    backup = root.parent / f".{root.name}-restore-{os.getpid()}"
+    shutil.rmtree(backup, ignore_errors=True)
+    try:
+        change = source_archive.apply_tree(kept, root, source_archive.tree_files(root), backup)
+    except OSError as e:
+        return [f"{root}: {e}"]
+    change.discard()
+    return []
+
+
+def _restore_fetched(repo: str, commit: str, root: Path) -> list:
+    """Make the source files of the tree at *root* those of *commit* of the
+    GitHub repository *repo*, fetched as a source archive. Returns the
+    failures."""
+    from localm.media import managed_comfy as mc
+    from localm.media import source_archive
+    staging = root.parent / f".{root.name}-fetch-{os.getpid()}"
+    if staging.exists():
+        mc.rmtree_robust(staging)
+    try:
+        try:
+            source_archive.fetch_tree(repo, commit, staging)
+        except (source_archive.ArchiveError, OSError) as e:
+            return [f"{root}: could not fetch {commit[:12]}: {e}"]
+        return _restore_tree(staging, root)
+    finally:
+        if staging.exists():
+            mc.rmtree_robust(staging)
+
+
+def _restore_comfy_legacy(root: Path, info: dict) -> list:
+    """Put back the source of a managed ComfyUI kept by an older localm (its
+    commit and its custom nodes' commits, no copy of the files): each tree is
+    fetched at its commit and written over the current one, then localm's patch
+    set is applied again. Returns the failures."""
+    from localm.media import managed_comfy_fresh as fresh
+    from localm.media import source_archive
+    from localm.media.comfy_patches import apply_patches
+    errors = [f"managed ComfyUI: {e}"
+              for e in _restore_fetched(fresh.COMFYUI_REPO, info["commit"], root)]
+    if errors:
+        return errors
+    repos = {n.name: n.repo for n in fresh.required_custom_nodes().nodes}
+    for name, commit in (info.get("nodes") or {}).items():
+        node = root / "custom_nodes" / name
+        if not node.is_dir() or source_archive.tree_commit(node) == commit:
+            continue
+        if name not in repos:
+            errors.append(f"managed ComfyUI: custom node {name}: localm does not know where "
+                          f"to fetch {str(commit)[:12]} from")
+            continue
+        errors += [f"managed ComfyUI: custom node {name}: {e}"
+                   for e in _restore_fetched(repos[name], commit, node)]
+    errors += [f"managed ComfyUI: patch {o.name}: {o.detail}"
+               for o in apply_patches(root) if not o.ok]
+    return errors
 
 
 def _restore_comfy(root: Path, src: Path, info: dict, say: Callable) -> list:
-    """Put the managed ComfyUI kept in *src* back at *root*: its commit, edits,
-    marker, custom nodes' commits and venv. Returns the failures."""
+    """Put the managed ComfyUI kept in *src* back at *root*: its source files,
+    marker, custom nodes' source files and venv. Returns the failures."""
     from localm.media import managed_comfy as mc
     errors = []
     left = _stop_comfy(root, say)
@@ -1057,26 +1119,18 @@ def _restore_comfy(root: Path, src: Path, info: dict, say: Callable) -> list:
         return [f"the managed ComfyUI was not restored: {busy}"]
     try:
         say(f"Restoring the managed ComfyUI ({info['commit'][:12]})...")
-        try:
-            r = _git(root, "checkout", "--force", "--quiet", info["commit"])
-            if r.returncode != 0:
-                return [f"managed ComfyUI: could not check out {info['commit'][:12]}: "
-                        + r.stderr.strip()[-300:]]
-            patch = src / "comfy.patch"
-            if patch.is_file() and patch.stat().st_size:
-                r = _git(root, "apply", "--binary", "--whitespace=nowarn", str(patch))
-                if r.returncode != 0:
-                    errors.append("managed ComfyUI: could not re-apply its edits: "
-                                  + r.stderr.strip()[-300:])
-            for name, head in (info.get("nodes") or {}).items():
-                node = root / "custom_nodes" / name
-                if node.is_dir() and _git_head(node) != head:
-                    r = _git(node, "checkout", "--force", "--quiet", head)
-                    if r.returncode != 0:
-                        errors.append(f"managed ComfyUI: custom node {name}: "
-                                      + r.stderr.strip()[-300:])
-        except (OSError, subprocess.SubprocessError) as e:
-            return [f"managed ComfyUI: could not run git: {e}"]
+        legacy = not (src / "comfy-src").exists() and (src / "comfy.patch").exists()
+        if legacy:
+            errors += _restore_comfy_legacy(root, info)
+        else:
+            errors += [f"managed ComfyUI: {e}" for e in _restore_tree(src / "comfy-src", root)]
+        if errors:
+            return errors
+        for name in ({} if legacy else (info.get("nodes") or {})):
+            node, kept = root / "custom_nodes" / name, src / "comfy-nodes" / name
+            if node.is_dir() and kept.is_dir():
+                errors += [f"managed ComfyUI: custom node {name}: {e}"
+                           for e in _restore_tree(kept, node)]
         try:
             shutil.copy2(src / "comfy-marker.json", root / _COMFY_MARKER)
         except OSError as e:
@@ -1160,7 +1214,8 @@ def _drop_one(src: Path, name: str, info: Optional[dict]) -> None:
     elif (info or {}).get("venv_copy"):
         _warn("update: not removing %s: it is not a venv copy of %s",
               (info or {}).get("venv_copy"), src)
-    extra = {"uv": [_KEPT_UV], "comfyui": ["comfy.patch", "comfy-marker.json"]}.get(name, [])
+    extra = {"uv": [_KEPT_UV], "comfyui": ["comfy-src", "comfy-nodes", "comfy.patch",
+                                                        "comfy-marker.json"]}.get(name, [])
     for rel in extra:
         p = src / rel
         try:

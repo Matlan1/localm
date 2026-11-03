@@ -231,6 +231,15 @@ function activityAge(op) {
   return op.status === "running" ? d : `${d} ago`;
 }
 
+// "2 running", "1 running, 1 queued" or "2 queued" for the running-status
+// *ops*, counting an op still waiting its turn as queued.
+function activityCountText(ops) {
+  const queued = ops.filter((op) => activityState(op) === "queued").length;
+  const active = ops.length - queued;
+  return [active ? `${active} running` : "", queued ? `${queued} queued` : ""]
+    .filter(Boolean).join(", ");
+}
+
 export function renderActivityPill(ops) {
   const pill = $("activity-pill");
   if (!pill) return;
@@ -262,7 +271,7 @@ export function renderActivityPill(ops) {
     pill.classList.remove("st-running");
     pill.title = "Could not reach the server for an activity update - showing the last known state.";
     const label = running.length === 1 ? activityLabel(running[0])
-      : running.length > 1 ? `${running.length} running` : null;
+      : running.length > 1 ? activityCountText(running) : null;
     pill.textContent = label ? `${label} - status unknown` : "Status unknown";
     return;
   }
@@ -275,7 +284,7 @@ export function renderActivityPill(ops) {
     pill.textContent = activityLabel(op) +
       (activityState(op) === "queued" ? " - queued" : pct);
   } else {
-    pill.textContent = `${running.length} running`;
+    pill.textContent = activityCountText(running);
   }
 }
 
@@ -1105,11 +1114,11 @@ function _showServedModel() {
   if (modelSelect.value !== shown) modelSelect.value = "";
 }
 
-async function _postLoad(model, force) {
+async function _postLoad(model, force, asChat = false) {
   const r = await fetch("/api/models/load", {
     method: "POST",
     headers: authHeaders(),
-    body: JSON.stringify(force ? { model, force: true } : { model }),
+    body: JSON.stringify({ model, ...(force ? { force: true } : {}), ...(asChat ? { as_chat: true } : {}) }),
   });
   if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
   return await r.json().catch(() => ({ status: "loaded", model }));
@@ -1144,8 +1153,10 @@ export async function switchModel(model, { local = false } = {}) {
     setStatus("busy", t("sidebar.status.loading", { model }));
     data = await _postLoad(model, false);
     if (data.status === "confirm_required") {
+      const notChat = data.reason === "not_chat_model";
       const confirmed = await confirmDangerAsync(
-        t("models.switch.confirmTitle"), data.detail, t("models.switch.confirmLabel"));
+        t(notChat ? "models.notChat.title" : "models.switch.confirmTitle"), data.detail,
+        t(notChat ? "models.notChat.confirmLabel" : "models.switch.confirmLabel"));
       if (!confirmed) {
         setStatus("ok", modelCache.active || t("sidebar.status.noModel"));
         _showServedModel();
@@ -1153,7 +1164,7 @@ export async function switchModel(model, { local = false } = {}) {
         return { status: "cancelled", reason: "declined by user", model };
       }
       setStatus("busy", t("sidebar.status.loading", { model }));
-      data = await _postLoad(model, true);
+      data = notChat ? await _postLoad(model, false, true) : await _postLoad(model, true);
     }
   } catch (e) {
     // A failed load ends the busy pill and re-reads the server's model state.

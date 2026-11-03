@@ -332,7 +332,7 @@ def _install_runtime_wheel(pkg_dir: Path) -> bool:
     if not _net_allowed():
         env = {**env, "UV_OFFLINE": "1", "PIP_NO_INDEX": "1"}
     last_err = ""
-    uv = uv_tool.find_uv(uv_tool.install_root())
+    uv = uv_tool.own_uv(uv_tool.install_root())
     commands = [[sys.executable, "-m", "pip", "install", "-e", str(pkg_dir)]]
     if uv:
         commands.insert(0, [uv, "pip", "install", "-e", str(pkg_dir)])

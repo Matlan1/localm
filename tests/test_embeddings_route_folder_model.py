@@ -40,8 +40,9 @@ def test_a_registered_folder_embedder_is_served_by_its_own_engine(app_client, mo
         display_name="bge-st", _backend=types.SimpleNamespace(can_embed=True),
         embed=lambda texts: [[1.0, 2.0] for _ in texts], count_tokens=lambda text: 3)
 
-    async def fake_get_engine(name, load=True):
+    async def fake_get_engine(name, load=True, allow_embedding=False):
         assert name == "bge-st"
+        assert allow_embedding is True
         return engine
 
     monkeypatch.setattr(hs, "get_engine", fake_get_engine)
@@ -107,7 +108,8 @@ def test_a_folder_named_differently_from_the_pinned_embedder_is_still_served_by_
         display_name="bge-st", _backend=types.SimpleNamespace(can_embed=True),
         embed=lambda texts: [[1.0, 2.0] for _ in texts], count_tokens=lambda text: 3)
 
-    async def fake_get_engine(name, load=True):
+    async def fake_get_engine(name, load=True, allow_embedding=False):
+        assert allow_embedding is True
         return engine
 
     monkeypatch.setattr(hs, "get_engine", fake_get_engine)
@@ -162,7 +164,8 @@ def test_the_folder_check_runs_off_the_event_loop(app_client, monkeypatch, tmp_p
         display_name="bge-st", _backend=types.SimpleNamespace(can_embed=True),
         embed=lambda texts: [[1.0, 2.0] for _ in texts], count_tokens=lambda text: 3)
 
-    async def fake_get_engine(name, load=True):
+    async def fake_get_engine(name, load=True, allow_embedding=False):
+        assert allow_embedding is True
         return engine
 
     monkeypatch.setattr(hs, "get_engine", fake_get_engine)

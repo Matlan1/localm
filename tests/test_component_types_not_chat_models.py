@@ -39,6 +39,10 @@ def _registry():
     reg = {"aaa-working": {"path": "models/aaa-working.gguf", "source": "local",
                            "model_type": "llm"},
            "emb": {"path": "models/emb.gguf", "model_type": "embedding"},
+           "emb-rerank": {"path": "models/emb-rerank.gguf", "model_type": "embedding",
+                          "architecture": "qwen3", "reranker": True},
+           "emb-t5": {"path": "models/emb-t5.gguf", "model_type": "embedding",
+                      "architecture": "t5encoder", "reranker": False},
            "unk": {"path": "models/unk.gguf", "model_type": "unknown"},
            "proj": {"path": "models/proj-mmproj.gguf", "model_type": "mmproj"}}
     for kind in COMPONENT_TYPES:
@@ -158,7 +162,7 @@ def test_gui_load_route_refuses_a_component_with_422(monkeypatch, kind):
 def test_v1_models_lists_what_v1_accepts_by_name(served):
     client, _ = served
     ids = {m["id"] for m in client.get("/v1/models").json()["data"]}
-    assert ids == {"aaa-working", "emb", _name("tts")}
+    assert ids == {"aaa-working", "emb", "emb-rerank", _name("tts")}
 
 
 def test_the_refused_and_unlisted_type_sets():
@@ -231,16 +235,144 @@ def test_an_unknown_typed_file_is_refused_unless_a_plugin_backend_claims_it(
     assert chat_load_refusal("u", reg) is None
 
 
-@pytest.mark.parametrize("name", ["aaa-working", "emb", "unk", "not-registered"])
+@pytest.mark.parametrize("name", ["aaa-working", "unk", "not-registered"])
 def test_loadable_types_and_unknown_names_are_not_refused(name):
     assert chat_load_refusal(name, _registry()) is None
 
 
-def test_embedding_and_unknown_entries_still_load(served):
+def test_unknown_entries_still_load(served):
     client, _ = served
-    for name in ("emb", "unk"):
-        r = client.post("/v1/models/load", params={"model": name})
-        assert r.status_code == 200 and r.json()["status"] == "loaded"
+    r = client.post("/v1/models/load", params={"model": "unk"})
+    assert r.status_code == 200 and r.json()["status"] == "loaded"
+
+
+EMBEDDING_ENTRIES = {
+    "emb": "an embedding model",
+    "emb-rerank": "a reranker",
+    "emb-t5": "a text encoder",
+}
+
+
+@pytest.mark.parametrize("name", list(EMBEDDING_ENTRIES))
+@pytest.mark.parametrize("stream", [False, True])
+def test_chat_naming_an_embedding_entry_is_refused_and_keeps_the_loaded_model(
+        served, name, stream):
+    client, engines = served
+    r = client.post("/v1/chat/completions", json={
+        "model": name, "stream": stream,
+        "messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 422
+    assert EMBEDDING_ENTRIES[name] in r.json()["detail"]
+    _assert_untouched(engines, name)
+
+
+@pytest.mark.parametrize("name", list(EMBEDDING_ENTRIES))
+def test_models_load_naming_an_embedding_entry_is_refused(served, name):
+    client, engines = served
+    r = client.post("/v1/models/load", params={"model": name})
+    assert r.status_code == 422
+    assert EMBEDDING_ENTRIES[name] in r.json()["detail"]
+    _assert_untouched(engines, name)
+
+
+@pytest.mark.parametrize("name", list(EMBEDDING_ENTRIES))
+def test_switch_engine_refuses_an_embedding_entry_before_cancelling_a_pending_switch(
+        served, name):
+    _, engines = served
+    hs._switch_desired = "aaa-working"
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(hs.switch_engine(name, hs._engine_factory))
+    assert exc.value.status_code == 422
+    assert hs._switch_desired == "aaa-working"
+    _assert_untouched(engines, name)
+
+
+@pytest.mark.parametrize("name", list(EMBEDDING_ENTRIES))
+def test_get_engine_refuses_an_embedding_entry_unless_embeddings_asks(served, name):
+    _, engines = served
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(hs.get_engine(name, load=False))
+    assert exc.value.status_code == 422
+    _assert_untouched(engines, name)
+    engine = asyncio.run(hs.get_engine(name, load=False, allow_embedding=True))
+    assert engine is engines[name]
+
+
+GUI_PROMPT_WORDS = {
+    "emb": "an embedding model",
+    "emb-rerank": "a reranker",
+    "emb-t5": "a text encoder for image, video and music generation",
+}
+
+
+def _gui_client(monkeypatch):
+    reg = _registry()
+    monkeypatch.setattr("localm.config.load_registry", lambda: reg)
+    switched = []
+    retyped = []
+
+    async def switch_model(model, **kw):
+        switched.append(model)
+        return {"status": "loaded", "model": model}
+
+    monkeypatch.setattr("localm.model_manager.registry.set_model_type",
+                        lambda name, kind: retyped.append((name, kind)) or True)
+    app = FastAPI()
+    attach_gui(app, self_url="http://127.0.0.1:9/v1",
+               switch_model=switch_model, active_model=lambda: "aaa-working")
+    return TestClient(app), switched, retyped
+
+
+@pytest.mark.parametrize("name", list(EMBEDDING_ENTRIES))
+def test_gui_load_route_asks_before_loading_an_embedding_entry(monkeypatch, name):
+    client, switched, retyped = _gui_client(monkeypatch)
+    with client:
+        r = client.post("/api/models/load", json={"model": name})
+    body = r.json()
+    assert r.status_code == 200
+    assert body["status"] == "confirm_required" and body["reason"] == "not_chat_model"
+    assert GUI_PROMPT_WORDS[name] in body["detail"] and "gibberish" in body["detail"]
+    assert switched == [] and retyped == []
+
+
+@pytest.mark.parametrize("name", list(EMBEDDING_ENTRIES))
+def test_gui_load_route_loads_an_embedding_entry_as_chat_once_confirmed(monkeypatch, name):
+    client, switched, retyped = _gui_client(monkeypatch)
+    with client:
+        r = client.post("/api/models/load", json={"model": name, "as_chat": True})
+    assert r.status_code == 200 and r.json()["status"] == "loaded"
+    assert retyped == [(name, "llm")]
+    assert switched == [name]
+
+
+def test_gui_load_route_does_not_load_when_marking_as_chat_fails(monkeypatch):
+    client, switched, _ = _gui_client(monkeypatch)
+    monkeypatch.setattr("localm.model_manager.registry.set_model_type",
+                        lambda name, kind: False)
+    with client:
+        r = client.post("/api/models/load", json={"model": "emb", "as_chat": True})
+    assert r.status_code == 500 and switched == []
+
+
+def test_embedding_refusals_name_the_route_that_serves_the_entry():
+    reg = _registry()
+    assert "/v1/embeddings" in chat_load_refusal("emb", reg)
+    for name in EMBEDDING_ENTRIES:
+        assert f"localm set-type {name} llm" in chat_load_refusal(name, reg)
+    assert "/v1/rerank" in chat_load_refusal("emb-rerank", reg)
+    assert "image, video or music generation" in chat_load_refusal("emb-t5", reg)
+    for name in EMBEDDING_ENTRIES:
+        assert chat_load_refusal(name, reg, allow_embedding=True) is None
+
+
+def test_a_media_text_encoder_is_not_offered_but_embedding_models_and_rerankers_are(served):
+    client, _ = served
+    ids = {m["id"] for m in client.get("/v1/models").json()["data"]}
+    assert {"emb", "emb-rerank"} <= ids and "emb-t5" not in ids
+    tags = {m["name"] for m in client.get("/api/tags").json()["models"]}
+    assert {"emb", "emb-rerank"} <= tags and "emb-t5" not in tags
+    assert is_unlisted_entry({"model_type": "embedding", "architecture": "t5encoder"}) is True
+    assert is_unlisted_entry({"model_type": "embedding", "architecture": "bert"}) is False
 
 
 @pytest.mark.parametrize("bad", [None, "x", 5, [], {"model_type": None},

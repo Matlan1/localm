@@ -388,7 +388,7 @@ def chat_load(fake_gpu, no_peers, monkeypatch):
     itself against, in order."""
     events = []
 
-    async def _not_refused(name, registry=None):
+    async def _not_refused(name, registry=None, *, allow_embedding=False):
         return None
 
     monkeypatch.setattr(hs, "_refuse_non_chat_model", _not_refused)

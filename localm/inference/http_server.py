@@ -574,18 +574,22 @@ _BUSY_MEDIA_POLL_S = 0.25
 _VICTIM_RELEASE_EXTRA_WAIT_S = 25.0
 
 
-async def _refuse_non_chat_model(name: str, registry: dict | None = None) -> None:
+async def _refuse_non_chat_model(name: str, registry: dict | None = None, *,
+                                 allow_embedding: bool = False) -> None:
     """Raise HTTPException 422 when *name* is a registered entry the chat engine
     can never load (a vision projector, an image or video component, a
-    text-to-speech model, an unknown-typed file no backend runs). Runs before
-    any eviction or cancellation, so the resident model stays loaded. The check
-    of an unknown-typed entry reads the file system on a worker thread.
-    *registry* defaults to the current registry."""
+    text-to-speech model, an embedding model, a reranker, a media text encoder,
+    an unknown-typed file no backend runs). Runs before any eviction or
+    cancellation, so the resident model stays loaded. The check of an
+    unknown-typed or embedding-typed entry reads the file system on a worker
+    thread. *registry* defaults to the current registry. *allow_embedding*
+    admits an embedding-typed entry (/v1/embeddings loading a Hugging Face
+    embedding folder)."""
     from localm.model_manager.registry import chat_load_refusal_off_loop
     if registry is None:
         from localm.config import load_registry
         registry = load_registry()
-    msg = await chat_load_refusal_off_loop(name, registry)
+    msg = await chat_load_refusal_off_loop(name, registry, allow_embedding=allow_embedding)
     if msg is not None:
         raise HTTPException(422, msg)
 
@@ -660,8 +664,11 @@ def _load_for_switch(engine, reading: Optional[_FirstPassReading]) -> None:
 async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool = True,
                         force: bool = False, activate: bool = True,
                         skip_if_latched: bool = False,
-                        on_status: Optional[Callable[[str], None]] = None) -> dict:
+                        on_status: Optional[Callable[[str], None]] = None,
+                        allow_embedding: bool = False) -> dict:
     """Make model *name* resident and, with *activate*, the active model.
+    An embedding-typed *name* (an embedding model, a reranker, a media text
+    encoder) is refused with a 422 unless *allow_embedding*.
 
     *make_engine*, when not None, becomes the engine factory used to build an
     engine for a name not registered in ``_engines``. *on_active* is called
@@ -721,7 +728,7 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
     """
     global _engine_factory, _switch_desired
 
-    await _refuse_non_chat_model(name)
+    await _refuse_non_chat_model(name, allow_embedding=allow_embedding)
 
     if preempt:
         _switch_desired = name
@@ -1535,9 +1542,13 @@ class VictimRelease(NamedTuple):
     seconds: float
     expected: bool = True
     extended: bool = False
+    held_nothing: bool = False
 
     def describe(self) -> str:
-        """``evicting '<victim>': <outcome>`` for a log line."""
+        """``evicting '<victim>': <outcome>`` for a log line. A CPU-only
+        victim (``held_nothing``) held no VRAM, so no release was waited for."""
+        if self.held_nothing:
+            return f"evicting '{self.victim}': held no VRAM, nothing to wait for"
         if self.released is True:
             outcome = "VRAM release confirmed"
         elif self.released is False and not self.expected:
@@ -1552,6 +1563,38 @@ class VictimRelease(NamedTuple):
         else:
             outcome += f" (after {self.seconds:.1f}s)"
         return f"evicting '{self.victim}': {outcome}"
+
+
+def _holds_no_vram(engine) -> bool:
+    """True when *engine*'s loaded model is a CPU-only load (0 GPU layers),
+    so unloading it frees no VRAM and there is nothing to wait for. False for
+    any engine that does not report it."""
+    return getattr(engine, "cpu_only_load", False) is True
+
+
+async def _only_cpu_only_chat_loaded(loop, cpu_only_names: set, media: bool) -> bool:
+    """True when every loaded chat engine is in *cpu_only_names* and no
+    embedding, reranker or speech model is loaded, nor, with *media*, a native
+    media runtime: an unload of everything then frees no VRAM. False when no
+    chat engine is loaded. Reads the non-chat models off the event loop."""
+    if not cpu_only_names:
+        return False
+    if any(e.loaded and n not in cpu_only_names for n, e in list(_engines.items())):
+        return False
+    from localm.inference import embedder as _embedder_mod
+    from localm.inference import reranker as _reranker_mod
+    from localm.inference import speech as _speech_mod
+    if await loop.run_in_executor(None, _embedder_mod.loaded_dim) is not None:
+        return False
+    if await loop.run_in_executor(None, _reranker_mod.is_loaded):
+        return False
+    if await loop.run_in_executor(None, _speech_mod.is_loaded):
+        return False
+    if media:
+        from localm.vram import loaded_native_media_runtimes
+        if await loop.run_in_executor(None, loaded_native_media_runtimes):
+            return False
+    return True
 
 
 def _victim_vram_estimate(engine) -> int:
@@ -1790,12 +1833,14 @@ async def _switch_free_victim(loop, victim: str, engine,
     started = time.monotonic()
     released, after = None, None
     extended = False
+    held_nothing = False
     _evicting_names.add(victim)
     try:
         expected = await loop.run_in_executor(None, _victim_vram_estimate, engine)
         expect_rise = expected >= _MIN_RELEASE_RISE
+        held_nothing = _holds_no_vram(engine)
         await loop.run_in_executor(None, engine.unload)
-        if probe.measurable:
+        if probe.measurable and not held_nothing:
             reader = _probe_free_reader(probe)
             released, after = await loop.run_in_executor(
                 None, lambda: wait_for_vram_release(reader, before_bytes=probe.free))
@@ -1812,8 +1857,11 @@ async def _switch_free_victim(loop, victim: str, engine,
     finally:
         _evicting_names.discard(victim)
     result = VictimRelease(victim, released, probe.free, after,
-                           time.monotonic() - started, expect_rise, extended)
-    if released is False and expect_rise:
+                           time.monotonic() - started, expect_rise, extended,
+                           held_nothing)
+    if held_nothing:
+        _dbg.debug("switch_engine: %s", result.describe())
+    elif released is False and expect_rise:
         _dbg.warning("switch_engine: %s; free VRAM did not rise, so the next "
                      "reading may still count its memory", result.describe())
     elif released is None or extended:
@@ -2215,8 +2263,12 @@ def plan_capability_route(model_name: str | None, messages: list,
 
 async def get_engine(model_name: str | None, *, load: bool = True,
                      activate: bool = True, skip_if_latched: bool = False,
-                     on_status: Optional[Callable[[str], None]] = None) -> Engine:
-    """Resolve the engine for *model_name*, loading it if necessary.
+                     on_status: Optional[Callable[[str], None]] = None,
+                     allow_embedding: bool = False) -> Engine:
+    """Resolve the engine for *model_name*, loading it if necessary. An
+    embedding-typed *model_name* (an embedding model, a reranker, a media text
+    encoder) is refused with a 422 unless *allow_embedding*, which only
+    /v1/embeddings sets.
 
     With ``load=False`` the resolved engine is returned WITHOUT forcing a load -
     for callers like /v1/embeddings whose backend may not need the model resident
@@ -2283,7 +2335,7 @@ async def get_engine(model_name: str | None, *, load: bool = True,
         raise HTTPException(503, "No model is loaded and none was specified. "
                             "Load a model first or name one explicitly.")
 
-    await _refuse_non_chat_model(name, registry)
+    await _refuse_non_chat_model(name, registry, allow_embedding=allow_embedding)
 
     # `not unloading`: never hand back (and let the caller pin) an engine that an
     # eviction/unload path is mid-freeing - that is the pin-arrives-during-the-
@@ -2310,7 +2362,7 @@ async def get_engine(model_name: str | None, *, load: bool = True,
 
     res = await switch_engine(name, _engine_factory, preempt=False,
                               activate=activate, skip_if_latched=skip_if_latched,
-                              on_status=on_status)
+                              on_status=on_status, allow_embedding=allow_embedding)
     if res.get("status") == "superseded":
         raise HTTPException(503, f"Model load was superseded by a newer request: {res.get('by')}")
     if res.get("status") == "cancelled":
@@ -2547,8 +2599,13 @@ async def unload_all_models(*, force: bool = False, media: bool = False) -> dict
 
     _free = _live_free_vram_bytes
 
-    before, before_fresh, before_scope = await loop.run_in_executor(
-        None, _vram_free_reading)
+    cpu_only_names = {n for n, e in list(_engines.items())
+                      if e.loaded and _holds_no_vram(e)}
+    if await _only_cpu_only_chat_loaded(loop, cpu_only_names, media):
+        before, before_fresh, before_scope = None, True, None
+    else:
+        before, before_fresh, before_scope = await loop.run_in_executor(
+            None, _vram_free_reading)
     unloaded_models = []
     skipped_in_use = []
     unloaded_other: list[str] = []
@@ -2598,7 +2655,9 @@ async def unload_all_models(*, force: bool = False, media: bool = False) -> dict
                 media_left_running[kind] = outcome
 
     released_anything = bool(unloaded_models) or embedder_was_loaded or media_stopped
-    if before is not None and released_anything:
+    freed_vram = (embedder_was_loaded or media_stopped
+                  or any(n not in cpu_only_names for n in unloaded_models))
+    if before is not None and freed_vram:
         released, after = await loop.run_in_executor(
             None, lambda: wait_for_vram_release(_free, before_bytes=before))
     else:
@@ -2978,8 +3037,11 @@ async def unload_one_model(name: str, *, force: bool = False) -> dict:
     engine.unloading = True
     try:
         async with exclusively(sem):
-            before, before_fresh, before_scope = await loop.run_in_executor(
-                None, _vram_free_reading)
+            if _holds_no_vram(engine):
+                before, before_fresh, before_scope = None, True, None
+            else:
+                before, before_fresh, before_scope = await loop.run_in_executor(
+                    None, _vram_free_reading)
             await loop.run_in_executor(None, engine.unload)
             if name in _engines_lru:
                 _engines_lru.remove(name)

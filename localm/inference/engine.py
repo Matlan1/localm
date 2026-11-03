@@ -589,6 +589,16 @@ class Engine:
                 placement["moe_ram_read_bytes"] = read
         return placement
 
+    @property
+    def cpu_only_load(self) -> bool:
+        """True when the last load handed the backend 0 GPU layers, which a
+        GGUF backend runs with no GPU device at all (weights, KV cache,
+        vision projector and draft model on the CPU), so unloading it frees
+        no VRAM. False for a backend that does not report its GPU layer
+        count, and for any load that offloaded a layer."""
+        offloaded = getattr(self._backend, "gpu_layers_offloaded", None)
+        return type(offloaded) is int and offloaded == 0
+
     def full_offload_vram_bytes(self) -> Optional[int]:
         """Free VRAM the next load needs for every layer to go on the GPU, as
         the backend sizes it (``full_offload_vram_bytes`` of a GGUF backend),

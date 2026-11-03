@@ -491,3 +491,27 @@ test("a running operation past the queue is shown as running", async () => {
   win.showActivityDetails();
   assert.equal(win.document.querySelector("#modal-body .job-state").textContent, "running");
 });
+
+test("pollActivity: a queued operation beside a running one is counted as queued, not running", async () => {
+  const { fetchImpl } = makeActivityFetch([
+    [{ id: "j1", kind: "pull", status: "running" },
+     { id: "j2", kind: "imagine", status: "running", phase: "queued" }],
+  ]);
+  const { window: win } = loadApp({ fetchImpl });
+  await win.pollActivity();
+
+  const text = win.document.getElementById("activity-pill").textContent;
+  assert.equal(text, "1 running, 1 queued");
+});
+
+test("pollActivity: only queued operations read as queued, never as running", async () => {
+  const { fetchImpl } = makeActivityFetch([
+    [{ id: "j1", kind: "imagine", status: "running", phase: "queued" },
+     { id: "j2", kind: "imagine", status: "running", phase: "queued" }],
+  ]);
+  const { window: win } = loadApp({ fetchImpl });
+  await win.pollActivity();
+
+  const text = win.document.getElementById("activity-pill").textContent;
+  assert.equal(text, "2 queued");
+});

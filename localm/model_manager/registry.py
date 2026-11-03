@@ -262,23 +262,72 @@ def _no_backend_runs_file(path: str) -> bool:
             and backend_registry.backend_for(path) is None)
 
 
+MEDIA_TEXT_ENCODER_ARCHITECTURES = frozenset({"t5encoder", "t5"})
+
+
+def is_media_text_encoder_entry(entry) -> bool:
+    """True when a registry *entry* is an encoder-only text encoder that image,
+    video and music generation use: an ``embedding``-type entry whose recorded
+    ``architecture`` is in :data:`MEDIA_TEXT_ENCODER_ARCHITECTURES`."""
+    return (isinstance(entry, dict) and entry.get("model_type") == "embedding"
+            and entry.get("architecture") in MEDIA_TEXT_ENCODER_ARCHITECTURES)
+
+
 def is_unlisted_entry(entry) -> bool:
-    """True when a registry *entry*'s ``model_type`` is one GET /v1/models omits
-    (see :data:`UNLISTED_TYPES`)."""
+    """True when a registry *entry* is one GET /v1/models omits: its
+    ``model_type`` is in :data:`UNLISTED_TYPES`, or it is a media text encoder
+    (see :func:`is_media_text_encoder_entry`)."""
     return (isinstance(entry, dict) and isinstance(entry.get("model_type"), str)
-            and entry["model_type"] in UNLISTED_TYPES)
+            and entry["model_type"] in UNLISTED_TYPES) or is_media_text_encoder_entry(entry)
 
 
-def chat_load_refusal(name: str, registry: dict) -> Optional[str]:
+def _embedding_refusal(name: str, entry: dict) -> str:
+    """The message refusing to load or chat with the ``embedding``-type entry
+    *entry*: it names a media text encoder, a reranker or an embedding model, the
+    route that serves it, and the ``localm set-type`` command that makes it a chat
+    model anyway. A reranker check reads the model file (see
+    :func:`entry_is_reranker`)."""
+    anyway = f" To chat with it anyway, run 'localm set-type {name} llm'."
+    if is_media_text_encoder_entry(entry):
+        return (f"'{name}' is a text encoder, not a model that can be loaded or chatted with. "
+                "It is a component of image, video or music generation." + anyway)
+    if entry_is_reranker(name, entry):
+        return (f"'{name}' is a reranker, not a model that can be loaded or chatted with. "
+                "It scores query and document pairs (POST /v1/rerank)." + anyway)
+    return (f"'{name}' is an embedding model, not a model that can be loaded or chatted with. "
+            "Use it with POST /v1/embeddings." + anyway)
+
+
+def embedding_load_prompt(name: str, entry: dict) -> str:
+    """The text of the GUI's "not a chat model" confirmation for the
+    ``embedding``-type entry *entry*: what the model is, that chatting with it
+    gives gibberish, and that loading it anyway marks it as a chat model. A
+    reranker check reads the model file (see :func:`entry_is_reranker`)."""
+    if is_media_text_encoder_entry(entry):
+        what = "a text encoder for image, video and music generation"
+    elif entry_is_reranker(name, entry):
+        what = "a reranker, which scores how well documents match a question"
+    else:
+        what = "an embedding model, which turns text into numbers for search and memory"
+    return (f"\"{name}\" is {what}. It cannot write replies, so chatting with it would "
+            "only produce gibberish. If you load it anyway, it is marked as a chat model; "
+            "you can change its type again on the Models page.")
+
+
+def chat_load_refusal(name: str, registry: dict, *, allow_embedding: bool = False) -> Optional[str]:
     """The message refusing a request that names *name* as a model to load, or
     None when *name* may be loaded. Refuses an entry whose ``model_type`` is in
     :data:`NON_CHAT_TYPES`: a vision projector gets :func:`projector_refusal`'s
     message naming its chat model, every other type a message saying what the
-    entry is (and, for 'tts', where it is used). An 'unknown' entry is refused
-    when its file is one no backend runs; that check reads the file system and
-    the backend registry."""
+    entry is (and, for 'tts', where it is used). An 'embedding' entry (an
+    embedding model, a reranker or a media text encoder) is refused unless
+    *allow_embedding*; the reranker check reads the model file. An 'unknown'
+    entry is refused when its file is one no backend runs; that check reads the
+    file system and the backend registry."""
     entry = registry.get(name)
     kind = entry.get("model_type") if isinstance(entry, dict) else None
+    if kind == "embedding" and isinstance(entry, dict):
+        return None if allow_embedding else _embedding_refusal(name, entry)
     if kind == "unknown":
         path = _entry_path(entry)
         if path and _no_backend_runs_file(path):
@@ -297,16 +346,18 @@ def chat_load_refusal(name: str, registry: dict) -> Optional[str]:
     return msg + " It is a component of image, video or music generation."
 
 
-async def chat_load_refusal_off_loop(name: str, registry: dict) -> Optional[str]:
+async def chat_load_refusal_off_loop(name: str, registry: dict, *,
+                                     allow_embedding: bool = False) -> Optional[str]:
     """:func:`chat_load_refusal`, run on a worker thread when the check reads
-    the file system (an 'unknown' entry), inline otherwise. For callers on the
-    event loop."""
+    the file system (an 'unknown' entry, or an 'embedding' entry that is
+    refused), inline otherwise. For callers on the event loop."""
     entry = registry.get(name)
-    if isinstance(entry, dict) and entry.get("model_type") == "unknown":
+    kind = entry.get("model_type") if isinstance(entry, dict) else None
+    if kind == "unknown" or (kind == "embedding" and not allow_embedding):
         import asyncio
         return await asyncio.get_running_loop().run_in_executor(
-            None, chat_load_refusal, name, registry)
-    return chat_load_refusal(name, registry)
+            None, lambda: chat_load_refusal(name, registry, allow_embedding=allow_embedding))
+    return chat_load_refusal(name, registry, allow_embedding=allow_embedding)
 
 
 def models_of_type(model_type: str, registry: Optional[dict] = None) -> dict:
