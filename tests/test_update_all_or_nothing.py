@@ -824,6 +824,7 @@ def test_doctor_lists_the_parts_that_differ(monkeypatch):
     doctor = importlib.import_module("localm.cli.doctor")
     monkeypatch.setattr(updater_parts, "installed_parts", lambda: {
         "app": "0.3.2", "install_record": "0.1.5", "install_record_matches": False,
+        "install_record_problem": True,
         "deps_problems": [], "runtime": {}, "components": [], "consistent": False,
         "problems": ["the venv's install record is localm 0.1.5, but localm 0.3.2 is installed"]})
     out = io.StringIO()
@@ -831,3 +832,4 @@ def test_doctor_lists_the_parts_that_differ(monkeypatch):
     doctor._check_installed_parts()
     text = out.getvalue()
     assert "install record is localm 0.1.5" in text and "localm update --repair" in text
+    assert "install record: localm" not in text, "no OK line over the same record"

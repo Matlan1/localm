@@ -117,13 +117,14 @@ def installed_parts(root=None) -> dict:
     at, against this localm version. Read-only, never raises.
 
     Returns ``{"app", "install_record", "install_record_matches",
-    "deps_problems", "runtime", "components", "problems", "consistent",
+    "install_record_problem", "deps_problems", "runtime", "components", "problems", "consistent",
     "last_steps"}``:
     ``app`` the code's version, ``install_record`` the venv's localm record
     version (None when there is none to compare: no venv, a source checkout,
     or a pip install) and whether it is ``app`` (False also when the venv has
-    no record at all). A record of another version is a problem unless an
-    update that kept the dependencies left it (:func:`note_kept_record`),
+    no record at all). A record of another version is a problem
+    (``install_record_problem``) unless an update that kept the dependencies
+    left it (:func:`note_kept_record`),
     ``deps_problems`` each dependency the venv does not satisfy (a problem),
     ``runtime``
     ``{"backend", "current", "target", "matches"}`` (``matches`` None when it
@@ -138,6 +139,7 @@ def installed_parts(root=None) -> dict:
     app = _version.read_version()
     problems: list = []
     record, record_matches, deps_problems = None, None, []
+    record_problem = False
     if not _source_checkout(root) and not updater.is_site_packages_install(root):
         d = {"venv": False}
         try:
@@ -146,12 +148,13 @@ def installed_parts(root=None) -> dict:
         except Exception as e:
             problems.append(f"could not read the venv's packages: {e}")
         if d.get("venv") and record is None:
-            record_matches = False
+            record_matches, record_problem = False, True
             problems.append("the venv has no install record of localm, so localm is not "
                             "installed in it")
         elif record is not None:
             record_matches = _norm_version(record) == _norm_version(app)
-            if not record_matches and _kept_records().get(app) != record:
+            record_problem = not record_matches and _kept_records().get(app) != record
+            if record_problem:
                 problems.append(f"the venv's install record is localm {record}, but localm "
                                 f"{app} is installed")
         if deps_problems:
@@ -186,6 +189,7 @@ def installed_parts(root=None) -> dict:
     except Exception as e:
         problems.append(f"could not compare the components with this version: {e}")
     return {"app": app, "install_record": record, "install_record_matches": record_matches,
+            "install_record_problem": record_problem,
             "deps_problems": deps_problems, "last_steps": _last_steps(),
             "runtime": runtime, "components": components, "problems": problems,
             "consistent": not problems}

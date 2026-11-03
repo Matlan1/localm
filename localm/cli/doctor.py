@@ -831,7 +831,8 @@ def _check_installed_parts() -> None:
                       f"version [dim]({escape(str(e))})[/dim]")
         return
     app = escape(str(parts["app"]))
-    if parts["install_record"] is not None and not parts["deps_problems"]:
+    if (parts["install_record"] is not None and not parts["deps_problems"]
+            and not parts["install_record_problem"]):
         console.print(f"  {_OK_SYM}  install record: localm {escape(parts['install_record'])}, "
                       "dependencies satisfied")
         if parts["install_record_matches"] is False:
