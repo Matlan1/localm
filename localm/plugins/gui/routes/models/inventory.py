@@ -392,11 +392,25 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
 
     @app.post("/api/models/load", dependencies=[Depends(require_scope(scopes.MODELS_WRITE))])
     async def gui_load_model(req: LoadModelRequest):
-        from localm.model_manager.registry import chat_load_refusal_off_loop
-        refusal = await chat_load_refusal_off_loop(
-            req.model, _require_registered(req.model))
-        if refusal is not None:
-            raise HTTPException(422, refusal)
+        from localm.model_manager.registry import (chat_load_refusal_off_loop,
+                                                   embedding_load_prompt,
+                                                   set_model_type)
+        registry = _require_registered(req.model)
+        entry = registry.get(req.model)
+        if isinstance(entry, dict) and entry.get("model_type") == "embedding":
+            loop = asyncio.get_running_loop()
+            if not req.as_chat:
+                detail = await loop.run_in_executor(
+                    None, embedding_load_prompt, req.model, entry)
+                return {"status": "confirm_required", "reason": "not_chat_model",
+                        "model": req.model, "detail": detail}
+            if not await loop.run_in_executor(
+                    None, set_model_type, req.model, "llm"):
+                raise HTTPException(500, f"Could not mark {req.model} as a chat model")
+        else:
+            refusal = await chat_load_refusal_off_loop(req.model, registry)
+            if refusal is not None:
+                raise HTTPException(422, refusal)
         # Route every switch through the coordinator so a new selection preempts an
         # in-flight load instead of queuing behind it. The coordinator returns the
         # authoritative status: loaded, already_active, superseded (a newer
