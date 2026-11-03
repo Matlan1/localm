@@ -234,3 +234,17 @@ class TestMultiGpuPlacement:
         placement = self._placement(gpu_blocks=LAYERS, free_each=40 * GIB)
         assert b._placement_ctx_max(placement) > 65536
         assert readers.ram_calls == 0
+
+
+class TestLiveContextKvPlacement:
+    @pytest.mark.parametrize("gpu_layers, offload_kqv, in_vram", [
+        (0, True, False), (12, True, True), (99, True, True), (99, False, False)])
+    def test_kv_in_vram_follows_the_layers_on_the_gpu(self, gpu_layers, offload_kqv,
+                                                      in_vram):
+        from types import SimpleNamespace
+
+        from localm.inference.backends.llamacpp._worker import GgufWorker
+        w = GgufWorker.__new__(GgufWorker)
+        w.effective_gpu_layers = gpu_layers
+        w._llm = SimpleNamespace(_ctx_ptr=1, _ctx_capacity=4096, _offload_kqv=offload_kqv)
+        assert w.live_context == {"n_ctx": 4096, "kv_in_vram": in_vram}
