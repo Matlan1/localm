@@ -144,11 +144,14 @@ def test_cmd_exit_reaches_createprocess_with_create_no_window(spy):
 
 @_needs_windows
 def test_the_child_runs_on_a_console_of_its_own(spy):
-    probe = ("import ctypes; a = (ctypes.c_uint * 16)(); "
-             "print(ctypes.windll.kernel32.GetConsoleProcessList(a, 16))")
+    probe = ("import ctypes; a = (ctypes.c_uint * 64)(); "
+             "n = ctypes.windll.kernel32.GetConsoleProcessList(a, 64); "
+             "print(' '.join(str(a[i]) for i in range(n)))")
     out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True)
     assert out.returncode == 0, out.stderr
-    assert out.stdout.strip() == "1"
+    on_its_console = [int(p) for p in out.stdout.split()]
+    assert on_its_console
+    assert os.getpid() not in on_its_console
 
 
 @_needs_windows
@@ -232,4 +235,4 @@ def test_startfile_and_webbrowser_are_refused(tmp_path, refusals):
         webbrowser.open("http://127.0.0.1:9/")
     with pytest.raises(RuntimeError, match="webbrowser.open"):
         webbrowser.open_new_tab("http://127.0.0.1:9/")
-    assert len(refusals()) == 2
+    assert len(refusals()) == 3
