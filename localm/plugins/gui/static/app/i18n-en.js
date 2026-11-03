@@ -1411,7 +1411,7 @@ export const I18N_EN = {
   "models.pull.store.move": "Move into library",
   "models.pull.store.registerInPlace": "Register in place",
   "models.pull.storeTitle":
-    "Only applies to a local folder/file path - a HuggingFace or URL download always lands in ~/.localm/models on its own.",
+    "Only applies to a local folder/file path - a HuggingFace, CivitAI or URL download always lands in ~/.localm/models on its own.",
   "models.pull.title": "Add a model",
   "models.pull.verifying": "verifying… {pct}%",
   "models.relocate.failed": "Relocate failed",
