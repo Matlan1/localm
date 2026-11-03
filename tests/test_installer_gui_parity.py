@@ -34,9 +34,24 @@ def gui(tmp_path, monkeypatch):
     sys.modules[_MOD_NAME] = mod
     spec.loader.exec_module(mod)
     monkeypatch.setattr(mod, "ROOT", tmp_path)
+    profile = tmp_path.parent / f"{tmp_path.name}-profile"
+    monkeypatch.setenv("LOCALAPPDATA", str(profile))
+    monkeypatch.setenv("XDG_DATA_HOME", str(profile))
+    _fake_system32(mod, tmp_path, monkeypatch)
     for name in (mod.STORE_ENV, mod.UV_ENV, mod.UV_INSTALLED_ENV):
         monkeypatch.delenv(name, raising=False)
     return mod
+
+
+def _fake_system32(gui, tmp_path, monkeypatch):
+    """A Windows system folder holding powershell, attrib and taskkill."""
+    sysdir = tmp_path.parent / f"{tmp_path.name}-System32"
+    (sysdir / "WindowsPowerShell" / "v1.0").mkdir(parents=True, exist_ok=True)
+    (sysdir / "WindowsPowerShell" / "v1.0" / "powershell.exe").write_bytes(b"")
+    for name in ("attrib", "taskkill"):
+        (sysdir / f"{name}.exe").write_bytes(b"")
+    monkeypatch.setattr(gui, "windows_system_dir", lambda: sysdir)
+    return sysdir
 
 
 def _step(gui, plan, prefix, resume=None):
@@ -91,7 +106,7 @@ class TestExistingVenv:
 
     def test_replace_recreates_it_with_clear(self, gui, tmp_path, monkeypatch):
         (tmp_path / ".venv").mkdir()
-        monkeypatch.setattr(gui, "find_uv", lambda root: "uv")
+        monkeypatch.setattr(gui, "find_uv", lambda root, portable=None: "uv")
         fake, calls = _recorder(gui, tmp_path)
         monkeypatch.setattr(gui, "_run", fake)
         _step(gui, gui.Plan(replace_venv=True), "Creating the Python environment").run(
@@ -102,7 +117,7 @@ class TestExistingVenv:
     def test_a_foreign_venv_a_cut_short_run_left_is_recreated(
             self, gui, tmp_path, monkeypatch):
         (tmp_path / ".venv").mkdir()
-        monkeypatch.setattr(gui, "find_uv", lambda root: "uv")
+        monkeypatch.setattr(gui, "find_uv", lambda root, portable=None: "uv")
         fake, calls = _recorder(gui, tmp_path)
         monkeypatch.setattr(gui, "_run", fake)
         _step(gui, gui.Plan(), "Creating the Python environment",
@@ -151,7 +166,7 @@ def _widgets(widget):
 class TestVenvRecovery:
     def test_a_certificate_error_retries_once_with_the_bundled_roots(
             self, gui, tmp_path, monkeypatch):
-        monkeypatch.setattr(gui, "find_uv", lambda root: "uv")
+        monkeypatch.setattr(gui, "find_uv", lambda root, portable=None: "uv")
         fake, calls = _recorder(gui, tmp_path, [
             (1, ["error: invalid peer certificate: UnknownIssuer"]), (0, [])])
         monkeypatch.setattr(gui, "_run", fake)
@@ -166,7 +181,7 @@ class TestVenvRecovery:
 
     def test_a_second_certificate_error_is_not_retried_again(
             self, gui, tmp_path, monkeypatch):
-        monkeypatch.setattr(gui, "find_uv", lambda root: "uv")
+        monkeypatch.setattr(gui, "find_uv", lambda root, portable=None: "uv")
         fake, calls = _recorder(gui, tmp_path, [
             (1, ["certificate"]), (1, ["certificate"])])
         monkeypatch.setattr(gui, "_run", fake)
@@ -176,7 +191,8 @@ class TestVenvRecovery:
 
     def _locked(self, gui, tmp_path, monkeypatch, lockers):
         monkeypatch.setattr(gui, "IS_WINDOWS", True)
-        monkeypatch.setattr(gui, "find_uv", lambda root: "uv")
+        self.sysdir = _fake_system32(gui, tmp_path, monkeypatch)
+        monkeypatch.setattr(gui, "find_uv", lambda root, portable=None: "uv")
         monkeypatch.setattr(gui.time, "sleep", lambda s: None)
         monkeypatch.setattr(gui, "find_venv_lockers", lambda root: lockers)
         ran = []
@@ -194,8 +210,8 @@ class TestVenvRecovery:
         ask, asked = _answers("y")
         monkeypatch.setattr(gui, "ASK", ask)
         gui.create_venv(gui.Plan(), lambda s: None)
-        assert ran[0][0] == "attrib"
-        assert ran[1][:3] == ["taskkill", "/PID", "4242"]
+        assert ran[0][0] == str(self.sysdir / "attrib.exe")
+        assert ran[1][:3] == [str(self.sysdir / "taskkill.exe"), "/PID", "4242"]
         assert [q["id"] for q in asked] == ["venv-lockers"]
         assert len(calls) == 3
 
@@ -362,21 +378,23 @@ def test_the_plugin_deps_answer_is_saved(gui, tmp_path, monkeypatch):
 
 
 class TestLauncherUv:
-    def test_the_launchers_uv_is_used_even_with_a_contained_one(
+    def test_the_launchers_uv_is_ignored_for_localm_s_own(
             self, gui, tmp_path, monkeypatch):
         contained = tmp_path / ".uv"
         contained.mkdir()
         (contained / ("uv.exe" if gui.IS_WINDOWS else "uv")).write_bytes(b"")
-        shared = tmp_path / "elsewhere" / "uv.exe"
-        shared.parent.mkdir()
-        shared.write_bytes(b"")
-        monkeypatch.setenv(gui.UV_ENV, str(shared))
-        assert gui.find_uv(tmp_path) == str(shared)
+        (contained / ("uv.exe" if gui.IS_WINDOWS else "uv")).chmod(0o755)
+        elsewhere = tmp_path / "elsewhere" / "uv.exe"
+        elsewhere.parent.mkdir()
+        elsewhere.write_bytes(b"")
+        monkeypatch.setenv(gui.UV_ENV, str(elsewhere))
+        assert gui.find_uv(tmp_path) == str(contained / ("uv.exe" if gui.IS_WINDOWS else "uv"))
 
-    def test_a_launcher_uv_that_does_not_exist_falls_back(self, gui, tmp_path, monkeypatch):
+    def test_no_uv_in_the_store_never_falls_back(self, gui, tmp_path, monkeypatch):
         monkeypatch.setenv(gui.UV_ENV, str(tmp_path / "missing" / "uv"))
         monkeypatch.setattr(gui.uv_tool(), "find_uv", lambda root: "found")
-        assert gui.find_uv(tmp_path) == "found"
+        assert gui.find_uv(tmp_path) is None
+        assert gui.find_uv(tmp_path, False) is None
 
     @pytest.mark.parametrize("value,expected", [("shared", "shared"),
                                                  ("portable", "portable"),
@@ -387,9 +405,10 @@ class TestLauncherUv:
 
     def test_a_shared_uv_the_launcher_installed_is_recorded(
             self, gui, tmp_path, monkeypatch):
-        shared = tmp_path.parent / f"{tmp_path.name}-uv" / "uv.exe"
-        shared.parent.mkdir()
+        shared = gui.store_dirs(False)["uv"] / ("uv.exe" if gui.IS_WINDOWS else "uv")
+        shared.parent.mkdir(parents=True)
         shared.write_bytes(b"")
+        shared.chmod(0o755)
         monkeypatch.setenv(gui.UV_ENV, str(shared))
         monkeypatch.setenv(gui.UV_INSTALLED_ENV, "1")
         fake, calls = _recorder(gui, tmp_path)
@@ -477,6 +496,7 @@ class _Done:
 def test_the_window_never_lists_itself(gui, tmp_path, monkeypatch):
     """Stopping a process that holds .venv must never stop the window."""
     monkeypatch.setattr(gui, "IS_WINDOWS", True)
+    _fake_system32(gui, tmp_path, monkeypatch)
     me, parent = os.getpid(), os.getppid()
 
     def fake_run(argv, **kw):
@@ -489,6 +509,7 @@ def test_the_window_never_lists_itself(gui, tmp_path, monkeypatch):
 
 def test_the_windows_launcher_chain_is_left_out_too(gui, tmp_path, monkeypatch):
     monkeypatch.setattr(gui, "IS_WINDOWS", True)
+    _fake_system32(gui, tmp_path, monkeypatch)
 
     def fake_run(argv, **kw):
         if "LOCALM_OWN_PID" in kw.get("env", {}):

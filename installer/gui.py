@@ -2,9 +2,17 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """LocaLM graphical installer - the windowed alternative to setup.bat/setup.sh.
 
-Run by `setup-gui.bat` (Windows) or `setup-gui.sh` via:
+Run by `setup-gui.bat` (Windows) or `setup-gui.sh` on localm's own uv via:
 
-    uv run --no-project --isolated --python 3.12 python installer/gui.py
+    uv run --no-project --isolated --python 3.12 --python-preference only-managed
+        python installer/gui.py
+
+Every program it starts uses only what localm brings: localm's own uv in the
+store the tooling answer picked (Portable: .uv, .python and .cache in this
+folder; Shared: uv, python and cache in a localm folder in the user profile),
+a managed Python only, an environment without the user's UV_*, PIP_* and
+Python variables or config files, TEMP inside this folder, and operating-system
+programs by their full path in the system folder.
 
 SEPARATE FROM THE INSTALL IT CREATES. This script is not part of the `localm`
 package and never imports the installed distribution: it runs on a managed
@@ -34,11 +42,15 @@ setup-gui.sh, which remove it after the window closes (exit code 42).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import queue
+import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -56,8 +68,8 @@ APP_NAME = "LocaLM"
 PYVER = "3.12"
 
 # Set by setup-gui.bat / setup-gui.sh from the tooling question they ask:
-# "portable" or "shared", the full path of the uv they chose, and "1" when they
-# installed that uv at its per-user location.
+# "portable" or "shared", the full path of the uv they ran the window with, and
+# "1" when they installed localm's own uv in the Shared store.
 STORE_ENV = "LOCALM_GUI_STORE"
 UV_ENV = "LOCALM_GUI_UV"
 UV_INSTALLED_ENV = "LOCALM_GUI_UV_INSTALLED"
@@ -152,20 +164,133 @@ def uv_tool():
     return module
 
 
-def find_uv(root: Path) -> Optional[str]:
-    """The full path of the uv to run, or None if there is none.
+# The setup temp folder inside the install folder: TEMP, TMP and TMPDIR of
+# every child process point here, and a run that reaches its end removes it.
+SETUP_TMP_NAME = ".localm-setup-tmp"
 
-    The uv the launcher chose (LOCALM_GUI_UV) when it names an existing file;
-    otherwise the same lookup the updater uses (localm.uv_tool.find_uv): the
-    contained copy in the folder, the shared uv the install record names, a uv
-    on PATH, then Astral's default install directories. Every uv invocation and
-    the entry check below both go through this, so a uv that starts the
-    installer is always a uv the steps can run. See tests/test_installer_gui.py
-    TestUvResolution."""
-    chosen = os.environ.get(UV_ENV, "").strip()
-    if chosen and os.path.isfile(chosen):
-        return chosen
-    return uv_tool().find_uv(root)
+# Removed from every child's environment before setup sets its own values.
+_CLEARED_PREFIXES = ("UV_", "PIP_")
+_CLEARED_NAMES = ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONUSERBASE",
+                  "VIRTUAL_ENV", "CONDA_PREFIX", "LOCALM_HOME")
+
+# The folders a POSIX system program is looked for in, in this order.
+POSIX_SYSTEM_DIRS = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
+
+# Passed to every child process: no console window opens on Windows.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def isolated_environ(base=None) -> dict:
+    """A copy of *base* (default os.environ) without any UV_* or PIP_* variable,
+    PYTHONPATH, PYTHONHOME, PYTHONSTARTUP, PYTHONUSERBASE, VIRTUAL_ENV,
+    CONDA_PREFIX or LOCALM_HOME, then with UV_NO_CONFIG=1,
+    PIP_CONFIG_FILE=os.devnull and PYTHONNOUSERSITE=1. Names are matched
+    without regard to case."""
+    base = os.environ if base is None else base
+    cleared = {n.upper() for n in _CLEARED_NAMES}
+    env = {k: v for k, v in base.items()
+           if not k.upper().startswith(_CLEARED_PREFIXES) and k.upper() not in cleared}
+    env["UV_NO_CONFIG"] = "1"
+    env["PIP_CONFIG_FILE"] = os.devnull
+    env["PYTHONNOUSERSITE"] = "1"
+    return env
+
+
+def windows_system_dir() -> Optional[Path]:
+    """Windows' System32 folder as GetSystemDirectoryW reports it, else
+    %SystemRoot%\\System32; None when neither is known."""
+    try:
+        import ctypes
+        buf = ctypes.create_unicode_buffer(32768)
+        n = ctypes.windll.kernel32.GetSystemDirectoryW(buf, len(buf))
+        if 0 < n < len(buf):
+            return Path(buf.value)
+    except (ImportError, AttributeError, OSError):
+        pass
+    root = os.environ.get("SystemRoot") or os.environ.get("windir") or ""
+    return Path(root) / "System32" if root and os.path.isabs(root) else None
+
+
+def system_program(name: str) -> Optional[str]:
+    """Full path of the operating-system program *name*, or None when it is not
+    there. Windows: ``<System32>\\<name>.exe``, and for "powershell"
+    ``<System32>\\WindowsPowerShell\\v1.0\\powershell.exe``. Elsewhere: the first
+    of POSIX_SYSTEM_DIRS holding an executable *name*. An absolute *name* is
+    returned as it is when it is a file. PATH is never searched."""
+    if os.path.isabs(name):
+        return name if os.path.isfile(name) else None
+    if IS_WINDOWS:
+        sysdir = windows_system_dir()
+        if sysdir is None:
+            return None
+        if name == "powershell":
+            candidate = sysdir / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+        else:
+            candidate = sysdir / f"{name}.exe"
+        return str(candidate) if candidate.is_file() else None
+    for folder in POSIX_SYSTEM_DIRS:
+        candidate = Path(folder) / name
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
+
+
+def shared_store_root() -> Path:
+    """The folder every Shared LocaLM install of this user keeps its uv, Python
+    and download cache in: ``%LOCALAPPDATA%\\localm\\shared`` on Windows,
+    ``${XDG_DATA_HOME:-~/.local/share}/localm/shared`` elsewhere (a relative
+    XDG_DATA_HOME is ignored). Raises StepFailed when LOCALAPPDATA is unset or
+    relative on Windows."""
+    if IS_WINDOWS:
+        base = os.environ.get("LOCALAPPDATA", "")
+        if not base or not os.path.isabs(base):
+            raise StepFailed("LOCALAPPDATA is not set, so the Shared tooling folder "
+                             "cannot be found; choose Portable instead")
+        return Path(base) / "localm" / "shared"
+    xdg = os.environ.get("XDG_DATA_HOME", "")
+    base = Path(xdg) if xdg and os.path.isabs(xdg) else Path.home() / ".local" / "share"
+    return base / "localm" / "shared"
+
+
+def store_dirs(portable: bool, root: Optional[Path] = None) -> dict:
+    """{"uv", "python", "cache", "credentials"}: where localm's own uv, managed
+    Python, download cache and uv's credentials store live. Portable: .uv,
+    .python and .cache in *root* (default ROOT). Shared: uv, python and cache in
+    shared_store_root(). The credentials store is ``credentials`` in the uv
+    folder. Raises StepFailed when the Shared folder cannot be found."""
+    if portable:
+        root = Path(ROOT if root is None else root)
+        dirs = {"uv": root / ".uv", "python": root / ".python", "cache": root / ".cache"}
+    else:
+        base = shared_store_root()
+        dirs = {"uv": base / "uv", "python": base / "python", "cache": base / "cache"}
+    dirs["credentials"] = dirs["uv"] / "credentials"
+    return dirs
+
+
+def setup_temp() -> Path:
+    """ROOT/.localm-setup-tmp as an absolute path."""
+    return Path(os.path.abspath(ROOT / SETUP_TMP_NAME))
+
+
+def _portable_default(portable: Optional[bool]) -> bool:
+    return launcher_store() == "portable" if portable is None else bool(portable)
+
+
+def find_uv(root: Path, portable: Optional[bool] = None) -> Optional[str]:
+    """The full path of localm's own uv in the store for *portable* (default:
+    the launcher's answer), directly in its uv folder or in that folder's
+    ``bin``; None when it is not there or the store cannot be found. PATH, the
+    user profile and LOCALM_GUI_UV are never consulted."""
+    try:
+        folder = store_dirs(_portable_default(portable), root)["uv"]
+    except StepFailed:
+        return None
+    name = "uv.exe" if IS_WINDOWS else "uv"
+    for candidate in (folder / name, folder / "bin" / name):
+        if candidate.is_file() and (IS_WINDOWS or os.access(candidate, os.X_OK)):
+            return str(candidate)
+    return None
 
 
 def install_manifest():
@@ -185,16 +310,21 @@ def existing_install(root: Path) -> bool:
 
 
 def _tooling_fields(root: Path, portable: bool = True) -> dict:
-    """install_manifest.record() keywords for the tooling folders inside
-    *root*; empty when there are none or the tooling is shared."""
-    fields = {}
-    if not portable:
-        return fields
-    for key, name in (("python_dir", ".python"), ("cache_dir", ".cache"),
-                      ("uv_dir", ".uv")):
-        if (root / name).exists():
-            fields[key] = str(root / name)
-    if fields:
+    """install_manifest.record() keywords for the store folders (store_dirs)
+    that exist: python_dir, cache_dir and uv_dir, plus runtime_contained=True
+    for a Portable store. Empty when none exists, when the Shared store cannot
+    be found, or for Shared when *root* still holds a .python, .cache or .uv of
+    its own (an earlier Portable setup), whose record then stays as it is."""
+    if not portable and any((Path(root) / n).exists() for n in (".python", ".cache", ".uv")):
+        return {}
+    try:
+        store = store_dirs(portable, root)
+    except StepFailed:
+        return {}
+    fields = {key: str(store[name]) for key, name in
+              (("python_dir", "python"), ("cache_dir", "cache"), ("uv_dir", "uv"))
+              if store[name].exists()}
+    if fields and portable:
         fields["runtime_contained"] = True
     return fields
 
@@ -223,7 +353,8 @@ def torch_spec_for(backend: str) -> tuple:
     try:
         out = subprocess.run(
             [sys.executable, "-m", "localm.hwdetect", "torch-args", backend],
-            cwd=str(ROOT), capture_output=True, text=True, timeout=60)
+            cwd=str(ROOT), capture_output=True, text=True, timeout=60,
+            env=_helper_env(), stdin=subprocess.DEVNULL, creationflags=_NO_WINDOW)
     except Exception as e:
         return None, f"could not ask which PyTorch build this machine needs: {e}"
     if out.returncode != 0:
@@ -269,14 +400,17 @@ class StopSetup(StepFailed):
 _CERTS = {"system": True}
 
 
-def uv_argv(*args: str) -> list[str]:
-    """A uv command line, resolved when the step runs. Raises StepFailed when
-    uv cannot be found, so a missing uv is reported as the step it broke."""
-    exe = find_uv(ROOT)
+def uv_argv(plan: Plan, *args: str) -> list[str]:
+    """A command line for localm's own uv in *plan*'s store, resolved when the
+    step runs. Raises StepFailed when that uv is not there, so a missing uv is
+    reported as the step it broke."""
+    exe = find_uv(ROOT, plan.portable_store)
     if exe is None:
-        raise StepFailed(
-            "uv was not found. Looked in: " + uv_tool().describe_search(ROOT)
-            + ". Close this window and run setup.bat / setup.sh instead.")
+        try:
+            where = str(store_dirs(plan.portable_store)["uv"])
+        except StepFailed as e:
+            where = str(e)
+        raise StepFailed(f"localm's own uv was not found in {where}")
     return [exe, *args]
 
 
@@ -330,32 +464,48 @@ def begin_journal(emit: Callable[[str], None]) -> dict:
     return state
 
 
-def _env_for(plan: Plan) -> dict:
-    """uv's environment. Portable keeps the managed interpreter AND the wheel
-    cache inside the clone, so nothing is written to the user profile - the
-    same containment setup.bat's Portable option gives."""
-    env = dict(os.environ)
-    env["LOCALM_SETUP"] = "1"
+def _helper_env(**extra: str) -> dict:
+    """The environment of the operating-system programs and probes setup runs:
+    isolated_environ() with TEMP, TMP and TMPDIR at setup_temp(), plus
+    *extra*."""
+    env = isolated_environ()
+    tmp = str(setup_temp())
+    env.update(TEMP=tmp, TMP=tmp, TMPDIR=tmp)
+    env.update(extra)
+    return env
+
+
+def _ensure_setup_temp() -> None:
+    """Create setup_temp(). Raises StepFailed when it cannot be created."""
+    try:
+        setup_temp().mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise StepFailed(f"could not create the setup temp folder {setup_temp()}: {e}") from e
+
+
+def _env_for(plan: Optional[Plan] = None) -> dict:
+    """The environment of every step: _helper_env() plus LOCALM_SETUP=1,
+    UV_PYTHON_INSTALL_DIR, UV_CACHE_DIR and UV_CREDENTIALS_DIR at *plan*'s
+    store (store_dirs; the
+    launcher's answer when *plan* is None), UV_PYTHON_PREFERENCE=only-managed,
+    UV_PYTHON_INSTALL_BIN=0 and UV_PYTHON_INSTALL_REGISTRY=0,
+    UV_SYSTEM_CERTS=1 until a certificate error turned it off, and the folder
+    of localm's own uv first on PATH when that uv exists. Raises StepFailed
+    when the Shared store cannot be found."""
+    portable = _portable_default(None if plan is None else plan.portable_store)
+    store = store_dirs(portable)
+    env = _helper_env(LOCALM_SETUP="1",
+                      UV_PYTHON_INSTALL_DIR=str(store["python"]),
+                      UV_CACHE_DIR=str(store["cache"]),
+                      UV_CREDENTIALS_DIR=str(store["credentials"]),
+                      UV_PYTHON_PREFERENCE="only-managed",
+                      UV_PYTHON_INSTALL_BIN="0",
+                      UV_PYTHON_INSTALL_REGISTRY="0")
     if _CERTS["system"]:
         env["UV_SYSTEM_CERTS"] = "1"
-    else:
-        env.pop("UV_SYSTEM_CERTS", None)
-    # Put the uv being used on PATH for everything the steps run. localm's own
-    # plugin dependency installer shells out to a bare uv, and a portable copy
-    # inside the folder is not on PATH; its fallback cannot help either,
-    # because a uv-created environment has no pip.
-    exe = find_uv(ROOT)
-    uv_bin = os.path.dirname(exe) if exe else ""
-    if uv_bin:
-        env["PATH"] = uv_bin + os.pathsep + env.get("PATH", "")
-    ours = {"UV_PYTHON_INSTALL_DIR": str(ROOT / ".python"),
-            "UV_CACHE_DIR": str(ROOT / ".cache")}
-    for key, value in ours.items():
-        if plan.portable_store:
-            env[key] = value
-        elif env.get(key) == value:
-            # Inherited from the launcher, not chosen by the user.
-            env.pop(key)
+    exe = find_uv(ROOT, portable)
+    if exe:
+        env["PATH"] = os.path.dirname(exe) + os.pathsep + env.get("PATH", "")
     return env
 
 
@@ -370,6 +520,7 @@ def _run(cmd: list[str], emit: Callable[[str], None], plan: Plan,
     the command's questions (localm.setup_spec ASK protocol) are answered
     through ask(); without it stdin is closed."""
     emit("$ " + " ".join(str(c) for c in cmd))
+    _ensure_setup_temp()
     env = _env_for(plan)
     if answers:
         env[spec.ASK_ENV] = "stdio"
@@ -378,7 +529,8 @@ def _run(cmd: list[str], emit: Callable[[str], None], plan: Plan,
             [str(c) for c in cmd], cwd=str(ROOT), env=env,
             stdin=subprocess.PIPE if answers else subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, encoding="utf-8", errors="replace", bufsize=1)
+            text=True, encoding="utf-8", errors="replace", bufsize=1,
+            creationflags=_NO_WINDOW)
     except OSError as e:
         if allow_fail:
             emit(f"[!] could not start: {e}")
@@ -431,7 +583,9 @@ def _query(args: list[str]) -> str:
     """The first line the installed localm prints for *args*, or empty."""
     try:
         out = subprocess.run([str(venv_python(ROOT)), *args], cwd=str(ROOT),
-                             capture_output=True, text=True, timeout=60)
+                             capture_output=True, text=True, timeout=60,
+                             env=_env_for(), stdin=subprocess.DEVNULL,
+                             creationflags=_NO_WINDOW)
         lines = (out.stdout or "").strip().splitlines()
         return lines[0] if lines else ""
     except Exception:
@@ -445,6 +599,36 @@ def _record_now(emit: Callable[[str], None], **fields) -> None:
         install_manifest().record(ROOT, **fields)
     except Exception as e:
         emit(f"[!] could not record this step yet: {e}")
+
+
+def remove_setup_temp(emit: Callable[[str], None]) -> None:
+    """Remove setup_temp() and everything in it, saying so in the log when
+    something is left behind."""
+    path = setup_temp()
+    if not path.exists():
+        return
+    shutil.rmtree(path, ignore_errors=True)
+    if path.exists():
+        emit(f"[!] could not remove the setup temp folder {path}; delete it by hand")
+
+
+def launch_env(plan: Plan) -> dict:
+    """The environment LocaLM is started with when setup ends: isolated_environ(),
+    and each of TEMP, TMP and TMPDIR that points into setup_temp() (removed when
+    setup ends) pointed at the tmp folder in *plan*'s data folder instead."""
+    env = isolated_environ()
+    inside = [k for k in ("TEMP", "TMP", "TMPDIR")
+              if env.get(k) and uv_tool().is_inside(env[k], setup_temp())]
+    if inside:
+        data = ROOT / "home" if plan.portable_data else Path(plan.data_path)
+        tmp = data / "tmp"
+        try:
+            tmp.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return env
+        for key in inside:
+            env[key] = str(tmp)
+    return env
 
 
 def run_steps(steps: list[Step], emit: Callable[[str], None],
@@ -475,31 +659,208 @@ def run_steps(steps: list[Step], emit: Callable[[str], None],
     return failures, None
 
 
-def shared_uv() -> Optional[str]:
-    """The uv in use when it is not the contained copy in the folder (the user's
-    own), or None. The install record stores it."""
-    exe = find_uv(ROOT)
-    if exe is None or not os.path.isabs(exe) or uv_tool().is_inside(exe, ROOT):
+def shared_uv(plan: Plan) -> Optional[str]:
+    """localm's own uv in the Shared store when *plan* is Shared and that uv
+    exists, for the install record; None otherwise."""
+    if plan.portable_store:
         return None
-    return exe
+    return find_uv(ROOT, False)
 
 
-def contained_uv_step(plan: Plan) -> Optional[Step]:
-    """The step that puts uv itself inside the folder when the Portable choice
-    was made and the uv found is not already there; None when there is nothing
-    to do. setup.bat's Portable option does the same ("uv, Python, and
-    downloads all under this folder")."""
-    if not plan.portable_store or uv_tool().contained_uv(ROOT) is not None:
+def uv_version(exe) -> Optional[str]:
+    """The version ``<exe> --version`` reports, or None when it cannot be run or
+    prints no version."""
+    try:
+        out = subprocess.run([str(exe), "--version"], capture_output=True, text=True,
+                             encoding="utf-8", errors="replace", timeout=30,
+                             stdin=subprocess.DEVNULL, env=_helper_env(),
+                             creationflags=_NO_WINDOW).stdout
+    except (OSError, ValueError, subprocess.SubprocessError):
         return None
+    m = re.search(r"^uv\s+([0-9]\S*)", out or "", re.M)
+    return m.group(1) if m else None
 
-    def install(emit):
+
+# PowerShell functions defined before Astral's installer runs when its temp
+# folder path holds [ or ]: Expand-Archive, Copy-Item and Remove-Item on literal
+# paths, the zip unpacked with System.IO.Compression and every entry kept
+# inside the destination. See test_the_installer_runs_from_a_bracketed_folder.
+_PS_LITERAL_PATH_PROXIES = (
+    "function Expand-Archive { [CmdletBinding()] param([Parameter(Position=0)][string]$Path, "
+    "[string]$LiteralPath, [string]$DestinationPath, [switch]$Force) "
+    "if (-not $LiteralPath) { $LiteralPath = $Path }; "
+    "Add-Type -AssemblyName System.IO.Compression.FileSystem; "
+    "$root = [IO.Path]::GetFullPath($DestinationPath).TrimEnd('\\') + '\\'; "
+    "$z = [IO.Compression.ZipFile]::OpenRead($LiteralPath); "
+    "try { foreach ($e in $z.Entries) { "
+    "$t = [IO.Path]::GetFullPath([IO.Path]::Combine($root, $e.FullName)); "
+    "if (-not $t.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) "
+    "{ throw \"unsafe archive entry $($e.FullName)\" }; "
+    "if ($e.FullName.EndsWith('/')) { $null = [IO.Directory]::CreateDirectory($t) } "
+    "else { $null = [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($t)); "
+    "[IO.Compression.ZipFileExtensions]::ExtractToFile($e, $t, $true) } } } "
+    "finally { $z.Dispose() } }; "
+    "function Copy-Item { [CmdletBinding()] param([Parameter(Position=0)][string]$Path, "
+    "[Parameter(Position=1)][string]$Destination) "
+    "Microsoft.PowerShell.Management\\Copy-Item -LiteralPath $Path -Destination $Destination }; "
+    "function Remove-Item { [CmdletBinding()] param([Parameter(Position=0)][string]$Path, "
+    "[switch]$Recurse, [switch]$Force) "
+    "Microsoft.PowerShell.Management\\Remove-Item -LiteralPath $Path -Recurse:$Recurse "
+    "-Force:$Force }; ")
+
+
+def uv_installer_argv(script: Path, env: dict) -> list[str]:
+    """The command line that runs Astral's uv installer *script*: Windows
+    PowerShell from System32 (with _PS_LITERAL_PATH_PROXIES first when
+    env["TEMP"] holds [ or ]; the script path is then read from
+    LOCALM_UV_INSTALLER, which this sets in *env*), elsewhere the system's
+    ``sh``. Raises StepFailed when that program is not there."""
+    if IS_WINDOWS:
+        ps = system_program("powershell")
+        if ps is None:
+            raise StepFailed("Windows PowerShell was not found in the Windows system folder")
+        if any(c in env.get("TEMP", "") for c in "[]"):
+            env["LOCALM_UV_INSTALLER"] = str(script)
+            return [ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+                    _PS_LITERAL_PATH_PROXIES + "& $env:LOCALM_UV_INSTALLER; exit $LASTEXITCODE"]
+        return [ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)]
+    sh = system_program("sh")
+    if sh is None:
+        raise StepFailed("sh was not found in " + ", ".join(POSIX_SYSTEM_DIRS))
+    return [sh, str(script)]
+
+
+def system_path() -> str:
+    """A PATH of only the operating-system folders: on Windows System32, its
+    WindowsPowerShell\\v1.0 and the Windows folder; elsewhere
+    POSIX_SYSTEM_DIRS."""
+    if IS_WINDOWS:
+        sysdir = windows_system_dir()
+        if sysdir is None:
+            return ""
+        return os.pathsep.join(str(d) for d in (
+            sysdir, sysdir / "WindowsPowerShell" / "v1.0", sysdir.parent))
+    return os.pathsep.join(POSIX_SYSTEM_DIRS)
+
+
+def _run_uv_installer(script: Path, env: dict, emit: Callable[[str], None]) -> int:
+    """Run Astral's uv installer *script* with *env* (PSModulePath removed and
+    PATH set to system_path()), streaming its output into the log; returns its
+    exit code."""
+    env = {k: v for k, v in env.items() if k.upper() not in ("PSMODULEPATH", "PATH")}
+    env["PATH"] = system_path()
+    argv = uv_installer_argv(script, env)
+    proc = subprocess.Popen(argv, env=env, cwd=str(script.parent),
+                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+                            errors="replace", creationflags=_NO_WINDOW)
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        emit(line.rstrip())
+    return proc.wait()
+
+
+def _download(url: str, dest: Path) -> None:
+    """Write the body of *url* to *dest* (localm.http_ssl.verified_urlopen)."""
+    import urllib.request
+    from localm.http_ssl import verified_urlopen
+    req = urllib.request.Request(url, headers={"User-Agent": "localm"}, method="GET")
+    with verified_urlopen(req, timeout=120) as resp:
+        if not 200 <= int(resp.status) < 300:
+            raise OSError(f"HTTP {resp.status}")
+        dest.write_bytes(resp.read())
+
+
+# Whether this run installed localm's own uv.
+_UV_INSTALLED = {"here": False}
+
+
+def install_store_uv(plan: Plan, emit: Callable[[str], None], *,
+                     download: Optional[Callable[[str, Path], None]] = None,
+                     run_installer: Optional[Callable[..., int]] = None) -> Path:
+    """Install the uv pinned by this folder's setup script (uv_tool.read_pin)
+    into *plan*'s store uv folder and return its path.
+
+    The installer script is downloaded from the pinned release into a scratch
+    folder under setup_temp() and runs only if its sha256 equals the pin, with
+    UV_INSTALL_DIR and UV_UNMANAGED_INSTALL at the store uv folder and TEMP,
+    TMP and TMPDIR at that scratch folder; the scratch folder is removed
+    afterwards. Raises StepFailed, naming what failed, when the pin cannot be
+    read, the download fails, the checksum differs, the installer fails, or the
+    installed uv does not report the pinned version."""
+    tool = uv_tool()
+    try:
+        version, expected = tool.read_pin(ROOT)
+    except tool.UvBootstrapError as e:
+        raise StepFailed(str(e)) from None
+    target = store_dirs(plan.portable_store)["uv"]
+    _ensure_setup_temp()
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        scratch = Path(tempfile.mkdtemp(prefix="uv-installer-", dir=setup_temp()))
+    except OSError as e:
+        raise StepFailed(f"could not prepare {target} for uv: {e}") from None
+    name = "uv-installer.ps1" if IS_WINDOWS else "uv-installer.sh"
+    try:
+        installer_tmp = scratch / "tmp"
+        installer_tmp.mkdir()
+        script = scratch / name
+        url = f"https://github.com/astral-sh/uv/releases/download/{version}/{name}"
+        emit(f"Downloading the uv {version} installer ...")
+        try:
+            (download or _download)(url, script)
+        except Exception as e:
+            raise StepFailed(f"could not download the uv {version} installer: {e}") from None
+        if hashlib.sha256(script.read_bytes()).hexdigest() != expected:
+            raise StepFailed(f"the downloaded uv {version} installer did not match its "
+                             "expected checksum and was not run")
+        tmp = str(installer_tmp)
+        env = _helper_env(UV_INSTALL_DIR=str(target), UV_UNMANAGED_INSTALL=str(target),
+                          TEMP=tmp, TMP=tmp, TMPDIR=tmp)
+        emit(f"Installing uv {version} into {target} ...")
+        try:
+            rc = (run_installer or _run_uv_installer)(script, env, emit)
+        except OSError as e:
+            raise StepFailed(f"could not run the uv installer: {e}") from None
+        if rc != 0:
+            raise StepFailed(f"the uv installer exited {rc}")
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+        if scratch.exists():
+            emit(f"[!] could not remove the uv installer's scratch folder {scratch}")
+    exe = find_uv(ROOT, plan.portable_store)
+    if exe is None:
+        raise StepFailed(f"the uv installer finished but no uv appeared in {target}")
+    got = uv_version(exe)
+    if got != version:
+        raise StepFailed(f"{exe} reports uv {got or '(no version)'}, not the pinned {version}")
+    _UV_INSTALLED["here"] = True
+    return Path(exe)
+
+
+def uv_store_step(plan: Plan) -> Step:
+    """The first step of every install: keep localm's own uv in *plan*'s store
+    when it reports the pinned version, otherwise install the pinned uv there
+    (install_store_uv). Journaled as uv-portable (Portable) or uv-bootstrap
+    (Shared)."""
+    def ensure(emit):
         tool = uv_tool()
         try:
-            exe = tool.bootstrap_uv(ROOT, emit=emit)
+            version, _ = tool.read_pin(ROOT)
         except tool.UvBootstrapError as e:
             raise StepFailed(str(e)) from None
-        emit(f"uv is installed in the folder: {exe}")
-    return Step("Installing uv into this folder", install, key="uv-portable")
+        exe = find_uv(ROOT, plan.portable_store)
+        have = uv_version(exe) if exe else None
+        if exe and have == version:
+            emit(f"Using localm's own uv {version}: {exe}")
+            return
+        if exe:
+            emit(f"{exe} reports uv {have or '(no version)'}, not the pinned "
+                 f"{version}; installing uv {version} over it.")
+        emit(f"localm's own uv is installed: {install_store_uv(plan, emit)}")
+    label = ("Installing uv into this folder" if plan.portable_store
+             else "Installing localm's own uv in your user profile")
+    return Step(label, ensure, key="uv-portable" if plan.portable_store else "uv-bootstrap")
 
 
 def venv_is_ours(root: Path) -> bool:
@@ -507,6 +868,20 @@ def venv_is_ours(root: Path) -> bool:
     venv = root / ".venv"
     return ((venv / ".localm-venv").is_file()
             or (venv_bin(root) / ("localm.exe" if IS_WINDOWS else "localm")).exists())
+
+
+def run_system(name: str, *args: str, **kw) -> subprocess.CompletedProcess:
+    """subprocess.run of the operating-system program *name* (system_program)
+    with *args*: stdin closed, no console window, and _helper_env() unless *kw*
+    gives an env. Raises FileNotFoundError when the program is not in the
+    system folder; otherwise as subprocess.run."""
+    exe = system_program(name)
+    if exe is None:
+        raise FileNotFoundError(f"{name} was not found in the system folder")
+    kw.setdefault("env", _helper_env())
+    kw.setdefault("stdin", subprocess.DEVNULL)
+    kw.setdefault("creationflags", _NO_WINDOW)
+    return subprocess.run([exe, *args], **kw)
 
 
 def find_venv_lockers(root: Path) -> list[tuple]:
@@ -521,9 +896,9 @@ def find_venv_lockers(root: Path) -> list[tuple]:
           "$_.ExecutablePath.ToLowerInvariant().StartsWith($root) } | "
           "ForEach-Object { '{0}|{1}' -f $_.ProcessId, $_.Name }")
     try:
-        out = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
-                             capture_output=True, text=True, timeout=60,
-                             env={**os.environ, "LOCALM_VENV_PREFIX": prefix})
+        out = run_system("powershell", "-NoProfile", "-Command", ps,
+                         capture_output=True, text=True, timeout=60,
+                         env=_helper_env(LOCALM_VENV_PREFIX=prefix))
     except (OSError, subprocess.SubprocessError):
         return []
     found = []
@@ -544,9 +919,9 @@ def _own_process_tree() -> set:
           "$p = (Get-CimInstance Win32_Process -Filter \"ProcessId=$p\").ParentProcessId };"
           "$seen -join ' '")
     try:
-        out = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
-                             capture_output=True, text=True, timeout=60,
-                             env={**os.environ, "LOCALM_OWN_PID": str(os.getpid())})
+        out = run_system("powershell", "-NoProfile", "-Command", ps,
+                         capture_output=True, text=True, timeout=60,
+                         env=_helper_env(LOCALM_OWN_PID=str(os.getpid())))
         own.update(int(t) for t in (out.stdout or "").split() if t.isdigit())
     except (OSError, subprocess.SubprocessError):
         # This process and its parent stay excluded. See test_the_window_never_lists_itself.
@@ -566,19 +941,18 @@ def onedrive_root(root: Path) -> str:
 
 
 def create_venv(plan: Plan, emit: Callable[[str], None]) -> None:
-    """``uv venv --clear .venv``, recovering the way setup.bat does: one retry
+    """``uv venv --python 3.12 --python-preference only-managed --clear .venv``
+    with localm's own uv, recovering the way setup.bat does: one retry
     with uv's bundled certificates after a certificate error, and on Windows,
     for a locked .venv, an attribute reset, stopping this folder's own
     processes (asked first), one short wait, then the question whether to try
     again. Raises StepFailed when the user stops trying."""
-    args = ["venv", "--python", PYVER]
-    if plan.portable_store:
-        args += ["--python-preference", "only-managed"]
-    args += ["--clear", ".venv"]
+    args = ["venv", "--python", PYVER, "--python-preference", "only-managed",
+            "--clear", ".venv"]
     attrib_tried = wait_tried = False
     while True:
         lines: list = []
-        if _run(uv_argv(*args), emit, plan, allow_fail=True, collect=lines) == 0:
+        if _run(uv_argv(plan, *args), emit, plan, allow_fail=True, collect=lines) == 0:
             return
         text = "\n".join(lines)
         if _CERTS["system"] and "certificate" in text.lower():
@@ -590,8 +964,11 @@ def create_venv(plan: Plan, emit: Callable[[str], None]) -> None:
         if IS_WINDOWS and ("os error 5" in text or "os error 32" in text):
             if not attrib_tried:
                 attrib_tried = True
-                subprocess.run(["attrib", "-R", "-H", str(ROOT / ".venv" / "*.*"),
-                                "/S", "/D"], capture_output=True)
+                try:
+                    run_system("attrib", "-R", "-H", str(ROOT / ".venv" / "*.*"),
+                               "/S", "/D", capture_output=True)
+                except OSError as e:
+                    emit(f"[!] could not reset the attributes in .venv: {e}")
                 continue
             lockers = find_venv_lockers(ROOT)
             if lockers:
@@ -602,8 +979,11 @@ def create_venv(plan: Plan, emit: Callable[[str], None]) -> None:
                 # SETUP-Q: venv-lockers
                 if ASK is not None and ask_yes("venv-lockers", "Stop them and retry now?"):
                     for pid, _ in lockers:
-                        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                        try:
+                            run_system("taskkill", "/PID", str(pid), "/T", "/F",
                                        capture_output=True)
+                        except OSError as e:
+                            emit(f"[!] could not stop PID {pid}: {e}")
                     time.sleep(2)
                     continue
                 reason = "lockers_declined"
@@ -663,11 +1043,8 @@ def runtime_failed(emit: Callable[[str], None], retry: str, detail: str) -> None
 
 
 def all_steps(plan: Plan, resume: Optional[dict] = None) -> list[Step]:
-    """What the window runs: the install, preceded by the contained-uv step when
-    the Portable choice needs it."""
-    steps = build_steps(plan, resume)
-    first = contained_uv_step(plan)
-    return [first, *steps] if first else steps
+    """What the window runs: uv_store_step, then the install."""
+    return [uv_store_step(plan), *build_steps(plan, resume)]
 
 
 def build_steps(plan: Plan, resume: Optional[dict] = None) -> list[Step]:
@@ -717,13 +1094,13 @@ def build_steps(plan: Plan, resume: Optional[dict] = None) -> list[Step]:
     steps.append(Step("Recording where data lives", data_dir, key="data-folder"))
 
     def install_localm(emit):
-        _run(uv_argv("pip", "install", "-p", ".venv", "-e", f".[{plan.extras}]"),
+        _run(uv_argv(plan, "pip", "install", "-p", ".venv", "-e", f".[{plan.extras}]"),
              emit, plan)
     steps.append(Step("Installing LocaLM", install_localm, key="install-localm"))
 
     def install_runtime_pkg(emit):
         # Carries llama.dll + ggml inside the venv; setup-llama fills it below.
-        _run(uv_argv("pip", "install", "-p", ".venv", "-e", "./runtime"), emit, plan)
+        _run(uv_argv(plan, "pip", "install", "-p", ".venv", "-e", "./runtime"), emit, plan)
     steps.append(Step("Installing the native runtime package", install_runtime_pkg,
                       key="runtime-package"))
 
@@ -735,13 +1112,13 @@ def build_steps(plan: Plan, resume: Optional[dict] = None) -> list[Step]:
             emit("No PyTorch stack needed for this backend (GGUF chat does not use it).")
             return
         if spec == "-e .[gpu]":
-            codes = [_run(uv_argv("pip", "install", "-p", ".venv", "-e", ".[gpu,audio]"),
+            codes = [_run(uv_argv(plan, "pip", "install", "-p", ".venv", "-e", ".[gpu,audio]"),
                           emit, plan, allow_fail=True)]
         else:
             codes = [
-                _run(uv_argv("pip", "install", "-p", ".venv", *spec.split()),
+                _run(uv_argv(plan, "pip", "install", "-p", ".venv", *spec.split()),
                      emit, plan, allow_fail=True),
-                _run(uv_argv("pip", "install", "-p", ".venv", "-e", ".[hf,audio]"),
+                _run(uv_argv(plan, "pip", "install", "-p", ".venv", "-e", ".[hf,audio]"),
                      emit, plan, allow_fail=True),
             ]
         if any(codes):
@@ -857,19 +1234,17 @@ def build_steps(plan: Plan, resume: Optional[dict] = None) -> list[Step]:
             args += ["--file", str(ROOT / "LocaLM.desktop")]
         if state.get("path_modified"):
             args.append("--path-modified")
-        if plan.portable_store:
-            contained = [("--python-dir", ROOT / ".python"),
-                         ("--cache-dir", ROOT / ".cache"),
-                         ("--uv-dir", ROOT / ".uv")]
-            present = [(flag, d) for flag, d in contained if d.exists()]
-            if present:
-                args.append("--runtime-contained")
-                for flag, d in present:
-                    args += [flag, str(d)]
-        own_uv = shared_uv()
+        tooling = _tooling_fields(ROOT, plan.portable_store)
+        if tooling.get("runtime_contained"):
+            args.append("--runtime-contained")
+        for key, flag in (("python_dir", "--python-dir"), ("cache_dir", "--cache-dir"),
+                          ("uv_dir", "--uv-dir")):
+            if key in tooling:
+                args += [flag, tooling[key]]
+        own_uv = shared_uv(plan)
         if own_uv:
             args += ["--uv-exe", own_uv]
-            if os.environ.get(UV_INSTALLED_ENV) == "1":
+            if os.environ.get(UV_INSTALLED_ENV) == "1" or _UV_INSTALLED["here"]:
                 args.append("--uv-shared-installed")
         _run(args, emit, plan)
         emit("Recorded what this install created, so uninstall removes only that.")
@@ -884,10 +1259,9 @@ def intended_shortcut_path() -> str:
     creating and recording it still lets uninstall remove it."""
     if IS_WINDOWS:
         try:
-            out = subprocess.run(
-                ["powershell", "-NoProfile", "-Command",
-                 "[Environment]::GetFolderPath('Desktop')"],
-                capture_output=True, text=True, timeout=30)
+            out = run_system("powershell", "-NoProfile", "-Command",
+                             "[Environment]::GetFolderPath('Desktop')",
+                             capture_output=True, text=True, timeout=30)
         except (OSError, subprocess.SubprocessError):
             return ""
         lines = (out.stdout or "").strip().splitlines()
@@ -935,8 +1309,8 @@ def make_shortcut(plan: Plan, emit: Callable[[str], None]) -> str:
             + (f"$s.IconLocation = '{q(ico)}';" if ico.exists() else "")
             + "$s.Description = 'LocaLM';$s.Save();Write-Output $p"
         )
-        out = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
-                             check=True, capture_output=True, text=True)
+        out = run_system("powershell", "-NoProfile", "-Command", ps,
+                         check=True, capture_output=True, text=True)
         written = (out.stdout or "").strip().splitlines()
         emit("Shortcut created on your Desktop.")
         return written[-1] if written else ""
@@ -1036,11 +1410,12 @@ def _apps_use_light_theme():
 
 
 def _command_output(argv: list[str], timeout: float = 2.0) -> Optional[str]:
-    """stdout of argv, or None when it cannot start, exits non-zero or runs
-    longer than timeout seconds."""
+    """stdout of argv (its program as system_program finds it), or None when
+    that program is not there, cannot start, exits non-zero or runs longer than
+    timeout seconds."""
     try:
-        proc = subprocess.run(argv, stdin=subprocess.DEVNULL,
-                              capture_output=True, text=True, timeout=timeout)
+        proc = run_system(argv[0], *argv[1:], capture_output=True, text=True,
+                          timeout=timeout, env=isolated_environ())
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
     return proc.stdout if proc.returncode == 0 else None
@@ -1384,10 +1759,11 @@ class Wizard:
 
         ttk.Label(page, text="Python tooling",
                   font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(16, 0))
-        ttk.Label(page, text=("Portable - uv, its Python and downloads all inside "
-                              "this folder" if self.store_var.get() else
-                              "Shared - uv and its Python + cache at their "
-                              "normal per-user location")
+        ttk.Label(page, text=("Portable - localm's own uv, its Python and downloads "
+                              "all inside this folder" if self.store_var.get() else
+                              "Shared - localm's own uv, its Python and downloads "
+                              "in a localm folder in your user profile, reused by "
+                              "every LocaLM install of yours")
                   + " (chosen when setup started)",
                   wraplength=560).pack(anchor="w")
 
@@ -1702,6 +2078,7 @@ class Wizard:
         if fatal:
             self.lines.put(("done", fatal))
             return
+        remove_setup_temp(self._emit)
         self.lines.put(("done", None if not failures
                         else "PARTIAL:" + "; ".join(failures)))
 
@@ -1840,7 +2217,9 @@ class Wizard:
     def _launch(self) -> None:
         exe = venv_bin(ROOT) / ("localm.exe" if IS_WINDOWS else "localm")
         try:
-            subprocess.Popen([str(exe), "gui"], cwd=str(ROOT))
+            subprocess.Popen([str(exe), "gui"], cwd=str(ROOT),
+                             env=launch_env(self.current_plan()),
+                             stdin=subprocess.DEVNULL, creationflags=_NO_WINDOW)
         except OSError:
             pass
         self.root.destroy()
@@ -1857,8 +2236,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    if find_uv(ROOT) is None:
-        print("uv is required and was not found. Run setup.bat / setup.sh instead.",
-              file=sys.stderr)
-        raise SystemExit(2)
     raise SystemExit(main())
