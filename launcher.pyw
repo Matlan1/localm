@@ -864,7 +864,8 @@ class Launcher(tk.Tk):
                     [python_exe(), "-m", "localm", "add", path,
                      "--on-duplicate", "alias", "--fast"],
                     cwd=str(REPO_DIR), capture_output=True, text=True,
-                    timeout=900)
+                    timeout=900,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
                 ok = proc.returncode == 0
                 out = (proc.stdout + proc.stderr).strip().splitlines()
                 msg = out[-1] if out else ""
