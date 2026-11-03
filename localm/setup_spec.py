@@ -72,7 +72,6 @@ QUESTIONS: tuple = (
     Question("uninstall-confirm", "n"),
     Question("uninstall-no-python", "n", variants=(CONSOLE,)),
     Question("tooling-store", "1", (("1", "portable"), ("2", "shared"))),
-    Question("uv-install", "y"),
     Question("replace-venv", "n"),
     Question("venv-lockers", "y", platforms=("win32",)),
     Question("venv-retry", "y"),

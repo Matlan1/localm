@@ -363,7 +363,7 @@ WINDOW_CONTROLS = {
 WINDOW_DIALOGS = {"uninstall-confirm", "venv-lockers", "venv-retry", "runtime-failed",
                   "keep-data", "data-offline"}
 # Questions the launcher asks before the window opens.
-LAUNCHER_QUESTIONS = {"tooling-store", "uv-install"}
+LAUNCHER_QUESTIONS = {"tooling-store"}
 
 
 def test_every_window_control_answers_a_spec_question(tmp_path, monkeypatch):
