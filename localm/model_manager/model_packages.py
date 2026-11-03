@@ -181,12 +181,32 @@ def installed_distributions() -> dict:
 def torch_backend(installed: dict) -> Optional[str]:
     """The ``--torch-backend`` value matching the installed torch (its local
     version label: ``cpu``, ``cu126``, ``rocm6.4``, ``xpu``), or None for a torch
-    from PyPI, no torch, or a label uv does not know."""
+    from PyPI, no torch, or a label of another shape."""
     version = installed.get("torch")
     if not version or "+" not in version:
         return None
     label = version.split("+", 1)[1]
     return label if _TORCH_LABEL.match(label) else None
+
+
+def torch_from_elsewhere() -> Optional[str]:
+    """The installed torch's version when it was installed from a file or a URL
+    rather than an index (its ``direct_url.json``), else None. Packages built
+    against such a torch cannot be matched to it from PyPI or PyTorch's index."""
+    try:
+        dist = md.distribution("torch")
+    except md.PackageNotFoundError:
+        return None
+    try:
+        direct = dist.read_text("direct_url.json")
+    except OSError:
+        return None
+    return dist.version if direct else None
+
+
+def _unmatched_torch(version: str) -> PlanError:
+    return PlanError(f"this install's PyTorch ({version}) did not come from PyPI or PyTorch's "
+                     "own index, so localm cannot find packages built to match it.")
 
 
 def check_network(backend: Optional[str]) -> None:
@@ -202,7 +222,7 @@ def check_network(backend: Optional[str]) -> None:
 
 def _uv() -> str:
     from localm import uv_tool
-    uv = uv_tool.own_uv(uv_tool.install_root())
+    uv = uv_tool.bundled_uv()
     if not uv:
         raise PlanError("localm cannot find the uv its install uses, so it cannot add packages. "
                         "Run localm's setup again to restore it.")
@@ -211,7 +231,9 @@ def _uv() -> str:
 
 def _run_kwargs() -> dict:
     from localm import config
-    kw: dict = {"env": config.contained_pip_env(), "stdin": subprocess.DEVNULL}
+    env = {k: v for k, v in config.contained_pip_env().items()
+           if not k.upper().startswith("UV_") or k.upper() == "UV_CACHE_DIR"}
+    kw: dict = {"env": env, "stdin": subprocess.DEVNULL}
     if os.name == "nt":
         kw["creationflags"] = subprocess.CREATE_NO_WINDOW
     return kw
@@ -256,6 +278,9 @@ def plan(modules: list, *, run: Callable = subprocess.run) -> Plan:
         if reason is not None:
             raise PlanError(f"localm cannot add {package_label(m)}: {reason}.")
     installed = installed_distributions()
+    elsewhere = torch_from_elsewhere()
+    if elsewhere is not None:
+        raise _unmatched_torch(elsewhere)
     backend = torch_backend(installed)
     check_network(backend)
     uv = _uv()
@@ -273,9 +298,7 @@ def plan(modules: list, *, run: Callable = subprocess.run) -> Plan:
         except (OSError, subprocess.TimeoutExpired) as e:
             raise PlanError(f"uv could not resolve the packages: {e}") from e
     if proc.returncode != 0:
-        detail = _tail(proc.stderr or proc.stdout)
-        raise PlanError("localm cannot add these packages without changing ones it already "
-                        f"uses, or a package has no ready-built version for this machine. uv said: {detail}")
+        raise _compile_failure(proc.stderr or proc.stdout, installed)
     pins = parse_pins(proc.stdout)
     adds = []
     lines = []
@@ -293,6 +316,22 @@ def plan(modules: list, *, run: Callable = subprocess.run) -> Plan:
         lines.append(f"{name}=={version} " + " ".join(f"--hash={h}" for h in hashes))
     return Plan(modules=modules, adds=adds, requirements="\n".join(lines) + "\n",
                 torch_backend=backend)
+
+
+_NETWORK_FAILURE = re.compile(r"failed to fetch|error sending request|dns error|"
+                              r"failed to connect|connection refused|timed out|offline",
+                              re.IGNORECASE)
+
+
+def _compile_failure(text: Optional[str], installed: dict) -> PlanError:
+    """The PlanError for a failed ``uv pip compile`` whose output is *text*."""
+    detail = _tail(text)
+    if "--torch-backend" in (text or ""):
+        return _unmatched_torch(installed.get("torch", "unknown"))
+    if _NETWORK_FAILURE.search(text or ""):
+        return PlanError(f"localm could not reach the package index. uv said: {detail}")
+    return PlanError("localm found no way to add these packages as ready-built packages "
+                     f"without changing a package it already has. uv said: {detail}")
 
 
 def _tail(text: Optional[str], limit: int = 600) -> str:
@@ -314,20 +353,35 @@ _VERIFY = "import importlib, sys\nfor m in sys.argv[1:]:\n    importlib.import_m
 _INSTALL_LOCK = threading.Lock()
 
 
-def _stream(cmd: list, on_progress: ProgressCb) -> tuple[int, str]:
+def _stream(cmd: list, on_progress: ProgressCb,
+            timeout: float = _INSTALL_TIMEOUT_S) -> tuple[int, str]:
+    """Run *cmd*, passing each output line to *on_progress*. Returns ``(exit
+    code, output)``; a run still going after *timeout* seconds is killed and
+    reported with a nonzero code and a closing line saying so."""
     kw = _run_kwargs()
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                             bufsize=1, **kw)
-    lines = []
-    assert proc.stdout is not None
-    for line in proc.stdout:
-        lines.append(line)
-        _emit(on_progress, line.rstrip())
-    try:
-        rc = proc.wait(timeout=_INSTALL_TIMEOUT_S)
-    except subprocess.TimeoutExpired:
+    expired = threading.Event()
+
+    def kill() -> None:
+        expired.set()
         proc.kill()
+
+    timer = threading.Timer(timeout, kill)
+    timer.daemon = True
+    timer.start()
+    lines = []
+    try:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            lines.append(line)
+            _emit(on_progress, line.rstrip())
         rc = proc.wait()
+    finally:
+        timer.cancel()
+    if expired.is_set():
+        lines.append(f"stopped after {int(timeout)} seconds without finishing\n")
+        rc = rc or 1
     return rc, "".join(lines)
 
 
@@ -346,7 +400,8 @@ def _imports_fail(modules: list) -> Optional[str]:
 def install(p: Plan, *, on_progress: ProgressCb = None) -> InstallResult:
     """Install exactly what plan *p* lists, then check every requested module,
     and torchvision or torchaudio when the plan adds them, imports. When one
-    does not, the distributions this call added are removed again. One install runs at a time per process; a second is refused."""
+    does not, or the install fails, the distributions this call added are
+    removed again. One install runs at a time per process; a second is refused."""
     if not _INSTALL_LOCK.acquire(blocking=False):
         return InstallResult(ok=False, error="another package install is running")
     try:
@@ -374,7 +429,8 @@ def _install(p: Plan, on_progress: ProgressCb) -> InstallResult:
             except OSError as e:
                 return InstallResult(ok=False, error=f"uv could not be started: {e}")
         if rc != 0:
-            return InstallResult(ok=False, error="uv could not install the packages: " + _tail(out))
+            error = "uv could not install the packages: " + _tail(out)
+            return InstallResult(ok=False, error=error + _remove_added(uv, p, on_progress))
     importlib.invalidate_caches()
     check = list(p.modules) + [m for m in ("torchvision", "torchaudio")
                                if m in {_canon(n) for n in names} and m not in p.modules]
@@ -382,15 +438,23 @@ def _install(p: Plan, on_progress: ProgressCb) -> InstallResult:
     failed = _imports_fail(check)
     if failed is not None:
         error = f"the packages were installed but do not import: {failed}"
-        if names:
-            rc, out = _stream([uv, "pip", "uninstall", "--python", sys.executable, *names],
-                              on_progress)
-            error += ("; the packages added were removed again" if rc == 0
-                      else "; removing the packages added failed too: " + _tail(out))
-        return InstallResult(ok=False, error=error)
+        return InstallResult(ok=False, error=error + _remove_added(uv, p, on_progress))
     _record(p)
     _emit(on_progress, "Done.")
     return InstallResult(ok=True, installed=[f"{n}=={v}" for n, v in p.adds])
+
+
+def _remove_added(uv: str, p: Plan, on_progress: ProgressCb) -> str:
+    """Uninstall the distributions of plan *p* that are installed now (none
+    were before the plan). Returns the clause the error message ends with."""
+    present = installed_distributions()
+    names = [n for n, _v in p.adds if _canon(n) in present]
+    if not names:
+        return ""
+    rc, out = _stream([uv, "pip", "uninstall", "--no-config", "--python", sys.executable,
+                       *names], on_progress)
+    return ("; the packages added were removed again" if rc == 0
+            else "; removing the packages added failed too: " + _tail(out))
 
 
 def _record(p: Plan) -> None:
@@ -401,7 +465,9 @@ def _record(p: Plan) -> None:
         return
     from localm import install_manifest, uv_tool
     from localm.debuglog import logger
-    entries = [{"project": n, "version": v, "for_modules": list(p.modules)} for n, v in p.adds]
+    day = time.strftime("%Y-%m-%d")
+    entries = [{"project": n, "version": v, "for_modules": list(p.modules), "installed": day}
+               for n, v in p.adds]
     try:
         install_manifest.record_model_packages(uv_tool.install_root(), entries)
     except (OSError, ValueError) as e:
@@ -526,3 +592,12 @@ def _folder_imports(folder: Path) -> frozenset:
             _scan_cache.clear()
         _scan_cache[name] = (key, found)
     return found
+
+
+def recorded() -> list:
+    """The packages the install record lists as added for models
+    (``{"project", "version", "for_modules", "installed"}``), oldest first;
+    empty without an install record."""
+    from localm import install_manifest, uv_tool
+    data = install_manifest.load(uv_tool.install_root()) or {}
+    return [e for e in data.get("model_packages") or [] if isinstance(e, dict)]

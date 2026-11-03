@@ -115,6 +115,9 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
         if not deps_task.host_pip_allowed(app):
             raise HTTPException(403, _NETWORK_BIND)
         from localm.model_manager import model_packages
+        running = current_task()
+        if running is not None and running.status == "running":
+            raise HTTPException(409, "Another package install is running.")
         p = model_packages.take(req.plan_id)
         if p is None:
             raise HTTPException(404, "This install list has expired. Open it again.")

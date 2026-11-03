@@ -292,7 +292,9 @@ def main() -> int:
         if module_is_shipped(module, shipped):
             status = "shipped"
         elif module in ON_DEMAND:
-            status = f"added on request ({ON_DEMAND[module].project})"
+            entry = ON_DEMAND[module]
+            where = f", {'/'.join(entry.platforms)} only" if entry.platforms else ""
+            status = f"added on request ({entry.project}{where})"
         elif module in ACCEPTED_REFUSALS:
             status = f"refused early: {ACCEPTED_REFUSALS[module]}"
         else:

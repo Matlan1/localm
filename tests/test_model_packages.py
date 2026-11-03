@@ -54,6 +54,7 @@ def online(monkeypatch):
     """Network policy allows the indexes; uv is found; torch is the PyPI build."""
     monkeypatch.setattr(mpk, "check_network", lambda backend: None)
     monkeypatch.setattr(mpk, "_uv", lambda: "uv")
+    monkeypatch.setattr(mpk, "torch_from_elsewhere", lambda: None)
     monkeypatch.setattr(mpk, "installed_distributions",
                         lambda: {"torch": "2.9.0", "numpy": "2.3.1", "pyyaml": "6.0.2"})
 
@@ -114,6 +115,7 @@ def test_plan_refuses_a_module_not_on_the_list_without_running_uv(online):
 def test_plan_refuses_when_the_network_is_off_without_running_uv(monkeypatch, available):
     monkeypatch.setenv("LOCALM_NET_MODE", "off")
     monkeypatch.setattr(mpk, "_uv", lambda: "uv")
+    monkeypatch.setattr(mpk, "torch_from_elsewhere", lambda: None)
     run = FakeRun()
     with pytest.raises(mpk.PlanError, match="net_mode=off"):
         mpk.plan(["timm"], run=run)
@@ -185,6 +187,50 @@ def test_plan_reports_what_uv_said_when_it_cannot_resolve(online, available):
         mpk.plan(["timm"], run=run)
 
 
+def test_plan_refuses_a_torch_installed_from_a_file_or_url_without_running_uv(online, available,
+                                                                          monkeypatch):
+    monkeypatch.setattr(mpk, "torch_from_elsewhere", lambda: "2.11.0+rocm7.13.0")
+    run = FakeRun()
+    with pytest.raises(mpk.PlanError, match=r"PyTorch \(2.11.0\+rocm7.13.0\) did not come from"):
+        mpk.plan(["timm"], run=run)
+    assert run.calls == []
+
+
+def test_a_torch_label_uv_does_not_know_is_reported_as_an_unmatched_torch(online, available,
+                                                                          monkeypatch):
+    monkeypatch.setattr(mpk, "installed_distributions", lambda: {"torch": "2.11.0+rocm9.9"})
+    run = FakeRun(rc=2, stderr="error: invalid value 'rocm9.9' for '--torch-backend <BACKEND>'")
+    with pytest.raises(mpk.PlanError, match=r"PyTorch \(2.11.0\+rocm9.9\) did not come from"):
+        mpk.plan(["timm"], run=run)
+
+
+def test_an_unreachable_index_is_reported_as_such(online, available):
+    run = FakeRun(rc=2, stderr="error: Failed to fetch: `https://pypi.org/simple/timm/`")
+    with pytest.raises(mpk.PlanError, match="could not reach the package index"):
+        mpk.plan(["timm"], run=run)
+
+
+def test_torch_from_elsewhere_reads_direct_url(monkeypatch):
+    class Dist:
+        version = "2.11.0+rocm7.13.0"
+
+        def __init__(self, direct):
+            self.direct = direct
+
+        def read_text(self, name):
+            return self.direct if name == "direct_url.json" else None
+
+    monkeypatch.setattr(mpk.md, "distribution", lambda name: Dist('{"url": "https://x/t.whl"}'))
+    assert mpk.torch_from_elsewhere() == "2.11.0+rocm7.13.0"
+    monkeypatch.setattr(mpk.md, "distribution", lambda name: Dist(None))
+    assert mpk.torch_from_elsewhere() is None
+
+    def absent(name):
+        raise mpk.md.PackageNotFoundError(name)
+    monkeypatch.setattr(mpk.md, "distribution", absent)
+    assert mpk.torch_from_elsewhere() is None
+
+
 def test_parse_pins_reads_continuations_and_rejects_a_loose_requirement():
     pins = mpk.parse_pins(_compile_output(("Open_Clip-Torch", "3.3.0")) + "# comment\n")
     assert pins == {"open-clip-torch": ("Open_Clip-Torch", "3.3.0", [H1, H2])}
@@ -229,6 +275,7 @@ def fake_uv(monkeypatch):
     monkeypatch.setattr(mpk, "_stream", stream)
     monkeypatch.setattr(mpk, "_imports_fail", lambda modules: calls.import_error)
     monkeypatch.setattr(mpk, "_record", lambda p: calls.recorded.append(p))
+    monkeypatch.setattr(mpk, "installed_distributions", lambda: {"timm": "1.0.30"})
     return calls
 
 
@@ -257,6 +304,7 @@ def test_install_removes_what_it_added_when_a_module_does_not_import(fake_uv):
     assert "do not import: ImportError: boom" in result.error
     assert "removed again" in result.error
     assert fake_uv.cmds[-1][:3] == ["uv", "pip", "uninstall"] and fake_uv.cmds[-1][-1] == "timm"
+    assert "--no-config" in fake_uv.cmds[-1]
     assert fake_uv.recorded == []
 
 
@@ -269,11 +317,38 @@ def test_an_added_torchvision_must_import_too(fake_uv, monkeypatch):
     assert checked == [["timm", "torchvision"]]
 
 
-def test_a_failed_uv_install_is_reported_and_nothing_recorded(fake_uv):
+def test_a_failed_uv_install_removes_what_it_left_and_records_nothing(fake_uv):
     fake_uv.rc = 2
     result = mpk.install(_plan())
     assert not result.ok and "uv could not install" in result.error
+    assert "removed again" in result.error
+    assert fake_uv.cmds[-1][:3] == ["uv", "pip", "uninstall"] and fake_uv.cmds[-1][-1] == "timm"
+    assert fake_uv.recorded == []
+
+
+def test_a_failed_uv_install_that_left_nothing_uninstalls_nothing(fake_uv, monkeypatch):
+    monkeypatch.setattr(mpk, "installed_distributions", lambda: {})
+    fake_uv.rc = 2
+    result = mpk.install(_plan())
+    assert not result.ok and "removed again" not in result.error
     assert len(fake_uv.cmds) == 1 and fake_uv.recorded == []
+
+
+def test_a_run_that_does_not_finish_is_stopped():
+    started = time.monotonic()
+    rc, out = mpk._stream([sys.executable, "-c", "import time; print('x', flush=True); "
+                           "time.sleep(60)"], None, timeout=2)
+    assert rc != 0 and "stopped after 2 seconds" in out and "x" in out
+    assert time.monotonic() - started < 30
+
+
+def test_uv_index_settings_from_the_environment_are_not_passed_on(monkeypatch):
+    monkeypatch.setenv("UV_INDEX_URL", "https://evil.example/simple")
+    monkeypatch.setenv("UV_EXTRA_INDEX_URL", "https://evil.example/simple")
+    monkeypatch.setenv("UV_INDEX_STRATEGY", "unsafe-best-match")
+    env = mpk._run_kwargs()["env"]
+    assert not any(k.upper().startswith("UV_") and k.upper() != "UV_CACHE_DIR" for k in env)
+    assert env["UV_CACHE_DIR"]
 
 
 def test_a_second_install_at_the_same_time_is_refused(fake_uv):
@@ -327,6 +402,23 @@ def test_record_model_packages_refuses_a_newer_manifest(tmp_path):
     _manifest(tmp_path, schema=install_manifest.SCHEMA_VERSION + 1)
     with pytest.raises(ValueError):
         install_manifest.record_model_packages(tmp_path, [{"project": "timm"}])
+
+
+def test_the_record_names_each_package_its_modules_and_the_day(monkeypatch):
+    seen = []
+    monkeypatch.setattr(install_manifest, "record_model_packages",
+                        lambda root, entries: seen.append(entries))
+    mpk._record(_plan())
+    assert seen == [[{"project": "timm", "version": "1.0.30", "for_modules": ["timm"],
+                      "installed": time.strftime("%Y-%m-%d")}]]
+
+
+def test_recorded_lists_what_the_install_record_holds(tmp_path, monkeypatch):
+    from localm import uv_tool
+    monkeypatch.setattr(uv_tool, "install_root", lambda: tmp_path)
+    assert mpk.recorded() == []
+    _manifest(tmp_path, model_packages=[{"project": "timm", "version": "1.0.30"}, "junk"])
+    assert mpk.recorded() == [{"project": "timm", "version": "1.0.30"}]
 
 
 def test_a_record_that_cannot_be_written_is_logged_and_install_still_succeeds(monkeypatch, caplog):
@@ -505,6 +597,7 @@ def test_a_second_install_while_one_runs_is_refused(routes, monkeypatch):
     mpk.remember(p)
     r = routes.client.post("/api/models/packages/install", json={"plan_id": p.id})
     assert r.status_code == 409 and routes.installs == []
+    assert mpk.take(p.id) is p
 
 
 def test_the_model_list_says_which_packages_a_model_needs(routes):
@@ -555,6 +648,20 @@ def test_the_command_with_yes_does_not_ask(cli):
     assert len(cli.installs) == 1
 
 
+def test_the_command_lists_what_was_added(cli, monkeypatch):
+    monkeypatch.setattr(mpk, "recorded", lambda: [
+        {"project": "timm", "version": "1.0.30", "for_modules": ["timm"],
+         "installed": "2026-11-03"}])
+    result = cli.run("--list")
+    assert result.exit_code == 0 and "timm 1.0.30" in result.output
+    assert "for timm, 2026-11-03" in result.output and cli.installs == []
+
+
+def test_the_command_needs_a_model_or_list(cli):
+    result = cli.run()
+    assert result.exit_code == 2 and "Name a model, or pass --list." in result.output
+
+
 def test_the_command_refuses_an_unknown_model(cli):
     result = cli.run("nope")
     assert result.exit_code == 1 and "not a registered Hugging Face model folder" in result.output
@@ -573,13 +680,14 @@ def test_model_folder_resolves_a_name_a_folder_name_or_a_path(tmp_path, monkeypa
     assert mpk.model_folder("nope") is None
 
 
-def test_uv_comes_from_the_installs_own_lookup(monkeypatch):
+def test_uv_is_the_one_installed_with_localm(monkeypatch):
     from localm import uv_tool
-    seen = []
-    monkeypatch.setattr(uv_tool, "own_uv", lambda root: seen.append(root) or None)
+    monkeypatch.setattr(uv_tool, "find_uv", lambda root: "uv-on-path")
+    monkeypatch.setattr(uv_tool, "bundled_uv", lambda: None)
     with pytest.raises(mpk.PlanError, match="cannot find the uv"):
         mpk._uv()
-    assert seen == [uv_tool.install_root()]
+    monkeypatch.setattr(uv_tool, "bundled_uv", lambda: "/venv/bin/uv")
+    assert mpk._uv() == "/venv/bin/uv"
 
 
 def test_subprocesses_open_no_window_on_windows():

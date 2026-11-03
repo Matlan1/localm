@@ -1432,10 +1432,12 @@ def add(path, name, no_hash, fast, on_duplicate, type, store):
 
 
 @main.command("install-packages")
-@click.argument("model", shell_complete=_complete_model_name)
+@click.argument("model", required=False, shell_complete=_complete_model_name)
 @click.option("-y", "--yes", is_flag=True,
               help="Install without asking (the list is still printed).")
-def install_packages_cmd(model, yes):
+@click.option("--list", "list_added", is_flag=True,
+              help="List the packages added for models so far, and stop.")
+def install_packages_cmd(model, yes, list_added):
     """Add the Python packages a Hugging Face model's own code needs to localm.
 
     MODEL is a registered model name, or the folder of one. Only packages localm
@@ -1448,10 +1450,22 @@ def install_packages_cmd(model, yes):
     Examples:
       localm install-packages Kimi-Linear-48B-A3B-Instruct
       localm install-packages D:\\models\\some-model --yes
+      localm install-packages --list
     """
     from localm.model_manager import model_packages as mpk
     from localm.model_manager.missing_packages import refusal_for
     from rich.markup import escape
+    if list_added:
+        added = mpk.recorded()
+        if not added:
+            console.print("No packages have been added for models in this install.")
+        for e in added:
+            console.print(f"  {escape(str(e.get('project')))} {escape(str(e.get('version')))}"
+                          f"  [dim]for {escape(', '.join(e.get('for_modules') or []))}, "
+                          f"{escape(str(e.get('installed', '')))}[/dim]")
+        return
+    if not model:
+        raise click.UsageError("Name a model, or pass --list.")
     folder = mpk.model_folder(model)
     if folder is None:
         console.print(f"[red]{escape(model)} is not a registered Hugging Face model folder.[/red]")
