@@ -3,4 +3,3 @@
 from tests import _no_console_window, _no_window
 
 _no_console_window.arm()
-_no_window.arm()
