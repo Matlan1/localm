@@ -27,6 +27,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **"Still generating" after Unload all is no longer an error.** Models that were busy and stayed loaded show a normal message that fades by itself and is no longer added to Settings > Recent errors.
 - **The Activity pill counts queued jobs separately.** With several jobs it reads, for example, "1 running, 1 queued" instead of counting the queued job as running.
 - **Live tuning shows the free VRAM instead of "free VRAM unknown".** The memory estimate under Settings > Live tuning, and the fit badges on the Discover page, now wait for a GPU reading already in progress instead of giving up on it.
+- **The sidebar's split line names the right GPUs.** On a PC where an integrated GPU or an extra adapter shifts the runtime's own device numbers, the line under the loaded model ("Split: GPU 1 39% ...", by free VRAM) named the runtime's device numbers instead of the GPU numbers shown in the per-GPU rows, the GPU selector and `localm gpus`, so it could name a card the model was not on. It now uses the same GPU numbers everywhere.
 
 ## [0.3.2] - 2026-10-29
 

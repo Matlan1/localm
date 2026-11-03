@@ -8,7 +8,7 @@ import pytest
 
 from localm import discover, sysstats
 from localm.inference.backends.gguf import GgufBackend
-from tests.test_gpu_placement import TestBackendLoad
+from tests import test_gpu_placement
 from tests.test_implicit_split_fit import (
     _config, _load_capturing, _registry, _tiny_model, _torch_readings)
 from tests.test_multigpu_config_placement import _backend as _cfg_backend
@@ -69,7 +69,7 @@ class TestImplicitFitBranch:
         gpus = [{"index": i, "name": f"gpu{i}", "free": f, "total": f + 10,
                  "free_scope": discover.FREE_SCOPE_DEVICE, "integrated": ig}
                 for i, (f, ig) in enumerate(
-                    [(2_000_000_000, True), (60_000_000, False), (40_000_000, False),
+                    [(2_000_000_000, True), (60_000_000, False), (50_000_000, False),
                      (30_000_000, False)])]
         b = self._backend(tmp_path)
         params = _load_capturing(b, gpus, _registry(gpus))
@@ -84,7 +84,7 @@ class TestPlacedBranch:
 
     def test_a_reordered_runtime_still_names_the_selected_cards(self, tmp_path):
         from localm.config import load_config
-        loader = TestBackendLoad()
+        loader = test_gpu_placement.TestBackendLoad()
         b = loader._backend(tmp_path)
         readings, registry = loader._world([30_000, 30_000, 30_000], [2, 0, 1])
         cfg = dict(load_config(), gpu_split_indices=[0, 2], gpu_split_ratios=None,
