@@ -24,16 +24,19 @@ function previewFor(model) {
 
 function makeApp({ active = "qwen3", resumable = "", reply, finish, chatStatus = 200, importResult, importStatus = 200 } = {}) {
   const calls = [];
+  let chatServed = false;
   const fetchImpl = async (url, opts = {}) => {
     const u = String(url);
     calls.push({ u, opts });
     const ok = (body, status = 200) => ({ ok: status < 400, status, statusText: "ERR", json: async () => body, text: async () => "" });
     if (u.startsWith("/api/models")) {
       const names = [active, resumable].filter(Boolean);
-      return ok({ models: names.map((name) => ({ name })), active,
-                  ...(resumable ? { resumable } : {}) });
+      const live = chatServed && resumable ? resumable : active;
+      return ok({ models: names.map((name) => ({ name })), active: live,
+                  ...(resumable && !live ? { resumable } : {}) });
     }
     if (u.includes("/v1/chat/completions")) {
+      chatServed = true;
       if (chatStatus !== 200) return ok({ detail: "model is busy" }, chatStatus);
       return ok({ choices: [{ message: { content: reply ?? "an enhanced prompt" },
                               finish_reason: finish ?? "stop" }] });
@@ -106,6 +109,8 @@ test("Enhance with the chat model unloaded but resumable sends the request to it
   assert.equal(JSON.parse(chatCalls(calls)[0].opts.body).model, "llama-8b");
   assert.equal($("img-prompt").value, "an enhanced prompt");
   assert.ok(labels.includes("Loading llama-8b..."), `labels seen: ${labels.join(" | ")}`);
+  runScript(win, "globalThis.__active = modelCache.active;");
+  assert.equal(win.__active, "llama-8b", "the model list is re-read once the model has loaded");
 });
 
 test("Enhance with no chat model at all says so and focuses the sidebar picker", async () => {
