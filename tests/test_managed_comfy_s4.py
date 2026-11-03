@@ -34,6 +34,8 @@ import pytest
 
 import localm.config as cfg
 from localm.media import managed_comfy as mc
+from localm.media import source_archive
+from tests._source_archives import FakeGitHub
 
 
 # --------------------------------------------------------------------------- #
@@ -273,7 +275,7 @@ def test_func_patch_is_registered():
 
 
 # =========================================================================== #
-#  helpers for the provisioning + update oracles (real git)                   #
+#  helpers for the provisioning + update oracles (source archives, no git)    #
 # =========================================================================== #
 
 def _git_available() -> bool:
@@ -294,21 +296,10 @@ def _git(cwd: Path, *args) -> None:
                    check=True, capture_output=True, text=True)
 
 
-def _head(root: Path) -> str:
-    return subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(root), env=_GIT_ENV,
-                          capture_output=True, text=True, check=True).stdout.strip()
-
-
-def _commit_all(workdir: Path, msg: str) -> str:
-    _git(workdir, "add", "-A")
-    _git(workdir, "commit", "-m", msg)
-    return _head(workdir)
-
-
 def _make_fake_venv(root: Path) -> None:
     """A placeholder venv interpreter + completion marker so
     is_managed_comfy_installed() reads True (S4's update never rebuilds the venv;
-    it only moves the git source + patches). The marker is load-bearing: main.py
+    it only moves the source + patches). The marker is load-bearing: main.py
     plus a venv alone reads as "still installing", not "installed"."""
     from localm.media.managed_comfy_provision import MARKER_FILENAME
     paths = mc.managed_comfy_paths()
@@ -317,11 +308,22 @@ def _make_fake_venv(root: Path) -> None:
     (paths.root / MARKER_FILENAME).write_text("{}", encoding="utf-8")
 
 
+_CORE = {"comfy_api/__init__.py": "", "comfy_api/internal/__init__.py": _BUGGY_SRC}
+
+
+def _tree(**changes) -> dict:
+    """A fake ComfyUI tree: main.py, gone_at_c2.py, a .gitignore and the fragile
+    core, with *changes* applied (a None value drops that file)."""
+    files = {"main.py": "print('comfy')\n", "gone_at_c2.py": "x = 1\n",
+             ".gitignore": "venv/\nmodels/\ncustom_nodes/\noutput/\n", **_CORE}
+    files.update(changes)
+    return {k: v for k, v in files.items() if v is not None}
+
+
 # =========================================================================== #
-#  2. PROVISIONING applies the patch set (fresh path, real git + venv).       #
+#  2. PROVISIONING applies the patch set (fresh path, source archive + venv). #
 # =========================================================================== #
 
-@pytest.mark.skipif(not _git_available(), reason="git not on PATH")
 def test_provision_fresh_applies_localm_patches(home, tmp_path, monkeypatch):
     """A fresh provision against a fake ComfyUI that ships the fragile file leaves
     the managed core PATCHED (tolerant). Negative: the fake's own source is fragile
@@ -334,17 +336,11 @@ def test_provision_fresh_applies_localm_patches(home, tmp_path, monkeypatch):
     # would otherwise shell out to the real nvidia-smi.
     monkeypatch.setattr(hwdetect, "_cuda_compute_capabilities", lambda: [])
 
-    # A minimal fake ComfyUI git repo: main.py + the fragile core file, no reqs.
-    src = tmp_path / "ComfyUI"
-    src.mkdir()
-    (src / "main.py").write_text("print('comfy')\n", encoding="utf-8")
-    _write_internal(src, _BUGGY_SRC)
-    (src / ".gitignore").write_text("venv/\nmodels/\ncustom_nodes/\n", encoding="utf-8")
-    _git(src, "init")
-    commit = _commit_all(src, "init")
+    hub = FakeGitHub(tmp_path / "hub").install(monkeypatch)
+    repo, commit = hub.add("fake", "ComfyUI", _tree())
 
     result = fresh.provision_fresh(
-        comfyui_repo=str(src), comfyui_commit=commit,
+        comfyui_repo=repo, comfyui_commit=commit,
         custom_nodes=[], install_torch=False)
     assert result.ok, result.message
 
@@ -359,87 +355,103 @@ def test_provision_fresh_applies_localm_patches(home, tmp_path, monkeypatch):
 #  3. `localm comfy update`: move the pin, re-apply patches, roll back safely. #
 # =========================================================================== #
 
-def _build_update_remote(tmp_path: Path):
-    """A fake ComfyUI 'remote' with a linear history, returning (path, shas):
-      c1: main.py + fragile core       (the 'installed' pin)
-      c2: c1 + a VERSION bump, still fragile core  (a clean advance target)
+def _build_update_remote(tmp_path: Path, monkeypatch):
+    """A fake ComfyUI on a fake GitHub with three commits, returning
+    (hub, repo, c1, c2, c3):
+      c1: main.py + fragile core + gone_at_c2.py  (the 'installed' pin)
+      c2: c1 + a VERSION file, gone_at_c2.py removed, still fragile core
       c3: c2 with main.py DELETED       (a broken target -> update must roll back)
     """
-    remote = tmp_path / "remote_comfy"
-    remote.mkdir()
-    (remote / "main.py").write_text("print('comfy')\n", encoding="utf-8")
-    _write_internal(remote, _BUGGY_SRC)
-    (remote / ".gitignore").write_text("venv/\nmodels/\n", encoding="utf-8")
-    _git(remote, "init")
-    c1 = _commit_all(remote, "c1")
-    (remote / "VERSION").write_text("0.9.3\n", encoding="utf-8")
-    c2 = _commit_all(remote, "c2 advance")
-    (remote / "main.py").unlink()
-    c3 = _commit_all(remote, "c3 broken (main.py gone)")
-    return remote, c1, c2, c3
+    hub = FakeGitHub(tmp_path / "hub").install(monkeypatch)
+    repo, c1 = hub.add("fake", "ComfyUI", _tree())
+    _, c2 = hub.add("fake", "ComfyUI", _tree(VERSION="0.9.3\n", **{"gone_at_c2.py": None}))
+    _, c3 = hub.add("fake", "ComfyUI", _tree(VERSION="0.9.3\n",
+                                             **{"gone_at_c2.py": None, "main.py": None}))
+    return hub, repo, c1, c2, c3
 
 
-def _install_managed_from(remote: Path, commit: str) -> Path:
-    """Clone *remote* into the managed dir, pin *commit*, add a fake venv, and apply
-    the real localm patch set - i.e. a managed ComfyUI installed + patched at *commit*."""
+def _install_managed_from(repo: str, commit: str) -> Path:
+    """Fetch *commit* into the managed dir, add a fake venv, and apply the real
+    localm patch set - i.e. a managed ComfyUI installed + patched at *commit*."""
     from localm.media.comfy_patches import apply_patches
     root = mc.managed_comfy_paths().root
-    _git(Path("."), "clone", "--quiet", str(remote), str(root))
-    _git(root, "checkout", "--quiet", commit)
+    source_archive.fetch_tree(repo, commit, root)
     _make_fake_venv(root)
     outcomes = apply_patches(root)
     assert all(o.ok for o in outcomes)
     return root
 
 
-@pytest.mark.skipif(not _git_available(), reason="git not on PATH")
-def test_update_advances_pin_and_reapplies_patches(home, tmp_path):
-    """Moving the pin re-checks-out the managed checkout to the new commit and
-    re-applies the localm patch set (the freshly-checked-out fragile core is made
-    tolerant again). Negative: at the new commit the tracked file is fragile until
-    the patch re-applies."""
+def test_update_advances_pin_and_reapplies_patches(home, tmp_path, monkeypatch):
+    """Moving the pin replaces the managed source with the new commit's files,
+    removes a file the new commit dropped, keeps files that are not source (the
+    venv, outputs) and re-applies the localm patch set. No git program runs."""
     from localm.media import managed_comfy_update as upd
 
-    remote, c1, c2, _c3 = _build_update_remote(tmp_path)
-    root = _install_managed_from(remote, c1)
-    assert _head(root) == c1
+    _hub, repo, c1, c2, _c3 = _build_update_remote(tmp_path, monkeypatch)
+    root = _install_managed_from(repo, c1)
+    (root / "output").mkdir()
+    (root / "output" / "mine.png").write_bytes(b"user data")
+    assert source_archive.tree_commit(root) == c1
 
     result = upd.update_managed_comfy(
-        comfyui_repo=str(remote), target_commit=c2, reinstall_requirements=False)
+        comfyui_repo=repo, target_commit=c2, reinstall_requirements=False)
     assert result.ok, result.message
-    assert _head(root) == c2                       # advanced to the new pin
+    assert source_archive.tree_commit(root) == c2  # advanced to the new pin
     assert (root / "VERSION").is_file()            # c2 content present
+    assert not (root / "gone_at_c2.py").exists()   # dropped upstream, removed here
+    assert (root / "output" / "mine.png").read_bytes() == b"user data"
+    assert mc.managed_comfy_paths().venv_python.is_file()
     patched = (root / "comfy_api" / "internal" / "__init__.py").read_text(encoding="utf-8")
     assert 'hasattr(attr, "__func__")' in patched  # patch re-applied at the new pin
     assert "getattr(type_obj, func).__func__" not in patched
     assert mc.is_managed_comfy_installed()
+    leftovers = [p.name for p in root.parent.iterdir()
+                 if "-backup-" in p.name or "-download-" in p.name]
+    assert leftovers == []
 
 
-@pytest.mark.skipif(not _git_available(), reason="git not on PATH")
-def test_update_rolls_back_on_failure(home, tmp_path):
+def test_update_rolls_back_on_failure(home, tmp_path, monkeypatch):
     """A mid-update failure (the target commit leaves the tree not-installed) ROLLS
-    BACK to the prior managed ComfyUI: prior commit, main.py restored, patch
-    re-applied, reads as installed again."""
+    BACK to the prior managed ComfyUI: prior commit, main.py and the dropped file
+    restored, patch re-applied, reads as installed again."""
     from localm.media import managed_comfy_update as upd
 
-    remote, c1, _c2, c3 = _build_update_remote(tmp_path)
-    root = _install_managed_from(remote, c1)
-    assert _head(root) == c1
+    _hub, repo, c1, _c2, c3 = _build_update_remote(tmp_path, monkeypatch)
+    root = _install_managed_from(repo, c1)
+    before = (root / "comfy_api" / "internal" / "__init__.py").read_text(encoding="utf-8")
 
     result = upd.update_managed_comfy(
-        comfyui_repo=str(remote), target_commit=c3, reinstall_requirements=False)
+        comfyui_repo=repo, target_commit=c3, reinstall_requirements=False)
     assert not result.ok
     # Rolled back to the prior state - nothing half-updated left behind.
-    assert _head(root) == c1
+    assert source_archive.tree_commit(root) == c1
     assert (root / "main.py").is_file()
-    patched = (root / "comfy_api" / "internal" / "__init__.py").read_text(encoding="utf-8")
-    assert 'hasattr(attr, "__func__")' in patched
+    assert (root / "gone_at_c2.py").is_file()
+    assert not (root / "VERSION").exists()
+    after = (root / "comfy_api" / "internal" / "__init__.py").read_text(encoding="utf-8")
+    assert after == before and 'hasattr(attr, "__func__")' in after
     assert mc.is_managed_comfy_installed()
 
 
-@pytest.mark.skipif(not _git_available(), reason="git not on PATH")
+def test_update_refuses_an_archive_of_another_commit(home, tmp_path, monkeypatch):
+    """An archive whose zip comment names a different commit is never applied."""
+    from localm.media import managed_comfy_update as upd
+
+    hub, repo, c1, _c2, _c3 = _build_update_remote(tmp_path, monkeypatch)
+    root = _install_managed_from(repo, c1)
+    _, bad = hub.add("fake", "ComfyUI", _tree(VERSION="evil\n"), comment="0" * 40)
+
+    result = upd.update_managed_comfy(comfyui_repo=repo, target_commit=bad,
+                                      reinstall_requirements=False)
+    assert not result.ok
+    assert f"not {bad}" in result.message
+    assert source_archive.tree_commit(root) == c1
+    assert not (root / "VERSION").exists()
+
+
 def test_update_rollback_surfaces_failed_patch_reapply(home, tmp_path, monkeypatch):
-    """When a mid-update failure triggers rollback and the git source IS restored
+    """When a mid-update failure triggers rollback and the source IS restored
     but the localm patch set cannot be re-applied on it, update must NOT report a
     clean rollback: the failed re-apply is surfaced in the returned message.
     Discarding the rollback's apply_patches outcomes would tell the user the prior
@@ -448,9 +460,8 @@ def test_update_rollback_surfaces_failed_patch_reapply(home, tmp_path, monkeypat
     from localm.media import managed_comfy_update as upd
     from localm.media import comfy_patches as cp
 
-    remote, c1, _c2, c3 = _build_update_remote(tmp_path)
-    root = _install_managed_from(remote, c1)
-    assert _head(root) == c1
+    _hub, repo, c1, _c2, c3 = _build_update_remote(tmp_path, monkeypatch)
+    root = _install_managed_from(repo, c1)
 
     # The forward apply (call #1, at c3) is real and succeeds; the ROLLBACK re-apply
     # (call #2, on the restored c1 source) simulates a patch that cannot be applied.
@@ -469,31 +480,65 @@ def test_update_rollback_surfaces_failed_patch_reapply(home, tmp_path, monkeypat
     # c3 deletes main.py -> the forward update reaches the not-installed check and rolls
     # back to c1 (the rollback trigger is NOT a patch failure, isolating this leg).
     result = upd.update_managed_comfy(
-        comfyui_repo=str(remote), target_commit=c3, reinstall_requirements=False)
+        comfyui_repo=repo, target_commit=c3, reinstall_requirements=False)
 
     assert not result.ok
     assert calls["n"] == 2                    # forward apply + rollback re-apply both ran
-    assert _head(root) == c1                   # the git source WAS restored ...
+    assert source_archive.tree_commit(root) == c1  # the source WAS restored ...
     assert (root / "main.py").is_file()
     # ... but the FAILED patch re-apply is SURFACED, not hidden behind a clean rollback.
     assert "could not be re-applied on the restored install" in result.message
     assert "simulated re-apply failure" in result.message
 
 
-@pytest.mark.skipif(not _git_available(), reason="git not on PATH")
-def test_update_requires_git_checkout(home):
-    """A managed ComfyUI with no git history (the non-git copytree fallback) cannot
-    be pin-updated; update says so honestly instead of pretending."""
+@pytest.mark.skipif(not _git_available(), reason="git builds the older-localm checkout")
+def test_a_checkout_an_older_localm_cloned_updates_without_git(home, tmp_path, monkeypatch):
+    """A managed ComfyUI made by ``git clone`` (older localm) is read through its
+    .git folder (HEAD and index) and updated from an archive with no git program:
+    a tracked file the new commit drops is removed, an untracked one is kept."""
+    from localm.media import managed_comfy_update as upd
+
+    _hub, repo, _c1, c2, _c3 = _build_update_remote(tmp_path, monkeypatch)
+    root = mc.managed_comfy_paths().root
+    root.mkdir(parents=True)
+    for rel, text in _tree().items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(text, encoding="utf-8")
+    _git(root, "init")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-m", "old")
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(root), env=_GIT_ENV,
+                          capture_output=True, text=True, check=True).stdout.strip()
+    _make_fake_venv(root)
+    (root / "untracked.txt").write_text("keep\n", encoding="utf-8")
+    assert source_archive.tree_commit(root) == head
+    assert "gone_at_c2.py" in source_archive.tree_files(root)
+
+    def _no_git(*a, **k):
+        raise AssertionError("a git program was started")
+
+    monkeypatch.setattr(upd, "_run", _no_git)
+    result = upd.update_managed_comfy(comfyui_repo=repo, target_commit=c2,
+                                      reinstall_requirements=False)
+    assert result.ok, result.message
+    assert source_archive.tree_commit(root) == c2
+    assert not (root / "gone_at_c2.py").exists()
+    assert (root / "untracked.txt").is_file()
+
+
+def test_update_requires_a_recorded_commit(home):
+    """A managed ComfyUI with no recorded source commit (the non-git copytree
+    fallback) cannot be pin-updated; update says so honestly instead of pretending."""
     from localm.media import managed_comfy_update as upd
     root = mc.managed_comfy_paths().root
     root.mkdir(parents=True)
     (root / "main.py").write_text("print('comfy')\n", encoding="utf-8")
-    _make_fake_venv(root)  # installed, but NOT a git checkout
+    _make_fake_venv(root)  # installed, but no source record and not a git checkout
 
     result = upd.update_managed_comfy(target_commit="0" * 40,
                                       reinstall_requirements=False)
     assert not result.ok
-    assert "git" in result.message.lower()
+    assert "no recorded source commit" in result.message.lower()
 
 
 def test_update_requires_installed(home):
@@ -583,7 +628,7 @@ def test_update_refuses_while_a_LIVE_holder_owns_the_lock(home, monkeypatch):
                                         encoding="utf-8")   # THIS process: provably alive
 
     ran = []
-    monkeypatch.setattr(upd, "_run", lambda *a, **k: (ran.append(a), (True, ""))[1])
+    monkeypatch.setattr(source_archive, "download", lambda *a, **k: ran.append(a))
     res = upd.update_managed_comfy()
 
     assert res.ok is False
@@ -591,7 +636,7 @@ def test_update_refuses_while_a_LIVE_holder_owns_the_lock(home, monkeypatch):
     assert "already running" in res.message
     assert str(os.getpid()) in res.message, "name the holder so the user can check"
     # It refused BEFORE touching the tree.
-    assert ran == [], "a refused update must not run a single git command"
+    assert ran == [], "a refused update must not fetch anything"
 
 
 def test_update_reclaims_a_lock_whose_owner_is_DEAD(home, monkeypatch):
@@ -627,7 +672,7 @@ def test_update_will_not_steal_a_lock_it_cannot_identify(home, monkeypatch):
     lock.mkdir(parents=True)          # no owner file at all
 
     ran = []
-    monkeypatch.setattr(upd, "_run", lambda *a, **k: (ran.append(a), (True, ""))[1])
+    monkeypatch.setattr(source_archive, "download", lambda *a, **k: ran.append(a))
     res = upd.update_managed_comfy()
     assert res.ok is False and res.status == "busy"
     assert "could not be read" in res.message
@@ -644,19 +689,21 @@ def test_update_releases_the_lock_on_success_and_on_failure(home, monkeypatch):
     monkeypatch.setattr(mc, "is_managed_comfy_installed", lambda: True)
     monkeypatch.setattr(upd, "apply_patches", lambda root: [])
 
-    monkeypatch.setattr(upd, "_run", lambda *a, **k: (True, ""))
     upd.update_managed_comfy(target_commit="abc123")
     assert not _lock_dir().exists(), "lock leaked after a SUCCESSFUL update"
 
     # Now a failing update: the fetch fails, so it rolls back and returns an error.
-    monkeypatch.setattr(upd, "_run", lambda *a, **k: (False, "boom"))
-    res = upd.update_managed_comfy(target_commit="abc123")
+    def _boom(url, dest):
+        raise source_archive.ArchiveError("boom")
+
+    monkeypatch.setattr(source_archive, "download", _boom)
+    res = upd.update_managed_comfy(target_commit="b" * 40)
     assert res.ok is False
     assert not _lock_dir().exists(), "lock leaked after a FAILED update"
 
 
 def test_the_lock_lives_outside_the_checkout_git_force_cannot_disturb_it(home):
-    """The update's own `git checkout --force` runs inside the checkout. A lock stored
+    """The update's own source replace runs inside the checkout. A lock stored
     in there would be protecting itself from the very operation it guards."""
     _installed_git_checkout(home)
     root = mc.managed_comfy_paths().root
@@ -784,7 +831,7 @@ def test_remove_lock_names_a_remove_holder_to_a_contending_update(home, monkeypa
     assert acquired, why
     try:
         ran = []
-        monkeypatch.setattr(upd, "_run", lambda *a, **k: (ran.append(a), (True, ""))[1])
+        monkeypatch.setattr(source_archive, "download", lambda *a, **k: ran.append(a))
         res = upd.update_managed_comfy()
         assert res.ok is False and res.status == "busy"
         assert "remove" in res.message and str(os.getpid()) in res.message, res.message
