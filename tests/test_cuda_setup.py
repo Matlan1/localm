@@ -671,6 +671,15 @@ def test_clear_target_removes_files_keeps_subdirs(tmp_path):
     assert (sub / "keep.txt").exists()           # subdirectories are left alone
 
 
+def test_clear_target_removes_the_kernel_pack_directory(tmp_path):
+    packs = tmp_path / ".kpack"
+    packs.mkdir()
+    (packs / "blas_lib_gfx1030.kpack").write_bytes(b"pack")
+    assert sl._clearable_files(tmp_path) == [packs / "blas_lib_gfx1030.kpack"]
+    assert sl._clear_target(tmp_path) == []
+    assert not packs.exists()
+
+
 def test_clear_target_missing_dir_does_not_raise(tmp_path):
     sl._clear_target(tmp_path / "nope")          # must not raise
 
