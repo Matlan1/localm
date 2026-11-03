@@ -773,15 +773,18 @@ _CRASH_PHASE_BY_FRAME = {
 # Frames that put any crash below them in the draft-model load.
 _DRAFT_LOAD_FRAMES = frozenset({"_attach_draft_model"})
 
-_TRACE_CURRENT_THREAD_RE = re.compile(r"^Current thread\b")
+_TRACE_CURRENT_THREAD_RE = re.compile(
+    r"^(?:Current thread\b|Stack \(most recent call first\):)")
 _TRACE_FRAME_RE = re.compile(
     r'^\s+File "[^"\n]*", line \d+ in ([A-Za-z_][A-Za-z0-9_]*)\s*$')
 
 
 def crash_phase_from_trace(trace: str) -> Optional[str]:
     """The load phase whose native call was running on the crashing thread of
-    a faulthandler *trace*, or ``None`` when the trace has no "Current thread"
-    block or none of its frames is a known entry point. ``"draft"`` when any
+    a faulthandler *trace*, or ``None`` when the trace has no block for the
+    crashing thread ("Current thread ..." in an all-thread dump, "Stack (most
+    recent call first):" in a single-thread one) or none of its frames is a
+    known entry point. ``"draft"`` when any
     frame of that block is a draft-model load frame; otherwise frames are read
     from the innermost outward and the first known entry point wins."""
     in_current = False

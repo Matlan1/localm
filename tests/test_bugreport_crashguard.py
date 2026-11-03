@@ -551,7 +551,6 @@ def test_a_fault_after_a_clean_stop_began_is_reported_once(tmp_path, monkeypatch
     assert len(calls) == 1, "the same stop was reported twice"
 
 
-@pytest.mark.parametrize("text", ["", _FIRST_CHANCE_TRACE])
 def test_a_reported_prior_crash_is_logged_with_its_report_path(
         tmp_path, monkeypatch, caplog):
     """The recovering run's debug log names the prior crash and its report."""
@@ -596,6 +595,7 @@ def test_an_unreported_prior_crash_logs_no_report_warning(tmp_path, monkeypatch,
                 if r.levelno == logging.WARNING and "crash report:" in r.getMessage()]
 
 
+@pytest.mark.parametrize("text", ["", _FIRST_CHANCE_TRACE])
 def test_a_clean_stop_that_ended_before_releasing_its_trace_is_only_cleaned_up(
         tmp_path, monkeypatch, text):
     _pin_mode(monkeypatch, "log")
