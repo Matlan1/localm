@@ -608,12 +608,12 @@ The context window starts at `n_ctx` (default 4096) and grows automatically when
 ```bash
 localm config n_ctx_max 32768    # raise the ceiling
 localm config n_ctx_grow 8192    # grow in bigger steps (fewer rebuilds)
-localm config ctx_auto false     # use the fixed n_ctx_max ceiling instead of VRAM sizing
+localm config ctx_auto false     # use the fixed n_ctx_max ceiling instead of memory sizing
 ```
 
-`ctx_auto` is **on by default**: it sizes the ceiling from free VRAM at load time (clamped to 4k-64k; `n_ctx_max 0` lifts the 64k clamp), overriding a non-zero `n_ctx_max`. When a conversation reaches the ceiling, replies shorten to fit; when even that is impossible you get a clear error instead of an out-of-memory crash. An explicit `-c/--ctx` larger than the ceiling always wins.
+`ctx_auto` is **on by default**: it sizes the ceiling at load time from the free memory the KV cache lands in: free VRAM when every layer is on the GPU, free system RAM for a CPU-only load (`-g 0`, or a runtime with no GPU backend), and both for a partial offload, each share against its own memory (clamped to 4k-64k; `n_ctx_max 0` lifts the 64k clamp), overriding a non-zero `n_ctx_max`. When a conversation reaches the ceiling, replies shorten to fit; when even that is impossible you get a clear error instead of an out-of-memory crash. An explicit `-c/--ctx` larger than the ceiling always wins.
 
-When free VRAM cannot be measured (for example on a CPU-only machine), `ctx_auto` falls back to a fixed 16384-token ceiling (set `ctx_auto false` and raise `n_ctx_max` to change it).
+When the memory it needs cannot be measured (for example free VRAM on a GPU runtime that cannot read it), `ctx_auto` falls back to a fixed 16384-token ceiling (set `ctx_auto false` and raise `n_ctx_max` to change it).
 
 Long chats compact automatically before they collide with the ceiling. See [docs/architecture.md](architecture.md) for the compaction and VRAM-sizing details.
 
