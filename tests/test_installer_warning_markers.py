@@ -81,6 +81,15 @@ def test_every_known_site_uses_the_double_caret_escape(bat):
         "below) rather than just this assertion")
 
 
+def test_setup_sh_warns_when_the_transformers_install_fails():
+    text = (ROOT / "setup.sh").read_text(encoding="utf-8", errors="replace")
+    _, sep, tail = text.partition('uv pip install -p .venv -e ".[hf,audio]"')
+    assert sep, "setup.sh no longer installs the transformers stack"
+    handler = "\n".join(tail.splitlines()[:2])
+    assert "|| say" in handler and "transformers install failed" in handler
+    assert "|| true" not in handler
+
+
 def _line_containing(bat_text, needle):
     for line in bat_text.splitlines():
         if needle in line:
