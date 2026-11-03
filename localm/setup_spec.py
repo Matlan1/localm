@@ -193,10 +193,11 @@ def backend_hint(plat: str | None = None, arch: str | None = None) -> str:
 
 def setup_plugins() -> list:
     """``(name, description)`` for every plugin setup offers: the catalog's
-    entries that are offered and not preinstalled, in catalog order."""
+    entries that are offered on this machine and not preinstalled, in catalog
+    order."""
     from localm.plugins import catalog
     return [(e.name, e.description) for e in catalog.CATALOG
-            if e.offered and not e.preinstalled]
+            if catalog.offered_entry(e) and not e.preinstalled]
 
 
 def main(argv=None) -> int:

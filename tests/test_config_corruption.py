@@ -7,6 +7,7 @@ valid-JSON-wrong-shape case would otherwise be silent.
 `_merge_stored_config` surfaces that discard once per process, while a MISSING
 file stays the benign silent default."""
 
+import json
 import os
 
 import pytest
@@ -521,3 +522,27 @@ def test_ensure_dirs_names_localm_home_only_for_the_home_dir(tmp_path, monkeypat
     with pytest.raises(click.ClickException) as models_err:
         cfg.ensure_dirs()
     assert models_err.value.message.startswith("localm's data path is a file")
+
+
+def test_peek_registry_returns_the_registered_models(cfg_home):
+    registry = {"tiny": {"path": "models/tiny.gguf", "format": "gguf"}}
+    (cfg_home / "registry.json").write_text(json.dumps(registry), encoding="utf-8")
+
+    assert cfg.peek_registry() == registry
+
+
+@pytest.mark.parametrize("bad", ["[1, 2, 3]", "null", "{not json"])
+def test_peek_registry_of_a_non_object_registry_is_empty(cfg_home, bad):
+    (cfg_home / "registry.json").write_text(bad, encoding="utf-8")
+
+    assert cfg.peek_registry() == {}
+
+
+def test_peek_registry_creates_no_directories(tmp_path, monkeypatch):
+    home = tmp_path / "absent-home"
+    monkeypatch.setattr(cfg, "HOME_DIR", home)
+    monkeypatch.setattr(cfg, "MODELS_DIR", home / "models")
+    monkeypatch.setattr(cfg, "REGISTRY_FILE", home / "registry.json")
+
+    assert cfg.peek_registry() == {}
+    assert not home.exists()

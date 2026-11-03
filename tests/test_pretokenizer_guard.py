@@ -47,6 +47,13 @@ from localm.inference.backends.llamacpp.llama import _Tokenizer
 
 _LLAMA_API = "localm.inference.backends.llamacpp.llama.api"
 
+
+@pytest.fixture(autouse=True)
+def _windows_limits(monkeypatch):
+    """The limits this file pins are the table's (measured on Windows); the
+    Linux limits have their own tests."""
+    monkeypatch.setattr(guard, "_LINUX", False)
+
 # Captured at import, before any test can touch it, so a test that REPLACES or
 # DELETES it is caught by identity rather than by presence.
 from localm.inference.backends.gguf import GgufBackend as _GgufBackend  # noqa: E402
@@ -665,11 +672,12 @@ class TestScannerCacheKeysAreDistinct:
         # A shared key would silently apply one policy's scanner to another's
         # text, which reads as the guard working.
         pairs = set()
-        for p in guard.UNSAFE_PRE_TYPES.values():
-            if p.char_class is not None:
-                pairs.add((p.char_class, p.max_run))
-            if p.newline_run is not None:
-                pairs.add((guard._CLASS_NEWLINE, p.newline_run))
+        for table_policy in guard.UNSAFE_PRE_TYPES.values():
+            for p in (table_policy, guard._linux_policy(table_policy)):
+                if p.char_class is not None:
+                    pairs.add((p.char_class, p.max_run))
+                if p.newline_run is not None:
+                    pairs.add((guard._CLASS_NEWLINE, p.newline_run))
         assert len(guard._SCANNERS) == len(pairs)
         for cls, limit in pairs:
             scanner = guard._SCANNERS[(cls, limit)]
@@ -1639,7 +1647,7 @@ class TestANewlineRunIsRefusedBeforeNativeCode:
         # Bounding the run at the crash length would leave the cost unbounded:
         # runs of 1024 still cost seconds once repeated over a whole request.
         limit = guard.UNSAFE_PRE_TYPES[pre_type].newline_run
-        assert limit <= 64
+        assert limit <= 256
 
     @pytest.mark.parametrize("pre_type", _NEWLINE_BOUNDED)
     def test_llama_tokenize_is_not_reached(self, pre_type):
@@ -1961,3 +1969,58 @@ class TestEveryRunClassCanBeNamedInAMessage:
         with patch.object(guard, "UNSAFE_PRE_TYPES", bad):
             with pytest.raises(ValueError, match="_RUN_KIND"):
                 guard._validate_table()
+
+
+class TestLinuxLimits:
+    """On a Linux runtime the run and line-break limits are longer: libstdc++
+    did not throw on any run of letters, line breaks or whitespace tried up to
+    32768 characters, and aborted on one unbroken run of 65536 (clean at 40000,
+    aborts by 45000 for the gpt-4o pattern). Digit runs of superbpe and the
+    cost-bounded entries keep the table's limits."""
+
+    MEASURED_LINUX_CLEAN = 32768
+    MEASURED_LINUX_ABORT = 45000
+
+    @pytest.fixture(autouse=True)
+    def _linux(self, monkeypatch):
+        monkeypatch.setattr(guard, "_LINUX", True)
+
+    def test_the_linux_limit_sits_below_the_length_measured_to_abort(self):
+        assert guard._LINUX_RUN_LIMIT <= self.MEASURED_LINUX_ABORT / 2
+        assert guard._LINUX_RUN_LIMIT <= self.MEASURED_LINUX_CLEAN / 2
+
+    @pytest.mark.parametrize("pre_type", _LETTER_RUN)
+    def test_a_letter_run_up_to_the_linux_limit_passes(self, pre_type):
+        policy = guard.policy_for(pre_type)
+        if policy.unusable:
+            pytest.skip("load-refused")
+        guard.check_text(pre_type, "a" * guard._LINUX_RUN_LIMIT)
+        with pytest.raises(PretokenizerUnsafeInputError, match="more than 16384 letters"):
+            guard.check_text(pre_type, "a" * (guard._LINUX_RUN_LIMIT + 1))
+
+    @pytest.mark.parametrize("pre_type", _NEWLINE_BOUNDED)
+    def test_a_line_break_run_up_to_the_linux_limit_passes(self, pre_type):
+        guard.check_text(pre_type, "a" + "\n" * guard._LINUX_RUN_LIMIT + "b")
+        with pytest.raises(PretokenizerUnsafeInputError, match="line breaks"):
+            guard.check_text(pre_type, "a" + "\n" * (guard._LINUX_RUN_LIMIT + 1) + "b")
+
+    def test_jais2_whitespace_follows_the_linux_limit(self):
+        assert guard.policy_for("jais-2").max_run == guard._LINUX_RUN_LIMIT
+
+    def test_superbpe_digits_and_the_cost_budget_keep_the_table_limits(self):
+        assert guard.policy_for("superbpe").max_run == guard.UNSAFE_PRE_TYPES["superbpe"].max_run
+        assert guard.policy_for("deepseek-llm") == guard.UNSAFE_PRE_TYPES["deepseek-llm"]
+        assert guard.policy_for("exaone-moe") == guard.UNSAFE_PRE_TYPES["exaone-moe"]
+
+    def test_the_lengths_are_not_applied_off_linux(self, monkeypatch):
+        monkeypatch.setattr(guard, "_LINUX", False)
+        for pre_type in _AFFECTED:
+            assert guard.policy_for(pre_type) is guard.UNSAFE_PRE_TYPES[pre_type]
+
+    def test_every_linux_limit_has_a_compiled_scanner(self):
+        for pre_type in _AFFECTED:
+            policy = guard.policy_for(pre_type)
+            if policy.char_class is not None:
+                assert (policy.char_class, policy.max_run) in guard._SCANNERS
+            if policy.newline_run is not None:
+                assert (guard._CLASS_NEWLINE, policy.newline_run) in guard._SCANNERS

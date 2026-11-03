@@ -24,6 +24,8 @@ import { I18N_EN } from "./i18n-en.js";
 export const LANGUAGES = [
   { id: "en", label: "English" },
   { id: "de", label: "Deutsch" },
+  { id: "es", label: "Español" },
+  { id: "fr", label: "Français" },
 ];
 export const LANGUAGE_DEFAULT = "en";
 export const LANGUAGE_STORAGE_KEY = "localm.language";

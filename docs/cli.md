@@ -596,12 +596,12 @@ The context window starts at `n_ctx` (default 4096) and grows automatically when
 ```bash
 localm config n_ctx_max 32768    # raise the ceiling
 localm config n_ctx_grow 8192    # grow in bigger steps (fewer rebuilds)
-localm config ctx_auto false     # use the fixed n_ctx_max ceiling instead of VRAM sizing
+localm config ctx_auto false     # use the fixed n_ctx_max ceiling instead of memory sizing
 ```
 
-`ctx_auto` is **on by default**: it sizes the ceiling from free VRAM at load time (clamped to 4k-64k; `n_ctx_max 0` lifts the 64k clamp), overriding a non-zero `n_ctx_max`. When a conversation reaches the ceiling, replies shorten to fit; when even that is impossible you get a clear error instead of an out-of-memory crash. An explicit `-c/--ctx` larger than the ceiling always wins.
+`ctx_auto` is **on by default**: it sizes the ceiling at load time from the free memory the KV cache lands in: free VRAM when every layer is on the GPU, free system RAM for a CPU-only load (`-g 0`, or a runtime with no GPU backend), and both for a partial offload, each share against its own memory (clamped to 4k-64k; `n_ctx_max 0` lifts the 64k clamp), overriding a non-zero `n_ctx_max`. When a conversation reaches the ceiling, replies shorten to fit; when even that is impossible you get a clear error instead of an out-of-memory crash. An explicit `-c/--ctx` larger than the ceiling always wins.
 
-When free VRAM cannot be measured (for example on a CPU-only machine), `ctx_auto` falls back to a fixed 16384-token ceiling (set `ctx_auto false` and raise `n_ctx_max` to change it).
+When the memory it needs cannot be measured (for example free VRAM on a GPU runtime that cannot read it), `ctx_auto` falls back to a fixed 16384-token ceiling (set `ctx_auto false` and raise `n_ctx_max` to change it).
 
 Long chats compact automatically before they collide with the ceiling. See [docs/architecture.md](architecture.md) for the compaction and VRAM-sizing details.
 
@@ -1245,8 +1245,7 @@ localm update --to 0.3.0        # install that release, older or newer than your
 localm update --to 0.3.0 -y --allow-unverified   # non-interactive, even if its signature does not verify
 localm bug-report -m "..."      # generate an editable bug report and offer to send it to the maintainer
 localm bug-report -m "what I did" -e "what I expected" -w "what happened" --send   # non-interactive, send immediately
-localm issues [NUMBER]          # list the project's issues, or show one by number
-localm issues --state open      # open | closed | all (default all)
+localm issues [NUMBER]          # list the bug reports this install filed, or show one by number
 ```
 
 `bug-report` asks three questions (what you were doing, what you expected, what actually happened; Enter skips one) when run in a terminal without `-m`/`-e`/`-w`, and needs at least `-m` or `-w`. It attaches the tail of this run's debug log when one exists (`--no-log` to leave it out), never chat content. `issues` is read-only and needs the bug-report proxy to be configured.

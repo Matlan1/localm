@@ -145,15 +145,19 @@ def _cuda_state(lib: Path, staged_root, installed_root) -> Optional[tuple]:
 def _is_current(lib: Path, backend: str, build: Optional[str], target: str, pins: dict,
                 *, after: bool = False) -> bool:
     """Whether the runtime at *lib* is the build *target* (and, for a cuda
-    runtime whose pins name its PyPI CUDA libraries, holds those versions).
+    runtime whose pins name its PyPI CUDA libraries, holds those versions; for
+    an amd-rocm runtime, is not missing its ROCm kernel packs, see
+    ``setup_llama.kernel_packs_missing``).
     With *after* (checking a re-provision just made) a cuda runtime without a
     record of its CUDA libraries counts as current: a tree from before the
-    record does not write it."""
+    record does not write it. With *after*, the amd-rocm kernel pack check is
+    skipped."""
     if backend == "amd-rocm":
         from localm import setup_llama as sl
-        return sl.rocm_build_is_current(lib, build, rocm_tag=pins.get("rocm_tag"),
-                                        rocm_build_id=target,
-                                        cpu_tag=pins.get("rocm_cpu_tag"))
+        return (sl.rocm_build_is_current(lib, build, rocm_tag=pins.get("rocm_tag"),
+                                         rocm_build_id=target,
+                                         cpu_tag=pins.get("rocm_cpu_tag"))
+                and (after or not sl.kernel_packs_missing(lib)))
     if build != target:
         return False
     if backend == "cuda" and pins.get("cuda"):
@@ -174,15 +178,17 @@ def plan(staged_root, installed_root) -> dict:
     *installed_root* must re-provision the native runtime.
 
     Returns ``{"reprovision", "backend", "current", "target", "source", "pins",
-    "note"}``. ``reprovision`` is True only when a runtime is installed, its
-    marker records its build, the build the staged release installs for that
-    backend comes from the release (not from the user's pin or "latest"
-    choice, see ``setup_llama.versions.runtime_target``), and it differs from
-    the installed one. ``note`` is a one-line, user-facing sentence for the
-    update summary, or None. Never raises: a failure to read the marker or the
+    "note", "kernel_packs"}``. ``reprovision`` is True only when a runtime is
+    installed, its marker records its build, the build the staged release
+    installs for that backend comes from the release (not from the user's pin
+    or "latest" choice, see ``setup_llama.versions.runtime_target``), and it
+    differs from the installed one, or it is an amd-rocm runtime missing its
+    ROCm kernel packs (``kernel_packs`` True, see
+    ``setup_llama.kernel_packs_missing``). ``note`` is a one-line, user-facing
+    sentence for the update summary, or None. Never raises: a failure to read the marker or the
     configuration answers ``reprovision`` False with a note saying so."""
     out = {"reprovision": False, "backend": None, "current": None, "target": None,
-           "source": None, "pins": {}, "note": None}
+           "source": None, "pins": {}, "note": None, "kernel_packs": False}
     try:
         from localm import setup_llama as sl
         from localm.setup_llama.versions import runtime_target
@@ -234,6 +240,12 @@ def plan(staged_root, installed_root) -> dict:
                            + ", ".join(f"{p} {cuda[0].get(p, '?')} -> {v}"
                                        for p, v in sorted(cuda[1].items())
                                        if cuda[0].get(p) != v) + ")")
+        elif backend == "amd-rocm" and sl.rocm_build_is_current(
+                lib, current, rocm_tag=pins.get("rocm_tag"), rocm_build_id=target,
+                cpu_tag=pins.get("rocm_cpu_tag")):
+            out["kernel_packs"] = True
+            out["note"] = (f"re-provisions the {backend} runtime {current} to add the ROCm "
+                           "kernel packs an earlier setup left out")
         else:
             out["note"] = f"re-provisions the {backend} runtime from {current} to {target}"
         return out
@@ -770,7 +782,7 @@ def finish_pending(*, root=None, runner: Optional[Callable] = None,
     clear_pending()
     if problem is None:
         status.update(state="updated", note=f"re-provisioned the {backend} runtime: "
-                                            f"{pending.get('from')} -> {target}")
+                                            f"{pending.get('from')} -> {now_build or target}")
         _write_status(status)
         return status
     restore_errors = au.restore_runtime(snapshot, lib)

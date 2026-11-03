@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // jsdom tests for the interface-language runtime (app/i18n.js) and the two
 // catalogs it reads: the built-in English source language (app/i18n-en.js) and
-// the fetched German translation (static/i18n/de.json).
+// the fetched translations (static/i18n/<id>.json: German, Spanish, French).
 //
 // Several of these are drift gates rather than behaviour tests: every
 // data-i18n* key in index.html must resolve and must still carry the English it
 // was written from, every t()/tn() key in the migrated modules must exist, and
-// the two catalogs must hold the same keys. Without them a renamed key or an
+// every translation must hold the English keys. Without them a renamed key or an
 // edited English string degrades silently to a raw key on screen.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { loadApp, loadAppWithPages, runScript } from "./harness.mjs";
@@ -21,6 +21,10 @@ const STATIC = join(ROOT, "localm", "plugins", "gui", "static");
 const read = (...p) => readFileSync(join(STATIC, ...p), "utf-8");
 
 const DE = JSON.parse(read("i18n", "de.json"));
+// Every translation catalog on disk, by language id.
+const CATALOGS = Object.fromEntries(
+  readdirSync(join(STATIC, "i18n")).filter((f) => f.endsWith(".json"))
+    .map((f) => [f.slice(0, -".json".length), JSON.parse(read("i18n", f))]));
 const INDEX_HTML = read("index.html");
 
 const settle = (ms = 0) => new Promise((r) => setTimeout(r, ms));
@@ -30,16 +34,21 @@ async function waitFor(fn, timeout = 1000) {
   return false;
 }
 
-// Serves the real German catalog. /api/models answers 401 so init.js's boot
-// chain stops at the key gate: its tail is fire-and-forget, and a continuation
-// still in flight when the harness closes the window reads a torn-down document.
-function makeFetch(calls, { deStatus = 200, deBody = null } = {}) {
+// Serves the real catalogs (`bodies` replaces one by id). /api/models answers
+// 401 so init.js's boot chain stops at the key gate: its tail is
+// fire-and-forget, and a continuation still in flight when the harness closes
+// the window reads a torn-down document.
+function makeFetch(calls, { deStatus = 200, deBody = null, bodies = {} } = {}) {
   return async (url, opts = {}) => {
     const u = String(url);
     calls.push({ u, method: (opts.method || "GET").toUpperCase(), body: opts.body });
     if (u.includes("/i18n/de.json")) {
       return { ok: deStatus === 200, status: deStatus,
-               json: async () => (deBody === null ? DE : deBody) };
+               json: async () => (deBody === null ? (bodies.de || DE) : deBody) };
+    }
+    const cat = /\/i18n\/(\w+)\.json/.exec(u);
+    if (cat && (cat[1] in bodies || cat[1] in CATALOGS)) {
+      return { ok: true, status: 200, json: async () => bodies[cat[1]] || CATALOGS[cat[1]] };
     }
     if (u.includes("/i18n/")) return { ok: false, status: 404, json: async () => ({}) };
     if (u.includes("/api/models")) return { ok: false, status: 401, json: async () => ({}) };
@@ -198,6 +207,55 @@ test("applying German translates the shell, sets <html lang>, and announces itse
     "the nav icon must survive translation");
 });
 
+for (const id of ["es", "fr"]) {
+  test(`applying ${id} translates the shell from its catalog`, async () => {
+    const cat = CATALOGS[id];
+    const { window } = await loadIn(id);
+    const doc = window.document;
+    const en = evalIn(window, "I18N_EN");
+    assert.equal(doc.documentElement.lang, id);
+    assert.equal(evalIn(window, "currentLanguage()"), id);
+    assert.equal(doc.getElementById("nav-settings").textContent.trim(), cat["nav.settings"]);
+    assert.equal(doc.getElementById("nav-models").textContent.trim(), cat["nav.models"]);
+    assert.equal(doc.getElementById("chat-send").getAttribute("title"), cat["chat.send"]);
+    assert.equal(doc.getElementById("chat-input").getAttribute("placeholder"),
+      cat["chat.inputPlaceholder"]);
+    for (const k of ["nav.settings", "nav.models", "chat.send", "chat.inputPlaceholder"]) {
+      assert.notEqual(cat[k], en[k], `${id} must not read English for ${k}`);
+    }
+    assert.equal(doc.querySelectorAll("#nav-chat .nav-ic").length, 1,
+      "the nav icon must survive translation");
+  });
+
+  test(`a key missing from the ${id} catalog renders in English, never as the raw key`,
+    async () => {
+      const partial = { ...CATALOGS[id] };
+      delete partial["nav.settings"];
+      const { window } = await loadIn(id, { bodies: { [id]: partial } });
+      const doc = window.document;
+      assert.equal(evalIn(window, "currentLanguage()"), id);
+      assert.equal(doc.getElementById("nav-settings").textContent.trim(), "Settings");
+      assert.equal(evalIn(window, 't("nav.settings")'), "Settings");
+      assert.equal(doc.getElementById("nav-models").textContent.trim(), CATALOGS[id]["nav.models"],
+        "the keys the catalog does carry stay translated");
+    });
+}
+
+test("tn() picks the French one form for 0 and 1 and the Spanish one form for 1 only",
+  async () => {
+    const fill = (s, n) => s.replace("{count}", String(n));
+    const fr = (await loadIn("fr")).window;
+    const frCat = CATALOGS.fr;
+    assert.equal(evalIn(fr, 'tn("chat.share.imagesIn", 0)'), fill(frCat["chat.share.imagesIn.one"], 0));
+    assert.equal(evalIn(fr, 'tn("chat.share.imagesIn", 1)'), fill(frCat["chat.share.imagesIn.one"], 1));
+    assert.equal(evalIn(fr, 'tn("chat.share.imagesIn", 3)'), fill(frCat["chat.share.imagesIn.other"], 3));
+    const es = (await loadIn("es")).window;
+    const esCat = CATALOGS.es;
+    assert.equal(evalIn(es, 'tn("chat.share.imagesIn", 0)'), fill(esCat["chat.share.imagesIn.other"], 0));
+    assert.equal(evalIn(es, 'tn("chat.share.imagesIn", 1)'), fill(esCat["chat.share.imagesIn.one"], 1));
+    assert.notEqual(frCat["chat.share.imagesIn.one"], frCat["chat.share.imagesIn.other"]);
+  });
+
 test("the choice is cached in this browser and re-applied on the next load", async () => {
   const first = await loadIn(null);
   runScript(first.window, 'window.__p = applyLanguage("de");');
@@ -249,7 +307,7 @@ test("the Appearance picker lists every language in its own name and selects the
     runScript(window, "renderLanguagePicker();");
     const sel = window.document.getElementById("lang-select");
     assert.deepEqual(Array.from(sel.options).map((o) => [o.value, o.textContent]),
-      [["en", "English"], ["de", "Deutsch"]]);
+      [["en", "English"], ["de", "Deutsch"], ["es", "Espa\u00f1ol"], ["fr", "Fran\u00e7ais"]]);
     assert.equal(sel.value, "de");
   });
 
@@ -648,41 +706,49 @@ test("the settings nav group ids all have a catalog entry", async () => {
   assert.deepEqual(ids.filter((id) => typeof en[`settings.group.${id}`] !== "string"), []);
 });
 
-test("the German catalog carries exactly the English keys", async () => {
-  const { window } = await loadIn(null);
-  const en = evalIn(window, "I18N_EN");
-  const missing = Object.keys(en).filter((k) => !(k in DE));
-  // A language with more plural categories than English legitimately carries
-  // extra `<base>.<category>` keys; anything else is an orphan.
-  const orphan = Object.keys(DE).filter((k) => {
-    if (k in en) return false;
-    return typeof en[`${k.replace(/\.[a-z]+$/, "")}.other`] !== "string";
-  });
-  assert.deepEqual(missing, [],
-    "an English key with no German entry falls back and reads English");
-  assert.deepEqual(orphan, [], "a German key with no English key is dead weight or a typo");
+test("the translation catalogs on disk are German, Spanish and French", () => {
+  assert.deepEqual(Object.keys(CATALOGS).sort(), ["de", "es", "fr"]);
 });
 
-test("the German catalog keeps each string's placeholders and inline markup", async () => {
-  const { window } = await loadIn(null);
-  const en = evalIn(window, "I18N_EN");
-  const ph = (s) => (s.match(/\{\w+\}/g) || []).sort().join(",");
-  const tags = (s) => (s.match(/<\/?(?:b|strong|code)>/g) || []).sort().join(",");
-  const bad = [];
-  for (const [k, enText] of Object.entries(en)) {
-    const deText = DE[k];
-    if (typeof deText !== "string") continue;
-    if (ph(enText) !== ph(deText)) bad.push(`${k}: placeholders ${ph(enText)} vs ${ph(deText)}`);
-    if (tags(enText) !== tags(deText)) bad.push(`${k}: markup ${tags(enText)} vs ${tags(deText)}`);
-  }
-  assert.deepEqual(bad, []);
-});
+for (const [id, cat] of Object.entries(CATALOGS)) {
+  test(`the ${id} catalog carries exactly the English keys`, async () => {
+    const { window } = await loadIn(null);
+    const en = evalIn(window, "I18N_EN");
+    const missing = Object.keys(en).filter((k) => !(k in cat));
+    // A language with more plural categories than English legitimately carries
+    // extra `<base>.<category>` keys; anything else is an orphan.
+    const orphan = Object.keys(cat).filter((k) => {
+      if (k in en) return false;
+      return typeof en[`${k.replace(/\.[a-z]+$/, "")}.other`] !== "string";
+    });
+    const blank = Object.keys(cat).filter((k) => typeof cat[k] !== "string" || cat[k].trim() === "");
+    assert.deepEqual(missing, [],
+      `an English key with no ${id} entry falls back and reads English`);
+    assert.deepEqual(orphan, [], `a ${id} key with no English key is dead weight or a typo`);
+    assert.deepEqual(blank, [], `a blank ${id} entry falls back and reads English`);
+  });
+
+  test(`the ${id} catalog keeps each string's placeholders and inline markup`, async () => {
+    const { window } = await loadIn(null);
+    const en = evalIn(window, "I18N_EN");
+    const ph = (s) => (s.match(/\{\w+\}/g) || []).sort().join(",");
+    const tags = (s) => (s.match(/<\/?(?:b|strong|code)>/g) || []).sort().join(",");
+    const bad = [];
+    for (const [k, enText] of Object.entries(en)) {
+      const text = cat[k];
+      if (typeof text !== "string") continue;
+      if (ph(enText) !== ph(text)) bad.push(`${k}: placeholders ${ph(enText)} vs ${ph(text)}`);
+      if (tags(enText) !== tags(text)) bad.push(`${k}: markup ${tags(enText)} vs ${tags(text)}`);
+    }
+    assert.deepEqual(bad, []);
+  });
+}
 
 test("no catalog string carries an em-dash or en-dash", async () => {
   const { window } = await loadIn(null);
   const en = evalIn(window, "I18N_EN");
   const offenders = [];
-  for (const [name, cat] of [["en", en], ["de", DE]]) {
+  for (const [name, cat] of [["en", en], ...Object.entries(CATALOGS)]) {
     for (const [k, v] of Object.entries(cat)) {
       if (/[\u2013\u2014]/.test(v)) offenders.push(`${name}: ${k}`);
     }
@@ -728,7 +794,9 @@ test("index.html still carries the English each data-i18n key was written from",
 test("the service worker precaches the runtime and every language catalog", () => {
   const shell = /const SHELL = \[(.*?)\];/s.exec(read("sw.js"));
   assert.ok(shell, "SHELL array not found in sw.js");
-  assert.ok(shell[1].includes('"/i18n/de.json"'),
-    "a catalog missing from SHELL cannot be selected offline");
+  for (const id of Object.keys(CATALOGS)) {
+    assert.ok(shell[1].includes(`"/i18n/${id}.json"`),
+      `the ${id} catalog is missing from SHELL and cannot be selected offline`);
+  }
   assert.ok(shell[1].includes('"/app/i18n.js"') && shell[1].includes('"/app/i18n-en.js"'));
 });

@@ -781,7 +781,13 @@ class TestPluginChoices:
         assert offered, "no optional features are offered"
         assert offered == [n for n in catalog.names()
                            if n not in catalog.preinstalled() and catalog.offered(n)]
-        assert "exllama" not in offered
+
+    def test_exllama_follows_the_machine(self, gui, monkeypatch):
+        from localm.plugins import catalog
+        monkeypatch.setattr(catalog, "_nvidia_linux", lambda: False)
+        assert "exllama" not in [n for n, _ in gui.plugin_choices()]
+        monkeypatch.setattr(catalog, "_nvidia_linux", lambda: True)
+        assert "exllama" in [n for n, _ in gui.plugin_choices()]
 
     def test_chat_is_never_offered_because_it_is_always_installed(self, gui):
         assert "chat" not in [n for n, _ in gui.plugin_choices()]

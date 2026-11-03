@@ -75,7 +75,7 @@ LOGO_STYLE_IDS = ["local-m", "loca-lm", "localm"]
 # Interface languages the web GUI ships. "en" is built into the app; every
 # other id must have a static/i18n/<id>.json catalog. Pinned to the GUI's own
 # LANGUAGES registry by test_language_ids_match_the_gui_registry.
-LANGUAGE_IDS = ["en", "de"]
+LANGUAGE_IDS = ["en", "de", "es", "fr"]
 # Chat avatars (user_avatar / model_avatar_default / model_avatar_overrides, see
 # config.py). A value is "", a short emoji/text glyph, or a raster data URI -
 # never a URL or path. See test_avatar_value_rejects_url_or_path.

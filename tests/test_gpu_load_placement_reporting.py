@@ -15,6 +15,8 @@ layer count reported back by the native worker for this load.
 import asyncio
 from unittest.mock import patch
 
+import pytest
+
 from localm.inference.backends.gguf import GgufBackend
 from localm.inference import http_server as hs
 
@@ -78,6 +80,40 @@ class TestBackendRecordsGpuPlacement:
         _load(b, n_layers=32)
         assert b.gpu_layers_total == 32
         assert b.gpu_layers_offloaded == 24
+
+    def test_negative_choice_is_recorded_as_every_layer(self, tmp_path):
+        b = _backend(tmp_path, n_gpu_layers=-1, n_gpu_layers_auto=False)
+        b.effective_gpu_layers = -1
+        _load(b, n_layers=32)
+        assert b.gpu_layers_total == 32
+        assert b.gpu_layers_offloaded == 32
+
+    @pytest.mark.parametrize("gpu_layers, has_gpu, expected", [
+        (99, False, True), (99, True, False), (99, None, False), (12, False, True),
+        (0, False, False)])
+    def test_runtime_without_a_gpu_backend_is_recorded(
+            self, tmp_path, gpu_layers, has_gpu, expected):
+        b = _backend(tmp_path, n_gpu_layers=gpu_layers)
+        b.effective_gpu_layers = gpu_layers
+        with patch("localm.discover.native_backend_has_gpu", return_value=has_gpu):
+            _load(b, n_layers=32)
+        assert b.runtime_has_no_gpu is expected
+
+    def test_ctx_auto_of_a_cpu_load_is_sized_from_ram_at_load(self, tmp_path, monkeypatch):
+        from localm.inference.backends.llamacpp import _sizing
+        printed = []
+        monkeypatch.setattr(_sizing.console, "print",
+                            lambda *a, **k: printed.extend(str(x) for x in a))
+        monkeypatch.setattr("localm.sysstats.system_ram", lambda: (64 * 1024 ** 3,
+                                                                    32 * 1024 ** 3))
+        b = _backend(tmp_path, n_gpu_layers=0)
+        b.ctx_auto = True
+        b.n_ctx_max = 16384
+        b.effective_gpu_layers = 0
+        _load(b, n_layers=32)
+        assert [p for p in printed if "ctx auto" in p] == [
+            "[dim]  ctx auto : window may grow to 65,536 tokens (from free RAM)[/dim]"]
+        assert b.effective_ctx_max == 65536
 
     def test_offloaded_never_exceeds_true_total(self, tmp_path):
         # An effective_gpu_layers larger than the model's real layer count (e.g.
