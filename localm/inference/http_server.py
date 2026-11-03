@@ -574,18 +574,22 @@ _BUSY_MEDIA_POLL_S = 0.25
 _VICTIM_RELEASE_EXTRA_WAIT_S = 25.0
 
 
-async def _refuse_non_chat_model(name: str, registry: dict | None = None) -> None:
+async def _refuse_non_chat_model(name: str, registry: dict | None = None, *,
+                                 allow_embedding: bool = False) -> None:
     """Raise HTTPException 422 when *name* is a registered entry the chat engine
     can never load (a vision projector, an image or video component, a
-    text-to-speech model, an unknown-typed file no backend runs). Runs before
-    any eviction or cancellation, so the resident model stays loaded. The check
-    of an unknown-typed entry reads the file system on a worker thread.
-    *registry* defaults to the current registry."""
+    text-to-speech model, an embedding model, a reranker, a media text encoder,
+    an unknown-typed file no backend runs). Runs before any eviction or
+    cancellation, so the resident model stays loaded. The check of an
+    unknown-typed or embedding-typed entry reads the file system on a worker
+    thread. *registry* defaults to the current registry. *allow_embedding*
+    admits an embedding-typed entry (/v1/embeddings loading a Hugging Face
+    embedding folder)."""
     from localm.model_manager.registry import chat_load_refusal_off_loop
     if registry is None:
         from localm.config import load_registry
         registry = load_registry()
-    msg = await chat_load_refusal_off_loop(name, registry)
+    msg = await chat_load_refusal_off_loop(name, registry, allow_embedding=allow_embedding)
     if msg is not None:
         raise HTTPException(422, msg)
 
@@ -660,8 +664,11 @@ def _load_for_switch(engine, reading: Optional[_FirstPassReading]) -> None:
 async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool = True,
                         force: bool = False, activate: bool = True,
                         skip_if_latched: bool = False,
-                        on_status: Optional[Callable[[str], None]] = None) -> dict:
+                        on_status: Optional[Callable[[str], None]] = None,
+                        allow_embedding: bool = False) -> dict:
     """Make model *name* resident and, with *activate*, the active model.
+    An embedding-typed *name* (an embedding model, a reranker, a media text
+    encoder) is refused with a 422 unless *allow_embedding*.
 
     *make_engine*, when not None, becomes the engine factory used to build an
     engine for a name not registered in ``_engines``. *on_active* is called
@@ -721,7 +728,7 @@ async def switch_engine(name: str, make_engine, *, on_active=None, preempt: bool
     """
     global _engine_factory, _switch_desired
 
-    await _refuse_non_chat_model(name)
+    await _refuse_non_chat_model(name, allow_embedding=allow_embedding)
 
     if preempt:
         _switch_desired = name
@@ -2215,8 +2222,12 @@ def plan_capability_route(model_name: str | None, messages: list,
 
 async def get_engine(model_name: str | None, *, load: bool = True,
                      activate: bool = True, skip_if_latched: bool = False,
-                     on_status: Optional[Callable[[str], None]] = None) -> Engine:
-    """Resolve the engine for *model_name*, loading it if necessary.
+                     on_status: Optional[Callable[[str], None]] = None,
+                     allow_embedding: bool = False) -> Engine:
+    """Resolve the engine for *model_name*, loading it if necessary. An
+    embedding-typed *model_name* (an embedding model, a reranker, a media text
+    encoder) is refused with a 422 unless *allow_embedding*, which only
+    /v1/embeddings sets.
 
     With ``load=False`` the resolved engine is returned WITHOUT forcing a load -
     for callers like /v1/embeddings whose backend may not need the model resident
@@ -2283,7 +2294,7 @@ async def get_engine(model_name: str | None, *, load: bool = True,
         raise HTTPException(503, "No model is loaded and none was specified. "
                             "Load a model first or name one explicitly.")
 
-    await _refuse_non_chat_model(name, registry)
+    await _refuse_non_chat_model(name, registry, allow_embedding=allow_embedding)
 
     # `not unloading`: never hand back (and let the caller pin) an engine that an
     # eviction/unload path is mid-freeing - that is the pin-arrives-during-the-
@@ -2310,7 +2321,7 @@ async def get_engine(model_name: str | None, *, load: bool = True,
 
     res = await switch_engine(name, _engine_factory, preempt=False,
                               activate=activate, skip_if_latched=skip_if_latched,
-                              on_status=on_status)
+                              on_status=on_status, allow_embedding=allow_embedding)
     if res.get("status") == "superseded":
         raise HTTPException(503, f"Model load was superseded by a newer request: {res.get('by')}")
     if res.get("status") == "cancelled":
