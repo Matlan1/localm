@@ -81,14 +81,16 @@ class TestReservedWindowComesFirst:
         assert budget.kv == N_CTX * KV_PER_TOKEN
 
     def test_a_dense_model_keeps_its_layers_and_only_raises_the_ceiling(self, tmp_path):
-        b = _backend(_dense_model(tmp_path), ctx_reserve=RESERVE)
+        window = 8192
+        assert window > GgufBackend._AUTO_CTX_MIN
+        b = _backend(_dense_model(tmp_path), ctx_reserve=window)
         free = b._vram_model_bytes(0) + N_CTX * KV_PER_TOKEN + OVERHEAD
         with _Vram(free):
             budget = b._auto_gpu_layers_budget()
             ceiling = b._effective_ctx_max()
         assert (budget.layers, budget.moe_cpu_layers) == (99, 0)
         assert budget.kv == N_CTX * KV_PER_TOKEN
-        assert ceiling >= RESERVE
+        assert ceiling >= window
 
     def test_a_configured_n_cpu_moe_is_sized_for_n_ctx_only(self, tmp_path):
         b = _backend(_moe_model(tmp_path), ctx_reserve=RESERVE, n_cpu_moe=1)
