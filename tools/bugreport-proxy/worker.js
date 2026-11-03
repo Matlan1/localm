@@ -204,15 +204,22 @@ async function fileReport(request, env) {
       return resp;
     }
   }
-  const auth = await issueToken(env);
-  if (auth.error) return auth.error;
   let payload;
   try { payload = await request.json(); } catch { return json({ error: "invalid JSON" }, 400); }
   const title = (String(payload.title || "").slice(0, 200).trim()) || "localm bug report";
-  const report = String(payload.body || "").slice(0, 60000);
-  if (!report.trim()) return json({ error: "empty report body" }, 400);
-  const note = looksLikeLocalmReport(report) ? REPORTER_NOTE : REPORTER_NOTE_UNSHAPED;
-  const issue = { title, body: note + report };
+  const full = String(payload.body || "");
+  if (!full.trim()) return json({ error: "empty report body" }, 400);
+  // A body localm did not build is not filed: no GitHub call, a 202 that does not
+  // echo it, and one log line without its content. The whole body is checked; only
+  // a body that is filed is cut to 60000 characters.
+  if (!isLocalmBuiltReport(full)) {
+    console.log("report held: not built by localm", JSON.stringify({ chars: full.length }));
+    return json({ ok: true, filed: false }, 202);
+  }
+  const auth = await issueToken(env);
+  if (auth.error) return auth.error;
+  const report = full.slice(0, 60000);
+  const issue = { title, body: REPORTER_NOTE + report };
   if (env.ISSUE_LABELS) {
     const labels = env.ISSUE_LABELS.split(",").map((s) => s.trim()).filter(Boolean);
     if (labels.length) issue.labels = labels;
@@ -232,18 +239,35 @@ async function fileReport(request, env) {
 const REPORTER_NOTE =
   "> Submitted by a localm user through the built-in bug reporter.\n\n";
 
-// Prepended instead of REPORTER_NOTE when the body lacks the REPORT_SECTIONS headings.
-const REPORTER_NOTE_UNSHAPED =
-  "> Submitted by a localm user through the built-in bug reporter.\n" +
-  "> It does not have the sections a report built by localm contains.\n\n";
+// The first line of every report localm's reporter builds (localm/bugreport/assembly.py).
+const REPORT_TITLE_PREFIX = "# localm bug report:";
 
-// Section headings every report built by localm's reporter contains.
-const REPORT_SECTIONS = ["## What happened", "## Environment"];
+// The lines localm's reporter writes after the title, in this order. Each entry is a
+// heading line and, when *next* is set, a test the line right after it must pass.
+const REPORT_MARKERS = [
+  { line: "## What I was doing" },
+  { line: "## What happened" },
+  { line: "## App state", next: (l) => l.startsWith("- Model: ") },
+  { line: "## Environment",
+    next: (l) => /^- localm: \S/.test(l) || l === "(could not collect environment)" },
+];
 
-// True when *text* has every heading in REPORT_SECTIONS on a line of its own.
-function looksLikeLocalmReport(text) {
-  const lines = text.split(/\r?\n/).map((line) => line.trim());
-  return REPORT_SECTIONS.every((h) => lines.includes(h));
+// True when the first non-empty line of *text* is localm's report title and every
+// REPORT_MARKERS entry follows it in order, each on a line of its own.
+function isLocalmBuiltReport(text) {
+  const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/).map((l) => l.trim());
+  const first = lines.findIndex((l) => l !== "");
+  if (first < 0 || !lines[first].startsWith(REPORT_TITLE_PREFIX)) return false;
+  let at = first + 1;
+  for (const m of REPORT_MARKERS) {
+    while (at < lines.length
+           && !(lines[at] === m.line && (!m.next || (at + 1 < lines.length && m.next(lines[at + 1]))))) {
+      at++;
+    }
+    if (at >= lines.length) return false;
+    at += m.next ? 2 : 1;
+  }
+  return true;
 }
 
 // ---------------------------- issues ------------------------------------
