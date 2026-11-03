@@ -1198,6 +1198,15 @@
                   <button class="btn-primary" id="update-apply" hidden data-i18n="settings.update.applyButton">Update now</button>
                 </div>
                 <div class="sub" data-i18n="settings.update.versionsHelp">Install a specific release, older or newer. A downgrade asks first and backs up your settings and data.</div>
+                <div id="update-version-picker" hidden>
+                  <label class="sub" for="update-version-select" data-i18n="settings.update.versionLabel">Version to install</label>
+                  <select id="update-version-select"></select>
+                  <div id="update-version-info" class="sub"></div>
+                  <div class="actions">
+                    <button class="btn-secondary" id="update-install-version" data-i18n="settings.update.installVersionButton">Install this version</button>
+                  </div>
+                </div>
+                <div id="update-version-status" class="sub" role="status" aria-live="polite" hidden></div>
                 <div id="update-status" class="sub" role="status" aria-live="polite" hidden></div>
                 <!-- The offered release's notes, rendered by renderUpdateNotes
                      (pages/models.js) through the sanitizing Markdown path. -->
@@ -1221,16 +1230,6 @@
                     <button class="btn-primary settings-section-save" id="update-toggles-save" data-i18n="settings.update.saveButton">Save update settings</button>
                   </div>
                 </div>
-                <!-- The picker below is the GUI form of `localm update --list` / `--to <version>`. -->
-                <div id="update-version-picker" hidden>
-                  <label class="sub" for="update-version-select" data-i18n="settings.update.versionLabel">Version to install</label>
-                  <select id="update-version-select"></select>
-                  <div id="update-version-info" class="sub"></div>
-                  <div class="actions">
-                    <button class="btn-secondary" id="update-install-version" data-i18n="settings.update.installVersionButton">Install this version</button>
-                  </div>
-                </div>
-                <div id="update-version-status" class="sub" role="status" aria-live="polite" hidden></div>
               </div>
 
               <!-- The GUI half of `localm update --rollback`. Its OWN sub-block, not

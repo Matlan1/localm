@@ -26,6 +26,12 @@ test("Choose a version is in the same row as Check for updates, outside the sett
   assert.equal(doc.getElementById("update-toggles-block").hidden, true, "settings fields not loaded");
   assert.equal(btn.closest("[hidden]")?.id, "app-update-block", "gated only by the app-update block");
   assert.ok(doc.querySelector('[data-i18n="settings.update.versionsHelp"]'), "description line present");
+  const toggles = doc.getElementById("update-toggles-block");
+  for (const id of ["update-version-picker", "update-version-status"]) {
+    const el = doc.getElementById(id);
+    assert.ok(btn.compareDocumentPosition(el) & 4, id + " follows the button");
+    assert.ok(el.compareDocumentPosition(toggles) & 4, id + " sits above the settings fields");
+  }
 });
 
 test("clicking Choose a version opens the picker without the settings fields", async () => {
