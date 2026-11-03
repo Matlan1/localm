@@ -262,13 +262,15 @@ def test_a_plan_is_taken_once_and_expires(monkeypatch):
 @pytest.fixture
 def fake_uv(monkeypatch):
     """Records the uv commands install runs and the requirements file it passed."""
-    calls = SimpleNamespace(cmds=[], reqs=None, import_error=None, rc=0, recorded=[])
+    calls = SimpleNamespace(cmds=[], reqs=None, import_error=None, rc=0, uninstall_rc=0,
+                            recorded=[])
 
     def stream(cmd, on_progress):
         calls.cmds.append(cmd)
         if "-r" in cmd:
             calls.reqs = Path(cmd[cmd.index("-r") + 1]).read_text(encoding="utf-8")
-        return calls.rc, "uv output"
+            return calls.rc, "uv output"
+        return calls.uninstall_rc, "uv output"
 
     monkeypatch.setattr(mpk, "check_network", lambda backend: None)
     monkeypatch.setattr(mpk, "_uv", lambda: "uv")
@@ -324,6 +326,13 @@ def test_a_failed_uv_install_removes_what_it_left_and_records_nothing(fake_uv):
     assert "removed again" in result.error
     assert fake_uv.cmds[-1][:3] == ["uv", "pip", "uninstall"] and fake_uv.cmds[-1][-1] == "timm"
     assert fake_uv.recorded == []
+
+
+def test_a_failed_removal_is_reported(fake_uv):
+    fake_uv.import_error = "ImportError: boom"
+    fake_uv.uninstall_rc = 1
+    result = mpk.install(_plan())
+    assert not result.ok and "removing the packages added failed too: uv output" in result.error
 
 
 def test_a_failed_uv_install_that_left_nothing_uninstalls_nothing(fake_uv, monkeypatch):

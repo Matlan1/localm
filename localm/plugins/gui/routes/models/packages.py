@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from pathlib import Path
 from typing import Optional
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -85,11 +86,12 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
             raise HTTPException(403, _NETWORK_BIND)
         from localm.model_manager import model_packages
         from localm.model_manager.missing_packages import refusal_for
-        from localm.model_manager.registry import get_model_path
+        from localm.model_manager.registry import _entry_path
 
         def _plan():
-            _require_registered(req.model)
-            folder = get_model_path(req.model)
+            registry = _require_registered(req.model)
+            path = _entry_path(registry[req.model])
+            folder = Path(path) if path else None
             if folder is None or not folder.is_dir():
                 raise HTTPException(409, f"{req.model} is not a Hugging Face model folder.")
             state = model_packages.folder_state(folder)

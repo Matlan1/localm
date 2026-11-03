@@ -264,6 +264,9 @@ def _requests_for(app):
         ("POST", "/api/models/relocate", {"model": "nope", "new_path": "Z:/x.gguf"}),
         ("GET", "/api/discover/search?q=x", None),
         ("GET", "/api/discover/files?repo=a/b", None),
+        ("POST", "/api/models/packages/plan", {"model": "nope"}),
+        ("POST", "/api/models/packages/install", {"plan_id": "nope"}),
+        ("GET", "/api/models/packages/install/events", None),
     ]
 
 
