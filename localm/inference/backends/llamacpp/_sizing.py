@@ -2057,9 +2057,9 @@ class VramSizingMixin:
 
         The budget follows where llama.cpp puts the KV cache
         (:meth:`_kv_vram_share`): a load with every layer on the GPU is sized
-        from free VRAM alone as above; a load with no layer on the GPU (or a
-        runtime with no GPU backend whose VRAM cannot be read) from free system
-        RAM alone, without reading VRAM; a partial offload from both, each
+        from free VRAM alone as above; a load with no layer on the GPU (or with
+        ``runtime_has_no_gpu`` set: the native runtime ships no GPU backend)
+        from free system RAM alone, without reading VRAM; a partial offload from both, each
         share against its own memory, and the smaller window wins. See
         :meth:`_auto_ctx_sized`.
         """
@@ -2073,27 +2073,30 @@ class VramSizingMixin:
             gpu_layers = getattr(self, "n_gpu_layers", None)
         return self._DEFAULT_GPU_LAYERS if gpu_layers is None else int(gpu_layers)
 
-    def _kv_vram_share(self) -> float:
-        """The share of this load's KV cache llama.cpp places in VRAM: 1.0 when
-        every layer is offloaded (n_gpu_layers 99 or more, or negative), 0.0
-        for n_gpu_layers 0, else the repeating blocks at or above
-        ``n_layer + 1 - n_gpu_layers`` over the block count (from
-        :meth:`_cached_layer_count`, ``_ASSUMED_LAYERS`` when unknown). The KV
-        of every other block lives in system RAM."""
-        gpu_layers = self._ctx_gpu_layers()
+    def _kv_shares(self, gpu_layers: int) -> tuple[float, float]:
+        """``(vram, ram)``: the shares of this load's KV cache llama.cpp places
+        in VRAM and in system RAM with *gpu_layers* on the GPU. ``(1, 0)`` when
+        every layer is offloaded (99 or more, or negative), ``(0, 1)`` for 0,
+        else the repeating blocks at or above ``n_layer + 1 - gpu_layers`` over
+        the block count for VRAM and the rest for RAM. When the block count is
+        unknown (:meth:`_cached_layer_count` None) the VRAM share is estimated
+        from ``_ASSUMED_LAYERS`` and the RAM share is 1."""
         if gpu_layers < 0 or gpu_layers >= self._DEFAULT_GPU_LAYERS:
-            return 1.0
+            return 1.0, 0.0
         if gpu_layers == 0:
-            return 0.0
-        layers = self._cached_layer_count() or self._ASSUMED_LAYERS
-        return min(layers, gpu_layers - 1) / layers
+            return 0.0, 1.0
+        layers = self._cached_layer_count()
+        if not layers:
+            return min(1.0, (gpu_layers - 1) / self._ASSUMED_LAYERS), 1.0
+        vram = min(layers, gpu_layers - 1) / layers
+        return vram, 1.0 - vram
 
     def _ram_ctx_tokens(self, gpu_layers: int, ram_per_token: int) -> Optional[int]:
         """Tokens of context whose system-RAM share (*ram_per_token* bytes each)
         fits available system RAM (``sysstats.system_ram``) beside the weights a
         load with *gpu_layers* on the GPU keeps there
         (:meth:`_cpu_held_weight_bytes`, the whole file when that count fails,
-        plus :meth:`_cpu_draft_weight_bytes`; with no layer on the GPU also the
+        plus :meth:`_cpu_draft_weight_bytes`; with no block on the GPU also the
         recurrent state) and :data:`HOST_RAM_HEADROOM_BYTES`. 0 when they leave
         no room; None when available RAM cannot be read."""
         from localm.sysstats import system_ram
@@ -2104,7 +2107,7 @@ class VramSizingMixin:
         if held is None:
             held = self._model_bytes()
         held += self._cpu_draft_weight_bytes(gpu_layers > 0)
-        if gpu_layers == 0:
+        if gpu_layers <= 1:
             held += self._recurrent_state_vram_bytes()
         budget = available - held - HOST_RAM_HEADROOM_BYTES
         return max(0, budget) // max(1, ram_per_token)
@@ -2119,15 +2122,18 @@ class VramSizingMixin:
         be read, or ``"free <memory> not measurable, default"`` when the
         ceiling is ``_AUTO_CTX_FALLBACK`` because no budget could be read.
 
-        RAM side: :meth:`_ram_ctx_tokens` for the KV bytes per token of the
-        blocks on the CPU; with no layer on the GPU the draft source's KV per
+        The shares come from :meth:`_kv_shares`; ``runtime_has_no_gpu`` True
+        counts every layer as on the CPU. RAM side: :meth:`_ram_ctx_tokens` for
+        the KV bytes per token of the blocks on the CPU; with no layer on the GPU the draft source's KV per
         token is charged there too, and VRAM is not read. VRAM side of a
         partial offload: as for a full offload, but charged only the weights
         not kept in system RAM and the KV bytes per token of the blocks on the
         GPU. Each share is divided by its own bytes per token; the smaller
         window wins."""
-        share = self._kv_vram_share()
         gpu_layers = self._ctx_gpu_layers()
+        if getattr(self, "runtime_has_no_gpu", False):
+            gpu_layers = 0
+        share, ram_share = self._kv_shares(gpu_layers)
         free = None
         split_devices = 1
         if share > 0:
@@ -2139,10 +2145,7 @@ class VramSizingMixin:
                 free = self._free_vram_bytes()
                 split_devices = 1   # single-device reading - the flat overhead
             if free is None and share >= 1.0:
-                from localm.discover import native_backend_has_gpu
-                if native_backend_has_gpu() is not False:
-                    return self._AUTO_CTX_FALLBACK, "free VRAM not measurable, default"
-                share, gpu_layers = 0.0, 0
+                return self._AUTO_CTX_FALLBACK, "free VRAM not measurable, default"
         per_token = self._kv_bytes_per_token()
         if per_token <= 0:
             return max(self.n_ctx, self._AUTO_CTX_MIN), (
@@ -2157,7 +2160,7 @@ class VramSizingMixin:
             read.append("VRAM")
             # An n_cpu_moe load's pinned expert weights never draw on this budget.
             model = self._effective_model_bytes_for_vram()
-            if share < 1.0:
+            if ram_share > 0:
                 held = self._cpu_held_weight_bytes(gpu_layers)
                 if held is not None:
                     model = max(0, self._model_bytes() - held)
@@ -2170,8 +2173,9 @@ class VramSizingMixin:
                       - self._recurrent_state_vram_bytes())
             gpu_per_token = max(1, int(per_token * share) + spec_per_token)
             limits.append(max(0, budget) // gpu_per_token)
-        if share < 1.0:
-            ram_per_token = per_token - int(per_token * share)
+        if ram_share > 0:
+            ram_per_token = (per_token if ram_share >= 1.0
+                             else per_token - int(per_token * share))
             if share <= 0:
                 ram_per_token += spec_per_token
             tokens = self._ram_ctx_tokens(gpu_layers, ram_per_token)

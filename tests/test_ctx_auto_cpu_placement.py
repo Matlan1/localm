@@ -103,15 +103,15 @@ class TestCpuOnly:
         assert b._auto_ctx_sized() == (16384, "free RAM not measurable, default")
         assert readers.vram_calls == 0
 
-    def test_runtime_without_a_gpu_backend_sizes_from_ram(self, make, monkeypatch):
-        monkeypatch.setattr("localm.discover.native_backend_has_gpu", lambda: False)
-        b, _ = make(99, vram=None, ram=6 * GIB)
+    @pytest.mark.parametrize("gpu_layers", [99, 16])
+    def test_runtime_without_a_gpu_backend_sizes_everything_from_ram(
+            self, make, gpu_layers):
+        b, readers = make(gpu_layers, vram=80 * GIB, ram=6 * GIB)
+        b.runtime_has_no_gpu = True
         assert b._auto_ctx_sized() == (8192, "from free RAM")
+        assert readers.vram_calls == 0
 
-    @pytest.mark.parametrize("has_gpu", [True, None])
-    def test_gpu_runtime_with_vram_unreadable_keeps_the_fallback(
-            self, make, monkeypatch, has_gpu):
-        monkeypatch.setattr("localm.discover.native_backend_has_gpu", lambda: has_gpu)
+    def test_full_offload_with_vram_unreadable_keeps_the_fallback(self, make):
         b, readers = make(99, vram=None, ram=6 * GIB)
         assert b._auto_ctx_sized() == (16384, "free VRAM not measurable, default")
         assert readers.ram_calls == 0
@@ -152,6 +152,16 @@ class TestPartialOffload:
         assert source == "from free RAM; free VRAM not measurable"
         assert tokens == _ceiling(4 * GIB - self.CPU_HELD - HOST_RAM_HEADROOM_BYTES,
                                   PER_TOKEN - self.HALF)
+
+
+    def test_unknown_block_count_charges_all_kv_to_ram(self, make):
+        b, _ = make(self.GPU_LAYERS, vram=16 * GIB, ram=8 * GIB)
+        b._header_layer_count = None
+        b._block_bytes_cache = {}
+        tokens, source = b._auto_ctx_sized(capped=False)
+        assert source == "from free VRAM and RAM"
+        assert tokens == _ceiling(8 * GIB - MODEL - HOST_RAM_HEADROOM_BYTES, PER_TOKEN)
+        assert tokens == 25600
 
 
 class TestFullOffloadUnchanged:

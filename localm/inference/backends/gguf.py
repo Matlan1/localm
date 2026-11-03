@@ -306,6 +306,9 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         # layer count is unknowable for this load.
         self.gpu_layers_offloaded: Optional[int] = None
         self.gpu_layers_total: Optional[int] = None
+        # True when the last load's native runtime ships no GPU backend, so
+        # ctx_auto sizes every layer's KV cache from system RAM.
+        self.runtime_has_no_gpu = False
         # How the last load chose its n_gpu_layers (see
         # VramSizingMixin._record_gpu_sizing), or None before the first sizing.
         self.last_gpu_sizing: Optional[dict] = None
@@ -929,7 +932,12 @@ class GgufBackend(VramSizingMixin, BaseBackend):
 
         # The context ceiling is sized from the devices this load uses: a fit
         # that leaves devices out bounds it by the devices it keeps, and a
-        # placement by the device that fills first as the window grows.
+        # placement by the device that fills first as the window grows. A
+        # runtime with no GPU backend keeps every layer's KV cache in RAM.
+        self.runtime_has_no_gpu = False
+        if gpu_layers != 0:
+            from localm.discover import native_backend_has_gpu
+            self.runtime_has_no_gpu = native_backend_has_gpu() is False
         if gpu_devices is not None and gpu_placement is not None:
             ctx_max = self._placement_ctx_max(gpu_placement)
         else:
@@ -1106,8 +1114,9 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         total_layers = n_layers if isinstance(n_layers, int) and n_layers > 0 else self._cached_layer_count()
         self.gpu_layers_total = total_layers
         if total_layers:
-            self.gpu_layers_offloaded = min(gpu_layers, total_layers)
-        elif gpu_layers < self._DEFAULT_GPU_LAYERS:
+            self.gpu_layers_offloaded = (total_layers if gpu_layers < 0
+                                         else min(gpu_layers, total_layers))
+        elif 0 <= gpu_layers < self._DEFAULT_GPU_LAYERS:
             self.gpu_layers_offloaded = gpu_layers   # already an absolute count
         else:
             self.gpu_layers_offloaded = None   # "everything" sentinel, true count unknown
