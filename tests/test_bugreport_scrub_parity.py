@@ -22,6 +22,7 @@ import pytest
 
 from localm import pathscrub
 from localm.bugreport import scrub as br_scrub
+from tests._posix_sysdirs import sys_prog_function, sysdirs_for
 
 _REPO = Path(__file__).resolve().parents[1]
 _RI_PATH = _REPO / "scripts" / "report_issue.py"
@@ -192,7 +193,7 @@ def _sh_scrub_function() -> str:
     text = _SH_PATH.read_text(encoding="utf-8")
     start = text.index("\nscrub() {\n") + 1
     end = text.index("\n}\n", start) + 3
-    return text[start:end]
+    return sysdirs_for("perl") + sys_prog_function(text) + text[start:end]
 
 
 def _bash_with_perl():
@@ -234,6 +235,7 @@ def test_shell_standalone_reporter_replaces_its_home(tmp_path):
 def _run_curl_fallback(tmp_path, bash, *, drop_terminal_check):
     text = _SH_PATH.read_text(encoding="utf-8")
     fallback_text = text[text.index("# --- No Python at all"):]
+    fallback_text = sys_prog_function(text) + fallback_text
     if drop_terminal_check:
         assert fallback_text.count("if [ ! -t 0 ]; then") == 1
         fallback_text = fallback_text.replace("if [ ! -t 0 ]; then", "if false; then")
@@ -249,7 +251,8 @@ def _run_curl_fallback(tmp_path, bash, *, drop_terminal_check):
     proc = subprocess.run(
         [bash, "-c",
          'p="$(cygpath -u "$1" 2>/dev/null || printf %s "$1")"; '
-         'PATH="$p:$PATH"; cd "$2" && bash fallback.sh',
+         'PATH="$p:$PATH"; LOCALM_SYSDIRS="$p:/usr/bin:/bin"; export LOCALM_SYSDIRS; '
+         'cd "$2" && bash fallback.sh',
          "_", fake.as_posix(), work.as_posix()],
         input="it broke\ny\n", capture_output=True, text=True, timeout=120, env=env)
     return proc, sink

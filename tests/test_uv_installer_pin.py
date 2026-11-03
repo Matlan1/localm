@@ -40,12 +40,22 @@ def _pin(name: str, var: str) -> str:
     return m.group(1)
 
 
-def _helpers(name: str) -> str:
-    """The pin constants and the two verification functions of *name*."""
-    lines = _text(name).splitlines()
+def _function(text: str, name: str) -> str:
+    start = text.index(f"\n{name}() {{") + 1
+    return text[start:text.index("\n}\n", start) + 3]
+
+
+def _helpers(name: str, sysdirs: Path) -> str:
+    """The pin constants and the two verification functions of *name*, after the
+    sys_prog and download functions they call, with the script's fixed system
+    folders set to *sysdirs*."""
+    text = _text(name)
+    lines = text.splitlines()
     start = next(i for i, ln in enumerate(lines) if ln.startswith("UV_INSTALLER_VERSION="))
     closes = [i for i in range(start, len(lines)) if lines[i] == "}"]
-    return "\n".join(lines[start:closes[1] + 1]) + "\n"
+    return (f'LOCALM_SYSDIRS="{sysdirs.as_posix()}"\n'
+            + _function(text, "sys_prog") + _function(text, "download")
+            + "\n".join(lines[start:closes[1] + 1]) + "\n")
 
 
 @pytest.mark.parametrize("name", SCRIPTS)
@@ -128,7 +138,7 @@ def _run_fetch(tmp_path: Path, name: str, *, expected_sha: str | None = None,
         stub.write_text("#!/bin/sh\n" + body, encoding="utf-8", newline="\n")
         stub.chmod(0o755)
     helpers = tmp_path / "helpers.sh"
-    helpers.write_text(_helpers(name), encoding="utf-8", newline="\n")
+    helpers.write_text(_helpers(name, stubs), encoding="utf-8", newline="\n")
     override = f'UV_INSTALLER_SHA256="{expected_sha}"\n' if expected_sha else ""
     dest = tmp_path / "uv-installer.sh"
     script = (f'say() {{ printf "%s\\n" "$*"; }}\n. "{helpers}"\n{override}'

@@ -28,6 +28,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._posix_sysdirs import bash_path
+
 ROOT = Path(__file__).resolve().parents[1]
 SETUP_SH = ROOT / "setup.sh"
 LOCALM_SH = ROOT / "localm.sh"
@@ -106,6 +108,8 @@ def _run_install_block(tmp_path: Path, *, call_specs: dict[int, tuple[int, bool]
         # "${EXTRAS}" without setting it itself - under `set -u` above that is
         # otherwise an unbound-variable error before uv is even reached.
         'EXTRAS="coder,voice,monitor"\n'
+        # The real script sets UVEXE (localm's own uv) and STMP (its temp folder).
+        f'UVEXE="{bash_path(bin_dir / "uv")}"\nSTMP="{bash_path(tmp_path)}"\n'
         # The real script journals each step (see test_setup_sh_journal.py); the
         # extracted block calls the journal helpers, which this synthetic script
         # does not need to exercise.
@@ -182,7 +186,7 @@ def test_retry_install_is_guarded_in_source():
     reads `-e ".[${EXTRAS}]"` at both call sites, never the resolved value.
     """
     block = _install_block()
-    needle = 'uv pip install -p .venv -e ".[${EXTRAS}]"'
+    needle = '"$UVEXE" pip install -p .venv -e ".[${EXTRAS}]"'
     first = block.index(needle)
     second = block.index(needle, first + 1)
     line_end = block.index("\n", second)

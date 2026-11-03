@@ -5,25 +5,44 @@
 #  Run:  bash report-issue.sh
 #  Files a bug report as an account-less GitHub issue via the localm proxy (no
 #  GitHub login), showing you exactly what will be sent and asking you to confirm
-#  first. It runs the self-contained reporter on any Python it can find (so a
-#  broken venv still reports fine), and falls back to curl if there is no Python.
+#  first. It runs the self-contained reporter on localm's own Python (so a
+#  broken venv still reports fine), and falls back to the system curl if there is
+#  none.
 #
 #  Optional args (used by setup.sh's failure paths) pass straight through:
 #    --summary "..."  --detail "..."  --log <path>  --yes
 # =============================================================================
-cd "$(dirname "$0")" || exit 1
+# Inherited uv / pip / Python settings and LOCALM_HOME are cleared, and PATH is
+# the fixed system folders.
+LOCALM_SYSDIRS="/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH="$LOCALM_SYSDIRS"
+for _var in $(compgen -e); do
+  case "$_var" in UV_*|PIP_*) unset "$_var" ;; esac
+done
+unset PYTHONPATH PYTHONHOME PYTHONSTARTUP PYTHONUSERBASE VIRTUAL_ENV CONDA_PREFIX LOCALM_HOME
+export UV_NO_CONFIG=1 PIP_CONFIG_FILE=/dev/null PYTHONNOUSERSITE=1
+case "$0" in */*) cd -- "${0%/*}" || exit 1 ;; esac
 
-# Prefer the clone's venv python; else any python3/python. All run the SAME
-# stdlib-only reporter (needs no working localm install).
+sys_prog() {  # sys_prog NAME  ->  prints NAME's full path in the fixed system folders; 1 when absent
+  local d IFS=:
+  for d in $LOCALM_SYSDIRS; do
+    if [ -x "$d/$1" ] && [ ! -d "$d/$1" ]; then printf '%s\n' "$d/$1"; return 0; fi
+  done
+  return 1
+}
+
+# The reporter runs on this clone's .venv Python, else on localm's own managed
+# Python (./.python, or the Shared store); never on a Python from PATH. All run
+# the SAME stdlib-only reporter (needs no working localm install).
+case "${XDG_DATA_HOME:-}" in
+  /*) SHARED_STORE="$XDG_DATA_HOME/localm/shared" ;;
+  *)  SHARED_STORE="${HOME:+$HOME/.local/share/localm/shared}" ;;
+esac
 RIPY=""
-for c in ".venv/bin/python3" ".venv/bin/python"; do
+for c in .venv/bin/python3 .venv/bin/python .python/*/bin/python3 \
+    "${SHARED_STORE:-/nonexistent}"/python/*/bin/python3; do
   [ -x "$c" ] && { RIPY="$c"; break; }
 done
-if [ -z "$RIPY" ]; then
-  for c in python3 python; do
-    command -v "$c" >/dev/null 2>&1 && { RIPY="$c"; break; }
-  done
-fi
 
 if [ -n "$RIPY" ]; then
   exec "$RIPY" scripts/report_issue.py "$@"
@@ -34,7 +53,7 @@ echo ""
 echo "  localm - report a problem (curl fallback; no Python found)"
 echo ""
 email="theilige@gmail.com"
-if ! command -v curl >/dev/null 2>&1; then
+if ! curl_bin="$(sys_prog curl)"; then
   echo "  Cannot file automatically: no Python and no curl on this machine."
   echo "  Please email a short description to ${email}."
   exit 1
@@ -55,8 +74,9 @@ fi
 # _scrub_secrets in localm/bugreport/scrub.py. Returns non-zero, printing
 # nothing, when perl is not available.
 scrub() {
-  command -v perl >/dev/null 2>&1 || return 1
-  perl -CS -e "$(cat <<'PERL'
+  local perl_bin
+  perl_bin="$(sys_prog perl)" || return 1
+  "$perl_bin" -CS -e "$(cat <<'PERL'
     use strict;
     use warnings;
     my $home = $ENV{HOME} // '';
@@ -155,7 +175,7 @@ if [ -z "$url" ]; then
 fi
 
 payload="{\"title\":\"$(esc "$summary")\",\"body\":\"$(esc "$body")\"}"
-code="$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$url" \
+code="$("$curl_bin" -sS -o /dev/null -w '%{http_code}' -X POST "$url" \
   -H "Content-Type: application/json" ${tok:+-H "X-Localm-Token: $tok"} \
   -d "$payload" 2>/dev/null || echo 000)"
 if [ "$code" = "201" ] || [ "$code" = "200" ]; then

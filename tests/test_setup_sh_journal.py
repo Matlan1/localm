@@ -166,6 +166,7 @@ class TestSeveralOpenSteps:
 
 
 _UV_STUB = """#!/bin/sh
+if [ "$1" = --version ]; then echo "uv 0.13.6"; exit 0; fi
 echo "uv $*" >> "$STUB_LOG"
 case "$1" in
   venv) for last; do :; done; mkdir -p "$last/bin" ;;

@@ -10,8 +10,34 @@
 #  one-click install.sh).
 # =============================================================================
 set -euo pipefail
+# ---- isolation: no inherited tool settings; programs from the system folders --
+# PATH is the fixed system folders for the whole run; USER_PATH keeps the
+# caller's PATH for the one step that reads it (the global-command check).
+LOCALM_SYSDIRS="/usr/bin:/bin:/usr/sbin:/sbin"
+USER_PATH="${PATH:-}"
+export PATH="$LOCALM_SYSDIRS"
+for _var in $(compgen -e); do
+  case "$_var" in UV_*|PIP_*) unset "$_var" ;; esac
+done
+unset PYTHONPATH PYTHONHOME PYTHONSTARTUP PYTHONUSERBASE VIRTUAL_ENV CONDA_PREFIX LOCALM_HOME
+export UV_NO_CONFIG=1 PIP_CONFIG_FILE=/dev/null PYTHONNOUSERSITE=1
 cd "$(dirname "$0")"
 export LOCALM_SETUP=1
+ROOT="$(pwd)"
+# Every temporary file of this run (uv's lock files, the uv installer, the
+# heartbeat flags) goes to ./.localm-setup-tmp, removed when setup exits.
+STMP="$ROOT/.localm-setup-tmp"
+if ! mkdir -p "$STMP"; then
+  printf '%s\n' "  [!] Could not create $STMP for setup's temporary files."
+  exit 1
+fi
+export TMPDIR="$STMP" TMP="$STMP" TEMP="$STMP"
+# Shared mode's store: localm's own uv, Python and download cache for every
+# Shared localm install of this user.
+case "${XDG_DATA_HOME:-}" in
+  /*) SHARED_STORE="$XDG_DATA_HOME/localm/shared" ;;
+  *)  SHARED_STORE="${HOME:+$HOME/.local/share/localm/shared}" ;;
+esac
 
 #   --uninstall (or uninstall / --rollback)  remove LocaLM from this folder
 #   --purge-data        with --uninstall: also delete the saved data
@@ -52,22 +78,40 @@ ask() {  # ask PROMPT DEFAULT  ->  echoes the answer (the default in --yes mode)
   read -r -p "$prompt" ans || ans=""
   echo "${ans:-$def}"
 }
-uv_manual_hint() {  # the manual uv-install command; used from two call sites below
-  say "      install uv with your package manager, or download it from https://github.com/astral-sh/uv/releases"
+sys_prog() {  # sys_prog NAME  ->  prints NAME's full path in the fixed system folders; 1 when absent
+  local d IFS=:
+  for d in $LOCALM_SYSDIRS; do
+    if [ -x "$d/$1" ] && [ ! -d "$d/$1" ]; then printf '%s\n' "$d/$1"; return 0; fi
+  done
+  return 1
+}
+download() {  # download URL DEST  ->  0 when DEST holds URL, fetched with the system curl, else wget
+  local url="$1" dest="$2" dirs="$LOCALM_SYSDIRS" d
+  # macOS: a download tool may also come from /usr/local/bin or /opt/homebrew/bin.
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then dirs="$dirs:/usr/local/bin:/opt/homebrew/bin"; fi
+  local IFS=:
+  for d in $dirs; do
+    if [ -x "$d/curl" ] && [ ! -d "$d/curl" ]; then "$d/curl" -fsSL -o "$dest" "$url"; return; fi
+  done
+  for d in $dirs; do
+    if [ -x "$d/wget" ] && [ ! -d "$d/wget" ]; then "$d/wget" -q -O "$dest" "$url"; return; fi
+  done
+  return 1
 }
 # The uv release this setup installs; its installer script runs only when its
 # sha256 matches UV_INSTALLER_SHA256.
 UV_INSTALLER_VERSION="0.13.6"
 UV_INSTALLER_SHA256="f7a56e7afaec49a3bcbc3ac3cdbe917e7c6ce30e0d815308a12e531aa5ef23b7"
 file_sha256() {  # file_sha256 FILE  ->  prints the hex sha256, or nothing when no hashing tool exists
-  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
-  elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d' ' -f1
-  elif command -v openssl >/dev/null 2>&1; then openssl dgst -sha256 "$1" | sed 's/^.*= *//'
+  local t
+  if t="$(sys_prog sha256sum)"; then "$t" "$1" | cut -d' ' -f1
+  elif t="$(sys_prog shasum)"; then "$t" -a 256 "$1" | cut -d' ' -f1
+  elif t="$(sys_prog openssl)"; then "$t" dgst -sha256 "$1" | sed 's/^.*= *//'
   fi
 }
 fetch_uv_installer() {  # fetch_uv_installer DEST  ->  0 only when DEST holds the checksum-verified installer
   local dest="$1" got
-  if ! curl -fsSL -o "$dest" "https://github.com/astral-sh/uv/releases/download/${UV_INSTALLER_VERSION}/uv-installer.sh"; then
+  if ! download "https://github.com/astral-sh/uv/releases/download/${UV_INSTALLER_VERSION}/uv-installer.sh" "$dest"; then
     say "  [!] Could not download the uv ${UV_INSTALLER_VERSION} installer."
     return 1
   fi
@@ -109,11 +153,11 @@ fetch_uv_installer() {  # fetch_uv_installer DEST  ->  0 only when DEST holds th
 # printing after setup itself has ended.
 HB_SEQ=0
 HB_FLAG=""
-trap '[ -n "$HB_FLAG" ] && { : > "$HB_FLAG" 2>/dev/null || true; }' EXIT
+HB_PID=""
 heartbeat_start() {
   local secs="$1" msg="$2"
   HB_SEQ=$((HB_SEQ + 1))
-  HB_FLAG="${TMPDIR:-/tmp}/localm-setup-hb.$$.$HB_SEQ"
+  HB_FLAG="$STMP/localm-setup-hb.$$.$HB_SEQ"
   rm -f "$HB_FLAG"
   (
     n=0
@@ -127,12 +171,20 @@ heartbeat_start() {
     done
     rm -f "$HB_FLAG"
   ) &
+  HB_PID=$!
 }
-heartbeat_stop() {
-  [ -n "$HB_FLAG" ] && : > "$HB_FLAG"
+heartbeat_stop() {  # stops the heartbeat and waits until its loop has exited
+  if [ -n "$HB_FLAG" ]; then : > "$HB_FLAG" 2>/dev/null || true; fi
+  if [ -n "$HB_PID" ]; then wait "$HB_PID" 2>/dev/null || true; fi
   HB_FLAG=""
+  HB_PID=""
   return 0
 }
+on_exit() {  # on every exit: stop a running heartbeat, then remove ./.localm-setup-tmp
+  heartbeat_stop
+  rm -rf -- "$STMP" 2>/dev/null || true
+}
+trap on_exit EXIT
 handle_provision_failure() {  # handle_provision_failure "retry-cmd-hint" "detail"
   # Called only for a genuine setup-llama fault (not a DECLINED provision -
   # those already return 0 without reaching here). Offers to continue the
@@ -163,14 +215,13 @@ offer_report() {  # offer_report "summary" "detail"
   # (report-issue.sh), which works even though setup did not finish (it needs no
   # working install). The caller still exits non-zero afterwards - reporting never
   # masks the failure ("we do not hide problems"). Skipped in --yes mode (no prompt).
-  local here ans
-  here="$(cd "$(dirname "$0")" && pwd)"
-  [ -f "$here/report-issue.sh" ] || return 0
+  local ans
+  [ -f "$ROOT/report-issue.sh" ] || return 0
   [ "$YES" = 1 ] && return 0
   # SETUP-Q: report-problem
   ans="$(ask "  Report this problem to the maintainer (no GitHub account needed)? [Y/n]: " Y)"
   case "$ans" in [Nn]*) return 0 ;; esac
-  bash "$here/report-issue.sh" --summary "$1" --detail "$2" || true
+  "$BASH" "$ROOT/report-issue.sh" --summary "$1" --detail "$2" || true
 }
 
 # ---- uninstall ----------------------------------------------------------------
@@ -179,17 +230,11 @@ offer_report() {  # offer_report "summary" "detail"
 # only when asked, and never a path it has no record or rule for. It leaves the
 # Python runtime it runs on (.venv .python .cache .uv) named in
 # .localm-uninstall-pending; finish_pending removes those once it has exited.
-find_python() {  # sets PYBIN: this clone's .venv, its own .python, then python3 >= 3.9
+find_python() {  # sets PYBIN: this clone's .venv, its own .python, then the Shared store's Python; never one from PATH
   PYBIN=""
   local c
-  for c in .venv/bin/python .python/*/bin/python3; do
+  for c in .venv/bin/python .python/*/bin/python3 "${SHARED_STORE:-/nonexistent}"/python/*/bin/python3; do
     if [ -x "$c" ] && "$c" -c "import sys" >/dev/null 2>&1; then PYBIN="$c"; return 0; fi
-  done
-  for c in python3 python; do
-    if command -v "$c" >/dev/null 2>&1 \
-        && "$c" -c "import sys; sys.exit(sys.version_info < (3, 9))" >/dev/null 2>&1; then
-      PYBIN="$c"; return 0
-    fi
   done
   return 0
 }
@@ -407,39 +452,41 @@ if [ -x "./setup-gui.sh" ] && { [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY
 fi
 
 # ---- portable vs shared: where localm's Python tooling lives ----------------
-# Portable pulls uv ITSELF (when we have to install it below), its managed Python,
-# and its wheel cache INTO this folder, so the clone is truly self-contained
-# (delete it and nothing is left behind) at the cost of a per-clone re-download.
-# Shared reuses (or installs) uv at its normal per-user location and reuses its
-# per-user Python + cache. Asked BEFORE the uv bootstrap below so a Portable pick
-# also confines uv's own binary to this folder, not just the runtime it manages -
-# silently installing a tool into the user's home directory without ever asking
-# where is exactly the kind of outside-the-root write this project forbids.
-# The UV_* vars are exported for THIS setup process only (not persisted / not
-# global), so they never touch any other uv project. --python-preference
-# only-managed forces the contained download instead of reusing a system Python.
+# Both choices use only localm's own uv (the pinned release), its own managed
+# Python and its own download cache. Portable keeps them in ./.uv, ./.python and
+# ./.cache; Shared keeps them in one localm folder in the user profile
+# ($SHARED_STORE/uv, python, cache), reused by every Shared localm install.
 step_begin portable-choice
 say ""
 say "  Keep localm's Python tooling (uv itself, its runtime, and downloads) inside this folder?"
 say "    [1] Portable - everything in this folder (self-contained; re-downloads per clone)"
-say "    [2] Shared   - reuse/install uv at its normal per-user location (faster; lives in ~/.local)"
+say "    [2] Shared   - localm's own uv, Python and downloads in one localm folder in"
+say "                   your user profile, reused by every localm install (faster)"
 # SETUP-Q: tooling-store
 spick="$(ask "  Pick 1 or 2 [1]: " 1)"
-CONTAINED=0; PYPREF=""; UVDIR=""
+CONTAINED=0
 if [ "$spick" = 1 ]; then
   CONTAINED=1
-  export UV_PYTHON_INSTALL_DIR="$(pwd)/.python"
-  export UV_CACHE_DIR="$(pwd)/.cache"
-  PYPREF="--python-preference only-managed"
+  STORE_UV="$ROOT/.uv"; PYDIR="$ROOT/.python"; CACHEDIR="$ROOT/.cache"
   say "  Portable: uv, Python, and downloads all under this folder"
 else
-  say "  Shared: reusing/installing uv and its Python + cache (outside this folder)."
+  if [ -z "$SHARED_STORE" ]; then
+    say "  [!] Shared needs your home folder (HOME is not set). Pick Portable, or set HOME."
+    exit 1
+  fi
+  STORE_UV="$SHARED_STORE/uv"; PYDIR="$SHARED_STORE/python"; CACHEDIR="$SHARED_STORE/cache"
+  say "  Shared: localm's uv, Python and downloads in $SHARED_STORE"
 fi
+export UV_PYTHON_INSTALL_DIR="$PYDIR"
+export UV_CACHE_DIR="$CACHEDIR"
+export UV_CREDENTIALS_DIR="$STORE_UV/credentials"
+export UV_PYTHON_PREFERENCE=only-managed
+PYPREF="--python-preference only-managed"
+UVDIR="$STORE_UV"
+UVEXE="$STORE_UV/uv"
 # What the install manifest records about this choice.
-RCFLAG=""; PYDIR=""; CACHEDIR=""; UVSHARED=""
-if [ "$CONTAINED" = 1 ]; then
-  RCFLAG="--runtime-contained"; PYDIR="$(pwd)/.python"; CACHEDIR="$(pwd)/.cache"
-fi
+RCFLAG=""; UVSHARED=""
+if [ "$CONTAINED" = 1 ]; then RCFLAG="--runtime-contained"; else UVSHARED="--uv-shared-installed"; fi
 step_done portable-choice
 
 # 1 = verify against the platform's NATIVE certificate store - the same trust a
@@ -456,99 +503,47 @@ step_done portable-choice
 # below for the actual fallback).
 export UV_SYSTEM_CERTS=1
 
-# ---- uv is required; bootstrap it ourselves if it is missing ----------------
-# uv (Astral's fast Python package manager) builds the venv and resolves the GPU
-# wheels. Instead of dead-ending with "install it yourself", fetch it via Astral's
-# official installer and make it callable in THIS process (the installer updates a
-# shell profile, not the PATH of an already-running shell). In --yes mode this is
-# automatic (like the one-click install.sh); interactively it asks first (default
-# Yes) since it runs a script fetched from the network. A bootstrap failure is
-# surfaced, not hidden (rule 5): we re-check that uv is callable and exit if not.
-#
-# Portable (CONTAINED=1) must not settle for whatever uv happens to already be on
-# PATH - that could be a Shared install, a package manager, or a different clone
-# entirely, and reusing it silently would break the "uv itself ... inside this
-# folder" promise the user just picked two prompts ago. So Portable checks ONLY
-# for its own confined copy at ./.uv; anything else on PATH is irrelevant to it and
-# falls through to the same bootstrap a genuinely-missing uv would trigger. Shared
-# keeps the original behaviour: any uv already on PATH is fine to reuse.
-uv_present=0
-if [ "$CONTAINED" = 1 ]; then
-  if [ -x "./.uv/uv" ]; then
-    export PATH="$(pwd)/.uv:$PATH"
-    UVDIR="$(pwd)/.uv"
-    uv_present=1
-  fi
-elif command -v uv >/dev/null 2>&1; then
-  uv_present=1
-fi
-if [ "$uv_present" != 1 ]; then
-  say "  [!] uv (the Python package manager localm builds on) is not installed."
-  # SETUP-Q: uv-install
-  getuv="$(ask "  Install it now with Astral's official installer? [Y/n]: " Y)"
-  case "$getuv" in
-    [Nn]*)
-      say "  Setup needs uv. Install it, then re-run setup.sh:"
-      uv_manual_hint
-      exit 1
-      ;;
-  esac
-  say "  Installing uv ..."
+# ---- localm's own uv ------------------------------------------------------------
+# The uv in the store is used only when `uv --version` reports the pinned
+# release; otherwise the pinned, checksum-verified Astral installer puts it
+# there (UV_INSTALL_DIR and UV_UNMANAGED_INSTALL: no shell profile edit, no
+# install receipt). A uv anywhere else is never used. A failed install stops setup.
+uv_is_pinned() {  # true when $UVEXE runs and reports the pinned release
+  local v
+  [ -x "$UVEXE" ] || return 1
+  v="$("$UVEXE" --version 2>/dev/null)" || return 1
+  v="${v#uv }"; v="${v%% *}"
+  [ "$v" = "$UV_INSTALLER_VERSION" ]
+}
+if ! uv_is_pinned; then
   if [ "$CONTAINED" = 1 ]; then UVSTEP=uv-portable; else UVSTEP=uv-bootstrap; fi
   if [ "$RESUMING" = 1 ] && step_was_open uv-portable && [ -d ./.uv ]; then
     say "  The previous setup stopped while installing uv here; starting that over."
     rm -rf ./.uv
   fi
   step_begin "$UVSTEP"
-  if [ "$CONTAINED" = 1 ]; then
-    # Portable was picked: confine uv's OWN binary to this folder too, not just the
-    # Python runtime it manages - UV_INSTALL_DIR is Astral's own documented
-    # override for the installer's target dir. UV_UNMANAGED_INSTALL also stops it
-    # adding a line to your shell startup files and writing an install receipt
-    # under ~/.config/uv.
-    export UV_INSTALL_DIR="$(pwd)/.uv"
-    export UV_UNMANAGED_INSTALL="$(pwd)/.uv"
-    UVDIR="$(pwd)/.uv"
-    say "  Portable: installing uv itself under ./.uv"
-  else
-    UVSHARED="--uv-shared-installed"
-  fi
-  # A failed fetch, checksum mismatch or installer failure leaves uv missing;
-  # the re-check below reports it.
-  # The installer script and everything Astral's installer downloads (TMPDIR)
-  # stay in ./.localm-setup-tmp, which is removed again when it is empty.
-  UVTMP="$(pwd)/.localm-setup-tmp/uv-installer.$$"
+  say "  Installing localm's uv ${UV_INSTALLER_VERSION} into $STORE_UV ..."
+  export UV_INSTALL_DIR="$STORE_UV"
+  export UV_UNMANAGED_INSTALL="$STORE_UV"
+  # The installer script and everything Astral's installer downloads stay in
+  # ./.localm-setup-tmp/uv-installer.<pid>.
+  UVTMP="$STMP/uv-installer.$$"
   if mkdir -p "$UVTMP/tmp" && fetch_uv_installer "$UVTMP/uv-installer.sh"; then
     TMPDIR="$UVTMP/tmp" sh "$UVTMP/uv-installer.sh" || true
   else
     jr abandon "$UVSTEP"
   fi
   rm -rf "$UVTMP"
-  rmdir ./.localm-setup-tmp 2>/dev/null || true
-  # uv lands in ~/.local/bin (older builds used ~/.cargo/bin) unless UV_INSTALL_DIR
-  # was set above; the installer edits a shell profile, not this running shell, so
-  # add it (when set) plus both defaults to PATH for the rest of setup. Guarded so
-  # an unset UV_INSTALL_DIR never leaves an empty leading PATH entry (POSIX shells
-  # treat that as the current directory).
-  if [ -n "${UV_INSTALL_DIR:-}" ]; then
-    export PATH="$UV_INSTALL_DIR:$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
-  else
-    export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
-  fi
-  if ! command -v uv >/dev/null 2>&1; then
+  unset UV_INSTALL_DIR UV_UNMANAGED_INSTALL
+  if ! uv_is_pinned; then
     say ""
-    say "  [!] uv still is not callable after the install attempt."
-    say "      Open a new shell (so the updated PATH applies) and run setup.sh again,"
-    say "      or install uv manually first:"
-    uv_manual_hint
-    offer_report "localm setup could not install uv" "setup.sh tried Astral's installer but uv was still not callable afterwards."
+    say "  [!] localm could not install its own uv ${UV_INSTALLER_VERSION} into $STORE_UV."
+    say "      Check the network connection and run setup.sh again."
+    offer_report "localm setup could not install uv" "setup.sh could not install uv ${UV_INSTALLER_VERSION} into its own folder."
     exit 1
   fi
   step_done "$UVSTEP"
 fi
-# Shared: the uv in use, for the install record.
-UVEXE=""
-if [ "$CONTAINED" != 1 ]; then UVEXE="$(command -v uv || true)"; fi
 
 # ---- GPU probe fallback and platform flags -----------------------------------
 # detect_gpu is used only when `python -m localm.hwdetect` (once the venv
@@ -557,11 +552,12 @@ if [ "$CONTAINED" != 1 ]; then UVEXE="$(command -v uv || true)"; fi
 # nvidia-smi first, so leftover ROCm tooling on an NVIDIA box never shadows the
 # real GPU.
 detect_gpu() {
-  if command -v nvidia-smi >/dev/null 2>&1; then
+  local lspci_bin
+  if sys_prog nvidia-smi >/dev/null; then
     echo cuda
-  elif command -v rocminfo >/dev/null 2>&1 || command -v rocm-smi >/dev/null 2>&1 || [ -d /opt/rocm ]; then
+  elif sys_prog rocminfo >/dev/null || sys_prog rocm-smi >/dev/null || [ -d /opt/rocm ]; then
     echo rocm
-  elif command -v lspci >/dev/null 2>&1 && lspci 2>/dev/null | grep -Eiq 'intel.*(arc|dg2|xe)'; then
+  elif lspci_bin="$(sys_prog lspci)" && "$lspci_bin" 2>/dev/null | grep -Eiq 'intel.*(arc|dg2|xe)'; then
     echo intel
   elif [ "$(uname -s 2>/dev/null)" = "Darwin" ] && [ "$(uname -m 2>/dev/null)" = "arm64" ]; then
     echo metal
@@ -599,14 +595,11 @@ create_venv() {
   # heartbeat line covers the case that genuinely does take a while - a fresh
   # box downloading uv's managed Python - so that never looks like a hang.
   while : ; do
-    # PYPREF is empty (shared) or "--python-preference only-managed" (portable);
-    # left unquoted on purpose so an empty value expands to no argument. The
-    # `if var=$(cmd); then` form (not a bare assignment) is required under
-    # `set -e` - it is one of the contexts POSIX exempts from aborting on a
-    # non-zero exit, so a failure here can be examined instead of killing setup.
+    # PYPREF is "--python-preference only-managed", split into two words. The
+    # `if var=$(cmd); then` form keeps `set -e` from aborting on a failure here.
     heartbeat_start 15 "  ... still creating the environment (this can take a few minutes on a slow connection)"
     # shellcheck disable=SC2086
-    if errtext="$(uv venv --python 3.12 $PYPREF --clear .venv 2>&1)"; then
+    if errtext="$("$UVEXE" venv --python 3.12 $PYPREF --clear .venv 2>&1)"; then
       heartbeat_stop
       : > .venv/.localm-venv   # marker: this venv was created by localm setup
       record_runtime
@@ -824,9 +817,9 @@ say "  Installing localm into .venv ..."
 # bars during the torch install. The heartbeat is ONLY correct where uv's output
 # is CAPTURED and the terminal would otherwise be silent - the ONE such site is
 # the create_venv retry loop above. Do not copy it back here.
-uv pip install -p .venv -e ".[${EXTRAS}]" || {
+"$UVEXE" pip install -p .venv -e ".[${EXTRAS}]" || {
   say "  [!] Installing localm failed - see the error above."
-  offer_report "localm install failed during setup" "uv pip install -e .[${EXTRAS}] failed - see the error output above."
+  offer_report "localm install failed during setup" "installing localm .[${EXTRAS}] into .venv failed - see the error output above."
   exit 1
 }
 
@@ -848,7 +841,7 @@ if [ ! -x .venv/bin/localm ]; then
   # fix), and the rest of this script does not depend on the entry point (see the
   # block comment above). Without this guard, a non-zero retry under
   # `set -euo pipefail` kills setup mid-way and that warning never prints.
-  uv pip install -p .venv -e ".[${EXTRAS}]" || true
+  "$UVEXE" pip install -p .venv -e ".[${EXTRAS}]" || true
   if [ ! -x .venv/bin/localm ]; then
     say ""
     say "  [!!] .venv/bin/localm is STILL missing after a retry."
@@ -856,7 +849,7 @@ if [ ! -x .venv/bin/localm ]; then
     say "       this is fixed; the graphical launcher (./localm-launcher.sh) is"
     say "       unaffected."
     say "       Fix it yourself with:"
-    say "         uv pip install -p .venv -e \".[${EXTRAS}]\" --reinstall"
+    say "         \"$UVEXE\" pip install -p .venv -e \".[${EXTRAS}]\" --reinstall"
     say "       Seen specifically on a WSL2 clone under a Windows-drive mount"
     say "       (/mnt/c, /mnt/d, ...) - cloning into a native Linux path (e.g."
     say "       ~/localm) instead avoids that filesystem bridge entirely."
@@ -879,7 +872,7 @@ if [ "$RESUMING" = 1 ] && step_was_open native-runtime; then
 fi
 # (The PyTorch/transformers stack is installed further down, AFTER the backend
 # pick, so the HF torch variant can FOLLOW the chosen runtime - see SETUP-1.)
-uv pip install -p .venv -e ./runtime >/dev/null 2>&1 || true
+"$UVEXE" pip install -p .venv -e ./runtime >/dev/null 2>&1 || true
 
 # ---- provision the native library (official llama.cpp prebuilt) -------------
 # The RECOMMENDED backend comes from the SAME tested policy the Windows installer
@@ -1009,23 +1002,23 @@ if [ -n "$TORCHSPEC" ]; then
   # TORCHSPEC is a multi-token pip arg list (e.g. "torch torchvision --torch-backend=...");
   # it is intentionally left unquoted so the words split into separate arguments.
   # shellcheck disable=SC2086
-  uv pip install -p .venv $TORCHSPEC \
+  "$UVEXE" pip install -p .venv $TORCHSPEC \
     || say "  [!] torch install failed - install a matching torch manually (see docs/gpu-setup.md)."
-  uv pip install -p .venv -e ".[hf,audio]" || true
+  "$UVEXE" pip install -p .venv -e ".[hf,audio]" || true
 else
   say ""
   say "  Skipping the PyTorch/transformers stack (not needed for GGUF chat)."
   say "  You picked the '$BACKEND' runtime, so no vendor GPU torch was auto-installed."
   say "  For HuggingFace transformers models, add PyTorch later (see docs/gpu-setup.md):"
-  say "    CPU (any machine): uv pip install -p .venv torch torchvision --torch-backend=cpu"
+  say "    CPU (any machine): \"$UVEXE\" pip install -p .venv torch torchvision --torch-backend=cpu"
   # NVIDIA CUDA's wheel line depends on GPU generation (Blackwell and newer need
   # a different index than older cards - see hwdetect.pytorch_index_url), so ask
   # localm's own detector for THIS machine's actual line instead of hardcoding
   # one that would silently install kernel-less torch on a Blackwell card.
   cudaspec="$(.venv/bin/python -m localm.hwdetect torch-args cuda 2>/dev/null)"
-  say "    NVIDIA CUDA:       uv pip install -p .venv ${cudaspec:-torch torchvision --torch-backend=cu126}"
-  say "    AMD ROCm (Linux):  uv pip install -p .venv torch torchvision --torch-backend=rocm6.2"
-  say "    Intel Arc / XPU:   uv pip install -p .venv torch torchvision --torch-backend=xpu"
+  say "    NVIDIA CUDA:       \"$UVEXE\" pip install -p .venv ${cudaspec:-torch torchvision --torch-backend=cu126}"
+  say "    AMD ROCm (Linux):  \"$UVEXE\" pip install -p .venv torch torchvision --torch-backend=rocm6.2"
+  say "    Intel Arc / XPU:   \"$UVEXE\" pip install -p .venv torch torchvision --torch-backend=xpu"
 fi
 
 step_done torch
@@ -1131,7 +1124,8 @@ case "$gmk" in
     gcrc=0
     jr intend command "$HOME/.local/bin/localm"
     step_begin global-command
-    .venv/bin/python -m localm.globalcmd install --root . || gcrc=$?
+    # globalcmd reads the caller's PATH to tell whether ~/.local/bin is on it.
+    PATH="$USER_PATH" .venv/bin/python -m localm.globalcmd install --root . || gcrc=$?
     if [ "$gcrc" = 0 ] || [ "$gcrc" = 20 ]; then
       PATH_DIR="$HOME/.local/bin"; CMD_SHIM="$HOME/.local/bin/localm"
       if [ "$gcrc" = 0 ]; then PATH_MOD="--path-modified"; fi
@@ -1204,7 +1198,7 @@ else
   say "    ./localm-launcher.sh    graphical launcher - works now (does not need it)"
   say "    ./localm.sh <args>      will NOT work until it is fixed"
   say "    .venv/bin/localm ...    will NOT work until it is fixed"
-  say "  Fix it with:  uv pip install -p .venv -e \".[${EXTRAS}]\" --reinstall"
+  say "  Fix it with:  \"$UVEXE\" pip install -p .venv -e \".[${EXTRAS}]\" --reinstall"
 fi
 if [ -n "$SHORTCUT" ]; then
   say "    A LocaLM entry was also added to your application menu."

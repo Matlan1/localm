@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 
 from localm import install_manifest as im
+from tests._posix_sysdirs import fake_uv_script
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -33,6 +34,9 @@ def venv_template(tmp_path_factory):
     d = tmp_path_factory.mktemp("sh-uninstall-venv") / ".venv"
     subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(d)],
                    check=True, capture_output=True, timeout=300)
+    # setup.sh clears PYTHONPATH; the venv finds localm the way an editable install does.
+    for site in d.glob("lib/python3*/site-packages"):
+        (site / "localm-src.pth").write_text(str(ROOT) + "\n", encoding="utf-8")
     return d
 
 
@@ -180,7 +184,7 @@ def _gui_after_window(clone: Path, code: int):
         shutil.copy2(ROOT / name, clone / name)
     (clone / ".uv").mkdir()
     fake_uv = clone / ".uv" / "uv"
-    fake_uv.write_text(f"#!/bin/sh\nexit {code}\n", encoding="utf-8")
+    fake_uv.write_text(fake_uv_script(f"exit {code}\n"), encoding="utf-8")
     fake_uv.chmod(0o755)
     (clone / ".venv").mkdir()
     (clone / ".python").mkdir()

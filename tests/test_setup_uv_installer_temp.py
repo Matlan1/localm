@@ -35,6 +35,7 @@ import pytest
 
 from localm import uv_tool
 from tests import _fake_uv as fake_uv
+from tests._posix_sysdirs import bash_path, with_sysdirs
 
 ROOT = Path(__file__).resolve().parents[1]
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -89,7 +90,7 @@ _SH_STUB = (
     b'[ "${STUB_FAIL:-0}" = 1 ] && exit 3\n'
     b'dest="${UV_INSTALL_DIR:-$HOME/.local/bin}"\n'
     b'mkdir -p "$dest"\n'
-    b'printf "#!/bin/sh\\n" > "$dest/uv"\n'
+    b'printf "#!/bin/sh\\necho \\"uv 0.13.6\\"\\n" > "$dest/uv"\n'
     b'chmod +x "$dest/uv"\n'
 )
 _OUTCOMES = [pytest.param(False, id="installed"), pytest.param(True, id="installer-failed")]
@@ -324,6 +325,11 @@ def _bash_env(tmp_path: Path, scratch: Path, home: Path, log: Path, releases: Pa
     return env
 
 
+def _point_sysdirs(script: Path, stubs: Path) -> None:
+    """Lists *stubs* first among the copied script's fixed system folders."""
+    script.write_bytes(with_sysdirs(script.read_bytes().decode("utf-8"), stubs).encode("utf-8"))
+
+
 def _curl_log(tmp_path: Path) -> Path:
     return tmp_path / "curl.log"
 
@@ -344,6 +350,7 @@ def test_setup_sh_leaves_nothing_in_the_system_temp_folder(tmp_path, folder, fai
     releases = tmp_path / "releases"
     _pinned_copy("setup.sh", clone, releases, _SH_STUB, bat=False)
     env = _bash_env(tmp_path, scratch, home, log, releases, fails)
+    _point_sysdirs(clone / "setup.sh", tmp_path / "stubbin")
     env["LOCALM_SETUP_ABORT_AFTER"] = "uv-portable"
     r = subprocess.run([_BASH, "setup.sh", "--yes"], cwd=str(clone), env=env,
                        capture_output=True, text=True, timeout=180, creationflags=_NO_WINDOW)
@@ -367,8 +374,11 @@ def test_setup_gui_sh_leaves_nothing_in_the_system_temp_folder(tmp_path, folder,
     releases = tmp_path / "releases"
     _pinned_copy("setup-gui.sh", clone, releases, _SH_STUB, bat=False)
     env = _bash_env(tmp_path, scratch, home, log, releases, fails)
+    sysdirs = ":".join([bash_path(tmp_path / "stubbin"), "/usr/bin", "/bin"])
     script = (f'set -euo pipefail; cd "{clone.as_posix()}"; '
-              f'eval "$(sed -n \'/^UV_INSTALLER_VERSION=/,/^run_uv_installer()/p\' setup-gui.sh '
+              f'LOCALM_SYSDIRS="{sysdirs}"; STMP="$PWD/.localm-setup-tmp"; mkdir -p "$STMP"; '
+              'trap \'rm -rf -- "$STMP"\' EXIT; '
+              f'eval "$(sed -n \'/^sys_prog()/,/^run_uv_installer()/p\' setup-gui.sh '
               f'| sed \'$d\')"; '
               f'eval "$(sed -n \'/^run_uv_installer()/,/^}}/p\' setup-gui.sh)"; '
               'export UV_INSTALL_DIR="$PWD/.uv" UV_UNMANAGED_INSTALL="$PWD/.uv"; '
@@ -459,3 +469,73 @@ def test_bootstrap_uv_avoids_a_bracketed_temp_folder_on_windows(tmp_path, monkey
     assert len(seen) == 1 and not Path(seen[0]).exists()
     assert list(scratch.iterdir()) == []
     assert not (clone / ".localm-setup-tmp").exists()
+
+
+
+_UV_RECORDER = (
+    '#!/bin/sh\n'
+    'if [ "$1" = --version ]; then echo "uv 0.13.6"; exit 0; fi\n'
+    '{ echo "ARGS=$*"; echo "TMPDIR=${TMPDIR:-}"; echo "TMP=${TMP:-}"; echo "TEMP=${TEMP:-}";\n'
+    '  echo "PYDIR=${UV_PYTHON_INSTALL_DIR:-}"; echo "CACHE=${UV_CACHE_DIR:-}";\n'
+    '  echo "PREF=${UV_PYTHON_PREFERENCE:-}"; echo "NOCONFIG=${UV_NO_CONFIG:-}";\n'
+    '  echo "CRED=${UV_CREDENTIALS_DIR:-}";\n'
+    '  echo "PIPCONFIG=${PIP_CONFIG_FILE:-}"; echo "NOUSERSITE=${PYTHONNOUSERSITE:-}";\n'
+    '  echo "POISON=${UV_INDEX_URL:-}${PIP_INDEX_URL:-}${UV_PYTHON_INSTALL_MIRROR:-}'
+    '${PYTHONPATH:-}${PYTHONHOME:-}${VIRTUAL_ENV:-}${LOCALM_HOME:-}"; } >> "$STUB_UV_LOG"\n'
+    'if [ "$1" = venv ]; then mkdir -p .venv/bin; fi\n'
+    'exit 0\n')
+
+
+def _setup_sh_venv_step(tmp_path: Path, pick: str):
+    """Runs the real setup.sh up to the end of its venv step with a recording uv
+    already in the store *pick* names, a poisoned environment and the system temp
+    folder pointed at an empty directory."""
+    clone, scratch, home, _ = _layout(tmp_path)
+    shutil.copy2(ROOT / "setup.sh", clone / "setup.sh")
+    shared = home / ".local" / "share" / "localm" / "shared"
+    store_uv = clone / ".uv" if pick == "1" else shared / "uv"
+    store_uv.mkdir(parents=True)
+    (store_uv / "uv").write_bytes(_UV_RECORDER.encode())
+    (store_uv / "uv").chmod(0o755)
+    log = tmp_path / "uv.log"
+    env = dict(os.environ)
+    for var in ("LOCALM_SETUP_ABORT_AFTER", "XDG_DATA_HOME", "UV_INSTALL_DIR",
+                "UV_UNMANAGED_INSTALL", "UV_PYTHON_INSTALL_DIR", "UV_CACHE_DIR"):
+        env.pop(var, None)
+    env.update(TMPDIR=scratch.as_posix(), TEMP=str(scratch), TMP=str(scratch),
+               HOME=bash_path(home), STUB_UV_LOG=log.as_posix(), LOCALM_SETUP_ABORT_AFTER="venv",
+               UV_INDEX_URL="http://poison.invalid/uv", PIP_INDEX_URL="http://poison.invalid/pip",
+               UV_PYTHON_INSTALL_MIRROR="http://poison.invalid/mirror", PYTHONPATH=str(tmp_path),
+               PYTHONHOME=str(tmp_path), VIRTUAL_ENV=str(tmp_path), LOCALM_HOME=str(tmp_path))
+    r = subprocess.run([_BASH, "setup.sh"], cwd=str(clone), env=env, input=f"{pick}\n",
+                       capture_output=True, text=True, timeout=180, creationflags=_NO_WINDOW)
+    out = r.stdout + r.stderr
+    assert r.returncode == 99 and "stopping after 'venv'" in out, out
+    seen: dict = {}
+    for line in log.read_text(encoding="utf-8").splitlines():
+        key, _, value = line.partition("=")
+        seen.setdefault(key, []).append(value)
+    return clone, scratch, home, seen, out
+
+
+@_needs_bash
+@pytest.mark.parametrize("pick", ["1", "2"])
+def test_setup_sh_runs_uv_with_its_temp_folder_and_nothing_inherited(tmp_path, pick):
+    clone, scratch, home, seen, out = _setup_sh_venv_step(tmp_path, pick)
+    stmp = str(clone / ".localm-setup-tmp")
+    assert any(a.startswith("venv --python 3.12 --python-preference only-managed")
+               for a in seen["ARGS"]), seen["ARGS"]
+    for key in ("TMPDIR", "TMP", "TEMP"):
+        assert {str(Path(_native(v))) for v in seen[key]} == {stmp}, (key, seen[key])
+    store = clone if pick == "1" else home / ".local" / "share" / "localm" / "shared"
+    py, cache = (".python", ".cache") if pick == "1" else ("python", "cache")
+    assert {str(Path(_native(v))) for v in seen["PYDIR"]} == {str(store / py)}
+    assert {str(Path(_native(v))) for v in seen["CACHE"]} == {str(store / cache)}
+    uv_dir = clone / ".uv" if pick == "1" else store / "uv"
+    assert {str(Path(_native(v))) for v in seen["CRED"]} == {str(uv_dir / "credentials")}
+    assert set(seen["PREF"]) == {"only-managed"} and set(seen["NOCONFIG"]) == {"1"}
+    assert set(seen["PIPCONFIG"]) == {"/dev/null"} and set(seen["NOUSERSITE"]) == {"1"}
+    assert set(seen["POISON"]) == {""}
+    assert sorted(p.name for p in scratch.iterdir()) == [], out
+    assert not (clone / ".localm-setup-tmp").exists(), out
+    assert not (home / ".local" / "bin").exists() and not (home / ".cache").exists()
