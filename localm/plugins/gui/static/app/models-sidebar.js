@@ -1094,6 +1094,7 @@ async function _maybeRoutePeer(model) {
   }));
   _peerSelected = model;
   modelCache.active = model;
+  _showServedModel();
   toast(t("sidebar.peerRoute.routedToast", { model }));
   window.dispatchEvent(new CustomEvent("localm:model-switched", { detail: { model } }));
   return data;
@@ -1246,6 +1247,7 @@ export async function switchModel(model, { local = false } = {}) {
   // that load was abandoned, so claiming it would publish a model that is not
   // loaded.
   modelCache.active = data.model || model;
+  _showServedModel();
   window.dispatchEvent(new CustomEvent("localm:model-switched", { detail: { model: data.model || model } }));
   return data;
 }

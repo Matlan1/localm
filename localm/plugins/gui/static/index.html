@@ -194,6 +194,7 @@
                     title="Enter to send · Shift+Enter for a new line" data-i18n-title="chat.inputTitle"></textarea>
           <button class="send" id="chat-send" data-icon="send" title="Send" data-i18n-title="chat.send"></button>
         </div>
+        <div id="pin-mismatch" class="pin-mismatch" role="status" hidden></div>
         <div class="composer-row">
           <span>
             <button id="toggle-params" class="composer-action" data-i18n="chat.parameters"><span class="btn-ic" data-icon="sliders"></span>parameters</button>
@@ -434,7 +435,7 @@
               <option value="" data-i18n="models.pull.noVisionProjector">No vision projector</option>
             </select>
             <input type="text" id="pull-sha256" data-i18n-placeholder="models.pull.sha256Placeholder" placeholder="sha256 (optional)" spellcheck="false" maxlength="64" style="max-width:180px" data-i18n-title="models.pull.sha256Title" title="Expected SHA256. Verified against the downloaded (or local) file; refused on a mismatch. Not supported for a full HuggingFace repo or a local folder - both are many files with no single digest.">
-            <select id="pull-store" style="max-width:180px" data-i18n-title="models.pull.storeTitle" title="Only applies to a local folder/file path - a HuggingFace or URL download always lands in ~/.localm/models on its own.">
+            <select id="pull-store" style="max-width:180px" data-i18n-title="models.pull.storeTitle" title="Only applies to a local folder/file path - a HuggingFace, CivitAI or URL download always lands in ~/.localm/models on its own.">
               <option value="" data-i18n="models.pull.store.registerInPlace">Register in place</option>
               <option value="copy" data-i18n="models.pull.store.copy">Copy into library</option>
               <option value="move" data-i18n="models.pull.store.move">Move into library</option>
