@@ -19,6 +19,8 @@ function modelsFetch(models, embedding) {
   };
 }
 
+const tick = () => new Promise((r) => setTimeout(r, 0));
+
 const PARTS = [
   { name: "umt5-xxl-encoder-Q4_K_M", model_type: "text-encoder", architecture: "t5encoder" },
   { name: "music_vocoder", model_type: "vocoder", architecture: "ADaMoSHiFiGANV1", part_of: "ACE-Step" },
@@ -37,11 +39,16 @@ test("a text encoder row says what it is used for", async () => {
 });
 
 test("a music part shows its role and the model it belongs to", async () => {
-  const { window } = loadAppWithPages({ fetchImpl: modelsFetch(PARTS) });
+  const { window } = loadAppWithPages({
+    fetchImpl: modelsFetch(PARTS),
+    seedLocalStorage: { "localm.showOtherModelsInAll": "true" },
+  });
   await window.refreshModelsPage();
+  await tick();
   const rows = [...window.document.querySelectorAll("#models-table tbody tr")];
   const row = rows.find((r) => r.querySelector(".name")?.textContent === "music_vocoder");
-  assert.ok(row, "the vocoder row renders");
+  assert.ok(row, "the vocoder row renders: "
+    + rows.map((r) => r.querySelector(".name")?.textContent).join(","));
   assert.ok(row.querySelector("select.type-vocoder"));
   const badges = [...row.querySelectorAll(".arch-badge")].map((b) => b.textContent);
   assert.deepEqual(badges, ["ADaMoSHiFiGANV1", "part of ACE-Step"]);
