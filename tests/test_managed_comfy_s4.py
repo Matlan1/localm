@@ -491,18 +491,18 @@ def test_update_rollback_surfaces_failed_patch_reapply(home, tmp_path, monkeypat
     assert "simulated re-apply failure" in result.message
 
 
-def _refuse_main_py_writes(monkeypatch, times=None):
-    """Make every copy onto the managed tree's main.py fail (its write and its
-    restore), or only the first *times* of them; copies into the backup folder
-    still work. Returns the list of refused destinations."""
+def _refuse_writes(monkeypatch, name, times=None):
+    """Make every copy onto the managed tree's file *name* fail (its write and
+    its restore), or only the first *times* of them; copies into the backup
+    folder still work. Returns the list of refused destinations."""
     real = source_archive.shutil.copy2
     refused = []
 
     def flaky(src, dst, *a, **k):
-        if (str(dst).endswith("main.py") and "-backup-" not in str(dst)
+        if (os.path.basename(str(dst)) == name and "-backup-" not in str(dst)
                 and (times is None or len(refused) < times)):
             refused.append(str(dst))
-            raise OSError("main.py is in use")
+            raise OSError(f"{name} is in use")
         return real(src, dst, *a, **k)
 
     monkeypatch.setattr(source_archive.shutil, "copy2", flaky)
@@ -516,20 +516,21 @@ def test_update_reports_a_mixed_tree_when_a_file_cannot_be_put_back(home, tmp_pa
     _hub, repo, c1, c2, _c3 = _build_update_remote(tmp_path, monkeypatch)
     root = _install_managed_from(repo, c1)
     real_copy2 = source_archive.shutil.copy2
-    refused = _refuse_main_py_writes(monkeypatch)
+    refused = _refuse_writes(monkeypatch, ".gitignore")
 
     result = upd.update_managed_comfy(
         comfyui_repo=repo, target_commit=c2, reinstall_requirements=False)
 
     assert len(refused) == 3
     assert not result.ok
-    assert "main.py is in use" in result.message
-    assert "ALSO failed" in result.message and "main.py" in result.message
+    assert ".gitignore is in use" in result.message
+    assert "ALSO failed" in result.message and "e.g. .gitignore" in result.message
     assert "mixed state" in result.message
     kept = [p for p in root.parent.iterdir() if "-backup-" in p.name]
     assert len(kept) == 1 and str(kept[0]) in result.message
-    assert (kept[0] / "main.py").read_text(encoding="utf-8") == "print('comfy')\n"
-    assert not (root / "main.py").exists()
+    gitignore = "venv/\nmodels/\ncustom_nodes/\noutput/\n"
+    assert (kept[0] / ".gitignore").read_text(encoding="utf-8") == gitignore
+    assert not (root / ".gitignore").exists()
 
     monkeypatch.setattr(source_archive.shutil, "copy2", real_copy2)
     again = upd.update_managed_comfy(
@@ -537,7 +538,7 @@ def test_update_reports_a_mixed_tree_when_a_file_cannot_be_put_back(home, tmp_pa
     assert again.ok, again.message
     assert source_archive.tree_commit(root) == c2
     assert [p for p in root.parent.iterdir() if "-backup-" in p.name] == kept
-    assert (kept[0] / "main.py").read_text(encoding="utf-8") == "print('comfy')\n"
+    assert (kept[0] / ".gitignore").read_text(encoding="utf-8") == gitignore
 
 
 def test_update_retries_a_restore_that_failed_once_and_rolls_back_cleanly(home, tmp_path,
@@ -546,7 +547,7 @@ def test_update_retries_a_restore_that_failed_once_and_rolls_back_cleanly(home, 
 
     _hub, repo, c1, c2, _c3 = _build_update_remote(tmp_path, monkeypatch)
     root = _install_managed_from(repo, c1)
-    refused = _refuse_main_py_writes(monkeypatch, times=2)
+    refused = _refuse_writes(monkeypatch, "main.py", times=2)
 
     result = upd.update_managed_comfy(
         comfyui_repo=repo, target_commit=c2, reinstall_requirements=False)
