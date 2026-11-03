@@ -182,6 +182,11 @@ export const I18N_EN = {
     "Knowledge - ground replies in an indexed collection (manage on the Knowledge page)",
   "chat.maxTokens": "Max tokens",
   "chat.memory": "Memory - remind the model what it knows about you",
+  "chat.memory.exists": "Already in memory: {text}",
+  "chat.memory.full": "Memory is full, so this was not saved. Delete a fact in Memory first.",
+  "chat.memory.off": "Not saved: memory is off (privacy mode, or the memory switch is off).",
+  "chat.memory.saveFailed": "Could not save this to memory.",
+  "chat.memory.saved": "Saved to memory: {text}",
   "chat.memory.title":
     "Recalls facts localm has learned about you and adds them to the prompt. Add facts with /remember, view/edit with /memory. Blocked in privacy mode.",
   "chat.mic":
@@ -199,6 +204,7 @@ export const I18N_EN = {
   "chat.persona.save": "save…",
   "chat.persona.saveTitle": "Save the current system prompt and sampling values under a name",
   "chat.pinModel": "Pin this chat to",
+  "chat.pinModel.mismatch": "This chat is pinned to {pinned}, but {active} is loaded. Your next message loads {pinned} again.",
   "chat.pinModel.title": "Always answer this chat with this model, even when a request needs something it lacks (reading an image, tool calls, a longer conversation). Unpinned, such a request can be answered by an installed model that has it (see Model autoswitch in Settings).",
   "chat.privacyHint": "privacy mode - this session only",
   "chat.privacyHint.title":
@@ -755,8 +761,9 @@ export const I18N_EN = {
   "coder.state.error": "error",
   "coder.state.idle": "idle",
   "coder.state.working": "working…",
-  "coder.state.workingElapsed": "working… {secs}s",
-  "coder.state.workingStatus": "{status} {secs}s",
+  "coder.state.workingElapsed": "working… {time}",
+  "coder.state.workingStatus": "{status} {time}",
+  "coder.state.noOutput": " (no output for {time})",
   "coder.task.queuedLabel": "Queued",
   "coder.task.queuedToast": "Queued - the agent picks it up at the next turn",
   "coder.task.sendFailed": "Failed to send task: ",
@@ -1411,7 +1418,7 @@ export const I18N_EN = {
   "models.pull.store.move": "Move into library",
   "models.pull.store.registerInPlace": "Register in place",
   "models.pull.storeTitle":
-    "Only applies to a local folder/file path - a HuggingFace or URL download always lands in ~/.localm/models on its own.",
+    "Only applies to a local folder/file path - a HuggingFace, CivitAI or URL download always lands in ~/.localm/models on its own.",
   "models.pull.title": "Add a model",
   "models.pull.verifying": "verifying… {pct}%",
   "models.relocate.failed": "Relocate failed",
@@ -1476,6 +1483,10 @@ export const I18N_EN = {
   "models.tag.loaded": "loaded",
   "models.tag.missing": "missing",
   "models.title": "Models",
+  "models.partOf": "part of {model}",
+  "models.typeHint.planner": "Planner (language model used by music models)",
+  "models.typeHint.textEncoder": "Text encoder (used by image and video models)",
+  "models.typeHint.vocoder": "Vocoder (turns music latents into audio)",
   "models.typeSelect.ariaLabel": "Model type for {name}",
   "models.typeSelect.notSet": "not set",
   "models.typeSelect.titleChange": "Change this model's type",
@@ -2597,13 +2608,16 @@ export const I18N_EN = {
 
   // ---- Settings > Issues ----
   "settings.issues.title": "Issues",
-  "settings.issues.help": "Open and resolved issues for this project (read-only) - see whether a bug you reported has been fixed.",
+  "settings.issues.help": "The bug reports you sent from this install (read-only) - see whether one has been fixed.",
   "settings.issues.refreshButton": "Refresh",
   "settings.issues.loading": "Loading ...",
   "settings.issues.loadError": "Could not load: {error}",
-  "settings.issues.emptyTitle": "No open issues",
-  "settings.issues.emptyBody": "Reported bugs that are still open show up here.",
-  "settings.issues.openSuffix": " (open)",
+  "settings.issues.emptyTitle": "No reports sent from this install",
+  "settings.issues.emptyBody": "Bugs you report from here show up on this list.",
+  "settings.issues.openSuffix": " (view)",
+  "settings.issues.allLink": "All issues on GitHub",
+  "settings.issues.rowError": "(could not check: {error})",
+  "settings.issues.sessionOnly": "Privacy mode: this list is kept only until localm quits.",
   "settings.issues.loadFailed": "Could not load issues: {message}",
 
   // ---- Settings > Logs ----

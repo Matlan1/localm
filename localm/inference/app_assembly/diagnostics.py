@@ -40,19 +40,12 @@ def add_request_logging(app: FastAPI) -> None:
         @app.middleware("http")
         async def _log_requests(request, call_next):
             start = time.perf_counter()
+            start_mono = time.monotonic()
             response = await call_next(request)
-            # loop_lag = real scheduling delay (_loop_lag_seconds, see the
-            # comment above _hb_monotonic) - ~0 on a healthy server, and only
-            # positive when a preceding event-loop stall pushed the last
-            # heartbeat tick late. This is NOT time-since-last-tick, which
-            # saws 0..1s even when nothing is wrong. Resolution limit: a stall
-            # shorter than _HEARTBEAT_INTERVAL_S also reads 0.0 (see
-            # _loop_lag_seconds' docstring) - 0.0 means "no stall LONGER than the
-            # interval", not "no stall at all". None (cold start, before the
-            # heartbeat's first tick) renders as "n/a", never as 0.0, so a request
-            # served during startup is not reported as identically healthy to one
-            # with a real lag measurement behind it.
-            lag = _hs._loop_lag_seconds()
+            # loop_lag = longest event-loop stall that overlapped this request
+            # (_loop_stall_between); None (cold start, before the heartbeat's
+            # first tick) renders as "n/a", never as 0.00.
+            lag = _hs._loop_stall_between(start_mono, time.monotonic())
             lag_str = f"{lag:.2f}s" if lag is not None else "n/a"
             _dbg.debug(
                 "%s %s -> %d (%.0f ms, loop_lag=%s)",
@@ -139,10 +132,8 @@ def add_debug_stacks(app: FastAPI) -> None:
             _dbg.warning("/debug/stacks: executor snapshot failed: %s", e, exc_info=True)
             executors = {}
             executors_error = "the executor snapshot failed; the server log has the details"
-        # None (cold start, before the heartbeat's first tick) renders as
-        # JSON null, never as 0.0, so a stack dump taken during startup is not
-        # reported as identically healthy to one taken with a real lag
-        # measurement behind it.
+        # Longest loop stall in the last minute; JSON null before the
+        # heartbeat's first tick.
         lag = _hs._loop_lag_seconds()
         return {"pid": os.getpid(),
                 "loop_lag_s": round(lag, 2) if lag is not None else None,

@@ -105,8 +105,8 @@ def managed_comfy_paths() -> ManagedComfyPaths:
 
 
 def rmtree_robust(path: Path) -> None:
-    """``shutil.rmtree`` that also removes read-only files. A managed ComfyUI is a
-    git checkout (S2), and git marks its object store read-only - on Windows plain
+    """``shutil.rmtree`` that also removes read-only files. A managed ComfyUI made
+    by an older localm is a git checkout, and git marks its object store read-only - on Windows plain
     rmtree then raises PermissionError (WinError 5) and the delete half-fails. Both
     ``localm comfy remove`` and S2's rollback-on-failed-provision must be able to
     remove such a tree. Re-raises the underlying OSError when a file genuinely
@@ -128,7 +128,7 @@ def is_managed_comfy_installed() -> bool:
     (``main.py``) and the managed venv interpreter existing.
 
     main.py and venv_python both exist after step 2 of a 7-8 step pipeline (the
-    git clone, then `python -m venv`), so on their own they report an instance
+    source fetch, then `python -m venv`), so on their own they report an instance
     ready while torch, ComfyUI's own requirements, custom nodes and localm's
     patches are still installing - and `localm comfy status`, the Settings page
     pill and Generate-button routing all read this function. The marker is
@@ -163,7 +163,7 @@ def managed_comfy_remove_targets(with_models: bool = False) -> list:
 #  time (update, remove).                                                      #
 # --------------------------------------------------------------------------- #
 # An atomic mkdir at a SIBLING path of the checkout, never inside it, so an
-# update's `git checkout --force` and a remove's rmtree never touch the lock
+# update's source replace and a remove's rmtree never touch the lock
 # protecting them. Held by update_managed_comfy (managed_comfy_update.py) and
 # remove_managed_comfy below.
 _LOCK_OWNER = "owner.json"

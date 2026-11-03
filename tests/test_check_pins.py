@@ -874,6 +874,9 @@ _NOT_A_VERSION_PIN = {
     "localm/uv_tool.py": "the names of the setup scripts the uv pin is read from; it carries no pin of its own",
     "localm/plugins/coder/agent/context.py": "a cap on the changed files a compaction block lists",
     "localm/media/native_workflows.py": "the regex a workflow's sha256 field must match",
+    "localm/media/source_archive.py": "sha256 digests of the GitHub source archives of the pinned "
+                                      "ComfyUI and custom node commits, keyed by commit; the version "
+                                      "pins are in managed_comfy_fresh.py, which the registry reads",
 }
 
 

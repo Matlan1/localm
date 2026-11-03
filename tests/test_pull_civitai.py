@@ -166,6 +166,24 @@ def _wire_happy_path(monkeypatch, resolved: ResolvedDownload, dest_dir: Path,
         lambda method, url, **kw: _FakeStreamResponse(body))
 
 
+def _wire_real_destination(monkeypatch, resolved: ResolvedDownload, cfg: dict,
+                           body: bytes = b"fake-lora-bytes"):
+    """Like _wire_happy_path, but the destination comes from the real
+    comfy_models_dest_dir, resolved against the config *cfg* with no managed
+    ComfyUI installed."""
+    monkeypatch.setattr(
+        "localm.model_manager.sources.CivitAISource.resolve_download",
+        lambda self, ref, file, **kw: resolved)
+    monkeypatch.setattr("localm.media.managed_comfy.load_config", lambda: dict(cfg))
+    monkeypatch.setattr("localm.media.managed_comfy.is_managed_comfy_installed",
+                        lambda: False)
+    monkeypatch.setattr(
+        "localm.model_manager.pull._ssrf_resolve_final_url", lambda url: url)
+    monkeypatch.setattr(
+        "localm.netpolicy.pinned_request",
+        lambda method, url, **kw: _FakeStreamResponse(body))
+
+
 class TestPullCivitaiFile:
     def test_lands_in_the_resolved_comfy_subfolder_and_registers(
             self, fake_registry, tmp_path, monkeypatch):
@@ -250,20 +268,47 @@ class TestPullCivitaiFile:
         assert list(dest_dir.iterdir()) == []
         assert store == {}
 
-    def test_no_comfy_folder_configured_refuses_cleanly(
+    def test_no_comfy_folder_lands_in_the_models_folder_and_registers(
             self, fake_registry, tmp_path, monkeypatch):
-        store, _ = fake_registry
-        monkeypatch.setattr(
-            "localm.model_manager.sources.CivitAISource.resolve_download",
-            lambda self, ref, file, **kw: _resolved())
-        monkeypatch.setattr(
-            "localm.media.managed_comfy.comfy_models_dest_dir",
-            lambda subfolder, cfg=None, plugin=None: None)
+        store, models_dir = fake_registry
+        resolved = _resolved()
+        _wire_real_destination(monkeypatch, resolved, {})
 
         ok = _pull_civitai_file("135867", None)
 
-        assert ok is False
-        assert store == {}
+        assert ok is True
+        landed = models_dir / "add-detail-xl.safetensors"
+        assert landed.read_bytes() == b"fake-lora-bytes"
+        entry = store["add-detail-xl"]
+        assert Path(entry["path"]) == landed
+        assert entry["source"] == "civitai:135867"
+        assert entry["model_type"] == "lora"
+        assert entry["sha256"] == resolved.sha256
+
+    def test_no_comfy_folder_names_no_comfyui_in_its_output(
+            self, fake_registry, monkeypatch, capsys):
+        _, models_dir = fake_registry
+        _wire_real_destination(monkeypatch, _resolved(), {})
+
+        assert _pull_civitai_file("135867", None) is True
+
+        shown = "".join(capsys.readouterr().out.split())
+        shown = shown.replace("".join(str(models_dir).split()), "")
+        assert "comfy" not in shown.lower()
+
+    def test_a_comfy_workdir_still_receives_the_file_in_its_subfolder(
+            self, fake_registry, tmp_path, monkeypatch):
+        store, models_dir = fake_registry
+        workdir = tmp_path / "ComfyUI"
+        _wire_real_destination(monkeypatch, _resolved(),
+                               {"comfy_workdir": str(workdir)})
+
+        assert _pull_civitai_file("135867", None) is True
+
+        landed = workdir / "models" / "loras" / "add-detail-xl.safetensors"
+        assert landed.read_bytes() == b"fake-lora-bytes"
+        assert not (models_dir / "add-detail-xl.safetensors").exists()
+        assert Path(store["add-detail-xl"]["path"]) == landed
 
     def test_resolve_download_error_is_reported_not_raised(
             self, fake_registry, monkeypatch):

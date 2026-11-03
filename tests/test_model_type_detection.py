@@ -501,7 +501,7 @@ def test_pull_model_auto_upgrades_gguf_to_embedding(tmp_path, isolated_home, mon
 
 @pytest.mark.parametrize("arch,mtype", [
     ("acestep-dit", "diffusion-unet"), ("acestep-vae", "vae"),
-    ("acestep-text-enc", "text-encoder"), ("acestep-lm", "unknown"),
+    ("acestep-text-enc", "text-encoder"), ("acestep-lm", "planner"),
 ])
 def test_pull_model_types_acestep_components_from_their_header(
         tmp_path, isolated_home, monkeypatch, arch, mtype):

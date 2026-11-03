@@ -257,7 +257,7 @@ _ESCAPEE = (
     "    kw['start_new_session'] = True\n"
     "code = ('import os, time; open(%r, \"w\").write(str(os.getpid())); time.sleep(15)'\n"
     "        % pid_file)\n"
-    "subprocess.Popen([sys.executable, '-c', code], **kw)\n"
+    "subprocess.Popen([getattr(sys, '_base_executable', sys.executable), '-c', code], **kw)\n"
 )
 
 

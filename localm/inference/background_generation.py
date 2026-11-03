@@ -10,6 +10,7 @@ token cap, and stop as soon as a chat request is waiting.
 from __future__ import annotations
 
 BACKGROUND_MAX_TOKENS = 1024
+REASONING_MAX_TOKENS = 4096
 
 
 class BackgroundYield(BaseException):
@@ -29,10 +30,12 @@ def foreground_waiting(engine) -> bool:
 
 
 def background_complete(engine, prompt: str, *, yield_to_foreground: bool = False,
-                        max_tokens: int = BACKGROUND_MAX_TOKENS) -> str:
+                        max_tokens: int = BACKGROUND_MAX_TOKENS,
+                        thinking: bool | None = False) -> str:
     """Run *prompt* as one user turn and return the raw reply, reasoning included.
 
-    The reply is generated with thinking off and at most *max_tokens* tokens. With
+    The reply is generated with thinking off (*thinking* False; None leaves it to the
+    model, for a call the user is waiting on) and at most *max_tokens* tokens. With
     *yield_to_foreground*, raises :class:`BackgroundYield` before starting, or
     between two tokens, once a request is waiting for the model; the generation is
     cancelled and the model is free for that request. A reply cut at *max_tokens*
@@ -41,7 +44,7 @@ def background_complete(engine, prompt: str, *, yield_to_foreground: bool = Fals
     if yield_to_foreground and foreground_waiting(engine):
         raise BackgroundYield()
     stream = engine.chat_stream(
-        [{"role": "user", "content": prompt}], max_tokens=max_tokens, thinking=False)
+        [{"role": "user", "content": prompt}], max_tokens=max_tokens, thinking=thinking)
     parts: list[str] = []
     try:
         for chunk in stream:

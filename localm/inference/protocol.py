@@ -292,6 +292,11 @@ class ChatRequest(SamplingFields):
     # Tokens the answering model's trained context window must hold. Combined
     # with the window the prompt's own size implies; the larger one applies.
     min_context: Optional[int] = Field(None, ge=1)
+    # The autoswitch mode (off, image, ask, loaded, auto, eager) this one request
+    # is routed under, in place of the ``model_autoswitch`` setting. Unset: the
+    # setting applies. Like the setting, it only matters to a request that is not
+    # pinned.
+    model_autoswitch: Optional[str] = None
     # Chat-template switches. Only ``enable_thinking`` is applied: false asks a
     # reasoning model to answer without its reasoning channel. Other keys are
     # accepted and ignored.
@@ -312,6 +317,21 @@ class ChatRequest(SamplingFields):
         if flag is not None and not isinstance(flag, bool):
             raise ValueError("chat_template_kwargs.enable_thinking must be a boolean")
         return v
+
+    @field_validator("model_autoswitch")
+    @classmethod
+    def _known_autoswitch_mode(cls, v):
+        """Normalise to one of the autoswitch modes, rejecting any other value
+        instead of reading it as the default. Imported lazily like the
+        capability check below."""
+        if v is None:
+            return v
+        from localm.inference.capability_routing import AUTOSWITCH_MODES, coerce_autoswitch_mode
+        mode = coerce_autoswitch_mode(v)
+        if mode is None:
+            raise ValueError(f"unknown model_autoswitch {v!r}; expected any of "
+                             f"{list(AUTOSWITCH_MODES)}")
+        return mode
 
     @field_validator("required_capabilities")
     @classmethod

@@ -17,11 +17,13 @@ from tests.conftest import probe_double
 from tests.test_projector_not_a_model import FakeEngine
 
 COMPONENT_TYPES = ["diffusion-unet", "lora", "text-encoder", "tts", "upscaler", "vae",
-                   "controlnet", "textual-inversion", "segmentation"]
+                   "vocoder", "planner", "controlnet", "textual-inversion", "segmentation"]
 WORDS = {
     "diffusion-unet": "an image or video checkpoint",
     "text-encoder": "a text encoder",
     "vae": "a VAE",
+    "vocoder": "a vocoder",
+    "planner": "a music planner model",
     "lora": "a LoRA adapter",
     "upscaler": "an upscaler",
     "tts": "a text-to-speech model",
@@ -41,8 +43,6 @@ def _registry():
            "emb": {"path": "models/emb.gguf", "model_type": "embedding"},
            "emb-rerank": {"path": "models/emb-rerank.gguf", "model_type": "embedding",
                           "architecture": "qwen3", "reranker": True},
-           "emb-t5": {"path": "models/emb-t5.gguf", "model_type": "embedding",
-                      "architecture": "t5encoder", "reranker": False},
            "unk": {"path": "models/unk.gguf", "model_type": "unknown"},
            "proj": {"path": "models/proj-mmproj.gguf", "model_type": "mmproj"}}
     for kind in COMPONENT_TYPES:
@@ -249,7 +249,6 @@ def test_unknown_entries_still_load(served):
 EMBEDDING_ENTRIES = {
     "emb": "an embedding model",
     "emb-rerank": "a reranker",
-    "emb-t5": "a text encoder",
 }
 
 
@@ -301,7 +300,6 @@ def test_get_engine_refuses_an_embedding_entry_unless_embeddings_asks(served, na
 GUI_PROMPT_WORDS = {
     "emb": "an embedding model",
     "emb-rerank": "a reranker",
-    "emb-t5": "a text encoder for image, video and music generation",
 }
 
 
@@ -360,7 +358,7 @@ def test_embedding_refusals_name_the_route_that_serves_the_entry():
     for name in EMBEDDING_ENTRIES:
         assert f"localm set-type {name} llm" in chat_load_refusal(name, reg)
     assert "/v1/rerank" in chat_load_refusal("emb-rerank", reg)
-    assert "image, video or music generation" in chat_load_refusal("emb-t5", reg)
+    assert "image, video or music generation" in chat_load_refusal("zz-text-encoder", reg)
     for name in EMBEDDING_ENTRIES:
         assert chat_load_refusal(name, reg, allow_embedding=True) is None
 
@@ -368,10 +366,11 @@ def test_embedding_refusals_name_the_route_that_serves_the_entry():
 def test_a_media_text_encoder_is_not_offered_but_embedding_models_and_rerankers_are(served):
     client, _ = served
     ids = {m["id"] for m in client.get("/v1/models").json()["data"]}
-    assert {"emb", "emb-rerank"} <= ids and "emb-t5" not in ids
+    assert {"emb", "emb-rerank"} <= ids and "zz-text-encoder" not in ids
     tags = {m["name"] for m in client.get("/api/tags").json()["models"]}
-    assert {"emb", "emb-rerank"} <= tags and "emb-t5" not in tags
-    assert is_unlisted_entry({"model_type": "embedding", "architecture": "t5encoder"}) is True
+    assert {"emb", "emb-rerank"} <= tags and "zz-text-encoder" not in tags
+    assert is_unlisted_entry({"model_type": "text-encoder", "architecture": "t5encoder"}) is True
+    assert is_unlisted_entry({"model_type": "embedding", "architecture": "t5encoder"}) is False
     assert is_unlisted_entry({"model_type": "embedding", "architecture": "bert"}) is False
 
 

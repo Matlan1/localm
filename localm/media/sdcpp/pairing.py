@@ -228,7 +228,7 @@ def registry_candidates(reg: Optional[dict] = None) -> list[Candidate]:
                 continue
         except OSError:
             continue
-        if mtype == "embedding" and entry.get("architecture") not in ("t5encoder", "t5"):
+        if mtype == "embedding":
             if families.inspect_file(p).kind == "textual_inversion":
                 out.append(Candidate(str(name), p, families.inspect_file(p), mtype))
             continue

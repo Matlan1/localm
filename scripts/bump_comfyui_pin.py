@@ -2,18 +2,22 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Perform the mechanical half of advancing localm's pinned ComfyUI commit.
 
-Direct structural analog of scripts/bump_llama_pin.py, adapted for a git-clone
-pin instead of a downloaded-release pin: there is no sha256 asset table to
-maintain (ComfyUI is fetched by ``git clone`` + ``git checkout``, not release
-archives) and no MTP-style derived constant. It refuses to write unless a
+Direct structural analog of scripts/bump_llama_pin.py, adapted for a commit
+pin fetched as a GitHub source archive (see localm/media/source_archive.py)
+and with no MTP-style derived constant. It refuses to write unless a
 receipt from ``scripts/confirm_comfyui_runtime.py --receipt`` shows the
 target tag AND commit confirmed, with every check named by ``--require`` PASS.
 
 WHAT IT REWRITES (with ``--write``; without it, a unified diff is printed and
-nothing is touched), both in localm/media/managed_comfy_fresh.py:
+nothing is touched):
 
-  COMFYUI_PINNED_COMMIT   the target 40-hex commit sha
-  COMFYUI_PINNED_VERSION  the target tag
+  localm/media/managed_comfy_fresh.py
+    COMFYUI_PINNED_COMMIT   the target 40-hex commit sha
+    COMFYUI_PINNED_VERSION  the target tag
+  localm/media/source_archive.py
+    ARCHIVE_SHA256          the entry of the old commit is replaced, in place,
+                            by one for the target commit holding the sha256
+                            of its downloaded source archive
 
 COMFYUI_REPO and COMFYUI_PLACEMENT_MIN_VERSION are never touched.
 
@@ -22,12 +26,14 @@ WHAT IT CHECKS BEFORE WRITING:
     check is PASS;
   * the target tag is strictly newer than the currently pinned version
     (forward-only - a same-or-older tag is refused, never silently applied);
-  * the edited region is found exactly once.
+  * the downloaded source archive names the target commit in its zip
+    comment;
+  * each edited region is found exactly once.
 
-NO NETWORK CALLS: the receipt already carries the tag->commit resolution,
-cross-checked against a real clone by confirm_comfyui_runtime.py itself. That
-keeps this script's own tests fully offline, unlike bump_llama_pin.py (which
-still needs the GitHub API for the sha256 asset table).
+ONE NETWORK CALL: the source archive of the target commit is downloaded with
+``localm.media.source_archive.download`` from ``source_archive.archive_url``
+(the URL a managed install fetches) to compute its sha256, in a dry run too.
+The tag->commit resolution comes from the receipt.
 
 WHAT IT LEAVES TO A PERSON, printed as the remaining checklist: the targeted
 tests, ``check_comfyui_pin.py --gate``, a CHANGELOG bullet (with
@@ -50,20 +56,28 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import hashlib
 import importlib.util
 import json
 import re
 import sys
+import tempfile
+import zipfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+_CHECKOUT = REPO
 CONSTANTS_PATH = REPO / "localm" / "media" / "managed_comfy_fresh.py"
 CHECK_PIN_SCRIPT = REPO / "scripts" / "check_comfyui_pin.py"
+SOURCE_ARCHIVE_REL = "localm/media/source_archive.py"
 
 _TAG_RE = re.compile(r"^v\d+(?:\.\d+)+$")
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _PIN_COMMIT_RE = re.compile(r'^(COMFYUI_PINNED_COMMIT\s*=\s*")([0-9a-f]{40})(")', re.M)
 _PIN_VERSION_RE = re.compile(r'^(COMFYUI_PINNED_VERSION\s*=\s*")([^"]+)(")', re.M)
+_REPO_URL_RE = re.compile(r'^COMFYUI_REPO\s*=\s*"([^"]+)"', re.M)
+_SHA_TABLE_RE = re.compile(r"^ARCHIVE_SHA256 = \{\n(?P<body>.*?)^\}$", re.M | re.S)
+_SHA_ENTRY_RE = re.compile(r'^    "(?P<commit>[0-9a-f]{40})":\n        "[0-9a-f]{64}",\n', re.M)
 
 # Every check scripts/confirm_comfyui_runtime.py's receipt can report, in the
 # SAME names that script uses - this is the shared contract between the two
@@ -165,6 +179,78 @@ def rewrite(text: str, tag: str, commit: str) -> str:
     return set_version(set_commit(text, commit), tag)
 
 
+def current_pin(text: str) -> tuple[str, str]:
+    """(COMFYUI_REPO, COMFYUI_PINNED_COMMIT) of the constants *text*. Raises
+    Refused when either is not found exactly once."""
+    repos = _REPO_URL_RE.findall(text)
+    commits = _PIN_COMMIT_RE.findall(text)
+    if len(repos) != 1 or len(commits) != 1:
+        raise Refused(f"COMFYUI_REPO / COMFYUI_PINNED_COMMIT: expected exactly one of each, "
+                      f"found {len(repos)} / {len(commits)}")
+    return repos[0], commits[0][1]
+
+
+# --------------------------------------------------------------------------- #
+#  Source archive sha256 (also used by bump_gguf_node_pin.py)                  #
+# --------------------------------------------------------------------------- #
+
+def _source_archive():
+    """localm.media.source_archive, imported from this checkout."""
+    if str(_CHECKOUT) not in sys.path:
+        sys.path.insert(0, str(_CHECKOUT))
+    from localm.media import source_archive
+    return source_archive
+
+
+def archive_sha256(repo: str, commit: str) -> str:
+    """The sha256 of the GitHub source archive of *commit* in *repo*, downloaded
+    from ``source_archive.archive_url`` with ``source_archive.download`` into a
+    temporary folder that is removed afterwards. Raises Refused when the URL
+    cannot be built, the download fails, or the archive is not a zip whose
+    comment names *commit*."""
+    sa = _source_archive()
+    try:
+        url = sa.archive_url(repo, commit)
+        with tempfile.TemporaryDirectory(prefix="localm-pin-archive-") as work:
+            dest = Path(work) / "source.zip"
+            print(f"downloading {url} ...")
+            sa.download(url, dest)
+            data = dest.read_bytes()
+            with zipfile.ZipFile(dest) as zf:
+                named = zf.comment.decode("ascii", "replace").strip()
+    except sa.ArchiveError as e:
+        raise Refused(f"the source archive of {commit} could not be fetched: {e}") from e
+    except (OSError, zipfile.BadZipFile) as e:
+        raise Refused(f"the source archive of {commit} is not a readable zip file: {e}") from e
+    if named != commit:
+        raise Refused(f"the source archive downloaded for {commit} is of commit "
+                      f"{named or '(none)'!r}")
+    return hashlib.sha256(data).hexdigest()
+
+
+def set_archive_sha256(text: str, old_commit: str, new_commit: str, sha256: str) -> str:
+    """*text* (source_archive.py) with the ARCHIVE_SHA256 entry of *old_commit*
+    replaced, in the same place, by ``new_commit: sha256``. Any other entry of
+    *new_commit* is removed; when *old_commit* has no entry, the new one is
+    added at the end of the table. Raises Refused when the table is not found
+    exactly once."""
+    tables = list(_SHA_TABLE_RE.finditer(text))
+    if len(tables) != 1:
+        raise Refused(f"ARCHIVE_SHA256: expected exactly one table, found {len(tables)}; "
+                      "the file shape this script edits has changed")
+    entry = f'    "{new_commit}":\n        "{sha256}",\n'
+    body = tables[0].group("body")
+    if old_commit != new_commit:
+        body = _SHA_ENTRY_RE.sub(
+            lambda m: "" if m.group("commit") == new_commit else m.group(0), body)
+    old = [m for m in _SHA_ENTRY_RE.finditer(body) if m.group("commit") == old_commit]
+    if old:
+        body = body[:old[0].start()] + entry + body[old[0].end():]
+    else:
+        body += entry
+    return text[:tables[0].start("body")] + body + text[tables[0].end("body"):]
+
+
 # --------------------------------------------------------------------------- #
 #  Entry point                                                                 #
 # --------------------------------------------------------------------------- #
@@ -247,18 +333,28 @@ def main(argv=None) -> int:
             print("no receipt given: dry run only, nothing is confirmed")
 
         new_text = rewrite(text, tag, commit)
+        repo_url, old_commit = current_pin(text)
+        archive_path = REPO / SOURCE_ARCHIVE_REL
+        archive_text, archive_newline = _read(archive_path)
+        sha256 = archive_sha256(repo_url, commit)
+        print(f"source archive sha256 of {commit[:12]}: {sha256}")
+        new_archive_text = set_archive_sha256(archive_text, old_commit, commit, sha256)
     except Refused as e:
         print(f"REFUSED: {e}")
         return 1
 
-    if args.write:
-        _write(CONSTANTS_PATH, new_text, newline)
-        print(f"wrote {CONSTANTS_PATH.relative_to(REPO).as_posix()}")
-    else:
-        rel = CONSTANTS_PATH.relative_to(REPO).as_posix()
-        sys.stdout.writelines(difflib.unified_diff(
-            text.splitlines(keepends=True), new_text.splitlines(keepends=True),
-            fromfile=f"a/{rel}", tofile=f"b/{rel}"))
+    edits = ((CONSTANTS_PATH, text, new_text, newline),
+             (archive_path, archive_text, new_archive_text, archive_newline))
+    for path, before, after, nl in edits:
+        rel = path.relative_to(REPO).as_posix()
+        if args.write:
+            _write(path, after, nl)
+            print(f"wrote {rel}")
+        else:
+            sys.stdout.writelines(difflib.unified_diff(
+                before.splitlines(keepends=True), after.splitlines(keepends=True),
+                fromfile=f"a/{rel}", tofile=f"b/{rel}"))
+    if not args.write:
         print("\n(dry run: nothing written; add --write to apply)")
     print()
     print(checklist(tag, requirements_changed))
