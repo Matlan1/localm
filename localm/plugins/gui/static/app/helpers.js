@@ -203,6 +203,14 @@ export async function refreshCsrf() {
   }
 }
 
+/** Mark *btn* busy (disabled, aria-busy="true") or idle again. No-op without a button. */
+export function setBusy(btn, busy) {
+  if (!btn) return;
+  btn.disabled = !!busy;
+  if (busy) btn.setAttribute("aria-busy", "true");
+  else btn.removeAttribute("aria-busy");
+}
+
 /** Run the async *work* with *btn* disabled and showing *label*; the button's
  *  text and enabled state are restored afterwards, also when *work* throws, and
  *  left alone when the button has left the page. With no button, runs *work*
