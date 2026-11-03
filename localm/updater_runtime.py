@@ -145,15 +145,19 @@ def _cuda_state(lib: Path, staged_root, installed_root) -> Optional[tuple]:
 def _is_current(lib: Path, backend: str, build: Optional[str], target: str, pins: dict,
                 *, after: bool = False) -> bool:
     """Whether the runtime at *lib* is the build *target* (and, for a cuda
-    runtime whose pins name its PyPI CUDA libraries, holds those versions).
+    runtime whose pins name its PyPI CUDA libraries, holds those versions; for
+    an amd-rocm runtime, is not missing its ROCm kernel packs, see
+    ``setup_llama.kernel_packs_missing``).
     With *after* (checking a re-provision just made) a cuda runtime without a
     record of its CUDA libraries counts as current: a tree from before the
-    record does not write it."""
+    record does not write it. With *after*, the amd-rocm kernel pack check is
+    skipped."""
     if backend == "amd-rocm":
         from localm import setup_llama as sl
-        return sl.rocm_build_is_current(lib, build, rocm_tag=pins.get("rocm_tag"),
-                                        rocm_build_id=target,
-                                        cpu_tag=pins.get("rocm_cpu_tag"))
+        return (sl.rocm_build_is_current(lib, build, rocm_tag=pins.get("rocm_tag"),
+                                         rocm_build_id=target,
+                                         cpu_tag=pins.get("rocm_cpu_tag"))
+                and (after or not sl.kernel_packs_missing(lib)))
     if build != target:
         return False
     if backend == "cuda" and pins.get("cuda"):
@@ -234,6 +238,9 @@ def plan(staged_root, installed_root) -> dict:
                            + ", ".join(f"{p} {cuda[0].get(p, '?')} -> {v}"
                                        for p, v in sorted(cuda[1].items())
                                        if cuda[0].get(p) != v) + ")")
+        elif backend == "amd-rocm" and sl.kernel_packs_missing(lib):
+            out["note"] = (f"re-provisions the {backend} runtime {current} to add the ROCm "
+                           "kernel packs an earlier setup left out")
         else:
             out["note"] = f"re-provisions the {backend} runtime from {current} to {target}"
         return out

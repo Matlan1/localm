@@ -241,6 +241,38 @@ def test_blas_reports_an_unreadable_install_rather_than_calling_it_clean(tmp_pat
     assert problems and "could not inspect" in problems[0]
 
 
+def _kpacks(d: Path, names):
+    (d / ".kpack").mkdir(parents=True, exist_ok=True)
+    for n in names:
+        (d / ".kpack" / n).write_bytes(b"\x00")
+    return d
+
+
+def test_blas_ok_when_rocm_kpack_has_its_packs(tmp_path):
+    d = _install(tmp_path / "i", ["llama.dll", "rocblas.dll", "rocm_kpack.dll"],
+                 {"rocblas/library": 3})
+    _kpacks(d, ["blas_lib_gfx1030.kpack"])
+    assert setup_llama.blas_kernel_problems(d) == []
+
+
+@pytest.mark.parametrize("packs", [None, [], ["readme.txt"]])
+def test_blas_flags_rocm_kpack_without_its_packs(tmp_path, packs):
+    """rocm_kpack.dll beside rocblas with no .kpack/ directory, an empty one, or
+    one holding no .kpack file."""
+    d = _install(tmp_path / "i", ["llama.dll", "rocblas.dll", "rocm_kpack.dll"],
+                 {"rocblas/library": 3})
+    if packs is not None:
+        _kpacks(d, packs)
+    problems = setup_llama.blas_kernel_problems(d)
+    assert problems == ["rocm_kpack is installed but its .kpack/ kernel pack "
+                        "directory is missing or empty"]
+
+
+def test_blas_does_not_require_packs_without_rocm_kpack(tmp_path):
+    d = _install(tmp_path / "i", ["llama.dll", "rocblas.dll"], {"rocblas/library": 3})
+    assert setup_llama.blas_kernel_problems(d) == []
+
+
 def test_blas_ignores_a_path_that_is_not_a_directory(tmp_path):
     f = tmp_path / "not-a-dir"
     f.write_bytes(b"\x00")

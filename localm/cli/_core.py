@@ -548,10 +548,15 @@ def _finish_pending_runtime_update(command) -> None:
             found = updater_runtime.catch_up()
             if found is None:
                 return
-            console.print(f"[dim]This localm release uses the {escape(str(found['backend']))} "
-                          f"runtime {escape(str(found['target']))}, but "
-                          f"{escape(str(found['current']))} is installed; updating it "
-                          "...[/dim]")
+            if found["current"] == found["target"]:
+                console.print(f"[dim]This localm release {escape(str(found['note']))} "
+                              "...[/dim]")
+            else:
+                console.print(f"[dim]This localm release uses the "
+                              f"{escape(str(found['backend']))} runtime "
+                              f"{escape(str(found['target']))}, but "
+                              f"{escape(str(found['current']))} is installed; updating it "
+                              "...[/dim]")
         status = updater_runtime.finish_pending(
             say=lambda m: console.print(f"[dim]{escape(m)}[/dim]"))
     except Exception as e:
