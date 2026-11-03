@@ -427,12 +427,13 @@ def _clone_source(user_workdir: Path, managed_root: Path, commit: str,
     files = source_archive.git_tracked_files(Path(user_workdir))
     if files is None:
         return False, f"could not read the git index of {user_workdir}"
-    staging = managed_root.with_name(managed_root.name + ".copying")
+    staging = source_archive.long_path(managed_root.with_name(managed_root.name + ".copying"))
+    long_src = source_archive.long_path(Path(user_workdir))
     try:
         shutil.rmtree(staging, ignore_errors=True)
         copied = []
         for rel in files:
-            src = Path(user_workdir) / rel
+            src = long_src / rel
             if not src.is_file():
                 continue
             dst = staging / rel
@@ -441,7 +442,7 @@ def _clone_source(user_workdir: Path, managed_root: Path, commit: str,
             copied.append(rel)
         staging.mkdir(parents=True, exist_ok=True)
         source_archive.write_record(staging, str(user_workdir), commit, copied)
-        os.replace(staging, managed_root)
+        os.replace(staging, source_archive.long_path(managed_root))
     except OSError as e:
         shutil.rmtree(staging, ignore_errors=True)
         return False, str(e)
