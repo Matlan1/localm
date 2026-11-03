@@ -200,12 +200,14 @@ CORE_FIELDS: list = [
     # native ctypes layer unbounded.
     SettingField("n_ctx", Widget.NUMBER, "Context window (initial)",
                  "Tokens of history the model starts with; it grows on demand up "
-                 "to Context window (max).",
+                 "to Context window (max), or to the free-VRAM ceiling while Auto-size "
+                 "context from VRAM is on.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=512, max=1048576,
                  step=512),
     SettingField("n_ctx_max", Widget.NUMBER, "Context window (max)",
-                 "Largest the context window may grow to (0 = unlimited); bigger "
-                 "needs more VRAM.",
+                 "Largest the window may grow to while Auto-size context from VRAM is "
+                 "off (0 = unlimited). With it on, only 0 matters: it lifts the "
+                 "65536-token auto cap. Bigger needs more VRAM.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=0, max=1048576,
                  step=512),
     SettingField("n_ctx_grow", Widget.NUMBER, "Context growth step",
@@ -280,9 +282,9 @@ CORE_FIELDS: list = [
                  "lists the ones you have.",
                  group="Engine", applies=Applies.NEXT_LOAD, admin_only=True),
     SettingField("parallel_slots", Widget.SELECT, "Parallel requests",
-                 "How many chat requests one GGUF model answers at the same "
-                 "time; they share its context window. auto uses 4 (1 while "
-                 "speculative drafting is on). 1 answers one at a time.",
+                 "How many chat requests one GGUF model answers at once; they share "
+                 "its context window. auto uses 4 (fewer for a recurrent model short "
+                 "of VRAM). Speculative drafting forces 1.",
                  group="Engine", applies=Applies.NEXT_LOAD,
                  options=["auto"] + [str(n) for n in range(1, 17)]),
     SettingField("diffusion_steps", Widget.NUMBER, "Diffusion steps",
@@ -309,8 +311,9 @@ CORE_FIELDS: list = [
     # number box would not show device names/VRAM. Still accepted by PATCH
     # /v1/config (and `localm config main_gpu_index N`) like any other field.
     SettingField("main_gpu_index", Widget.HIDDEN, "Main GPU",
-                 "Which GPU device to load models onto, for multi-GPU systems. "
-                 "Blank uses device 0.",
+                 "GPU for HuggingFace models, the embedder, the vision projector and "
+                 "localm's own ComfyUI. A GGUF chat model spreads over every GPU "
+                 "unless Split across GPUs names some. Blank uses device 0.",
                  group="Engine", applies=Applies.NEXT_LOAD, min=0,
                  max=MAX_GPU_SPLIT_INDEX),
     # HIDDEN: rendered by a "Split across GPUs" checkbox row next to the Main
@@ -491,8 +494,8 @@ CORE_FIELDS: list = [
                  group="Chat", owner="chat", applies=Applies.LIVE),
     # ---- Server ----
     SettingField("port", Widget.NUMBER, "Server port",
-                 "Port the API/GUI server binds to (default 8642); auto-bumps to "
-                 "the next free port if busy.",
+                 "Port the API/GUI server binds to (default 8642). If it is busy, "
+                 "localm uses the first free port in 8642-8741.",
                  group="Server", applies=Applies.RESTART, min=1, max=65535, step=1),
     # admin_only: this decides WHICH NETWORK can reach the server at all - the
     # widest reach-widening key in the Server group, same trust boundary class
@@ -574,9 +577,10 @@ CORE_FIELDS: list = [
     # /api/session, and the CLI/launcher write config directly rather than
     # through this route.
     SettingField("require_auth", Widget.TOGGLE, "Require an API key",
-                 "Refuse all requests until an API key is set (fail closed). "
-                 "Required before exposing localm on a network.",
-                 group="Security", applies=Applies.RESTART, admin_only=True),
+                 "Fail closed: if every API key is later removed, refuse requests "
+                 "instead of running open. Can be turned on only while a key exists. "
+                 "Exposing localm on a network needs a strong key either way.",
+                 group="Security", admin_only=True),
     # admin_only: turning this ON lets a downloaded model directory run its own
     # bundled Python inside the localm process, which is arbitrary code execution
     # as the server user. Only an owner may make that call, never a config:write
@@ -636,7 +640,9 @@ CORE_FIELDS: list = [
     # disclosure surface.
     SettingField("coder_projects_remembered", Widget.NUMBER,
                  "Projects to remember",
-                 "How many recent project folders to keep in that list.",
+                 "How many recent project folders to keep in that list. A lower "
+                 "number trims the list the next time a project is recorded; 0 stops "
+                 "adding folders and keeps the ones listed.",
                  group="Coder", min=0, step=5),
     SettingField("coder_rail_side", Widget.SELECT, "Coder session list side",
                  "Which side the coder's session list sits on. right "
@@ -694,9 +700,9 @@ CORE_FIELDS: list = [
     # contract is that nothing is written automatically, so unlike recall it can
     # never be opted back in.
     SettingField("memory_auto_consolidate", Widget.TOGGLE, "Grow memory automatically",
-                 "After a chat turn, quietly distil durable facts from the "
-                 "conversation into memory, so it grows with no manual step. Always "
-                 "blocked in privacy mode. Off, memory grows only on demand.",
+                 "After a chat turn, distil durable facts from the conversation into "
+                 "memory, so it grows with no manual step. Needs Memory recall on. "
+                 "Always blocked in privacy mode. Off, it grows only on demand.",
                  group="Memory", owner="memory"),
     SettingField("memory_recall_in_privacy", Widget.TOGGLE,
                  "Allow memory recall in privacy mode",
@@ -723,9 +729,8 @@ CORE_FIELDS: list = [
     SettingField("keep_diagnostics", Widget.TOGGLE,
                  "Keep diagnostics for bug reports",
                  "Writes crash and hang diagnostics (stack traces, restart "
-                 "breadcrumbs, a debug log) even in privacy mode, so a freeze "
-                 "leaves something to attach. Code and operational logs only, "
-                 "never chat content.",
+                 "breadcrumbs, a debug log from the next server start) even in privacy "
+                 "mode. Code and operational logs only, never chat content.",
                  group="Diagnostics", admin_only=True),
     # ---- Models ----
     # A small on-device model, loaded separately from the chat model. The known
@@ -768,9 +773,9 @@ CORE_FIELDS: list = [
     # loaded chat model oversubscribes VRAM and slows the chat model down, so
     # automatic falls back to CPU rather than competing.
     SettingField("embedding_gpu_layers", Widget.NUMBER, "Embedder GPU layers",
-                 "GPU layers for the embedding model. Empty = automatic: full GPU "
-                 "offload when free VRAM holds it, otherwise CPU. 0 forces CPU; 99 "
-                 "forces full offload regardless of free VRAM.",
+                 "GPU layers for the embedding model. Empty = GPU layers (next load) "
+                 "when that is not 99, else full offload when free VRAM holds it, "
+                 "otherwise CPU. 0 forces CPU; 99 forces full offload.",
                  group="Embeddings", applies=Applies.NEXT_LOAD,
                  min=0, max=999, step=1),
     SettingField("confirm_remove", Widget.TOGGLE,
@@ -780,8 +785,9 @@ CORE_FIELDS: list = [
                  group="Models"),
     SettingField("autoprune_missing_models", Widget.TOGGLE,
                  "Auto-remove entries for missing files",
-                 "When a registered model's file has gone, delete its registry "
-                 "entry automatically instead of flagging it as missing.",
+                 "When a model file in the models folder has gone, delete its "
+                 "registry entry automatically instead of flagging it as missing. "
+                 "Models added from other folders are only flagged.",
                  group="Models"),
     # Neither key is in DEFAULT_CONFIG: validate_update() rejects any key not
     # there, so a caller that ever skips the interception below gets a loud 400
@@ -894,9 +900,9 @@ CORE_FIELDS: list = [
                  group="Coder", owner="coder", min=0, step=10),
     SettingField("coder_index_timeout", Widget.NUMBER,
                  "Coder project-scan timeout (s)",
-                 "Wall-clock cap on the coder's startup project-map scan (0 = no "
-                 "limit; scan to completion however long it takes). Raise this on "
-                 "a very large repo if the map is being cut off.",
+                 "Wall-clock cap on the coder's startup project-map scan (0 = no time "
+                 "limit). The scan also stops after 20,000 files whatever this is, so "
+                 "raising it helps only with a slow walk, not a large one.",
                  group="Coder", owner="coder", min=0, step=5),
     SettingField("coder_grep_max_per_file", Widget.NUMBER,
                  "Coder grep matches per file",
@@ -921,7 +927,7 @@ CORE_FIELDS: list = [
                  "Once the model starts a <tool_call>, force it to be valid "
                  "tool-call JSON (lazy GBNF grammar; local grammar-capable "
                  "backends only). Free text and thinking are unaffected.",
-                 group="Coder", owner="coder", applies=Applies.NEXT_LOAD),
+                 group="Coder", owner="coder"),
     # Recall is free; the write half is skipped in privacy mode and for shared
     # keys. Episodes are stored under the localm data dir, never inside the
     # project, and are managed with `localcoder --episodes` /
@@ -930,8 +936,8 @@ CORE_FIELDS: list = [
                  "Coder episodic memory",
                  "Recall lessons from past sessions on a project and, at session "
                  "close, distil the finished session into a new one. Costs one "
-                 "extra model call per session that changed files.",
-                 group="Coder", owner="coder", applies=Applies.NEXT_LOAD),
+                 "extra model call per session that changed files or failed.",
+                 group="Coder", owner="coder"),
     # admin_only: an INJECTION-HARDENING control, so a non-owner turning it off
     # would re-open the indirect-prompt-injection boundary for the OWNER's coder.
     # The mechanism is marking tool results as DATA rather than instructions; it
@@ -942,8 +948,7 @@ CORE_FIELDS: list = [
                  "MCP servers as untrusted data, so a fetched page cannot inject "
                  "commands into the agent. Leave on unless you have a specific "
                  "reason.",
-                 group="Coder", owner="coder", applies=Applies.NEXT_LOAD,
-                 admin_only=True),
+                 group="Coder", owner="coder", admin_only=True),
     SettingField("coder_review", Widget.TOGGLE,
                  "Review changes before finishing",
                  "Before the coder declares a task done, a reviewer model reads the "
@@ -954,7 +959,7 @@ CORE_FIELDS: list = [
                  # boundary. coder_reviewer / coder_reviewer_model ARE owner-only,
                  # because they choose WHICH backend or model file reviews (a URL
                  # or a path).
-                 group="Coder", owner="coder", applies=Applies.NEXT_LOAD),
+                 group="Coder", owner="coder"),
     # 'local' is heterogeneous and private but adds CPU latency (the model is
     # set via coder_reviewer_model); an http(s) URL is a second
     # OpenAI-compatible endpoint, e.g. a second local server. A network reviewer
@@ -962,11 +967,10 @@ CORE_FIELDS: list = [
     # local model instead.
     SettingField("coder_reviewer", Widget.TEXT,
                  "Reviewer model target",
-                 "Sends your diff off-machine (network policy applies) unless "
-                 "blank or 'local'. Values: blank = the agent's own model; "
-                 "local = a small CPU model; openai; anthropic; or an http(s) URL.",
-                 group="Coder", owner="coder", applies=Applies.NEXT_LOAD,
-                 admin_only=True),
+                 "Sends your diff off-machine (network policy applies) unless blank, "
+                 "local or a loopback URL. blank = the agent's own model; local = "
+                 "Reviewer model name, on CPU; openai; anthropic; or a URL.",
+                 group="Coder", owner="coder", admin_only=True),
     # Gated together with coder_reviewer: gating the SELECTOR while leaving its
     # ARGUMENT writable would be a half-fix. registry.py falls through to
     # Path(name), accepting any existing GGUF / HF dir, so this is not
@@ -974,10 +978,10 @@ CORE_FIELDS: list = [
     # backend.
     SettingField("coder_reviewer_model", Widget.TEXT,
                  "Reviewer model name",
-                 "Model name for a cloud/URL reviewer. Blank uses a sensible provider "
-                 "default or the agent's own model name.",
-                 group="Coder", owner="coder", applies=Applies.NEXT_LOAD,
-                 admin_only=True),
+                 "The reviewer's model. Required for local (an installed model name or "
+                 "a GGUF path). For openai, anthropic or a URL, blank uses the "
+                 "provider's default or the agent's own model name.",
+                 group="Coder", owner="coder", admin_only=True),
     # ---- Knowledge (RAG plugin) ----
     # All three are OWNER-ONLY: they define which host folders document indexing
     # may read (a filesystem-read boundary). Credential folders (.ssh, .aws, ...)
@@ -1040,15 +1044,18 @@ CORE_FIELDS: list = [
     # attacker-chosen workdir still reaches execution.
     SettingField("comfy_workdir", Widget.FOLDER, "ComfyUI folder",
                  "Your ComfyUI install folder. localm runs it from here and "
-                 "auto-detects a launcher inside. The one setting most setups need.",
+                 "auto-detects a launcher inside. While ComfyUI to use is own and "
+                 "localm's own ComfyUI is installed, it is not started from here.",
                  group="Media", owner="image", admin_only=True),
     SettingField("comfy_launch_cmd", Widget.TEXT, "ComfyUI launch command",
                  "Launcher script (.bat/.sh) that starts ComfyUI. Blank "
-                 "auto-detects one inside the ComfyUI folder.",
+                 "auto-detects one inside the ComfyUI folder. Not used while ComfyUI to "
+                 "use is own and localm's own ComfyUI is installed.",
                  group="Media", owner="image", admin_only=True),
     SettingField("comfy_api_url", Widget.TEXT, "ComfyUI API URL",
                  "Where ComfyUI listens. Blank uses FLUX_API_URL, else "
-                 "http://127.0.0.1:8188.",
+                 "http://127.0.0.1:8188. Not used while ComfyUI to use is own and "
+                 "localm's own ComfyUI is installed.",
                  group="Media", owner="image", admin_only=True),
     SettingField("comfy_launch_timeout", Widget.NUMBER,
                  "ComfyUI launch timeout (s)",
@@ -1056,8 +1063,9 @@ CORE_FIELDS: list = [
                  "start can take minutes.",
                  group="Media", owner="image", min=30, step=30),
     SettingField("comfy_output_dir", Widget.FOLDER, "ComfyUI output folder",
-                 "ComfyUI's own output folder. Only needed with 'Remove ComfyUI's "
-                 "copy after generating' on; blank derives it.",
+                 "ComfyUI's own output folder, needed whenever ComfyUI's copy is "
+                 "removed (the toggle, or privacy mode). Blank uses the output folder "
+                 "inside the ComfyUI folder.",
                  # admin_only: names a host folder this process deletes from when
                  # comfy_delete_outputs is on, and a scoped key never receives a
                  # host path.
@@ -1104,18 +1112,19 @@ CORE_FIELDS: list = [
                  # The help must keep BOTH halves: that placement is not promised
                  # everywhere, and that single-GPU setups are unaffected. See
                  # test_placement_help_still_states_the_two_gpu_precondition.
-                 "EXPERIMENTAL, off by default. With two or more GPUs, put the text "
-                 "encoder and VAE on a second card, freeing room for the diffusion "
-                 "model. Single-GPU setups are unaffected. Needs a recent ComfyUI.",
-                 group="Media", owner="image", applies=Applies.RESTART),
+                 "EXPERIMENTAL, off by default. When the chat model is split across "
+                 "two or more GPUs, put the text encoder and VAE on a second card. "
+                 "Single-GPU setups are unaffected. Needs a recent ComfyUI.",
+                 group="Media", owner="image"),
     SettingField("reload_llm_after_imagine", Widget.TOGGLE,
                  "Reload chat model after generating",
                  "Free the media model's VRAM and reload the chat model after a "
                  "gen. Turn off when making many in a row.",
                  group="Media", owner="image"),
     SettingField("model_swap_policy", Widget.SELECT, "Media VRAM swap",
-                 "auto = keep chat loaded if the media model fits alongside; "
-                 "always = always unload chat; never = keep chat hot.",
+                 "auto = keep chat loaded if the other model fits alongside; always = "
+                 "always unload chat; never = keep chat hot. Also used when the "
+                 "embedding or speech model loads.",
                  group="Media", owner="image",
                  options=["auto", "always", "never"]),
     # 'own' is INERT until `localm comfy setup` has been run. The user's own
@@ -1125,8 +1134,7 @@ CORE_FIELDS: list = [
                  "own = localm's own managed ComfyUI, installed under the localm "
                  "data folder by 'localm comfy setup'. user = always your own "
                  "ComfyUI install, even when a managed one exists.",
-                 group="Media", owner="image", options=["own", "user"],
-                 applies=Applies.RESTART),
+                 group="Media", owner="image", options=["own", "user"]),
     # The GLOBAL fallback behind the per-plugin "Model weight dtype" Media
     # field (MEDIA_PLUGIN_FIELDS "float_type"): the music/video backends read
     # the plugin block's value, else this key. Options must stay identical to
@@ -1136,8 +1144,9 @@ CORE_FIELDS: list = [
     # (schema_json's media_per_plugin annotation routes it away from the
     # Media section's shared box).
     SettingField("comfy_float_type", Widget.SELECT, "Media weight dtype (shared)",
-                 "Shared fallback for the per-plugin 'Model weight dtype' "
-                 "Media setting. Blank inherits the workflow default.",
+                 "Shared fallback for the per-plugin 'Model weight dtype' Media "
+                 "setting (ComfyUI only). default keeps the workflow's value; no "
+                 "effect on a workflow that loads a full checkpoint.",
                  group="Media", owner="image",
                  options=["default", "fp16", "bf16", "fp32", "fp8_e4m3fn",
                           "fp8_e5m2"]),
@@ -1147,13 +1156,14 @@ CORE_FIELDS: list = [
     # private-address SSRF guard and the domain lists apply in every mode, "off"
     # included.
     SettingField("net_mode", Widget.SELECT, "Network access",
-                 "Model-initiated web access: off = every request fails; ask = the "
-                 "GUI prompts first; allow = no prompt. The SSRF guard and the "
-                 "domain lists apply in all three.",
+                 "Model-initiated web access: off = refused (model downloads too, "
+                 "unless allowed); ask = chat and coder ask first, jobs and API "
+                 "clients do not; allow = no prompt. The SSRF guard always applies.",
                  group="Network", owner="web", options=["off", "ask", "allow"]),
     SettingField("net_allow", Widget.LIST, "Allowed domains",
-                 "Domains the model may reach. Empty = any. e.g. example.com "
-                 "(also covers *.example.com).",
+                 "Domains localm may reach, model requests and model downloads alike. "
+                 "Empty = any. e.g. example.com (also covers *.example.com). A list "
+                 "must also name the hosts you pull models from.",
                  group="Network", owner="web"),
     # admin_only: net_deny is the SUPPRESSIVE half of the domain policy and is
     # stored verbatim, so without the gate a non-owner could CLEAR it
@@ -1214,10 +1224,9 @@ CORE_FIELDS: list = [
     # per-image, since the payload is in the URL.
     SettingField("gui_proxy_remote_images", Widget.SELECT,
                  "Show remote images in replies (fetched by this machine)",
-                 "Off by default. 'on' loads them; 'ask' checks with you once "
-                 "per site per conversation first. Either way this machine "
-                 "fetches the image, so the site never learns your IP or "
-                 "browser.",
+                 "Off by default. 'on' loads them; 'ask' checks with you once per "
+                 "site per conversation first. Either way this machine fetches the "
+                 "image: the site sees its address, never your browser.",
                  # Spelled out rather than imported from config: every
                  # localm.config import in this module is LAZY (inside a
                  # function), because importing config runs its data-directory
@@ -1271,7 +1280,7 @@ CORE_FIELDS: list = [
                  "Off by default. On mirrors the same live view the Browser "
                  "tab already offers directly inside the coder session that "
                  "triggered it, in addition to the tab.",
-                 group="Network", owner="browser"),
+                 group="Coder", owner="browser"),
     # ---- Preview (GUI renderer, core) ----
     # owner="core": the artifact canvas is the GUI's own renderer and stays
     # visible on an install with no plugin beyond chat.
@@ -1924,9 +1933,9 @@ MEDIA_PLUGIN_FIELDS: list = [
                options=["auto", "native", "comfy"], plugins=_NATIVE, default="auto"),
     MediaField("native_model", ("native", "model"), "", Widget.TEXT,
                "Native model",
-               "Registered model name or file path: an image checkpoint, or a diffusion "
-               "model when the native text encoder fields are set (video models always "
-               "are). Blank uses the recommended model once downloaded.",
+               "Registered name or file path: a full checkpoint, or a diffusion model "
+               "(encoders and VAE from the native fields, else your registered "
+               "models). Blank uses the recommended model once downloaded.",
                plugins=_NATIVE, admin_only=True),
     MediaField("native_runtime", ("native", "runtime"), "", Widget.SELECT,
                "Native runtime",
@@ -2004,7 +2013,9 @@ MEDIA_PLUGIN_FIELDS: list = [
     # routes/config.py, which covers workdir alongside launch_cmd/api_url.
     MediaField("workdir", ("comfy", "workdir"), "comfy_workdir", Widget.FOLDER,
                "ComfyUI folder",
-               "This plugin's ComfyUI install folder. Blank uses the shared default.",
+               "This plugin's ComfyUI install folder. Blank uses the shared default. "
+               "Not used while ComfyUI to use is own and localm's own ComfyUI is "
+               "installed.",
                admin_only=True),
     # launch_cmd is a shell command and api_url is a render target, so both
     # widen a trust boundary the same way the tts library/wasm_paths script-URL
@@ -2014,14 +2025,19 @@ MEDIA_PLUGIN_FIELDS: list = [
     MediaField("launch_cmd", ("comfy", "launch_cmd"), "comfy_launch_cmd", Widget.TEXT,
                "ComfyUI launch command",
                "Launcher that starts ComfyUI for this plugin. Blank auto-detects one "
-               "in the folder.", admin_only=True),
+               "in the folder. Not used while ComfyUI to use is own and localm's own "
+               "ComfyUI is installed.", admin_only=True),
     MediaField("api_url", ("comfy", "api_url"), "comfy_api_url", Widget.TEXT,
                "ComfyUI API URL",
-               "Where this plugin's ComfyUI listens. Blank uses the shared default.",
+               "Where this plugin's ComfyUI listens. Blank uses the shared default. "
+               "Not used while ComfyUI to use is own and localm's own ComfyUI is "
+               "installed.",
                admin_only=True),
     MediaField("output_dir", ("comfy", "output_dir"), "comfy_output_dir", Widget.FOLDER,
                "ComfyUI output folder",
-               "Only needed if 'Remove ComfyUI's copy' is on; blank derives it.",
+               "Needed whenever ComfyUI's copy is removed (the toggle, or privacy "
+               "mode). Blank uses the shared value, else the output folder inside "
+               "the shared ComfyUI folder.",
                admin_only=True),
     # The swap_policy SELECT sits ahead of the toggle fields so all dropdowns
     # render before all checkboxes in each subsection.
@@ -2039,7 +2055,9 @@ MEDIA_PLUGIN_FIELDS: list = [
                image_only=True),
     MediaField("float_type", ("comfy", "float_type"), "comfy_float_type",
                Widget.SELECT, "Model weight dtype",
-               "Force the compute precision (dtype) of the model weights.",
+               "ComfyUI only: the dtype the diffusion model's weights load in. "
+               "default keeps the workflow's value; no effect on a workflow that "
+               "loads a full checkpoint.",
                options=["default", "fp16", "bf16", "fp32", "fp8_e4m3fn", "fp8_e5m2"],
                plugins=["music", "video"]),
     MediaField("reload_after", ("reload_llm_after_generate",), "reload_llm_after_imagine",
