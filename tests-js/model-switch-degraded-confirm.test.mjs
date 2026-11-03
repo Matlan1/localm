@@ -122,7 +122,7 @@ async function switchWithChoice(choiceKey) {
 test("the never policy's choice offers loading beside or unloading", async () => {
   const { asked } = await switchWithChoice(null);
   assert.equal(asked.length, 1);
-  assert.deepEqual(asked[0].keys, ["beside", "unload"]);
+  assert.deepEqual([...asked[0].keys], ["beside", "unload"]);
   assert.match(asked[0].labels[1], /Unload 'chat-model' for this load/);
   assert.match(asked[0].text, /about 3000 MB is free beside 'chat-model'/);
 });
