@@ -482,3 +482,34 @@ def test_a_source_checkout_never_installs_uv_by_itself(poisoned, tmp_path, monke
     monkeypatch.setattr(uv_tool, "bootstrap_uv",
                         lambda *a, **k: pytest.fail("bootstrap in a source checkout"))
     assert uv_tool.uv_for_installs(tmp_path / "checkout") is None
+
+
+# --------------------------------------------------------------------------- #
+#  User-chosen locations are never blocked                                     #
+# --------------------------------------------------------------------------- #
+
+def test_a_model_outside_a_portable_install_is_registered_in_place(tmp_path, monkeypatch):
+    """Registering a model in place from a folder the user picked, outside the
+    install and outside its data folder, works in a Portable install with every
+    isolation step applied."""
+    from localm.model_manager import add_local
+    home = tmp_path / "install-data"
+    home.mkdir()
+    monkeypatch.setenv("LOCALM_HOME", str(home))
+    monkeypatch.setattr(config, "HOME_DIR", home)
+    monkeypatch.setattr(config, "MODELS_DIR", home / "models")
+    monkeypatch.setattr(config, "CONFIG_FILE", home / "config.json")
+    monkeypatch.setattr(config, "REGISTRY_FILE", home / "registry.json")
+    monkeypatch.setattr(config, "portable_install", lambda root=None: True)
+    monkeypatch.setattr(config, "portable_containment", lambda: True)
+    _isolate(monkeypatch, made_by_setup=True)
+    for key, value in config.contained_gpu_cache_env(config.contained_hf_env()).items():
+        monkeypatch.setenv(key, value)
+    elsewhere = tmp_path / "my-models-on-another-drive"
+    elsewhere.mkdir()
+    model = elsewhere / "mine.gguf"
+    model.write_bytes(b"GGUF\x00\x00\x00\x00mine")
+    assert add_local(str(model)) is True
+    entry = config.load_registry()["mine"]
+    assert _norm(entry["path"]) == _norm(model)
+    assert model.is_file() and not (home / "models" / "mine.gguf").exists()
