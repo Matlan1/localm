@@ -210,7 +210,8 @@ def test_no_two_settings_cards_share_a_heading():
     # must be unique on the whole page. Updates renders into the static Updates card;
     # Bug reports has no visible field and renders no card.
     card_groups = set(_visible_generic().values()) - {"Updates"}
-    cards = [("settings-sec-core-" + g, *GROUP_PLACEMENT[g]) for g in sorted(card_groups)]
+    cards = [("settings-sec-core-" + g, GROUP_TO_TOP[g], EN.get(HEADING_KEY.get(g, "")))
+             for g in sorted(card_groups)]
     static = _static_card_headings()
     assert len(static) > 10, "static cards were not found in index.html"
     seen = {}
