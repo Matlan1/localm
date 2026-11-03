@@ -23,20 +23,7 @@ class _Stop(Exception):
     pass
 
 
-@pytest.fixture
-def refusals():
-    """Yield a function returning the reasons refused since the test started,
-    then drop those refusals so the autouse fixture in tests/conftest.py does
-    not fail the test for them."""
-    before = dict(nw.HITS)
-
-    def new():
-        return [reason for (reason, origin), n in nw.HITS.items()
-                if n > before.get((reason, origin), 0)]
-
-    yield new
-    nw.HITS.clear()
-    nw.HITS.update(before)
+_Refused = pytest.fail.Exception
 
 
 @pytest.fixture
@@ -168,76 +155,70 @@ def test_multiprocessing_spawn_goes_through_the_guard(stop_spy):
 @_needs_windows
 @pytest.mark.parametrize("flags", [nw.CREATE_NEW_CONSOLE, nw.DETACHED_PROCESS],
                          ids=["new-console", "detached"])
-def test_a_visible_console_request_is_refused_before_anything_starts(
-        stop_spy, refusals, flags):
-    caught = None
-    try:
+def test_a_visible_console_request_is_refused_before_anything_starts(stop_spy, flags):
+    with pytest.raises(_Refused, match="BLOCKED by tests/_no_window.py"):
         subprocess.run(["cmd", "/c", "exit 0"], creationflags=flags)
-    except RuntimeError as exc:
-        caught = exc
     assert [c for c in stop_spy if "exit 0" in str(c[1])] == []
-    assert isinstance(caught, RuntimeError) and "BLOCKED by tests/_no_window.py" in str(caught)
-    assert len(refusals()) == 1
 
 
 @_needs_windows
-def test_a_hidden_new_console_starts_with_create_no_window(stop_spy, refusals):
+def test_a_hidden_new_console_starts_with_create_no_window(stop_spy):
     new_console = nw.CREATE_NEW_CONSOLE
     si = subprocess.STARTUPINFO(dwFlags=subprocess.STARTF_USESHOWWINDOW,
                                 wShowWindow=nw.SW_HIDE)
     with pytest.raises(_Stop):
         subprocess.run(["cmd", "/c", "exit 0"], creationflags=new_console, startupinfo=si)
     flags = _flags(_ours(stop_spy, "exit 0"))
-    assert refusals() == []
     assert flags & nw.CREATE_NO_WINDOW and not flags & nw.CREATE_NEW_CONSOLE
 
 
 @_needs_windows
-def test_allow_detached_lets_detached_through_on_its_own_thread_only(stop_spy, refusals):
+def test_allow_detached_lets_detached_through_on_its_own_thread_only(stop_spy):
     detached = nw.DETACHED_PROCESS
+    other = []
+
+    def elsewhere():
+        try:
+            subprocess.run(["cmd", "/c", "exit 1"], creationflags=detached)
+        except BaseException as exc:
+            other.append(exc)
+
     with nw.allow_detached():
         with pytest.raises(_Stop):
             subprocess.run(["cmd", "/c", "exit 0"], creationflags=detached)
-        other = []
-
-        def elsewhere():
-            try:
-                subprocess.run(["cmd", "/c", "exit 1"], creationflags=detached)
-            except BaseException as exc:
-                other.append(exc)
-
         t = threading.Thread(target=elsewhere)
         t.start()
         t.join(30)
     assert _flags(_ours(stop_spy, "exit 0")) & nw.DETACHED_PROCESS
     assert [c for c in stop_spy if "exit 1" in str(c[1])] == []
-    assert len(other) == 1 and isinstance(other[0], RuntimeError)
-    assert len(refusals()) == 1
-    with pytest.raises(RuntimeError):
-        subprocess.run(["cmd", "/c", "exit 0"], creationflags=detached)
+    assert len(other) == 1 and isinstance(other[0], _Refused)
+    with pytest.raises(_Refused):
+        subprocess.run(["cmd", "/c", "exit 2"], creationflags=detached)
+    assert [c for c in stop_spy if "exit 2" in str(c[1])] == []
 
 
 @_needs_windows
-def test_a_swallowed_refusal_is_still_recorded(stop_spy, refusals):
+def test_except_exception_does_not_swallow_a_refusal(stop_spy):
     new_console = nw.CREATE_NEW_CONSOLE
-    try:
-        subprocess.Popen(["cmd", "/c", "exit 0"], creationflags=new_console)
-    except Exception:
-        pass
+    swallowed = False
+    with pytest.raises(_Refused, match="CREATE_NEW_CONSOLE"):
+        try:
+            subprocess.Popen(["cmd", "/c", "exit 0"], creationflags=new_console)
+        except Exception:
+            swallowed = True
+    assert not swallowed
     assert [c for c in stop_spy if "exit 0" in str(c[1])] == []
-    assert len(refusals()) == 1 and "CREATE_NEW_CONSOLE" in refusals()[0]
 
 
 @_needs_windows
-def test_startfile_and_webbrowser_are_refused(tmp_path, refusals):
+def test_startfile_and_webbrowser_are_refused(tmp_path):
     assert os.startfile is nw.startfile and webbrowser.open is nw.browser_open
-    with pytest.raises(RuntimeError, match="os.startfile"):
+    with pytest.raises(_Refused, match="os.startfile"):
         os.startfile(str(tmp_path / "missing.txt"))
-    with pytest.raises(RuntimeError, match="webbrowser.open"):
+    with pytest.raises(_Refused, match="webbrowser.open"):
         webbrowser.open("http://127.0.0.1:9/")
-    with pytest.raises(RuntimeError, match="webbrowser.open"):
+    with pytest.raises(_Refused, match="webbrowser.open"):
         webbrowser.open_new_tab("http://127.0.0.1:9/")
-    assert len(refusals()) == 3
 
 
 @_needs_windows

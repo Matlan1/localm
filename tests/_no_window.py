@@ -14,9 +14,9 @@ would put a window on the desktop.
 * ``tkinter.Tk`` and ``tkinter.Toplevel``, which start withdrawn, and
   ``deiconify``, which leaves a window withdrawn.
 
-A refusal raises ``RuntimeError`` at the call and is recorded in ``HITS``,
-keyed by ``(reason, origin)``, so a test whose code under test swallows the
-error still fails (the autouse fixture in ``tests/conftest.py``).
+A refusal fails the test at the call with ``pytest.fail``, whose exception
+derives from ``BaseException``, so an ``except Exception`` in the code under
+test does not swallow it.
 """
 
 from __future__ import annotations
@@ -29,13 +29,13 @@ import threading
 import traceback
 import webbrowser
 
+import pytest
+
 CREATE_NO_WINDOW = 0x08000000
 CREATE_NEW_CONSOLE = 0x00000010
 DETACHED_PROCESS = 0x00000008
 STARTF_USESHOWWINDOW = 0x00000001
 SW_HIDE = 0
-
-HITS: dict[tuple[str, str], int] = {}
 
 ADVICE = (
     "  No test may put a window on the desktop of the person running the suite.\n"
@@ -127,16 +127,10 @@ def _origin() -> str:
 
 
 def refuse(reason: str, what: str) -> None:
-    """Record a refusal in ``HITS`` and raise ``RuntimeError`` naming it."""
-    key = (f"{reason}: {what}"[:300], _origin())
-    HITS[key] = HITS.get(key, 0) + 1
-    raise RuntimeError("BLOCKED by tests/_no_window.py: " + reason + "\n    " + what
-                       + "\n" + ADVICE)
-
-
-def format_hits(hits) -> str:
-    return "\n".join(f"    {reason}\n        from {origin}   x{count}"
-                     for (reason, origin), count in sorted(hits.items()))
+    """Fail the current test with ``pytest.fail``, naming *reason*, *what* and
+    the call site."""
+    pytest.fail("BLOCKED by tests/_no_window.py: " + reason + "\n    " + what
+                + "\n    from " + _origin() + "\n" + ADVICE, pytrace=False)
 
 
 _real_create = None
