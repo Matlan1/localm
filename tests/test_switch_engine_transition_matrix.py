@@ -1073,6 +1073,47 @@ class TestLoadPlacementLog:
             "needs ~9216 MB: weights 8192 + KV 512 + overhead 512) - only 6.0 of 16.0 "
             "GB free - another app holds VRAM")
 
+    @pytest.mark.parametrize("placement, sizing, level", [
+        ({"gpu_layers_offloaded": 0, "gpu_layers_total": 30, "degraded": True},
+         {"mode": "configured", "layers": 0, "n_ctx": 4096, "n_cpu_moe": 0,
+          "n_cpu_moe_auto": False}, "INFO"),
+        ({"gpu_layers_offloaded": 20, "gpu_layers_total": 30, "degraded": True},
+         {"mode": "configured", "layers": 20, "n_ctx": 4096, "n_cpu_moe": 0,
+          "n_cpu_moe_auto": False}, "INFO"),
+        ({"gpu_layers_offloaded": 30, "gpu_layers_total": 30, "degraded": True,
+          "moe_cpu_layers": 6},
+         {"mode": "configured", "layers": 99, "n_ctx": 4096, "n_cpu_moe": 6,
+          "n_cpu_moe_auto": False}, "INFO"),
+        ({"gpu_layers_offloaded": 12, "gpu_layers_total": 30, "degraded": True},
+         {"mode": "configured", "layers": 20, "n_ctx": 4096, "n_cpu_moe": 0,
+          "n_cpu_moe_auto": False}, "WARNING"),
+        ({"gpu_layers_offloaded": 30, "gpu_layers_total": 30, "degraded": True,
+          "moe_cpu_layers": 6},
+         {"mode": "configured", "layers": 99, "n_ctx": 4096, "n_cpu_moe": 6,
+          "n_cpu_moe_auto": True}, "WARNING"),
+        ({"gpu_layers_offloaded": 0, "gpu_layers_total": 30, "degraded": True},
+         {"mode": "unmeasurable", "layers": 0, "n_ctx": 4096, "n_cpu_moe": 0,
+          "n_cpu_moe_auto": False}, "WARNING"),
+        ({"gpu_layers_offloaded": 0, "gpu_layers_total": 30, "degraded": True},
+         None, "WARNING"),
+    ], ids=["explicit-g0", "explicit-partial", "configured-n_cpu_moe",
+            "fewer-than-configured", "auto-n_cpu_moe", "unmeasurable", "no-sizing"])
+    def test_a_configured_cpu_placement_logs_info_and_a_shortfall_warns(
+            self, monkeypatch, caplog, placement, sizing, level):
+        b = PlacementEngine("model-b", gpu_placement=placement)
+        b.gpu_sizing = sizing
+        env = _install(monkeypatch, {"model-b": b})
+
+        with caplog.at_level("INFO", logger="localm"):
+            asyncio.run(hs.switch_engine("model-b", env.factory, preempt=False))
+
+        [(got, line)] = _switch_lines(caplog)
+        assert got == level, line
+        assert line.startswith(
+            f"switch_engine: loaded 'model-b': {placement['gpu_layers_offloaded']}/30 "
+            "layers on the GPU, the rest on the CPU" if placement["gpu_layers_offloaded"] < 30
+            else "switch_engine: loaded 'model-b': 30/30 layers on the GPU, routed experts")
+
     def test_an_already_resident_model_logs_no_load_line(self, monkeypatch, caplog):
         a = PlacementEngine("model-a")
         env = _install(monkeypatch, {"model-a": a})

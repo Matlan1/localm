@@ -271,7 +271,7 @@ class GgufBackend(VramSizingMixin, BaseBackend):
         self.spec_draft_model = spec_draft_model    # draft GGUF path for the draft source
         self.n_ctx_max = n_ctx_max       # ceiling for dynamic growth (0/None = unlimited)
         self.n_ctx_grow = n_ctx_grow
-        self.ctx_auto = ctx_auto         # derive n_ctx_max from free VRAM at load
+        self.ctx_auto = ctx_auto         # derive n_ctx_max from free VRAM/RAM at load
         # Auto-size how many layers go on the GPU from free VRAM at load, only
         # when n_gpu_layers is left at its everything default. An explicit -g is
         # never overridden.

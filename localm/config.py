@@ -564,7 +564,7 @@ DEFAULT_CONFIG: dict = {
     "n_ctx": 4096,         # initial context window (grows on demand)
     "n_ctx_max": 16384,    # ceiling the window may grow to (0 = unlimited)
     "n_ctx_grow": 4096,    # growth step - window expands in multiples of this
-    # Size ctx ceiling from free VRAM at load (clamped 4k-64k); window still
+    # Size ctx ceiling from free VRAM/RAM at load (clamped 4k-64k); window still
     # starts at n_ctx and grows on demand. False = use fixed n_ctx_max.
     "ctx_auto": True,
     "n_gpu_layers": 99,    # 99 = offload everything to GPU
