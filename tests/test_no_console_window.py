@@ -11,6 +11,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+import re
 import subprocess
 import sys
 import textwrap
@@ -103,7 +104,13 @@ def test_a_console_less_process_starts_children_without_a_window(tmp_path):
 def _window_openers(source: str) -> list[str]:
     """What in *source* opens a window by a route that process-creation wrapping cannot see."""
     found = []
-    for node in ast.walk(ast.parse(source)):
+    tree = ast.parse(source)
+    docstrings = {
+        id(n.body[0].value) for n in ast.walk(tree)
+        if isinstance(n, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+        and n.body and isinstance(n.body[0], ast.Expr) and isinstance(n.body[0].value, ast.Constant)
+    }
+    for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             name = ast.unparse(node.func)
             if name == "os.startfile" or name.rsplit(".", 1)[-1] in {
@@ -116,6 +123,12 @@ def _window_openers(source: str) -> list[str]:
                     for bad in ("CREATE_NEW_CONSOLE", "DETACHED_PROCESS"):
                         if bad in text:
                             found.append(f"line {node.lineno}: creationflags uses {bad}")
+        elif (isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings
+              and "creationflags" in node.value and re.search(r"\bimport\b|Popen\(", node.value)):
+            text = node.value
+            if re.search(r"creationflags\W*=\s*(0x0*8|0x0*10)\b|creationflags\W*=[^\n]*(DETACHED_PROCESS|CREATE_NEW_CONSOLE)", text) \
+                    and "_base_executable" not in text:
+                found.append(f"line {node.lineno}: script text sets creationflags to DETACHED_PROCESS or CREATE_NEW_CONSOLE")
         elif isinstance(node, (ast.List, ast.Tuple)):
             items = [e.value for e in node.elts if isinstance(e, ast.Constant) and isinstance(e.value, str)]
             lowered = [i.lower() for i in items]
@@ -131,9 +144,14 @@ class TestWindowOpenersSentinel:
         "import subprocess\nsubprocess.Popen(['x'], creationflags=subprocess.CREATE_NEW_CONSOLE)\n",
         "import subprocess\nsubprocess.Popen(['x'], creationflags=subprocess.DETACHED_PROCESS | 8)\n",
         "import subprocess\nsubprocess.run(['cmd', '/c', 'start', 'x'])\n",
+        "SCRIPT = \"kw['creationflags'] = 0x00000008\\nsubprocess.Popen([sys.executable, '-c', code], **kw)\"\n",
     ])
     def test_the_scan_sees_each_way_to_open_a_window(self, snippet):
         assert _window_openers(snippet)
+
+    def test_the_scan_passes_a_detached_spawn_of_the_base_interpreter(self):
+        script = "kw['creationflags'] = 0x00000008\\nsubprocess.Popen([sys._base_executable, '-c', code], **kw)"
+        assert not _window_openers(f"SCRIPT = {script!r}\n")
 
     def test_the_scan_passes_an_ordinary_spawn(self):
         assert not _window_openers("import subprocess\nsubprocess.run(['git', 'init'], creationflags=0x200)\n")
