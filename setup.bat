@@ -652,18 +652,19 @@ rem  NO heartbeat around the installs below, deliberately - see the base install
 rem  above for the mechanism. uv's output goes straight to the console here, so it
 rem  already shows live per-package byte progress (which is exactly what a
 rem  gigabyte-plus torch download needs), and a second writer would corrupt that
-rem  in-place redraw rather than reassure anyone.
+rem  in-place redraw rather than reassure anyone. Each install is tried twice
+rem  before it is reported.
 if not defined TORCHSPEC (
     echo  Skipping the PyTorch/transformers stack ^(not needed for GGUF chat^).
 ) else if "%TORCHSPEC%"=="-e .[gpu]" (
     rem  gfx103X (RX 6000): the bundled self-contained build carries torch + the HF
     rem  stack + the ROCm runtime; add audio (soundfile) for unified-audio models.
     echo  Installing PyTorch ^(AMD ROCm, gfx103X^) + transformers ...
-    "!UVEXE!" pip install -p .venv -e ".[gpu,audio]" || echo  [^^!] ROCm torch install failed. GGUF chat still works. ^(see docs/gpu-setup.md^)
+    "!UVEXE!" pip install -p .venv -e ".[gpu,audio]" || "!UVEXE!" pip install -p .venv -e ".[gpu,audio]" || echo  [^^!] ROCm PyTorch could not be installed. GGUF chat still works; running setup again retries it.
 ) else (
     echo  Installing PyTorch + transformers ...
-    "!UVEXE!" pip install -p .venv %TORCHSPEC% || echo  [^^!] torch install failed. GGUF chat still works. ^(see docs/gpu-setup.md^)
-    "!UVEXE!" pip install -p .venv -e ".[hf,audio]" || echo  [^^!] transformers install failed. GGUF chat still works. ^(see docs/gpu-setup.md^)
+    "!UVEXE!" pip install -p .venv %TORCHSPEC% || "!UVEXE!" pip install -p .venv %TORCHSPEC% || echo  [^^!] PyTorch could not be installed. GGUF chat still works; running setup again retries it.
+    "!UVEXE!" pip install -p .venv -e ".[hf,audio]" || "!UVEXE!" pip install -p .venv -e ".[hf,audio]" || echo  [^^!] transformers could not be installed. GGUF chat still works; running setup again retries it.
 )
 call :step_done torch || exit /b 99
 

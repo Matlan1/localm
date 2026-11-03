@@ -52,9 +52,9 @@ def test_every_known_site_uses_the_double_caret_escape(bat):
         'echo  [^^!] uv still is not callable after the install attempt:',
         'echo  [^^!] Could not create the environment.',
         'echo  [^^!] Install failed - see the error above.',
-        '"!UVEXE!" pip install -p .venv -e ".[gpu,audio]" || echo  [^^!] ROCm torch install failed.',
-        '"!UVEXE!" pip install -p .venv %TORCHSPEC% || echo  [^^!] torch install failed.',
-        '"!UVEXE!" pip install -p .venv -e ".[hf,audio]" || echo  [^^!] transformers install failed.',
+        '|| echo  [^^!] ROCm PyTorch could not be installed.',
+        '%TORCHSPEC% || echo  [^^!] PyTorch could not be installed.',
+        '|| echo  [^^!] transformers could not be installed.',
         'echo  [^^!] !PFDETAIL!',
         'if "%RUNTIME_OK%"=="0" echo  [^^!] No model can load yet - the native llama.cpp runtime did not finish',
         'if "%BKSWAP%"=="1" echo  [^^!] The %BACKEND% runtime did not load here;',
@@ -190,8 +190,23 @@ class TestBangSurvivesEveryStructuralShape:
         """The `cmd || echo [^^!] ...` shape - distinct from `if errorlevel 1`,
         since the marker fires from a short-circuited command, not a separate
         conditional line."""
-        line = _line_containing(bat, "ROCm torch install failed")
+        line = _line_containing(bat, "ROCm PyTorch could not be installed")
         stubbed = line.replace(
-            'uv pip install -p .venv -e ".[gpu,audio]"', "cmd /c exit /b 1", 1)
+            '"!UVEXE!" pip install -p .venv -e ".[gpu,audio]"', "cmd /c exit /b 1")
+        assert stubbed.count("cmd /c exit /b 1") == 2, stubbed
         out = self._run(tmp_path, "", stubbed)
-        assert "[!] ROCm torch install failed." in out.stdout, (out.stdout, out.stderr)
+        assert "[!] ROCm PyTorch could not be installed." in out.stdout, (out.stdout, out.stderr)
+
+    @pytest.mark.parametrize("needle,call", [
+        ("ROCm PyTorch could not be installed", '"!UVEXE!" pip install -p .venv -e ".[gpu,audio]"'),
+        ("transformers could not be installed", '"!UVEXE!" pip install -p .venv -e ".[hf,audio]"'),
+    ])
+    def test_a_torch_install_that_fails_once_is_retried(self, bat, tmp_path, needle, call):
+        line = _line_containing(bat, needle)
+        assert line.count(call) == 2, line
+        first = line.index(call)
+        stubbed = (line[:first] + "cmd /c exit /b 1"
+                   + line[first + len(call):].replace(call, "echo RETRIED", 1))
+        out = self._run(tmp_path, "", stubbed)
+        assert "RETRIED" in out.stdout, (out.stdout, out.stderr)
+        assert "[!]" not in out.stdout, (out.stdout, out.stderr)

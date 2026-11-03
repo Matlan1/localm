@@ -6,8 +6,8 @@
 #  Files a bug report as an account-less GitHub issue via the localm proxy (no
 #  GitHub login), showing you exactly what will be sent and asking you to confirm
 #  first. It runs the self-contained reporter on localm's own Python (so a
-#  broken venv still reports fine), and falls back to the system curl if there is
-#  none.
+#  broken venv still reports fine), and falls back to the system curl (or wget)
+#  if there is none.
 #
 #  Optional args (used by setup.sh's failure paths) pass straight through:
 #    --summary "..."  --detail "..."  --log <path>  --yes
@@ -48,13 +48,14 @@ if [ -n "$RIPY" ]; then
   exec "$RIPY" scripts/report_issue.py "$@"
 fi
 
-# --- No Python at all: minimal curl reporter (a rare fallback) ---------------
+# --- No Python at all: minimal curl / wget reporter (a rare fallback) --------
 echo ""
-echo "  localm - report a problem (curl fallback; no Python found)"
+echo "  localm - report a problem (no Python found)"
 echo ""
 email="theilige@gmail.com"
-if ! curl_bin="$(sys_prog curl)"; then
-  echo "  Cannot file automatically: no Python and no curl on this machine."
+curl_bin=""; wget_bin=""
+if ! curl_bin="$(sys_prog curl)" && ! wget_bin="$(sys_prog wget)"; then
+  echo "  Cannot file automatically: no Python, curl or wget on this machine."
   echo "  Please email a short description to ${email}."
   exit 1
 fi
@@ -154,7 +155,7 @@ fi
 os="$(uname -srm 2>/dev/null || echo unknown)"
 # Single-line body so JSON escaping stays simple and safe (quotes + backslashes).
 esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
-body="Filed via the standalone curl reporter (no Python available). OS: ${os}. Details: ${summary}"
+body="Filed via the standalone shell reporter (no Python available). OS: ${os}. Details: ${summary}"
 
 echo ""
 echo "  ----- this is exactly what will be sent -----"
@@ -175,9 +176,18 @@ if [ -z "$url" ]; then
 fi
 
 payload="{\"title\":\"$(esc "$summary")\",\"body\":\"$(esc "$body")\"}"
-code="$("$curl_bin" -sS -o /dev/null -w '%{http_code}' -X POST "$url" \
-  -H "Content-Type: application/json" ${tok:+-H "X-Localm-Token: $tok"} \
-  -d "$payload" 2>/dev/null || echo 000)"
+if [ -n "$curl_bin" ]; then
+  code="$("$curl_bin" -sS -o /dev/null -w '%{http_code}' -X POST "$url" \
+    -H "Content-Type: application/json" ${tok:+-H "X-Localm-Token: $tok"} \
+    -d "$payload" 2>/dev/null || echo 000)"
+else
+  # wget prints the response headers on stderr with --server-response; the last
+  # status line is the answer.
+  code="$("$wget_bin" -q -O /dev/null --server-response \
+    --header="Content-Type: application/json" ${tok:+--header="X-Localm-Token: $tok"} \
+    --post-data="$payload" "$url" 2>&1 | sed -n 's/^ *HTTP\/[0-9.]* \([0-9][0-9][0-9]\).*/\1/p' | tail -1)"
+  code="${code:-000}"
+fi
 if [ "$code" = "201" ] || [ "$code" = "200" ]; then
   echo "  Sent to the maintainer. Thank you!"
 else

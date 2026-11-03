@@ -22,7 +22,7 @@ import pytest
 
 from localm import pathscrub
 from localm.bugreport import scrub as br_scrub
-from tests._posix_sysdirs import sys_prog_function, sysdirs_for
+from tests._posix_sysdirs import bash_path, sys_prog_function, sysdirs_for
 
 _REPO = Path(__file__).resolve().parents[1]
 _RI_PATH = _REPO / "scripts" / "report_issue.py"
@@ -269,3 +269,40 @@ def test_shell_reporter_sends_nothing_without_a_terminal(tmp_path):
     assert proc.returncode == 0, out
     assert "nothing was sent" in out, out
     assert not sink.exists()
+
+
+def test_shell_reporter_sends_with_wget_when_there_is_no_curl(tmp_path):
+    """With no Python and no curl in the system folders, the standalone reporter
+    posts the report with wget and reads the HTTP status from its headers."""
+    bash = _bash_with_perl()
+    text = _SH_PATH.read_text(encoding="utf-8")
+    fallback_text = sys_prog_function(text) + text[text.index("# --- No Python at all"):]
+    assert fallback_text.count("if [ ! -t 0 ]; then") == 1
+    fallback_text = fallback_text.replace("if [ ! -t 0 ]; then", "if false; then")
+    work = tmp_path / "wget"
+    fake = work / "bin"
+    fake.mkdir(parents=True)
+    (work / "fallback.sh").write_text(fallback_text, encoding="utf-8", newline="\n")
+    sink = work / "wget_args"
+    (fake / "wget").write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$@" > "' + sink.as_posix() + '"\n'
+        'echo "  HTTP/1.1 201 Created" >&2\nexit 0\n', encoding="utf-8", newline="\n")
+    perl = bash_path(shutil.which("perl"))
+    (fake / "perl").write_text(f'#!/bin/sh\nexec "{perl}" "$@"\n',
+                               encoding="utf-8", newline="\n")
+    for f in ("wget", "perl"):
+        (fake / f).chmod(0o755)
+    env = dict(os.environ, LOCALM_BUGREPORT_URL="http://127.0.0.1:9/report")
+    proc = subprocess.run(
+        [bash, "-c",
+         'p="$(cygpath -u "$1" 2>/dev/null || printf %s "$1")"; '
+         'PATH="$p:$PATH"; LOCALM_SYSDIRS="$p"; export LOCALM_SYSDIRS; '
+         'cd "$2" && bash fallback.sh',
+         "_", fake.as_posix(), work.as_posix()],
+        input="it broke\ny\n", capture_output=True, text=True, timeout=120, env=env)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 0, out
+    assert "Sent to the maintainer" in out, out
+    args = sink.read_text(encoding="utf-8").splitlines()
+    assert "http://127.0.0.1:9/report" in args, args
+    assert any(a.startswith("--post-data=") and "it broke" in a for a in args), args

@@ -2,7 +2,7 @@
 """setup.sh's localm-entry-point install/retry block, and localm.sh's own
 diagnosis of the same failure mode.
 
-setup.sh retries the `uv pip install` once if `.venv/bin/localm` did not land
+setup.sh reinstalls once (`uv pip install ... --reinstall`) if `.venv/bin/localm` did not land
 (a WSL2/DrvFs quirk where uv reports success but drops exactly one file), then
 warns loudly and CONTINUES if it is still missing afterwards, since the rest of
 setup does not depend on this entry point. The retry call must be GUARDED: as a
@@ -84,6 +84,7 @@ def _make_uv_stub(bin_dir: Path) -> None:
         'N=$(cat "$COUNT_FILE" 2>/dev/null || echo 0)\n'
         'N=$((N + 1))\n'
         'echo "$N" > "$COUNT_FILE"\n'
+        'echo "$*" >> .stub-uv-args\n'
         'eval "RC=\\${STUB_RC_$N:-0}"\n'
         'eval "CREATE=\\${STUB_CREATE_$N:-0}"\n'
         'if [ "$CREATE" = "1" ]; then\n'
@@ -135,7 +136,7 @@ def test_present_no_retry_needed(tmp_path):
     result = _run_install_block(tmp_path, call_specs={1: (0, True)})
     assert result.returncode == 0, result.stderr
     assert "COMPLETED" in result.stdout
-    assert "retrying once" not in result.stdout
+    assert "reinstalling once" not in result.stdout
     assert "STILL missing" not in result.stdout
     assert (tmp_path / ".venv" / "bin" / "localm").exists()
     assert (tmp_path / ".stub-uv-calls").read_text().strip() == "1"
@@ -145,8 +146,10 @@ def test_present_no_retry_needed(tmp_path):
 def test_recovered_by_retry(tmp_path):
     result = _run_install_block(tmp_path, call_specs={1: (0, False), 2: (0, True)})
     assert result.returncode == 0, result.stderr
+    calls = (tmp_path / ".stub-uv-args").read_text().splitlines()
+    assert "--reinstall" not in calls[0] and calls[1].endswith("--reinstall"), calls
     assert "COMPLETED" in result.stdout
-    assert "retrying once" in result.stdout
+    assert "reinstalling once" in result.stdout
     assert "STILL missing" not in result.stdout
     assert (tmp_path / ".venv" / "bin" / "localm").exists()
     assert "LOCALM_BIN_OK=1" in result.stdout
@@ -156,9 +159,11 @@ def test_still_missing_after_retry_warns_and_continues(tmp_path):
     result = _run_install_block(tmp_path, call_specs={1: (0, False), 2: (0, False)})
     assert result.returncode == 0, result.stderr
     assert "COMPLETED" in result.stdout
-    assert "retrying once" in result.stdout
+    assert "reinstalling once" in result.stdout
     assert "STILL missing" in result.stdout
     assert not (tmp_path / ".venv" / "bin" / "localm").exists()
+    assert "bash setup.sh  again repairs it" in result.stdout
+    assert "pip install" not in result.stdout and "yourself" not in result.stdout, result.stdout
     # LOCALM_BIN_OK must reflect the real, still-missing state: setup-llama,
     # make-launcher and plugin-setup downstream branch on it instead of blindly
     # invoking a binary that was just diagnosed absent.
@@ -172,7 +177,7 @@ def test_retry_itself_erroring_still_reaches_the_still_missing_warning(tmp_path)
     result = _run_install_block(tmp_path, call_specs={1: (0, False), 2: (7, False)})
     assert result.returncode == 0, result.stderr
     assert "COMPLETED" in result.stdout
-    assert "retrying once" in result.stdout
+    assert "reinstalling once" in result.stdout
     assert "STILL missing" in result.stdout
     assert "LOCALM_BIN_OK=0" in result.stdout
 
