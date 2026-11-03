@@ -431,8 +431,10 @@ def test_consolidation_idempotent_with_embedder(tmp_path):
     assert sorted(r.id for r in s.all()) == ids1     # same records, stable ids
 
 
-def test_extract_parse_failure_returns_empty(tmp_path):
-    assert extract(lambda p: "totally not json", "some session") == []
+def test_extract_unreadable_reply_raises_instead_of_returning_no_facts(tmp_path):
+    with pytest.raises(M.ConsolidationReplyError):
+        extract(lambda p: "totally not json", "some session")
+    assert extract(lambda p: '{"facts": []}', "some session") == []
     with pytest.raises(M.ConsolidationModelError):
         extract(lambda p: (_ for _ in ()).throw(RuntimeError("boom")), "x")
 

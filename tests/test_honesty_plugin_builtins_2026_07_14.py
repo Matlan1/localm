@@ -151,8 +151,9 @@ def test_self_describe_image_no_vision_message(monkeypatch):
 
     resp = _FakeResp(ok=False, status_code=400, detail="model cannot accept image input")
     monkeypatch.setattr(selfclient, "self_request", lambda *a, **k: resp)
+    monkeypatch.setattr("localm.model_manager.vision_capable_models", lambda: [])
     fn = ragplug._make_self_describe_image("http://x", lambda: "m")
-    with pytest.raises(RuntimeError, match="does not support vision"):
+    with pytest.raises(RuntimeError, match="m cannot read images and no installed model"):
         fn(_PNG, "image/png")
 
 
