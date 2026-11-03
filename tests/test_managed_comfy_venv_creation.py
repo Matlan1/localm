@@ -30,8 +30,8 @@ from localm.media import managed_comfy_fresh as fresh
 
 
 def test_provision_fresh_uses_real_base_python_not_sys_executable(monkeypatch, tmp_path):
-    """Drives the REAL provision_fresh(), mocking only the clone (no network or
-    git needed) and stopping right after the venv-creation step - the fake
+    """Drives the REAL provision_fresh(), mocking only the source fetch (no network
+    needed) and stopping right after the venv-creation step - the fake
     venv_python path is never created, matching a real broken run - so the one
     _run call under test is captured with no other side effects. The venv call
     must use real_base_python(), never sys.executable."""
@@ -42,7 +42,7 @@ def test_provision_fresh_uses_real_base_python_not_sys_executable(monkeypatch, t
         return True, ""
 
     monkeypatch.setattr(fresh, "_run", _fake_run)
-    monkeypatch.setattr(fresh, "_clone_at_commit", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(fresh, "_fetch_at_commit", lambda *a, **k: (True, ""))
     # provision_fresh computes comfy_torch_spec() regardless of install_torch,
     # which on an NVIDIA box would shell out to nvidia-smi via the Blackwell
     # detection; stubbed so the result does not depend on the host hardware.
@@ -109,7 +109,7 @@ def test_provision_fresh_fails_loudly_when_venv_has_no_pip(monkeypatch, tmp_path
         raise AssertionError(f"unexpected call reached past the pip probe: {cmd}")
 
     monkeypatch.setattr(fresh, "_run", _fake_run)
-    monkeypatch.setattr(fresh, "_clone_at_commit", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(fresh, "_fetch_at_commit", lambda *a, **k: (True, ""))
     monkeypatch.setattr(hwdetect, "_cuda_compute_capabilities", lambda: [])
 
     fake_paths = mc.ManagedComfyPaths(
