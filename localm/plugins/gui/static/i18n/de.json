@@ -1339,6 +1339,7 @@
   "models.switch.unloadAskFreed": "Das Laden von '{model}' entlädt {names}, das gibt etwa {freed} MB VRAM frei.",
   "models.switch.busyModel": "'{model}' (die Antwort, die es gerade schreibt, wird abgebrochen)",
   "models.switch.peerModel": "{model} einer anderen localm-Instanz",
+  "models.switch.unloadChoiceMoe": "'{model}' braucht etwa {full} MB freien VRAM, um jeden Experten auf der GPU zu halten, und neben {names} sind etwa {free} MB frei. Daneben laden, mit einem Teil seiner Experten im System-RAM (langsamer), oder für diesen Ladevorgang entladen.",
   "models.switch.unloadChoice": "'{model}' braucht etwa {plan} MB freien VRAM, damit jeder Layer auf der GPU läuft, und neben {names} sind etwa {free} MB frei.",
   "models.switch.loadBeside": "Daneben laden (langsamer)",
   "models.switch.unloadForThis": "{names} für diesen Ladevorgang entladen",

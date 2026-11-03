@@ -1174,8 +1174,8 @@ export function confirmLoadText(data) {
       : t("models.switch.unloadAsk", { model: data.model, names });
   }
   if (data && data.reason === "unload_choice") {
-    return t("models.switch.unloadChoice", {
-      model: data.model, plan: data.plan_mb, free: data.free_mb,
+    return t(data.fits_with_experts_in_ram ? "models.switch.unloadChoiceMoe" : "models.switch.unloadChoice", {
+      model: data.model, plan: data.plan_mb, full: data.full_mb, free: data.free_mb,
       names: _unloadNames(data).join(", ") });
   }
   if (!data || data.reason !== "degraded_load" || typeof data.plan_mb !== "number") {

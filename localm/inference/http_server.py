@@ -1513,15 +1513,17 @@ async def _switch_unload_policy_step(loop, probe: switch_admission.VramProbe,
     """What a load that does not fit beside the loaded models does under the
     "ask" or "never" unload policy (*mode*), instead of evicting.
 
-    Returns None to load now: when only the resident cap wanted room, when a
-    Mixture-of-Experts model fits with its experts in system RAM
+    Returns None to load now: when only the resident cap wanted room, under
+    "never" when a Mixture-of-Experts model fits with its experts in system RAM
     (``switch_admission.experts_in_ram_fit``), or under "never" for a load
     that is not an explicit switch, for *keep_others*, or on a reading with
     no free figure (``attempt.deferred_to_backend`` is set: the backend sizes
     the load with what is left; logged at INFO). Returns
     ``switch_admission.unload_choice_confirm`` under "never" for an explicit
-    switch. Under "ask": the ``_switch_confirm_before_eviction`` result when
-    the load would not fit even after unloading everything, else
+    switch, and under "ask" for a model that fits beside the loaded chat models
+    with its experts in system RAM (unloading them would keep more experts on
+    the GPU). Under "ask" otherwise: the ``_switch_confirm_before_eviction``
+    result when the load would not fit even after unloading everything, else
     ``switch_admission.unload_ask_confirm`` naming every chat model it may
     unload (a busy one marked so, since a confirmed switch stops its reply),
     the loaded shared models and other instances' models, or
@@ -1531,15 +1533,18 @@ async def _switch_unload_policy_step(loop, probe: switch_admission.VramProbe,
         _dbg.info("switch_engine: unload_for_room=%s, loading '%s' beside the "
                   "resident models over max_resident_models", mode, budget.name)
         return None
+    others = [n for n in _engines_lru
+              if n != budget.name and _is_reusable(_engines.get(n))]
     if switch_admission.experts_in_ram_fit(probe, budget):
+        if mode == switch_admission.UNLOAD_ASK and others:
+            return switch_admission.unload_choice_confirm(
+                budget.name, budget, probe.free, others)
         _dbg.info("switch_engine: unload_for_room=%s, '%s' loads beside the resident "
                   "models with some of its experts in system RAM (~%s MB needed, "
                   "%s MB free)", mode, budget.name, budget.plan_bytes // 1024 ** 2,
                   probe.free // 1024 ** 2)
         return None
     if mode == switch_admission.UNLOAD_NEVER:
-        others = [n for n in _engines_lru
-                  if n != budget.name and _is_reusable(_engines.get(n))]
         if preempt and not keep_others and probe.measurable and others:
             return switch_admission.unload_choice_confirm(
                 budget.name, budget, probe.free, others)

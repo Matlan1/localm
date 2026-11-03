@@ -1367,6 +1367,7 @@
   "models.switch.unloadAskFreed": "Cargar '{model}' descarga {names}, lo que libera unos {freed} MB de VRAM.",
   "models.switch.unloadAskLabel": "Descargar y cambiar",
   "models.switch.unloadAskTitle": "¿Descargar modelos?",
+  "models.switch.unloadChoiceMoe": "'{model}' necesita unos {full} MB de VRAM libre para mantener todos los expertos en la GPU y hay unos {free} MB libres junto a {names}. Cárgalo junto a ellos con parte de sus expertos en la RAM del sistema (más lento), o descárgalos para esta carga.",
   "models.switch.unloadChoice": "'{model}' necesita unos {plan} MB de VRAM libre para ejecutar cada capa en la GPU y hay unos {free} MB libres junto a {names}.",
   "models.switch.unloadForThis": "Descargar {names} para esta carga",
   "models.tab.all": "Todos",

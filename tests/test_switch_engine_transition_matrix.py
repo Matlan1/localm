@@ -2800,3 +2800,47 @@ class TestPeerModelsAreNeverUnloadedSilently:
                                            activate=False))
 
         assert res["status"] == "loaded" and asked == []
+
+
+class TestUnloadPolicyWithExpertsInRam:
+    """model-b is a Mixture-of-Experts model that fits beside model-a with its
+    experts in system RAM but would keep every expert on the GPU alone."""
+
+    def _setup(self, monkeypatch, policy):
+        import localm.config as cfg
+        real = cfg.load_config
+        monkeypatch.setattr("localm.config.load_config",
+                            lambda *a, **k: {**real(*a, **k), "unload_for_room": policy})
+        a = GatedEngine("model-a")
+        b = _MoeSizedEngine("model-b", 9 * GB, 2 * GB)
+        env = _install(monkeypatch, {"model-a": a, "model-b": b})
+        _seat("model-a", a, active=True)
+        return a, b, env
+
+    def test_ask_offers_the_choice_naming_the_full_figure(self, monkeypatch):
+        a, b, env = self._setup(monkeypatch, "ask")
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert res["reason"] == "unload_choice" and res["fits_with_experts_in_ram"] is True
+        assert res["unloaded"] == ["model-a"]
+        assert res["full_mb"] == 9 * 1024
+        assert "to keep every expert on the GPU" in res["detail"]
+        assert a.loaded and b.load_calls == 0
+
+    def test_never_loads_beside_without_asking(self, monkeypatch):
+        a, b, env = self._setup(monkeypatch, "never")
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory))
+
+        assert res["status"] == "loaded"
+        assert a.loaded and b.load_calls == 1
+
+    def test_ask_for_a_load_nobody_can_be_asked_about_loads_beside(self, monkeypatch):
+        a, b, env = self._setup(monkeypatch, "ask")
+
+        res = asyncio.run(hs.switch_engine("model-b", env.factory, preempt=False,
+                                           activate=False))
+
+        assert res["status"] == "loaded"
+        assert a.loaded and b.load_calls == 1

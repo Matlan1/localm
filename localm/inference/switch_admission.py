@@ -470,22 +470,35 @@ def unload_ask_confirm(name: str, models: Iterable[str], freed: int, *,
 
 def unload_choice_confirm(name: str, budget: LoadBudget, free: int,
                           models: Iterable[str]) -> dict:
-    """The confirm_required result of the "never" unload policy for an
-    explicit switch that does not fit beside the loaded models: *free* bytes
-    are free with *models* still loaded. The caller offers three answers: load
-    beside them with what is left (``keep_others``), unload them for this load
-    only (``force``), or cancel. Carries ``reason`` "unload_choice",
-    ``unloaded``, ``plan_mb``, ``free_mb`` and ``moe`` besides ``detail``."""
+    """The confirm_required result offering the choice for an explicit switch
+    that does not fully fit beside the loaded models: *free* bytes are free
+    with *models* still loaded. The caller offers three answers: load beside
+    them with what is left (``keep_others``), unload them for this load only
+    (``force``), or cancel. When *free* covers ``budget.plan_bytes``, every
+    layer stays on the GPU beside them with routed experts in system RAM
+    (``fits_with_experts_in_ram``), and the text names the free VRAM every
+    expert on the GPU would need. Carries ``reason`` "unload_choice",
+    ``unloaded``, ``plan_mb``, ``full_mb``, ``free_mb``, ``moe`` and
+    ``fits_with_experts_in_ram`` besides ``detail``."""
     models = list(models)
-    plan_mb, free_mb = budget.plan_bytes // _MB, max(0, free) // _MB
+    plan_mb, full_mb, free_mb = (budget.plan_bytes // _MB, budget.needed_bytes // _MB,
+                                 max(0, free) // _MB)
     named = ", ".join(repr(n) for n in models) or "the other models"
+    fits = budget.keeps_experts_in_ram and free >= budget.plan_bytes
+    if fits:
+        detail = (f"'{name}' needs about {full_mb} MB of free VRAM to keep every expert "
+                  f"on the GPU and about {free_mb} MB is free beside {named}. Load it "
+                  "beside them with some of its experts in system RAM (slower), or "
+                  "unload them for this load.")
+    else:
+        detail = (f"'{name}' needs about {plan_mb} MB of free VRAM to run every "
+                  f"layer on the GPU and about {free_mb} MB is free beside {named}. "
+                  "Load it beside them, slower, or unload them for this load.")
     return {
         "status": "confirm_required", "model": name, "reason": "unload_choice",
-        "unloaded": models, "plan_mb": plan_mb, "free_mb": free_mb,
-        "moe": budget.keeps_experts_in_ram,
-        "detail": (f"'{name}' needs about {plan_mb} MB of free VRAM to run every "
-                   f"layer on the GPU and about {free_mb} MB is free beside {named}. "
-                   "Load it beside them, slower, or unload them for this load."),
+        "unloaded": models, "plan_mb": plan_mb, "full_mb": full_mb, "free_mb": free_mb,
+        "moe": budget.keeps_experts_in_ram, "fits_with_experts_in_ram": fits,
+        "detail": detail,
     }
 
 
