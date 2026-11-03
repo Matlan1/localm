@@ -147,6 +147,86 @@ def test_downloads_errors_and_warnings_are_found(tmp_path):
     assert events[2].lines == [3, 4]
 
 
+def _real_format(level, msg, *args):
+    import logging
+    fmt = logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s")
+    rec = logging.LogRecord("localm", level, __file__, 1, msg, args, None)
+    return fmt.format(rec)
+
+
+@pytest.mark.parametrize("level,msg,args,subject", [
+    (40, "%s", ("",), ""),
+    (40, "%s", (RuntimeError(),), ""),
+    (30, "\nDetail on the next line", (), "Detail on the next line"),
+])
+def test_record_with_an_empty_first_line_is_still_an_event(tmp_path, capsys, level, msg, args, subject):
+    text = CLEAN_LOG + _real_format(level, msg, *args) + "\n"
+    log = _write(tmp_path, "localm_h.log", text)
+    events, _lines, records = la.parse_log(log)
+    assert records == 4
+    assert [(e.kind, e.subject) for e in events] == [
+        ("error" if level == 40 else "warning", subject)]
+    assert la.main(["--manifest", str(_manifest(tmp_path, {})), str(log)]) == 1
+
+
+@pytest.mark.parametrize("line", [
+    "ROCm error: out of memory",
+    "CUDA error: an illegal memory access was encountered",
+    "D:/a/llama.cpp/ggml/src/ggml-cuda/ggml-cuda.cu:88: ROCm error",
+    "Fatal Python error: Segmentation fault",
+    "Windows fatal exception: access violation",
+    "Traceback (most recent call last):",
+])
+def test_fatal_native_and_python_lines_are_errors(tmp_path, line):
+    events = _events(tmp_path, CLEAN_LOG + line + "\n")
+    assert [(e.kind, e.subject) for e in events] == [("error", line)]
+
+
+def test_traceback_of_a_flagged_record_is_part_of_it(tmp_path):
+    text = CLEAN_LOG + textwrap.dedent("""\
+        2026-11-03 11:20:32,000 ERROR   localm: worker crashed
+        Traceback (most recent call last):
+          File "x.py", line 1, in <module>
+        ValueError: boom
+        """)
+    events = _events(tmp_path, text)
+    assert [(e.kind, e.subject) for e in events] == [("error", "worker crashed")]
+
+
+def test_crash_artefacts_in_the_home_are_errors(tmp_path, capsys):
+    home = tmp_path / "home"
+    (home / "run").mkdir(parents=True)
+    (home / "logs").mkdir()
+    (home / "run" / "server-crash-trace.abc.txt").write_text("")
+    log = _write(tmp_path, "localm_i.log", CLEAN_LOG)
+    manifest = _manifest(tmp_path, {})
+    assert la.main(["--manifest", str(manifest), "--home", str(home), str(log)]) == 0
+    (home / "run" / "server-crash-trace.abc.txt").write_text("Fatal Python error: Aborted\n")
+    (home / "logs" / "hang_2026-11-03_1_2.log").write_text("stack\n")
+    assert la.main(["--manifest", str(manifest), "--home", str(home), str(log)]) == 1
+    out = capsys.readouterr().out
+    assert "crash artefact run/server-crash-trace.abc.txt" in out
+    assert "crash artefact logs/hang_2026-11-03_1_2.log" in out
+    assert la.main(["--manifest", str(manifest), "--home", str(tmp_path / "nope"), str(log)]) == 2
+
+
+def test_every_remote_pull_logs_a_download_line(monkeypatch, caplog):
+    import contextlib
+    import logging
+
+    from localm.model_manager import pending_pulls, pull
+    monkeypatch.setattr(pending_pulls, "tracking", lambda record: contextlib.nullcontext({}))
+    monkeypatch.setattr(pull, "_pull_remote", lambda *a, **k: False)
+    with caplog.at_level(logging.INFO, logger="localm"):
+        pull.pull_model("Qwen/Qwen3-0.6B-GGUF:Qwen3-0.6B-Q8_0.gguf")
+        pull.pull_model("https://user:secret@example.com/m.gguf?token=abc#x")
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("pull: ")]
+    assert lines == ["pull: downloading Qwen/Qwen3-0.6B-GGUF:Qwen3-0.6B-Q8_0.gguf",
+                     "pull: downloading https://example.com/m.gguf"]
+    for line in lines:
+        assert la.PULL_LOG_RE.match(line)
+
+
 def test_strict_fails_on_a_load_that_never_happened(tmp_path, capsys):
     log = _write(tmp_path, "localm_e.log", CLEAN_LOG)
     manifest = _manifest(tmp_path, {"models": ["Qwen3-0.6B-Q8_0"]})

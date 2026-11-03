@@ -7,20 +7,33 @@ and a per-run manifest, and prints every event of these kinds, each marked
 EXPECTED (a manifest entry matches it) or UNEXPLAINED:
 
   warning     a WARNING record, or a Python ``...py:N: SomeWarning:`` line
-  error       an ERROR or CRITICAL record, a native llama.cpp / ggml / mtmd
-              line reporting an error or failure, a ``GGML_ASSERT``, or an
-              ``Exception in thread`` / ``Exception ignored in`` line
+  error       an ERROR or CRITICAL record; a native llama.cpp / ggml / mtmd
+              line reporting an error or failure; a backend error (``ROCm
+              error``, ``CUDA error``, ...); a ggml abort (``file.cu:88: ...``);
+              ``GGML_ASSERT``; ``Fatal Python error``, ``Windows fatal
+              exception``, ``Segmentation fault``, ``Exception in thread``,
+              ``Exception ignored in``; a ``Traceback`` that does not belong to
+              a WARNING-or-higher record; and, with ``--home``, every non-empty
+              crash or hang trace the run left in its data dir
+              (``run/server-crash-trace*.txt``, ``logs/crash_*.txt``,
+              ``logs/hang_*.log``)
   toast       a GUI report sent through ``POST /api/gui-error`` (logged at
               WARNING as ``gui: [source page] message``)
   model-load  a llama.cpp model loader banner (``loaded meta data ... from``),
               an mtmd projector load (``loaded N tensors from``), ``embedding
               model ready: ...`` or ``switch_engine: loaded '...'``
-  download    ``downloading ... model ... (one-time)``, ``Model pull ...
-              started`` or a tqdm progress bar (``name:  42%|``)
+  download    ``downloading ... model ... (one-time)``, ``pull: downloading
+              ...`` (every remote pull: CLI, MCP, GUI), ``Model pull ...
+              started`` (a GUI pull job) or a tqdm progress bar (``name:  42%|``)
 
 Consecutive load lines naming the same model are one model-load event, and
 consecutive progress lines of one file are one download event. A WARNING record
-that also reports a load is both a warning event and a model-load event.
+that also reports a load is both a warning event and a model-load event. A
+WARNING-or-higher record whose first line is empty takes its text from the next
+line.
+
+A log that simply stops (the process was killed) is not detectable from the log
+alone; pass ``--home`` so a crash leaves an event.
 
 Manifest (JSON object; every key optional, any other key is an error):
 
@@ -40,11 +53,13 @@ name for warning and error, and the text after ``gui: `` for toast.
 
 Exit codes: 0 every event is EXPECTED; 1 at least one is UNEXPLAINED (or, with
 ``--strict``, a ``models``/``downloads`` entry matched nothing); 2 the audit
-could not run (a log missing, unreadable or holding no localm log record, or a
-malformed manifest). 2 is never reported as 0.
+could not run (a log missing, unreadable or holding no localm log record, a
+``--home`` that is not a folder, or a malformed manifest). 2 is never reported
+as 0.
 
 Usage:
     python scripts/log_audit.py --manifest run.json <log> [<log> ...]
+    python scripts/log_audit.py --manifest run.json --home <data dir> <data dir>/logs/localm_*.log
     python scripts/log_audit.py --manifest run.json --json audit.json <log>
     python scripts/log_audit.py --manifest run.json --strict <log>
 """
@@ -65,20 +80,28 @@ KIND_KEYS = {"model-load": "models", "download": "downloads", "warning": "warnin
 
 RECORD_RE = re.compile(
     r"^(?P<time>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}) "
-    r"(?P<level>DEBUG|INFO|WARNING|ERROR|CRITICAL)\s+(?P<logger>[\w.\-]+): (?P<msg>.*)$")
+    r"(?P<level>DEBUG|INFO|WARNING|ERROR|CRITICAL)\s+(?P<logger>[\w.\-]+):(?: (?P<msg>.*))?$")
 GUI_TOAST_RE = re.compile(r"^gui: (?P<text>.*)$")
 EMBED_READY_RE = re.compile(r"^embedding model ready: (?P<model>.+?) \(dim=")
 SWITCH_LOADED_RE = re.compile(r"^switch_engine: loaded '(?P<model>[^']+)'")
 DOWNLOADING_RE = re.compile(r"^downloading .*?model (?P<id>\S+) \(one-time\)")
 PULL_STARTED_RE = re.compile(r"^Model pull (?P<id>.+?) started\b")
+PULL_LOG_RE = re.compile(r"^pull: downloading (?P<id>.+?)\s*$")
 
 NATIVE_PREFIX = r"(?:llama|ggml|clip|mtmd|gguf|whisper|sd|common|load|sched|graph|init|decode|print_info|alloc)\w*"
 LLAMA_LOADER_RE = re.compile(r"^llama_model_loader: loaded meta data with .* from (?P<path>.+?) \(version")
 MTMD_LOADED_RE = re.compile(rf"^{NATIVE_PREFIX}: loaded \d+ tensors from (?P<path>.+?)\s*$")
 NATIVE_ERROR_RE = re.compile(rf"^{NATIVE_PREFIX}: .*\b(?:error|failed|failure)\b", re.IGNORECASE)
-ASSERT_RE = re.compile(r"GGML_ASSERT|^Exception in thread |^Exception ignored in")
+BACKEND_ERROR_RE = re.compile(r"\b(?:ROCm|CUDA|HIP|Vulkan|Metal|SYCL|cuBLAS|hipBLAS) error\b")
+NATIVE_ABORT_RE = re.compile(r"^\S+\.(?:c|cc|cpp|cu|h|hpp|m|mm):\d+: ")
+FATAL_RE = re.compile(r"GGML_ASSERT|^Exception in thread |^Exception ignored in|^Fatal Python error"
+                      r"|^Windows fatal exception|^Segmentation fault")
+TRACEBACK_RE = re.compile(r"^Traceback \(most recent call last\):")
 PY_WARNING_RE = re.compile(r"^.+\.py:\d+: (?P<cat>\w*Warning): (?P<msg>.*)$")
 TQDM_RE = re.compile(r"^(?P<name>[^\s|][^|]*?):\s+\d{1,3}%\|")
+
+# Files localm writes only when something crashed or hung, relative to its data dir.
+CRASH_ARTEFACT_GLOBS = ("run/server-crash-trace*.txt", "logs/crash_*.txt", "logs/hang_*.log")
 
 
 class AuditError(Exception):
@@ -153,6 +176,8 @@ def parse_log(path: Path) -> tuple[list[Event], int, int]:
     events: list[Event] = []
     records = 0
     cur_time = ""
+    cur_flagged = False
+    pending: Optional[Event] = None
     last_load: Optional[Event] = None
     last_tqdm: Optional[Event] = None
     label = str(path)
@@ -170,28 +195,40 @@ def parse_log(path: Path) -> tuple[list[Event], int, int]:
         last_load = add("model-load", subject, n)
 
     for n, raw in enumerate(lines, start=1):
+        m = RECORD_RE.match(raw)
         line = raw.rstrip()
-        if not line:
-            continue
-        m = RECORD_RE.match(line)
         if m:
             records += 1
+            pending = None
             cur_time = m.group("time")
-            level, msg = m.group("level"), m.group("msg")
-            if level in ("WARNING", "ERROR", "CRITICAL"):
+            level, msg = m.group("level"), (m.group("msg") or "").rstrip()
+            cur_flagged = level in ("WARNING", "ERROR", "CRITICAL")
+            if cur_flagged:
                 toast = GUI_TOAST_RE.match(msg)
                 if toast:
-                    add("toast", toast.group("text"), n)
+                    ev = add("toast", toast.group("text"), n)
                 else:
-                    add("warning" if level == "WARNING" else "error", msg, n)
+                    ev = add("warning" if level == "WARNING" else "error", msg, n)
+                if not ev.subject.strip():
+                    pending = ev
             for rx in (EMBED_READY_RE, SWITCH_LOADED_RE):
                 lm = rx.match(msg)
                 if lm:
                     add_load(_model_name(lm.group("model")), n)
-            for rx in (DOWNLOADING_RE, PULL_STARTED_RE):
+            for rx in (DOWNLOADING_RE, PULL_STARTED_RE, PULL_LOG_RE):
                 dm = rx.match(msg)
                 if dm:
                     add("download", dm.group("id"), n)
+            continue
+        if not line:
+            continue
+        if pending is not None:
+            pending.subject = f"{pending.subject} {line.strip()}".strip()
+            pending.lines.append(n)
+            pending = None
+        if BACKEND_ERROR_RE.search(line) or NATIVE_ABORT_RE.match(line) or FATAL_RE.search(line) or \
+                (TRACEBACK_RE.match(line) and not cur_flagged):
+            add("error", line, n)
             continue
         lm = LLAMA_LOADER_RE.match(line) or MTMD_LOADED_RE.match(line)
         if lm:
@@ -210,11 +247,30 @@ def parse_log(path: Path) -> tuple[list[Event], int, int]:
         if pw:
             add("warning", f"{pw.group('cat')}: {pw.group('msg')}", n)
             continue
-        if NATIVE_ERROR_RE.match(line) or ASSERT_RE.search(line):
+        if NATIVE_ERROR_RE.match(line):
             add("error", line, n)
     if records == 0:
         raise AuditError(f"{path} holds no localm log record (not a --debug log?)")
     return events, len(lines), records
+
+
+def crash_artefacts(home: Path) -> list[Event]:
+    """One error event per non-empty crash or hang trace in the localm data dir
+    *home* (``CRASH_ARTEFACT_GLOBS``). Raises AuditError when *home* is not a
+    folder."""
+    if not home.is_dir():
+        raise AuditError(f"--home {home} is not a folder")
+    out = []
+    for pattern in CRASH_ARTEFACT_GLOBS:
+        for p in sorted(home.glob(pattern)):
+            try:
+                size = p.stat().st_size
+            except OSError as e:
+                raise AuditError(f"cannot read {p}: {e}") from e
+            if size > 0:
+                out.append(Event("error", f"crash artefact {p.relative_to(home).as_posix()}"
+                                          f" ({size} bytes)", str(p), 0, "", [0]))
+    return out
 
 
 def judge(events: list[Event], rules: dict[str, list[Rule]]) -> None:
@@ -230,8 +286,10 @@ def judge(events: list[Event], rules: dict[str, list[Rule]]) -> None:
                 break
 
 
-def audit(logs: list[Path], manifest: Path) -> tuple[list[Event], dict[str, list[Rule]], list[dict]]:
-    """Parse and judge every log. Returns ``(events, rules, per_log_info)``."""
+def audit(logs: list[Path], manifest: Path, homes: tuple[Path, ...] = ()
+          ) -> tuple[list[Event], dict[str, list[Rule]], list[dict]]:
+    """Parse and judge every log, plus the crash artefacts of each data dir in
+    *homes*. Returns ``(events, rules, per_log_info)``."""
     rules = load_manifest(manifest)
     events: list[Event] = []
     info = []
@@ -240,6 +298,8 @@ def audit(logs: list[Path], manifest: Path) -> tuple[list[Event], dict[str, list
         info.append({"log": str(log), "lines": n_lines, "records": n_records,
                      "events": len(evs)})
         events.extend(evs)
+    for home in homes:
+        events.extend(crash_artefacts(home))
     judge(events, rules)
     return events, rules, info
 
@@ -255,9 +315,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--strict", action="store_true",
                     help="also fail when a models or downloads entry matched nothing")
     ap.add_argument("--json", type=Path, help="also write the events as JSON to this file")
+    ap.add_argument("--home", type=Path, action="append", default=[],
+                    help="localm data dir of the run; its crash and hang traces become error events"
+                         " (repeatable)")
     args = ap.parse_args(argv)
     try:
-        events, rules, info = audit(args.logs, args.manifest)
+        events, rules, info = audit(args.logs, args.manifest, tuple(args.home))
     except AuditError as e:
         print(f"log audit could not run: {e}")
         return 2

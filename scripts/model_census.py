@@ -27,7 +27,13 @@ pass).
 
 Exit codes: 0 every row passes; 1 at least one row fails; 2 the census could
 not run (no such folder, an empty folder, ``localm add`` or the server could not
-start, ``/api/models`` unreadable). 2 is never reported as 0.
+start, ``/api/models`` unreadable) or left its throwaway home or a server
+process behind. 2 is never reported as 0.
+
+Every localm child (``localm add``, ``localm key generate``, the server, the
+identity probe) runs with the throwaway home as its working directory, so all of
+them import the localm that ``--python`` resolves (with ``PYTHONPATH`` when set);
+the ``localm:`` line of the report names it.
 
 The models folder is only read. The throwaway home is created under
 ``--work-dir`` and deleted at the end unless ``--keep`` is given; its
@@ -60,7 +66,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 MODEL_FILE_SUFFIXES = (".gguf", ".safetensors", ".pth", ".pt", ".ckpt", ".bin", ".onnx",
-                       ".sft")
+                       ".sft", ".llamafile")
 PARTIAL_SUFFIXES = (".part", ".partial", ".incomplete", ".tmp", ".download")
 
 GGUF_MAGIC = b"GGUF"
@@ -80,6 +86,16 @@ _GGUF_ARRAY = 9
 
 # llama.cpp ``enum llama_pooling_type``: RANK is the reranker head.
 POOLING_RANK = 4
+
+# ggml tensor type id -> (elements per block, bytes per block).
+GGML_TYPE_SIZES = {
+    0: (1, 4), 1: (1, 2), 2: (32, 18), 3: (32, 20), 6: (32, 22), 7: (32, 24), 8: (32, 34),
+    9: (32, 36), 10: (256, 84), 11: (256, 110), 12: (256, 144), 13: (256, 176), 14: (256, 210),
+    15: (256, 292), 16: (256, 66), 17: (256, 74), 18: (256, 98), 19: (256, 50), 20: (32, 18),
+    21: (256, 110), 22: (256, 82), 23: (256, 136), 24: (1, 1), 25: (1, 2), 26: (1, 4), 27: (1, 8),
+    28: (1, 8), 29: (256, 56), 30: (1, 2), 34: (256, 54), 35: (256, 66), 39: (32, 17),
+}
+GGUF_DEFAULT_ALIGNMENT = 32
 
 
 class MetadataError(Exception):
@@ -126,9 +142,13 @@ def _gguf_value(fh, vtype: int, keep_array: bool):
 
 def read_gguf(path: Path) -> dict:
     """``{"kv": {key: value}, "tensors": [name, ...]}`` from a GGUF header.
-    Array values are summarised as ``{"array_of", "count"}`` except short string
-    arrays. Raises MetadataError on anything that is not a readable GGUF."""
+    Array values are summarised as ``{"array_of", "count"}`` except the
+    ``general.*`` arrays. Raises MetadataError on anything that is not a
+    readable GGUF, including a file shorter than the tensor data its header
+    declares (for a tensor type missing from ``GGML_TYPE_SIZES`` only its start
+    offset is checked)."""
     try:
+        size = path.stat().st_size
         with open(path, "rb") as fh:
             if _read_exact(fh, 4) != GGUF_MAGIC:
                 raise MetadataError("no GGUF magic")
@@ -145,15 +165,29 @@ def read_gguf(path: Path) -> dict:
                 keep = vtype == _GGUF_ARRAY and key.startswith("general.")
                 kv[key] = _gguf_value(fh, vtype, keep)
             tensors = []
+            data_end = 0
             for _ in range(n_tensors):
                 name = _gguf_string(fh)
                 (n_dims,) = struct.unpack("<I", _read_exact(fh, 4))
                 if n_dims > 8:
                     raise MetadataError(f"tensor {name!r} has {n_dims} dimensions")
-                _read_exact(fh, 8 * n_dims + 4 + 8)
+                dims = struct.unpack(f"<{n_dims}Q", _read_exact(fh, 8 * n_dims))
+                ttype, offset = struct.unpack("<IQ", _read_exact(fh, 12))
+                n_el = 1
+                for d in dims:
+                    n_el *= d
+                block = GGML_TYPE_SIZES.get(ttype)
+                nbytes = n_el // block[0] * block[1] if block else 0
+                data_end = max(data_end, offset + nbytes)
                 tensors.append(name)
+            align = kv.get("general.alignment")
+            align = align if isinstance(align, int) and align > 0 else GGUF_DEFAULT_ALIGNMENT
+            data_start = (fh.tell() + align - 1) // align * align
     except OSError as e:
         raise MetadataError(f"cannot read: {e}") from e
+    if n_tensors and size < data_start + data_end:
+        raise MetadataError(f"file is {size} bytes, its header declares tensor data up to"
+                            f" byte {data_start + data_end} (truncated)")
     return {"version": version, "kv": kv, "tensors": tensors}
 
 
@@ -424,8 +458,8 @@ class Entry:
 def enumerate_models(root: Path) -> tuple[list[Entry], list[tuple[Path, str]]]:
     """``(entries, skipped)``. A folder holding a ``config.json`` or
     ``model_index.json`` is one entry; any other folder is searched. Split GGUF
-    parts collapse into their first part. Dot-entries and partial downloads are
-    skipped with the reason."""
+    parts collapse into their first part. Dot-entries, partial downloads and
+    files without a model file suffix are skipped with the reason."""
     entries: list[Entry] = []
     skipped: list[tuple[Path, str]] = []
     splits: dict[tuple[Path, str], Entry] = {}
@@ -446,6 +480,7 @@ def enumerate_models(root: Path) -> tuple[list[Entry], list[tuple[Path, str]]]:
                 skipped.append((p, "partial download"))
                 continue
             if not low.endswith(MODEL_FILE_SUFFIXES):
+                skipped.append((p, f"not a model file suffix ({p.suffix or 'none'})"))
                 continue
             m = _SPLIT_RE.search(p.name)
             if m:
@@ -485,8 +520,8 @@ def _localm_env(home: Path) -> dict:
 
 
 def _run(cmd: list[str], home: Path, timeout: float) -> tuple[int, str]:
-    proc = subprocess.run(cmd, env=_localm_env(home), capture_output=True, text=True,
-                          encoding="utf-8", errors="replace", timeout=timeout,
+    proc = subprocess.run(cmd, env=_localm_env(home), cwd=str(home), capture_output=True,
+                          text=True, encoding="utf-8", errors="replace", timeout=timeout,
                           creationflags=_NO_WINDOW, stdin=subprocess.DEVNULL)
     return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
 
@@ -551,28 +586,63 @@ def _get(url: str, key: Optional[str] = None, timeout: float = 10.0) -> tuple[in
         return exc.code, exc.read()
 
 
-def _kill_tree(proc: subprocess.Popen) -> None:
-    if proc.poll() is not None:
-        return
-    if sys.platform == "win32":
-        subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True,
-                       timeout=60, creationflags=_NO_WINDOW)
-    else:
-        proc.terminate()
+def _descendants(pid: int) -> dict:
+    """``{pid: psutil.Process}`` of *pid*'s live descendants ({} when psutil is
+    missing or *pid* is gone)."""
+    try:
+        import psutil
+        return {c.pid: c for c in psutil.Process(pid).children(recursive=True)}
+    except Exception:
+        return {}
+
+
+def _kill_tree(proc: subprocess.Popen, seen: dict) -> list[int]:
+    """Stop *proc* and its process tree, plus every process in *seen*
+    (descendants recorded while it ran) that is still the same process (psutil
+    compares its creation time, so a reused PID is left alone). Returns the
+    PIDs still running afterwards."""
+    seen = {**seen, **_descendants(proc.pid)}
+    if proc.poll() is None:
+        if sys.platform == "win32":
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True,
+                           timeout=60, creationflags=_NO_WINDOW)
+        else:
+            import signal
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+                proc.wait(timeout=15)
+            except (OSError, subprocess.TimeoutExpired):
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+        proc.wait(timeout=60)
+    survivors = []
+    for child in seen.values():
         try:
-            proc.wait(timeout=15)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-    proc.wait(timeout=60)
+            if child.is_running():
+                child.kill()
+                child.wait(timeout=15)
+        except Exception:
+            pass
+        try:
+            if child.is_running():
+                survivors.append(child.pid)
+        except Exception:
+            pass
+    if proc.poll() is None:
+        survivors.append(proc.pid)
+    return survivors
 
 
-def fetch_api_models(python: str, home: Path, timeout: float) -> list[dict]:
+def fetch_api_models(python: str, home: Path, timeout: float, info: dict) -> list[dict]:
     """``GET /api/models`` rows from a ``localm gui --no-model --no-browser
     --isolated`` server started on a free loopback port with *home*, sent with
     an owner key made in *home* by ``localm key generate``. The server is
     stopped by its own PID tree before this returns. Raises RuntimeError when no
     key could be made, or the server does not answer with a model list within
-    *timeout* seconds, or keeps refusing the key."""
+    *timeout* seconds, or keeps refusing the key. PIDs of the server tree still
+    running after the stop are listed in ``info["leftover_pids"]``."""
     code, out = _run([python, "-m", "localm", "key", "generate"], home, 120)
     key_path = home / "auth.key"
     if code != 0 or not key_path.is_file():
@@ -586,12 +656,15 @@ def fetch_api_models(python: str, home: Path, timeout: float) -> list[dict]:
             [python, "-m", "localm", "gui", "--no-model", "--no-browser", "--isolated", "--new",
              "--host", "127.0.0.1", "--port", str(port)],
             stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-            env=_localm_env(home), cwd=str(home), creationflags=_NO_WINDOW | _NEW_GROUP)
+            env=_localm_env(home), cwd=str(home), creationflags=_NO_WINDOW | _NEW_GROUP,
+            start_new_session=sys.platform != "win32")
+        seen: dict = {}
         try:
             deadline = time.monotonic() + timeout
             last = "no answer"
             refusals = 0
             while time.monotonic() < deadline:
+                seen.update(_descendants(proc.pid))
                 if proc.poll() is not None:
                     raise RuntimeError(f"the GUI server exited with code {proc.returncode}"
                                        f" before answering (log: {log_path})")
@@ -613,7 +686,9 @@ def fetch_api_models(python: str, home: Path, timeout: float) -> list[dict]:
                 time.sleep(1.0)
             raise RuntimeError(f"/api/models did not answer in {timeout:.0f}s ({last})")
         finally:
-            _kill_tree(proc)
+            leftover = _kill_tree(proc, seen)
+            if leftover:
+                info["leftover_pids"] = leftover
 
 
 def localm_identity(python: str, home: Path) -> str:
@@ -681,16 +756,20 @@ def judge(rel: str, implied: Implied, name: Optional[str], entry: Optional[dict]
 
 
 def census(root: Path, python: str, work_dir: Optional[Path], timeout: float,
-           metadata_only: bool, keep: bool) -> tuple[list[Row], dict]:
-    """Run the census over *root*. Returns ``(rows, info)``. Raises
+           metadata_only: bool, keep: bool, info: Optional[dict] = None
+           ) -> tuple[list[Row], dict]:
+    """Run the census over *root*. Returns ``(rows, info)``; *info* (a fresh
+    dict when None) is filled as the run goes, so a caller still holds the
+    throwaway home's path and deletion outcome after an exception. Raises
     RuntimeError when it cannot run."""
+    info = {} if info is None else info
     if not root.is_dir():
         raise RuntimeError(f"no such folder: {root}")
     entries, skipped = enumerate_models(root)
     if not entries:
         raise RuntimeError(f"no model files or folders in {root}")
-    info: dict[str, Any] = {"models_dir": str(root), "entries": len(entries),
-                            "skipped": [f"{p.name} ({why})" for p, why in skipped]}
+    info.update({"models_dir": str(root), "entries": len(entries),
+                 "skipped": [f"{p.name} ({why})" for p, why in skipped]})
     implied = {_norm(e.path): implied_kind(e.path) for e in entries}
 
     def rel(p: Path) -> str:
@@ -713,7 +792,7 @@ def census(root: Path, python: str, work_dir: Optional[Path], timeout: float,
         info["localm"] = localm_identity(python, home)
         refused = register_all(python, root, entries, home, timeout)
         registry = load_registry_file(home)
-        api_rows = {str(r.get("name")): r for r in fetch_api_models(python, home, timeout)}
+        api_rows = {str(r.get("name")): r for r in fetch_api_models(python, home, timeout, info)}
         by_path: dict[str, list[str]] = {}
         for name, entry in registry.items():
             by_path.setdefault(_norm(entry.get("path", "")), []).append(name)
@@ -778,11 +857,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--keep", action="store_true", help="keep the throwaway home")
     ap.add_argument("--json", type=Path, help="also write the rows as JSON to this file")
     args = ap.parse_args(argv)
+    info: dict[str, Any] = {}
     try:
         rows, info = census(args.models_dir, args.python, args.work_dir, args.timeout,
-                            args.metadata_only, args.keep)
+                            args.metadata_only, args.keep, info)
     except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as e:
         print(f"model census could not run: {e}")
+        _print_leftovers(info)
         return 2
     print(f"model census of {info['models_dir']}: {info['entries']} entries")
     if info.get("localm"):
@@ -797,7 +878,21 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"metadata only, nothing registered: {len(failing)} undetermined")
     else:
         print(f"{len(rows) - len(failing)} pass, {len(failing)} fail")
+    if _print_leftovers(info):
+        return 2
     return 1 if failing else 0
+
+
+def _print_leftovers(info: dict) -> bool:
+    """Print what the run failed to clean up; True when anything is left."""
+    left = False
+    if info.get("home") and info.get("home_deleted") is False:
+        print(f"model census left its throwaway home behind: {info['home']}")
+        left = True
+    if info.get("leftover_pids"):
+        print(f"model census could not stop server process(es): {info['leftover_pids']}")
+        left = True
+    return left
 
 
 if __name__ == "__main__":

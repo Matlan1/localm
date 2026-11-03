@@ -1032,6 +1032,21 @@ def _report_success(rich_msg: str, plain_msg: str) -> None:
 
 
 
+def _spec_for_log(spec: str) -> str:
+    """*spec* for a log line: an ``http(s)`` URL loses its user info, query and
+    fragment; any other spec is returned unchanged."""
+    if not spec.startswith(("http://", "https://")):
+        return spec
+    from urllib.parse import urlsplit
+    try:
+        parts = urlsplit(spec)
+        host = parts.hostname or ""
+        port = f":{parts.port}" if parts.port else ""
+    except ValueError:
+        return "<unparseable URL>"
+    return f"{parts.scheme}://{host}{port}{parts.path}"
+
+
 def pull_model(
     model_spec: str,
     name: Optional[str] = None,
@@ -1108,6 +1123,7 @@ def pull_model(
         local_type = None if model_type == "auto" else model_type
         return _mm.add_local(str(local), name=name, model_type=local_type, store=store)
 
+    logger.info("pull: downloading %s", _spec_for_log(spec))
     from . import pending_pulls
     with pending_pulls.tracking({
             "spec": model_spec, "name": name, "sha256": expected_sha256,

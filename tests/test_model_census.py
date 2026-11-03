@@ -39,15 +39,20 @@ def _gval(v) -> bytes:
     raise TypeError(v)
 
 
-def write_gguf(path: Path, kv: dict, tensors=("token_embd.weight", "output.weight")) -> Path:
-    """A GGUF v3 header with *kv* and one 1-D f32 tensor info per name (no data)."""
+def write_gguf(path: Path, kv: dict, tensors=("token_embd.weight", "output.weight"),
+               truncate: int = 0) -> Path:
+    """A GGUF v3 file with *kv* and one 8-element f32 tensor per name, its data
+    aligned to 32 bytes; *truncate* cuts that many bytes off the end."""
     out = [b"GGUF", struct.pack("<I", 3), struct.pack("<QQ", len(tensors), len(kv))]
     for k, v in kv.items():
         out.append(_gstr(k) + _gval(v))
     for i, name in enumerate(tensors):
         out.append(_gstr(name) + struct.pack("<I", 1) + struct.pack("<Q", 8)
                    + struct.pack("<I", 0) + struct.pack("<Q", i * 32))
-    path.write_bytes(b"".join(out))
+    head = b"".join(out)
+    head += b"\0" * (-len(head) % 32)
+    data = head + b"\0" * (32 * len(tensors))
+    path.write_bytes(data[:len(data) - truncate] if truncate else data)
     return path
 
 
@@ -239,7 +244,7 @@ def test_census_rows_from_a_registry(tmp_path, monkeypatch):
     calls = []
 
     def fake_register(python, root, entries, home, timeout):
-        calls.append(home)
+        calls.append(json.loads((home / "config.json").read_text(encoding="utf-8")))
         (home / "registry.json").write_text(json.dumps({
             "chat": {"path": str(models / "chat.gguf"), "model_type": "llm", "architecture": "qwen3"},
             "enc": {"path": str(models / "enc.gguf"), "model_type": "embedding", "architecture": "t5encoder"},
@@ -247,15 +252,97 @@ def test_census_rows_from_a_registry(tmp_path, monkeypatch):
         return {mc._norm(models / "up.safetensors"): "exit 0: Not a model"}
 
     monkeypatch.setattr(mc, "register_all", fake_register)
-    monkeypatch.setattr(mc, "fetch_api_models", lambda python, home, timeout: [
+    monkeypatch.setattr(mc, "fetch_api_models", lambda python, home, timeout, info: [
         {"name": "chat", "model_type": "llm"}, {"name": "enc", "model_type": "embedding"}])
     monkeypatch.setattr(mc, "localm_identity", lambda python, home: "test")
     rows, info = mc.census(models, sys.executable, tmp_path / "work", 60, False, False)
     assert {r.entry: r.verdict for r in rows} == {
         "chat.gguf": "PASS", "enc.gguf": "MISMATCH", "up.safetensors": "NOT-REGISTERED"}
-    assert json.loads((calls[0] / "config.json").read_text()) == {
-        "update_url": "", "bugreport_upload_url": ""} or not calls[0].exists()
-    assert info["home_deleted"] is True and not calls[0].exists()
+    assert calls == [{"update_url": "", "bugreport_upload_url": ""}]
+    assert info["home_deleted"] is True and not Path(info["home"]).exists()
+
+
+def test_truncated_gguf_is_undetermined(tmp_path):
+    whole = write_gguf(tmp_path / "whole.gguf", llm_kv())
+    assert mc.implied_kind(whole).kind == "llm"
+    cut = write_gguf(tmp_path / "cut.gguf", llm_kv(), truncate=1)
+    implied = mc.implied_kind(cut)
+    assert implied.kind == "undetermined" and "truncated" in implied.evidence
+
+
+def test_other_files_are_listed_as_skipped(tmp_path):
+    write_gguf(tmp_path / "ok.gguf", llm_kv())
+    (tmp_path / "tiny.llamafile").write_bytes(b"MZ")
+    (tmp_path / "carrier.exe").write_bytes(b"MZ")
+    entries, skipped = mc.enumerate_models(tmp_path)
+    assert sorted(e.path.name for e in entries) == ["ok.gguf", "tiny.llamafile"]
+    assert [(p.name, why) for p, why in skipped] == [("carrier.exe", "not a model file suffix (.exe)")]
+    assert mc.implied_kind(tmp_path / "tiny.llamafile").kind == "undetermined"
+
+
+def _stub_census(monkeypatch, models, leftover=None, fail=False):
+    def fake_register(python, root, entries, home, timeout):
+        (home / "registry.json").write_text(json.dumps({
+            "chat": {"path": str(models / "chat.gguf"), "model_type": "llm", "architecture": "qwen3"}}))
+        return {}
+
+    def fake_fetch(python, home, timeout, info):
+        if leftover:
+            info["leftover_pids"] = leftover
+        if fail:
+            raise RuntimeError("server did not answer")
+        return [{"name": "chat", "model_type": "llm"}]
+
+    monkeypatch.setattr(mc, "register_all", fake_register)
+    monkeypatch.setattr(mc, "fetch_api_models", fake_fetch)
+    monkeypatch.setattr(mc, "localm_identity", lambda python, home: "test")
+
+
+def test_leftovers_fail_the_run(tmp_path, monkeypatch, capsys):
+    models = tmp_path / "models"
+    models.mkdir()
+    write_gguf(models / "chat.gguf", llm_kv())
+    work = tmp_path / "work"
+    _stub_census(monkeypatch, models)
+    assert mc.main(["--models-dir", str(models), "--work-dir", str(work)]) == 0
+    monkeypatch.setattr(mc.shutil, "rmtree", lambda path, ignore_errors=False: None)
+    assert mc.main(["--models-dir", str(models), "--work-dir", str(work)]) == 2
+    assert "left its throwaway home behind" in capsys.readouterr().out
+    _stub_census(monkeypatch, models, leftover=[4242])
+    assert mc.main(["--models-dir", str(models), "--work-dir", str(work), "--keep"]) == 2
+    assert "could not stop server process(es): [4242]" in capsys.readouterr().out
+
+
+def test_home_deletion_is_reported_after_a_failed_run(tmp_path, monkeypatch, capsys):
+    models = tmp_path / "models"
+    models.mkdir()
+    write_gguf(models / "chat.gguf", llm_kv())
+    _stub_census(monkeypatch, models, fail=True)
+    monkeypatch.setattr(mc.shutil, "rmtree", lambda path, ignore_errors=False: None)
+    assert mc.main(["--models-dir", str(models), "--work-dir", str(tmp_path / "work")]) == 2
+    out = capsys.readouterr().out
+    assert "could not run: server did not answer" in out
+    assert "left its throwaway home behind" in out
+
+
+def test_kill_tree_stops_grandchildren(tmp_path):
+    psutil = pytest.importorskip("psutil")
+    child = ("import subprocess, sys, time\n"
+             "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'],"
+             " creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))\n"
+             "print(p.pid, flush=True)\n"
+             "time.sleep(120)\n")
+    import subprocess as sp
+    proc = sp.Popen([sys.executable, "-c", child], stdout=sp.PIPE, text=True,
+                    creationflags=getattr(sp, "CREATE_NO_WINDOW", 0) | getattr(sp, "CREATE_NEW_PROCESS_GROUP", 0),
+                    start_new_session=sys.platform != "win32")
+    grandchild = int(proc.stdout.readline())
+    seen = mc._descendants(proc.pid)
+    assert grandchild in seen
+    assert mc._kill_tree(proc, seen) == []
+    assert proc.poll() is not None
+    assert not psutil.pid_exists(grandchild) or \
+        psutil.Process(grandchild).status() == psutil.STATUS_ZOMBIE
 
 
 @pytest.mark.integration
