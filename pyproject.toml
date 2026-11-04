@@ -5,6 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "localm"
 version = "0.3.3"
+dynamic = ["scripts"]
 description = "Local AI platform - offline LLM inference, model management, and extensible agent plugins"
 readme = "docs/pypi-readme.md"
 license = { text = "AGPL-3.0-or-later" }
@@ -380,11 +381,11 @@ docs = [
     "mkdocs-material>=9.7.7,<10",
 ]
 
-[project.scripts]
-# console_main wraps the CLI group with the venv guard (NEW-J); the bare `main`
-# stays importable for in-process callers (tests, the `localm coder` route).
-localm    = "localm.cli:console_main"
-# backward-compat alias for `localm coder`; installed with every localm install.
+[tool.hatch.metadata.hooks.custom]
+path = "hatch_build.py"
+
+[tool.hatch.metadata.hooks.custom.console-scripts]
+localm = "localm.cli:console_main"
 localcoder = "localm.plugins.coder.cli:console_main"
 
 [project.urls]
