@@ -52,7 +52,7 @@ class _CollectionResync:
             skipped_roots, was_missing=was_missing,
             prune_missing=prune_missing, say=say)
         if pruned:
-            self._save()            # chunks and vectors changed
+            self._save(on_progress)  # chunks and vectors changed
         elif missing or restored:
             self._save_meta()       # only flags changed - see _save_meta
 
