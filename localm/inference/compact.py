@@ -414,6 +414,19 @@ def reply_reserve(capacity) -> int:
     return max(REPLY_RESERVE_MIN, int(capacity * REPLY_RESERVE_SHARE))
 
 
+def room_after_compaction(messages: list[dict], capacity: int,
+                          count_messages: Callable[[list[dict]], int]) -> bool:
+    """True when ``compact_messages`` would bring *messages* inside a window of
+    *capacity* tokens with its reply buffer (``reply_reserve``) free: the system
+    prompt and recent tail it always keeps (measured by *count_messages*), the
+    larger of a summary and a digest of the removed turns, and the template
+    margin. May raise what *count_messages* raises."""
+    head, _older, recent = _split(messages)
+    bridge = max(summary_reply_tokens(capacity), DIGEST_MAX_CHARS // CHARS_PER_TOKEN)
+    kept = count_messages([*head, *recent]) + bridge + template_margin(capacity)
+    return kept + reply_reserve(capacity) <= capacity
+
+
 def _message_key(message: dict) -> str:
     """Canonical JSON of the parts of *message* a model reads."""
     keyed = {k: message.get(k) for k in ("role", "content", "name", "tool_calls",

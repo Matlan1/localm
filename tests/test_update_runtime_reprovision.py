@@ -8,6 +8,7 @@ rollback that restores the runtime it replaced."""
 
 import io
 import json
+import os
 import subprocess
 import sys
 import zipfile
@@ -526,9 +527,11 @@ def test_the_restart_boot_does_not_start_a_download(install, monkeypatch):
     monkeypatch.setattr(updater, "repo_root", lambda: install)
     monkeypatch.setenv("LOCALM_RESTART_IN_PROGRESS", "1")
     monkeypatch.setenv("LOCALM_UPDATE_STEPS_DONE", "1")
+    monkeypatch.setenv("LOCALM_FINISH_UPDATE_AFTER_START", "")
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail("no provision"))
     _core._update_steps_at_start("gui")
     assert updater_runtime.read_pending() is not None
+    assert os.environ["LOCALM_FINISH_UPDATE_AFTER_START"] == "1"
 
 
 @pytest.mark.skipif(not (sys.platform == "win32" or sys.platform.startswith("linux")),

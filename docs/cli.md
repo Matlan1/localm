@@ -615,7 +615,7 @@ localm config ctx_auto false     # use the fixed n_ctx_max ceiling instead of me
 
 When the memory it needs cannot be measured (for example free VRAM on a GPU runtime that cannot read it), `ctx_auto` falls back to a fixed 16384-token ceiling (set `ctx_auto false` and raise `n_ctx_max` to change it).
 
-`ctx_reserve` (default 16384) is the window every load keeps usable. A Mixture-of-Experts model sized automatically keeps more of its experts in system RAM so this window stays on the GPU; any other model keeps its layers, and past free VRAM the KV cache lives in system RAM. A request larger than the loaded window reloads the model with a larger one, up to the model's trained window, `n_ctx_max` with `ctx_auto` off, or 65536 with `ctx_auto` on and `n_ctx_max` above 0. The coding agent asks for 32768 tokens.
+`ctx_reserve` (default 16384) is the window every load keeps usable. A Mixture-of-Experts model sized automatically keeps more of its experts in system RAM so this window stays on the GPU; any other model keeps its layers, and past free VRAM the KV cache lives in system RAM. A long chat that compaction can bring inside the loaded window is compacted and the model stays loaded. A request that compaction cannot help (one message larger than the window, or a conversation with nothing to summarise), or one that declares a window with `min_context` or `context_reserve`, reloads the model with a larger window instead, at least double, up to the model's trained window, `n_ctx_max` with `ctx_auto` off, or 65536 with `ctx_auto` on and `n_ctx_max` above 0. The coding agent asks for 32768 tokens.
 
 ```bash
 localm config ctx_reserve 32768  # keep a 32k window on every load

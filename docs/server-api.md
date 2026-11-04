@@ -374,7 +374,7 @@ server log rather than to the client.
 
 When the memory plugin is active and recalls facts for a turn, the response also carries an `X-Localm-Memory` header (see [Memory endpoints](#memory-endpoints-memory-plugin)).
 
-When the conversation is too long for the answering model's context window, the server compacts it for that request (older turns summarised, recent ones kept) and the response carries `X-Localm-Context-Compacted: 1`. Only the server's copy is compacted; a client that keeps the history itself can compact its own copy from then on instead of sending the full history every turn.
+When the conversation is too long for the answering model's context window, the server compacts it for that request (older turns summarised, recent ones kept) and the response carries `X-Localm-Context-Compacted: 1`. When compacting cannot make it fit, or the request declares a window with `min_context` or `context_reserve`, the server reloads the model with a larger window first, where the model's settings allow. Only the server's copy is compacted; a client that keeps the history itself can compact its own copy from then on instead of sending the full history every turn.
 
 ### Capability-based model routing
 

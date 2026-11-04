@@ -77,13 +77,13 @@ def make(monkeypatch, tmp_path):
 
 class TestCpuOnly:
     def test_g0_sizes_from_free_ram_and_never_reads_vram(self, make):
-        b, readers = make(0, vram=80 * GIB, ram=6 * GIB)
+        b, readers = make(0, vram=80 * GIB, ram=8 * GIB)
         tokens, source = b._auto_ctx_sized(capped=False)
         assert readers.vram_calls == 0
         assert readers.ram_calls == 1
         assert source == "from free RAM"
-        assert tokens == _ceiling(6 * GIB - MODEL - HOST_RAM_HEADROOM_BYTES, PER_TOKEN)
-        assert tokens == 8192
+        assert tokens == _ceiling(8 * GIB - MODEL - HOST_RAM_HEADROOM_BYTES, PER_TOKEN)
+        assert tokens == 25600
 
     def test_g0_ceiling_never_exceeds_what_free_ram_holds(self, make):
         b, _ = make(0, vram=80 * GIB, ram=6 * GIB)
@@ -93,9 +93,9 @@ class TestCpuOnly:
     def test_g0_prints_from_free_ram(self, make, monkeypatch):
         printed = []
         monkeypatch.setattr(_sizing.console, "print", lambda s, *a, **k: printed.append(s))
-        b, _ = make(0, vram=80 * GIB, ram=6 * GIB)
-        assert b._effective_ctx_max() == 8192
-        assert printed == ["[dim]  ctx auto : window may grow to 8,192 tokens "
+        b, _ = make(0, vram=80 * GIB, ram=8 * GIB)
+        assert b._effective_ctx_max() == 25600
+        assert printed == ["[dim]  ctx auto : window may grow to 25,600 tokens "
                            "(from free RAM)[/dim]"]
 
     def test_g0_with_ram_unreadable_falls_back_and_says_so(self, make):
@@ -106,9 +106,9 @@ class TestCpuOnly:
     @pytest.mark.parametrize("gpu_layers", [99, 16])
     def test_runtime_without_a_gpu_backend_sizes_everything_from_ram(
             self, make, gpu_layers):
-        b, readers = make(gpu_layers, vram=80 * GIB, ram=6 * GIB)
+        b, readers = make(gpu_layers, vram=80 * GIB, ram=8 * GIB)
         b.runtime_has_no_gpu = True
-        assert b._auto_ctx_sized() == (8192, "from free RAM")
+        assert b._auto_ctx_sized() == (25600, "from free RAM")
         assert readers.vram_calls == 0
 
     def test_full_offload_with_vram_unreadable_keeps_the_fallback(self, make):
@@ -141,10 +141,37 @@ class TestHeadroomLeavesNoBudget:
         b, _ = make(0, vram=80 * GIB, ram=ram)
         assert b._auto_ctx_sized() == (4096, "from free RAM")
 
-    def test_a_budget_after_the_headroom_is_still_held_to_it(self, make):
+    def test_a_small_budget_after_the_headroom_keeps_the_fallback_window(self, make):
         ram = MODEL + HOST_RAM_HEADROOM_BYTES + 1500 * MIB
         b, _ = make(0, vram=80 * GIB, ram=ram)
-        assert b._auto_ctx_sized(capped=False)[0] == _ceiling(1500 * MIB, PER_TOKEN) == 12288
+        assert _ceiling(1500 * MIB, PER_TOKEN) == 12288
+        assert b._auto_ctx_sized(capped=False)[0] == b._AUTO_CTX_FALLBACK == 16384
+
+    def test_a_large_budget_after_the_headroom_is_held_to_it(self, make):
+        ram = MODEL + HOST_RAM_HEADROOM_BYTES + 4 * GIB
+        b, _ = make(0, vram=80 * GIB, ram=ram)
+        tokens = b._auto_ctx_sized(capped=False)[0]
+        assert tokens == _ceiling(4 * GIB, PER_TOKEN) > b._AUTO_CTX_FALLBACK
+
+    @pytest.mark.parametrize("per_token", [PER_TOKEN, 100_000, 4096, 1_000_000])
+    def test_the_ceiling_never_falls_as_free_ram_rises(self, make, per_token):
+        previous_tokens = previous_ceiling = -1
+        for spare in range(0, 8 * GIB, 16 * MIB):
+            b, _ = make(0, vram=80 * GIB, ram=MODEL + spare)
+            b._gguf_kv_bpt = per_token
+            tokens = b._ram_ctx_tokens(0, per_token)
+            ceiling = b._auto_ctx_sized(capped=False)[0]
+            assert tokens >= previous_tokens, f"spare {spare}"
+            assert ceiling >= previous_ceiling, f"spare {spare}"
+            previous_tokens, previous_ceiling = tokens, ceiling
+
+    @pytest.mark.parametrize("spare_mib,expected", [
+        (1900, 16384), (2048, 16384), (2060, 16384), (2150, 16384), (3072, 16384),
+        (3900, 18432)])
+    def test_the_ceiling_around_the_headroom(self, make, spare_mib, expected):
+        b, _ = make(0, vram=80 * GIB, ram=MODEL + spare_mib * MIB)
+        b._gguf_kv_bpt = 100 * 1024
+        assert b._auto_ctx_sized(capped=False)[0] == expected
 
     def test_a_partial_offload_with_a_short_headroom_keeps_its_window(self, make):
         cpu_held = 15 * BLOCK + INPUT
@@ -163,11 +190,11 @@ class TestPartialOffload:
     HALF = PER_TOKEN // 2
 
     def test_ram_share_limits_the_ceiling(self, make):
-        b, readers = make(self.GPU_LAYERS, vram=16 * GIB, ram=4 * GIB)
+        b, readers = make(self.GPU_LAYERS, vram=16 * GIB, ram=6 * GIB)
         tokens, source = b._auto_ctx_sized(capped=False)
         assert source == "from free VRAM and RAM"
         assert readers.vram_calls >= 1 and readers.ram_calls == 1
-        assert tokens == _ceiling(4 * GIB - self.CPU_HELD - HOST_RAM_HEADROOM_BYTES,
+        assert tokens == _ceiling(6 * GIB - self.CPU_HELD - HOST_RAM_HEADROOM_BYTES,
                                   PER_TOKEN - self.HALF)
 
     def test_vram_share_is_charged_only_the_gpu_blocks(self, make):
@@ -186,10 +213,10 @@ class TestPartialOffload:
                                   - b._split_overhead_bytes(1), self.HALF)
 
     def test_vram_unreadable_keeps_the_ram_share_and_says_so(self, make):
-        b, _ = make(self.GPU_LAYERS, vram=None, ram=4 * GIB)
+        b, _ = make(self.GPU_LAYERS, vram=None, ram=6 * GIB)
         tokens, source = b._auto_ctx_sized(capped=False)
         assert source == "from free RAM; free VRAM not measurable"
-        assert tokens == _ceiling(4 * GIB - self.CPU_HELD - HOST_RAM_HEADROOM_BYTES,
+        assert tokens == _ceiling(6 * GIB - self.CPU_HELD - HOST_RAM_HEADROOM_BYTES,
                                   PER_TOKEN - self.HALF)
 
 
@@ -255,12 +282,12 @@ class TestMultiGpuPlacement:
     def test_cpu_blocks_are_held_to_free_ram(self, make, monkeypatch):
         printed = []
         monkeypatch.setattr(_sizing.console, "print", lambda s, *a, **k: printed.append(s))
-        b, readers = make(16, vram=None, ram=4 * GIB, n_ctx_max=0)
+        b, readers = make(16, vram=None, ram=6 * GIB, n_ctx_max=0)
         b._placement_units = self._units
         placement = self._placement(gpu_blocks=15, free_each=40 * GIB)
         tokens = b._placement_ctx_max(placement)
         cpu_held = 15 * BLOCK + INPUT
-        assert tokens == _ceiling(4 * GIB - cpu_held - HOST_RAM_HEADROOM_BYTES,
+        assert tokens == _ceiling(6 * GIB - cpu_held - HOST_RAM_HEADROOM_BYTES,
                                   PER_TOKEN // 2)
         assert readers.ram_calls == 1
         assert printed == [f"[dim]  ctx auto : window may grow to {tokens:,} tokens "

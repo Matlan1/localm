@@ -458,9 +458,14 @@ def register(app: FastAPI, ctx) -> None:
 
             from localm.inference.compact import compactable
             capacity = engine.context_capacity()
-            wanted = _hs.context_window_wanted(
-                engine, prompt_tokens, max(req.min_context or 0, req.context_reserve or 0),
-                capacity)
+            declared = max(req.min_context or 0, req.context_reserve or 0)
+            wanted = _hs.context_window_wanted(engine, prompt_tokens, declared, capacity)
+            # A conversation compaction can bring inside the window compacts
+            # instead of growing it, unless the client declared a window.
+            if (wanted is not None and not declared
+                    and await loop.run_in_executor(None, _hs.compaction_avoids_growth, engine,
+                                                   messages, prompt_tokens, capacity)):
+                wanted = None
             if wanted is not None:
                 engine = await _hs.grow_context_window(engine, wanted, on_status=say)
                 capacity = engine.context_capacity()
@@ -492,6 +497,10 @@ def register(app: FastAPI, ctx) -> None:
                             # it can carry a run of its own. This count gates the
                             # generation, so it refuses rather than estimating.
                             raise HTTPException(400, str(e)) from e
+                        wanted = _hs.context_window_wanted(engine, prompt_tokens, None, capacity)
+                        if wanted is not None:
+                            engine = await _hs.grow_context_window(engine, wanted, on_status=say)
+                            capacity = engine.context_capacity()
 
             if (not compact_in_stream and isinstance(capacity, int) and capacity > 0
                     and isinstance(prompt_tokens, int) and prompt_tokens > capacity):

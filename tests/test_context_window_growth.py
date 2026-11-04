@@ -9,11 +9,12 @@ backend stand-in that reports its window, the way tests/
 test_context_capacity_guard.py drives the capacity guard."""
 
 import asyncio
+import json
 
 import pytest
 from fastapi.testclient import TestClient
 
-from localm.inference import http_server as hs
+from localm.inference import compact, http_server as hs
 from localm.inference.http_server import create_app
 from localm.inference.protocol import GROWING_CONTEXT_STATUS
 from tests.test_context_capacity_guard import (_SKIP_ROLE_NUDGE_SYSTEM, _EngineWithBackend,
@@ -171,13 +172,16 @@ class TestGrowDue:
 class TestWanted:
     @pytest.mark.parametrize("prompt,min_context,capacity,expected", [
         (100, None, 8192, None),
-        (7000, None, 8192, 7000 + 2048),
+        (7000, None, 8192, 2 * 8192),
+        (20000, None, 8192, 20000 + 2048),
+        (29500, None, 32768, 2 * 32768),
         (100, 32768, 8192, 32768),
+        (100, 9000, 8192, 9000),
         (40000, 32768, 8192, 40000 + 2048),
         (100, None, None, None),
         (100, 4096, 8192, None),
     ])
-    def test_the_prompt_plus_its_reply_buffer_or_the_declared_window(
+    def test_the_prompt_plus_its_reply_buffer_at_least_doubled_or_the_declared_window(
             self, prompt, min_context, capacity, expected):
         engine = _EngineWithBackend(_MockBackend(capacity))
         assert hs.context_window_wanted(engine, prompt, min_context, capacity) == expected
@@ -252,6 +256,289 @@ class TestGrowthSafety:
         assert resp.status_code == 413, resp.text
         assert calls == [hs._CONTEXT_GROW_STEP, 0]
         assert hs._engines["test-cap-model"].loaded
+
+    @staticmethod
+    def _failing_first_load(backend, during=None):
+        real_load = backend.load
+        calls = []
+
+        def _load():
+            calls.append(backend.ctx_reserve)
+            if len(calls) == 1:
+                if during is not None:
+                    during()
+                raise RuntimeError("out of memory")
+            real_load()
+
+        backend.load = _load
+        return calls
+
+    def test_a_failed_growth_reload_leaves_the_active_model_active(self):
+        backend = _GrowableBackend(capacity=100)
+        calls = self._failing_first_load(backend)
+        engine = _EngineWithBackend(backend)
+        client = TestClient(create_app(engine))
+        assert client.get("/health").json()["loaded"] is True
+
+        resp = _post_chat(client, "x" * 150)
+
+        assert resp.status_code == 413, resp.text
+        assert len(calls) == 2, "the fault fired and the model loaded again"
+        assert hs._active_model_name == "test-cap-model"
+        assert hs._engine is engine
+        assert client.get("/health").json()["loaded"] is True
+        listed = {m["id"]: m for m in client.get("/v1/models").json()["data"]}
+        assert listed["test-cap-model"]["active"] is True
+
+    def test_a_failed_growth_reload_of_another_model_does_not_make_it_active(self, monkeypatch):
+        backend = _GrowableBackend(capacity=100)
+        calls = self._failing_first_load(backend)
+        engine = _EngineWithBackend(backend, display_name="m")
+        engine.active_requests = 1
+        other = _EngineWithBackend(_GrowableBackend(capacity=100), display_name="other")
+        hs._engines.update({"m": engine, "other": other})
+        monkeypatch.setattr(hs, "_active_model_name", "other")
+        monkeypatch.setattr(hs, "_engine", other)
+        monkeypatch.setattr("localm.config.load_registry", lambda: {})
+        monkeypatch.setattr("localm.model_manager.get_model_info", lambda name: None)
+
+        answering = asyncio.run(hs.grow_context_window(engine, 4096))
+
+        assert answering is engine and engine.loaded
+        assert len(calls) == 2
+        assert hs._active_model_name == "other"
+        assert hs._engine is other
+
+    def test_a_model_made_active_during_a_failed_reload_stays_active(self, monkeypatch):
+        backend = _GrowableBackend(capacity=100)
+        calls = self._failing_first_load(
+            backend, during=lambda: setattr(hs, "_active_model_name", "other"))
+        client = TestClient(create_app(_EngineWithBackend(backend)))
+        hs._engines["other"] = _EngineWithBackend(_GrowableBackend(capacity=100),
+                                                  display_name="other")
+        monkeypatch.setattr(hs, "_active_model_name", hs._active_model_name)
+
+        resp = _post_chat(client, "x" * 150)
+
+        assert resp.status_code == 413, resp.text
+        assert len(calls) == 2
+        assert hs._active_model_name == "other"
+
+
+def _long_chat(turns, size=400):
+    """A chat of *turns* user and assistant pairs of *size* tokens each (one
+    token a character on the stand-in backend), ending on a new user message."""
+    messages = [_SKIP_ROLE_NUDGE_SYSTEM]
+    for i in range(turns):
+        messages.append({"role": "user", "content": f"{i} " + "u" * size})
+        messages.append({"role": "assistant", "content": f"{i} " + "a" * size})
+    messages.append({"role": "user", "content": "and now?"})
+    return messages
+
+
+def _post_messages(client, messages, stream=False, **extra):
+    return client.post("/v1/chat/completions", json={
+        "model": "test-cap-model", "stream": stream, "messages": messages, **extra})
+
+
+def _stream_statuses(resp):
+    """The status codes of an SSE reply, and whether it ended on an error."""
+    codes, errored = [], False
+    for line in resp.text.splitlines():
+        if not line.startswith("data: ") or line == "data: [DONE]":
+            continue
+        chunk = json.loads(line[6:])
+        errored = errored or bool(chunk.get("localm_error"))
+        for choice in chunk.get("choices") or []:
+            code = (choice.get("delta") or {}).get("status_code")
+            if code:
+                codes.append(code)
+    return codes, errored
+
+
+class _SummaryHogBackend(_GrowableBackend):
+    """A model whose summary ignores its token budget, so a compacted
+    conversation can still overflow the window."""
+
+    def chat_stream(self, messages, **kwargs):
+        if "Summarise the following" in str(messages[0].get("content", "")):
+            yield "s" * 9000
+            return
+        yield from super().chat_stream(messages, **kwargs)
+
+
+class TestCompactionComesBeforeGrowth:
+    def test_a_long_chat_compacts_and_keeps_the_model_loaded(self):
+        backend = _GrowableBackend(capacity=16384)
+        client = TestClient(create_app(_EngineWithBackend(backend)))
+        messages = _long_chat(19)
+        assert 16384 - 2048 < backend.count_messages_tokens(messages) <= 16384
+
+        resp = _post_messages(client, messages)
+
+        assert resp.status_code == 200, resp.text
+        assert resp.headers["X-Localm-Context-Compacted"] == "1"
+        assert backend.loads == 0
+        assert backend.effective_ctx_max == 16384
+
+    def test_a_streamed_long_chat_compacts_and_keeps_the_model_loaded(self):
+        backend = _GrowableBackend(capacity=16384)
+        client = TestClient(create_app(_EngineWithBackend(backend)))
+
+        resp = _post_messages(client, _long_chat(19), stream=True)
+
+        codes, errored = _stream_statuses(resp)
+        assert "compacting" in codes
+        assert "growing_context" not in codes
+        assert not errored
+        assert backend.loads == 0
+
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_a_chat_far_past_the_window_never_reloads(self, stream):
+        backend = _GrowableBackend(capacity=16384)
+        client = TestClient(create_app(_EngineWithBackend(backend)))
+
+        for turns in range(15, 90, 5):
+            resp = _post_messages(client, _long_chat(turns), stream=stream)
+            assert resp.status_code == 200, resp.text
+            if stream:
+                assert not _stream_statuses(resp)[1]
+
+        assert backend.loads == 0
+        assert backend.effective_ctx_max == 16384
+
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_a_message_larger_than_the_window_grows_without_compacting(self, stream):
+        backend = _GrowableBackend(capacity=16384)
+        client = TestClient(create_app(_EngineWithBackend(backend)))
+        messages = _long_chat(5)
+        messages[-1]["content"] = "p" * 20000
+
+        resp = _post_messages(client, messages, stream=stream)
+
+        assert resp.status_code == 200, resp.text
+        if stream:
+            codes, errored = _stream_statuses(resp)
+            assert "compacting" not in codes
+            assert not errored
+        else:
+            assert "X-Localm-Context-Compacted" not in resp.headers
+        assert backend.loads == 1
+        assert backend.effective_ctx_max == 2 * 16384
+
+    @pytest.mark.parametrize("field", ["min_context", "context_reserve"])
+    def test_a_declared_window_grows_a_chat_that_could_compact(self, field):
+        backend = _GrowableBackend(capacity=16384)
+        client = TestClient(create_app(_EngineWithBackend(backend)))
+
+        resp = _post_messages(client, _long_chat(19), **{field: 8192})
+
+        assert resp.status_code == 200, resp.text
+        assert "X-Localm-Context-Compacted" not in resp.headers
+        assert backend.loads == 1
+        assert backend.effective_ctx_max == 2 * 16384
+
+    def test_a_short_conversation_grows_since_nothing_can_compact(self):
+        backend = _GrowableBackend(capacity=8192)
+        client = TestClient(create_app(_EngineWithBackend(backend)))
+
+        resp = _post_chat(client, "x" * 7000)
+
+        assert resp.status_code == 200, resp.text
+        assert backend.loads == 1
+        assert backend.effective_ctx_max == 2 * 8192
+
+    def test_growth_doubles_so_the_next_turns_do_not_reload(self):
+        backend = _GrowableBackend(capacity=8192)
+        client = TestClient(create_app(_EngineWithBackend(backend)))
+
+        for size in (7000, 8000, 9000, 10000, 12000):
+            assert _post_chat(client, "x" * size).status_code == 200
+
+        assert backend.loads == 1
+
+    def test_a_window_at_its_limit_still_compacts(self):
+        backend = _GrowableBackend(capacity=16384, limit=(16384, "trained"))
+        client = TestClient(create_app(_EngineWithBackend(backend)))
+        messages = _long_chat(5)
+        messages[-1]["content"] = "p" * 13000
+
+        resp = _post_messages(client, messages)
+
+        assert resp.status_code == 200, resp.text
+        assert resp.headers["X-Localm-Context-Compacted"] == "1"
+        assert backend.loads == 0
+
+    def test_a_compacted_prompt_that_still_overflows_grows(self):
+        backend = _SummaryHogBackend(capacity=8192)
+        client = TestClient(create_app(_EngineWithBackend(backend)))
+        messages = _long_chat(9)
+        assert backend.count_messages_tokens(messages) > 8192 - 2048
+
+        resp = _post_messages(client, messages)
+
+        assert resp.status_code == 200, resp.text
+        assert resp.headers["X-Localm-Context-Compacted"] == "1"
+        assert backend.loads == 1
+        assert backend.effective_ctx_max > 9000
+
+
+class TestCompactionAvoidsGrowth:
+    def test_a_refused_count_does_not_choose_compaction(self):
+        from localm.inference.backends.base import PretokenizerUnsafeInputError
+
+        class _Refusing(_GrowableBackend):
+            def count_messages_tokens(self, messages):
+                raise PretokenizerUnsafeInputError("unbroken run")
+
+        engine = _EngineWithBackend(_Refusing(capacity=16384))
+
+        assert hs.compaction_avoids_growth(engine, _long_chat(19), 16000, 16384) is False
+
+    def test_a_backend_that_cannot_reserve_does_not_count(self):
+        backend = _MockBackend(capacity=16384)
+        counted = []
+        backend.count_messages_tokens = lambda messages: counted.append(messages) or 0
+
+        assert hs.compaction_avoids_growth(
+            _EngineWithBackend(backend), _long_chat(19), 16000, 16384) is False
+        assert counted == []
+
+
+class TestRoomAfterCompaction:
+    @staticmethod
+    def _count(messages):
+        return sum(len(str(m.get("content", ""))) for m in messages)
+
+    def _chat_with_tail(self, tail_tokens):
+        return [{"role": "user", "content": "older"},
+                {"role": "assistant", "content": "older"},
+                {"role": "user", "content": "x" * tail_tokens},
+                {"role": "assistant", "content": ""},
+                {"role": "user", "content": ""},
+                {"role": "assistant", "content": ""},
+                {"role": "user", "content": ""}]
+
+    def test_the_kept_tail_the_summary_and_the_reply_must_fit(self):
+        capacity = 16384
+        bound = (compact.reply_reserve(capacity) + compact.template_margin(capacity)
+                 + max(compact.summary_reply_tokens(capacity),
+                       compact.DIGEST_MAX_CHARS // compact.CHARS_PER_TOKEN))
+        room = capacity - bound
+        assert compact.room_after_compaction(self._chat_with_tail(room), capacity, self._count)
+        assert not compact.room_after_compaction(
+            self._chat_with_tail(room + 1), capacity, self._count)
+
+    def test_it_measures_what_compaction_keeps(self):
+        messages = self._chat_with_tail(100)
+        kept = []
+
+        def _count(ms):
+            kept.append(ms)
+            return self._count(ms)
+
+        compact.room_after_compaction(messages, 16384, _count)
+        assert kept == [messages[2:]]
 
 
     def test_a_switch_that_takes_the_model_during_the_reload_asks_for_a_retry(self, monkeypatch):

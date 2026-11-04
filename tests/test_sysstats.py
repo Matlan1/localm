@@ -1649,7 +1649,7 @@ class _Cuda:
 
     @staticmethod
     def mem_get_info(i):
-        return (6 * 2**30, 8 * 2**30)
+        return (int(os.environ.get("PROBE_STUB_FREE_GIB", "6")) * 2**30, 8 * 2**30)
 
     @staticmethod
     def get_device_name(i):
@@ -1755,6 +1755,42 @@ class TestMeterTorchSpawns:
         assert self._spawns() == 1
         self._round()
         assert self._spawns() == 2
+
+    def test_a_probe_another_caller_took_reaches_an_uncovered_meter_at_once(
+            self, monkeypatch, tmp_path):
+        from localm import discover, gpu_usage
+        self._meter(monkeypatch, tmp_path)
+        monkeypatch.setattr(gpu_usage, "device_global_used_bytes", lambda gpus: {})
+        monkeypatch.setattr(sysstats, "_nvidia_smi_used_by_bus", lambda: {})
+        first = self._round()
+        assert first["vram"]["used"] == 2 * GB
+        assert self._round() == first
+
+        monkeypatch.setenv("PROBE_STUB_FREE_GIB", "2")
+        discover.list_gpus(return_status=True, wait_for_inflight=True)
+        assert self._spawns() == 2, "the other caller's probe"
+
+        after = self._round()
+        assert after["vram"]["used"] == 6 * GB
+        assert self._round() == after
+        assert self._spawns() == 2, "the meter started no probe of its own"
+
+    def test_an_uncovered_meter_keeps_its_reading_after_an_unchanged_probe(
+            self, monkeypatch, tmp_path):
+        from localm import discover, gpu_usage
+        self._meter(monkeypatch, tmp_path)
+        monkeypatch.setattr(gpu_usage, "device_global_used_bytes", lambda gpus: {})
+        monkeypatch.setattr(sysstats, "_nvidia_smi_used_by_bus", lambda: {})
+        first = self._round()
+        shape = []
+        real = sysstats._cheap_vram
+        monkeypatch.setattr(sysstats, "_cheap_vram",
+                            lambda fresh: shape.append(fresh) or real(fresh))
+
+        discover.list_gpus(return_status=True, wait_for_inflight=True)
+
+        assert self._round() == first
+        assert shape == []
 
     def test_nvidia_smi_covers_a_device_the_windows_sources_do_not(
             self, monkeypatch, tmp_path):
