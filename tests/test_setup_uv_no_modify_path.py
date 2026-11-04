@@ -210,7 +210,7 @@ def _probe_default_uv_dir(tmp_path: Path, home: Path, **extra) -> str:
     probe.write_bytes(("@echo off\r\nsetlocal EnableDelayedExpansion\r\n"
                        "call :add_default_uv_dir\r\nwhere uv\r\nexit /b 0\r\n" + sub + "\r\n").encode())
     env = _win_env(tmp_path / "scratch", home, tmp_path / "log.txt", tmp_path / "unused.exe")
-    env.update(extra)
+    env.update(HOMEPATH="\\no-such-home", **extra)
     rc, out = _run_cmd(tmp_path, "probe.bat", env, "")
     return out.strip()
 
