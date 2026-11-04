@@ -319,12 +319,14 @@ def register(app: FastAPI, ctx) -> None:
         return info
 
     def _probes_held(fn, *args, **kwargs):
-        """Call *fn* with the GPU meter's torch probe children held
-        (``discover.torch_probes_held``): while an update or rollback replaces the
-        install's files, a probe child would run from a half-replaced tree and
-        hold PyTorch's libraries. Blocks: call it off the event loop."""
+        """Call *fn* with the GPU meter's torch probe children and runtime probe
+        daemon held (``discover.torch_probes_held``, ``_loader.probe_daemon_held``):
+        while an update or rollback replaces the install's files, a probe child
+        would run from a half-replaced tree and hold PyTorch's libraries or the
+        native runtime. Blocks: call it off the event loop."""
         from localm import discover
-        with discover.torch_probes_held():
+        from localm.inference.backends.llamacpp._loader import probe_daemon_held
+        with discover.torch_probes_held(), probe_daemon_held():
             return fn(*args, **kwargs)
 
     def _restart_after_apply(res: dict) -> None:

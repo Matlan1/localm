@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import zipfile
 from pathlib import Path
 
@@ -572,6 +573,47 @@ def test_the_restart_path_carries_out_a_pending_reprovision(install, monkeypatch
     assert stopped == [1]
     assert _marker(install) == "amd-rocm b1355-cpu-b11908"
     assert updater_runtime.last_status()["state"] == "updated"
+
+
+def test_a_runtime_step_that_rolls_the_update_back_stays_visible_with_what_to_do(install,
+                                                                                 monkeypatch):
+    from localm import updater_parts
+    data, sig = _release()
+    updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
+                  defer_runtime=True)
+    import localm.inference.http_server as hs
+    monkeypatch.setattr(updater, "repo_root", lambda: install)
+    fake = _fake_setup_llama(install, "b1355-cpu-b11908", rc=1)
+    monkeypatch.setattr(subprocess, "run",
+                        lambda cmd, **kw: subprocess.CompletedProcess(cmd, fake(cmd)))
+    assert hs._finish_pending_runtime_update() is True
+    assert (install / "VERSION").read_text(encoding="utf-8") == "0.3.1"
+    steps = updater_parts.installed_parts(install)["last_steps"]
+    assert len(steps) == 1, "a note both parts recorded is listed once"
+    note = steps[0]["note"]
+    assert "NOT updated" in note and "setup-llama exited 1" in note
+    assert "To try again" in note and "Update now" in note
+    assert "--force" not in note, "the command of the version rolled back from is not offered"
+
+
+def test_a_later_failed_step_is_named_after_a_rollback_that_restores_the_runtime(install,
+                                                                                 monkeypatch):
+    from localm import updater_components, updater_parts
+    data, sig = _release()
+    updater.apply(1, signature=sig, installed=install, download_opener=_download(data),
+                  defer_runtime=True)
+    monkeypatch.setattr(updater, "repo_root", lambda: install)
+    fake = _fake_setup_llama(install, "b1355-cpu-b11908")
+    monkeypatch.setattr(subprocess, "run",
+                        lambda cmd, **kw: subprocess.CompletedProcess(cmd, fake(cmd)))
+    assert updater_runtime.finish_pending()["state"] == "updated"
+    (updater._updates_dir() / updater_components.STATUS_FILE).write_text(json.dumps(
+        {"state": "failed", "components": [], "note": "the PyTorch stack was not updated",
+         "error": "uv exited 2", "root": str(install), "version": "0.3.2",
+         "at": time.time()}), encoding="utf-8")
+    updater.rollback_last(installed=install)
+    notes = [s["note"] for s in updater_parts.installed_parts(install)["last_steps"]]
+    assert any("the PyTorch stack was not updated" in n and "To try again" in n for n in notes)
 
 
 # ------------------------------------ doctor ---------------------------------
