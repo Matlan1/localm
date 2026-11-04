@@ -117,6 +117,45 @@ class TestCpuOnly:
         assert readers.ram_calls == 0
 
 
+class TestHeadroomLeavesNoBudget:
+    """Free RAM that holds the weights and a useful window but not the headroom
+    beside them still gets that window, never more than the 16384 fallback."""
+
+    def test_a_window_that_fits_is_not_cut_to_the_floor(self, make):
+        ram = MODEL + 3 * GIB // 2
+        assert ram - MODEL - HOST_RAM_HEADROOM_BYTES < 0
+        b, _ = make(0, vram=80 * GIB, ram=ram)
+        tokens, source = b._auto_ctx_sized()
+        assert source == "from free RAM"
+        assert tokens == _ceiling(ram - MODEL, PER_TOKEN) == 12288
+        assert MODEL + tokens * PER_TOKEN <= ram
+
+    def test_the_ceiling_never_exceeds_the_fallback(self, make):
+        b, _ = make(0, vram=80 * GIB, ram=MODEL + GIB)
+        b._gguf_kv_bpt = 4096
+        assert b._auto_ctx_sized(capped=True)[0] == b._AUTO_CTX_FALLBACK == 16384
+        assert b._auto_ctx_sized(capped=False)[0] == 16384
+
+    @pytest.mark.parametrize("ram", [MODEL - 1, MODEL, 0])
+    def test_weights_that_leave_no_room_keep_the_floor(self, make, ram):
+        b, _ = make(0, vram=80 * GIB, ram=ram)
+        assert b._auto_ctx_sized() == (4096, "from free RAM")
+
+    def test_a_budget_after_the_headroom_is_still_held_to_it(self, make):
+        ram = MODEL + HOST_RAM_HEADROOM_BYTES + 1500 * MIB
+        b, _ = make(0, vram=80 * GIB, ram=ram)
+        assert b._auto_ctx_sized(capped=False)[0] == _ceiling(1500 * MIB, PER_TOKEN) == 12288
+
+    def test_a_partial_offload_with_a_short_headroom_keeps_its_window(self, make):
+        cpu_held = 15 * BLOCK + INPUT
+        ram = cpu_held + 3 * GIB // 2
+        assert ram - cpu_held - HOST_RAM_HEADROOM_BYTES < 0
+        b, _ = make(16, vram=16 * GIB, ram=ram)
+        tokens, source = b._auto_ctx_sized(capped=False)
+        assert source == "from free VRAM and RAM"
+        assert tokens == min(16384, _ceiling(ram - cpu_held, PER_TOKEN - PER_TOKEN // 2)) == 16384
+
+
 class TestPartialOffload:
     # -g 16 on 30 blocks: blocks 15..29 (15 of them) keep their KV in VRAM.
     GPU_LAYERS = 16
