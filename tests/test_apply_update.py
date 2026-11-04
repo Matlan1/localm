@@ -13,6 +13,7 @@ import zipfile
 import pytest
 
 from localm import _apply_update as au
+from tests._held_file import held
 
 
 def _make_zip(path, files, wrap=None):
@@ -147,6 +148,102 @@ def test_rollback_restores_exact_pre_apply_state(tmp_path):
     # Never-touch survived throughout.
     assert (inst / ".venv" / "marker").read_text() == "keep"
     assert (inst / "home" / "config.json").read_text() == "user data"
+
+
+_WINDOWS_HOLDS = pytest.mark.skipif(sys.platform != "win32",
+                                    reason="elsewhere an open file can be removed")
+
+
+def _tree_old_and_new(tmp_path):
+    """An install whose ``localm`` holds the new build and a backup that holds the
+    old one, with a file only the new build has."""
+    inst, bdir = tmp_path / "inst", tmp_path / "bak"
+    for root, text in ((inst, "NEW"), (bdir, "OLD")):
+        (root / "localm" / "sub").mkdir(parents=True)
+        for rel in ("a.py", "b.py", "z.py", "sub/c.py"):
+            (root / "localm" / rel).write_text(text, encoding="utf-8")
+        (root / "VERSION").write_text(text, encoding="utf-8")
+    (inst / "localm" / "only_new.py").write_text("NEW", encoding="utf-8")
+    return inst, bdir, ["VERSION", "localm"]
+
+
+@_WINDOWS_HOLDS
+@pytest.mark.parametrize("exclusive", [False, True], ids=["others-may-read", "no-sharing"])
+def test_a_held_file_does_not_stop_the_rest_of_its_folder_coming_back(tmp_path, exclusive):
+    inst, bdir, names = _tree_old_and_new(tmp_path)
+    raised = None
+    with held(inst / "localm" / "z.py", exclusive=exclusive):
+        try:
+            au.rollback(bdir, inst, names)
+        except RuntimeError as e:
+            raised = e
+    for rel in ("a.py", "b.py", "sub/c.py"):
+        assert (inst / "localm" / rel).read_text(encoding="utf-8") == "OLD", rel
+    assert (inst / "VERSION").read_text(encoding="utf-8") == "OLD"
+    assert (inst / "localm" / "z.py").read_text(encoding="utf-8") == (
+        "NEW" if exclusive else "OLD")
+    assert raised is not None, "a rollback that could not remove a file never reports success"
+    assert "remove localm" in str(raised)
+    assert ("restore localm" in str(raised)) is exclusive
+    assert (bdir / "localm" / "z.py").exists(), "the backup is kept"
+    au.rollback(bdir, inst, names)
+    assert sorted(p.name for p in (inst / "localm").iterdir()) == ["a.py", "b.py", "sub", "z.py"]
+    assert (inst / "localm" / "z.py").read_text(encoding="utf-8") == "OLD"
+
+
+@_WINDOWS_HOLDS
+def test_a_file_held_during_the_swap_leaves_the_previous_files_in_place(tmp_path):
+    inst, staged, bdir = tmp_path / "inst", tmp_path / "staged", tmp_path / "bak"
+    inst.mkdir()
+    staged.mkdir()
+    _fake_install(inst)
+    _staged_build(staged)
+    (inst / "localm" / "z_last.py").write_text("old", encoding="utf-8")
+    raised = None
+    with held(inst / "localm" / "z_last.py"):
+        try:
+            au.swap_with_backup(staged, inst, bdir)
+        except RuntimeError as e:
+            raised = e
+    assert (inst / "localm" / "__init__.py").read_text(encoding="utf-8") == "old"
+    assert (inst / "localm" / "gone.py").read_text(encoding="utf-8") == "removed upstream"
+    assert (inst / "VERSION").read_text(encoding="utf-8").strip() == "0.1.0"
+    assert not (inst / "pyproject.toml").exists()
+    assert raised is not None and "rollback also failed" in str(raised)
+    assert (bdir / "localm" / "__init__.py").exists(), "the backup is kept for a manual restore"
+
+
+@_WINDOWS_HOLDS
+def test_a_backup_that_cannot_be_completed_is_removed_and_nothing_is_swapped(tmp_path):
+    inst, staged, bdir = tmp_path / "inst", tmp_path / "staged", tmp_path / "bak"
+    inst.mkdir()
+    staged.mkdir()
+    _fake_install(inst)
+    _staged_build(staged)
+    raised = None
+    with held(inst / "localm" / "gone.py", exclusive=True):
+        try:
+            au.swap_with_backup(staged, inst, bdir)
+        except au.BackupFailed as e:
+            raised = e
+    assert not bdir.exists(), "no partial backup stays behind"
+    assert (inst / "localm" / "__init__.py").read_text(encoding="utf-8") == "old"
+    assert (inst / "VERSION").read_text(encoding="utf-8").strip() == "0.1.0"
+    assert raised is not None
+
+
+def test_a_swap_that_was_undone_removes_its_backup(tmp_path, monkeypatch):
+    inst, staged, bdir = tmp_path / "inst", tmp_path / "staged", tmp_path / "bak"
+    inst.mkdir()
+    staged.mkdir()
+    _fake_install(inst)
+    _staged_build(staged)
+    monkeypatch.setattr(au, "apply_files",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("swap boom")))
+    with pytest.raises(OSError, match="swap boom"):
+        au.swap_with_backup(staged, inst, bdir)
+    assert (inst / "localm" / "__init__.py").read_text(encoding="utf-8") == "old"
+    assert not bdir.exists()
 
 
 # --------- preserve provisioned native binaries across a swap -----------

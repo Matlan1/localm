@@ -705,8 +705,8 @@ def finish_pending(*, root=None, runner: Optional[Callable] = None,
     back or replaced since) is dropped and None returned.
 
     Returns None when nothing is pending, else a status ``{"state", "backend",
-    "from", "to", "holders", "error", "note"}`` (also recorded for ``localm
-    doctor``). ``state`` is:
+    "from", "to", "holders", "error", "note", "version"}`` (also recorded for ``localm
+    doctor``), ``version`` being the localm version installed. ``state`` is:
 
     - ``"updated"``: the runtime now is the release's build;
     - ``"current"``: it already was, or the user has since chosen a build;
@@ -743,7 +743,7 @@ def finish_pending(*, root=None, runner: Optional[Callable] = None,
     lib = runtime_lib(root)
     backend, target, pins = pending["backend"], pending["target"], pending.get("pins") or {}
     status = {"state": None, "backend": backend, "from": pending.get("from"), "to": target,
-              "holders": [], "error": None, "note": None}
+              "holders": [], "error": None, "note": None, "version": installed_version}
 
     _t, source = runtime_target(backend, pin=sl.pinned_tag(), tracking=sl.tracks_latest(),
                                 release_tag=pins.get("pinned_tag"),

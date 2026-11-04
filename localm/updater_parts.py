@@ -123,7 +123,7 @@ def installed_parts(root=None) -> dict:
     "target", "matches"}]`` for every installed component the shallow plan can
     compare, and ``problems`` one user-facing line per part that disagrees.
     ``consistent`` is True when ``problems`` is empty. ``last_steps`` holds
-    the runtime and component update results of the last day
+    the runtime and component update results of the last day for this version
     (:func:`_last_steps`)."""
     from localm import _version, updater
     root = Path(root) if root else updater.repo_root()
@@ -181,7 +181,7 @@ def installed_parts(root=None) -> dict:
         problems.append(f"could not compare the components with this version: {e}")
     return {"app": app, "install_record": record, "install_record_matches": record_matches,
             "install_record_problem": record_problem,
-            "deps_problems": deps_problems, "last_steps": _last_steps(),
+            "deps_problems": deps_problems, "last_steps": _last_steps(app),
             "runtime": runtime, "components": components, "problems": problems,
             "consistent": not problems}
 
@@ -190,9 +190,11 @@ def installed_parts(root=None) -> dict:
 LAST_STEPS_S = 24 * 3600.0
 
 
-def _last_steps() -> list:
+def _last_steps(version: Optional[str]) -> list:
     """The results of the runtime and component updates of the last
-    :data:`LAST_STEPS_S` seconds: ``[{"part", "state", "note", "at"}]``."""
+    :data:`LAST_STEPS_S` seconds: ``[{"part", "state", "note", "at"}]``. A result
+    recorded under another localm version than *version* is left out; one that
+    names no version (written by an older build) is kept."""
     import time
     out = []
     try:
@@ -200,6 +202,8 @@ def _last_steps() -> list:
         for part, st in (("runtime", updater_runtime.last_status()),
                          ("components", updater_components.last_status())):
             if not st or not st.get("note"):
+                continue
+            if st.get("version") and _norm_version(st["version"]) != _norm_version(version):
                 continue
             try:
                 at = float(st.get("at") or 0)

@@ -23,6 +23,7 @@ from localm.bugreport import LocalmError
 from tests._net_config import set_config
 from tests._update_signing import envelope, keyset
 
+_REAL_RUN = subprocess.run
 _PRIV = Ed25519PrivateKey.generate()
 _RECOVERY = [Ed25519PrivateKey.generate() for _ in range(3)]
 
@@ -941,6 +942,568 @@ def test_the_standalone_rollback_puts_the_packages_back_when_the_code_fails(
     assert rb.main(["--yes"], install_root=inst, code_root=repo) == 2
     assert "The packages were put back as they were" in capsys.readouterr().err
     assert _state(site) == {"localm": "0.3.2", "click": "8.1", "rich": "13.0"}
+
+
+REPO = Path(__file__).resolve().parents[1]
+_NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
+
+
+def _stage_standalone_tools(inst: Path) -> None:
+    """Put the rollback scripts and the two helpers they load by file path into the
+    install, as a real build has them."""
+    (inst / "scripts").mkdir(exist_ok=True)
+    for rel in ("scripts/rollback_update.py", "scripts/update_watchdog.py",
+                "localm/_apply_update.py", "localm/updater_components.py"):
+        (inst / rel).write_bytes((REPO / rel).read_bytes())
+
+
+def _run_script(inst: Path, home: Path, name: str, *args, flags=("-I", "-S"), env=None):
+    full = {"LOCALM_HOME": str(home), "SYSTEMROOT": os.environ.get("SYSTEMROOT", "")}
+    full.update(env or {})
+    return subprocess.run([sys.executable, *flags, str(inst / "scripts" / name), *args],
+                          cwd=str(inst.parent), env=full, capture_output=True, text=True,
+                          timeout=120, **_NO_WINDOW)
+
+
+@pytest.mark.parametrize("flags, env", [
+    (("-I", "-S"), None),
+    ((), "PYTHONPATH"),
+], ids=["no-localm-importable", "localm-raises-on-import"])
+def test_the_standalone_rollback_runs_when_localm_cannot_be_imported(
+        install, home, flags, env):
+    inst, site = install
+    data, sig = _release_032(sd=None)
+    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                  runner=_deps_step(site))
+    _stage_standalone_tools(inst)
+    (inst / "localm" / "__init__.py").write_text("raise RuntimeError('broken build')\n",
+                                                 encoding="utf-8")
+    out = _run_script(inst, home, "rollback_update.py", "--yes", flags=flags,
+                      env={"PYTHONPATH": str(inst)} if env else None)
+    _assert_venv_is_031(site)
+    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1"
+    assert (inst / "localm" / "__init__.py").read_text(encoding="utf-8") == "# 0.3.1"
+    assert out.returncode == 0, (out.stdout, out.stderr)
+    assert "Traceback" not in out.stderr
+
+
+def test_the_watchdog_rolls_back_when_localm_cannot_be_imported(install, home):
+    inst, site = install
+    data, sig = _release_032(sd=None)
+    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                  runner=_deps_step(site))
+    _stage_standalone_tools(inst)
+    out = _run_script(inst, home, "update_watchdog.py", "--host", "127.0.0.1", "--port", "9",
+                      "--expect-version", "0.3.2", "--install-root", str(inst),
+                      "--timeout", "0.2", "--poll-interval", "0.1", "--request-timeout", "0.1")
+    _assert_venv_is_031(site)
+    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1"
+    assert out.returncode == 1, (out.stdout, out.stderr)
+
+
+def test_the_long_path_form_in_the_standalone_helper_matches_the_shared_one(tmp_path):
+    from localm.media.source_archive import long_path
+    for p in (tmp_path / "x", Path("relative") / "y", Path(r"\\server\share\z"),
+              long_path(tmp_path / "already")):
+        assert uc._long(p) == long_path(p), p
+
+
+def test_an_unexpected_failure_of_the_package_helper_changes_nothing_and_says_so(install, home):
+    inst, site = install
+    data, sig = _release_032(sd=None)
+    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                  runner=_deps_step(site))
+    _stage_standalone_tools(inst)
+    helper = inst / "localm" / "updater_components.py"
+    helper.write_text(helper.read_text(encoding="utf-8") + (
+        "\ndef _clone_venv(venv, copy, owner):\n"
+        "    raise ImportError('a helper of the new build is missing')\n"), encoding="utf-8")
+    out = _run_script(inst, home, "rollback_update.py", "--yes")
+    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.2"
+    assert _state(site)["localm"] == "0.3.2"
+    assert (updater._backup_dir() / "VERSION").exists()
+    assert out.returncode == 2, (out.stdout, out.stderr)
+    assert "Rollback FAILED" in out.stderr and "a helper of the new build" in out.stderr
+    assert "Traceback" not in out.stderr
+
+
+def test_a_failure_while_restoring_the_packages_puts_them_back_and_says_so(install, home):
+    inst, site = install
+    data, sig = _release_032(sd=None)
+    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                  runner=_deps_step(site))
+    _stage_standalone_tools(inst)
+    helper = inst / "localm" / "updater_components.py"
+    helper.write_text(helper.read_text(encoding="utf-8").replace(
+        "    errors = []\n    for name in changed:\n        if name in now:\n"
+        "            shutil.rmtree(site_now",
+        "    raise ValueError('restore helper broke')\n"
+        "    errors = []\n    for name in changed:\n        if name in now:\n"
+        "            shutil.rmtree(site_now"), encoding="utf-8")
+    assert "restore helper broke" in helper.read_text(encoding="utf-8")
+    out = _run_script(inst, home, "rollback_update.py", "--yes")
+    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.2"
+    assert out.returncode == 2, (out.stdout, out.stderr)
+    assert "restore helper broke" in out.stderr and "Traceback" not in out.stderr
+
+
+def test_a_failed_undo_of_the_packages_is_reported_without_a_traceback(install, home):
+    inst, site = install
+    data, sig = _release_032(sd=None)
+    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                  runner=_deps_step(site))
+    _stage_standalone_tools(inst)
+    helper = inst / "localm" / "updater_components.py"
+    helper.write_text(helper.read_text(encoding="utf-8") + (
+        "\n_real_restore = _restore_venv\n"
+        "def _restore_venv(copy, venv, *, own=False, only=None):\n"
+        "    if 'before-rollback' in str(copy):\n"
+        "        raise ValueError('the undo broke')\n"
+        "    return _real_restore(copy, venv, own=own, only=only)\n"), encoding="utf-8")
+    manifest = updater._updates_dir() / "applied_names.json"
+    manifest.write_text(json.dumps(json.loads(manifest.read_text(encoding="utf-8"))
+                                   + ["../outside"]), encoding="utf-8")
+    out = _run_script(inst, home, "rollback_update.py", "--yes")
+    assert out.returncode == 2, (out.stdout, out.stderr)
+    assert "ALSO failed" in out.stderr and "the undo broke" in out.stderr
+    assert "Traceback" not in out.stderr
+    assert (updater._backup_dir() / "VERSION").exists()
+
+
+# ------------------- the standalone rollback and what it reports ----------------
+
+def _add_kept_parts(names=("comfyui", "uv")) -> None:
+    """Note in the update's snapshot that it also replaced *names*."""
+    state_file = uc.snapshot_dir(updater._backup_dir()) / uc.STATE_FILE
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    state["components"].update({n: {} for n in names})
+    state_file.write_text(json.dumps(state), encoding="utf-8")
+
+
+def test_the_standalone_rollback_says_which_parts_it_leaves_and_records_itself(install, home):
+    from localm import updater_parts
+    inst, site = install
+    data, sig = _release_032(sd=None)
+    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                  runner=_deps_step(site))
+    _add_kept_parts()
+    updater_runtime._write_status({"state": "updated", "note": "re-provisioned the runtime",
+                                   "version": "0.3.2"})
+    uc._write_status({"state": "updated", "note": "updated the uv: 0.13.4 -> 0.13.6",
+                      "components": []}, inst, "0.3.2")
+    _stage_standalone_tools(inst)
+    out = _run_script(inst, home, "rollback_update.py", "--yes")
+    assert out.returncode == 0, (out.stdout, out.stderr)
+    assert "ComfyUI" in out.stdout and "uv" in out.stdout
+    assert "next start" in out.stdout
+    for status in (uc.last_status(), updater_runtime.last_status()):
+        assert status["state"] == "rolled_back"
+        assert status["version"] == "0.3.1"
+        assert "rolled back to localm 0.3.1" in status["note"] and "ComfyUI" in status["note"]
+    steps = updater_parts.installed_parts(inst)["last_steps"]
+    assert {s["state"] for s in steps} == {"rolled_back"}
+    assert not any("0.13.6" in s["note"] for s in steps), "no stale line about the update"
+
+
+def test_the_standalone_rollback_names_no_part_the_update_did_not_keep(install, home):
+    inst, site = install
+    data, sig = _release_032(sd=None)
+    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                  runner=_deps_step(site))
+    _stage_standalone_tools(inst)
+    out = _run_script(inst, home, "rollback_update.py", "--yes")
+    assert out.returncode == 0, (out.stdout, out.stderr)
+    assert "ComfyUI" not in out.stdout and "next start" not in out.stdout
+    assert "ComfyUI" not in uc.last_status()["note"]
+
+
+def test_the_standalone_rollback_ignores_parts_kept_for_another_backup(install, home):
+    inst, site = install
+    data, sig = _release_032(sd=None)
+    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                  runner=_deps_step(site))
+    _add_kept_parts()
+    (updater._backup_dir() / "VERSION").write_text("0.1.5", encoding="utf-8")
+    _stage_standalone_tools(inst)
+    out = _run_script(inst, home, "rollback_update.py", "--yes")
+    assert out.returncode == 0, (out.stdout, out.stderr)
+    assert "ComfyUI" not in out.stdout
+
+
+def test_the_next_start_brings_uv_back_after_a_standalone_rollback(install, home, monkeypatch):
+    inst, site = install
+    script = "setup.bat" if sys.platform == "win32" else "setup.sh"
+
+    def pin(version):
+        return f"UV_INSTALLER_VERSION={version}\nUV_INSTALLER_SHA256={'0' * 64}\n"
+
+    (inst / script).write_text(pin("0.13.4"), encoding="utf-8")
+    uv_dir = inst / uv_tool.CONTAINED_DIR
+    uv_dir.mkdir()
+    (uv_dir / uv_tool.UV_NAME).write_bytes(b"")
+    (uv_dir / uv_tool.UV_NAME).chmod(0o755)
+    monkeypatch.setattr(uv_tool, "uv_version", lambda path: "0.13.6")
+    files = _files("0.3.2", ["click", "rich"])
+    files[script] = pin("0.13.6")
+    data, sig = _release(files)
+    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                  runner=_deps_step(site))
+    _add_kept_parts(("uv",))
+    uc._mark_checked(inst, "0.3.2")
+    _stage_standalone_tools(inst)
+    out = _run_script(inst, home, "rollback_update.py", "--yes")
+    assert out.returncode == 0, (out.stdout, out.stderr)
+    assert uc.last_status()["state"] == "rolled_back"
+    monkeypatch.setattr(updater, "repo_root", lambda: inst)
+    plans = uc.catch_up(inst)
+    assert plans is not None, "the recorded rollback does not hold the catch-up back"
+    assert [(p["name"], p["target"]) for p in plans if p["update"]] == [("uv", "0.13.4")]
+    assert uc.read_pending() is not None
+
+
+def test_a_step_result_of_another_version_is_not_shown(install, monkeypatch):
+    from localm import updater_parts
+    inst, _site = install
+    updater_runtime._write_status({"state": "updated", "note": "runtime of the other version",
+                                   "version": "0.3.2"})
+    uc._write_status({"state": "updated", "note": "components of this version",
+                      "components": []}, inst, "0.3.1")
+    assert [s["note"] for s in updater_parts.installed_parts(inst)["last_steps"]] == [
+        "components of this version"]
+    monkeypatch.setattr(_version, "read_version", lambda: "0.3.2")
+    assert [s["note"] for s in updater_parts.installed_parts(inst)["last_steps"]] == [
+        "runtime of the other version"]
+
+
+def test_the_runtime_step_result_names_its_version(install, monkeypatch):
+    inst, _site = install
+    monkeypatch.setattr(updater, "repo_root", lambda: inst)
+    updater_runtime.write_pending({"backend": "vulkan", "current": "b1", "target": "b2",
+                                   "pins": {}}, root=inst, version="0.3.1")
+    status = updater_runtime.finish_pending(root=inst)
+    assert status is not None and status["state"] == "current"
+    assert updater_runtime.last_status()["version"] == "0.3.1"
+
+
+def test_a_rollback_records_the_version_it_returned_to(install, home):
+    inst, site = install
+    data, sig = _release_032(sd=None)
+    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                  runner=_deps_step(site))
+    updater.rollback_last(installed=inst)
+    assert updater_runtime.last_status()["version"] == "0.3.1"
+
+
+# ------------------------- a failed move of the backup --------------------------
+
+_WINDOWS_HOLDS = pytest.mark.skipif(sys.platform != "win32",
+                                    reason="elsewhere an open file does not stop a rename")
+
+
+def _files_of(root: Path) -> dict:
+    return {p.relative_to(root).as_posix(): p.read_bytes()
+            for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+def _second_update_ready(install, home, monkeypatch):
+    """0.3.1 updated to 0.3.2 (dependency step included), and the signed 0.3.3."""
+    inst, site = install
+    data, sig = _release_032(sd=None)
+    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                  runner=_deps_step(site))
+    monkeypatch.setattr(_version, "read_version", lambda: "0.3.2")
+    return _release(_files("0.3.3", ["click", "rich", "tomli"]))
+
+
+@_WINDOWS_HOLDS
+def test_a_backup_that_cannot_be_replaced_rolls_the_update_back_and_stays_whole(
+        install, home, monkeypatch):
+    from tests._held_file import held
+    inst, site = install
+    data, sig = _second_update_ready(install, home, monkeypatch)
+    backup = updater._backup_dir()
+    kept, runtime_kept = _files_of(backup), au.runtime_snapshot_dir(backup)
+    runtime_kept.mkdir()
+    (runtime_kept / "marker").write_text("runtime of 0.3.1", encoding="utf-8")
+    manifest = updater._updates_dir() / "applied_names.json"
+    recorded = manifest.read_text(encoding="utf-8")
+    ran = []
+    raised = None
+    with held(backup / "localm" / "__init__.py"):
+        try:
+            updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                          runner=lambda c: ran.append(c) or 1)
+        except LocalmError as e:
+            raised = e
+    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.2", "the update is undone"
+    assert (inst / "localm" / "__init__.py").read_text(encoding="utf-8") == "# 0.3.2"
+    assert _files_of(backup) == kept, "the backup of the earlier update is whole"
+    assert (runtime_kept / "marker").exists(), "and so is what it keeps beside it"
+    assert uc.snapshot_dir(backup).is_dir()
+    assert manifest.read_text(encoding="utf-8") == recorded
+    assert ran == [], "no step of the update ran"
+    assert not any((updater._updates_dir() / "runs").iterdir())
+    assert raised is not None and "so it was rolled back" in raised.summary
+    assert str(backup) in raised.reason
+
+    res = updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                        runner=lambda c: 0)
+    assert res["version"] == "0.3.3"
+    assert (backup / "VERSION").read_text(encoding="utf-8") == "0.3.2"
+    assert not runtime_kept.exists()
+    assert not list(updater._updates_dir().glob("backup-replaced-*"))
+    updater.rollback_last(installed=inst)
+    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.2", "the right version"
+
+
+@_WINDOWS_HOLDS
+def test_a_later_rollback_after_a_refused_move_lands_on_the_version_before(
+        install, home, monkeypatch):
+    from tests._held_file import held
+    inst, site = install
+    data, sig = _second_update_ready(install, home, monkeypatch)
+    backup = updater._backup_dir()
+    with held(backup / "localm" / "__init__.py"):
+        with pytest.raises(LocalmError):
+            updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                          runner=lambda c: 0)
+    updater.rollback_last(installed=inst)
+    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1"
+    _assert_venv_is_031(site)
+
+
+@_WINDOWS_HOLDS
+def test_a_run_backup_a_scanner_holds_is_still_promoted(install, home, monkeypatch):
+    """A program that has one new file of this run's backup open stops the rename; the
+    backup is copied into place instead."""
+    from tests._held_file import held
+    inst, site = install
+    data, sig = _release_032(sd=None)
+    real = au.swap_with_backup
+    holds = []
+
+    def swap_then_hold(root, target, run_backup):
+        names = real(root, target, run_backup)
+        holds.append(held(run_backup / "localm" / "__init__.py"))
+        holds[0].__enter__()
+        return names
+
+    monkeypatch.setattr(au, "swap_with_backup", swap_then_hold)
+    monkeypatch.setattr(updater, "_BACKUP_MOVE_WAIT_S", 0.01)
+    try:
+        res = updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                            runner=_deps_step(site))
+    finally:
+        holds[0].__exit__(None, None, None)
+    assert res["version"] == "0.3.2"
+    backup = updater._backup_dir()
+    assert (backup / "VERSION").read_text(encoding="utf-8") == "0.3.1"
+    assert (backup / "localm" / "__init__.py").read_text(encoding="utf-8") == "# 0.3.1"
+    updater.rollback_last(installed=inst)
+    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1"
+
+
+@_WINDOWS_HOLDS
+def test_a_run_backup_that_cannot_be_moved_puts_the_earlier_backup_back(install, home, monkeypatch):
+    from tests._held_file import held
+    inst, site = install
+    data, sig = _second_update_ready(install, home, monkeypatch)
+    backup = updater._backup_dir()
+    kept = _files_of(backup)
+    real = au.swap_with_backup
+    holds = []
+
+    def swap_then_hold(root, target, run_backup):
+        names = real(root, target, run_backup)
+        holds.append(held(run_backup / "localm" / "__init__.py", exclusive=True))
+        holds[0].__enter__()
+        return names
+
+    monkeypatch.setattr(au, "swap_with_backup", swap_then_hold)
+    monkeypatch.setattr(updater, "_BACKUP_MOVE_WAIT_S", 0.01)
+    raised = None
+    try:
+        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                      runner=lambda c: 0)
+    except LocalmError as e:
+        raised = e
+    finally:
+        holds[0].__exit__(None, None, None)
+    assert _files_of(backup) == kept
+    assert not list(updater._updates_dir().glob("backup-replaced-*"))
+    assert raised is not None and "could not move this update's backup" in raised.reason
+    runs = list((updater._updates_dir() / "runs").glob("*/backup"))
+    assert len(runs) == 1, "the recovery could not read the held file, so this copy stays"
+    assert (runs[0] / "VERSION").read_text(encoding="utf-8") == "0.3.2"
+
+
+@_WINDOWS_HOLDS
+def test_a_failed_recovery_after_a_refused_move_keeps_the_good_backup(install, home, monkeypatch):
+    from tests._held_file import held
+    inst, site = install
+    data, sig = _second_update_ready(install, home, monkeypatch)
+    backup = updater._backup_dir()
+    monkeypatch.setattr(au, "rollback",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("restore boom")))
+    raised = None
+    with held(backup / "localm" / "__init__.py"):
+        try:
+            updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                          runner=lambda c: 0)
+        except LocalmError as e:
+            raised = e
+    runs = list((updater._updates_dir() / "runs").glob("*/backup"))
+    assert len(runs) == 1 and (runs[0] / "VERSION").read_text(encoding="utf-8") == "0.3.2"
+    assert raised is not None and "manual recovery needed" in raised.summary
+    assert str(runs[0]) in raised.reason
+
+
+# ------------------- a rollback during the restart and the watchdog --------------
+
+class _Whoami:
+    """A stand-in for the restarted server's own ``/whoami``, answering *version*."""
+
+    def __init__(self, version: str):
+        import http.server
+        import threading
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = json.dumps({"version": version}).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=10)
+
+
+def _restart_with_real_watchdog(monkeypatch, *, port, expect, after_steps=None):
+    """Run the real ``_do_restart`` up to its re-exec, with *after_steps* called once its
+    update steps are over. The health watchdog it spawns is the real script, run to its end
+    with a short timeout. Returns the finished watchdog runs."""
+    import localm.inference.backends.llamacpp._loader as loader
+    import localm.inference.http_server as hs
+    from localm import instances
+    monkeypatch.setattr(loader, "stop_probe_daemon", lambda *a, **k: None)
+    monkeypatch.setattr(hs, "_engine", None)
+    monkeypatch.setattr(instances, "unregister_own", lambda iid: None)
+    monkeypatch.setattr(instances, "restore_own", lambda removed: None)
+    for var in ("LOCALM_RESTART_IN_PROGRESS", "LOCALM_UPDATE_STEPS_DONE"):
+        monkeypatch.setenv(var, "1")
+        monkeypatch.delenv(var)
+    ran = []
+    real_spawn = updater.spawn_health_watchdog
+
+    def run_to_the_end(argv, **kw):
+        ran.append(_REAL_RUN(argv, env=kw["env"], capture_output=True, text=True,
+                             timeout=120, **_NO_WINDOW))
+
+    def spawn(**kw):
+        return real_spawn(timeout=1.0, poll_interval=0.2, request_timeout=1.0,
+                          popen=run_to_the_end, **kw)
+
+    monkeypatch.setattr(updater, "spawn_health_watchdog", spawn)
+    real_finish = hs._finish_pending_runtime_update
+
+    def finish():
+        result = real_finish()
+        if after_steps:
+            after_steps()
+        return result
+
+    monkeypatch.setattr(hs, "_finish_pending_runtime_update", finish)
+
+    def stop_here(*_a):
+        raise SystemExit(0)
+
+    monkeypatch.setattr(os, "execv", stop_here)
+    with pytest.raises(SystemExit):
+        hs._do_restart(update_watchdog={"host": "127.0.0.1", "port": port, "scheme": "http",
+                                        "expect_version": expect})
+    return ran
+
+
+def _update_with_steps_left_for_the_restart(install, home, monkeypatch, *, sd_rc):
+    """0.3.1 updated to 0.3.2 with its sd.cpp step left for the restart, which then fails
+    (*sd_rc* 1) or works (0)."""
+    inst, site = install
+    data, sig = _release_032()
+    updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                  runner=_deps_step(site), defer_runtime=True)
+    monkeypatch.setattr(updater, "repo_root", lambda: inst)
+    run = _children(home, site, sd_rc=sd_rc)
+    monkeypatch.setattr(subprocess, "run",
+                        lambda cmd, **kw: subprocess.CompletedProcess(cmd, run(cmd)))
+    return inst, site
+
+
+def test_a_rollback_during_the_restart_is_not_rolled_back_again(install, home, monkeypatch, caplog):
+    import logging
+    inst, site = _update_with_steps_left_for_the_restart(install, home, monkeypatch, sd_rc=1)
+    sentinel = inst / "localm" / "written_by_the_running_server.txt"
+    with _Whoami("0.3.1") as stub, caplog.at_level(logging.INFO, logger="localm"):
+        ran = _restart_with_real_watchdog(
+            monkeypatch, port=stub.port, expect="0.3.2",
+            after_steps=lambda: sentinel.write_text("x", encoding="utf-8"))
+    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1", "the first rollback ran"
+    _assert_venv_is_031(site)
+    assert sentinel.exists(), "nothing touches the tree the server now runs from"
+    assert ran == [], "no health check waits for a version this restart does not start"
+    assert "health check not started" in caplog.text
+
+
+def test_the_health_check_still_rolls_back_a_build_that_never_answers_its_version(
+        install, home, monkeypatch):
+    inst, site = _update_with_steps_left_for_the_restart(install, home, monkeypatch, sd_rc=0)
+    sentinel = inst / "localm" / "written_by_the_running_server.txt"
+    with _Whoami("0.3.1") as stub:
+        ran = _restart_with_real_watchdog(
+            monkeypatch, port=stub.port, expect="0.3.2",
+            after_steps=lambda: sentinel.write_text("x", encoding="utf-8"))
+    assert [r.returncode for r in ran] == [1], [(r.stdout, r.stderr) for r in ran]
+    assert not sentinel.exists()
+    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1"
+
+
+def test_a_restart_whose_steps_worked_gets_its_health_check(install, home, monkeypatch):
+    inst, site = _update_with_steps_left_for_the_restart(install, home, monkeypatch, sd_rc=0)
+    sentinel = inst / "localm" / "written_by_the_running_server.txt"
+    with _Whoami("0.3.2") as stub:
+        ran = _restart_with_real_watchdog(
+            monkeypatch, port=stub.port, expect="0.3.2",
+            after_steps=lambda: sentinel.write_text("x", encoding="utf-8"))
+    assert [r.returncode for r in ran] == [0], [(r.stdout, r.stderr) for r in ran]
+    assert sentinel.exists()
+    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.2"
+
+
+@pytest.mark.parametrize("failure", [
+    LocalmError("nothing was rolled back", reason="a holder"),
+    RuntimeError("rollback incomplete"),
+], ids=["refused", "incomplete"])
+def test_a_rollback_that_did_not_finish_keeps_the_health_check(
+        install, home, monkeypatch, failure):
+    inst, site = _update_with_steps_left_for_the_restart(install, home, monkeypatch, sd_rc=1)
+    monkeypatch.setattr(updater, "rollback_last",
+                        lambda **kw: (_ for _ in ()).throw(failure))
+    with _Whoami("0.3.2") as stub:
+        ran = _restart_with_real_watchdog(monkeypatch, port=stub.port, expect="0.3.2")
+    assert [r.returncode for r in ran] == [0], [(r.stdout, r.stderr) for r in ran]
 
 
 def test_the_watchdog_runs_the_rollback_of_the_code_root(tmp_path, monkeypatch):

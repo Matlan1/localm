@@ -906,9 +906,14 @@ def _venv_copy_path(venv: Path, dest: Path, kind: str = "") -> Path:
 
 def _long(path: Path) -> Path:
     """*path* in the form that reaches a file deeper than 260 characters on
-    Windows."""
-    from localm.media.source_archive import long_path
-    return long_path(path)
+    Windows. Standard library only: the standalone rollback loads this module by
+    file path with no ``localm`` to import. See
+    test_the_standalone_rollback_runs_when_localm_cannot_be_imported."""
+    path = Path(os.path.abspath(path))
+    if os.name == "nt" and not str(path).startswith("\\\\?\\"):
+        text = str(path)
+        return Path("\\\\?\\UNC\\" + text[2:] if text.startswith("\\\\") else "\\\\?\\" + text)
+    return path
 
 
 def _link(src: Path, dst: Path) -> None:
