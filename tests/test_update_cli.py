@@ -113,9 +113,10 @@ def test_update_rollback(monkeypatch):
     monkeypatch.setattr(updater, "rollback_last", lambda **kw: {"rolled_back": True, "backup": "b"})
     from localm.cli import _core
     steps = []
-    monkeypatch.setattr(_core, "_finish_pending_runtime_update", lambda c: steps.append("runtime"))
+    monkeypatch.setattr(_core, "_finish_pending_runtime_update",
+                        lambda c: c == "gui" and steps.append("runtime"))
     monkeypatch.setattr(_core, "_finish_pending_component_update",
-                        lambda c: steps.append("components"))
+                        lambda c: c == "gui" and steps.append("components"))
     r = CliRunner().invoke(main, ["update", "--rollback"])
     assert "Rolled back" in r.output
     assert steps == ["runtime", "components"], "the parts follow the restored version"

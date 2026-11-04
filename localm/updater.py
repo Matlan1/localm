@@ -1407,7 +1407,7 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
             try:
                 updater_components.snapshot(
                     [updater_components.DEPS], updater_components.snapshot_dir(backup_dir),
-                    root=target, for_backup=previous_version)
+                    root=target, for_backup=updater_components.backup_version(backup_dir))
             except OSError as e:
                 _roll_back(f"could not keep a copy of the venv: {e}",
                            "keeping a copy of the dependencies failed",

@@ -284,7 +284,7 @@ def test_a_rollback_undoes_the_pytorch_step_and_the_deps_step_in_order(install, 
     _dist(site, "transformers", "5.15", {"transformers/__init__.py": b"t 5.15"})
     uc.snapshot([uc.DEPS], snap, root=inst)
     _deps_step(site)([str(_fake_uv(tmp_path))])
-    uc.record_deps_changes(snap, inst)
+    uc.record_changes(snap, uc.DEPS, inst)
     uc.snapshot(["pytorch"], snap, root=inst, add=True)
     _uninstall(site, "transformers")
     _dist(site, "transformers", "5.20", {"transformers/__init__.py": b"t 5.20"})
@@ -462,6 +462,7 @@ def test_a_real_mismatch_is_not_hidden_by_a_later_update_that_keeps_the_dependen
 def test_a_stale_snapshot_is_replaced_by_the_component_step(install, home, monkeypatch):
     inst, site = install
     snap = uc.snapshot_dir(updater._backup_dir(create=True))
+    updater._backup_dir().mkdir(parents=True, exist_ok=True)
     (updater._backup_dir() / "VERSION").write_text("0.1.5", encoding="utf-8")
     uc.snapshot([uc.DEPS], snap, root=inst, for_backup="0.3.2")
     assert not uc.snapshot_is_for(snap, "0.1.5") and uc.snapshot_is_for(snap, "0.3.2")
@@ -564,14 +565,17 @@ def test_the_update_routes_really_hold_the_probes_while_they_run(tmp_path, monke
     (home / "updates" / "backup").mkdir(parents=True)
     (home / "updates" / "backup" / "VERSION").write_text("0.1.0", encoding="utf-8")
     monkeypatch.setenv("LOCALM_HOME", str(home))
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    monkeypatch.delenv("LOCALM_REQUIRE_AUTH", raising=False)
     import localm.inference.http_server as hs
-    monkeypatch.setattr(hs, "caller_is_operator", lambda request: True)
     monkeypatch.setattr(hs, "_request_restart", lambda **kw: None)
     seen = []
     monkeypatch.setattr(updater, "rollback_last",
                         lambda: seen.append(discover._torch_probe_holds) or {"rolled_back": True})
-    with TestClient(create_app(None)) as c:
-        r = c.post("/api/update/rollback", headers={"host": "127.0.0.1"})
+    app = create_app(None)
+    with TestClient(app) as c:
+        r = c.post("/api/update/rollback",
+                   headers={"Authorization": f"Bearer {app.state.shell_token}"})
     assert r.status_code == 200, r.text
     assert seen == [1] and discover._torch_probe_holds == 0
 
