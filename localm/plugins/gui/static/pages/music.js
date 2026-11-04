@@ -5,7 +5,7 @@
 
 "use strict";
 
-import { $, authHeaders, checkModelsBeforeGenerate, fetchImageURL, fmtBytes, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
+import { $, authHeaders, checkModelsBeforeGenerate, createMissingModelOffer, fetchImageURL, fmtBytes, jobStatusWord, revealFilledAdvanced, streamJob, toast } from "../app/helpers.js";
 import { t } from "../app/i18n.js";
 import { bindReloadToggle, createGallery, musicPreview, playerDetail, reportMediaLoadFailure, refreshReloadToggle } from "../app/media-gallery.js";
 import { createMusicModelPicker, mountEnhanceButton } from "../app/native-models.js";
@@ -187,18 +187,21 @@ $("music-generate").onclick = async () => {
   log.textContent = "";
   $("music-result").replaceChildren();
   try {
-    await checkModelsBeforeGenerate("music", log,
+    const proceed = await checkModelsBeforeGenerate("music", log,
       native ? nativeChoice : { model_overrides: modelOverrides.music });
+    if (!proceed) return;
     const r = await fetch("/api/music", {
       method: "POST", headers: authHeaders(), body: JSON.stringify(body),
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
     showStop("music-stop", data.job_id);
+    const missing = createMissingModelOffer(log);
     const end = await streamJob(data.job_id, (line) => {
+      if (!missing.show(line)) return;
       log.textContent += line + "\n";
       log.scrollTop = log.scrollHeight;
-    });
+    }, undefined, undefined, missing.onEvent);
     if (end.status === "done" && end.result) {
       toast(t("music.generatedToast"));
       const player = document.createElement("audio");
@@ -211,6 +214,7 @@ $("music-generate").onclick = async () => {
       refreshMusicHistory();
     } else {
       toast(t("music.generationStatus", { status: jobStatusWord(end.status) }), end.status !== "cancelled");
+      await missing.offer();
     }
   } catch (e) {
     toast(t("music.generationFailed", { message: e.message }), true);

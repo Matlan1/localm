@@ -635,3 +635,38 @@ def test_route_applies_the_pages_component_choice_for_one_job(tmp_path, monkeypa
     assert seen and seen[0]["dit"] == "my-dit"
     assert bad.status_code == 400 and "not a registered model" in bad.text
     assert bad_slot.status_code == 400
+
+
+def test_a_job_with_no_models_carries_the_downloads_beside_the_text(tmp_path, monkeypatch,
+                                                                    no_comfy):
+    from fastapi.testclient import TestClient
+
+    def not_downloaded(*a, **k):
+        raise music.ModelError("the default ACE-Step models are not downloaded: run "
+                               "'localm setup-music'")
+    monkeypatch.setattr(music, "prepare", not_downloaded)
+    app = _music_app(tmp_path, monkeypatch)
+    h = _key(["music"])
+    with TestClient(app) as c:
+        r = c.post("/api/music", headers=h, json={"tags": "lofi", "duration_seconds": 2})
+        end, lines = _wait_job(c, r.json()["job_id"], h)
+        job = app.state.jobs.get(r.json()["job_id"])
+    assert end and end["status"] == "failed", lines
+    events = [e for e in job._history if e.get("type") == "missing_model"]
+    [event] = events
+    assert [m["filename"] for m in event["missing"]] == [
+        models.DEFAULT_FILES[c] for c in ("text_encoder", "dit", "vae", "lm")]
+    assert {m["filename"]: m["source"]["sha256"] for m in event["missing"]} == {
+        models.DEFAULT_FILES[c]: models.DEFAULT_SHA256[c] for c in models.COMPONENTS}
+    assert event["text"] in lines and "localm setup-music" in event["text"]
+
+
+def test_music_preflight_marks_the_offer_blocked_when_net_mode_is_off(tmp_path, monkeypatch,
+                                                                      no_comfy):
+    from fastapi.testclient import TestClient
+    monkeypatch.setenv("LOCALM_NET_MODE", "off")
+    app = _music_app(tmp_path, monkeypatch)
+    with TestClient(app) as c:
+        data = c.post("/api/media/music/preflight",
+                      headers=_key(["models:write", "music"]), json={}).json()
+    assert data["missing"] and all(m["blocked"] == "net_mode_off" for m in data["missing"])
