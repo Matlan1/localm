@@ -81,7 +81,9 @@ test("a rename made on the page rewrites the chats pinned to it, here, in the br
 
   await renameOnPage(window, "daily-driver");
 
-  const snapshot = JSON.parse(window.localStorage.getItem("localm.conversations"));
+  const saved = window.localStorage.getItem("localm.conversations");
+  assert.ok(saved, "the browser copy of the chats was rewritten");
+  const snapshot = JSON.parse(saved);
   const byId = Object.fromEntries(snapshot.map((c) => [c.id, c]));
   assert.equal(byId.mine.pinnedModel, "daily-driver");
   assert.equal(byId.mine.messages[0].content, "gemma3-12b stays");
@@ -127,7 +129,7 @@ function chatSetup({ registry = ["live"], stored = null, chat404 = false } = {})
   const toasts = [];
   const impl = async (url, opts = {}) => {
     const u = String(url);
-    let body = null;
+    let body;
     try { body = opts.body ? JSON.parse(opts.body) : null; } catch { body = opts.body; }
     calls.push({ u, body });
     const headers = { get: () => null };
