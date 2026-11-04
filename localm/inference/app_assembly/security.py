@@ -24,6 +24,11 @@ from localm.inference import anthropic_protocol as _anthropic
 from localm.inference import ollama_protocol as _ollama
 from localm.inference import responses_protocol as _responses
 
+SHELL_REJECTED_HEADER = "X-Localm-Shell-Rejected"
+"""Set on the open-mode gate's 403 when the presented shell or instance token
+was missing or wrong, so the GUI can tell a rejected token from a route's own
+403. The GUI reads it in static/app/init.js."""
+
 
 def add_cors(app: FastAPI) -> Any:
     """Add CORSMiddleware for the "cors_origins" setting and return the setting,
@@ -292,6 +297,8 @@ def add_origin_guard(app: FastAPI, cors_cfg: Any) -> None:
                         content={"detail": "Open-mode management requires the "
                                  "localm GUI shell on this machine, or an API key "
                                  "(run 'localm key generate')."},
+                        headers=({SHELL_REJECTED_HEADER: "1"}
+                                 if not token_ok else None),
                     )
         return await call_next(request)
 

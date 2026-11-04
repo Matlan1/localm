@@ -146,13 +146,20 @@ test("RESTART: a 403 that SURVIVES the one-shot recovery says so instead of " +
     "and shown - the failure is stated, not swallowed into a silently dead shell");
 });
 
+// The server marks a 403 that rejected the shell token with this header.
+const REJECTED = { get: (n) => (String(n).toLowerCase() === "x-localm-shell-rejected" ? "1" : null) };
+const NO_HEADERS = { get: () => null };
+const okBody = { ok: true, status: 200, json: async () => ({ models: [], active: "" }), text: async () => "" };
+const rejectedToken = { ok: false, status: 403, headers: REJECTED, json: async () => ({}), text: async () => "" };
+const policyRefusal = (detail) => ({
+  ok: false, status: 403, headers: NO_HEADERS, json: async () => ({ detail }), text: async () => "",
+});
+
 test("RESTART: a shell-token 403 on an ORDINARY call (the real restart case: the " +
      "page booted fine, then the server re-execed) triggers the recovery", async () => {
   // Boot healthy in open mode.
   let status = 200;
-  const fetchImpl = async () => (status === 200
-    ? { ok: true, status: 200, json: async () => ({ models: [], active: "" }), text: async () => "" }
-    : { ok: false, status: 403, json: async () => ({}), text: async () => "" });
+  const fetchImpl = async () => (status === 200 ? okBody : rejectedToken);
   const { window } = loadApp({ fetchImpl, shellToken: SHELL });
   await bootSettled(window);
   assert.equal(window.__localmLocked, false, "premise: this boot unlocked normally");
@@ -187,9 +194,8 @@ test("RESTART: a 403 from /api/image-proxy is the route saying the feature is OF
   // mid-reply. Measured in a real browser: proxy OFF reloaded the page every
   // time, proxy ON never did, same page and same image URL.
   let status = 200;
-  const fetchImpl = async () => (status === 200
-    ? { ok: true, status: 200, json: async () => ({ models: [], active: "" }), text: async () => "" }
-    : { ok: false, status: 403, json: async () => ({}), text: async () => "" });
+  const fetchImpl = async (url) => (status === 200 ? okBody
+    : String(url).startsWith("/api/image-proxy") ? policyRefusal("") : rejectedToken);
   const { window } = loadApp({ fetchImpl, shellToken: SHELL });
   await bootSettled(window);
   assert.equal(window.__localmLocked, false, "premise: this boot unlocked normally");
@@ -229,9 +235,9 @@ test("RESTART: a 403 from /api/discover/search is the route's own net_mode=off "
   // net_mode=off reloaded the whole app to the Chat tab mid-search, discarding
   // the query and any results already on screen.
   let status = 200;
-  const fetchImpl = async () => (status === 200
-    ? { ok: true, status: 200, json: async () => ({ models: [], active: "" }), text: async () => "" }
-    : { ok: false, status: 403, json: async () => ({ detail: "Network access is off. Turn it on, or allow downloads only, in Settings → Network." }), text: async () => "" });
+  const NETOFF = "Network access is off. Turn it on, or allow downloads only, in Settings → Network.";
+  const fetchImpl = async (url) => (status === 200 ? okBody
+    : String(url).startsWith("/api/discover/") ? policyRefusal(NETOFF) : rejectedToken);
   const { window } = loadApp({ fetchImpl, shellToken: SHELL });
   await bootSettled(window);
   assert.equal(window.__localmLocked, false, "premise: this boot unlocked normally");
@@ -260,6 +266,32 @@ test("RESTART: a 403 from /api/discover/search is the route's own net_mode=off "
     "positive control: the recovery's cache drop is observable from this harness");
   assert.equal(unregistered.length, 1, "exactly the control's recovery ran, not an earlier one");
   assert.equal(window.sessionStorage.getItem("localm.shellReset"), "1");
+});
+
+test("RESTART: a network-policy 403 from ANY route (here /api/web/retrieve, not on " +
+     "any list) leaves the page alone; a header-marked rejection on the same route " +
+     "still recovers", async () => {
+  let mode = "ok";
+  const fetchImpl = async () => (mode === "ok" ? okBody
+    : mode === "policy" ? policyRefusal("Network access is off.") : rejectedToken);
+  const { window } = loadApp({ fetchImpl, shellToken: SHELL });
+  await bootSettled(window);
+  assert.equal(window.__localmLocked, false, "premise: this boot unlocked normally");
+
+  stubReload(window);
+  const { unregistered, deleted } = stubSWAndCaches(window);
+  mode = "policy";
+  await window.fetch("/api/web/retrieve", { method: "POST", headers: window.authHeaders() });
+  assert.equal(recoveryStarted(window), false, "a policy refusal is not a rejected credential");
+  assert.equal(unregistered.length, 0);
+  assert.deepEqual(deleted, []);
+  assert.equal(window.sessionStorage.getItem("localm.shellReset"), null);
+
+  mode = "rejected";
+  await window.fetch("/api/web/retrieve", { method: "POST", headers: window.authHeaders() });
+  assert.equal(recoveryStarted(window), true, "the same route with a rejected token recovers");
+  assert.ok(await waitFor(() => deleted.length > 0));
+  assert.equal(unregistered.length, 1);
 });
 
 test("RESTART: a 403 with NO shell token is NOT swept into the shell recovery", async () => {
