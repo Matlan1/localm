@@ -2,8 +2,8 @@
 """The managed ComfyUI must not fail with Windows' legacy 260-char MAX_PATH limit.
 
 A custom node under a sufficiently nested LOCALM_HOME puts some of its files past
-260 characters. Fetching, replacing, keeping, restoring, copying and removing such
-a tree go through extended-length paths, so they work whatever the OS-level
+260 characters. Fetching, replacing, keeping, restoring and removing such a
+source tree go through extended-length paths, so they work whatever the OS-level
 LongPathsEnabled policy is. The ``max_path`` fixture makes Windows apply the limit
 in the test process.
 """
@@ -113,33 +113,6 @@ def test_rmtree_robust_removes_a_deep_read_only_file(tmp_path):
     assert not os.path.lexists(_long(root))
 
 
-def _fake_venv(path, version, file_text):
-    site = path / "Lib" / "site-packages"
-    info = site / f"pkg-{version}.dist-info"
-    _write(info / "METADATA", f"Name: pkg\nVersion: {version}\n\n")
-    rel = _DEEP_REL.replace("leaf.py", "pkg.py")
-    _write(info / "RECORD", f"{rel},,\npkg-{version}.dist-info/METADATA,,\n")
-    _write(site / rel, file_text)
-    return site, rel
-
-
-def test_a_deep_venv_file_is_kept_and_put_back(tmp_path):
-    venv = tmp_path / ("v" * 40) / "venv"
-    site, rel = _fake_venv(venv, "1.0", "old\n")
-    assert len(str(site / rel)) > 260
-    copy = uc._venv_copy_path(venv, tmp_path / "snap")
-    (tmp_path / "snap").mkdir()
-
-    uc._clone_venv(venv, copy, tmp_path / "snap")
-    assert _read(copy / "Lib" / "site-packages" / rel) == "old\n"
-
-    shutil.rmtree(_long(venv))
-    _fake_venv(venv, "2.0", "new\n")
-    assert uc._restore_venv(copy, venv) == []
-    assert _read(site / rel) == "old\n"
-    assert uc.dists(_long(site))["pkg"]["version"] == "1.0"
-
-
 def _user_comfyui(tmp_path):
     user = tmp_path / ("u" * 40) / "ComfyUI"
     _write(user / _DEEP_REL, "deep\n")
@@ -162,23 +135,3 @@ def test_copying_a_deep_user_comfyui_keeps_every_tracked_file(tmp_path):
     assert _read(managed / _DEEP_REL) == "deep\n"
     assert sorted(source_archive.tree_files(managed)) == sorted([_DEEP_REL, "main.py"])
     assert not os.path.lexists(managed.with_name("comfyui.copying"))
-
-
-def test_copying_a_deep_user_comfyui_without_git_keeps_its_files(tmp_path):
-    user = _user_comfyui(tmp_path)
-    managed = tmp_path / ("m" * 40) / "comfyui"
-    managed.parent.mkdir()
-
-    ok, out = provision._copytree_source(user, managed, None)
-    assert ok, out
-    assert _read(managed / _DEEP_REL) == "deep\n"
-
-
-def test_a_deep_user_custom_node_is_copied(tmp_path):
-    user = tmp_path / ("u" * 40) / "ComfyUI"
-    _write(user / "custom_nodes" / "Node" / _DEEP_REL, "deep\n")
-    managed = tmp_path / ("m" * 40) / "comfyui"
-
-    count, warnings = provision._copy_custom_nodes(user, managed)
-    assert (count, warnings) == (1, [])
-    assert _read(managed / "custom_nodes" / "Node" / _DEEP_REL) == "deep\n"

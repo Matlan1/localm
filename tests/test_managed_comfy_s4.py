@@ -562,40 +562,26 @@ def test_update_retries_a_restore_that_failed_once_and_rolls_back_cleanly(home, 
     assert [p.name for p in root.parent.iterdir() if "-backup-" in p.name] == []
 
 
-def test_a_rollback_removes_the_backup_of_a_tree_it_put_back_and_names_the_other(
-        home, tmp_path, monkeypatch):
+def test_a_custom_node_backup_that_is_kept_stays_out_of_custom_nodes(home, tmp_path, monkeypatch):
     from localm.media import managed_comfy_update as upd
 
-    _hub, repo, c1, c2, _c3 = _build_update_remote(tmp_path, monkeypatch)
-    root = _install_managed_from(repo, c1)
+    hub = FakeGitHub(tmp_path / "hub").install(monkeypatch)
+    repo, c1 = hub.add("o", "Node", {"__init__.py": "old\n"})
+    _, c2 = hub.add("o", "Node", {"__init__.py": "new\n"})
+    root = tmp_path / "comfyui"
     node = root / "custom_nodes" / "Node"
-    node.mkdir(parents=True)
-    (node / "__init__.py").write_text("old\n", encoding="utf-8")
-    source_archive.write_record(node, "https://github.com/o/Node.git", "1" * 40, ["__init__.py"])
-    new_node = tmp_path / "new-node"
-    new_node.mkdir()
-    (new_node / "__init__.py").write_text("new\n", encoding="utf-8")
-    source_archive.write_record(new_node, "https://github.com/o/Node.git", "2" * 40, ["__init__.py"])
+    node.parent.mkdir(parents=True)
+    source_archive.fetch_tree(repo, c1, node)
+    refused = _refuse_writes(monkeypatch, "__init__.py")
 
-    def sync_nodes(_root, _progress, _say, changes):
-        change = source_archive.apply_tree(new_node, node, source_archive.tree_files(node),
-                                           source_archive.new_backup_path(node))
-        monkeypatch.setattr(change, "rollback", lambda: ["__init__.py"])
-        changes.append(change)
-        return False, "the node step failed"
+    changes = []
+    ok, detail, _ = upd._replace_source(node, repo, c2, changes, None)
 
-    monkeypatch.setattr(upd, "_sync_pinned_torch", lambda *a: (True, ""))
-    monkeypatch.setattr(upd, "_sync_custom_nodes", sync_nodes)
-
-    result = upd.update_managed_comfy(
-        comfyui_repo=repo, target_commit=c2, reinstall_requirements=True)
-
-    assert not result.ok and "ALSO failed" in result.message
-    assert [p.name for p in root.parent.iterdir() if "-backup-" in p.name] == []
-    kept = [p for p in root.iterdir() if "-backup-" in p.name]
-    assert len(kept) == 1 and str(kept[0]) in result.message
-    assert (kept[0] / "__init__.py").read_text(encoding="utf-8") == "old\n"
+    assert refused and not ok and "__init__.py is in use" in detail
     assert [p.name for p in (root / "custom_nodes").iterdir()] == ["Node"]
+    kept = [p for p in root.iterdir() if "-backup-" in p.name]
+    assert len(kept) == 1 and changes[0].rollback() == ["__init__.py"]
+    assert (kept[0] / "__init__.py").read_text(encoding="utf-8") == "old\n"
 
 
 def test_update_and_remove_work_on_a_tree_past_the_path_limit(home, tmp_path, monkeypatch,

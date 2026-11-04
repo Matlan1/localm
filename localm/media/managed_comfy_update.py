@@ -105,11 +105,9 @@ def _replace_source(root: Path, repo: str, commit: str, changes: list,
                                                      source_archive.new_backup_path(root)))
         except source_archive.TreeRollbackError as e:
             changes.append(e.change)
-            return (False, f"could not write the new source into {root}: "
-                    f"{source_archive.plain_text(e.cause)}", False)
+            return False, f"could not write the new source into {root}: {e.cause}", False
         except OSError as e:
-            return (False, f"could not write the new source into {root}: "
-                    f"{source_archive.plain_text(e)}", False)
+            return False, f"could not write the new source into {root}: {e}", False
         return True, "", deps_changed
     finally:
         if new.exists():
@@ -235,20 +233,15 @@ def update_managed_comfy(cfg: Optional[dict] = None, *, on_progress: ProgressCb 
         """Put back every source file the update overwrote or removed (ComfyUI and
         its custom nodes) and re-apply the patch set, then report *reason*. If a
         file cannot be put back - OR the localm patch set cannot be re-applied on
-        the restored source - say so rather than report a clean tree. The backup of
-        a tree put back in full is removed; one with a file still missing is kept
-        and named."""
+        the restored source - say so rather than report a clean tree."""
         note = ""
         failed_files = []
         kept = []
-        restored = []
         for change in reversed(changes):
             failed = change.rollback()
             if failed:
                 failed_files += failed
-                kept.append(source_archive.plain_text(change.backup))
-            else:
-                restored.append(change)
+                kept.append(source_archive.plain_path(change.backup))
         if not failed_files:
             failed = [o for o in apply_patches(root) if not o.ok]
             if failed:
@@ -261,14 +254,14 @@ def update_managed_comfy(cfg: Optional[dict] = None, *, on_progress: ProgressCb 
             elif changes:
                 _emit(on_progress,
                       f"Rolled back to the previous ComfyUI ({prev_commit[:12]}).")
+            for change in changes:
+                change.discard()
         else:
             note = (f" The rollback to {prev_commit[:12]} ALSO failed ({len(failed_files)} "
                     f"file(s) could not be put back, e.g. {failed_files[0]}); the managed "
                     "ComfyUI may be in a mixed state - reinstall it with 'localm comfy "
                     "remove' then 'localm comfy setup'. The original files are kept in "
                     f"{', '.join(kept)}.")
-        for change in restored:
-            change.discard()
         return _result(False, "error", reason + note)
 
     try:

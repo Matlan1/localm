@@ -445,7 +445,7 @@ def _clone_source(user_workdir: Path, managed_root: Path, commit: str,
         os.replace(staging, source_archive.long_path(managed_root))
     except OSError as e:
         shutil.rmtree(staging, ignore_errors=True)
-        return False, source_archive.plain_text(e)
+        return False, str(e)
     return True, f"copied {len(copied)} tracked files of {commit[:12]} to {managed_root}"
 
 
@@ -454,12 +454,11 @@ def _copytree_source(user_workdir: Path, managed_root: Path,
     """Fallback when the user's ComfyUI is NOT a git checkout: copy the source tree,
     excluding the venv / models / custom_nodes / outputs (the user's data + env)."""
     try:
-        shutil.copytree(str(source_archive.long_path(user_workdir)),
-                        str(source_archive.long_path(managed_root)),
+        shutil.copytree(str(user_workdir), str(managed_root),
                         ignore=shutil.ignore_patterns(*_NON_SOURCE_DIRS, "*.pyc"))
         return True, f"copied source tree to {managed_root}"
     except Exception as e:
-        return False, source_archive.plain_text(e)
+        return False, str(e)
 
 
 def _create_managed_venv(user_venv_python: Path, managed_venv_dir: Path,
@@ -552,8 +551,7 @@ def _copy_custom_nodes(user_workdir: Path, managed_root: Path,
             phase="custom_nodes", done=i, total=total, unit="nodes"))
         try:
             if entry.is_dir():
-                shutil.copytree(str(source_archive.long_path(entry)),
-                                str(source_archive.long_path(target)),
+                shutil.copytree(str(entry), str(target),
                                 ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
                                 dirs_exist_ok=True)
                 count += 1
@@ -561,8 +559,7 @@ def _copy_custom_nodes(user_workdir: Path, managed_root: Path,
                 shutil.copy2(str(entry), str(target))
                 count += 1
         except Exception as e:
-            warnings.append(f"could not copy custom node {name}: "
-                            f"{source_archive.plain_text(e)}")
+            warnings.append(f"could not copy custom node {name}: {e}")
     return count, warnings
 
 

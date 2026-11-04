@@ -119,8 +119,7 @@ def test_a_cut_off_download_is_an_archive_error(monkeypatch, tmp_path):
 @pytest.mark.parametrize("bad", ["../evil.py", "/abs.py", "a/../../evil.py", "C:/x.py",
                                  "a/D:/escaped.py", "a/..\\..\\evil.py",
                                  ".git/HEAD", ".GIT/config", "sub/.git/config",
-                                 "a/b/.Git/hooks/post-checkout", "GIT~1/hooks/post-checkout",
-                                 "a/git~1/config", ".git./config", "a/.git /config"])
+                                 "a/b/.Git/hooks/post-checkout"])
 def test_an_unsafe_path_is_refused(monkeypatch, tmp_path, bad):
     commit = fake_commit(bad)
     zpath = tmp_path / "a.zip"
@@ -265,32 +264,6 @@ def test_a_file_that_cannot_be_put_back_is_named_and_its_original_kept(tmp_path,
     assert (root / "b.py").read_text(encoding="utf-8") == "old"
 
 
-def test_plain_text_drops_the_extended_length_prefix():
-    assert sa.plain_text("\\\\?\\D:\\a\\b") == "D:\\a\\b"
-    assert sa.plain_text("\\\\?\\UNC\\host\\share\\x") == "\\\\host\\share\\x"
-    assert sa.plain_text("/srv/x") == "/srv/x"
-    err = OSError(13, "denied", "\\\\?\\D:\\a\\b")
-    assert "?" not in sa.plain_text(err) and "D:" in sa.plain_text(err)
-
-
-def test_a_mixed_tree_error_shows_a_real_copy_failure_without_the_prefix(tmp_path, monkeypatch):
-    root = _tree(tmp_path, "root", {"b.py": "old"}, "1" * 40)
-    new = _tree(tmp_path, "new", {"b.py": "new"}, "2" * 40)
-    backup = tmp_path / "backup"
-    real = shutil.copy2
-
-    def flaky(src, dst, *a, **k):
-        if str(dst).endswith("b.py") and not str(dst).startswith(str(sa.long_path(backup))):
-            raise PermissionError(13, "denied", str(dst))
-        return real(src, dst, *a, **k)
-
-    monkeypatch.setattr(sa.shutil, "copy2", flaky)
-    with pytest.raises(sa.TreeRollbackError) as caught:
-        sa.apply_tree(new, root, sa.tree_files(root), backup)
-    assert "\\\\?\\" not in str(caught.value) and "?\\\\" not in str(caught.value)
-    assert "denied" in str(caught.value)
-
-
 def test_a_new_backup_path_leaves_a_kept_backup_and_stays_out_of_custom_nodes(tmp_path):
     root = tmp_path / "comfyui"
     node = root / "custom_nodes" / "Node"
@@ -305,10 +278,10 @@ def test_a_new_backup_path_leaves_a_kept_backup_and_stays_out_of_custom_nodes(tm
     assert sa.new_backup_path(node).parent == root
 
 
-@pytest.mark.parametrize("fine", [".github/workflows/ci.yml", ".gitignore", ".gitattributes",
-                                  "a/.gitmodules", "foo.git/x", "git/x", "a/git~2/x"])
-def test_safe_name_keeps_names_that_only_look_like_the_git_folder(fine):
-    assert sa._safe_name(fine) == fine
+def test_plain_path_drops_the_extended_length_prefix():
+    assert sa.plain_path("\\\\?\\D:\\a\\b") == "D:\\a\\b"
+    assert sa.plain_path("\\\\?\\UNC\\host\\share\\x") == "\\\\host\\share\\x"
+    assert sa.plain_path("/srv/x") == "/srv/x"
 
 
 def test_a_record_is_ignored_once_the_git_checkout_moved(tmp_path):

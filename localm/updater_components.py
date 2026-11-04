@@ -935,7 +935,6 @@ def _clone_venv(venv: Path, copy: Path, owner: Path) -> None:
     """Recreate every file of *venv* in *copy* (replaced first) as a hard link,
     or a copy where a link cannot be made, and mark *copy* as belonging to the
     snapshot *owner*. Raises OSError."""
-    venv, copy = _long(venv), _long(copy)
     if copy.exists():
         shutil.rmtree(copy)
     copy.mkdir(parents=True)
@@ -973,11 +972,9 @@ def _restore_venv(copy: Path, venv: Path) -> list:
     kept one's files are put back, so a file two distributions share ends up
     restored. The install's own package is left alone, and nothing outside
     *venv* is removed. Returns the failures."""
-    shown = venv
-    venv, copy = _long(venv), _long(copy)
     site_now, site_was = site_packages(venv), site_packages(copy)
     if site_now is None or site_was is None:
-        return [f"could not find the packages of {shown} or of its copy"]
+        return [f"could not find the packages of {venv} or of its copy {copy}"]
     now, was = dists(site_now), dists(site_was)
     errors = []
     changed = [name for name in sorted(set(now) | set(was))
@@ -1007,7 +1004,7 @@ def _restore_venv(copy: Path, venv: Path) -> list:
                     _link(src, dst)
                 except OSError as e:
                     errors.append(f"restore {rel}: {e}")
-    return [f"{shown}: " + "; ".join(errors[:5])] if errors else []
+    return [f"{venv}: " + "; ".join(errors[:5])] if errors else []
 
 
 def _snapshot_tree(root: Path, dest: Path) -> dict:
@@ -1065,7 +1062,7 @@ def _restore_tree(kept: Path, root: Path) -> list:
     try:
         change = source_archive.apply_tree(kept, root, source_archive.tree_files(root), backup)
     except OSError as e:
-        return [f"{root}: {source_archive.plain_text(e)}"]
+        return [f"{root}: {e}"]
     change.discard()
     return []
 
