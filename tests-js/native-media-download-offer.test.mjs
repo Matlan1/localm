@@ -3,9 +3,11 @@
 // box, never as a command to run: several missing files share ONE box and one
 // confirmation, declining downloads nothing, and a job that stopped for a
 // missing file offers the same box from its "missing_model" event.
-import { test } from "node:test";
+import { test as nodeTest } from "node:test";
 import assert from "node:assert/strict";
 import { loadApp } from "./harness.mjs";
+
+const test = (name, fn) => nodeTest(name, { timeout: 15000 }, fn);
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
