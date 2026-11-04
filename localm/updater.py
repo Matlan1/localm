@@ -1501,10 +1501,13 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
             raise LocalmError(rolled_back, reason=reason or why)
 
         took_over = frozenset()
+        venv_kept = False
         if has_finish:
+            venv_kept = updater_components.site_packages(target / ".venv") is not None
             try:
                 updater_components.snapshot(
-                    [updater_components.DEPS] + [p["name"] for p in comp_plans if p["update"]],
+                    ([updater_components.DEPS] if venv_kept else [])
+                    + [p["name"] for p in comp_plans if p["update"]],
                     updater_components.snapshot_dir(backup_dir), root=target,
                     for_backup=updater_components.backup_version(backup_dir))
                 rt_lib = updater_runtime.runtime_lib(target)
@@ -1553,7 +1556,7 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
             if rc != 0:
                 _roll_back(f"{cmd[0]} exited {rc}", "the post-update step failed",
                            "the post-update step failed; rolled back")
-        if cmd or has_finish:
+        if cmd or venv_kept:
             try:
                 updater_components.record_changes(
                     updater_components.snapshot_dir(backup_dir), updater_components.DEPS,

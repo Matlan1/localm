@@ -9,6 +9,7 @@ steps of a restart are not held up by this install's own PyTorch probe."""
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import zipfile
@@ -1968,6 +1969,20 @@ def test_a_failing_finishing_step_puts_every_part_back(install, ending, reason):
     assert ran == []
     assert ei.value.summary == "the update's finishing step failed, so the update was rolled back"
     assert ei.value.reason == reason
+
+
+def test_an_install_without_a_venv_runs_and_rolls_back_a_finishing_step(install):
+    inst, _site = install
+    shutil.rmtree(inst / ".venv")
+    data, sig = _finish_release("import sys; print('no'); sys.exit(1)")
+    with pytest.raises(LocalmError) as ei:
+        updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                      runner=_forbid_deps_step([]))
+    assert ei.value.summary == "the update's finishing step failed, so the update was rolled back"
+    assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1"
+    data, sig = _finish_release(_FINISH_OK % '["dependencies"]')
+    assert updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
+                         runner=_forbid_deps_step([]))["applied"]
 
 
 def test_a_failing_finishing_step_with_no_output_says_how_it_exited(install):
