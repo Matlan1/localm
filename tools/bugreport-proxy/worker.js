@@ -209,12 +209,13 @@ async function fileReport(request, env) {
   const title = (String(payload.title || "").slice(0, 200).trim()) || "localm bug report";
   const full = String(payload.body || "");
   if (!full.trim()) return json({ error: "empty report body" }, 400);
-  // A body localm did not build is not filed: no GitHub call, a 202 that does not
+  // A body localm did not build is not filed: no GitHub call, a 422 that does not
   // echo it, and one log line without its content. The whole body is checked; only
-  // a body that is filed is cut to 60000 characters.
+  // a body that is filed is cut to 60000 characters. The status must stay non-2xx:
+  // released clients read any 2xx as sent. See the test "a held report is not 2xx".
   if (!isLocalmBuiltReport(full)) {
     console.log("report held: not built by localm", JSON.stringify({ chars: full.length }));
-    return json({ ok: true, filed: false }, 202);
+    return json({ error: "report not filed", filed: false }, 422);
   }
   const auth = await issueToken(env);
   if (auth.error) return auth.error;
@@ -239,27 +240,36 @@ async function fileReport(request, env) {
 const REPORTER_NOTE =
   "> Submitted by a localm user through the built-in bug reporter.\n\n";
 
-// The first line of every report localm's reporter builds (localm/bugreport/assembly.py).
+// The first line of every markdown report localm builds: the in-app reporter
+// (localm/bugreport/assembly.py), scripts/report_issue.py and scripts/report_issue.ps1.
 const REPORT_TITLE_PREFIX = "# localm bug report:";
 
-// The lines localm's reporter writes after the title, in this order. Each entry is a
-// heading line and, when *next* is set, a test the line right after it must pass.
-const REPORT_MARKERS = [
-  { line: "## What I was doing" },
-  { line: "## What happened" },
-  { line: "## App state", next: (l) => l.startsWith("- Model: ") },
-  { line: "## Environment",
-    next: (l) => /^- localm: \S/.test(l) || l === "(could not collect environment)" },
+// The lines each markdown reporter writes after the title, in this order. Each entry is
+// a heading line and, when *next* is set, a test the line right after it must pass.
+const REPORT_SHAPES = [
+  // The in-app reporter.
+  [
+    { line: "## What I was doing" },
+    { line: "## What happened" },
+    { line: "## App state", next: (l) => l.startsWith("- Model: ") },
+    { line: "## Environment",
+      next: (l) => /^- localm: \S/.test(l) || l === "(could not collect environment)" },
+  ],
+  // scripts/report_issue.py and scripts/report_issue.ps1.
+  [
+    { line: "## What happened" },
+    { line: "## How it was filed", next: (l) => l.startsWith("- Filed via the standalone ") },
+    { line: "## Environment", next: (l) => l.startsWith("- ") },
+  ],
 ];
 
-// True when the first non-empty line of *text* is localm's report title and every
-// REPORT_MARKERS entry follows it in order, each on a line of its own.
-function isLocalmBuiltReport(text) {
-  const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/).map((l) => l.trim());
-  const first = lines.findIndex((l) => l !== "");
-  if (first < 0 || !lines[first].startsWith(REPORT_TITLE_PREFIX)) return false;
-  let at = first + 1;
-  for (const m of REPORT_MARKERS) {
+// The one-line body of report-issue.sh.
+const CURL_REPORT_RE = /^Filed via the standalone curl reporter \(no Python available\)\. OS: .*\. Details: /;
+
+// True when lines[from:] holds every entry of *markers* in order, each on a line of its own.
+function hasMarkers(lines, from, markers) {
+  let at = from;
+  for (const m of markers) {
     while (at < lines.length
            && !(lines[at] === m.line && (!m.next || (at + 1 < lines.length && m.next(lines[at + 1]))))) {
       at++;
@@ -268,6 +278,17 @@ function isLocalmBuiltReport(text) {
     at += m.next ? 2 : 1;
   }
   return true;
+}
+
+// True when the first non-empty line of *text* is the curl reporter's body, or is
+// the report title with every entry of one of REPORT_SHAPES after it.
+function isLocalmBuiltReport(text) {
+  const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/).map((l) => l.trim());
+  const first = lines.findIndex((l) => l !== "");
+  if (first < 0) return false;
+  if (CURL_REPORT_RE.test(lines[first])) return true;
+  if (!lines[first].startsWith(REPORT_TITLE_PREFIX)) return false;
+  return REPORT_SHAPES.some((markers) => hasMarkers(lines, first + 1, markers));
 }
 
 // ---------------------------- issues ------------------------------------
