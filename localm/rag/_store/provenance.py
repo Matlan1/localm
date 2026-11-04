@@ -52,7 +52,7 @@ def collection_provenance_report(candidate_model: Optional[str] = None) -> list:
                 if not peeked.get("has_vectors"):
                     continue
                 found = _st.Collection._peek_meta(name)
-                raw_model = found[2].get("embedding_model") if found else None
+                raw_model = _st.current_embedding_label(found[2]) if found else None
                 built_with = str(raw_model) if raw_model else None
                 mixed = bool(found[2].get("embedding_model_mixed")) if found else False
                 if _provenance_excludable(built_with, mixed, candidate_model):

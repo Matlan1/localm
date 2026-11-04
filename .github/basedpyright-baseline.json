@@ -7384,8 +7384,8 @@
             {
                 "code": "reportAttributeAccessIssue",
                 "range": {
-                    "startColumn": 17,
-                    "endColumn": 22,
+                    "startColumn": 45,
+                    "endColumn": 50,
                     "lineCount": 1
                 }
             },
@@ -7836,8 +7836,8 @@
             {
                 "code": "reportAttributeAccessIssue",
                 "range": {
-                    "startColumn": 55,
-                    "endColumn": 60,
+                    "startColumn": 83,
+                    "endColumn": 88,
                     "lineCount": 1
                 }
             },
@@ -8062,8 +8062,8 @@
             {
                 "code": "reportAttributeAccessIssue",
                 "range": {
-                    "startColumn": 72,
-                    "endColumn": 77,
+                    "startColumn": 75,
+                    "endColumn": 80,
                     "lineCount": 1
                 }
             },

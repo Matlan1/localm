@@ -3470,8 +3470,8 @@ def rekey_loaded_model(old_name: str, new_name: str) -> bool:
 
 
 async def rename_registered_model(model: str, new_name_raw: str) -> dict:
-    """Move a registry entry to a new name AND re-key the live engine, in that
-    order, in ONE process. The single entry point every rename route uses.
+    """Change a model's display name AND re-key the live engine, in that order,
+    in ONE process. The single entry point every rename route uses.
 
     The re-key is not bookkeeping that can be added later by whoever remembers:
     until it runs, the registry holds the new name while the engine map is
@@ -3481,16 +3481,16 @@ async def rename_registered_model(model: str, new_name_raw: str) -> dict:
     half at all, which is why ``localm rename`` asks a running server to call
     this rather than moving the registry entry behind its back.
 
-    Raises HTTPException (404 unregistered, 409 name taken, 400 rename failed)
-    so both the /v1 and the GUI route answer identically. Returns the response
-    body: status, the old name, the sanitized new name, and the migration
-    notes, which must reach the caller rather than only the server log - a user
-    has no other way to learn that e.g. a per-project coder config still names
-    the old model.
+    Raises HTTPException (404 unregistered, 400 no usable name or the write
+    failed, 409 name taken) so both the /v1 and the GUI route answer identically.
+    Returns the response body: status, the old name, the sanitized new name, and
+    notes (empty unless first-time reference recording could not finish).
     """
+    from localm import model_ids
     from localm.config import load_registry
     from localm.executor import get_plugin_executor
-    from localm.model_manager import _sanitize_name, rename_model_with_notes
+    from localm.model_manager import rename_model_with_notes
+    from localm.model_manager.registry import _sanitized_or_empty
 
     registry = load_registry()
     if model not in registry:
@@ -3499,7 +3499,9 @@ async def rename_registered_model(model: str, new_name_raw: str) -> dict:
     # response must both speak the sanitized name, not the raw text the caller
     # sent: prechecking the raw name would let a collision through, and
     # answering with the raw name would name an entry that does not exist.
-    new_name = _sanitize_name(new_name_raw)
+    new_name = _sanitized_or_empty(new_name_raw)
+    if not new_name:
+        raise HTTPException(400, "A model name needs at least one letter or digit.")
     if new_name != model and new_name in registry:
         raise HTTPException(409, f"Name already taken: {new_name}")
     loop = asyncio.get_running_loop()
@@ -3518,6 +3520,8 @@ async def rename_registered_model(model: str, new_name_raw: str) -> dict:
     # Synchronous, in-memory only (no await) - safe to call directly on the
     # event loop right after the executor call above returns.
     rekey_loaded_model(model, new_name)
+    if new_name != model:
+        model_ids.notify_renamed(model, new_name)
     return {"status": "renamed", "model": model, "new_name": new_name,
             "notes": notes}
 

@@ -39,6 +39,9 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from localm import model_ids
+from localm.config import model_index
+
 _router = APIRouter()
 
 
@@ -90,6 +93,18 @@ _RESERVED_NAMES = {"con", "prn", "aux", "nul",
 def _home() -> Path:
     from localm.config import home_dir
     return home_dir()
+
+
+def _conv_with_current_pin(data: dict) -> dict:
+    """Saved conversation *data* with ``pinned_model`` holding the pinned model's
+    current name and without the stored ``model_refs``."""
+    if not isinstance(data, dict):
+        return data
+    refs = data.pop(model_ids.REFS_KEY, None)
+    if data.get("pinned_model"):
+        data["pinned_model"] = model_ids.stored_to_current(
+            data["pinned_model"], refs, model_index())
+    return data
 
 
 def _persist_enabled() -> bool:
@@ -183,7 +198,7 @@ async def conversations_list(meta: bool = False, limit: int = 0, offset: int = 0
                 else:
                     data = json.loads(p.read_text(encoding="utf-8"))
                     data["id"] = p.stem
-                    rows.append(data)
+                    rows.append(_conv_with_current_pin(data))
             except FileNotFoundError:
                 continue
             except Exception as e:
@@ -218,7 +233,7 @@ async def conversation_get(conv_id: str):
     if not isinstance(data, dict):
         raise HTTPException(500, "Conversation file is unreadable")
     data["id"] = conv_id
-    return data
+    return _conv_with_current_pin(data)
 
 
 @_router.put("/api/conversations/{conv_id}")
@@ -228,14 +243,17 @@ async def conversation_upsert(conv_id: str, req: ConversationUpsert):
             403, "Chat persistence is off (privacy mode). "
                  "Set mode/chat_mode to 'log' or 'full' to enable it.")
     path = _conv_path(conv_id)
-    payload = json.dumps(
-        {"id": conv_id, "title": req.title,
-         "updated_at": req.updated_at,
-         "pinned": req.pinned, "folder": req.folder,
-         "pinned_model": req.pinned_model,
-         "branches": req.branches,
-         "messages": req.messages},
-        ensure_ascii=False)
+    record = {"id": conv_id, "title": req.title,
+              "updated_at": req.updated_at,
+              "pinned": req.pinned, "folder": req.folder,
+              "pinned_model": req.pinned_model,
+              "branches": req.branches,
+              "messages": req.messages}
+    if req.pinned_model:
+        index = model_index()
+        record["pinned_model"] = model_ids.stored_to_current(req.pinned_model, None, index)
+        model_ids.attach_refs(record, (record["pinned_model"],), index)
+    payload = json.dumps(record, ensure_ascii=False)
     if len(payload.encode("utf-8")) > _CONV_MAX_BYTES:
         raise HTTPException(413, "Conversation too large to persist")
     path.parent.mkdir(parents=True, exist_ok=True)
