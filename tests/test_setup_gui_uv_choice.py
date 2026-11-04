@@ -23,6 +23,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._exe_stub import write_exe_stub
+
 ROOT = Path(__file__).resolve().parents[1]
 
 pytestmark = pytest.mark.skipif(os.name != "nt", reason="setup-gui.bat runs only on Windows")
@@ -61,7 +63,7 @@ def _run(tmp_path: Path, *, answers: str, system_uv: bool, contained_uv: bool = 
     (clone / "probe.bat").write_text(_probe_text(), encoding="utf-8", newline="")
     if contained_uv:
         (clone / ".uv").mkdir()
-        (clone / ".uv" / "uv.exe").write_bytes(b"")
+        write_exe_stub(clone / ".uv" / "uv.exe")
     home = tmp_path / "home"
     home.mkdir()
     installer = tmp_path / "stub-installer.bat"
