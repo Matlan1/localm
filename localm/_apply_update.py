@@ -53,7 +53,7 @@ RUNTIME_LIB = PRESERVE_WITHIN[0]
 BACKUP_RECORD = ".localm-backup.json"
 
 # Top-level names every localm build has, so no update can have added them.
-_IN_EVERY_BUILD = ("VERSION", "localm")
+_IN_EVERY_BUILD = ("VERSION", "pyproject.toml", "localm")
 
 # Files up to this size are compared by content in :func:`runtime_differs`; larger
 # ones by size.
