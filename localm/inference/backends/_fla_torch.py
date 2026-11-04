@@ -2,18 +2,19 @@
 """PyTorch implementations of the parts of the ``fla`` (flash-linear-attention)
 package that Kimi-Linear's bundled code imports.
 
-The real package needs Triton kernels, which have no build for every platform
-localm runs on (no Triton for AMD GPUs on Windows, and ``fla`` imports
-``torch.distributed`` names that a Windows PyTorch lacks). This module provides
-the same names with the same call signatures and results, computed with plain
-PyTorch operations on whatever device the tensors are on, so such a model loads
-and generates there.
+The real package needs Triton kernels, which run only on a GPU Triton has a driver
+for (no CPU, and no build for AMD GPUs on Windows), and its current releases take
+other arguments in the gate the model's code calls. This module provides the same
+names with the same call signatures and results, computed with plain PyTorch
+operations on whatever device the tensors are on, so such a model loads and
+generates anywhere.
 
-:func:`provide_for` registers the modules ``fla``, ``fla.modules``,
-``fla.ops``, ``fla.ops.kda``, ``fla.ops.kda.gate``, ``fla.ops.utils``,
-``fla.ops.utils.index`` and ``fla.utils`` in ``sys.modules`` when a model
-folder's bundled code imports ``fla`` and the real package cannot be imported.
-A working ``fla`` install is always preferred.
+:func:`provide_for` picks the kernels when a model folder's bundled code imports
+``fla``: an installed ``fla`` when its kernels run on the load's device and match this
+module's there, otherwise this module's, registered as the modules ``fla``,
+``fla.modules``, ``fla.ops``, ``fla.ops.kda``, ``fla.ops.kda.gate``, ``fla.ops.utils``,
+``fla.ops.utils.index`` and ``fla.utils`` in ``sys.modules``. :func:`kernel_note` words
+the choice for the load output.
 
 Covered: the forward (inference) computation of Kimi Delta Attention in chunked
 form (:func:`chunk_kda`, any length) and recurrent form (:func:`fused_recurrent_kda`),
@@ -25,8 +26,11 @@ and training.
 
 from __future__ import annotations
 
+import functools
 import importlib
 import importlib.util
+import inspect
+import json
 import logging
 import sys
 import types
@@ -42,6 +46,9 @@ logger = logging.getLogger("localm")
 CHUNK_SIZE = 64
 _L2_EPS = 1e-6
 STAND_IN_MARK = "__localm_stand_in__"
+_CHECK_LENGTH = CHUNK_SIZE + 6
+_CHECK_TOLERANCE = 1e-3
+_real_failure: Optional[str] = None
 
 
 def prepare_lens_from_mask(mask: torch.Tensor) -> torch.Tensor:
@@ -322,35 +329,151 @@ def _install_modules() -> None:
         setattr(sys.modules[parent], child, mod)
 
 
-def _real_fla_imports() -> bool:
-    if sys.modules.get("fla") is not None and not getattr(sys.modules["fla"], STAND_IN_MARK, False):
-        return True
-    if importlib.util.find_spec("fla") is None:
+def _forget_modules() -> None:
+    for name in [n for n in sys.modules if n == "fla" or n.startswith("fla.")]:
+        del sys.modules[name]
+
+
+def _accept_kimi_gate_call(gate_module) -> None:
+    """Make ``fused_kda_gate`` of a release whose signature is ``(g, A_log, dt_bias)``, with
+    *g* shaped ``[..., H, K]``, accept the call Kimi-Linear's code makes:
+    ``(g, A, head_k_dim, g_bias=...)`` with *g* shaped ``[..., H * K]``."""
+    gate = gate_module.fused_kda_gate
+    params = inspect.signature(gate).parameters
+    if "g_bias" in params or "dt_bias" not in params:
+        return
+
+    @functools.wraps(gate)
+    def fused_kda_gate_kimi_call(g, A, head_k_dim, g_bias=None):
+        g = g.float()
+        return gate(g.reshape(*g.shape[:-1], -1, head_k_dim), A.reshape(-1).float(),
+                    dt_bias=None if g_bias is None else g_bias.float())
+
+    del fused_kda_gate_kimi_call.__wrapped__
+    gate_module.fused_kda_gate = fused_kda_gate_kimi_call
+
+
+def _worst_error(got: torch.Tensor, want: torch.Tensor) -> float:
+    """Largest absolute difference between the tensors, relative to their scale when
+    that is above 1. NaN when either holds a NaN."""
+    return float((got.float() - want.float()).abs().max()) / max(1.0, float(want.float().abs().max()))
+
+
+def _check_real_kernels(device: str, heads: int, dim: int, conv_size: int) -> None:
+    """Run the installed ``fla`` kernels on *device* as Kimi-Linear calls them and compare
+    each with this module's. Raises when one raises or differs by more than
+    :data:`_CHECK_TOLERANCE`."""
+    from fla.modules import FusedRMSNormGated as RealNorm
+    from fla.modules import ShortConvolution as RealConv
+    from fla.ops.kda import chunk_kda as real_chunk
+    from fla.ops.kda import fused_recurrent_kda as real_recurrent
+    from fla.ops.kda.gate import fused_kda_gate as real_gate
+
+    gen = torch.Generator().manual_seed(0)
+
+    def rnd(*shape):
+        return torch.randn(*shape, generator=gen).to(device)
+
+    length = _CHECK_LENGTH
+    q, k, v = rnd(1, length, heads, dim), rnd(1, length, heads, dim), rnd(1, length, heads, dim)
+    raw, bias, log_a = rnd(1, length, heads * dim), rnd(heads * dim), rnd(1, 1, heads, 1)
+    beta = rnd(1, length, heads).sigmoid()
+    checks: list[tuple[str, torch.Tensor, torch.Tensor]] = []
+    with torch.no_grad():
+        g = fused_kda_gate(raw, log_a, dim, g_bias=bias)
+        checks.append(("the gate", real_gate(raw, log_a, dim, g_bias=bias), g))
+        kda = {"q": q, "k": k, "v": v, "g": g, "beta": beta, "initial_state": None,
+               "output_final_state": True, "use_qk_l2norm_in_kernel": True, "cu_seqlens": None}
+        out, state = chunk_kda(**kda)
+        real_out, real_state = real_chunk(**kda)
+        checks += [("chunked KDA", real_out, out), ("chunked KDA state", real_state, state)]
+        step = {**kda, "initial_state": state, **{n: kda[n][:, :2] for n in ("q", "k", "v", "g", "beta")}}
+        out, next_state = fused_recurrent_kda(**step)
+        real_out, real_state = real_recurrent(**{**step, "initial_state": state.clone()})
+        checks += [("recurrent KDA", real_out, out), ("recurrent KDA state", real_state, next_state)]
+        mine = ShortConvolution(heads * dim, conv_size, activation="silu").to(device)
+        real = RealConv(hidden_size=heads * dim, kernel_size=conv_size, activation="silu").to(device)
+        real.load_state_dict(mine.state_dict())
+        out, state = mine(x=raw, cache=None, output_final_state=True, cu_seqlens=None)
+        real_out, real_state = real(x=raw, cache=None, output_final_state=True, cu_seqlens=None)
+        checks += [("the convolution", real_out, out), ("the convolution state", real_state, state)]
+        norm = FusedRMSNormGated(dim, eps=1e-5, activation="sigmoid").to(device)
+        real_norm = RealNorm(dim, eps=1e-5, activation="sigmoid").to(device)
+        real_norm.load_state_dict(norm.state_dict())
+        checks.append(("the gated norm", real_norm(v, q), norm(v, q)))
+    for name, got, want in checks:
+        worst = _worst_error(got, want)
+        if not worst <= _CHECK_TOLERANCE:
+            raise ValueError(f"{name} differs from the PyTorch kernels by {worst:.3g}")
+
+
+def _kernel_sizes(model_path: str) -> tuple[int, int, int]:
+    """``(heads, head dim, convolution width)`` from the folder's ``config.json``; small
+    sizes for a config that does not hold them."""
+    try:
+        with open(Path(model_path) / "config.json", encoding="utf-8") as f:
+            config = json.load(f)["linear_attn_config"]
+        return (int(config["num_heads"]), int(config["head_dim"]), int(config["short_conv_kernel_size"]))
+    except (OSError, ValueError, KeyError, TypeError):
+        return (2, 8, 4)
+
+
+def _real_fla_works(model_path: str, device: str) -> bool:
+    """Whether the installed ``fla`` imports and its kernels give this module's results on
+    *device*. When it is installed and does not, the reason is kept for
+    :func:`kernel_note` and its modules are forgotten."""
+    global _real_failure
+    if getattr(sys.modules.get("fla"), STAND_IN_MARK, False):
+        _forget_modules()
+    if sys.modules.get("fla") is None and importlib.util.find_spec("fla") is None:
         return False
     try:
-        for name in ("fla.modules", "fla.ops.kda", "fla.ops.kda.gate", "fla.ops.utils.index",
-                     "fla.utils"):
+        for name in ("fla.modules", "fla.ops.kda", "fla.ops.kda.gate", "fla.ops.utils.index", "fla.utils"):
             importlib.import_module(name)
+        _accept_kimi_gate_call(sys.modules["fla.ops.kda.gate"])
+        _check_real_kernels(device, *_kernel_sizes(model_path))
     except Exception as e:
-        logger.debug("hf load: the installed fla package does not import (%s: %s)",
-                     type(e).__name__, e)
-        for name in [n for n in sys.modules if n == "fla" or n.startswith("fla.")]:
-            del sys.modules[name]
+        _real_failure = f"{type(e).__name__}: {e}"
+        logger.warning("hf load: the installed fla-core cannot run on %s (%s); using localm's "
+                       "PyTorch kernels", device, _real_failure)
+        _forget_modules()
         return False
     return True
 
 
-def provide_for(model_path: str) -> bool:
-    """Register the PyTorch stand-ins for ``fla`` when the bundled code of the
-    model folder *model_path* imports it and the installed ``fla`` is absent or
-    does not import. Returns True when the stand-ins were registered."""
+def provide_for(model_path: str, device: str = "cpu") -> bool:
+    """Choose the kernels the bundled code of the model folder *model_path* imports as
+    ``fla``, for a load on *device*: an installed ``fla`` whose kernels run there and match
+    this module's, else this module's, registered as the ``fla`` modules. Returns True
+    when this module's were registered; False when the folder's code does not import
+    ``fla`` or the installed package was chosen."""
+    global _real_failure
+    _real_failure = None
     from localm.model_manager.missing_packages import folder_third_party_imports
     try:
         needs_fla = "fla" in folder_third_party_imports(Path(model_path), guarded=True)
     except (OSError, ValueError, RecursionError):
         return False
-    if not needs_fla or _real_fla_imports():
+    if not needs_fla or _real_fla_works(model_path, device):
         return False
     _install_modules()
-    logger.debug("hf load: fla is not usable here; using localm's PyTorch implementations")
+    logger.debug("hf load: using localm's PyTorch kernels for fla")
     return True
+
+
+def kernel_note() -> Optional[str]:
+    """One line for the load output saying which kernels :func:`provide_for` chose, and,
+    when they are this module's, why an installed ``fla`` was passed over or how to add
+    it where localm can. None when no ``fla`` was chosen."""
+    loaded = sys.modules.get("fla")
+    if loaded is None:
+        return None
+    if not getattr(loaded, STAND_IN_MARK, False):
+        return f"linear attention kernels: fla-core {getattr(loaded, '__version__', '?')} (Triton)"
+    note = "linear attention kernels: localm's PyTorch kernels"
+    if _real_failure is not None:
+        return f"{note}; the installed fla-core could not run here ({_real_failure})"
+    from localm.model_manager.model_packages import installable
+    if installable("fla"):
+        return f"{note}; `localm install-packages` adds the Triton kernels of fla-core"
+    return note

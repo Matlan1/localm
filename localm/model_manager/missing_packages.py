@@ -318,7 +318,7 @@ def missing_modules(folder: Path, guarded: bool = False) -> list[str]:
 
 
 _NAMES = {"PIL": "pillow", "yaml": "pyyaml", "sklearn": "scikit-learn", "cv2": "opencv",
-          "fla": "flash-linear-attention", "google": "protobuf"}
+          "fla": "fla-core", "google": "protobuf"}
 
 
 def package_label(module: str) -> str:

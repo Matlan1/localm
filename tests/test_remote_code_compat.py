@@ -66,7 +66,7 @@ def test_wrapping_twice_wraps_once(tmp_path, mask_functions):
 
 
 def _stateful_model(monkeypatch, name="Fake"):
-    module = types.ModuleType(f"fake_remote_{name}")
+    module = types.ModuleType(f"transformers_modules.fake_{name}")
     monkeypatch.setitem(sys.modules, module.__name__, module)
 
     class Cache:
@@ -115,8 +115,76 @@ def test_a_model_without_its_own_cache_is_left_alone(monkeypatch):
 @pytest.mark.parametrize("installed,expected", [(False, "sdpa"), (True, "flash_attention_2")])
 def test_flash_attention_is_replaced_by_sdpa_only_when_flash_attn_is_missing(
         monkeypatch, installed, expected):
-    model = types.SimpleNamespace(config=types.SimpleNamespace(_attn_implementation="flash_attention_2"))
+    class Model:
+        config = types.SimpleNamespace(_attn_implementation="flash_attention_2")
+
+    Model.__module__ = "transformers_modules.fake_flash"
+    model = Model()
     monkeypatch.setattr(compat.importlib.util, "find_spec",
                         lambda name: object() if installed else None)
     assert compat.apply_to_model(model) is (not installed)
     assert model.config._attn_implementation == expected
+
+
+def test_a_stateful_class_of_transformers_itself_is_left_alone(monkeypatch):
+    from transformers import FalconMambaConfig, FalconMambaForCausalLM
+    assert FalconMambaForCausalLM._is_stateful is True
+    model = FalconMambaForCausalLM(FalconMambaConfig(hidden_size=8, num_hidden_layers=1, vocab_size=16))
+    monkeypatch.setattr(FalconMambaForCausalLM, "_supports_default_dynamic_cache",
+                        FalconMambaForCausalLM._supports_default_dynamic_cache)
+    before = FalconMambaForCausalLM.__dict__["_supports_default_dynamic_cache"]
+    assert compat.apply_to_model(model) is False
+    assert FalconMambaForCausalLM.__dict__["_supports_default_dynamic_cache"] is before
+
+
+def test_flash_attention_of_a_class_of_transformers_itself_is_left_alone(monkeypatch):
+    from transformers import LlamaConfig, LlamaForCausalLM
+    model = LlamaForCausalLM(LlamaConfig(hidden_size=8, num_attention_heads=2, num_hidden_layers=1,
+                                         intermediate_size=8, vocab_size=16))
+    model.config._attn_implementation = "flash_attention_2"
+    monkeypatch.setattr(compat.importlib.util, "find_spec", lambda name: None)
+    assert compat.apply_to_model(model) is False
+    assert model.config._attn_implementation == "flash_attention_2"
+
+
+MOVED_IMPORT = "from transformers.utils.generic import OutputRecorder, check_model_inputs\n"
+MOVED_IMPORT_LONG = ("from transformers.utils.generic import (\n    check_model_inputs,\n"
+                     "    OutputRecorder,\n)\n")
+
+
+@pytest.fixture
+def generic_without_the_moved_name(monkeypatch):
+    generic = pytest.importorskip("transformers.utils.generic")
+    monkeypatch.delattr(generic, "OutputRecorder", raising=False)
+    # Whatever apply_for adds is removed again when the test ends.
+    monkeypatch.setattr(generic, "OutputRecorder", None, raising=False)
+    monkeypatch.delattr(generic, "OutputRecorder")
+    return generic
+
+
+@pytest.mark.parametrize("code", [MOVED_IMPORT, MOVED_IMPORT_LONG])
+def test_a_name_transformers_moved_is_importable_for_code_that_imports_it(
+        tmp_path, generic_without_the_moved_name, code):
+    from transformers.utils.output_capturing import OutputRecorder
+    generic = generic_without_the_moved_name
+    assert not hasattr(generic, "OutputRecorder")
+    try:
+        assert compat.apply_for(str(_folder(tmp_path, code))) is True
+        assert generic.OutputRecorder is OutputRecorder
+        namespace: dict = {}
+        exec(code, namespace)
+        assert namespace["OutputRecorder"] is OutputRecorder
+        assert compat.apply_for(str(tmp_path / "m")) is False
+    finally:
+        vars(generic).pop("OutputRecorder", None)
+
+
+def test_code_that_does_not_import_the_moved_name_changes_nothing(tmp_path, generic_without_the_moved_name):
+    code = "from transformers.utils.generic import check_model_inputs\nOutputRecorder = 1\n"
+    assert compat.apply_for(str(_folder(tmp_path, code))) is False
+    assert not hasattr(generic_without_the_moved_name, "OutputRecorder")
+
+
+def test_a_folder_that_does_not_exist_changes_nothing(tmp_path, generic_without_the_moved_name):
+    assert compat.apply_for(str(tmp_path / "absent")) is False
+    assert not hasattr(generic_without_the_moved_name, "OutputRecorder")

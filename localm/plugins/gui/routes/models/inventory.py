@@ -168,7 +168,7 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                     except (OSError, ValueError, RecursionError):
                         logger.debug("could not check the packages of %s", ep, exc_info=True)
                     else:
-                        if state.missing:
+                        if state.missing or state.optional:
                             packages[_n] = state.as_dict()
                 # ONE stat() for both size and mtime. mtime is recorded for a
                 # directory too (an HF model dir); size stays None for a directory.

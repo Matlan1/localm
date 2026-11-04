@@ -6,7 +6,9 @@ registration of the stand-in modules."""
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
+import inspect
 import json
 import sys
 from pathlib import Path
@@ -63,7 +65,8 @@ def _inputs(batch, length, heads, value_heads, dim_k, dim_v, seed=0):
 
 
 @pytest.mark.parametrize("shape", [(1, 5, 2, 2, 8, 8), (2, 64, 2, 2, 8, 12),
-                                   (2, 131, 2, 4, 16, 16), (1, 200, 3, 3, 32, 16)])
+                                   (2, 131, 2, 4, 16, 16), (1, 200, 3, 3, 32, 16),
+                                   (1, 130, 32, 32, 128, 128)])
 @pytest.mark.parametrize("use_state", [False, True])
 def test_both_forms_of_kda_match_the_per_token_reference(shape, use_state):
     batch, length, heads, value_heads, dim_k, dim_v = shape
@@ -164,16 +167,40 @@ def test_the_short_convolution_is_causal_and_carries_its_state():
     assert conv(x)[1] is None
 
 
+def _convolved(conv, x, state):
+    width = conv.kernel_size[0]
+    xin = torch.cat([state[..., -(width - 1):], x.transpose(1, 2)], dim=-1)
+    return torch.nn.functional.silu(
+        torch.nn.functional.conv1d(xin, conv.weight, groups=conv.hidden_size)).transpose(1, 2)
+
+
 def test_the_short_convolution_restarts_at_each_variable_length_sequence():
     conv = ft.ShortConvolution(6, 4)
     torch.nn.init.normal_(conv.weight)
     x = torch.randn(1, 30, 6)
-    cu = torch.tensor([0, 11, 30])
+    cu = torch.tensor([0, 11, 11, 30])
     got, state = conv(x, output_final_state=True, cu_seqlens=cu)
-    first, first_state = conv(x[:, :11], output_final_state=True)
-    second, second_state = conv(x[:, 11:], output_final_state=True)
+    zero = torch.zeros(1, 6, 4)
+    first, second = _convolved(conv, x[:, :11], zero), _convolved(conv, x[:, 11:], zero)
     assert torch.allclose(got, torch.cat([first, second], 1), atol=1e-6)
-    assert torch.allclose(state, torch.cat([first_state, second_state], 0))
+    assert state.shape == (3, 6, 4)
+    assert torch.allclose(state[0], x[:, 7:11].transpose(1, 2)[0])
+    assert torch.equal(state[1], torch.zeros(6, 4))
+    assert torch.allclose(state[2], x[:, 26:30].transpose(1, 2)[0])
+
+
+def test_each_variable_length_sequence_continues_from_its_own_state():
+    conv = ft.ShortConvolution(6, 4)
+    torch.nn.init.normal_(conv.weight)
+    x = torch.randn(1, 30, 6)
+    cu = torch.tensor([0, 11, 11, 30])
+    cache = torch.randn(3, 6, 4)
+    got, state = conv(x, cache=cache, output_final_state=True, cu_seqlens=cu)
+    first = _convolved(conv, x[:, :11], cache[0:1])
+    second = _convolved(conv, x[:, 11:], cache[2:3])
+    assert torch.allclose(got, torch.cat([first, second], 1), atol=1e-6)
+    assert torch.equal(state[1], cache[1])
+    assert torch.allclose(state[2], x[:, 26:30].transpose(1, 2)[0])
 
 
 def test_the_mask_helpers_count_the_unpadded_tokens():
@@ -186,7 +213,8 @@ def test_the_mask_helpers_count_the_unpadded_tokens():
 def no_fla(monkeypatch):
     for name in [n for n in sys.modules if n == "fla" or n.startswith("fla.")]:
         monkeypatch.delitem(sys.modules, name)
-    monkeypatch.setattr(ft, "_real_fla_imports", lambda: False)
+    monkeypatch.setattr(ft, "_real_fla_works", lambda _path, _device: False)
+    monkeypatch.setattr(ft, "_real_failure", None)
 
 
 def _kimi_folder(tmp_path: Path, source: str = KIMI_IMPORTS) -> Path:
@@ -216,23 +244,155 @@ def test_provide_for_leaves_a_model_that_does_not_import_fla_alone(tmp_path, no_
     assert "fla" not in sys.modules
 
 
-def test_provide_for_prefers_a_working_fla_install(tmp_path, no_fla, monkeypatch):
-    monkeypatch.setattr(ft, "_real_fla_imports", lambda: True)
-    assert ft.provide_for(str(_kimi_folder(tmp_path))) is False
-    assert "fla" not in sys.modules
+FAKE_RELEASE = """
+__version__ = "9.9.9"
+"""
+
+FAKE_OLD_GATE = """
+from localm.inference.backends import _fla_torch as ft
+def fused_kda_gate(g, A, head_k_dim, g_bias=None, beta=1.0, threshold=20.0):
+    return ft.fused_kda_gate(g, A, head_k_dim, g_bias=g_bias)
+"""
+
+# The signature of the current releases: g is [..., H, K], A_log has H elements.
+FAKE_NEW_GATE = """
+import torch
+def fused_kda_gate(g, A_log=None, dt_bias=None, lower_bound=None, output_dtype=torch.float32):
+    assert g.shape[-1] != A_log.numel() * g.shape[-2] and A_log.dim() == 1
+    assert dt_bias.dim() == 1 and g.dtype == torch.float32
+    H, K = g.shape[-2:]
+    assert A_log.numel() == H and dt_bias.numel() == H * K
+    return -A_log.view(H, 1).exp() * torch.nn.functional.softplus(g + dt_bias.view(H, K))
+"""
+
+FAKE_KERNELS = """
+from localm.inference.backends import _fla_torch as ft
+chunk_kda = ft.chunk_kda
+fused_recurrent_kda = ft.fused_recurrent_kda
+"""
+
+FAKE_MODULES = """
+from localm.inference.backends import _fla_torch as ft
+class FusedRMSNormGated(ft.FusedRMSNormGated):
+    pass
+class ShortConvolution(ft.ShortConvolution):
+    pass
+"""
 
 
-def test_provide_for_replaces_an_fla_that_is_installed_but_does_not_import(tmp_path, monkeypatch):
+def _fake_fla(tmp_path, monkeypatch, gate=FAKE_NEW_GATE, kernels=FAKE_KERNELS, modules=FAKE_MODULES):
+    site = tmp_path / "site"
+    pkg = site / "fla"
+    for sub in (pkg, pkg / "ops", pkg / "ops" / "kda", pkg / "ops" / "utils"):
+        sub.mkdir(parents=True)
+        (sub / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "__init__.py").write_text(FAKE_RELEASE, encoding="utf-8")
+    (pkg / "modules.py").write_text(modules, encoding="utf-8")
+    (pkg / "ops" / "kda" / "__init__.py").write_text(kernels, encoding="utf-8")
+    (pkg / "ops" / "kda" / "gate.py").write_text(gate, encoding="utf-8")
+    (pkg / "ops" / "utils" / "index.py").write_text(
+        "from localm.inference.backends._fla_torch import prepare_lens_from_mask, "
+        "prepare_cu_seqlens_from_mask\n", encoding="utf-8")
+    (pkg / "utils.py").write_text("def tensor_cache(fn):\n    return fn\n", encoding="utf-8")
     for name in [n for n in sys.modules if n == "fla" or n.startswith("fla.")]:
         monkeypatch.delitem(sys.modules, name)
-    pkg = tmp_path / "site" / "fla"
-    pkg.mkdir(parents=True)
-    (pkg / "__init__.py").write_text("", encoding="utf-8")
-    (pkg / "modules.py").write_text("import localm_no_such_dependency_zz\n", encoding="utf-8")
-    monkeypatch.syspath_prepend(str(tmp_path / "site"))
-    assert ft._real_fla_imports() is False
+    monkeypatch.syspath_prepend(str(site))
+    monkeypatch.setattr(ft, "_real_failure", None)
+    importlib.invalidate_caches()
+
+
+@pytest.fixture
+def clean_fla():
+    yield
+    for name in [n for n in sys.modules if n == "fla" or n.startswith("fla.")]:
+        del sys.modules[name]
+
+
+def test_a_working_fla_install_is_chosen_and_says_so(tmp_path, monkeypatch, clean_fla):
+    _fake_fla(tmp_path, monkeypatch)
+    assert ft.provide_for(str(_kimi_folder(tmp_path))) is False
+    assert not getattr(sys.modules["fla"], ft.STAND_IN_MARK, False)
+    assert sys.modules["fla.ops.kda"].chunk_kda is ft.chunk_kda
+    assert ft.kernel_note() == "linear attention kernels: fla-core 9.9.9 (Triton)"
+
+
+def test_the_gate_of_a_current_release_takes_the_call_the_model_makes(tmp_path, monkeypatch, clean_fla):
+    _fake_fla(tmp_path, monkeypatch)
+    assert ft.provide_for(str(_kimi_folder(tmp_path))) is False
+    raw, bias = torch.randn(1, 5, 3 * 8).bfloat16(), torch.randn(24)
+    log_a = torch.randn(1, 1, 3, 1)
+    got = sys.modules["fla.ops.kda.gate"].fused_kda_gate(raw, log_a, 8, g_bias=bias)
+    assert torch.allclose(got, ft.fused_kda_gate(raw, log_a, 8, g_bias=bias), atol=1e-6)
+
+
+def test_a_release_with_the_gate_the_model_was_written_for_is_not_wrapped(tmp_path, monkeypatch, clean_fla):
+    _fake_fla(tmp_path, monkeypatch, gate=FAKE_OLD_GATE)
+    assert ft.provide_for(str(_kimi_folder(tmp_path))) is False
+    gate = sys.modules["fla.ops.kda.gate"].fused_kda_gate
+    assert "g_bias" in inspect.signature(gate).parameters and "beta" in inspect.signature(gate).parameters
+
+
+@pytest.mark.parametrize("kernels,reason", [
+    ("def chunk_kda(*a, **k):\n    raise RuntimeError('0 active drivers ([]). There should only be one.')\n"
+     "fused_recurrent_kda = chunk_kda\n", "0 active drivers"),
+    (FAKE_KERNELS + "_good = chunk_kda\ndef chunk_kda(q, k, v, g, beta, **kw):\n"
+     "    o, s = _good(q, k, v, g, beta, **kw)\n    return o + 0.5, s\n", "chunked KDA differs"),
+    (FAKE_KERNELS + "_good = fused_recurrent_kda\ndef fused_recurrent_kda(q, k, v, g, beta, **kw):\n"
+     "    o, s = _good(q, k, v, g, beta, **kw)\n    return o, s * float('nan')\n", "recurrent KDA state differs"),
+])
+def test_an_installed_fla_whose_kernels_fail_or_differ_gives_way(tmp_path, monkeypatch, clean_fla, kernels, reason):
+    _fake_fla(tmp_path, monkeypatch, kernels=kernels)
     assert ft.provide_for(str(_kimi_folder(tmp_path))) is True
     assert getattr(sys.modules["fla"], ft.STAND_IN_MARK)
+    assert sys.modules["fla.ops.kda"].chunk_kda is ft.chunk_kda
+    note = ft.kernel_note()
+    assert note.startswith("linear attention kernels: localm's PyTorch kernels; the installed fla-core")
+    assert reason in note
+
+
+def test_an_installed_fla_whose_gate_cannot_take_the_call_gives_way(tmp_path, monkeypatch, clean_fla):
+    _fake_fla(tmp_path, monkeypatch, gate="def fused_kda_gate(g):\n    return g\n")
+    assert ft.provide_for(str(_kimi_folder(tmp_path))) is True
+    assert "TypeError" in ft.kernel_note()
+
+
+def test_provide_for_replaces_an_fla_that_is_installed_but_does_not_import(tmp_path, monkeypatch, clean_fla):
+    _fake_fla(tmp_path, monkeypatch, modules="import localm_no_such_dependency_zz\n")
+    assert ft.provide_for(str(_kimi_folder(tmp_path))) is True
+    assert getattr(sys.modules["fla"], ft.STAND_IN_MARK)
+    assert "localm_no_such_dependency_zz" in ft.kernel_note()
+
+
+def test_the_check_runs_at_the_sizes_in_the_models_config(tmp_path, monkeypatch, clean_fla):
+    folder = _kimi_folder(tmp_path)
+    config = json.loads((folder / "config.json").read_text(encoding="utf-8"))
+    config["linear_attn_config"] = {"num_heads": 3, "head_dim": 16, "short_conv_kernel_size": 5}
+    (folder / "config.json").write_text(json.dumps(config), encoding="utf-8")
+    assert ft._kernel_sizes(str(folder)) == (3, 16, 5)
+    seen = []
+    monkeypatch.setattr(ft, "_check_real_kernels", lambda *a: seen.append(a))
+    _fake_fla(tmp_path, monkeypatch)
+    assert ft.provide_for(str(folder), "cpu") is False
+    assert seen == [("cpu", 3, 16, 5)]
+
+
+def test_a_config_without_the_sizes_gets_small_ones(tmp_path):
+    assert ft._kernel_sizes(str(_kimi_folder(tmp_path))) == (2, 8, 4)
+    assert ft._kernel_sizes(str(tmp_path / "absent")) == (2, 8, 4)
+
+
+def test_the_note_offers_the_package_only_where_localm_can_add_it(tmp_path, no_fla, monkeypatch, clean_fla):
+    assert ft.kernel_note() is None
+    assert ft.provide_for(str(_kimi_folder(tmp_path))) is True
+    monkeypatch.setattr(mpk, "_importable", lambda m: m == "triton")
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert ft.kernel_note() == ("linear attention kernels: localm's PyTorch kernels; "
+                                "`localm install-packages` adds the Triton kernels of fla-core")
+    monkeypatch.setattr(mpk, "_importable", lambda m: False)
+    assert ft.kernel_note() == "linear attention kernels: localm's PyTorch kernels"
+    monkeypatch.setattr(mpk, "_importable", lambda m: True)
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert ft.kernel_note() == "linear attention kernels: localm's PyTorch kernels"
 
 
 def test_a_model_needing_only_fla_is_neither_missing_nor_refused(tmp_path, monkeypatch):
@@ -246,3 +406,36 @@ def test_a_model_needing_only_fla_is_neither_missing_nor_refused(tmp_path, monke
     assert mp.folder_refusal(folder) is None
     state = mpk.folder_state(folder)
     assert state.missing == [] and state.addable == []
+
+
+def test_linux_with_triton_loads_without_fla_and_offers_it(tmp_path, monkeypatch):
+    from localm.inference.backends import hf as hf_backend
+    monkeypatch.setattr(hf_backend, "_trust_remote_code_enabled", lambda: True)
+    monkeypatch.setattr(mp, "is_importable", lambda m: m != "fla")
+    monkeypatch.setattr(mpk, "_importable", lambda m: m == "triton")
+    monkeypatch.setattr(sys, "platform", "linux")
+    folder = _kimi_folder(tmp_path)
+    assert mp.folder_refusal(folder) is None
+    state = mpk.folder_state(folder)
+    assert state.missing == [] and state.optional == ["fla"] and state.to_add == ["fla"]
+    assert state.as_dict() == {"missing": [], "addable": ["fla-core"], "installable": True}
+
+
+def test_linux_without_triton_loads_without_fla_and_offers_nothing(tmp_path, monkeypatch):
+    from localm.inference.backends import hf as hf_backend
+    monkeypatch.setattr(hf_backend, "_trust_remote_code_enabled", lambda: True)
+    monkeypatch.setattr(mp, "is_importable", lambda m: m != "fla")
+    monkeypatch.setattr(mpk, "_importable", lambda m: False)
+    monkeypatch.setattr(sys, "platform", "linux")
+    state = mpk.folder_state(_kimi_folder(tmp_path))
+    assert state.missing == [] and state.to_add == []
+
+
+def test_an_install_that_has_fla_offers_nothing(tmp_path, monkeypatch):
+    from localm.inference.backends import hf as hf_backend
+    monkeypatch.setattr(hf_backend, "_trust_remote_code_enabled", lambda: True)
+    monkeypatch.setattr(mp, "is_importable", lambda m: True)
+    monkeypatch.setattr(mpk, "_importable", lambda m: True)
+    monkeypatch.setattr(sys, "platform", "linux")
+    state = mpk.folder_state(_kimi_folder(tmp_path))
+    assert state.missing == [] and state.to_add == []

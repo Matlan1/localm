@@ -1717,8 +1717,11 @@ class HFWorker:
 
         if trust_remote_code:
             from localm.inference.backends import _remote_code_compat
-            from localm.inference.backends._fla_torch import provide_for
-            provide_for(self.model_path)
+            from localm.inference.backends._fla_torch import kernel_note, provide_for
+            provide_for(self.model_path, device)
+            note = kernel_note()
+            if note:
+                self.load_notes.append(note)
             _remote_code_compat.apply_for(self.model_path)
 
         # --- Processor / tokenizer ---

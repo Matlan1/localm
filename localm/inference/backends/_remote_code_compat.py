@@ -18,6 +18,7 @@ the methods the current mask functions call.
 from __future__ import annotations
 
 import functools
+import importlib
 import importlib.util
 import inspect
 import logging
@@ -32,6 +33,9 @@ logger = logging.getLogger("localm")
 _MASK_FUNCTIONS = ("create_causal_mask", "create_sliding_window_causal_mask")
 _LEGACY_CALL = re.compile(r"\b(?:create_causal_mask|create_sliding_window_causal_mask)\s*\(")
 _WRAPPED_MARK = "__localm_accepts_legacy_mask_arguments__"
+_BUNDLED_CODE_PACKAGE = "transformers_modules."
+# Old module -> names that moved out of it -> the module that now holds each.
+_MOVED_NAMES = {"transformers.utils.generic": {"OutputRecorder": "transformers.utils.output_capturing"}}
 
 
 def _accepting_legacy_arguments(fn):
@@ -59,19 +63,49 @@ def _folder_calls_mask_functions(folder: Path) -> bool:
     return False
 
 
+def _restore_moved_names(folder: Path) -> bool:
+    """Make each name of :data:`_MOVED_NAMES` that the code of *folder* imports from its
+    old module importable there again. True when a name was added."""
+    restored = False
+    for source in folder.glob("*.py"):
+        try:
+            text = source.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for old_module, names in _MOVED_NAMES.items():
+            imports = re.search(rf"from\s+{re.escape(old_module)}\s+import\s+(\([^)]*\)|[^\n]*)", text)
+            if imports is None:
+                continue
+            for name, new_module in names.items():
+                if re.search(rf"\b{name}\b", imports.group(1)) is None:
+                    continue
+                try:
+                    old = importlib.import_module(old_module)
+                    if not hasattr(old, name):
+                        setattr(old, name, getattr(importlib.import_module(new_module), name))
+                        restored = True
+                except (ImportError, AttributeError) as e:
+                    logger.debug("hf load: %s could not be restored in %s: %s", name, old_module, e)
+    return restored
+
+
 def apply_for(model_path: str) -> bool:
-    """Wrap transformers' mask-building functions to accept the older keyword names
-    when the code bundled in the model folder *model_path* calls them. Returns True
-    when a function was wrapped by this call; False when the folder does not call
-    them, transformers has no such functions, or they are already wrapped."""
+    """Prepare transformers for the code bundled in the model folder *model_path*: a name
+    that code imports from where older releases kept it (:data:`_MOVED_NAMES`) is made
+    importable there, and when that code calls the mask-building functions they are
+    wrapped to accept the older keyword names. Returns True when this call changed
+    anything; False for a folder whose code uses neither, or when transformers is
+    already prepared."""
     folder = Path(model_path)
-    if not folder.is_dir() or not _folder_calls_mask_functions(folder):
+    if not folder.is_dir():
         return False
+    wrapped = _restore_moved_names(folder)
+    if not _folder_calls_mask_functions(folder):
+        return wrapped
     try:
         import transformers.masking_utils as masking
     except ImportError:
-        return False
-    wrapped = False
+        return wrapped
     for name in _MASK_FUNCTIONS:
         fn = getattr(masking, name, None)
         if fn is None or getattr(fn, _WRAPPED_MARK, False):
@@ -113,14 +147,17 @@ def _sdpa_without_flash_attn(model) -> bool:
 
 
 def apply_to_model(model) -> bool:
-    """Adjust a loaded model whose bundled code was written for an older transformers.
-    A model configured for ``flash_attention_2`` while ``flash_attn`` is not installed
-    uses ``sdpa`` attention. A model whose class declares ``_is_stateful`` (it carries
-    its own generation cache) is no longer handed a default ``DynamicCache`` by
-    ``generate``, and its cache classes written for the older mask API are given the
-    methods the current one calls. Returns True when anything was changed."""
-    changed = _sdpa_without_flash_attn(model)
+    """Adjust a loaded model whose class comes from its folder's bundled code, written
+    for an older transformers; a class of transformers itself is left alone. A model
+    configured for ``flash_attention_2`` while ``flash_attn`` is not installed uses
+    ``sdpa`` attention. A model whose class declares ``_is_stateful`` (it carries its own
+    generation cache) is no longer handed a default ``DynamicCache`` by ``generate``, and
+    its cache classes written for the older mask API are given the methods the current
+    one calls. Returns True when anything was changed."""
     cls = type(model)
+    if not cls.__module__.startswith(_BUNDLED_CODE_PACKAGE):
+        return False
+    changed = _sdpa_without_flash_attn(model)
     if not getattr(cls, "_is_stateful", False):
         return changed
     supports = getattr(cls, "_supports_default_dynamic_cache", None)

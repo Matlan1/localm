@@ -1480,7 +1480,7 @@ def install_packages_cmd(model, yes, list_added):
                       "does with hf_trust_remote_code on, so its packages are not checked. "
                       "Turn it on with:  localm config hf_trust_remote_code true")
         sys.exit(1)
-    if not state.missing:
+    if not state.to_add and not state.missing:
         console.print(f"{escape(folder.name)} needs no packages this install lacks.")
         return
     if state.shipped or state.blocked:
@@ -1488,7 +1488,7 @@ def install_packages_cmd(model, yes, list_added):
         sys.exit(1)
     console.print("Working out what to install...")
     try:
-        plan = mpk.plan(state.addable)
+        plan = mpk.plan(state.to_add)
     except mpk.PlanError as e:
         console.print(f"[red]{escape(str(e))}[/red]")
         sys.exit(1)
