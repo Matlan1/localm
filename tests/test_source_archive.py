@@ -118,7 +118,8 @@ def test_a_cut_off_download_is_an_archive_error(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("bad", ["../evil.py", "/abs.py", "a/../../evil.py", "C:/x.py",
                                  "a/D:/escaped.py", "a/..\\..\\evil.py",
-                                 ".git/HEAD", ".GIT/config"])
+                                 ".git/HEAD", ".GIT/config", "sub/.git/config",
+                                 "a/b/.Git/hooks/post-checkout"])
 def test_an_unsafe_path_is_refused(monkeypatch, tmp_path, bad):
     commit = fake_commit(bad)
     zpath = tmp_path / "a.zip"
@@ -216,7 +217,7 @@ def test_apply_tree_puts_everything_back_when_a_write_fails(tmp_path, monkeypatc
     seen = []
 
     def flaky(src, dst, *a, **k):
-        if str(src).startswith(str(sa._long(new))) and str(dst).endswith("b.py"):
+        if str(src).startswith(str(sa.long_path(new))) and str(dst).endswith("b.py"):
             seen.append(dst)
             raise OSError("disk full")
         return real(src, dst, *a, **k)
@@ -228,6 +229,45 @@ def test_apply_tree_puts_everything_back_when_a_write_fails(tmp_path, monkeypatc
     assert (root / "a.py").read_text(encoding="utf-8") == "old"
     assert (root / "b.py").read_text(encoding="utf-8") == "old"
     assert sa.tree_commit(root) == "1" * 40
+    assert not (tmp_path / "backup").exists()
+
+
+def test_a_file_that_cannot_be_put_back_is_named_and_its_original_kept(tmp_path, monkeypatch):
+    root = _tree(tmp_path, "root", {"a.py": "old", "b.py": "old"}, "1" * 40)
+    new = _tree(tmp_path, "new", {"a.py": "new", "b.py": "new"}, "2" * 40)
+    backup = tmp_path / "backup"
+    real = shutil.copy2
+    refused = []
+
+    def flaky(src, dst, *a, **k):
+        if str(dst).endswith("b.py") and not str(dst).startswith(str(sa.long_path(backup))):
+            refused.append((src, dst))
+            raise OSError("file in use")
+        return real(src, dst, *a, **k)
+
+    monkeypatch.setattr(sa.shutil, "copy2", flaky)
+    with pytest.raises(sa.TreeRollbackError) as caught:
+        sa.apply_tree(new, root, sa.tree_files(root), backup)
+    err = caught.value
+    assert len(refused) == 2
+    assert (backup / "b.py").read_text(encoding="utf-8") == "old"
+    assert err.failed == ["b.py"]
+    assert isinstance(err, OSError) and "file in use" in str(err.cause)
+    assert str(err.backup).endswith(str(backup)) and err.change.root == sa.long_path(root)
+    assert "b.py" in str(err) and str(backup) in str(err) and "\\\\?\\" not in str(err)
+    assert "holds a mix of old and new files" in str(err)
+    assert (root / "a.py").read_text(encoding="utf-8") == "old"
+    assert not (root / "b.py").exists()
+
+    monkeypatch.setattr(sa.shutil, "copy2", real)
+    assert err.change.rollback() == []
+    assert (root / "b.py").read_text(encoding="utf-8") == "old"
+
+
+def test_plain_path_drops_the_extended_length_prefix():
+    assert sa.plain_path("\\\\?\\D:\\a\\b") == "D:\\a\\b"
+    assert sa.plain_path("\\\\?\\UNC\\host\\share\\x") == "\\\\host\\share\\x"
+    assert sa.plain_path("/srv/x") == "/srv/x"
 
 
 def test_a_record_is_ignored_once_the_git_checkout_moved(tmp_path):
@@ -247,7 +287,8 @@ def test_a_record_is_ignored_once_the_git_checkout_moved(tmp_path):
     assert sa.tree_files(root) is None
 
 
-@pytest.mark.parametrize("bad", ["a\\b.py", "a/x:y.py", "a/b\0.py", ".git/HEAD", ""])
+@pytest.mark.parametrize("bad", ["a\\b.py", "a/x:y.py", "a/b\0.py", ".git/HEAD",
+                                 "sub/.git/HEAD", "a/.GIT", ""])
 def test_safe_name_refuses_names_windows_reads_as_another_path(bad):
     assert sa._safe_name(bad) is None
     assert sa._safe_name("a/b.py") == "a/b.py"

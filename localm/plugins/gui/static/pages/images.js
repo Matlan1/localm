@@ -547,6 +547,8 @@ if (imageHelperRow) {
   const importBtn = el("button", "btn-secondary btn-sm", t("images.import.button"));
   importBtn.type = "button";
   importBtn.title = t("images.import.title");
+  importBtn.dataset.i18n = "images.import.button";
+  importBtn.dataset.i18nTitle = "images.import.title";
   importBtn.onclick = () => picker.click();
   picker.onchange = async () => {
     const file = picker.files && picker.files[0];

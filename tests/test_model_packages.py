@@ -487,6 +487,37 @@ def test_folder_state_sorts_the_missing_packages(tmp_path, trusted, monkeypatch)
                                "installable": False}
 
 
+@pytest.mark.parametrize("plat, machine, label, module, source", [
+    ("linux", "aarch64", "Linux ARM64", "decord", "decord"),
+    ("win32", "ARM64", "Windows ARM64", "tiktoken", "tiktoken"),
+    ("win32", "ARM64", "Windows ARM64", "cv2", "opencv"),
+    ("darwin", "x86_64", "macOS x64", "monai", "monai"),
+])
+def test_a_module_with_no_build_for_this_platform_is_blocked(
+        tmp_path, trusted, monkeypatch, plat, machine, label, module, source):
+    monkeypatch.setattr(mp.sys, "platform", plat)
+    monkeypatch.setattr(mp.platform, "machine", lambda: machine)
+    monkeypatch.setattr(mp, "is_importable", lambda m: m != module)
+    state = mpk.folder_state(_model(tmp_path, f"import {module}\n"))
+    assert (state.shipped, state.blocked, state.addable) == ([], [module], [])
+    assert state.as_dict() == {"missing": [source], "addable": [], "installable": False}
+    assert mpk.unavailable_reason(module) == f"it is not available for this platform ({label})"
+    assert f"not available for this platform ({label})" in mp.refusal_for("m", state.missing)
+    with pytest.raises(mpk.PlanError) as raised:
+        mpk.plan([module])
+    assert f"not available for this platform ({label})" in str(raised.value)
+
+
+def test_a_module_shipped_for_this_platform_is_still_an_incomplete_install(
+        tmp_path, trusted, monkeypatch):
+    monkeypatch.setattr(mp.sys, "platform", "linux")
+    monkeypatch.setattr(mp.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(mp, "is_importable", lambda m: m != "decord")
+    state = mpk.folder_state(_model(tmp_path, "import decord\n"))
+    assert (state.shipped, state.blocked, state.addable) == (["decord"], [], [])
+    assert "normally includes" in mp.refusal_for("m", state.missing)
+
+
 def test_folder_state_scans_the_code_again_only_after_it_changed(tmp_path, trusted, monkeypatch):
     calls = []
     real = mp.folder_third_party_imports

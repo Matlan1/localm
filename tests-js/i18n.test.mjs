@@ -256,6 +256,23 @@ test("tn() picks the French one form for 0 and 1 and the Spanish one form for 1 
     assert.notEqual(frCat["chat.share.imagesIn.one"], frCat["chat.share.imagesIn.other"]);
   });
 
+for (const [id, cat] of Object.entries(CATALOGS)) {
+  test(`the buttons the media pages paint at load follow the ${id} catalog`, async () => {
+    const { window } = await loadIn(id, { withPages: true });
+    const doc = window.document;
+    const enhance = Array.from(doc.querySelectorAll('[data-i18n="enhance.button"]'));
+    assert.ok(enhance.length >= 3, "one Enhance button per media page");
+    for (const b of enhance) {
+      assert.equal(b.textContent, cat["enhance.button"]);
+      assert.equal(b.title, cat["enhance.title"]);
+    }
+    const imported = doc.querySelector('[data-i18n="images.import.button"]');
+    assert.ok(imported, "the Images page has its import button");
+    assert.equal(imported.textContent, cat["images.import.button"]);
+    assert.equal(imported.title, cat["images.import.title"]);
+  });
+}
+
 test("the choice is cached in this browser and re-applied on the next load", async () => {
   const first = await loadIn(null);
   runScript(first.window, 'window.__p = applyLanguage("de");');

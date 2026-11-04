@@ -136,7 +136,7 @@ test("with the GitHub App configured, a body localm did not build makes no GitHu
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title: "0", body: "/tmp/pp-fuzz/probe" }) });
     const { res, upstream } = await callWithApp(worker, request, appEnv(106));
-    assert.equal(res.status, 202);
+    assert.equal(res.status, 422);
     assert.equal(upstream.length, 0, "not even the installation token is requested");
   } finally {
     console.log = realLog;

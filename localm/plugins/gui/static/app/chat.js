@@ -3085,7 +3085,7 @@ export function mountStatusIndicator(bodyEl, text, isWarn = false) {
 
 // Status codes (delta.status_code) that call for the warning style, independent
 // of which language the accompanying text is in.
-const WARN_STATUS_CODES = new Set(["vision_cpu_retry", "audio_cpu_retry"]);
+const WARN_STATUS_CODES = new Set(["vision_cpu_retry", "audio_cpu_retry", "loading_beside"]);
 
 /** The chat.status.* catalog key for a snake_case server status code. */
 function statusIndicatorI18nKey(code) {
@@ -3093,9 +3093,13 @@ function statusIndicatorI18nKey(code) {
 }
 
 /** The label for a server status: the localized text for its status `code`
- *  when the catalog has one, otherwise `text` as given. */
-export function statusLabel(text, code = null) {
-  return code ? tOr(statusIndicatorI18nKey(code), text) : text;
+ *  filled from `args` (the server's delta.status_args) when the catalog has
+ *  one, otherwise `text` as given. A localized text with a placeholder `args`
+ *  does not fill is not used. */
+export function statusLabel(text, code = null, args = null) {
+  if (!code) return text;
+  const label = tOr(statusIndicatorI18nKey(code), text, args || undefined);
+  return /\{\w+\}/.test(label) ? text : label;
 }
 
 /** Update the text and warning state of an existing status indicator in bodyEl,
@@ -3103,9 +3107,9 @@ export function statusLabel(text, code = null) {
  *  when it resolves to a catalog entry, that localized text and the code's
  *  warning style are used; otherwise `text` is shown as given and the warning
  *  style is matched from its English wording. */
-export function updateStatusIndicator(bodyEl, text, code = null) {
+export function updateStatusIndicator(bodyEl, text, code = null, args = null) {
   if (!bodyEl) return null;
-  const label = statusLabel(text, code);
+  const label = statusLabel(text, code, args);
   const shouldWarn = code
     ? WARN_STATUS_CODES.has(code)
     : (typeof text === "string" && (

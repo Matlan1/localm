@@ -3,7 +3,7 @@
 "use strict";
 
 // --- ES module imports ---
-import { clearRecentGuiErrors, onRecentGuiErrorsChange, recentGuiErrors } from "../app/client-log.js";
+import { clearRecentGuiErrors, dismissRecentGuiError, onRecentGuiErrorsChange, recentGuiErrors } from "../app/client-log.js";
 import { pickDirectory } from "../app/picker.js";
 import { $, GIB, authHeaders, cancelJob, confirmDanger, confirmDangerAsync, downloadRate, el, fmtBytes, fmtDuration, openModal, promptText, readSSE, renderMarkdown, showInlineError, streamJob, toast, setBusy, whileBusy } from "../app/helpers.js";
 import { t, tn } from "../app/i18n.js";
@@ -2058,7 +2058,7 @@ export async function sendReviewedBugReport(isRetry = false, rep = _reviewedBugR
     }
     const sent = !!data.uploaded;
     const uploadFailed = !sent && data.upload_error && !data.rate_limited;
-    _showBugActions({ retry: !sent, download: !sent && !!_lastBugReport });
+    _showBugActions({ retry: !sent && data.upload_stage !== "not_filed", download: !sent && !!_lastBugReport });
     if (out) {
       out.hidden = false;
       if (sent) {
@@ -2189,7 +2189,12 @@ export function renderRecentErrors(list = recentGuiErrors()) {
     const report = el("button", "btn-secondary", t("settings.recentErrors.report"));
     report.type = "button";
     report.onclick = () => reportGuiErrorEntry(entry);
-    actions.append(copy, report);
+    const dismiss = el("button", "btn-secondary recent-error-dismiss", "\u00d7");
+    dismiss.type = "button";
+    dismiss.title = t("settings.recentErrors.dismiss");
+    dismiss.setAttribute("aria-label", t("settings.recentErrors.dismiss"));
+    dismiss.onclick = () => dismissRecentGuiError(entry);
+    actions.append(copy, report, dismiss);
     li.append(meta, text, actions);
     box.appendChild(li);
   }
