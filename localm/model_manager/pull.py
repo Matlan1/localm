@@ -3171,8 +3171,9 @@ def _warn_if_repo_ships_code(dest: Path, repo_id: str) -> None:
         f"Python file(s) ({shown}).")
     console.print(
         "[dim]  localm will NOT run them: model-bundled custom code is disabled "
-        "by default. A model that requires it is refused with an explanation "
-        "unless you enable 'hf_trust_remote_code'.[/dim]")
+        "by default. Such a model runs on transformers' own support when there is "
+        "one; otherwise it is refused with an explanation unless you enable "
+        "'hf_trust_remote_code'.[/dim]")
 
 
 def _resolve_snapshot_type(dest: Path, model_type: str) -> str:

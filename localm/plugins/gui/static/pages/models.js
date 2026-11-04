@@ -585,6 +585,11 @@ export async function refreshModelsPage() {
     if (m.part_of) {
       nameLine.appendChild(el("span", "arch-badge", t("models.partOf", { model: m.part_of })));
     }
+    if (m.own_code_off) {
+      const ownCode = el("span", "moe-badge moe-likely", t("models.ownCodeOff"));
+      ownCode.title = t("models.ownCodeOffHint");
+      nameLine.appendChild(ownCode);
+    }
     if (m.expert_count > 0) {
       nameLine.appendChild(el("span", "moe-badge moe-confirmed", t(MOE_LABEL.confirmed)));
     }
@@ -1283,6 +1288,7 @@ function discRepoRow(m, gpus) {
     if (m.size_bytes) {
       head.appendChild(el("span", "disc-hf-size", fmtSize(m.size_bytes)));
       if (m.fit) head.appendChild(el("span", "fit " + m.fit, t(FIT_TEXT[m.fit])));
+      if (m.exceeds_memory) head.appendChild(el("span", "sub split-hint", t("models.fit.exceedsMemory")));
       // "fits"/"tight" already account for a configured split (the server sums
       // capacity across it - see discover.vram_capacity), so no split hint.
       const hint = (m.fit === "fits" || m.fit === "tight")

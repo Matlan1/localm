@@ -456,6 +456,7 @@ _TORCH_INDEX = {
     "cpu": "https://download.pytorch.org/whl/cpu",
 }
 
+_FLA_CORE_LINUX_CUDA = "fla-core==0.6.0"
 # uv's `--torch-backend` values for the same variants. See
 # test_torch_backend_avoids_the_setuptools_conflict_index_url_hits.
 _TORCH_BACKEND = {
@@ -559,7 +560,9 @@ def torch_pip_args(backend: str, det: Detection | None = None) -> str:
 
       * cuda            -> CUDA wheels (cu126, or the Blackwell-and-newer line
                            when this machine has one - see pytorch_index_url);
-                           any OS with NVIDIA
+                           any OS with NVIDIA. On Linux also fla-core, the Triton
+                           kernels of linear-attention models; the Linux CUDA wheels
+                           bring Triton
       * xpu             -> Intel wheels (self-provision the oneAPI runtime)
       * rocm, Linux     -> upstream ROCm wheels (broad gfx support)
       * rocm, Windows, gfx103X (RX 6000 / RDNA2) -> localm's bundled self-contained
@@ -573,7 +576,8 @@ def torch_pip_args(backend: str, det: Detection | None = None) -> str:
     variant = recommended_torch_variant(backend, det)
     if variant == "cuda":
         key = "cuda-blackwell" if _cuda_is_blackwell() else "cuda"
-        return f"torch torchvision --torch-backend={_TORCH_BACKEND[key]}"
+        kernels = f" {_FLA_CORE_LINUX_CUDA}" if sys.platform.startswith("linux") else ""
+        return f"torch torchvision{kernels} --torch-backend={_TORCH_BACKEND[key]}"
     if variant == "xpu":
         return f"torch torchvision --torch-backend={_TORCH_BACKEND['xpu']}"
     if variant == "rocm":

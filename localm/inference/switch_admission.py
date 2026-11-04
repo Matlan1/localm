@@ -75,6 +75,8 @@ class LoadBudget:
     needs (a Mixture-of-Experts model with its routed experts in system RAM),
     or None when it is not known or equals ``backend_need``.
     ``unload_policy`` is the ``unload_for_room`` setting (``UNLOAD_POLICIES``).
+    ``experts_on_disk`` is True for a checkpoint whose routed experts the backend reads from
+    its files as they are needed when it does not fit.
     """
 
     name: str
@@ -88,6 +90,7 @@ class LoadBudget:
     backend_sized: bool = False
     min_need: Optional[int] = None
     unload_policy: str = UNLOAD_ALWAYS
+    experts_on_disk: bool = False
 
     @property
     def needed_bytes(self) -> int:
@@ -414,7 +417,7 @@ def degraded_load_confirm(name: str, budget: LoadBudget, free: int,
     need (``budget.needed_bytes``).
 
     Besides ``detail``, the result carries ``reason`` "degraded_load",
-    ``plan_mb``, ``full_mb``, ``free_mb``, ``moe``, ``unloaded`` (a list),
+    ``plan_mb``, ``full_mb``, ``free_mb``, ``moe``, ``experts_on_disk``, ``unloaded`` (a list),
     ``unloads_shared`` and ``unloads_peers`` for a client that words the
     question itself."""
     unloaded = list(unloaded)
@@ -437,9 +440,13 @@ def degraded_load_confirm(name: str, budget: LoadBudget, free: int,
     return {
         "status": "confirm_required", "model": name, "reason": "degraded_load",
         "plan_mb": plan_mb, "full_mb": full_mb, "free_mb": free_mb, "moe": moe,
+        "experts_on_disk": budget.experts_on_disk,
         "unloaded": unloaded, "unloads_shared": shared, "unloads_peers": peers,
-        "detail": (f"'{name}' does not fit: {need}, and {where}. Loading it "
-                   "anyway runs some of its layers on the CPU, which is slower."),
+        "detail": (f"'{name}' does not fit: {need}, and {where}. "
+                   + ("Loading it anyway keeps its routed experts on disk and reads them as "
+                      "they are needed, so replies are very slow."
+                      if budget.experts_on_disk else
+                      "Loading it anyway runs some of its layers on the CPU, which is slower.")),
     }
 
 

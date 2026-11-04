@@ -535,6 +535,33 @@ def test_torch_pip_args_cuda(monkeypatch):
     assert "cu126" in args and args.startswith("torch torchvision")
 
 
+def test_torch_pip_args_cuda_on_linux_brings_the_triton_kernels_for_linear_attention(monkeypatch):
+    monkeypatch.setattr(hwdetect, "_cuda_compute_capabilities", lambda: [])
+    monkeypatch.setattr(hwdetect.sys, "platform", "linux")
+    args = hwdetect.torch_pip_args("cuda", Detection(vendors=["nvidia"]))
+    assert args.split() == ["torch", "torchvision", "fla-core==0.6.0", "--torch-backend=cu126"]
+
+
+@pytest.mark.parametrize("plat", ["win32", "darwin"])
+def test_torch_pip_args_cuda_elsewhere_does_not(monkeypatch, plat):
+    monkeypatch.setattr(hwdetect, "_cuda_compute_capabilities", lambda: [])
+    monkeypatch.setattr(hwdetect.sys, "platform", plat)
+    args = hwdetect.torch_pip_args("cuda", Detection(vendors=["nvidia"]))
+    assert args.split() == ["torch", "torchvision", "--torch-backend=cu126"]
+
+
+def test_torch_pip_args_only_cuda_brings_the_triton_kernels(monkeypatch):
+    monkeypatch.setattr(hwdetect.sys, "platform", "linux")
+    for backend, det in (("cpu", Detection(vendors=[])), ("rocm", Detection(vendors=["amd"], gpu_names="rx 6800")),
+                         ("sycl", Detection(vendors=["intel"]))):
+        assert "fla-core" not in hwdetect.torch_pip_args(backend, det)
+
+
+def test_the_setup_pin_of_fla_core_is_the_version_localm_offers_on_demand():
+    from localm.model_manager.model_packages import ON_DEMAND
+    assert hwdetect._FLA_CORE_LINUX_CUDA == f"fla-core=={ON_DEMAND['fla'].floor}"
+
+
 def test_torch_pip_args_cpu_is_empty():
     assert hwdetect.torch_pip_args("cpu", Detection(vendors=[])) == ""
 

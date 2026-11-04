@@ -255,8 +255,9 @@ clients you trust.
   line (`localm run D:\models\foo.gguf`, `localm gui <path>`, `localm mcp
   --model <path>`) is unchanged and still allowed - you typed it yourself.
 - **A model's own bundled code does not run just because you loaded it.**
-  Custom model code (`trust_remote_code`) is off by default; a model that
-  needs it is refused with an explanation, and the owner-only "Allow
+  Custom model code (`trust_remote_code`) is off by default. A model that
+  ships it runs on the classes transformers has for it, without its code,
+  and is refused with an explanation when there are none. The owner-only "Allow
   model-bundled custom code" setting (Settings > Model) turns it back on
   for a model you trust.
 - **A downloaded model or vision-projector filename** cannot resolve to

@@ -1256,7 +1256,9 @@ export function confirmLoadText(data) {
   const where = names.length
     ? t("models.switch.freeAfterUnload", { free: data.free_mb, names: names.join(", ") })
     : t("models.switch.freeNow", { free: data.free_mb });
-  return t(data.moe ? "models.switch.degradedMoe" : "models.switch.degradedDense", {
+  const worded = data.experts_on_disk ? "models.switch.degradedDisk"
+    : (data.moe ? "models.switch.degradedMoe" : "models.switch.degradedDense");
+  return t(worded, {
     model: data.model, plan: data.plan_mb, full: data.full_mb, where });
 }
 

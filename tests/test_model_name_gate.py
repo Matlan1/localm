@@ -73,7 +73,7 @@ def evil_hf_dir(tmp_path):
     d = tmp_path / "evil_hf"
     d.mkdir()
     (d / "config.json").write_text(json.dumps({
-        "model_type": "llama",
+        "model_type": "localm_no_such_type",
         # Deliberately content that is NOT a plausible model name: markup, a
         # newline, and a filesystem path.
         "_name_or_path": "<script>alert(1)</script>\nD:/some/host/path",
@@ -614,7 +614,7 @@ def test_custom_code_detected_in_preprocessor_config(home, tmp_path):
     from localm.inference.backends.hf import _check_custom_code_allowed
     d = tmp_path / "vlm"
     d.mkdir()
-    (d / "config.json").write_text(json.dumps({"model_type": "llama"}))
+    (d / "config.json").write_text(json.dumps({"model_type": "localm_no_such_type"}))
     (d / "preprocessor_config.json").write_text(json.dumps(
         {"auto_map": {"AutoProcessor": "proc.EvilProcessor"}}))
     with pytest.raises(RuntimeError, match="hf_trust_remote_code"):

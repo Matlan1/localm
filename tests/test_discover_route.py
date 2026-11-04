@@ -211,6 +211,27 @@ def test_detected_type_passed_through_response(gui_app, monkeypatch):
     assert r.json()["results"][0]["detected_type"] == "unknown"
 
 
+def test_a_result_larger_than_video_memory_and_ram_together_says_so(gui_app, monkeypatch):
+    from localm.plugins.gui.routes.models import discovery
+    app, disc = gui_app
+
+    def spy(query, limit=20, formats=("gguf",), model_types=None):
+        return [{"id": "org/huge", "downloads": 1, "likes": 0, "updated": "", "formats": ["hf"],
+                 "size_bytes": 91_000_000_000},
+                {"id": "org/big", "downloads": 1, "likes": 0, "updated": "", "formats": ["hf"],
+                 "size_bytes": 40_000_000_000}]
+
+    monkeypatch.setattr(disc, "hf_search", spy)
+    monkeypatch.setattr(disc, "hf_backend_available", lambda: True)
+    monkeypatch.setattr(disc, "vram_info", _vram_dict_stub({"total": 16_000_000_000}))
+    monkeypatch.setattr(discovery, "_total_ram", lambda: 32_000_000_000)
+    with TestClient(app) as c:
+        r = c.get("/api/discover/search?q=x&formats=hf", headers=_hdr())
+    by_id = {x["id"]: x for x in r.json()["results"]}
+    assert by_id["org/huge"]["exceeds_memory"] is True and by_id["org/huge"]["fit"] == "too-big"
+    assert "exceeds_memory" not in by_id["org/big"] and by_id["org/big"]["fit"] == "too-big"
+
+
 def test_hf_result_gets_fit_from_size(gui_app, monkeypatch):
     app, disc = gui_app
 

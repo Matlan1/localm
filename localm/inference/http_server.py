@@ -980,6 +980,7 @@ def _switch_load_budget(name: str) -> switch_admission.LoadBudget | None:
         return None
 
     from localm.inference import backend_registry
+    from localm.inference.backends._hf_expert_files import worth_using
     from localm.inference.engine import _is_gguf
     vram_required = residency.required_vram_bytes(file_size)
     cfg = load_config()
@@ -993,6 +994,7 @@ def _switch_load_budget(name: str) -> switch_admission.LoadBudget | None:
         plugin_backend=(info is not None
                         and backend_registry.backend_for(str(info[0])) is not None),
         unload_policy=switch_admission.unload_policy(cfg),
+        experts_on_disk=info is not None and worth_using(str(info[0]), 0),
     )
 
 
