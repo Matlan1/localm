@@ -52,7 +52,7 @@ def test_cuda_uses_cu126_any_os(monkeypatch):
     # this would pass or fail depending on whether the box has an NVIDIA GPU.
     monkeypatch.setattr(hwdetect, "_cuda_compute_capabilities", lambda: [])
     args = hwdetect.torch_pip_args("cuda", _det("nvidia rtx 4090", ("nvidia",)))
-    assert args == "torch torchvision --torch-backend=cu126"
+    assert args.replace(f"{hwdetect._FLA_CORE_LINUX_CUDA} ", "") == "torch torchvision --torch-backend=cu126"
 
 
 def test_cuda_uses_blackwell_line_when_detected(monkeypatch):
@@ -61,7 +61,7 @@ def test_cuda_uses_blackwell_line_when_detected(monkeypatch):
     torch loads but warns every device is unsupported and runs CPU-only."""
     monkeypatch.setattr(hwdetect, "_cuda_compute_capabilities", lambda: [(12, 0)])
     args = hwdetect.torch_pip_args("cuda", _det("nvidia rtx pro 4000 blackwell", ("nvidia",)))
-    assert args == "torch torchvision --torch-backend=cu130"
+    assert args.replace(f"{hwdetect._FLA_CORE_LINUX_CUDA} ", "") == "torch torchvision --torch-backend=cu130"
 
 
 def test_cuda_uses_blackwell_line_if_any_of_several_gpus_is_blackwell(monkeypatch):

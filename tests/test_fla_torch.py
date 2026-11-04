@@ -358,7 +358,7 @@ def test_a_release_with_the_gate_the_model_was_written_for_is_not_wrapped(tmp_pa
     assert "g_bias" in inspect.signature(gate).parameters and "beta" in inspect.signature(gate).parameters
 
 
-@pytest.mark.parametrize("kernels,reason", [
+@pytest.mark.parametrize("kernels,reason", ids=["raises", "differs", "nan"], argvalues=[
     ("def chunk_kda(*a, **k):\n    raise RuntimeError('0 active drivers ([]). There should only be one.')\n"
      "fused_recurrent_kda = chunk_kda\n", "0 active drivers"),
     (FAKE_KERNELS + "_good = chunk_kda\ndef chunk_kda(q, k, v, g, beta, **kw):\n"

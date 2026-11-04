@@ -5,6 +5,7 @@ model that insists on flash attention falls back to sdpa when flash_attn is abse
 
 from __future__ import annotations
 
+import logging
 import sys
 import types
 
@@ -188,3 +189,25 @@ def test_code_that_does_not_import_the_moved_name_changes_nothing(tmp_path, gene
 def test_a_folder_that_does_not_exist_changes_nothing(tmp_path, generic_without_the_moved_name):
     assert compat.apply_for(str(tmp_path / "absent")) is False
     assert not hasattr(generic_without_the_moved_name, "OutputRecorder")
+
+
+def test_the_encode_notice_of_a_bundled_tokenizer_is_dropped_and_nothing_else(caplog):
+    class Tokenizer:
+        pass
+
+    Tokenizer.__module__ = "transformers_modules.fake_tok.tokenization_x"
+    log = logging.getLogger(Tokenizer.__module__)
+    compat.drop_encode_notice(Tokenizer())
+    with caplog.at_level(logging.WARNING, logger=Tokenizer.__module__):
+        log.warning("Calling super().encode with %s", {"add_special_tokens": False})
+        log.warning("the vocabulary is damaged")
+    assert [r.getMessage() for r in caplog.records] == ["the vocabulary is damaged"]
+
+
+def test_a_tokenizer_of_transformers_itself_keeps_its_module_logger_as_it_is():
+    class Tokenizer:
+        pass
+
+    Tokenizer.__module__ = "transformers.fake_tok"
+    compat.drop_encode_notice(Tokenizer())
+    assert logging.getLogger(Tokenizer.__module__).filters == []

@@ -34,6 +34,7 @@ _MASK_FUNCTIONS = ("create_causal_mask", "create_sliding_window_causal_mask")
 _LEGACY_CALL = re.compile(r"\b(?:create_causal_mask|create_sliding_window_causal_mask)\s*\(")
 _WRAPPED_MARK = "__localm_accepts_legacy_mask_arguments__"
 _BUNDLED_CODE_PACKAGE = "transformers_modules."
+_ENCODE_NOTICE = "Calling super().encode with"
 # Old module -> names that moved out of it -> the module that now holds each.
 _MOVED_NAMES = {"transformers.utils.generic": {"OutputRecorder": "transformers.utils.output_capturing"}}
 
@@ -115,6 +116,21 @@ def apply_for(model_path: str) -> bool:
     if wrapped:
         logger.debug("hf load: mask functions now accept the keyword names older model code uses")
     return wrapped
+
+
+class _EncodeNoticeFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not record.getMessage().startswith(_ENCODE_NOTICE)
+
+
+def drop_encode_notice(tokenizer) -> None:
+    """Drop the warning a bundled tokenizer's module logs on every encode with keyword
+    arguments, which would land in the reply on a console. Other records of that module
+    pass, and a tokenizer of transformers itself is left alone. See
+    test_the_encode_notice_of_a_bundled_tokenizer_is_dropped_and_nothing_else."""
+    module = type(tokenizer).__module__
+    if module.startswith(_BUNDLED_CODE_PACKAGE):
+        logging.getLogger(module).addFilter(_EncodeNoticeFilter())
 
 
 def _adapt_cache_class(cache_cls) -> bool:

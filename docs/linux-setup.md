@@ -202,6 +202,9 @@ uv pip install -p .venv torch torchvision --torch-backend=rocm6.2
 Not sure which CUDA line your card needs? `.venv/bin/python -m localm.hwdetect
 torch-args cuda` prints the exact one for the GPU actually in this machine (see
 [gpu-setup.md](gpu-setup.md#huggingface-transformers-pytorch) for the full table).
+On Linux that line also installs `fla-core`, the Triton kernels of Kimi-Linear
+models; the CUDA PyTorch brings Triton itself. The load output of such a model
+names the kernels in use.
 
 A HuggingFace AWQ (4-bit) checkpoint needs nothing beyond this PyTorch stack:
 localm dequantizes AWQ layers natively (no `gptqmodel`/`autoawq`/`torchao`

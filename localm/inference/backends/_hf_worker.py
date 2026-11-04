@@ -1752,6 +1752,9 @@ class HFWorker:
             self._processor = None
             self.processor_error = shown
             self._tokenizer = _load_text_tokenizer(tr, self.model_path, trust_remote_code)
+        if trust_remote_code:
+            from localm.inference.backends import _remote_code_compat
+            _remote_code_compat.drop_encode_notice(self._tokenizer)
 
         # --- Model ---
         logger.debug("hf load: loading weights")
