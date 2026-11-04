@@ -277,23 +277,52 @@ def _kda(core, q, k, v, g, beta, scale, initial_state, output_final_state,
         (torch.cat(states, dim=0) if output_final_state else None)
 
 
+def _gate_in_kernel(g, A_log, dt_bias, lower_bound):
+    heads, dim = g.shape[-2:]
+    g = g.float()
+    if dt_bias is not None:
+        g = g + dt_bias.float().view(heads, dim)
+    rate = None if A_log is None else A_log.float().view(heads, 1).exp()
+    if lower_bound is not None:
+        return lower_bound * torch.sigmoid(g if rate is None else rate * g)
+    return -rate * F.softplus(g)
+
+
 def chunk_kda(q, k, v, g, beta, scale=None, initial_state=None, output_final_state=False,
-              use_qk_l2norm_in_kernel=False, cu_seqlens=None, **kwargs):
+              use_qk_l2norm_in_kernel=False, cu_seqlens=None, A_log=None, dt_bias=None,
+              use_gate_in_kernel=False, use_beta_sigmoid_in_kernel=False, safe_gate=False,
+              lower_bound=None, state_v_first=False, transpose_state_layout=False):
     """Kimi Delta Attention over whole sequences in chunks of :data:`CHUNK_SIZE`.
 
     *q*, *k* are ``[B, T, H, K]``, *v* is ``[B, T, HV, V]`` (``HV`` a multiple of
     ``H``), *g* the log-space decay ``[B, T, HV, K]``, *beta* ``[B, T, HV]``.
-    *initial_state* is ``[N, HV, K, V]``. Returns ``(o, final_state)`` with ``o``
-    shaped like *v* and ``final_state`` None unless *output_final_state*."""
+    *initial_state* is ``[N, HV, K, V]``. With *use_gate_in_kernel*, *g* is the raw gate
+    input, turned into the decay with *A_log* (``HV`` values), *dt_bias* (``HV * K``) and
+    *lower_bound* (``lower_bound * sigmoid(exp(A_log) * (g + dt_bias))`` when set, else
+    ``-exp(A_log) * softplus(g + dt_bias)``); with *use_beta_sigmoid_in_kernel*, *beta* is
+    passed through a sigmoid. *safe_gate*, *state_v_first* and *transpose_state_layout*
+    have no effect here: a returned state is only ever read back by these functions.
+    Any other keyword raises TypeError. Returns ``(o, final_state)`` with ``o`` shaped like
+    *v* and ``final_state`` None unless *output_final_state*."""
+    if use_gate_in_kernel:
+        g = _gate_in_kernel(g, A_log, dt_bias, lower_bound)
+    if use_beta_sigmoid_in_kernel:
+        beta = beta.float().sigmoid()
     return _kda(_chunked, q, k, v, g, beta, scale, initial_state, output_final_state,
                 use_qk_l2norm_in_kernel, cu_seqlens)
 
 
 def fused_recurrent_kda(q, k, v, g, beta, scale=None, initial_state=None,
                         output_final_state=False, use_qk_l2norm_in_kernel=False,
-                        cu_seqlens=None, **kwargs):
+                        cu_seqlens=None, A_log=None, dt_bias=None, use_gate_in_kernel=False,
+                        use_beta_sigmoid_in_kernel=False, lower_bound=None, state_v_first=False,
+                        transpose_state_layout=False):
     """Kimi Delta Attention one token at a time; same arguments and results as
     :func:`chunk_kda`."""
+    if use_gate_in_kernel:
+        g = _gate_in_kernel(g, A_log, dt_bias, lower_bound)
+    if use_beta_sigmoid_in_kernel:
+        beta = beta.float().sigmoid()
     return _kda(_recurrent, q, k, v, g, beta, scale, initial_state, output_final_state,
                 use_qk_l2norm_in_kernel, cu_seqlens)
 

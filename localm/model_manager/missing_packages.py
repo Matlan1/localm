@@ -13,10 +13,9 @@ reaches us.
 The scan follows transformers' ``check_imports``: every ``import`` and ``from``
 statement of the entry modules named by ``auto_map`` and of the sibling modules
 they import relatively, except those behind an availability check or inside a
-``try`` whose handler does not raise. It differs from transformers in one rule:
-a ``try`` whose ``ImportError`` handler raises marks its imports as required, so
-the model's own "please install X" stop is found before the load (see
-:func:`imports_of`).
+``try``. It differs from transformers in one rule: a ``try`` outside any function whose
+``ImportError`` handler raises marks its imports as required, so the model's own
+"please install X" stop is found before the load (see :func:`imports_of`).
 """
 
 from __future__ import annotations
@@ -144,23 +143,12 @@ def _catches_import_failure(handler: ast.ExceptHandler) -> bool:
     return any(getattr(n, "id", getattr(n, "attr", "")) in _IMPORT_FAILURES for n in names)
 
 
-def _raises(body: list) -> bool:
-    stack: list = list(body)
-    while stack:
-        node = stack.pop()
-        if isinstance(node, ast.Raise):
-            return True
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
-            continue
-        stack.extend(ast.iter_child_nodes(node))
-    return False
-
-
 def _requires_its_imports(node: ast.AST) -> bool:
-    """True for a ``try`` with a handler for a failed import that raises: the
-    code stops when the import fails, so the package is required."""
-    handlers = getattr(node, "handlers", [])
-    return any(_catches_import_failure(h) and _raises(h.body) for h in handlers)
+    """True for a ``try`` with a handler for a failed import whose own statements
+    include a ``raise``: the code stops when the import fails, so the package is
+    required."""
+    return any(_catches_import_failure(h) and any(isinstance(s, ast.Raise) for s in h.body)
+               for h in getattr(node, "handlers", []))
 
 
 def imports_of(source: str, known: Optional[frozenset] = None,
@@ -168,10 +156,11 @@ def imports_of(source: str, known: Optional[frozenset] = None,
     """``(absolute, relative)`` imports of the Python *source*: the top-level names
     of absolute imports and the module names of same-folder relative imports.
     Follows transformers' import check, which reads no import inside a ``try``,
-    except that the body of a ``try`` whose ``ImportError`` handler raises is read:
-    the module stops at that import, so the package is required. Not read: the
-    body of any other ``try`` (an optional import) unless *guarded* is true, the
-    handlers of any ``try``, and an ``if`` whose test calls an
+    except that the body of a ``try`` outside any function whose ``ImportError`` handler
+    raises is read: the module stops at that import when it loads, so the package is
+    required. Inside a function such a ``try`` stops only that function, when it is
+    called. Not read: the body of any other ``try`` (an optional import) unless
+    *guarded* is true, the handlers of any ``try``, and an ``if`` whose test calls an
     ``is_flash_attn*_available`` helper or a name defined in transformers'
     ``import_utils`` (*known*, read from the installed transformers when omitted).
     A source that does not parse yields two empty sets."""
@@ -186,11 +175,11 @@ def imports_of(source: str, known: Optional[frozenset] = None,
     absolute: set[str] = set()
     relative: set[str] = set()
 
-    def visit(node: ast.AST) -> None:
+    def visit(node: ast.AST, in_function: bool = False) -> None:
         if isinstance(node, _TRY_NODES):
-            if guarded or _requires_its_imports(node):
+            if guarded or (not in_function and _requires_its_imports(node)):
                 for child in [*getattr(node, "body", []), *getattr(node, "orelse", [])]:
-                    visit(child)
+                    visit(child, in_function)
             return
         if isinstance(node, ast.If) and _is_availability_guard(node, known):
             return
@@ -202,8 +191,9 @@ def imports_of(source: str, known: Optional[frozenset] = None,
                 absolute.add(node.module.split(".")[0])
             elif node.level == 1 and node.module:
                 relative.add(node.module.split(".")[0])
+        inside = in_function or isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
         for child in ast.iter_child_nodes(node):
-            visit(child)
+            visit(child, inside)
 
     try:
         visit(tree)

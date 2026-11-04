@@ -89,6 +89,32 @@ def test_kda_without_the_state_or_norm_options():
     assert state is None and (out.double() - want).abs().max() < 1e-4
 
 
+@pytest.mark.parametrize("lower_bound", [None, -5.0])
+def test_the_gate_and_beta_can_be_computed_in_the_kernel(lower_bound):
+    q, k, v, _, _ = _inputs(1, 70, 2, 2, 8, 8)
+    raw, bias, log_a = torch.randn(1, 70, 2, 8), torch.randn(16), torch.randn(2)
+    beta_raw = torch.randn(1, 70, 2)
+    if lower_bound is None:
+        g = -log_a.view(2, 1).exp() * torch.nn.functional.softplus(raw + bias.view(2, 8))
+    else:
+        g = lower_bound * torch.sigmoid(log_a.view(2, 1).exp() * (raw + bias.view(2, 8)))
+    want, want_state = _reference(q, k, v, g, beta_raw.sigmoid(), torch.zeros(1, 2, 8, 8), True)
+    for kda, extra in ((ft.chunk_kda, {"safe_gate": lower_bound is not None}), (ft.fused_recurrent_kda, {})):
+        got, state = kda(q, k, v, raw, beta_raw, A_log=log_a, dt_bias=bias, output_final_state=True,
+                         use_qk_l2norm_in_kernel=True, use_gate_in_kernel=True,
+                         use_beta_sigmoid_in_kernel=True, lower_bound=lower_bound,
+                         transpose_state_layout=True, **extra)
+        assert (got.double() - want).abs().max() < 1e-4
+        assert (state.double() - want_state).abs().max() < 1e-4
+
+
+@pytest.mark.parametrize("kda", [ft.chunk_kda, ft.fused_recurrent_kda])
+def test_an_option_the_kernels_do_not_have_raises_instead_of_changing_the_result(kda):
+    q, k, v, g, beta = _inputs(1, 5, 2, 2, 8, 8)
+    with pytest.raises(TypeError, match="allow_neg_eigval"):
+        kda(q, k, v, g, beta, allow_neg_eigval=True)
+
+
 def test_a_split_sequence_with_the_carried_state_equals_the_whole_one():
     q, k, v, g, beta = _inputs(1, 150, 2, 2, 8, 8)
     whole, whole_state = ft.chunk_kda(q, k, v, g, beta, output_final_state=True,

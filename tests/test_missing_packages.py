@@ -340,6 +340,23 @@ def test_a_try_whose_import_handler_raises_marks_its_imports_required():
         "needed_a", "needed_b", "optional_a", "optional_b", "optional_c", "optional_d"}
 
 
+def test_a_raising_try_inside_a_function_does_not_make_its_import_required():
+    source = (
+        "def load_audio():\n    try:\n        import feature_only\n    except ImportError:\n"
+        "        raise ImportError('install it')\n"
+        "class Model:\n    def weights(self):\n        try:\n            from engine_only import x\n"
+        "        except ImportError as e:\n            raise RuntimeError('install') from e\n"
+        "    try:\n        import class_body_needed\n    except ImportError:\n        raise\n")
+    assert mp.imports_of(source)[0] == {"class_body_needed"}
+    assert mp.imports_of(source, guarded=True)[0] == {"feature_only", "engine_only", "class_body_needed"}
+
+
+def test_a_handler_that_raises_only_on_a_condition_does_not_make_its_import_required():
+    source = ("try:\n    import optional\nexcept ImportError:\n    if strict:\n        raise\n"
+              "    optional = None\n")
+    assert mp.imports_of(source)[0] == set()
+
+
 def test_a_model_that_stops_when_a_guarded_import_fails_is_refused_before_the_load(
         tmp_path, trusted, monkeypatch):
     class _Runner:
