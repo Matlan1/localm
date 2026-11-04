@@ -384,8 +384,8 @@ def test_rows_past_the_deadline_are_not_requested_and_say_so(monkeypatch, fresh_
     assert [r["number"] for r in rows] == list(range(issue_tracker.MAX_LISTED, 0, -1))
     assert rows[0]["state"] == "open" and "error" not in rows[0]
     assert rows[-1] == {"number": 1, "title": "report 1", "error": issue_tracker.NOT_CHECKED}
-    time.sleep(0.5)
-    assert 1 <= len(calls) <= 5
+    time.sleep(1.0)
+    assert 1 <= len(calls) <= 4
 
 
 def test_a_lookup_that_never_returns_cannot_hold_the_answer(monkeypatch, fresh_record):
