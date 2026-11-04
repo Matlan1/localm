@@ -1416,6 +1416,7 @@ def test_a_backup_missing_files_on_its_list_is_refused_with_nothing_removed(
     backup = updater._backup_dir()
     shutil.rmtree(backup / "localm" / "setup_llama")
     (backup / "pyproject.toml").unlink()
+    assert updater.rollback_info()["available"] is False, "Settings does not offer it"
     _assert_refused_with_nothing_changed(roll_back, inst, site, home)
     assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.2"
 
@@ -1452,6 +1453,7 @@ def test_a_whole_backup_rolls_back_and_removes_what_the_update_added(install, ho
     backup = updater._backup_dir()
     assert not (backup / "brand_new").exists() and not (backup / "added.txt").exists()
     assert au.backup_problem(backup, au.backup_names(backup)) is None
+    assert updater.rollback_info()["available"] is True
     done, said = roll_back(inst, home)
     assert done, said
     assert (inst / "VERSION").read_text(encoding="utf-8") == "0.3.1"
@@ -1634,8 +1636,9 @@ def test_a_failed_runtime_step_stays_visible_after_the_update_is_undone(install,
         updater.apply(1, signature=sig, installed=inst, download_opener=_download(data),
                       runner=_deps_step(site))
     steps = updater_parts.installed_parts(inst)["last_steps"]
-    assert [(s["part"], s["state"], s["note"]) for s in steps] == [
-        ("runtime", "failed", "setup-llama exited 1")]
+    assert [(s["part"], s["state"]) for s in steps] == [("runtime", "failed")]
+    assert "setup-llama exited 1" in steps[0]["note"]
+    assert "rolled back to localm 0.3.1" in steps[0]["note"]
 
 
 # ------------------- a rollback during the restart and the watchdog --------------

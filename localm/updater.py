@@ -1451,8 +1451,9 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
         # test_apply_pins_imports_to_the_running_code.
         unpin = au.pin_imports(backup_dir / "localm", target / "localm")
 
-        # Replace the previous update's manifest, so a failed write below degrades to
-        # the backup-dir listing rather than leaving that update's names.
+        # Replace the previous update's manifest, which only a rollback by an older build
+        # reads, so a failed write below degrades to the backup-dir listing there rather
+        # than leaving that update's names.
         manifest_path = updir / "applied_names.json"
         try:
             manifest_path.unlink()
@@ -1460,18 +1461,18 @@ def apply(asset_id, *, signature=None, target_version=None, allow_unverified=Fal
             pass
         except OSError as e:
             _apply_warn("could not remove the previous update manifest %s: %s; if recording "
-                        "the new one below also fails, a later rollback may use stale names",
-                        manifest_path, e)
+                        "the new one below also fails, a rollback by an older build may use "
+                        "stale names", manifest_path, e)
 
         # Record the full swap set, including brand-new top-level entries the backup
-        # dir does not contain, so a later `update --rollback` removes them too.
+        # dir does not contain, for a rollback by an older build after a downgrade.
         try:
             import json
             manifest_path.write_text(json.dumps(sorted(names)), encoding="utf-8")
         except OSError as e:
-            _apply_warn("could not record the update manifest %s: %s; a later "
-                        "`update --rollback` will fall back to the backup listing and cannot "
-                        "remove brand-new top-level entries this update added", manifest_path, e)
+            _apply_warn("could not record the update manifest %s: %s; a rollback by an older "
+                        "build falls back to the backup listing and cannot remove brand-new "
+                        "top-level entries this update added", manifest_path, e)
 
         def _roll_back(why, step, rolled_back, *, reason=None) -> NoReturn:
             # Every part back (components and venv, runtime, code), then raise.
@@ -1788,15 +1789,18 @@ def _backup_is_restorable(backup_dir: Path) -> bool:
 def rollback_info() -> dict:
     """What :func:`rollback_last` would restore, WITHOUT restoring anything.
 
-    Returns ``{available, backup, version, current}``. ``version`` is the backed-up
-    build's VERSION, or None when the backup predates that file or it is unreadable
-    (reported as unknown, never guessed from the running version).
+    Returns ``{available, backup, version, current}``. ``available`` is False too when
+    the backup's own list (``_apply_update.backup_problem``) shows it incomplete.
+    ``version`` is the backed-up build's VERSION, or None when the backup predates that
+    file or it is unreadable (reported as unknown, never guessed from the running version).
 
     STRICTLY READ-ONLY: it restores nothing (:func:`rollback_last` MOVES THE
     INSTALL) and does not create ``updates/`` (see :func:`_updates_dir`), so a GUI
     status poll leaves an install that has never updated exactly as it was."""
+    from localm import _apply_update as au
     backup_dir = _backup_dir()
-    available = _backup_is_restorable(backup_dir)
+    available = _backup_is_restorable(backup_dir) and au.backup_problem(
+        backup_dir, au.backup_names(backup_dir) or []) is None
     version = None
     if available:
         try:
@@ -1930,9 +1934,9 @@ def _record_rollback(target: Path, backup_dir: Path, *, keep_failures: bool = Fa
     update was rolled back, so ``localm doctor`` and the GUI do not report the
     state the rolled-back update left. A ``failed`` or ``waiting`` status written
     since this update's backup was made stays named in the new note as the
-    reason; with *keep_failures* such a status stays, with its version changed to the
-    one the install is back on. Best-effort: a status that cannot be written is
-    logged."""
+    reason; with *keep_failures* such a status stays, under the version the install is
+    back on and with the rollback added to its note. Best-effort: a status that cannot
+    be written is logged."""
     from localm import updater_components, updater_runtime
     version = _version.read_version()
     note = f"the update was rolled back to localm {version}"
@@ -1946,13 +1950,14 @@ def _record_rollback(target: Path, backup_dir: Path, *, keep_failures: bool = Fa
         except (OSError, TypeError, ValueError):
             return False
     if keep_failures:
-        # A kept failure is listed under the version the install is back on.
+        # A kept failure is listed under the version the install is back on, and says so.
         for name, st in ((updater_runtime.STATUS_FILE, runtime_last),
                          (updater_components.STATUS_FILE, comp_last)):
-            if failed_now(st):
+            if st and failed_now(st):
                 try:
-                    (_updates_dir() / name).write_text(_json.dumps({**st, "version": version}),
-                                                       encoding="utf-8")
+                    (_updates_dir() / name).write_text(_json.dumps(
+                        {**st, "version": version, "note": f"{st['note']}; {note}"}),
+                        encoding="utf-8")
                 except OSError as e:
                     _apply_warn("could not record the version of the kept update result: %s", e)
     why = [str((st or {}).get("note")) for st in (runtime_last, comp_last) if failed_now(st)]

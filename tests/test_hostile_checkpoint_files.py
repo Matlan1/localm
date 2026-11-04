@@ -393,6 +393,16 @@ class TestDocumentArchives:
         assert "[1 archive member(s) not read" in text
         assert "does not unpack" in caplog.text
 
+    def test_lzma_parameters_the_decompressor_does_not_take_are_noted(self, tmp_path):
+        from localm.rag import extract
+        raw = bytearray(self._refused_member(tmp_path / "x.zip"))
+        at = raw.rfind(b"PK\x03\x04")
+        data = at + 30 + struct.unpack_from("<H", raw, at + 26)[0]
+        struct.pack_into("<I", raw, data + 5, 1 << 16)
+        raw[data + 4] = 8
+        text = extract.extract_bytes(bytes(raw), "x.zip")
+        assert "readable words" in text and "[1 archive member(s) not read" in text
+
     def test_a_refused_member_stays_small(self, tmp_path):
         self._refused_member(tmp_path / "x.zip")
         got = _read_in_child("zip", tmp_path / "x.zip", tmp_path)

@@ -784,15 +784,16 @@ def _strip_compression_suffix(filename: str) -> str:
 
 class _MemberNotUnpacked(ExtractError):
     """A zip member is encrypted, packed with a method localm has no decompressor
-    for, or asks for an LZMA dictionary over :data:`_MAX_LZMA_DICT_BYTES`."""
+    for, has LZMA parameters the decompressor does not take, or asks for an LZMA
+    dictionary over :data:`_MAX_LZMA_DICT_BYTES`."""
 
 
 def _zip_lzma_decompressor(header: bytes, member: str, filename: str):
     """The raw LZMA1 decompressor for a zip member's 9-byte LZMA header (version, the
     size of the properties, then lc/lp/pb and the dictionary size). Raises
     :class:`_MemberNotUnpacked` over the dictionary limit, since the decompressor
-    allocates the whole dictionary when it starts, and ``zipfile.BadZipFile`` on a
-    header of another shape."""
+    allocates the whole dictionary when it starts, or on parameters it does not take,
+    and ``zipfile.BadZipFile`` on a header of another shape."""
     import lzma
     import struct
     if len(header) != 9 or struct.unpack("<H", header[2:4])[0] != 5:
@@ -803,8 +804,12 @@ def _zip_lzma_decompressor(header: bytes, member: str, filename: str):
                                  "MiB LZMA dictionary; refusing to extract.")
     rest, lc = divmod(header[4], 9)
     pb, lp = divmod(rest, 5)
-    return lzma.LZMADecompressor(lzma.FORMAT_RAW, filters=[{
-        "id": lzma.FILTER_LZMA1, "dict_size": dict_size, "lc": lc, "lp": lp, "pb": pb}])
+    try:
+        return lzma.LZMADecompressor(lzma.FORMAT_RAW, filters=[{
+            "id": lzma.FILTER_LZMA1, "dict_size": dict_size, "lc": lc, "lp": lp, "pb": pb}])
+    except (lzma.LZMAError, ValueError) as e:
+        raise _MemberNotUnpacked(f"{filename}: embedded '{member}' has LZMA parameters localm "
+                                 f"does not unpack: {e}") from None
 
 
 def _read_member_capped(zf: zipfile.ZipFile, member: str, filename: str, max_bytes: int) -> bytes:

@@ -114,6 +114,18 @@ def test_read_names_warns_on_corrupt_manifest(tmp_path, capsys):
     assert "unreadable" in capsys.readouterr().err   # ... but said so
 
 
+def test_read_names_treats_a_hostile_manifest_as_unreadable(tmp_path, capsys):
+    rb = _load_rb()
+    updates = tmp_path / "updates"
+    backup = updates / "backup"
+    backup.mkdir(parents=True)
+    (backup / "existing.txt").write_text("OLD", encoding="utf-8")
+    (updates / "applied_names.json").write_text("[" * 100_000, encoding="utf-8")
+
+    assert rb._read_names(updates, backup) == ["existing.txt"]
+    assert "unreadable" in capsys.readouterr().err
+
+
 def test_detect_home_honors_localm_home(tmp_path, monkeypatch):
     rb = _load_rb()
     monkeypatch.setenv("LOCALM_HOME", str(tmp_path / "custom"))

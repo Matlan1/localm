@@ -244,7 +244,7 @@ def _read_names(updates_dir: Path, backup_dir: Path) -> list:
             loaded = json.loads(manifest.read_text(encoding="utf-8"))
             if isinstance(loaded, list) and all(isinstance(x, str) for x in loaded):
                 return loaded
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
             pass
         # The manifest exists but is unreadable or malformed: roll back from the backup
         # dir instead, whose listing lacks the top-level entries the update added.
