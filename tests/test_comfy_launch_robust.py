@@ -31,6 +31,12 @@ def _no_leftover_comfy_handles():
     comfy_client._device_errors.clear()
 
 
+@pytest.fixture(autouse=True)
+def _comfy_port_reads_free(monkeypatch):
+    """comfy_port_holder reports a free port, whatever listens on this machine."""
+    monkeypatch.setattr(comfy_client, "comfy_port_holder", lambda *a, **k: None)
+
+
 def test_derive_workdir_from_full_bat_path(tmp_path):
     bat = tmp_path / "launch-comfyui.bat"
     bat.write_text("echo hi\n", encoding="utf-8")

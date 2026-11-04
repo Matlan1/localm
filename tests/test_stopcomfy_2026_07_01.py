@@ -5,7 +5,15 @@ Covers the retained-handle registry, the graceful stop (abort render + clear
 queue + free VRAM), the never-kill-a-user's-ComfyUI rule, and the HTTP routes.
 """
 
+import pytest
 from fastapi.testclient import TestClient
+
+
+@pytest.fixture(autouse=True)
+def _comfy_port_reads_free(monkeypatch):
+    """comfy_port_holder reports a free port, whatever listens on this machine."""
+    from localm.media import comfy_client
+    monkeypatch.setattr(comfy_client, "comfy_port_holder", lambda *a, **k: None)
 
 
 # --------------------------------------------------------------------------- #
