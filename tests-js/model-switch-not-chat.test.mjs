@@ -64,3 +64,64 @@ test("declining the Not a chat model box never retries", async () => {
   assert.deepEqual(calls, [{ model: "bge" }]);
   assert.equal(select.value, "q7", "the dropdown returns to the loaded model");
 });
+
+const BUSY = { status: "confirm_required", model: "bge",
+               detail: "loading 'bge' needs to free 'q7', which is writing a reply" };
+
+async function pickTwice(win, answers) {
+  runScript(win, `window.__asks = []; window.__answers = ${JSON.stringify(answers)};
+    confirmDangerAsync = async (title, text, label) => {
+      window.__asks.push({ title, text, label }); return window.__answers.shift(); };
+    window.__switched = [];
+    window.addEventListener("localm:model-switched", (e) => window.__switched.push(e.detail.model));`);
+  runScript(win, "refreshModels();");
+  await settle();
+  const select = win.document.getElementById("model-select");
+  select.focus();
+  select.value = "bge";
+  runScript(win, "window.__onchange = modelSelect.onchange;");
+  await win.__onchange();
+  await settle();
+  return select;
+}
+
+test("a second confirm after Load anyway asks the switch question and retries with force and as_chat", async () => {
+  const calls = [];
+  const { window: win } = loadApp({ fetchImpl: makeFetch(
+    [PROMPT, BUSY, { status: "loaded", model: "bge" }], calls) });
+  await pickTwice(win, [true, true]);
+
+  assert.deepEqual(calls, [
+    { model: "bge" },
+    { model: "bge", as_chat: true },
+    { model: "bge", force: true, as_chat: true },
+  ]);
+  assert.deepEqual(Array.from(win.__asks, (a) => a.title), ["Not a chat model", "Confirm model switch"]);
+  assert.equal(win.__asks[1].label, "Switch anyway");
+  assert.match(win.__asks[1].text, /needs to free 'q7'/);
+  assert.deepEqual(Array.from(win.__switched), ["bge"]);
+});
+
+test("declining the second confirm after Load anyway claims no load", async () => {
+  const calls = [];
+  const { window: win } = loadApp({ fetchImpl: makeFetch([PROMPT, BUSY], calls) });
+  const select = await pickTwice(win, [true, false]);
+
+  assert.deepEqual(calls, [{ model: "bge" }, { model: "bge", as_chat: true }]);
+  assert.deepEqual(Array.from(win.__switched), [], "no model-switched event for a load that never happened");
+  runScript(win, "window.__active = modelCache.active;");
+  assert.equal(win.__active, "q7");
+  assert.equal(select.value, "q7", "the dropdown returns to the loaded model");
+});
+
+test("a confirm repeated after its flag was sent is a failed load, not a loaded model", async () => {
+  const calls = [];
+  const { window: win } = loadApp({ fetchImpl: makeFetch([PROMPT, BUSY, BUSY], calls) });
+  await pickTwice(win, [true, true]);
+
+  assert.equal(calls.length, 3);
+  assert.equal(win.__asks.length, 2, "the same question is not asked twice");
+  assert.deepEqual(Array.from(win.__switched), []);
+  runScript(win, "window.__active = modelCache.active;");
+  assert.equal(win.__active, "q7");
+});

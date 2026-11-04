@@ -75,7 +75,8 @@ test("declining after the server freed the model shows the model that serves nex
 
   await pickAndDecline(win, select);
 
-  assert.equal(select.value, "q7");
+  assert.equal(select.value, "", "nothing is resident, so no model option is selected");
+  assert.equal(select.selectedOptions[0].textContent, "q7 (not loaded)");
 });
 
 test("declining with nothing loaded or resumable shows the placeholder", async () => {

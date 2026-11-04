@@ -410,7 +410,8 @@ async def test_heartbeat_records_a_real_block_and_ignores_a_healthy_loop(clean_s
 
 def _request_loop_lags(tmp_path, monkeypatch, caplog, paths):
     """Serve `paths` from a real app with the real heartbeat running (pytest
-    hidden from the lifespan gate) and return {path: logged loop_lag seconds}."""
+    hidden from the lifespan gate) and return {path: (logged loop_lag seconds,
+    logged request duration seconds)}."""
     import localm.config as cfg
     from localm.inference import http_server as hs
 
@@ -452,19 +453,23 @@ def _request_loop_lags(tmp_path, monkeypatch, caplog, paths):
                 lines = [rec.getMessage() for rec in caplog.records
                          if f"GET {path} " in rec.getMessage()]
                 assert lines, (path, [rec.getMessage() for rec in caplog.records])
-                m = re.search(r"loop_lag=(\d+\.\d{2})s", lines[-1])
+                m = re.search(r"\((\d+) ms, loop_lag=(\d+\.\d{2})s\)", lines[-1])
                 assert m, lines[-1]
-                out[path] = float(m.group(1))
+                out[path] = (float(m.group(2)), int(m.group(1)) / 1000)
     return out
 
 
 def test_request_log_reports_the_stall_that_overlapped_the_request(tmp_path, monkeypatch, caplog):
-    lags = _request_loop_lags(
+    readings = _request_loop_lags(
         tmp_path, monkeypatch, caplog,
         ["/_t/block/0.5", "/_t/block/2", "/_t/wait/2"])
+    lags = {path: lag for path, (lag, _) in readings.items()}
     interval = 0.1
-    assert 0.5 - interval - 0.02 <= lags["/_t/block/0.5"] <= 1.5, lags
-    assert 2.0 - interval - 0.02 <= lags["/_t/block/2"] <= 3.0, lags
+    clock_tick = 0.03
+    assert 0.5 - interval - 0.02 <= lags["/_t/block/0.5"], lags
+    assert 2.0 - interval - 0.02 <= lags["/_t/block/2"], lags
+    for path, (lag, request_s) in readings.items():
+        assert lag <= request_s + clock_tick, (path, readings)
     assert lags["/_t/wait/2"] <= 0.3, lags
 
 

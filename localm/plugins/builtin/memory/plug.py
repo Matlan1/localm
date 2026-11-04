@@ -307,8 +307,10 @@ def _legacy_bullets() -> list:
             if _strip_bullet(ln)]
 
 
-def _migrate_legacy(store) -> None:
+def _migrate_legacy(store, before_embed=None) -> None:
     """Import the legacy flat chat-memory.md into the structured store ONCE.
+    *before_embed*, when given, is called once just before the embedder is
+    resolved; it must not block.
 
     Gated on the chat session mode (privacy skips - a migration materialises new
     durable records, which is a write) and on a per-namespace marker file so it
@@ -339,6 +341,8 @@ def _migrate_legacy(store) -> None:
                 if bullet.casefold() in existing:
                     continue
                 if not ef_resolved:
+                    if before_embed is not None:
+                        before_embed()
                     ef = _embed_fn()
                     ef_resolved = True
                 store.add(MemoryRecord(text=bullet, kind="semantic",
@@ -1668,7 +1672,7 @@ def _add_explicit_fact(store, fact: str, embed_fn) -> str:
         return "saved"
 
 
-def _remember_explicit(messages, ctx) -> None:
+def _remember_explicit(messages, ctx, before_embed=None) -> None:
     """Store the fact the latest user message asks to remember ("remember that
     ...", "merk dir ..."), without the model. The outcome goes to
     ``ctx.state["memory_saved"]`` for the response header: ``{"text", "status"}``
@@ -1676,7 +1680,8 @@ def _remember_explicit(messages, ctx) -> None:
     store is at its cap); "off" and "failed" are set by the callers. Only the user's
     own words count; a user row the client marked with an ``origin`` is not
     examined. Blocking (embedder); the caller runs it off the loop. Nothing is
-    stored in privacy mode."""
+    stored in privacy mode. *before_embed*, when given, is called before the
+    embedder is first resolved; it must not block."""
     if ctx is None or not _persist_enabled():
         return
     from localm.inference.protocol import is_user_written, user_written_text
@@ -1688,6 +1693,8 @@ def _remember_explicit(messages, ctx) -> None:
     if not fact:
         return
     store = _chat_store(_ctx_principal(ctx))
+    if before_embed is not None:
+        before_embed()
     _migrate_legacy(store)
     status = _add_explicit_fact(store, fact, _embed_fn())
     ctx.state["memory_saved"] = {"text": fact, "status": status}
@@ -1702,8 +1709,9 @@ def _memory_inlet(messages, ctx, announce=None):
     then it only READS: no reinforcement, no migration, no write. Best-effort: any
     failure is logged at debug and skipped (the pipeline also isolates it).
     *announce*, when given, is called with ``DOWNLOADING_EMBEDDER_STATUS``
-    before a recall that first downloads the embedding model, and with
-    ``RECALLING_MEMORY_STATUS`` just before the recall itself."""
+    before the turn's first embedder resolution that downloads the embedding
+    model (storing a remember request, importing the legacy file, or the
+    recall), and with ``RECALLING_MEMORY_STATUS`` just before the recall itself."""
     if ctx is not None and ctx.state.get("client_id") == "coder":
         return None
     recall_on = _recall_enabled()
@@ -1715,9 +1723,30 @@ def _memory_inlet(messages, ctx, announce=None):
     # Privacy mode: fully off unless the user opted into read-only recall for chat.
     if not writes_ok and not _recall_in_privacy("chat"):
         return None
+    download_announced = []
+
+    def before_embed() -> bool:
+        """True when the next embedder resolution downloads the model. The first
+        such call of the turn announces DOWNLOADING_EMBEDDER_STATUS."""
+        if announce is None:
+            return False
+        try:
+            from localm.inference.embedder import will_download_on_first_use
+            from localm.inference.protocol import DOWNLOADING_EMBEDDER_STATUS
+            if not will_download_on_first_use():
+                return False
+            if not download_announced:
+                download_announced.append(True)
+                announce(DOWNLOADING_EMBEDDER_STATUS)
+        except Exception as e:
+            from localm.debuglog import logger
+            logger.debug("memory: could not announce the embedder download: %s", e)
+            return False
+        return True
+
     if writes_ok:
         try:
-            _remember_explicit(messages, ctx)
+            _remember_explicit(messages, ctx, before_embed=before_embed)
         except Exception as e:
             from localm.debuglog import logger
             logger.warning("memory: could not store a remember request: %s", e)
@@ -1728,24 +1757,19 @@ def _memory_inlet(messages, ctx, announce=None):
         query = _recall_query(messages)
         if not query.strip():
             return None
-        from localm.inference.protocol import (
-            DOWNLOADING_EMBEDDER_STATUS, RECALLING_MEMORY_STATUS,
-        )
+        from localm.inference.protocol import RECALLING_MEMORY_STATUS
         # Resolve the SAME namespace the write path and the outlet write to
         # (ADMIN/owner -> "owner"), so an owner's saved memories are recalled in
         # protected mode.
         store = _chat_store(_ctx_principal(ctx))
 
         if writes_ok:
-            _migrate_legacy(store)                 # migration is a write
+            _migrate_legacy(store, before_embed=before_embed)  # migration is a write
         embed_fn = None
         if store.all():
-            downloading = False
-            if announce is not None:
-                from localm.inference.embedder import will_download_on_first_use
-                downloading = will_download_on_first_use()
-                announce(DOWNLOADING_EMBEDDER_STATUS if downloading
-                         else RECALLING_MEMORY_STATUS)
+            downloading = before_embed()
+            if announce is not None and not downloading:
+                announce(RECALLING_MEMORY_STATUS)
             embed_fn = _embed_fn()
             if announce is not None and downloading:
                 announce(RECALLING_MEMORY_STATUS)
@@ -1796,8 +1820,9 @@ async def _memory_inlet_hook(messages, ctx):
     run_inlet awaits an awaitable hook.
 
     A recall that runs is reported through ``ctx.on_status`` as
-    ``RECALLING_MEMORY_STATUS``, preceded by ``DOWNLOADING_EMBEDDER_STATUS``
-    when it first downloads the embedding model.
+    ``RECALLING_MEMORY_STATUS``. ``DOWNLOADING_EMBEDDER_STATUS`` is reported
+    before the turn first downloads the embedding model (for a remember request,
+    a legacy import or the recall).
     """
     announce = None
     on_status = getattr(ctx, "on_status", None)

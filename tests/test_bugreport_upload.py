@@ -236,6 +236,56 @@ def test_cli_send_menu_does_not_offer_a_retry_for_a_report_that_was_not_filed(mo
     assert asked == []
 
 
+def _menu_send(monkeypatch, path, pick, on_prompt=None, channel="upload"):
+    """Run the send menu on *path*, answering *pick*; returns the sent bodies."""
+    from localm.bugreport import consent
+    sent = []
+    monkeypatch.setattr(bugreport, "upload_config", lambda: ("https://proxy.example", None))
+    monkeypatch.setattr(bugreport, "upload_report",
+                        lambda title, body, **kw: sent.append(body) or {"url": "u"})
+
+    def _ask(_prompt):
+        if on_prompt:
+            on_prompt()
+        return pick
+
+    consent.offer_to_send("t", path, "original SECRET", prompt=_ask,
+                          open_browser=lambda url: sent.append(url))
+    return sent
+
+
+def test_send_menu_uploads_the_edits_made_while_it_waited(tmp_path, monkeypatch):
+    path = tmp_path / "bug.md"
+    path.write_text("original SECRET", encoding="utf-8")
+    sent = _menu_send(monkeypatch, path, "1",
+                      on_prompt=lambda: path.write_text("edited text", encoding="utf-8"))
+    assert sent == ["edited text"]
+
+
+def test_send_menu_email_carries_the_edits_made_while_it_waited(tmp_path, monkeypatch):
+    path = tmp_path / "bug.md"
+    path.write_text("original SECRET", encoding="utf-8")
+    sent = _menu_send(monkeypatch, path, "2",
+                      on_prompt=lambda: path.write_text("edited text", encoding="utf-8"))
+    assert len(sent) == 1
+    assert "SECRET" not in sent[0]
+    assert "edited" in sent[0]
+
+
+@pytest.mark.parametrize("pick", ["1", "2"], ids=["upload", "email"])
+def test_send_menu_sends_nothing_when_the_saved_file_cannot_be_read(tmp_path, monkeypatch, capsys, pick):
+    path = tmp_path / "bug.md"
+    path.write_text("original SECRET", encoding="utf-8")
+    sent = _menu_send(monkeypatch, path, pick, on_prompt=path.unlink)
+    assert sent == []
+    assert "nothing was sent" in " ".join(capsys.readouterr().out.split())
+
+
+def test_send_menu_uses_the_text_when_no_file_was_saved(monkeypatch):
+    sent = _menu_send(monkeypatch, None, "1")
+    assert sent == ["original SECRET"]
+
+
 def test_upload_report_429_raises_rate_limited():
     # A 429 raises the distinct RateLimitedError carrying retry_after (parsed from the
     # body), so callers can count down and retry instead of failing outright.

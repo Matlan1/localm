@@ -206,6 +206,7 @@ async function fileReport(request, env) {
   }
   let payload;
   try { payload = await request.json(); } catch { return json({ error: "invalid JSON" }, 400); }
+  if (!payload || typeof payload !== "object") return json({ error: "invalid JSON" }, 400);
   const title = (String(payload.title || "").slice(0, 200).trim()) || "localm bug report";
   const full = String(payload.body || "");
   if (!full.trim()) return json({ error: "empty report body" }, 400);
@@ -264,7 +265,7 @@ const REPORT_SHAPES = [
 ];
 
 // The one-line body of report-issue.sh.
-const CURL_REPORT_RE = /^Filed via the standalone curl reporter \(no Python available\)\. OS: .*\. Details: /;
+const CURL_REPORT_RE = /^Filed via the standalone curl reporter \(no Python available\)\. OS: .*\. Details:(\s|$)/;
 
 // True when lines[from:] holds every entry of *markers* in order, each on a line of its own.
 function hasMarkers(lines, from, markers) {
@@ -280,13 +281,13 @@ function hasMarkers(lines, from, markers) {
   return true;
 }
 
-// True when the first non-empty line of *text* is the curl reporter's body, or is
-// the report title with every entry of one of REPORT_SHAPES after it.
+// True when *text* is one non-empty line holding the curl reporter's body, or its first
+// non-empty line is the report title with every entry of one of REPORT_SHAPES after it.
 function isLocalmBuiltReport(text) {
   const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/).map((l) => l.trim());
   const first = lines.findIndex((l) => l !== "");
   if (first < 0) return false;
-  if (CURL_REPORT_RE.test(lines[first])) return true;
+  if (CURL_REPORT_RE.test(lines[first])) return lines.filter((l) => l !== "").length === 1;
   if (!lines[first].startsWith(REPORT_TITLE_PREFIX)) return false;
   return REPORT_SHAPES.some((markers) => hasMarkers(lines, first + 1, markers));
 }
