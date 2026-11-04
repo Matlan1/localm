@@ -1057,6 +1057,7 @@ def pull_model(
     store: Optional[str] = None,
     dest_dir: Optional[Path] = None,
     register: bool = True,
+    type_is_hint: bool = False,
 ) -> bool:
     """Download a model from HuggingFace or a URL.
 
@@ -1073,9 +1074,15 @@ def pull_model(
     spec (``owner/repo:file`` or ``owner/repo/file.gguf``) - a bare-repo
     snapshot or a direct URL pull with *dest_dir* set is refused rather than
     silently downloading to MODELS_DIR anyway.
+
+    *type_is_hint* says an explicit *model_type* is a suggestion (a search
+    result's badge), not the user's choice: the entry is registered with it, and
+    the registry sync may still correct it. Without it an explicit *model_type*
+    is recorded as ``type_user_set``.
     """
     spec = _mm.resolve_spec(model_spec)
     type_is_auto = (model_type == "auto")
+    type_user_set = not type_is_auto and not type_is_hint
 
     # A local filesystem path is not a remote spec: register it in place rather
     # than mis-parsing a Windows drive-colon as an owner/repo:file spec. This is
@@ -1129,9 +1136,10 @@ def pull_model(
             "spec": model_spec, "name": name, "sha256": expected_sha256,
             "mmproj": mmproj_spec, "type": model_type, "redownload": redownload,
             "dest_dir": str(dest_dir) if dest_dir is not None else None,
-            "register": register}) as outcome:
+            "register": register, "type_is_hint": type_is_hint}) as outcome:
         res = _pull_remote(model_spec, spec, name, expected_sha256, redownload,
-                           mmproj_spec, model_type, dest_dir, register, type_is_auto)
+                           mmproj_spec, model_type, dest_dir, register, type_is_auto,
+                           type_user_set)
         outcome["ok"] = bool(res)
     return res
 
@@ -1139,7 +1147,8 @@ def pull_model(
 def _pull_remote(model_spec: str, spec: str, name: Optional[str],
                  expected_sha256: Optional[str], redownload: bool,
                  mmproj_spec: Optional[str], model_type: str,
-                 dest_dir: Optional[Path], register: bool, type_is_auto: bool) -> bool:
+                 dest_dir: Optional[Path], register: bool, type_is_auto: bool,
+                 type_user_set: bool) -> bool:
     """The remote half of :func:`pull_model`: *spec* is *model_spec* resolved
     by ``resolve_spec`` and is not a local path."""
     from rich.markup import escape
@@ -1260,7 +1269,7 @@ def _pull_remote(model_spec: str, spec: str, name: Optional[str],
     if spec.startswith("http://") or spec.startswith("https://"):
         res = _pull_url(spec, _sanitize_name(name or _stem_from_url(spec)),
                          expected_sha256=expected_sha256, redownload=redownload,
-                         model_type=detected_type)
+                         model_type=detected_type, type_user_set=type_user_set)
     elif "/" in spec:
         if ":" in spec or spec.rsplit("/", 1)[-1].endswith(".gguf"):
             # owner/repo:file.gguf  or  owner/repo/file.gguf  -> single GGUF file
@@ -1269,13 +1278,14 @@ def _pull_remote(model_spec: str, spec: str, name: Optional[str],
             res = _mm._pull_gguf_file(spec, name, expected_sha256=expected_sha256 or starter_pin,
                                    redownload=redownload, model_type=detected_type,
                                    dest_dir=dest_dir, register=register,
-                                   type_is_auto=type_is_auto, mmproj_spec=mmproj_spec,
+                                   type_is_auto=type_is_auto, type_user_set=type_user_set,
+                                   mmproj_spec=mmproj_spec,
                                    pinned_starter=bool(starter_pin), **rev_kw)
         else:
             # owner/repo  (no filename) -> full HuggingFace snapshot
             res = _mm._pull_hf_snapshot(spec, name, expected_sha256=expected_sha256,
                                      redownload=redownload, model_type=detected_type,
-                                     **rev_kw)
+                                     type_user_set=type_user_set, **rev_kw)
     else:
         console.print(f"[red]Unknown spec:[/red] {escape(model_spec)}")
         console.print("Formats:")
@@ -2244,6 +2254,7 @@ def _pull_gguf_file(
     mmproj_spec: Optional[str] = None,
     pinned_starter: bool = False,
     revision: Optional[HfRevision] = None,
+    type_user_set: bool = False,
 ) -> bool:
     """Download a single file from a HuggingFace repo (despite the name, not
     restricted to .gguf - any single-file ``owner/repo:filename`` spec dispatches
@@ -2491,7 +2502,7 @@ def _pull_gguf_file(
                                  mmproj=mmproj_path, architecture=gguf_meta.get("architecture"),
                                  expert_count=gguf_meta.get("expert_count"),
                                  refresh=_revision_record_differs(model_name, revision),
-                                 type_user_set=not type_is_auto,
+                                 type_user_set=type_user_set,
                                  **_register_revision(revision))
         return True
 
@@ -2722,7 +2733,7 @@ def _pull_gguf_file(
                   sha256=verify_digest, model_type=reg_type, mmproj=mmproj_path,
                   architecture=gguf_meta.get("architecture"),
                   expert_count=gguf_meta.get("expert_count"),
-                  type_user_set=not type_is_auto,
+                  type_user_set=type_user_set,
                   **_register_revision(revision))
         # model_name is _sanitize_name()-derived (A-Za-z0-9._- only) and is
         # escaped anyway.
@@ -3238,13 +3249,17 @@ def _pull_hf_snapshot(
     redownload: bool = False,
     model_type: str = "llm",
     revision: Optional[HfRevision] = None,
+    type_user_set: bool = False,
 ) -> bool:
     """Download a complete HuggingFace model repo (for transformers/HF format models).
 
     *revision*, when given, is the branch, tag or commit already resolved by
     ``resolve_hf_revision``: the listing, the download and the digest check all
     use its commit, the registry entry records it, and the default folder name
-    carries it."""
+    carries it.
+
+    *type_user_set* says *model_type* is the user's own choice: the entry takes
+    exactly that type and is recorded as ``type_user_set``."""
     # repo_id is the raw caller-supplied spec (CLI/GUI/MCP), dest is derived
     # from it via _sanitize_name, and every exception's text is remote-sourced;
     # all are escaped. Several sites below interpolate repo_id/dest directly
@@ -3274,7 +3289,7 @@ def _pull_hf_snapshot(
         with _snapshot_dest_lock(model_name):
             return _pull_hf_snapshot_locked(
                 repo_id, model_name, redownload, model_type, revision,
-                snapshot_download)
+                snapshot_download, type_user_set)
     except PullLockUnavailable as e:
         console.print(f"[red]Could not lock the download folder:[/red] {escape(str(e))}")
         return False
@@ -3291,6 +3306,7 @@ def _pull_hf_snapshot_locked(
     model_type: str,
     revision: Optional[HfRevision],
     snapshot_download,
+    type_user_set: bool = False,
 ) -> bool:
     """The body of :func:`_pull_hf_snapshot`, run while holding the lock on the
     folder *model_name* (see :func:`_snapshot_dest_lock`); *snapshot_download*
@@ -3354,8 +3370,8 @@ def _pull_hf_snapshot_locked(
                                              revision.ref if revision else None)
         registered = _mm._register_with_dedup(
             model_name, dest, f"hf:{repo_id}",
-            model_type=_resolve_snapshot_type(dest, model_type),
-            **_register_revision(revision))
+            model_type=model_type if type_user_set else _resolve_snapshot_type(dest, model_type),
+            type_user_set=type_user_set, **_register_revision(revision))
         if not registered:
             console.print(
                 f"[yellow]{escape(repo_id)} is in {escape(str(dest))}, but could not "
@@ -3541,8 +3557,8 @@ def _pull_hf_snapshot_locked(
     # then the download has written real bytes to disk.
     registered = _mm._register_with_dedup(
         model_name, dest, f"hf:{repo_id}",
-        model_type=_resolve_snapshot_type(dest, model_type), refresh=True,
-        **_register_revision(revision))
+        model_type=model_type if type_user_set else _resolve_snapshot_type(dest, model_type),
+        refresh=True, type_user_set=type_user_set, **_register_revision(revision))
     if not registered:
         # TAG-INJECTION site: repo_id/dest sit directly inside the OPEN
         # [yellow]...[/yellow] tag. model_name is _sanitize_name()-derived and
@@ -4093,6 +4109,7 @@ def _pull_url(
     expected_sha256: Optional[str] = None,
     redownload: bool = False,
     model_type: str = "llm",
+    type_user_set: bool = False,
 ) -> bool:
     """Download a model from a direct URL with resumable .part file support.
 
@@ -4133,7 +4150,7 @@ def _pull_url(
     try:
         with _part_lock(filename):
             return _pull_url_locked(url, name, filename, expected_sha256,
-                                    redownload, model_type)
+                                    redownload, model_type, type_user_set)
     except PullInFlight as e:
         console.print(f"[red]Download already in progress:[/red] {escape(str(e))}")
         return False
@@ -4158,6 +4175,7 @@ def _pull_url_locked(
     expected_sha256: Optional[str] = None,
     redownload: bool = False,
     model_type: str = "llm",
+    type_user_set: bool = False,
 ) -> bool:
     """The body of :func:`_pull_url`, run holding the lock on *filename*.
 
@@ -4209,7 +4227,8 @@ def _pull_url_locked(
         if unusable is not None:
             console.print(f"[red]Not registered:[/red] {escape(filename)}\n{escape(unusable)}")
             return False
-        _mm._register_with_dedup(name, dest, url, model_type=model_type)
+        _mm._register_with_dedup(name, dest, url, model_type=model_type,
+                                 type_user_set=type_user_set)
         return True
 
     if _refuse_name_held_by_external_file(name, dest):
@@ -4446,7 +4465,8 @@ def _pull_url_locked(
     if unusable is not None:
         console.print(f"[red]Not registered:[/red] {escape(filename)}\n{escape(unusable)}")
         return False
-    _mm._register(name, dest, url, sha256=actual, model_type=model_type)
+    _mm._register(name, dest, url, sha256=actual, model_type=model_type,
+                  type_user_set=type_user_set)
     # name is always _sanitize_name()-derived by pull_model() before reaching
     # here, and is escaped anyway; it sits in a TAG-INJECTION position.
     _report_success(f"[green]✓[/green] [bold]{escape(name)}[/bold] is ready",

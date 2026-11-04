@@ -140,6 +140,8 @@ def register(app: FastAPI, context: ModelRouteContext) -> None:
                     400, f"Invalid type: {req.model_type}. "
                          f"One of: {', '.join(sorted(MODEL_TYPES))}")
             args += ["--type", req.model_type]
+            if req.type_is_hint:
+                args += ["--type-hint"]
         args += ["--", spec]
         # Stream structured download progress; suppress huggingface_hub's own
         # tqdm bars.

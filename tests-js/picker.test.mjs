@@ -531,3 +531,248 @@ test("closing the picker removes its language listener - a later language change
       "a language change after the picker closed must not re-run its retranslate - "
       + "the listener was removed in cleanup, so nothing fires or touches stale DOM");
   });
+
+// --------------------------------------------------------------------------- //
+//  Keyboard: Tab to a button in an open editor, then Enter or Space            //
+// --------------------------------------------------------------------------- //
+
+const pastBlurTimer = () => new Promise((r) => setTimeout(r, 130));
+const keydown = (win, target, key) => {
+  const e = new win.KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+  target.dispatchEvent(e);
+  return e;
+};
+const mousedown = (win, target) => {
+  const e = new win.MouseEvent("mousedown", { bubbles: true, cancelable: true });
+  target.dispatchEvent(e);
+  return e;
+};
+
+async function openPathEditor(win) {
+  start(win, `{ mode: "dir", startPath: "/root" }`);
+  await ticks();
+  body(win).querySelector(".picker-path-edit").click();
+  return {
+    inp: body(win).querySelector(".picker-path-input"),
+    go: body(win).querySelector(".picker-path-go"),
+  };
+}
+
+test("Tab to Go keeps the path editor open, and Enter on it navigates", async () => {
+  const { window: win } = loadApp({ fetchImpl });
+  const { inp, go } = await openPathEditor(win);
+  inp.value = "/root/sub";
+  inp.focus();
+  go.focus();
+  await pastBlurTimer();
+  assert.ok(go.isConnected, "focus on Go does not close the editor");
+  assert.equal(win.document.activeElement, go);
+
+  const e = keydown(win, go, "Enter");
+  assert.equal(e.defaultPrevented, false, "the browser turns Enter on a button into a click");
+  go.click();
+  await ticks();
+  assert.ok(rowNamed(win, "note.txt"), "navigated to the typed path");
+  assert.equal(win.__done, false, "the picker stays open");
+  assert.ok(win.document.activeElement.classList.contains("picker-list"),
+    "focus lands on the listing, not on nothing");
+});
+
+test("a mouse press on Go keeps focus in the input, and the click navigates once", async () => {
+  const dirCalls = [];
+  const customFetch = (url, opts = {}) => {
+    if (String(url).includes("/api/fs/dirs")) dirCalls.push(String(url));
+    return fetchImpl(url, opts);
+  };
+  const { window: win } = loadApp({ fetchImpl: customFetch });
+  const { inp, go } = await openPathEditor(win);
+  inp.value = "/root/sub";
+  inp.focus();
+  dirCalls.length = 0;
+
+  const e = mousedown(win, go);
+  assert.equal(e.defaultPrevented, true, "the press does not move focus to the button");
+  assert.equal(win.document.activeElement, inp);
+  await pastBlurTimer();
+  assert.ok(go.isConnected);
+  assert.deepEqual(dirCalls, [], "the press alone does not navigate");
+
+  go.click();
+  await ticks();
+  assert.equal(dirCalls.length, 1, "one request for the press and click together");
+  assert.ok(rowNamed(win, "note.txt"));
+});
+
+test("Tab past Go closes the path editor", async () => {
+  const { window: win } = loadApp({ fetchImpl });
+  const { inp, go } = await openPathEditor(win);
+  inp.focus();
+  go.focus();
+  await pastBlurTimer();
+  assert.ok(go.isConnected);
+  body(win).querySelector(".picker-filter input").focus();
+  await pastBlurTimer();
+  assert.equal(body(win).querySelector(".picker-path-input"), null, "back to breadcrumbs");
+  assert.equal(win.__done, false);
+});
+
+test("Tab back from Go to the input keeps the path editor open", async () => {
+  const { window: win } = loadApp({ fetchImpl });
+  const { inp, go } = await openPathEditor(win);
+  go.focus();
+  inp.focus();
+  await pastBlurTimer();
+  assert.ok(inp.isConnected);
+});
+
+test("Escape on Go closes the path editor, not the picker", async () => {
+  const { window: win } = loadApp({ fetchImpl });
+  const { go } = await openPathEditor(win);
+  go.focus();
+  keydown(win, go, "Escape");
+  await ticks(1);
+  assert.equal(body(win).querySelector(".picker-path-input"), null, "back to breadcrumbs");
+  assert.equal(win.__done, false, "the picker stays open");
+  assert.ok(win.document.activeElement.classList.contains("picker-list"));
+});
+
+test("Escape on the picker's other buttons still closes the picker", async () => {
+  const { window: win } = loadApp({ fetchImpl });
+  start(win, `{ mode: "dir", startPath: "/root" }`);
+  await ticks();
+  const ok = okBtn(win);
+  ok.focus();
+  keydown(win, ok, "Escape");
+  await ticks();
+  assert.equal(win.__done, true);
+  assert.equal(win.__res, null);
+});
+
+function mkdirFetch(mkdirCalls) {
+  return (url, opts = {}) => {
+    const u = String(url);
+    if (u.includes("/api/fs/mkdir")) {
+      const b = JSON.parse(opts.body);
+      mkdirCalls.push(b);
+      return Promise.resolve(json({ path: "/root/" + b.name, parent: "/root", name: b.name }));
+    }
+    return fetchImpl(url, opts);
+  };
+}
+
+async function openNewFolder(win) {
+  start(win, `{ mode: "dir", startPath: "/root" }`);
+  await ticks();
+  body(win).querySelector('button[title="New folder"]').click();
+  await ticks(1);
+  return {
+    inp: body(win).querySelector(".picker-inline-input"),
+    create: body(win).querySelector('.picker-inline-btn[title="Create"]'),
+    cancel: body(win).querySelector('.picker-inline-btn[title="Cancel"]'),
+  };
+}
+
+test("Tab to Create keeps the new folder row open, and Enter on it creates the folder", async () => {
+  const mkdirCalls = [];
+  const { window: win } = loadApp({ fetchImpl: mkdirFetch(mkdirCalls) });
+  const { inp, create } = await openNewFolder(win);
+  inp.value = "Fresh";
+  create.focus();
+  await pastBlurTimer();
+  assert.ok(create.isConnected, "focus on Create does not close the row");
+
+  const e = keydown(win, create, "Enter");
+  assert.equal(e.defaultPrevented, false, "the browser turns Enter on a button into a click");
+  assert.equal(win.__done, false, "Enter does not reach the listing, which would pick the folder");
+  create.click();
+  await ticks(3);
+  assert.deepEqual(mkdirCalls, [{ path: "/root", name: "Fresh" }]);
+  assert.equal(body(win).querySelector(".picker-crumb-cur").textContent, "Fresh");
+  assert.ok(win.document.activeElement.classList.contains("picker-list"));
+});
+
+test("Tab to Cancel and Enter closes the new folder row without creating anything", async () => {
+  const mkdirCalls = [];
+  const { window: win } = loadApp({ fetchImpl: mkdirFetch(mkdirCalls) });
+  const { inp, create, cancel } = await openNewFolder(win);
+  create.focus();
+  cancel.focus();
+  await pastBlurTimer();
+  assert.ok(cancel.isConnected, "moving between the row's buttons does not close it");
+  assert.equal(inp.isConnected, true);
+
+  keydown(win, cancel, "Enter");
+  cancel.click();
+  await ticks(1);
+  assert.equal(body(win).querySelector(".picker-inline-input"), null, "row closed");
+  assert.deepEqual(mkdirCalls, []);
+  assert.ok(rowNamed(win, "sub"), "back to the normal listing");
+  assert.equal(win.__done, false);
+  assert.ok(win.document.activeElement.classList.contains("picker-list"));
+});
+
+test("a mouse press on Create keeps focus in the name, and the click creates once", async () => {
+  const mkdirCalls = [];
+  const { window: win } = loadApp({ fetchImpl: mkdirFetch(mkdirCalls) });
+  const { inp, create } = await openNewFolder(win);
+  inp.value = "Fresh";
+  const e = mousedown(win, create);
+  assert.equal(e.defaultPrevented, true);
+  assert.equal(win.document.activeElement, inp);
+  await pastBlurTimer();
+  assert.deepEqual(mkdirCalls, [], "the press alone does not create");
+  create.click();
+  await ticks(3);
+  assert.equal(mkdirCalls.length, 1);
+});
+
+test("a mouse press on the row's Cancel keeps it open until the click", async () => {
+  const { window: win } = loadApp({ fetchImpl: mkdirFetch([]) });
+  const { inp, cancel } = await openNewFolder(win);
+  mousedown(win, cancel);
+  await pastBlurTimer();
+  assert.ok(inp.isConnected);
+  cancel.click();
+  await ticks(1);
+  assert.equal(body(win).querySelector(".picker-inline-input"), null);
+});
+
+test("Tab past the new folder row closes it", async () => {
+  const { window: win } = loadApp({ fetchImpl: mkdirFetch([]) });
+  const { create } = await openNewFolder(win);
+  create.focus();
+  body(win).querySelector(".picker-filter input").focus();
+  await pastBlurTimer();
+  assert.equal(body(win).querySelector(".picker-inline-input"), null);
+  assert.equal(win.__done, false);
+});
+
+test("Escape on a new folder button closes the row, not the picker", async () => {
+  const { window: win } = loadApp({ fetchImpl: mkdirFetch([]) });
+  const { create } = await openNewFolder(win);
+  create.focus();
+  keydown(win, create, "Escape");
+  await ticks(1);
+  assert.equal(body(win).querySelector(".picker-inline-input"), null);
+  assert.equal(win.__done, false);
+});
+
+test("keys typed in the new folder name stay out of the listing's key handler", async () => {
+  const mkdirCalls = [];
+  const { window: win } = loadApp({ fetchImpl: mkdirFetch(mkdirCalls) });
+  const { inp } = await openNewFolder(win);
+  for (const key of ["Backspace", "ArrowLeft", "ArrowDown"]) {
+    const e = keydown(win, inp, key);
+    assert.equal(e.defaultPrevented, false, key + " edits the name");
+    await ticks();
+    assert.ok(inp.isConnected, key + " leaves the row open");
+  }
+  assert.equal(body(win).querySelector(".picker-crumb-cur").textContent, "root",
+    "Backspace and the left arrow do not go up a folder");
+
+  inp.value = "Fresh";
+  keydown(win, inp, "Enter");
+  await ticks(3);
+  assert.equal(win.__done, false, "Enter does not also pick the current folder");
+  assert.deepEqual(mkdirCalls, [{ path: "/root", name: "Fresh" }]);
+});

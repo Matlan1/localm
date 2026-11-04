@@ -400,6 +400,7 @@ def test_first_start_catches_up_a_component_an_old_updater_left_behind(tmp_path,
     from localm.cli import _core
     monkeypatch.setattr(updater, "repo_root", lambda: inst)
     monkeypatch.delenv("LOCALM_RESTART_IN_PROGRESS", raising=False)
+    monkeypatch.delenv("LOCALM_UPDATE_STEPS_DONE", raising=False)
     calls = []
     fake = _fake_children(home, calls=calls)
     monkeypatch.setattr(subprocess, "run",
@@ -1064,6 +1065,7 @@ def _start_components(inst, home, monkeypatch, command="gui", rc=0, calls=None):
     from localm.cli import _core
     monkeypatch.setattr(updater, "repo_root", lambda: inst)
     monkeypatch.delenv("LOCALM_RESTART_IN_PROGRESS", raising=False)
+    monkeypatch.delenv("LOCALM_UPDATE_STEPS_DONE", raising=False)
     fake = _fake_children(home, rc=rc, calls=calls)
     monkeypatch.setattr(subprocess, "run",
                         lambda cmd, **kw: subprocess.CompletedProcess(cmd, fake(cmd)))
