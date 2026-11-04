@@ -290,7 +290,7 @@ export function renderActivityPill(ops) {
       pill.textContent = tn("activity.interruptedPill", interrupted);
     } else if (_unseenStall()) {
       pill.style.display = "";
-      pill.title = "Click for details";
+      pill.title = t("activity.clickForDetails");
       pill.textContent = t("activity.stallPill");
     } else {
       pill.style.display = "none";

@@ -703,6 +703,7 @@ test("Apply on a busy running model saves and does not load it again", async () 
   const calls = [];
   const { window } = loadApp({ fetchImpl: makeFetch(calls, { active: "m", unloadStatus: "in_use" }) });
   await waitFor(() => window.document.getElementById("model-select").value === "m");
+  setPerf(window, "perf-ctx", "16384");
   window.document.getElementById("perf-apply").click();
   assert.ok(await waitFor(() => calls.some((c) => c.u.includes("/api/models/unload"))));
   await settle(100);
@@ -713,6 +714,7 @@ test("Apply whose reload fails leaves the status on the failure, not on loading"
   const calls = [];
   const { window } = loadApp({ fetchImpl: makeFetch(calls, { active: "m", loadFails: true }) });
   await waitFor(() => window.document.getElementById("model-select").value === "m");
+  setPerf(window, "perf-ctx", "16384");
   window.document.getElementById("perf-apply").click();
   const toastEl = window.document.getElementById("toast");
   assert.ok(await waitFor(() => /reloading m failed: boom/.test(toastEl.textContent), 3000),

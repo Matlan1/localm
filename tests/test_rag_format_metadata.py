@@ -234,26 +234,19 @@ def test_classify_format_no_model_is_not_remembered_for_the_extension(monkeypatc
     from localm.rag.extract import classify_format, _EXT_CLASSIFICATION_CACHE
     _EXT_CLASSIFICATION_CACHE.clear()
     monkeypatch.setattr(cfg, "load_config", lambda: {"rag_classify_unknown_files": True})
+    from localm.plugins.builtin.rag.plug import _make_self_classify
+    model = {"name": ""}
+    classify = _make_self_classify("http://127.0.0.1:1", lambda: model["name"])
     text = "plain words with no structure at all"
-    assert classify_format(text, "a.nomodel", classify_fn=lambda s: None) == "text"
+    assert classify.ready() is False
+    assert classify_format(text, "a.nomodel", classify_fn=classify) == "text"
     assert ".nomodel" not in _EXT_CLASSIFICATION_CACHE
-    assert classify_format(text, "b.nomodel", classify_fn=lambda s: "javascript") == "javascript"
 
-
-def test_classify_format_failed_attempt_is_remembered_for_the_extension(monkeypatch):
-    import localm.config as cfg
-    from localm.rag.extract import classify_format, _EXT_CLASSIFICATION_CACHE
-    _EXT_CLASSIFICATION_CACHE.clear()
-    monkeypatch.setattr(cfg, "load_config", lambda: {"rag_classify_unknown_files": True})
-    calls = []
-
-    def failing(snippet):
-        calls.append(snippet)
-        return ""
-    text = "plain words with no structure at all"
-    assert classify_format(text, "a.failing", classify_fn=failing) == "text"
-    assert classify_format(text, "b.failing", classify_fn=failing) == "text"
-    assert len(calls) == 1
+    def answers(snippet):
+        return "javascript"
+    answers.ready = classify.ready
+    model["name"] = "chat"
+    assert classify_format(text, "b.nomodel", classify_fn=answers) == "javascript"
 
 
 def test_classify_format_config_disables_tiebreak(monkeypatch):

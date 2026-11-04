@@ -175,8 +175,8 @@ def _make_self_classify(self_url: str, active_model):
     Short-circuits to None when NO chat model is loaded (``active_model()`` is
     falsy): indexing is frequently embedding-only, and firing a chat request with
     no model would just burn the 10s request timeout per unknown extension for
-    nothing. The caller then falls back to the plain "text" label - no stall. A
-    failed attempt returns "", which the caller caches for that extension."""
+    nothing. The caller then falls back to the plain "text" label - no stall. The
+    returned function's ``ready()`` says whether a chat model is loaded now."""
     def _self_classify(text_snippet: str) -> Optional[str]:
         model = active_model()
         if not model:
@@ -210,7 +210,7 @@ def _make_self_classify(self_url: str, active_model):
                     logger.debug("rag classify: tie-break backend errored mid-"
                                  "generation, falling back to heuristic label: %s",
                                  body["message"]["content"].strip())
-                    return ""
+                    return None
                 choice = body["message"]["content"].strip().lower()
                 choice = choice.replace("`", "").replace(".", "")
                 return choice
@@ -225,7 +225,8 @@ def _make_self_classify(self_url: str, active_model):
             from localm.debuglog import logger
             logger.debug("rag classify: self-classification tie-break failed, "
                          "falling back to heuristic label: %s", e)
-        return ""
+        return None
+    _self_classify.ready = lambda: bool(active_model())
     return _self_classify
 
 

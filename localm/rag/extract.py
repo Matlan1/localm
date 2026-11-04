@@ -283,9 +283,9 @@ def classify_format(text: str, filename: str = "", *,
     structural content sniff (:func:`sniff_text_format`). Only when BOTH are
     inconclusive is *classify_fn* (an LLM tie-break) consulted - and only when the
     user left ``rag_classify_unknown_files`` on. *classify_fn* must itself be a
-    no-op returning None when no chat model is loaded (see the rag plugin's
-    ``_make_self_classify``), so an embedding-only index never stalls on a chat
-    call; a failed attempt returns "". Always returns a label
+    no-op when no chat model is loaded (see the rag plugin's ``_make_self_classify``),
+    so an embedding-only index never stalls on a chat call; an optional
+    ``classify_fn.ready()`` returning False skips the attempt. Always returns a label
     (falling back to "text") so every chunk can carry one for filtering / display.
     """
     if not text.strip():
@@ -301,8 +301,8 @@ def classify_format(text: str, filename: str = "", *,
     # consulted, and only when the toggle is on. The outcome of an attempt (a real
     # guess, or the "text" fallback) is cached per extension, so a same-extension
     # corpus attempts the tie-break at most once per process. With the toggle off
-    # the cache is not read. A None from *classify_fn* means no attempt was made
-    # (no chat model) and is not cached.
+    # the cache is not read. A *classify_fn* whose ``ready()`` is false makes no
+    # attempt and nothing is cached.
     if classify_fn is not None:
         try:
             from localm.config import load_config
@@ -317,10 +317,10 @@ def classify_format(text: str, filename: str = "", *,
             cached = _EXT_CLASSIFICATION_CACHE.get(suffix)
             if cached is not None:
                 return cached
-            answer = classify_fn(text[:1000])
-            if answer is None:
+            ready = getattr(classify_fn, "ready", None)
+            if ready is not None and not ready():
                 return "text"
-            label = _normalise_label(answer) or "text"
+            label = _normalise_label(classify_fn(text[:1000]) or "") or "text"
             _EXT_CLASSIFICATION_CACHE[suffix] = label
             return label
     return "text"
