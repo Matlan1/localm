@@ -230,60 +230,133 @@ def test_cli_send_menu_does_not_offer_a_retry_for_a_report_that_was_not_filed(mo
                                     stage="not_filed", hint="not filed")
 
     monkeypatch.setattr(bugreport, "upload_report", _held)
-    consent._upload_with_retries("t", "b", "https://proxy.example", None,
+    consent._upload_with_retries("t", None, "b", "https://proxy.example", None,
                                  lambda prompt: asked.append(prompt) or "y", "the file")
     assert len(calls) == 1
     assert asked == []
 
 
-def _menu_send(monkeypatch, path, pick, on_prompt=None, channel="upload"):
-    """Run the send menu on *path*, answering *pick*; returns the sent bodies."""
+REPORT = "# localm bug report: Alice Private crashed\n\n## What happened\nAlice Private crashed\n"
+EDITED = "# localm bug report: it crashed\n\n## What happened\nit crashed\n"
+
+
+class _Reply:
+    def __init__(self, status=201, body=b'{"ok": true, "url": "https://example.invalid/1", "number": 1}'):
+        self.status, self._body = status, body
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _menu(monkeypatch, path, picks, on_prompt=None, replies=(), text="in memory text", summary="Alice Private crashed"):
+    """Run the real send menu and the real upload_report with only the socket faked.
+    Returns (posted payloads, mailto urls). *picks* answers the prompts in order;
+    *on_prompt* runs at each prompt with its text."""
+    import json as _json
     from localm.bugreport import consent
-    sent = []
+    posted, mails = [], []
+    pending = list(replies)
+
+    def _socket(req, timeout=None):
+        posted.append(_json.loads(req.data))
+        reply = pending.pop(0) if pending else _Reply()
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    monkeypatch.setattr("localm.http_ssl.verified_urlopen", _socket)
     monkeypatch.setattr(bugreport, "upload_config", lambda: ("https://proxy.example", None))
-    monkeypatch.setattr(bugreport, "upload_report",
-                        lambda title, body, **kw: sent.append(body) or {"url": "u"})
+    answers = list(picks)
 
-    def _ask(_prompt):
+    def _ask(prompt):
         if on_prompt:
-            on_prompt()
-        return pick
+            on_prompt(prompt)
+        return answers.pop(0)
 
-    consent.offer_to_send("t", path, "original SECRET", prompt=_ask,
-                          open_browser=lambda url: sent.append(url))
-    return sent
+    consent.offer_to_send(summary, path, text, prompt=_ask, open_browser=mails.append)
+    return posted, mails
 
 
-def test_send_menu_uploads_the_edits_made_while_it_waited(tmp_path, monkeypatch):
+def _saved(tmp_path):
     path = tmp_path / "bug.md"
-    path.write_text("original SECRET", encoding="utf-8")
-    sent = _menu_send(monkeypatch, path, "1",
-                      on_prompt=lambda: path.write_text("edited text", encoding="utf-8"))
-    assert sent == ["edited text"]
+    path.write_text(REPORT, encoding="utf-8")
+    return path
 
 
-def test_send_menu_email_carries_the_edits_made_while_it_waited(tmp_path, monkeypatch):
-    path = tmp_path / "bug.md"
-    path.write_text("original SECRET", encoding="utf-8")
-    sent = _menu_send(monkeypatch, path, "2",
-                      on_prompt=lambda: path.write_text("edited text", encoding="utf-8"))
-    assert len(sent) == 1
-    assert "SECRET" not in sent[0]
-    assert "edited" in sent[0]
+def test_send_menu_uploads_the_edited_title_and_body(tmp_path, monkeypatch):
+    path = _saved(tmp_path)
+    posted, _ = _menu(monkeypatch, path, ["1"],
+                      on_prompt=lambda _p: path.write_text(EDITED, encoding="utf-8"))
+    assert len(posted) == 1
+    assert posted[0]["body"] == EDITED
+    assert posted[0]["title"] == "it crashed"
+    assert "Alice" not in str(posted)
+
+
+def test_send_menu_email_carries_the_edited_subject_and_body(tmp_path, monkeypatch):
+    from urllib.parse import parse_qs, urlsplit
+    path = _saved(tmp_path)
+    _, mails = _menu(monkeypatch, path, ["2"],
+                     on_prompt=lambda _p: path.write_text(EDITED, encoding="utf-8"))
+    assert len(mails) == 1
+    query = parse_qs(urlsplit(mails[0]).query)
+    assert query["subject"] == ["localm bug: it crashed"]
+    assert query["body"] == [EDITED]
+    assert "Alice" not in mails[0]
+
+
+def test_send_menu_retry_sends_an_edit_made_at_the_retry_prompt(tmp_path, monkeypatch):
+    path = _saved(tmp_path)
+
+    def _edit_at_retry(prompt):
+        if "Retry" in prompt:
+            path.write_text(EDITED, encoding="utf-8")
+
+    posted, _ = _menu(monkeypatch, path, ["1", "y"], on_prompt=_edit_at_retry,
+                      replies=[OSError("no route"), _Reply()])
+    assert [p["title"] for p in posted] == ["Alice Private crashed", "it crashed"]
+    assert posted[1]["body"] == EDITED
 
 
 @pytest.mark.parametrize("pick", ["1", "2"], ids=["upload", "email"])
-def test_send_menu_sends_nothing_when_the_saved_file_cannot_be_read(tmp_path, monkeypatch, capsys, pick):
-    path = tmp_path / "bug.md"
-    path.write_text("original SECRET", encoding="utf-8")
-    sent = _menu_send(monkeypatch, path, pick, on_prompt=path.unlink)
-    assert sent == []
+@pytest.mark.parametrize("spoil", ["deleted", "not-utf8"])
+def test_send_menu_sends_nothing_when_the_saved_file_cannot_be_read(tmp_path, monkeypatch, capsys, pick, spoil):
+    path = _saved(tmp_path)
+
+    def _spoil(_prompt):
+        if spoil == "deleted":
+            path.unlink()
+        else:
+            path.write_bytes(b"# localm bug report: \xff\xfe\n")
+
+    posted, mails = _menu(monkeypatch, path, [pick], on_prompt=_spoil)
+    assert posted == []
+    assert mails == []
     assert "nothing was sent" in " ".join(capsys.readouterr().out.split())
 
 
-def test_send_menu_uses_the_text_when_no_file_was_saved(monkeypatch):
-    sent = _menu_send(monkeypatch, None, "1")
-    assert sent == ["original SECRET"]
+def test_send_menu_stops_retrying_when_the_file_went_away(tmp_path, monkeypatch, capsys):
+    path = _saved(tmp_path)
+
+    def _delete_at_retry(prompt):
+        if "Retry" in prompt:
+            path.unlink()
+
+    posted, _ = _menu(monkeypatch, path, ["1", "y"], on_prompt=_delete_at_retry,
+                      replies=[OSError("no route")])
+    assert len(posted) == 1
+    assert "nothing was sent" in " ".join(capsys.readouterr().out.split())
+
+
+def test_send_menu_uses_the_summary_and_text_when_no_file_was_saved(monkeypatch):
+    posted, _ = _menu(monkeypatch, None, ["1"], text="in memory text", summary="a summary")
+    assert posted == [{"title": "a summary", "body": "in memory text"}]
 
 
 def test_upload_report_429_raises_rate_limited():

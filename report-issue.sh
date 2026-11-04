@@ -125,6 +125,7 @@ if [ ! -t 0 ]; then
 fi
 
 printf '  One line - what went wrong? '; IFS= read -r summary || summary=""
+summary="$(printf '%s' "$summary" | tr '[:cntrl:]' ' ')"
 [ -n "$(printf '%s' "$summary" | tr -d '[:space:]')" ] || summary="localm would not start"
 if ! summary="$(printf '%s\n' "$summary" | RI_EMAIL="$email" scrub)" || [ -z "$summary" ]; then
   echo "  Cannot remove personal details from the report here (perl is not installed),"

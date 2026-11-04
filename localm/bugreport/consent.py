@@ -112,9 +112,9 @@ def offer_to_send(summary: str, path: Optional[Path], text: str, *,
     built via save_user_report) - rather than two copies that can drift on
     retry/rate-limit/failure handling. *text* is the in-memory report
     body (used when *path* is None because the save itself failed); when a
-    file exists, the sent body is read from it after the channel is picked, so a
-    user's edits made while the menu waited are what gets sent, and nothing is sent
-    when the file cannot be read."""
+    file exists, the sent title and body are read from it after the channel is
+    picked, and again before each retry, so a user's edits are what gets sent, and
+    nothing is sent when the file cannot be read."""
     up_url, up_token = _br.upload_config()
     can_upload = up_url is not None
 
@@ -160,22 +160,14 @@ def offer_to_send(summary: str, path: Optional[Path], text: str, *,
     where = (str(path) if path is not None
              else "the text above (it could not be saved to a file)")
 
-    # Read the saved file after the choice, so edits made while the menu waited are
-    # what is sent. A saved file that cannot be read now sends nothing.
-    body = text
-    if path is not None and action in ("upload", "email"):
-        try:
-            body = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            console.print("[yellow]The saved report could not be read, so nothing was sent: "
-                          f"{markup_safe(where)}.[/yellow]", soft_wrap=True)
-            return
-
     try:
         if action == "upload":
-            _upload_with_retries(summary, body, up_url, up_token, ask, where)
+            _upload_with_retries(summary, path, text, up_url, up_token, ask, where)
         elif action == "email":
-            open_browser(mailto_url(summary, body))
+            report = _read_report(summary, path, text, where)
+            if report is None:
+                return
+            open_browser(mailto_url(*report))
             console.print(f"[green]Opened your mail app to {MAINTAINER_EMAIL}.[/green]")
         elif action == "self":
             console.print(f"[dim]Thanks. Send {markup_safe(where)} to {MAINTAINER_EMAIL} or on "
@@ -230,16 +222,35 @@ def _print_sent(res) -> None:
                   + (f" Tracking issue: {markup_safe(link)}" if link else ""))
 
 
-def _upload_with_retries(summary: str, body: str, up_url, up_token, ask,
-                         where: str) -> None:
-    """Upload *body* for the menu's send choice. A rate limit is waited out and
-    retried once; any other failure says where the report is and is retried
-    only when the user answers yes, for at most three attempts in all."""
+def _read_report(summary: str, path: Optional[Path], text: str, where: str):
+    """The ``(title, body)`` to send: *summary* and *text* when no file was saved,
+    else the saved file's text and the title in its own H1. Returns None after
+    saying so when the file cannot be read, so nothing is sent."""
+    if path is None:
+        return summary, text
+    try:
+        body = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        console.print("[yellow]The saved report could not be read, so nothing was sent: "
+                      f"{markup_safe(where)}.[/yellow]", soft_wrap=True)
+        return None
+    return _br.report_title_from_markdown(body), body
+
+
+def _upload_with_retries(summary: str, path: Optional[Path], text: str, up_url, up_token,
+                         ask, where: str) -> None:
+    """Upload the report for the menu's send choice, read afresh for each attempt
+    by _read_report. A rate limit is waited out and retried once; any other failure
+    says where the report is and is retried only when the user answers yes, for at
+    most three attempts in all."""
     attempt = 0
     while True:
         attempt += 1
+        report = _read_report(summary, path, text, where)
+        if report is None:
+            return
         try:
-            res = _br.upload_report(summary, body, url=up_url, token=up_token)
+            res = _br.upload_report(report[0], report[1], url=up_url, token=up_token)
             _print_sent(res)
             break
         except RateLimitedError as e:
