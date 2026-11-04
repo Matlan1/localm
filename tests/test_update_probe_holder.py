@@ -269,3 +269,16 @@ def test_the_restart_runs_its_update_steps_with_the_daemon_held(monkeypatch):
                         lambda: seen.append(_loader._PROBE_HOLDS) or False)
     assert hs._finish_pending_runtime_update() is False
     assert seen == [1] and _loader._PROBE_HOLDS == 0
+
+
+@pytest.mark.parametrize("spec", ["-e .[gpu]", "torch==2.6.0 --torch-backend=cu126"])
+def test_the_pytorch_step_leaves_the_project_alone(tmp_path, spec):
+    from localm import updater_components as uc
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "1"\n', encoding="utf-8")
+    _reqs, commands, _line = uc.torch_step(tmp_path, spec)
+    assert commands
+    for cmd in commands:
+        assert "-e" not in cmd and "--editable" not in cmd
+        assert not any(a.startswith(".[") or a == "." for a in cmd)
+    assert commands[-1][-5:-4] == ["pyproject.toml"] and commands[-1].count("--extra") == 2

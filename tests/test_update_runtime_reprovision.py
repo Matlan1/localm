@@ -589,7 +589,8 @@ def test_a_runtime_step_that_rolls_the_update_back_stays_visible_with_what_to_do
     assert hs._finish_pending_runtime_update() is True
     assert (install / "VERSION").read_text(encoding="utf-8") == "0.3.1"
     steps = updater_parts.installed_parts(install)["last_steps"]
-    note = next(s["note"] for s in steps if s["part"] == "runtime")
+    assert len(steps) == 1, "a note both parts recorded is listed once"
+    note = steps[0]["note"]
     assert "NOT updated" in note and "setup-llama exited 1" in note
     assert "To try again" in note and "Update now" in note
     assert "--force" not in note, "the command of the version rolled back from is not offered"

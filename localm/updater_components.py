@@ -534,9 +534,10 @@ def torch_step(tree: Path, spec: str) -> tuple:
     of the PyTorch step setup runs for the torch-args *spec* in the tree at
     *tree*: ``(requirements, commands, wheel_line)``. ``wheel_line`` is the
     ``--torch-backend`` value (``cu126``, ``rocm6.2``, ...) or None. The commands
-    install the project's dependencies and these extras from ``pyproject.toml``,
-    not the project: reinstalling it rewrites ``Scripts/localm.exe``, which fails
-    while that launcher is the running program."""
+    install the project's dependencies and these extras from ``pyproject.toml``
+    and leave the project and ``Scripts/localm.exe`` as they are, so they can run
+    while that launcher is the running program. See
+    test_the_pytorch_step_leaves_the_project_alone."""
     if spec.strip() == "-e .[gpu]":
         return (_extras(tree, ["gpu", "audio"]),
                 [["pip", "install", "-p", ".venv", "-r", "pyproject.toml",

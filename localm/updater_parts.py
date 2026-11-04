@@ -194,7 +194,8 @@ def _last_steps(version: Optional[str]) -> list:
     """The results of the runtime and component updates of the last
     :data:`LAST_STEPS_S` seconds: ``[{"part", "state", "note", "at"}]``. A result
     recorded under another localm version than *version* is left out; one that
-    names no version (written by an older build) is kept."""
+    names no version (written by an older build) is kept. A note both parts
+    recorded (a rollback) is listed once."""
     import time
     out = []
     try:
@@ -209,7 +210,7 @@ def _last_steps(version: Optional[str]) -> list:
                 at = float(st.get("at") or 0)
             except (TypeError, ValueError):
                 continue
-            if time.time() - at < LAST_STEPS_S:
+            if time.time() - at < LAST_STEPS_S and st["note"] not in [s["note"] for s in out]:
                 out.append({"part": part, "state": st.get("state"), "note": st["note"],
                             "at": at})
     except Exception:
