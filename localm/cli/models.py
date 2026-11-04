@@ -1138,7 +1138,7 @@ def search_cmd(query, limit, list_files, source, nsfw, legacy_formats):
                 fit = fit_label(f["size_bytes"], total)
                 badge = {"fits": "[green]fits[/green]",
                          "tight": "[yellow]tight[/yellow]",
-                         "too-big": "[red]too big[/red]"}.get(fit, "")
+                         "too-big": "[red]needs partial CPU offload[/red]"}.get(fit, "")
                 parts = f" ({f['n_parts']} parts)" if f["n_parts"] > 1 else ""
                 # quant/file are parsed from a remote repo's own filenames
                 # (hf_gguf_files), so they are escaped.
