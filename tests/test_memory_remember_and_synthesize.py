@@ -19,6 +19,10 @@ from fastapi.testclient import TestClient
 from localm.inference.http_server import create_app
 from localm.memory import MemoryStore, explicit_fact
 from localm.plugins.builtin.memory import plug
+from tests._shared_model_guard import (  # noqa: F401
+    no_embedder_download,
+    no_shared_model_left_resident,
+)
 
 FACT = "User loves playing RPG-style games"
 FACTS_JSON = json.dumps({"facts": [{"fact": FACT, "confidence": 0.9}]})

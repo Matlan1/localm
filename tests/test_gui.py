@@ -21,6 +21,7 @@ from localm.plugins.coder.sessions import CoderSession, SessionManager
 from localm.plugins.gui.web import attach_gui
 from tests.conftest import final_answer as _final_answer, free_loopback_port, probe_double
 from tests.test_sysstats import VRAM_POLL_DEADLINE
+from tests._shared_model_guard import no_shared_model_left_resident  # noqa: F401
 
 
 # ------------------------------------------------------------------ #
@@ -3317,6 +3318,9 @@ def persist_app(tmp_path, monkeypatch):
     throwaway home."""
     home = tmp_path / ".localm"
     monkeypatch.setenv("LOCALM_HOME", str(home))
+    # A memory write resolves the shared embedder; this keeps it from downloading
+    # and loading a real model.
+    monkeypatch.setenv("LOCALM_NET_MODE", "off")
     monkeypatch.delenv("LOCALM_API_KEY", raising=False)
     monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
     import localm.config as _cfg

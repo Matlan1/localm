@@ -577,26 +577,31 @@ def test_lockless_reader_never_observes_a_torn_write(home):
 
     stop = threading.Event()
     bad_reads = []
+    good_reads = []
+    writes = []
+    writer_failures = []
+    writer_deadline = time.monotonic() + 45
 
     def _writer():
-        for i in range(40):
-            content = a_bytes if i % 2 == 0 else b_bytes
-            with mw._lock_for("music"):
-                # atomic_write's own bounded retry (5x20ms) is occasionally not
-                # enough against THIS test's own hammering readers on a loaded
-                # box (Defender/indexer contention - the exact class atomic_write
-                # already retries, just exhausted here by test-induced pressure
-                # rather than production load). Retrying the whole save is what a
-                # real caller would do; content integrity, not writer throughput
-                # under artificial stress, is the property this test guards.
-                for attempt in range(5):
+        # Retries a save refused with PermissionError until writer_deadline. A
+        # failure is recorded for the assertions below.
+        try:
+            for i in range(40):
+                content = a_bytes if i % 2 == 0 else b_bytes
+                while True:
                     try:
-                        mw.save_workflow("music", "race.json", content)
+                        with mw._lock_for("music"):
+                            mw.save_workflow("music", "race.json", content)
                         break
                     except PermissionError:
-                        if attempt == 4:
+                        if time.monotonic() > writer_deadline:
                             raise
-        stop.set()
+                        time.sleep(0.01)
+                writes.append(i)
+        except Exception as e:  # noqa: BLE001 - reported by the assertions below
+            writer_failures.append(e)
+        finally:
+            stop.set()
 
     def _reader():
         while not stop.is_set():
@@ -617,13 +622,16 @@ def test_lockless_reader_never_observes_a_torn_write(home):
                 continue
             if data != payload_a and data != payload_b:
                 bad_reads.append(("mismatched-content", len(raw)))
+            else:
+                good_reads.append(len(raw))
 
     writer = threading.Thread(target=_writer)
     readers = [threading.Thread(target=_reader) for _ in range(2)]
     writer.start()
     for r in readers:
         r.start()
-    writer.join(timeout=30)
+    writer.join(timeout=60)
+    writer_alive = writer.is_alive()
     stop.set()
     for r in readers:
         r.join(timeout=5)
@@ -631,6 +639,10 @@ def test_lockless_reader_never_observes_a_torn_write(home):
     assert not bad_reads, (
         f"a lockless reader observed a torn/partial write {len(bad_reads)} "
         f"times: {bad_reads[:5]}")
+    assert not writer_alive, "the writer did not finish inside its deadline"
+    assert not writer_failures, f"the writer stopped early: {writer_failures[0]!r}"
+    assert len(writes) == 40
+    assert good_reads, "no reader saw a complete file, so nothing was checked"
 
 
 def test_concurrent_list_survives_a_racing_delete(home):

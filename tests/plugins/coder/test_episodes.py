@@ -22,6 +22,10 @@ from localm.plugins.coder.episodes import (
     reflect_and_store,
     render_for_prompt,
 )
+from tests._shared_model_guard import (  # noqa: F401
+    no_embedder_download,
+    no_shared_model_left_resident,
+)
 
 
 @pytest.fixture

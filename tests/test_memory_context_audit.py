@@ -15,6 +15,10 @@ from localm.plugins.builtin.memory.plug import (
 )
 from localm.inference.chat_pipeline import ChatHookContext
 from pydantic import BaseModel
+from tests._shared_model_guard import (  # noqa: F401
+    no_embedder_download,
+    no_shared_model_left_resident,
+)
 
 # Mock pydantic models for request bodies
 class MemoryUpdate(BaseModel):

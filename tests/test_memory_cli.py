@@ -23,6 +23,10 @@ from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
+from tests._shared_model_guard import (  # noqa: F401
+    no_embedder_download,
+    no_shared_model_left_resident,
+)
 
 
 @pytest.fixture()

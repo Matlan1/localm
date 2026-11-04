@@ -669,6 +669,17 @@ def test_do_restart_waits_for_vram_release_when_engines_present(monkeypatch):
     assert calls == [10_000_000_000]
 
 
+def _no_shared_model_resident(monkeypatch):
+    """Report the embedder, reranker and speech model as not loaded, whatever an
+    earlier test in this worker left behind."""
+    from localm.inference import embedder, reranker, speech
+    monkeypatch.setattr(embedder, "loaded_path", lambda: None)
+    monkeypatch.setattr(reranker, "is_resident", lambda: False)
+    monkeypatch.setattr(speech, "is_resident", lambda: False)
+    for module in (embedder, reranker, speech):
+        monkeypatch.setattr(module, "release_for_exit", lambda: False)
+
+
 def test_do_restart_skips_vram_wait_when_nothing_was_loaded(monkeypatch):
     """A model-less restart (no chat engine, no embedder loaded) must not pay
     the wait's latency - there is nothing whose release needs confirming. It
@@ -677,6 +688,7 @@ def test_do_restart_skips_vram_wait_when_nothing_was_loaded(monkeypatch):
     seconds for a free_before value nothing below would read anyway."""
     monkeypatch.setattr(http_server, "_engines", {})
     monkeypatch.setattr(http_server, "_engine", None)
+    _no_shared_model_resident(monkeypatch)
 
     def _fake_relaunch(exe, argv):
         raise SystemExit(0)
@@ -719,6 +731,7 @@ def test_do_restart_skips_vram_wait_for_a_stale_unloaded_engine_entry(monkeypatc
 
     monkeypatch.setattr(http_server, "_engines", {"model-a": _StaleEngine()})
     monkeypatch.setattr(http_server, "_engine", None)
+    _no_shared_model_resident(monkeypatch)
 
     def _fake_relaunch(exe, argv):
         raise SystemExit(0)
