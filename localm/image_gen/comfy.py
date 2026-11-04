@@ -410,7 +410,7 @@ def _build_image_workflow(
     # caller removes only a copy it was handed. See
     # test_a_refused_image_workflow_uploads_nothing.
     uploaded_name: Optional[str] = None
-    if load_id is not None:
+    if input_image is not None and load_id is not None:
         try:
             uploaded_name = _upload_image(input_image, api_url)
         except Exception as e:
@@ -768,7 +768,7 @@ def generate_image(
         elif kind == SUBMIT_ERROR:
             return False, f"Error queuing prompt in ComfyUI: {value}"
         prompt_id = value
-        input_copy.prompt_id = prompt_id
+        input_copy.prompt_id = str(prompt_id)
 
         # 10. Poll /history with a visible progress spinner (CLI console only) and a
         # heartbeat on the job stream: the ComfyUI queue position while queued,

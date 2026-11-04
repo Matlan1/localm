@@ -495,7 +495,7 @@ def generate_video(
         elif kind == SUBMIT_ERROR:
             return False, f"Error queuing prompt in ComfyUI: {value}"
         prompt_id = value
-        input_copy.prompt_id = prompt_id
+        input_copy.prompt_id = str(prompt_id)
 
         _say(f"Rendering {frames} frames ({frames / fps:.1f}s at {fps} fps)…")
 
