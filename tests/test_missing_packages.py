@@ -383,7 +383,7 @@ def test_an_import_error_telling_to_run_pip_names_the_package_without_a_folder_s
     text = f"ImportError: Plese run `pip install -U {PIP_NAME}`"
     sentence = mp.rewrite_import_error("m", text)
     assert sentence is not None and PIP_NAME in sentence and "pip" not in sentence.lower()
-    assert mp.rewrite_import_error("m", "ImportError: Plese run `pip install -U numpy`") is None
+    assert mp.rewrite_import_error("m", "ImportError: Plese run `pip install -U pytest`") is None
 
 
 def test_an_import_error_that_names_no_package_is_still_a_refusal_without_pip():
