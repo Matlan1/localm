@@ -104,7 +104,7 @@ def _has_transformers_support(model_path: str) -> bool:
         config = json.loads((Path(model_path) / "config.json").read_text(encoding="utf-8"))
         model_type = config.get("model_type")
         spec = importlib.util.find_spec("transformers")
-    except (OSError, ValueError, ImportError, AttributeError) as e:
+    except (OSError, ValueError, ImportError, AttributeError, RecursionError) as e:
         logger.debug("hf: could not check for transformers' own support of %s: %s", model_path, e)
         return False
     if not isinstance(model_type, str) or not model_type or spec is None or not spec.origin:
@@ -124,7 +124,7 @@ def _config_model_type(model_path: str):
     import json
     try:
         return json.loads((Path(model_path) / "config.json").read_text(encoding="utf-8")).get("model_type")
-    except (OSError, ValueError, AttributeError) as e:
+    except (OSError, ValueError, AttributeError, RecursionError) as e:
         logger.debug("hf: could not read the model_type of %s: %s", model_path, e)
         return None
 

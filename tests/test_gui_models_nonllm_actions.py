@@ -31,7 +31,10 @@ def home(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def app():
+def app(monkeypatch):
+    from localm.inference import http_server
+    monkeypatch.setattr(http_server, "_engine", None)
+    monkeypatch.setattr(http_server, "_engines", {})
     app = FastAPI()
     attach_gui(app, self_url="http://127.0.0.1:9/v1",
                switch_model=lambda name: {"status": "loaded", "model": name},

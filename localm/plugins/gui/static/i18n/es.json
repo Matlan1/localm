@@ -2170,7 +2170,7 @@
   "settings.field.hfToken.help": "Opcional: aumenta los límites de peticiones y desbloquea modelos restringidos. En blanco usa HF_TOKEN y, si no, acceso anónimo; un inicio de sesión guardado de huggingface-cli cubre entonces solo las descargas, no la búsqueda de modelos ni sus listas de archivos.",
   "settings.field.hfToken.label": "Token de API de Hugging Face",
   "settings.field.hfToken.link.label": "Obtener un token",
-  "settings.field.hfTrustRemoteCode.help": "Ejecución de código arbitrario en este equipo: permite que una carpeta de modelo de HuggingFace ejecute su propio Python al cargar. Desactivado por defecto; un modelo así se ejecuta entonces con el soporte propio de transformers cuando existe, y en caso contrario se rechaza. Actívalo solo para una fuente en la que confíes.",
+  "settings.field.hfTrustRemoteCode.help": "Ejecución de código arbitrario en este equipo: permite que una carpeta de modelo de HuggingFace ejecute su propio Python al cargar. Desactivado por defecto: un modelo así usa el soporte de transformers, si existe. Actívalo solo para una fuente de confianza.",
   "settings.field.hfTrustRemoteCode.label": "Permitir código propio incluido en el modelo",
   "settings.field.idleUnloadSeconds.help": "Libera la VRAM del modelo tras estos segundos sin peticiones (0 = nunca; el modelo sigue cargado). El siguiente mensaje lo vuelve a cargar automáticamente.",
   "settings.field.idleUnloadSeconds.label": "Liberar modelo inactivo (s)",

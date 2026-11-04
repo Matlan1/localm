@@ -2170,7 +2170,7 @@
   "settings.field.hfToken.help": "Facultatif : relève les limites de débit et débloque les modèles restreints. Vide utilise HF_TOKEN, sinon un accès anonyme ; une connexion huggingface-cli enregistrée ne couvre alors que les téléchargements, pas la recherche de modèles ni ses listes de fichiers.",
   "settings.field.hfToken.label": "Token API Hugging Face",
   "settings.field.hfToken.link.label": "Obtenir un token",
-  "settings.field.hfTrustRemoteCode.help": "Exécution de code arbitraire sur cette machine : permet à un dossier de modèle HuggingFace d'exécuter son propre Python au chargement. Désactivé par défaut ; un tel modèle s'exécute alors avec la prise en charge propre de transformers si elle existe, et il est refusé sinon. N'activez cette option que pour une source de confiance.",
+  "settings.field.hfTrustRemoteCode.help": "Exécution de code arbitraire sur cette machine : permet à un dossier de modèle HuggingFace d'exécuter son propre Python au chargement. Désactivé par défaut : un tel modèle utilise la prise en charge de transformers, si elle existe. N'activez que pour une source de confiance.",
   "settings.field.hfTrustRemoteCode.label": "Autoriser le code personnalisé fourni avec le modèle",
   "settings.field.idleUnloadSeconds.help": "Libère la VRAM du modèle après ce nombre de secondes sans requête (0 = jamais ; le modèle reste chargé). Le message suivant le recharge automatiquement.",
   "settings.field.idleUnloadSeconds.label": "Déchargement du modèle inactif (s)",

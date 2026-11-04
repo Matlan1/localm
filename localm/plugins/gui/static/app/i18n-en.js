@@ -1902,7 +1902,7 @@ export const I18N_EN = {
   "settings.field.idleUnloadSeconds.label": "Idle model unload (s)",
   "settings.field.idleUnloadSeconds.help": "Free the model's VRAM after this many seconds with no request (0 = never; the model stays resident). The next message reloads it automatically.",
   "settings.field.hfTrustRemoteCode.label": "Allow model-bundled custom code",
-  "settings.field.hfTrustRemoteCode.help": "Arbitrary code execution on this machine: lets a HuggingFace model directory run its own Python when loading. Off by default; such a model then runs on transformers' own support when there is one, and is refused otherwise. Turn on only for a source you trust.",
+  "settings.field.hfTrustRemoteCode.help": "Arbitrary code execution: lets a HuggingFace model folder run its own Python when loading. Off by default: such a model runs on transformers' own support, if any. Turn on only for a trusted source.",
 
   // Settings > schema fields: Timeouts
   "settings.field.ggufLoadTimeoutS.label": "GGUF load timeout (s)",

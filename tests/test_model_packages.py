@@ -792,6 +792,8 @@ def test_the_model_list_says_which_packages_a_model_needs(routes):
 
 
 def test_the_model_list_marks_a_model_whose_own_code_does_not_run(routes, tmp_path, monkeypatch):
+    pytest.importorskip("transformers")
+
     def row():
         rows = routes.client.get("/api/models").json()
         rows = rows["models"] if isinstance(rows, dict) else rows

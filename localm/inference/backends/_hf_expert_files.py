@@ -16,10 +16,14 @@ _EXPERT_KEY = re.compile(r"^model\.layers\.(\d+)\.block_sparse_moe\.experts\.(\d
 
 
 def _safetensors_header(path: Path) -> tuple[dict, int]:
-    """``(header, offset of the data)`` of a ``.safetensors`` file."""
+    """``(header, offset of the data)`` of a ``.safetensors`` file. Raises OSError for a file
+    it cannot read and ValueError for a header it cannot parse."""
     with open(path, "rb") as f:
         size = int.from_bytes(f.read(8), "little")
-        return json.loads(f.read(size)), 8 + size
+        try:
+            return json.loads(f.read(size)), 8 + size
+        except RecursionError as e:
+            raise ValueError(f"{path.name}: the header is nested too deeply") from e
 
 
 def _weight_map(folder: Path) -> dict:
@@ -33,7 +37,7 @@ def _weight_map(folder: Path) -> dict:
         if single.is_file():
             names = (n for n in _safetensors_header(single)[0] if n != "__metadata__")
             return dict.fromkeys(names, single.name)
-    except (OSError, ValueError, KeyError, TypeError) as e:
+    except (OSError, ValueError, KeyError, TypeError, RecursionError) as e:
         logger.debug("hf load: could not read the weight map of %s: %s", folder, e)
     return {}
 
@@ -46,7 +50,7 @@ def worth_using(model_path: str, available_bytes: int) -> bool:
         if json.loads((folder / "config.json").read_text(encoding="utf-8")).get("model_type") != MODEL_TYPE:
             return False
         total = sum(f.stat().st_size for f in folder.glob("*.safetensors"))
-    except (OSError, ValueError, AttributeError):
+    except (OSError, ValueError, AttributeError, RecursionError):
         return False
     if total <= available_bytes:
         return False
