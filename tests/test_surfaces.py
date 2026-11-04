@@ -416,8 +416,8 @@ class TestSwitchModelForwardsActivate:
         asyncio.run(app.state.switch_model("m", activate=False))
         asyncio.run(app.state.switch_model("m"))
 
-        assert calls == [("m", {"force": False, "activate": False}),
-                         ("m", {"force": False, "activate": True})]
+        assert calls == [("m", {"force": False, "activate": False, "keep_others": False}),
+                         ("m", {"force": False, "activate": True, "keep_others": False})]
 
     def test_the_gui_launcher_app_forwards_activate(self, tmp_path, monkeypatch):
         import asyncio
@@ -431,4 +431,4 @@ class TestSwitchModelForwardsActivate:
 
         asyncio.run(app.state.switch_model("m", activate=False, force=True))
 
-        assert calls == [("m", {"force": True, "activate": False})]
+        assert calls == [("m", {"force": True, "activate": False, "keep_others": False})]
