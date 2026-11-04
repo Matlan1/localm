@@ -506,8 +506,10 @@ def _locked_after_stopping_own_probes(target: Path, check) -> list[Path]:
         n = _stop_own_probes(target)
         if n is None or (n == 0 and not stopped):
             return locked
-        stopped = stopped or n > 0
-        time.sleep(0.1)
+        if n > 0:
+            stopped = True
+        else:
+            time.sleep(0.1)
 
 
 def _clear_target_or_refuse(target: Path) -> None:

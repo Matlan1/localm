@@ -45,10 +45,14 @@ def _start(python: Path, code_dir: Path, args: list, dll: Path) -> subprocess.Po
     wait until it has loaded it."""
     env = {"PYTHONHOME": sys.base_prefix, "PYTHONPATH": str(code_dir),
            "SystemRoot": os.environ.get("SystemRoot", "")}
-    proc = subprocess.Popen([str(python), *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                            stderr=subprocess.DEVNULL, text=True, env=env,
+    proc = subprocess.Popen([str(python), *args], cwd=str(code_dir),
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, env=env,
                             creationflags=subprocess.CREATE_NO_WINDOW)
-    assert proc.stdout.readline().strip() == "ready", "the holder did not load the DLL"
+    line = proc.stdout.readline().strip()
+    if line != "ready":
+        rest = proc.stdout.read() if proc.poll() is not None or proc.wait(timeout=10) is not None else ""
+        pytest.fail(f"the holder did not load the DLL: {line} {rest}")
     return proc
 
 
@@ -113,10 +117,24 @@ def test_replace_stops_the_own_probe_daemon_while_it_keeps_respawning(world):
     t = threading.Thread(target=parent_polling_stats, daemon=True)
     t.start()
     try:
-        while not pids:
+        deadline = time.monotonic() + 60
+        while not pids and t.is_alive() and time.monotonic() < deadline:
             time.sleep(0.05)
+        assert pids, "the first daemon did not start"
         assert runtime_dir._files_in_use(world["lib"]), "the daemon must really hold the DLL"
-        assert runtime_dir._replace_target(world["lib"], _fill) == "filled"
+
+        def fill_during_which_a_new_daemon_starts(staging):
+            first = pids[-1]
+            deadline = time.monotonic() + 60
+            while (pids[-1] == first or not runtime_dir._files_in_use(world["lib"])) and (
+                    time.monotonic() < deadline):
+                time.sleep(0.02)
+            assert pids[-1] != first, "the first daemon was stopped and a new one started"
+            stop.set()
+            return _fill(staging)
+
+        assert runtime_dir._replace_target(world["lib"],
+                                           fill_during_which_a_new_daemon_starts) == "filled"
         assert (world["lib"] / "marker.txt").read_text(encoding="utf-8") == "new"
         assert world["dll"].read_bytes() == b"new build"
     finally:
