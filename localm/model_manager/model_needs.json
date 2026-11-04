@@ -1,0 +1,4824 @@
+{
+ "version": 1,
+ "collected": "2026-11-04",
+ "transformers": "5.20.2",
+ "types": {
+  "DiCoW": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "pandas",
+    "project": "pandas",
+    "min_version": "3.1.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm uv.lock lists the project",
+     "requirements.txt of 1 repos (e.g. interfaze-ai/interfaze-1-lite)"
+    ],
+    "repos": 3,
+    "of": 3
+   }
+  ],
+  "InternLMXComposer": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "InternVideoNext_Large": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "LLM_is_LinearRegresison": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "joblib",
+    "project": "joblib",
+    "min_version": "1.6.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm uv.lock lists the project"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "MAE": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "NVLM_D": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "SPRING_F5": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "pydub",
+    "project": "pydub",
+    "min_version": "0.25.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "requirements.txt of 1 repos (e.g. SPRINGLab/SPRING_F5)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "VideoMAEv2_Base": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 4,
+    "of": 4
+   }
+  ],
+  "alice_ai": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "fla",
+    "project": "flash-linear-attention",
+    "min_version": "0.6.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "requirements.txt of 15 repos (e.g. chen-l/LiveMem-RL, chen-l/LiveMem-SFT, tensor-ai-inc/d3-flash-NVFP4)"
+    ],
+    "repos": 2,
+    "of": 3
+   }
+  ],
+  "armt": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "liger_kernel",
+    "project": "liger-kernel",
+    "min_version": "0.8.5",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "pip install line in code of 1 repos (e.g. KitsuVp/NeoLLM)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "asr4all": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 3,
+    "of": 3
+   }
+  ],
+  "asr_model": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "bailing_hybrid": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "fla",
+    "project": "flash-linear-attention",
+    "min_version": "0.6.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "requirements.txt of 15 repos (e.g. chen-l/LiveMem-RL, chen-l/LiveMem-SFT, tensor-ai-inc/d3-flash-NVFP4)"
+    ],
+    "repos": 38,
+    "of": 42
+   }
+  ],
+  "bailing_moe_linear": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "fla",
+    "project": "flash-linear-attention",
+    "min_version": "0.6.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "requirements.txt of 15 repos (e.g. chen-l/LiveMem-RL, chen-l/LiveMem-SFT, tensor-ai-inc/d3-flash-NVFP4)"
+    ],
+    "repos": 2,
+    "of": 2
+   }
+  ],
+  "bailing_moe_v3_audio": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "fla",
+    "project": "flash-linear-attention",
+    "min_version": "0.6.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "requirements.txt of 15 repos (e.g. chen-l/LiveMem-RL, chen-l/LiveMem-SFT, tensor-ai-inc/d3-flash-NVFP4)"
+    ],
+    "repos": 2,
+    "of": 2
+   },
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 2,
+    "of": 2
+   }
+  ],
+  "bert_vits2": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "pypinyin",
+    "project": "pypinyin",
+    "min_version": "0.55.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "pip install line in code of 1 repos (e.g. BricksDisplay/ellie-Bert-VITS2-small-onnx)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "bolmo": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "xlstm",
+    "project": "xlstm",
+    "min_version": "2.0.6",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "pip install line in code of 8 repos (e.g. allenai/Bolmo-1B, allenai/Bolmo-1B-Stage1, allenai/Bolmo-7B)"
+    ],
+    "repos": 8,
+    "of": 8
+   }
+  ],
+  "centurio": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "cls_vitdet": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 4,
+    "of": 5
+   }
+  ],
+  "clsp": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "clyp": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 2,
+    "of": 2
+   }
+  ],
+  "covo_audio": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "cpmant": [
+   {
+    "scope": "native",
+    "part": "tokenizer",
+    "module": "rjieba",
+    "project": "rjieba",
+    "min_version": "0.2.2",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "transformers extras (Requires-Dist)",
+     "transformers import-error text"
+    ]
+   }
+  ],
+  "custom_resnet": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "cxr_basic": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "albumentations",
+    "project": "albumentations",
+    "min_version": "2.0.8",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "requirements.txt of 2 repos (e.g. nvidia/NVIDIA-Nemotron-Parse-v1.1, nvidia/NVIDIA-Nemotron-Parse-v1.1-TC)"
+    ],
+    "repos": 1,
+    "of": 1
+   },
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "dashengtokenizer": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "dinat": [
+   {
+    "scope": "native",
+    "part": "model",
+    "module": "natten",
+    "project": "natten",
+    "min_version": "0.21.7",
+    "platforms": [],
+    "status": "confirmed",
+    "evidence": [
+     "transformers import-error text"
+    ]
+   }
+  ],
+  "dualturn_qwen_mimi": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "eat": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 5,
+    "of": 5
+   }
+  ],
+  "echo": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "triton",
+    "project": "triton",
+    "min_version": "3.9.0",
+    "platforms": [
+     "linux-x64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm uv.lock lists the project"
+    ],
+    "repos": 2,
+    "of": 2
+   }
+  ],
+  "emuru": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "diffusers",
+    "project": "diffusers",
+    "min_version": "0.42.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "transformers extras (Requires-Dist)",
+     "transformers import-error text",
+     "requirements.txt of 1 repos (e.g. meituan-longcat/LongCat-Next)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "eruku": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "diffusers",
+    "project": "diffusers",
+    "min_version": "0.42.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "transformers extras (Requires-Dist)",
+     "transformers import-error text",
+     "requirements.txt of 1 repos (e.g. meituan-longcat/LongCat-Next)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "esmc": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "esm",
+    "project": "esm",
+    "min_version": "3.4.2",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "pip install line in README of biohub/ESMC-300M",
+     "pip install line in README of biohub/ESMC-6B",
+     "pip install line in README of biohub/ESMFold2"
+    ],
+    "repos": 17,
+    "of": 17
+   }
+  ],
+  "esmfold2": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "esm",
+    "project": "esm",
+    "min_version": "3.4.2",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "pip install line in README of biohub/ESMC-300M",
+     "pip install line in README of biohub/ESMC-6B",
+     "pip install line in README of biohub/ESMFold2"
+    ],
+    "repos": 2,
+    "of": 4
+   }
+  ],
+  "falcon_ocr": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "triton",
+    "project": "triton",
+    "min_version": "3.9.0",
+    "platforms": [
+     "linux-x64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm uv.lock lists the project"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "falcon_perception": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "triton",
+    "project": "triton",
+    "min_version": "3.9.0",
+    "platforms": [
+     "linux-x64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm uv.lock lists the project"
+    ],
+    "repos": 2,
+    "of": 2
+   }
+  ],
+  "fastvit_image_encoder": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "finelap": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   },
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "fisher": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "florence2": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 28,
+    "of": 28
+   }
+  ],
+  "fun_asr_nano": [
+   {
+    "scope": "native",
+    "part": "processor",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ]
+   }
+  ],
+  "fun_asr_nano_encoder": [
+   {
+    "scope": "native",
+    "part": "processor",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ]
+   }
+  ],
+  "fusion-embedding-connector": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchcodec",
+    "project": "torchcodec",
+    "min_version": "0.17.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "transformers import-error text",
+     "pip install line in code of 1 repos (e.g. EximiusLabs/fusion-embedding-1-2b-preview)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "gemma3n": [
+   {
+    "scope": "native",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ]
+   }
+  ],
+  "gemma3n_audio": [
+   {
+    "scope": "native",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ]
+   }
+  ],
+  "gemma3n_text": [
+   {
+    "scope": "native",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ]
+   }
+  ],
+  "gemma3n_vision": [
+   {
+    "scope": "native",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ]
+   }
+  ],
+  "gigaam": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "pyannote",
+    "project": "pyannote-audio",
+    "min_version": "4.0.7",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "requirements.txt of 1 repos (e.g. interfaze-ai/interfaze-1-lite)"
+    ],
+    "repos": 2,
+    "of": 3
+   },
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 2,
+    "of": 3
+   }
+  ],
+  "gigachat_audio": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "gramt-binaural-time": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "gramt-mono": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "granite_speech": [
+   {
+    "scope": "native",
+    "part": "processor",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ]
+   }
+  ],
+  "granite_speech5_ctc": [
+   {
+    "scope": "native",
+    "part": "processor",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ]
+   }
+  ],
+  "granite_speech5_encoder": [
+   {
+    "scope": "native",
+    "part": "processor",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ]
+   }
+  ],
+  "granite_speech_encoder": [
+   {
+    "scope": "native",
+    "part": "processor",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ]
+   }
+  ],
+  "h2ovl_chat": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 2,
+    "of": 2
+   }
+  ],
+  "han2han": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "fla",
+    "project": "flash-linear-attention",
+    "min_version": "0.6.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "requirements.txt of 15 repos (e.g. chen-l/LiveMem-RL, chen-l/LiveMem-SFT, tensor-ai-inc/d3-flash-NVFP4)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "hf_olmo": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "hf_olmo",
+    "project": "ai2-olmo",
+    "min_version": "0.6.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "pip install line in README of allenai/OLMo-1B",
+     "pip install line in README of allenai/OLMo-7B",
+     "pip install line in README of allenai/OLMo-7B-Instruct"
+    ],
+    "repos": 4,
+    "of": 4
+   }
+  ],
+  "higgs_audio_v2_tokenizer": [
+   {
+    "scope": "native",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ]
+   }
+  ],
+  "higgs_multimodal_qwen3": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "hima_asr": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "hubi-tts": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "hunyuan_image_3_moe": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "diffusers",
+    "project": "diffusers",
+    "min_version": "0.42.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "transformers extras (Requires-Dist)",
+     "transformers import-error text",
+     "requirements.txt of 1 repos (e.g. meituan-longcat/LongCat-Next)"
+    ],
+    "repos": 3,
+    "of": 3
+   }
+  ],
+  "hyperclovax_vlm": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "indicf5_hinglish": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   },
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchdiffeq",
+    "project": "torchdiffeq",
+    "min_version": "0.2.5",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "requirements.txt of 1 repos (e.g. Tharshan/indicf5_hindi-english_code_switch)"
+    ],
+    "repos": 1,
+    "of": 1
+   },
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "vocos",
+    "project": "vocos",
+    "min_version": "0.1.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "requirements.txt of 1 repos (e.g. Tharshan/indicf5_hindi-english_code_switch)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "inf5": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "pydub",
+    "project": "pydub",
+    "min_version": "0.25.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "requirements.txt of 1 repos (e.g. SPRINGLab/SPRING_F5)"
+    ],
+    "repos": 4,
+    "of": 4
+   }
+  ],
+  "interfaze_lite": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "paddleocr",
+    "project": "paddleocr",
+    "min_version": "3.7.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "requirements.txt of 1 repos (e.g. interfaze-ai/interfaze-1-lite)"
+    ],
+    "repos": 1,
+    "of": 1
+   },
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "pandas",
+    "project": "pandas",
+    "min_version": "3.1.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm uv.lock lists the project",
+     "requirements.txt of 1 repos (e.g. interfaze-ai/interfaze-1-lite)"
+    ],
+    "repos": 1,
+    "of": 1
+   },
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "pyannote",
+    "project": "pyannote-audio",
+    "min_version": "4.0.7",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "requirements.txt of 1 repos (e.g. interfaze-ai/interfaze-1-lite)"
+    ],
+    "repos": 1,
+    "of": 1
+   },
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "pymupdf",
+    "project": "pymupdf",
+    "min_version": "2.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "requirements.txt of 1 repos (e.g. interfaze-ai/interfaze-1-lite)"
+    ],
+    "repos": 1,
+    "of": 1
+   },
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "rapidfuzz",
+    "project": "rapidfuzz",
+    "min_version": "3.14.6",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "requirements.txt of 1 repos (e.g. interfaze-ai/interfaze-1-lite)"
+    ],
+    "repos": 1,
+    "of": 1
+   },
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timesfm",
+    "project": "timesfm",
+    "min_version": "3.0.2",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "requirements.txt of 1 repos (e.g. interfaze-ai/interfaze-1-lite)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "intern_vit_6b": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 4,
+    "of": 4
+   }
+  ],
+  "internimage": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "interns1": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 2
+   }
+  ],
+  "internvideo2": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "open_clip",
+    "project": "open-clip-torch",
+    "min_version": "3.3.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry"
+    ],
+    "repos": 1,
+    "of": 1
+   },
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "internvl_chat": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 79,
+    "of": 96
+   }
+  ],
+  "isaac": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "perceptron",
+    "project": "perceptron",
+    "min_version": "0.4.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "pip install line in README of PerceptronAI/Isaac-0.1",
+     "pip install line in README of PerceptronAI/Isaac-0.2-1B",
+     "pip install line in README of PerceptronAI/Isaac-0.2-2B-Preview"
+    ],
+    "repos": 2,
+    "of": 3
+   }
+  ],
+  "jais_asr": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 3,
+    "of": 3
+   }
+  ],
+  "jet_nemotron": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "fla",
+    "project": "flash-linear-attention",
+    "min_version": "0.6.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "requirements.txt of 15 repos (e.g. chen-l/LiveMem-RL, chen-l/LiveMem-SFT, tensor-ai-inc/d3-flash-NVFP4)"
+    ],
+    "repos": 1,
+    "of": 1
+   },
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "triton",
+    "project": "triton",
+    "min_version": "3.9.0",
+    "platforms": [
+     "linux-x64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm uv.lock lists the project"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "jina_clip": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 2,
+    "of": 2
+   }
+  ],
+  "kanana-1.5-v": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "keep": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "kimi_k3": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "fla",
+    "project": "flash-linear-attention",
+    "min_version": "0.6.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "requirements.txt of 15 repos (e.g. chen-l/LiveMem-RL, chen-l/LiveMem-SFT, tensor-ai-inc/d3-flash-NVFP4)"
+    ],
+    "repos": 21,
+    "of": 26
+   }
+  ],
+  "kimi_linear": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "fla",
+    "project": "flash-linear-attention",
+    "min_version": "0.6.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "requirements.txt of 15 repos (e.g. chen-l/LiveMem-RL, chen-l/LiveMem-SFT, tensor-ai-inc/d3-flash-NVFP4)"
+    ],
+    "repos": 10,
+    "of": 11
+   }
+  ],
+  "layoutlmv2": [
+   {
+    "scope": "native",
+    "part": "processor",
+    "module": "pytesseract",
+    "project": "pytesseract",
+    "min_version": "0.3.13",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "transformers import-error text"
+    ]
+   }
+  ],
+  "layoutlmv3": [
+   {
+    "scope": "native",
+    "part": "processor",
+    "module": "pytesseract",
+    "project": "pytesseract",
+    "min_version": "0.3.13",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "transformers import-error text"
+    ]
+   }
+  ],
+  "linear_50m": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "fla",
+    "project": "flash-linear-attention",
+    "min_version": "0.6.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "requirements.txt of 15 repos (e.g. chen-l/LiveMem-RL, chen-l/LiveMem-SFT, tensor-ai-inc/d3-flash-NVFP4)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "lingv3_tts": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "fla",
+    "project": "flash-linear-attention",
+    "min_version": "0.6.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "requirements.txt of 15 repos (e.g. chen-l/LiveMem-RL, chen-l/LiveMem-SFT, tensor-ai-inc/d3-flash-NVFP4)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "livemem": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "fla",
+    "project": "flash-linear-attention",
+    "min_version": "0.6.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "requirements.txt of 15 repos (e.g. chen-l/LiveMem-RL, chen-l/LiveMem-SFT, tensor-ai-inc/d3-flash-NVFP4)"
+    ],
+    "repos": 2,
+    "of": 2
+   }
+  ],
+  "llava_qwen2": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 4,
+    "of": 4
+   }
+  ],
+  "longcat_next": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "diffusers",
+    "project": "diffusers",
+    "min_version": "0.42.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "transformers extras (Requires-Dist)",
+     "transformers import-error text",
+     "requirements.txt of 1 repos (e.g. meituan-longcat/LongCat-Next)"
+    ],
+    "repos": 1,
+    "of": 1
+   },
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "magma": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "open_clip",
+    "project": "open-clip-torch",
+    "min_version": "3.3.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "mambavision": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 3,
+    "of": 3
+   }
+  ],
+  "markuplm": [
+   {
+    "scope": "native",
+    "part": "processor",
+    "module": "bs4",
+    "project": "beautifulsoup4",
+    "min_version": "4.15.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "transformers import-error text"
+    ]
+   }
+  ],
+  "matpac": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   },
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "mert2": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 2,
+    "of": 2
+   }
+  ],
+  "mic_asr": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "midashenglm": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 4,
+    "of": 4
+   }
+  ],
+  "midashenglm_spatial": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "miewid": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 2,
+    "of": 2
+   }
+  ],
+  "ming_v3_asr": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "fla",
+    "project": "flash-linear-attention",
+    "min_version": "0.6.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "requirements.txt of 15 repos (e.g. chen-l/LiveMem-RL, chen-l/LiveMem-SFT, tensor-ai-inc/d3-flash-NVFP4)"
+    ],
+    "repos": 1,
+    "of": 1
+   },
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "minicpm_sala": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "fla",
+    "project": "flash-linear-attention",
+    "min_version": "0.6.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "requirements.txt of 15 repos (e.g. chen-l/LiveMem-RL, chen-l/LiveMem-SFT, tensor-ai-inc/d3-flash-NVFP4)"
+    ],
+    "repos": 3,
+    "of": 3
+   }
+  ],
+  "minicpm_vla": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "diffusers",
+    "project": "diffusers",
+    "min_version": "0.42.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "transformers extras (Requires-Dist)",
+     "transformers import-error text",
+     "requirements.txt of 1 repos (e.g. meituan-longcat/LongCat-Next)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "minicpmo": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 5,
+    "of": 10
+   }
+  ],
+  "mobilint-aya_vision": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "transformers_mblt",
+    "project": "transformers-mblt",
+    "min_version": "0.7.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "pip install line in code of 33 repos (e.g. mobilint/EAGLE3-JPharmatron-7B, mobilint/EXAONE-3.5-2.4B-Instruct, mobilint/EXAONE-3.5-2.4B-Instruct-Batch16)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "mobilint-bert": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "transformers_mblt",
+    "project": "transformers-mblt",
+    "min_version": "0.7.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "pip install line in code of 33 repos (e.g. mobilint/EAGLE3-JPharmatron-7B, mobilint/EXAONE-3.5-2.4B-Instruct, mobilint/EXAONE-3.5-2.4B-Instruct-Batch16)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "mobilint-blip": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "transformers_mblt",
+    "project": "transformers-mblt",
+    "min_version": "0.7.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "pip install line in code of 33 repos (e.g. mobilint/EAGLE3-JPharmatron-7B, mobilint/EXAONE-3.5-2.4B-Instruct, mobilint/EXAONE-3.5-2.4B-Instruct-Batch16)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "mobilint-exaone": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "transformers_mblt",
+    "project": "transformers-mblt",
+    "min_version": "0.7.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "pip install line in code of 33 repos (e.g. mobilint/EAGLE3-JPharmatron-7B, mobilint/EXAONE-3.5-2.4B-Instruct, mobilint/EXAONE-3.5-2.4B-Instruct-Batch16)"
+    ],
+    "repos": 5,
+    "of": 5
+   }
+  ],
+  "mobilint-exaone4": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "transformers_mblt",
+    "project": "transformers-mblt",
+    "min_version": "0.7.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "pip install line in code of 33 repos (e.g. mobilint/EAGLE3-JPharmatron-7B, mobilint/EXAONE-3.5-2.4B-Instruct, mobilint/EXAONE-3.5-2.4B-Instruct-Batch16)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "mobilint-llama": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "transformers_mblt",
+    "project": "transformers-mblt",
+    "min_version": "0.7.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "pip install line in code of 33 repos (e.g. mobilint/EAGLE3-JPharmatron-7B, mobilint/EXAONE-3.5-2.4B-Instruct, mobilint/EXAONE-3.5-2.4B-Instruct-Batch16)"
+    ],
+    "repos": 7,
+    "of": 7
+   }
+  ],
+  "mobilint-qwen2": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "transformers_mblt",
+    "project": "transformers-mblt",
+    "min_version": "0.7.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "pip install line in code of 33 repos (e.g. mobilint/EAGLE3-JPharmatron-7B, mobilint/EXAONE-3.5-2.4B-Instruct, mobilint/EXAONE-3.5-2.4B-Instruct-Batch16)"
+    ],
+    "repos": 5,
+    "of": 5
+   }
+  ],
+  "mobilint-qwen2-eagle3": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "transformers_mblt",
+    "project": "transformers-mblt",
+    "min_version": "0.7.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "pip install line in code of 33 repos (e.g. mobilint/EAGLE3-JPharmatron-7B, mobilint/EXAONE-3.5-2.4B-Instruct, mobilint/EXAONE-3.5-2.4B-Instruct-Batch16)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "mobilint-qwen2_vl": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "transformers_mblt",
+    "project": "transformers-mblt",
+    "min_version": "0.7.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "pip install line in code of 33 repos (e.g. mobilint/EAGLE3-JPharmatron-7B, mobilint/EXAONE-3.5-2.4B-Instruct, mobilint/EXAONE-3.5-2.4B-Instruct-Batch16)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "mobilint-qwen3": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "transformers_mblt",
+    "project": "transformers-mblt",
+    "min_version": "0.7.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "pip install line in code of 33 repos (e.g. mobilint/EAGLE3-JPharmatron-7B, mobilint/EXAONE-3.5-2.4B-Instruct, mobilint/EXAONE-3.5-2.4B-Instruct-Batch16)"
+    ],
+    "repos": 5,
+    "of": 5
+   }
+  ],
+  "mobilint-qwen3_vl": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "transformers_mblt",
+    "project": "transformers-mblt",
+    "min_version": "0.7.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "pip install line in code of 33 repos (e.g. mobilint/EAGLE3-JPharmatron-7B, mobilint/EXAONE-3.5-2.4B-Instruct, mobilint/EXAONE-3.5-2.4B-Instruct-Batch16)"
+    ],
+    "repos": 4,
+    "of": 4
+   }
+  ],
+  "mobilint-whisper": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "transformers_mblt",
+    "project": "transformers-mblt",
+    "min_version": "0.7.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "pip install line in code of 33 repos (e.g. mobilint/EAGLE3-JPharmatron-7B, mobilint/EXAONE-3.5-2.4B-Instruct, mobilint/EXAONE-3.5-2.4B-Instruct-Batch16)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "moljepa": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "molfeat",
+    "project": "molfeat",
+    "min_version": "1.0.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "pip install line in README of Flogrammer/Mol-JEPA"
+    ],
+    "repos": 1,
+    "of": 1
+   },
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "rdkit",
+    "project": "rdkit",
+    "min_version": "2026.9.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "pip install line in code of 8 repos (e.g. internlm/Intern-S1, internlm/Intern-S1-Pro, internlm/Intern-S1-mini)"
+    ],
+    "repos": 1,
+    "of": 1
+   },
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torch_geometric",
+    "project": "torch-geometric",
+    "min_version": "2.8.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "pip install line in README of Flogrammer/Mol-JEPA"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "molparser_vision_encoder_decoder": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "moondream3": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchao",
+    "project": "torchao",
+    "min_version": "0.18.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "pip install line in code of 4 repos (e.g. RuVI-AI/Pragya-EXP2, moondream/moondream3-preview, vikhyatk/moondream2)",
+     "requirements.txt of 2 repos (e.g. Shockt/moondream-2b-2025-04-14-4bit, moondream/moondream-2b-2025-04-14-4bit)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "moss_audio": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 2,
+    "of": 4
+   }
+  ],
+  "moss_music": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 2,
+    "of": 4
+   }
+  ],
+  "moss_tts_delay": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 6,
+    "of": 6
+   }
+  ],
+  "moss_tts_local": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 3,
+    "of": 6
+   }
+  ],
+  "moss_tts_nano": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 2,
+    "of": 3
+   }
+  ],
+  "ms_eff_gcvit": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "deepguard",
+    "project": "deepguard",
+    "min_version": "1.1.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "pip install line in README of KoreaPeter/ms-eff-gcvit-deepfake-b0-celeb-df-v2",
+     "pip install line in README of KoreaPeter/ms-eff-gcvit-deepfake-b0-ff-plus-plus",
+     "pip install line in README of KoreaPeter/ms-eff-gcvit-deepfake-b5-ff-plus-plus"
+    ],
+    "repos": 6,
+    "of": 6
+   }
+  ],
+  "musicfm": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "musicgen_melody": [
+   {
+    "scope": "native",
+    "part": "processor",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ]
+   }
+  ],
+  "musicgen_melody_decoder": [
+   {
+    "scope": "native",
+    "part": "processor",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ]
+   }
+  ],
+  "myna": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "nnAudio",
+    "project": "nnaudio",
+    "min_version": "0.3.4",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "pip install line in code of 2 repos (e.g. m-a-p/MERT-v1-330M, m-a-p/MERT-v1-95M)"
+    ],
+    "repos": 1,
+    "of": 1
+   },
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "nemotron_flash": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "fla",
+    "project": "flash-linear-attention",
+    "min_version": "0.6.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "requirements.txt of 15 repos (e.g. chen-l/LiveMem-RL, chen-l/LiveMem-SFT, tensor-ai-inc/d3-flash-NVFP4)"
+    ],
+    "repos": 3,
+    "of": 3
+   },
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "triton",
+    "project": "triton",
+    "min_version": "3.9.0",
+    "platforms": [
+     "linux-x64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm uv.lock lists the project"
+    ],
+    "repos": 3,
+    "of": 3
+   }
+  ],
+  "nemotron_parse": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "albumentations",
+    "project": "albumentations",
+    "min_version": "2.0.8",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "requirements.txt of 2 repos (e.g. nvidia/NVIDIA-Nemotron-Parse-v1.1, nvidia/NVIDIA-Nemotron-Parse-v1.1-TC)"
+    ],
+    "repos": 2,
+    "of": 4
+   }
+  ],
+  "nemotron_parse_tc": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "albumentations",
+    "project": "albumentations",
+    "min_version": "2.0.8",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "requirements.txt of 2 repos (e.g. nvidia/NVIDIA-Nemotron-Parse-v1.1, nvidia/NVIDIA-Nemotron-Parse-v1.1-TC)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "neucodec": [
+   {
+    "scope": "native",
+    "part": "processor",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ]
+   }
+  ],
+  "nicheformer": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "numba",
+    "project": "numba",
+    "min_version": "0.68.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm uv.lock lists the project"
+    ],
+    "repos": 1,
+    "of": 1
+   },
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "pandas",
+    "project": "pandas",
+    "min_version": "3.1.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm uv.lock lists the project",
+     "requirements.txt of 1 repos (e.g. interfaze-ai/interfaze-1-lite)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "nlduni": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "nv_esm": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "transformer_engine",
+    "project": "transformer-engine",
+    "min_version": "2.20.2",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "pip install line in README of nvidia/Cosmos-Embed1-224p",
+     "pip install line in README of nvidia/Cosmos-Embed1-448p"
+    ],
+    "repos": 3,
+    "of": 3
+   }
+  ],
+  "olmo": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "hf_olmo",
+    "project": "ai2-olmo",
+    "min_version": "0.6.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "pip install line in README of allenai/OLMo-1B",
+     "pip install line in README of allenai/OLMo-7B",
+     "pip install line in README of allenai/OLMo-7B-Instruct"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "olmo-gfm": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "olmo",
+    "project": "ai2-olmo",
+    "min_version": "0.6.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "pip install line in README of zehui127/Omni-DNA-116M"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "omni": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "diffusers",
+    "project": "diffusers",
+    "min_version": "0.42.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "transformers extras (Requires-Dist)",
+     "transformers import-error text",
+     "requirements.txt of 1 repos (e.g. meituan-longcat/LongCat-Next)"
+    ],
+    "repos": 1,
+    "of": 1
+   },
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "openvla": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 12,
+    "of": 12
+   }
+  ],
+  "opt": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "einops_exts",
+    "project": "einops-exts",
+    "min_version": "0.0.4",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "pip install line in README of Salesforce/xgen-mm-phi3-mini-instruct-interleave-r-v1.5",
+     "pip install line in README of Salesforce/xgen-mm-phi3-mini-instruct-r-v1"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "ovis_u1": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "diffusers",
+    "project": "diffusers",
+    "min_version": "0.42.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "transformers extras (Requires-Dist)",
+     "transformers import-error text",
+     "requirements.txt of 1 repos (e.g. meituan-longcat/LongCat-Next)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "panolm": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "fla",
+    "project": "flash-linear-attention",
+    "min_version": "0.6.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "requirements.txt of 15 repos (e.g. chen-l/LiveMem-RL, chen-l/LiveMem-SFT, tensor-ai-inc/d3-flash-NVFP4)"
+    ],
+    "repos": 2,
+    "of": 2
+   }
+  ],
+  "panovlm": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "fla",
+    "project": "flash-linear-attention",
+    "min_version": "0.6.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "requirements.txt of 15 repos (e.g. chen-l/LiveMem-RL, chen-l/LiveMem-SFT, tensor-ai-inc/d3-flash-NVFP4)"
+    ],
+    "repos": 1,
+    "of": 1
+   },
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "panovlm_decision": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "fla",
+    "project": "flash-linear-attention",
+    "min_version": "0.6.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "requirements.txt of 15 repos (e.g. chen-l/LiveMem-RL, chen-l/LiveMem-SFT, tensor-ai-inc/d3-flash-NVFP4)"
+    ],
+    "repos": 1,
+    "of": 1
+   },
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "phi3small": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "pytest",
+    "project": "pytest",
+    "min_version": "9.2.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 2,
+    "of": 2
+   },
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "triton",
+    "project": "triton",
+    "min_version": "3.9.0",
+    "platforms": [
+     "linux-x64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm uv.lock lists the project"
+    ],
+    "repos": 2,
+    "of": 2
+   }
+  ],
+  "pinyin_code": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "jieba",
+    "project": "jieba",
+    "min_version": "0.42.1",
+    "platforms": [],
+    "status": "confirmed",
+    "evidence": [
+     "pip install line in README of timorobrecht/full_chinese_gpu3.1"
+    ],
+    "repos": 4,
+    "of": 4
+   },
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "pypinyin",
+    "project": "pypinyin",
+    "min_version": "0.55.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "pip install line in code of 1 repos (e.g. BricksDisplay/ellie-Bert-VITS2-small-onnx)"
+    ],
+    "repos": 4,
+    "of": 4
+   }
+  ],
+  "plamo2": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "numba",
+    "project": "numba",
+    "min_version": "0.68.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm uv.lock lists the project"
+    ],
+    "repos": 4,
+    "of": 4
+   }
+  ],
+  "plamo2vl": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "numba",
+    "project": "numba",
+    "min_version": "0.68.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm uv.lock lists the project"
+    ],
+    "repos": 2,
+    "of": 2
+   }
+  ],
+  "plamo3": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "numba",
+    "project": "numba",
+    "min_version": "0.68.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm uv.lock lists the project"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "pop2piano": [
+   {
+    "scope": "native",
+    "part": "processor",
+    "module": "essentia",
+    "project": "essentia",
+    "min_version": "2.1b6.dev1438",
+    "platforms": [],
+    "status": "confirmed",
+    "evidence": [
+     "transformers import-error text"
+    ]
+   }
+  ],
+  "qianfanvl_chat": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 2,
+    "of": 2
+   }
+  ],
+  "qwen": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "transformers_stream_generator",
+    "project": "transformers-stream-generator",
+    "min_version": "0.0.5",
+    "platforms": [],
+    "status": "confirmed",
+    "evidence": [
+     "requirements.txt of 3 repos (e.g. Qwen/Qwen-Audio-Chat, Qwen/Qwen-VL-Chat-Int4, baichuan-inc/Baichuan-13B-Base)"
+    ],
+    "repos": 21,
+    "of": 22
+   }
+  ],
+  "qwen3_5_moe_text": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "fraqtl",
+    "project": "fraqtl-runtime",
+    "min_version": "0.1.1",
+    "platforms": [],
+    "status": "confirmed",
+    "evidence": [
+     "pip install line in code of 1 repos (e.g. fraQtl/Qwen3.6-35B-A3B-compressed)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "radjepa": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "raon": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 2,
+    "of": 2
+   }
+  ],
+  "raon_duplex": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "rwkv5": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "flash_rwkv",
+    "project": "flash-rwkv",
+    "min_version": "0.3.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "pip install line in code of 1 repos (e.g. RWKV/rwkv-5-world-3b)"
+    ],
+    "repos": 1,
+    "of": 2
+   }
+  ],
+  "sa2va_chat": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 4,
+    "of": 7
+   }
+  ],
+  "salmonn_2": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "sdar_v": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "triton",
+    "project": "triton",
+    "min_version": "3.9.0",
+    "platforms": [
+     "linux-x64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm uv.lock lists the project"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "sfi_hubert": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "sheetsage2": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "playwright",
+    "project": "playwright",
+    "min_version": "1.64.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm uv.lock lists the project"
+    ],
+    "repos": 1,
+    "of": 1
+   },
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "shrutam2": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "siglip": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "open_clip",
+    "project": "open-clip-torch",
+    "min_version": "3.3.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry"
+    ],
+    "repos": 3,
+    "of": 4
+   }
+  ],
+  "skywork_chat": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 2,
+    "of": 2
+   }
+  ],
+  "solar_open2": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "fla",
+    "project": "flash-linear-attention",
+    "min_version": "0.6.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "requirements.txt of 15 repos (e.g. chen-l/LiveMem-RL, chen-l/LiveMem-SFT, tensor-ai-inc/d3-flash-NVFP4)"
+    ],
+    "repos": 4,
+    "of": 4
+   }
+  ],
+  "spark-tts": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "einx",
+    "project": "einx",
+    "min_version": "0.4.3",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm uv.lock lists the project"
+    ],
+    "repos": 1,
+    "of": 1
+   },
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "soxr",
+    "project": "soxr",
+    "min_version": "1.1.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm uv.lock lists the project",
+     "pip install line in code of 3 repos (e.g. IFM/Jais-ASR, IFM/Jais-ASR-FP8, IFM/Jais-ASR-W4A16-AWQ)"
+    ],
+    "repos": 1,
+    "of": 1
+   },
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "spear": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 4,
+    "of": 4
+   }
+  ],
+  "speech_truncation_detection": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "step_audio_2": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 3,
+    "of": 3
+   }
+  ],
+  "step_audio_2_full_duplex": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "talk2dino": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 3,
+    "of": 3
+   }
+  ],
+  "teratts_onnx": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "sounddevice",
+    "project": "sounddevice",
+    "min_version": "0.5.6",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "requirements.txt of 1 repos (e.g. TeraSpace/TeraTTSv2)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "timm_backbone": [
+   {
+    "scope": "native",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ]
+   }
+  ],
+  "timm_wrapper": [
+   {
+    "scope": "native",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ]
+   },
+   {
+    "scope": "native",
+    "part": "processor",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ]
+   }
+  ],
+  "topk_embed": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "fla",
+    "project": "flash-linear-attention",
+    "min_version": "0.6.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "requirements.txt of 15 repos (e.g. chen-l/LiveMem-RL, chen-l/LiveMem-SFT, tensor-ai-inc/d3-flash-NVFP4)"
+    ],
+    "repos": 2,
+    "of": 2
+   }
+  ],
+  "typhoon2audio": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "fairseq",
+    "project": "fairseq",
+    "min_version": "0.12.2",
+    "platforms": [],
+    "status": "confirmed",
+    "evidence": [
+     "pip install line in README of typhoon-ai/llama3.1-typhoon2-audio-8b-instruct"
+    ],
+    "repos": 1,
+    "of": 1
+   },
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "uniformer": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "unlimited-ocr-mlx": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "mlx",
+    "project": "mlx",
+    "min_version": "0.32.4",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "requirements.txt of 1 repos (e.g. LoJexLLM/Unlimited-OCR-MLX)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "utmos22": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "utmosv2": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "videochat_flash_qwen": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "imageio",
+    "project": "imageio",
+    "min_version": "2.38.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "pip install line in README of OpenGVLab/VideoChat-Flash-Qwen2-7B_res448"
+    ],
+    "repos": 2,
+    "of": 2
+   },
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 2
+   }
+  ],
+  "videollama3_qwen2": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "imageio",
+    "project": "imageio",
+    "min_version": "2.38.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "pip install line in README of OpenGVLab/VideoChat-Flash-Qwen2-7B_res448"
+    ],
+    "repos": 2,
+    "of": 2
+   }
+  ],
+  "vila": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "xgrammar",
+    "project": "xgrammar",
+    "min_version": "0.2.8",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm uv.lock lists the project"
+    ],
+    "repos": 1,
+    "of": 2
+   }
+  ],
+  "vits": [
+   {
+    "scope": "native",
+    "part": "tokenizer",
+    "module": "phonemizer",
+    "project": "phonemizer",
+    "min_version": "3.6.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "transformers extras (Requires-Dist)",
+     "transformers import-error text"
+    ]
+   }
+  ],
+  "vlm_qwen": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "voxtral": [
+   {
+    "scope": "native",
+    "part": "processor",
+    "module": "mistral_common",
+    "project": "mistral-common",
+    "min_version": "1.13.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "transformers extras (Requires-Dist)",
+     "transformers import-error text"
+    ]
+   }
+  ],
+  "voxtral_encoder": [
+   {
+    "scope": "native",
+    "part": "processor",
+    "module": "mistral_common",
+    "project": "mistral-common",
+    "min_version": "1.13.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "transformers extras (Requires-Dist)",
+     "transformers import-error text"
+    ]
+   }
+  ],
+  "voxtral_realtime": [
+   {
+    "scope": "native",
+    "part": "processor",
+    "module": "mistral_common",
+    "project": "mistral-common",
+    "min_version": "1.13.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "transformers extras (Requires-Dist)",
+     "transformers import-error text"
+    ]
+   }
+  ],
+  "voxtral_realtime_encoder": [
+   {
+    "scope": "native",
+    "part": "processor",
+    "module": "mistral_common",
+    "project": "mistral-common",
+    "min_version": "1.13.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "transformers extras (Requires-Dist)",
+     "transformers import-error text"
+    ]
+   }
+  ],
+  "voxtral_realtime_text": [
+   {
+    "scope": "native",
+    "part": "processor",
+    "module": "mistral_common",
+    "project": "mistral-common",
+    "min_version": "1.13.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "transformers extras (Requires-Dist)",
+     "transformers import-error text"
+    ]
+   }
+  ],
+  "wavlm_speaker_verification": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "x-omni": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "xcodec2": [
+   {
+    "scope": "native",
+    "part": "processor",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ]
+   }
+  ],
+  "xgenmm": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "einops_exts",
+    "project": "einops-exts",
+    "min_version": "0.0.4",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "pip install line in README of Salesforce/xgen-mm-phi3-mini-instruct-interleave-r-v1.5",
+     "pip install line in README of Salesforce/xgen-mm-phi3-mini-instruct-r-v1"
+    ],
+    "repos": 2,
+    "of": 2
+   },
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "open_clip",
+    "project": "open-clip-torch",
+    "min_version": "3.3.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry"
+    ],
+    "repos": 1,
+    "of": 2
+   }
+  ],
+  "xqwen": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "fla",
+    "project": "flash-linear-attention",
+    "min_version": "0.6.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "requirements.txt of 15 repos (e.g. chen-l/LiveMem-RL, chen-l/LiveMem-SFT, tensor-ai-inc/d3-flash-NVFP4)"
+    ],
+    "repos": 2,
+    "of": 2
+   },
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "xlstm",
+    "project": "xlstm",
+    "min_version": "2.0.6",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "pip install line in code of 8 repos (e.g. allenai/Bolmo-1B, allenai/Bolmo-1B-Stage1, allenai/Bolmo-7B)"
+    ],
+    "repos": 2,
+    "of": 2
+   }
+  ],
+  "xtts": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "pypinyin",
+    "project": "pypinyin",
+    "min_version": "0.55.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "pip install line in code of 1 repos (e.g. BricksDisplay/ellie-Bert-VITS2-small-onnx)"
+    ],
+    "repos": 1,
+    "of": 1
+   },
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "sounddevice",
+    "project": "sounddevice",
+    "min_version": "0.5.6",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "requirements.txt of 1 repos (e.g. TeraSpace/TeraTTSv2)"
+    ],
+    "repos": 1,
+    "of": 1
+   },
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "torchaudio",
+    "project": "torchaudio",
+    "min_version": "2.11.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "xtts_gpt": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "pypinyin",
+    "project": "pypinyin",
+    "min_version": "0.55.0",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "pip install line in code of 1 repos (e.g. BricksDisplay/ellie-Bert-VITS2-small-onnx)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "xvla": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 3,
+    "of": 3
+   }
+  ],
+  "yasa2": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "imageio",
+    "project": "imageio",
+    "min_version": "2.38.1",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "pip install line in README of OpenGVLab/VideoChat-Flash-Qwen2-7B_res448"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "yolov8": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "ultralytics",
+    "project": "ultralytics",
+    "min_version": "8.4.202",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "requirements.txt of 1 repos (e.g. iitolstykh/YOLO-Face-Person-Detector)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ],
+  "zdtaichu5_0": [
+   {
+    "scope": "custom_code",
+    "part": "model",
+    "module": "timm",
+    "project": "timm",
+    "min_version": "1.0.31",
+    "platforms": [
+     "linux-x64",
+     "win-x64",
+     "macos-arm64"
+    ],
+    "status": "confirmed",
+    "evidence": [
+     "localm ON_DEMAND entry",
+     "localm uv.lock lists the project",
+     "transformers extras (Requires-Dist)"
+    ],
+    "repos": 1,
+    "of": 1
+   }
+  ]
+ }
+}
