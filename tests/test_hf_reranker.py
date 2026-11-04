@@ -168,7 +168,9 @@ class TestConfigState:
         entry = {"model_type": "embedding", "reranker": True, "path": str(folder)}
         mm.update_registry(lambda reg: reg.__setitem__("q", dict(entry)))
         assert entry_is_reranker("q", entry) is True
-        assert load_registry()["q"] == entry
+        stored = load_registry()["q"]
+        assert stored.pop("id")
+        assert stored == entry
 
     @pytest.mark.parametrize("build", ["_qwen3_seq_cls_reranker", "_reward_model", "_cross_encoder"])
     def test_reclassifying_a_stored_reranker_equals_a_fresh_registration(
