@@ -63,6 +63,17 @@ shared_uv() {  # prints the first uv on PATH that is not this folder's ./.uv cop
     done
     return 0
 }
+default_uv() {  # prints the first uv in a folder Astral's installer uses, in its own order, or nothing
+    local d
+    for d in "${XDG_BIN_HOME:-}" "${XDG_DATA_HOME:+$XDG_DATA_HOME/../bin}" "$HOME/.local/bin" "$HOME/.cargo/bin"; do
+        [ -n "$d" ] || continue
+        if [ -x "$d/uv" ] && [ ! -d "$d/uv" ]; then
+            echo "$(cd "$d" && pwd)/uv"
+            return 0
+        fi
+    done
+    return 0
+}
 ask_install_uv() {  # setup.sh's uv-install question; exits when the user declines
     local getuv=""
     echo "  [!] uv (the Python package manager localm builds on) is not installed."
@@ -81,7 +92,7 @@ run_uv_installer() {  # the pinned, checksum-verified Astral installer; exits on
     # stay in ./.localm-setup-tmp, which is removed again when it is empty.
     UVTMP="$(pwd)/.localm-setup-tmp/uv-installer.$$"
     if ! { mkdir -p "$UVTMP/tmp" && fetch_uv_installer "$UVTMP/uv-installer.sh" \
-            && TMPDIR="$UVTMP/tmp" sh "$UVTMP/uv-installer.sh"; }; then
+            && UV_NO_MODIFY_PATH=1 TMPDIR="$UVTMP/tmp" sh "$UVTMP/uv-installer.sh"; }; then
         rm -rf "$UVTMP"
         rmdir ./.localm-setup-tmp 2>/dev/null || true
         echo
@@ -120,16 +131,14 @@ else
     export LOCALM_GUI_STORE=shared
     echo "  Shared: reusing/installing uv and its Python + cache (outside this folder)."
     UVEXE="$(shared_uv)"
+    if [ -z "$UVEXE" ]; then UVEXE="$(default_uv)"; fi
     if [ -z "$UVEXE" ]; then
         ask_install_uv
         echo "  Installing uv ..."
         unset UV_INSTALL_DIR UV_UNMANAGED_INSTALL
         run_uv_installer
         export LOCALM_GUI_UV_INSTALLED=1
-        # Prepend both directories the installer may have used, in setup.sh's
-        # own order.
-        export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
-        UVEXE="$(shared_uv)"
+        UVEXE="$(default_uv)"
     fi
 fi
 echo
@@ -140,7 +149,7 @@ if [ -z "$UVEXE" ]; then
     if [ "$LOCALM_GUI_STORE" = portable ]; then
         echo "      Looked for $PWD/.uv/uv (the installer did not leave one there)."
     fi
-    echo "      Open a NEW terminal and run ./setup.sh instead."
+    echo "      Run ./setup.sh instead."
     exit 1
 fi
 

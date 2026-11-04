@@ -1497,7 +1497,7 @@ def _plan(root: Path, m: Optional[dict], *, purge_data: bool,
 
     # Things kept on purpose, reported so nothing setup did is silent.
     if m and m.get("uv_shared_installed"):
-        where = shutil.which("uv") or "your user profile"
+        where = m.get("uv_exe") or shutil.which("uv") or "your user profile"
         items.append(_Item(where, "report", "keep",
                            "uv was installed by LocaLM setup; other programs may use it"))
     if m and m.get("uv_exe") and not m.get("uv_shared_installed"):

@@ -40,6 +40,7 @@ if "%STOREPICK%"=="1" goto portable_uv
 set "LOCALM_GUI_STORE=shared"
 echo  Shared: reusing/installing uv and its Python + cache ^(outside this folder^).
 call :find_shared_uv
+if not defined UVEXE call :find_default_uv
 if defined UVEXE goto have_uv
 call :ask_install_uv
 if errorlevel 1 goto uv_declined
@@ -70,8 +71,10 @@ set "STMP=.localm-setup-tmp"
 if not exist "%STMP%" mkdir "%STMP%" >nul 2>nul
 set "UV_INSTALLER_VERSION=0.13.6"
 set "UV_INSTALLER_SHA256=d00580051699bee58a2e2d9b925f45788b35f7e0fff7966fd5bedfc3c547dc7d"
+set "UV_NO_MODIFY_PATH=1"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol=[Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; $f=$null; $t=$null; $w=$null; try { $d=$env:STMP; if ($d) { $d=[IO.Path]::GetFullPath($d); if (-not [IO.Directory]::Exists($d)) { exit 63 }; if ($d.IndexOfAny([char[]]'[]') -ge 0) { $w=Join-Path ([IO.Path]::GetTempPath()) ('localm-uv-'+[guid]::NewGuid()); try { $null=[IO.Directory]::CreateDirectory($w) } catch { $w=$null; exit 63 }; $d=$w } } else { $d=[IO.Path]::GetTempPath() }; $f=Join-Path $d ('uv-installer-'+[guid]::NewGuid()+'.ps1'); try { Invoke-WebRequest -UseBasicParsing -Uri ('https://github.com/astral-sh/uv/releases/download/'+$env:UV_INSTALLER_VERSION+'/uv-installer.ps1') -OutFile $f -ErrorAction Stop } catch { exit 61 }; $h=$null; $fs=$null; try { $fs=[IO.File]::Open($f,'Open','Read','Read'); $h=[BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($fs)).Replace('-','') } catch { }; if ($h -ne $env:UV_INSTALLER_SHA256) { exit 62 }; $t=Join-Path $d ('uv-tmp-'+[guid]::NewGuid()); try { $null=[IO.Directory]::CreateDirectory($t) } catch { $t=$null; exit 63 }; $env:TEMP=$t; $env:TMP=$t; $env:PSModulePath=$null; & powershell -NoProfile -ExecutionPolicy Bypass -File $f; exit $LASTEXITCODE } finally { if ($fs) { $fs.Dispose() }; if ($f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }; if ($t) { Remove-Item -LiteralPath $t -Recurse -Force -ErrorAction SilentlyContinue }; if ($w) { Remove-Item -LiteralPath $w -Recurse -Force -ErrorAction SilentlyContinue } }"
 set "UVRC=%errorlevel%"
+set "UV_NO_MODIFY_PATH="
 rd "%STMP%" >nul 2>nul
 if "%UVRC%"=="61" echo   [!] Could not download the uv %UV_INSTALLER_VERSION% installer.
 if "%UVRC%"=="62" echo   [!] The downloaded uv installer did not match its expected checksum, or could not be read to check it, and was not run.
@@ -81,10 +84,7 @@ if "%UVRC%"=="62" goto uv_refused
 if "%UVRC%"=="63" goto uv_refused
 if "%LOCALM_GUI_STORE%"=="portable" goto portable_installed
 set "LOCALM_GUI_UV_INSTALLED=1"
-rem  Prepend every directory the per-user install may have used, in setup.bat's
-rem  own order.
-set "PATH=%USERPROFILE%\.local\bin;%USERPROFILE%\.cargo\bin;%HOMEDRIVE%%HOMEPATH%\.local\bin;%PATH%"
-call :find_shared_uv
+call :find_default_uv
 if defined UVEXE goto have_uv
 goto uv_not_callable
 
@@ -102,7 +102,7 @@ goto open_window
 echo.
 echo   [!] uv still is not callable, so the graphical setup cannot start.
 if "%LOCALM_GUI_STORE%"=="portable" echo       Looked for %CD%\.uv\uv.exe ^(the installer did not leave one there^).
-echo       Open a NEW terminal and run setup.bat instead.
+echo       Run setup.bat instead.
 pause
 exit /b 1
 
@@ -184,6 +184,21 @@ rem ===========================================================================
 :find_shared_uv
 set "UVEXE="
 for /f "delims=" %%i in ('where uv 2^>nul') do if not defined UVEXE if /i not "%%~dpi"=="%CD%\.uv\" set "UVEXE=%%i"
+goto :eof
+
+rem ===========================================================================
+rem  :find_default_uv - sets UVEXE to the first uv.exe in a folder Astral's
+rem  installer uses (XDG_BIN_HOME, XDG_DATA_HOME\..\bin, then the user profile's
+rem  .local\bin and .cargo\bin and the redirected-home form), same order as
+rem  setup.bat. Nothing on PATH or in the user's settings changes.
+rem ===========================================================================
+:find_default_uv
+set "UVEXE="
+if defined XDG_BIN_HOME if exist "%XDG_BIN_HOME%\uv.exe" set "UVEXE=%XDG_BIN_HOME%\uv.exe"
+if not defined UVEXE if defined XDG_DATA_HOME if exist "%XDG_DATA_HOME%\..\bin\uv.exe" set "UVEXE=%XDG_DATA_HOME%\..\bin\uv.exe"
+if not defined UVEXE if exist "%USERPROFILE%\.local\bin\uv.exe" set "UVEXE=%USERPROFILE%\.local\bin\uv.exe"
+if not defined UVEXE if exist "%USERPROFILE%\.cargo\bin\uv.exe" set "UVEXE=%USERPROFILE%\.cargo\bin\uv.exe"
+if not defined UVEXE if exist "%HOMEDRIVE%%HOMEPATH%\.local\bin\uv.exe" set "UVEXE=%HOMEDRIVE%%HOMEPATH%\.local\bin\uv.exe"
 goto :eof
 
 rem ===========================================================================

@@ -158,10 +158,11 @@ rem ---- uv is required; bootstrap it ourselves if it is missing --------------
 rem  uv (Astral's fast Python package manager) drives the whole install: it builds
 rem  the venv and resolves the GPU wheels. Rather than dead-ending with "go install
 rem  it yourself", fetch it via Astral's official installer, then make it callable in
-rem  THIS process. The installer updates the persistent USER PATH, but not the PATH
-rem  of a shell that was already running, so we prepend its install dir here. We do
-rem  not hide a bootstrap failure: we re-check that uv is actually callable and, if
-rem  it is not, say so and show the manual options.
+rem  THIS process. The installer is told not to touch the persistent USER PATH, so
+rem  we prepend the install dir to this process's PATH here, and do the same on a
+rem  later run when uv is in that dir but not on PATH. We do not hide a bootstrap
+rem  failure: we re-check that uv is actually callable and, if it is not, say so and
+rem  show the manual options.
 rem  Portable (CONTAINED=1) must not settle for whatever uv happens to already be
 rem  on PATH - that could be a Shared install, winget, or a different clone
 rem  entirely, and reusing it silently would break the "uv itself ... inside this
@@ -170,6 +171,9 @@ rem  for ITS OWN confined copy at .\.uv; anything else on PATH is irrelevant to 
 rem  and falls through to the same bootstrap a genuinely-missing uv would trigger.
 rem  Shared keeps the original behaviour: any uv already on PATH is fine to reuse.
 if "%CONTAINED%"=="1" goto uv_check_portable
+where uv >nul 2>nul
+if not errorlevel 1 goto uv_ready
+call :add_default_uv_dir
 where uv >nul 2>nul
 if not errorlevel 1 goto uv_ready
 goto uv_missing
@@ -209,8 +213,10 @@ if "%CONTAINED%"=="1" (
 )
 set "UV_INSTALLER_VERSION=0.13.6"
 set "UV_INSTALLER_SHA256=d00580051699bee58a2e2d9b925f45788b35f7e0fff7966fd5bedfc3c547dc7d"
+set "UV_NO_MODIFY_PATH=1"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol=[Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; $f=$null; $t=$null; $w=$null; try { $d=$env:STMP; if ($d) { $d=[IO.Path]::GetFullPath($d); if (-not [IO.Directory]::Exists($d)) { exit 63 }; if ($d.IndexOfAny([char[]]'[]') -ge 0) { $w=Join-Path ([IO.Path]::GetTempPath()) ('localm-uv-'+[guid]::NewGuid()); try { $null=[IO.Directory]::CreateDirectory($w) } catch { $w=$null; exit 63 }; $d=$w } } else { $d=[IO.Path]::GetTempPath() }; $f=Join-Path $d ('uv-installer-'+[guid]::NewGuid()+'.ps1'); try { Invoke-WebRequest -UseBasicParsing -Uri ('https://github.com/astral-sh/uv/releases/download/'+$env:UV_INSTALLER_VERSION+'/uv-installer.ps1') -OutFile $f -ErrorAction Stop } catch { exit 61 }; $h=$null; $fs=$null; try { $fs=[IO.File]::Open($f,'Open','Read','Read'); $h=[BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($fs)).Replace('-','') } catch { }; if ($h -ne $env:UV_INSTALLER_SHA256) { exit 62 }; $t=Join-Path $d ('uv-tmp-'+[guid]::NewGuid()); try { $null=[IO.Directory]::CreateDirectory($t) } catch { $t=$null; exit 63 }; $env:TEMP=$t; $env:TMP=$t; $env:PSModulePath=$null; & powershell -NoProfile -ExecutionPolicy Bypass -File $f; exit $LASTEXITCODE } finally { if ($fs) { $fs.Dispose() }; if ($f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }; if ($t) { Remove-Item -LiteralPath $t -Recurse -Force -ErrorAction SilentlyContinue }; if ($w) { Remove-Item -LiteralPath $w -Recurse -Force -ErrorAction SilentlyContinue } }"
 set "UVRC=%errorlevel%"
+set "UV_NO_MODIFY_PATH="
 if "%UVRC%"=="61" echo  [^^!] Could not download the uv %UV_INSTALLER_VERSION% installer.
 if "%UVRC%"=="62" echo  [^^!] The downloaded uv installer did not match its expected checksum, or could not be read to check it, and was not run.
 if "%UVRC%"=="63" echo  [^^!] Could not create a temporary folder in %STMP% for the uv installer.
@@ -218,22 +224,13 @@ if "%UVRC%"=="61" goto uv_refused
 if "%UVRC%"=="62" goto uv_refused
 if "%UVRC%"=="63" goto uv_refused
 if not "%CONTAINED%"=="1" set "UVSHARED=--uv-shared-installed"
-rem  Make the freshly installed uv callable for the rest of THIS run (the installer
-rem  updates the persistent USER PATH, not this already-running shell). Prepend every
-rem  dir Astral's installer might have used: an explicit %UV_INSTALL_DIR%, its
-rem  %USERPROFILE%\.local\bin default, the older .cargo\bin, and the domain
-rem  redirected-home %HOMEDRIVE%%HOMEPATH% form. If uv still is not found (an exotic
-rem  install dir), the honest "open a new terminal" fallback below recovers via the
-rem  persistent PATH the installer set.
-rem  Harmless caveat: under this file's EnableDelayedExpansion a `!` inside the
-rem  user's INHERITED PATH is dropped when PATH is re-assigned here.
-rem  Proven harmless: this runs only in the uv-missing branch, the change is
-rem  process-local (never the persistent PATH), and every OTHER tool the rest of
-rem  setup runs resolves via an explicit path (.venv\Scripts, System32). A dir
-rem  literally named with `!` in the inherited PATH is exotic, and a bulletproof-
-rem  preserving assignment needs fragile batch not worth it here.
-set "UVDIRS=%USERPROFILE%\.local\bin;%USERPROFILE%\.cargo\bin;%HOMEDRIVE%%HOMEPATH%\.local\bin"
-set "PATH=%UVDIRS%;%PATH%"
+rem  Make the freshly installed uv callable for the rest of THIS run: the installer
+rem  was told not to change the persistent USER PATH. Put the dir Astral's installer
+rem  used on this process's PATH: an explicit %UV_INSTALL_DIR%, or the first of the
+rem  default dirs that holds uv.exe (see :add_default_uv_dir). The change is
+rem  process-local; every OTHER tool the rest of setup runs resolves via an explicit
+rem  path (.venv\Scripts, System32).
+call :add_default_uv_dir
 rem  UV_INSTALL_DIR itself is prepended fresh from !CD! here rather than
 rem  read back - see test_uv_install_dir_is_actually_findable_on_path_after_a_bang_install.
 if defined UV_INSTALL_DIR set "PATH=!CD!\.uv;!PATH!"
@@ -242,8 +239,8 @@ if not errorlevel 1 goto uv_ready
 
 echo.
 echo  [^^!] uv still is not callable after the install attempt.
-echo      Open a NEW terminal (so the updated PATH applies) and run setup.bat again,
-echo      or install uv manually first, then re-run setup.bat:
+echo      Setup does not change your PATH. Install uv manually first, then re-run
+echo      setup.bat:
 call :uv_manual_hint
 call :offer_report "localm setup could not install uv" "setup.bat tried Astral's installer but uv was still not callable afterwards."
 echo.
@@ -1151,9 +1148,27 @@ rmdir /s /q ".uv" >nul 2>nul
 goto :eof
 
 rem ===========================================================================
+rem  :add_default_uv_dir - puts the first dir that holds uv.exe, among the dirs
+rem  Astral's installer uses (XDG_BIN_HOME, XDG_DATA_HOME\..\bin, then the user
+rem  profile's .local\bin and .cargo\bin and the redirected-home form), on this
+rem  process's PATH. Nothing persistent changes. Leaves PATH alone when none holds one.
+rem ===========================================================================
+:add_default_uv_dir
+set "UVHOME="
+if defined XDG_BIN_HOME if exist "%XDG_BIN_HOME%\uv.exe" set "UVHOME=%XDG_BIN_HOME%"
+if not defined UVHOME if defined XDG_DATA_HOME if exist "%XDG_DATA_HOME%\..\bin\uv.exe" set "UVHOME=%XDG_DATA_HOME%\..\bin"
+if not defined UVHOME if exist "%USERPROFILE%\.local\bin\uv.exe" set "UVHOME=%USERPROFILE%\.local\bin"
+if not defined UVHOME if exist "%USERPROFILE%\.cargo\bin\uv.exe" set "UVHOME=%USERPROFILE%\.cargo\bin"
+if not defined UVHOME if exist "%HOMEDRIVE%%HOMEPATH%\.local\bin\uv.exe" set "UVHOME=%HOMEDRIVE%%HOMEPATH%\.local\bin"
+if defined UVHOME set "PATH=!UVHOME!;!PATH!"
+set "UVHOME="
+goto :eof
+
+rem ===========================================================================
 rem  :record_shared_uv - Shared only: records the first uv on PATH as the
-rem  install's uv (--uv-exe). Runs with delayed expansion off, so a "!" in the
-rem  path is kept.
+rem  install's uv (--uv-exe); the uv found in Astral's install dir was put on this
+rem  process's PATH by :add_default_uv_dir. Runs with delayed expansion off, so a
+rem  "!" in the path is kept.
 rem ===========================================================================
 :record_shared_uv
 if "%CONTAINED%"=="1" goto :eof

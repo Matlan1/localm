@@ -55,6 +55,22 @@ ask() {  # ask PROMPT DEFAULT  ->  echoes the answer (the default in --yes mode)
 uv_manual_hint() {  # the manual uv-install command; used from two call sites below
   say "      install uv with your package manager, or download it from https://github.com/astral-sh/uv/releases"
 }
+default_uv_dirs() {  # the folders Astral's installer puts uv in, in its own order, one per line
+  if [ -n "${XDG_BIN_HOME:-}" ]; then printf '%s\n' "$XDG_BIN_HOME"; fi
+  if [ -n "${XDG_DATA_HOME:-}" ]; then printf '%s\n' "$XDG_DATA_HOME/../bin"; fi
+  printf '%s\n' "$HOME/.local/bin" "$HOME/.cargo/bin"
+}
+add_default_uv_to_path() {  # puts the first uv found in an installer folder on PATH for this run only; 1 when there is none
+  local d
+  while IFS= read -r d; do
+    if [ -x "$d/uv" ] && [ ! -d "$d/uv" ]; then
+      PATH="$(cd "$d" && pwd):$PATH"
+      export PATH
+      return 0
+    fi
+  done < <(default_uv_dirs)
+  return 1
+}
 # The uv release this setup installs; its installer script runs only when its
 # sha256 matches UV_INSTALLER_SHA256.
 UV_INSTALLER_VERSION="0.13.6"
@@ -481,6 +497,8 @@ if [ "$CONTAINED" = 1 ]; then
   fi
 elif command -v uv >/dev/null 2>&1; then
   uv_present=1
+elif add_default_uv_to_path; then
+  uv_present=1
 fi
 if [ "$uv_present" != 1 ]; then
   say "  [!] uv (the Python package manager localm builds on) is not installed."
@@ -519,27 +537,27 @@ if [ "$uv_present" != 1 ]; then
   # stay in ./.localm-setup-tmp, which is removed again when it is empty.
   UVTMP="$(pwd)/.localm-setup-tmp/uv-installer.$$"
   if mkdir -p "$UVTMP/tmp" && fetch_uv_installer "$UVTMP/uv-installer.sh"; then
-    TMPDIR="$UVTMP/tmp" sh "$UVTMP/uv-installer.sh" || true
+    UV_NO_MODIFY_PATH=1 TMPDIR="$UVTMP/tmp" sh "$UVTMP/uv-installer.sh" || true
   else
     jr abandon "$UVSTEP"
   fi
   rm -rf "$UVTMP"
   rmdir ./.localm-setup-tmp 2>/dev/null || true
   # uv lands in ~/.local/bin (older builds used ~/.cargo/bin) unless UV_INSTALL_DIR
-  # was set above; the installer edits a shell profile, not this running shell, so
-  # add it (when set) plus both defaults to PATH for the rest of setup. Guarded so
-  # an unset UV_INSTALL_DIR never leaves an empty leading PATH entry (POSIX shells
-  # treat that as the current directory).
+  # was set above; the installer is told not to touch any shell startup file, so
+  # make the uv it installed callable for the rest of setup. Guarded so an unset
+  # UV_INSTALL_DIR never leaves an empty leading PATH entry (POSIX shells treat
+  # that as the current directory).
   if [ -n "${UV_INSTALL_DIR:-}" ]; then
-    export PATH="$UV_INSTALL_DIR:$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+    export PATH="$UV_INSTALL_DIR:$PATH"
   else
-    export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+    add_default_uv_to_path || true
   fi
   if ! command -v uv >/dev/null 2>&1; then
     say ""
     say "  [!] uv still is not callable after the install attempt."
-    say "      Open a new shell (so the updated PATH applies) and run setup.sh again,"
-    say "      or install uv manually first:"
+    say "      Setup does not change your PATH or shell startup files. Install uv"
+    say "      manually first, then run setup.sh again:"
     uv_manual_hint
     offer_report "localm setup could not install uv" "setup.sh tried Astral's installer but uv was still not callable afterwards."
     exit 1
