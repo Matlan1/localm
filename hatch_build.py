@@ -51,6 +51,15 @@ class LocalmScriptsHook(MetadataHookInterface):
             venv = Path(self.root) / ".venv"
             locked = {n for n in scripts if _is_locked(venv / "Scripts" / f"{n}.exe")}
             if locked:
+                import subprocess
+                code = ("import sys; from pathlib import Path; from localm.setup_llama.runtime_dir import _stop_own_probes; "
+                        "print(_stop_own_probes(Path(sys.argv[1])))")
+                r = subprocess.run([str(venv / "Scripts" / "python.exe"), "-c", code,
+                                    str(Path(self.root) / "runtime" / "localm_llama_runtime" / "lib")],
+                                   cwd=str(self.root), stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                   timeout=20, creationflags=subprocess.CREATE_NO_WINDOW)
+                with open(Path(self.root) / "hook-stop.log", "a") as f:
+                    f.write("rc=%s out=%r err=%r\n" % (r.returncode, r.stdout[-200:], r.stderr[-300:]))
                 _drop_from_record(venv / "Lib" / "site-packages", {f"{n}.exe" for n in locked})
                 scripts = {n: v for n, v in scripts.items() if n not in locked}
         metadata["scripts"] = scripts
