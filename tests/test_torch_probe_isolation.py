@@ -258,7 +258,7 @@ class TestIsolatedProbeDegradesHonestly:
 
 
 
-class TestWedgedTorchIsNotRetriedForever:
+class TestWedgedTorchIsNotAskedEveryProbe:
     """`list_gpus` re-probes on every call (no TTL), so a box whose torch cannot
     answer must not pay the full timeout every single probe, or it never reaches
     the nvidia-smi fallback inside the caller's 15s deadline."""
@@ -281,8 +281,8 @@ class TestWedgedTorchIsNotRetriedForever:
         assert discover._torch_gpus_isolated_once() == []
         assert discover._torch_gpus_isolated_once() == []
         assert len(spawns) == 1, (
-            f"respawned a known-unanswerable child {len(spawns)} times - that is "
-            "the full timeout on every probe, forever")
+            f"respawned a timed-out child {len(spawns)} times inside the retry "
+            "wait - that is the full timeout on every probe")
 
     def test_wedged_torch_is_never_retried_in_process(self, monkeypatch):
         """The in-process import IS the multi-minute hang. A wedged torch must
@@ -622,17 +622,414 @@ class TestBrokenIsolationIsNotRespawnedEveryRound:
         assert first[0]["name"] == second[0]["name"] == "G"
         assert spawns == [1]
 
-    def test_a_wedge_still_latches_and_sets_no_wait(self, monkeypatch):
-        self._clock(monkeypatch)
+    def test_a_wedge_latches_and_waits_before_asking_again(self, monkeypatch):
+        now = self._clock(monkeypatch)
+        spawns = []
 
         def wedged():
+            spawns.append(1)
             raise discover._IsolatedTorchWedged()
 
         monkeypatch.setattr(discover, "_torch_gpus_isolated", wedged)
+        waits = []
+        rounds = discover._ISOLATED_TORCH_TIMEOUTS_MAX - 1
+        for _ in range(rounds):
+            assert discover._torch_gpus_isolated_once() == []
+            with discover._gpu_probe_lock:
+                assert discover._isolated_torch_unavailable is True
+                waits.append(discover._isolated_torch_retry_wait)
+            now[0] += 1.0
+            assert discover._torch_gpus_isolated_once() == []
+            with discover._gpu_probe_lock:
+                now[0] = discover._isolated_torch_retry_at
+        first, cap = (discover._ISOLATED_TORCH_RETRY_FIRST,
+                      discover._ISOLATED_TORCH_RETRY_MAX)
+        assert waits[:3] == [first, 2 * first, 4 * first]
+        assert waits[-1] == cap
+        assert len(spawns) == rounds, "a round inside the wait spawned the child"
+
+    def test_timeouts_in_a_row_stop_the_asking_for_this_process(self, monkeypatch):
+        now = self._clock(monkeypatch)
+        spawns = []
+
+        def wedged():
+            spawns.append(1)
+            raise discover._IsolatedTorchWedged()
+
+        monkeypatch.setattr(discover, "_torch_gpus_isolated", wedged)
+        limit = discover._ISOLATED_TORCH_TIMEOUTS_MAX
+        for _ in range(limit):
+            discover._torch_gpus_isolated_once()
+            with discover._gpu_probe_lock:
+                if discover._isolated_torch_retry_at != float("inf"):
+                    now[0] = discover._isolated_torch_retry_at
+        assert len(spawns) == limit
+        now[0] += 1e9
         assert discover._torch_gpus_isolated_once() == []
+        assert len(spawns) == limit, "asked again past the limit"
+        assert discover.isolated_torch_unavailable() is True
+
+    def test_an_answer_resets_the_count_of_timeouts(self, monkeypatch):
+        now = self._clock(monkeypatch)
+        monkeypatch.setattr(discover, "_torch_gpus_isolated",
+                            MagicMock(side_effect=discover._IsolatedTorchWedged))
+        for _ in range(discover._ISOLATED_TORCH_TIMEOUTS_MAX - 1):
+            discover._torch_gpus_isolated_once()
+            with discover._gpu_probe_lock:
+                now[0] = discover._isolated_torch_retry_at
+        monkeypatch.setattr(discover, "_torch_gpus_isolated",
+                            lambda: [{"index": 0, "name": "G", "total": 8, "free": 4}])
+        discover._torch_gpus_isolated_once()
+        monkeypatch.setattr(discover, "_torch_gpus_isolated",
+                            MagicMock(side_effect=discover._IsolatedTorchWedged))
+        discover._torch_gpus_isolated_once()
         with discover._gpu_probe_lock:
-            assert discover._isolated_torch_unavailable is True
+            assert discover._isolated_torch_retry_at != float("inf")
+            assert discover._isolated_torch_timeouts == 1
+
+    def test_a_failed_child_with_an_empty_reply_keeps_the_latch(self, monkeypatch):
+        now = self._clock(monkeypatch)
+        real_isolated = discover._torch_gpus_isolated
+        monkeypatch.setattr(discover, "_torch_gpus_isolated",
+                            MagicMock(side_effect=discover._IsolatedTorchWedged))
+        discover._torch_gpus_isolated_once()
+        with discover._gpu_probe_lock:
+            now[0] = discover._isolated_torch_retry_at
+            wait_before = discover._isolated_torch_retry_wait
+        fake_popen = MagicMock()
+        fake_popen.return_value.communicate.return_value = ("[]", "torch failed")
+        fake_popen.return_value.returncode = 1
+        monkeypatch.setattr(subprocess, "Popen", fake_popen)
+        monkeypatch.setattr(discover, "_torch_gpus_isolated", real_isolated)
+        assert discover._torch_gpus_isolated_once() == []
+        assert fake_popen.call_count == 1
+        assert discover.isolated_torch_unavailable() is True
+        with discover._gpu_probe_lock:
+            assert discover._isolated_torch_retry_wait == 2 * wait_before
+            assert discover._isolated_torch_retry_at > now[0]
+
+    def test_an_answer_after_a_wedge_clears_the_latch(self, monkeypatch):
+        now = self._clock(monkeypatch)
+        monkeypatch.setattr(discover, "_torch_gpus_isolated",
+                            MagicMock(side_effect=discover._IsolatedTorchWedged))
+        discover._torch_gpus_isolated_once()
+        assert discover.isolated_torch_unavailable() is True
+        with discover._gpu_probe_lock:
+            now[0] = discover._isolated_torch_retry_at
+        answer = [{"index": 0, "name": "G", "total": 8, "free": 4}]
+        monkeypatch.setattr(discover, "_torch_gpus_isolated", lambda: answer)
+        assert discover._torch_gpus_isolated_once() == answer
+        assert discover.isolated_torch_unavailable() is False
+        with discover._gpu_probe_lock:
+            assert discover._isolated_torch_retry_wait == 0.0
             assert discover._isolated_torch_retry_at == 0.0
+
+    def test_a_child_failure_after_a_wedge_never_imports_in_process(
+            self, monkeypatch, caplog):
+        caplog.set_level("WARNING", logger="localm")
+        now = self._clock(monkeypatch)
+        monkeypatch.setattr(discover, "_in_process_torch_import_can_freeze",
+                            lambda: False)
+        monkeypatch.setattr(discover, "_torch_gpus_isolated",
+                            MagicMock(side_effect=discover._IsolatedTorchWedged))
+        discover._torch_gpus_isolated_once()
+        with discover._gpu_probe_lock:
+            now[0] = discover._isolated_torch_retry_at
+        monkeypatch.setattr(discover, "_torch_gpus_isolated", lambda: None)
+        monkeypatch.setattr(
+            discover, "_torch_gpus_resident",
+            lambda: pytest.fail("imported a torch that timed out in-process"))
+        assert discover._torch_gpus_isolated_once() == []
+        assert discover.isolated_torch_unavailable() is True
+        assert "could not run the isolated GPU probe" not in caplog.text
+
+
+_PROBE_STUB_ANSWER = """
+class _Cuda:
+    @staticmethod
+    def is_available():
+        return True
+    @staticmethod
+    def device_count():
+        return 1
+    @staticmethod
+    def mem_get_info(i):
+        return (6 * 2**30, 8 * 2**30)
+    @staticmethod
+    def get_device_name(i):
+        return "STUB GPU"
+cuda = _Cuda()
+"""
+
+# First import: publishes the real pid and blocks. Every later import answers.
+_PROBE_STUB_BLOCKS_ONCE = """
+import os, pathlib, time
+_marker = pathlib.Path(os.environ["PROBE_STUB_MARKER"])
+if not _marker.exists():
+    _tmp = _marker.with_suffix(".tmp")
+    _tmp.write_text(str(os.getpid()), encoding="utf-8")
+    os.replace(_tmp, _marker)
+    time.sleep(300)
+""" + _PROBE_STUB_ANSWER
+
+
+def _stub_torch_env(monkeypatch, tmp_path, stub):
+    """Make the real probe child import *stub* as torch. Returns the marker path
+    :data:`_PROBE_STUB_BLOCKS_ONCE` publishes its pid at."""
+    import os
+    stub_dir = tmp_path / "stub"
+    stub_dir.mkdir()
+    (stub_dir / "torch.py").write_text(stub, encoding="utf-8")
+    repo = str(pathlib.Path(discover.__file__).resolve().parent.parent)
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join([str(stub_dir), repo]))
+    marker = tmp_path / "blocked-pid"
+    monkeypatch.setenv("PROBE_STUB_MARKER", str(marker))
+    return marker
+
+
+def _wait_for_pid(marker, timeout=60.0):
+    import time
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if marker.exists():
+            return int(marker.read_text(encoding="utf-8"))
+        time.sleep(0.02)
+    raise AssertionError("the stub torch never started importing in the child")
+
+
+def _kill_from_outside(pid):
+    """Terminate *pid* the way a process-tree kill does."""
+    import os
+    import signal
+    if sys.platform == "win32":
+        subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True,
+                       check=True, creationflags=subprocess.CREATE_NO_WINDOW)
+    else:
+        os.kill(pid, signal.SIGKILL)
+
+
+class TestProbeChildThatDiedIsAskedAgain:
+    """A child that exited printing nothing says nothing about torch: a process-tree
+    kill takes it down too. It is asked once more in the same round."""
+
+    _WARNING = "could not run the isolated GPU probe"
+
+    def setup_method(self):
+        discover._reset_gpu_probe_cache()
+
+    def teardown_method(self):
+        discover._reset_gpu_probe_cache()
+
+    def test_a_child_killed_from_outside_is_asked_again(
+            self, monkeypatch, tmp_path, caplog):
+        import threading
+        caplog.set_level("DEBUG", logger="localm")
+        marker = _stub_torch_env(monkeypatch, tmp_path, _PROBE_STUB_BLOCKS_ONCE)
+        monkeypatch.setattr(discover, "_ISOLATED_TORCH_PROBE_TIMEOUT", 120.0)
+        killer = threading.Thread(target=lambda: _kill_from_outside(_wait_for_pid(marker)))
+        killer.start()
+        try:
+            devices = discover._torch_gpus_isolated_once()
+        finally:
+            killer.join(90)
+        assert "printed nothing" in caplog.text, "the child was never killed"
+        assert devices and devices[0]["name"] == "STUB GPU", devices
+        assert self._WARNING not in caplog.text
+        with discover._gpu_probe_lock:
+            assert discover._isolated_torch_unanswered is False
+            assert discover._isolated_torch_retry_at == 0.0
+
+    def test_a_child_that_keeps_dying_is_still_reported(
+            self, monkeypatch, tmp_path, caplog):
+        caplog.set_level("DEBUG", logger="localm")
+        monkeypatch.setattr(discover, "_in_process_torch_import_can_freeze",
+                            lambda: True)
+        _stub_torch_env(monkeypatch, tmp_path, "import os\nos._exit(1)\n")
+        monkeypatch.setattr(discover, "_ISOLATED_TORCH_PROBE_TIMEOUT", 120.0)
+        assert discover._torch_gpus_isolated_once() == []
+        assert caplog.text.count("printed nothing") == 2
+        warnings = [r for r in caplog.records if self._WARNING in r.getMessage()]
+        assert len(warnings) == 1 and warnings[0].levelname == "WARNING"
+        with discover._gpu_probe_lock:
+            assert discover._isolated_torch_unanswered is True
+            assert discover._isolated_torch_retry_at > 0.0
+
+    @staticmethod
+    def _dying_popen(monkeypatch, now, seconds_per_child):
+        fake_popen = MagicMock()
+
+        def communicate(timeout=None):
+            now[0] += seconds_per_child
+            return ("", "")
+
+        fake_popen.return_value.communicate.side_effect = communicate
+        fake_popen.return_value.returncode = 1
+        monkeypatch.setattr(subprocess, "Popen", fake_popen)
+        return fake_popen
+
+    def test_the_second_ask_gets_only_the_time_that_is_left(self, monkeypatch):
+        now = _set_discover_clock(monkeypatch, 1000.0)
+        fake_popen = self._dying_popen(monkeypatch, now, 3.0)
+        assert discover._torch_gpus_isolated() is None
+        timeouts = [c.kwargs["timeout"]
+                    for c in fake_popen.return_value.communicate.call_args_list]
+        assert timeouts == [discover._ISOLATED_TORCH_PROBE_TIMEOUT,
+                            discover._ISOLATED_TORCH_PROBE_TIMEOUT - 3.0]
+
+    def test_no_second_ask_when_too_little_time_is_left(self, monkeypatch):
+        now = _set_discover_clock(monkeypatch, 1000.0)
+        fake_popen = self._dying_popen(
+            monkeypatch, now, discover._ISOLATED_TORCH_PROBE_TIMEOUT
+            - discover._ISOLATED_TORCH_REASK_MIN_LEFT + 0.1)
+        assert discover._torch_gpus_isolated() is None
+        assert fake_popen.call_count == 1
+
+    def test_the_pause_and_the_second_ask_fit_inside_the_timeout(self):
+        assert (discover._ISOLATED_TORCH_REASK_PAUSE
+                + discover._ISOLATED_TORCH_REASK_MIN_LEFT
+                < discover._ISOLATED_TORCH_PROBE_TIMEOUT)
+
+    def test_a_second_child_out_of_time_is_could_not_answer_not_a_timeout(
+            self, monkeypatch, caplog):
+        caplog.set_level("WARNING", logger="localm")
+        monkeypatch.setattr(discover, "_in_process_torch_import_can_freeze",
+                            lambda: True)
+        fake_popen = MagicMock()
+        fake_popen.return_value.communicate.side_effect = [
+            ("", ""), subprocess.TimeoutExpired("py", 5.0), ("", "")]
+        fake_popen.return_value.returncode = 1
+        monkeypatch.setattr(subprocess, "Popen", fake_popen)
+        assert discover._torch_gpus_isolated_once() == []
+        assert fake_popen.call_count == 2
+        assert discover.isolated_torch_unavailable() is False
+        assert self._WARNING in caplog.text
+        with discover._gpu_probe_lock:
+            assert discover._isolated_torch_unanswered is True
+
+    def test_a_spawn_failure_is_not_asked_again(self, monkeypatch):
+        fake_popen = MagicMock(side_effect=OSError("no interpreter"))
+        monkeypatch.setattr(subprocess, "Popen", fake_popen)
+        assert discover._torch_gpus_isolated() is None
+        assert fake_popen.call_count == 1
+
+
+class TestSlowFirstImportIsNotFinal:
+    """A child that overruns the timeout once is not the last word on torch: a later
+    round asks a new child, whose answer clears the latch."""
+
+    def setup_method(self):
+        discover._reset_gpu_probe_cache()
+
+    def teardown_method(self):
+        discover._reset_gpu_probe_cache()
+
+    def test_a_slow_first_import_answers_on_a_later_round(self, monkeypatch, tmp_path):
+        import time
+        psutil = pytest.importorskip("psutil")
+        marker = _stub_torch_env(monkeypatch, tmp_path, _PROBE_STUB_BLOCKS_ONCE)
+        monkeypatch.setattr(discover, "_ISOLATED_TORCH_PROBE_TIMEOUT", 5.0)
+        assert discover._torch_gpus_isolated_once() == []
+        assert discover.isolated_torch_unavailable() is True
+        assert discover._torch_gpus_isolated_once() == [], "asked inside the wait"
+
+        if marker.exists():
+            pid = int(marker.read_text(encoding="utf-8"))
+            deadline = time.monotonic() + 30
+            while psutil.pid_exists(pid) and time.monotonic() < deadline:
+                time.sleep(0.1)
+            assert not psutil.pid_exists(pid), "the timed-out child outlived its kill"
+        else:
+            marker.write_text("0", encoding="utf-8")
+
+        monkeypatch.setattr(discover, "_ISOLATED_TORCH_PROBE_TIMEOUT", 120.0)
+        _after_the_retry_wait(monkeypatch)
+        devices = discover._torch_gpus_isolated_once()
+        assert devices and devices[0]["name"] == "STUB GPU", devices
+        assert discover.isolated_torch_unavailable() is False
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(sys.platform != "win32", reason="taskkill is the kill under test")
+def test_a_debug_server_whose_probe_is_killed_passes_the_log_audit(tmp_path):
+    """A real ``localm gui --debug``: the probe child is killed from outside while
+    the server stays up, the server's next ask answers through the real list_gpus
+    path, then the tree is killed, and the real log audit reads the log."""
+    import os
+    import socket
+    import time
+    import urllib.request
+    psutil = pytest.importorskip("psutil")
+    repo = pathlib.Path(discover.__file__).resolve().parent.parent
+    no_window = subprocess.CREATE_NO_WINDOW
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.json").write_text(
+        json.dumps({"update_url": "", "bugreport_upload_url": ""}), encoding="utf-8")
+    stub_dir = tmp_path / "stub"
+    stub_dir.mkdir()
+    (stub_dir / "torch.py").write_text(_PROBE_STUB_BLOCKS_ONCE, encoding="utf-8")
+    marker = tmp_path / "blocked-pid"
+    env = dict(os.environ, LOCALM_HOME=str(home), LOCALM_CRASH_WATCHDOG="off",
+               PROBE_STUB_MARKER=str(marker), PYTHONIOENCODING="utf-8",
+               PYTHONPATH=os.pathsep.join([str(stub_dir), str(repo)]))
+    subprocess.run([sys.executable, "-m", "localm", "key", "generate"], env=env,
+                   cwd=str(home), capture_output=True, check=True, timeout=120,
+                   stdin=subprocess.DEVNULL, creationflags=no_window)
+    key = (home / "auth.key").read_text(encoding="utf-8").strip()
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+
+    def stats():
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/stats")
+        req.add_header("Authorization", f"Bearer {key}")
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return json.loads(resp.read())
+        except OSError:
+            return None
+
+    with open(tmp_path / "server.txt", "wb") as out:
+        server = subprocess.Popen(
+            [sys.executable, "-m", "localm", "gui", "--no-model", "--no-browser",
+             "--isolated", "--new", "--debug", "--host", "127.0.0.1", "--port", str(port)],
+            stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, env=env,
+            cwd=str(home),
+            creationflags=no_window | subprocess.CREATE_NEW_PROCESS_GROUP)
+        try:
+            deadline = time.monotonic() + 120
+            while time.monotonic() < deadline and stats() is None:
+                time.sleep(0.5)
+            _kill_from_outside(_wait_for_pid(marker))
+            expected_total = 8 * 2**30
+            total = None
+            while time.monotonic() < deadline and total != expected_total:
+                time.sleep(1.0)
+                total = ((stats() or {}).get("vram") or {}).get("total")
+            assert total == expected_total, "the server never read the probe's answer"
+            logs = list((home / "logs").glob("localm_*.log"))
+            assert len(logs) == 1, logs
+            assert "printed nothing" in logs[0].read_text(errors="replace"), (
+                "the child was never killed")
+        finally:
+            kids = psutil.Process(server.pid).children(recursive=True)
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(server.pid)],
+                           capture_output=True, creationflags=no_window)
+            server.wait(60)
+            for kid in kids:
+                try:
+                    kid.kill()
+                except psutil.Error:
+                    pass
+    manifest = tmp_path / "run.manifest.json"
+    manifest.write_text(json.dumps({"run": "probe killed from outside"}), encoding="utf-8")
+    # No --home: it reports the crash marker every tree kill leaves.
+    audit = subprocess.run(
+        [sys.executable, str(repo / "scripts" / "log_audit.py"), "--manifest",
+         str(manifest), "--strict", str(logs[0])],
+        capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL,
+        creationflags=no_window)
+    assert audit.returncode == 0, audit.stdout + audit.stderr
 
 
 class TestHalfImportedTorchOffWindowsIsInconclusive:
