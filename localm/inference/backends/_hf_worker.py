@@ -735,6 +735,28 @@ def _cuda_device_map(torch, config: Optional[dict] = None) -> dict:
     return {"device_map": "auto"}
 
 
+def _safetensors_bytes(model_path: str) -> int:
+    """Total size of the ``.safetensors`` files directly in *model_path*; 0 when there are
+    none or the folder cannot be read."""
+    try:
+        return sum(f.stat().st_size for f in Path(model_path).glob("*.safetensors"))
+    except OSError:
+        return 0
+
+
+def _cpu_device_map(model_path: str) -> tuple[dict, bool]:
+    """``(device_map kwargs, keep the checkpoint's dtype)`` for a CPU load. The whole model
+    goes to system RAM unless its ``.safetensors`` files, at the float32 a CPU load uses,
+    need more than 90% of the available RAM; then placement is automatic with 80% of it as
+    the budget, the rest stays on disk in the model's own files, and the load keeps the
+    checkpoint's dtype so those files are read as they are."""
+    import psutil
+    available = int(psutil.virtual_memory().available)
+    if _safetensors_bytes(model_path) * 2 <= available * 0.9:
+        return {"device_map": "cpu"}, False
+    return {"device_map": "auto", "max_memory": {"cpu": int(available * 0.8)}}, True
+
+
 def _auto_device(torch, override: Optional[str] = None) -> str:
     """Pick the HF inference device: an explicit *override*, else the best available
     GPU, else CPU. CUDA (which also covers AMD ROCm via PyTorch) is preferred, then
@@ -1655,8 +1677,13 @@ class HFWorker:
         device = _auto_device(torch, self._device)
         self.resolved_device = device
         dtype = torch.bfloat16 if device in ("cuda", "xpu") else torch.float32
-        device_map_kwargs = (_cuda_device_map(torch) if device == "cuda"
-                              else {"device_map": "cpu"})
+        keep_checkpoint_dtype = False
+        if device == "cuda":
+            device_map_kwargs = _cuda_device_map(torch)
+        elif device == "cpu":
+            device_map_kwargs, keep_checkpoint_dtype = _cpu_device_map(self.model_path)
+        else:
+            device_map_kwargs = {"device_map": "cpu"}
 
         # Runs before transformers first checks for the kernels package (the
         # check is cached): a native FP8 plan, or a Hub-kernel quantization the
@@ -1761,7 +1788,8 @@ class HFWorker:
         load_kwargs = _build_load_kwargs(
             tr,
             device_map_kwargs=device_map_kwargs,
-            dtype=dtype,
+            dtype=("auto" if keep_checkpoint_dtype and fp8 is None
+                   and not _is_compressed_tensors(self.model_path) else dtype),
             trust_remote_code=trust_remote_code,
         )
         if fp8 is not None and not fp8.native:
