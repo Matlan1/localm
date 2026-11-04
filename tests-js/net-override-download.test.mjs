@@ -76,7 +76,7 @@ test("a refused download: tooltip and click both show the refusal", async () => 
   assert.equal(win.document.getElementById("chat-mic").title, refusal);
   await win.toggleMic();
   await tick();
-  assert.deepEqual(win.__toasts, [refusal]);
+  assert.deepEqual([...win.__toasts], [refusal]);
   assert.equal(calls.filter((c) => c.url === "/api/voice/model/download").length, 0);
 });
 

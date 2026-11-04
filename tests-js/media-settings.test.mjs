@@ -121,7 +121,7 @@ test("media config renders one independent subsection per plugin", async () => {
 
 test("an old stored dtype is shown, and choosing default is a change Save writes", async () => {
   const options = ["default", "fp8_e4m3fn", "fp8_e4m3fn_fast", "fp8_e5m2"];
-  const media = { plugins: [{ name: "video", label: "Video", fields: [
+  const media = { plugins: [{ plugin: "video", label: "Video", fields: [
     { key: "float_type", widget: "select", label: "Model weight dtype", help: "",
       value: "fp16", options: [...options, "fp16"], is_override: true },
   ] }] };
@@ -146,7 +146,7 @@ test("an old stored dtype is shown, and choosing default is a change Save writes
   };
   const { window: win } = loadAppWithPages({ fetchImpl });
   await render(win);
-  const select = () => win.document.querySelector('[data-key="float_type"] select');
+  const select = () => win.document.querySelector('select[data-key="float_type"]');
   assert.equal(select().value, "fp16", "the page shows what is stored");
 
   await win.saveMediaPlugin("video");
