@@ -2436,6 +2436,7 @@
   "settings.update.applyButton": "Jetzt aktualisieren",
   "settings.update.applyFailed": "Update fehlgeschlagen: {message}",
   "settings.update.versionsButton": "Version auswählen",
+  "settings.update.versionsHelp": "Ein bestimmtes Release installieren, älter oder neuer. Bei einem Downgrade wird zuerst gefragt und es werden Einstellungen und Daten gesichert.",
   "settings.update.versionLabel": "Zu installierende Version",
   "settings.update.installVersionButton": "Diese Version installieren",
   "settings.update.versionsLoading": "Releases werden geladen…",

@@ -2557,6 +2557,7 @@
   "settings.update.versionNotInstallable": "Non installable : {reason}",
   "settings.update.versionPublished": "Publiée le {date}",
   "settings.update.versionsButton": "Choisir une version",
+  "settings.update.versionsHelp": "Installe une version précise, plus ancienne ou plus récente. Un retour en arrière demande d'abord confirmation et sauvegarde vos réglages et vos données.",
   "settings.update.versionsCurrent": "Vous êtes sur {current}. Choisissez une version à installer, plus ancienne ou plus récente.",
   "settings.update.versionsFailed": "Impossible de lister les versions : {message}",
   "settings.update.versionsLoading": "Chargement des versions…",
