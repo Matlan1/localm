@@ -213,6 +213,43 @@ def test_indexing_into_a_large_collection_never_starves_another_thread(big_colle
     assert s.worst < _MAX_STARVED_S, f"another thread was starved {s.worst:.2f} s"
 
 
+_MAX_HEALTH_S = 0.75
+
+
+def test_health_answers_while_a_large_collection_is_indexed(big_collection, tmp_path, monkeypatch):
+    """A request served by the event loop answers within _MAX_HEALTH_S during
+    the whole of add_paths: its load, its embedding and its save."""
+    from fastapi.testclient import TestClient
+
+    from localm.inference.http_server import create_app
+    monkeypatch.delenv("LOCALM_API_KEY", raising=False)
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "new.txt").write_text("a new document about gearboxes", encoding="utf-8")
+    result = {}
+
+    def index():
+        result.update(Collection("big", base=big_collection, load=False, cache=False).add_paths(
+            [docs], embed_fn=lambda texts: [[0.5] * _DIM for _ in texts]))
+
+    worker = threading.Thread(target=index)
+    worst = 0.0
+    answers = 0
+    with TestClient(create_app(None)) as client:
+        client.get("/health")
+        worker.start()
+        while worker.is_alive():
+            t0 = time.perf_counter()
+            assert client.get("/health").status_code in (200, 503)
+            worst = max(worst, time.perf_counter() - t0)
+            answers += 1
+            time.sleep(0.01)
+    worker.join()
+    assert result["added"] == 1
+    assert answers > 10
+    assert worst < _MAX_HEALTH_S, f"/health took {worst:.2f} s during indexing"
+
+
 def test_the_saved_file_is_exactly_what_a_single_dumps_wrote(big_collection):
     coll = Collection("big", base=big_collection, cache=False)
     text = (Path(big_collection) / "big" / "vectors.json").read_text(encoding="utf-8")
