@@ -75,7 +75,7 @@ class _CollectionEmbedding:
         self._vectors_file_rejected = False
         self.vector_degrade_reason = None
         self.corrupt = False
-        self._save()
+        self._save(on_progress)
         with _files_changing(self.dir):
             self._discard_rejected_vectors(
                 f"re-embedded to {self._vec_dim} dimensions"

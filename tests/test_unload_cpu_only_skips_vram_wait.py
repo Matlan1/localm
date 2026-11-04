@@ -138,6 +138,58 @@ class TestUnloadAll:
         assert result["unloaded_other"] == ["embedding model"]
         assert (spy.readings, spy.waits) == (1, 1)
 
+    def test_a_model_holding_vram_loaded_during_the_check_still_waits(self, spy, monkeypatch):
+        from localm.inference import speech
+        readings_at_unload = []
+        gpu = _FakeEngine("gpu", cpu_only=False)
+        gpu._loaded = False
+        gpu.unload = lambda: (readings_at_unload.append(spy.readings),
+                              setattr(gpu, "_loaded", False))
+
+        def _a_load_finishes_meanwhile():
+            gpu._loaded = True
+            return False
+
+        monkeypatch.setattr(speech, "is_loaded", _a_load_finishes_meanwhile)
+        _put(_FakeEngine("cpu", cpu_only=True), gpu)
+        result = asyncio.run(hs.unload_all_models())
+        assert sorted(result["unloaded_models"]) == ["cpu", "gpu"]
+        assert readings_at_unload == [1], "the reading precedes the release"
+        assert (spy.readings, spy.waits) == (1, 1)
+        assert result["vram_freed"] is True
+
+    def test_an_embedder_loaded_during_the_check_still_waits(self, spy, monkeypatch):
+        from localm.inference import embedder, speech
+        state = {"dim": None}
+
+        def _embedder_loads_meanwhile():
+            state["dim"] = 384
+            return False
+
+        monkeypatch.setattr(embedder, "loaded_dim", lambda: state["dim"])
+        monkeypatch.setattr(embedder, "reset_embedder", lambda force=False: True)
+        monkeypatch.setattr(speech, "is_loaded", _embedder_loads_meanwhile)
+        _put(_FakeEngine("cpu", cpu_only=True))
+        result = asyncio.run(hs.unload_all_models())
+        assert result["unloaded_other"] == ["embedding model"]
+        assert (spy.readings, spy.waits) == (1, 1)
+
+    def test_a_media_runtime_started_during_the_check_still_waits(self, spy, monkeypatch):
+        import localm.vram as vram
+        calls = []
+
+        def _loaded_runtimes():
+            calls.append(spy.readings)
+            return [] if len(calls) == 1 else ["native image/video worker"]
+
+        monkeypatch.setattr(vram, "loaded_native_media_runtimes", _loaded_runtimes)
+        monkeypatch.setattr(vram, "stop_idle_native_media",
+                            lambda: {"native image/video worker": vram.MEDIA_STOPPED})
+        _put(_FakeEngine("cpu", cpu_only=True))
+        result = asyncio.run(hs.unload_all_models(media=True))
+        assert result["unloaded_other"] == ["native image/video worker"]
+        assert (spy.readings, spy.waits) == (1, 1)
+
     def test_nothing_loaded_still_reports_the_reading(self, spy):
         result = asyncio.run(hs.unload_all_models())
         assert result["status"] == "already_unloaded"

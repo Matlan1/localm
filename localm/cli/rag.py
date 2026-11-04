@@ -148,7 +148,7 @@ def rag_add(collection, paths, force, embed, url):
         try:
             result = coll.add_paths(
                 list(paths), force=force, embed_fn=embed_fn, model_name=model_name,
-                on_progress=lambda t: console.print(f"  [dim]{escape(t)}[/dim]"))
+                on_progress=lambda t, **_: console.print(f"  [dim]{escape(t)}[/dim]"))
         except ValueError:
             if created_here:
                 _discard_if_empty(console, collection)
@@ -279,7 +279,7 @@ def rag_repair(collection, embed, url, yes):
     with _refuse_if_locked(console), _refuse_bad_path(console):
         result = coll.add_paths(
             paths, force=True, embed_fn=embed_fn, model_name=model_name,
-            on_progress=lambda t: console.print(f"  [dim]{escape(t)}[/dim]"))
+            on_progress=lambda t, **_: console.print(f"  [dim]{escape(t)}[/dim]"))
     console.print(f"[green]repaired: {result['updated']} re-indexed, "
                   f"{result['added']} added[/green] - "
                   f"{result['chunks']} chunks in '{escape(collection)}'")
@@ -354,7 +354,7 @@ def rag_resync(collection, embed, url, prune_missing):
         result = coll.resync(
             embed_fn=embed_fn, policy=None, prune_missing=prune_missing,
             model_name=model_name,
-            on_progress=lambda t: console.print(f"  [dim]{escape(t)}[/dim]"))
+            on_progress=lambda t, **_: console.print(f"  [dim]{escape(t)}[/dim]"))
     console.print(f"[green]{result['added']} added, {result['updated']} updated, "
                   f"{result['skipped']} unchanged[/green] - "
                   f"{result['chunks']} chunks in '{escape(collection)}' over "

@@ -92,7 +92,7 @@ cannot do safely. (Free Worker tier is far more than enough for 1-2 testers.)
   - `scripts/report_issue.py` and `scripts/report_issue.ps1`: the title line, then
     `## What happened`, `## How it was filed` followed by its `- Filed via the
     standalone` line, and `## Environment` followed by a `- ` line;
-  - `report-issue.sh`: the one line starting `Filed via the standalone curl reporter`.
+  - `report-issue.sh`: a body of one line starting `Filed via the standalone curl reporter`.
 
   Installed clones keep sending these, so a change to a reporter's structure must keep
   the Worker accepting the old one. Anything else gets a 422 and is not filed; each one

@@ -124,7 +124,7 @@ def _without_pip_advice(model_path: str, err: RuntimeError) -> RuntimeError:
     when it is a missing-package ImportError or tells the reader to run pip."""
     from localm.model_manager.missing_packages import rewrite_import_error, strip_pip_instructions
     text = str(err)
-    sentence = rewrite_import_error(Path(model_path).name, text)
+    sentence = rewrite_import_error(Path(model_path).name, text, model_path)
     if sentence is not None:
         return ModelRefusedError(sentence)
     stripped = strip_pip_instructions(text)
@@ -372,6 +372,7 @@ class HFBackend(BaseBackend):
         self.effective_ctx_max = meta.get("context_capacity")
         self.n_ctx_max = self.effective_ctx_max
         self._loaded = True
+        logger.info("hf model ready: %s", Path(self.model_path).name)
         # Printed in the parent, not the child: the child's stdout inherits the
         # codepage the spawn gave it rather than the parent's console
         # configuration, and a rich/Unicode console.print from the child raises
