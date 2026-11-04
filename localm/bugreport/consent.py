@@ -112,9 +112,9 @@ def offer_to_send(summary: str, path: Optional[Path], text: str, *,
     built via save_user_report) - rather than two copies that can drift on
     retry/rate-limit/failure handling. *text* is the in-memory report
     body (used when *path* is None because the save itself failed); when a
-    file exists, the actually-sent body is RE-READ from it so a user's edits
-    made before picking a channel are what gets sent, not the stale
-    in-memory copy."""
+    file exists, the sent body is read from it after the channel is picked, so a
+    user's edits made while the menu waited are what gets sent, and nothing is sent
+    when the file cannot be read."""
     up_url, up_token = _br.upload_config()
     can_upload = up_url is not None
 
@@ -131,15 +131,6 @@ def offer_to_send(summary: str, path: Optional[Path], text: str, *,
             console.print(f"[dim]Send it to the maintainer ({MAINTAINER_EMAIL}) by email or "
                           "Discord.[/dim]")
         return
-
-    # Re-read the saved file so the user's edits (made before picking a channel)
-    # are what actually gets sent - otherwise "edit it first" would be a lie.
-    body = text
-    if path is not None:
-        try:
-            body = path.read_text(encoding="utf-8")
-        except OSError:
-            body = text
 
     console.print("How would you like to send it (edit the file first if you want)?")
     # Map the displayed number -> action, so an extra "send now" option when an
@@ -168,6 +159,17 @@ def offer_to_send(summary: str, path: Optional[Path], text: str, *,
     # report actually is, honestly ("we do not hide problems").
     where = (str(path) if path is not None
              else "the text above (it could not be saved to a file)")
+
+    # Read the saved file after the choice, so edits made while the menu waited are
+    # what is sent. A saved file that cannot be read now sends nothing.
+    body = text
+    if path is not None and action in ("upload", "email"):
+        try:
+            body = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            console.print("[yellow]The saved report could not be read, so nothing was sent: "
+                          f"{markup_safe(where)}.[/yellow]", soft_wrap=True)
+            return
 
     try:
         if action == "upload":

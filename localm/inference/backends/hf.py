@@ -124,7 +124,7 @@ def _without_pip_advice(model_path: str, err: RuntimeError) -> RuntimeError:
     when it is a missing-package ImportError or tells the reader to run pip."""
     from localm.model_manager.missing_packages import rewrite_import_error, strip_pip_instructions
     text = str(err)
-    sentence = rewrite_import_error(Path(model_path).name, text)
+    sentence = rewrite_import_error(Path(model_path).name, text, model_path)
     if sentence is not None:
         return ModelRefusedError(sentence)
     stripped = strip_pip_instructions(text)
