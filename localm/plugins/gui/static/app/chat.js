@@ -1625,8 +1625,7 @@ export function buildConvItem(conv, snippet) {
 
   const del = el("button", "del", "×");
   del.title = t("chat.conv.delete");
-  del.onclick = (e) => {
-    e.stopPropagation();
+  const removeConversation = () => {
     chat.conversations = chat.conversations.filter((c) => c.id !== conv.id);
     if (chat.activeId === conv.id) chat.activeId = chat.conversations[0]?.id || null;
     chat.queue = chat.queue.filter((q) => q.convId !== conv.id);
@@ -1635,6 +1634,14 @@ export function buildConvItem(conv, snippet) {
     renderConvList();
     renderChat();
     processChatQueue();
+  };
+  del.onclick = (e) => {
+    e.stopPropagation();
+    const shown = conv.title && conv.title !== "New chat" ? conv.title : t("chat.conv.newTitle");
+    confirmDanger(
+      t("chat.conv.deleteConfirm.title", { name: shown }),
+      t("chat.conv.deleteConfirm.body"),
+      t("chat.conv.deleteConfirm.confirm"), removeConversation);
   };
   item.appendChild(del);
 

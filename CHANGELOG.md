@@ -12,6 +12,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 ## [Unreleased]
 
 ### Added
+- **Every model on the Models page can be renamed, given an alias and removed.** Embedding, diffusion, VAE, LoRA, upscaler and other non-chat rows used to show only info; they now have alias, rename and remove, and unload when loaded. Use and reload stay on chat models.
 - **Each entry in Settings > Recent errors can be dismissed on its own.** Every error now has an **x** button ("Dismiss this error") beside Copy and Report this error; Clear still empties the whole list.
 - **The interface can now be shown in Spanish and French.** Pick Español or Français under Settings > Appearance, or run `localm config language es` / `localm config language fr`. They cover everything the German interface covers, and a string that is not translated yet shows in English rather than as a blank or a raw key.
 - **"Remember that ..." in a chat message is saved to memory.** A message such as "remember that I love RPG-style games" or "merk dir, dass ich gerne Rollenspiele spiele" stores that fact right away, without the model having to do anything, and the reply shows "Saved to memory: ..." (or "Already in memory"). It works whenever memory is on and the session mode is log or full; in privacy mode nothing is stored. A question or a recollection ("remember to buy milk", "do you remember my name?") is not saved, and neither is a message that points back at something and asks for a task ("remember that bug from earlier. Fix it", "remember that script you wrote, can you add logging"). When the first save needs the embedding model downloaded, the chat status says so while it downloads.
@@ -31,6 +32,7 @@ permanent public record of what shipped and are never rewritten; the in-progress
 - **The debug log's `loop_lag` now shows real loop stalls.** It used to read `0.00s` on nearly every request, whatever happened. Each request line now reports the longest stretch the server was frozen while that request was in flight (a slow request with `loop_lag` near 0 was just waiting; one with a large `loop_lag` had the server blocked). `/debug/stacks` reports the longest stall of the last minute.
 
 ### Fixed
+- **Deleting a chat from the sidebar asks first.** The x on a chat used to delete it at once; it now asks for confirmation and names the chat.
 - **A refused web search no longer reloads the page and clears the chat.** With network access off, `/web <query>` showed its refusal and then reloaded the page mid-reply, wiping the conversation. The page now restarts itself only when the server says the page's own access token was rejected, not for any other refusal.
 - **Clearing a number setting in Settings puts it back to its default.** Blanking a saved number such as Context window (initial) and saving said "Saved" but kept the old value; it now returns to the default.
 - **The debug log keeps growing after Restart server.** A server started with `--debug` stopped writing to its log file after a restart while the console kept showing messages; the restarted server now continues in the same file.

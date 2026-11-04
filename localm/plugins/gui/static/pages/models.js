@@ -705,9 +705,8 @@ export async function refreshModelsPage() {
       }
     }
 
-    // Only LLMs support use/alias/remove
-    const isLlm = !m.model_type || m.model_type === "llm";
-    if (isLlm) {
+    const canChat = !m.model_type || m.model_type === "llm";
+    if (canChat) {
       if (!m.active) {
         const use = el("button", "primary", t("models.action.use"));
         use.onclick = async () => {
@@ -756,116 +755,116 @@ export async function refreshModelsPage() {
         pkgBtn.onclick = () => installModelPackages(m.name, pkgBtn);
         actions.appendChild(pkgBtn);
       }
-      const aliasBtn = el("button", "secondary", t("models.action.alias"));
-      aliasBtn.onclick = async () => {
-        const name = await promptText(t("models.alias.prompt", { name: m.name }));
-        if (!name) return;
-        const r = await fetch("/api/models/alias", {
-          method: "POST", headers: authHeaders(),
-          body: JSON.stringify({ model: m.name, alias: name.trim() }),
-        });
-        const data = await r.json().catch(() => ({}));
-        // Report the alias the SERVER stored, not the raw text: aliases are
-        // sanitized server-side ("daily driver" -> "daily-driver").
-        if (r.ok) {
-          toast(t("models.alias.toast", { alias: data.alias || name.trim() }));
-          refreshModelsPage();
-        } else toast(data.detail || t("models.alias.failed"), true);
-      };
-      actions.appendChild(aliasBtn);
-      const renameBtn = el("button", "secondary", t("models.action.rename"));
-      renameBtn.title = t("models.rename.title");
-      renameBtn.onclick = async () => {
-        const name = await promptText(t("models.rename.prompt", { name: m.name }), m.name);
-        if (!name || name.trim() === m.name) return;
-        const r = await fetch("/api/models/rename", {
-          method: "POST", headers: authHeaders(),
-          body: JSON.stringify({ model: m.name, new_name: name.trim() }),
-        });
-        const data = await r.json().catch(() => ({}));
-        // Same as alias above: the server sanitizes the name, so report what it
-        // actually stored, not the raw text typed in.
-        if (r.ok) {
-          let msg = t("models.rename.toast", { name: data.new_name || name.trim() });
-          // The server's migration notes - what it updated, and what it could
-          // NOT reach (e.g. a per-project .localcoder/config.toml) - are shown
-          // to the user, not left in the server log alone.
-          if (Array.isArray(data.notes) && data.notes.length) {
-            msg += ". " + data.notes.join(" ");
+    }
+    const aliasBtn = el("button", "secondary", t("models.action.alias"));
+    aliasBtn.onclick = async () => {
+      const name = await promptText(t("models.alias.prompt", { name: m.name }));
+      if (!name) return;
+      const r = await fetch("/api/models/alias", {
+        method: "POST", headers: authHeaders(),
+        body: JSON.stringify({ model: m.name, alias: name.trim() }),
+      });
+      const data = await r.json().catch(() => ({}));
+      // Report the alias the SERVER stored, not the raw text: aliases are
+      // sanitized server-side ("daily driver" -> "daily-driver").
+      if (r.ok) {
+        toast(t("models.alias.toast", { alias: data.alias || name.trim() }));
+        refreshModelsPage();
+      } else toast(data.detail || t("models.alias.failed"), true);
+    };
+    actions.appendChild(aliasBtn);
+    const renameBtn = el("button", "secondary", t("models.action.rename"));
+    renameBtn.title = t("models.rename.title");
+    renameBtn.onclick = async () => {
+      const name = await promptText(t("models.rename.prompt", { name: m.name }), m.name);
+      if (!name || name.trim() === m.name) return;
+      const r = await fetch("/api/models/rename", {
+        method: "POST", headers: authHeaders(),
+        body: JSON.stringify({ model: m.name, new_name: name.trim() }),
+      });
+      const data = await r.json().catch(() => ({}));
+      // Same as alias above: the server sanitizes the name, so report what it
+      // actually stored, not the raw text typed in.
+      if (r.ok) {
+        let msg = t("models.rename.toast", { name: data.new_name || name.trim() });
+        // The server's migration notes - what it updated, and what it could
+        // NOT reach (e.g. a per-project .localcoder/config.toml) - are shown
+        // to the user, not left in the server log alone.
+        if (Array.isArray(data.notes) && data.notes.length) {
+          msg += ". " + data.notes.join(" ");
+        }
+        toast(msg);
+        refreshModelsPage();
+      } else toast(data.detail || t("models.rename.failed"), true);
+    };
+    actions.appendChild(renameBtn);
+    if (m.loaded) {
+      const unload = el("button", "secondary", t("models.action.unload"));
+      unload.title = t("models.unload.title");
+      unload.onclick = async () => {
+        unload.disabled = true;
+        try {
+          const post = async (force) => {
+            const r = await fetch("/api/models/unload", {
+              method: "POST", headers: authHeaders(),
+              body: JSON.stringify(force ? { model: m.name, force: true } : { model: m.name }),
+            });
+            const data = await r.json().catch(() => ({}));
+            if (!r.ok) throw new Error(data.detail || t("models.unload.failed"));
+            return data;
+          };
+          let data = await post(false);
+          // unload_one_model() (http_server.py) answers HTTP 200 for a
+          // busy engine too - a request is mid-generation against it, or a
+          // coder session is using it, so nothing was released yet.
+          if (data.status === "confirm_required") {
+            const confirmed = await confirmDangerAsync(
+              t("models.unload.confirmTitle"), data.detail, t("models.unload.confirmLabel"));
+            if (!confirmed) { refreshModelsPage(); return; }
+            data = await post(true);
           }
-          toast(msg);
-          refreshModelsPage();
-        } else toast(data.detail || t("models.rename.failed"), true);
-      };
-      actions.appendChild(renameBtn);
-      if (m.loaded) {
-        const unload = el("button", "secondary", t("models.action.unload"));
-        unload.title = t("models.unload.title");
-        unload.onclick = async () => {
-          unload.disabled = true;
-          try {
-            const post = async (force) => {
-              const r = await fetch("/api/models/unload", {
-                method: "POST", headers: authHeaders(),
-                body: JSON.stringify(force ? { model: m.name, force: true } : { model: m.name }),
-              });
-              const data = await r.json().catch(() => ({}));
-              if (!r.ok) throw new Error(data.detail || t("models.unload.failed"));
-              return data;
-            };
-            let data = await post(false);
-            // unload_one_model() (http_server.py) answers HTTP 200 for a
-            // busy engine too - a request is mid-generation against it, or a
-            // coder session is using it, so nothing was released yet.
-            if (data.status === "confirm_required") {
-              const confirmed = await confirmDangerAsync(
-                t("models.unload.confirmTitle"), data.detail, t("models.unload.confirmLabel"));
-              if (!confirmed) { refreshModelsPage(); return; }
-              data = await post(true);
-            }
-            if (data.status === "in_use") {
-              toast(t("models.unload.inUse", { name: m.name }), true);
-              refreshModelsPage();
-              return;
-            }
-            toast(t("models.unload.toast", { name: m.name }));
+          if (data.status === "in_use") {
+            toast(t("models.unload.inUse", { name: m.name }), true);
             refreshModelsPage();
-            refreshPerfEstimate();
-          } catch (e) {
-            toast(e.message || t("models.unload.failed"), true);
-          } finally { unload.disabled = false; }
-        };
-        actions.appendChild(unload);
-      }
-      if (!m.active) {
-        const rm = el("button", "danger", t("models.action.remove"));
-        rm.onclick = () => {
-          confirmDanger(t("models.remove.confirmTitle", { name: m.name }),
-            t("models.remove.confirmBody"), t("models.remove.confirmLabel"),
-            () => whileBusy(rm, t("models.remove.working"), async () => {
-              const r = await fetch("/api/models/remove", {
-                method: "POST", headers: authHeaders(),
-                body: JSON.stringify({ model: m.name }),
-              });
-              const data = await r.json().catch(() => ({}));
-              if (!r.ok) { toast(data.detail || t("models.remove.failed"), true); return; }
-              const end = await streamJob(data.job_id, null);
-              // "disconnected" (streamJob gave up reconnecting, or the job was
-              // already gone) is not the same outcome as the remove having
-              // failed. refreshModelsPage() below shows the current state either
-              // way.
-              if (end.status === "done") {
-                toast(t("models.remove.toast", { name: m.name }));
-              } else if (end.status === "disconnected") {
-                toast(t("models.remove.disconnected"), true);
-              } else {
-                toast(t("models.remove.failed"), true);
-              }
-              refreshModelsPage();
-            }));
-        };
-        actions.appendChild(rm);
-      }
+            return;
+          }
+          toast(t("models.unload.toast", { name: m.name }));
+          refreshModelsPage();
+          refreshPerfEstimate();
+        } catch (e) {
+          toast(e.message || t("models.unload.failed"), true);
+        } finally { unload.disabled = false; }
+      };
+      actions.appendChild(unload);
+    }
+    if (!m.active) {
+      const rm = el("button", "danger", t("models.action.remove"));
+      rm.onclick = () => {
+        confirmDanger(t("models.remove.confirmTitle", { name: m.name }),
+          t("models.remove.confirmBody"), t("models.remove.confirmLabel"),
+          () => whileBusy(rm, t("models.remove.working"), async () => {
+            const r = await fetch("/api/models/remove", {
+              method: "POST", headers: authHeaders(),
+              body: JSON.stringify({ model: m.name }),
+            });
+            const data = await r.json().catch(() => ({}));
+            if (!r.ok) { toast(data.detail || t("models.remove.failed"), true); return; }
+            const end = await streamJob(data.job_id, null);
+            // "disconnected" (streamJob gave up reconnecting, or the job was
+            // already gone) is not the same outcome as the remove having
+            // failed. refreshModelsPage() below shows the current state either
+            // way.
+            if (end.status === "done") {
+              toast(t("models.remove.toast", { name: m.name }));
+            } else if (end.status === "disconnected") {
+              toast(t("models.remove.disconnected"), true);
+            } else {
+              toast(t("models.remove.failed"), true);
+            }
+            refreshModelsPage();
+          }));
+      };
+      actions.appendChild(rm);
     }
     tr.appendChild(actions);
     tbody.appendChild(tr);

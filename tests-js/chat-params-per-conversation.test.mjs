@@ -136,6 +136,7 @@ test("deleting the chat on screen does not hand its values to the next chat", as
   const idx = win.chat.conversations.findIndex((c) => c.id === second);
   const dels = rows[idx].querySelectorAll("button.del");
   dels[dels.length - 1].click();
+  doc.querySelector("#modal-body button.btn-danger").click();
   await tick();
   assert.notEqual(win.chat.activeId, second);
   assert.equal(val("p-grammar"), "");
