@@ -2612,9 +2612,9 @@ def contain_comfy_artifacts(
                 "localm config comfy_output_dir <path>)")
         else:
             # `subfolder` and `filename` are parsed straight out of ComfyUI's
-            # /history JSON - remote data, same as uploaded_input above. Nesting
-            # is legitimate here (that is what `subfolder` IS), so this needs
-            # confined_under's nested form, not confined_name.
+            # /history JSON - remote data. Nesting is legitimate here (that is
+            # what `subfolder` IS), so this needs confined_under's nested form,
+            # not confined_name.
             rel = "/".join(
                 p for p in (str(info.get("subfolder", "") or ""),
                             str(info.get("filename", "") or "")) if p)
@@ -2687,9 +2687,9 @@ class UploadedInputCopy:
     The generator sets ``prompt_id`` once ComfyUI accepts the job.
 
     An unfinished job is stopped first: it is cancelled again if ComfyUI still lists
-    it, and the copy is deleted once ComfyUI accepts the cancel, because localm
-    uses nothing from that job after that. If ComfyUI refuses, the copy stays and
-    the warning says so. A queue that cannot be read counts as stopped."""
+    it, and the copy is deleted once ComfyUI accepts the cancel. If ComfyUI refuses,
+    the copy stays and the warning says so. A queue that cannot be read counts as
+    stopped."""
 
     def __init__(self, name: Optional[str], api_url: str, *, delete_outputs: bool,
                  comfy_output_dir: Optional[str] = None,
