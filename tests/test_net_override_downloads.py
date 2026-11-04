@@ -990,6 +990,45 @@ class TestDomainListsBindDownloads:
         assert body["can_download"] is False
         assert "net_deny" in body["download_blocked"]
 
+    @pytest.mark.parametrize("config", [
+        {"net_deny": ["huggingface.co"]},
+        {"net_allow": ["example.com"]},
+    ], ids=["denied", "not_allowed"])
+    def test_the_mic_reason_offers_no_download_a_list_refuses(
+            self, voice_client, monkeypatch, config):
+        _fake_faster_whisper_present(monkeypatch)
+        from localm.config import update_config
+        update_config(lambda c: c.update(config))
+        body = voice_client.c.get("/api/voice/status", headers=_hdr(OWNER_KEY)).json()
+        assert body["available"] is False and body["can_download"] is False
+        assert body["reason"] == body["download_blocked"] != ""
+        assert "one-time download" not in body["reason"]
+
+    def test_the_mic_reason_under_net_mode_off_keeps_its_own_text(self, voice_client, monkeypatch):
+        _fake_faster_whisper_present(monkeypatch)
+        from localm.config import update_config
+        update_config(lambda c: c.__setitem__("net_mode", "off"))
+        body = voice_client.c.get("/api/voice/status", headers=_hdr(OWNER_KEY)).json()
+        assert body["available"] is False and body["can_download"] is False
+        assert "net_mode=off" in body["download_blocked"]
+        assert "Allow model downloads" in body["reason"]
+        assert "one-time download" not in body["reason"]
+
+    def test_the_mic_reason_offers_no_download_the_scope_refuses(self, voice_client, monkeypatch):
+        _fake_faster_whisper_present(monkeypatch)
+        body = voice_client.c.get(
+            "/api/voice/status", headers=_hdr(voice_client.voice_only)).json()
+        assert body["available"] is False and body["can_download"] is False
+        assert "config:write" in body["reason"]
+        assert "one-time download" not in body["reason"]
+
+    def test_the_mic_reason_still_offers_a_download_the_caller_can_make(
+            self, voice_client, monkeypatch):
+        _fake_faster_whisper_present(monkeypatch)
+        body = voice_client.c.get("/api/voice/status", headers=_hdr(OWNER_KEY)).json()
+        assert body["can_download"] is True
+        assert "one-time download" in body["reason"]
+
     def test_status_names_the_missing_scope(self, voice_client, monkeypatch):
         _fake_faster_whisper_present(monkeypatch)
         body = voice_client.c.get(

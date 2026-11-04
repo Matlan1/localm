@@ -85,6 +85,7 @@ from localm.media.comfy_client import (
     SUBMIT_NO_ID,
     SUBMIT_OK,
     SUBMIT_URL_ERROR,
+    UploadedInputCopy,
     workflow_model_slots,
 )
 
@@ -281,15 +282,11 @@ def _build_image_workflow(
                 else:
                     loader_node["class_type"] = "DualCLIPLoader"
 
-    # 4. img2img: upload input image, add LoadImage + VAEEncode, redirect latent
-    uploaded_name: Optional[str] = None
+    # 4. img2img: add LoadImage + VAEEncode, redirect latent (the upload is step 10)
+    load_id: Optional[str] = None
     if input_image is not None:
         if not input_image.is_file():
             return False, f"Input image not found: {input_image}", None
-        try:
-            uploaded_name = _upload_image(input_image, api_url)
-        except Exception as e:
-            return False, f"Failed to upload input image to ComfyUI: {e}", None
 
         w, h = _image_dimensions(input_image)
 
@@ -298,7 +295,7 @@ def _build_image_workflow(
         # exported graph already uses.
         load_id = next_node_id(workflow)
         workflow[load_id] = {
-            "inputs": {"image": uploaded_name, "upload": "image"},
+            "inputs": {"upload": "image"},
             "class_type": "LoadImage",
         }
         # VAEEncode - encode the loaded image into latent space
@@ -408,6 +405,17 @@ def _build_image_workflow(
     # 9. Set seed (use provided value or randomise) - on every noise/sampler
     # node, so workflows with more than one of them stay reproducible
     set_seed_on_all(workflow, seed)
+
+    # 10. img2img: upload the source. No failure return may follow this: the
+    # caller removes only a copy it was handed. See
+    # test_a_refused_image_workflow_uploads_nothing.
+    uploaded_name: Optional[str] = None
+    if input_image is not None and load_id is not None:
+        try:
+            uploaded_name = _upload_image(input_image, api_url)
+        except Exception as e:
+            return False, f"Failed to upload input image to ComfyUI: {e}", None
+        workflow[load_id]["inputs"]["image"] = uploaded_name
 
     return True, "", uploaded_name
 
@@ -632,6 +640,10 @@ def generate_image(
         the image can be reproduced.  Pass False in privacy mode. The image's
         own PNG metadata is stripped either way, so the sidecar is the only
         file on disk that records the prompt.
+    delete_outputs
+        Remove ComfyUI's copies: its history entry and its output file after a
+        fetch, and the uploaded *input_image* on every way out of this function
+        (see ``UploadedInputCopy``). A copy that stays is named in the message.
 
     Returns
     -------
@@ -699,188 +711,195 @@ def generate_image(
     if not ok:
         return False, msg
 
-    # 9a. Pre-submit model validation against ComfyUI /object_info: confirm each
-    # loader's model file exists (auto-substituting an unambiguous precision
-    # variant) and fail with the exact missing filename, before the LLM unload
-    # below. Best-effort: a no-op when /object_info is unreachable.
-    pf_ok, pf_msg = preflight_models(workflow, api_url, on_progress=_say)
-    if not pf_ok:
-        return False, pf_msg
+    input_copy = UploadedInputCopy(uploaded_name, api_url, delete_outputs=delete_outputs,
+                                   comfy_output_dir=comfy_output_dir,
+                                   comfy_workdir=workdir)
 
-    # 8c. Per-component GPU placement (opt-in, multi-GPU only): apply the plan
-    # from comfy_client.resolve_media_placement() to the built graph by
-    # injecting the core Select*Device nodes, after preflight and just before
-    # submit. A component whose loader is absent from this graph is reported to
-    # the caller rather than dropped.
-    if placement:
-        for _note in inject_device_placement(workflow, placement):
-            if on_progress and "could not place" in _note:
-                on_progress(_note)
+    def _run_job() -> tuple[bool, str]:
+        # 9a. Pre-submit model validation against ComfyUI /object_info: confirm each
+        # loader's model file exists (auto-substituting an unambiguous precision
+        # variant) and fail with the exact missing filename, before the LLM unload
+        # below. Best-effort: a no-op when /object_info is unreachable.
+        pf_ok, pf_msg = preflight_models(workflow, api_url, on_progress=_say)
+        if not pf_ok:
+            return False, pf_msg
 
-    # 9b. Unload the chat LLM to free VRAM for FLUX, now that the workflow is valid.
-    # Skipped when the caller decided the media model fits alongside the chat model
-    # (swap=False), so the chat model stays hot.
-    if swap:
-        _localm_unload(localm_url, instance_token)
+        # 8c. Per-component GPU placement (opt-in, multi-GPU only): apply the plan
+        # from comfy_client.resolve_media_placement() to the built graph by
+        # injecting the core Select*Device nodes, after preflight and just before
+        # submit. A component whose loader is absent from this graph is reported to
+        # the caller rather than dropped.
+        if placement:
+            for _note in inject_device_placement(workflow, placement):
+                if on_progress and "could not place" in _note:
+                    on_progress(_note)
 
-    # 9. Queue the prompt in ComfyUI. Mark 'now' in ComfyUI's own console log
-    # FIRST (comfy_console_tail_start), so a partial-apply warning printed while
-    # THIS prompt runs is attributable to this generation. None when localm did
-    # not launch this ComfyUI itself, in which case
-    # comfy_console_warnings_since() always reports [].
-    console_tail_start = comfy_console_tail_start(api_url)
-    kind, value = comfy_submit_prompt(api_url, workflow)
-    if kind == SUBMIT_NO_ID:
-        return False, (
-            "ComfyUI accepted the request but returned no prompt_id.\n"
-            "Check the ComfyUI console for workflow validation errors."
-        )
-    elif kind == SUBMIT_HTTP_ERROR:
-        return False, (
-            f"ComfyUI rejected the workflow (HTTP {value.code}):\n"
-            f"{comfy_http_error_detail(value)}\n"
-            "A model file missing from ComfyUI's models directory is the "
-            "usual cause - check the names in your workflow template."
-        )
-    elif kind == SUBMIT_URL_ERROR:
-        return False, (
-            f"Could not connect to ComfyUI at {api_url}.\n"
-            f"Error: {value}\n"
-            "Make sure ComfyUI is running."
-        )
-    elif kind == SUBMIT_ERROR:
-        return False, f"Error queuing prompt in ComfyUI: {value}"
-    prompt_id = value
+        # 9b. Unload the chat LLM to free VRAM for FLUX, now that the workflow is valid.
+        # Skipped when the caller decided the media model fits alongside the chat model
+        # (swap=False), so the chat model stays hot.
+        if swap:
+            _localm_unload(localm_url, instance_token)
 
-    # 10. Poll /history with a visible progress spinner (CLI console only) and a
-    # heartbeat on the job stream: the ComfyUI queue position while queued,
-    # elapsed rendering time every 15s once running.
-    start_time = time.time()
-    filename = None
-    subfolder = ""
-    img_type = "output"
+        # 9. Queue the prompt in ComfyUI. Mark 'now' in ComfyUI's own console log
+        # FIRST (comfy_console_tail_start), so a partial-apply warning printed while
+        # THIS prompt runs is attributable to this generation. None when localm did
+        # not launch this ComfyUI itself, in which case
+        # comfy_console_warnings_since() always reports [].
+        console_tail_start = comfy_console_tail_start(api_url)
+        kind, value = comfy_submit_prompt(api_url, workflow)
+        if kind == SUBMIT_NO_ID:
+            return False, (
+                "ComfyUI accepted the request but returned no prompt_id.\n"
+                "Check the ComfyUI console for workflow validation errors."
+            )
+        elif kind == SUBMIT_HTTP_ERROR:
+            return False, (
+                f"ComfyUI rejected the workflow (HTTP {value.code}):\n"
+                f"{comfy_http_error_detail(value)}\n"
+                "A model file missing from ComfyUI's models directory is the "
+                "usual cause - check the names in your workflow template."
+            )
+        elif kind == SUBMIT_URL_ERROR:
+            return False, (
+                f"Could not connect to ComfyUI at {api_url}.\n"
+                f"Error: {value}\n"
+                "Make sure ComfyUI is running."
+            )
+        elif kind == SUBMIT_ERROR:
+            return False, f"Error queuing prompt in ComfyUI: {value}"
+        prompt_id = value
+        input_copy.prompt_id = str(prompt_id)
 
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[dim]{task.description}[/dim]"),
-        TimeElapsedColumn(),
-        transient=True,
-        console=_con,
-    ) as progress:
-        task_id = progress.add_task("Generating image…", total=None)
-        _heartbeat = (comfy_wait_heartbeat(api_url, prompt_id, on_progress)
-                      if on_progress else None)
+        # 10. Poll /history with a visible progress spinner (CLI console only) and a
+        # heartbeat on the job stream: the ComfyUI queue position while queued,
+        # elapsed rendering time every 15s once running.
+        start_time = time.time()
+        filename = None
+        subfolder = ""
+        img_type = "output"
 
-        def _tick(elapsed: float) -> None:
-            progress.update(task_id,
-                            description=f"Generating image… ({int(elapsed)}s)")
-            if _heartbeat is not None:
-                _heartbeat(elapsed)
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[dim]{task.description}[/dim]"),
+            TimeElapsedColumn(),
+            transient=True,
+            console=_con,
+        ) as progress:
+            task_id = progress.add_task("Generating image…", total=None)
+            _heartbeat = (comfy_wait_heartbeat(api_url, prompt_id, on_progress)
+                          if on_progress else None)
 
-        status, payload = comfy_poll_until_done(
-            api_url, prompt_id,
-            max_poll_seconds=max_poll_seconds,
-            cancel_check=cancel_check,
-            on_tick=_tick,
-        )
+            def _tick(elapsed: float) -> None:
+                progress.update(task_id,
+                                description=f"Generating image… ({int(elapsed)}s)")
+                if _heartbeat is not None:
+                    _heartbeat(elapsed)
 
-    if status == POLL_CANCELLED:
-        return False, "Generation cancelled."
-    if status == POLL_EXEC_ERROR:
-        return False, comfy_exec_error_message(payload, api_url)
-    if status == POLL_TIMEOUT:
-        # Surface the last poll error (if any) so an unreachable ComfyUI reads
-        # differently from one that was simply still working when time ran out.
-        err_note = (f"; last error contacting ComfyUI: {payload}"
-                    if payload is not None else "")
-        return False, (f"Image generation timed out after "
-                       f"{max_poll_seconds // 60} minutes{err_note}.")
-
-    # status == POLL_FINISHED means ComfyUI reported no execution_error; a node
-    # whose weights only partly matched is only a console warning there, and the
-    # run still succeeds. Check for a KNOWN warning of that shape printed while
-    # THIS prompt ran. console_checked reflects whether a read actually happened
-    # just now, and is what drives the sidecar's comfy_console_checked below.
-    console_checked, comfy_console_warnings = comfy_console_warnings_since(
-        api_url, console_tail_start)
-
-    # status == POLL_FINISHED: find the first SaveImage output (presence-based,
-    # matching the original loop - the first node carrying an "images" entry wins).
-    for node_output in payload.get("outputs", {}).values():
-        if "images" in node_output:
-            img_info = node_output["images"][0]
-            filename = img_info.get("filename")
-            subfolder = img_info.get("subfolder", "")
-            img_type = img_info.get("type", "output")
-            break
-
-    if not filename:
-        return False, (
-            "Generation finished but no output image was found in ComfyUI history.\n"
-            "Check the ComfyUI console - a SaveImage node error is likely."
-        )
-
-    # 11. Fetch image from ComfyUI /view, save locally, strip metadata
-    try:
-        info = {"filename": filename, "subfolder": subfolder, "type": img_type}
-        output_sha256 = comfy_fetch_output(api_url, info, output_path, timeout=10)
-
-        # Strip PNG metadata/EXIF for privacy; a strip that did not run returns
-        # a warning rather than an empty string.
-        strip_warning = _strip_png_metadata(output_path)
-
-        # Output containment (opt-in): clear ComfyUI's history entry and delete its
-        # own on-disk copy + any uploaded img2img source ONLY when delete_outputs
-        # is set (user opted in, or privacy mode forces no-trace). Default keeps
-        # ComfyUI's copies. Returns a warning when a copy could not be removed.
-        contain_warning = contain_comfy_artifacts(
-            api_url, prompt_id, info,
-            comfy_output_dir=comfy_output_dir,
-            comfy_workdir=workdir,
-            uploaded_input=uploaded_name,
-            output_sha256=output_sha256,
-            delete_outputs=delete_outputs,
-        )
-
-        # Sidecar JSON: everything needed to reproduce or tweak this image,
-        # saved as <output>.json next to it. Skipped when write_sidecar is
-        # False; a write failure returns a warning.
-        comfy_console_warning_text = ("; ".join(comfy_console_warnings)
-                                      if comfy_console_warnings else None)
-
-        sidecar_warning = ""
-        if write_sidecar:
-            sidecar_warning = _write_image_sidecar(
-                output_path,
-                prompt=prompt,
-                negative_prompt=negative_prompt,
-                cfg=cfg,
-                seed=seed,
-                guidance=guidance,
-                lora_name=lora_name,
-                lora_strength_model=lora_strength_model,
-                lora_strength_clip=lora_strength_clip,
-                input_image=input_image,
-                denoise=denoise,
-                clip_name1=clip_name1,
-                clip_name2=clip_name2,
-                start_time=start_time,
-                comfy_console_warning=comfy_console_warning_text,
-                comfy_console_checked=console_checked,
+            status, payload = comfy_poll_until_done(
+                api_url, prompt_id,
+                max_poll_seconds=max_poll_seconds,
+                cancel_check=cancel_check,
+                on_tick=_tick,
             )
 
-        comfy_warning = (
-            "WARNING: ComfyUI's own console reported: "
-            + comfy_console_warning_text
-            + ". The generation still completed, but the requested LoRA/model "
-              "weights may not have fully applied - see comfy-launch.log."
-        ) if comfy_console_warning_text else ""
+        if status == POLL_CANCELLED:
+            return False, "Generation cancelled."
+        if status == POLL_EXEC_ERROR:
+            return False, comfy_exec_error_message(payload, api_url)
+        if status == POLL_TIMEOUT:
+            # Surface the last poll error (if any) so an unreachable ComfyUI reads
+            # differently from one that was simply still working when time ran out.
+            err_note = (f"; last error contacting ComfyUI: {payload}"
+                        if payload is not None else "")
+            return False, (f"Image generation timed out after "
+                           f"{max_poll_seconds // 60} minutes{err_note}.")
 
-        combined = "\n".join(w for w in (strip_warning, contain_warning, comfy_warning,
-                                         sidecar_warning) if w)
-        return True, _with_warning(
-            f"Image saved to {output_path} (seed {seed} - reuse it to reproduce)",
-            combined)
+        # status == POLL_FINISHED means ComfyUI reported no execution_error; a node
+        # whose weights only partly matched is only a console warning there, and the
+        # run still succeeds. Check for a KNOWN warning of that shape printed while
+        # THIS prompt ran. console_checked reflects whether a read actually happened
+        # just now, and is what drives the sidecar's comfy_console_checked below.
+        console_checked, comfy_console_warnings = comfy_console_warnings_since(
+            api_url, console_tail_start)
 
-    except Exception as e:
-        return False, f"Failed to download generated image from ComfyUI: {e}"
+        # status == POLL_FINISHED: find the first SaveImage output (presence-based,
+        # matching the original loop - the first node carrying an "images" entry wins).
+        for node_output in payload.get("outputs", {}).values():
+            if "images" in node_output:
+                img_info = node_output["images"][0]
+                filename = img_info.get("filename")
+                subfolder = img_info.get("subfolder", "")
+                img_type = img_info.get("type", "output")
+                break
+
+        if not filename:
+            return False, (
+                "Generation finished but no output image was found in ComfyUI history.\n"
+                "Check the ComfyUI console - a SaveImage node error is likely."
+            )
+
+        # 11. Fetch image from ComfyUI /view, save locally, strip metadata
+        try:
+            info = {"filename": filename, "subfolder": subfolder, "type": img_type}
+            output_sha256 = comfy_fetch_output(api_url, info, output_path, timeout=10)
+
+            # Strip PNG metadata/EXIF for privacy; a strip that did not run returns
+            # a warning rather than an empty string.
+            strip_warning = _strip_png_metadata(output_path)
+
+            # Output containment (opt-in): clear ComfyUI's history entry and delete its
+            # own on-disk copy ONLY when delete_outputs is set (user opted in, or
+            # privacy mode forces no-trace). Default keeps ComfyUI's copies. Returns a
+            # warning when a copy could not be removed.
+            contain_warning = contain_comfy_artifacts(
+                api_url, prompt_id, info,
+                comfy_output_dir=comfy_output_dir,
+                comfy_workdir=workdir,
+                output_sha256=output_sha256,
+                delete_outputs=delete_outputs,
+            )
+
+            # Sidecar JSON: everything needed to reproduce or tweak this image,
+            # saved as <output>.json next to it. Skipped when write_sidecar is
+            # False; a write failure returns a warning.
+            comfy_console_warning_text = ("; ".join(comfy_console_warnings)
+                                          if comfy_console_warnings else None)
+
+            sidecar_warning = ""
+            if write_sidecar:
+                sidecar_warning = _write_image_sidecar(
+                    output_path,
+                    prompt=prompt,
+                    negative_prompt=negative_prompt,
+                    cfg=cfg,
+                    seed=seed,
+                    guidance=guidance,
+                    lora_name=lora_name,
+                    lora_strength_model=lora_strength_model,
+                    lora_strength_clip=lora_strength_clip,
+                    input_image=input_image,
+                    denoise=denoise,
+                    clip_name1=clip_name1,
+                    clip_name2=clip_name2,
+                    start_time=start_time,
+                    comfy_console_warning=comfy_console_warning_text,
+                    comfy_console_checked=console_checked,
+                )
+
+            comfy_warning = (
+                "WARNING: ComfyUI's own console reported: "
+                + comfy_console_warning_text
+                + ". The generation still completed, but the requested LoRA/model "
+                  "weights may not have fully applied - see comfy-launch.log."
+            ) if comfy_console_warning_text else ""
+
+            combined = "\n".join(w for w in (strip_warning, contain_warning, comfy_warning,
+                                             sidecar_warning) if w)
+            return True, _with_warning(
+                f"Image saved to {output_path} (seed {seed} - reuse it to reproduce)",
+                combined)
+
+        except Exception as e:
+            return False, f"Failed to download generated image from ComfyUI: {e}"
+
+    return input_copy.run(_run_job)

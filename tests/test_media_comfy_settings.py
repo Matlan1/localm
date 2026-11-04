@@ -89,15 +89,81 @@ class TestWeightDtype:
         assert s["float_type"] == "fp8_e4m3fn"
         assert "dtype" not in (s["warning"] or "")
 
-    def test_the_settings_page_shows_default_for_an_old_stored_value(self):
-        rows = ss.media_schema_json("video", {"comfy": {"float_type": "fp16"}}, {})
+    @pytest.mark.parametrize("block,config", [
+        ({"comfy": {"float_type": "fp16"}}, {}),
+        ({}, {"comfy_float_type": "fp16"}),
+    ], ids=["own", "shared"])
+    def test_the_settings_page_shows_an_old_stored_value(self, block, config):
+        offered = next(f for f in ss.MEDIA_PLUGIN_FIELDS if f.key == "float_type").options
+        before = list(offered)
+        rows = ss.media_schema_json("video", block, config)
         field = next(f for f in rows if f["key"] == "float_type")
-        assert field["value"] == "default"
-        assert field["value"] in field["options"]
+        assert field["value"] == "fp16"
+        assert field["options"] == [*before, "fp16"]
+        assert offered == before, "the shared option list was changed"
+
+    def test_a_stored_value_that_is_not_text_is_shown_as_text(self):
+        rows = ss.media_schema_json("video", {"comfy": {"float_type": 16}}, {})
+        field = next(f for f in rows if f["key"] == "float_type")
+        assert field["value"] == "16"
+        assert "16" in field["options"]
+
+    def test_an_accepted_value_adds_no_option(self):
+        offered = next(f for f in ss.MEDIA_PLUGIN_FIELDS if f.key == "float_type").options
+        rows = ss.media_schema_json("video", {"comfy": {"float_type": "fp8_e5m2"}}, {})
+        field = next(f for f in rows if f["key"] == "float_type")
+        assert field["value"] == "fp8_e5m2"
+        assert field["options"] == offered
 
     def test_generators_import_the_writer(self):
         assert music_comfy.apply_weight_dtype is comfy_client.apply_weight_dtype
         assert video_comfy.apply_weight_dtype is comfy_client.apply_weight_dtype
+
+
+_OWNER_KEY = "owner-key-for-dtype-route-tests"
+_OWNER = {"Authorization": f"Bearer {_OWNER_KEY}"}
+
+
+@pytest.mark.parametrize("name,backend", BACKENDS[1:])
+@pytest.mark.parametrize("stored", [
+    {"plugins": {"video": {"comfy": {"float_type": "fp16"}},
+                 "music": {"comfy": {"float_type": "fp16"}}}},
+    {"comfy_float_type": "bf16"},
+], ids=["own", "shared"])
+class TestSavingDefaultClearsAnOldDtype:
+    @pytest.fixture
+    def client(self, tmp_path, monkeypatch):
+        import localm.config as cfg
+        home = tmp_path / ".localm"
+        home.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setenv("LOCALM_HOME", str(home))
+        monkeypatch.setenv("LOCALM_API_KEY", _OWNER_KEY)
+        monkeypatch.setattr(cfg, "HOME_DIR", home)
+        monkeypatch.setattr(cfg, "MODELS_DIR", home / "models")
+        monkeypatch.setattr(cfg, "CONFIG_FILE", home / "config.json")
+        monkeypatch.setattr(cfg, "REGISTRY_FILE", home / "registry.json")
+        from fastapi.testclient import TestClient
+
+        from localm.inference.http_server import create_app
+        with TestClient(create_app(None)) as c:
+            yield c, cfg
+
+    def test_the_real_route_clears_the_note(self, client, name, backend, stored):
+        c, cfg = client
+        cfg.update_config(lambda conf: conf.update(stored))
+        assert "dtype" in (backend.settings(cfg.load_config())["warning"] or "")
+
+        shown = c.get("/v1/media/config", headers=_OWNER).json()
+        field = next(f for p in shown["plugins"] if p["plugin"] == name
+                     for f in p["fields"] if f["key"] == "float_type")
+        assert field["value"] in ("fp16", "bf16") and field["value"] in field["options"]
+
+        r = c.post(f"/v1/media/config/{name}", json={"float_type": "default"}, headers=_OWNER)
+        assert r.status_code == 200, r.text
+        saved = next(f for f in r.json()["fields"] if f["key"] == "float_type")
+        assert saved["value"] == "default"
+        assert saved["options"] == ["default", "fp8_e4m3fn", "fp8_e4m3fn_fast", "fp8_e5m2"]
+        assert "dtype" not in (backend.settings(cfg.load_config())["warning"] or "")
 
 
 class TestLauncherHint:

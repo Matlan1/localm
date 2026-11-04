@@ -2412,10 +2412,11 @@ def _upload_image(image_path: Path, api_url: str) -> str:
     """
     Upload a local image to ComfyUI via POST /upload/image.
 
-    Sent as ``localm-input-<sha256 prefix><extension>``, so a later cleanup of
-    that name can only reach a file localm uploaded, and uploading the same
-    image twice reuses one file. Returns the filename ComfyUI assigned (used in
-    the LoadImage node). Raises on failure.
+    Sent as ``localm-input-<sha256 prefix><extension>``, which is what
+    ``remove_uploaded_input`` checks a file against before deleting it, and
+    uploading the same image twice reuses one file. Returns the filename ComfyUI
+    assigned (used in the LoadImage node); the reply is remote data, so it can be
+    any string. Raises on failure.
 
     Sniffs the magic bytes FIRST, before reading the body or opening the socket.
     This upload TRANSMITS the file, and sanitize_comfy_url permits
@@ -2475,7 +2476,8 @@ def _upload_image(image_path: Path, api_url: str) -> str:
 #  comfy_delete_outputs config / a per-plugin delete_outputs), and privacy mode
 #  forces it on (no trace anywhere). When enabled, after the artifact has been
 #  fetched into localm's own location we clear ComfyUI's /history entry AND delete
-#  its on-disk copy of the output plus any img2img source we uploaded into input/.
+#  its on-disk copy of the output. A source image we uploaded into input/ is removed
+#  on every way out of the job, success or not (UploadedInputCopy).
 #  Deleting files needs ComfyUI's output/ dir; when it cannot be resolved we
 #  return a loud warning rather than silently leaving a copy the user asked to
 #  remove. Shared by image, music, and video generation.
@@ -2570,7 +2572,6 @@ def contain_comfy_artifacts(
     *,
     comfy_output_dir: Optional[str] = None,
     comfy_workdir: Optional[str] = None,
-    uploaded_input: Optional[str] = None,
     output_sha256: Optional[str] = None,
     delete_outputs: bool = False,
 ) -> str:
@@ -2579,8 +2580,8 @@ def contain_comfy_artifacts(
     By DEFAULT (delete_outputs=False) this is a no-op: ComfyUI keeps its /history
     entry and its on-disk output, because a user may run ComfyUI for its own
     gallery and want them. When the user opts in (or privacy mode forces no-trace),
-    it clears the history entry and deletes ComfyUI's duplicate output plus any
-    img2img source we uploaded into input/.
+    it clears the history entry and deletes ComfyUI's duplicate output. The source
+    image of an img2img job is ``UploadedInputCopy``'s to remove.
 
     The output file is deleted only when its sha256 equals *output_sha256*, the
     value ``comfy_fetch_output`` returned for this job; a file of that name with
@@ -2599,41 +2600,6 @@ def contain_comfy_artifacts(
             "and remains visible in its Queue/History panel")
     root = _comfy_output_root(comfy_output_dir, api_url=api_url,
                               comfy_workdir=comfy_workdir)
-    # Remove the uploaded img2img source from ComfyUI's input/ dir (sibling of
-    # output/). Surface a failure (do not silence): it is still a stray copy of
-    # the user's input that they asked to contain.
-    #
-    # `uploaded_input` is ComfyUI's OWN reply (result["name"] from /upload/image),
-    # so it is remote data driving an unlink(). Confine it: pathlib would let an
-    # absolute component REPLACE the base outright and a "../.." walk out of it,
-    # which on a LAN or public api_url (sanitize_comfy_url permits both, over
-    # plaintext http) hands a hostile or compromised ComfyUI arbitrary file
-    # deletion with localm's privileges.
-    if uploaded_input and root is not None:
-        try:
-            inp = confined_under(root.parent / "input", uploaded_input)
-        except ValueError:
-            # NOT silently skipped: containment was requested and did not
-            # happen, so the user is told rather than shown a success.
-            warnings.append(
-                f"ComfyUI returned an out-of-bounds input filename "
-                f"({uploaded_input!r}); its copy in ComfyUI's input folder was "
-                f"not removed")
-        else:
-            try:
-                if inp.exists():
-                    inp.unlink()
-                else:
-                    warnings.append(
-                        "a copy of your input image may remain in ComfyUI's input "
-                        "folder: it is not beside the output folder localm checked")
-            except OSError as e:
-                warnings.append(
-                    f"a copy of your input image remains in ComfyUI's input folder ({e})")
-    elif uploaded_input:
-        warnings.append(
-            "a copy of your input image remains in ComfyUI's input folder: localm "
-            "cannot tell where that folder is until you set the ComfyUI output dir")
 
     # Delete ComfyUI's on-disk copy of the output. type "temp" is auto-purged
     # by ComfyUI, so only a real "output" artifact needs removing.
@@ -2646,9 +2612,9 @@ def contain_comfy_artifacts(
                 "localm config comfy_output_dir <path>)")
         else:
             # `subfolder` and `filename` are parsed straight out of ComfyUI's
-            # /history JSON - remote data, same as uploaded_input above. Nesting
-            # is legitimate here (that is what `subfolder` IS), so this needs
-            # confined_under's nested form, not confined_name.
+            # /history JSON - remote data. Nesting is legitimate here (that is
+            # what `subfolder` IS), so this needs confined_under's nested form,
+            # not confined_name.
             rel = "/".join(
                 p for p in (str(info.get("subfolder", "") or ""),
                             str(info.get("filename", "") or "")) if p)
@@ -2665,6 +2631,110 @@ def contain_comfy_artifacts(
                     warnings.append(refusal)
 
     return ("WARNING: " + "; ".join(warnings) + ".") if warnings else ""
+
+
+# The name ``_upload_image`` sends, and ComfyUI's " (1)" form of it for a clash.
+_UPLOADED_INPUT_NAME = re.compile(r"localm-input-([0-9a-f]{32})(?: \(\d+\))?(?:\.[^./\\]*)?")
+
+
+def remove_uploaded_input(api_url: str, uploaded_input: str, *,
+                          comfy_output_dir: Optional[str] = None,
+                          comfy_workdir: Optional[str] = None) -> str:
+    """Delete a source image ``_upload_image`` put in ComfyUI's input folder (the
+    sibling of its output folder). Returns "" once it is deleted, else the reason a
+    copy stays. Never raises for a filesystem error.
+
+    *uploaded_input* is ComfyUI's own reply from /upload/image, so it is remote
+    data driving an unlink. The file is deleted only when the name stays inside
+    the folder, has the form localm sends, and the file's sha256 starts with the
+    hash in that name; any other file stays."""
+    root = _comfy_output_root(comfy_output_dir, api_url=api_url,
+                              comfy_workdir=comfy_workdir)
+    if root is None:
+        return ("a copy of your input image remains in ComfyUI's input folder: localm "
+                "cannot tell where that folder is until you set the ComfyUI output dir")
+    name = str(uploaded_input)
+    try:
+        inp = confined_under(root.parent / "input", name)
+    except ValueError:
+        return (f"ComfyUI returned an out-of-bounds input filename ({name!r}); its "
+                "copy in ComfyUI's input folder was not removed")
+    sent = _UPLOADED_INPUT_NAME.fullmatch(name)
+    if sent is None:
+        return (f"a copy of your input image may remain in ComfyUI's input folder: "
+                f"ComfyUI named it {name!r}, which is not a name localm sent, so that "
+                "file was left alone")
+    try:
+        if not inp.is_file():
+            return ("a copy of your input image may remain in ComfyUI's input folder: "
+                    "it is not beside the output folder localm checked")
+        with open(inp, "rb") as f:
+            actual = hashlib.file_digest(f, "sha256").hexdigest()
+        if not actual.startswith(sent.group(1)):
+            return ("a copy of your input image may remain in ComfyUI's input folder: "
+                    f"the file named {name!r} there holds different content, so it was "
+                    "left alone")
+        inp.unlink()
+    except OSError as e:
+        return f"a copy of your input image remains in ComfyUI's input folder ({e})"
+    return ""
+
+
+class UploadedInputCopy:
+    """The source image one job uploaded to ComfyUI, removed however the job ends.
+
+    A no-op when *name* is None (nothing was uploaded) or *delete_outputs* is off.
+    The generator sets ``prompt_id`` once ComfyUI accepts the job.
+
+    An unfinished job is stopped first: it is cancelled again if ComfyUI still lists
+    it, and the copy is deleted once ComfyUI accepts the cancel. If ComfyUI refuses,
+    the copy stays and the warning says so. A queue that cannot be read counts as
+    stopped."""
+
+    def __init__(self, name: Optional[str], api_url: str, *, delete_outputs: bool,
+                 comfy_output_dir: Optional[str] = None,
+                 comfy_workdir: Optional[str] = None) -> None:
+        self.name = name
+        self.api_url = api_url
+        self.delete_outputs = delete_outputs
+        self.comfy_output_dir = comfy_output_dir
+        self.comfy_workdir = comfy_workdir
+        self.prompt_id: Optional[str] = None
+
+    def run(self, job) -> tuple[bool, str]:
+        """Call *job*, which returns ``(ok, message)``, then remove the copy. Returns
+        ``(ok, message)`` with any removal warning appended. An exception from *job*
+        propagates after the removal; a warning turns an ``Exception`` into a
+        ``RuntimeError`` carrying both texts, and for anything else goes to the log."""
+        try:
+            ok, message = job()
+        except BaseException as e:
+            warning = self._remove(finished=False)
+            if warning:
+                if isinstance(e, Exception):
+                    raise RuntimeError(f"{e}\n{warning}") from e
+                from localm.debuglog import logger
+                logger.warning("%s", warning)
+            raise
+        return ok, _with_warning(message, self._remove(finished=ok))
+
+    def _remove(self, *, finished: bool) -> str:
+        """Remove the copy. *finished* False stops an unfinished job first. Returns
+        a WARNING line, or "". Never raises an ``Exception``."""
+        if not (self.name and self.delete_outputs):
+            return ""
+        try:
+            if (not finished and self.prompt_id
+                    and not _comfy_job_stopped(self.api_url, self.prompt_id)):
+                reason = ("ComfyUI did not stop this job, so a copy of your input "
+                          "image stays in its input folder")
+            else:
+                reason = remove_uploaded_input(
+                    self.api_url, self.name, comfy_output_dir=self.comfy_output_dir,
+                    comfy_workdir=self.comfy_workdir)
+        except Exception as e:
+            reason = f"a copy of your input image may remain in ComfyUI's input folder ({e})"
+        return f"WARNING: {reason}." if reason else ""
 
 
 def _delete_job_output(copy: Path, expected_sha256: Optional[str]) -> str:
@@ -2747,6 +2817,16 @@ def _comfy_post(api_url: str, path: str, body: dict) -> bool:
         from localm.debuglog import logger
         logger.debug("ComfyUI POST %s failed: %s", path, e)
         return False
+
+
+def _comfy_job_stopped(api_url: str, prompt_id: str) -> bool:
+    """False only when ComfyUI still lists *prompt_id* and refuses a cancel. True
+    when it is not listed, when the queue cannot be read, and when the cancel is
+    accepted (the job may take a moment to leave the queue)."""
+    lists = _comfy_queue_lists(api_url, prompt_id)
+    if lists is None or not any(lists):
+        return True
+    return cancel_comfy_prompt(api_url, prompt_id)
 
 
 def cancel_comfy_prompt(api_url: str, prompt_id: str) -> bool:

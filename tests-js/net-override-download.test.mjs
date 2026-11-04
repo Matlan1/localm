@@ -66,6 +66,20 @@ test("declining the consent dialog sends nothing", async () => {
     "no download without the explicit yes");
 });
 
+test("a refused download: tooltip and click both show the refusal", async () => {
+  const refusal = "huggingface.co is on the net_deny list";
+  const body = { ...BLOCKED, reason: refusal, can_download: false, download_blocked: refusal };
+  const calls = [];
+  const { window: win } = loadApp({ fetchImpl: voiceFetch(body, calls) });
+  await tick(); await tick(); await tick();
+  runScript(win, `globalThis.__toasts = []; toast = (m, e) => { globalThis.__toasts.push(m); };`);
+  assert.equal(win.document.getElementById("chat-mic").title, refusal);
+  await win.toggleMic();
+  await tick();
+  assert.deepEqual([...win.__toasts], [refusal]);
+  assert.equal(calls.filter((c) => c.url === "/api/voice/model/download").length, 0);
+});
+
 test("without can_download the click only reports the reason", async () => {
   const calls = [];
   const body = { ...BLOCKED, can_download: false };

@@ -70,6 +70,7 @@ from localm.media.comfy_client import (
     SUBMIT_HTTP_ERROR,
     SUBMIT_NO_ID,
     SUBMIT_URL_ERROR,
+    UploadedInputCopy,
 )
 from localm.media.output_metadata import strip_video_metadata
 
@@ -375,6 +376,10 @@ def generate_video(
         the clip can be reproduced.  Pass False in privacy mode. The clip's
         own container metadata is stripped either way, so the sidecar is the
         only file on disk that records the prompt.
+    delete_outputs
+        Remove ComfyUI's copies: its history entry and its output file after a
+        fetch, and the uploaded *input_image* on every way out once it is uploaded
+        (see ``UploadedInputCopy``). A copy that stays is named in the message.
 
     Returns
     -------
@@ -432,181 +437,184 @@ def generate_video(
     if not ok:
         return False, msg
 
-    # Decode in spatial tiles on an AMD GPU. See test_shipped_workflow_decode_is_tiled_on_amd.
-    if comfy_runs_on_amd(api_url) and tile_vae_decode(workflow, frames):
-        _say(f"Decoding in {AMD_VAE_DECODE_TILE_PX} px tiles to keep each GPU step short "
-             "on this AMD GPU.")
+    input_copy = UploadedInputCopy(uploaded_name, api_url, delete_outputs=delete_outputs,
+                                   comfy_workdir=workdir)
 
-    # Pre-submit model validation: confirm the Wan model files exist (substituting
-    # an unambiguous precision variant), failing EARLY with the exact missing file
-    # BEFORE the LLM unload. Best-effort when /object_info is unreachable.
-    pf_ok, pf_msg = preflight_models(workflow, api_url, on_progress=_say)
-    if not pf_ok:
-        return False, pf_msg
+    def _run_job() -> tuple[bool, str]:
+        # Decode in spatial tiles on an AMD GPU. See test_shipped_workflow_decode_is_tiled_on_amd.
+        if comfy_runs_on_amd(api_url) and tile_vae_decode(workflow, frames):
+            _say(f"Decoding in {AMD_VAE_DECODE_TILE_PX} px tiles to keep each GPU step short "
+                 "on this AMD GPU.")
 
-    # Now free VRAM (the workflow is valid). swap=False keeps the chat model hot.
-    if swap:
-        _localm_unload(localm_url, instance_token)
+        # Pre-submit model validation: confirm the Wan model files exist (substituting
+        # an unambiguous precision variant), failing EARLY with the exact missing file
+        # BEFORE the LLM unload. Best-effort when /object_info is unreachable.
+        pf_ok, pf_msg = preflight_models(workflow, api_url, on_progress=_say)
+        if not pf_ok:
+            return False, pf_msg
 
-    # Per-component GPU placement (opt-in, multi-GPU only): inject the core Select*Device
-    # nodes per the plan resolve_media_placement() decided. A component whose loader is
-    # absent from this graph is surfaced to the user, never silently dropped; the
-    # happy-path summary already went out via the placement notice.
-    if placement:
-        for _note in inject_device_placement(workflow, placement):
-            if "could not place" in _note:
-                _say(_note)
+        # Now free VRAM (the workflow is valid). swap=False keeps the chat model hot.
+        if swap:
+            _localm_unload(localm_url, instance_token)
 
-    # Queue. Mark 'now' in ComfyUI's own console log FIRST (comfy_console_tail_start),
-    # so any silent partial-apply warning it prints while running THIS prompt (a
-    # mismatched checkpoint's UNet/CLIP/VAE keys, ...) can be attributed to this
-    # generation and not an earlier one. None when localm did not launch this
-    # ComfyUI itself; comfy_console_warnings_since() then always reports
-    # checked=False.
-    console_tail_start = comfy_console_tail_start(api_url)
-    kind, value = comfy_submit_prompt(api_url, workflow)
-    if kind == SUBMIT_NO_ID:
-        return False, (
-            "ComfyUI accepted the request but returned no prompt_id.\n"
-            "Check the ComfyUI console for workflow validation errors - "
-            "missing Wan 2.2 model files are the usual cause (see "
-            "docs/video.md for the download list), and the Wan nodes "
-            "need ComfyUI v0.3.46+."
+        # Per-component GPU placement (opt-in, multi-GPU only): inject the core Select*Device
+        # nodes per the plan resolve_media_placement() decided. A component whose loader is
+        # absent from this graph is surfaced to the user, never silently dropped; the
+        # happy-path summary already went out via the placement notice.
+        if placement:
+            for _note in inject_device_placement(workflow, placement):
+                if "could not place" in _note:
+                    _say(_note)
+
+        # Queue. Mark 'now' in ComfyUI's own console log FIRST (comfy_console_tail_start),
+        # so any silent partial-apply warning it prints while running THIS prompt (a
+        # mismatched checkpoint's UNet/CLIP/VAE keys, ...) can be attributed to this
+        # generation and not an earlier one. None when localm did not launch this
+        # ComfyUI itself; comfy_console_warnings_since() then always reports
+        # checked=False.
+        console_tail_start = comfy_console_tail_start(api_url)
+        kind, value = comfy_submit_prompt(api_url, workflow)
+        if kind == SUBMIT_NO_ID:
+            return False, (
+                "ComfyUI accepted the request but returned no prompt_id.\n"
+                "Check the ComfyUI console for workflow validation errors - "
+                "missing Wan 2.2 model files are the usual cause (see "
+                "docs/video.md for the download list), and the Wan nodes "
+                "need ComfyUI v0.3.46+."
+            )
+        elif kind == SUBMIT_HTTP_ERROR:
+            return False, (
+                f"ComfyUI rejected the Wan 2.2 workflow (HTTP {value.code}):\n"
+                f"{comfy_http_error_detail(value)}\n"
+                "Missing Wan 2.2 model files are the usual cause (see "
+                "docs/video.md for the download list); the Wan nodes need "
+                "ComfyUI v0.3.46+."
+            )
+        elif kind == SUBMIT_URL_ERROR:
+            return False, f"Could not connect to ComfyUI at {api_url}: {value}"
+        elif kind == SUBMIT_ERROR:
+            return False, f"Error queuing prompt in ComfyUI: {value}"
+        prompt_id = value
+        input_copy.prompt_id = str(prompt_id)
+
+        _say(f"Rendering {frames} frames ({frames / fps:.1f}s at {fps} fps)…")
+
+        # Poll history until the clip is rendered, reporting the ComfyUI queue
+        # position while queued and the elapsed rendering time every 15s. start_time
+        # is taken here so the sidecar's elapsed_seconds covers poll + download.
+        start_time = time.time()
+        _tick = comfy_wait_heartbeat(api_url, prompt_id, _say) if on_progress else None
+
+        status, payload = comfy_poll_until_done(
+            api_url, prompt_id,
+            max_poll_seconds=max_poll_seconds,
+            cancel_check=cancel_check,
+            on_tick=_tick,
         )
-    elif kind == SUBMIT_HTTP_ERROR:
-        return False, (
-            f"ComfyUI rejected the Wan 2.2 workflow (HTTP {value.code}):\n"
-            f"{comfy_http_error_detail(value)}\n"
-            "Missing Wan 2.2 model files are the usual cause (see "
-            "docs/video.md for the download list); the Wan nodes need "
-            "ComfyUI v0.3.46+."
-        )
-    elif kind == SUBMIT_URL_ERROR:
-        return False, f"Could not connect to ComfyUI at {api_url}: {value}"
-    elif kind == SUBMIT_ERROR:
-        return False, f"Error queuing prompt in ComfyUI: {value}"
-    prompt_id = value
+        if status == POLL_CANCELLED:
+            return False, "Generation cancelled."
+        if status == POLL_EXEC_ERROR:
+            return False, comfy_exec_error_message(payload, api_url)
+        if status == POLL_TIMEOUT:
+            msg = (
+                f"Video generation timed out after {max_poll_seconds // 60} minutes."
+            )
+            if payload is not None:
+                # A persistent poll error means ComfyUI likely crashed or went
+                # unreachable, not just a slow render - say so instead of hiding it.
+                msg += f" Last poll error: {payload}"
+            return False, msg
 
-    _say(f"Rendering {frames} frames ({frames / fps:.1f}s at {fps} fps)…")
+        # status == POLL_FINISHED means ComfyUI reported no execution_error - but a
+        # node whose weights only partly matched (a mismatched checkpoint's UNet/CLIP
+        # keys, ...) is not an execution_error to ComfyUI, only a console warning, and
+        # the run still "succeeds" with that component silently under-applied. Check
+        # for any KNOWN warning of that shape printed while THIS prompt ran (see
+        # NEW-COMFY-SILENT-PARTIAL-APPLY in image_gen/comfy.py). console_checked
+        # reflects whether a real read actually happened just now, not whether
+        # console_tail_start found a process before the prompt was even submitted.
+        console_checked, comfy_console_warnings = comfy_console_warnings_since(
+            api_url, console_tail_start)
+        comfy_console_warning_text = ("; ".join(comfy_console_warnings)
+                                      if comfy_console_warnings else None)
+        comfy_console_msg = (
+            "WARNING: ComfyUI's own console reported: "
+            + comfy_console_warning_text
+            + ". The generation still completed, but the requested model weights "
+              "may not have fully applied - see comfy-launch.log."
+        ) if comfy_console_warning_text else ""
 
-    # Poll history until the clip is rendered, reporting the ComfyUI queue
-    # position while queued and the elapsed rendering time every 15s. start_time
-    # is taken here so the sidecar's elapsed_seconds covers poll + download.
-    start_time = time.time()
-    _tick = comfy_wait_heartbeat(api_url, prompt_id, _say) if on_progress else None
+        video_info = select_output_info(payload, _OUTPUT_KEYS)
 
-    status, payload = comfy_poll_until_done(
-        api_url, prompt_id,
-        max_poll_seconds=max_poll_seconds,
-        cancel_check=cancel_check,
-        on_tick=_tick,
-    )
-    if status == POLL_CANCELLED:
-        return False, "Generation cancelled."
-    if status == POLL_EXEC_ERROR:
-        return False, comfy_exec_error_message(payload, api_url)
-    if status == POLL_TIMEOUT:
-        msg = (
-            f"Video generation timed out after {max_poll_seconds // 60} minutes."
-        )
-        if payload is not None:
-            # A persistent poll error means ComfyUI likely crashed or went
-            # unreachable, not just a slow render - say so instead of hiding it.
-            msg += f" Last poll error: {payload}"
-        return False, msg
+        if not video_info:
+            return False, (
+                "Generation finished but no video output was found in ComfyUI "
+                "history. Check the ComfyUI console - a SaveVideo node error or "
+                "an outdated ComfyUI (need v0.3.46+ for Wan 2.2) is likely."
+            )
 
-    # status == POLL_FINISHED means ComfyUI reported no execution_error - but a
-    # node whose weights only partly matched (a mismatched checkpoint's UNet/CLIP
-    # keys, ...) is not an execution_error to ComfyUI, only a console warning, and
-    # the run still "succeeds" with that component silently under-applied. Check
-    # for any KNOWN warning of that shape printed while THIS prompt ran (see
-    # NEW-COMFY-SILENT-PARTIAL-APPLY in image_gen/comfy.py). console_checked
-    # reflects whether a real read actually happened just now, not whether
-    # console_tail_start found a process before the prompt was even submitted.
-    console_checked, comfy_console_warnings = comfy_console_warnings_since(
-        api_url, console_tail_start)
-    comfy_console_warning_text = ("; ".join(comfy_console_warnings)
-                                  if comfy_console_warnings else None)
-    comfy_console_msg = (
-        "WARNING: ComfyUI's own console reported: "
-        + comfy_console_warning_text
-        + ". The generation still completed, but the requested model weights "
-          "may not have fully applied - see comfy-launch.log."
-    ) if comfy_console_warning_text else ""
+        # Fetch the file from ComfyUI and save locally
+        try:
+            output_sha256 = comfy_fetch_output(api_url, video_info, output_path, timeout=120)
+        except Exception as e:
+            return False, f"Failed to download generated clip from ComfyUI: {e}"
 
-    video_info = select_output_info(payload, _OUTPUT_KEYS)
+        # Strip the container metadata ComfyUI's SaveVideo embeds (the submitted
+        # workflow, prompt included); a strip that did not run returns a warning.
+        strip_warning = strip_video_metadata(output_path)
 
-    if not video_info:
-        return False, (
-            "Generation finished but no video output was found in ComfyUI "
-            "history. Check the ComfyUI console - a SaveVideo node error or "
-            "an outdated ComfyUI (need v0.3.46+ for Wan 2.2) is likely."
+        # Output containment: when delete_outputs is set (opt-in, forced True by
+        # the caller in privacy mode), clear ComfyUI's history entry (the
+        # Queue/History + gallery view) and delete ComfyUI's own on-disk copy of
+        # the clip. Returns a warning when the file copy could not be removed
+        # (e.g. comfy_output_dir unset). With delete_outputs off it does nothing.
+        contain_warning = contain_comfy_artifacts(
+            api_url, prompt_id,
+            {"filename": video_info.get("filename"),
+             "subfolder": video_info.get("subfolder", ""),
+             "type": video_info.get("type", "output")},
+            comfy_workdir=workdir,
+            output_sha256=output_sha256,
+            delete_outputs=delete_outputs,
         )
 
-    # Fetch the file from ComfyUI and save locally
-    try:
-        output_sha256 = comfy_fetch_output(api_url, video_info, output_path, timeout=120)
-    except Exception as e:
-        return False, f"Failed to download generated clip from ComfyUI: {e}"
+        # Sidecar JSON - everything needed to reproduce or tweak the clip.
+        # Skipped entirely in privacy mode (write_sidecar=False): with the container
+        # metadata stripped above, the sidecar is the only file that records the
+        # prompt. The console warning (a real quality issue with THIS clip) is still
+        # reported in the message either way - only the sidecar's record of it is
+        # what privacy mode suppresses.
+        output_warning = "\n".join(w for w in (strip_warning, contain_warning) if w)
+        if not write_sidecar:
+            return True, _with_warning(
+                _with_warning(
+                    f"Clip saved to {output_path} "
+                    f"(seed {seed} - reuse it to reproduce)", output_warning),
+                comfy_console_msg)
 
-    # Strip the container metadata ComfyUI's SaveVideo embeds (the submitted
-    # workflow, prompt included); a strip that did not run returns a warning.
-    strip_warning = strip_video_metadata(output_path)
+        sidecar_warning = _write_video_sidecar(
+            output_path,
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            frames=frames,
+            fps=fps,
+            width=width,
+            height=height,
+            seed=seed,
+            steps=steps,
+            cfg=cfg,
+            input_image=input_image,
+            start_time=start_time,
+            comfy_console_warning=comfy_console_warning_text,
+            comfy_console_checked=console_checked,
+        )
 
-    # Enforce output containment: clear ComfyUI's history entry (the
-    # Queue/History + gallery view) and delete ComfyUI's own on-disk copy of
-    # the clip plus any uploaded img2video source. Returns a warning when the
-    # file copy could not be removed (e.g. comfy_output_dir unset).
-    # delete_outputs controls whether ComfyUI's own on-disk copy is removed:
-    # opt-in containment (default False keeps the copy), forced True by the
-    # caller in privacy mode so no traces remain. The history entry and any
-    # uploaded img2video source are always cleared regardless.
-    contain_warning = contain_comfy_artifacts(
-        api_url, prompt_id,
-        {"filename": video_info.get("filename"),
-         "subfolder": video_info.get("subfolder", ""),
-         "type": video_info.get("type", "output")},
-        comfy_workdir=workdir,
-        uploaded_input=uploaded_name,
-        output_sha256=output_sha256,
-        delete_outputs=delete_outputs,
-    )
-
-    # Sidecar JSON - everything needed to reproduce or tweak the clip.
-    # Skipped entirely in privacy mode (write_sidecar=False): with the container
-    # metadata stripped above, the sidecar is the only file that records the
-    # prompt. The console warning (a real quality issue with THIS clip) is still
-    # reported in the message either way - only the sidecar's record of it is
-    # what privacy mode suppresses.
-    output_warning = "\n".join(w for w in (strip_warning, contain_warning) if w)
-    if not write_sidecar:
         return True, _with_warning(
             _with_warning(
-                f"Clip saved to {output_path} "
-                f"(seed {seed} - reuse it to reproduce)", output_warning),
-            comfy_console_msg)
+                _with_warning(
+                    f"Clip saved to {output_path} "
+                    f"(seed {seed} - reuse it to reproduce)", output_warning),
+                comfy_console_msg),
+            sidecar_warning)
 
-    sidecar_warning = _write_video_sidecar(
-        output_path,
-        prompt=prompt,
-        negative_prompt=negative_prompt,
-        frames=frames,
-        fps=fps,
-        width=width,
-        height=height,
-        seed=seed,
-        steps=steps,
-        cfg=cfg,
-        input_image=input_image,
-        start_time=start_time,
-        comfy_console_warning=comfy_console_warning_text,
-        comfy_console_checked=console_checked,
-    )
-
-    return True, _with_warning(
-        _with_warning(
-            _with_warning(
-                f"Clip saved to {output_path} "
-                f"(seed {seed} - reuse it to reproduce)", output_warning),
-            comfy_console_msg),
-        sidecar_warning)
+    return input_copy.run(_run_job)

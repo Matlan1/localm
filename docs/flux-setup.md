@@ -129,7 +129,9 @@ nothing more. For your own ComfyUI, if its output folder is not the `output`
 folder inside the ComfyUI folder you configured, also set the
 `comfy_output_dir` config key (or `COMFY_OUTPUT_DIR` env var) to point at it.
 A file is deleted only when its content is what the generation produced;
-otherwise a warning says a copy may remain.
+otherwise a warning says a copy may remain. With this on, and in privacy mode, the
+input image of an img2img job is also removed from ComfyUI's input folder, whether
+the job succeeds, fails or is cancelled; if it cannot be, the job's message says so.
 
 ## Performance notes
 

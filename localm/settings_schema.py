@@ -2113,7 +2113,10 @@ def media_schema_json(name: str, block: Optional[dict], full_config: dict, *,
 
     ``value`` is the per-plugin block value when set, else the global comfy_*
     fallback, so the GUI shows what is actually in effect. ``is_override`` flags
-    whether this plugin has its own value (vs inheriting the shared default).
+    whether this plugin has its own value (vs inheriting the shared default). A
+    stored value a field with a "default" option no longer offers is returned as
+    a string and added to that field's ``options``, so the page shows it and
+    choosing "default" is a change that Save writes.
 
     When *is_owner* is False, admin_only fields (launch_cmd, api_url) are
     OMITTED entirely, mirroring schema_json's admin_only handling for the core
@@ -2129,12 +2132,14 @@ def media_schema_json(name: str, block: Optional[dict], full_config: dict, *,
         has_own = block_val not in (None, "")
         global_val = full_config.get(f.global_key) if f.global_key else None
         value = block_val if has_own else (global_val if global_val is not None else f.default)
+        options = f.options
         if f.options and "default" in f.options and value not in f.options and value not in (None, ""):
-            value = "default"
+            value = str(value)
+            options = [*f.options, value]
         d = {"key": f.key, "widget": f.widget, "label": f.label, "help": f.help,
              "value": value, "is_override": has_own, "global": global_val}
-        if f.options:
-            d["options"] = f.options
+        if options:
+            d["options"] = options
             
         if f.key == "launch_cmd":
             try:
