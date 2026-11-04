@@ -275,11 +275,6 @@ def main(argv=None, *, install_root: Path = INSTALL_ROOT, code_root=None) -> int
 
     print(f"Roll back localm at {install_root}")
     print(f"  restoring the previous version from {backup_dir}")
-    if not args.yes and sys.stdin.isatty():
-        if input("Proceed? [y/N] ").strip().lower() not in ("y", "yes"):
-            print("Not rolled back.")
-            return 1
-
     au = _load_apply_update(install_root, code_root)
     if au is None:
         print("Could not load the rollback helper (localm/_apply_update.py). The backup "
@@ -295,6 +290,10 @@ def main(argv=None, *, install_root: Path = INSTALL_ROOT, code_root=None) -> int
         print(f"Rollback refused: the backup is incomplete: {problem} in {backup_dir}.\n"
               "Nothing was changed; the next update replaces it.", file=sys.stderr)
         return 2
+    if not args.yes and sys.stdin.isatty():
+        if input("Proceed? [y/N] ").strip().lower() not in ("y", "yes"):
+            print("Not rolled back.")
+            return 1
     try:
         errors, undo = _restore_venv(install_root, updates_dir, code_root)
     except Exception as e:

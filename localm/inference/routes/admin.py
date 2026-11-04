@@ -569,8 +569,8 @@ def register(app: FastAPI, ctx) -> None:
         try:
             res = await asyncio.to_thread(_probes_held, updater.rollback_last)
         except LocalmError as e:
-        # A precondition failure, so nothing was touched: either there is no backup,
-        # or an update/rollback already holds the single-flight lock. Kept distinct
+        # A precondition failure, so nothing was touched: there is no backup, the backup
+        # is incomplete, or an update/rollback already holds the single-flight lock. Kept distinct
         # from the partial-restore case below, where the install HAS been modified.
             raise HTTPException(409, format_localm_error(e)) from e
         except Exception as e:
