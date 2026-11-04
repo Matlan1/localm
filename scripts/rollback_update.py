@@ -305,7 +305,7 @@ def main(argv=None, *, install_root: Path = INSTALL_ROOT, code_root=None) -> int
             back = [f"the package restore helper stopped with an error: {undo_error}"]
         packages = ("the packages were put back as they were" if not back else
                     "putting the packages back ALSO failed: " + "; ".join(back))
-        print(f"Rollback FAILED: {e}\n{packages.capitalize()}. The backup is kept at "
+        print(f"Rollback FAILED: {e}\n{packages[0].upper()}{packages[1:]}. The backup is kept at "
               f"{backup_dir} for a manual restore; nothing was reported recovered that "
               "was not.", file=sys.stderr)
         return 2
