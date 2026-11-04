@@ -370,6 +370,32 @@ class ChoiceDelta(BaseModel):
     # localizes the status text instead of displaying it verbatim. None when
     # `status` is not one of the known strings.
     status_code: Optional[str] = None
+    # The values of a status whose text is built from parameters (see
+    # StatusText), keyed by the placeholder names of its localized text.
+    status_args: Optional[dict[str, str]] = None
+
+
+class StatusText(str):
+    """A status string built from parameters, carrying its stable ``code`` and
+    the ``args`` it was built from, so a client can localize it although its
+    text is not a key of STATUS_CODE_BY_TEXT. Compares and prints as its
+    English text."""
+
+    code: str
+    args: dict[str, str]
+
+    def __new__(cls, text: str, code: str, args: dict[str, str]) -> StatusText:
+        obj = super().__new__(cls, text)
+        obj.code = code
+        obj.args = dict(args)
+        return obj
+
+
+def status_code_of(text: str) -> Optional[str]:
+    """The stable code of status *text*: a StatusText's own code, otherwise its
+    STATUS_CODE_BY_TEXT entry, otherwise None."""
+    code = getattr(text, "code", None)
+    return code if isinstance(code, str) else STATUS_CODE_BY_TEXT.get(text)
 
 
 # Emitted while the prompt is tokenized and evaluated, before the first token.
@@ -416,6 +442,12 @@ STATUS_CODE_BY_TEXT: dict[str, str] = {
     DOWNLOADING_EMBEDDER_STATUS: "downloading_embedder",
     RUNNING_CHAT_HOOKS_STATUS: "chat_hooks",
     CHECKING_GRAMMAR_STATUS: "checking_grammar",
+}
+
+# Stable ids of the statuses whose text is built from parameters (sent as a
+# StatusText), each with the names of the ``status_args`` it carries.
+STATUS_ARGS_BY_CODE: dict[str, tuple[str, ...]] = {
+    "loading_beside": ("model", "resident"),
 }
 
 
@@ -500,7 +532,8 @@ class ChatChunk(BaseModel):
             created=ts,
             model=model,
             choices=[StreamChoice(delta=ChoiceDelta(
-                status=text, status_code=STATUS_CODE_BY_TEXT.get(text)))],
+                status=str(text), status_code=status_code_of(text),
+                status_args=getattr(text, "args", None)))],
         )
 
     @classmethod

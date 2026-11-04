@@ -3743,6 +3743,10 @@ def _register_with_dedup(
     *revision* / *commit* record the Hugging Face revision the file was pulled
     at (see ``_register``); *refresh* rewrites them with the source.
 
+    *type_user_set* records *model_type* as the user's own choice (see
+    ``_register``), also on an entry of the same name already holding *p*, which
+    then takes *model_type*.
+
     Returns True when *model_name* ends up correctly registered for *p*
     (freshly registered, aliased, deduped, or already correct) - False for
     every path where nothing was written: a real name/content conflict
@@ -3803,8 +3807,10 @@ def _register_with_dedup(
         need_expert_backfill = expert_count is not None and "expert_count" not in reg[model_name]
         need_type_backfill = (reg[model_name].get("model_type") == "unknown"
                               and model_type in MODEL_TYPES - {"llm", "unknown"})
+        need_user_type = type_user_set and (reg[model_name].get("model_type") != model_type
+                                            or not reg[model_name].get("type_user_set"))
         if (need_sha_backfill or need_mmproj_backfill or need_arch_backfill
-                or need_expert_backfill or need_type_backfill):
+                or need_expert_backfill or need_type_backfill or need_user_type):
             def _backfill(r: dict) -> None:      # atomic RMW
                 e = r.get(model_name)
                 if not isinstance(e, dict):
@@ -3819,8 +3825,11 @@ def _register_with_dedup(
                     e["expert_count"] = expert_count
                 if need_type_backfill and e.get("model_type") == "unknown":
                     e["model_type"] = model_type
+                if need_user_type:
+                    e["model_type"] = model_type
+                    e["type_user_set"] = True
             _mm.update_registry(_backfill)
-            if need_type_backfill:
+            if need_type_backfill or need_user_type:
                 console.print(f"[green]✓[/green] Typed [bold]{escape(model_name)}[/bold] "
                               f"as {escape(model_type)}")
         others = [a for a in aliases if a != model_name]
@@ -3889,6 +3898,8 @@ def _register_with_dedup(
                     entry["revision"] = revision
                     if commit:
                         entry["commit"] = commit
+                if type_user_set:
+                    entry["type_user_set"] = True
                 if digest:
                     entry["sha256"] = digest.lower()
                 if mmproj:

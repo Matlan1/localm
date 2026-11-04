@@ -378,14 +378,12 @@ marked.setOptions({ breaks: true });
  *  Handles a still-open block during streaming. */
 export function splitThink(text) {
   const src = text || "";
-  const m = /<think>([\s\S]*?)(<\/think>|$)/.exec(maskCode(src));
-  if (!m) return { think: null, open: false, rest: src };
-  const closed = m[2] !== "";
-  const end = m.index + m[0].length;
+  const b = findThinkBlock(src, 0);
+  if (!b) return { think: null, open: false, rest: src };
   return {
-    think: src.slice(m.index + 7, end - m[2].length).trim(),
-    open: !closed,
-    rest: src.slice(0, m.index) + src.slice(end),
+    think: src.slice(b.bodyStart, b.bodyEnd).trim(),
+    open: !b.closed,
+    rest: src.slice(0, b.start) + src.slice(b.end),
   };
 }
 
@@ -395,16 +393,32 @@ function maskCode(text) {
   return text.replace(/(`{3,})[\s\S]*?(?:\1|$)|(`+)[^`\n][\s\S]*?\2(?!`)/g, (m) => " ".repeat(m.length));
 }
 
+/** First reasoning block in *src* at or after *from*, or null.
+ *  The opening `<think>` is searched with code masked, so a tag quoted in code
+ *  is not an opener. The closing `</think>` is searched in the raw text, so an
+ *  unbalanced backtick inside the reasoning cannot hide it.
+ *  Returns {start, bodyStart, bodyEnd, end, closed}; an unclosed block runs to
+ *  the end of *src*. See test "an unbalanced backtick in the reasoning does not
+ *  swallow the answer". */
+function findThinkBlock(src, from) {
+  const i = maskCode(src.slice(from)).indexOf("<think>");
+  if (i < 0) return null;
+  const start = from + i;
+  const bodyStart = start + 7;
+  const close = src.indexOf("</think>", bodyStart);
+  if (close < 0) return { start, bodyStart, bodyEnd: src.length, end: src.length, closed: false };
+  return { start, bodyStart, bodyEnd: close, end: close + 8, closed: true };
+}
+
 /** Reply text with reasoning blocks removed - what gets sent back to the
  *  model on later turns. */
 export function stripThink(text) {
   const src = text || "";
-  const masked = maskCode(src);
   let out = "";
   let last = 0;
-  for (const m of masked.matchAll(/<think>[\s\S]*?(<\/think>|$)/g)) {
-    out += src.slice(last, m.index);
-    last = m.index + m[0].length;
+  for (let b = findThinkBlock(src, 0); b; b = findThinkBlock(src, last)) {
+    out += src.slice(last, b.start);
+    last = b.end;
   }
   return (out + src.slice(last)).trim();
 }

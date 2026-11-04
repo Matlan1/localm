@@ -346,6 +346,33 @@ class TestATypeGivenToAPull:
         assert mm.pull_model("o/ace", name="ace", model_type="unknown") is True
         assert _entry(home, "ace")["type_user_set"] is True
 
+    def test_a_url_pull_of_a_registered_file_takes_the_explicit_type(
+            self, home, tmp_path, monkeypatch):
+        _serve_url(monkeypatch, self._encoder_bytes(tmp_path))
+        assert mm.pull_model("https://x.test/enc.gguf", name="enc") is True
+        assert _entry(home, "enc")["model_type"] != "embedding"
+        assert mm.pull_model("https://x.test/enc.gguf", name="enc", model_type="embedding") is True
+        assert _entry(home, "enc")["model_type"] == "embedding"
+        assert _entry(home, "enc")["type_user_set"] is True
+
+    def test_a_hint_on_a_registered_file_changes_nothing(self, home, tmp_path, monkeypatch):
+        _serve_url(monkeypatch, self._encoder_bytes(tmp_path))
+        assert mm.pull_model("https://x.test/enc.gguf", name="enc") is True
+        before = _entry(home, "enc")
+        assert before["model_type"] != "embedding"
+        assert mm.pull_model("https://x.test/enc.gguf", name="enc", model_type="embedding",
+                             type_is_hint=True) is True
+        assert _entry(home, "enc")["model_type"] == before["model_type"]
+        assert "type_user_set" not in _entry(home, "enc")
+
+    def test_a_moved_duplicate_keeps_the_explicit_type(self, home, tmp_path):
+        f = _gguf(tmp_path / "te.gguf", "t5encoder")
+        assert mm.add_local(str(f), name="first", on_duplicate="register") is True
+        assert mm.add_local(str(f), name="second", on_duplicate="move",
+                            model_type="embedding") is True
+        entry = _entry(home, "second")
+        assert entry["model_type"] == "embedding" and entry["type_user_set"] is True
+
     def test_a_single_file_pull_with_a_hint_records_no_choice(self, monkeypatch):
         seen = {}
 
