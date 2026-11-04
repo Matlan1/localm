@@ -879,21 +879,22 @@
                    them from Runtime & GPU's persisted "GPU layers (next load)". -->
               <label for="perf-gpu-layers" data-i18n="settings.perf.gpuLayersLabel">GPU layers (running model)</label>
               <input type="number" id="perf-gpu-layers" min="0" max="999" step="1" value="999">
-              <div class="sub" data-i18n="settings.perf.gpuLayersHelp">How much of the model to offload to the GPU (0-999).</div>
-              <label for="perf-ctx" data-i18n="settings.perf.ctxLabel">Context window (running model)</label>
+              <div class="sub" data-i18n="settings.perf.gpuLayersHelp">Model layers to run on the GPU (0-999). 99 lets Auto-size GPU layers from VRAM fit them to free VRAM; 999 puts every layer on the GPU.</div>
+              <label for="perf-ctx" data-i18n="settings.perf.ctxLabel">Starting context window (running model)</label>
               <input type="range" id="perf-ctx" min="512" max="32768" step="512" value="4096">
               <!-- Content is fully owned by settings-perf.js's syncPerfCtxHelp() (a text
                    node + a <span id="perf-ctx-val"> live number + a trailing text node -
                    setI18nText only safely retranslates ONE leading text node, so a
                    data-i18n here would blank the trailing "." on every language switch). -->
-              <div id="perf-ctx-help" class="sub">The most tokens the model can attend to
-                (<span id="perf-ctx-val">4096</span>).</div>
+              <div id="perf-ctx-help" class="sub">Tokens of history the model starts with
+                (<span id="perf-ctx-val">4096</span>); the window grows on demand.</div>
               <div id="perf-estimate" class="sub perf-estimate">estimate unavailable</div>
               <div id="perf-gpu-select-row" hidden>
                 <label for="perf-main-gpu" data-i18n="settings.perf.mainGpuLabel">Main GPU</label>
                 <select id="perf-main-gpu"></select>
-                <div class="sub" data-i18n="settings.perf.mainGpuHelp">Which device the model loads onto. Saves immediately;
-                applies on the next model load.</div>
+                <div class="sub" data-i18n="settings.perf.mainGpuHelp">GPU for HuggingFace models, the embedder, the
+                vision projector and localm's own ComfyUI; a GGUF chat model spreads over every GPU
+                unless Split across GPUs names some. Saves immediately; applies on the next model load.</div>
               </div>
               <div id="perf-gpu-split-row" hidden>
                 <label data-i18n="settings.perf.splitLabel">Split across GPUs</label>
@@ -952,7 +953,7 @@
               not translated yet stay in English.</div>
 
               <label data-i18n="appearance.logoStyle">Logo style</label>
-              <div class="sub" data-i18n="appearance.logoStyle.help">How the wordmark is drawn in the sidebar. Saved in this browser only.</div>
+              <div class="sub" data-i18n="appearance.logoStyle.help">How the wordmark is drawn in the sidebar. Saved on the server, so every browser and the desktop launcher use it.</div>
               <div id="logo-style-picker" class="logo-style-picker"></div>
 
               <label data-i18n="settings.chatBg.label">Chat background</label>
@@ -968,7 +969,7 @@
 
               <label class="check" data-i18n="appearance.showMmproj">
                 <input type="checkbox" id="show-mmproj-files">
-                Show vision projector (.mmproj) files in repository search results
+                Show vision projector (.mmproj) files in repository search results (this browser only)
               </label>
             </section>
 
@@ -980,8 +981,9 @@
                 <div class="card-head-text"><h3 data-i18n="settings.ownerKey.title">Owner key</h3></div></div>
               <div class="sub" data-i18n="settings.ownerKey.intro">The one key that grants full access to this server - the
                 named keys below are limited slices of it. Roll it if it may have leaked,
-                or set one you already use. This browser stays signed in; every other
-                device keeps working only once you give it the new key.</div>
+                or set one you already use. Other devices need the new key to sign in again;
+                browsers already signed in stay signed in. To sign every browser out, run
+                localm key recover on this machine.</div>
               <div class="actions">
                 <button class="btn-secondary" id="owner-key-roll" data-i18n="settings.ownerKey.generateButton">Generate new key</button>
               </div>
@@ -995,7 +997,7 @@
               <div class="actions">
                 <button class="btn-secondary" id="owner-key-clear" data-i18n="settings.ownerKey.removeButton">Remove the owner key</button>
               </div>
-              <div class="sub" data-i18n="settings.ownerKey.removeHelp">Removing it returns this server to open mode: anyone who can reach it gets full access, with no key needed.</div>
+              <div class="sub" data-i18n="settings.ownerKey.removeHelp">Removing it also deletes every named device key and signs out every browser, and returns this server to open mode: anyone who can reach it gets full access, with no key needed.</div>
             </section>
 
             <section class="card settings-section" id="keys-card" data-group="security" data-sec-label="Keys &amp; devices">
@@ -1031,7 +1033,7 @@
                 <div class="card-head-text"><h3 data-i18n="settings.signIn.title">Sign in on this device</h3></div></div>
               <div class="sub" data-i18n="settings.signIn.intro">Save an API key on this device (a secure cookie) so you stay signed in.
               Leave blank and Save to sign out.</div>
-              <input type="password" id="gui-api-key" placeholder="only needed when LOCALM_API_KEY is set"
+              <input type="password" id="gui-api-key" placeholder="only needed when this server has a key"
                      data-i18n-placeholder="settings.signIn.keyPlaceholder">
               <div class="actions">
                 <button class="btn-secondary" id="gui-key-save" data-i18n="settings.signIn.saveButton">Save key</button>
@@ -1048,7 +1050,8 @@
               <div id="companion-hint" class="sub" style="display:none"></div>
               <div id="pairing" class="pairing" style="display:none">
                 <div class="sub" data-i18n-rich="settings.companion.pairingHelp">Pair a phone: open LocaLM on the phone, tap <b>Scan QR code</b> on the
-                onboarding screen, and point it at this code to copy the API key over - no typing.</div>
+                onboarding screen, and point it at this code to copy the owner key (full access) over - no typing.
+                For a limited key, use Keys &amp; devices.</div>
                 <div id="pairing-qr" class="pairing-qr"></div>
               </div>
               <div class="actions">
@@ -1099,7 +1102,7 @@
             <section class="card settings-section" id="sec-privacy-data" data-group="privacy" data-sec-label="Your data">
               <div class="card-head"><span class="ic cat-ic cat-green" data-icon="memory"></span>
                 <div class="card-head-text"><h3 data-i18n="settings.privacyData.title">Your data</h3></div></div>
-              <div class="sub" data-i18n="settings.privacyData.help">Erase the conversations stored on this device. This cannot be undone.</div>
+              <div class="sub" data-i18n="settings.privacyData.help">Erase every saved conversation: in this browser, and on the server too when the server keeps them. This cannot be undone.</div>
               <div class="actions">
                 <!-- btn-danger: gui-design.md rule 3 reserves it for destructive
                      actions, and this card's own copy says it cannot be undone.
@@ -1202,8 +1205,19 @@
                 never updates itself. Most updates apply with just a restart.</div>
                 <div class="actions">
                   <button class="btn-secondary" id="update-check" data-i18n="settings.update.checkButton">Check for updates</button>
+                  <button class="btn-secondary" id="update-versions" data-i18n="settings.update.versionsButton">Choose a version</button>
                   <button class="btn-primary" id="update-apply" hidden data-i18n="settings.update.applyButton">Update now</button>
                 </div>
+                <div class="sub" data-i18n="settings.update.versionsHelp">Install a specific release, older or newer. A downgrade asks first and backs up your settings and data.</div>
+                <div id="update-version-picker" hidden>
+                  <label class="sub" for="update-version-select" data-i18n="settings.update.versionLabel">Version to install</label>
+                  <select id="update-version-select"></select>
+                  <div id="update-version-info" class="sub"></div>
+                  <div class="actions">
+                    <button class="btn-secondary" id="update-install-version" data-i18n="settings.update.installVersionButton">Install this version</button>
+                  </div>
+                </div>
+                <div id="update-version-status" class="sub" role="status" aria-live="polite" hidden></div>
                 <div id="update-status" class="sub" role="status" aria-live="polite" hidden></div>
                 <!-- The offered release's notes, rendered by renderUpdateNotes
                      (pages/models.js) through the sanitizing Markdown path. -->
@@ -1227,19 +1241,6 @@
                     <button class="btn-primary settings-section-save" id="update-toggles-save" data-i18n="settings.update.saveButton">Save update settings</button>
                   </div>
                 </div>
-                <!-- The GUI form of `localm update --list` / `--to <version>`. -->
-                <div class="actions">
-                  <button class="btn-secondary" id="update-versions" data-i18n="settings.update.versionsButton">Choose a version</button>
-                </div>
-                <div id="update-version-picker" hidden>
-                  <label class="sub" for="update-version-select" data-i18n="settings.update.versionLabel">Version to install</label>
-                  <select id="update-version-select"></select>
-                  <div id="update-version-info" class="sub"></div>
-                  <div class="actions">
-                    <button class="btn-secondary" id="update-install-version" data-i18n="settings.update.installVersionButton">Install this version</button>
-                  </div>
-                </div>
-                <div id="update-version-status" class="sub" role="status" aria-live="polite" hidden></div>
               </div>
 
               <!-- The GUI half of `localm update --rollback`. Its OWN sub-block, not

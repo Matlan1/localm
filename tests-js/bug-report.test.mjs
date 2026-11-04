@@ -238,6 +238,24 @@ test("R47: a failed send shows WHERE it failed, reveals Retry + Download, keeps 
     "the description is kept");
 });
 
+test("a report the server did not file offers Download but not Retry", async () => {
+  const calls = [];
+  const { window } = loadAppWithPages({ fetchImpl: makeSendFetch(calls, [{
+    uploaded: false, upload_stage: "not_filed", upload_message: "It was not filed.",
+    upload_error: "the bug-report server did not file the report",
+    maintainer: "owner@example.com",
+  }]) });
+  const doc = window.document;
+  doc.getElementById("bug-desc").value = "it will not file";
+  doc.getElementById("bug-upload").click();
+  await flush();
+  doc.getElementById("bug-confirm-send").click();
+  await flush();
+  assert.match(doc.getElementById("bug-result").textContent, /Could not send: It was not filed\./);
+  assert.equal(doc.getElementById("bug-retry").hidden, true, "a retry would get the same answer");
+  assert.equal(doc.getElementById("bug-download").hidden, false, "Download revealed");
+});
+
 test("R47: Retry re-sends the SAME reviewed report and Download hands back its markdown", async () => {
   const calls = [];
   const { window } = loadAppWithPages({ fetchImpl: makeSendFetch(calls, [

@@ -495,8 +495,9 @@ def build_body(summary: str, description: str, diag: dict,
 def post_report(url: str, token: str | None, title: str, body: str,
                 *, timeout: float = 15.0, opener=None) -> dict:
     """POST the report to the proxy and return its JSON response (e.g.
-    {"url": "<issue url>"}). Raises RuntimeError on any non-2xx / network error so a
-    failed send is never mistaken for success. *opener* is injectable for tests."""
+    {"url": "<issue url>"}). Raises RuntimeError on any non-2xx / network error, or a
+    reply saying the report was not filed, so a failed send is never mistaken for
+    success. *opener* is injectable for tests."""
     # Reject a non-http(s) endpoint at the sink, before anything is built or opened.
     if not endpoint_is_allowed(url):
         raise RuntimeError(
@@ -530,9 +531,12 @@ def post_report(url: str, token: str | None, title: str, body: str,
     if not (200 <= int(status) < 300):
         raise RuntimeError(f"HTTP {status}: {str(raw)[:300]}".strip())
     try:
-        return json.loads(raw) if raw and raw.strip() else {}
+        result = json.loads(raw) if raw and raw.strip() else {}
     except ValueError:
         return {"raw": str(raw)[:300]}
+    if isinstance(result, dict) and result.get("filed") is False:
+        raise RuntimeError("the server did not file the report")
+    return result
 
 
 def save_report(body: str, when: str) -> Path | None:

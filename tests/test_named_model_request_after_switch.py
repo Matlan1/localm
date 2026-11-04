@@ -7,6 +7,8 @@ it is evicted and the named model loads on the GPU, instead of the named model
 loading beside it with whatever VRAM is left.
 """
 
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -17,6 +19,8 @@ GIB = 1024 ** 3
 
 
 class FakeEngine:
+    load_delay = 0.0
+
     def __init__(self, name, vram):
         self.display_name = name
         self._loaded = False
@@ -34,6 +38,7 @@ class FakeEngine:
         pass
 
     def load(self):
+        time.sleep(self.load_delay)
         self._loaded = True
         self.held = self._vram["want"][self.display_name]
         self._vram["free"] -= self.held
@@ -131,6 +136,53 @@ def test_a_load_beside_a_pinned_model_says_so(two_models, monkeypatch):
 
     assert engines["a"].loaded and engines["b"].loaded
     assert hs.LOADING_BESIDE_STATUS.format(model="b", resident="'a'") in said
+
+
+@pytest.mark.parametrize("activate, active_after", [(False, "a"), (True, "b")])
+def test_reloading_a_resident_model_keeps_the_active_one_unless_asked(
+        two_models, activate, active_after):
+    import asyncio
+
+    client, engines, vram = two_models
+    vram["want"]["b"] = 2 * GIB
+    vram["free"] = 12 * GIB
+    asyncio.run(hs.switch_engine("b", None, activate=False))
+    assert engines["a"].loaded and engines["b"].loaded
+    assert hs._active_model_name == "a"
+
+    async def reload_b():
+        await hs.unload_one_model("b")
+        return await hs.switch_engine("b", None, activate=activate)
+
+    res = asyncio.run(reload_b())
+
+    assert res["status"] == "loaded", res
+    assert engines["a"].loaded and engines["b"].loaded
+    assert hs._active_model_name == active_after
+
+
+def test_the_load_beside_status_streams_its_code_and_args(two_models, monkeypatch):
+    import json
+
+    client, engines, vram = two_models
+    monkeypatch.setattr("localm.config.load_config",
+                        lambda *a, **k: {"pinned_models": ["a"]})
+    monkeypatch.setattr(FakeEngine, "load_delay", hs.PREP_STATUS_GRACE_S * 2)
+
+    r = client.post("/v1/chat/completions",
+                    json={"model": "b", "stream": True, "pin_model": True,
+                          "messages": [{"role": "user", "content": "hi"}]})
+
+    assert r.status_code == 200, r.text
+    deltas = [json.loads(line[6:])["choices"][0]["delta"]
+              for line in r.text.splitlines()
+              if line.startswith("data: {")]
+    beside = [d for d in deltas if " beside " in (d.get("status") or "")]
+    assert beside, [d.get("status") for d in deltas]
+    assert beside[0]["status"] == hs.LOADING_BESIDE_STATUS.format(model="b", resident="'a'")
+    assert beside[0]["status_code"] == "loading_beside"
+    assert beside[0]["status_args"] == {"model": "b", "resident": "'a'"}
+    assert all(d.get("status_args") is None for d in deltas if d is not beside[0])
 
 
 def test_a_load_that_evicts_does_not_claim_to_load_beside(two_models):

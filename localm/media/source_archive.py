@@ -56,6 +56,24 @@ class ArchiveError(Exception):
     says which and why."""
 
 
+class TreeRollbackError(OSError):
+    """:func:`apply_tree` failed and could not put every file back: *root* holds
+    a mix of old and new files. ``cause`` is the error that stopped the write,
+    ``failed`` the files (relative POSIX paths) that could not be put back,
+    ``change`` the :class:`TreeChange` (its ``rollback`` can be tried again) and
+    ``backup`` the folder that still holds the originals."""
+
+    def __init__(self, cause: OSError, failed: list[str], change: TreeChange):
+        self.cause = cause
+        self.failed = list(failed)
+        self.change = change
+        self.backup = change.backup
+        super().__init__(
+            f"{cause}; {len(self.failed)} file(s) could not be put back (e.g. "
+            f"{self.failed[0]}), so {plain_path(change.root)} holds a mix of old and new "
+            f"files; the originals are kept in {plain_path(change.backup)}")
+
+
 def archive_url(repo: str, commit: str) -> str:
     """The GitHub zip archive URL of *commit* in the GitHub repository *repo*
     (``https://github.com/<owner>/<repo>[.git]``). Raises ArchiveError for any
@@ -85,14 +103,25 @@ def download(url: str, dest: Path) -> None:
         raise ArchiveError(f"downloading {url} failed: {e!r}") from None
 
 
-def _long(path: Path) -> Path:
+def long_path(path: Path) -> Path:
     """*path* made absolute, with the Windows extended-length prefix on Windows
-    so a file deeper than 260 characters can be written."""
+    so a file deeper than 260 characters can be read and written."""
     path = Path(os.path.abspath(path))
     if os.name == "nt" and not str(path).startswith("\\\\?\\"):
         text = str(path)
         return Path("\\\\?\\UNC\\" + text[2:] if text.startswith("\\\\") else "\\\\?\\" + text)
     return path
+
+
+def plain_path(path: Path) -> str:
+    """*path* as text without the Windows extended-length prefix that
+    :func:`long_path` adds."""
+    text = str(path)
+    if text.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + text[8:]
+    if text.startswith("\\\\?\\"):
+        return text[4:]
+    return text
 
 
 def _safe_name(name: str) -> Optional[str]:
@@ -103,7 +132,7 @@ def _safe_name(name: str) -> Optional[str]:
     p = PurePosixPath(name)
     if not name or p.is_absolute() or ".." in p.parts or not p.parts:
         return None
-    if p.parts[0].casefold() == ".git":
+    if any(part.casefold() == ".git" for part in p.parts):
         return None
     if any(c in part for part in p.parts for c in (":", "\\", "\0")):
         return None
@@ -125,7 +154,7 @@ def _unpack(archive: Path, dest: Path, commit: str) -> list[str]:
                                f"not {commit}")
         files = []
         dest.mkdir(parents=True)
-        base = _long(dest)
+        base = long_path(dest)
         for info in zf.infolist():
             top, _, rest = info.filename.partition("/")
             if info.is_dir() or not rest:
@@ -178,7 +207,7 @@ def fetch_tree(repo: str, commit: str, dest: Path, *, on_progress: Progress = No
         os.replace(staging, dest)
         return files
     finally:
-        shutil.rmtree(_long(work), ignore_errors=True)
+        shutil.rmtree(long_path(work), ignore_errors=True)
 
 
 def write_record(folder: Path, repo: str, commit: str, files: list[str],
@@ -402,10 +431,11 @@ def apply_tree(new: Path, root: Path, old_files: Optional[list[str]],
     venv, models, outputs, installed custom nodes) are not touched. Each file
     overwritten or removed is first copied to *backup*, which must not exist.
     When *root* is a git checkout, the record written into it also holds the
-    HEAD its ``.git`` folder has checked out. Raises OSError after putting back
-    what it changed when a write fails."""
+    HEAD its ``.git`` folder has checked out. When a write fails, puts back what
+    it changed, removes *backup* and raises the OSError; when a file cannot be
+    put back either, keeps *backup* and raises :class:`TreeRollbackError`."""
     new_files = tree_files(new) or []
-    new, root, backup = _long(new), _long(root), _long(backup)
+    new, root, backup = long_path(new), long_path(root), long_path(backup)
     change = TreeChange(root=root, backup=backup)
     backup.mkdir(parents=True)
     wanted = set(new_files) | {SOURCE_RECORD}
@@ -432,7 +462,10 @@ def apply_tree(new: Path, root: Path, old_files: Optional[list[str]],
         if head is not None and rec is not None:
             write_record(root, rec.get("repo") or "", rec["commit"], rec["files"],
                          git_head=head)
-    except OSError:
-        change.rollback()
+    except OSError as e:
+        failed = change.rollback()
+        if failed:
+            raise TreeRollbackError(e, failed, change) from e
+        change.discard()
         raise
     return change

@@ -1,0 +1,1 @@
+Filed via the standalone curl reporter (no Python available). OS: {{OS}}. Details: it would not start
